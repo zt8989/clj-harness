@@ -5,6 +5,7 @@
 
 (def test-namespaces
   '[harness.event-test
+    harness.llm-test
     harness.tools-test
     harness.loop-test])
 
