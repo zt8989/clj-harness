@@ -9,6 +9,7 @@
     harness.tools-test
     harness.loop-test
     harness.ag-ui-test
+    harness.replay-test
     harness.http-test])
 
 (defn -main [& _]

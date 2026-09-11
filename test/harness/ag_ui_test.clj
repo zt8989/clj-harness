@@ -109,56 +109,10 @@
 
 ;; -------------------------------------------------------------------- inbound
 ;;
-;; apply-frames is the bare minimum of what @ag-ui/client's applier does: accumulate
-;; text and reasoning into separate messages, attach tool calls to the open assistant
-;; message, and turn results into tool messages. It lives here so the round trip
-;; outbound -> client -> inbound is testable offline -- and that round trip is the
+;; The round trip outbound -> client -> inbound is asserted here using the applier in
+;; harness.wire -- the same one the replay tool uses to rebuild conversations. Testing
+;; the shipped path rather than a test-local copy is the point: that round trip is the
 ;; only thing standing between this harness and a DeepSeek 400 on the second turn.
-
-(defn- patch-by-id [messages id f]
-  (mapv (fn [m] (if (= id (:id m)) (f m) m)) messages))
-
-(defn- patch-tool-call [messages id f]
-  (mapv (fn [m]
-          (if (some #(= id (:id %)) (:toolCalls m))
-            (update m :toolCalls #(mapv (fn [tc] (if (= id (:id tc)) (f tc) tc)) %))
-            m))
-        messages))
-
-(defn- apply-frames [frames]
-  (reduce
-   (fn [msgs f]
-     (let [t (:type f)]
-       (cond
-         (= t "TEXT_MESSAGE_START")
-         (conj msgs {:id (:messageId f) :role "assistant" :content ""})
-
-         (= t "TEXT_MESSAGE_CONTENT")
-         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
-
-         (= t "REASONING_MESSAGE_START")
-         (conj msgs {:id (:messageId f) :role "reasoning" :content ""})
-
-         (= t "REASONING_MESSAGE_CONTENT")
-         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
-
-         (= t "TOOL_CALL_START")
-         (patch-by-id msgs (:parentMessageId f)
-                      #(update % :toolCalls (fnil conj [])
-                               {:id (:toolCallId f) :type "function"
-                                :function {:name (:toolCallName f) :arguments ""}}))
-
-         (= t "TOOL_CALL_ARGS")
-         (patch-tool-call msgs (:toolCallId f)
-                          #(update-in % [:function :arguments] str (:delta f)))
-
-         (= t "TOOL_CALL_RESULT")
-         (conj msgs {:id (:messageId f) :role "tool"
-                     :toolCallId (:toolCallId f) :content (:content f)})
-
-         :else msgs)))
-   []
-   frames))
 
 (deftest outbound-then-inbound-preserves-reasoning
   (let [emit   (ag/outbound "thr-1" "run-1")
@@ -168,7 +122,7 @@
                                {:content "等于 3"}])
                []
                #(swap! frames into (emit %)))
-    (let [client    (apply-frames @frames)
+    (let [client    (wire/apply-frames @frames)
           sent      (ag/inbound client "SYSTEM" nil)
           assistant (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) sent))]
       (testing "the client really did store reasoning as a message of its own"

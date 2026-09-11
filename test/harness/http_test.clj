@@ -10,6 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.http :as http]
+            [harness.replay :as replay]
             [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -30,8 +31,12 @@
   (let [stop (http/start! {:port port})]
     (try (f) (finally (stop) (http/use-provider! nil)))))
 
-(defn- post-run [port]
-  (let [body (json/write-str {:threadId "it-1" :runId "r1"
+(defn- post-run
+  "A real request for THREAD-ID. The run id is random so that two runs -- whether for
+  different threads or for the same thread at different times -- never share frame ids.
+  A repeated run id would make two runs' frames collide in a rebuilt conversation."
+  [port thread-id]
+  (let [body (json/write-str {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
                               :messages [{:id "u1" :role "user"
                                           :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
                               :tools [] :context []})
@@ -43,6 +48,8 @@
     (.send (HttpClient/newHttpClient) req
            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
 
+(def ^:private log-dir (str (System/getProperty "user.home") "/.lisp-harness/logs"))
+
 (defn- header [resp name]
   (str (.orElse (.firstValue (.headers resp) name) "")))
 
@@ -50,7 +57,7 @@
   (with-server
    8097
    (fn []
-     (let [resp   (post-run 8097)
+     (let [resp   (post-run 8097 "it-1")
            body   (.body resp)
            frames (wire/frames-from-sse body)]
        (testing "the headers a browser client needs, given it calls us directly"
@@ -74,8 +81,8 @@
   (with-server
    8098
    (fn []
-     (post-run 8098)
-     (let [f     (io/file (str (System/getProperty "user.home") "/.lisp-harness/logs") "it-1.jsonl")
+     (post-run 8098 "it-1")
+     (let [f     (io/file log-dir "it-1.jsonl")
            lines (mapv #(json/read-str % :key-fn keyword)
                        (str/split-lines (slurp f :encoding "UTF-8")))]
        (testing "both the inbound input and every emitted frame are on disk"
@@ -85,6 +92,29 @@
          (is (some #(= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
                        (get-in % [:payload :messages 0 :content]))
                    lines)))))))
+
+(deftest the-log-the-server-writes-is-one-replay-can-read
+  ;; Every other replay test builds its log with the emitter directly. This one goes
+  ;; through the real edge -- real server, real request, real file -- because that is
+  ;; the only way to catch a disagreement about the log's name or its line format, and
+  ;; the two sides live in different namespaces on different sides of dev/src.
+  (with-server
+   8095
+   (fn []
+     (io/delete-file (io/file log-dir "replay-e2e.jsonl") true)
+     (post-run 8095 "replay-e2e")
+     (let [history (replay/history log-dir "replay-e2e")]
+       (testing "the reader found the file the writer wrote, and rebuilt a conversation"
+         (is (= "system" (:role (first history))))
+         (is (some #(= "user" (:role %)) history)))
+       (testing "the reasoning the server emitted is folded back for the model"
+         (is (= reasoning
+                (:reasoning_content
+                 (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
+       (testing "and the tool the server actually ran is in the rebuilt conversation"
+         (is (str/includes?
+              (str (:content (first (filter #(= "tool" (:role %)) history))))
+              ":paths")))))))
 
 (deftest answers-the-cors-preflight
   (with-server
