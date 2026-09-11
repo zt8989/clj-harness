@@ -1,0 +1,20 @@
+{:paths ["src"]
+ ;; Java 17 on Chinese Windows defaults to a GBK charset, which silently mangles
+ ;; implicit byte<->String conversions. Two consequences:
+ ;;   1. VERIFIED: the deps.clj launcher installed here (scoop clj-deps) IGNORES
+ ;;      :jvm-opts, so the line below does nothing on this machine -- it is kept for
+ ;;      an official Clojure CLI, which does honor it. To fix console output here,
+ ;;      pass it by hand:  clojure '-J-Dstdout.encoding=UTF-8' -M:dev ...
+ ;;   2. Therefore code must NEVER rely on the JVM default charset. Decode and encode
+ ;;      UTF-8 explicitly at every byte boundary (HTTP bodies, files, JSONL).
+ ;;      clojure.core/spit and slurp already default to UTF-8 and are safe.
+ :jvm-opts ["-Dfile.encoding=UTF-8" "-Dstdout.encoding=UTF-8" "-Dstderr.encoding=UTF-8"]
+ :deps {org.clojure/clojure   {:mvn/version "1.12.6"}
+        http-kit/http-kit     {:mvn/version "2.8.0"}
+        org.clojure/data.json {:mvn/version "2.5.2"}
+        lynxeyes/dotenv       {:mvn/version "1.1.0"}}
+ :aliases
+ {:test {:extra-paths ["test"]}
+  :dev  {:extra-paths ["dev" "test"]}
+  :run  {:main-opts ["-m" "harness.http"]}
+  :repl {:extra-paths ["dev" "test"] :main-opts ["-m" "harness.repl"]}}}
