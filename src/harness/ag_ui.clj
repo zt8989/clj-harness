@@ -35,7 +35,13 @@
   (if-let [id (:reasoning s)]
     (-> s (assoc :reasoning nil)
           (update :frames conj {:type "REASONING_MESSAGE_END" :messageId id}
-                              {:type "REASONING_END"}))
+                              {:type "REASONING_END" :messageId id})
+          ;; An assistant message must always follow the reasoning group. Without this,
+          ;; a turn that produced reasoning and then nothing -- which is precisely what
+          ;; a max_tokens-exhausted think looks like, finish_reason "length" with empty
+          ;; content -- would leave the reasoning with no assistant message to fold
+          ;; back onto, and DeepSeek answers 400 on the next turn.
+          open-text)
     s))
 
 (defn- open-reasoning [s]
@@ -43,8 +49,14 @@
     s
     (let [id (str (:run-id s) "-r" (:n s))]
       (-> s (assoc :reasoning id) (update :n inc)
-            (update :frames conj {:type "REASONING_START"}
-                                {:type "REASONING_MESSAGE_START" :messageId id})))))
+            (update :frames conj {:type "REASONING_START" :messageId id}
+                                ;; The role is a literal the shipped schema insists on.
+                                ;; @ag-ui/client's applier ignores it and hard-codes
+                                ;; "reasoning" itself -- but zod validates the event
+                                ;; BEFORE the applier ever sees it, so omitting it is a
+                                ;; hard client-side failure. Found by running the real
+                                ;; client, not by reading the spec.
+                                {:type "REASONING_MESSAGE_START" :messageId id :role "reasoning"})))))
 
 (defn- step [s ev]
   (case (:type ev)

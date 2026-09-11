@@ -58,6 +58,30 @@
         (is (= 2 (count ids)))
         (is (= 2 (count (distinct ids))))))))
 
+(deftest reasoning-frames-carry-what-the-shipped-schema-demands
+  ;; The shipped EventSchemas union is a zod discriminated union, and @ag-ui/client
+  ;; parses every event through it BEFORE its applier runs. Two things it insists on
+  ;; that the prose docs leave ambiguous: a messageId on the standalone REASONING_START
+  ;; and REASONING_END lifecycle frames, and a literal role on REASONING_MESSAGE_START.
+  ;; Omitting either is a hard failure in a real client.
+  (let [frames  (wire [(ev/run-start) (ev/reasoning-delta "x") (ev/run-end)])
+        at      (fn [t] (first (filter #(= t (:type %)) frames)))
+        id      (fn [t] (:messageId (at t)))]
+    (is (string? (id "REASONING_START")))
+    (is (string? (id "REASONING_END")))
+    (is (= "reasoning" (:role (at "REASONING_MESSAGE_START"))))
+    (is (= "assistant" (:role (at "TEXT_MESSAGE_START"))))
+    (testing "every frame in the group agrees on the id"
+      (is (apply = (map id ["REASONING_START" "REASONING_MESSAGE_START"
+                            "REASONING_MESSAGE_CONTENT" "REASONING_MESSAGE_END"
+                            "REASONING_END"]))))
+    (testing "a turn of reasoning and nothing else still emits an assistant message"
+      ;; Otherwise the reasoning has nothing to fold back onto and DeepSeek 400s.
+      (is (= ["RUN_STARTED" "REASONING_START" "REASONING_MESSAGE_START"
+              "REASONING_MESSAGE_CONTENT" "REASONING_MESSAGE_END" "REASONING_END"
+              "TEXT_MESSAGE_START" "TEXT_MESSAGE_END" "RUN_FINISHED"]
+             (types frames))))))
+
 (deftest an-error-closes-whatever-is-open
   (let [frames (wire [(ev/run-start)
                       (ev/reasoning-delta "x") (ev/text-delta "y")
