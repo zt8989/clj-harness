@@ -8,7 +8,8 @@
     harness.llm-test
     harness.tools-test
     harness.loop-test
-    harness.ag-ui-test])
+    harness.ag-ui-test
+    harness.http-test])
 
 (defn -main [& _]
   (apply require test-namespaces)
