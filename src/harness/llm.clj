@@ -38,6 +38,12 @@
   (assoc (edn/read-string (slurp "config.edn"))
          :api-key (dotenv/env "HARNESS_API_KEY")))
 
+(defn prompt
+  "prompt.md, re-read before every run so the agent can rewrite its own instructions
+  -- or its own kernel -- and see the change take effect on the very next turn."
+  []
+  (slurp "prompt.md" :encoding "UTF-8"))
+
 ;; ------------------------------------------------------------ openai-completions
 
 (defonce ^:private http-client

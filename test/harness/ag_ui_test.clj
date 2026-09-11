@@ -117,3 +117,115 @@
       (is (some #(and (= "TOOL_CALL_RESULT" (:type %))
                       (str/includes? (str (:content %)) "3"))
                 @frames)))))
+
+;; -------------------------------------------------------------------- inbound
+;;
+;; apply-frames is the bare minimum of what @ag-ui/client's applier does: accumulate
+;; text and reasoning into separate messages, attach tool calls to the open assistant
+;; message, and turn results into tool messages. It lives here so the round trip
+;; outbound -> client -> inbound is testable offline -- and that round trip is the
+;; only thing standing between this harness and a DeepSeek 400 on the second turn.
+
+(defn- patch-by-id [messages id f]
+  (mapv (fn [m] (if (= id (:id m)) (f m) m)) messages))
+
+(defn- patch-tool-call [messages id f]
+  (mapv (fn [m]
+          (if (some #(= id (:id %)) (:toolCalls m))
+            (update m :toolCalls #(mapv (fn [tc] (if (= id (:id tc)) (f tc) tc)) %))
+            m))
+        messages))
+
+(defn- apply-frames [frames]
+  (reduce
+   (fn [msgs f]
+     (let [t (:type f)]
+       (cond
+         (= t "TEXT_MESSAGE_START")
+         (conj msgs {:id (:messageId f) :role "assistant" :content ""})
+
+         (= t "TEXT_MESSAGE_CONTENT")
+         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
+
+         (= t "REASONING_MESSAGE_START")
+         (conj msgs {:id (:messageId f) :role "reasoning" :content ""})
+
+         (= t "REASONING_MESSAGE_CONTENT")
+         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
+
+         (= t "TOOL_CALL_START")
+         (patch-by-id msgs (:parentMessageId f)
+                      #(update % :toolCalls (fnil conj [])
+                               {:id (:toolCallId f) :type "function"
+                                :function {:name (:toolCallName f) :arguments ""}}))
+
+         (= t "TOOL_CALL_ARGS")
+         (patch-tool-call msgs (:toolCallId f)
+                          #(update-in % [:function :arguments] str (:delta f)))
+
+         (= t "TOOL_CALL_RESULT")
+         (conj msgs {:id (:messageId f) :role "tool"
+                     :toolCallId (:toolCallId f) :content (:content f)})
+
+         :else msgs)))
+   []
+   frames))
+
+(deftest outbound-then-inbound-preserves-reasoning
+  (let [emit   (ag/outbound "thr-1" "run-1")
+        frames (atom [])]
+    (loop/run! (fake/scripted [{:reasoning "先算一下。" :content ""
+                                :tool-calls [{:id "c1" :name "eval" :arguments {:code "(+ 1 2)"}}]}
+                               {:content "等于 3"}])
+               []
+               #(swap! frames into (emit %)))
+    (let [client    (apply-frames @frames)
+          sent      (ag/inbound client "SYSTEM" nil)
+          assistant (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) sent))]
+      (testing "the client really did store reasoning as a message of its own"
+        (is (some #(= "reasoning" (:role %)) client)))
+      (testing "replaying it carries reasoning_content -- without this DeepSeek answers 400"
+        (is (= "先算一下。" (:reasoning_content assistant))))
+      (testing "tool calls are renamed to snake_case, arguments intact"
+        (is (= [{:id "c1" :type "function"
+                 :function {:name "eval" :arguments "{\"code\":\"(+ 1 2)\"}"}}]
+               (:tool_calls assistant))))
+      (testing "the tool result became a tool message keyed by tool_call_id"
+        (is (= {:role "tool" :tool_call_id "c1" :content "3"}
+               (last (filter #(= "tool" (:role %)) sent)))))
+      (testing "the assistant turn that had no reasoning gets no reasoning_content"
+        (is (not (contains? (last (filter #(= "assistant" (:role %)) sent))
+                            :reasoning_content))))
+      (testing "the system prompt leads"
+        (is (= [{:role "system" :content "SYSTEM"}] (vec (take 1 sent))))))))
+
+(deftest drops-activity-and-rebuilds-in-the-provider-shape
+  (let [sent (ag/inbound [{:id "a" :role "activity" :activityType "x" :content "nope"}
+                          {:id "r" :role "reasoning" :content "why "}
+                          {:id "r2" :role "reasoning" :content "not"}
+                          {:id "m" :role "assistant" :content "hi" :metadata {:k 1}
+                           :toolCalls [{:id "c1" :type "function" :encryptedValue "zz"
+                                        :function {:name "read" :arguments "{}"}}]}]
+                         "S" nil)]
+    (is (= ["system" "assistant"] (mapv :role sent)))
+    (is (= "why not" (:reasoning_content (second sent))))
+    (is (= [{:id "c1" :type "function" :function {:name "read" :arguments "{}"}}]
+           (:tool_calls (second sent))))
+    (testing "no AG-UI-only field survives"
+      (is (not-any? #(contains? % :metadata) sent))
+      (is (not-any? #(contains? % :encryptedValue) sent)))))
+
+(deftest user-content-passes-through-untouched
+  (let [parts [{:type "text" :text "看图"} {:type "image" :url "u"}]
+        sent  (ag/inbound [{:id "u1" :role "user" :content parts}] "S" nil)]
+    (testing "multimodal parts are not flattened by a whitelist"
+      (is (= parts (:content (second sent)))))
+    (is (not (contains? (second sent) :id)))))
+
+(deftest a-leading-system-message-is-replaced
+  (is (= [{:role "system" :content "S"}] (ag/inbound [{:role "system" :content "客户端的"}] "S" nil)))
+  (is (= ["S"] (mapv :content (ag/inbound [] "S" nil)))))
+
+(deftest context-is-appended-to-the-prompt
+  (let [sent (ag/inbound [] "S" [{:description "repo" :value "lisp-harness"}])]
+    (is (str/includes? (:content (first sent)) "repo: lisp-harness"))))
