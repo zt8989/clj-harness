@@ -7,7 +7,8 @@
   '[harness.event-test
     harness.llm-test
     harness.tools-test
-    harness.loop-test])
+    harness.loop-test
+    harness.ag-ui-test])
 
 (defn -main [& _]
   (apply require test-namespaces)
