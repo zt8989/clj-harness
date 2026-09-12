@@ -12,7 +12,8 @@
   a client's second input already restates everything before it, so folding it in would
   duplicate the conversation. The frames are the source of truth; the inputs are only a
   starting point."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.ag-ui :as ag]
@@ -77,7 +78,8 @@
   (records->messages (lines->records lines)))
 
 (defn history
-  "A thread's log -> the provider-shaped messages you can hand straight to loop/run!.
+  "A thread's log -> the provider-shaped messages you can hand straight to
+  loop/run-chan.
 
   This is the whole point of the namespace: after the process that wrote the log is
   gone, this rebuilds the conversation that was in flight, reasoning and tool results
@@ -107,8 +109,12 @@
   ([dir thread-id text provider]
    (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)
-         frames (atom [])]
-     (loop/run! provider
-                (conj (history dir thread-id) {:role "user" :content text})
-                (fn [event] (doseq [frame (emit event)] (swap! frames conj frame))))
+         frames (atom [])
+         events (loop/run-chan provider
+                               (conj (history dir thread-id) {:role "user" :content text}))]
+     (loop []
+       (when-let [event (async/<!! events)]
+         (when-not (= :run/done (:type event))
+           (doseq [frame (emit event)] (swap! frames conj frame))
+           (recur))))
      @frames)))

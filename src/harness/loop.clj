@@ -1,7 +1,7 @@
 (ns harness.loop
   "ReAct: stream a turn, run its tool calls serially, append the results, repeat.
-  Terminates when a turn has no tool calls. No iteration cap, by design."
-  (:refer-clojure :exclude [run!])
+  Terminates when a turn has no tool calls. No iteration cap, by design.
+  Events leave the kernel over a core.async channel (run-chan)."
   (:require [clojure.core.async :as async]
             [harness.event :as ev]
             [harness.llm :as llm]
@@ -9,8 +9,8 @@
 
 (defn- drive!
   "Run one run, calling EMIT with each harness.event value as it is produced.
-  Returns the final history. Shared by both the callback and channel contracts so
-  the run's behaviour lives in exactly one place."
+  Returns the final history. The producer side of run-chan; all run behaviour
+  lives in exactly this one place."
   [provider messages emit]
   (let [history (atom (vec messages))]
     (emit (ev/run-start))
@@ -29,14 +29,6 @@
       (catch Throwable t
         (emit (ev/run-error (ex-message t)))))
     @history))
-
-(defn run!
-  "Drive one run to completion. MESSAGES is the provider-shaped history.
-  ON-EVENT receives each harness.event value. Returns the final history.
-
-  Callback contract -- kept for compatibility; the channel form is run-chan."
-  [provider messages on-event]
-  (drive! provider messages on-event))
 
 (defn run-chan
   "Drive one run, returning a channel of harness.event values. After the run a

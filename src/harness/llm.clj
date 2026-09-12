@@ -10,7 +10,7 @@
   tool rounds, which DeepSeek requires whenever the request carries tools
   (omitting it there is a hard HTTP 400).
 
-  A provider is just a config map, so (config) can be handed straight to loop/run!:
+  A provider is just a config map, so (config) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key .., :reasoning-effort ..}"
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]

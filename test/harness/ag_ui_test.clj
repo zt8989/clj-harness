@@ -1,5 +1,6 @@
 (ns harness.ag-ui-test
-  (:require [clojure.string :as str]
+  (:require [clojure.core.async :as async]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
@@ -12,6 +13,19 @@
     (vec (mapcat emit events))))
 
 (defn- types [frames] (mapv :type frames))
+
+(defn- run-events
+  "Drive one scripted run through loop/run-chan and return the kernel events,
+  the :run/done terminal dropped."
+  [turns]
+  (let [ch  (loop/run-chan (fake/scripted turns) [])
+        out (atom [])]
+    (loop []
+      (when-let [ev (async/<!! ch)]
+        (when-not (= :run/done (:type ev))
+          (swap! out conj ev)
+          (recur))))
+    @out))
 
 (deftest text-only-turn
   (let [frames (wire [(ev/run-start)
@@ -92,11 +106,10 @@
 (deftest drives-the-real-loop-offline
   (let [emit   (ag/outbound "thr-9" "run-9")
         frames (atom [])]
-    (loop/run! (fake/scripted [{:reasoning "想一下" :content ""
+    (doseq [event (run-events [{:reasoning "想一下" :content ""
                                 :tool-calls [{:id "c1" :name "eval" :arguments {:code "(+ 1 2)"}}]}
-                               {:content "等于 3"}])
-               []
-               #(swap! frames into (emit %)))
+                               {:content "等于 3"}])]
+      (swap! frames into (emit event)))
     (is (empty? (wire/violations @frames)))
     (is (= "RUN_STARTED" (first (types @frames))))
     (is (= "RUN_FINISHED" (last (types @frames))))
@@ -117,11 +130,10 @@
 (deftest outbound-then-inbound-preserves-reasoning
   (let [emit   (ag/outbound "thr-1" "run-1")
         frames (atom [])]
-    (loop/run! (fake/scripted [{:reasoning "先算一下。" :content ""
+    (doseq [event (run-events [{:reasoning "先算一下。" :content ""
                                 :tool-calls [{:id "c1" :name "eval" :arguments {:code "(+ 1 2)"}}]}
-                               {:content "等于 3"}])
-               []
-               #(swap! frames into (emit %)))
+                               {:content "等于 3"}])]
+      (swap! frames into (emit event)))
     (let [client    (wire/apply-frames @frames)
           sent      (ag/inbound client "SYSTEM" nil)
           assistant (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) sent))]

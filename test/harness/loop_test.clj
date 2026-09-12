@@ -4,11 +4,6 @@
             [harness.fake :as fake]
             [harness.loop :as loop]))
 
-(defn- drive [provider messages]
-  (let [seen   (atom [])
-        result (loop/run! provider messages #(swap! seen conj %))]
-    {:history result :seen @seen}))
-
 (defn- drain-chan [ch]
   (loop [acc []]
     (if-let [ev (async/<!! ch)]
@@ -16,6 +11,9 @@
         {:history (:history ev) :seen acc}
         (recur (conj acc ev)))
       {:history nil :seen acc})))
+
+(defn- drive [provider messages]
+  (drain-chan (loop/run-chan provider messages)))
 
 (defn- joined [seen type]
   (apply str (map :text (filter #(= type (:type %)) seen))))
@@ -66,31 +64,3 @@
         (drive {:protocol :explodes} [])]
     (is (= [:run/start :run/error] (mapv :type seen)))
     (is (string? (:message (last seen))))))
-
-;; ----------------------------------------------------- channel contract (01)
-
-(defn- script [turns] (fake/scripted turns))
-
-(deftest run-chan-emits-the-same-event-sequence-as-run-bang
-  (testing "text-only run: events and history match"
-    (let [turns [{:reasoning "thinking..." :content "hello world"}]
-          a (drive (script turns) [])
-          b (drain-chan (loop/run-chan (script turns) []))]
-      (is (= (mapv :type (:seen a)) (mapv :type (:seen b))))
-      (is (= (joined (:seen a) :reasoning/delta) (joined (:seen b) :reasoning/delta)))
-      (is (= (joined (:seen a) :text/delta) (joined (:seen b) :text/delta)))
-      (is (= (:history a) (:history b)))))
-  (testing "tool turn: call, result, and final answer match in order"
-    (let [turns [{:content ""
-                  :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}
-                               {:id "c2" :name "no-such-tool" :arguments {}}]}
-                 {:content "done"}]
-          a (drive (script turns) [])
-          b (drain-chan (loop/run-chan (script turns) []))]
-      (is (= (mapv :type (:seen a)) (mapv :type (:seen b))))
-      (is (= ["c1" "c2"] (mapv :id (filter #(= :tool/result (:type %)) (:seen b)))))
-      (is (= (:history a) (:history b)))))
-  (testing "transport failure surfaces as run/error on the channel too"
-    (let [b (drain-chan (loop/run-chan {:protocol :explodes} []))]
-      (is (= [:run/start :run/error] (mapv :type (:seen b))))
-      (is (string? (:message (last (:seen b))))))))
