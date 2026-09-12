@@ -6,9 +6,10 @@
 
     \"input\"   -- the client's RunAgentInput as received.
     \"event\"   -- every AG-UI frame we emitted.
-    \"message\" -- one line per provider-shaped message the LLM will see, VERBATIM:
-                   the system prompt as assembled for this run (prompt.md re-read,
-                   context folded in) and each inbound message.
+    \"message\" -- one line per provider-shaped message the LLM saw or produced,
+                   VERBATIM: the system prompt as assembled for this run (prompt.md
+                   re-read, context folded in), each inbound message, and every
+                   assistant reply / tool result the kernel appended.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -113,15 +114,26 @@
           ;; provider's shape, one line each, VERBATIM.
           (doseq [m messages]
             (log! thread-id run-id "message" m))
-          ;; Drain run-chan and convert each kernel event to AG-UI frames. :run/done
-          ;; carries history and is ignored -- the stream already closed via :run/end's
-          ;; RUN_FINISHED (or RUN_ERROR).
+          ;; Drain run-chan and convert each kernel event to AG-UI frames. The
+          ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR); the
+          ;; :run/done history itself is never converted -- it is the returned
+          ;; side of the message record instead.
           (let [events (loop/run-chan provider messages)]
             (loop []
               (when-let [ev (async/<! events)]
-                (when-not (= :run/done (:type ev))
-                  (doseq [frame (convert ev)] (emit frame))
-                  (recur))))))))))
+                (if (= :run/done (:type ev))
+                  ;; Returned side: every message the kernel appended after the
+                  ;; initial vector -- assistant replies VERBATIM (the history
+                  ;; holds the provider message unrebuilt, reasoning and tool
+                  ;; calls intact) and each tool result as the tool message
+                  ;; submitted on the next call. :run/done follows RUN_ERROR
+                  ;; too, so any run the kernel started leaves its full message
+                  ;; tail on disk -- but it lands one beat AFTER the terminal
+                  ;; frame, so a reader racing the consumer may not see it yet.
+                  (doseq [m (subvec (:history ev) (count messages))]
+                    (log! thread-id run-id "message" m))
+                  (do (doseq [frame (convert ev)] (emit frame))
+                      (recur)))))))))))
 
 
 (defn- handle-run [req]

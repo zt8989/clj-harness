@@ -64,7 +64,7 @@ npm run dev   # vite --port 5173 --strictPort
 
 ### 停止
 
-`Ctrl+C` 或 `Get-Process clojure,node | Stop-Process`。日志落盘 `~/.lisp-harness/logs/<threadId>.jsonl`，每行 `{ts, runId, kind:"input"|"event"|"message", payload}`：`input` 是收到的 RunAgentInput，`event` 是发出的每个 AG-UI 帧，`message` 是提交给 LLM 的 provider 形态消息原样（本次 run 组装出的 system prompt 与入站消息）。只 append 永不读。
+`Ctrl+C` 或 `Get-Process clojure,node | Stop-Process`。日志落盘 `~/.lisp-harness/logs/<threadId>.jsonl`，每行 `{ts, runId, kind:"input"|"event"|"message", payload}`：`input` 是收到的 RunAgentInput，`event` 是发出的每个 AG-UI 帧，`message` 是 LLM 真实看到/返回的 provider 形态消息原样（system prompt、入站消息、assistant 返回、tool 结果，按序构成完整消息数组）。只 append 永不读。
 
 ## 验证
 

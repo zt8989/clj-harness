@@ -85,6 +85,21 @@
                                                           frames))))
                             ":paths")))))))
 
+(defn- wait-for-recorded
+  "Poll the thread's log, parsed, until PRED holds over the parsed lines or MS
+  elapses. Needed because the returned side of the message record lands one beat
+  after the terminal frame -- :run/done reaches the consumer only after the SSE
+  has closed -- so a reader that races the consumer sees a file without it."
+  [f pred ms]
+  (let [read   (fn [] (mapv #(json/read-str % :key-fn keyword)
+                            (str/split-lines (slurp f :encoding "UTF-8"))))
+        finish (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (let [lines (read)]
+        (if (or (pred lines) (> (System/currentTimeMillis) finish))
+          lines
+          (do (Thread/sleep 25) (recur)))))))
+
 (deftest records-the-run-as-jsonl
   (with-server
    8098
@@ -94,9 +109,12 @@
      ;; executions must not bleed in.
      (io/delete-file (io/file log-dir "it-1.jsonl") true)
      (post-run 8098 "it-1")
-     (let [f    (io/file log-dir "it-1.jsonl")
-           lines (mapv #(json/read-str % :key-fn keyword)
-                       (str/split-lines (slurp f :encoding "UTF-8")))
+     (let [f     (io/file log-dir "it-1.jsonl")
+           lines (wait-for-recorded f
+                                    #(some (fn [l] (and (= "message" (:kind l))
+                                                        (= "assistant" (get-in l [:payload :role]))))
+                                           %)
+                                    2000)
            msgs  (mapv :payload (filter #(= "message" (:kind %)) lines))]
        (testing "both the inbound input and every emitted frame are on disk"
          (is (contains? (set (map :kind lines)) "input"))
@@ -117,7 +135,18 @@
                    msgs))
          ;; ag/inbound strips the AG-UI-only fields, :id among them -- the record
          ;; holds what the model will see, not what the client sent.
-         (is (some #(and (= "user" (:role %)) (not (contains? % :id))) msgs)))))))
+         (is (some #(and (= "user" (:role %)) (not (contains? % :id))) msgs)))
+       (testing "every LLM return is on disk VERBATIM"
+         (let [assistants (filter #(= "assistant" (:role %)) msgs)]
+           (is (= reasoning (:reasoning_content (first assistants))))
+           (is (= #{"c1" "c2"} (set (map :id (:tool_calls (first assistants))))))
+           (is (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
+                  (:content (last assistants))))))
+       (testing "tool results are recorded as the tool messages they became"
+         ;; History appends tool messages in the provider's call order, whatever
+         ;; the completion order on the wire was.
+         (is (= ["c1" "c2"] (mapv :tool_call_id
+                                  (filter #(= "tool" (:role %)) msgs)))))))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read
   ;; Every other replay test builds its log with the emitter directly. This one goes
