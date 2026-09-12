@@ -139,14 +139,24 @@
        (testing "every LLM return is on disk VERBATIM"
          (let [assistants (filter #(= "assistant" (:role %)) msgs)]
            (is (= reasoning (:reasoning_content (first assistants))))
-           (is (= #{"c1" "c2"} (set (map :id (:tool_calls (first assistants))))))
+           ;; The whole tool_calls payload, not just the ids: the record holds
+           ;; the provider message unrebuilt.
+           (is (= [{:id "c1" :type "function"
+                    :function {:name "read" :arguments "{\"path\":\"deps.edn\"}"}}
+                   {:id "c2" :type "function"
+                    :function {:name "read" :arguments "{\"path\":\"README.md\"}"}}]
+                  (:tool_calls (first assistants))))
            (is (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
                   (:content (last assistants))))))
        (testing "tool results are recorded as the tool messages they became"
          ;; History appends tool messages in the provider's call order, whatever
          ;; the completion order on the wire was.
-         (is (= ["c1" "c2"] (mapv :tool_call_id
-                                  (filter #(= "tool" (:role %)) msgs)))))))))
+         (let [tools (filter #(= "tool" (:role %)) msgs)]
+           (is (= ["c1" "c2"] (mapv :tool_call_id tools)))
+           ;; The content is what the read tool actually returned.
+           (is (some #(and (= "c1" (:tool_call_id %))
+                           (= (slurp "deps.edn" :encoding "UTF-8") (:content %)))
+                     tools))))))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read
   ;; Every other replay test builds its log with the emitter directly. This one goes

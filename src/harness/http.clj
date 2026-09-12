@@ -45,6 +45,13 @@
                                   :runId run-id :kind kind :payload payload}) "\n")
           :append true :encoding "UTF-8")))
 
+(defn- log-messages!
+  "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
+  the returned side of the message record both come through here."
+  [thread-id run-id msgs]
+  (doseq [m msgs]
+    (log! thread-id run-id "message" m)))
+
 ;; ------------------------------------------------------------------- the edge
 
 (defonce ^:private provider-override (atom nil))
@@ -112,8 +119,7 @@
           ;; to see. The system prompt as assembled for THIS run -- prompt.md
           ;; re-read, context folded in -- plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM.
-          (doseq [m messages]
-            (log! thread-id run-id "message" m))
+          (log-messages! thread-id run-id messages)
           ;; Drain run-chan and convert each kernel event to AG-UI frames. The
           ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR); the
           ;; :run/done history itself is never converted -- it is the returned
@@ -130,8 +136,8 @@
                   ;; too, so any run the kernel started leaves its full message
                   ;; tail on disk -- but it lands one beat AFTER the terminal
                   ;; frame, so a reader racing the consumer may not see it yet.
-                  (doseq [m (subvec (:history ev) (count messages))]
-                    (log! thread-id run-id "message" m))
+                  (log-messages! thread-id run-id
+                                 (subvec (:history ev) (count messages)))
                   (do (doseq [frame (convert ev)] (emit frame))
                       (recur)))))))))))
 
