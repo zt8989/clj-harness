@@ -5,7 +5,8 @@
   Also append-only JSONL logging: one file per thread, holding both the inbound
   RunAgentInput and every frame we emitted. It is a RECORD, never a source of truth --
   the client owns the conversation, and nothing here is ever read back."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.ag-ui :as ag]
@@ -83,29 +84,39 @@
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
-        emit      (runner thread-id run-id ch)
-        convert   (ag/outbound thread-id run-id)]
+        emit    (runner thread-id run-id ch)
+        convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
-    (try
-      (loop/run! (current-provider)
-                 (ag/inbound (:messages input) (llm/prompt) (:context input))
-                 (fn [kernel-event]
-                   (doseq [frame (convert kernel-event)] (emit frame))))
-      (catch Throwable t
-        ;; Reaching here means we failed before the loop could report for itself --
-        ;; a bad config, an unreadable prompt, a malformed RunAgentInput. Push a
-        ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
-        ;; run rather than a broken stream.
-        (let [conv (ag/outbound thread-id run-id)]
-          (doseq [frame (into (vec (conv (ev/run-start)))
-                              (conv (ev/run-error (ex-message t))))]
-            (emit frame)))))))
+    ;; The run lives on a core.async channel (loop/run-chan): drain it on a go loop and
+    ;; convert each kernel event to AG-UI frames. The :run/done terminal carries history
+    ;; and is ignored -- RUN_FINISHED (or RUN_ERROR) already closed the stream via :run/end.
+    (async/go-loop []
+      (let [[provider messages]
+            ;; A malformed input, an unreadable prompt, or a bad config blows up before
+            ;; the run starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR
+            ;; pair so the client sees a terminated run rather than a broken stream.
+            (try [(current-provider)
+                  (ag/inbound (:messages input) (llm/prompt) (:context input))]
+                 (catch Throwable t
+                   (doseq [frame (into (vec (convert (ev/run-start)))
+                                       (convert (ev/run-error (ex-message t))))]
+                     (emit frame))
+                   nil))]
+        (when provider
+          (let [events (loop/run-chan provider messages)]
+            (loop []
+              (if-let [ev (async/<! events)]
+                (if (= :run/done (:type ev))
+                  nil
+                  (do (doseq [frame (convert ev)] (emit frame)) (recur)))
+                nil))))))))
 
 (defn- handle-run [req]
   (let [input (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)]
-    ;; as-channel wants no status or headers of its own, and the work must not block
-    ;; the worker that :on-open runs on.
-    (hk/as-channel req {:on-open (fn [ch] (future (run-agent! ch input)))})))
+    ;; as-channel wants no status or headers of its own. run-agent! returns immediately
+    ;; -- the run is driven by a go loop draining the core.async channel -- so it does
+    ;; not block the worker that :on-open runs on.
+    (hk/as-channel req {:on-open (fn [ch] (run-agent! ch input))})))
 
 (defn handler [req]
   (if (= :options (:request-method req))
