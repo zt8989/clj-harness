@@ -57,6 +57,29 @@
 
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
+(defn- lifecycle-record
+  "A tool-lifecycle kernel event -> the [kind payload] jsonl line it becomes,
+  keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every other
+  event kind. The audit line is additive: the event itself carries no wire
+  frame, so the AG-UI conversion upstream of this is untouched."
+  [ev]
+  (case (:type ev)
+    :tool/pre-execute
+    ["tools/pre-execute" (merge {:toolCallId (:id ev) :toolName (:name ev)}
+                                (when-not (= :pass (:outcome ev))
+                                  {:outcome (name (:outcome ev))})
+                                (when (seq (:missing ev))
+                                  {:missing (mapv name (:missing ev))}))]
+
+    :tool/execute
+    ["tools/execute" (merge {:toolCallId (:id ev) :toolName (:name ev)}
+                            (when (:error ev) {:error (:error ev)}))]
+
+    :tool/post-execute
+    ["tools/post-execute" {:toolCallId (:id ev) :toolName (:name ev)}]
+
+    nil))
+
 (defn- runner
   "Build the frame emitter for one run. Two http-kit rules have to hold at once:
 
@@ -129,7 +152,11 @@
                   ;; frame, so a reader racing the consumer may not see it yet.
                   (log-messages! thread-id run-id
                                  (subvec (:history ev) (count messages)))
-                  (do (doseq [frame (convert ev)] (emit frame))
+                  (do ;; Tool-lifecycle events are audit lines, not wire frames:
+                      ;; each lands as its own jsonl line, keyed by toolCallId.
+                      (when-let [[kind payload] (lifecycle-record ev)]
+                        (log! thread-id run-id kind payload))
+                      (doseq [frame (convert ev)] (emit frame))
                       (recur)))))))))))
 
 

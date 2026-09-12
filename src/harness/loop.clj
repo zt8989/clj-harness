@@ -37,7 +37,10 @@
             (let [chs  (mapv (fn [{:keys [id] :as call}]
                                (let [ch (async/chan 1)]
                                  (async/thread
-                                   (let [{:keys [content error]} (tools/run! call thread-id)]
+                                   ;; EMIT doubles as the lifecycle on-phase:
+                                   ;; the seam's pre/execute/post events ride the
+                                   ;; same channel out to the edge.
+                                   (let [{:keys [content error]} (tools/run! call thread-id emit)]
                                      (async/>!! ch {:id id :content content :error error})))
                                  ch))
                              calls)

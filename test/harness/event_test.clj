@@ -2,6 +2,18 @@
   (:require [clojure.test :refer [deftest is]]
             [harness.event :as ev]))
 
+(deftest tool-lifecycle-shapes
+  (is (= {:type :tool/pre-execute :id "c" :name "read" :outcome :pass :missing []}
+         (ev/tool-pre-execute "c" "read" :pass [])))
+  (is (= {:type :tool/pre-execute :id "c" :name "read" :outcome :missing-args :missing [:path]}
+         (ev/tool-pre-execute "c" "read" :missing-args [:path])))
+  (is (= {:type :tool/execute :id "c" :name "read" :error nil}
+         (ev/tool-executed "c" "read" nil)))
+  (is (= {:type :tool/execute :id "c" :name "read" :error "boom"}
+         (ev/tool-executed "c" "read" "boom")))
+  (is (= {:type :tool/post-execute :id "c" :name "read"}
+         (ev/tool-post-execute "c" "read"))))
+
 (deftest shapes
   (is (= {:type :run/start} (ev/run-start)))
   (is (= {:type :text/delta :text "a"} (ev/text-delta "a")))

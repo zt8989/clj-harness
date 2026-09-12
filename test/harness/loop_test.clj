@@ -19,12 +19,20 @@
 (defn- joined [seen type]
   (apply str (map :text (filter #(= type (:type %)) seen))))
 
+(defn- without-lifecycle [seen]
+  "The audit events ride the same stream as the wire-relevant ones; the run's
+  shape is asserted over the latter only."
+  (remove #(contains? #{:tool/pre-execute :tool/execute :tool/post-execute}
+                      (:type %))
+          seen))
+
 (deftest text-only-run
   (let [{:keys [history seen]}
         (drive (fake/scripted [{:reasoning "thinking..." :content "hello world"}]) [])]
     (testing "streams reasoning then text, then ends"
       (is (= [:run/start :run/end]
-             (mapv :type (remove #(#{:reasoning/delta :text/delta} (:type %)) seen))))
+             (mapv :type (without-lifecycle
+                          (remove #(#{:reasoning/delta :text/delta} (:type %)) seen)))))
       (is (= "thinking..." (joined seen :reasoning/delta)))
       (is (= "hello world" (joined seen :text/delta))))
     (testing "the assistant message is appended verbatim, reasoning_content included"
@@ -40,7 +48,13 @@
                [])]
     (testing "one serial tool round, then a final answer"
       (is (= [:run/start :tool/call :tool/result :text/delta :run/end]
-             (mapv :type seen))))
+             (mapv :type (without-lifecycle seen))))
+      (testing "the failed call's lifecycle: pre-execute refused, no execute, post closes"
+        (let [pre  (first (filter #(= :tool/pre-execute (:type %)) seen))
+              post (first (filter #(= :tool/post-execute (:type %)) seen))]
+          (is (= :unknown-tool (:outcome pre)))
+          (is (empty? (filter #(= :tool/execute (:type %)) seen)))
+          (is (= "c1" (:id post))))))
     (testing "the call is fully accumulated before it is emitted"
       (is (= "{}" (:args (first (filter #(= :tool/call (:type %)) seen))))))
     (testing "a failing tool does not end the run -- it is fed back as the result"
@@ -63,19 +77,21 @@
       (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history)))))))
 
 (deftest a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
-  (mem/register! "slow"
-                   {:description "Sleep MS then return."
-                    :parameters  {:type "object"
-                                  :properties {"ms" {:type "integer" :description "Millis."}}}
-                    :required    [:ms]
-                    :run         (fn [{:keys [ms]}] (Thread/sleep ms) "ok")})
+  ;; The slow tool lives on a session overlay, not the base registry: runtime
+  ;; registration must never mutate the base other tests read.
+  (mem/session-register! "t-slow" "slow"
+                         {:description "Sleep MS then return."
+                          :parameters  {:type "object"
+                                        :properties {"ms" {:type "integer" :description "Millis."}}}
+                          :required    [:ms]
+                          :run         (fn [{:keys [ms]}] (Thread/sleep ms) "ok")})
   (let [turns [{:content ""
                 :tool-calls [{:id "c1" :name "slow" :arguments {:ms 300}}
                              {:id "c2" :name "slow" :arguments {:ms 300}}]}
                {:content "done"}]
         t0    (System/nanoTime)
         {:keys [history seen]}
-        (drive (fake/scripted turns) [])
+        (drain-chan (loop/run-chan (fake/scripted turns) [] {:thread-id "t-slow"}))
         ms    (/ (- (System/nanoTime) t0) 1e6)]
     (testing "wall clock is the slower tool, not the sum of both"
       ;; Concurrent: ~300ms plus scheduling slack. Serial would be >= 600ms.
@@ -87,7 +103,8 @@
       (is (every? false? (map :error (filter #(= :tool/result (:type %)) seen)))))
     (testing "and the run still terminates with a well-formed history"
       (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))
-      (is (= "done" (:content (last history)))))))
+      (is (= "done" (:content (last history))))))
+  (mem/session-unregister! "t-slow" "slow"))
 
 (deftest transport-failure-ends-the-run
   (let [{:keys [seen]}

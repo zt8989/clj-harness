@@ -94,6 +94,14 @@
       (update s :frames conj {:type "TOOL_CALL_RESULT" :messageId id :toolCallId (:id ev)
                               :content (:content ev) :role "tool"}))
 
+    (:tool/pre-execute :tool/execute :tool/post-execute)
+    ;; The tool-lifecycle audit events carry no AG-UI frame at all: the edge
+    ;; records them as jsonl lines. Passing the event through unchanged keeps
+    ;; the fold total without inventing wire frames for audit data. (The
+    ;; constants share one result and so must be grouped in a list -- bare
+    ;; consecutive constants would pair each with its own result.)
+    s
+
     :run/end
     (-> s close-reasoning close-text
           (update :frames conj {:type "RUN_FINISHED"

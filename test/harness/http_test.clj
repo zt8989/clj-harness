@@ -112,9 +112,18 @@
      (post-run 8098 "it-1")
      (let [f     (io/file log-dir "it-1.jsonl")
            lines (wait-for-recorded f
-                                    #(some (fn [l] (and (= "message" (:kind l))
-                                                        (= "assistant" (get-in l [:payload :role]))))
-                                           %)
+                                    ;; The returned tail lands one line at a
+                                    ;; time after the terminal frame -- wait
+                                    ;; for its LAST line (the final answer),
+                                    ;; not its first, or the reader races the
+                                    ;; writer and sees half a tail.
+                                    (fn [ls]
+                                      (some (fn [l]
+                                              (and (= "message" (:kind l))
+                                                   (= "assistant" (get-in l [:payload :role]))
+                                                   (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
+                                                      (get-in l [:payload :content]))))
+                                            ls))
                                     2000)
            msgs  (mapv :payload (filter #(= "message" (:kind %)) lines))]
        (testing "both the inbound input and every emitted frame are on disk"
@@ -184,6 +193,34 @@
          (is (some #(and (= "c1" (:tool_call_id %))
                          (str/includes? (str (:content %)) ":paths"))
                    (filter #(= "tool" (:role %)) history))))))))
+
+(deftest records-the-tool-lifecycle-as-jsonl
+  ;; ApplePi's ADR-0021 audit trio, keyed by toolCallId: every call enters
+  ;; (pre-execute), executes, and closes (post-execute) -- a pass carries no
+  ;; outcome key, and the wire is untouched by any of it.
+  (with-server
+   8094
+   (fn []
+     (io/delete-file (io/file log-dir "lifecycle.jsonl") true)
+     (post-run 8094 "lifecycle")
+     (let [f     (io/file log-dir "lifecycle.jsonl")
+           lines (wait-for-recorded f
+                                    (fn [ls]
+                                      (>= (count (filter #(= "tools/post-execute" (:kind %)) ls)) 2))
+                                    2000)
+           phases (group-by :kind (filter #(.startsWith ^String (str (:kind %)) "tools/") lines))
+           pre    (mapv :payload (get phases "tools/pre-execute"))
+           ex     (mapv :payload (get phases "tools/execute"))
+           post   (mapv :payload (get phases "tools/post-execute"))]
+       (testing "both calls entered, executed and closed the seam, keyed by id"
+         (is (= #{"c1" "c2"} (set (map :toolCallId pre))))
+         (is (= #{"c1" "c2"} (set (map :toolCallId ex))))
+         (is (= #{"c1" "c2"} (set (map :toolCallId post)))))
+       (testing "a passing call carries no outcome and no error"
+         (is (every? #(not (contains? % :outcome)) pre))
+         (is (every? #(not (contains? % :error)) ex)))
+       (testing "every phase names the tool that ran"
+         (is (every? #(= "read" (:toolName %)) post)))))))
 
 (deftest answers-the-cors-preflight
   (with-server

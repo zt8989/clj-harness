@@ -13,6 +13,7 @@
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
+            [harness.event :as ev]
             [harness.memory :as mem])
   (:import [java.util.regex Pattern]))
 
@@ -125,26 +126,49 @@
 
 ;; ------------------------------------------------------------------ dispatch
 
-(defn- validate! [{:keys [required]} args]
-  (let [missing (remove #(contains? args %) required)]
-    (when (seq missing)
-      (throw (ex-info (str "missing required argument(s): "
-                           (str/join ", " (map name missing)))
-                      {})))))
+(defn- missing-args [{:keys [required]} args]
+  (vec (remove #(contains? args %) required)))
 
 (defn run!
-  ([call] (run! call nil))
-  ([{:keys [function]} thread-id]
-   (try
-     (let [{:keys [name arguments]} function
-           tool   (or (get (mem/effective-tools thread-id) name)
-                      (throw (ex-info (str "unknown tool: " name) {})))
-           parsed (json/read-str (if (str/blank? arguments) "{}" arguments) :key-fn keyword)]
-       (validate! tool parsed)
-       ;; *thread-id* is bound around the tool body so code running inside a
-       ;; tool -- eval above all -- can address its own session (harness.memory).
-       {:content (str (binding [mem/*thread-id* thread-id]
-                        ((:run tool) parsed)))
-        :error false})
-     (catch Throwable t
-       {:content (ex-message t) :error true}))))
+  "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
+  (a fn of kernel events, may be nil) as it passes through:
+    :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool or
+                           :missing-args (with the missing names)
+    :tool/execute       -- left execution; the error message, or nil
+    :tool/post-execute  -- closes the lifecycle, whatever the phases decided
+  A call that never passes pre-execute (unknown tool, missing arguments) skips
+  the :tool/execute phase, but its :tool/post-execute still arrives -- the
+  lifecycle is always closed."
+  ([call] (run! call nil nil))
+  ([call thread-id] (run! call thread-id nil))
+  ([{:keys [id function] :as _call} thread-id on-phase]
+   (let [report (fn [e] (when on-phase (on-phase e)))
+         {:keys [name arguments]} function]
+     (if-let [tool (get (mem/effective-tools thread-id) name)]
+       (try
+         (let [parsed (json/read-str (if (str/blank? arguments) "{}" arguments)
+                                     :key-fn keyword)
+               missing (missing-args tool parsed)]
+           (if (seq missing)
+             (do (report (ev/tool-pre-execute id name :missing-args missing))
+                 (report (ev/tool-post-execute id name))
+                 {:content (str "missing required argument(s): "
+                                (str/join ", " (map (fn [k] (clojure.core/name k)) missing)))
+                  :error true})
+             (do (report (ev/tool-pre-execute id name :pass []))
+                 ;; *thread-id* is bound around the tool body so code running
+                 ;; inside a tool -- eval above all -- can address its own
+                 ;; session (harness.memory).
+                 (let [[result err]
+                       (try [(binding [mem/*thread-id* thread-id] ((:run tool) parsed)) nil]
+                            (catch Throwable t [nil t]))
+                       _ (report (ev/tool-executed id name (some-> err ex-message)))
+                       _ (report (ev/tool-post-execute id name))]
+                   (if err
+                     {:content (ex-message err) :error true}
+                     {:content (str result) :error false})))))
+         (catch Throwable t
+           {:content (ex-message t) :error true}))
+       (do (report (ev/tool-pre-execute id name :unknown-tool []))
+           (report (ev/tool-post-execute id name))
+           {:content (str "unknown tool: " name) :error true})))))
