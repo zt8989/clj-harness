@@ -58,16 +58,16 @@
 (defn run-chan
   "Drive one run, returning a channel of harness.event values. After the run a
   terminal event {:type :run/done :history <final-history>} is put, then the
-  channel closes. The channel is unbuffered: a slow consumer applies natural
-  backpressure rather than dropping events.
+  channel closes. The channel is unbuffered and the producer BLOCKS on every
+  put (>!!): a slow consumer applies natural backpressure rather than dropping
+  events or queueing them up.
 
-  Pass your own CH to own the buffer policy; otherwise one is created. The
-  producer runs on async/thread because the run does blocking I/O (the network
-  stream and the tools), so it must not occupy a go block."
-  ([provider messages] (run-chan provider messages (async/chan)))
-  ([provider messages ch]
-   (async/thread
-     (let [history (drive! provider messages #(async/put! ch %))]
-       (async/put! ch {:type :run/done :history history})
-       (async/close! ch)))
-   ch))
+  The producer runs on async/thread because the run does blocking I/O (the
+  network stream and the tools), so it must not occupy a go block."
+  [provider messages]
+  (let [ch (async/chan)]
+    (async/thread
+      (let [history (drive! provider messages #(async/>!! ch %))]
+        (async/>!! ch {:type :run/done :history history})
+        (async/close! ch)))
+    ch))

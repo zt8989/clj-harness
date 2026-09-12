@@ -120,10 +120,11 @@
                 (:reasoning_content
                  (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
        (testing "and the tools the server actually ran are in the rebuilt conversation"
-         ;; Tool messages come back in completion order, so match by content,
-         ;; not by position.
-         (let [tool-msgs (filter #(= "tool" (:role %)) history)]
-           (is (some #(str/includes? (str (:content %)) ":paths") tool-msgs))))))))
+         ;; Match c1 by its own id: README.md also contains ":paths", so content
+         ;; alone could be satisfied by the other call's result.
+         (is (some #(and (= "c1" (:tool_call_id %))
+                         (str/includes? (str (:content %)) ":paths"))
+                   (filter #(= "tool" (:role %)) history))))))))
 
 (deftest answers-the-cors-preflight
   (with-server

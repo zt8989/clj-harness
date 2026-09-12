@@ -135,7 +135,7 @@ shipped 版（`@ag-ui/core` 0.0.59 一代）的 zod 判别联合比文档严格�
   http-kit 对小块写入做缓冲，close 走另一条路径时未 flush 的部分就没了。
   症状是"日志里有完整正确的帧，客户端收到 0 帧"
 - `send!` 对 HTTP 的 `close-after-send?` **默认为 true**，中间每个 chunk 都要显式传 false
-- `:on-open` 里不能阻塞，用 `future`
+- `:on-open` 里不能阻塞（core-async 落地后由抽取 `run-chan` 的 `go` 循环承担，不再用 `future`）
 - 响应体发 **UTF-8 byte 数组**，不发 String
 - `emitter` 和 `converter` 都**每次 run 只建一次**（每事件新建会让 messageId 重启、
   `START` 帧重复）
