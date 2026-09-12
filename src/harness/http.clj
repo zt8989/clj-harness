@@ -87,14 +87,11 @@
         emit    (runner thread-id run-id ch)
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
-    ;; The run lives on a core.async channel (loop/run-chan): drain it on a go loop and
-    ;; convert each kernel event to AG-UI frames. The :run/done terminal carries history
-    ;; and is ignored -- RUN_FINISHED (or RUN_ERROR) already closed the stream via :run/end.
-    (async/go-loop []
+    (async/go
+      ;; A malformed input, an unreadable prompt, or a bad config blows up before the
+      ;; run starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
+      ;; so the client sees a terminated run rather than a broken stream.
       (let [[provider messages]
-            ;; A malformed input, an unreadable prompt, or a bad config blows up before
-            ;; the run starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR
-            ;; pair so the client sees a terminated run rather than a broken stream.
             (try [(current-provider)
                   (ag/inbound (:messages input) (llm/prompt) (:context input))]
                  (catch Throwable t
@@ -103,13 +100,16 @@
                      (emit frame))
                    nil))]
         (when provider
+          ;; Drain run-chan and convert each kernel event to AG-UI frames. :run/done
+          ;; carries history and is ignored -- the stream already closed via :run/end's
+          ;; RUN_FINISHED (or RUN_ERROR).
           (let [events (loop/run-chan provider messages)]
             (loop []
-              (if-let [ev (async/<! events)]
-                (if (= :run/done (:type ev))
-                  nil
-                  (do (doseq [frame (convert ev)] (emit frame)) (recur)))
-                nil))))))))
+              (when-let [ev (async/<! events)]
+                (when-not (= :run/done (:type ev))
+                  (doseq [frame (convert ev)] (emit frame))
+                  (recur))))))))))
+
 
 (defn- handle-run [req]
   (let [input (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)]
@@ -128,8 +128,9 @@
 (defn start!
   "Start the server and return its stop fn. Default port is 8080."
   [& [opts]]
-  (let [server (hk/run-server handler (merge {:port port} opts))]
-    (println (str "harness listening on http://localhost:" (:port (merge {:port port} opts)))
+  (let [opts   (merge {:port port} opts)
+        server (hk/run-server handler opts)]
+    (println (str "harness listening on http://localhost:" (:port opts))
              "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
     server))
 
