@@ -18,3 +18,15 @@
 ## 验收主线
 
 离线全量 `harness.test-runner` 在每一票落地后保持全绿（当前基线 45 tests / 175 assertions，只增不减）。集成测试 `records-the-run-as-jsonl` 扩展后：system 行 content 逐字等于 `prompt.md`（测试内 context 为空）、user 行等于客户端提交的消息、assistant 行含 reasoning_content 与 tool_calls 且与脚本逐字一致、tool 行按 call 顺序每 id 恰好一条；`the-log-the-server-writes-is-one-replay-can-read` 及 replay_test 全部不受影响。
+
+## 已验证到什么程度（2026-09-12，两票全部落地）
+
+- **01**（`4ba546f`）：提交侧——`ag/inbound` 成功后、首调 LLM 前，初始向量逐条落 `kind:"message"` 行。断言 system 行逐字等于 prompt.md、user 行 content 一致且无 AG-UI-only 字段（`:id` 已剥离）。
+- **02**（`197ec05`）：返回侧——drain loop 捕 `:run/done`，`log-messages!` 落 history 尾巴。断言 assistant 行 reasoning_content/tool_calls 完整 payload 逐字（id/type/function.name/arguments）、tool 行按 call 序且 content 等于 read 工具真实返回的 deps.edn 原文。
+- **code-review 修复**（`1531547`）：两处 doseq 落盘循环收口为 `log-messages!`；补齐上述逐字断言。
+- **实测确认的时序窗口**：返回侧尾巴落在终端帧（RUN_FINISHED）之后一拍——`:run/done` 在 SSE 关闭后才到达消费者。测试读文件曾两次抢跑抓到空尾巴，`wait-for-recorded` 轮询（25ms 步进、2s 上限）容忍该窗口。这与"JVM 被杀窗口"同族，属记录语义的已知代价。
+- replay 读侧（replay_test 全部 + `the-log-the-server-writes-is-one-replay-can-read`）零改动全过；kernel 零改动。
+
+**测试**：45 tests / 184 assertions，全绿。
+
+**环境踩坑**：scoop 各 app 的 `current` junction 在本机是 msys 风格软链，原生 Windows 进程走不通；PATH 上的 `java` 是 JDK 8（无 java.net.http）。跑测试须用版本化实路径：`JAVA_HOME=scoop/apps/openjdk17/17.0.2-8` + `CLOJURE_TOOLS_DIR=scoop/apps/clj-deps/1.12.6.1673` + 直接调版本化 deps.exe。
