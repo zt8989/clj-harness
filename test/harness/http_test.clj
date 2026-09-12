@@ -89,17 +89,35 @@
   (with-server
    8098
    (fn []
+     ;; Delete first, like the replay e2e does: the assertions below use
+     ;; first/last over the parsed lines, so leftover runs from earlier test
+     ;; executions must not bleed in.
+     (io/delete-file (io/file log-dir "it-1.jsonl") true)
      (post-run 8098 "it-1")
-     (let [f     (io/file log-dir "it-1.jsonl")
+     (let [f    (io/file log-dir "it-1.jsonl")
            lines (mapv #(json/read-str % :key-fn keyword)
-                       (str/split-lines (slurp f :encoding "UTF-8")))]
+                       (str/split-lines (slurp f :encoding "UTF-8")))
+           msgs  (mapv :payload (filter #(= "message" (:kind %)) lines))]
        (testing "both the inbound input and every emitted frame are on disk"
          (is (contains? (set (map :kind lines)) "input"))
          (is (contains? (set (map :kind lines)) "event")))
        (testing "the record holds the raw RunAgentInput, not a summary"
          (is (some #(= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
                        (get-in % [:payload :messages 0 :content]))
-                   lines)))))))
+                   lines)))
+       (testing "the submitted system prompt is on disk VERBATIM"
+         (let [sys (first (filter #(= "system" (:role %)) msgs))]
+           (is (some? sys))
+           ;; The posted context is empty, so what was submitted is prompt.md
+           ;; and nothing else.
+           (is (= (slurp "prompt.md" :encoding "UTF-8") (:content sys)))))
+       (testing "the user's message is recorded in the provider's shape"
+         (is (some #(and (= "user" (:role %))
+                         (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee" (:content %)))
+                   msgs))
+         ;; ag/inbound strips the AG-UI-only fields, :id among them -- the record
+         ;; holds what the model will see, not what the client sent.
+         (is (some #(and (= "user" (:role %)) (not (contains? % :id))) msgs)))))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read
   ;; Every other replay test builds its log with the emitter directly. This one goes

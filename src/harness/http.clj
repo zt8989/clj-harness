@@ -2,9 +2,16 @@
   "The AG-UI edge. One POST endpoint, SSE out, CORS so a browser app on :5173 can call
   it directly (there is no proxy in front of us).
 
-  Also append-only JSONL logging: one file per thread, holding both the inbound
-  RunAgentInput and every frame we emitted. It is a RECORD, never a source of truth --
-  the client owns the conversation, and nothing here is ever read back."
+  Also append-only JSONL logging: one file per thread, three line kinds.
+
+    \"input\"   -- the client's RunAgentInput as received.
+    \"event\"   -- every AG-UI frame we emitted.
+    \"message\" -- one line per provider-shaped message the LLM will see, VERBATIM:
+                   the system prompt as assembled for this run (prompt.md re-read,
+                   context folded in) and each inbound message.
+
+  All of it is a RECORD, never a source of truth -- the client owns the conversation,
+  and the server never reads the file back."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -100,6 +107,12 @@
                      (emit frame))
                    nil))]
         (when provider
+          ;; The message record, submitted side: what the first LLM call is about
+          ;; to see. The system prompt as assembled for THIS run -- prompt.md
+          ;; re-read, context folded in -- plus every inbound message in the
+          ;; provider's shape, one line each, VERBATIM.
+          (doseq [m messages]
+            (log! thread-id run-id "message" m))
           ;; Drain run-chan and convert each kernel event to AG-UI frames. :run/done
           ;; carries history and is ignored -- the stream already closed via :run/end's
           ;; RUN_FINISHED (or RUN_ERROR).
