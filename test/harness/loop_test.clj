@@ -2,7 +2,8 @@
   (:require [clojure.core.async :as async]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
-            [harness.loop :as loop]))
+            [harness.loop :as loop]
+            [harness.tools :as tools]))
 
 (defn- drain-chan [ch]
   (loop [acc []]
@@ -49,15 +50,44 @@
     (testing "the run continues to a final answer"
       (is (= "done" (:content (last history)))))))
 
-(deftest multiple-tool-calls-run-serially-in-order
+(deftest multiple-tool-calls-run-concurrently
   (let [{:keys [history seen]}
         (drive (fake/scripted [{:content ""
                                 :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}
                                              {:id "c2" :name "no-such-tool" :arguments {}}]}
                                {:content "done"}])
                [])]
-    (is (= ["c1" "c2"] (mapv :id (filter #(= :tool/result (:type %)) seen))))
-    (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))))
+    (testing "every call got exactly one result, in whatever order they finished"
+      (is (= ["c1" "c2"] (sort (mapv :id (filter #(= :tool/result (:type %)) seen))))))
+    (testing "the history answers the calls in call order, not completion order"
+      (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history)))))))
+
+(deftest a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
+  (tools/register! "slow"
+                   {:description "Sleep MS then return."
+                    :parameters  {:type "object"
+                                  :properties {"ms" {:type "integer" :description "Millis."}}}
+                    :required    [:ms]
+                    :run         (fn [{:keys [ms]}] (Thread/sleep ms) "ok")})
+  (let [turns [{:content ""
+                :tool-calls [{:id "c1" :name "slow" :arguments {:ms 300}}
+                             {:id "c2" :name "slow" :arguments {:ms 300}}]}
+               {:content "done"}]
+        t0    (System/nanoTime)
+        {:keys [history seen]}
+        (drive (fake/scripted turns) [])
+        ms    (/ (- (System/nanoTime) t0) 1e6)]
+    (testing "wall clock is the slower tool, not the sum of both"
+      ;; Concurrent: ~300ms plus scheduling slack. Serial would be >= 600ms.
+      ;; History and events are still asserted below, so a timing flake here
+      ;; cannot mask a broken run.
+      (is (< ms 550)))
+    (testing "both results came back clean"
+      (is (= #{"c1" "c2"} (set (mapv :id (filter #(= :tool/result (:type %)) seen)))))
+      (is (every? false? (map :error (filter #(= :tool/result (:type %)) seen)))))
+    (testing "and the run still terminates with a well-formed history"
+      (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))
+      (is (= "done" (:content (last history)))))))
 
 (deftest transport-failure-ends-the-run
   (let [{:keys [seen]}

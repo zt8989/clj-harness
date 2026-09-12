@@ -23,7 +23,8 @@
 
 (def ^:private script
   [{:reasoning reasoning :content ""
-    :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
+    :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}
+                 {:id "c2" :name "read" :arguments {:path "README.md"}}]}
    {:content "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"}])
 
 (defn- with-server [port f]
@@ -73,8 +74,15 @@
        (testing "reasoning crossed the wire and reassembles intact"
          (is (= reasoning
                 (apply str (map :delta (filter #(= "REASONING_MESSAGE_CONTENT" (:type %)) frames))))))
+       (testing "both tool calls were answered on the wire, each keyed to its own call"
+         (let [results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+           (is (= #{"c1" "c2"} (set (map :toolCallId results))))
+           (is (= 2 (count results)))
+           (is (= 2 (count (distinct (map :messageId results)))))))
        (testing "the read tool really ran on the server"
-         (is (str/includes? (str (:content (first (filter #(= "TOOL_CALL_RESULT" (:type %)) frames))))
+         (is (str/includes? (str (:content (first (filter #(and (= "TOOL_CALL_RESULT" (:type %))
+                                                                (= "c1" (:toolCallId %)))
+                                                          frames))))
                             ":paths")))))))
 
 (deftest records-the-run-as-jsonl
@@ -111,10 +119,11 @@
          (is (= reasoning
                 (:reasoning_content
                  (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
-       (testing "and the tool the server actually ran is in the rebuilt conversation"
-         (is (str/includes?
-              (str (:content (first (filter #(= "tool" (:role %)) history))))
-              ":paths")))))))
+       (testing "and the tools the server actually ran are in the rebuilt conversation"
+         ;; Tool messages come back in completion order, so match by content,
+         ;; not by position.
+         (let [tool-msgs (filter #(= "tool" (:role %)) history)]
+           (is (some #(str/includes? (str (:content %)) ":paths") tool-msgs))))))))
 
 (deftest answers-the-cors-preflight
   (with-server
