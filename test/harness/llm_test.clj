@@ -38,6 +38,23 @@
       (is (= [:reasoning/delta :tool/call]
              (distinct (map :type seen)))))))
 
+(deftest prompt-is-frozen
+  ;; The system prompt is read ONCE and frozen -- the provider's prefill (prompt
+  ;; cache) keys on a byte-identical first message, so a prompt.md edit must not
+  ;; leak into served prompts until reset-prompt! deliberately thaws it. The
+  ;; file edit below is restored in finally, so the rest of the suite still sees
+  ;; the real prompt.md.
+  (let [original (slurp "prompt.md" :encoding "UTF-8")]
+    (try
+      (llm/reset-prompt!)
+      (is (= original (llm/prompt)) "the first call reads prompt.md")
+      (spit "prompt.md" (str original "\n<!-- drifted after freeze -->\n")
+            :encoding "UTF-8")
+      (is (= original (llm/prompt)) "a file edit does NOT leak into the frozen prompt")
+      (finally
+        (spit "prompt.md" original :encoding "UTF-8")
+        (llm/reset-prompt!)))))
+
 (deftest the-opening-empty-chunk-emits-nothing
   (testing "the opening chunk is {\"role\":\"assistant\",\"content\":\"\"}. An empty
             string is truthy in Clojure, so a naive guard would emit a text delta

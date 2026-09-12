@@ -28,8 +28,8 @@
 - **实测确认的时序窗口**：返回侧尾巴落在终端帧（RUN_FINISHED）之后一拍——`:run/done` 在 SSE 关闭后才到达消费者。测试读文件曾两次抢跑抓到空尾巴，`wait-for-recorded` 轮询（25ms 步进、2s 上限）容忍该窗口。这与"JVM 被杀窗口"同族，属记录语义的已知代价。
 - replay 读侧（replay_test 全部 + `the-log-the-server-writes-is-one-replay-can-read`）零改动全过；kernel 零改动。
 
-- **冻结反转已落地**（2026-09-12）：`context-rides-as-a-trailing-user-message` 断言 system 恒等于冻结 prompt、context 为尾部 user 消息、无 context 不追加；`records-the-run-as-jsonl` 的 system 行逐字断言改为无条件成立。全量 45 tests / 186 assertions 全绿。
+- **冻结反转已落地**（`f844e40`）：`context-rides-as-a-trailing-user-message` 断言 system 恒等于冻结 prompt、context 为尾部 user 消息、无 context 不追加；`records-the-run-as-jsonl` 的 system 行逐字断言改为无条件成立。`prompt-is-frozen`（llm_test）直接验证冻结语义：改写 prompt.md 后 `(llm/prompt)` 仍返回冻结原文，`reset-prompt!` 后才重读——文件改动在 finally 中还原。
 
-**测试**：45 tests / 186 assertions，全绿。
+**测试**：46 tests / 188 assertions，全绿。
 
 **环境踩坑**：scoop 各 app 的 `current` junction 在本机是 msys 风格软链，原生 Windows 进程走不通；PATH 上的 `java` 是 JDK 8（无 java.net.http）。跑测试须用版本化实路径：`JAVA_HOME=scoop/apps/openjdk17/17.0.2-8` + `CLOJURE_TOOLS_DIR=scoop/apps/clj-deps/1.12.6.1673` + 直接调版本化 deps.exe。
