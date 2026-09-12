@@ -1,7 +1,12 @@
 (ns harness.provider-contract-test
   "Provider seam contract. Any provider behind llm/stream! must satisfy
   these to plug into loop/run! without touching loop/tools/event.
-  03's new provider passes by calling check! with its own factory."
+
+  The active provider is now langchain4j (harness.llm-langchain). Its own
+  round-trip (content + tool_calls survive) is covered in llm_langchain_test;
+  here `fake` is the canonical provider-shape oracle that drives loop/run! so the
+  seam itself stays honest. reasoning_content is a KNOWN GAP for langchain4j -- it
+  is not asserted against the active provider (see .scratch/langchain4clj-provider/spec.md)."
   (:require [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.loop :as loop]))

@@ -37,3 +37,15 @@
 
 - 不碰 `loop` 的调度权（接管 loop 是下一刀，与 ticket 03 的探针结论衔接）。
 - 不删老 provider（那是 05 的 flag-day，受 04 门禁约束；04 结论即本 spec）。
+
+## 结论（flag-day 05 已落地，2026-09-12）
+
+老 provider（`:openai-completions` SSE 链路、含 `consume-sse` / `speak!` / `reasoning_content`
+回传与 DeepSeek 400 规避）已彻底下线。仓库现在只有单 provider `:langchain4j`：
+
+- 默认与唯一路径均为 `:langchain4j`；`config.edn`、`:protocol` 配置项已切换，无老分支残留。
+- 工具翻译层（历史 + OpenAI specs ↔ ToolSpecification）已落地，`loop/run!` 仍掌调度与执行。
+- **已知代价（与本 spec 冲突表一致）**：`reasoning_content` 不抽取，推理卡片退化；
+  DeepSeek/OpenRouter 经 OpenAI 兼容 builder 续命，但 400 回归不再保证。
+- 离线 46 tests / 170 assertions 全绿；`ui/verify*.mjs` 已改写为不假定推理卡片存在。
+- 后续可选：03 的 loop 接管（LangChain4j 流式句柄为单 string、无工具流，难度较高）。

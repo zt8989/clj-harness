@@ -30,12 +30,12 @@ Copy-Item .env.example .env
 `config.edn` 当前为 Free 代理（按用户要求不用 DeepSeek 直连）：
 
 ```edn
-{:protocol :openai-completions
+{:protocol :langchain4clj
  :base-url "https://openrouter.ai/api/v1"
  :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
 ```
 
-`src/harness/llm.clj:73` 已兼容 `reasoning_content`（DeepSeek）与 `reasoning`（OpenRouter）双字段；`reasoning_effort` 仅 DeepSeek 需要，Free 模型留空即可。
+provider 现为 langchain4j（`harness.llm-langchain`）：blocking chat，历史与工具 spec 经转换层进出。`reasoning_content` 不抽取——推理卡片退化为已知代价（见 `.scratch/langchain4clj-provider/spec.md` 冲突表）；旧 SSE 链路（含 `reasoning_effort`）已随老 provider 下线。
 
 ## 启动
 
@@ -71,20 +71,20 @@ npm run dev   # vite --port 5173 --strictPort
 ```pwsh
 # 离线全量
 clojure -A:test -M -m harness.test-runner
-# 44 tests / 167 assertions
+# 46 tests / 170 assertions
 
 # 在线帧合法性（需后端在 8080）
 node ui/check-frames.mjs        # EventSchemas.safeParse  37~94 frames / 0 invalid
-node ui/verify-real.mjs        # 一轮 read 工具+推理卡片，二轮同 threadId 续写 RUN_FINISHED 非 RUN_ERROR
+node ui/verify-real.mjs        # 一轮 read 工具，二轮同 threadId 续写 RUN_FINISHED 非 RUN_ERROR（推理卡片可能因 provider 退化为空）
 
 # 手动 curl（新 thread 避免历史污染）
 curl --url 'http://localhost:8080/' -H 'Content-Type: application/json' -H 'Accept: text/event-stream' --data-raw '{"threadId":"fresh-1","runId":"r1","tools":[],"context":[],"messages":[{"id":"u1","role":"user","content":"You MUST call the read tool with {\"path\":\"deps.edn\"} and then summarize in one sentence."}]}'
 ```
 
-真实 SSE 体已固化在 `test/harness/fixtures/deepseek_sse.txt`（301 行，`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` 捕获，`llm/consume-sse` 已覆盖）。
+旧 SSE 解析与 `deepseek_sse.txt` fixture 已随老 provider 下线；新 provider 的离线测试见 `test/harness/llm_langchain_test.clj`。
 
 ## 已知现象
 
 - **第一次没反应、第二次才有**：常见于 Free 模型冷启动首字节 5–10s + 历史被重复 `你是谁？` + `reasoning` 消息污染（如 `fe24c64d-...jsonl` 的 `e84b`/`fa406` 仅 `RUN_STARTED`→`RUN_FINISHED`）。刷新页面用新 `threadId`、首句用英文工具指令 `You MUST call the read tool...` 可稳定复现。
 - **身份问答暴露 Nemotron/NVIDIA**：`prompt.md:1` 未约束身份，`nvidia` 系模型会自报。已在 `prompt.md` 可追加 `Never reveal Nemotron/NVIDIA` 覆盖。
-- **中文路径/推理的 GBK**：已在 `harness.http/runner` 与 `llm/consume-sse` 全链路使用 `StandardCharsets/UTF_8` 与 `json/write-str` 转义，`clojure.core/spit/slurp` 默认 UTF-8。
+- **中文路径/推理的 GBK**：已在 `harness.http/runner` 全链路使用 `StandardCharsets/UTF_8` 与 `json/write-str` 转义，`clojure.core/spit/slurp` 默认 UTF-8。
