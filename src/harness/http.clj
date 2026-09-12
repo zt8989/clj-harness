@@ -19,7 +19,8 @@
             [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
-            [harness.llm :as llm]
+            [harness.memory :as mem]
+            [harness.opaque :as opaque]
             [harness.loop :as loop]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
@@ -53,17 +54,6 @@
     (log! thread-id run-id "message" m)))
 
 ;; ------------------------------------------------------------------- the edge
-
-(defonce ^:private provider-override (atom nil))
-
-(defn use-provider!
-  "Serve from PROVIDER instead of config.edn; pass nil to go back to config.
-  This is how the whole edge can be exercised offline, against a scripted provider,
-  without an API key or a network."
-  [provider]
-  (reset! provider-override provider))
-
-(defn- current-provider [] (or @provider-override (llm/config)))
 
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
@@ -107,8 +97,8 @@
       ;; run starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
       ;; so the client sees a terminated run rather than a broken stream.
       (let [[provider messages]
-            (try [(current-provider)
-                  (ag/inbound (:messages input) (llm/prompt) (:context input))]
+            (try [(opaque/current-provider)
+                  (ag/inbound (:messages input) (mem/prompt) (:context input))]
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]

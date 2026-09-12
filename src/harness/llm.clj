@@ -10,13 +10,12 @@
   tool rounds, which DeepSeek requires whenever the request carries tools
   (omitting it there is a hard HTTP 400).
 
-  A provider is just a config map, so (config) can be handed straight to loop/run-chan:
+  A provider is just a config map, so (opaque/current-provider) or
+  (opaque/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key .., :reasoning-effort ..}"
   (:require [clojure.data.json :as json]
-            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [dotenv :as dotenv]
             [harness.event :as ev]
             [harness.tools :as tools])
   (:import [java.net URI]
@@ -26,36 +25,6 @@
 
 (defmulti stream!
   (fn [provider _messages _on-event] (:protocol provider)))
-
-;; --------------------------------------------------------------------- config
-
-(defn config
-  "config.edn, re-read every time so it can be edited while the process runs.
-  The API key comes from .env through the dotenv library, following ITS precedence:
-  a value in .env wins over a real environment variable. So .env is the single place
-  that decides, and setting a shell variable will NOT override it."
-  []
-  (assoc (edn/read-string (slurp "config.edn"))
-         :api-key (dotenv/env "HARNESS_API_KEY")))
-
-(defonce ^:private frozen-prompt (atom nil))
-
-(defn prompt
-  "The system prompt, FROZEN: prompt.md is read once -- on the first call -- and
-  every run after that reuses the same text. The provider's prefill (prompt
-  cache) keys on a stable prefix; a system prompt that changes per run would
-  miss it on every call. Editing prompt.md takes effect only after
-  (reset-prompt!) or a process restart."
-  []
-  (or @frozen-prompt
-      (reset! frozen-prompt (slurp "prompt.md" :encoding "UTF-8"))))
-
-(defn reset-prompt!
-  "Re-read prompt.md into the frozen slot. The deliberate counterpart of
-  freezing: the agent -- or you, in the REPL -- opts into a new prefix, trading
-  one cold prefill for the change."
-  []
-  (reset! frozen-prompt nil))
 
 ;; ------------------------------------------------------------ openai-completions
 

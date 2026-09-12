@@ -17,7 +17,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.ag-ui :as ag]
-            [harness.llm :as llm]
+            [harness.memory :as mem]
+            [harness.opaque :as opaque]
             [harness.loop :as loop]
             [harness.wire :as wire]))
 
@@ -92,7 +93,7 @@
                          first
                          :payload
                          :context)]
-    (ag/inbound (records->messages records) (llm/prompt) context)))
+    (ag/inbound (records->messages records) (mem/prompt) context)))
 
 (defn resume!
   "Rebuild a thread from its log, append TEXT as a new user turn, and run the agent on.
@@ -105,7 +106,7 @@
   It does NOT append to the log. The writer lives at the http edge, and this namespace
   is deliberately the read side only; a resumed conversation therefore leaves no new
   trace on disk."
-  ([dir thread-id text] (resume! dir thread-id text (llm/config)))
+  ([dir thread-id text] (resume! dir thread-id text (opaque/effective-provider)))
   ([dir thread-id text provider]
    (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)

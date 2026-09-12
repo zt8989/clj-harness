@@ -10,6 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.http :as http]
+            [harness.opaque :as opaque]
             [harness.replay :as replay]
             [harness.wire :as wire])
   (:import [java.net URI]
@@ -28,9 +29,9 @@
    {:content "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"}])
 
 (defn- with-server [port f]
-  (http/use-provider! (fake/scripted script))
+  (opaque/use-provider! (fake/scripted script))
   (let [stop (http/start! {:port port})]
-    (try (f) (finally (stop) (http/use-provider! nil)))))
+    (try (f) (finally (stop) (opaque/use-provider! nil)))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for

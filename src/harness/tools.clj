@@ -12,21 +12,13 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [harness.memory :as mem])
   (:import [java.util.regex Pattern]))
 
-(defonce registry (atom {}))
-
-(defn register! [name tool] (swap! registry assoc name tool))
-
-(defn specs
-  "The tools array as an OpenAI-compatible provider expects it."
-  []
-  (mapv (fn [[n t]] {:type "function"
-                     :function {:name n
-                                :description (:description t)
-                                :parameters (:parameters t)}})
-        (sort-by key @registry)))
+;; The tool registry itself lives in harness.memory (the introspectable
+;; surface): the agent reads and extends its own toolset through eval. This
+;; namespace owns only the tool SHAPE, the five built-ins, and dispatch.
 
 ;; A resident namespace, so `def`s in eval persist across calls. This is what lets
 ;; the agent build itself a toolset -- and hot-swap the kernel with (require .. :reload).
@@ -90,30 +82,41 @@
 
 ;; ------------------------------------------------------------------ registry
 
-(register! "read"
+(defn specs
+  "The tools array as an OpenAI-compatible provider expects it."
+  []
+  (mapv (fn [[n t]] {:type "function"
+                     :function {:name n
+                                :description (:description t)
+                                :parameters (:parameters t)}})
+        (sort-by key @mem/registry)))
+
+;; ------------------------------------------------------------------ registry
+
+(mem/register! "read"
   (tool "Read a file."
         {"path" {:type "string" :description "File path."}}
         [:path] t-read))
 
-(register! "write"
+(mem/register! "write"
   (tool "Write a file, overwriting it."
         {"path"    {:type "string" :description "File path."}
          "content" {:type "string" :description "Full new contents."}}
         [:path :content] t-write))
 
-(register! "edit"
+(mem/register! "edit"
   (tool "Replace an exact string in a file. Fails if old_string is absent or not unique."
         {"path"       {:type "string" :description "File path."}
          "old_string" {:type "string" :description "Exact text to replace."}
          "new_string" {:type "string" :description "Replacement text."}}
         [:path :old_string :new_string] t-edit))
 
-(register! "bash"
+(mem/register! "bash"
   (tool "Run a shell command in Git Bash."
         {"command" {:type "string" :description "Command line."}}
         [:command] t-bash))
 
-(register! "eval"
+(mem/register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."
         {"code" {:type "string" :description "Clojure source."}}
         [:code] t-eval))
@@ -131,7 +134,7 @@
   [{:keys [function]}]
   (try
     (let [{:keys [name arguments]} function
-          tool   (or (get @registry name)
+          tool   (or (get @mem/registry name)
                      (throw (ex-info (str "unknown tool: " name) {})))
           parsed (json/read-str (if (str/blank? arguments) "{}" arguments) :key-fn keyword)]
       (validate! tool parsed)

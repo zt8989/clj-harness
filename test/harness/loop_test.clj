@@ -3,7 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.loop :as loop]
-            [harness.tools :as tools]))
+            [harness.memory :as mem]))
 
 (defn- drain-chan [ch]
   (loop [acc []]
@@ -63,7 +63,7 @@
       (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history)))))))
 
 (deftest a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
-  (tools/register! "slow"
+  (mem/register! "slow"
                    {:description "Sleep MS then return."
                     :parameters  {:type "object"
                                   :properties {"ms" {:type "integer" :description "Millis."}}}
