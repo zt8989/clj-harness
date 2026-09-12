@@ -29,6 +29,14 @@
 
 ## 状态
 
-- 01（会话级工具注册表）：未开始，blocked by eval-introspection/01（ns 划分）
-- 02（三相 jsonl 生命周期事件）：未开始，blocked by 01
-- 03（eval 集成 + prompt.md）：未开始，blocked by 01、02
+- 01（会话级工具注册表）：已落地（`57c3a00`）
+- 02（三相 jsonl 生命周期事件）：已落地（`51a055c`）
+- 03（eval 集成 + prompt.md）：已落地
+
+## 已验证到什么程度（2026-09-12，三票全部落地）
+
+- **01**：base 不可变 + per-thread overlay（add 覆盖 base 仅本会话胜出、remove 单调：先撤 added 再隐藏 base 名、不存在 no-op）；thread-id 贯通 http→run-chan/drive!→llm/stream!（multimethod 四参）→tools/specs、tools/run!（`*thread-id*` 在工具体周围绑定）；spy provider 断言 tools 数组按 thread 生效、跨 thread 隔离。
+- **02**：kernel 词汇表 7→10 种（:tool/pre-execute/execute/post-execute）；missing-args 在 pre 拒绝（跳过 execute 段）、unknown-tool 同、pass 三相齐全、execute 段带 error 消息、post 恒闭合；jsonl 行 kind "tools/*" 按 toolCallId 键控、pass 无 outcome 键；ag_ui 对三类事件零帧（**踩坑：case 连续裸常量是逐个配对，多常量共享结果必须加列表**——曾致 go loop 死于 Keyword→Associative CCE，生产者 >!! 永久阻塞，表现为集成测试挂死）。
+- **03**：eval tool-call 全形态走通 session-register! → 下一 run tools 数组含新工具且 dispatch 真实执行；session-unregister! base 工具 → 模型收到 "unknown tool: read"；prompt.md 增 session tools 章节。
+- **附带修复**：run! 内局部 `name` 遮蔽 core/name 的 CCE；loop_test 的 "slow" 从全局注册迁到会话 overlay（base 不再被测试污染）。
+- **最终全量**：55 tests / 247 assertions，全绿。

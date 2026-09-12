@@ -75,6 +75,32 @@
     (let [{:keys [added removed]} (get @overlays thread-id {:added {} :removed #{}})]
       (into (apply dissoc @registry removed) added))))
 
+;; ----------------------------------------------------------------- sessions
+
+(defonce ^:private sessions
+  (atom {}))
+;; thread-id -> {:provider {...} :history [...]}
+
+(defn record-provider!
+  "Snapshot, for THREAD-ID, the provider its run actually serves with. The
+  api-key is stripped HERE and never enters the memory surface; the config
+  fields (:protocol/:base-url/:model ...) stay."
+  [thread-id provider]
+  (swap! sessions assoc-in [thread-id :provider] (dissoc provider :api-key)))
+
+(defn record-history!
+  "Record THREAD-ID's final history at :run/done -- the same landing point and
+  the same known timing window as the jsonl message tail (harness.http)."
+  [thread-id history]
+  (swap! sessions assoc-in [thread-id :history] (vec history)))
+
+(defn session
+  "The recorded state of THREAD-ID's last run: {:provider .. :history ..}, or
+  nil for a thread this process has never served. This is the introspection
+  read side -- what eval hands the agent when it asks about its own session."
+  [thread-id]
+  (get @sessions thread-id))
+
 ;; ------------------------------------------------------------------- config
 
 (defn config

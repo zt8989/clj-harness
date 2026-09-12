@@ -128,6 +128,9 @@
                      (emit frame))
                    nil))]
         (when provider
+          ;; The introspection record, provider half: what this run actually
+          ;; serves with, api-key stripped by the memory surface itself.
+          (mem/record-provider! thread-id provider)
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a
@@ -150,8 +153,12 @@
                   ;; too, so any run the kernel started leaves its full message
                   ;; tail on disk -- but it lands one beat AFTER the terminal
                   ;; frame, so a reader racing the consumer may not see it yet.
-                  (log-messages! thread-id run-id
-                                 (subvec (:history ev) (count messages)))
+                  (do ;; Introspection record, history half: the final history
+                      ;; is addressable by thread-id from here on -- same
+                      ;; landing point as the jsonl tail below, same window.
+                      (mem/record-history! thread-id (:history ev))
+                      (log-messages! thread-id run-id
+                                     (subvec (:history ev) (count messages))))
                   (do ;; Tool-lifecycle events are audit lines, not wire frames:
                       ;; each lands as its own jsonl line, keyed by toolCallId.
                       (when-let [[kind payload] (lifecycle-record ev)]

@@ -3,6 +3,7 @@
   A thread's add/remove reaches its next run's tools array and tool dispatch --
   and never another thread's. The base registry is never mutated at runtime."
   (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.event :as ev]
@@ -155,3 +156,61 @@
     (mem/session-unregister! "t-life" "ok-tool")
     (mem/session-unregister! "t-life" "boom")
     (mem/session-unregister! "t-life" "needs-arg")))
+
+;; ---------------------------------------------------------------- introspection
+
+(deftest the-session-record-never-holds-a-key
+  (mem/record-provider! "t-rec" {:protocol :openai-completions :base-url "http://u"
+                                 :model "m" :api-key "sk-secret"})
+  (testing "the provider snapshot rides, the key does not"
+    (is (not (contains? (:provider (mem/session "t-rec")) :api-key)))
+    (is (= :openai-completions (get-in (mem/session "t-rec") [:provider :protocol]))))
+  (mem/record-history! "t-rec" [{:role "assistant" :content "x"}])
+  (is (= [{:role "assistant" :content "x"}] (:history (mem/session "t-rec"))))
+  (testing "a thread this process never served reads as nil, not an error"
+    (is (nil? (mem/session "t-never")))))
+
+(deftest eval-joins-the-session-across-the-real-tool-call-shape
+  ;; The agent's own path: a full eval tool call, thread context bound, extends
+  ;; the session -- and the next run's tools array and dispatch both see it.
+  (let [eval!  (fn [thread-id code]
+                 (tools/run! {:function {:name "eval"
+                                         :arguments (json/write-str {:code code})}}
+                             thread-id))
+        {:keys [content error]}
+        (eval! "t-e2e"
+               "(do (harness.memory/session-register! harness.memory/*thread-id* \"note\"
+                      {:description \"note\"
+                       :parameters {:type \"object\" :properties {\"text\" {:type \"string\"}}}
+                       :required [:text]
+                       :run (fn [{:keys [text]}] (str \"noted \" text))})
+                    :added)")]
+    (is (false? error))
+    (is (str/includes? content ":added"))
+    (let [events (drain-events
+                  (fake/scripted [{:content ""
+                                   :tool-calls [{:id "c1" :name "note" :arguments {:text "hi"}}]}
+                                  {:content "done"}])
+                  "t-e2e")
+          result (first (filter #(= :tool/result (:type %)) events))]
+      (testing "the next run's dispatch runs the session-added tool"
+        (is (false? (:error result)))
+        (is (= "noted hi" (:content result)))))
+    (testing "the recorded state is reachable through the same eval surface"
+      (is (str/includes? (:content (eval! "t-e2e"
+                                          "(keys (harness.memory/config))"))
+                         ":protocol"))
+      (is (str/includes? (:content (eval! "t-e2e"
+                                          "(pr-str (harness.memory/session \"t-never\"))"))
+                         "nil")
+          "an unserved thread reads as nil, not an error"))
+    (testing "removing a base tool surfaces a readable error to the model"
+      (mem/session-unregister! "t-e2e" "read")
+      (let [events (drain-events
+                    (fake/scripted [{:content ""
+                                     :tool-calls [{:id "c2" :name "read" :arguments {:path "deps.edn"}}]}
+                                    {:content "done"}])
+                    "t-e2e")
+            result (first (filter #(= :tool/result (:type %)) events))]
+        (is (true? (:error result)))
+        (is (str/includes? (str (:content result)) "unknown tool: read"))))))

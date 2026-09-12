@@ -26,6 +26,13 @@
 
 ## 状态
 
-- 01（自省边界两 ns 划分）：未开始
-- 02（会话状态注册表）：未开始，blocked by 01
-- 03（eval 自省端到端）：未开始，blocked by 02
+- 01（自省边界两 ns 划分）：已落地（`1d92d5e`）
+- 02（会话状态注册表）：已落地
+- 03（eval 自省端到端）：已落地
+
+## 已验证到什么程度（2026-09-12，三票全部落地）
+
+- **01**：`harness.memory`（frozen-prompt/registry/config，全 public）与 `harness.opaque`（api-key 解析/provider-override/effective-provider 组装，var private）就位；调用点一次迁移（http/replay/四份测试），零行为变化，基线 46/188 全绿。
+- **02**：`mem/record-provider!`（run 开始，dissoc api-key）+ `mem/record-history!`（:run/done，与 jsonl 尾巴同一落点）+ `mem/session` 读取 helper；http 集成测试断言快照无 api-key、history 尾巴与 jsonl message 行逐字一致（`the-session-state-is-addressable-by-thread-id`）。
+- **03**：`the-session-record-never-holds-a-key`、`eval-joins-the-session-across-the-real-tool-call-shape`——走完整 eval tool-call 形态读到 config keys、unserved thread 返回 nil；prompt.md 增自省入口与 opaque 禁区声明。
+- **最终全量**：55 tests / 247 assertions，全绿（含 tools-lifecycle 特性）。

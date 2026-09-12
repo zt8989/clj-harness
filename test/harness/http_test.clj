@@ -10,6 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.http :as http]
+            [harness.memory :as mem]
             [harness.opaque :as opaque]
             [harness.replay :as replay]
             [harness.wire :as wire])
@@ -221,6 +222,38 @@
          (is (every? #(not (contains? % :error)) ex)))
        (testing "every phase names the tool that ran"
          (is (every? #(= "read" (:toolName %)) post)))))))
+
+(deftest the-session-state-is-addressable-by-thread-id
+  ;; eval-introspection: the provider a run served with (key stripped) and the
+  ;; final history are addressable from the memory surface after the run -- the
+  ;; history tail must agree VERBATIM with the jsonl message rows, which are
+  ;; written at the same landing point.
+  (with-server
+   8096
+   (fn []
+     (io/delete-file (io/file log-dir "t-addr.jsonl") true)
+     (post-run 8096 "t-addr")
+     (let [f     (io/file log-dir "t-addr.jsonl")
+           _     (wait-for-recorded f
+                                    (fn [ls]
+                                      (some (fn [l]
+                                              (and (= "message" (:kind l))
+                                                   (= "assistant" (get-in l [:payload :role]))
+                                                   (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
+                                                      (get-in l [:payload :content]))))
+                                            ls))
+                                    2000)
+           st    (mem/session "t-addr")
+           jsonl (mapv :payload (filter #(= "message" (:kind %))
+                                        (mapv #(json/read-str % :key-fn keyword)
+                                              (str/split-lines (slurp f :encoding "UTF-8")))))]
+       (testing "the provider snapshot rides without its key"
+         (is (= :fake (get-in st [:provider :protocol])))
+         (is (not (contains? (:provider st) :api-key))))
+       (testing "the recorded history tail is the jsonl message tail, verbatim"
+         ;; The submitted side (system + one user message) is two rows.
+         (is (= (subvec (:history st) 2)
+                (vec (drop 2 jsonl)))))))))
 
 (deftest answers-the-cors-preflight
   (with-server
