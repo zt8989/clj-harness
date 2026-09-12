@@ -126,8 +126,9 @@
        (testing "the submitted system prompt is on disk VERBATIM"
          (let [sys (first (filter #(= "system" (:role %)) msgs))]
            (is (some? sys))
-           ;; The posted context is empty, so what was submitted is prompt.md
-           ;; and nothing else.
+           ;; Context never touches the system message -- it rides as a trailing
+           ;; user message -- so what was submitted is the frozen prompt.md
+           ;; and nothing else, in every run.
            (is (= (slurp "prompt.md" :encoding "UTF-8") (:content sys)))))
        (testing "the user's message is recorded in the provider's shape"
          (is (some #(and (= "user" (:role %))

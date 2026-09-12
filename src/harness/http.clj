@@ -7,8 +7,8 @@
     \"input\"   -- the client's RunAgentInput as received.
     \"event\"   -- every AG-UI frame we emitted.
     \"message\" -- one line per provider-shaped message the LLM saw or produced,
-                   VERBATIM: the system prompt as assembled for this run (prompt.md
-                   re-read, context folded in), each inbound message, and every
+                   VERBATIM: the frozen system prompt, each inbound message
+                   (per-run context rides as a trailing user message), and every
                    assistant reply / tool result the kernel appended.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
@@ -116,9 +116,10 @@
                    nil))]
         (when provider
           ;; The message record, submitted side: what the first LLM call is about
-          ;; to see. The system prompt as assembled for THIS run -- prompt.md
-          ;; re-read, context folded in -- plus every inbound message in the
-          ;; provider's shape, one line each, VERBATIM.
+          ;; to see. The FROZEN system prompt plus every inbound message in the
+          ;; provider's shape, one line each, VERBATIM. Context rides as a
+          ;; trailing user message -- it must never touch the system prompt, or
+          ;; the provider's prefill (prompt cache) would miss every call.
           (log-messages! thread-id run-id messages)
           ;; Drain run-chan and convert each kernel event to AG-UI frames. The
           ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR); the

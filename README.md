@@ -6,7 +6,7 @@
 
 - `src/harness/{event,llm,loop,tools,ag_ui,http}.clj` — 内核 + AG-UI 适配 + HTTP 边
 - `dev/harness/{wire,replay}.clj` — 客户端最小 applier 与日志回放（内核永不读日志）
-- `prompt.md` — 每轮重读的 system prompt，agent 可用 `write` 热改
+- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交
 - `config.edn` — 每轮重读的模型配置，`HARNESS_API_KEY` 在 `.env`（`lynxeyes/dotenv`，`.env` 覆盖真实环境变量）
 
 详见 `.scratch/minimal-kernel/spec.md`。

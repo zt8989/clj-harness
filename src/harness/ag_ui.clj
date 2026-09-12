@@ -163,17 +163,24 @@
            {:pending nil :out []}
            messages)))
 
-(defn- context-text [context]
+(defn- context-message [context]
   (when (seq context)
-    (str "\n\n" (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context)))))
+    {:role "user"
+     :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
 
 (defn inbound
   "A client's AG-UI messages -> the provider's message vector.
-  PROMPT is the system prompt text, read fresh by the caller before each run. A
-  leading system message is replaced by it; otherwise it is prepended."
+  PROMPT is the FROZEN system prompt text. A leading system message is replaced
+  by it; otherwise it is prepended. CONTEXT is per-run and must never touch the
+  system message -- the provider's prefill (prompt cache) keys on a stable
+  prefix, so a per-run system prompt would miss it every call -- so it rides as
+  a trailing user message instead, after everything the client sent."
   [messages prompt context]
   (let [msgs (absorbed messages)
-        sys  {:role "system" :content (str prompt (context-text context))}]
-    (if (= "system" (get-in msgs [0 :role]))
-      (assoc msgs 0 sys)
-      (into [sys] msgs))))
+        sys  {:role "system" :content prompt}
+        msgs (if (= "system" (get-in msgs [0 :role]))
+               (assoc msgs 0 sys)
+               (into [sys] msgs))]
+    (if-let [ctx (context-message context)]
+      (conj msgs ctx)
+      msgs)))
