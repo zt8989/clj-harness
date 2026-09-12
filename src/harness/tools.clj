@@ -83,13 +83,15 @@
 ;; ------------------------------------------------------------------ registry
 
 (defn specs
-  "The tools array as an OpenAI-compatible provider expects it."
-  []
-  (mapv (fn [[n t]] {:type "function"
-                     :function {:name n
-                                :description (:description t)
-                                :parameters (:parameters t)}})
-        (sort-by key @mem/registry)))
+  "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
+  effective toolset (base overlaid with its session additions/removals)."
+  ([] (specs nil))
+  ([thread-id]
+   (mapv (fn [[n t]] {:type "function"
+                      :function {:name n
+                                 :description (:description t)
+                                 :parameters (:parameters t)}})
+         (sort-by key (mem/effective-tools thread-id)))))
 
 ;; ------------------------------------------------------------------ registry
 
@@ -131,13 +133,18 @@
                       {})))))
 
 (defn run!
-  [{:keys [function]}]
-  (try
-    (let [{:keys [name arguments]} function
-          tool   (or (get @mem/registry name)
-                     (throw (ex-info (str "unknown tool: " name) {})))
-          parsed (json/read-str (if (str/blank? arguments) "{}" arguments) :key-fn keyword)]
-      (validate! tool parsed)
-      {:content (str ((:run tool) parsed)) :error false})
-    (catch Throwable t
-      {:content (ex-message t) :error true})))
+  ([call] (run! call nil))
+  ([{:keys [function]} thread-id]
+   (try
+     (let [{:keys [name arguments]} function
+           tool   (or (get (mem/effective-tools thread-id) name)
+                      (throw (ex-info (str "unknown tool: " name) {})))
+           parsed (json/read-str (if (str/blank? arguments) "{}" arguments) :key-fn keyword)]
+       (validate! tool parsed)
+       ;; *thread-id* is bound around the tool body so code running inside a
+       ;; tool -- eval above all -- can address its own session (harness.memory).
+       {:content (str (binding [mem/*thread-id* thread-id]
+                        ((:run tool) parsed)))
+        :error false})
+     (catch Throwable t
+       {:content (ex-message t) :error true}))))

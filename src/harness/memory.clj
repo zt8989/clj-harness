@@ -33,6 +33,48 @@
 
 (defn register! [name tool] (swap! registry assoc name tool))
 
+;; ------------------------------------------------------------ session tools
+
+(def ^:dynamic *thread-id*
+  "Bound by the execution seam (harness.tools/run!) to the thread whose run the
+  current tool call serves, so code inside a tool -- eval above all -- can
+  address its own session. Unbound outside a run.")
+
+(defonce ^:private overlays
+  (atom {}))
+;; thread-id -> {:added {name tool} :removed #{name}}
+
+(defn session-register!
+  "Add NAME->TOOL for THREAD-ID's session only. Registering over a base tool's
+  name SHADOWS it for this session -- the base definition is untouched -- and
+  the change is visible to the next run of this thread, never to another."
+  [thread-id name tool]
+  (swap! overlays assoc-in [thread-id :added name] tool))
+
+(defn session-unregister!
+  "Remove NAME from THREAD-ID's session view: an added tool is retracted, a
+  base tool is hidden for this session only. A name that is neither is a
+  no-op. The base registry is never mutated."
+  [thread-id name]
+  (swap! overlays
+         (fn [ov]
+           (let [added (get-in ov [thread-id :added])]
+             (cond
+               (contains? added name)   (update-in ov [thread-id :added] dissoc name)
+               (contains? @registry name) (update-in ov [thread-id :removed]
+                                                     (fnil conj #{}) name)
+               :else ov)))))
+
+(defn effective-tools
+  "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
+  additions and removals. A thread with no overlay sees the pure base; nil
+  THREAD-ID (no session context) also means the base."
+  [thread-id]
+  (if (nil? thread-id)
+    @registry
+    (let [{:keys [added removed]} (get @overlays thread-id {:added {} :removed #{}})]
+      (into (apply dissoc @registry removed) added))))
+
 ;; ------------------------------------------------------------------- config
 
 (defn config

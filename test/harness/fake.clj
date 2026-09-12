@@ -21,7 +21,7 @@
   {:protocol :fake :script (atom (vec turns))})
 
 (defmethod llm/stream! :fake
-  [{:keys [script]} _messages on-event]
+  [{:keys [script]} _messages on-event _thread-id]
   (let [{:keys [reasoning content tool-calls]} (first @script)]
     (swap! script #(vec (rest %)))
     (emit! ev/reasoning-delta reasoning on-event)

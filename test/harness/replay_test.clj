@@ -157,7 +157,7 @@
 ;; cannot show that the rebuilt history actually reached the model -- which is the only
 ;; thing worth asserting here.
 (defmethod llm/stream! :recording
-  [{:keys [seen reply]} messages on-event]
+  [{:keys [seen reply]} messages on-event _thread-id]
   (reset! seen messages)
   (on-event (ev/text-delta reply))
   {:role "assistant" :content reply})

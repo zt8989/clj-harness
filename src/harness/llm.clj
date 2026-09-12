@@ -2,7 +2,11 @@
   "Provider layer. One multimethod, dispatched on :protocol.
 
   Contract for every method:
-    (stream! provider messages on-event) -> assistant message
+    (stream! provider messages on-event thread-id) -> assistant message
+
+  THREAD-ID is the session the run serves; it selects the thread's effective
+  toolset (harness.memory base + session overlay) for the request's tools array
+  and is otherwise opaque to the methods.
 
   ON-EVENT is called with each harness.event value as it is produced. The returned
   assistant message is provider-shaped and is appended to the history VERBATIM by
@@ -24,7 +28,7 @@
            [java.nio.charset StandardCharsets]))
 
 (defmulti stream!
-  (fn [provider _messages _on-event] (:protocol provider)))
+  (fn [_provider _messages _on-event _thread-id] (:protocol _provider)))
 
 ;; ------------------------------------------------------------ openai-completions
 
@@ -101,10 +105,10 @@
         (seq assembled)        (assoc :tool_calls assembled)))))
 
 (defmethod stream! :openai-completions
-  [{:keys [model reasoning-effort] :as provider} messages on-event]
+  [{:keys [model reasoning-effort] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
                                       :messages messages
-                                      :tools (tools/specs)
+                                      :tools (tools/specs thread-id)
                                       :stream true}
                                reasoning-effort (assoc :reasoning_effort reasoning-effort)))
         resp (.send http-client (request provider body) (HttpResponse$BodyHandlers/ofInputStream))]

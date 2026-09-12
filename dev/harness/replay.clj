@@ -108,11 +108,12 @@
   trace on disk."
   ([dir thread-id text] (resume! dir thread-id text (opaque/effective-provider)))
   ([dir thread-id text provider]
-   (let [run-id (str (java.util.UUID/randomUUID))
+     (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)
          frames (atom [])
          events (loop/run-chan provider
-                               (conj (history dir thread-id) {:role "user" :content text}))]
+                               (conj (history dir thread-id) {:role "user" :content text})
+                               {:thread-id thread-id})]
      (loop []
        (when-let [event (async/<!! events)]
          (when-not (= :run/done (:type event))

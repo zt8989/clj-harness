@@ -7,6 +7,7 @@
   '[harness.event-test
     harness.llm-test
     harness.tools-test
+    harness.session-tools-test
     harness.loop-test
     harness.ag-ui-test
     harness.replay-test

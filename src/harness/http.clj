@@ -115,7 +115,7 @@
           ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR); the
           ;; :run/done history itself is never converted -- it is the returned
           ;; side of the message record instead.
-          (let [events (loop/run-chan provider messages)]
+          (let [events (loop/run-chan provider messages {:thread-id thread-id})]
             (loop []
               (when-let [ev (async/<! events)]
                 (if (= :run/done (:type ev))

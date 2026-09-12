@@ -10,7 +10,8 @@
 (defn- drive!
   "Run one run, calling EMIT with each harness.event value as it is produced.
   Returns the final history. The producer side of run-chan; all run behaviour
-  lives in exactly this one place.
+  lives in exactly this one place. OPTS carries {:thread-id}, the session the
+  run serves -- it selects the thread's effective toolset, nothing else.
 
   Tool calls of one turn run CONCURRENTLY, each on its own thread-pool thread --
   they are blocking I/O, not go material. Every :tool/result is emitted the
@@ -19,12 +20,12 @@
   completion order was, each tool_call_id is answered exactly once, in the
   order the calls were made. Conversion to AG-UI frames stays serial at the
   consumer, so ag/outbound's message-id atom never races."
-  [provider messages emit]
+  [provider messages emit {:keys [thread-id] :as _opts}]
   (let [history (atom (vec messages))]
     (emit (ev/run-start))
     (try
       (loop []
-        (let [assistant (llm/stream! provider @history emit)
+        (let [assistant (llm/stream! provider @history emit thread-id)
               calls     (:tool_calls assistant)]
           (swap! history conj assistant)
           (when (seq calls)
@@ -36,7 +37,7 @@
             (let [chs  (mapv (fn [{:keys [id] :as call}]
                                (let [ch (async/chan 1)]
                                  (async/thread
-                                   (let [{:keys [content error]} (tools/run! call)]
+                                   (let [{:keys [content error]} (tools/run! call thread-id)]
                                      (async/>!! ch {:id id :content content :error error})))
                                  ch))
                              calls)
@@ -64,10 +65,11 @@
 
   The producer runs on async/thread because the run does blocking I/O (the
   network stream and the tools), so it must not occupy a go block."
-  [provider messages]
-  (let [ch (async/chan)]
-    (async/thread
-      (let [history (drive! provider messages #(async/>!! ch %))]
-        (async/>!! ch {:type :run/done :history history})
-        (async/close! ch)))
-    ch))
+  ([provider messages] (run-chan provider messages nil))
+  ([provider messages {:keys [thread-id] :as opts}]
+   (let [ch (async/chan)]
+     (async/thread
+       (let [history (drive! provider messages #(async/>!! ch %) opts)]
+         (async/>!! ch {:type :run/done :history history})
+         (async/close! ch)))
+     ch)))
