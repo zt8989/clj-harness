@@ -5,10 +5,9 @@
 
 (def test-namespaces
   '[harness.event-test
+    harness.llm-test
     harness.tools-test
     harness.loop-test
-    harness.provider-contract-test
-    harness.llm-langchain-test
     harness.ag-ui-test
     harness.replay-test
     harness.http-test])

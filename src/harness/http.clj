@@ -11,10 +11,6 @@
             [harness.ag-ui :as ag]
             [harness.event :as ev]
             [harness.llm :as llm]
-            ;; Pull in the active provider's stream! method so it is registered
-            ;; before the server answers its first request (the defmethod lives in
-            ;; harness.llm-langchain, not in this namespace).
-            [harness.llm-langchain]
             [harness.loop :as loop]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
