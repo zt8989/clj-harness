@@ -69,10 +69,12 @@
 (defn- absorb!
   "Fold one chunk's delta into TEXT, THINK and CALLS.
   Tool-call fragments arrive spread across chunks: the first carries id and name,
-  later ones only index plus an arguments fragment. Key by index and concatenate."
+  later ones only index plus an arguments fragment. Key by index and concatenate.
+  OpenRouter proxies reasoning as `reasoning` while DeepSeek uses
+  `reasoning_content`; both are accepted."
   [text think calls delta]
   (when-let [c (:content delta)] (.append text c))
-  (when-let [r (:reasoning_content delta)] (.append think r))
+  (when-let [r (or (:reasoning_content delta) (:reasoning delta))] (.append think r))
   (doseq [tc (:tool_calls delta)]
     (let [i (:index tc)]
       (when-let [id (:id tc)] (swap! calls assoc-in [i :id] id))
@@ -87,7 +89,8 @@
   adjacency rule ag-ui relies on to fold reasoning back onto its assistant message."
   [delta emit]
   (when (seq (:content delta)) (emit (ev/text-delta (:content delta))))
-  (when (seq (:reasoning_content delta)) (emit (ev/reasoning-delta (:reasoning_content delta)))))
+  (when-let [r (or (:reasoning_content delta) (:reasoning delta))]
+    (when (seq r) (emit (ev/reasoning-delta r)))))
 
 (defn- fold-tool-calls [calls]
   (mapv (fn [[_ t]] {:id (:id t) :type "function"

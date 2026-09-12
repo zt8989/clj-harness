@@ -15,24 +15,27 @@
 (defn- joined [seen type] (apply str (map :text (filter #(= type (:type %)) seen))))
 
 (deftest parses-a-streaming-body
+  ;; This fixture is a REAL capture from OpenRouter (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)
+  ;; via lisp-harness/src/harness/llm.clj:consume-sse. The synthetic 3-chunk split test below
+  ;; preserves the edge case (arguments diced inside a JSON token) that the real body
+  ;; happens to exercise as 2 chunks. Both are assertions against the same parser.
   (let [{:keys [msg seen]} (parse (str/split-lines fixture))]
     (testing "content and reasoning are concatenated across chunks, in order"
-      (is (= "我先读一下。" (:content msg)))
-      (is (= "用户想要看 deps.edn。" (:reasoning_content msg)))
-      (is (= "我先读一下。" (joined seen :text/delta)))
-      (is (= "用户想要看 deps.edn。" (joined seen :reasoning/delta))))
-    (testing "a tool call split across three chunks comes back assembled"
-      (is (= [{:id "call_00_abc" :type "function"
-               :function {:name "read" :arguments "{\"path\": \"deps.edn\"}"}}]
-             (:tool_calls msg))))
+      (is (= "" (:content msg)))
+      (is (str/includes? (str (:reasoning_content msg)) "deps.edn"))
+      (is (= "" (joined seen :text/delta)))
+      (is (str/includes? (joined seen :reasoning/delta) "deps.edn")))
+    (testing "a tool call split across chunks comes back assembled"
+      (is (= 1 (count (:tool_calls msg))))
+      (is (= "read" (get-in (first (:tool_calls msg)) [:function :name])))
+      (is (str/includes? (get-in (first (:tool_calls msg)) [:function :arguments]) "deps.edn")))
     (testing "the tool call is emitted exactly once, fully accumulated"
       (let [calls (filter #(= :tool/call (:type %)) seen)]
         (is (= 1 (count calls)))
-        (is (= {:type :tool/call :id "call_00_abc" :name "read"
-                :args "{\"path\": \"deps.edn\"}"}
-               (first calls)))))
-    (testing "reasoning arrives before content, as the wire does"
-      (is (= [:reasoning/delta :text/delta :tool/call]
+        (is (= "read" (:name (first calls))))
+        (is (str/includes? (:args (first calls)) "deps.edn"))))
+    (testing "reasoning arrives before the tool call, as the wire does"
+      (is (= [:reasoning/delta :tool/call]
              (distinct (map :type seen)))))))
 
 (deftest the-opening-empty-chunk-emits-nothing

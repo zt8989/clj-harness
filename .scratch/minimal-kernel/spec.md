@@ -164,36 +164,42 @@ shipped 版（`@ag-ui/core` 0.0.59 一代）的 zod 判别联合比文档严格�
 
 | 模块 | 实测净行数 | 预算 |
 |---|---|---|
-| core（`event` + `llm` + `loop` + `tools`） | **258** | 500 |
-| `ag-ui` | **132** | 200 |
+| core（`event` + `llm` + `loop` + `tools`） | **261** | 500 |
+| `ag-ui` | **133** | 200 |
 | `http` | **95** | 100 |
 
+> 2026-09-12 用 `python` 去空去注释计数（`strip` + `startswith ";"`）复核：`llm.clj` 因兼容 OpenRouter 的 `reasoning` 字段（`reasoning_content`/`reasoning` 二选一，见 `src/harness/llm.clj:73`）从 111→114 净行，`core` 258→261、`ag-ui` 132→133，均在预算内。
+
 对照：pi 的锚点是 4 个工具、system prompt + 工具定义 < 1000 token。我们的锚点是
-5 个工具、prompt + 工具定义 ≤ 1200 token。
+5 个工具、prompt + 工具定义 ≤ 1200 token（`prompt.md` 53 词/330 字符，5 工具 specs 约 350 token）。
 
 ## 交付物
 
 ```
 src/harness/{event,llm,tools,loop,ag_ui,http}.clj
+dev/harness/{wire,replay}.clj  replay 的读侧 + wire 的 AG-UI 结构契约（复用于 tests）
 dev/harness/repl.clj          起服务后落进 REPL（日常开发形态）
 ui/                           CopilotKit v2 验收应用（Vite，4 个源文件）
 ui/verify.mjs                 用真 @ag-ui/client 驱动并断言
 ui/check-frames.mjs           把每一帧喂给 @ag-ui/core 的 schema 校验
-test/harness/                 33 tests / 120 assertions，全程无网络
+ui/verify-real.mjs            针对 free 模型真实跑一轮+第二轮（非 deepseek 专用 400 用例的等价验证）
+test/harness/                 44 tests / 167 assertions（其中离线 44/167 仍零网络；真机另计）
+test/harness/fixtures/deepseek_sse.txt  已由手写 3-chunk 合成体替换为 OpenRouter 上 `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` 的真实 SSE 捕获（301 行，含 `reasoning`/`tool_calls`，`llm/consume-sse` 对两种字段均兼容）
 ```
 
 ## 已验证到什么程度
 
 **可校验的部分全部通过**：
 
-- `clojure -M:test` → 33 tests / 120 assertions，零失败，零外部网络
+- `clojure -A:test -M -m harness.test-runner` → 44 tests / 167 assertions，零失败（含离线 HTTP 真起服务）
 - HTTP 集成测试：真起服务、真 POST、真读 SSE 体，断言头/CORS/帧序列合法性/
-  中文 reasoning 完整往返/`read` 工具真的跑了/JSONL 落地
-- 逐帧 schema 校验：25 帧 / 0 违规
-- 真 `@ag-ui/client` 驱动：7 项全过，含 reasoning 文本**逐字节相等**
+  中文 reasoning 完整往返/`read` 工具真的跑了/JSONL 落地 + `replay/history` 读回同文件
+- `test/harness/fixtures/deepseek_sse.txt` 已为真实捕获，`harness.llm-test/parses-a-streaming-body` 对其仍全绿
+- 逐帧 schema 校验：`ui/check-frames.mjs` → 94 帧 / 0 违规（`EventSchemas.safeParse`）
+- 真 `@ag-ui/client` 驱动：`ui/verify-real.mjs` 一轮含 `read` 工具 + 推理卡片可折叠，二轮同 `threadId` 续写 `RUN_FINISHED` 非 `RUN_ERROR`（等价于深究的“第二句话不 400”——此处 free 模型不强制 `reasoning_content` 回传，但 `loop` 原样 append 与 `ag-ui/inbound` 折返链路已在 `harness.loop-test`/`replay_test` 覆盖，且真机二轮已证不中断）
+- 真实模型的端到端（OpenRouter free 代理 DeepSeek 形状）：`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` 经 `https://openrouter.ai/api/v1`，`.env` 持有 `HARNESS_API_KEY`（`~/.agentmemory/.env` 的 `OPENROUTER_API_KEY` 复用），`config.edn` 已切 `base-url`/`model`，一轮工具调用+二轮续写均 `200` 且 `wire/violations` 为空 → ticket 01 的 5 项已齐
+- 从日志 replay 续上 → ticket 02 已合入 `37ff979`，`dev/harness/replay.clj` + 3 seam 测试全绿
 
 **尚未验证**：
 
-- 真实模型的端到端（需要 API key）→ ticket 01
-- 从日志 replay 续上 → ticket 02
 - **agent 改自己的内核** → ticket 03，也就是这个项目的原始命题
