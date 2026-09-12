@@ -10,6 +10,7 @@
  ;;      clojure.core/spit and slurp already default to UTF-8 and are safe.
  :jvm-opts ["-Dfile.encoding=UTF-8" "-Dstdout.encoding=UTF-8" "-Dstderr.encoding=UTF-8"]
  :deps {org.clojure/clojure   {:mvn/version "1.12.6"}
+        org.clojure/core.async {:mvn/version "1.6.681"}
         http-kit/http-kit     {:mvn/version "2.8.0"}
         org.clojure/data.json {:mvn/version "2.5.2"}
         lynxeyes/dotenv       {:mvn/version "1.1.0"}}
