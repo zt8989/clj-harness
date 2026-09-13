@@ -74,7 +74,15 @@
 (deftest malformed-arguments-are-an-error-not-a-crash
   (let [{:keys [content error]} (tools/run! {:function {:name "read" :arguments "{not json"}})]
     (is (true? error))
-    (is (string? content))))
+    (is (string? content)))
+  (testing "the lifecycle still closes: execute carries the error, post always arrives"
+    ;; Malformed JSON dies before the pass branch starts, so there is no
+    ;; :tool/pre-execute -- but post-execute must never be skipped.
+    (let [seen (atom [])]
+      (tools/run! {:function {:name "read" :arguments "{not json"}}
+                  nil #(swap! seen conj %))
+      (is (= [:tool/execute :tool/post-execute] (mapv :type @seen)))
+      (is (string? (:error (first @seen)))))))
 
 (deftest missing-args-and-unknown-tools-are-errors
   (let [{:keys [content error]} (call "read" {})]

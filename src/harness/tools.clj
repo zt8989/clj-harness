@@ -168,6 +168,10 @@
                      {:content (ex-message err) :error true}
                      {:content (str result) :error false})))))
          (catch Throwable t
+           ;; A malformed argument payload dies before the pass branch even
+           ;; starts; the lifecycle still closes on the seam's own terms.
+           (report (ev/tool-executed id name (ex-message t)))
+           (report (ev/tool-post-execute id name))
            {:content (ex-message t) :error true}))
        (do (report (ev/tool-pre-execute id name :unknown-tool []))
            (report (ev/tool-post-execute id name))
