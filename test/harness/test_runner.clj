@@ -24,6 +24,7 @@
     harness.loop-test
     harness.ag-ui-test
     harness.replay-test
+    harness.evals-test
     harness.http-test])
 
 (def ^:private tmp-home

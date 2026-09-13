@@ -7,7 +7,19 @@
 - `src/harness/{event,llm,loop,tools,ag_ui,http,memory,opaque,home}.clj` — 内核 + AG-UI 适配 + HTTP 边
 - `src/harness/memory.clj` / `src/harness/opaque.clj` — 一对：前者是可自省面（冻结 prompt、工具注册表、config.edn、待决审批），后者是不可自省面（api-key、provider override），`eval` 只被邀请进前者
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
-- `dev/harness/{wire,replay}.clj` — 客户端最小 applier 与日志回放（内核永不读日志）
+- `dev/harness/{wire,replay,evals}.clj` — 客户端最小 applier、日志回放、eval 提取器（内核永不读日志）。`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
+
+### 会话级自我扩展与晋升路径
+
+agent 可以在运行期通过 `eval` 给**本会话**长出新的工具（`session-register!`），也可以把已有工具**关掉/打开**（`session-disable!` / `session-enable!`，关闭后工具仍在工具表里、只是调用被拒）。
+
+这些能力**仅本会话生效，进程重启即失**。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness` 的正式工具表 → git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+
+```pwsh
+clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code 与返回值
+```
+
+写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
 - `ui/src/harness/ui/{main,app,approval_gate}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.mjs` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
 - `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
@@ -111,7 +123,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 - `input` — 收到的 RunAgentInput
 - `event` — 发出的每个 AG-UI 帧
 - `message` — LLM 真实看到/返回的 provider 形态消息原样（system prompt、入站消息、assistant 返回、tool 结果，按序构成完整消息数组）
-- `tools/pre-execute` | `tools/execute` | `tools/post-execute` — 工具执行三相，按 `toolCallId` 键控，**不上 wire**，纯审计行
+- `tools/pre-execute` | `tools/execute` | `tools/post-execute` — 工具执行三相，按 `toolCallId` 键控，**不上 wire**，纯审计行。pre-execute 的 `outcome` ∈ `pass` / `unknown-tool` / `disabled` / `missing-args` / `needs-approval` / `approved` / `vetoed`；`disabled` 是会话开关（工具仍可见、调用被拒），先于审批检查
 - `approval/decided` — 人工对某个 park 调用的答复（含 interruptId 与客户端 payload）
 
 只 append 永不读。

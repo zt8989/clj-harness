@@ -15,7 +15,10 @@
         org.clojure/data.json {:mvn/version "2.5.2"}}
  :aliases
  ;; :test carries dev/ because the replay tool lives there and has tests of its own.
- {:test {:extra-paths ["test" "dev"]}
-  :dev  {:extra-paths ["dev" "test"]}
-  :run  {:main-opts ["-m" "harness.http"]}
-  :repl {:extra-paths ["dev" "test"] :main-opts ["-m" "harness.repl"]}}}
+ {:test  {:extra-paths ["test" "dev"]}
+  :dev   {:extra-paths ["dev" "test"]}
+  :run   {:main-opts ["-m" "harness.http"]}
+  ;; Read back what an agent built at runtime, for the promotion decision:
+  ;;   clojure -M:evals <thread-id> [log-dir]
+  :evals {:extra-paths ["dev"] :main-opts ["-m" "harness.evals"]}
+  :repl  {:extra-paths ["dev" "test"] :main-opts ["-m" "harness.repl"]}}}
