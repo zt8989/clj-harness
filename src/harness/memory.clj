@@ -231,18 +231,26 @@
 
 (defonce ^:private provider-changes
   (atom []))
-;; [{:thread-id .. :before {field value} :after {field value} :verdict kw}]
+;; [{:thread-id .. :before <slice> :after <slice>
+;;   :trigger "session-configure" :override <full session override after the change>}]
 
 (defn record-provider-change!
   "Note that THREAD-ID's provider moved from BEFORE to AFTER, by an APPROVED
-  change. The body only runs on an approval -- a vetoed call never reaches it --
-  so landing here means the human said yes; a veto leaves no change line at all,
-  and the reader tells the two apart by the presence of this line (paired with
-  its approval/decided row). Drained, not read: the writer empties this after
-  every run."
-  [thread-id before after]
+  change of TRIGGER (a string identifying the path that pressed the change --
+  currently always \"session-configure\"). The body only runs on an approval --
+  a vetoed call never reaches it -- so landing here means the human said yes;
+  a veto leaves no change line at all, and the reader tells the two apart by
+  the presence of this line (paired with its approval/decided row).
+
+  OVERRIDE is the session's OWN tier after the change -- the partial the next
+  resolve-provider would consult as tier 3. :before / :after are slices (only
+  the fields this call moved); :override is the whole tier, so a reader can
+  reconstruct the post-change session without consulting opaque. Drained, not
+  read: the writer empties this after every run."
+  [thread-id before after trigger override]
   (swap! provider-changes conj {:thread-id thread-id
-                                :before before :after after}))
+                                :before before :after after
+                                :trigger trigger :override override}))
 
 (defn take-provider-changes!
   "Every pending provider change recorded for THREAD-ID, in order, clearing them.

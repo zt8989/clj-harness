@@ -481,7 +481,12 @@
              (is (= "small" (get-in changed [:after :model]))
                  "the model never moved; only the effort did")
              (is (= "high" (get-in changed [:after :reasoning-effort]))
-                 "and the new field is the one the change named"))
+                 "and the new field is the one the change named")
+             (is (= "session-configure" (:trigger changed))
+                 "the change names the path that pressed it")
+             (is (= {:model "small" :reasoning-effort "high"}
+                    (select-keys (:override changed) [:model :reasoning-effort]))
+                 "the override is the full session slice after the change"))
            (testing "consecutive changes chain through the same slice"
              ;; One more approved change: reasoning-effort goes from high to
              ;; low. before on the new line MUST equal after on the previous.
@@ -502,7 +507,13 @@
                (is (= "high" (get-in a [:after :reasoning-effort])))
                (is (= "high" (get-in b [:before :reasoning-effort]))
                    "the second change starts where the first ended")
-               (is (= "low" (get-in b [:after :reasoning-effort]))))))
+               (is (= "low" (get-in b [:after :reasoning-effort])))
+               (is (every? #(= "session-configure" (:trigger %)) [a b])
+                   "every chained change names its trigger")
+               (is (= {:model "small"} (select-keys (:override a) [:model]))
+                   "the first change's override is the full session slice")
+               (is (= "low" (get-in (:override b) [:reasoning-effort]))
+                   "the second change's override reflects the latest session state"))))
          (finally (stop) (opaque/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight

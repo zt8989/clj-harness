@@ -108,7 +108,11 @@
       (opaque/set-override! thread-id after)
       ;; Tell the writer what moved. The edge drains this and lands a
       ;; provider/changed line after the approval/decided line for this call.
-      (mem/record-provider-change! thread-id before after)
+      ;; :trigger names the path that pressed the change (currently always
+      ;; session-configure); :override is the FULL session override after this
+      ;; change, so a reader can reconstruct post-change session state without
+      ;; consulting opaque.
+      (mem/record-provider-change! thread-id before after "session-configure" after)
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."
            (when (nil? thread-id)

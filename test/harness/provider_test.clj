@@ -245,3 +245,44 @@
         (is (= "small" (:model (opaque/effective-provider "t-b")))
             "another session serves from the untouched default")
         (finally (opaque/set-override! "t-a" nil))))))
+
+;; -- provider/changed line shape: :trigger and :override ----------------
+
+(deftest an-approved-configure-tags-the-change-with-trigger-and-override
+  "Every approved change carries :trigger (the path that pressed it -- currently
+  always session-configure) and :override (the FULL session override after this
+  change, so a reader can reconstruct post-change session state without asking
+  opaque)."
+  (with-home "{:provider :cheap}\n" registry
+    (fn []
+      (try
+        (opaque/set-override! "t-tag" {:reasoning-effort "low"})
+        (approve! "t-tag" "sc-tag" {:model "bigger"})
+        (let [[c] (mem/take-provider-changes! "t-tag")]
+          (is (some? c))
+          (is (= "session-configure" (:trigger c))
+              "the trigger names the path that pressed the change")
+          (is (= {:model "bigger" :reasoning-effort "low"} (:override c))
+              "the override is the full session slice after the change -- every
+              field the session owns, not just what this call touched"))
+        (finally (opaque/set-override! "t-tag" nil))))))
+
+(deftest consecutive-changes-pin-trigger-and-override-throughout
+  "Chained changes all carry the same trigger, and each :override is the previous
+  :override plus the new patch -- so a reader stepping through the timeline sees
+  the session evolving without consulting opaque."
+  (with-home "{:provider :cheap}\n" registry
+    (fn []
+      (try
+        (approve! "t-ch2" "sc-1" {:model "m1"})
+        (approve! "t-ch2" "sc-2" {:model "m2" :reasoning-effort "high"})
+        (let [[a b] (mem/take-provider-changes! "t-ch2")]
+          (is (every? #(= "session-configure" (:trigger %)) [a b])
+              "every change names its trigger")
+          (is (= {:model "m1"} (:override a))
+              "the first change's override is just what it set")
+          (is (= (:override b)
+                 (merge (:override a)
+                        {:model "m2" :reasoning-effort "high"}))
+              "the second change's override is the first one plus the new patch"))
+        (finally (opaque/set-override! "t-ch2" nil))))))

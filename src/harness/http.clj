@@ -191,9 +191,11 @@
           ;; here is what it changed".
           (doseq [c (mem/take-provider-changes! thread-id)]
             (log! thread-id run-id "provider/changed"
-                  {:verdict :approved
-                   :before (select-keys (:before c) [:protocol :base-url :model :reasoning-effort])
-                   :after  (select-keys (:after c)  [:protocol :base-url :model :reasoning-effort])}))
+                  {:verdict  (:verdict c :approved)
+                   :before   (select-keys (:before c) [:protocol :base-url :model :reasoning-effort])
+                   :after    (select-keys (:after c)  [:protocol :base-url :model :reasoning-effort])
+                   :trigger  (:trigger c)
+                   :override (select-keys (:override c) [:protocol :base-url :model :reasoning-effort])}))
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a

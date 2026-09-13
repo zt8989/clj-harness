@@ -154,7 +154,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 会话的 provider 历史落成两种新行——**不是**每 run 一行快照，时间线 init + changes 已能完整重建：
 
 - **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含 `:protocol` / `:base-url` / `:model` / `:reasoning-effort` 四字段 + `:source`（`default` / `request` / `inline`），以及 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。
-- **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before {...} :after {...}}`，落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。
+- **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before <slice> :after <slice> :trigger "session-configure" :override <完整 session override>}`。`:before`/`:after` 是本次按下的 slice（仅命中的字段），`:override` 是按完之后 session 这一档的完整 shape——回放者拿到这一字段即可还原「按完 session 长什么样」，不必再向 opaque 询问。`:trigger` 标注是哪条路径按下的 change（当前唯一合法值 `"session-configure"`）。落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。
 
 读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，两种新行不参与回放——它们是审计轨迹，不是对话的一部分。
 
@@ -188,7 +188,7 @@ UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 
 ```pwsh
 # 离线全量
 clojure -M:test -m harness.test-runner
-# 101 tests / 467 assertions, 0 failures
+# 103 tests / 478 assertions, 0 failures
 
 # 在线帧合法性（需后端在 8080）
 node ui/check-frames.mjs        # EventSchemas.safeParse  37~94 frames / 0 invalid
