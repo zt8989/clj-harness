@@ -159,17 +159,6 @@
 
 ;; ---------------------------------------------------------------- introspection
 
-(deftest the-session-record-never-holds-a-key
-  (mem/record-provider! "t-rec" {:protocol :openai-completions :base-url "http://u"
-                                 :model "m" :api-key "sk-secret"})
-  (testing "the provider snapshot rides, the key does not"
-    (is (not (contains? (:provider (mem/session "t-rec")) :api-key)))
-    (is (= :openai-completions (get-in (mem/session "t-rec") [:provider :protocol]))))
-  (mem/record-history! "t-rec" [{:role "assistant" :content "x"}])
-  (is (= [{:role "assistant" :content "x"}] (:history (mem/session "t-rec"))))
-  (testing "a thread this process never served reads as nil, not an error"
-    (is (nil? (mem/session "t-never")))))
-
 (deftest eval-joins-the-session-across-the-real-tool-call-shape
   ;; The agent's own path: a full eval tool call, thread context bound, extends
   ;; the session -- and the next run's tools array and dispatch both see it.
@@ -199,11 +188,7 @@
     (testing "the recorded state is reachable through the same eval surface"
       (is (str/includes? (:content (eval! "t-e2e"
                                           "(keys (harness.memory/config))"))
-                         ":protocol"))
-      (is (str/includes? (:content (eval! "t-e2e"
-                                          "(pr-str (harness.memory/session \"t-never\"))"))
-                         "nil")
-          "an unserved thread reads as nil, not an error"))
+                         ":protocol")))
     (testing "removing a base tool surfaces a readable error to the model"
       (mem/session-unregister! "t-e2e" "read")
       (let [events (drain-events

@@ -36,3 +36,19 @@
 - **02**：`mem/record-provider!`（run 开始，dissoc api-key）+ `mem/record-history!`（:run/done，与 jsonl 尾巴同一落点）+ `mem/session` 读取 helper；http 集成测试断言快照无 api-key、history 尾巴与 jsonl message 行逐字一致（`the-session-state-is-addressable-by-thread-id`）。
 - **03**：`the-session-record-never-holds-a-key`、`eval-joins-the-session-across-the-real-tool-call-shape`——走完整 eval tool-call 形态读到 config keys、unserved thread 返回 nil；prompt.md 增自省入口与 opaque 禁区声明。
 - **最终全量**：55 tests / 247 assertions，全绿（含 tools-lifecycle 特性）。
+
+## 反转记录（2026-09-13，部分撤销 + 升格）
+
+**撤销：会话内存副本。** 本 spec 当时的「会话注册表（thread-id → history + provider 快照）」被撤销。理由是**副本会与 JSONL 腐坏**——`message` 行已经逐字记录了每一条提交与返回的消息，`provider/init` 行已记录本 run 的 provider，再在内存里留一份副本，只是制造一个第二个真相源，且这份副本对进程重启无记忆、对 run 进行中的窗口无覆盖，远不如日志本身完整。**「抄的是错的，问的是对的」。**
+
+具体撤销物（`eval-self-extension/02` 落地）：
+- 删 `harness.memory` 的 `sessions` atom、`record-provider!`、`record-history!`、`session`；
+- 删 http 层两处调用点（run 开始处记 provider、`:run/done` 处记 history），run 生命周期与 JSONL 落盘时序逐字不变；
+- 删 `the-session-state-is-addressable-by-thread-id`（http_test，整条）、`the-session-record-never-holds-a-key`（session_tools_test，整条）、`eval-joins-the-session-across-the-real-tool-call-shape` 尾部读 `session` 的一处；
+- prompt.md 的 Introspection 段改写为 Self-extension 段。
+
+**保留：`harness.memory` / `harness.opaque` 的 ns 分界（01）与 `harness.opaque` 禁区声明（03）。** 撤销的只是「抄副本」，**不是**读自省面整体。「密钥绝不进可寻址 var」这条理由依然成立，且更强——现在连 provider 快照都不进内存了，密钥自然无从泄漏。
+
+**升格：provider 从「快照」到「一等公民」。** 本 spec 把 provider 当成「读一下当前生效值」的附属品；牛总 2026-09-13 指令把它升格为可切换的一等状态，且**所有事件（初始化与变更）都落 jsonl**。由 `eval-self-extension` 的 03（落盘时间线 init + changed）、04（当下查询与授权写）、05（多 provider 注册表与解析）取代。**取代关系是覆盖而非续修——本 spec 的知识面到此为止，后续以 eval-self-extension 为准。**
+
+**跨特性前置：** 读自省面若要真正可用，须先有单一配置根（否则路径散落、沙盒读写失控），故 `config-home` 是 04 的前置，已完成（`92febbc`）。

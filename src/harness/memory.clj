@@ -9,7 +9,11 @@
 
   Where those files ARE is harness.home's business: the config root is
   ~/.clj-harness (relocatable via CLJ_HARNESS_HOME), and prompt.md is the one
-  file that stays in the repository."
+  file that stays in the repository.
+
+  What is deliberately NOT here: a copy of a thread's history or of the provider
+  its run served with. The jsonl log already holds both, and a second copy in
+  memory can only drift from it -- so the log is the record, read it there."
   (:require [clojure.edn :as edn]
             [harness.home :as home]))
 
@@ -164,32 +168,6 @@
     (let [rec (get before interrupt-id)]
       (when (and (:verdict rec) (not (:consumed rec)))
         (select-keys rec [:verdict :payload])))))
-
-;; ----------------------------------------------------------------- sessions
-
-(defonce ^:private sessions
-  (atom {}))
-;; thread-id -> {:provider {...} :history [...]}
-
-(defn record-provider!
-  "Snapshot, for THREAD-ID, the provider its run actually serves with. The
-  api-key is stripped HERE and never enters the memory surface; the config
-  fields (:protocol/:base-url/:model ...) stay."
-  [thread-id provider]
-  (swap! sessions assoc-in [thread-id :provider] (dissoc provider :api-key)))
-
-(defn record-history!
-  "Record THREAD-ID's final history at :run/done -- the same landing point and
-  the same known timing window as the jsonl message tail (harness.http)."
-  [thread-id history]
-  (swap! sessions assoc-in [thread-id :history] (vec history)))
-
-(defn session
-  "The recorded state of THREAD-ID's last run: {:provider .. :history ..}, or
-  nil for a thread this process has never served. This is the introspection
-  read side -- what eval hands the agent when it asks about its own session."
-  [thread-id]
-  (get @sessions thread-id))
 
 ;; ------------------------------------------------------------------- config
 

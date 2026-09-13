@@ -18,6 +18,8 @@ prompt.md 删掉 Introspection 段，改写成「自我扩展」定位：eval �
 - [ ] http 层不再有那两处记录调用，且 run 的 JSONL 落盘时序完全不变：message 行、审计三行、`approval/decided` 的内容与顺序逐字不变
 - [ ] 本票**不引入**任何新的读入口（`active-provider` / `log-path` 属 04），memory ns 的 diff 是纯删
 - [ ] prompt.md 不再出现会话自省说明；含「仅本会话生效 / 进程重启即失 / 每次 eval 都落日志」三条事实；Session tools 段与 opaque 禁区声明原样保留
-- [ ] 移除的断言在票面与 spec 列明：http_test 的 `the-session-state-is-addressable-by-thread-id`（整条），session_tools_test 的 `the-session-record-never-holds-a-key`，以及 `eval-joins-the-session-across-the-real-tool-call-shape` 尾部读 `session` 的两处。**移除而非改写为读文件**
+- [ ] 移除的断言在票面与 spec 列明：http_test 的 `the-session-state-is-addressable-by-thread-id`（整条），session_tools_test 的 `the-session-record-never-holds-a-key`（整条），以及 `eval-joins-the-session-across-the-real-tool-call-shape` 尾部读 `session` 的那一处。**移除而非改写为读文件**
 - [ ] `eval-introspection/spec.md` 记录反转（撤销内容、理由、取代关系），其既有「已验证到什么程度」段不回改（那是历史事实）
 - [ ] 离线全量 harness.test-runner 全绿（本票净减，清单见上）
+
+**测试净减账（实测）：** `the-session-record-never-holds-a-key` 整条（3 断言）与 `eval-joins-...` 尾部 1 断言**纯删**；`the-session-state-is-addressable-by-thread-id` 因原断言全部依赖 `mem/session`（provider 快照 + `subvec history`），**按「移除而非改写」整条删除**。它承担的另一件事——「JSONL 的 submitted side / returned side 是同一条记录」——由既有的 `jsonl-message-record` 特性覆盖，且新行种 `provider/init` 的断言属 **03**，本票不越界补。
