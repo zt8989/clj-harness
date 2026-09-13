@@ -156,7 +156,13 @@
   ;; A directory of its OWN: the other tests in this namespace write logs into
   ;; dir, and a listing test that shares it would count their lines.
   (let [ldir (str (System/getProperty "java.io.tmpdir") "/harness-replay-listing")]
-    (io/delete-file ldir true)
+    ;; io/delete-file cannot remove a NON-EMPTY directory, and java.io.tmpdir
+    ;; outlives this JVM -- the files this test writes on one run would sit
+    ;; there on the next and break the empty-directory assertion. Remove the
+    ;; tree deepest-first, then start fresh.
+    (run! #(.delete ^java.io.File %)
+          (sort-by (fn [^java.io.File f] (count (.getPath f))) >
+                   (file-seq (io/file ldir))))
     (.mkdirs (io/file ldir))
     (testing "an empty directory is an empty list, not an error"
       (is (= [] (replay/threads ldir))))
