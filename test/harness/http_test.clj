@@ -533,6 +533,17 @@
 (def ^:private project-dir
   (str (System/getProperty "java.io.tmpdir") "/harness-http-project"))
 
+(def ^:private project-dir-2
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-project-2"))
+
+(defn- bound-lines
+  "The thread's project/bound audit lines, oldest first."
+  [tid]
+  (->> (str/split-lines
+        (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8"))
+       (mapv #(json/read-str % :key-fn keyword))
+       (filterv #(= "project/bound" (:kind %)))))
+
 (defn- api-call
   "A plain JSON call to the management edge -- the /api/* endpoints, not the
   AG-UI run endpoint. Returns the raw HttpResponse."
@@ -598,10 +609,60 @@
          (testing "exactly ONE project/bound audit line is on disk"
            (is (= 1 (count bound)))
            (is (nil? (:runId (first bound))) "a binding happens outside any run")
-           (is (str/ends-with? (get-in (first bound) [:payload :dir]) "harness-http-project"))
+           (is (nil? (get-in (first bound) [:payload :before]))
+               "a FIRST bind has no previous directory")
+           (is (str/ends-with? (get-in (first bound) [:payload :after]) "harness-http-project"))
            (is (= "http" (get-in (first bound) [:payload :via]))))
          (testing "the two failed binds added no second line"
            (is (= 1 (count (filter #(= "project/bound" (:kind %)) lines))))))))))
+
+(deftest rebinding-moves-the-root-and-lands-a-timeline
+  ;; Ticket 04: rebinding an already-bound thread is the ordinary case --
+  ;; resolution moves to the new directory immediately (the relative write
+  ;; lands THERE, not in the old one), GET answers the new binding, and each
+  ;; audit line carries before -> after so the directory timeline reads
+  ;; straight off the log. The UI switches with the same entry point: this
+  ;; endpoint IS the entry point it uses.
+  ;; Recursive wipe, not plain delete-file: a directory survives a previous
+  ;; JVM with its e2e.txt inside, delete-file silently refuses non-empty
+  ;; directories, and the not-in-the-OLD-directory assertion would trip on
+  ;; that residue (deep-to-shallow file-seq delete, then mkdirs).
+  (doseq [d [project-dir project-dir-2]]
+    (doseq [f (reverse (file-seq (io/file d)))]
+      (io/delete-file f true))
+    (.mkdirs (io/file d)))
+  (with-server
+   8107
+   {"rebind-run" bound-script}
+   (fn []
+     (let [tid "rebind-run"]
+       (testing "the first bind's line carries before nil"
+         (let [resp (api-call 8107 :post "/api/project"
+                              (json/write-str {:threadId tid :dir project-dir}))]
+           (is (= 200 (.statusCode resp))))
+         (let [line (first (bound-lines tid))]
+           (is (nil? (get-in line [:payload :before])))
+           (is (str/ends-with? (get-in line [:payload :after]) "harness-http-project"))))
+       (testing "rebinding answers and displays the new directory"
+         (let [resp (api-call 8107 :post "/api/project"
+                              (json/write-str {:threadId tid :dir project-dir-2}))]
+           (is (= 200 (.statusCode resp)))
+           (is (str/ends-with? (:dir (read-json resp)) "harness-http-project-2"))
+           (testing "GET reflects the switch"
+             (is (str/ends-with?
+                  (:dir (read-json (api-call 8107 :get (str "/api/project?threadId=" tid) nil)))
+                  "harness-http-project-2")))))
+       (testing "a relative write after the switch lands in the NEW directory"
+         (let [frames (wire/frames-from-sse (.body (post-run 8107 tid)))]
+           (is (= "RUN_FINISHED" (:type (last frames))))
+           (is (empty? (wire/violations frames))))
+         (is (= "landed" (slurp (io/file project-dir-2 "e2e.txt") :encoding "UTF-8")))
+         (is (not (.exists (io/file project-dir "e2e.txt")))))
+       (testing "the log reads as a before -> after timeline"
+         (let [bounds (bound-lines tid)]
+           (is (= 2 (count bounds)))
+           (is (str/ends-with? (get-in (nth bounds 1) [:payload :before]) "harness-http-project"))
+           (is (str/ends-with? (get-in (nth bounds 1) [:payload :after]) "harness-http-project-2"))))))))
 
 (deftest a-bound-thread-writes-into-its-project-over-the-real-edge
   ;; The full vertical: bind through the management edge the way the UI will,

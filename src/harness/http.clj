@@ -21,10 +21,12 @@
                    the api-key was stripped. Never a per-run snapshot.
     \"provider/changed\" -- a mid-session provider change, before -> after, once
                    the approving human's decision has been consumed.
-    \"project/bound\" -- a session's project-directory binding, with the
-                   absolute path. Written by the /api/project endpoint, OUTSIDE
-                   any run (runId null). Rebinding lands another line; the
-                   reader takes the last one, like any append-only record.
+    \"project/bound\" -- a session's project-directory binding, BEFORE ->
+                   AFTER (a first bind's before is null; rebinding moves the
+                   root and lands another line, so the directory timeline
+                   reads straight off the log). Written by the /api/project
+                   endpoint, OUTSIDE any run (runId null). The reader takes
+                   the last line, like any append-only record.
     \"session/rebuilt\" -- a rebuild action, recorded on the log it rebuilt:
                    the message count and the fact. The rebuild itself only
                    READS the log; this line is its one trace.
@@ -286,8 +288,12 @@
 (defn- project-post
   "POST /api/project {threadId, dir} -- bind the thread to the directory,
   validate FIRST (a missing or non-directory path is a named 400 and leaves
-  no trace), then land the project/bound audit line. runId is nil on that
-  line because a binding happens OUTSIDE any run."
+  no trace), then land the project/bound audit line as before -> after, the
+  provider/changed style: the previous binding (nil for a first bind) and the
+  one now stored, so a session's directory timeline is readable off the log.
+  runId is nil on that line because a binding happens OUTSIDE any run. The
+  previous binding is read BEFORE binding: bind! overwrites, and the audit
+  line is the only place the old value would survive."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
@@ -305,12 +311,13 @@
 
       :else
       (let [thread-id (str (:threadId ok))
+            before    (project/binding-for thread-id)
             bound     (try {:ok (project/bind! thread-id (str (:dir ok)))}
                            (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error bound)]
           (api-response 400 {:error error})
           (let [abs (:ok bound)]
-            (log! thread-id nil "project/bound" {:dir abs :via "http"})
+            (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
             (api-response 200 {:threadId thread-id :dir abs})))))))
 
 (defn- threads-get

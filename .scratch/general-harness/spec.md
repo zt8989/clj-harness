@@ -271,12 +271,19 @@ P3 各项彼此独立、可按需插队。
 
 ### jsonl 契约（随交付补充）
 
-- **`project/bound`**（01 号票，`harness.http` 管理边写入）：会话绑定项目目录的审计行。
-  payload `{:dir <绝对路径> :via "http"}`，`runId` 为 null（绑定发生在任何 run 之外）。
-  同一 thread 重复绑定各落一行，append-only 语义下读者以最后一行为准。
+- **`project/bound`**（01 号票，`harness.http` 管理边写入；**04 号票演进为 before/after**）：
+  会话绑定项目目录的审计行。payload `{:before <绝对路径|null> :after <绝对路径> :via "http"}`——
+  对齐 provider/changed 行的 before→after 风格，首次绑定 before 为 null；`runId` 为 null
+  （绑定发生在任何 run 之外）。同一 thread 重复绑定各落一行，append-only 语义下
+  **逐行连读即目录变更时间线**；读者以最后一行为准。
   对应端点：`GET /api/project?threadId=..`（未绑定答 `:dir null`，不是错误）、
   `POST /api/project {"threadId","dir"}`（`harness.project/bind!` 先校验目录存在且是目录，
-  校验失败的 400 指名报错且不落行）。
+  校验失败的 400 指名报错且不落行；旧绑定值在校验通过后才被覆盖——审计行是它唯一的存身之处）。
+  **CwdChanged 事件源（04 号票就位，P2 接线）**：绑定变更点是 hook 表 CwdChanged 行的触发源
+  （本表 P2 批次）；事件事实的 payload 形态由 `harness.project/cwd-changed` 纯函数锁定并有测试
+  ——`{:hook "CwdChanged" :thread_id .. :project_dir <新目录> :before <旧目录|null>}`，
+  snake_case 对齐本 spec 的 hook payload 约定。本票只产事件事实与审计行，不 spawn 命令、
+  不落 `hook/` 审计行——那是 hook 引擎（P2）在变更点接线时的职责。
 - **`session/rebuilt`**（05 号票，`harness.http` 写入**被重建的日志自身**）：重建动作的
   唯一痕迹。payload `{:messages <重建消息数> :via "http"}`，`runId` 为 null。重建本身
   只读日志。对应端点：`GET /api/threads`（目录扫描，空/缺失目录 → `[]`）与

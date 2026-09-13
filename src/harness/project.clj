@@ -75,6 +75,21 @@
   [thread-id]
   (get @bindings thread-id))
 
+(defn cwd-changed
+  "The CwdChanged hook-event FACTS for a binding change: BEFORE (the previous
+  directory, nil for a first bind) -> AFTER (the directory now bound). This is
+  the event source the hook engine (P2) will wire at the binding-change point
+  -- the payload shape is locked here, with a test, so it cannot drift between
+  this ticket and the wiring. Field names follow the hook-payload convention
+  (snake_case, aligned with the CodeBuddy list). What to DO with the event --
+  spawning commands, timeouts, gating -- is the hook engine's business, not
+  this namespace's: here it is only the fact that the working directory moved."
+  [thread-id before after]
+  {:hook        "CwdChanged"
+   :thread_id   thread-id
+   :project_dir after
+   :before      before})
+
 (defn resolve-path
   "PATH as this session will use it: relative paths resolve against the
   session's project directory when one is bound, and pass through UNCHANGED

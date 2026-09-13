@@ -225,3 +225,15 @@
     (testing "the file is read fresh per call: edits move the fence live"
       (write-project-harness! "{}")
       (is (false? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))))))
+
+(deftest cwd-changed-is-the-hook-payload-shape
+  ;; The CwdChanged event source (ticket 04): the facts a P2 hook engine will
+  ;; consume verbatim at the binding-change point. Locked here so the shape
+  ;; cannot drift between this ticket and the hook wiring; what to DO with
+  ;; the event is the hook engine's business, not this namespace's.
+  (is (= {:hook "CwdChanged" :thread_id "t" :project_dir "/b" :before "/a"}
+         (project/cwd-changed "t" "/a" "/b")))
+  (is (nil? (:before (project/cwd-changed "t" nil "/b")))
+      "a first bind has no previous directory")
+  (is (= "/b" (:project_dir (project/cwd-changed "t" "/a" "/b")))
+      "project_dir is where the working directory moved TO"))
