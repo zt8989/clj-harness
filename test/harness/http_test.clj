@@ -622,3 +622,94 @@
          (is (empty? (wire/violations frames)))))
      (testing "the relative write landed INSIDE the project directory"
        (is (= "landed" (slurp (io/file project-dir "e2e.txt") :encoding "UTF-8")))))))
+
+(deftest threads-listing-and-rebuild-over-the-real-edge
+  ;; Ticket 05 over the real edge: a real run writes a real log; the listing
+  ;; finds it with its metadata; the rebuild endpoint hands the conversation
+  ;; back in the shape a client re-owns; and the action leaves its audit line.
+  ;; The pin is keyed to the RANDOM thread id the run will use -- a pin under
+  ;; any other name would let the run resolve config's bare :fake provider and
+  ;; produce an empty stream (the per-thread-pin rule, learned the hard way).
+  (let [tid (str "rebuild-" (java.util.UUID/randomUUID))]
+    (with-server
+     8105
+     {tid script}
+     (fn []
+       ;; The log: one real run of the default script -- reasoning, two tool
+       ;; calls, tool results, a final answer.
+       (let [frames (wire/frames-from-sse (.body (post-run 8105 tid)))]
+         (is (= "RUN_FINISHED" (:type (last frames)))))
+       (testing "GET /api/threads lists the conversation with its metadata"
+         (let [resp (api-call 8105 :get "/api/threads" nil)
+               rows (->> (json/read-str (.body resp) :key-fn keyword)
+                         (filterv #(= tid (:threadId %))))]
+           (is (= 200 (.statusCode resp)))
+           (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
+           (is (= 1 (count rows)))
+           (is (pos? (:bytes (first rows))))
+           (is (pos? (:lastActivity (first rows))))))
+       (testing "POST rebuild returns a continuable message list"
+         (let [resp  (api-call 8105 :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (json/read-str (.body resp) :key-fn keyword)]
+           (is (= 200 (.statusCode resp)))
+           (is (= tid (:threadId reply)))
+           (is (= [] (:context reply)) "the seed run carried no context")
+           (let [msgs (:messages reply)]
+             (testing "the client's seed message opens the list"
+               (is (= "user" (:role (first msgs)))))
+             (testing "reasoning, tool calls, tool results are all there"
+               (is (some #(= "reasoning" (:role %)) msgs))
+               (is (some #(seq (:toolCalls %)) msgs))
+               (is (some #(= "tool" (:role %)) msgs)))
+             (testing "and the final assistant answer closes it"
+               (is (= "assistant" (:role (last msgs))))))))
+       (testing "the rebuild action landed its audit line"
+         (let [lines (mapv #(json/read-str % :key-fn keyword)
+                           (str/split-lines
+                            (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8")))
+               rb    (filterv #(= "session/rebuilt" (:kind %)) lines)]
+           (is (= 1 (count rb)))
+           (is (nil? (:runId (first rb))) "a rebuild happens outside any run")
+           (is (pos? (get-in (first rb) [:payload :messages])))
+           (is (= "http" (get-in (first rb) [:payload :via])))))))))
+
+(deftest rebuild-refuses-truncated-and-corrupt-logs-by-name
+  (with-server
+   8106
+   "it-refuse"
+   (fn []
+     (testing "a log that ends mid-run is refused, naming the last frame"
+       (let [tid (str "trunc-" (java.util.UUID/randomUUID))
+             f   (io/file (log-dir) (str tid ".jsonl"))]
+         (spit f (str (json/write-str
+                       {:ts 1 :runId "r1" :kind "input"
+                        :payload {:threadId tid :runId "r1"
+                                  :messages [{:id "u1" :role "user" :content "hi"}]
+                                  :tools [] :context []}})
+                      "\n"
+                      (json/write-str
+                       {:ts 2 :runId "r1" :kind "event"
+                        :payload {:type "RUN_STARTED" :threadId tid :runId "r1"}})
+                      "\n")
+               :encoding "UTF-8")
+         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (json/read-str (.body resp) :key-fn keyword)]
+           (is (= 400 (.statusCode resp)))
+           (is (re-find #"(?i)mid-run|RUN_FINISHED|RUN_ERROR" (:error reply)))
+           (testing "the refusal left no audit line behind"
+             (is (not-any? #(= "session/rebuilt" (:kind %))
+                           (mapv #(json/read-str % :key-fn keyword)
+                                 (str/split-lines (slurp f :encoding "UTF-8")))))))))
+     (testing "a half-written line is refused, naming the line"
+       (let [tid (str "corrupt-" (java.util.UUID/randomUUID))]
+         (spit (io/file (log-dir) (str tid ".jsonl"))
+               "{\"ts\":1,\"runId\":\"r1\",\"kin" :encoding "UTF-8")
+         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (json/read-str (.body resp) :key-fn keyword)]
+           (is (= 400 (.statusCode resp)))
+           (is (re-find #"line 1" (:error reply))))))
+     (testing "a thread with no log at all is refused, naming the thread"
+       (let [resp  (api-call 8106 :post "/api/threads/no-such-thread-xyz/rebuild" nil)
+             reply (json/read-str (.body resp) :key-fn keyword)]
+         (is (= 400 (.statusCode resp)))
+         (is (str/includes? (:error reply) "no-such-thread-xyz")))))))

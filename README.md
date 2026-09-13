@@ -4,10 +4,11 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home,project}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录
+- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
 - `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加 provider 装配（四级解析 + api-key 解析）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
-- `dev/harness/{wire,replay,evals}.clj` — 客户端最小 applier、日志回放、eval 提取器（内核永不读日志）。`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
+- `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
+- `dev/harness/{wire,evals,repl}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
 
 ### 会话级自我扩展与晋升路径
 
@@ -168,6 +169,15 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:dir <绝对路径> :via "http"}`，`runId` 为 null（绑定发生在任何 run 之外）。重复绑定各落一行，读者以最后一行为准。
 
 agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。
+
+### 会话列表与重建（`/api/threads` 与 `session/rebuilt`）
+
+jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**——服务端把对话重建出来交还客户端持有，之后照常走 AG-UI，服务端不因此成为会话状态权威，重建也不引入第二条流式路径。
+
+- `GET /api/threads` → 扫描日志目录，`[{:threadId <文件名 stem> :lastActivity <epoch ms> :bytes <n>}...]` 按最后活动降序；空/缺失目录返回 `[]`（全新安装是正常态）。清单对日志完整性**不表态**，截断的日志在 rebuild 时被拒。
+- `POST /api/threads/<stem>/rebuild` → `{:threadId .. :messages [..] :context [..]}`。messages = 种子（第一条 input 的 messages）+ 全部 event 帧折叠（`harness.frames/apply-frames`，reasoning、tool calls、tool results 都在），即客户端可重新持有并直接续聊的 AG-UI 形态；context 是会话启动时的 context。后续输入多份 input 只取第一份做种子——客户端的第二次 input 本就重述了此前全部历史，折叠进去只会重复。
+- **拒绝而非猜**：截断日志（末帧非 RUN_FINISHED/RUN_ERROR）、坏 JSON 行（指名行号）、无日志的 thread，一律指名 400——重建半截对话是最坏的失败模式。
+- 重建动作在**被重建的日志自身**落一行 `session/rebuilt` 审计线 `{:messages <count> :via "http"}`，`runId` null（重建发生在任何 run 之外）。重建只读日志，这一行是它唯一的痕迹。
 
 ## 授权变更（session-configure）
 

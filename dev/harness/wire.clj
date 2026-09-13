@@ -1,12 +1,22 @@
 (ns harness.wire
   "This project's own minimal model of an AG-UI client, plus the structural rules that
   client enforces. Lives under dev/ rather than test/ because two callers need it and
-  neither should own it: the replay tool (which rebuilds conversations from a log) and
-  the tests (which assert the same contract).
+  neither should own it: the tests (which assert the same contract) and any dev-side
+  tooling that inspects an SSE stream.
+
+  Since ticket 05 the frame applier and the terminal check live in src/ as
+  harness.frames -- rebuilding a conversation from recorded frames is a product
+  capability now. What is left here is purely TEST TOOLING:
+
+    - frames-from-sse, which parses a raw SSE body into frames so tests can assert
+      on what the wire actually carried;
+    - violations, the structural rule check, which every SSE-reading test runs to
+      prove the stream was well-formed end to end.
 
   It is deliberately NOT in src/. The kernel emits events; it does not consume them."
   (:require [clojure.data.json :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [harness.frames :as frames]))
 
 (defn frames-from-sse
   "The AG-UI events carried by a raw SSE body."
@@ -16,11 +26,6 @@
                (when (str/starts-with? line "data:")
                  (json/read-str (str/trim (subs line 5)) :key-fn keyword))))
        vec))
-
-(defn terminal?
-  "A run is over when one of these arrives. Nothing may follow it."
-  [frame]
-  (contains? #{"RUN_FINISHED" "RUN_ERROR"} (:type frame)))
 
 (defn violations
   "Every structural rule an AG-UI client enforces, checked across a whole stream.
@@ -56,63 +61,8 @@
 
           (= t "TOOL_CALL_END") (swap! open dissoc id)
 
-          (terminal? f)
+          (frames/terminal? f)
           (do (when (seq @open) (swap! bad conj (str "left open at " t ": " (keys @open))))
               (when-not (= f (last frames))
                 (swap! bad conj (str "frames after " t)))))))
     @bad))
-
-;; ------------------------------------------------------------------ the applier
-
-(defn- patch-by-id [messages id f]
-  (mapv (fn [m] (if (= id (:id m)) (f m) m)) messages))
-
-(defn- patch-tool-call [messages id f]
-  (mapv (fn [m]
-          (if (some #(= id (:id %)) (:toolCalls m))
-            (update m :toolCalls #(mapv (fn [tc] (if (= id (:id tc)) (f tc) tc)) %))
-            m))
-        messages))
-
-(defn apply-frames
-  "The bare minimum of what @ag-ui/client's applier does: accumulate text and reasoning
-  into separate messages, attach tool calls to the open assistant message, and turn
-  results into tool messages.
-
-  This is the inverse of harness.ag-ui/outbound, and it is load-bearing for more than
-  testing: it is how a conversation is rebuilt from its recorded frames, which is what
-  makes the log readable at all."
-  [frames]
-  (reduce
-   (fn [msgs f]
-     (let [t (:type f)]
-       (cond
-         (= t "TEXT_MESSAGE_START")
-         (conj msgs {:id (:messageId f) :role "assistant" :content ""})
-
-         (= t "TEXT_MESSAGE_CONTENT")
-         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
-
-         (= t "REASONING_MESSAGE_START")
-         (conj msgs {:id (:messageId f) :role "reasoning" :content ""})
-
-         (= t "REASONING_MESSAGE_CONTENT")
-         (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
-
-         (= t "TOOL_CALL_START")
-         (patch-by-id msgs (:parentMessageId f)
-                      #(update % :toolCalls (fnil conj [])
-                               {:id (:toolCallId f) :type "function"
-                                :function {:name (:toolCallName f) :arguments ""}}))
-
-         (= t "TOOL_CALL_ARGS")
-         (patch-tool-call msgs (:toolCallId f)
-                          #(update-in % [:function :arguments] str (:delta f)))
-
-         (= t "TOOL_CALL_RESULT")
-         (conj msgs {:id (:messageId f) :role "tool"
-                     :toolCallId (:toolCallId f) :content (:content f)})
-
-         :else msgs)))
-   []
-   frames))

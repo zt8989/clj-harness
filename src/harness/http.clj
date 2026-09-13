@@ -25,6 +25,9 @@
                    absolute path. Written by the /api/project endpoint, OUTSIDE
                    any run (runId null). Rebinding lands another line; the
                    reader takes the last one, like any append-only record.
+    \"session/rebuilt\" -- a rebuild action, recorded on the log it rebuilt:
+                   the message count and the fact. The rebuild itself only
+                   READS the log; this line is its one trace.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -37,6 +40,7 @@
             [harness.memory :as mem]
             [harness.loop :as loop]
             [harness.project :as project]
+            [harness.replay :as replay]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
 
@@ -309,6 +313,51 @@
             (log! thread-id nil "project/bound" {:dir abs :via "http"})
             (api-response 200 {:threadId thread-id :dir abs})))))))
 
+(defn- threads-get
+  "GET /api/threads -- the conversations the log directory holds, newest
+  first. The listing is a DIRECTORY SCAN of files, so it knows nothing about
+  whether a conversation is complete; a truncated one is refused at rebuild
+  time, not listed differently here."
+  [_req]
+  (api-response 200
+                (mapv (fn [t] {:threadId     (:thread-id t)
+                               :lastActivity (:last-activity t)
+                               :bytes        (:bytes t)})
+                      (replay/threads (home/logs-dir)))))
+
+(defn- thread-rebuild-stem
+  "/api/threads/<stem>/rebuild -> <stem>, else nil. The stem is the sanitized
+  FILE stem -- the same id /api/threads lists -- so a client can copy it
+  straight from the listing. Percent-decoding happens after the path split, so
+  an id that contains an encoded slash cannot jump out of its path segment."
+  [uri]
+  (let [parts (str/split (str uri) #"/")]
+    (when (and (= 5 (count parts))
+               (= "api" (nth parts 1))
+               (= "threads" (nth parts 2))
+               (= "rebuild" (nth parts 4))
+               (seq (nth parts 3)))
+      (java.net.URLDecoder/decode (nth parts 3) "UTF-8"))))
+
+(defn- rebuild-post
+  "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
+  the AG-UI message list (seed + every recorded frame, reasoning and tool
+  calls included) plus the context it started with. The client takes both into
+  its next ordinary run; the server holds no rebuilt state. A truncated or
+  corrupt log is refused with the reason on the 400. The rebuild action lands
+  a session/rebuilt audit line on the log it rebuilt -- runId nil, because a
+  rebuild happens OUTSIDE any run."
+  [req stem]
+  (let [result (try {:ok (replay/rebuild (home/logs-dir) stem)}
+                    (catch Throwable t {:error (ex-message t)}))]
+    (if-some [error (:error result)]
+      (api-response 400 {:error error})
+      (let [{:keys [messages context]} (:ok result)]
+        (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"})
+        (api-response 200 {:threadId stem
+                           :messages messages
+                           :context  (or context [])})))))
+
 (defn handler [req]
   (cond
     (= :options (:request-method req))
@@ -319,6 +368,14 @@
       :get  (project-get req)
       :post (project-post req)
       (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/threads" (:uri req))
+    (case (:request-method req)
+      :get  (threads-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (and (= :post (:request-method req)) (thread-rebuild-stem (:uri req)))
+    (rebuild-post req (thread-rebuild-stem (:uri req)))
 
     :else
     (handle-run req)))

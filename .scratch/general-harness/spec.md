@@ -277,6 +277,11 @@ P3 各项彼此独立、可按需插队。
   对应端点：`GET /api/project?threadId=..`（未绑定答 `:dir null`，不是错误）、
   `POST /api/project {"threadId","dir"}`（`harness.project/bind!` 先校验目录存在且是目录，
   校验失败的 400 指名报错且不落行）。
+- **`session/rebuilt`**（05 号票，`harness.http` 写入**被重建的日志自身**）：重建动作的
+  唯一痕迹。payload `{:messages <重建消息数> :via "http"}`，`runId` 为 null。重建本身
+  只读日志。对应端点：`GET /api/threads`（目录扫描，空/缺失目录 → `[]`）与
+  `POST /api/threads/<stem>/rebuild`（种子 = 第一条 input、折叠全部 event 帧、context
+  带回；截断/坏 JSON 行/无日志指名 400 且不落行）。
 
 ## 已验证到什么程度
 

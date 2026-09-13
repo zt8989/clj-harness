@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
+            [harness.frames :as frames]
             [harness.llm :as llm]
             [harness.memory :as mem]
             [harness.replay :as replay]
@@ -151,6 +152,30 @@
     (is (some? e))
     (is (str/includes? (str (ex-message e)) "no-such-thread"))))
 
+(deftest the-thread-listing-reads-the-directory
+  ;; A directory of its OWN: the other tests in this namespace write logs into
+  ;; dir, and a listing test that shares it would count their lines.
+  (let [ldir (str (System/getProperty "java.io.tmpdir") "/harness-replay-listing")]
+    (io/delete-file ldir true)
+    (.mkdirs (io/file ldir))
+    (testing "an empty directory is an empty list, not an error"
+      (is (= [] (replay/threads ldir))))
+    (testing "a MISSING directory is also an empty list -- a fresh install is normal"
+      (is (= [] (replay/threads (str ldir "/does-not-exist")))))
+    ;; Two logs, written in order: newest first.
+    (let [write (fn [tid]
+                  (spit (io/file ldir (str tid ".jsonl"))
+                        (str (str/join "\n" (one-run-lines)) "\n") :encoding "UTF-8"))]
+      (write "t-list-a")
+      (Thread/sleep 20)
+      (write "t-list-b")
+      (let [rows (replay/threads ldir)]
+        (testing "every .jsonl file is a row carrying its stem and its size"
+          (is (= ["t-list-b" "t-list-a"] (mapv :thread-id rows)))
+          (is (every? #(pos? (:bytes %)) rows))
+          (is (every? #(pos? (:last-activity %)) rows))
+          (is (apply > (mapv :last-activity rows)) "newest first"))))))
+
 ;; ------------------------------------------------------------------ seam C
 
 ;; A provider that records what it was asked. The scripted fake ignores its input, so it
@@ -183,7 +208,7 @@
     (testing "the continuation produced a complete, structurally valid run"
       (is (seq frames))
       (is (= "RUN_STARTED" (:type (first frames))))
-      (is (wire/terminal? (peek frames)))
+      (is (frames/terminal? (peek frames)))
       (is (empty? (wire/violations frames))))
     (testing "and the answer is on the wire"
       (is (= "\u7ee7\u7eed\u7684\u56de\u7b54"

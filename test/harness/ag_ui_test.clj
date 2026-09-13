@@ -5,6 +5,7 @@
             [harness.ag-ui :as ag]
             [harness.event :as ev]
             [harness.fake :as fake]
+            [harness.frames :as frames]
             [harness.loop :as loop]
             [harness.wire :as wire]))
 
@@ -144,9 +145,9 @@
 ;; -------------------------------------------------------------------- inbound
 ;;
 ;; The round trip outbound -> client -> inbound is asserted here using the applier in
-;; harness.wire -- the same one the replay tool uses to rebuild conversations. Testing
-;; the shipped path rather than a test-local copy is the point: that round trip is the
-;; only thing standing between this harness and a DeepSeek 400 on the second turn.
+;; harness.frames -- the same one the rebuild endpoint uses to hand a conversation back.
+;; Testing the shipped path rather than a test-local copy is the point: that round trip
+;; is the only thing standing between this harness and a DeepSeek 400 on the second turn.
 
 (deftest outbound-then-inbound-preserves-reasoning
   (let [emit   (ag/outbound "thr-1" "run-1")
@@ -155,7 +156,7 @@
                                 :tool-calls [{:id "c1" :name "eval" :arguments {:code "(+ 1 2)"}}]}
                                {:content "等于 3"}])]
       (swap! frames into (emit event)))
-    (let [client    (wire/apply-frames @frames)
+    (let [client    (frames/apply-frames @frames)
           sent      (ag/inbound client "SYSTEM" nil)
           assistant (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) sent))]
       (testing "the client really did store reasoning as a message of its own"
