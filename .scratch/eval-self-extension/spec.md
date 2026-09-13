@@ -40,7 +40,15 @@
 ## 状态
 
 - 01（只读提取器）：未开始
-- 02（撤内存副本）：未开始
-- 03（provider 时间线 init/changed 落盘）：未开始（Blocked by 02）
-- 04（会话状态暴露 + 授权变更 + per-thread 作用域）：未开始（Blocked by 02、03；与 05 互为阻塞，需同批次落地）
-- 05（具名注册表 + 默认档 + 继承 + 请求指定）：未开始（**Blocked by config-home**；与 04 互为阻塞）
+- 02（撤内存副本）：**已完成**（`762b0d2`）
+- 03（provider 时间线 init/changed 落盘）：未开始（Blocked by 02 —— 已解除）
+- 04（会话状态暴露 + 授权变更 + per-thread 作用域）：未开始（Blocked by 02 ✅、03；与 05 互为阻塞，需同批次落地）
+- 05（具名注册表 + 默认档 + 继承 + 请求指定）：未开始（**Blocked by config-home ✅**；与 04 互为阻塞）
+
+## 已验证到什么程度（2026-09-13，02 落地）
+
+- **02（`762b0d2`）**：`harness.memory` 的 `sessions` atom 与 `record-provider!` / `record-history!` / `session` 三入口全删，memory ns 的 diff 是纯删（`-26` 行）。http 层两处调用点删除后，`:run/done` 分支由 `(do (record-history! ..) (log-messages! ..))` 塌缩为单独的 `(log-messages! ..)`，`log-messages!` 的调用位置、参数、与 `approval/decided` / 审计三行的相对顺序均未变——**JSONL 落盘时序逐字不变**。
+- **测试净减实测为 2 tests / 8 assertions**（70/348 → 68/340）：`the-session-record-never-holds-a-key` 整条（3 断言）与 `eval-joins-...` 尾部 1 断言纯删；`the-session-state-is-addressable-by-thread-id` 因**其全部断言都依赖 `mem/session`**（provider 快照 + `subvec history`），按票面「移除而非改写为读文件」整条删除。后一条承担的「JSONL submitted/returned 同一条记录」由既有 `jsonl-message-record` 特性覆盖；新行种 `provider/init` 的断言属 **03**，本票刻意不越界补。
+- **prompt.md**：Introspection 段改写为 Self-extension 段，含三条事实（仅本会话生效 / 进程重启即失 / 每次 eval 的 code 与结果都落日志），Session tools 段与 `harness.opaque` 禁区声明原样保留。`(harness.memory/session ..)` 的自省示例已从 prompt 移除——不再指引模型去调一个已不存在的入口。
+- **`eval-introspection/spec.md`** 记入反转（撤销内容、理由、由本特征 03/04/05 取代），其「已验证到什么程度」段作为历史事实不回改。
+- **全量**：68 tests / 340 assertions，全绿。测试跑在隔离的家目录（`clj-harness-test-*`），真实 `~/.clj-harness/logs/` 零写入。
