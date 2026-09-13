@@ -29,27 +29,32 @@
                  {:id "c2" :name "read" :arguments {:path "README.md"}}]}
    {:content "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"}])
 
-(defn- with-server [port f]
-  (opaque/use-provider! (fake/scripted script))
-  (let [stop (http/start! {:port port})]
-    (try (f) (finally (stop) (opaque/use-provider! nil)))))
+(defn- with-server
+  ([port f] (with-server port script f))
+  ([port turns f]
+   (opaque/use-provider! (fake/scripted turns))
+   (let [stop (http/start! {:port port})]
+     (try (f) (finally (stop) (opaque/use-provider! nil))))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
   different threads or for the same thread at different times -- never share frame ids.
-  A repeated run id would make two runs' frames collide in a rebuilt conversation."
-  [port thread-id]
-  (let [body (json/write-str {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user"
-                                          :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
-                              :tools [] :context []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.send (HttpClient/newHttpClient) req
-           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+  A repeated run id would make two runs' frames collide in a rebuilt conversation.
+  EXTRA is merged into the body, which is how a resume is sent."
+  ([port thread-id] (post-run port thread-id {}))
+  ([port thread-id extra]
+   (let [body (json/write-str (merge {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
+                                      :messages [{:id "u1" :role "user"
+                                                  :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
+                                      :tools [] :context []}
+                                     extra))
+         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/")))
+                  (.header "Content-Type" "application/json")
+                  (.header "Accept" "text/event-stream")
+                  (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
+                  (.build))]
+     (.send (HttpClient/newHttpClient) req
+            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
 
 (def ^:private log-dir (str (System/getProperty "user.home") "/.lisp-harness/logs"))
 
@@ -222,6 +227,114 @@
          (is (every? #(not (contains? % :error)) ex)))
        (testing "every phase names the tool that ran"
          (is (every? #(= "read" (:toolName %)) post)))))))
+
+(defn- assistant-with-call
+  "The assistant message a client holds after a run parked: its tool call, never
+  answered. A resume request carries it back, exactly as CopilotKit does."
+  [id name args]
+  {:id "m1" :role "assistant" :content ""
+   :toolCalls [{:id id :type "function"
+                :function {:name name :arguments (json/write-str args)}}]})
+
+(deftest a-parked-run-asks-over-http-and-resumes
+  ;; The whole pre-tool approval path over a real socket: run one parks and asks,
+  ;; the client answers with resume, run two replays the answer. Approve and veto
+  ;; both, each on its own thread -- the script's turns are consumed in run order,
+  ;; so the two threads' turns are laid out alternately.
+  (let [ok   (str (System/getProperty "java.io.tmpdir") "/harness-http-approved.txt")
+        veto (str (System/getProperty "java.io.tmpdir") "/harness-http-vetoed.txt")
+        call (fn [path] {:content ""
+                         :tool-calls [{:id "c1" :name "write"
+                                       :arguments {:path path :content "written"}}]})
+        _    (io/delete-file ok true)
+        _    (io/delete-file veto true)
+        _    (mem/session-require-approval! "http-approve" "write")
+        _    (mem/session-require-approval! "http-veto" "write")]
+    (with-server
+     8093
+     [(call ok) {:content "wrote it"} (call veto) {:content "understood"}]
+     (fn []
+       (let [asked   (wire/frames-from-sse (.body (post-run 8093 "http-approve")))
+             term    (last asked)
+             iid     (get-in term [:outcome :interrupts 0 :id])]
+         (testing "the first run ends on an interrupt the client can act on"
+           (is (empty? (wire/violations asked)))
+           (is (= 1 (count (filter #(= "RUN_FINISHED" (:type %)) asked))))
+           (is (= "interrupt" (get-in term [:outcome :type])))
+           (is (= ["c1"] (mapv :toolCallId (get-in term [:outcome :interrupts]))))
+           (is (not-any? #(= "TOOL_CALL_RESULT" (:type %)) asked)))
+         (testing "and it did not write anything yet"
+           (is (false? (.exists (io/file ok)))))
+
+         (let [resumed (wire/frames-from-sse
+                        (.body (post-run 8093 "http-approve"
+                                         {:messages [{:id "u1" :role "user" :content "go"}
+                                                     (assistant-with-call
+                                                      "c1" "write" {:path ok :content "written"})]
+                                          :resume [{:interruptId iid :status "resolved"
+                                                    :payload {:decision "approved"}}]})))]
+           (testing "the approved call really runs on the resume run"
+             (is (true? (.exists (io/file ok))))
+             (is (= "written" (slurp ok :encoding "UTF-8"))))
+           (testing "the resumed run is a complete, valid run of its own"
+             (is (empty? (wire/violations resumed)))
+             (is (= "RUN_FINISHED" (:type (last resumed))))
+             ;; A natural end carries no outcome at all.
+             (is (not (contains? (last resumed) :outcome)))
+             (is (some #(= "TOOL_CALL_RESULT" (:type %)) resumed))))
+
+         ;; Second thread: same shape, a veto instead. Its parked run is turn 3.
+         (let [asked-v (wire/frames-from-sse (.body (post-run 8093 "http-veto")))
+               iid-v   (get-in (last asked-v) [:outcome :interrupts 0 :id])
+               vetoed  (wire/frames-from-sse
+                        (.body (post-run 8093 "http-veto"
+                                         {:messages [{:id "u1" :role "user" :content "go"}
+                                                     (assistant-with-call
+                                                      "c1" "write" {:path veto :content "written"})]
+                                          :resume [{:interruptId iid-v :status "cancelled"
+                                                    :payload {:reason "not on my watch"}}]})))]
+           (testing "a veto never runs the tool"
+             (is (false? (.exists (io/file veto)))))
+           (testing "the veto comes back as the call's answer, on the wire"
+             (let [result (first (filter #(= "TOOL_CALL_RESULT" (:type %)) vetoed))]
+               (is (= "c1" (:toolCallId result)))
+               (is (str/includes? (str (:content result)) "vetoed by human"))
+               (is (str/includes? (str (:content result)) "not on my watch"))))
+           (testing "and the run carries on to a normal end"
+             (is (= "RUN_FINISHED" (:type (last vetoed))))
+             (is (not (contains? (last vetoed) :outcome)))
+             (is (empty? (wire/violations vetoed))))
+
+           (testing "both decisions are on disk: the audit line and the resumed transit"
+             (let [lines (wait-for-recorded
+                          (io/file log-dir "http-approve.jsonl")
+                          (fn [ls] (some #(= "approval/decided" (:kind %)) ls))
+                          2000)
+                   decided (filter #(= "approval/decided" (:kind %)) lines)
+                   pre     (filter #(and (= "tools/pre-execute" (:kind %))
+                                          (= "c1" (get-in % [:payload :toolCallId])))
+                                   lines)]
+               ;; The verdict is a keyword in the event and a string on disk --
+               ;; json has no keywords.
+               (is (= "approved" (get-in (first decided) [:payload :verdict])))
+               (is (= "c1" (get-in (first decided) [:payload :tool-call-id])))
+               (is (= "approved" (get-in (first decided) [:payload :payload :decision])))
+               (is (some #(= "needs-approval" (get-in % [:payload :outcome])) pre))
+               (is (some #(= "approved" (get-in % [:payload :outcome])) pre))))))))))
+
+(deftest an-unknown-interrupt-is-refused-over-http
+  ;; A restart loses the parking; a client resuming an interrupt this process
+  ;; never parked must be told so, never quietly granted.
+  (with-server
+   8092
+   [{:content "never reached"}]
+   (fn []
+     (let [frames (wire/frames-from-sse
+                   (.body (post-run 8092 "http-unknown"
+                                    {:resume [{:interruptId "never-parked"
+                                               :status "resolved"}]})))]
+       (is (= ["RUN_STARTED" "RUN_ERROR"] (mapv :type frames)))
+       (is (str/includes? (:message (last frames)) "unknown interrupt"))))))
 
 (deftest the-session-state-is-addressable-by-thread-id
   ;; eval-introspection: the provider a run served with (key stripped) and the
