@@ -5,7 +5,7 @@
   on paths and never out of bounds."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.home :as home]
             [harness.project :as project])
   (:import (java.io File)))
@@ -19,6 +19,26 @@
 (spit (str root "/file.txt") "plain file")
 
 (defn- tmp [name] (str root "/" name))
+
+;; Tests in this namespace write a USER-level harness.edn into the (shared,
+;; test-runner-owned) config home. Wipe it around every test: a leftover would
+;; leak into the NEXT namespace's fence assertions (http-test runs after this
+;; one) as a silent strict mode -- the exact "config that says nothing vs a
+;; config that was ignored" confusion the reader refuses to conflate.
+;; A fixture is (fn [f] ... (f) ...): it RUNS f between its own two halves.
+;; Wrapping the whole body in another (fn []) would swallow f -- every test
+;; silently skipped, :test 0, no error anywhere (measured, not guessed).
+(defn- wipe-user-harness-edn [f]
+  (io/delete-file (io/file (home/root) "harness.edn") true)
+  ;; The project-level file lives under the SHARED root, which tmpdir
+  ;; keeps across JVM runs: a leftover strict/allow from the last run
+  ;; would silently move this run's fence. Same wipe before and after.
+  (io/delete-file (io/file root ".harness" "harness.edn") true)
+  (f)
+  (io/delete-file (io/file (home/root) "harness.edn") true)
+  (io/delete-file (io/file root ".harness" "harness.edn") true))
+
+(use-fixtures :each wipe-user-harness-edn)
 
 (deftest bind-validates-the-directory-before-binding
   (testing "a path that does not exist is a NAMED error"
@@ -125,3 +145,83 @@
     (testing "the answer follows the CURRENT binding -- drop it, fence off"
       (project/bind! "pt-fence" nil)
       (is (false? (project/out-of-bounds? "pt-fence" outside))))))
+
+(defn- write-project-harness!
+  "Drop an EDN string at the project's .harness/harness.edn. SLASHED paths in
+  the EDN: io/File accepts forward slashes on Windows, and EDN strings would
+  need the backslashes escaped anyway."
+  [edn]
+  (let [f (io/file root ".harness" "harness.edn")]
+    (.mkdirs (.getParentFile f))
+    (spit f edn :encoding "UTF-8")
+    f))
+
+(deftest harness-config-assembles-two-levels
+  ;; User level = the config home's harness.edn; project level = the bound
+  ;; project's .harness/harness.edn. Top-level shallow merge, project wins.
+  (let [user-file (io/file (home/root) "harness.edn")]
+    (project/bind! "pt-cfg" root)
+    (testing "missing at both levels is the empty map -- and a .harness dir
+              without the file is just as empty"
+      (.mkdirs (io/file root ".harness"))
+      (is (= {} (project/harness-config "pt-cfg"))))
+    (testing "the user level alone answers the user level"
+      (spit user-file "{:approval {:allow [\"shared\"]} :other 1}" :encoding "UTF-8")
+      (is (= {:approval {:allow ["shared"]} :other 1}
+             (project/harness-config "pt-cfg")))
+      (testing "an UNBOUND thread sees only the user level, even while another
+                thread is bound to a project with its own file"
+        (write-project-harness! "{:approval {:strict true}}")
+        (is (= {:approval {:allow ["shared"]} :other 1}
+               (project/harness-config)))))
+    (testing "the project level alone answers the project level"
+      (io/delete-file user-file true)
+      (is (= {:approval {:strict true}} (project/harness-config "pt-cfg"))))
+    (testing "both levels: the project REPLACES the user's top-level keys whole"
+      (spit user-file "{:approval {:allow [\"shared\"]} :other 1}" :encoding "UTF-8")
+      ;; :approval is replaced entirely (no deep merge, no union); :other,
+      ;; which the project does not mention, survives the merge.
+      (is (= {:approval {:strict true} :other 1}
+             (project/harness-config "pt-cfg"))))))
+
+(deftest a-broken-harness-edn-is-a-named-failure-not-a-silent-empty
+  (let [user-file (io/file (home/root) "harness.edn")]
+    (project/bind! "pt-bad" root)
+    (testing "invalid EDN at the user level names the absolute path"
+      (spit user-file "{:approval " :encoding "UTF-8")
+      (let [e (try (project/harness-config "pt-bad") nil (catch Exception e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) (.getAbsolutePath user-file)))
+        (is (= :invalid-edn (:reason (ex-data e))))))
+    (testing "invalid EDN at the user level breaks even an UNBOUND query"
+      (is (thrown-with-msg? Exception #"not valid EDN" (project/harness-config))))
+    (testing "valid EDN that is not a map is broken too, project level"
+      (io/delete-file user-file true)
+      (let [pf (write-project-harness! "42")]
+        (let [e (try (project/harness-config "pt-bad") nil (catch Exception e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) (.getAbsolutePath pf)))
+          (is (= :not-a-map (:reason (ex-data e)))))))))
+
+(deftest the-fence-obeys-harness-edn
+  ;; The first real consumer of the assembly: the approval boundary.
+  (let [outside (str (System/getProperty "java.io.tmpdir")
+                     "/harness-project-outside2.txt")]
+    (.mkdirs (io/file root ".harness"))
+    (project/bind! "pt-fence-cfg" root)
+    (testing ":allow frees a declared path, resolved like any tool path"
+      (write-project-harness! "{:approval {:allow [\"../shared\"]}}")
+      (is (false? (project/out-of-bounds? "pt-fence-cfg"
+                                          (str (io/file root ".." "shared" "x.txt")))))
+      (is (true? (project/out-of-bounds? "pt-fence-cfg" outside))
+          "only what was declared is freed, not the world"))
+    (testing ":strict tightens the fence over the project itself, config home kept"
+      (write-project-harness! "{:approval {:strict true}}")
+      (is (true? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))
+          "a project-relative path is out of bounds under strict")
+      (is (false? (project/out-of-bounds? "pt-fence-cfg"
+                                          (str (io/file (home/root) "config.edn"))))
+          "the configuration home is never tightened away"))
+    (testing "the file is read fresh per call: edits move the fence live"
+      (write-project-harness! "{}")
+      (is (false? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))))))

@@ -295,10 +295,22 @@
 ;; the project cwd but its command content is never judged, a DECLARED escape
 ;; surface (approval is a workflow convention, not a security boundary).
 
+(defn- rm-r!
+  "Recursive delete, deepest first (io/delete-file cannot remove a non-empty
+  directory, and java.io.tmpdir outlives the JVM -- the replay-test lesson)."
+  [d]
+  (run! #(.delete ^java.io.File %)
+        (sort-by (fn [^java.io.File f] (count (.getPath f))) >
+                 (file-seq (io/file d)))))
+
 (defn- fence-rig
   "Bind THR to a fresh project directory holding one readable file."
   [thr]
   (let [pdir (str dir "/fence-project")]
+    ;; rm-r first: tmpdir survives across JVM runs, and a leftover
+    ;; .harness/harness.edn from the ticket-03 tests would silently re-tighten
+    ;; or re-widen the fence for these ticket-02 tests.
+    (rm-r! pdir)
     (.mkdirs (io/file pdir))
     (spit (str pdir "/inside.txt") "inside" :encoding "UTF-8")
     (project/bind! thr pdir)
@@ -396,3 +408,76 @@
       (is (= :run/end (:type (last seen))))
       (is (= "reachable" (:content (first (results seen)))))
       (is (= 1 (count (tool-msgs history)))))))
+
+;; ------------------------------------------------- the fence, configurable
+;;
+;; Ticket 03: the project's .harness/harness.edn (over the config home's user
+;; level) moves the fence -- :allow frees declared paths, :strict tightens it
+;; over the project itself. Same park, same interrupt; only the allowed set
+;; changes. Slash-form paths in the EDN: io/File accepts them on Windows and
+;; EDN would need backslashes escaped anyway.
+
+(defn- write-project-harness!
+  "Drop an EDN string at the project's .harness/harness.edn."
+  [pdir edn]
+  (let [f (io/file pdir ".harness" "harness.edn")]
+    (.mkdirs (.getParentFile f))
+    (spit f edn :encoding "UTF-8")
+    f))
+
+(defn- slashed [p] (str/replace p "\\" "/"))
+
+(deftest the-project-can-free-a-path-with-allow
+  (let [thr   "thr-fence-allow-cfg"
+        pdir  (fence-rig thr)
+        freed (str dir "/freed-neighbor")
+        _     (.mkdirs (io/file freed))
+        _     (spit (str freed "/note.txt") "free to read" :encoding "UTF-8")
+        _     (write-project-harness! pdir
+                                      (str "{:approval {:allow [\"" (slashed freed) "\"]}}"))
+        {:keys [seen history]}
+        (run (fake/scripted [{:content ""
+                              :tool-calls [(call "c1" "read" {:path (str freed "/note.txt")})]}
+                             {:content "done"}])
+             [] thr)]
+    (testing "a path that was out of bounds runs, because the project freed it"
+      (is (= :run/end (:type (last seen))))
+      (is (= "free to read" (:content (first (results seen)))))
+      (is (= 1 (count (tool-msgs history)))))))
+
+(deftest strict-tightens-the-fence-over-the-project-itself
+  (let [thr  "thr-fence-strict"
+        pdir (fence-rig thr)
+        _    (write-project-harness! pdir "{:approval {:strict true}}")
+        {:keys [seen history]}
+        (run (fake/scripted [{:content ""
+                              :tool-calls [(call "c1" "read" {:path "inside.txt"})]}
+                             {:content "never reached"}])
+             [] thr)
+        term (last seen)]
+    (testing "an in-project read parks under strict -- the ordinary interrupt"
+      (is (= :run/interrupt (:type term)))
+      (is (empty? (results seen)))
+      (is (empty? (tool-msgs history)))
+      (is (= :out-of-bounds (:reason (mem/parked (:id (first (:interrupts term))))))))))
+
+(deftest the-project-level-replaces-the-user-level-whole
+  ;; The user level freed the whole project (:allow on pdir); the project's
+  ;; own :approval {:strict true} REPLACES that whole key -- so the in-project
+  ;; read parks. A deep merge or a union would free it again and this test
+  ;; would catch it.
+  (let [thr  "thr-fence-priority"
+        pdir (fence-rig thr)
+        uf   (io/file (home/root) "harness.edn")]
+    (spit uf (str "{:approval {:allow [\"" (slashed pdir) "\"]}}") :encoding "UTF-8")
+    (write-project-harness! pdir "{:approval {:strict true}}")
+    (try
+      (let [{:keys [seen]}
+            (run (fake/scripted [{:content ""
+                                  :tool-calls [(call "c1" "read" {:path "inside.txt"})]}
+                                 {:content "never reached"}])
+                 [] thr)]
+        (is (= :run/interrupt (:type (last seen)))
+            "the project's :approval replaced the user's -- the allow is gone"))
+      (finally
+        (io/delete-file uf true)))))

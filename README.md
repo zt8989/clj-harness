@@ -161,7 +161,9 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 ### 项目目录绑定（`/api/project` 与 `project/bound`）
 
-每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：read/write/edit 的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。绑定是**默认值不是围栏**：本 ns 只决定操作发生在哪，不管该不该发生（出界审批是下一票的事）。
+每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：read/write/edit 的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。
+
+**出界审批（02 号票）**：绑定后 read/write/edit 的目标在允许集之外 → 工具调用 park 待人工批准（`project/out-of-bounds?`）。允许集 = canonical 项目目录 ∪ canonical 配置家（读自己的 config/providers/.env 不算出界，这是围栏刻意留的自留地）∪ 项目配置声明的额外路径；未绑定 thread 恒 false（回归保证）。批准 = 人 override 围栏照常执行。bash 只换 cwd 不判命令内容——明示接受的逃逸面。
 
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
@@ -169,6 +171,13 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:dir <绝对路径> :via "http"}`，`runId` 为 null（绑定发生在任何 run 之外）。重复绑定各落一行，读者以最后一行为准。
 
 agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。
+
+### `.harness/harness.edn` 装配（03 号票）
+
+项目可以带自己的 harness 配置：**两级装配**——配置家 `harness.edn`（用户级，harness 自身的地盘）+ 绑定项目的 `.harness/harness.edn`（项目级）。`harness.project/harness-config` 每次现读（config.edn 纪律），顶层浅合并、项目级**整键替换**（项目提到 `:approval` 就整个换掉用户的 `:approval`，不深合并不做并集）。
+
+- 缺失 = `{}`，不报错（含 `.harness` 目录在而文件缺）；坏文件（EDN 语法坏或非 map）指名绝对路径硬失败（`:invalid-edn` / `:not-a-map`），不静默回退——配置没生效和配置被忽略是两回事。
+- 首个消费者 `:approval`：`{:allow ["../shared"]}` 把相对项目根解析的路径加进允许集（免审）；`{:strict true}` 把项目目录本身移出允许集——项目内也 park。**配置家永不收紧**（strict 只作用于项目目录）。
 
 ### 会话列表与重建（`/api/threads` 与 `session/rebuilt`）
 

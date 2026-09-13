@@ -14,13 +14,19 @@
 
   A binding is a DEFAULT, not a fence -- the enforcement question is a separate,
   explicit boolean: out-of-bounds? answers whether a resolved path stays inside
-  the directories a bound session is allowed to touch (the project directory
-  and the configuration home). The fence engages ONLY when a binding exists,
-  so an unbound session gets false for everything -- the same regression
-  guarantee resolve-path makes. What to DO about an out-of-bounds answer (park
-  it, ask a human) is the tool seam's business, not this namespace's: here it
-  is still only the WHERE question, now also stated as containment."
-  (:require [clojure.java.io :as io]
+  the directories a bound session is allowed to touch. The fence engages ONLY
+  when a binding exists, so an unbound session gets false for everything -- the
+  same regression guarantee resolve-path makes. What to DO about an
+  out-of-bounds answer (park it, ask a human) is the tool seam's business, not
+  this namespace's: here it is still only the WHERE question, now also stated
+  as containment.
+
+  The allowed set is itself configurable per project: .harness/harness.edn in
+  the bound project (overlaid on the configuration home's user-level
+  harness.edn) can add allow paths and tighten the fence. See harness-config
+  for the two-level shape, and out-of-bounds? for what the fence does with it."
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.home :as home])
   (:import (java.io File)))
@@ -103,19 +109,81 @@
                    (str/starts-with? cp (if (.endsWith cd sep) cd (str cd sep))))))
     (catch Exception _ false)))
 
+(defn- read-harness-edn
+  "One harness.edn FILE, or {} when it does not exist -- a missing file is the
+  empty configuration, never an error: most projects have no .harness/ at all.
+  A file that EXISTS but is broken -- not valid EDN, or not a map -- is a hard,
+  NAMED failure carrying the absolute path. A silently ignored config would be
+  indistinguishable from a config that says nothing, and the fence's whole
+  meaning depends on that distinction never blurring."
+  [file]
+  (let [f (io/file file)]
+    (if-not (.exists f)
+      {}
+      (let [abs (.getAbsolutePath f)
+            v   (try
+                  (edn/read-string (slurp f :encoding "UTF-8"))
+                  (catch Exception e
+                    (throw (ex-info (str "harness.edn is not valid EDN: " abs
+                                         " (" (ex-message e) ")")
+                                    {:path abs :reason :invalid-edn}))))]
+        (when-not (map? v)
+          (throw (ex-info (str "harness.edn must be an EDN map: " abs)
+                          {:path abs :reason :not-a-map})))
+        v))))
+
+(defn harness-config
+  "The .harness/harness.edn configuration for THREAD-ID, merged from two
+  levels: the configuration home's harness.edn (the USER level), overlaid by
+  the bound project's .harness/harness.edn (the PROJECT level).
+
+  The merge is a SHALLOW merge of top-level keys, project wins -- a project
+  :approval replaces the user's whole :approval, it does not merge into it.
+  That is deliberate, and now written down: a deep merge would make 'what
+  will the fence actually do' a function of how two files nest, when the
+  point of a project-level override is to be legible in one file.
+
+  Each level is read fresh on every call (the config.edn discipline), so
+  editing harness.edn moves the fence without a restart. A missing level is
+  the empty map. The first consumer is the approval boundary:
+  :approval {:allow [..]} adds paths to the fence's allowed set,
+  :approval {:strict true} removes the project directory from it. The
+  skills/mcp/hooks subdirectories of .harness/ are RESERVED for their own
+  consumers -- this reader only ever opens harness.edn."
+  ([] (harness-config nil))
+  ([thread-id]
+   (merge (read-harness-edn (io/file (home/root) "harness.edn"))
+          (when-let [dir (binding-for thread-id)]
+            (read-harness-edn (io/file dir ".harness" "harness.edn"))))))
+
 (defn out-of-bounds?
   "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every
-  directory a bound session may touch: the project directory itself and the
-  configuration home (config.edn, providers.edn, .env -- reading one's own
-  configuration is the fence's explicit allowance, not an escape from it).
+  directory a bound session may touch. The allowed set:
 
-  The fence engages ONLY when a binding exists: an unbound session answers
-  false for every path, byte-for-byte the pre-binding behavior. This fn is the
-  WHERE question as a boolean -- whether to PARK an out-of-bounds call is the
-  tool seam's decision, made through the ordinary approval flow."
+    - the project directory itself -- UNLESS the project's harness.edn set
+      :approval {:strict true}, which tightens the fence until every project
+      path needs an approval too;
+    - the configuration home (config.edn, providers.edn, .env -- reading
+      one's own configuration is the fence's explicit allowance, and strict
+      does not tighten it away: the config home is harness's own ground, not
+      the project's);
+    - :approval {:allow [..]} -- extra paths the project declares free of
+      the fence, each resolved for the session like any tool path (relative
+      to the project root, absolute passes through).
+
+  The config is read fresh per call, so harness.edn edits take effect on the
+  next tool call. The fence engages ONLY when a binding exists: an unbound
+  session answers false for every path, byte-for-byte the pre-binding
+  behavior. This fn is the WHERE question as a boolean -- whether to PARK an
+  out-of-bounds call is the tool seam's decision, made through the ordinary
+  approval flow."
   [thread-id path]
   (boolean
    (when-let [dir (binding-for thread-id)]
-     (let [resolved (resolve-path thread-id path)]
-       (not (or (under? resolved dir)
-                (under? resolved (home/root))))))))
+     (let [{:keys [approval]}   (harness-config thread-id)
+           {:keys [allow strict]} approval
+           resolved (resolve-path thread-id path)
+           allowed  (concat (when-not strict [dir])
+                            [(home/root)]
+                            (map #(resolve-path thread-id %) (or allow [])))]
+       (not (some #(under? resolved %) allowed))))))
