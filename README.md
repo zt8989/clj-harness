@@ -1,15 +1,15 @@
-# lisp-harness / minimal-kernel
+# clj-harness
 
 极简 Clojure agent 内核，唯一对外接口为 AG-UI 协议，验收用 CopilotKit v2 客户端。
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,opaque}.clj` — 内核 + AG-UI 适配 + HTTP 边
+- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,opaque,home}.clj` — 内核 + AG-UI 适配 + HTTP 边
 - `src/harness/memory.clj` / `src/harness/opaque.clj` — 一对：前者是可自省面（冻结 prompt、工具注册表、config.edn、待决审批），后者是不可自省面（api-key、provider override），`eval` 只被邀请进前者
+- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
 - `dev/harness/{wire,replay}.clj` — 客户端最小 applier 与日志回放（内核永不读日志）
 - `ui/src/harness/ui/{main,app,approval_gate}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.mjs` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
-- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交
-- `config.edn` — 每轮重读的模型配置，`HARNESS_API_KEY` 在 `.env`（`lynxeyes/dotenv`，`.env` 覆盖真实环境变量）
+- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
 详见 `.scratch/minimal-kernel/spec.md`。
 
@@ -28,11 +28,36 @@
 
 ## 配置
 
-```pwsh
-Copy-Item .env.example .env
-# 编辑 .env
-# HARNESS_API_KEY=sk-or-v1-...  # OpenRouter key 已在 ~/.agentmemory/.env 的 OPENROUTER_API_KEY，可复用
+### 配置家目录
+
+所有运行期配置与产物都住在**一个目录**里，默认 `~/.clj-harness/`：
+
 ```
+~/.clj-harness/
+├── config.edn      模型配置（每轮重读，可运行期编辑）
+├── .env            HARNESS_API_KEY
+└── logs/*.jsonl    会话日志
+```
+
+想换位置就设 `CLJ_HARNESS_HOME`——这是唯一的旋钮，测试也用它把自己的读写隔离到临时目录：
+
+```pwsh
+$env:CLJ_HARNESS_HOME = "D:\harness-config"
+clojure -M:run
+```
+
+首次使用先建目录：
+
+```pwsh
+New-Item -ItemType Directory -Force ~/.clj-harness
+Copy-Item config.edn.example ~/.clj-harness/config.edn
+Copy-Item .env.example ~/.clj-harness/.env
+# 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
+```
+
+`config.edn` 或 `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。
+
+**为什么 `prompt.md` 不搬进去**：它是被 review 的代码资产，每次改动都需要 git 历史；放进家目录就脱离了版本控制。它是这个规则唯一的例外。
 
 `config.edn` 当前为 Free 代理（按用户要求不用 DeepSeek 直连）：
 
@@ -41,6 +66,8 @@ Copy-Item .env.example .env
  :base-url "https://openrouter.ai/api/v1"
  :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
 ```
+
+`.env` 里的值**优先于**真实环境变量（即 `HARNESS_API_KEY` 以 `.env` 为准，shell 变量不会覆盖它）；`.env` 每次重读，改完不必重启。
 
 `src/harness/llm.clj:73` 已兼容 `reasoning_content`（DeepSeek）与 `reasoning`（OpenRouter）双字段；`reasoning_effort` 仅 DeepSeek 需要，Free 模型留空即可。
 
@@ -79,7 +106,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 ### 停止
 
-`Ctrl+C` 或 `Get-Process clojure,node | Stop-Process`。日志落盘 `~/.lisp-harness/logs/<threadId>.jsonl`，每行 `{ts, runId, kind, payload}`，kind 有五种形态：
+`Ctrl+C` 或 `Get-Process clojure,node | Stop-Process`。日志落盘 `~/.clj-harness/logs/<threadId>.jsonl`，每行 `{ts, runId, kind, payload}`，kind 有五种形态：
 
 - `input` — 收到的 RunAgentInput
 - `event` — 发出的每个 AG-UI 帧

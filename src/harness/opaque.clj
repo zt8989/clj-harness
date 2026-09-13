@@ -5,7 +5,9 @@
   provider override may carry a key (an offline scripted provider need not, but
   nothing forbids one), so it lives here too. Vars are private wherever the
   language allows -- eval is not invited to this namespace."
-  (:require [dotenv :as dotenv]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [harness.home :as home]
             [harness.memory :as mem]))
 
 (defonce ^:private provider-override (atom nil))
@@ -17,12 +19,44 @@
   [provider]
   (reset! provider-override provider))
 
+(defn- parse-dotenv
+  "A .env file's contents -> a {name value} map. Handles the shapes the format
+  actually uses: `export` prefixes, surrounding single or double quotes,
+  `#` comments, blank lines, and values that themselves contain `=` (only the
+  first `=` splits).
+
+  We parse it ourselves rather than lean on the dotenv library because that
+  library resolves `.env` from the CURRENT DIRECTORY at namespace-load time and
+  caches it in a def -- so it cannot be pointed at harness.home, and it would
+  miss an edit made while the process runs. Both of those matter here."
+  [raw]
+  (into {}
+        (->> (str/split-lines raw)
+             (map str/trim)
+             (remove #(or (empty? %) (str/starts-with? % "#")))
+             (map #(str/split % #"=" 2))
+             (filter #(= 2 (count %)))
+             (map (fn [[k v]]
+                    [(str/replace (str/trim k) #"^export\s+" "")
+                     (let [v (str/trim v)]
+                       (if (and (>= (count v) 2)
+                                (or (and (str/starts-with? v "\"") (str/ends-with? v "\""))
+                                    (and (str/starts-with? v "'") (str/ends-with? v "'"))))
+                         (subs v 1 (dec (count v)))
+                         v))])))))
+
 (defn- api-key
-  "The API key from .env through the dotenv library, following ITS precedence:
-  a value in .env wins over a real environment variable. So .env is the single
-  place that decides, and setting a shell variable will NOT override it."
+  "The API key, following the dotenv library's documented precedence: a value in
+  .env wins over a real environment variable. So .env is the single place that
+  decides, and setting a shell variable will NOT override it.
+
+  The file is harness.home's .env -- and is re-read every time, like config.edn,
+  so editing it takes effect without a restart."
   []
-  (dotenv/env "HARNESS_API_KEY"))
+  (let [f (home/dotenv-file)
+        from-file (when (.exists f) (get (parse-dotenv (slurp f :encoding "UTF-8"))
+                                         "HARNESS_API_KEY"))]
+    (or from-file (System/getenv "HARNESS_API_KEY"))))
 
 (defn effective-provider
   "config.edn plus the ENV-sourced api-key. The config half is re-read every

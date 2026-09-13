@@ -204,12 +204,12 @@
 
 (deftest context-rides-as-a-trailing-user-message
   (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
-                         "S" [{:description "repo" :value "lisp-harness"}])]
+                         "S" [{:description "repo" :value "clj-harness"}])]
     ;; The system prompt is FROZEN -- the provider's prefill (prompt cache) keys
     ;; on it, so per-run context must never touch it.
     (is (= "S" (:content (first sent))))
     (testing "context is the last message, a user message after everything the client sent"
-      (is (= {:role "user" :content "- repo: lisp-harness"} (last sent))))
+      (is (= {:role "user" :content "- repo: clj-harness"} (last sent))))
     (testing "with no context nothing is appended"
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))

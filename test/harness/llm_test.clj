@@ -17,7 +17,7 @@
 
 (deftest parses-a-streaming-body
   ;; This fixture is a REAL capture from OpenRouter (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)
-  ;; via lisp-harness/src/harness/llm.clj:consume-sse. The synthetic 3-chunk split test below
+  ;; via src/harness/llm.clj:consume-sse. The synthetic 3-chunk split test below
   ;; preserves the edge case (arguments diced inside a JSON token) that the real body
   ;; happens to exercise as 2 chunks. Both are assertions against the same parser.
   (let [{:keys [msg seen]} (parse (str/split-lines fixture))]

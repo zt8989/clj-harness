@@ -5,8 +5,13 @@
   contents, and the calls parked for a human's approval. Nothing here ever
   carries a secret: the ENV-sourced api-key and any raw provider that could
   hold one live in harness.opaque, the non-introspectable counterpart of this
-  namespace."
-  (:require [clojure.edn :as edn]))
+  namespace.
+
+  Where those files ARE is harness.home's business: the config root is
+  ~/.clj-harness (relocatable via CLJ_HARNESS_HOME), and prompt.md is the one
+  file that stays in the repository."
+  (:require [clojure.edn :as edn]
+            [harness.home :as home]))
 
 ;; ------------------------------------------------------------------- prompt
 
@@ -192,6 +197,8 @@
   "config.edn, re-read every time so it can be edited while the process runs.
   This is the EDN half only (:protocol/:base-url/:model...) -- there is no
   api-key here and never will be: the key is resolved from .env/environment in
-  harness.opaque, which is where the effective provider is assembled."
+  harness.opaque, which is where the effective provider is assembled.
+
+  The path comes from harness.home; a missing file is a named failure there."
   []
-  (edn/read-string (slurp "config.edn")))
+  (edn/read-string (home/config)))

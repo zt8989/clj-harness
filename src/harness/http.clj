@@ -19,10 +19,9 @@
   and the server never reads the file back."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
-            [clojure.java.io :as io]
-            [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
+            [harness.home :as home]
             [harness.memory :as mem]
             [harness.opaque :as opaque]
             [harness.loop :as loop]
@@ -39,13 +38,9 @@
 
 ;; ------------------------------------------------------------------- logging
 
-(defn- log-file [thread-id]
-  (io/file (str (System/getProperty "user.home") "/.lisp-harness/logs")
-           (str (str/replace (str thread-id) #"[^A-Za-z0-9._-]" "_") ".jsonl")))
-
 (defn- log! [thread-id run-id kind payload]
-  (let [f (log-file thread-id)]
-  (.mkdirs (.getParentFile f))
+  (let [f (home/log-file thread-id)]
+    (.mkdirs (.getParentFile f))
     (spit f (str (json/write-str {:ts (System/currentTimeMillis)
                                   :runId run-id :kind kind :payload payload}) "\n")
           :append true :encoding "UTF-8")))

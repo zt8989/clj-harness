@@ -14,9 +14,9 @@
   starting point."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.ag-ui :as ag]
+            [harness.home :as home]
             [harness.memory :as mem]
             [harness.opaque :as opaque]
             [harness.loop :as loop]
@@ -25,11 +25,14 @@
 (defn- log-file
   "The file the writer in harness.http would have produced for this thread.
 
-  The sanitisation is repeated from there rather than shared: sharing it would mean the
-  kernel growing a read side, and the kernel must not read its own log. It is one
-  expression, and the two sites have to agree -- if you change one, change both."
+  The DIRECTORY is the caller's -- this namespace stays a pure reader and never
+  learns where the process keeps its home. The FILENAME rule, though, is shared
+  with the writer through harness.home/sanitize: that one expression is the part
+  the two sides must agree on, and sharing it is what stops them drifting. The
+  kernel still never reads its own log -- this is dev-side, and harness.home
+  only computes a name."
   [dir thread-id]
-  (io/file dir (str (str/replace (str thread-id) #"[^A-Za-z0-9._-]" "_") ".jsonl")))
+  (home/log-file dir thread-id))
 
 (defn read-lines
   "A thread's raw log lines. A missing log is a failure, not an empty conversation."

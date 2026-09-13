@@ -45,7 +45,15 @@
     (testing "uname reports MINGW -- Git Bash, not the WSL launcher on PATH"
       (is (str/includes? content "MINGW"))))
   (testing "the working directory is the project"
-    (is (str/includes? (:content (call "bash" {:command "pwd"})) "lisp-harness")))
+    ;; Assert the invariant, not a substring of the project's name: bash must be
+    ;; sitting in the same directory the JVM considers its own. Git Bash reports
+    ;; POSIX paths (/c/Users/...) where the JVM says C:\Users\..., so compare the
+    ;; normalized tail -- the drive letter is the only legitimate difference.
+    (let [pwd  (str/trim (:content (call "bash" {:command "pwd"})))
+          cwd  (System/getProperty "user.dir")
+          norm (fn [p] (-> p (str/replace "\\" "/") (str/replace #"^[A-Za-z]:" "")
+                           (str/replace #"^/c/" "/") (str/replace #"/+$" "")))]
+      (is (= (norm cwd) (norm pwd)))))
   (testing "a non-zero exit is surfaced, not swallowed"
     (let [{:keys [content error]} (call "bash" {:command "exit 3"})]
       (is (false? error))

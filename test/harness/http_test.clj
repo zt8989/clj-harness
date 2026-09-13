@@ -9,6 +9,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
+            [harness.home :as home]
             [harness.http :as http]
             [harness.memory :as mem]
             [harness.opaque :as opaque]
@@ -56,7 +57,12 @@
      (.send (HttpClient/newHttpClient) req
             (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
 
-(def ^:private log-dir (str (System/getProperty "user.home") "/.lisp-harness/logs"))
+(defn- log-dir
+  "Where the server under test writes its logs. Derived from harness.home so it
+  follows the config root -- which the test fixture rebinds to a temp directory,
+  so these tests never touch the real one."
+  []
+  (str (home/logs-dir)))
 
 (defn- header [resp name]
   (str (.orElse (.firstValue (.headers resp) name) "")))
@@ -114,9 +120,9 @@
      ;; Delete first, like the replay e2e does: the assertions below use
      ;; first/last over the parsed lines, so leftover runs from earlier test
      ;; executions must not bleed in.
-     (io/delete-file (io/file log-dir "it-1.jsonl") true)
+     (io/delete-file (io/file (log-dir) "it-1.jsonl") true)
      (post-run 8098 "it-1")
-     (let [f     (io/file log-dir "it-1.jsonl")
+     (let [f     (io/file (log-dir) "it-1.jsonl")
            lines (wait-for-recorded f
                                     ;; The returned tail lands one line at a
                                     ;; time after the terminal frame -- wait
@@ -183,9 +189,9 @@
   (with-server
    8095
    (fn []
-     (io/delete-file (io/file log-dir "replay-e2e.jsonl") true)
+     (io/delete-file (io/file (log-dir) "replay-e2e.jsonl") true)
      (post-run 8095 "replay-e2e")
-     (let [history (replay/history log-dir "replay-e2e")]
+     (let [history (replay/history (log-dir) "replay-e2e")]
        (testing "the reader found the file the writer wrote, and rebuilt a conversation"
          (is (= "system" (:role (first history))))
          (is (some #(= "user" (:role %)) history)))
@@ -207,9 +213,9 @@
   (with-server
    8094
    (fn []
-     (io/delete-file (io/file log-dir "lifecycle.jsonl") true)
+     (io/delete-file (io/file (log-dir) "lifecycle.jsonl") true)
      (post-run 8094 "lifecycle")
-     (let [f     (io/file log-dir "lifecycle.jsonl")
+     (let [f     (io/file (log-dir) "lifecycle.jsonl")
            lines (wait-for-recorded f
                                     (fn [ls]
                                       (>= (count (filter #(= "tools/post-execute" (:kind %)) ls)) 2))
@@ -307,7 +313,7 @@
 
            (testing "both decisions are on disk: the audit line and the resumed transit"
              (let [lines (wait-for-recorded
-                          (io/file log-dir "http-approve.jsonl")
+                          (io/file (log-dir) "http-approve.jsonl")
                           (fn [ls] (some #(= "approval/decided" (:kind %)) ls))
                           2000)
                    decided (filter #(= "approval/decided" (:kind %)) lines)
@@ -344,9 +350,9 @@
   (with-server
    8096
    (fn []
-     (io/delete-file (io/file log-dir "t-addr.jsonl") true)
+     (io/delete-file (io/file (log-dir) "t-addr.jsonl") true)
      (post-run 8096 "t-addr")
-     (let [f     (io/file log-dir "t-addr.jsonl")
+     (let [f     (io/file (log-dir) "t-addr.jsonl")
            _     (wait-for-recorded f
                                     (fn [ls]
                                       (some (fn [l]
