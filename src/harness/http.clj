@@ -14,6 +14,11 @@
                    post-execute), keyed by toolCallId. No wire frame at all.
     \"approval/decided\" -- a human's answer to a parked call, with the interrupt
                    id and whatever payload the client attached.
+    \"provider/init\"   -- once per thread, on its first run: the provider the
+                   session serves from (four fields + source) and the fact that
+                   the api-key was stripped. Never a per-run snapshot.
+    \"provider/changed\" -- a mid-session provider change, before -> after, once
+                   the approving human's decision has been consumed.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -127,6 +132,16 @@
              :tool-call-id (:tool-call-id rec)}))
         resume))
 
+(defn- provider-line
+  "The provider a run is serving from, in the shape the jsonl records: the four
+  descriptive fields, and an explicit statement that the api-key was STRIPPED
+  rather than a value. A field no tier ever named is simply absent -- the
+  resolution is field-by-field, so a missing :reasoning-effort is a fact, not an
+  error."
+  [provider]
+  (merge (select-keys provider [:protocol :base-url :model :reasoning-effort])
+         {:api-key :stripped}))
+
 (defn- run-agent! [ch input]
   (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
@@ -141,22 +156,44 @@
       ;; naming an interrupt this process never parked -- blows up before the run
       ;; starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
       ;; so the client sees a terminated run rather than a broken stream.
-      (let [[provider messages decisions]
-            (try [(opaque/current-provider)
+      (let [[provider messages decisions resolved]
+            (try [(opaque/current-provider thread-id (:provider input))
                   (ag/inbound (:messages input) (mem/prompt) (:context input))
-                  (resume-decisions (:resume input))]
+                  (resume-decisions (:resume input))
+                  (opaque/resolve-provider thread-id (:provider input))]
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]
                      (emit frame))
                    nil))]
         (when provider
+          ;; The provider timeline, part 1: ONE init line per session, on its
+          ;; first run. It lands after the input line and before the first
+          ;; message line, so a reader meets "here is what this conversation is
+          ;; served by" before it meets the conversation. Later runs of the same
+          ;; thread do not repeat it -- the timeline is init plus changes, not a
+          ;; snapshot per run.
+          (when (and (nil? (opaque/pinned-provider thread-id))
+                     (not (mem/init-logged? thread-id)))
+            (log! thread-id run-id "provider/init"
+                  (assoc (provider-line provider) :source (:source resolved)))
+            (mem/mark-init-logged! thread-id))
           ;; The decision record: what the human answered, next to the input that
           ;; carried it. The same verdict also lands on the resumed call's
           ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
           ;; that carries the interrupt id and the client's payload.
           (doseq [d decisions]
             (log! thread-id run-id "approval/decided" d))
+          ;; The provider timeline, part 2: any change a tool made during this
+          ;; run, drained from the outbox. It lands after approval/decided
+          ;; because the change is only written once the human's approval has
+          ;; been consumed -- so the two lines read together as "approved, and
+          ;; here is what it changed".
+          (doseq [c (mem/take-provider-changes! thread-id)]
+            (log! thread-id run-id "provider/changed"
+                  {:verdict :approved
+                   :before (select-keys (:before c) [:protocol :base-url :model :reasoning-effort])
+                   :after  (select-keys (:after c)  [:protocol :base-url :model :reasoning-effort])}))
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a

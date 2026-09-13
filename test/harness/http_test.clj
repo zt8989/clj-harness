@@ -14,6 +14,7 @@
             [harness.memory :as mem]
             [harness.opaque :as opaque]
             [harness.replay :as replay]
+            [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -31,11 +32,30 @@
    {:content "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"}])
 
 (defn- with-server
-  ([port f] (with-server port script f))
-  ([port turns f]
-   (opaque/use-provider! (fake/scripted turns))
-   (let [stop (http/start! {:port port})]
-     (try (f) (finally (stop) (opaque/use-provider! nil))))))
+  "Run F against a live server on PORT, with a scripted provider pinned to each
+  thread the test serves.
+
+  THREADS names them and is one of:
+
+    \"it-1\"                 one thread, using SCRIPT (the default script below)
+    [\"a\" \"b\"]              several threads, all sharing SCRIPT
+    {\"a\" SCRIPT-A \"b\" SCRIPT-B}  per-thread scripts -- for a test whose
+                            threads must consume turns in a known order
+
+  The pin is PER-THREAD, matching harness.opaque's resolution: a provider
+  override is a session's, and the server looks it up by the request's threadId.
+  There is deliberately no process-wide slot to fall back on -- a test that
+  pinned globally would pass while the per-thread wiring was broken."
+  ([port threads f]
+   (with-server port threads script f))
+  ([port threads turns f]
+   (let [pins (cond
+                (map? threads) threads
+                (coll? threads) (into {} (map (fn [t] [t turns])) threads)
+                :else           {threads turns})]
+     (doseq [[t ts] pins] (opaque/use-provider! (str t) (fake/scripted ts)))
+     (let [stop (http/start! {:port port})]
+       (try (f) (finally (stop) (doseq [t (keys pins)] (opaque/use-provider! (str t) nil))))))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
@@ -70,6 +90,7 @@
 (deftest serves-a-well-formed-run-over-real-http
   (with-server
    8097
+   "it-1"
    (fn []
      (let [resp   (post-run 8097 "it-1")
            body   (.body resp)
@@ -116,6 +137,7 @@
 (deftest records-the-run-as-jsonl
   (with-server
    8098
+   "it-1"
    (fn []
      ;; Delete first, like the replay e2e does: the assertions below use
      ;; first/last over the parsed lines, so leftover runs from earlier test
@@ -188,6 +210,7 @@
   ;; the two sides live in different namespaces on different sides of dev/src.
   (with-server
    8095
+   "replay-e2e"
    (fn []
      (io/delete-file (io/file (log-dir) "replay-e2e.jsonl") true)
      (post-run 8095 "replay-e2e")
@@ -212,6 +235,7 @@
   ;; outcome key, and the wire is untouched by any of it.
   (with-server
    8094
+   "lifecycle"
    (fn []
      (io/delete-file (io/file (log-dir) "lifecycle.jsonl") true)
      (post-run 8094 "lifecycle")
@@ -258,7 +282,8 @@
         _    (mem/session-require-approval! "http-veto" "write")]
     (with-server
      8093
-     [(call ok) {:content "wrote it"} (call veto) {:content "understood"}]
+     {"http-approve" [(call ok) {:content "wrote it"}]
+      "http-veto"    [(call veto) {:content "understood"}]}
      (fn []
        (let [asked   (wire/frames-from-sse (.body (post-run 8093 "http-approve")))
              term    (last asked)
@@ -333,6 +358,7 @@
   ;; never parked must be told so, never quietly granted.
   (with-server
    8092
+   "http-unknown"
    [{:content "never reached"}]
    (fn []
      (let [frames (wire/frames-from-sse
@@ -342,9 +368,147 @@
        (is (= ["RUN_STARTED" "RUN_ERROR"] (mapv :type frames)))
        (is (str/includes? (:message (last frames)) "unknown interrupt"))))))
 
+;; ----------------------------------------------------- the provider timeline
+
+(defn- with-resolved-config
+  "Install a config root that RESOLVES its provider -- a registry plus a default
+  tier, no scripted pin -- and restore the previous one after. The registry's
+  entries use :protocol :fake (and live in the shared test-script atom -- an
+  atom cannot cross EDN), so the RESOLVED provider is a working fake:
+  resolution runs for real while the LLM stays offline.
+
+  Used by the two tests below. A pinned provider skips resolution, and the
+  provider timeline is precisely about resolution, so these must not pin."
+  [turns f]
+  (let [cfg-file (io/file (log-dir) ".." "config.edn")
+        reg-file (io/file (log-dir) ".." "providers.edn")
+        read-back (fn [f] (when (.exists f) (slurp f :encoding "UTF-8")))
+        old-cfg (read-back cfg-file) old-reg (read-back reg-file)
+        old-script @fake/test-script]
+    (try
+      (reset! fake/test-script (vec turns))
+      (spit cfg-file "{:provider :cheap}\n" :encoding "UTF-8")
+      (spit reg-file
+            (pr-str {:cheap {:protocol :fake :base-url "https://x/v1" :model "small"}
+                     :smart {:protocol :fake :base-url "https://x/v1" :model "big"}})
+            :encoding "UTF-8")
+      (f)
+      (finally
+        (spit cfg-file (or old-cfg "{:protocol :fake}\n") :encoding "UTF-8")
+        (io/delete-file reg-file true)
+        (reset! fake/test-script old-script)))))
+
+(deftest the-provider-timeline-is-init-once-then-changes
+  ;; Ticket 03, over the real edge. A session's provider history lands as
+  ;; exactly one init line and one line per change -- never a snapshot per run.
+  (with-resolved-config
+   [{:content "hello"} {:content "hello"}]
+   (fn []
+     (let [id   "http-prov"
+           stop (http/start! {:port 8101})]
+       (try
+         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         ;; Run one: the init line lands. The scripted turn is a plain reply,
+         ;; so the run does not touch the provider.
+         (post-run 8101 id)
+         (let [after-first (wait-for-recorded
+                            (io/file (log-dir) (str id ".jsonl"))
+                            (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                            2000)]
+           (testing "the first run lands exactly one init line, before any message"
+             (let [kinds (mapv :kind after-first)]
+               (is (= 1 (count (filter #(= "provider/init" %) kinds))))
+               (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
+               (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
+           (testing "it carries the four fields, the source, and NO api-key value"
+             (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
+               (is (= "fake" (:protocol p)))
+               (is (= "https://x/v1" (:base-url p)))
+               (is (= "small" (:model p)))
+               (is (= "default" (:source p)))
+               (is (= "stripped" (:api-key p)))))
+           ;; Run two of the same thread: no second init.
+           (post-run 8101 id)
+           (let [after-second (wait-for-recorded
+                               (io/file (log-dir) (str id ".jsonl"))
+                               (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
+                               2000)]
+             (testing "a later run of the same thread does not repeat the init"
+               (is (= 1 (count (filter #(= "provider/init" (:kind %)) after-second)))))))
+         (finally (stop)))))))
+
+(deftest a-session-configure-lands-as-a-changed-line
+  ;; The write half of 04, end to end: the agent changes its reasoning effort,
+  ;; the change is approved, and the jsonl shows a provider/changed line with
+  ;; before -> after. The approval gate is what makes it land only after the
+  ;; human's verdict.
+  ;;
+  ;; A session override holds ONLY the fields the session owns (not the resolved
+  ;; provider's full shape -- that is what the init line is for). So the
+  ;; change's before and after show the session's slice, and the chain between
+  ;; consecutive changes is exactly the test of "what moved in this session".
+  (with-resolved-config
+   [{:content "hello"}]
+   (fn []
+     (let [id   "http-change"
+           stop (http/start! {:port 8102})]
+       (try
+         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         ;; Seed the session with a baseline the change can stand on. The change
+         ;; line is the session's own slice, not the full provider.
+         (opaque/set-override! id {:model "small"})
+         ;; Drive the change the way a run would: park, approve, resume-transit.
+         (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
+                                        :function {:name "session-configure"
+                                                   :arguments (json/write-str {:reasoning-effort "high"})}}
+                                       id))
+               {:keys [parked]} (call)]
+           (mem/decide-approval! (:interrupt-id parked) :approved {})
+           (call))
+         (testing "the session now serves the changed value"
+           (is (= "high" (:reasoning-effort (mem/active-provider id)))))
+         ;; Run once so the edge drains the outbox to the log.
+         (post-run 8102 id)
+         (let [lines (wait-for-recorded
+                      (io/file (log-dir) (str id ".jsonl"))
+                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      2000)
+               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+           (testing "the change is on disk, before -> after, marked approved"
+             (is (= "approved" (:verdict changed)))
+             (is (= "small" (get-in changed [:before :model]))
+                 "the session's pre-change slice is the baseline that stood")
+             (is (= "small" (get-in changed [:after :model]))
+                 "the model never moved; only the effort did")
+             (is (= "high" (get-in changed [:after :reasoning-effort]))
+                 "and the new field is the one the change named"))
+           (testing "consecutive changes chain through the same slice"
+             ;; One more approved change: reasoning-effort goes from high to
+             ;; low. before on the new line MUST equal after on the previous.
+             (let [call (fn [] (tools/run! {:id "cfg2" :type "function"
+                                            :function {:name "session-configure"
+                                                       :arguments (json/write-str {:reasoning-effort "low"})}}
+                                           id))
+                   {:keys [parked]} (call)]
+               (mem/decide-approval! (:interrupt-id parked) :approved {})
+               (call))
+             (post-run 8102 id)
+             (let [lines (wait-for-recorded
+                          (io/file (log-dir) (str id ".jsonl"))
+                          (fn [ls] (>= (count (filter #(= "provider/changed" (:kind %)) ls)) 2))
+                          2000)
+                   changes (filter #(= "provider/changed" (:kind %)) lines)
+                   [a b]   (mapv :payload changes)]
+               (is (= "high" (get-in a [:after :reasoning-effort])))
+               (is (= "high" (get-in b [:before :reasoning-effort]))
+                   "the second change starts where the first ended")
+               (is (= "low" (get-in b [:after :reasoning-effort]))))))
+         (finally (stop) (opaque/set-override! id nil)))))))
+
 (deftest answers-the-cors-preflight
   (with-server
    8099
+   "preflight"
    (fn []
      (let [req  (-> (HttpRequest/newBuilder (URI/create "http://127.0.0.1:8099/"))
                     (.method "OPTIONS" (HttpRequest$BodyPublishers/noBody))

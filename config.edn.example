@@ -1,3 +1,7 @@
-{:protocol :openai-completions
- :base-url "https://openrouter.ai/api/v1"
- :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
+;; The DEFAULT tier: which entry in providers.edn to start from, and which
+;; fields to tune on top. Anything you omit here falls back to the registry
+;; entry -- so a config that only names a provider is the simplest case.
+;;
+;; To add a new model, edit providers.edn, not this file.
+
+{:provider :cheap :reasoning-effort "low"}

@@ -46,9 +46,10 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 
 ```
 ~/.clj-harness/
-├── config.edn      模型配置（每轮重读，可运行期编辑）
-├── .env            HARNESS_API_KEY
-└── logs/*.jsonl    会话日志
+├── config.edn        模型默认档（每轮重读，可运行期编辑）
+├── providers.edn     具名 provider 注册表（每轮重读）
+├── .env              HARNESS_API_KEY
+└── logs/*.jsonl      会话日志
 ```
 
 想换位置就设 `CLJ_HARNESS_HOME`——这是唯一的旋钮，测试也用它把自己的读写隔离到临时目录：
@@ -63,21 +64,41 @@ clojure -M:run
 ```pwsh
 New-Item -ItemType Directory -Force ~/.clj-harness
 Copy-Item config.edn.example ~/.clj-harness/config.edn
+Copy-Item providers.edn.example ~/.clj-harness/providers.edn
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
 
-`config.edn` 或 `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。
+`config.edn` / `providers.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。
 
 **为什么 `prompt.md` 不搬进去**：它是被 review 的代码资产，每次改动都需要 git 历史；放进家目录就脱离了版本控制。它是这个规则唯一的例外。
 
-`config.edn` 当前为 Free 代理（按用户要求不用 DeepSeek 直连）：
+`config.edn` 当前为 Free 代理（按用户要求不用 DeepSeek 直连）——它降级为**默认档**，指向注册表里的 `:cheap`：
 
 ```edn
-{:protocol :openai-completions
- :base-url "https://openrouter.ai/api/v1"
- :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
+{:provider :cheap :reasoning-effort "low"}
 ```
+
+具名注册表在 `providers.edn`：
+
+```edn
+{:cheap {:protocol :openai-completions
+         :base-url "https://openrouter.ai/api/v1"
+         :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
+ :smart {:protocol :openai-completions
+         :base-url "https://openrouter.ai/api/v1"
+         :model "anthropic/claude-sonnet-4.5"
+         :reasoning-effort "high"}}
+```
+
+**解析优先级**（低→高，后者覆盖前者，**逐字段**合并——一档只填它要改的字段，其余落回上一档）：
+
+1. **`providers.edn` 具名项**（或 `config.edn` 里 `{:provider {...}}` 的 inline map——逃生门）
+2. **`config.edn` 默认档的字段覆盖**（如 `{:provider :cheap :reasoning-effort "low"}` 把 `reasoning-effort` 单独调低）
+3. **本 thread 的会话级覆盖**（`session-configure` 工具调用，**经人工审批**后写入；详见下）
+4. **本 run 的请求指定**（AG-UI `forwardedProps.provider` / `.model` / `.reasoning-effort`，只影响这次 run；**走顶层** input map，不进 `:context`——后者会变成尾部 user 消息污染 prefix cache）
+
+每档**只填它要改的字段**：`{:model "anthropic/claude-sonnet-4.5"}` 只覆盖 model，protocol/base-url/reasoning-effort 仍取上一档。这让三档各管各的，不需要为每种组合造新条目。
 
 `.env` 里的值**优先于**真实环境变量（即 `HARNESS_API_KEY` 以 `.env` 为准，shell 变量不会覆盖它）；`.env` 每次重读，改完不必重启。
 
@@ -128,6 +149,21 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 只 append 永不读。
 
+### Provider 时间线（`provider/init` 与 `provider/changed`）
+
+会话的 provider 历史落成两种新行——**不是**每 run 一行快照，时间线 init + changes 已能完整重建：
+
+- **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含 `:protocol` / `:base-url` / `:model` / `:reasoning-effort` 四字段 + `:source`（`default` / `request` / `inline`），以及 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。
+- **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before {...} :after {...}}`，落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。
+
+读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，两种新行不参与回放——它们是审计轨迹，不是对话的一部分。
+
+## 授权变更（session-configure）
+
+agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread 的 provider / model / reasoning-effort。**三字段各自独立可选**——只传要改的，其余保持当前值；空调用直接拒绝。**经人工审批后**生效（park 走 AG-UI 原生 interrupt，与工具审批同一条路径），否决则不生效且无 `provider/changed` 落盘。
+
+**性质：流程约定，不是安全边界。** `harness.opaque/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
+
 ## 人工审批（pre-tool HITL）
 
 被标记的工具调用在**真正执行前**暂停，把决定权交给人：批准则照常执行，否决则不执行、并把"人工否决 + 理由"当作工具结果回灌给模型，run 继续。
@@ -152,7 +188,7 @@ UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 
 ```pwsh
 # 离线全量
 clojure -M:test -m harness.test-runner
-# 70 tests / 348 assertions, 0 failures
+# 101 tests / 467 assertions, 0 failures
 
 # 在线帧合法性（需后端在 8080）
 node ui/check-frames.mjs        # EventSchemas.safeParse  37~94 frames / 0 invalid

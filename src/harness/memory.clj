@@ -13,9 +13,15 @@
 
   What is deliberately NOT here: a copy of a thread's history or of the provider
   its run served with. The jsonl log already holds both, and a second copy in
-  memory can only drift from it -- so the log is the record, read it there."
+  memory can only drift from it -- so the log is the record, read it there.
+
+  The provider question is answered by ASKING harness.opaque (active-provider),
+  never by keeping a copy: opaque assembles the provider because that is where
+  the api-key legitimately lives, and this namespace is the introspectable face
+  of the answer."
   (:require [clojure.edn :as edn]
-            [harness.home :as home]))
+            [harness.home :as home]
+            [harness.opaque :as opaque]))
 
 ;; ------------------------------------------------------------------- prompt
 
@@ -214,6 +220,56 @@
       (when (and (:verdict rec) (not (:consumed rec)))
         (select-keys rec [:verdict :payload])))))
 
+;; ------------------------------------------------------- provider outbox
+;;
+;; A PENDING-OUTBOX, not a copy of state: the tool body records that the session
+;; changed and what it changed from and to, and the http edge drains it to the
+;; jsonl. It exists for exactly the reason parked-registry does -- to carry a
+;; fact across the seam from the code that knows it (the tool) to the code that
+;; writes it down (the edge -- the only writer). Once drained it is gone, and
+;; nothing reads it back.
+
+(defonce ^:private provider-changes
+  (atom []))
+;; [{:thread-id .. :before {field value} :after {field value} :verdict kw}]
+
+(defn record-provider-change!
+  "Note that THREAD-ID's provider moved from BEFORE to AFTER, by an APPROVED
+  change. The body only runs on an approval -- a vetoed call never reaches it --
+  so landing here means the human said yes; a veto leaves no change line at all,
+  and the reader tells the two apart by the presence of this line (paired with
+  its approval/decided row). Drained, not read: the writer empties this after
+  every run."
+  [thread-id before after]
+  (swap! provider-changes conj {:thread-id thread-id
+                                :before before :after after}))
+
+(defn take-provider-changes!
+  "Every pending provider change recorded for THREAD-ID, in order, clearing them.
+  Called by the http edge after a run -- the one writer."
+  [thread-id]
+  (let [[taken _] (swap-vals! provider-changes
+                              (fn [vs] (into [] (remove #(= thread-id (:thread-id %))) vs)))]
+    (filterv #(= thread-id (:thread-id %)) taken)))
+
+(defonce ^:private init-logged
+  (atom #{}))
+;; thread-ids whose provider/init line has been written. Writer-side state,
+;; deliberately NOT re-derived from the log: the edge must not read its own
+;; log, so "have I written the init line yet" has to be remembered here. This
+;; is a fact about the FILE, not a copy of the conversation or the provider.
+
+(defn init-logged?
+  "Has THREAD-ID's provider/init line already been written?"
+  [thread-id]
+  (contains? @init-logged thread-id))
+
+(defn mark-init-logged!
+  "Remember that THREAD-ID's provider/init line is now on disk, so later runs
+  do not write a second one."
+  [thread-id]
+  (swap! init-logged conj thread-id))
+
 ;; ------------------------------------------------------------------- config
 
 (defn config
@@ -225,3 +281,37 @@
   The path comes from harness.home; a missing file is a named failure there."
   []
   (edn/read-string (home/config)))
+
+;; -------------------------------------------------------------- introspection
+;;
+;; Two FACTS ABOUT NOW, computed on demand -- not copies of anything. The
+;; question "where is this conversation's log" and "what provider is this session
+;; serving from" have answers the jsonl cannot give (the path is a fact about
+;; this process; the provider is resolved live), so asking beats copying. Both
+;; re-derive every call, matching mem/config.
+
+(defn log-path
+  "This thread's JSONL log file, as a string path -- the file harness.http
+  appends to, named by the same harness.home/log-file the writer uses. Computed
+  fresh every call: the root can change (CLJ_HARNESS_HOME, a test binding)
+  between calls, and a cached path would silently point at the wrong file.
+
+  A THREAD-ID of nil answers for the process-wide slot, matching the rest of the
+  session-scoped surface."
+  [thread-id]
+  (str (home/log-file thread-id)))
+
+(defn active-provider
+  "What THREAD-ID's session is serving from right now:
+  {:protocol .. :base-url .. :model .. :reasoning-effort ..}.
+
+  Resolved live through harness.opaque -- the four-tier resolution, session
+  override included -- but NEVER the api-key: that is copied out, field by
+  field, so a future change to the resolver cannot leak one through here.
+
+  A nil THREAD-ID answers for the process-wide slot (no session in play), which
+  is what an offline tool wants. The three knobs are independently movable, so
+  any of them may be absent if no tier ever named it."
+  [thread-id]
+  (let [p (opaque/effective-provider thread-id)]
+    (select-keys p [:protocol :base-url :model :reasoning-effort])))

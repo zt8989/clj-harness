@@ -14,7 +14,8 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [harness.event :as ev]
-            [harness.memory :as mem])
+            [harness.memory :as mem]
+            [harness.opaque :as opaque])
   (:import [java.util.regex Pattern]))
 
 ;; The tool registry itself lives in harness.memory (the introspectable
@@ -81,6 +82,38 @@
     (clip (str (when (seq printed) (str printed "\n"))
                (pr-str v)))))
 
+(defn- t-configure
+  "Change THIS session's provider / model / reasoning-effort. Each of the three
+  is independent: pass only what you mean to change, and the rest keep the value
+  the tier below gave them.
+
+  Marks :requires-approval, so the call parks and a human decides before any of
+  it takes effect -- the body only runs on an approved resume, and a veto means
+  it never runs at all. The gate is a WORKFLOW convention, not a security
+  boundary: eval can still reach harness.opaque/use-provider! directly, and bash
+  can still read .env. It is here to stop a slip, and it is labelled as such."
+  [{:keys [provider model reasoning-effort]}]
+  (let [thread-id mem/*thread-id*
+        change    (cond-> {}
+                    (some? provider)         (assoc :provider provider)
+                    (some? model)            (assoc :model model)
+                    (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
+    (when (empty? change)
+      (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
+    ;; :provider names a registry entry (a keyword) or is an inline map (the
+    ;; escape hatch). opaque validates a name against providers.edn, so a typo
+    ;; fails here, loudly, naming what it looked for.
+    (let [before (opaque/override-for thread-id)
+          after  (merge before change)]
+      (opaque/set-override! thread-id after)
+      ;; Tell the writer what moved. The edge drains this and lands a
+      ;; provider/changed line after the approval/decided line for this call.
+      (mem/record-provider-change! thread-id before after)
+      (str "session reconfigured: " (pr-str change)
+           " -- effective now for this thread only."
+           (when (nil? thread-id)
+             " (warning: no session in scope; the change landed on the process-wide slot)")))))
+
 ;; ------------------------------------------------------------------ registry
 
 (defn specs
@@ -123,6 +156,18 @@
   (tool "Evaluate Clojure in this process. Defs persist across calls."
         {"code" {:type "string" :description "Clojure source."}}
         [:code] t-eval))
+
+;; Configure this session's provider. Marked :requires-approval so a model
+;; cannot repoint its own session at another endpoint without a human saying so
+;; -- the marked call parks, and only an approved resume runs the body. Every
+;; field is optional and independent; give only what you mean to change.
+(mem/register! "session-configure"
+  (assoc (tool "Change this session's provider, model, or reasoning effort. Parks for human approval; only an approved change takes effect. Each argument is independent -- pass only what you mean to change."
+               {"provider"         {:type "string" :description "A provider name from providers.edn (e.g. \"cheap\")."}
+                "model"            {:type "string" :description "Model id to use."}
+                "reasoning-effort" {:type "string" :description "Reasoning effort (e.g. \"low\", \"high\")."}}
+               [] t-configure)
+         :requires-approval true))
 
 ;; ------------------------------------------------------------------ dispatch
 
