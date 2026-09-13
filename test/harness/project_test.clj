@@ -1,11 +1,14 @@
 (ns harness.project-test
   "harness.project's external behavior: bind validates, resolve roots relative
-  paths at the binding, and -- the regression guarantee -- an unbound session
-  is the identity function on paths."
+  paths at the binding, out-of-bounds? answers the fence's containment question
+  -- and, the regression guarantee, an unbound session is the identity function
+  on paths and never out of bounds."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [harness.project :as project]))
+            [harness.home :as home]
+            [harness.project :as project])
+  (:import (java.io File)))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-project-test"))
 
@@ -91,3 +94,34 @@
   (project/bind! "pt-real" root)
   (spit (project/resolve-path "pt-real" "real.txt") "landed" :encoding "UTF-8")
   (is (= "landed" (slurp (str (io/file root "real.txt")) :encoding "UTF-8"))))
+
+(deftest out-of-bounds-answers-the-containment-question
+  ;; The fence's boolean, unit-level. Allowed set: the project directory and
+  ;; the configuration home; everything else -- including lookalike siblings
+  ;; and .. escapes -- is out. The config home is exercised through the REAL
+  ;; (test-runner-seeded) root, since allowing it is the fence's deliberate
+  ;; carve-out: reading one's own config must not be an approval offense.
+  (let [outside (str (System/getProperty "java.io.tmpdir")
+                     "/harness-project-outside.txt")]
+    (testing "an unbound session is never out of bounds -- the regression guarantee"
+      (is (false? (project/out-of-bounds? "pt-fence" outside)))
+      (is (false? (project/out-of-bounds? "pt-fence" "anything.txt"))))
+    (project/bind! "pt-fence" root)
+    (testing "inside the project: relative and absolute, both allowed"
+      (is (false? (project/out-of-bounds? "pt-fence" "in.txt")))
+      (is (false? (project/out-of-bounds? "pt-fence" (str (io/file root "in.txt")))))
+      (is (false? (project/out-of-bounds? "pt-fence" "sub/in.txt"))))
+    (testing "the configuration home is allowed, root itself included"
+      (is (false? (project/out-of-bounds? "pt-fence" (str (io/file (home/root) "config.edn")))))
+      (is (false? (project/out-of-bounds? "pt-fence" (home/root)))))
+    (testing "outside both allowed roots is out of bounds"
+      (is (true?  (project/out-of-bounds? "pt-fence" outside)))
+      (is (true?  (project/out-of-bounds? "pt-fence" "../escape.txt")))
+      (is (true?  (project/out-of-bounds? "pt-fence" (str (io/file root ".." "escape.txt"))))))
+    (testing "a sibling whose name extends the project's is not confused with it"
+      ;; C:\\proj must not contain C:\\project2: the separator boundary.
+      (is (true? (project/out-of-bounds? "pt-fence"
+                                         (str (str root "2") File/separator "f.txt")))))
+    (testing "the answer follows the CURRENT binding -- drop it, fence off"
+      (project/bind! "pt-fence" nil)
+      (is (false? (project/out-of-bounds? "pt-fence" outside))))))

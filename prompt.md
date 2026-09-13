@@ -17,7 +17,10 @@ Your project: ask `(harness.memory/active-project harness.memory/*thread-id*)`
 for the directory this session is bound to -- nil means none, which is normal.
 When bound, relative paths in read/write/edit resolve against that directory
 and bash runs with it as its working directory; absolute paths are never
-redirected.
+redirected. When bound, a read/write/edit path that resolves outside the
+project directory and the configuration home parks for human approval before
+it runs -- the configuration home is where your config, providers and .env
+live, and reading your own configuration there is allowed.
 
 Secrets discipline -- FORBIDDEN, no exceptions:
   - reading or exposing the api-key. It is resolved inside `harness.memory` and

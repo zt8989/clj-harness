@@ -1,14 +1,19 @@
 (ns harness.approval-test
   "Pre-tool human approval, kernel half: a marked call parks in the seam and the
-  run ends on an interrupt instead of running the tool."
+  run ends on an interrupt instead of running the tool. Also the project fence
+  (ticket 02): a BOUND session's file tools park on a path resolving outside
+  the project directory and the configuration home -- same park, same
+  interrupt, same resume, only the reason differs."
   (:require [clojure.core.async :as async]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.ag-ui :as ag]
             [harness.fake :as fake]
+            [harness.home :as home]
             [harness.loop :as loop]
             [harness.memory :as mem]
+            [harness.project :as project]
             [harness.tools :as tools]
             [harness.wire :as wire]))
 
@@ -279,3 +284,115 @@
 (deftest unknown-interrupts-are-not-invented
   (is (nil? (mem/parked "no-such-interrupt")))
   (is (empty? (mem/parked-calls "thr-that-never-parked"))))
+
+;; ----------------------------------------------------------------- the fence
+;;
+;; Ticket 02: when a session is BOUND to a project directory, a file tool whose
+;; path resolves outside the project directory AND the configuration home parks
+;; for approval. Everything about the park is the ordinary approval flow -- the
+;; fence only chooses WHICH calls enter it, and stamps :reason :out-of-bounds
+;; on the parked record. bash is deliberately untouched: it is constrained to
+;; the project cwd but its command content is never judged, a DECLARED escape
+;; surface (approval is a workflow convention, not a security boundary).
+
+(defn- fence-rig
+  "Bind THR to a fresh project directory holding one readable file."
+  [thr]
+  (let [pdir (str dir "/fence-project")]
+    (.mkdirs (io/file pdir))
+    (spit (str pdir "/inside.txt") "inside" :encoding "UTF-8")
+    (project/bind! thr pdir)
+    pdir))
+
+(deftest a-bound-session-parks-an-out-of-bounds-path
+  (let [thr     "thr-fence-park"
+        _       (fence-rig thr)
+        outside (str dir "/outside-the-fence.txt")
+        {:keys [seen history]}
+        (run (fake/scripted [{:content ""
+                              :tool-calls [(call "c1" "read" {:path outside})]}
+                             {:content "never reached"}])
+             [] thr)
+        term (last seen)]
+    (testing "the run interrupts exactly like any approval"
+      (is (= :run/interrupt (:type term)))
+      (is (not-any? #(= :run/end (:type %)) seen)))
+    (testing "the tool never ran, the call is unanswered"
+      (is (empty? (results seen)))
+      (is (empty? (tool-msgs history))))
+    (testing "the interrupt carries the same facts as any approval"
+      (let [[int]  (:interrupts term)
+            parked (mem/parked (:id int))]
+        (is (= "c1" (:tool-call-id int)))
+        (is (= "read" (:name int)))
+        (is (string? (:id int)))
+        (is (= thr (:thread-id parked)))
+        (testing "and the parked record is stamped with the fence reason"
+          (is (= :out-of-bounds (:reason parked))))
+        (testing "the path itself is the evidence the human sees"
+          (is (str/includes? (:args parked) "outside-the-fence")))))))
+
+(deftest inside-paths-and-the-config-home-run-without-parking
+  (let [thr  "thr-fence-allow"
+        pdir (fence-rig thr)
+        {:keys [seen history]}
+        (run (fake/scripted [{:content ""
+                              :tool-calls [(call "c1" "read" {:path "inside.txt"})
+                                           (call "c2" "read" {:path (str pdir "/inside.txt")})
+                                           (call "c3" "read" {:path (str (io/file (home/root) "config.edn"))})]}
+                             {:content "done"}])
+             [] thr)]
+    (testing "relative, absolute-in-project, and the config home all ran"
+      (is (= :run/end (:type (last seen))))
+      (is (= #{"c1" "c2" "c3"} (set (mapv :id (results seen)))))
+      (is (= 3 (count (tool-msgs history)))))
+    (testing "the config-home read got the real seeded config, not a refusal"
+      (let [by-call (into {} (map (juxt :id identity) (results seen)))]
+        (is (str/includes? (:content (by-call "c3")) ":protocol"))))))
+
+(deftest fence-verdicts-follow-the-ordinary-resume
+  ;; Approval overrides the fence: the human's yes stands even though the path
+  ;; is still out of bounds on the resume transit. A veto is the ordinary veto:
+  ;; no execution, the payload reason fed back to the model.
+  (let [thr     "thr-fence-resume"
+        _       (fence-rig thr)
+        outside (str dir "/fence-approved.txt")
+        park    (run (fake/scripted [{:content ""
+                                      :tool-calls [(call "c1" "write" {:path outside :content "human said yes"})]}])
+                     [] thr)
+        iid     (interrupt-id park)
+        yes     (run (fake/scripted [{:content "done"}]) (:history park) thr
+                     {:resume [{:interrupt-id iid :verdict :approved}]})
+        outside2 (str dir "/fence-vetoed.txt")
+        park2   (run (fake/scripted [{:content ""
+                                      :tool-calls [(call "c2" "write" {:path outside2 :content "human said no"})]}])
+                     [] thr)
+        iid2    (interrupt-id park2)
+        no      (run (fake/scripted [{:content "understood"}]) (:history park2) thr
+                     {:resume [{:interrupt-id iid2 :verdict :vetoed
+                                :payload {:reason "stays inside the project"}}]})]
+    (testing "an approved fence catch executes like :pass"
+      (is (true? (.exists (io/file outside))))
+      (is (= "human said yes" (slurp outside :encoding "UTF-8")))
+      (is (= :run/end (:type (last (:seen yes)))))
+      (is (= :approved (:outcome (first (phases (:seen yes)))))))
+    (testing "a vetoed fence catch feeds the payload reason back"
+      (let [result (first (results (:seen no)))]
+        (is (true? (:error result)))
+        (is (str/includes? (:content result) "vetoed by human"))
+        (is (str/includes? (:content result) "stays inside the project")))
+      (is (= :run/end (:type (last (:seen no))))))))
+
+(deftest the-fence-never-engages-on-an-unbound-session
+  ;; The regression guarantee, end to end: no binding, no fence. The same
+  ;; outside path runs exactly as it did before the fence existed.
+  (let [outside (str dir "/unbound-outside.txt")]
+    (spit outside "reachable" :encoding "UTF-8")
+    (let [{:keys [seen history]}
+          (run (fake/scripted [{:content ""
+                                :tool-calls [(call "c1" "read" {:path outside})]}
+                               {:content "done"}])
+               [] "thr-never-bound")]
+      (is (= :run/end (:type (last seen))))
+      (is (= "reachable" (:content (first (results seen)))))
+      (is (= 1 (count (tool-msgs history)))))))

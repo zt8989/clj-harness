@@ -144,23 +144,32 @@
 
 ;; ------------------------------------------------------------------ registry
 
+;; read/write/edit carry :fence-paths -- when the session is bound to a
+;; project directory, a path resolving outside the project directory AND the
+;; configuration home parks for approval before it runs. Unbound sessions are
+;; untouched: the fence is a property of the tool MARKER, engaged only by a
+;; binding, and the park itself is the ordinary approval flow.
+
 (mem/register! "read"
-  (tool "Read a file. A relative path resolves against this session's project directory when one is bound."
-        {"path" {:type "string" :description "File path."}}
-        [:path] t-read))
+  (assoc (tool "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+               {"path" {:type "string" :description "File path."}}
+               [:path] t-read)
+         :fence-paths true))
 
 (mem/register! "write"
-  (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound."
-        {"path"    {:type "string" :description "File path."}
-         "content" {:type "string" :description "Full new contents."}}
-        [:path :content] t-write))
+  (assoc (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+               {"path"    {:type "string" :description "File path."}
+                "content" {:type "string" :description "Full new contents."}}
+               [:path :content] t-write)
+         :fence-paths true))
 
 (mem/register! "edit"
-  (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound."
-        {"path"       {:type "string" :description "File path."}
-         "old_string" {:type "string" :description "Exact text to replace."}
-         "new_string" {:type "string" :description "Replacement text."}}
-        [:path :old_string :new_string] t-edit))
+  (assoc (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+               {"path"       {:type "string" :description "File path."}
+                "old_string" {:type "string" :description "Exact text to replace."}
+                "new_string" {:type "string" :description "Replacement text."}}
+               [:path :old_string :new_string] t-edit)
+         :fence-paths true))
 
 (mem/register! "bash"
   (tool "Run a shell command in Git Bash. The working directory is this session's project directory when one is bound, otherwise the process working directory."
@@ -189,11 +198,23 @@
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
-(defn- approval-required?
-  "A call parks when either the tool declares it or this thread's session asked
-  for it. Union, so a session can tighten the base without touching it."
-  [tool name thread-id]
-  (or (:requires-approval tool) (mem/session-approval-required? thread-id name)))
+(defn- approval-reason
+  "WHY this call parks -- nil meaning it does not. The same union
+  approval-required? answered, now with the reason attached, in the order the
+  or short-circuited: the tool's own declaration first, then the session's
+  ask, then the project fence (a fence-marked tool whose path, resolved for
+  this session, lands outside the project directory and the configuration
+  home). The reason rides the parked record, so the human deciding -- and any
+  reader of the audit trail -- can tell a declared-approval call from a fence
+  catch without re-deriving either."
+  [tool name thread-id parsed]
+  (cond
+    (:requires-approval tool)                       :tool-declares
+    (mem/session-approval-required? thread-id name) :session-asks
+    (and (:fence-paths tool)
+         (project/out-of-bounds? thread-id (:path parsed)))
+    :out-of-bounds
+    :else nil))
 
 (defn- veto-message
   "What the model is told when a human vetoed the call. It is information, not a
@@ -234,7 +255,14 @@
                               fed back to the model like any tool failure.
 
   The verdict is taken from harness.memory by interrupt id and consumed on the
-  way through, so a replayed interrupt can never run its call twice."
+  way through, so a replayed interrupt can never run its call twice.
+
+  WHY a call parks is computed once per transit (approval-reason) and rides
+  the parked record: :tool-declares (the tool's own :requires-approval),
+  :session-asks (this session required it), or :out-of-bounds (a fence-marked
+  file tool whose path resolves outside the session's project directory and
+  the configuration home -- only when a project is bound). The verdict of a
+  human override stands: an approved out-of-bounds call executes like :pass."
   ([call] (run! call nil nil))
   ([call thread-id] (run! call thread-id nil))
   ([{:keys [id function] :as _call} thread-id on-phase]
@@ -245,6 +273,7 @@
          (let [parsed  (json/read-str (if (str/blank? arguments) "{}" arguments)
                                       :key-fn keyword)
                missing (missing-args tool parsed)
+               reason  (approval-reason tool name thread-id parsed)
                execute (fn []
                          ;; *thread-id* is bound around the tool body so code
                          ;; running inside a tool -- eval above all -- can address
@@ -257,18 +286,20 @@
                            (if err
                              {:content (ex-message err) :error true}
                              {:content (str result) :error false})))
-               park (fn []
+               park (fn [reason]
                       (let [existing (mem/parked-for-call thread-id id)
                             interrupt-id (or (:interrupt-id existing)
                                              (str (java.util.UUID/randomUUID)))]
-                        (mem/park-approval! interrupt-id {:thread-id thread-id
-                                                          :tool-call-id id
-                                                          :name name :args arguments})
+                        (mem/park-approval! interrupt-id (cond-> {:thread-id thread-id
+                                                                  :tool-call-id id
+                                                                  :name name :args arguments}
+                                                           reason (assoc :reason reason)))
                         (report (ev/tool-pre-execute id name :needs-approval []))
                         (report (ev/tool-post-execute id name))
                         {:content "" :error false
-                         :parked {:interrupt-id interrupt-id :id id
-                                  :name name :args arguments}}))]
+                         :parked (cond-> {:interrupt-id interrupt-id :id id
+                                          :name name :args arguments}
+                                   reason (assoc :reason reason))}))]
            (cond
              ;; Disabled is checked FIRST: it is a hard refusal, and there is no
              ;; point parking a call that is never going to execute.
@@ -284,7 +315,7 @@
                                 (str/join ", " (map (fn [k] (clojure.core/name k)) missing)))
                   :error true})
 
-             (approval-required? tool name thread-id)
+             reason
              (let [existing (mem/parked-for-call thread-id id)
                    decision (when existing (mem/take-decision! (:interrupt-id existing)))]
                (case (:verdict decision)
@@ -295,7 +326,7 @@
                                {:content (veto-message decision) :error true})
                  ;; nothing decided yet (or the verdict was already spent):
                  ;; the call is the human's until they answer.
-                 (park)))
+                 (park reason)))
 
              :else
              (do (report (ev/tool-pre-execute id name :pass []))
