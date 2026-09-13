@@ -18,17 +18,18 @@
             [helix.hooks :as hooks]))
 
 (defn- format-duration
-  "Same shape as the default's formatter: whole seconds below a minute,
-  then minutes-and-seconds."
+  "Same shape as the default's formatter: \"a few seconds\" below one
+  second, whole seconds below a minute, then minutes-and-seconds."
   [seconds]
   (let [total (js/Math.round seconds)]
-    (if (< total 60)
-      (str total " seconds")
-      (let [mins (quot total 60)
-            rem  (mod total 60)]
-        (if (zero? rem)
-          (str mins (if (= mins 1) " minute" " minutes"))
-          (str mins "m " rem "s"))))))
+    (cond
+      (< total 1) "a few seconds"
+      (< total 60) (str total " seconds")
+      :else (let [mins (quot total 60)
+                  rem  (mod total 60)]
+              (if (zero? rem)
+                (str mins (if (= mins 1) " minute" " minutes"))
+                (str mins "m " rem "s"))))))
 
 (defnc reasoning-message
   "Props: {message, messages, isRunning} as handed down by CopilotChatMessageView."
@@ -42,16 +43,14 @@
         content (.-content message)
         has-content? (boolean (and (string? content) (pos? (.-length content))))
         [open? set-open!] (hooks/use-state true)
-        user-toggled (hooks/use-ref false)
         start (hooks/use-ref nil)
         [elapsed set-elapsed!] (hooks/use-state 0)]
 
     ;; A new thinking phase opens up, like the default. The END of one does not
-    ;; close it -- that is the whole point of this component. The user-toggled
-    ;; ref only matters in the default's logic; here the close path is manual.
+    ;; close it -- that is the whole point of this component: the close path
+    ;; here is manual only (the Header's onClick).
     (hooks/use-effect [streaming?]
       (when streaming?
-        (set! (.-current user-toggled) false)
         (set-open! true)))
 
     ;; Elapsed timer: starts with streaming, freezes when it stops.
@@ -77,7 +76,6 @@
            :isStreaming streaming?
            :onClick (when has-content?
                       (fn []
-                        (set! (.-current user-toggled) true)
                         (set-open! not)))})
        ($ (.-Toggle CopilotChatReasoningMessage)
           {:isOpen open?}
