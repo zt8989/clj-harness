@@ -50,13 +50,29 @@
 
 本特征是 `eval-self-extension/05`（`providers.edn`）的前置：05 新增的注册表要有个确定的家。05 的路径须依本特征而定，故本特征先落地。
 
-## 落地后的收尾（不在本特征的票内，但别忘）
+## 已验证到什么程度（2026-09-13，提交 `92febbc`）
 
-- **`.workbuddy/memory/MEMORY.md` 需在 01 落地后同步**：标题 `# lisp-harness — 项目长期约定` → `# clj-harness — 项目长期约定`；日志路径 `~/.lisp-harness/logs/...` → `~/.clj-harness/...`。**必须等代码改完才改它**——它描述的是现状，先改就成了伪史。
-- **`.workbuddy/memory/2026-09-*.md` 的日志文件不改**：那是历史事实，改了就是伪造记录。
-- **仓库目录改名**（`lisp-harness` → `clj-harness`）由牛总自行执行——本特征只保证代码与文档内的引用改完，目录名不影响测试通过。
+票 01、02 已落地，验收项逐条覆盖：
+
+- **配置根**：`harness.home` 建立，解析顺序 `*root-override*`（测试）→ `CLJ_HARNESS_HOME` → `~/.clj-harness`，`root` 每次现算不缓存。
+- **调用点**：`memory/config`、`http/log!`、`opaque/api-key` 三处改造完成；**全仓已无裸相对路径读配置**。`lynxeyes/dotenv` 依赖**已移除**（实测它从 cwd 载入 `.env` 并缓存在 `def`，既指不到家目录也读不到运行期修改）；改为自解析并保留其优先级语义。
+- **sanitize 收口**：`home/sanitize` 一份，`home/log-file` 双 arity；`replay/log-file` 保留 `[dir thread-id]`，仍是不知道 home 的纯读侧。
+- **更名**：代码与文档中 `lisp-harness` 引用 **0 处残留**（`grep -ri` 全仓验过，产物目录除外）。`config.edn` → `config.edn.example` 模板；运行时配置在 `~/.clj-harness/`（已为牛总建好）。
+- **测试隔离**：`test_runner` 在任何 ns 加载前 `alter-var-root` 指向临时目录，跑完清理。**实测跑完全量后 `~/.clj-harness/logs/` 为空、`~/.lisp-harness` 无新增、临时目录无残留。**
+- **全量**：`70 tests / 348 assertions, 0 failures`（与基线持平，本特征不增不减断言——`tools_test` 那条改写了内容但数量不变）。
+
+**落地中的两处判断（记在案）**：
+
+1. **`alter-var-root` 而非 `binding`**：动态绑定不跨线程，而 http 测试的服务在别的线程写日志——`binding` 会让隔离静默失效。测试进程是一次性的，改根正是本意。
+2. **`tools_test` 的 pwd 断言要规范化**：Git Bash 报 POSIX 路径（`/c/Users/...`）而 JVM 报 `C:\Users\...`，直接比较会挂。规范化后半段比较，且**不再依赖目录名**。
+
+## 落地后的收尾
+
+- [x] **`.workbuddy/memory/MEMORY.md` 已同步**（标题 + 日志路径）——在代码落地后改的，未伪造现状。
+- `.workbuddy/memory/2026-09-*.md` 日志文件未改（历史事实）。
+- **仓库目录改名**（`lisp-harness` → `clj-harness`）仍未执行，由牛总自行操作；代码与文档引用已全部改完，测试不依赖目录名。
 
 ## 状态
 
-- 01（配置根 ns + 环境变量覆盖 + 调用点改造 + 项目更名）：未开始
-- 02（测试隔离：临时 home + 断言不写真实目录）：未开始
+- 01（配置根 ns + 环境变量覆盖 + 调用点改造 + 项目更名）：**已完成** `92febbc`（票已删）
+- 02（测试隔离：临时 home + 断言不写真实目录）：**已完成** `92febbc`（票已删）
