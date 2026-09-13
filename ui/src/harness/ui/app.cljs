@@ -17,11 +17,20 @@
     reasoningMessage prop here ends up spread onto a div and React rejects it. The
     wrapper is the one seam where the fine-grained slots are reachable.
 
-  Above the chat sits the project panel: the session's project-directory binding,
-  read from and written through the management edge (/api/project). The thread id
-  comes off the agent itself -- CopilotKit assigns one per conversation and writes
-  it onto the agent instance, so a new conversation after a stop reads as a fresh,
-  unbound thread."
+  Above the chat sit the project panel (the session's project-directory binding)
+  and the session panel (the conversations the harness log directory holds).
+  The thread id comes off the agent itself -- CopilotKit assigns one per
+  conversation and writes it onto the agent instance, so a new conversation
+  after a stop reads as a fresh, unbound thread.
+
+  Restoring a session (ticket 06) is deliberately AGENT-ONLY: the rebuilt thread
+  id and message list are written onto the agent, and nothing else is touched.
+  That works because AbstractAgent builds its RunAgentInput from its own state
+  (prepareRunAgentInput: threadId + messages off the agent), so the next input
+  continues the restored thread as an ordinary AG-UI run. The CopilotKit-level
+  explicit-thread path (setActiveThreadId) is avoided on purpose -- it drags in
+  connectAgent handshakes and message-clearing rules that a client talking
+  straight to the harness has no use for."
   (:require ["@ag-ui/client" :refer [HttpAgent]]
             ["@copilotkit/react-core/v2" :refer [CopilotChat CopilotChatMessageView
                                                  CopilotKit WildcardToolCallRender
@@ -131,7 +140,10 @@
   nothing to bind and the panel says so."
   []
   (let [^js ctx   (useAgent #js {:agentId "default"
-                                 :updates #js [(gobj/get UseAgentUpdate "OnRunStatusChanged")]})
+                                 ;; OnMessagesChanged so a session restore (setMessages)
+                                 ;; re-renders the panel and re-reads the thread binding
+                                 :updates #js [(gobj/get UseAgentUpdate "OnRunStatusChanged")
+                                               (gobj/get UseAgentUpdate "OnMessagesChanged")]})
         ^js agent (.-agent ctx)
         thread-id (.-threadId agent)
         [bound set-bound] (hooks/use-state nil)
@@ -171,6 +183,143 @@
        (when error
          ($ :span {:style error-style} error)))))
 
+;; ---------------------------------------------------------------- session panel
+
+(def ^:private row-style
+  {:display "flex"
+   :gap 10
+   :align-items "center"
+   :font-size 12
+   :flex-basis "100%"})
+
+(def ^:private ghost-style
+  {:border "1px solid #d9d9d9"
+   :background "#fff"
+   :color "#1677ff"
+   :padding "2px 10px"
+   :border-radius 6
+   :cursor "pointer"
+   :font-size 12})
+
+(defn- fmt-bytes [n]
+  (cond
+    (< n 1024)    (str n " B")
+    (< n 1048576) (str (.toFixed (/ n 1024) 1) " KB")
+    :else         (str (.toFixed (/ n 1048576) 1) " MB")))
+
+(defn- fetch-threads!
+  "GET /api/threads -- on-ok receives the JS array of {threadId, lastActivity,
+  bytes} (a JSON array at the top level, so there is no field to unwrap);
+  on-error a message string."
+  [on-ok on-error]
+  (-> (js/fetch (str harness-url "/api/threads"))
+      (.then (fn [^js resp]
+               (-> (.json resp)
+                   (.then (fn [^js data]
+                            (if (.-ok resp)
+                              (on-ok data)
+                              (on-error (or (.-error data) "读取会话列表失败"))))))))
+      (.catch (fn [^js e] (on-error (.-message e))))))
+
+(defn- restore-thread!
+  "POST /api/threads/<stem>/rebuild, then hand the conversation back to the
+  CLIENT: the rebuilt thread id and message list both land on the AGENT, which
+  is exactly what the next run reads. A 400 (truncated or corrupt log) carries
+  the server's named reason to on-error -- the panel stays alive either way."
+  [agent thread-id on-ok on-error]
+  (-> (js/fetch (str harness-url "/api/threads/" (js/encodeURIComponent thread-id) "/rebuild")
+                #js {:method "POST"})
+      (.then (fn [^js resp]
+               (-> (.json resp)
+                   (.then (fn [^js data]
+                            (if (.-ok resp)
+                              (do (set! (.-threadId agent) (.-threadId data))
+                                  (.setMessages agent (.-messages data))
+                                  (on-ok (.-threadId data)))
+                              (on-error (or (.-error data) "恢复失败"))))))))
+      (.catch (fn [^js e] (on-error (.-message e))))))
+
+(defnc session-panel
+  "The conversations the log directory holds, and the way back into one.
+
+  恢复 hands the rebuilt history to the agent (thread id + messages) -- the
+  client re-owns the conversation, and the next input continues it as an
+  ordinary AG-UI run that appends to the SAME log. A refused rebuild shows the
+  named reason inline while every other row stays clickable. 新建会话 starts a
+  fresh thread the same agent-owned way: a new id, empty messages.
+
+  Subscribed to OnMessagesChanged as well as OnRunStatusChanged so the panel
+  re-renders when a restore lands (setMessages is a message change, not a run
+  status change)."
+  []
+  (let [^js ctx   (useAgent #js {:agentId "default"
+                                 :updates #js [(gobj/get UseAgentUpdate "OnRunStatusChanged")
+                                               (gobj/get UseAgentUpdate "OnMessagesChanged")]})
+        ^js agent (.-agent ctx)
+        [sessions set-sessions] (hooks/use-state nil)
+        [error    set-error]    (hooks/use-state nil)
+        [busy     set-busy]     (hooks/use-state nil)
+        current   (.-threadId agent)
+
+        refresh
+        (fn []
+          (fetch-threads! (fn [rows]
+                            (set-sessions rows)
+                            (set-error nil))
+                          set-error))
+
+        restore
+        (fn [thread-id]
+          (if (.-isRunning agent)
+            (set-error "有正在进行的运行，等它结束再恢复。")
+            (do (set-busy thread-id)
+                (restore-thread! agent thread-id
+                                 (fn [_]
+                                   (set-busy nil)
+                                   (set-error nil)
+                                   ;; the rebuild just appended its audit line to the
+                                   ;; log -- re-list so sizes and order stay honest
+                                   (fetch-threads! #(set-sessions %) set-error))
+                                 (fn [msg]
+                                   (set-busy nil)
+                                   (set-error msg))))))
+
+        new-session
+        (fn []
+          (set! (.-threadId agent) (str (js/crypto.randomUUID)))
+          (.setMessages agent #js [])
+          (set-error nil))]
+
+    (hooks/use-effect [] (refresh))
+
+    ($ :div {:style panel-style}
+       ($ :span {:style {:font-weight 600}} "会话")
+       ($ :button {:style ghost-style :on-click (fn [_] (refresh))} "刷新")
+       ($ :button {:style ghost-style :on-click (fn [_] (new-session))} "新建会话")
+       ($ :span {:style muted-style} "恢复后历史归本页持有，续聊照常走 AG-UI")
+       (when error
+         ($ :span {:style error-style} error))
+       (cond
+         (nil? sessions) nil
+         (empty? sessions) ($ :span {:style muted-style} "日志目录还没有会话")
+         :else
+         (into-array
+          (map (fn [^js t]
+                 (let [tid (.-threadId t)]
+                   ($ :span {:key tid :style row-style}
+                      ($ :span {:style (if (= tid current)
+                                         {:color "#1677ff" :font-weight 600}
+                                         muted-style)}
+                         tid)
+                      ($ :span {:style muted-style}
+                         (str (-> (js/Date. (.-lastActivity t)) (.toLocaleString))
+                              " · " (fmt-bytes (.-bytes t))))
+                      ($ :button {:style ghost-style
+                                  :disabled (= busy tid)
+                                  :on-click (fn [_] (restore tid))}
+                         (if (= busy tid) "恢复中…" "恢复")))))
+               sessions))))))
+
 ;; --------------------------------------------------------------------- the page
 
 (defnc App []
@@ -193,5 +342,6 @@
      ($ :div {:style {:height "100vh" :display "flex" :flex-direction "column"}}
         ($ ApprovalGate)
         ($ project-panel)
+        ($ session-panel)
         ($ :div {:style {:flex 1 :min-height 0}}
            ($ CopilotChat {:messageView message-view})))))

@@ -178,6 +178,7 @@ jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**�
 - `POST /api/threads/<stem>/rebuild` → `{:threadId .. :messages [..] :context [..]}`。messages = 种子（第一条 input 的 messages）+ 全部 event 帧折叠（`harness.frames/apply-frames`，reasoning、tool calls、tool results 都在），即客户端可重新持有并直接续聊的 AG-UI 形态；context 是会话启动时的 context。后续输入多份 input 只取第一份做种子——客户端的第二次 input 本就重述了此前全部历史，折叠进去只会重复。
 - **拒绝而非猜**：截断日志（末帧非 RUN_FINISHED/RUN_ERROR）、坏 JSON 行（指名行号）、无日志的 thread，一律指名 400——重建半截对话是最坏的失败模式。
 - 重建动作在**被重建的日志自身**落一行 `session/rebuilt` 审计线 `{:messages <count> :via "http"}`，`runId` null（重建发生在任何 run 之外）。重建只读日志，这一行是它唯一的痕迹。
+- UI 侧（06 号票，`app.cljs` 会话面板）：列出会话（stem/最后活动/大小）+ 刷新 + 新建会话；**恢复** = POST rebuild → 把 `threadId` 与 `messages` 写上 agent 实例。这在 agent 侧就是全部：`AbstractAgent.prepareRunAgentInput` 用 agent 自身的 `threadId`/`messages` 构造 `RunAgentInput`，所以下一条输入续写**同一个日志**，服务端零会话状态。刻意不走 CopilotKit 的 `setActiveThreadId` 显式线程路径——那会牵入 connectAgent 握手与消息清空规则，直连后端的客户端用不上。截断/损坏的指名 400 内联展示，面板不崩、可换会话/新建。
 
 ## 授权变更（session-configure）
 
