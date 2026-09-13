@@ -1,27 +1,30 @@
 (ns harness.memory
-  "The introspectable surface: the in-memory state and accessors eval (and the
-  agent through it) may freely read -- the frozen system prompt, the tool
+  "The introspectable surface AND the provider assembler, in one namespace: eval
+  and the agent through it may freely read the frozen system prompt, the tool
   registry (the immutable base plus this session's overlay), the config.edn
-  contents, and the calls parked for a human's approval. Nothing here ever
-  carries a secret: the ENV-sourced api-key and any raw provider that could
-  hold one live in harness.opaque, the non-introspectable counterpart of this
-  namespace.
+  contents, the calls parked for a human's approval -- and ask what provider a
+  session is serving from.
+
+  The former harness.opaque (the api-key, provider resolution, session
+  overrides) was merged in here: Clojure cannot actually wall a namespace off
+  from eval -- var-quote and resolve reach any var -- so the structural split
+  guarded nothing. The boundary it used to mark is now a WRITTEN DISCIPLINE in
+  prompt.md instead: the api-key is resolved in this namespace and must never be
+  read, printed, or returned; introspection answers with the four descriptive
+  fields, never the key; and the two override atoms below stay private.
 
   Where those files ARE is harness.home's business: the config root is
   ~/.clj-harness (relocatable via CLJ_HARNESS_HOME), and prompt.md is the one
   file that stays in the repository.
 
-  What is deliberately NOT here: a copy of a thread's history or of the provider
-  its run served with. The jsonl log already holds both, and a second copy in
-  memory can only drift from it -- so the log is the record, read it there.
-
-  The provider question is answered by ASKING harness.opaque (active-provider),
-  never by keeping a copy: opaque assembles the provider because that is where
-  the api-key legitimately lives, and this namespace is the introspectable face
-  of the answer."
+  What is deliberately NOT here: a copy of a thread's history. The jsonl log
+  already holds the conversation, and a second copy in memory can only drift
+  from it -- so the log is the record, read it there. The provider question is
+  answered by ASKING (effective-provider below), never by keeping a copy: the
+  resolution re-derives every call."
   (:require [clojure.edn :as edn]
-            [harness.home :as home]
-            [harness.opaque :as opaque]))
+            [clojure.string :as str]
+            [harness.home :as home]))
 
 ;; ------------------------------------------------------------------- prompt
 
@@ -245,7 +248,7 @@
   OVERRIDE is the session's OWN tier after the change -- the partial the next
   resolve-provider would consult as tier 3. :before / :after are slices (only
   the fields this call moved); :override is the whole tier, so a reader can
-  reconstruct the post-change session without consulting opaque. Drained, not
+  reconstruct the post-change session from this line alone. Drained, not
   read: the writer empties this after every run."
   [thread-id before after trigger override]
   (swap! provider-changes conj {:thread-id thread-id
@@ -284,11 +287,222 @@
   "config.edn, re-read every time so it can be edited while the process runs.
   This is the EDN half only (:protocol/:base-url/:model...) -- there is no
   api-key here and never will be: the key is resolved from .env/environment in
-  harness.opaque, which is where the effective provider is assembled.
+  the provider-resolution section below, which is where the effective provider
+  is assembled.
 
   The path comes from harness.home; a missing file is a named failure there."
   []
   (edn/read-string (home/config)))
+
+;; -------------------------------------------------------- provider resolution
+;;
+;; Merged in from the former harness.opaque, unchanged in behaviour. This is
+;; where the effective provider is ASSEMBLED, because that is the one place the
+;; api-key is legitimate -- and the one place it must never leak from. The
+;; resolution has four levels, each overriding the one before it, field by
+;; field (see resolve-provider). The boundary this section marks is prompt.md's
+;; written discipline, not the language: eval can reach every var here, and the
+;; rule it must follow is spelled out in prompt.md, not in visibility.
+
+;; TWO slots, on purpose -- they answer different questions and must not collide:
+;;
+;;   scripted-pins     a WHOLE provider, installed by tests (and replay) to take
+;;                     the place of config resolution entirely. It is the seam
+;;                     that drives the edge offline.
+;;   session-overrides a PARTIAL {field value}, the session's own configuration
+;;                     change (tier 3 of resolve-provider).
+;;
+;; Both are keyed by thread-id: one session reconfiguring itself must not
+;; silently reconfigure every other session in the process. A nil thread-id
+;; addresses the process-wide slot -- replay and offline tools run outside a
+;; session and use that one.
+(defonce ^:private scripted-pins (atom {}))
+(defonce ^:private session-overrides (atom {}))
+
+(defn use-provider!
+  "Pin THREAD-ID's session to a whole PROVIDER, bypassing the config files (and
+  the session override). Pass nil to drop the pin. This is how the edge is
+  exercised offline, against a scripted provider, without an api-key or a
+  network."
+  ([provider] (use-provider! nil provider))
+  ([thread-id provider]
+   (if (nil? provider)
+     (swap! scripted-pins dissoc thread-id)
+     (swap! scripted-pins assoc thread-id provider))))
+
+(defn pinned-provider
+  "THREAD-ID's scripted pin, or nil. A pin may carry a key, though a scripted
+  one does not -- which is one more reason introspection never returns a whole
+  provider map."
+  [thread-id]
+  (get @scripted-pins thread-id))
+
+(defn override-for
+  "THREAD-ID's session configuration override -- a PARTIAL {field value} -- or
+  nil. This is tier 3 of resolve-provider: the session's own change, not a test
+  seam."
+  [thread-id]
+  (get @session-overrides thread-id))
+
+(defn set-override!
+  "Replace THREAD-ID's session override with OV (a partial {field value} map), or
+  drop it entirely when OV is nil. Separate from use-provider! because a session
+  override is PARTIAL -- naming only what changes -- while a pin is a whole
+  provider."
+  [thread-id ov]
+  (if (nil? ov)
+    (swap! session-overrides dissoc thread-id)
+    (swap! session-overrides assoc thread-id ov)))
+
+(defn- parse-dotenv
+  "A .env file's contents -> a {name value} map. Handles the shapes the format
+  actually uses: `export` prefixes, surrounding single or double quotes,
+  `#` comments, blank lines, and values that themselves contain `=` (only the
+  first `=` splits).
+
+  We parse it ourselves rather than lean on the dotenv library because that
+  library resolves `.env` from the CURRENT DIRECTORY at namespace-load time and
+  caches it in a def -- so it cannot be pointed at harness.home, and it would
+  miss an edit made while the process runs. Both of those matter here."
+  [raw]
+  (into {}
+        (->> (str/split-lines raw)
+             (map str/trim)
+             (remove #(or (empty? %) (str/starts-with? % "#")))
+             (map #(str/split % #"=" 2))
+             (filter #(= 2 (count %)))
+             (map (fn [[k v]]
+                    [(str/replace (str/trim k) #"^export\s+" "")
+                     (let [v (str/trim v)]
+                       (if (and (>= (count v) 2)
+                                (or (and (str/starts-with? v "\"") (str/ends-with? v "\""))
+                                    (and (str/starts-with? v "'") (str/ends-with? v "'"))))
+                         (subs v 1 (dec (count v)))
+                         v))])))))
+
+(defn- api-key
+  "The API key, following the dotenv library's documented precedence: a value in
+  .env wins over a real environment variable. So .env is the single place that
+  decides, and setting a shell variable will NOT override it.
+
+  The file is harness.home's .env -- and is re-read every time, like config.edn,
+  so editing it takes effect without a restart. PRIVATE, and doubly so by
+  discipline: the key flows ONLY into resolve-provider's result, and prompt.md
+  forbids reaching for it any other way."
+  []
+  (let [f (home/dotenv-file)
+        from-file (when (.exists f) (get (parse-dotenv (slurp f :encoding "UTF-8"))
+                                         "HARNESS_API_KEY"))]
+    (or from-file (System/getenv "HARNESS_API_KEY"))))
+
+(def ^:private fields
+  "The four fields a provider is described by. Nothing else is inherited, so a
+  partial provider can never silently pick up a stray key from another level."
+  [:protocol :base-url :model :reasoning-effort])
+
+(defn providers
+  "providers.edn -> {name provider-map}. Re-read every time, like config.edn.
+
+  A MISSING file is an EMPTY registry, not an error: a config.edn that describes
+  its provider inline (the escape hatch) needs no registry at all. The named
+  failure belongs where a name is actually used -- see named."
+  []
+  (let [f (home/providers-file)]
+    (if (.exists f)
+      (edn/read-string (slurp f :encoding "UTF-8"))
+      {})))
+
+(defn- named
+  "Look NAME up in the registry. A name that is not there is a hard, NAMED
+  failure: falling back to nil would serve the run from nowhere and report the
+  problem as a confusing downstream error instead of 'no such provider'."
+  [registry name]
+  (or (get registry name)
+      (throw (ex-info (str "no provider named " (pr-str name) " in providers.edn"
+                           "; it defines " (pr-str (vec (sort (keys registry)))))
+                      {:name name :known (vec (sort (keys registry)))}))))
+
+(defn- default-base
+  "config.edn, the default tier. Three shapes are accepted, in this order:
+
+    {:provider :cheap}       a registry name; looked up in providers.edn
+    {:provider {..provider}} an inline map -- the escape hatch (try one endpoint
+                             once without registering it)
+    {:protocol .. :model ..} a FLAT provider, every field at the top level
+
+  The flat form is last and needs no registry at all: a config that describes
+  its provider directly is complete on its own, and is what a lone-provider
+  deployment naturally writes. Only when :provider is present and names a
+  missing entry does resolution fail -- and it fails NAMING the entry."
+  [registry cfg]
+  (let [base (cond
+               (map? (:provider cfg))  (:provider cfg)
+               (some? (:provider cfg)) (named registry (:provider cfg))
+               :else                   (select-keys cfg fields))]
+    ;; Whatever the shape, the default tier may ALSO override individual fields
+    ;; at the top level. That is why config.edn stays a tier instead of
+    ;; collapsing into the registry: you can tune one knob (usually
+    ;; :reasoning-effort) without minting a new registry entry.
+    (merge base (select-keys cfg fields))))
+
+(defn- overlay
+  "Apply a partial override: only the fields actually present win. A field left
+  out falls back to the tier below, which is what lets the three knobs move
+  independently."
+  [base over]
+  (merge base (select-keys over fields)))
+
+(defn resolve-provider
+  "The effective provider for THREAD-ID, plus where it came from.
+
+  Four tiers, each overriding the one before it FIELD BY FIELD (a tier that
+  names no value for a field leaves the one below it standing):
+
+    1. the named entry in providers.edn          (or an inline map in config.edn)
+    2. config.edn's default-tier field overrides  (:model / :reasoning-effort)
+    3. this session's override                    (the session-configure tool)
+    4. this run's request                         (REQUEST, from the input map)
+
+  Returns {:provider {.. :api-key ..} :source :default|:request|:inline}, where
+  the api-key is attached LAST and only here. The source is :inline when
+  config.edn describes its provider directly (an inline map or a flat set of
+  fields) rather than naming a registry entry -- the two are worth telling
+  apart in the audit trail. A THREAD-ID of nil resolves tiers 1-2 with no
+  session in play, which is what an offline tool wants.
+
+  REQUEST must not be routed through the prompt context -- it would become a
+  trailing user message and poison the provider's prefix cache."
+  ([thread-id] (resolve-provider thread-id nil))
+  ([thread-id request]
+   (let [registry (providers)
+         cfg      (config)
+         inline?  (not (keyword? (:provider cfg)))
+         base     (default-base registry cfg)
+         with-ses (overlay base (or (override-for thread-id) {}))
+         with-run (overlay with-ses (or (select-keys request fields) {}))
+         source   (cond
+                    (seq (select-keys request fields)) :request
+                    inline?                            :inline
+                    :else                              :default)]
+     {:provider (assoc with-run :api-key (api-key))
+      :source   source})))
+
+(defn effective-provider
+  "The provider for THREAD-ID, without a run request: tiers 1-3 plus the
+  ENV-sourced api-key. Offline tools and replay use this -- they run outside a
+  run, so there is no request to layer on top."
+  ([] (effective-provider nil))
+  ([thread-id] (:provider (resolve-provider thread-id))))
+
+(defn current-provider
+  "What the http edge serves from for THREAD-ID on this run: an explicit scripted
+  pin wins outright -- it is the test seam, and the tests that use it are not
+  exercising provider resolution. Otherwise the four-tier resolution runs, with
+  REQUEST layered on top."
+  ([thread-id] (current-provider thread-id nil))
+  ([thread-id request]
+   (or (pinned-provider thread-id)
+       (:provider (resolve-provider thread-id request)))))
 
 ;; -------------------------------------------------------------- introspection
 ;;
@@ -313,7 +527,7 @@
   "What THREAD-ID's session is serving from right now:
   {:protocol .. :base-url .. :model .. :reasoning-effort ..}.
 
-  Resolved live through harness.opaque -- the four-tier resolution, session
+  Resolved live through the four-tier resolution above -- the session
   override included -- but NEVER the api-key: that is copied out, field by
   field, so a future change to the resolver cannot leak one through here.
 
@@ -321,5 +535,5 @@
   is what an offline tool wants. The three knobs are independently movable, so
   any of them may be absent if no tier ever named it."
   [thread-id]
-  (let [p (opaque/effective-provider thread-id)]
+  (let [p (effective-provider thread-id)]
     (select-keys p [:protocol :base-url :model :reasoning-effort])))

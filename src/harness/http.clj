@@ -28,7 +28,6 @@
             [harness.event :as ev]
             [harness.home :as home]
             [harness.memory :as mem]
-            [harness.opaque :as opaque]
             [harness.loop :as loop]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
@@ -157,10 +156,10 @@
       ;; starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
       ;; so the client sees a terminated run rather than a broken stream.
       (let [[provider messages decisions resolved]
-            (try [(opaque/current-provider thread-id (:provider input))
+            (try [(mem/current-provider thread-id (:provider input))
                   (ag/inbound (:messages input) (mem/prompt) (:context input))
                   (resume-decisions (:resume input))
-                  (opaque/resolve-provider thread-id (:provider input))]
+                  (mem/resolve-provider thread-id (:provider input))]
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]
@@ -173,7 +172,7 @@
           ;; served by" before it meets the conversation. Later runs of the same
           ;; thread do not repeat it -- the timeline is init plus changes, not a
           ;; snapshot per run.
-          (when (and (nil? (opaque/pinned-provider thread-id))
+          (when (and (nil? (mem/pinned-provider thread-id))
                      (not (mem/init-logged? thread-id)))
             (log! thread-id run-id "provider/init"
                   (assoc (provider-line provider) :source (:source resolved)))

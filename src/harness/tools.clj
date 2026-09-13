@@ -14,8 +14,7 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [harness.event :as ev]
-            [harness.memory :as mem]
-            [harness.opaque :as opaque])
+            [harness.memory :as mem])
   (:import [java.util.regex Pattern]))
 
 ;; The tool registry itself lives in harness.memory (the introspectable
@@ -90,7 +89,7 @@
   Marks :requires-approval, so the call parks and a human decides before any of
   it takes effect -- the body only runs on an approved resume, and a veto means
   it never runs at all. The gate is a WORKFLOW convention, not a security
-  boundary: eval can still reach harness.opaque/use-provider! directly, and bash
+  boundary: eval can still reach harness.memory/use-provider! directly, and bash
   can still read .env. It is here to stop a slip, and it is labelled as such."
   [{:keys [provider model reasoning-effort]}]
   (let [thread-id mem/*thread-id*
@@ -101,17 +100,17 @@
     (when (empty? change)
       (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
     ;; :provider names a registry entry (a keyword) or is an inline map (the
-    ;; escape hatch). opaque validates a name against providers.edn, so a typo
+    ;; escape hatch). The resolution validates a name against providers.edn, so a typo
     ;; fails here, loudly, naming what it looked for.
-    (let [before (opaque/override-for thread-id)
+    (let [before (mem/override-for thread-id)
           after  (merge before change)]
-      (opaque/set-override! thread-id after)
+      (mem/set-override! thread-id after)
       ;; Tell the writer what moved. The edge drains this and lands a
       ;; provider/changed line after the approval/decided line for this call.
       ;; :trigger names the path that pressed the change (currently always
       ;; session-configure); :override is the FULL session override after this
       ;; change, so a reader can reconstruct post-change session state without
-      ;; consulting opaque.
+      ;; re-deriving it live.
       (mem/record-provider-change! thread-id before after "session-configure" after)
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."

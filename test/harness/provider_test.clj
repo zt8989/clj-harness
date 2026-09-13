@@ -11,7 +11,6 @@
             [clojure.test :refer [deftest is testing]]
             [harness.home :as home]
             [harness.memory :as mem]
-            [harness.opaque :as opaque]
             [harness.tools :as tools]))
 
 ;; ------------------------------------------------------------------ fixtures
@@ -44,7 +43,7 @@
 (deftest the-registry-supplies-the-base-provider
   (with-home "{:provider :cheap}\n" registry
     (fn []
-      (let [p (opaque/effective-provider "p-tier")]
+      (let [p (mem/effective-provider "p-tier")]
         (is (= :openai-completions (:protocol p)))
         (is (= "https://a/v1" (:base-url p)))
         (is (= "small" (:model p)))
@@ -54,7 +53,7 @@
 (deftest the-default-tier-overrides-fields-without-a-new-entry
   (with-home "{:provider :cheap :reasoning-effort \"low\"}\n" registry
     (fn []
-      (let [p (opaque/effective-provider "p-default")]
+      (let [p (mem/effective-provider "p-default")]
         (is (= "small" (:model p)) "the registry's model still stands")
         (is (= "low" (:reasoning-effort p)) "and the default tier tuned one field")))))
 
@@ -62,37 +61,37 @@
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
-        (opaque/set-override! "p-sess" {:model "medium"})
-        (let [p (opaque/effective-provider "p-sess")]
+        (mem/set-override! "p-sess" {:model "medium"})
+        (let [p (mem/effective-provider "p-sess")]
           (is (= "medium" (:model p)))
           (is (= :openai-completions (:protocol p)) "untouched fields inherit below"))
         (testing "and another session is untouched"
-          (is (= "small" (:model (opaque/effective-provider "p-sess-other")))))
-        (finally (opaque/set-override! "p-sess" nil))))))
+          (is (= "small" (:model (mem/effective-provider "p-sess-other")))))
+        (finally (mem/set-override! "p-sess" nil))))))
 
 (deftest a-run-request-sits-on-top-of-everything
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
-        (opaque/set-override! "p-req" {:model "medium"})
-        (let [{:keys [provider source]} (opaque/resolve-provider "p-req" {:model "biggest"})]
+        (mem/set-override! "p-req" {:model "medium"})
+        (let [{:keys [provider source]} (mem/resolve-provider "p-req" {:model "biggest"})]
           (is (= "biggest" (:model provider)))
           (is (= :request source)))
         (testing "with no request, the session's override is the top tier"
-          (is (= :default (:source (opaque/resolve-provider "p-req")))))
-        (finally (opaque/set-override! "p-req" nil))))))
+          (is (= :default (:source (mem/resolve-provider "p-req")))))
+        (finally (mem/set-override! "p-req" nil))))))
 
 (deftest a-missing-registry-is-empty-not-fatal
   ;; A config that describes its provider inline needs no registry at all.
   (with-home "{:protocol :fake :model \"flat\"}\n" nil
     (fn []
-      (is (= "flat" (:model (opaque/effective-provider "p-flat"))))
-      (is (= :inline (:source (opaque/resolve-provider "p-flat")))))))
+      (is (= "flat" (:model (mem/effective-provider "p-flat"))))
+      (is (= :inline (:source (mem/resolve-provider "p-flat")))))))
 
 (deftest a-named-but-missing-provider-fails-naming-what-it-looked-for
   (with-home "{:provider :nope}\n" registry
     (fn []
-      (let [e (try (opaque/effective-provider "p-bad") nil
+      (let [e (try (mem/effective-provider "p-bad") nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (some? e) "a name that is not in the registry is a hard failure")
         (is (str/includes? (ex-message e) "nope") "the message names the missing entry")
@@ -101,7 +100,7 @@
 (deftest the-api-key-is-attached-last-and-only-in-the-resolver
   (with-home "{:provider :cheap}\n" registry
     (fn []
-      (let [p (opaque/effective-provider "p-key")]
+      (let [p (mem/effective-provider "p-key")]
         (is (contains? p :api-key) "the assembled provider carries the key slot")
         (testing "but the introspectable answer deliberately does not"
           (let [a (mem/active-provider "p-key")]
@@ -125,9 +124,9 @@
                 :model "big" :reasoning-effort "high"}
                a)))
       (testing "a change is visible to the very next call -- nothing is cached"
-        (opaque/set-override! "t-act" {:model "bigger"})
+        (mem/set-override! "t-act" {:model "bigger"})
         (is (= "bigger" (:model (mem/active-provider "t-act"))))
-        (opaque/set-override! "t-act" nil))
+        (mem/set-override! "t-act" nil))
       (testing "and no api-key key exists, at any nesting depth"
         (is (not-any? #(str/includes? (str %) "api-key")
                       (tree-seq coll? seq (mem/active-provider "t-act"))))))))
@@ -173,21 +172,21 @@
       (let [{:keys [parked]} (configure! "t-conf" {:model "sneaky"})]
         (testing "with no decision yet, the call parks and nothing is written"
           (is (some? parked) "the seam reports the call as parked")
-          (is (nil? (opaque/override-for "t-conf")) "the session override is untouched"))))))
+          (is (nil? (mem/override-for "t-conf")) "the session override is untouched"))))))
 
 (deftest an-approved-configure-writes-only-what-it-names
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
-        (opaque/set-override! "t-ok" {:reasoning-effort "low"})
+        (mem/set-override! "t-ok" {:reasoning-effort "low"})
         (approve! "t-ok" "sc-ok" {:model "bigger"})
-        (let [ov (opaque/override-for "t-ok")]
+        (let [ov (mem/override-for "t-ok")]
           (is (= "bigger" (:model ov)))
           (is (= "low" (:reasoning-effort ov))
               "the field it did not name is left exactly as it was")
           (is (not (contains? ov :base-url))
               "and nothing it could not know about was invented"))
-        (finally (opaque/set-override! "t-ok" nil))))))
+        (finally (mem/set-override! "t-ok" nil))))))
 
 (deftest a-configure-with-nothing-to-change-is-refused
   (with-home "{:provider :cheap}\n" registry
@@ -197,17 +196,17 @@
       (let [{:keys [content error]} (approve! "t-empty" "sc-empty" {})]
         (is (true? error))
         (is (str/includes? content "nothing to change"))
-        (is (nil? (opaque/override-for "t-empty")) "and nothing was written")))))
+        (is (nil? (mem/override-for "t-empty")) "and nothing was written")))))
 
 (deftest a-vetoed-configure-never-writes
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
         (veto! "t-veto" "sc-veto" {:model "rejected"})
-        (is (nil? (opaque/override-for "t-veto")))
+        (is (nil? (mem/override-for "t-veto")))
         (testing "and no change was queued for the writer"
           (is (empty? (mem/take-provider-changes! "t-veto"))))
-        (finally (opaque/set-override! "t-veto" nil))))))
+        (finally (mem/set-override! "t-veto" nil))))))
 
 (deftest an-approved-configure-queues-one-change-for-the-writer
   (with-home "{:provider :cheap}\n" registry
@@ -221,7 +220,7 @@
               "the after side shows the new value"))
         (testing "and draining clears it -- the outbox is not read twice"
           (is (empty? (mem/take-provider-changes! "t-queue"))))
-        (finally (opaque/set-override! "t-queue" nil))))))
+        (finally (mem/set-override! "t-queue" nil))))))
 
 (deftest consecutive-changes-chain-before-and-after
   (with-home "{:provider :cheap}\n" registry
@@ -234,17 +233,17 @@
           (is (= "m1" (:model (:before b)))
               "the second change starts where the first ended")
           (is (= "m2" (:model (:after b)))))
-        (finally (opaque/set-override! "t-chain" nil))))))
+        (finally (mem/set-override! "t-chain" nil))))))
 
 (deftest the-change-is-scoped-to-its-own-thread
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
         (approve! "t-a" "sc-a" {:model "for-a"})
-        (is (= "for-a" (:model (opaque/effective-provider "t-a"))))
-        (is (= "small" (:model (opaque/effective-provider "t-b")))
+        (is (= "for-a" (:model (mem/effective-provider "t-a"))))
+        (is (= "small" (:model (mem/effective-provider "t-b")))
             "another session serves from the untouched default")
-        (finally (opaque/set-override! "t-a" nil))))))
+        (finally (mem/set-override! "t-a" nil))))))
 
 ;; -- provider/changed line shape: :trigger and :override ----------------
 
@@ -252,11 +251,11 @@
   "Every approved change carries :trigger (the path that pressed it -- currently
   always session-configure) and :override (the FULL session override after this
   change, so a reader can reconstruct post-change session state without asking
-  opaque)."
+  the resolution)."
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
-        (opaque/set-override! "t-tag" {:reasoning-effort "low"})
+        (mem/set-override! "t-tag" {:reasoning-effort "low"})
         (approve! "t-tag" "sc-tag" {:model "bigger"})
         (let [[c] (mem/take-provider-changes! "t-tag")]
           (is (some? c))
@@ -265,12 +264,12 @@
           (is (= {:model "bigger" :reasoning-effort "low"} (:override c))
               "the override is the full session slice after the change -- every
               field the session owns, not just what this call touched"))
-        (finally (opaque/set-override! "t-tag" nil))))))
+        (finally (mem/set-override! "t-tag" nil))))))
 
 (deftest consecutive-changes-pin-trigger-and-override-throughout
   "Chained changes all carry the same trigger, and each :override is the previous
   :override plus the new patch -- so a reader stepping through the timeline sees
-  the session evolving without consulting opaque."
+  the session evolving without consulting the resolution."
   (with-home "{:provider :cheap}\n" registry
     (fn []
       (try
@@ -285,4 +284,4 @@
                  (merge (:override a)
                         {:model "m2" :reasoning-effort "high"}))
               "the second change's override is the first one plus the new patch"))
-        (finally (opaque/set-override! "t-ch2" nil))))))
+        (finally (mem/set-override! "t-ch2" nil))))))

@@ -18,7 +18,6 @@
             [harness.ag-ui :as ag]
             [harness.home :as home]
             [harness.memory :as mem]
-            [harness.opaque :as opaque]
             [harness.loop :as loop]
             [harness.wire :as wire]))
 
@@ -109,7 +108,7 @@
   It does NOT append to the log. The writer lives at the http edge, and this namespace
   is deliberately the read side only; a resumed conversation therefore leaves no new
   trace on disk."
-  ([dir thread-id text] (resume! dir thread-id text (opaque/effective-provider thread-id)))
+  ([dir thread-id text] (resume! dir thread-id text (mem/effective-provider thread-id)))
   ([dir thread-id text provider]
      (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)

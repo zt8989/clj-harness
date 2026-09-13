@@ -4,8 +4,8 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,opaque,home}.clj` — 内核 + AG-UI 适配 + HTTP 边
-- `src/harness/memory.clj` / `src/harness/opaque.clj` — 一对：前者是可自省面（冻结 prompt、工具注册表、config.edn、待决审批），后者是不可自省面（api-key、provider override），`eval` 只被邀请进前者
+- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home}.clj` — 内核 + AG-UI 适配 + HTTP 边
+- `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加 provider 装配（四级解析 + api-key 解析）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
 - `dev/harness/{wire,replay,evals}.clj` — 客户端最小 applier、日志回放、eval 提取器（内核永不读日志）。`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
 
@@ -162,7 +162,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread 的 provider / model / reasoning-effort。**三字段各自独立可选**——只传要改的，其余保持当前值；空调用直接拒绝。**经人工审批后**生效（park 走 AG-UI 原生 interrupt，与工具审批同一条路径），否决则不生效且无 `provider/changed` 落盘。
 
-**性质：流程约定，不是安全边界。** `harness.opaque/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
+**性质：流程约定，不是安全边界。** `harness.memory/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
 
 ## 人工审批（pre-tool HITL）
 

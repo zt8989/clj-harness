@@ -12,7 +12,6 @@
             [harness.home :as home]
             [harness.http :as http]
             [harness.memory :as mem]
-            [harness.opaque :as opaque]
             [harness.replay :as replay]
             [harness.tools :as tools]
             [harness.wire :as wire])
@@ -42,7 +41,7 @@
     {\"a\" SCRIPT-A \"b\" SCRIPT-B}  per-thread scripts -- for a test whose
                             threads must consume turns in a known order
 
-  The pin is PER-THREAD, matching harness.opaque's resolution: a provider
+  The pin is PER-THREAD, matching harness.memory's resolution: a provider
   override is a session's, and the server looks it up by the request's threadId.
   There is deliberately no process-wide slot to fall back on -- a test that
   pinned globally would pass while the per-thread wiring was broken."
@@ -53,9 +52,9 @@
                 (map? threads) threads
                 (coll? threads) (into {} (map (fn [t] [t turns])) threads)
                 :else           {threads turns})]
-     (doseq [[t ts] pins] (opaque/use-provider! (str t) (fake/scripted ts)))
+     (doseq [[t ts] pins] (mem/use-provider! (str t) (fake/scripted ts)))
      (let [stop (http/start! {:port port})]
-       (try (f) (finally (stop) (doseq [t (keys pins)] (opaque/use-provider! (str t) nil))))))))
+       (try (f) (finally (stop) (doseq [t (keys pins)] (mem/use-provider! (str t) nil))))))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
@@ -456,7 +455,7 @@
          (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
          ;; Seed the session with a baseline the change can stand on. The change
          ;; line is the session's own slice, not the full provider.
-         (opaque/set-override! id {:model "small"})
+         (mem/set-override! id {:model "small"})
          ;; Drive the change the way a run would: park, approve, resume-transit.
          (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
                                         :function {:name "session-configure"
@@ -514,7 +513,7 @@
                    "the first change's override is the full session slice")
                (is (= "low" (get-in (:override b) [:reasoning-effort]))
                    "the second change's override reflects the latest session state"))))
-         (finally (stop) (opaque/set-override! id nil)))))))
+         (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
   (with-server
