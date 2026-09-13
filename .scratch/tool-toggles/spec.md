@@ -33,6 +33,17 @@
 
 ## 状态
 
-- 01（会话级开关）：未开始
-- 02（执行缝拒绝被关的调用）：未开始
-- 03（eval 集成 + prompt.md）：未开始
+- 01（会话级开关）：**已完成**（`eb3b1c7`）
+- 02（执行缝拒绝被关的调用）：**已完成**（`eb3b1c7`）
+- 03（eval 集成 + prompt.md）：**已完成**（`bc269a8`）
+
+## 已验证到什么程度（2026-09-13，三票全部落地）
+
+- **01 + 02（`eb3b1c7`）**：overlay 的 `:removed` 退役，改为 `:added` + `:disabled` 两轴。`session-unregister!` 对 base 名 no-op；撤回 addition 时连带清 `:disabled` 标记（`retracting-an-addition-clears-its-disabled-mark` 锁定——否则同名重插会继承僵尸关闭态）。`session-disable!` 对会话看不见的名字不造标记；`session-enable!` 与重复关/重复开均幂等；跨会话隔离。`effective-tools` 的 docstring 明写「DELIBERATELY NOT the set of tools that will run」。
+  - **实现坑**：`session-disable!` 需 `effective-tools` 判存在性，前者定义在前——加 `(declare effective-tools)` 解前向引用（Clojure 单遍编译）。另：禁用集合是 set，清标记用 `disj` 不是 `dissoc`（手滑过一次，5 个测试同时 CCE）。
+  - **执行缝**：`run!` 的 `cond` 首支插 `:disabled`，**先于** `missing-args` 与审批；`disabled-message` 明说 disabled 并给出 `session-enable!` 的自助路径。`event/tool-pre-execute` docstring 补 `:disabled` 取值。
+- **03（`bc269a8`）**：prompt.md 的 Self-extension 段把「读工具表」从 `@harness.memory/registry`（base）改为 `effective-tools`（本会话生效集）——原写法漏掉 overlay，agent 自己加/关的东西都不在里面。Session tools 段补 disable!/enable! 并写明「存在与可用是两个轴」「关闭不是禁止」。
+- **端到端**（`the-agent-toggles-a-tool-through-eval-and-reads-what-it-has`）：全程真 eval tool-call 形态——读自己的工具集（含会话新增、含被关的；别的会话读不到）→ 关 bash → 调用得 `:disabled`（不是 unknown）→ 再打开 → 真实执行。
+- **改写既有断言**（按本 spec 验收主线清单）：`session-add-and-remove-are-scoped-to-one-thread` 的两块改为 no-op 语义；`eval-joins-...` 尾部的 `unknown tool: read` 改为 `:disabled` → `:pass` 全形态。新增四组开关专项测试。
+- **全量**：73 tests / 380 assertions，全绿，连跑两次一致。
+- **`tools-lifecycle/spec.md`** 记入反转：remove 隐藏 base + remove 单调被推翻，`:disabled` 取值入缝；未被推翻的部分（base 不可变、overlay 落 memory、add shadow、thread-id 贯通、三相 + post 恒闭合）明列为地基。
