@@ -38,5 +38,5 @@
 - **01**：base 不可变 + per-thread overlay（add 覆盖 base 仅本会话胜出、remove 单调：先撤 added 再隐藏 base 名、不存在 no-op）；thread-id 贯通 http→run-chan/drive!→llm/stream!（multimethod 四参）→tools/specs、tools/run!（`*thread-id*` 在工具体周围绑定）；spy provider 断言 tools 数组按 thread 生效、跨 thread 隔离。
 - **02**：kernel 词汇表 7→10 种（:tool/pre-execute/execute/post-execute）；missing-args 在 pre 拒绝（跳过 execute 段）、unknown-tool 同、pass 三相齐全、execute 段带 error 消息、post 恒闭合；jsonl 行 kind "tools/*" 按 toolCallId 键控、pass 无 outcome 键；ag_ui 对三类事件零帧（**踩坑：case 连续裸常量是逐个配对，多常量共享结果必须加列表**——曾致 go loop 死于 Keyword→Associative CCE，生产者 >!! 永久阻塞，表现为集成测试挂死）。
 - **03**：eval tool-call 全形态走通 session-register! → 下一 run tools 数组含新工具且 dispatch 真实执行；session-unregister! base 工具 → 模型收到 "unknown tool: read"；prompt.md 增 session tools 章节。
-- **附带修复**：run! 内局部 `name` 遮蔽 core/name 的 CCE；loop_test 的 "slow" 从全局注册迁到会话 overlay（base 不再被测试污染）。
-- **最终全量**：55 tests / 247 assertions，全绿。
+- **附带修复**：run! 内局部 `name` 遮蔽 core/name 的 CCE；loop_test 的 "slow" 从全局注册迁到会话 overlay（base 不再被测试污染）；**畸形 JSON 参数在 JSON 解析处炸出外层 catch 时，:tool/execute（带 error）与 :tool/post-execute 原漏报，已补齐——"post 恒闭合"至此对所有路径成立（测试锁定：无 :tool/pre-execute、后两相齐全）**。
+- **最终全量**：55 tests / 249 assertions，全绿。
