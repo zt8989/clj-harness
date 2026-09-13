@@ -269,6 +269,15 @@ P3 各项彼此独立、可按需插队。
 - Windows 延续既有坑位：hook 命令与 MCP stdio spawn 走 Git Bash 钉路径；全部字节边界显式 UTF-8。
 - 每阶段交付自己的 UI 切片（P0 带项目选择与会话列表；P1 带工具/skills/MCP 面板只读版），不设统一的 P4。
 
+### jsonl 契约（随交付补充）
+
+- **`project/bound`**（01 号票，`harness.http` 管理边写入）：会话绑定项目目录的审计行。
+  payload `{:dir <绝对路径> :via "http"}`，`runId` 为 null（绑定发生在任何 run 之外）。
+  同一 thread 重复绑定各落一行，append-only 语义下读者以最后一行为准。
+  对应端点：`GET /api/project?threadId=..`（未绑定答 `:dir null`，不是错误）、
+  `POST /api/project {"threadId","dir"}`（`harness.project/bind!` 先校验目录存在且是目录，
+  校验失败的 400 指名报错且不落行）。
+
 ## 已验证到什么程度
 
 - 2026-09-13 提交 `0b131f0`（00 号票，预备重构）：harness.opaque 整体并入 harness.memory——结构屏障挡不住 eval 的 var-quote/resolve，屏障改由 prompt.md 的 secrets 纪律条款承担（禁读/禁暴露 api-key、禁 deref `scripted-pins`/`session-overrides`、禁返回 `:api-key`、provider 变更走 session-configure 审批流）。函数名不变，全部调用方 `opaque/*` 改 `mem/*`；`opaque` 私有 `config` 删除，resolve-provider 直用本 ns 的 `config`。全量测试 103 tests / 478 assertions 全绿（与基线持平）。架构铁律相应更新：不再有 memory/opaque 依赖环约束。

@@ -24,7 +24,8 @@
   resolution re-derives every call."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [harness.home :as home]))
+            [harness.home :as home]
+            [harness.project :as project]))
 
 ;; ------------------------------------------------------------------- prompt
 
@@ -537,3 +538,14 @@
   [thread-id]
   (let [p (effective-provider thread-id)]
     (select-keys p [:protocol :base-url :model :reasoning-effort])))
+
+(defn active-project
+  "The project directory THREAD-ID's session is bound to, as an absolute path
+  string -- or nil, the explicit answer for NO binding (never an error):
+  an unbound session is the normal case, and its file tools and shell run
+  exactly as they did before bindings existed.
+
+  Asked, not copied: the binding lives in harness.project and is re-read every
+  call, matching active-provider and log-path."
+  [thread-id]
+  (project/binding-for thread-id))

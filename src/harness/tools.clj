@@ -14,7 +14,8 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [harness.event :as ev]
-            [harness.memory :as mem])
+            [harness.memory :as mem]
+            [harness.project :as project])
   (:import [java.util.regex Pattern]))
 
 ;; The tool registry itself lives in harness.memory (the introspectable
@@ -52,23 +53,34 @@
 
 ;; --------------------------------------------------------------------- tools
 
-(defn- t-read [{:keys [path]}] (slurp path :encoding "UTF-8"))
+;; The file tools resolve their path through harness.project first: a session
+;; bound to a project directory gets its RELATIVE paths re-rooted there, an
+;; unbound session passes paths through unchanged (the pre-binding behavior,
+;; byte for byte). The tool's answer reports the RESOLVED path -- what actually
+;; happened, wherever the model's relative path ended up landing.
+
+(defn- t-read [{:keys [path]}]
+  (slurp (project/resolve-path mem/*thread-id* path) :encoding "UTF-8"))
 
 (defn- t-write [{:keys [path content]}]
-  (write-file! path content)
-  (str "wrote " (count content) " chars to " path))
+  (let [p (project/resolve-path mem/*thread-id* path)]
+    (write-file! p content)
+    (str "wrote " (count content) " chars to " p)))
 
 (defn- t-edit [{:keys [path old_string new_string]}]
-  (let [s (slurp path :encoding "UTF-8")
+  (let [p (project/resolve-path mem/*thread-id* path)
+        s (slurp p :encoding "UTF-8")
         n (count (re-seq (re-pattern (Pattern/quote old_string)) s))]
-    (when (zero? n) (throw (ex-info (str "old_string not found in " path) {})))
+    (when (zero? n) (throw (ex-info (str "old_string not found in " p) {})))
     (when (> n 1)
-      (throw (ex-info (str "old_string occurs " n " times in " path ", make it unique") {})))
-    (write-file! path (str/replace-first s old_string new_string))
-    (str "edited " path)))
+      (throw (ex-info (str "old_string occurs " n " times in " p ", make it unique") {})))
+    (write-file! p (str/replace-first s old_string new_string))
+    (str "edited " p)))
 
 (defn- t-bash [{:keys [command]}]
-  (let [{:keys [exit out err]} (shell/sh git-bash "-lc" command :out-enc "UTF-8")
+  (let [dir (project/binding-for mem/*thread-id*)
+        {:keys [exit out err]} (apply shell/sh git-bash "-lc" command :out-enc "UTF-8"
+                                      (when dir [:dir dir]))
         body (str out err)]
     (str (if (str/blank? body) "(no output)" body)
          (when-not (zero? exit) (str "\n[exit " exit "]")))))
@@ -133,25 +145,25 @@
 ;; ------------------------------------------------------------------ registry
 
 (mem/register! "read"
-  (tool "Read a file."
+  (tool "Read a file. A relative path resolves against this session's project directory when one is bound."
         {"path" {:type "string" :description "File path."}}
         [:path] t-read))
 
 (mem/register! "write"
-  (tool "Write a file, overwriting it."
+  (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound."
         {"path"    {:type "string" :description "File path."}
          "content" {:type "string" :description "Full new contents."}}
         [:path :content] t-write))
 
 (mem/register! "edit"
-  (tool "Replace an exact string in a file. Fails if old_string is absent or not unique."
+  (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound."
         {"path"       {:type "string" :description "File path."}
          "old_string" {:type "string" :description "Exact text to replace."}
          "new_string" {:type "string" :description "Replacement text."}}
         [:path :old_string :new_string] t-edit))
 
 (mem/register! "bash"
-  (tool "Run a shell command in Git Bash."
+  (tool "Run a shell command in Git Bash. The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
         [:command] t-bash))
 

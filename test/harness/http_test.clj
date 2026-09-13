@@ -527,3 +527,98 @@
        (is (= 204 (.statusCode resp)))
        (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
        (is (str/includes? (header resp "Access-Control-Allow-Methods") "POST"))))))
+
+;; ------------------------------------------------- the management edge
+
+(def ^:private project-dir
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-project"))
+
+(defn- api-call
+  "A plain JSON call to the management edge -- the /api/* endpoints, not the
+  AG-UI run endpoint. Returns the raw HttpResponse."
+  [port method path body]
+  (let [b (.header (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                   "Content-Type" "application/json")
+        b (if (= :post method)
+            (.POST b (HttpRequest$BodyPublishers/ofString (str body) StandardCharsets/UTF_8))
+            (.GET b))]
+    (.send (HttpClient/newHttpClient) (.build b)
+           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+
+(defn- read-json [resp]
+  (json/read-str (.body resp) :key-fn keyword))
+
+;; The scripted run that proves a bound thread's relative write lands in the
+;; project: turn one writes a RELATIVE path, turn two replies.
+(def ^:private bound-script
+  [{:content "" :tool-calls [{:id "c1" :name "write"
+                              :arguments {:path "e2e.txt" :content "landed"}}]}
+   {:content "done"}])
+
+(deftest the-project-endpoint-binds-records-and-refuses-cleanly
+  ;; The management edge itself: bind through /api/project, see the binding on
+  ;; GET, see exactly one project/bound audit line on disk -- and watch every
+  ;; bad input leave no trace at all.
+  (io/delete-file project-dir true)
+  (.mkdirs (io/file project-dir))
+  (with-server
+   8103
+   "it-proj"
+   (fn []
+     (let [tid (str "proj-" (java.util.UUID/randomUUID))]
+       (testing "an unbound thread answers with dir nil, not an error"
+         (let [resp (api-call 8103 :get (str "/api/project?threadId=" tid) nil)]
+           (is (= 200 (.statusCode resp)))
+           (is (= {:threadId tid :dir nil} (read-json resp)))
+           (is (= ui-origin (header resp "Access-Control-Allow-Origin")))))
+       (testing "a GET without threadId is a 400"
+         (is (= 400 (.statusCode (api-call 8103 :get "/api/project" nil)))))
+       (testing "binding a real directory answers with its absolute path"
+         (let [resp  (api-call 8103 :post "/api/project"
+                               (json/write-str {:threadId tid :dir project-dir}))
+               reply (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (.isAbsolute (io/file (:dir reply))))
+           (is (str/ends-with? (:dir reply) "harness-http-project"))
+           (testing "a GET now sees the binding"
+             (is (= (:dir reply)
+                    (:dir (read-json (api-call 8103 :get (str "/api/project?threadId=" tid) nil))))))))
+       (testing "binding a missing directory is a NAMED 400"
+         (let [resp (api-call 8103 :post "/api/project"
+                              (json/write-str {:threadId tid :dir (str project-dir "/nope")}))
+               reply (read-json resp)]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error reply) "no such directory"))))
+       (testing "a malformed body is a 400"
+         (is (= 400 (.statusCode (api-call 8103 :post "/api/project" "{not json")))))
+       (let [lines (mapv #(json/read-str % :key-fn keyword)
+                         (str/split-lines
+                          (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8")))
+             bound (filterv #(= "project/bound" (:kind %)) lines)]
+         (testing "exactly ONE project/bound audit line is on disk"
+           (is (= 1 (count bound)))
+           (is (nil? (:runId (first bound))) "a binding happens outside any run")
+           (is (str/ends-with? (get-in (first bound) [:payload :dir]) "harness-http-project"))
+           (is (= "http" (get-in (first bound) [:payload :via]))))
+         (testing "the two failed binds added no second line"
+           (is (= 1 (count (filter #(= "project/bound" (:kind %)) lines))))))))))
+
+(deftest a-bound-thread-writes-into-its-project-over-the-real-edge
+  ;; The full vertical: bind through the management edge the way the UI will,
+  ;; then a real AG-UI run whose scripted tool call writes a RELATIVE path --
+  ;; which must land inside the project directory, not the process cwd.
+  (io/delete-file project-dir true)
+  (.mkdirs (io/file project-dir))
+  (with-server
+   8104
+   {"proj-run" bound-script}
+   (fn []
+     (let [resp (api-call 8104 :post "/api/project"
+                          (json/write-str {:threadId "proj-run" :dir project-dir}))]
+       (is (= 200 (.statusCode resp))))
+     (let [frames (wire/frames-from-sse (.body (post-run 8104 "proj-run")))]
+       (testing "the run itself completed normally"
+         (is (= "RUN_FINISHED" (:type (last frames))))
+         (is (empty? (wire/violations frames)))))
+     (testing "the relative write landed INSIDE the project directory"
+       (is (= "landed" (slurp (io/file project-dir "e2e.txt") :encoding "UTF-8")))))))

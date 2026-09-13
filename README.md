@@ -4,7 +4,7 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home}.clj` — 内核 + AG-UI 适配 + HTTP 边
+- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home,project}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录
 - `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加 provider 装配（四级解析 + api-key 解析）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
 - `dev/harness/{wire,replay,evals}.clj` — 客户端最小 applier、日志回放、eval 提取器（内核永不读日志）。`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
@@ -156,7 +156,18 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 - **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含 `:protocol` / `:base-url` / `:model` / `:reasoning-effort` 四字段 + `:source`（`default` / `request` / `inline`），以及 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。
 - **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before <slice> :after <slice> :trigger "session-configure" :override <完整 session override>}`。`:before`/`:after` 是本次按下的 slice（仅命中的字段），`:override` 是按完之后 session 这一档的完整 shape——回放者拿到这一字段即可还原「按完 session 长什么样」，不必再向 opaque 询问。`:trigger` 标注是哪条路径按下的 change（当前唯一合法值 `"session-configure"`）。落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。
 
-读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，两种新行不参与回放——它们是审计轨迹，不是对话的一部分。
+读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，其余行不参与回放——它们是审计轨迹，不是对话的一部分。
+
+### 项目目录绑定（`/api/project` 与 `project/bound`）
+
+每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：read/write/edit 的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。绑定是**默认值不是围栏**：本 ns 只决定操作发生在哪，不管该不该发生（出界审批是下一票的事）。
+
+管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
+
+- `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
+- `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:dir <绝对路径> :via "http"}`，`runId` 为 null（绑定发生在任何 run 之外）。重复绑定各落一行，读者以最后一行为准。
+
+agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。
 
 ## 授权变更（session-configure）
 

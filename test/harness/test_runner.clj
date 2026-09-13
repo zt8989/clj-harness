@@ -26,6 +26,7 @@
     harness.replay-test
     harness.evals-test
     harness.provider-test
+    harness.project-test
     harness.http-test])
 
 (def ^:private tmp-home

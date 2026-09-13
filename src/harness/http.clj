@@ -1,6 +1,8 @@
 (ns harness.http
   "The AG-UI edge. One POST endpoint, SSE out, CORS so a browser app on :5173 can call
-  it directly (there is no proxy in front of us).
+  it directly (there is no proxy in front of us). Alongside it, a small management
+  edge of plain JSON endpoints -- currently /api/project, the session's
+  project-directory binding -- sharing the same CORS and logging.
 
   Also append-only JSONL logging: one file per thread, these line kinds.
 
@@ -19,16 +21,22 @@
                    the api-key was stripped. Never a per-run snapshot.
     \"provider/changed\" -- a mid-session provider change, before -> after, once
                    the approving human's decision has been consumed.
+    \"project/bound\" -- a session's project-directory binding, with the
+                   absolute path. Written by the /api/project endpoint, OUTSIDE
+                   any run (runId null). Rebinding lands another line; the
+                   reader takes the last one, like any append-only record.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
+            [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
             [harness.home :as home]
             [harness.memory :as mem]
             [harness.loop :as loop]
+            [harness.project :as project]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
 
@@ -37,7 +45,7 @@
 
 (def ^:private cors
   {"Access-Control-Allow-Origin"  ui-origin
-   "Access-Control-Allow-Methods" "POST, OPTIONS"
+   "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
    "Access-Control-Allow-Headers" "Content-Type"})
 
 ;; ------------------------------------------------------------------- logging
@@ -237,9 +245,82 @@
     ;; not block the worker that :on-open runs on.
     (hk/as-channel req {:on-open (fn [ch] (run-agent! ch input))})))
 
+;; ----------------------------------------------------- the management edge
+;;
+;; Plain request/response JSON, alongside the streaming AG-UI edge. Small on
+;; purpose: each endpoint is a thin wrapper over one harness namespace call.
+;; Responses are UTF-8 BYTES, like every other body this server writes -- the
+;; JVM default charset is GBK here.
+
+(defn- api-response [status body]
+  {:status  status
+   :headers (merge cors {"Content-Type" "application/json; charset=utf-8"})
+   :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
+
+(defn- query-params
+  "A request's raw query string -> a {name value} map. Hand-rolled because the
+  edge runs without ring middleware, and one parameter does not justify the
+  dependency's weight."
+  [^String qs]
+  (into {}
+        (for [kv (str/split (or qs "") #"&")
+              :when (seq kv)
+              :let [[k v] (str/split kv #"=" 2)]]
+          [(java.net.URLDecoder/decode k "UTF-8")
+           (java.net.URLDecoder/decode (or v "") "UTF-8")])))
+
+(defn- project-get
+  "GET /api/project?threadId=.. -- the thread's bound project directory, or
+  {:dir nil} for an unbound thread. Unbound is an answer, not an error."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")]
+    (if (str/blank? thread-id)
+      (api-response 400 {:error "missing threadId query parameter"})
+      (api-response 200 {:threadId thread-id
+                         :dir      (project/binding-for thread-id)}))))
+
+(defn- project-post
+  "POST /api/project {threadId, dir} -- bind the thread to the directory,
+  validate FIRST (a missing or non-directory path is a named 400 and leaves
+  no trace), then land the project/bound audit line. runId is nil on that
+  line because a binding happens OUTSIDE any run."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                     (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (str (:threadId ok)))
+      (api-response 400 {:error "missing threadId"})
+
+      (str/blank? (str (:dir ok)))
+      (api-response 400 {:error "missing dir"})
+
+      :else
+      (let [thread-id (str (:threadId ok))
+            bound     (try {:ok (project/bind! thread-id (str (:dir ok)))}
+                           (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error bound)]
+          (api-response 400 {:error error})
+          (let [abs (:ok bound)]
+            (log! thread-id nil "project/bound" {:dir abs :via "http"})
+            (api-response 200 {:threadId thread-id :dir abs})))))))
+
 (defn handler [req]
-  (if (= :options (:request-method req))
+  (cond
+    (= :options (:request-method req))
     {:status 204 :headers cors}
+
+    (= "/api/project" (:uri req))
+    (case (:request-method req)
+      :get  (project-get req)
+      :post (project-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    :else
     (handle-run req)))
 
 ;; ---------------------------------------------------------------------- start

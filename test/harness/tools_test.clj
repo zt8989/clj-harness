@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [harness.project :as project]
             [harness.tools :as tools]))
 
 (def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-tools-test"))
@@ -105,3 +106,46 @@
     ;; approval, which is a property of the tool, not of the list.
     (is (= ["bash" "edit" "eval" "read" "session-configure" "write"] names))
     (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
+
+(deftest a-bound-session-roots-relative-paths-at-its-project
+  (let [pdir (str (System/getProperty "java.io.tmpdir") "/harness-tools-project")]
+    (io/delete-file pdir true)
+    (.mkdirs (io/file pdir))
+    (project/bind! "tt-bound" pdir)
+    (letfn [(call-as [name args]
+              ;; run! binds *thread-id* to this thread around the tool body --
+              ;; exactly what a real run does -- which is what makes the tools
+              ;; consult the binding.
+              (tools/run! {:function {:name name :arguments (json/write-str args)}}
+                          "tt-bound"))]
+      (testing "a relative write lands in the project directory"
+        (let [{:keys [content error]} (call-as "write" {:path "marker.txt" :content "here"})]
+          (is (false? error))
+          (is (str/includes? content "marker.txt"))
+          (is (= "here" (slurp (str (io/file pdir "marker.txt")) :encoding "UTF-8")))))
+      (testing "a relative read reads from the project directory"
+        (is (= "here" (:content (call-as "read" {:path "marker.txt"})))))
+      (testing "an absolute path is not redirected"
+        (is (= "here" (:content (call-as "read" {:path (str pdir "/marker.txt")})))))
+      (testing "a relative edit re-roots too"
+        (let [{:keys [error]} (call-as "edit" {:path "marker.txt"
+                                               :old_string "here" :new_string "there"})]
+          (is (false? error))
+          (is (= "there" (slurp (str (io/file pdir "marker.txt")) :encoding "UTF-8")))))
+      (testing "bash runs with the project directory as its cwd"
+        ;; Proven WITHOUT parsing pwd: Git Bash prints POSIX-style paths
+        ;; (/c/Users/...) where the JVM says C:\Users\..., so instead cat a
+        ;; file that exists only in the project directory -- a relative cat
+        ;; finding it proves exactly where bash was sitting.
+        (let [{:keys [content error]} (call-as "bash" {:command "cat marker.txt"})]
+          (is (false? error))
+          (is (str/includes? content "there")))))
+    (testing "an unbound thread still resolves relative to the process cwd"
+      ;; The same relative read through a DIFFERENT thread: no binding, so the
+      ;; path passes through unchanged and lands in the process cwd.
+      (let [{:keys [content error]}
+            (tools/run! {:function {:name "read"
+                                    :arguments (json/write-str {:path "deps.edn"})}}
+                        "tt-unbound")]
+        (is (false? error))
+        (is (str/includes? content "{:paths"))))))

@@ -13,6 +13,12 @@ which is only the base. Anything you define takes effect only in THIS session an
 is gone when the process restarts -- and every `eval` call, its code and its
 result, is appended to this thread's log.
 
+Your project: ask `(harness.memory/active-project harness.memory/*thread-id*)`
+for the directory this session is bound to -- nil means none, which is normal.
+When bound, relative paths in read/write/edit resolve against that directory
+and bash runs with it as its working directory; absolute paths are never
+redirected.
+
 Secrets discipline -- FORBIDDEN, no exceptions:
   - reading or exposing the api-key. It is resolved inside `harness.memory` and
     must never be read, printed, returned, or written into any log or tool
