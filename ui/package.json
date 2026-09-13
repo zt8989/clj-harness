@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5173 --strictPort",
+    "dev": "vite",
     "build": "vite build",
     "verify": "node verify.mjs"
   },
@@ -15,10 +15,7 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.1",
-    "typescript": "^7.0.2",
+    "shadow-cljs": "^3.5.1",
     "vite": "^8.3.0"
   }
 }

@@ -7,6 +7,7 @@
 - `src/harness/{event,llm,loop,tools,ag_ui,http,memory,opaque}.clj` — 内核 + AG-UI 适配 + HTTP 边
 - `src/harness/memory.clj` / `src/harness/opaque.clj` — 一对：前者是可自省面（冻结 prompt、工具注册表、config.edn、待决审批），后者是不可自省面（api-key、provider override），`eval` 只被邀请进前者
 - `dev/harness/{wire,replay}.clj` — 客户端最小 applier 与日志回放（内核永不读日志）
+- `ui/src/harness/ui/{main,app,approval_gate}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.mjs` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
 - `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交
 - `config.edn` — 每轮重读的模型配置，`HARNESS_API_KEY` 在 `.env`（`lynxeyes/dotenv`，`.env` 覆盖真实环境变量）
 
@@ -15,6 +16,11 @@
 ## 前置
 
 - Java 17（本机默认字符集 GBK，代码所有字节↔字符串边界显式 UTF-8；`deps.clj` 启动器不读 `:jvm-opts`）
+- **OpenJDK 21**（`scoop install openjdk21`）——**只给 `ui/` 构建用**：shadow-cljs 3.x 编译要 Java 21，而全局默认仍是 17。构建时给子进程单独换 PATH，`scoop reset openjdk17` 保证全局不被改：
+  ```pwsh
+  cd ui
+  $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
+  ```
 - Clojure CLI（`scoop clj-deps` 安装）
 - Node.js 18+ / npm
 - Git Bash（已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出）
@@ -57,11 +63,19 @@ clojure -M:run
 ```pwsh
 cd ui
 npm install   # 首次
-npm run dev   # vite --port 5173 --strictPort
+npm run dev   # 拉起 shadow-cljs watch 并起 Vite 于 5173
 # 浏览器打开 http://localhost:5173
 ```
 
-`ui/src/App.tsx:7` 的 `HttpAgent({ url: "http://localhost:8080/" })` 经 `CopilotKit` 直连后端，无代理。
+构建要 Java 21（见"前置"），所以实际命令是：
+
+```pwsh
+cd ui
+$env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
+# 生产构建：$env:PATH = "..."; npm run build   → dist/
+```
+
+`ui/src/harness/ui/app.cljs` 的 `HttpAgent({ url: "http://localhost:8080/" })` 经 `CopilotKit` 直连后端，无代理。CLJS 改动由 shadow-cljs watch 自动重编译，Vite 感知到 `ui/cljs-out/` 变化即整页重载；首次编译约 25s，dev server 会等它落地再放行第一屏。
 
 ### 停止
 
@@ -92,7 +106,7 @@ npm run dev   # vite --port 5173 --strictPort
 
 被 park 的调用不发 `:tool/result`、不写 tool 消息——它还没被回答；它的工具消息落在 resume run 上。一份决定只消费一次；客户端拿未知 interruptId 来 resume 会被明确拒绝（猜一个批准是这里最坏的失败模式）。不做超时、不做跨进程持久化：人工一直不响应，该 thread 就一直待决。
 
-UI 侧 `ui/src/ApprovalGate.tsx` 用 CopilotKit 的 `useInterrupt` 渲染聊天内审批卡，批准 `resolve({decision:"approved"})`、否决 `cancel()`。
+UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 渲染聊天内审批卡（`ApprovalGate` 挂在 `app.cljs` 里 `CopilotChat` 之前）；批准 `resolve({decision:"approved"})`、否决 `cancel()`。卡片自行按 `reason === "tool-approval"` 认领属于它的 interrupt，工具名与参数从客户端自己的 `toolCalls` 里读，不让服务端回显。
 
 ## 验证
 

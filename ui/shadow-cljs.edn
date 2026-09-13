@@ -1,0 +1,10 @@
+{:source-paths ["src"]
+
+ ;; helix is the React wrapper; shadow-cljs itself rides in on the npm CLI's classpath.
+ :dependencies [[lilactown/helix "0.2.2"]]
+
+ :builds
+ {:app {:target :esm
+        :js-options {:js-provider :import}
+        :output-dir "cljs-out"
+        :modules {:main {:entries [harness.ui.main]}}}}}

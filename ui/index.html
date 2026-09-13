@@ -7,6 +7,21 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <!--
+      Two imports, and that is the whole entry.
+
+      `virtual:shadow-cljs/app` is shadow-cljs's compiled build, handed to Vite as a
+      module; the ClojureScript mounts itself on load, so there is nothing to call.
+
+      The stylesheet is named rather than inherited. CopilotKit's module does import
+      its own CSS, and its package.json does list `**/*.css` under sideEffects -- but
+      that import does not survive the production pipeline, so relying on it ships an
+      unstyled chat. Naming it costs one line and Vite still owns the bundling: the
+      sheet lands in dist as a hashed asset, no copying involved.
+    -->
+    <script type="module">
+      import "@copilotkit/react-core/v2/styles.css";
+      import "virtual:shadow-cljs/app";
+    </script>
   </body>
 </html>
