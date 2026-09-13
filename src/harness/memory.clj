@@ -1,9 +1,11 @@
 (ns harness.memory
   "The introspectable surface: the in-memory state and accessors eval (and the
   agent through it) may freely read -- the frozen system prompt, the tool
-  registry, and the config.edn contents. Nothing here ever carries a secret:
-  the ENV-sourced api-key and any raw provider that could hold one live in
-  harness.opaque, the non-introspectable counterpart of this namespace."
+  registry (the immutable base plus this session's overlay), the config.edn
+  contents, and the calls parked for a human's approval. Nothing here ever
+  carries a secret: the ENV-sourced api-key and any raw provider that could
+  hold one live in harness.opaque, the non-introspectable counterpart of this
+  namespace."
   (:require [clojure.edn :as edn]))
 
 ;; ------------------------------------------------------------------- prompt

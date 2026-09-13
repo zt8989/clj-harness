@@ -68,3 +68,16 @@
 - verify 脚本的合规性依赖真模型：弱模型会把"调用某工具"的轮次答成纯 reasoning（无文本、无工具调用）。脚本对每个合规依赖轮做最多 3 次重试并如实打印 note —— 本次第 4 步就用到了重试。park 之后的全部断言与模型无关，那半段才是这份脚本真正证明的东西。
 - 未覆盖：真机上多 interrupt 同时 park 的 UI 表现（离线有覆盖）；过期（非目标）；跨进程重启后 resume（非目标，且被 `resume-decisions` 明确拒绝）。
 - 环境注记：本机沙箱会把服务进程对 workspace 之外的写入重定向，`~/.lisp-harness/logs/*.jsonl` 在宿主机不可见。真机验证因此只走 wire、不读 jsonl；jsonl 的审批行（`tools/pre-execute` 的 `needs-approval`、`approval/decided`）由 `http_test` 在进程内覆盖。
+
+## code-review 偏差记录（2026-09-13，固定点 b3a4da4，两轴）
+
+审查本特性五个提交（`8151a38`/`531ad93`/`bbb27f0`/`840a319`/`aa2b4a5`）后发现四处 **spec 与实现不符**，逐条处置：
+
+1. **jsonl 新增了 `approval/decided` 这一 kind，而决策 L19 写的是"零新增 kind"。** 以实现为准，该 kind 也确实必要：决定行要同时携带 interruptId 与客户端 payload，而 `tools/pre-execute` 行只键控 toolCallId、装不下这两者。L19 的"零新增 kind"只对**生命周期相**成立（相未增，新增语义由 pre-execute 的 outcome 承载），对**边的审计行**不成立——原措辞过窄。
+2. **park 记录缺 `:run-id`（决策 L20 列了 run-id）。** 实现是 `{:thread-id :tool-call-id :name :args}`。建议**接受该偏差、不补字段**：run-id 无消费者（重放只需 thread-id + tool-call-id + name + args），且 `tools/run!` 的签名里本就没有 run-id，补它等于为一个不存在的需求把 run-id 贯通整条缝。
+3. **"eval 侧没有伪造入口"不准确（决策 L20）。** `harness.memory/decide-approval!` 是公开函数，eval 确实能调用它——但**不可利用**：`loop/replay!` 在 `tools/run!` 之前必定用客户端的 verdict 覆写同一条记录，而 `take-decision!` 只在重放路径被调用，所以预置的假 verdict 一定先被真 verdict 覆盖，凭它执行不了任何工具。准确措辞是"eval 侧没有**可用**的伪造入口"。
+4. **`event.clj` 的 `tool-pre-execute` docstring 漏列 `:approved` / `:vetoed`**（`tools.clj` 自己的 docstring 本来是对的）；`harness.memory` 的 ns docstring 也未同步新增的会话 overlay 与待决审批。**两处均已修**。
+
+审查同时确认（这些是**站得住**的部分，勿再怀疑）：验收主线 1–5 全部成立；"否决回灌的是一条普通 `TOOL_CALL_RESULT`"成立——`ag_ui.clj` 的 `:tool/result` 转换从不下发 `:error`，结果上那个 `:error true` 到不了 wire；未知 interrupt 在边与重放两处都拒绝而非猜成批准；决定确实由 `swap-vals!` 原子消费一次。
+
+仍未处置（留给牛总定夺）：`take-decision!`/`decide-approval!` 的命名在 `decision`/`verdict` 之间摇摆；`tools.clj` 的 approval 分支先算 `existing`、`park` 内又重算一次 `parked-for-call`；边与重放两处的 `"unknown interrupt: "` 守卫逐字重复；`{:id ..}` 在 `tools.clj` 的 parked 映射里是 tool-call-id、在 `event.clj` 的 `run-interrupt` 里是 interrupt-id，同键反义。这些是判断项，未改。

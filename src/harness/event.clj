@@ -22,10 +22,12 @@
 
 (defn tool-pre-execute
   "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool,
-  :missing-args, or :needs-approval -- the last one parks the call for a human
-  decision: it does not execute, and its :tool/post-execute still closes this
-  transit of the seam immediately. MISSING names the absent required arguments
-  on :missing-args."
+  :missing-args, :needs-approval, :approved, or :vetoed. :needs-approval parks
+  the call for a human decision: it does not execute, and its :tool/post-execute
+  still closes this transit of the seam immediately. A decided call crosses the
+  seam a SECOND time -- :approved executes it, :vetoed answers it without
+  executing -- so one toolCallId can carry two pre-execute lines; read them in
+  time order. MISSING names the absent required arguments on :missing-args."
   [id name outcome missing]
   {:type :tool/pre-execute :id id :name name :outcome outcome :missing missing})
 
