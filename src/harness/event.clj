@@ -1,9 +1,13 @@
 (ns harness.event
-  "The kernel's whole vocabulary: ten event kinds. Everything AG-UI-shaped
+  "The kernel's whole vocabulary: eleven event kinds. Everything AG-UI-shaped
   is derived from these by harness.ag-ui, never produced here; the three
   tool-lifecycle kinds (:tool/pre-execute, :tool/execute, :tool/post-execute)
   carry no wire frame at all -- the http edge turns them into jsonl audit
-  lines, never into AG-UI frames.")
+  lines, never into AG-UI frames.
+
+  :run/interrupt is the second terminal event: a run that parks calls for a
+  human decision ends with it instead of :run/end, so exactly one of the two
+  closes any run.")
 
 (defn run-start [] {:type :run/start})
 (defn text-delta [text] {:type :text/delta :text text})
@@ -17,8 +21,11 @@
   {:type :tool/result :id id :content content :error error?})
 
 (defn tool-pre-execute
-  "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool or
-  :missing-args; MISSING names the absent required arguments on the latter."
+  "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool,
+  :missing-args, or :needs-approval -- the last one parks the call for a human
+  decision: it does not execute, and its :tool/post-execute still closes this
+  transit of the seam immediately. MISSING names the absent required arguments
+  on :missing-args."
   [id name outcome missing]
   {:type :tool/pre-execute :id id :name name :outcome outcome :missing missing})
 
@@ -33,4 +40,12 @@
   [id name] {:type :tool/post-execute :id id :name name})
 
 (defn run-end [] {:type :run/end})
+
+(defn run-interrupt
+  "The run stops with calls parked pending a human decision. INTS carries the
+  parked calls in call order, facts only -- {:id <interrupt-id> :tool-call-id ..
+  :name .. :args <json-string>}. The id is the correlation key the client hands
+  back on resume. Terminal: a run emits this or :run/end, never both."
+  [ints] {:type :run/interrupt :interrupts (vec ints)})
+
 (defn run-error [message] {:type :run/error :message message})

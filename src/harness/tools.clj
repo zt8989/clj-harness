@@ -129,16 +129,29 @@
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
+(defn- approval-required?
+  "A call parks when either the tool declares it or this thread's session asked
+  for it. Union, so a session can tighten the base without touching it."
+  [tool name thread-id]
+  (or (:requires-approval tool) (mem/session-approval-required? thread-id name)))
+
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
-    :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool or
-                           :missing-args (with the missing names)
+    :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
+                           :missing-args (with the missing names), or
+                           :needs-approval
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
   A call that never passes pre-execute (unknown tool, missing arguments) skips
   the :tool/execute phase, but its :tool/post-execute still arrives -- the
-  lifecycle is always closed."
+  lifecycle is always closed.
+
+  :needs-approval parks a well-formed call for a human decision: the tool body
+  does NOT run, no :tool/result is produced, and this transit closes at once
+  (the seam looked, the call is now the human's). The returned map carries
+  :parked so the loop can stop the run on an interrupt; the parked record lives
+  in harness.memory under the interrupt id, which is what a resume names."
   ([call] (run! call nil nil))
   ([call thread-id] (run! call thread-id nil))
   ([{:keys [id function] :as _call} thread-id on-phase]
@@ -146,15 +159,27 @@
          {:keys [name arguments]} function]
      (if-let [tool (get (mem/effective-tools thread-id) name)]
        (try
-         (let [parsed (json/read-str (if (str/blank? arguments) "{}" arguments)
-                                     :key-fn keyword)
+         (let [parsed  (json/read-str (if (str/blank? arguments) "{}" arguments)
+                                      :key-fn keyword)
                missing (missing-args tool parsed)]
-           (if (seq missing)
+           (cond
+             (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))
                  (report (ev/tool-post-execute id name))
                  {:content (str "missing required argument(s): "
                                 (str/join ", " (map (fn [k] (clojure.core/name k)) missing)))
                   :error true})
+
+             (approval-required? tool name thread-id)
+             (let [interrupt-id (str (java.util.UUID/randomUUID))]
+               (mem/park-approval! interrupt-id {:thread-id thread-id :tool-call-id id
+                                                 :name name :args arguments})
+               (report (ev/tool-pre-execute id name :needs-approval []))
+               (report (ev/tool-post-execute id name))
+               {:content "" :error false
+                :parked {:interrupt-id interrupt-id :id id :name name :args arguments}})
+
+             :else
              (do (report (ev/tool-pre-execute id name :pass []))
                  ;; *thread-id* is bound around the tool body so code running
                  ;; inside a tool -- eval above all -- can address its own

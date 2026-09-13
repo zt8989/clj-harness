@@ -96,6 +96,27 @@
               "TEXT_MESSAGE_START" "TEXT_MESSAGE_END" "RUN_FINISHED"]
              (types frames))))))
 
+(deftest an-interrupt-closes-the-run-with-an-outcome
+  (let [frames (wire [(ev/run-start)
+                      (ev/text-delta "wait")
+                      (ev/tool-call "c1" "bash" "{\"command\":\"rm -rf /\"}")
+                      (ev/run-interrupt [{:id "int-1" :tool-call-id "c1" :name "bash"
+                                          :args "{\"command\":\"rm -rf /\"}"}])])
+        last-f (last frames)]
+    (is (empty? (wire/violations frames)))
+    (testing "the terminal frame is still RUN_FINISHED, now carrying the interrupt"
+      (is (= "RUN_FINISHED" (:type last-f)))
+      (is (= "interrupt" (get-in last-f [:outcome :type])))
+      (is (= ["int-1"] (mapv :id (get-in last-f [:outcome :interrupts])))))
+    (testing "the interrupt object carries only the keys the shipped schema defines"
+      (let [int (first (get-in last-f [:outcome :interrupts]))]
+        (is (= #{:id :reason :message :toolCallId} (set (keys int))))
+        (is (= "c1" (:toolCallId int)))
+        (is (string? (:message int)))))
+    (testing "the parked call is announced as a call, and no result follows it"
+      (is (= "bash" (:toolCallName (first (filter #(= "TOOL_CALL_START" (:type %)) frames)))))
+      (is (not-any? #(= "TOOL_CALL_RESULT" (:type %)) frames)))))
+
 (deftest an-error-closes-whatever-is-open
   (let [frames (wire [(ev/run-start)
                       (ev/reasoning-delta "x") (ev/text-delta "y")

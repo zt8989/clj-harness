@@ -19,42 +19,67 @@
   still appends the tool messages in the provider's call order: whatever the
   completion order was, each tool_call_id is answered exactly once, in the
   order the calls were made. Conversion to AG-UI frames stays serial at the
-  consumer, so ag/outbound's message-id atom never races."
+  consumer, so ag/outbound's message-id atom never races.
+
+  A call the seam parked (:needs-approval) never ran and is left UNANSWERED --
+  no :tool/result, no tool message -- and the run ends on :run/interrupt instead
+  of :run/end: the conversation is now the human's to decide. Its tool message
+  lands on the resume run, after the decision."
   [provider messages emit {:keys [thread-id] :as _opts}]
   (let [history (atom (vec messages))]
     (emit (ev/run-start))
     (try
-      (loop []
-        (let [assistant (llm/stream! provider @history emit thread-id)
-              calls     (:tool_calls assistant)]
-          (swap! history conj assistant)
-          (when (seq calls)
-            ;; One buffered channel per call: the tool thread never blocks on
-            ;; put, and alts!! over them hands back results as they finish.
-            ;; The channels are deliberately never closed -- alts!! treats a
-            ;; closed empty port as ready-with-nil, which would let a drain
-            ;; swallow a phantom nil and strand a real result.
-            (let [chs  (mapv (fn [{:keys [id] :as call}]
-                               (let [ch (async/chan 1)]
-                                 (async/thread
-                                   ;; EMIT doubles as the lifecycle on-phase:
-                                   ;; the seam's pre/execute/post events ride the
-                                   ;; same channel out to the edge.
-                                   (let [{:keys [content error]} (tools/run! call thread-id emit)]
-                                     (async/>!! ch {:id id :content content :error error})))
-                                 ch))
-                             calls)
-                  done (atom {})]
-              (dotimes [_ (count chs)]
-                ;; alts!! returns [value port]; the value carries its own id.
-                (let [[{:keys [id content error] :as result} _] (async/alts!! chs)]
-                  (emit (ev/tool-result id content error))
-                  (swap! done assoc id result)))
-              (doseq [{:keys [id]} calls]
-                (swap! history conj {:role "tool" :tool_call_id id
-                                     :content (:content (@done id))})))
-            (recur))))
-      (emit (ev/run-end))
+      (let [parked
+            (loop []
+              (let [assistant (llm/stream! provider @history emit thread-id)
+                    calls     (:tool_calls assistant)]
+                (swap! history conj assistant)
+                (if (seq calls)
+                  ;; One buffered channel per call: the tool thread never blocks
+                  ;; on put, and alts!! over them hands back results as they
+                  ;; finish. The channels are deliberately never closed --
+                  ;; alts!! treats a closed empty port as ready-with-nil, which
+                  ;; would let a drain swallow a phantom nil and strand a real
+                  ;; result.
+                  (let [chs  (mapv (fn [{:keys [id] :as call}]
+                                     (let [ch (async/chan 1)]
+                                       (async/thread
+                                         ;; EMIT doubles as the lifecycle
+                                         ;; on-phase: the seam's pre/execute/post
+                                         ;; events ride the same channel out to
+                                         ;; the edge.
+                                         (let [{:keys [content error parked]}
+                                               (tools/run! call thread-id emit)]
+                                           (async/>!! ch {:id id :content content
+                                                          :error error :parked parked})))
+                                       ch))
+                                   calls)
+                        done (atom {})]
+                    (dotimes [_ (count chs)]
+                      ;; alts!! returns [value port]; the value carries its own
+                      ;; id, so completion order needs no bookkeeping. A parked
+                      ;; call reports no result -- it has not been answered.
+                      (let [[result _] (async/alts!! chs)]
+                        (when (nil? (:parked result))
+                          (emit (ev/tool-result (:id result) (:content result) (:error result))))
+                        (swap! done assoc (:id result) result)))
+                    (let [results (mapv #(get @done (:id %)) calls)
+                          parked  (vec (keep :parked results))]
+                      ;; Answer every call that actually ran; a parked call
+                      ;; stays unanswered until a human decides.
+                      (doseq [{:keys [id content] :as result} results
+                              :when (nil? (:parked result))]
+                        (swap! history conj {:role "tool" :tool_call_id id :content content}))
+                      (if (seq parked)
+                        parked
+                        (recur))))
+                  nil)))]
+        (emit (if (seq parked)
+                (ev/run-interrupt
+                 (mapv (fn [{:keys [interrupt-id id name args]}]
+                         {:id interrupt-id :tool-call-id id :name name :args args})
+                       parked))
+                (ev/run-end))))
       (catch Throwable t
         (emit (ev/run-error (ex-message t)))))
     @history))

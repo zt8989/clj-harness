@@ -58,6 +58,16 @@
                                 ;; client, not by reading the spec.
                                 {:type "REASONING_MESSAGE_START" :messageId id :role "reasoning"})))))
 
+(defn- interrupt-frame
+  "One parked call -> the wire's interrupt object. AG-UI validates this shape
+  strictly: id and reason are required, message and toolCallId optional, and the
+  human-facing line is MESSAGE -- a client renders that, not reason."
+  [{:keys [id tool-call-id name args]}]
+  {:id id
+   :reason "tool-approval"
+   :message (str "Approve `" name "`? arguments: " args)
+   :toolCallId tool-call-id})
+
 (defn- step [s ev]
   (case (:type ev)
     :run/start
@@ -106,6 +116,18 @@
     (-> s close-reasoning close-text
           (update :frames conj {:type "RUN_FINISHED"
                                 :threadId (:thread-id s) :runId (:run-id s)}))
+
+    :run/interrupt
+    ;; The other terminal: same frame type, an outcome that names the parked
+    ;; calls a human must decide. RUN_FINISHED is still the closing frame, so
+    ;; the edge's terminal framing and the client's stream handling are
+    ;; unchanged; the client turns outcome.interrupts into pendingInterrupts.
+    (-> s close-reasoning close-text
+          (update :frames conj {:type "RUN_FINISHED"
+                                :threadId (:thread-id s) :runId (:run-id s)
+                                :outcome {:type "interrupt"
+                                          :interrupts (mapv interrupt-frame
+                                                            (:interrupts ev))}}))
 
     :run/error
     (-> s close-reasoning close-text

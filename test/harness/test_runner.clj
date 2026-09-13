@@ -8,6 +8,7 @@
     harness.llm-test
     harness.tools-test
     harness.session-tools-test
+    harness.approval-test
     harness.loop-test
     harness.ag-ui-test
     harness.replay-test

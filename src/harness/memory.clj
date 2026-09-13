@@ -75,6 +75,49 @@
     (let [{:keys [added removed]} (get @overlays thread-id {:added {} :removed #{}})]
       (into (apply dissoc @registry removed) added))))
 
+;; --------------------------------------------------------------- approvals
+
+(defonce ^:private session-approvals
+  (atom {}))
+;; thread-id -> #{name}
+
+(defn session-require-approval!
+  "Make every call of NAME park for a human decision in THREAD-ID's session only.
+  Session-scoped exactly like the tool overlay: another thread is unaffected, and
+  the process-wide base registry is never touched. The union of this set and the
+  tool's own :requires-approval flag is what parks a call."
+  [thread-id name]
+  (swap! session-approvals update thread-id (fnil conj #{}) name))
+
+(defn session-approval-required?
+  "Does THREAD-ID's session require a human decision for NAME?"
+  [thread-id name]
+  (contains? (get @session-approvals thread-id #{}) name))
+
+(defonce ^:private parked-registry
+  (atom {}))
+;; interrupt-id -> {:thread-id .. :tool-call-id .. :name .. :args ..}
+
+(defn park-approval!
+  "Record a parked call under INTERRUPT-ID -- the correlation key a client hands
+  back on resume. Deliberately process-local: a restart loses the parking, and a
+  resume naming an interrupt this process never parked is answered as unknown
+  rather than guessed at. Never persisted, never read back from disk."
+  [interrupt-id rec]
+  (swap! parked-registry assoc interrupt-id rec))
+
+(defn parked
+  "The parked record for INTERRUPT-ID, or nil. Part of the introspectable
+  surface: an agent may look up a call of its own that is waiting on a human."
+  [interrupt-id]
+  (get @parked-registry interrupt-id))
+
+(defn parked-calls
+  "interrupt-id -> parked record, for THREAD-ID (every thread when nil)."
+  ([] @parked-registry)
+  ([thread-id]
+   (into {} (filter #(= thread-id (:thread-id (val %))) @parked-registry))))
+
 ;; ----------------------------------------------------------------- sessions
 
 (defonce ^:private sessions
