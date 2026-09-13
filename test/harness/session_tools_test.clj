@@ -275,3 +275,57 @@
         (is (false? (:error result)))
         ;; t-read returns the file's CONTENTS -- assert on something in them.
         (is (str/includes? (str (:content result)) ":deps"))))))
+
+(deftest the-agent-toggles-a-tool-through-eval-and-reads-what-it-has
+  ;; The whole point of the feature, end to end and through the real tool call
+  ;; shape: the agent switches a tool off by hand, calls it and is told it is
+  ;; disabled, then switches it back on -- without ever losing sight of it.
+  (let [eval! (fn [thread-id code]
+                (tools/run! {:function {:name "eval"
+                                        :arguments (json/write-str {:code code})}}
+                            thread-id))
+        call  (fn [thread-id code]
+                (let [{:keys [content error]}
+                      (eval! thread-id code)]
+                  (is (false? error) (str "eval failed: " content))
+                  content))
+        seen  (fn [thread-id]
+                (call thread-id
+                      "(sort (keys (harness.memory/effective-tools
+                                     harness.memory/*thread-id*)))"))]
+    (testing "the toolset the agent reads reflects its OWN session, not the base"
+      (call "t-tog" "(harness.memory/session-register! harness.memory/*thread-id*
+                       \"probe\" {:description \"probe\"
+                                  :parameters {:type \"object\" :properties {}}
+                                  :required [] :run (fn [_] \"pong\")})")
+      (let [names (seen "t-tog")]
+        (is (str/includes? names "probe") "the session's own addition shows up")
+        (is (str/includes? names "bash") "and so do the base tools")
+        (is (not (str/includes? (seen "t-tog-other") "probe"))
+            "another session's read does not")))
+    (testing "a disabled tool is still in the toolset the agent reads"
+      (call "t-tog" "(harness.memory/session-disable! harness.memory/*thread-id* \"bash\")")
+      (is (str/includes? (seen "t-tog") "bash")
+          "disabling never removes it from what the agent sees"))
+    (testing "calling it reports disabled, never unknown"
+      (let [events (drain-events
+                    (fake/scripted [{:content ""
+                                     :tool-calls [{:id "d1" :name "bash"
+                                                   :arguments {:command "echo hi"}}]}
+                                    {:content "done"}])
+                    "t-tog")
+            result (first (filter #(= :tool/result (:type %)) events))]
+        (is (true? (:error result)))
+        (is (str/includes? (str (:content result)) "disabled"))
+        (is (not (str/includes? (str (:content result)) "unknown")))))
+    (testing "and the agent can turn it back on itself"
+      (call "t-tog" "(harness.memory/session-enable! harness.memory/*thread-id* \"bash\")")
+      (let [events (drain-events
+                    (fake/scripted [{:content ""
+                                     :tool-calls [{:id "d2" :name "bash"
+                                                   :arguments {:command "echo back-on"}}]}
+                                    {:content "done"}])
+                    "t-tog")
+            result (first (filter #(= :tool/result (:type %)) events))]
+        (is (false? (:error result)))
+        (is (str/includes? (str (:content result)) "back-on"))))))
