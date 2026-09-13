@@ -142,17 +142,27 @@
   (str "vetoed by human: the call was not executed."
        (when (some? payload) (str " reason: " (json/write-str payload)))))
 
+(defn- disabled-message
+  "What the model is told when it calls a tool this session switched off. Like a
+  veto, this is information rather than a run failure -- and it says DISABLED,
+  never unknown: the tool exists and is on offer, so calling its absence a lie
+  would only send the model hunting for a workaround."
+  [name]
+  (str "disabled in this session: " name
+       " is switched off. Re-enable it with harness.memory/session-enable!."))
+
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
-                           :missing-args (with the missing names),
+                           :disabled, :missing-args (with the missing names),
                            :needs-approval, :approved, or :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
-  A call that never passes pre-execute (unknown tool, missing arguments) skips
-  the :tool/execute phase, but its :tool/post-execute still arrives -- the
-  lifecycle is always closed.
+  A call that never passes pre-execute (unknown tool, disabled tool, missing
+  arguments) skips the :tool/execute phase, but its :tool/post-execute still
+  arrives -- the lifecycle is always closed. :disabled is checked before
+  approval: a tool this session switched off is refused outright, never parked.
 
   A call marked for approval takes one of three transits:
     - no decision yet      -> :needs-approval: parked, the tool body does NOT
@@ -200,6 +210,13 @@
                          :parked {:interrupt-id interrupt-id :id id
                                   :name name :args arguments}}))]
            (cond
+             ;; Disabled is checked FIRST: it is a hard refusal, and there is no
+             ;; point parking a call that is never going to execute.
+             (mem/session-disabled? thread-id name)
+             (do (report (ev/tool-pre-execute id name :disabled []))
+                 (report (ev/tool-post-execute id name))
+                 {:content (disabled-message name) :error true})
+
              (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))
                  (report (ev/tool-post-execute id name))

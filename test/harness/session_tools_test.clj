@@ -42,20 +42,76 @@
   (testing "the added tool is visible to its thread and to nobody else"
     (is (contains? (set (spec-names "t-scope")) "echo"))
     (is (= (base-count) (count (spec-names "t-other")))))
-  (testing "removing a base tool hides it for this session only"
+  (testing "unregistering a base tool is a no-op -- base tools cannot be removed"
     (mem/session-unregister! "t-scope" "read")
-    (is (not (contains? (set (spec-names "t-scope")) "read")))
+    (is (contains? (set (spec-names "t-scope")) "read"))
     (is (contains? (set (spec-names "t-other")) "read")))
-  (testing "removing a name nobody knows is a no-op"
+  (testing "unregistering a name nobody knows is a no-op"
     (mem/session-unregister! "t-scope" "no-such-tool")
-    ;; base minus the hidden read, plus the added echo.
-    (is (= (count (base-names)) (count (spec-names "t-scope")))))
-  (testing "removal is monotonic within a session: a hidden base tool stays hidden,
-            retracting an addition is the only undo there is"
+    ;; base plus the added echo. Nothing was hidden.
+    (is (= (inc (base-count)) (count (spec-names "t-scope")))))
+  (testing "retracting an addition is the only undo for presence"
     (mem/session-unregister! "t-scope" "echo")
-    (is (= (remove #{"read"} (base-names)) (spec-names "t-scope")))
+    (is (= (base-names) (spec-names "t-scope")))
     (is (= (base-names) (spec-names "t-other"))
         "and another thread was never touched")))
+
+;; ----------------------------------------------------------------- toggles
+
+(deftest disabling-a-tool-keeps-it-in-the-toolset
+  (mem/session-disable! "t-off" "read")
+  (testing "the disabled tool is still offered to the model"
+    (is (contains? (set (spec-names "t-off")) "read"))
+    (is (= (base-names) (spec-names "t-off")))
+    (is (= (spec-description nil "read") (spec-description "t-off" "read"))
+        "and its definition is untouched"))
+  (testing "the session can see that it is off"
+    (is (true? (mem/session-disabled? "t-off" "read")))
+    (is (false? (mem/session-disabled? "t-off" "write"))))
+  (testing "another session is unaffected"
+    (is (false? (mem/session-disabled? "t-off-other" "read")))
+    (is (not (mem/session-disabled? "t-off-other" "read"))))
+  (testing "enabling brings it back, and the toolset never changed"
+    (mem/session-enable! "t-off" "read")
+    (is (false? (mem/session-disabled? "t-off" "read")))
+    (is (= (base-names) (spec-names "t-off")))))
+
+(deftest toggles-are-idempotent-and-never-invent-a-tool
+  (testing "disabling twice is one mark"
+    (mem/session-disable! "t-idem" "bash")
+    (mem/session-disable! "t-idem" "bash")
+    (is (true? (mem/session-disabled? "t-idem" "bash"))))
+  (testing "enabling a name that was never disabled is a no-op"
+    (mem/session-enable! "t-idem" "edit")
+    (is (false? (mem/session-disabled? "t-idem" "edit"))))
+  (testing "disabling a name the session cannot see never invents a mark"
+    (mem/session-disable! "t-idem" "no-such-tool")
+    (is (false? (mem/session-disabled? "t-idem" "no-such-tool")))
+    (is (= (base-names) (spec-names "t-idem")))))
+
+(deftest a-session-added-tool-can-be-disabled-too
+  (mem/session-register! "t-own" "echo" (echo-tool "session echo"))
+  (mem/session-disable! "t-own" "echo")
+  (testing "disabling does not retract the definition"
+    (is (contains? (set (spec-names "t-own")) "echo"))
+    (is (true? (mem/session-disabled? "t-own" "echo"))))
+  (testing "enabling it again leaves the definition in place"
+    (mem/session-enable! "t-own" "echo")
+    (is (contains? (set (spec-names "t-own")) "echo"))))
+
+(deftest retracting-an-addition-clears-its-disabled-mark
+  ;; Otherwise re-adding the same name would inherit a zombie: present, but
+  ;; silently switched off by a state from a definition that no longer exists.
+  (mem/session-register! "t-zombie" "echo" (echo-tool "first"))
+  (mem/session-disable! "t-zombie" "echo")
+  (is (true? (mem/session-disabled? "t-zombie" "echo")))
+  (mem/session-unregister! "t-zombie" "echo")
+  (is (false? (mem/session-disabled? "t-zombie" "echo"))
+      "the mark went with the definition")
+  (mem/session-register! "t-zombie" "echo" (echo-tool "second"))
+  (is (false? (mem/session-disabled? "t-zombie" "echo"))
+      "a freshly added tool starts enabled")
+  (is (contains? (set (spec-names "t-zombie")) "echo")))
 
 (deftest a-session-shadow-leaves-the-base-untouched
   (let [base-read (@mem/registry "read")]
@@ -189,13 +245,33 @@
       (is (str/includes? (:content (eval! "t-e2e"
                                           "(keys (harness.memory/config))"))
                          ":protocol")))
-    (testing "removing a base tool surfaces a readable error to the model"
-      (mem/session-unregister! "t-e2e" "read")
+    (testing "disabling a base tool is reported as disabled, not as unknown"
+      (mem/session-disable! "t-e2e" "read")
       (let [events (drain-events
                     (fake/scripted [{:content ""
                                      :tool-calls [{:id "c2" :name "read" :arguments {:path "deps.edn"}}]}
                                     {:content "done"}])
                     "t-e2e")
-            result (first (filter #(= :tool/result (:type %)) events))]
+            result (first (filter #(= :tool/result (:type %)) events))
+            pre    (first (filter #(and (= :tool/pre-execute (:type %))
+                                        (= "c2" (:id %)))
+                                  events))]
+        (is (= :disabled (:outcome pre)))
         (is (true? (:error result)))
-        (is (str/includes? (str (:content result)) "unknown tool: read"))))))
+        (is (str/includes? (str (:content result)) "disabled"))
+        (is (not (str/includes? (str (:content result)) "unknown")))))
+    (mem/session-enable! "t-e2e" "read")
+    (testing "enabling it again restores dispatch in the same run shape"
+      (let [events (drain-events
+                    (fake/scripted [{:content ""
+                                     :tool-calls [{:id "c3" :name "read" :arguments {:path "deps.edn"}}]}
+                                    {:content "done"}])
+                    "t-e2e")
+            result (first (filter #(= :tool/result (:type %)) events))
+            pre    (first (filter #(and (= :tool/pre-execute (:type %))
+                                        (= "c3" (:id %)))
+                                  events))]
+        (is (= :pass (:outcome pre)))
+        (is (false? (:error result)))
+        ;; t-read returns the file's CONTENTS -- assert on something in them.
+        (is (str/includes? (str (:content result)) ":deps"))))))

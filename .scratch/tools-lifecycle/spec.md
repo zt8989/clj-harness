@@ -40,3 +40,18 @@
 - **03**：eval tool-call 全形态走通 session-register! → 下一 run tools 数组含新工具且 dispatch 真实执行；session-unregister! base 工具 → 模型收到 "unknown tool: read"；prompt.md 增 session tools 章节。
 - **附带修复**：run! 内局部 `name` 遮蔽 core/name 的 CCE；loop_test 的 "slow" 从全局注册迁到会话 overlay（base 不再被测试污染）；**畸形 JSON 参数在 JSON 解析处炸出外层 catch 时，:tool/execute（带 error）与 :tool/post-execute 原漏报，已补齐——"post 恒闭合"至此对所有路径成立（测试锁定：无 :tool/pre-execute、后两相齐全）**。
 - **最终全量**：55 tests / 249 assertions，全绿。
+
+## 反转记录（2026-09-13，`tool-toggles` 推翻两处）
+
+**反转一：remove 不再隐藏 base 名，也不再单调。** 本 spec 当时的决策写「remove 单调：先撤 overlay 添加，再对 base 名记隐藏」，其 03 验收断言「`session-unregister!` base 工具 → 模型收到 `unknown tool: read`」。`tool-toggles` 推翻：
+
+- **`session-unregister!` 收窄为「只撤本会话新增的定义」**，对 base 名是 no-op——`overlay` 的 `:removed` 集合**整个退役**。
+- **可用性改由 `session-disable!` / `session-enable!` 一对可逆操作承担**：被关的工具**仍在工具表里**，调用由执行缝报 `:disabled`（**不是** `:unknown-tool`——它存在，只是被关，说 unknown 是谎话）。
+- 理由：**「隐藏」会让模型把「被策略关掉」误读成「这能力不存在」**，进而去找 bash 绕路（与 pre-tool-approval 拒绝「错误消息是给模型的信息」同一条精神）。「可见但被拒」让模型知道限制存在，并能自己用 eval 打开它——在「自我扩展」定位下这是更好的行为。
+- 代价明写：**本特性之后，任何工具都不能再从工具表里消失。** 「从本会话移除」只对会话自己新增的定义成立。
+
+**反转二（连带）：`:tool/pre-execute` 的 outcome 词汇表新增 `:disabled`**，且**检查先于审批**——关闭是硬拒绝，没有理由为一个注定不执行的调用去 park 等人。
+
+**先例说明**：本仓允许后出特性推翻前 spec 的决策，只需记明。本例与「tools-lifecycle 非目标里的『不做审批暂停』已被 pre-tool-approval 推翻」同类——**本 spec 的「非目标」段不是永久承诺，是当时的边界声明。** 本 spec 的「已验证到什么程度」段作为历史事实**不回改**。
+
+**未被推翻的部分**（仍然生效）：base 不可变、会话 overlay 落 `harness.memory`、add 对 base 名 shadow、thread-id 贯通、三相生命周期事件与 `post 恒闭合`。这些是 `tool-toggles` 的地基。

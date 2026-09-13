@@ -53,38 +53,83 @@
 
 (defonce ^:private overlays
   (atom {}))
-;; thread-id -> {:added {name tool} :removed #{name}}
+;; thread-id -> {:added {name tool} :disabled #{name}}
+;;
+;; Two orthogonal axes over one immutable base:
+;;   :added     the presence half -- definitions this session contributed.
+;;   :disabled  the availability half -- names this session switched off. The
+;;              definition is untouched and the tool STAYS in the toolset; the
+;;              execution seam (harness.tools/run!) is what refuses the call.
+;; There is deliberately no :removed: nothing may vanish from a toolset, because
+;; a model that cannot see a tool reads its absence as "this capability does not
+;; exist" and goes looking for a way around it. Disabled is honest; hidden is not.
+
+(declare effective-tools)
 
 (defn session-register!
   "Add NAME->TOOL for THREAD-ID's session only. Registering over a base tool's
   name SHADOWS it for this session -- the base definition is untouched -- and
-  the change is visible to the next run of this thread, never to another."
+  the change is visible to the next run of this thread, never to another.
+
+  Re-adding a name that was retracted starts it ENABLED: retraction clears the
+  disabled mark, so a fresh definition never inherits a stale one."
   [thread-id name tool]
   (swap! overlays assoc-in [thread-id :added name] tool))
 
 (defn session-unregister!
-  "Remove NAME from THREAD-ID's session view: an added tool is retracted, a
-  base tool is hidden for this session only. A name that is neither is a
-  no-op. The base registry is never mutated."
+  "Retract NAME from THREAD-ID's session -- the presence half only. This undoes
+  a session-register! and nothing else: a base tool's name is a no-op, because
+  base tools cannot be removed (as of tool-toggles, nothing leaves a toolset;
+  use session-disable! to take one's availability away). A name that was never
+  added is also a no-op. The base registry is never mutated.
+
+  Retracting also drops NAME's disabled mark, so re-adding it later is enabled."
   [thread-id name]
   (swap! overlays
          (fn [ov]
-           (let [added (get-in ov [thread-id :added])]
-             (cond
-               (contains? added name)   (update-in ov [thread-id :added] dissoc name)
-               (contains? @registry name) (update-in ov [thread-id :removed]
-                                                     (fnil conj #{}) name)
-               :else ov)))))
+           (if (contains? (get-in ov [thread-id :added]) name)
+             (-> ov
+                 (update-in [thread-id :added] dissoc name)
+                 (update-in [thread-id :disabled] (fnil disj #{}) name))
+             ov))))
+
+(defn session-disable!
+  "Switch NAME off for THREAD-ID's session only -- the availability half. The
+  tool remains in the session's toolset and its definition is untouched; the
+  execution seam refuses calls of it with a :disabled outcome, and
+  session-enable! brings it straight back. Reversible, idempotent, and a no-op
+  for a name the session cannot see -- disabling never invents a tool.
+
+  This is a policy switch, NOT a security boundary: hiding a capability is not
+  the same as forbidding the behaviour (disabling `write` does not stop `bash`
+  from writing a file). The enforced bounds are the approval park and the
+  sandbox, not the toolset."
+  [thread-id name]
+  (when (contains? (effective-tools thread-id) name)
+    (swap! overlays update-in [thread-id :disabled] (fnil conj #{}) name)))
+
+(defn session-enable!
+  "Undo session-disable! for NAME. A name that was never disabled is a no-op."
+  [thread-id name]
+  (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
+
+(defn session-disabled?
+  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call."
+  [thread-id name]
+  (contains? (get-in @overlays [thread-id :disabled] #{}) name))
 
 (defn effective-tools
   "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
-  additions and removals. A thread with no overlay sees the pure base; nil
-  THREAD-ID (no session context) also means the base."
+  additions. A thread with no overlay sees the pure base; nil THREAD-ID (no
+  session context) also means the base.
+
+  DELIBERATELY NOT the set of tools that will run: a disabled tool is still in
+  here. Availability is a separate question, answered per call by
+  session-disabled? at the execution seam."
   [thread-id]
   (if (nil? thread-id)
     @registry
-    (let [{:keys [added removed]} (get @overlays thread-id {:added {} :removed #{}})]
-      (into (apply dissoc @registry removed) added))))
+    (into @registry (get-in @overlays [thread-id :added] {}))))
 
 ;; --------------------------------------------------------------- approvals
 
