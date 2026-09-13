@@ -3,3 +3,4 @@
 .nrepl-port
 target/
 node_modules/
+ui/dist/
