@@ -3,6 +3,7 @@
   run ends on an interrupt instead of running the tool."
   (:require [clojure.core.async :as async]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.ag-ui :as ag]
             [harness.fake :as fake]
@@ -26,8 +27,15 @@
 (defn- phases [seen] (filterv #(contains? lifecycle (:type %)) seen))
 (defn- results [seen] (filterv #(= :tool/result (:type %)) seen))
 (defn- tool-msgs [history] (filterv #(= "tool" (:role %)) history))
-(defn- run [provider messages thread-id]
-  (drain (loop/run-chan provider messages {:thread-id thread-id})))
+(defn- run
+  ([provider messages thread-id] (run provider messages thread-id nil))
+  ([provider messages thread-id opts]
+   (drain (loop/run-chan provider messages (merge {:thread-id thread-id} opts)))))
+
+(defn- interrupt-id
+  "The interrupt id of a park run's terminal event."
+  [park-run]
+  (:id (first (:interrupts (last (:seen park-run))))))
 
 (defn- call [id name arguments]
   {:id id :name name :arguments arguments})
@@ -147,6 +155,126 @@
       (is (= "interrupt" (get-in last-f [:outcome :type])))
       (is (= ["c1"] (mapv :toolCallId (get-in last-f [:outcome :interrupts]))))
       (is (not-any? #(= "TOOL_CALL_RESULT" (:type %)) @frames)))))
+
+;; ------------------------------------------------------------- resume replay
+
+(deftest an-approved-call-runs-on-resume
+  (let [thr  "thr-resume-yes"
+        path (str dir "/resumed.txt")
+        _    (io/delete-file path true)
+        _    (mem/session-require-approval! thr "write")
+        park (run (fake/scripted [{:content ""
+                                   :tool-calls [(call "c1" "write" {:path path :content "approved!"})]}
+                                  {:content "never reached"}])
+                  [] thr)
+        iid  (interrupt-id park)
+        ;; captured while parked: the let bindings below all evaluate before any
+        ;; assertion runs, so the file's state has to be sampled here.
+        written-while-parked? (.exists (io/file path))
+        {:keys [seen history]}
+        (run (fake/scripted [{:content "finished"}]) (:history park) thr
+             {:resume [{:interrupt-id iid :verdict :approved}]})]
+
+    (testing "the park run itself did not write"
+      (is (false? written-while-parked?)))
+
+    (testing "the approved call really runs this time"
+      (is (true? (.exists (io/file path))))
+      (is (= "approved!" (slurp path :encoding "UTF-8"))))
+
+    (testing "its result is reported and answered in the history"
+      (is (= ["c1"] (mapv :id (results seen))))
+      (is (= "c1" (:tool_call_id (first (tool-msgs history))))))
+
+    (testing "the lifecycle shows the second transit as approved"
+      (is (= [:tool/pre-execute :tool/execute :tool/post-execute]
+             (mapv :type (phases seen))))
+      (is (= :approved (:outcome (first (phases seen))))))
+
+    (testing "the run finishes naturally"
+      (is (= :run/end (:type (last seen)))))))
+
+(deftest a-vetoed-call-is-answered-without-running
+  (let [thr  "thr-resume-no"
+        path (str dir "/vetoed.txt")
+        _    (io/delete-file path true)
+        _    (mem/session-require-approval! thr "write")
+        park (run (fake/scripted [{:content ""
+                                   :tool-calls [(call "c1" "write" {:path path :content "nope"})]}])
+                  [] thr)
+        iid  (interrupt-id park)
+        {:keys [seen history]}
+        (run (fake/scripted [{:content "understood"}]) (:history park) thr
+             {:resume [{:interrupt-id iid :verdict :vetoed :payload {:reason "too risky"}}]})]
+
+    (testing "the tool never ran"
+      (is (false? (.exists (io/file path)))))
+
+    (testing "the veto is the answer the model gets, reason included"
+      (let [result (first (results seen))]
+        (is (= "c1" (:id result)))
+        (is (true? (:error result)))
+        (is (str/includes? (:content result) "vetoed by human"))
+        (is (str/includes? (:content result) "too risky")))
+      (is (= (:content (first (results seen))) (:content (first (tool-msgs history))))))
+
+    (testing "a veto has no execute phase, and the lifecycle still closes"
+      (is (= [:tool/pre-execute :tool/post-execute] (mapv :type (phases seen))))
+      (is (= :vetoed (:outcome (first (phases seen))))))
+
+    (testing "the run carries on rather than failing"
+      (is (= :run/end (:type (last seen)))))))
+
+(deftest a-decision-cannot-be-spent-twice
+  (let [thr "thr-resume-once"
+        n   (atom 0)]
+    (mem/session-register! thr "tick"
+      {:description "Counts." :parameters {:type "object" :properties {} :required []}
+       :required [] :run (fn [_] (swap! n inc) "tick")})
+    (mem/session-require-approval! thr "tick")
+    (let [park   (run (fake/scripted [{:content "" :tool-calls [(call "c1" "tick" {})]}]) [] thr)
+          iid    (interrupt-id park)
+          decide (fn [] (run (fake/scripted [{:content "ok"}]) (:history park) thr
+                             {:resume [{:interrupt-id iid :verdict :approved}]}))
+          first-run  (decide)
+          second-run (decide)]
+      (is (= :run/end (:type (last (:seen first-run)))))
+      (is (= 1 @n))
+      (testing "the spent verdict approves nothing: the call parks for a fresh decision"
+        (is (= :run/interrupt (:type (last (:seen second-run))))))
+      (is (= 1 @n)))))
+
+(deftest an-unknown-interrupt-is-an-error-not-an-approval
+  (let [{:keys [seen]} (run (fake/scripted [{:content "ok"}]) [] "thr-unknown"
+                            {:resume [{:interrupt-id "never-parked" :verdict :approved}]})]
+    (is (= [:run/start :run/error] (mapv :type seen)))
+    (is (str/includes? (:message (last seen)) "unknown interrupt"))))
+
+(deftest a-mixed-decision-list-is-answered-in-call-order
+  (let [thr  "thr-resume-mixed"
+        path (str dir "/mixed-resume.txt")
+        _    (io/delete-file path true)
+        _    (mem/session-require-approval! thr "read")
+        _    (mem/session-require-approval! thr "write")
+        park (run (fake/scripted [{:content ""
+                                   :tool-calls [(call "c1" "read" {:path "deps.edn"})
+                                                (call "c2" "write" {:path path :content "ok"})]}])
+                  [] thr)
+        [i1 i2] (mapv :id (:interrupts (last (:seen park))))
+        {:keys [seen history]}
+        (run (fake/scripted [{:content "done"}]) (:history park) thr
+             {:resume [{:interrupt-id i1 :verdict :vetoed}
+                       {:interrupt-id i2 :verdict :approved}]})]
+
+    (is (= :run/end (:type (last seen))))
+    (testing "the approved call ran, the vetoed one did not"
+      (is (true? (.exists (io/file path))))
+      (let [by-call (into {} (map (juxt :id identity) (results seen)))]
+        (is (str/includes? (:content (by-call "c1")) "vetoed by human"))
+        (is (str/includes? (:content (by-call "c2")) "wrote"))))
+
+    (testing "the history answers both calls in call order"
+      (is (= ["c1" "c2"] (mapv :tool_call_id (tool-msgs history)))))))
 
 (deftest unknown-interrupts-are-not-invented
   (is (nil? (mem/parked "no-such-interrupt")))

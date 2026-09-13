@@ -135,23 +135,36 @@
   [tool name thread-id]
   (or (:requires-approval tool) (mem/session-approval-required? thread-id name)))
 
+(defn- veto-message
+  "What the model is told when a human vetoed the call. It is information, not a
+  failure of the run: the loop carries on with this as the tool's answer."
+  [{:keys [payload]}]
+  (str "vetoed by human: the call was not executed."
+       (when (some? payload) (str " reason: " (json/write-str payload)))))
+
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
-                           :missing-args (with the missing names), or
-                           :needs-approval
+                           :missing-args (with the missing names),
+                           :needs-approval, :approved, or :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
   A call that never passes pre-execute (unknown tool, missing arguments) skips
   the :tool/execute phase, but its :tool/post-execute still arrives -- the
   lifecycle is always closed.
 
-  :needs-approval parks a well-formed call for a human decision: the tool body
-  does NOT run, no :tool/result is produced, and this transit closes at once
-  (the seam looked, the call is now the human's). The returned map carries
-  :parked so the loop can stop the run on an interrupt; the parked record lives
-  in harness.memory under the interrupt id, which is what a resume names."
+  A call marked for approval takes one of three transits:
+    - no decision yet      -> :needs-approval: parked, the tool body does NOT
+                              run, no :tool/result, and this transit closes at
+                              once (the seam looked; the call is the human's).
+                              The returned map carries :parked for the loop.
+    - approved             -> :approved, then it executes exactly like :pass.
+    - vetoed               -> :vetoed: no execution; the answer is the veto,
+                              fed back to the model like any tool failure.
+
+  The verdict is taken from harness.memory by interrupt id and consumed on the
+  way through, so a replayed interrupt can never run its call twice."
   ([call] (run! call nil nil))
   ([call thread-id] (run! call thread-id nil))
   ([{:keys [id function] :as _call} thread-id on-phase]
@@ -161,7 +174,31 @@
        (try
          (let [parsed  (json/read-str (if (str/blank? arguments) "{}" arguments)
                                       :key-fn keyword)
-               missing (missing-args tool parsed)]
+               missing (missing-args tool parsed)
+               execute (fn []
+                         ;; *thread-id* is bound around the tool body so code
+                         ;; running inside a tool -- eval above all -- can address
+                         ;; its own session (harness.memory).
+                         (let [[result err]
+                               (try [(binding [mem/*thread-id* thread-id] ((:run tool) parsed)) nil]
+                                    (catch Throwable t [nil t]))
+                               _ (report (ev/tool-executed id name (some-> err ex-message)))
+                               _ (report (ev/tool-post-execute id name))]
+                           (if err
+                             {:content (ex-message err) :error true}
+                             {:content (str result) :error false})))
+               park (fn []
+                      (let [existing (mem/parked-for-call thread-id id)
+                            interrupt-id (or (:interrupt-id existing)
+                                             (str (java.util.UUID/randomUUID)))]
+                        (mem/park-approval! interrupt-id {:thread-id thread-id
+                                                          :tool-call-id id
+                                                          :name name :args arguments})
+                        (report (ev/tool-pre-execute id name :needs-approval []))
+                        (report (ev/tool-post-execute id name))
+                        {:content "" :error false
+                         :parked {:interrupt-id interrupt-id :id id
+                                  :name name :args arguments}}))]
            (cond
              (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))
@@ -171,27 +208,21 @@
                   :error true})
 
              (approval-required? tool name thread-id)
-             (let [interrupt-id (str (java.util.UUID/randomUUID))]
-               (mem/park-approval! interrupt-id {:thread-id thread-id :tool-call-id id
-                                                 :name name :args arguments})
-               (report (ev/tool-pre-execute id name :needs-approval []))
-               (report (ev/tool-post-execute id name))
-               {:content "" :error false
-                :parked {:interrupt-id interrupt-id :id id :name name :args arguments}})
+             (let [existing (mem/parked-for-call thread-id id)
+                   decision (when existing (mem/take-decision! (:interrupt-id existing)))]
+               (case (:verdict decision)
+                 :approved (do (report (ev/tool-pre-execute id name :approved []))
+                               (execute))
+                 :vetoed   (do (report (ev/tool-pre-execute id name :vetoed []))
+                               (report (ev/tool-post-execute id name))
+                               {:content (veto-message decision) :error true})
+                 ;; nothing decided yet (or the verdict was already spent):
+                 ;; the call is the human's until they answer.
+                 (park)))
 
              :else
              (do (report (ev/tool-pre-execute id name :pass []))
-                 ;; *thread-id* is bound around the tool body so code running
-                 ;; inside a tool -- eval above all -- can address its own
-                 ;; session (harness.memory).
-                 (let [[result err]
-                       (try [(binding [mem/*thread-id* thread-id] ((:run tool) parsed)) nil]
-                            (catch Throwable t [nil t]))
-                       _ (report (ev/tool-executed id name (some-> err ex-message)))
-                       _ (report (ev/tool-post-execute id name))]
-                   (if err
-                     {:content (ex-message err) :error true}
-                     {:content (str result) :error false})))))
+                 (execute))))
          (catch Throwable t
            ;; A malformed argument payload dies before the pass branch even
            ;; starts; the lifecycle still closes on the seam's own terms.
