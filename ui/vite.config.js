@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import { cljs } from "./vite-plugin-cljs.mjs";
+import { cljs } from "./vite-plugin-cljs.js";
 
 // Two compilers, one dev server.
 //

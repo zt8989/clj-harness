@@ -9,7 +9,7 @@
 - `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加**三档选择**的折叠与 api-key 解析（目录的验证与装配交给 `models`，api-key 只在这一处挂上）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
-- `dev/harness/{wire,evals,repl}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
+- `dev/harness/{wire,evals,repl,e2e_server}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`；`e2e_server` 是 `npm test` 起的那个后端（脚本 provider + OS 分配端口）。
 
 ### 会话级自我扩展与晋升路径
 
@@ -22,7 +22,8 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ```
 
 写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
-- `ui/src/harness/ui/{main,app,approval_gate}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.mjs` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
+- `ui/src/harness/ui/{main,app,approval_gate,reasoning_message}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.js` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
+- `ui/test/` — UI 端到端测试：用例是 ClojureScript（与 `ui/src` 同构），`test/cljs.test.js` 把它接进 vitest（`cd ui && npm test`，自带脚本 provider 后端）
 - `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
 详见 `.scratch/minimal-kernel/spec.md`。
@@ -35,6 +36,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
   cd ui
   $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
   ```
+  测试不用手改：`npm test` 的构建步骤（`ui/test/support/java.js`）自己找 Java 21——先认 `JAVA_HOME`，再试常见安装位置；找不到就警告并回落到 PATH 上的 `java`（那种情况下 shadow-cljs 会以 `UnsupportedClassVersionError` 失败，不是静默出错）。
 - Clojure CLI（`scoop clj-deps` 安装）
 - Node.js 18+ / npm
 - Git Bash（Windows 必需：已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出。macOS / Linux 用系统自带的 shell，无需额外安装）
@@ -146,8 +148,9 @@ clojure -M:run
 
 ```pwsh
 cd ui
-npm install   # 首次
-npm run dev   # 拉起 shadow-cljs watch 并起 Vite 于 5173
+npm install      # 首次
+npm run dev      # 拉起 shadow-cljs watch 并起 Vite 于 5173
+npm test         # 端到端测试：自带后端，不需要上面这个 dev server
 # 浏览器打开 http://localhost:5173
 ```
 
@@ -261,22 +264,22 @@ UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 
 ## 验证
 
 ```pwsh
-# 离线全量
+# 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 103 tests / 478 assertions, 0 failures
+# 131 tests / 655 assertions（其中 1 条 bash-runs-git-bash-not-wsl 是 Windows 时代断言，在 macOS 上必红）
 
-# 在线帧合法性（需后端在 8080）
-node ui/check-frames.mjs        # EventSchemas.safeParse  37~94 frames / 0 invalid
-node ui/verify-real.mjs        # 一轮 read 工具+推理卡片，二轮同 threadId 续写 RUN_FINISHED 非 RUN_ERROR
-
-# 审批端到端：标记会话 ⇒ write park ⇒ 批准执行 ⇒ 再 write ⇒ 否决（需后端在 8080 + 真 provider）
-node ui/verify-approval.mjs    # 13 条断言 / RESULT: PASS
-
-# 手动 curl（新 thread 避免历史污染）
-curl --url 'http://localhost:8080/' -H 'Content-Type: application/json' -H 'Accept: text/event-stream' --data-raw '{"threadId":"fresh-1","runId":"r1","tools":[],"context":[],"messages":[{"id":"u1","role":"user","content":"You MUST call the read tool with {\"path\":\"deps.edn\"} and then summarize in one sentence."}]}'
+# UI（ClojureScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
+cd ui && npm test
+# 11 tests，含 4 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
 ```
 
-`verify-approval.mjs` 的 park 之后全部断言与模型无关，那半段才是它真正证明的东西（客户端把 `RUN_FINISHED+outcome` 变成可 resume 的 interrupt、真 `resume` 数组真驱动服务端重放）；前置的"调用 write/eval"轮依赖弱模型合规，脚本对每轮最多重试 3 次并如实打印 `note`。
+`npm test` 自己起后端：`dev/harness/e2e_server.clj`（`harness.e2e-server`）用 `harness.fake` 的**脚本 provider** 在 `--port 0`（OS 分配）上开服务，日志写进临时 `CLJ_HARNESS_HOME`，所以跑多少次结果都一样，也不会写进你真实的 `~/.clj-harness`。测什么由**脚本文件**决定：服务端在遇到**新的 threadId** 时重读它，测试写这个文件就相当于说"模型下一句回什么"——控制通道是文件而不是端点，生产 HTTP 边因此一个测试专用路由都不长。
+
+测试代码是 ClojureScript，与 `src/` 同构放在 `ui/test/harness/ui/*_test.cljs`；`ui/test/cljs.test.js` 负责起后端、把每个 `deftest` 注册成一个 vitest 用例、逐条跑 `cljs.test` 并把失败重新抛出（见 `ui/test/harness/ui/test_runner.{clj,cljs}` 的桥接层，以及 `npm run test:build`）。
+
+**这套测试替换了原来的四个手跑脚本**（`verify.mjs` / `verify-real.mjs` / `verify-approval.mjs` / `check-frames.mjs`），内容一一对应，但丢掉了它们的两处依赖：真模型（原来是 free 模型，弱模型不合规时脚本对每轮最多重试 3 次并打印 `note`）和"必须先在 8080 起个后端"。断言数与覆盖面不减——审批那条从 13 条变成 14 条，多出的正是"resume 一个本进程没 park 过的 interrupt 会被指名拒绝"。
+
+**顺带修掉的真 bug**：那四个脚本用 `onRunFailedEvent` 订阅失败——**这个 hook 在 @ag-ui/client 上不存在**（真名是 `onRunErrorEvent`），订阅注册表对未知 key 静默丢弃，所以脚本里"这一轮是不是失败了"的守卫一直在空转。现在 `client_test` / `turn_test` / `approval_test` 用真名订阅，并且有测试守着（`a-resume-for-an-unknown-interrupt-is-refused` 靠它才可能通过）。
 
 真实 SSE 体已固化在 `test/harness/fixtures/deepseek_sse.txt`（301 行，`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` 捕获，`llm/consume-sse` 已覆盖）。
 

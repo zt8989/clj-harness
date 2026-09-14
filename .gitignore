@@ -5,6 +5,7 @@ target/
 node_modules/
 ui/dist/
 ui/cljs-out/
+ui/cljs-test/
 ui/.shadow-cljs/
 
 # Local agent tooling: browser-driver artifacts and WorkBuddy's per-project
