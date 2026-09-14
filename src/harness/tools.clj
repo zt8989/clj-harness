@@ -1,5 +1,5 @@
 (ns harness.tools
-  "The tool table: the immutable base of five built-ins, the per-session overlay
+  "The tool table: the immutable base of six built-ins, the per-session overlay
   over it, the parked calls a human still has to answer, and the execution seam.
 
   A tool is
@@ -15,7 +15,24 @@
   THE TABLE LIVES HERE, with the seam that reads it, because they are two halves
   of one thing: the seam decides what a call means and the table says what exists
   to be called. It is also where a session's own additions and switches land, all
-  per-thread and gone on restart."
+  per-thread and gone on restart.
+
+  THE SEAM IS ALSO WHERE THE HOOKS SPEAK. Every call ends in one of three
+  outcomes -- allow, block, or suspend -- and two hook points decide alongside the
+  checks this namespace has always made:
+
+    PreToolUse        may turn an allow into a block. Runs LAST, after the
+                      disabled / missing-args / approval checks: a call that
+                      cannot run anyway should not be put to a user's rulebook.
+    PermissionRequest may answer a SUSPENDED call, so a rule can do what a person
+                      would have been interrupted for. Runs only when nothing is
+                      decided yet; an answer carries the same weight a human's
+                      does, and no answer leaves the call parked.
+
+  The suspend-type rules are also here and are not a separate mechanism from the
+  hooks: :requires-approval on a tool, and session-require-approval! for a whole
+  session, are how THIS session installs a rule that says 'ask before running
+  this'. The hook engine's answer to such a call is what makes them delegable."
   (:refer-clojure :exclude [run!])
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -337,15 +354,21 @@
 ;; thread-id -> #{name}
 
 (defn session-require-approval!
-  "Make every call of NAME park for a human decision in THREAD-ID's session only.
+  "Make every call of NAME suspend for a decision in THREAD-ID's session only --
+  the session's way of installing a rule that says 'ask before running this'.
   Session-scoped exactly like the tool overlay: another thread is unaffected, and
   the process-wide base registry is never touched. The union of this set and the
-  tool's own :requires-approval flag is what parks a call."
+  tool's own :requires-approval flag is what suspends a call.
+
+  'Ask' means the call parks; WHO answers is not this function's business. A
+  human does, unless a PermissionRequest hook answers first -- a rule that
+  delegates the decision is the point of that hook, and a session that declares
+  one gets its calls decided without interrupting anybody."
   [thread-id name]
   (swap! session-approvals update thread-id (fnil conj #{}) name))
 
 (defn session-approval-required?
-  "Does THREAD-ID's session require a human decision for NAME?"
+  "Does THREAD-ID's session suspend calls of NAME pending a decision?"
   [thread-id name]
   (contains? (get @session-approvals thread-id #{}) name))
 

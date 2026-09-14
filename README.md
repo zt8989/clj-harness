@@ -20,18 +20,18 @@
 
 ### 会话级自我扩展与晋升路径
 
-agent 可以在运行期通过 `eval` 给**本会话**长出新的工具（`session-register!`），也可以把已有工具**关掉/打开**（`session-disable!` / `session-enable!`，关闭后工具仍在工具表里、只是调用被拒）。
-
-这些能力**仅本会话生效，进程重启即失**。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness` 的正式工具表 → git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+`eval` 是本会话给自己长**行为**的地方，而今天的那个行为是 **hook**：本会话可以在运行期加一条 hook、撤掉自己加的、把任意一条（包括磁盘上声明的）关掉再打开（见下面的「Hook 引擎」）。
 
 ```pwsh
 clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code 与返回值
 ```
 
+**为什么是 hook。** 原先这个位置写的是"自我扩展 = 长出新的工具"。工具表那套入口（`session-register!` / `session-disable!` 等）一个都没删、测试还在跑，只是不再是对模型的承诺：它能表达的东西止于"又一个工具定义"，而 hook 能表达作者没枚举过的事情——拦住一次调用、替人回答一次审批、在 run 收尾时做点什么，且不需要有人先把那个点写进工具表。`eval` 因此仍能执行任意 Clojure（prompt.md 明说这一点）：收敛的是它的**定位与承诺**，不是它的能力。
+
+这些能力**仅本会话生效，进程重启即失**——这是特性而非缺陷：没落过盘的东西天然可回滚。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness`（正式工具表，或 hooks.edn 的一份默认声明）→ git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+
 写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
-- `ui/src/harness/ui/{main,app,approval_gate,reasoning_message}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.js` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
-- `ui/test/` — UI 端到端测试：用例是 ClojureScript（与 `ui/src` 同构），`test/cljs.test.js` 把它接进 vitest（`cd ui && npm test`，自带脚本 provider 后端）
-- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
+- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(harness.llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
 详见 `.scratch/minimal-kernel/spec.md`。
 
@@ -255,7 +255,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
 - `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
-- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"] :context-window 1000000 :max-output-tokens 64000}`——**这个会话现在服务的模型收什么、出什么、装得下多少**，给客户端决定要不要显示图片选择器、以及估算这段对话还塞得下多少用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。两个数字是整数（不是字符串），随 model 走；未声明时字段**缺席**，不是 `null`。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
+- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"] :context-window 1000000 :max-output-tokens 64000}`——**这个会话现在服务的模型收什么、出什么、装得下多少**，给客户端决定要不要显示图片选择器、以及估算这段对话还塞得下多少用。答案走**活解析**（`harness.providers/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。两个数字是整数（不是字符串），随 model 走；未声明时字段**缺席**，不是 `null`。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
 - `POST /api/project/pick` → 打开**操作系统原生目录选择框**，答 `{:dir <绝对路径|null>}`（取消即 null，不是错误）。存在的理由：浏览器给不出绝对路径（web file input 只给无真实位置的 File 对象），所以对话框必须跑在 harness 所在的机器上；它由拥有窗口的进程自己绘制，**不抢用户当前的焦点**。用 POST 而非 GET——这个调用有人可见的副作用（开窗），不该被缓存或预取触发。**它不绑定任何东西**：路径回给客户端填进输入框，绑定仍走下面那个唯一的 POST，所以「会改绑定的路由」永远只有一条，选择动作自身不留痕。`harness.http/*directory-chooser*` 是测试缝（真实弹窗要等人，测试里换 stub；`alter-var-root` 而非 `binding`——服务在别的线程上调它）。
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:before <绝对路径|null> :after <绝对路径> :via "http"}`（04 号票，对齐 provider/changed 的 before→after 风格；首次绑定 before 为 null），`runId` 为 null（绑定发生在任何 run 之外）。**对已绑定 thread 重新绑定 = 同一入口的普通调用**：路径解析立即切到新目录，审计行带 before/after，目录变更时间线直接从日志可读；读者以最后一行为准。绑定变更是 CwdChanged hook 点的事件源——payload 形态由 `harness.project/cwd-changed` 锁定（`{:hook "CwdChanged" :thread_id .. :project_dir .. :before ..}`，snake_case 对齐 hook payload 约定），hook 引擎（P2）接线时在变更点直接消费。
 
