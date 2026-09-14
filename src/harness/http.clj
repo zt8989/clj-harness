@@ -44,6 +44,7 @@
             [harness.ag-ui :as ag]
             [harness.event :as ev]
             [harness.home :as home]
+            [harness.llm :as llm]
             [harness.memory :as mem]
             [harness.models :as models]
             [harness.loop :as loop]
@@ -221,7 +222,7 @@
             (try (let [provider (mem/current-provider thread-id (:provider input))]
                    (guard-input-modalities! input provider)
                    [provider
-                    (ag/inbound (:messages input) (mem/prompt) (:context input))
+                    (ag/inbound (:messages input) (llm/prompt) (:context input))
                     (resume-decisions (:resume input))
                     (mem/resolve-provider thread-id (:provider input))])
                  (catch Throwable t

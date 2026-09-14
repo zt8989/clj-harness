@@ -5,7 +5,7 @@ Tools: read, write, edit, bash, eval. Use them.
 `bash` runs a shell (Git Bash on Windows, the host's shell elsewhere). `eval` evaluates Clojure in this process; `def`s persist across calls.
 
 Self-extension: `eval` evaluates Clojure in this process, and `harness.memory` is
-yours to read and extend. `(harness.memory/prompt)` is the frozen system prompt,
+yours to read and extend. `(harness.llm/prompt)` is the frozen system prompt,
 `(harness.memory/config)` the config.edn fields. To see the toolset you actually
 have, read `(harness.memory/effective-tools harness.memory/*thread-id*)` -- the
 process-wide base plus YOUR session's changes -- not `@harness.memory/registry`,

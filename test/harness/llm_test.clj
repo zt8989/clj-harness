@@ -2,8 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [harness.llm :as llm]
-            [harness.memory :as mem]))
+            [harness.llm :as llm]))
 
 (def ^:private fixture
   (slurp (io/resource "harness/fixtures/deepseek_sse.txt") :encoding "UTF-8"))
@@ -47,14 +46,14 @@
   ;; the real prompt.md.
   (let [original (slurp "prompt.md" :encoding "UTF-8")]
     (try
-      (mem/reset-prompt!)
-      (is (= original (mem/prompt)) "the first call reads prompt.md")
+      (llm/reset-prompt!)
+      (is (= original (llm/prompt)) "the first call reads prompt.md")
       (spit "prompt.md" (str original "\n<!-- drifted after freeze -->\n")
             :encoding "UTF-8")
-      (is (= original (mem/prompt)) "a file edit does NOT leak into the frozen prompt")
+      (is (= original (llm/prompt)) "a file edit does NOT leak into the frozen prompt")
       (finally
         (spit "prompt.md" original :encoding "UTF-8")
-        (mem/reset-prompt!)))))
+        (llm/reset-prompt!)))))
 
 (deftest the-opening-empty-chunk-emits-nothing
   (testing "the opening chunk is {\"role\":\"assistant\",\"content\":\"\"}. An empty

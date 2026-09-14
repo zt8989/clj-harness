@@ -35,27 +35,6 @@
             [harness.models :as models]
             [harness.project :as project]))
 
-;; ------------------------------------------------------------------- prompt
-
-(defonce frozen-prompt (atom nil))
-
-(defn prompt
-  "The system prompt, FROZEN: prompt.md is read once -- on the first call -- and
-  every run after that reuses the same text. The provider's prefill (prompt
-  cache) keys on a stable prefix; a system prompt that changes per run would
-  miss it on every call. Editing prompt.md takes effect only after
-  (reset-prompt!) or a process restart."
-  []
-  (or @frozen-prompt
-      (reset! frozen-prompt (slurp "prompt.md" :encoding "UTF-8"))))
-
-(defn reset-prompt!
-  "Re-read prompt.md into the frozen slot. The deliberate counterpart of
-  freezing: the agent -- or you, in the REPL -- opts into a new prefix, trading
-  one cold prefill for the change."
-  []
-  (reset! frozen-prompt nil))
-
 ;; -------------------------------------------------------------------- tools
 
 (defonce registry (atom {}))

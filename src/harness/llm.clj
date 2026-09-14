@@ -14,6 +14,10 @@
   tool rounds, which DeepSeek requires whenever the request carries tools
   (omitting it there is a hard HTTP 400).
 
+  The system prompt's carrier lives here too: prompt.md is read once and frozen
+  (see `prompt` / `reset-prompt!` below), because the provider's prefix cache is
+  what makes the freezing matter.
+
   A provider is just a config map, so (harness.memory/current-provider) or
   (harness.memory/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key ..
@@ -37,6 +41,31 @@
 
 (defmulti stream!
   (fn [_provider _messages _on-event _thread-id] (:protocol _provider)))
+
+;; ------------------------------------------------------------------- prompt
+
+;; The system prompt's carrier and its freezing discipline live here, with the
+;; provider layer, because that is whose constraint it is: the provider's prefill
+;; (prompt cache) keys on a byte-identical first message.
+
+(defonce frozen-prompt (atom nil))
+
+(defn prompt
+  "The system prompt, FROZEN: prompt.md is read once -- on the first call -- and
+  every run after that reuses the same text. The provider's prefill (prompt
+  cache) keys on a stable prefix; a system prompt that changes per run would
+  miss it on every call. Editing prompt.md takes effect only after
+  (reset-prompt!) or a process restart."
+  []
+  (or @frozen-prompt
+      (reset! frozen-prompt (slurp "prompt.md" :encoding "UTF-8"))))
+
+(defn reset-prompt!
+  "Re-read prompt.md into the frozen slot. The deliberate counterpart of
+  freezing: the agent -- or you, in the REPL -- opts into a new prefix, trading
+  one cold prefill for the change."
+  []
+  (reset! frozen-prompt nil))
 
 ;; ------------------------------------------------------------ openai-completions
 

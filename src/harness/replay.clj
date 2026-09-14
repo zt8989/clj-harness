@@ -26,6 +26,7 @@
             [harness.ag-ui :as ag]
             [harness.frames :as frames]
             [harness.home :as home]
+            [harness.llm :as llm]
             [harness.memory :as mem]
             [harness.loop :as loop]))
 
@@ -117,7 +118,7 @@
   folded onto its assistant message, calls in the provider's casing."
   [dir thread-id]
   (let [records (lines->records (read-lines dir thread-id))]
-    (ag/inbound (records->messages records) (mem/prompt) (:context (first-input records)))))
+    (ag/inbound (records->messages records) (llm/prompt) (:context (first-input records)))))
 
 (defn threads
   "The conversations a log DIRECTORY holds: one entry per *.jsonl file --
