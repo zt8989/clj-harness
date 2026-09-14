@@ -4,6 +4,7 @@
   Events leave the kernel over a core.async channel (run-chan)."
   (:require [clojure.core.async :as async]
             [harness.event :as ev]
+            [harness.hooks.dispatch :as hook]
             [harness.llm :as llm]
             [harness.tools :as tools]))
 
@@ -119,6 +120,13 @@
                           parked
                           (recur))))
                     nil))))]
+        ;; Stop is an OBSERVER, and it fires only where the run actually stops
+        ;; normally -- a run that ends on an interrupt is waiting for a human,
+        ;; and a run that threw ends on :run/error, which is StopFailure's
+        ;; business (declared, not wired). Its verdict is discarded: there is
+        ;; nothing left for it to gate.
+        (when-not (seq parked)
+          (hook/emit :stop {}))
         (emit (if (seq parked)
                 (ev/run-interrupt
                  (mapv (fn [{:keys [interrupt-id id name args]}]

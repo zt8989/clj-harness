@@ -194,8 +194,36 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 - `message` — LLM 真实看到/返回的 provider 形态消息原样（system prompt、入站消息、assistant 返回、tool 结果，按序构成完整消息数组）
 - `tools/pre-execute` | `tools/execute` | `tools/post-execute` — 工具执行三相，按 `toolCallId` 键控，**不上 wire**，纯审计行。pre-execute 的 `outcome` ∈ `pass` / `unknown-tool` / `disabled` / `missing-args` / `needs-approval` / `approved` / `vetoed`；`disabled` 是会话开关（工具仍可见、调用被拒），先于审批检查
 - `approval/decided` — 人工对某个 park 调用的答复（含 interruptId 与客户端 payload）
+- `hook/<Point>` — 一次 hook 触发（`hook/PostToolUse`、`hook/Stop`…），见下
 
-只 append 永不读。
+只 append 永不读。append 由一把锁串起来：大多数写入来自 run 的单个消费线程，但 hook 在它自己的点上触发（PostToolUse 跑在那次调用的线程上），两条线可能同时在飞——半行不是更短的记录，是一个坏掉的文件。
+
+### Hook 引擎（`hooks.edn`）
+
+用户在配置家（或绑定项目的 `.harness/`）写 `hooks.edn`，声明某个 hook 点上要跑的命令：
+
+```edn
+{:pre-tool-use  [{:matcher "bash|write" :command "scripts/gate.sh" :timeout 10000}]
+ :post-tool-use [{:command "scripts/note.sh"}]
+ :stop          [{:command "scripts/notify.sh"}]}
+```
+
+**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的只有三个观察者点**：`SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）。其余的点声明了就永不触发——这是设计，不是遗漏：门禁（`PreToolUse`）与审批（`PermissionRequest`）在接下来的票里接线，P3 的点等各自的子系统。
+
+**契约**：命令经钉住的 Git Bash spawn，payload 走 **stdin JSON**（`{hook, thread_id, project_dir, ...}`，键名 snake_case 按 payload 约定）；退出码 **0 = 放行，2 = 阻断（stderr 即理由，回喂给模型）**，其他非零按点定的失败语义（门禁 `:block`、观察者 `:proceed`）——**超时与起不来的命令也走这一条**：没能替你判断不等于判断为是。超时与崩溃都不炸 run。
+
+**没声明任何 hook 时整条路径是 no-op**：不 spawn、不等待、不落行，帧与审计线与没有这个能力时逐字节相同。hook 只在**边**绑定了 run 的 sink 时触发，所以离线工具、replay、直接驱动内核的测试一个 hook 都不跑。
+
+**会话级 overlay（`eval` 的新面）**：本会话可以在运行期给自己加 hook、撤掉自己加的、把任意一条（**包括磁盘上声明的**）关掉再打开，只影响本 thread、进程重启即失：
+
+```clojure
+(harness.hooks/session-add! harness.tools/*thread-id* :stop {:command "notify.sh"})  ; => "stop@1"
+(harness.hooks/session-disable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-enable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-remove! harness.tools/*thread-id* "stop@1")
+```
+
+两条正交轴，与工具表同一套词汇：**presence**（add/remove，remove 只撤本会话加的，磁盘声明只能关）与 **availability**（disable/enable）。**关闭不是隐藏**：被关的声明仍在本会话的表里、带 `:disabled? true`，只是不再触发——藏起来会让「没有这条 hook」和「这条 hook 关着」变成同一个观察，而前者是谎话，声明就摆在文件里。
 
 ### Provider 时间线（`provider/init` 与 `provider/changed`）
 

@@ -21,6 +21,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.event :as ev]
+            [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.shell :as shell])
@@ -503,6 +504,15 @@
                                (try [(binding [*thread-id* thread-id] ((:run tool) parsed)) nil]
                                     (catch Throwable t [nil t]))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
+                               ;; PostToolUse is an OBSERVER: its verdict is
+                               ;; discarded here on purpose. It already ran inside
+                               ;; the seam (hook/emit), it cannot un-run the tool,
+                               ;; and its failure semantics are the point's own
+                               ;; (:on-error :proceed) -- so nothing about this
+                               ;; call's outcome depends on it.
+                               _ (when-not err
+                                   (hook/emit :post-tool-use {:tool_name name
+                                                              :tool_input parsed}))
                                _ (report (ev/tool-post-execute id name))]
                            (if err
                              {:content (ex-message err) :error true}

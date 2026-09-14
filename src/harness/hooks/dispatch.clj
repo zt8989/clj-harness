@@ -32,12 +32,26 @@
   when it is hit."
   10000)
 
+(defn- jsonable
+  "V as something clojure.data.json can write. A value the encoder refuses (a
+  set, a lazy seq, anything exotic a fact happens to carry) becomes its printed
+  form rather than taking the whole hook down: a hook that cannot read ONE field
+  is still better than no hook at all, and the printed form is exactly what the
+  author would have written by hand."
+  [v]
+  (try
+    (json/write-str v)
+    (json/write-str (pr-str v))
+    (catch Exception _ (json/write-str (str v)))))
+
 (defn- matches? [decl subject]
   (if-let [pattern (:matcher decl)]
     ;; The matcher was compiled at load (harness.hooks/check-declaration), so
     ;; this cannot throw here; a malformed pattern never got this far.
     (boolean (re-find (re-pattern pattern) (str subject)))
     true))
+
+(declare fire)
 
 (defn- declaration-for
   "The declarations of POINT in force for THREAD-ID that this trigger should run:
@@ -80,6 +94,28 @@
           (and (= :error outcome) (= :block (or on-error (:on-error point)))))
     {:verdict :block :reason reason}
     {:verdict :allow :reason (when (= :error outcome) reason)}))
+
+(def ^:dynamic *sink*
+  "The run currently firing hooks, or nil. Bound by the edge (harness.http) for
+  the duration of a run, because the edge is what knows the two things a sink
+  needs and the kernel does not: which thread this run serves, and where an audit
+  line is written.
+
+  UNBOUND MEANS HOOKS DO NOT FIRE -- deliberately the default every other caller
+  gets. An offline tool, a scripted test, a replay: none of them has an audit
+  writer, and a hook whose verdict nobody records is worse than no hook, because
+  it changes a run silently. So the capability is opt-in at the edge, and
+  everything below the edge stays byte-identical without it."
+  nil)
+
+(defn emit
+  "Fire POINT with FACT as part of the current run, if one is bound. Returns the
+  same map `fire` does, or :allow when there is no sink -- the caller's code path
+  is the same either way, which is what makes the unbound case free."
+  [point fact]
+  (if *sink*
+    (fire (assoc *sink* :point point :fact fact))
+    {:verdict :allow :reason nil :matched 0}))
 
 (defn fire
   "Fire POINT for THREAD-ID with FACT, reporting through AUDIT (a fn of the

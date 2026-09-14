@@ -109,20 +109,26 @@
       (is (str/includes? (:reason r) "exited 3")))))
 
 (deftest a-hang-is-bounded-and-means-the-same-as-a-failure
+  ;; The sleeps are deliberately far longer than the bound below: if the timeout
+  ;; did NOT work the test waits the whole sleep and misses the bound by a mile,
+  ;; instead of flirting with it on a loaded machine.
   (testing "an observer that hangs does not hold the run"
-    (declared! :post-tool-use [{:command (script! "hang.sh" "sleep 5")
+    (declared! :post-tool-use [{:command (script! "hang.sh" "sleep 60")
                                 :timeout 300}])
     (let [started (System/currentTimeMillis)
           r (fire :post-tool-use {:tool_name "read"})
           elapsed (- (System/currentTimeMillis) started)]
       (is (= :allow (:verdict r)))
-      (is (< elapsed 4000) (str "should have been killed at 300ms, took " elapsed "ms"))))
+      (is (< elapsed 5000) (str "should have been killed at 300ms, took " elapsed "ms"))))
   (testing "a gate that hangs blocks"
-    (declared! :pre-tool-use [{:command (script! "hang2.sh" "sleep 5")
+    (declared! :pre-tool-use [{:command (script! "hang2.sh" "sleep 60")
                                :timeout 300}])
-    (let [r (fire :pre-tool-use {:tool_name "write"})]
+    (let [started (System/currentTimeMillis)
+          r (fire :pre-tool-use {:tool_name "write"})
+          elapsed (- (System/currentTimeMillis) started)]
       (is (= :block (:verdict r)))
-      (is (str/includes? (:reason r) "timed out")))))
+      (is (str/includes? (:reason r) "timed out"))
+      (is (< elapsed 5000) (str "the gate should have been killed too, took " elapsed "ms")))))
 
 (deftest a-command-that-cannot-be-run-is-a-failure-not-an-exception
   (declared! :pre-tool-use [{:command "/nonexistent/never-a-command.sh"}])
