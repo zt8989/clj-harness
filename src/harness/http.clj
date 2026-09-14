@@ -16,11 +16,15 @@
                    post-execute), keyed by toolCallId. No wire frame at all.
     \"approval/decided\" -- a human's answer to a parked call, with the interrupt
                    id and whatever payload the client attached.
-    \"provider/init\"   -- once per thread, on its first run: the provider the
-                   session serves from (four fields + source) and the fact that
-                   the api-key was stripped. Never a per-run snapshot.
-    \"provider/changed\" -- a mid-session provider change, before -> after, once
-                   the approving human's decision has been consumed.
+    \"provider/init\"   -- once per thread, on its first run: which provider and
+                   model this session serves from, the source that chose them,
+                   what the catalog resolved that to (endpoint + the model's
+                   input/output modalities), and the fact that the api-key was
+                   stripped. Never a per-run snapshot.
+    \"provider/changed\" -- a mid-session change of the selection, before ->
+                   after, with the session's whole tier afterwards and what it
+                   resolved to, once the approving human's decision has been
+                   consumed.
     \"project/bound\" -- a session's project-directory binding, BEFORE ->
                    AFTER (a first bind's before is null; rebinding moves the
                    root and lands another line, so the directory timeline
@@ -40,6 +44,7 @@
             [harness.event :as ev]
             [harness.home :as home]
             [harness.memory :as mem]
+            [harness.models :as models]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.replay :as replay]
@@ -146,14 +151,55 @@
         resume))
 
 (defn- provider-line
-  "The provider a run is serving from, in the shape the jsonl records: the four
-  descriptive fields, and an explicit statement that the api-key was STRIPPED
-  rather than a value. A field no tier ever named is simply absent -- the
-  resolution is field-by-field, so a missing :reasoning-effort is a fact, not an
-  error."
-  [provider]
-  (merge (select-keys provider [:protocol :base-url :model :reasoning-effort])
-         {:api-key :stripped}))
+  "A provider, in the shape the jsonl records: the SELECTION (which provider,
+  which model, what reasoning effort) and what the catalog RESOLVED it to (the
+  endpoint and the model's modalities), plus the selection's source.
+
+  RESOLVED IS RECORDED, NOT RE-DERIVED. The catalog is a living thing -- a
+  built-in table gains a model, someone moves a base-url -- so a reader
+  re-resolving an old init line months later would read today's answer as if it
+  were that run's. Writing the resolution down is what keeps the log
+  self-describing, and it is exactly why provider/changed carries its override
+  rather than leaving a reader to reconstruct the tier.
+
+  Sets render as sorted string vectors (harness.models/wire): two otherwise
+  identical runs must not produce lines differing only in set ordering. The
+  api-key is present as the fact that it was STRIPPED, never as a value -- so a
+  reader sees it is not a leak rather than wondering whether it was forgotten."
+  [provider source]
+  (assoc (models/wire provider) :source source :api-key :stripped))
+
+(defn- guard-input-modalities!
+  "Refuse a run whose messages carry a modality the selected model never declared
+  it accepts -- an image aimed at a text-only model, typically.
+
+  BEFORE the provider is called, which is the whole point: the vendor's own answer
+  to an undeclared modality is a 400 whose body names nothing useful, arriving
+  after the request has been paid for. This names the model and the modality, and
+  the run never leaves the process.
+
+  A model that declared NOTHING is not guarded (see ag/undeclared-input): no
+  declaration is no promise, and enforcing one would be inventing a rule the
+  configuration never stated.
+
+  PROPERTY, NOT SECURITY. A configuration that declares :image for a text-only
+  model is lying, and nothing here catches that -- the declaration is taken at its
+  word. Same standing as the project fence: this stops a slip, and the failure it
+  prevents is a confusing error message, not an exploit.
+
+  Returns nil when the run may proceed, so the caller reads as a guard clause."
+  [input provider]
+  (let [bad (ag/undeclared-input (:messages input) (:input provider))]
+    (when (seq bad)
+      (throw (ex-info (str "model " (pr-str (or (:model provider) "(unnamed)"))
+                           " does not accept " (pr-str (mapv name bad))
+                           " input; it declares "
+                           (pr-str (mapv name (sort-by name (:input provider))))
+                           (when-let [p (:provider provider)] (str " (provider " p ")"))
+                           " -- change the model, or send only what it declares")
+                      {:model (:model provider)
+                       :undeclared (vec bad)
+                       :declared (vec (sort-by name (:input provider)))})))))
 
 (defn- run-agent! [ch input]
   (let [thread-id (str (:threadId input))
@@ -165,15 +211,18 @@
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
     (async/go
-      ;; A malformed input, an unreadable prompt, a bad config -- or a resume
-      ;; naming an interrupt this process never parked -- blows up before the run
-      ;; starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
-      ;; so the client sees a terminated run rather than a broken stream.
+      ;; A malformed input, an unreadable prompt, a bad config, an image aimed at a
+      ;; text-only model -- or a resume naming an interrupt this process never
+      ;; parked -- blows up before the run starts. Catch it here and push a
+      ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
+      ;; run rather than a broken stream.
       (let [[provider messages decisions resolved]
-            (try [(mem/current-provider thread-id (:provider input))
-                  (ag/inbound (:messages input) (mem/prompt) (:context input))
-                  (resume-decisions (:resume input))
-                  (mem/resolve-provider thread-id (:provider input))]
+            (try (let [provider (mem/current-provider thread-id (:provider input))]
+                   (guard-input-modalities! input provider)
+                   [provider
+                    (ag/inbound (:messages input) (mem/prompt) (:context input))
+                    (resume-decisions (:resume input))
+                    (mem/resolve-provider thread-id (:provider input))])
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]
@@ -189,7 +238,7 @@
           (when (and (nil? (mem/pinned-provider thread-id))
                      (not (mem/init-logged? thread-id)))
             (log! thread-id run-id "provider/init"
-                  (assoc (provider-line provider) :source (:source resolved)))
+                  (provider-line provider (:source resolved)))
             (mem/mark-init-logged! thread-id))
           ;; The decision record: what the human answered, next to the input that
           ;; carried it. The same verdict also lands on the resumed call's
@@ -202,13 +251,20 @@
           ;; because the change is only written once the human's approval has
           ;; been consumed -- so the two lines read together as "approved, and
           ;; here is what it changed".
+          ;;
+          ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
+          ;; are what the change moved (a session can only move a knob), and
+          ;; :override is the session's whole tier afterwards. The endpoint that
+          ;; resulted is on :resolved, so a reader stepping the timeline sees
+          ;; both "what was chosen" and "what that meant" at each step.
           (doseq [c (mem/take-provider-changes! thread-id)]
             (log! thread-id run-id "provider/changed"
                   {:verdict  (:verdict c :approved)
-                   :before   (select-keys (:before c) [:protocol :base-url :model :reasoning-effort])
-                   :after    (select-keys (:after c)  [:protocol :base-url :model :reasoning-effort])
+                   :before   (models/wire (:before c)   models/knobs)
+                   :after    (models/wire (:after c)    models/knobs)
                    :trigger  (:trigger c)
-                   :override (select-keys (:override c) [:protocol :base-url :model :reasoning-effort])}))
+                   :override (models/wire (:override c) models/knobs)
+                   :resolved (models/wire (:resolved c))}))
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a
@@ -365,10 +421,49 @@
                            :messages messages
                            :context  (or context [])})))))
 
+(defn- model-get
+  "GET /api/model?threadId=.. -- what this session is served by and what that
+  model accepts, for a client deciding whether to offer an image picker:
+
+    {:provider :openrouter :model \"anthropic/claude-sonnet-4.5\"
+     :reasoning-effort \"high\"
+     :protocol :openai-completions :base-url \"https://openrouter.ai/api/v1\"
+     :input [\"image\" \"text\"] :output [\"text\"]}
+
+  Answered from the LIVE resolution (mem/active-provider): a session override
+  made a moment ago is already reflected, and nothing is cached between calls.
+  The api-key is not in the answer at any depth -- active-provider names its
+  fields one by one rather than passing the resolved map through.
+
+  THE SHAPE IS THIS HARNESS'S, NOT AG-UI's. AG-UI describes capabilities as
+  MultimodalCapabilities ({input.{image,audio,video,pdf,file}, ...}) for its
+  connect handshake; this endpoint answers the harness's own vocabulary
+  (:text/:image) and leaves that mapping to whoever wires the handshake up. It
+  is also only the INPUT half of that story, but here input is all there is to
+  report: output is always text, and a field that can only ever hold one value
+  says nothing.
+
+  READ-ONLY, and therefore leaves no trace: like GET /api/project, only a route
+  that can CHANGE something writes an audit line.
+
+  Absent is an answer, not an error. An unbound thread, a provider described
+  inline that declared no modalities, a model nobody gave a reasoning effort --
+  each comes back with the field missing rather than with a 400, because a
+  client asking 'what is this session' deserves the truth about a sparse
+  configuration rather than a failure it has to interpret."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")]
+    (api-response 200 (models/wire (mem/active-provider thread-id)))))
+
 (defn handler [req]
   (cond
     (= :options (:request-method req))
     {:status 204 :headers cors}
+
+    (= "/api/model" (:uri req))
+    (case (:request-method req)
+      :get  (model-get req)
+      (api-response 405 {:error "method not allowed"}))
 
     (= "/api/project" (:uri req))
     (case (:request-method req)

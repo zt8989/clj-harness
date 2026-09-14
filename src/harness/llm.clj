@@ -16,7 +16,11 @@
 
   A provider is just a config map, so (harness.memory/current-provider) or
   (harness.memory/effective-provider) can be handed straight to loop/run-chan:
-    {:protocol :openai-completions, :base-url .., :model .., :api-key .., :reasoning-effort ..}"
+    {:protocol :openai-completions, :base-url .., :model .., :api-key ..
+     :reasoning-effort ..}
+  :reasoning-effort is present only when some tier chose one, and :input/:output
+  are not read here at all -- they describe what a model accepts, which is the
+  edge's business (harness.http/guard-input-modalities!), not the wire's."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]

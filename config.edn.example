@@ -1,7 +1,27 @@
-;; The DEFAULT tier: which entry in providers.edn to start from, and which
-;; fields to tune on top. Anything you omit here falls back to the registry
-;; entry -- so a config that only names a provider is the simplest case.
+;; The DEFAULT tier: the three knobs a session starts from. Anything left out
+;; falls through -- to the provider's own default model, or to no reasoning
+;; effort at all -- so a config naming only a provider is the simplest case.
 ;;
-;; To add a new model, edit providers.edn, not this file.
+;;   :provider          a provider name from providers.edn or the built-in table
+;;   :model             a model id THAT provider declares (optional; leaving it
+;;                      out uses the provider's default)
+;;   :reasoning-effort  forwarded to providers that understand it
+;;
+;; Everything else about a provider -- its endpoint, its protocol, what each of
+;; its models accepts -- comes from the catalog, not from here. To add a model,
+;; edit providers.edn (or use one the built-in table already knows); to change an
+;; endpoint, edit the provider's entry. Naming an endpoint here is only meaningful
+;; in the INLINE form below, which describes a provider instead of naming one.
 
-{:provider :cheap :reasoning-effort "low"}
+{:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+
+;; THE INLINE FORM (the escape hatch): describe a provider instead of naming one,
+;; for trying an endpoint without registering it. Requires :protocol, :base-url
+;; and :model; :input/:output are optional and declaring nothing means the entry
+;; promises nothing (nothing then checks its input).
+;;
+;;   {:protocol :openai-completions
+;;    :base-url "https://some-endpoint/v1"
+;;    :model    "some-model"
+;;    :input    #{:text :image}
+;;    :output   #{:text}}

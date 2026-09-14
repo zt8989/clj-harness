@@ -122,10 +122,31 @@
   "Poll the thread's log, parsed, until PRED holds over the parsed lines or MS
   elapses. Needed because the returned side of the message record lands one beat
   after the terminal frame -- :run/done reaches the consumer only after the SSE
-  has closed -- so a reader that races the consumer sees a file without it."
+  has closed -- so a reader that races the consumer sees a file without it.
+
+  A TRAILING LINE THAT DOES NOT PARSE IS SKIPPED, NOT AN ERROR. The file is being
+  appended to while this reads it, so its last line may be half-written; that is a
+  fact about reading a live log, not a corrupt log. Only an unparseable line
+  BEFORE the last one is worth failing on, and the strict reader
+  (harness.replay/lines->records) is the one that makes that call -- this helper
+  only polls, so it reports what it could parse and lets the assertions judge."
   [f pred ms]
-  (let [read   (fn [] (mapv #(json/read-str % :key-fn keyword)
-                            (str/split-lines (slurp f :encoding "UTF-8"))))
+  (let [read   (fn []
+                 (let [raw (try (slurp f :encoding "UTF-8") (catch Throwable _ ""))
+                       ls  (str/split-lines raw)
+                       n   (count ls)]
+                   (into []
+                         (keep-indexed
+                          (fn [i line]
+                            (try
+                              (json/read-str line :key-fn keyword)
+                              (catch Throwable t
+                                ;; The LAST line may be half-written: the file is
+                                ;; still growing. Anywhere else it is corruption,
+                                ;; and swallowing that would turn this helper into
+                                ;; a way to make a broken log look readable.
+                                (when (< i (dec n)) (throw t))))))
+                         ls)))
         finish (+ (System/currentTimeMillis) ms)]
     (loop []
       (let [lines (read)]
@@ -207,26 +228,178 @@
   ;; through the real edge -- real server, real request, real file -- because that is
   ;; the only way to catch a disagreement about the log's name or its line format, and
   ;; the two sides live in different namespaces on different sides of dev/src.
+  ;;
+  ;; It WAITS for the run's returned message lines before reading: the write that
+  ;; ends a run lands after the SSE has closed, so reading straight afterwards
+  ;; races the writer and can catch the log mid-line. (It used to do exactly that,
+  ;; and failed intermittently with 'the log is truncated or corrupt' -- which is
+  ;; what a reader racing an append-only file looks like.)
   (with-server
    8095
    "replay-e2e"
    (fn []
-     (io/delete-file (io/file (log-dir) "replay-e2e.jsonl") true)
-     (post-run 8095 "replay-e2e")
-     (let [history (replay/history (log-dir) "replay-e2e")]
-       (testing "the reader found the file the writer wrote, and rebuilt a conversation"
-         (is (= "system" (:role (first history))))
-         (is (some #(= "user" (:role %)) history)))
-       (testing "the reasoning the server emitted is folded back for the model"
-         (is (= reasoning
-                (:reasoning_content
-                 (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
-       (testing "and the tools the server actually ran are in the rebuilt conversation"
-         ;; Match c1 by its own id: README.md also contains ":paths", so content
-         ;; alone could be satisfied by the other call's result.
-         (is (some #(and (= "c1" (:tool_call_id %))
-                         (str/includes? (str (:content %)) ":paths"))
-                   (filter #(= "tool" (:role %)) history))))))))
+     (let [log (io/file (log-dir) "replay-e2e.jsonl")]
+       (io/delete-file log true)
+       (post-run 8095 "replay-e2e")
+       (wait-for-recorded
+        log
+        (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
+                      (>= (count (filter #(= "message" (:kind %)) ls)) 4)))
+        3000)
+       (let [history (replay/history (log-dir) "replay-e2e")]
+         (testing "the reader found the file the writer wrote, and rebuilt a conversation"
+           (is (= "system" (:role (first history))))
+           (is (some #(= "user" (:role %)) history)))
+         (testing "the reasoning the server emitted is folded back for the model"
+           (is (= reasoning
+                  (:reasoning_content
+                   (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
+         (testing "and the tools the server actually ran are in the rebuilt conversation"
+           ;; Match c1 by its own id: README.md also contains ":paths", so content
+           ;; alone could be satisfied by the other call's result.
+           (is (some #(and (= "c1" (:tool_call_id %))
+                           (str/includes? (str (:content %)) ":paths"))
+                     (filter #(= "tool" (:role %)) history)))))))))
+
+(deftest an-image-part-reaches-the-model-translated-and-the-log-says-so
+  ;; Images end to end. The AG-UI spelling of a content part is not the provider's,
+  ;; so the translation happens on the way IN -- which is what lets the "message"
+  ;; line stay a truthful record of what the LLM was about to see. A log holding
+  ;; AG-UI parts under a "message" kind would be lying about the one thing it
+  ;; exists to record.
+  ;;
+  ;; The same messages are then rebuilt through replay/history, which re-derives
+  ;; them from the input line: live and replay must agree, or a resumed
+  ;; conversation would send the vendor a shape the live run never did.
+  (with-server
+   8093
+   "images"
+   (fn []
+     (let [log    (io/file (log-dir) "images.jsonl")
+           parts  [{:type "text" :text "what is this"}
+                   {:type "image" :source {:type "url" :value "https://example.test/a.png"}}
+                   {:type "image" :source {:type "data" :value "AAAB" :mimeType "image/jpeg"}}]
+           expect [{:type "text" :text "what is this"}
+                   {:type "image_url" :image_url {:url "https://example.test/a.png"}}
+                   {:type "image_url"
+                    :image_url {:url "data:image/jpeg;base64,AAAB"}}]]
+       (io/delete-file log true)
+       (post-run 8093 "images" {:messages [{:id "u1" :role "user" :content parts}]})
+       (let [lines (wait-for-recorded
+                    log
+                    (fn [ls] (some #(= "message" (:kind %)) ls))
+                    3000)
+             sent  (->> lines
+                        (filter #(= "message" (:kind %)))
+                        (map :payload)
+                        (filter #(= "user" (:role %))))]
+         (testing "what the LLM saw is the provider's part shape, not the client's"
+           (is (= [expect] (mapv :content sent)))
+           (is (not-any? #(str/includes? (json/write-str %) "\"source\"")
+                         sent)
+               "no AG-UI source wrapper survives into the record"))
+         (testing "and replay rebuilds the very same messages from the log"
+           (let [history (replay/history (log-dir) "images")
+                 rebuilt (mapv :content (filter #(= "user" (:role %)) history))]
+             (is (= [expect] rebuilt)
+                 "a resumed conversation sends what the live run sent"))))))))
+
+(defn- with-declaring-server
+  "Like with-server, but the scripted pin DECLARES an input modality set -- which
+  is how a pinned provider can stand in for a model with a stated capability.
+
+  The spec (as opposed to the pin) is what the guard reads, and a pin is a whole
+  provider map, so the declaration rides it. Returns the script atom so a test can
+  assert the provider was never called: a drained script is a provider that ran."
+  [port thread-id declared turns f]
+  (let [script (atom (vec turns))]
+    (mem/use-provider! thread-id (assoc (fake/scripted turns) :input declared
+                                        :script script))
+    (let [stop (http/start! {:port port})]
+      (try (f script) (finally (stop) (mem/use-provider! thread-id nil))))))
+
+(deftest a-text-only-model-refuses-an-image-by-name-and-never-calls-the-vendor
+  ;; The declaration is only worth anything if something enforces it. The vendor's
+  ;; own answer to an undeclared modality is a 400 whose body names nothing useful,
+  ;; arriving after the request was sent -- so the refusal happens here instead,
+  ;; and the provider is not contacted at all.
+  (with-declaring-server
+   8089
+   "guarded"
+   #{:text}
+   [{:content "should never be reached"}]
+   (fn [script]
+     (let [resp   (post-run 8089 "guarded"
+                            {:messages [{:id "u1" :role "user"
+                                         :content [{:type "text" :text "what is this"}
+                                                   {:type "image"
+                                                    :source {:type "url"
+                                                             :value "https://x/i.png"}}]}]})
+           frames (mapv #(json/read-str (str/trim (subs % 5)) :key-fn keyword)
+                        (filter #(str/starts-with? % "data:") (str/split-lines (.body resp))))
+           types  (mapv :type frames)
+           error  (first (filter #(= "RUN_ERROR" (:type %)) frames))]
+       (testing "the run terminates as an error, not as a success"
+         (is (some #(= "RUN_ERROR" %) types))
+         (is (not-any? #(= "RUN_FINISHED" %) types)))
+       (testing "and the refusal names the model and the modality it will not take"
+         (is (str/includes? (:message error) "image"))
+         (is (str/includes? (:message error) "text"))
+         (is (str/includes? (:message error) "does not accept")))
+       (testing "NOTHING WAS SENT -- the scripted provider is untouched"
+         (is (= 1 (count @script))
+             "the vendor would have consumed its turn had the run reached it"))))))
+
+(deftest a-model-that-declares-images-is-not-guarded
+  ;; The other half: the guard must not become a blanket refusal of images.
+  (with-declaring-server
+   8090
+   "unguarded"
+   #{:text :image}
+   [{:content "saw it"}]
+   (fn [script]
+     (let [resp (post-run 8090 "unguarded"
+                          {:messages [{:id "u1" :role "user"
+                                       :content [{:type "text" :text "what is this"}
+                                                 {:type "image"
+                                                  :source {:type "url"
+                                                           :value "https://x/i.png"}}]}]})
+           body (.body resp)]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script) "and the run really did reach the provider")))))
+
+(deftest a-text-only-model-takes-text-as-before
+  ;; Regression: the guard must not touch the ordinary run.
+  (with-declaring-server
+   8091
+   "plain"
+   #{:text}
+   [{:content "hello"}]
+   (fn [script]
+     (let [body (.body (post-run 8091 "plain"))]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script))))))
+
+(deftest a-model-that-declares-nothing-is-not-guarded
+  ;; An inline provider that never stated a capability promises nothing, so there
+  ;; is nothing to enforce. Guarding it would invent a rule the configuration never
+  ;; wrote -- and break every deployment that describes its endpoint directly.
+  (with-declaring-server
+   8092
+   "silent"
+   nil
+   [{:content "went through"}]
+   (fn [script]
+     (let [body (.body (post-run 8092 "silent"
+                                 {:messages [{:id "u1" :role "user"
+                                              :content [{:type "image"
+                                                         :source {:type "url"
+                                                                  :value "https://x/i.png"}}]}]}))]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script) "and the provider was reached")))))
 
 (deftest records-the-tool-lifecycle-as-jsonl
   ;; ApplePi's ADR-0021 audit trio, keyed by toolCallId: every call enters
@@ -370,14 +543,18 @@
 ;; ----------------------------------------------------- the provider timeline
 
 (defn- with-resolved-config
-  "Install a config root that RESOLVES its provider -- a registry plus a default
-  tier, no scripted pin -- and restore the previous one after. The registry's
-  entries use :protocol :fake (and live in the shared test-script atom -- an
-  atom cannot cross EDN), so the RESOLVED provider is a working fake:
-  resolution runs for real while the LLM stays offline.
+  "Install a config root that RESOLVES its provider -- a catalog plus a default
+  tier, no scripted pin -- and restore the previous one after. The catalog's
+  providers use :protocol :fake (and live in the shared test-script atom -- an
+  atom cannot cross EDN), so the RESOLVED provider is a working fake: resolution
+  runs for real while the LLM stays offline.
 
-  Used by the two tests below. A pinned provider skips resolution, and the
-  provider timeline is precisely about resolution, so these must not pin."
+  Two vendors with DIFFERENT endpoints, so a test can see a vendor switch move
+  the endpoint rather than only the model id -- and OPPOSITE declarations, alpha
+  taking images and beta not, so the input guard has a yes and a no to work with.
+
+  Used by the tests below. A pinned provider skips resolution, and the provider
+  timeline is precisely about resolution, so these must not pin."
   [turns f]
   (let [cfg-file (io/file (log-dir) ".." "config.edn")
         reg-file (io/file (log-dir) ".." "providers.edn")
@@ -386,16 +563,52 @@
         old-script @fake/test-script]
     (try
       (reset! fake/test-script (vec turns))
-      (spit cfg-file "{:provider :cheap}\n" :encoding "UTF-8")
+      (spit cfg-file "{:provider :alpha}\n" :encoding "UTF-8")
       (spit reg-file
-            (pr-str {:cheap {:protocol :fake :base-url "https://x/v1" :model "small"}
-                     :smart {:protocol :fake :base-url "https://x/v1" :model "big"}})
+            (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
+                             :model "alpha-small"
+                             :models {"alpha-small" {:input #{:text :image} :output #{:text}}
+                                      "alpha-big"   {:input #{:text :image} :output #{:text}}}}
+                     :beta  {:protocol :fake :base-url "https://y/v1"
+                             :model "beta-plain"
+                             :models {"beta-plain" {:input #{:text} :output #{:text}}}}})
             :encoding "UTF-8")
       (f)
       (finally
         (spit cfg-file (or old-cfg "{:protocol :fake}\n") :encoding "UTF-8")
         (io/delete-file reg-file true)
         (reset! fake/test-script old-script)))))
+
+(deftest the-guard-reads-the-catalogs-declaration-not-a-pin
+  ;; Through REAL resolution, unlike the pinned guard tests above: the catalog
+  ;; says beta-plain is text-only, so an image aimed at it is refused. This is the
+  ;; wiring that matters -- a guard reading a declaration nothing populates would
+  ;; pass every pinned test and do nothing in production.
+  (with-resolved-config
+   [{:content "unreachable"}]
+   (fn []
+     (let [id     "http-guard"
+           stop   (http/start! {:port 8088})
+           image  {:messages [{:id "u1" :role "user"
+                               :content [{:type "text" :text "look"}
+                                         {:type "image"
+                                          :source {:type "url" :value "https://x/i.png"}}]}]}
+           error  (fn [body]
+                    (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
+                                    (when (= "RUN_ERROR" (:type f)) f))
+                                 (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
+       (try
+         (testing "aimed at the text-only model, it is refused by name"
+           (mem/set-override! id {:provider :beta})
+           (let [e (error (.body (post-run 8088 id image)))]
+             (is (some? e))
+             (is (str/includes? (:message e) "beta-plain") "names the model")
+             (is (str/includes? (:message e) "image") "and the modality it will not take")))
+         (testing "the SAME input is served by a model that declares images"
+           (mem/set-override! id {:provider :alpha})
+           (is (= #{:text :image} (:input (mem/active-provider id))))
+           (is (nil? (error (.body (post-run 8088 id image))))))
+         (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest the-provider-timeline-is-init-once-then-changes
   ;; Ticket 03, over the real edge. A session's provider history lands as
@@ -419,13 +632,19 @@
                (is (= 1 (count (filter #(= "provider/init" %) kinds))))
                (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
                (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
-           (testing "it carries the four fields, the source, and NO api-key value"
+           (testing "it carries the selection, what it resolved to, the source, and NO key value"
              (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
-               (is (= "fake" (:protocol p)))
+               (is (= "alpha" (:provider p)) "the provider that was selected")
+               (is (= "alpha-small" (:model p)) "the model id that was selected")
+               (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
                (is (= "https://x/v1" (:base-url p)))
-               (is (= "small" (:model p)))
+               (is (= ["image" "text"] (:input p)) "the model's modalities, as wire strings")
+               (is (= ["text"] (:output p)))
                (is (= "default" (:source p)))
                (is (= "stripped" (:api-key p)))))
+           ;; The endpoint above is RECORDED, not re-derived: the catalog can
+           ;; change under an old log (a base-url moves, a model is added), so a
+           ;; reader re-resolving would report today's answer as that run's.
            ;; Run two of the same thread: no second init.
            (post-run 8101 id)
            (let [after-second (wait-for-recorded
@@ -437,13 +656,13 @@
          (finally (stop)))))))
 
 (deftest a-session-configure-lands-as-a-changed-line
-  ;; The write half of 04, end to end: the agent changes its reasoning effort,
-  ;; the change is approved, and the jsonl shows a provider/changed line with
-  ;; before -> after. The approval gate is what makes it land only after the
-  ;; human's verdict.
+  ;; The write half, end to end: the agent changes its reasoning effort, the
+  ;; change is approved, and the jsonl shows a provider/changed line with
+  ;; before -> after plus what it resolved to. The approval gate is what makes it
+  ;; land only after the human's verdict.
   ;;
-  ;; A session override holds ONLY the fields the session owns (not the resolved
-  ;; provider's full shape -- that is what the init line is for). So the
+  ;; A session override holds ONLY the knobs the session owns (not the resolved
+  ;; endpoint -- that is what :resolved and the init line are for). So the
   ;; change's before and after show the session's slice, and the chain between
   ;; consecutive changes is exactly the test of "what moved in this session".
   (with-resolved-config
@@ -453,9 +672,8 @@
            stop (http/start! {:port 8102})]
        (try
          (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
-         ;; Seed the session with a baseline the change can stand on. The change
-         ;; line is the session's own slice, not the full provider.
-         (mem/set-override! id {:model "small"})
+         ;; Seed the session with a baseline the change can stand on.
+         (mem/set-override! id {:model "alpha-big"})
          ;; Drive the change the way a run would: park, approve, resume-transit.
          (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
                                         :function {:name "session-configure"
@@ -475,17 +693,22 @@
                changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
            (testing "the change is on disk, before -> after, marked approved"
              (is (= "approved" (:verdict changed)))
-             (is (= "small" (get-in changed [:before :model]))
+             (is (= "alpha-big" (get-in changed [:before :model]))
                  "the session's pre-change slice is the baseline that stood")
-             (is (= "small" (get-in changed [:after :model]))
+             (is (= "alpha-big" (get-in changed [:after :model]))
                  "the model never moved; only the effort did")
              (is (= "high" (get-in changed [:after :reasoning-effort]))
-                 "and the new field is the one the change named")
+                 "and the new knob is the one the change named")
              (is (= "session-configure" (:trigger changed))
                  "the change names the path that pressed it")
-             (is (= {:model "small" :reasoning-effort "high"}
+             (is (= {:model "alpha-big" :reasoning-effort "high"}
                     (select-keys (:override changed) [:model :reasoning-effort]))
-                 "the override is the full session slice after the change"))
+                 "the override is the full session slice after the change")
+             (testing "and it records what that slice resolved to, so a reader
+                       months later is not reading today's catalog"
+               (is (= "https://x/v1" (get-in changed [:resolved :base-url])))
+               (is (= "alpha-big" (get-in changed [:resolved :model])))
+               (is (= ["image" "text"] (get-in changed [:resolved :input])))))
            (testing "consecutive changes chain through the same slice"
              ;; One more approved change: reasoning-effort goes from high to
              ;; low. before on the new line MUST equal after on the previous.
@@ -509,10 +732,49 @@
                (is (= "low" (get-in b [:after :reasoning-effort])))
                (is (every? #(= "session-configure" (:trigger %)) [a b])
                    "every chained change names its trigger")
-               (is (= {:model "small"} (select-keys (:override a) [:model]))
+               (is (= {:model "alpha-big"} (select-keys (:override a) [:model]))
                    "the first change's override is the full session slice")
                (is (= "low" (get-in (:override b) [:reasoning-effort]))
                    "the second change's override reflects the latest session state"))))
+         (finally (stop) (mem/set-override! id nil)))))))
+
+(deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
+  ;; The end-to-end proof of the feature: an agent naming a vendor gets that
+  ;; vendor's ENDPOINT, and the change line says so. Under the old shape this
+  ;; call was accepted, approved, and changed nothing -- the log line even
+  ;; recorded {:before {} :after {}}.
+  (with-resolved-config
+   [{:content "hello"}]
+   (fn []
+     (let [id   "http-vendor"
+           stop (http/start! {:port 8103})]
+       (try
+         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (let [call (fn [] (tools/run! {:id "vsw" :type "function"
+                                        :function {:name "session-configure"
+                                                   :arguments (json/write-str {:provider "beta"})}}
+                                       id))
+               {:keys [parked]} (call)]
+           (mem/decide-approval! (:interrupt-id parked) :approved {})
+           (call))
+         (testing "the session's served endpoint moved with the vendor"
+           (let [a (mem/active-provider id)]
+             (is (= :beta (:provider a)))
+             (is (= "https://y/v1" (:base-url a)))
+             (is (= "beta-plain" (:model a)) "and its default model came along")))
+         (post-run 8103 id)
+         (let [lines (wait-for-recorded
+                      (io/file (log-dir) (str id ".jsonl"))
+                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      2000)
+               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+           (is (= "beta" (get-in changed [:after :provider]))
+               "the change line names the vendor that was selected")
+           (is (not= {} (:after changed))
+               "and is not an empty change -- which is what the old shape wrote")
+           (is (= "https://y/v1" (get-in changed [:resolved :base-url]))
+               "with the endpoint that vendor resolves to")
+           (is (= "beta-plain" (get-in changed [:resolved :model]))))
          (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
@@ -615,6 +877,71 @@
            (is (= "http" (get-in (first bound) [:payload :via]))))
          (testing "the two failed binds added no second line"
            (is (= 1 (count (filter #(= "project/bound" (:kind %)) lines))))))))))
+
+(deftest the-model-endpoint-answers-what-this-session-can-send
+  ;; The capability endpoint. A client asks what this session is served by and
+  ;; what that model accepts, so it can decide whether to offer an image picker.
+  ;;
+  ;; Through REAL resolution rather than a pin, because the answer is precisely
+  ;; the resolution's output -- a pinned provider would make this pass while the
+  ;; endpoint reported nothing.
+  (with-resolved-config
+   [{:content "hello"}]
+   (fn []
+     (let [id   "http-model"
+           stop (http/start! {:port 8087})]
+       (try
+         (testing "the default: the selection and what the catalog resolved it to"
+           (let [resp (api-call 8087 :get (str "/api/model?threadId=" id) nil)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "alpha" (:provider body)))
+             (is (= "alpha-small" (:model body)))
+             (is (= "https://x/v1" (:base-url body)) "the resolved endpoint")
+             (is (= ["image" "text"] (:input body)) "the modalities, sorted, as wire strings")
+             (is (= ["text"] (:output body)))
+             (testing "and no api-key at any depth"
+               (is (not-any? #(str/includes? (str %) "api-key")
+                             (tree-seq coll? seq body))))))
+         (testing "a session can move to a text-only model and the answer follows"
+           (mem/set-override! id {:provider :beta})
+           (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
+             (is (= "beta" (:provider body)))
+             (is (= "beta-plain" (:model body)))
+             (is (= "https://y/v1" (:base-url body)) "the endpoint followed the vendor")
+             (is (= ["text"] (:input body)) "and the capability is the new model's")))
+         (testing "an unbound/unknown thread is still an answer, not a 400"
+           (let [resp (api-call 8087 :get "/api/model?threadId=who-is-this" nil)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "alpha-small" (:model body))
+                 "the default tier resolves for any thread with no session in play")))
+         (testing "a missing threadId is an answer too -- the process-wide slot"
+           (is (= 200 (.statusCode (api-call 8087 :get "/api/model" nil))))
+           (is (= ["image" "text"] (:input (read-json (api-call 8087 :get "/api/model" nil))))))
+         (testing "it is READ-ONLY: no audit line of its own"
+           (let [f (io/file (log-dir) (str id ".jsonl"))]
+             (is (not (.exists f))
+                 "asking a question must not write to the session's log")))
+         (finally (stop) (mem/set-override! id nil)))))))
+
+(deftest the-model-endpoint-reports-a-sparse-configuration-as-sparse
+  ;; Absent is a fact, not a failure. A provider described inline that declared no
+  ;; modalities has nothing to report, and saying so beats inventing a default or
+  ;; returning an error the client has to interpret.
+  (with-server
+   8086
+   "sparse"
+   (fn []
+     (let [tid  (str "sparse-" (java.util.UUID/randomUUID))
+           ;; The seeded test config IS the inline form, and it declares nothing
+           ;; -- which is exactly the sparse case.
+           body (read-json (api-call 8086 :get (str "/api/model?threadId=" tid) nil))]
+       (is (= "seeded" (:model body)))
+       (is (= "fake" (:protocol body)))
+       (is (not (contains? body :input)) "nothing was declared, so nothing is claimed")
+       (is (not (contains? body :output)))
+       (is (not (contains? body :provider)) "and no provider was named")))))
 
 (deftest rebinding-moves-the-root-and-lands-a-timeline
   ;; Ticket 04: rebinding an already-bound thread is the ordinary case --

@@ -43,9 +43,15 @@
     (when-let [p (.getParentFile f)] (.mkdirs p))
     (spit f content :encoding "UTF-8")))
 
-;; `bash` on PATH is C:\WINDOWS\System32\bash.exe -- the WSL launcher, a different
-;; filesystem entirely, which fails silently from a JVM. Pin Git Bash by path.
-(defonce git-bash
+;; On WINDOWS, `bash` on PATH is C:\WINDOWS\System32\bash.exe -- the WSL launcher,
+;; a different filesystem entirely, which fails silently from a JVM. So the Git
+;; Bash install is pinned by absolute path when one is found.
+;;
+;; Elsewhere neither path exists and this is plain "bash", the host's own shell:
+;; there is no second filesystem to be captured by, so nothing needs pinning. The
+;; lookup is the same on every platform and the fallback IS the answer on macOS
+;; and Linux, which is why it is written as a search rather than an os.name test.
+(defonce shell-binary
   (or (first (filter #(.exists (io/file %))
                      ["C:\\Program Files\\Git\\bin\\bash.exe"
                       "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]))
@@ -79,7 +85,7 @@
 
 (defn- t-bash [{:keys [command]}]
   (let [dir (project/binding-for mem/*thread-id*)
-        {:keys [exit out err]} (apply shell/sh git-bash "-lc" command :out-enc "UTF-8"
+        {:keys [exit out err]} (apply shell/sh shell-binary "-lc" command :out-enc "UTF-8"
                                       (when dir [:dir dir]))
         body (str out err)]
     (str (if (str/blank? body) "(no output)" body)
@@ -98,6 +104,15 @@
   is independent: pass only what you mean to change, and the rest keep the value
   the tier below gave them.
 
+  A model id means 'an id this provider serves'. Naming a new :provider with no
+  :model moves to that vendor's default model -- the old id belonged to the old
+  vendor and is not carried across. A :model the provider does not declare fails
+  HERE, by name, and nothing is written: that check is done by resolving the
+  proposed tier before committing it, because a change that cannot be served is
+  not a change. Writing first and failing later would leave the session's
+  override holding a configuration every later run fails on, and the failure
+  would surface on the NEXT run, nowhere near the call that caused it.
+
   Marks :requires-approval, so the call parks and a human decides before any of
   it takes effect -- the body only runs on an approved resume, and a veto means
   it never runs at all. The gate is a WORKFLOW convention, not a security
@@ -111,21 +126,21 @@
                     (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
     (when (empty? change)
       (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    ;; :provider names a registry entry (a keyword) or is an inline map (the
-    ;; escape hatch). The resolution validates a name against providers.edn, so a typo
-    ;; fails here, loudly, naming what it looked for.
     (let [before (mem/override-for thread-id)
-          after  (merge before change)]
-      (mem/set-override! thread-id after)
-      ;; Tell the writer what moved. The edge drains this and lands a
-      ;; provider/changed line after the approval/decided line for this call.
-      ;; :trigger names the path that pressed the change (currently always
-      ;; session-configure); :override is the FULL session override after this
-      ;; change, so a reader can reconstruct post-change session state without
-      ;; re-deriving it live.
-      (mem/record-provider-change! thread-id before after "session-configure" after)
+          ;; Resolve BEFORE writing: this proves the change can actually be
+          ;; served and hands the writer the resolved shape, so the log records
+          ;; what the session became rather than what it was asked to become.
+          resolved (mem/resolve-override (merge before change))
+          ;; set-override! answers with what it stored, and THAT is what the
+          ;; change line records -- not `change` merged over `before` a second
+          ;; time here. The stored value is the one the next run folds; a
+          ;; parallel copy is how a log and a session drift apart.
+          after (mem/set-override! thread-id (merge before change))]
+      (mem/record-provider-change! thread-id before after "session-configure"
+                                   after (:resolved resolved))
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."
+           (when-let [m (:model (:resolved resolved))] (str " Serving " m "."))
            (when (nil? thread-id)
              " (warning: no session in scope; the change landed on the process-wide slot)")))))
 
@@ -172,7 +187,7 @@
          :fence-paths true))
 
 (mem/register! "bash"
-  (tool "Run a shell command in Git Bash. The working directory is this session's project directory when one is bound, otherwise the process working directory."
+  (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
         [:command] t-bash))
 
@@ -184,11 +199,21 @@
 ;; Configure this session's provider. Marked :requires-approval so a model
 ;; cannot repoint its own session at another endpoint without a human saying so
 ;; -- the marked call parks, and only an approved resume runs the body. Every
-;; field is optional and independent; give only what you mean to change.
+;; knob is optional and independent; give only what you mean to change.
+;;
+;; "provider" names a VENDOR and "model" an id THAT VENDOR serves. A name the
+;; catalog does not know, or an id the named provider does not declare, is
+;; refused inside the body -- before anything is written, so a proposed change
+;; that cannot be served never becomes the session's configuration.
 (mem/register! "session-configure"
-  (assoc (tool "Change this session's provider, model, or reasoning effort. Parks for human approval; only an approved change takes effect. Each argument is independent -- pass only what you mean to change."
-               {"provider"         {:type "string" :description "A provider name from providers.edn (e.g. \"cheap\")."}
-                "model"            {:type "string" :description "Model id to use."}
+  (assoc (tool (str "Change this session's provider, model, or reasoning effort. "
+                    "Parks for human approval; only an approved change takes effect. "
+                    "Each argument is independent -- pass only what you mean to change. "
+                    "Naming a provider alone switches to that vendor AND its default model.")
+               {"provider"         {:type "string"
+                                    :description "A provider (vendor) name, e.g. \"openrouter\" or \"ollama\"."}
+                "model"            {:type "string"
+                                    :description "A model id the current provider serves, e.g. \"anthropic/claude-sonnet-4.5\"."}
                 "reasoning-effort" {:type "string" :description "Reasoning effort (e.g. \"low\", \"high\")."}}
                [] t-configure)
          :requires-approval true))

@@ -4,8 +4,9 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
-- `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加 provider 装配（四级解析 + api-key 解析）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
+- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,models,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
+- `src/harness/models.clj` — **provider 目录**：厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与三档折叠、把选择装配成 provider。目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移
+- `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加**三档选择**的折叠与 api-key 解析（目录的验证与装配交给 `models`，api-key 只在这一处挂上）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
 - `dev/harness/{wire,evals,repl}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`。
@@ -36,7 +37,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
   ```
 - Clojure CLI（`scoop clj-deps` 安装）
 - Node.js 18+ / npm
-- Git Bash（已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出）
+- Git Bash（Windows 必需：已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出。macOS / Linux 用系统自带的 shell，无需额外安装）
 - `bash` / `rg` 可用
 
 ## 配置
@@ -48,7 +49,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ```
 ~/.clj-harness/
 ├── config.edn        模型默认档（每轮重读，可运行期编辑）
-├── providers.edn     具名 provider 注册表（每轮重读）
+├── providers.edn     provider 目录：厂商 endpoint + 其 model 表（每轮重读）
 ├── .env              HARNESS_API_KEY
 └── logs/*.jsonl      会话日志
 ```
@@ -70,40 +71,62 @@ Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
 
-`config.edn` / `providers.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。
+`config.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。`providers.edn` 不同：它**可以不存在**——不命名 provider（用 inline 形式描述一个）就不需要它；而命名了内置目录里已有的 provider 时它也不需要。
 
 **为什么 `prompt.md` 不搬进去**：它是被 review 的代码资产，每次改动都需要 git 历史；放进家目录就脱离了版本控制。它是这个规则唯一的例外。
 
-`config.edn` 当前为 Free 代理（按用户要求不用 DeepSeek 直连）——它降级为**默认档**，指向注册表里的 `:cheap`：
+### provider 与 model
+
+**provider 是厂商，model 挂在厂商下面。** `providers.edn` 里每个 provider 是一个 endpoint 加一张它服务的 model 表：
 
 ```edn
-{:provider :cheap :reasoning-effort "low"}
+{:openrouter {:protocol :openai-completions
+              :base-url "https://openrouter.ai/api/v1"
+              :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
+              :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}}
+                         "deepseek/deepseek-chat"      {:input #{:text}       :output #{:text}}}}
+ :local      {:protocol :openai-completions
+              :base-url "http://localhost:11434/v1"
+              :model    "qwen3"
+              :models   {"qwen3" {:input #{:text} :output #{:text}}}}}
 ```
 
-具名注册表在 `providers.edn`：
+每个 model **必须**声明 `:input` / `:output`，词汇表就是本 harness 真搬得动的类型：`:input` ⊆ `#{:text :image}`、`:output` ⊆ `#{:text}`（响应里的文本、推理与工具调用是全部被读出来的东西）。集合外的值指名报错。
+
+`config.edn` 只写**三个旋钮**：
 
 ```edn
-{:cheap {:protocol :openai-completions
-         :base-url "https://openrouter.ai/api/v1"
-         :model "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
- :smart {:protocol :openai-completions
-         :base-url "https://openrouter.ai/api/v1"
-         :model "anthropic/claude-sonnet-4.5"
-         :reasoning-effort "high"}}
+{:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
 ```
 
-**解析优先级**（低→高，后者覆盖前者，**逐字段**合并——一档只填它要改的字段，其余落回上一档）：
+`:model` 可省（省则用该 provider 的默认 model）；`:reasoning-effort` 是 provider 不认识的约定（见 `llm.clj`），不属于 provider 定义。
 
-1. **`providers.edn` 具名项**（或 `config.edn` 里 `{:provider {...}}` 的 inline map——逃生门）
-2. **`config.edn` 默认档的字段覆盖**（如 `{:provider :cheap :reasoning-effort "low"}` 把 `reasoning-effort` 单独调低）
-3. **本 thread 的会话级覆盖**（`session-configure` 工具调用，**经人工审批**后写入；详见下）
-4. **本 run 的请求指定**（AG-UI `forwardedProps.provider` / `.model` / `.reasoning-effort`，只影响这次 run；**走顶层** input map，不进 `:context`——后者会变成尾部 user 消息污染 prefix cache）
+**解析**（低→高，**逐旋钮**合并——一档只填它要动的旋钮，其余落回上一档）：
 
-每档**只填它要改的字段**：`{:model "anthropic/claude-sonnet-4.5"}` 只覆盖 model，protocol/base-url/reasoning-effort 仍取上一档。这让三档各管各的，不需要为每种组合造新条目。
+1. **`config.edn` 默认档**（或 inline 描述的 provider——逃生门，见下）
+2. **本 thread 的会话级覆盖**（`session-configure` 工具调用，**经人工审批**后写入）
+3. **本 run 的请求指定**（AG-UI `forwardedProps.provider` / `.model` / `.reasoning-effort`，只影响这次 run；**走顶层** input map，不进 `:context`——后者会变成尾部 user 消息污染 prefix cache）
+
+每档只动它要动的旋钮。**换 provider 时若不指定 model，就落在新厂商的默认 model 上**——endpoint 随 provider 走，所以「只换厂商」是一个旋钮就能表达的动作：
+
+```edn
+{:provider :local}                      ; 从上面那份 config 出发 → endpoint 变 local，model 变 qwen3
+{:provider :local :model "qwen3-vl"}    ; 想连 model 一起定就一起写
+```
+
+写了一个该 provider 未声明的 model id → **指名报错**并列出它声明的 id（不回落、不猜）。命名了不存在的 provider → 同样指名报错并列出已有 provider。**没被任何一档读的键会被报出来**，不会静默忽略。
+
+**inline 逃生门**：不命名 provider，直接在 `config.edn` 里描述一个，用来试一次没登记过的 endpoint。`:protocol` / `:base-url` / `:model` 必填，`:input` / `:output` 可选（声明了就必须声明全；什么都不声明即「这个条目什么都不承诺」）：
+
+```edn
+{:protocol :openai-completions :base-url "https://some-endpoint/v1" :model "some-model"}
+```
+
+**旧形状不读、不迁移**：provider 里那条裸 `:model` 字符串而没有 `:models` 表（provider 自己就是一个 model）的形状现在会**指名报错**，并说明该写成什么。
 
 `.env` 里的值**优先于**真实环境变量（即 `HARNESS_API_KEY` 以 `.env` 为准，shell 变量不会覆盖它）；`.env` 每次重读，改完不必重启。
 
-`src/harness/llm.clj:73` 已兼容 `reasoning_content`（DeepSeek）与 `reasoning`（OpenRouter）双字段；`reasoning_effort` 仅 DeepSeek 需要，Free 模型留空即可。
+`src/harness/llm.clj` 已兼容 `reasoning_content`（DeepSeek）与 `reasoning`（OpenRouter）双字段；`reasoning_effort` 仅部分厂商需要，留空即可。
 
 ## 启动
 
@@ -154,8 +177,8 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 会话的 provider 历史落成两种新行——**不是**每 run 一行快照，时间线 init + changes 已能完整重建：
 
-- **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含 `:protocol` / `:base-url` / `:model` / `:reasoning-effort` 四字段 + `:source`（`default` / `request` / `inline`），以及 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。
-- **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before <slice> :after <slice> :trigger "session-configure" :override <完整 session override>}`。`:before`/`:after` 是本次按下的 slice（仅命中的字段），`:override` 是按完之后 session 这一档的完整 shape——回放者拿到这一字段即可还原「按完 session 长什么样」，不必再向 opaque 询问。`:trigger` 标注是哪条路径按下的 change（当前唯一合法值 `"session-configure"`）。落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。
+- **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含**选择**（`:provider` / `:model` / `:reasoning-effort`）、**选择来源** `:source`（`default` / `request` / `inline`）、以及**解析结果** `:resolved`（该 provider 的 `:protocol` / `:base-url` 与所选 model 的 `:input` / `:output`），另有 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。**解析结果是记下来的，不是事后重算的**：目录会变（某厂商的 base-url 改了、新增了 model），拿今天的目录去重算旧日志，读出来的就是今天的答案而非那天的。
+- **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before <选择 slice> :after <选择 slice> :trigger "session-configure" :override <完整 session 档> :resolved <该档解析到什么>}`。`:before`/`:after` 是本次按下的 slice（仅命中的旋钮），`:override` 是按完之后 session 这一档的完整 shape——回放者拿到这一字段即可还原「按完 session 长什么样」。`:trigger` 标注是哪条路径按下的 change（当前唯一合法值 `"session-configure"`）。落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。**换厂商不会被记成空变更**：slice 装的就是三个旋钮，而 `:provider` 是其中之一。
 
 读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，其余行不参与回放——它们是审计轨迹，不是对话的一部分。
 
@@ -168,7 +191,25 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
 - `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
+- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"]}`——**这个会话现在服务的模型收什么、出什么**，给客户端决定要不要显示图片选择器用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:before <绝对路径|null> :after <绝对路径> :via "http"}`（04 号票，对齐 provider/changed 的 before→after 风格；首次绑定 before 为 null），`runId` 为 null（绑定发生在任何 run 之外）。**对已绑定 thread 重新绑定 = 同一入口的普通调用**：路径解析立即切到新目录，审计行带 before/after，目录变更时间线直接从日志可读；读者以最后一行为准。绑定变更是 CwdChanged hook 点的事件源——payload 形态由 `harness.project/cwd-changed` 锁定（`{:hook "CwdChanged" :thread_id .. :project_dir .. :before ..}`，snake_case 对齐 hook payload 约定），hook 引擎（P2）接线时在变更点直接消费。
+
+### 图片输入
+
+入站消息的 `content` 可以是字符串，也可以是 parts，而两个协议对 parts 的拼法不同。**翻译发生在 `harness.ag-ui/inbound`**（不是 `llm.clj`），因为 `message` 行的契约是「LLM 真实看到的东西，逐字」——到协议层才翻会让日志撒谎：
+
+```
+AG-UI 入站                                  出网（OpenAI 兼容 chat-completions）
+{:type "text" :text "…"}                  → {:type "text" :text "…"}         同形，原样
+{:type "image" :source {:type "url"  :value "https://…"}}
+                                          → {:type "image_url" :image_url {:url "https://…"}}
+{:type "image" :source {:type "data" :value "<base64>" :mimeType "image/png"}}
+                                          → {:type "image_url" :image_url {:url "data:image/png;base64,<base64>"}}
+```
+
+认不出的 part 类型（如 `:document`）**指名报错**——既不静默丢弃，也不原样发出（原样发出等于把问题推给厂商那个什么都不指名的 400）。第二个协议出现时，这里是拆分接缝。
+
+**模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，消息里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。**未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的部署开始失败于一条没人写下来的规则。**性质是流程纪律，不是安全边界**——`config.edn` 给一个纯文本模型写 `:input #{:text :image}` 照样打得出去，这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
 agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。
 
@@ -191,7 +232,9 @@ jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**�
 
 ## 授权变更（session-configure）
 
-agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread 的 provider / model / reasoning-effort。**三字段各自独立可选**——只传要改的，其余保持当前值；空调用直接拒绝。**经人工审批后**生效（park 走 AG-UI 原生 interrupt，与工具审批同一条路径），否决则不生效且无 `provider/changed` 落盘。
+agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread 的 provider / model / reasoning-effort。**三旋钮各自独立可选**——只传要改的，其余保持当前值；空调用直接拒绝。**经人工审批后**生效（park 走 AG-UI 原生 interrupt，与工具审批同一条路径），否决则不生效且无 `provider/changed` 落盘。
+
+**改不动的东西当场拒绝，不落盘。** body 在写之前先把「改完之后这一档」拿去解析一遍：provider 名不在目录里、或 model id 不是所选 provider 声明的，都会**指名失败**并带回工具结果，session 保持原样、`provider/changed` 一行不落。先写后败会把一个每轮都跑不起来的配置钉在 session 上，而报错要等到**下一次** run 才出现，离按下它的那次调用很远。
 
 **性质：流程约定，不是安全边界。** `harness.memory/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
 

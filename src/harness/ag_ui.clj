@@ -149,22 +149,96 @@
 
 (defn- strip-ag-ui-only [m] (apply dissoc m ag-ui-only))
 
+;; ------------------------------------------------------------ content parts
+;;
+;; A message's content is either a STRING (the common case, and it passes through
+;; untouched) or a vector of PARTS, and the part shapes differ between the two
+;; protocols:
+;;
+;;   AG-UI in     {:type "image" :source {:type "url"  :value "https://…"}}
+;;                {:type "image" :source {:type "data" :value "<base64>"
+;;                                        :mimeType "image/png"}}
+;;   provider out {:type "image_url" :image_url {:url "https://…"}}
+;;                {:type "image_url" :image_url {:url "data:image/png;base64,…"}}
+;;   AG-UI in     {:type "text" :text "…"}
+;;   provider out {:type "text" :text "…"}          same shape, passed through
+;;
+;; THE TRANSLATION BELONGS HERE, not in harness.llm. The "message" line in the
+;; log is a VERBATIM record of what the LLM was about to see; translating at the
+;; protocol layer would leave that line holding a shape no provider ever received,
+;; which is a log that lies about the one thing it exists to record. Doing it on
+;; the way IN keeps writer and reader agreeing without either knowing about parts.
+;;
+;; It is also the seam where a SECOND protocol would split the two apart: the
+;; right-hand shapes above are OpenAI-compatible chat-completions specifically,
+;; and a provider that wanted Anthropic's `{:type "image" :source {:type "base64"…}}`
+;; would need its own table here rather than a shared one.
+
+(defn- provider-image-url
+  "An AG-UI image part -> the provider's image_url part. A `data` source is
+  prefixed into a data URL, which is how the wire carries inline bytes."
+  [part]
+  (let [src (:source part)
+        v   (:value src)]
+    (case (:type src)
+      "url"  {:type "image_url" :image_url {:url v}}
+      "data" {:type "image_url"
+              :image_url {:url (str "data:" (:mimeType src) ";base64," v)}}
+      (throw (ex-info (str "unsupported image source " (pr-str (:type src))
+                           "; this harness carries a \"url\" or a \"data\" source"
+                           (when (seq v) (str " (the part has a value of "
+                                              (count (str v)) " chars)")))
+                      {:part part})))))
+
+(defn- provider-part
+  "One AG-UI content part -> the provider's. An unknown part type is a NAMED
+  failure, never a pass-through: a part forwarded untouched reaches the vendor as
+  a shape it does not know, and the 400 that comes back names nothing useful.
+  Refusing here is what turns 'the vendor rejected the request' into 'this harness
+  cannot carry a :document part'."
+  [part]
+  (case (:type part)
+    "text"      (select-keys part [:type :text])
+    "image"     (provider-image-url part)
+    (throw (ex-info (str "unsupported content part type " (pr-str (:type part))
+                         "; this harness carries \"text\" and \"image\"")
+                    {:part part}))))
+
+(defn- provider-content
+  "A message's content -> the provider's. A string is a string; a vector of parts
+  is translated part by part, and an EMPTY vector is left alone (there is nothing
+  to translate and nothing to refuse)."
+  [content]
+  (if (sequential? content)
+    (mapv provider-part content)
+    content))
+
 (defn- provider-tool-call [tc]
   {:id (:id tc) :type "function"
    :function {:name (get-in tc [:function :name])
               :arguments (get-in tc [:function :arguments])}})
 
 (defn- provider-assistant
-  "Whitelist rebuild. Content passes through untouched, everything else is either
-  renamed to the provider's casing or dropped."
+  "Whitelist rebuild. Content is translated (assistant content is a string in
+  practice, but a multimodal turn is legal and must not arrive untranslated),
+  everything else is either renamed to the provider's casing or dropped."
   [m reasoning]
-  (cond-> {:role "assistant" :content (or (:content m) "")}
+  (cond-> {:role "assistant" :content (provider-content (or (:content m) ""))}
     (seq reasoning)      (assoc :reasoning_content reasoning)
     (seq (:toolCalls m)) (assoc :tool_calls (mapv provider-tool-call (:toolCalls m)))))
 
+(defn- provider-user
+  "A user (or any other role) message, stripped of AG-UI-only fields and with its
+  content translated. This is where an image actually enters a conversation."
+  [m]
+  (cond-> (-> m strip-ag-ui-only (update :content provider-content))
+    ;; An AG-UI message with no content at all would otherwise carry :content nil,
+    ;; which a provider reads as a null message body.
+    (nil? (:content m)) (assoc :content "")))
+
 (defn- absorbed
   "Drop activity, fold reasoning into the assistant message it precedes, and rebuild
-  each message in the provider's shape.
+  each message in the provider's shape -- content parts translated on the way.
 
   Reasoning that trails the whole list would be dropped, and that cannot happen: the
   outbound side always closes a turn with a text message, even an empty one. That
@@ -189,7 +263,7 @@
                                        :content (str (:content m))})}
 
                :else
-               {:pending pending :out (conj (:out acc) (strip-ag-ui-only m))}))
+               {:pending pending :out (conj (:out acc) (provider-user m))}))
            {:pending nil :out []}
            messages)))
 
@@ -197,6 +271,55 @@
   (when (seq context)
     {:role "user"
      :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
+
+;; ------------------------------------------------------------ input modality
+;;
+;; What a run is ABOUT to send, as modality keywords, so it can be checked against
+;; what the selected model declared it accepts. This is deliberately a SEPARATE
+;; question from provider-part's: that one refuses what the harness cannot CARRY
+;; at all, this one refuses what the chosen model did not declare. A harness that
+;; can carry images still has text-only models.
+;;
+;; The answer is read off the CLIENT's messages rather than the translated ones,
+;; because the client's spelling is the human-facing one -- an error can say
+;; ":image" rather than ":image_url", which is the difference between a message a
+;; person can act on and one they have to decode.
+
+(def ^:private part-modality
+  "AG-UI content part type -> the modality it exercises. A part type absent here
+  is not this check's business: provider-part refuses it with a better message
+  than 'the model does not accept it' would be."
+  {"text" :text "image" :image})
+
+(defn carried-input-types
+  "The modalities the client's MESSAGES carry, as a set. A string content carries
+  :text (a run always sends text, even when it sends a picture alongside it); a
+  part vector contributes whatever its parts name.
+
+  Only USER messages are inspected. The other roles in a rebuilt conversation come
+  from us -- the assistant's own turns, the tool results -- and a model cannot be
+  blamed for what it already said: an assistant turn holding an image is a fact
+  about history, not a request the model has to accept."
+  [messages]
+  (into #{}
+        (comp (filter #(= "user" (:role %)))
+              (mapcat (fn [m]
+                        (let [c (:content m)]
+                          (if (sequential? c)
+                            (keep #(get part-modality (:type %)) c)
+                            [:text])))))
+        messages))
+
+(defn undeclared-input
+  "The modalities in MESSAGES that DECLARED does not cover, sorted. Nil DECLARED
+  means nothing was declared, and nothing declared means nothing promised -- so
+  the answer is empty and the run proceeds. Guarding an undeclared model would be
+  guessing on its behalf, and an inline provider that never claimed to be
+  text-only would start failing runs for a reason nobody wrote down."
+  [messages declared]
+  (if (nil? declared)
+    []
+    (vec (sort (remove (set declared) (carried-input-types messages))))))
 
 (defn inbound
   "A client's AG-UI messages -> the provider's message vector.
