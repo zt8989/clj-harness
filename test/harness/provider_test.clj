@@ -594,6 +594,38 @@
         (is (nil? (mem/override-for "t-badprov")))
         (is (empty? (mem/take-provider-changes! "t-badprov")))))))
 
+(deftest the-configure-tool-describes-the-selection-it-makes
+  ;; A tool's description is what a model reads before deciding to call it, so it
+  ;; has to say what its arguments MEAN under the catalog shape: a provider is a
+  ;; vendor and a model is one of that vendor's ids. The old wording ("A provider
+  ;; name from providers.edn (e.g. \"cheap\")") described a scheme where those
+  ;; were the same thing -- precisely the confusion this shape removed. A model
+  ;; reading it would try to pass a model id as a provider name.
+  (let [t     (get @mem/registry "session-configure")
+        props (-> t :parameters :properties)]
+    (is (str/includes? (get-in props ["provider" :description]) "vendor")
+        "the provider argument says it names a VENDOR")
+    (is (str/includes? (get-in props ["model" :description]) "serves")
+        "while the model argument says the id belongs to the current provider")
+    (is (str/includes? (:description t) "provider")
+        "and the tool description names the knobs at all")
+    (testing "and the tool still parks for approval"
+      (is (true? (:requires-approval t))))))
+
+(deftest the-configure-result-says-what-it-is-now-serving
+  ;; The model that made the call gets told what changed AND what that resolved
+  ;; to. Without the second half, a provider-only switch reads as 'reconfigured'
+  ;; with no sign that the model id moved too -- and the next thing the model does
+  ;; is guess.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (try
+        (let [{:keys [content error]} (approve! "t-say" "sc-say" {:provider "beta"})]
+          (is (not= true error))
+          (is (str/includes? content "beta-plain")
+              "the reply names the model the session now serves"))
+        (finally (mem/set-override! "t-say" nil))))))
+
 (deftest a-vetoed-configure-never-writes
   (with-home (cfg :alpha) reg
     (fn []

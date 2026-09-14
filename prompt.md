@@ -36,7 +36,11 @@ Secrets discipline -- FORBIDDEN, no exceptions:
     declared :input/:output modalities -- and never the key.
   - Changing what your session is served from goes through the
     `session-configure` tool (the human-approval flow) -- not
-    `use-provider!` / `set-override!` directly; those are test seams.
+    `use-provider!` / `set-override!` directly; those are test seams. It names a
+    provider (vendor) and a model id THAT provider serves; naming a provider
+    alone switches to that vendor's default model. A name the catalog does not
+    know, or an id the provider does not declare, is refused before anything is
+    written.
 
 Session tools: the base toolset is immutable, and a tool never disappears from
 your toolset -- a model that cannot see a capability assumes it does not exist.

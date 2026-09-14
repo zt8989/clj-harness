@@ -98,12 +98,14 @@
   is independent: pass only what you mean to change, and the rest keep the value
   the tier below gave them.
 
-  A model id means 'this provider serves it' -- a new :provider with no :model
-  moves to that vendor's default model, and a :model the provider does not
-  declare fails HERE, by name, before anything is written. That check is done by
-  resolving the change before committing it: a change that cannot be served is
-  not a change, and letting it land would leave the session's override holding a
-  configuration every later run then fails on.
+  A model id means 'an id this provider serves'. Naming a new :provider with no
+  :model moves to that vendor's default model -- the old id belonged to the old
+  vendor and is not carried across. A :model the provider does not declare fails
+  HERE, by name, and nothing is written: that check is done by resolving the
+  proposed tier before committing it, because a change that cannot be served is
+  not a change. Writing first and failing later would leave the session's
+  override holding a configuration every later run fails on, and the failure
+  would surface on the NEXT run, nowhere near the call that caused it.
 
   Marks :requires-approval, so the call parks and a human decides before any of
   it takes effect -- the body only runs on an approved resume, and a veto means
@@ -124,14 +126,15 @@
           ;; what the session became rather than what it was asked to become.
           resolved (mem/resolve-override (merge before change))
           ;; set-override! answers with what it stored, and THAT is what the
-          ;; change line records -- not `change` plus `before` merged here a
-          ;; second time. The stored value is the one the next run folds; a
+          ;; change line records -- not `change` merged over `before` a second
+          ;; time here. The stored value is the one the next run folds; a
           ;; parallel copy is how a log and a session drift apart.
           after (mem/set-override! thread-id (merge before change))]
       (mem/record-provider-change! thread-id before after "session-configure"
                                    after (:resolved resolved))
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."
+           (when-let [m (:model (:resolved resolved))] (str " Serving " m "."))
            (when (nil? thread-id)
              " (warning: no session in scope; the change landed on the process-wide slot)")))))
 
@@ -190,11 +193,21 @@
 ;; Configure this session's provider. Marked :requires-approval so a model
 ;; cannot repoint its own session at another endpoint without a human saying so
 ;; -- the marked call parks, and only an approved resume runs the body. Every
-;; field is optional and independent; give only what you mean to change.
+;; knob is optional and independent; give only what you mean to change.
+;;
+;; "provider" names a VENDOR and "model" an id THAT VENDOR serves. A name the
+;; catalog does not know, or an id the named provider does not declare, is
+;; refused inside the body -- before anything is written, so a proposed change
+;; that cannot be served never becomes the session's configuration.
 (mem/register! "session-configure"
-  (assoc (tool "Change this session's provider, model, or reasoning effort. Parks for human approval; only an approved change takes effect. Each argument is independent -- pass only what you mean to change."
-               {"provider"         {:type "string" :description "A provider name from providers.edn (e.g. \"cheap\")."}
-                "model"            {:type "string" :description "Model id to use."}
+  (assoc (tool (str "Change this session's provider, model, or reasoning effort. "
+                    "Parks for human approval; only an approved change takes effect. "
+                    "Each argument is independent -- pass only what you mean to change. "
+                    "Naming a provider alone switches to that vendor AND its default model.")
+               {"provider"         {:type "string"
+                                    :description "A provider (vendor) name, e.g. \"openrouter\" or \"ollama\"."}
+                "model"            {:type "string"
+                                    :description "A model id the current provider serves, e.g. \"anthropic/claude-sonnet-4.5\"."}
                 "reasoning-effort" {:type "string" :description "Reasoning effort (e.g. \"low\", \"high\")."}}
                [] t-configure)
          :requires-approval true))
