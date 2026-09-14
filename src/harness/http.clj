@@ -421,10 +421,49 @@
                            :messages messages
                            :context  (or context [])})))))
 
+(defn- model-get
+  "GET /api/model?threadId=.. -- what this session is served by and what that
+  model accepts, for a client deciding whether to offer an image picker:
+
+    {:provider :openrouter :model \"anthropic/claude-sonnet-4.5\"
+     :reasoning-effort \"high\"
+     :protocol :openai-completions :base-url \"https://openrouter.ai/api/v1\"
+     :input [\"image\" \"text\"] :output [\"text\"]}
+
+  Answered from the LIVE resolution (mem/active-provider): a session override
+  made a moment ago is already reflected, and nothing is cached between calls.
+  The api-key is not in the answer at any depth -- active-provider names its
+  fields one by one rather than passing the resolved map through.
+
+  THE SHAPE IS THIS HARNESS'S, NOT AG-UI's. AG-UI describes capabilities as
+  MultimodalCapabilities ({input.{image,audio,video,pdf,file}, ...}) for its
+  connect handshake; this endpoint answers the harness's own vocabulary
+  (:text/:image) and leaves that mapping to whoever wires the handshake up. It
+  is also only the INPUT half of that story, but here input is all there is to
+  report: output is always text, and a field that can only ever hold one value
+  says nothing.
+
+  READ-ONLY, and therefore leaves no trace: like GET /api/project, only a route
+  that can CHANGE something writes an audit line.
+
+  Absent is an answer, not an error. An unbound thread, a provider described
+  inline that declared no modalities, a model nobody gave a reasoning effort --
+  each comes back with the field missing rather than with a 400, because a
+  client asking 'what is this session' deserves the truth about a sparse
+  configuration rather than a failure it has to interpret."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")]
+    (api-response 200 (models/wire (mem/active-provider thread-id)))))
+
 (defn handler [req]
   (cond
     (= :options (:request-method req))
     {:status 204 :headers cors}
+
+    (= "/api/model" (:uri req))
+    (case (:request-method req)
+      :get  (model-get req)
+      (api-response 405 {:error "method not allowed"}))
 
     (= "/api/project" (:uri req))
     (case (:request-method req)

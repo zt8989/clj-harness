@@ -878,6 +878,71 @@
          (testing "the two failed binds added no second line"
            (is (= 1 (count (filter #(= "project/bound" (:kind %)) lines))))))))))
 
+(deftest the-model-endpoint-answers-what-this-session-can-send
+  ;; The capability endpoint. A client asks what this session is served by and
+  ;; what that model accepts, so it can decide whether to offer an image picker.
+  ;;
+  ;; Through REAL resolution rather than a pin, because the answer is precisely
+  ;; the resolution's output -- a pinned provider would make this pass while the
+  ;; endpoint reported nothing.
+  (with-resolved-config
+   [{:content "hello"}]
+   (fn []
+     (let [id   "http-model"
+           stop (http/start! {:port 8087})]
+       (try
+         (testing "the default: the selection and what the catalog resolved it to"
+           (let [resp (api-call 8087 :get (str "/api/model?threadId=" id) nil)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "alpha" (:provider body)))
+             (is (= "alpha-small" (:model body)))
+             (is (= "https://x/v1" (:base-url body)) "the resolved endpoint")
+             (is (= ["image" "text"] (:input body)) "the modalities, sorted, as wire strings")
+             (is (= ["text"] (:output body)))
+             (testing "and no api-key at any depth"
+               (is (not-any? #(str/includes? (str %) "api-key")
+                             (tree-seq coll? seq body))))))
+         (testing "a session can move to a text-only model and the answer follows"
+           (mem/set-override! id {:provider :beta})
+           (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
+             (is (= "beta" (:provider body)))
+             (is (= "beta-plain" (:model body)))
+             (is (= "https://y/v1" (:base-url body)) "the endpoint followed the vendor")
+             (is (= ["text"] (:input body)) "and the capability is the new model's")))
+         (testing "an unbound/unknown thread is still an answer, not a 400"
+           (let [resp (api-call 8087 :get "/api/model?threadId=who-is-this" nil)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "alpha-small" (:model body))
+                 "the default tier resolves for any thread with no session in play")))
+         (testing "a missing threadId is an answer too -- the process-wide slot"
+           (is (= 200 (.statusCode (api-call 8087 :get "/api/model" nil))))
+           (is (= ["image" "text"] (:input (read-json (api-call 8087 :get "/api/model" nil))))))
+         (testing "it is READ-ONLY: no audit line of its own"
+           (let [f (io/file (log-dir) (str id ".jsonl"))]
+             (is (not (.exists f))
+                 "asking a question must not write to the session's log")))
+         (finally (stop) (mem/set-override! id nil)))))))
+
+(deftest the-model-endpoint-reports-a-sparse-configuration-as-sparse
+  ;; Absent is a fact, not a failure. A provider described inline that declared no
+  ;; modalities has nothing to report, and saying so beats inventing a default or
+  ;; returning an error the client has to interpret.
+  (with-server
+   8086
+   "sparse"
+   (fn []
+     (let [tid  (str "sparse-" (java.util.UUID/randomUUID))
+           ;; The seeded test config IS the inline form, and it declares nothing
+           ;; -- which is exactly the sparse case.
+           body (read-json (api-call 8086 :get (str "/api/model?threadId=" tid) nil))]
+       (is (= "seeded" (:model body)))
+       (is (= "fake" (:protocol body)))
+       (is (not (contains? body :input)) "nothing was declared, so nothing is claimed")
+       (is (not (contains? body :output)))
+       (is (not (contains? body :provider)) "and no provider was named")))))
+
 (deftest rebinding-moves-the-root-and-lands-a-timeline
   ;; Ticket 04: rebinding an already-bound thread is the ordinary case --
   ;; resolution moves to the new directory immediately (the relative write
