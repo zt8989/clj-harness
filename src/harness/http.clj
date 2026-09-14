@@ -70,6 +70,18 @@
                                   :runId run-id :kind kind :payload payload}) "\n")
           :append true :encoding "UTF-8")))
 
+(defonce ^:private init-logged
+  (atom #{}))
+;; thread-ids whose provider/init line has already been written. Writer-side
+;; state, and it lives with its only writer: deliberately NOT re-derived from the
+;; log, because the edge must not read its own log, so "have I written the init
+;; line yet" has to be remembered somewhere. It is a fact about the FILE, not a
+;; copy of the conversation or of the provider.
+
+(defn- init-logged? [thread-id] (contains? @init-logged thread-id))
+
+(defn- mark-init-logged! [thread-id] (swap! init-logged conj thread-id))
+
 (defn- log-messages!
   "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
   the returned side of the message record both come through here."
@@ -219,12 +231,12 @@
       ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
       ;; run rather than a broken stream.
       (let [[provider messages decisions resolved]
-            (try (let [provider (mem/current-provider thread-id (:provider input))]
+            (try (let [provider (providers/current-provider thread-id (:provider input))]
                    (guard-input-modalities! input provider)
                    [provider
                     (ag/inbound (:messages input) (llm/prompt) (:context input))
                     (resume-decisions (:resume input))
-                    (mem/resolve-provider thread-id (:provider input))])
+                    (providers/resolve-provider thread-id (:provider input))])
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]
@@ -237,11 +249,11 @@
           ;; served by" before it meets the conversation. Later runs of the same
           ;; thread do not repeat it -- the timeline is init plus changes, not a
           ;; snapshot per run.
-          (when (and (nil? (mem/pinned-provider thread-id))
-                     (not (mem/init-logged? thread-id)))
+          (when (and (nil? (providers/pinned-provider thread-id))
+                     (not (init-logged? thread-id)))
             (log! thread-id run-id "provider/init"
                   (provider-line provider (:source resolved)))
-            (mem/mark-init-logged! thread-id))
+            (mark-init-logged! thread-id))
           ;; The decision record: what the human answered, next to the input that
           ;; carried it. The same verdict also lands on the resumed call's
           ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
@@ -259,7 +271,7 @@
           ;; :override is the session's whole tier afterwards. The endpoint that
           ;; resulted is on :resolved, so a reader stepping the timeline sees
           ;; both "what was chosen" and "what that meant" at each step.
-          (doseq [c (mem/take-provider-changes! thread-id)]
+          (doseq [c (providers/take-provider-changes! thread-id)]
             (log! thread-id run-id "provider/changed"
                   {:verdict  (:verdict c :approved)
                    :before   (providers/wire (:before c)   providers/knobs)
@@ -483,7 +495,7 @@
      :input [\"image\" \"text\"] :output [\"text\"]
      :context-window 1000000 :max-output-tokens 64000}
 
-  Answered from the LIVE resolution (mem/active-provider): a session override
+  Answered from the LIVE resolution (providers/active-provider): a session override
   made a moment ago is already reflected, and nothing is cached between calls.
   The api-key is not in the answer at any depth -- active-provider names its
   fields one by one rather than passing the resolved map through.
@@ -511,7 +523,7 @@
   configuration rather than a failure it has to interpret."
   [req]
   (let [thread-id (get (query-params (:query-string req)) "threadId")]
-    (api-response 200 (providers/wire (mem/active-provider thread-id)))))
+    (api-response 200 (providers/wire (providers/active-provider thread-id)))))
 
 (defn handler [req]
   (cond

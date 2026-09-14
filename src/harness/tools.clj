@@ -15,6 +15,7 @@
             [clojure.string :as str]
             [harness.event :as ev]
             [harness.memory :as mem]
+            [harness.providers :as providers]
             [harness.project :as project])
   (:import [java.util.regex Pattern]))
 
@@ -116,7 +117,7 @@
   Marks :requires-approval, so the call parks and a human decides before any of
   it takes effect -- the body only runs on an approved resume, and a veto means
   it never runs at all. The gate is a WORKFLOW convention, not a security
-  boundary: eval can still reach harness.memory/use-provider! directly, and bash
+  boundary: eval can still reach harness.providers/use-provider! directly, and bash
   can still read .env. It is here to stop a slip, and it is labelled as such."
   [args]
   ;; The three knobs are the only thing this tool may move, and the check below
@@ -142,17 +143,17 @@
                     (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
     (when (empty? change)
       (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    (let [before (mem/override-for thread-id)
+    (let [before (providers/override-for thread-id)
           ;; Resolve BEFORE writing: this proves the change can actually be
           ;; served and hands the writer the resolved shape, so the log records
           ;; what the session became rather than what it was asked to become.
-          resolved (mem/resolve-override (merge before change))
+          resolved (providers/resolve-override (merge before change))
           ;; set-override! answers with what it stored, and THAT is what the
           ;; change line records -- not `change` merged over `before` a second
           ;; time here. The stored value is the one the next run folds; a
           ;; parallel copy is how a log and a session drift apart.
-          after (mem/set-override! thread-id (merge before change))]
-      (mem/record-provider-change! thread-id before after "session-configure"
+          after (providers/set-override! thread-id (merge before change))]
+      (providers/record-provider-change! thread-id before after "session-configure"
                                    after (:resolved resolved))
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."

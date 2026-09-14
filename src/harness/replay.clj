@@ -28,6 +28,7 @@
             [harness.home :as home]
             [harness.llm :as llm]
             [harness.memory :as mem]
+            [harness.providers :as providers]
             [harness.loop :as loop]))
 
 (defn- log-file
@@ -152,7 +153,7 @@
   It does NOT append to the log. The writer lives at the http edge, and this namespace
   is deliberately the read side only; a resumed conversation therefore leaves no new
   trace on disk. An author-side action, not a run path."
-  ([dir thread-id text] (resume! dir thread-id text (mem/effective-provider thread-id)))
+  ([dir thread-id text] (resume! dir thread-id text (providers/effective-provider thread-id)))
   ([dir thread-id text provider]
      (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)

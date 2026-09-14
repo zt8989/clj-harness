@@ -18,8 +18,8 @@
   (see `prompt` / `reset-prompt!` below), because the provider's prefix cache is
   what makes the freezing matter.
 
-  A provider is just a config map, so (harness.memory/current-provider) or
-  (harness.memory/effective-provider) can be handed straight to loop/run-chan:
+  A provider is just a config map, so (harness.providers/current-provider) or
+  (harness.providers/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key ..
      :reasoning-effort ..}
   :reasoning-effort is present only when some tier chose one. :input/:output and

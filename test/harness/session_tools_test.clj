@@ -243,7 +243,7 @@
         (is (= "noted hi" (:content result)))))
     (testing "the recorded state is reachable through the same eval surface"
       (is (str/includes? (:content (eval! "t-e2e"
-                                          "(keys (harness.memory/config))"))
+                                          "(keys (harness.providers/config))"))
                          ":protocol")))
     (testing "disabling a base tool is reported as disabled, not as unknown"
       (mem/session-disable! "t-e2e" "read")

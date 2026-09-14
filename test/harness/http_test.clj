@@ -12,6 +12,7 @@
             [harness.home :as home]
             [harness.http :as http]
             [harness.memory :as mem]
+            [harness.providers :as providers]
             [harness.project :as project]
             [harness.replay :as replay]
             [harness.tools :as tools]
@@ -42,7 +43,7 @@
     {\"a\" SCRIPT-A \"b\" SCRIPT-B}  per-thread scripts -- for a test whose
                             threads must consume turns in a known order
 
-  The pin is PER-THREAD, matching harness.memory's resolution: a provider
+  The pin is PER-THREAD, matching harness.providers' resolution: a provider
   override is a session's, and the server looks it up by the request's threadId.
   There is deliberately no process-wide slot to fall back on -- a test that
   pinned globally would pass while the per-thread wiring was broken."
@@ -53,9 +54,9 @@
                 (map? threads) threads
                 (coll? threads) (into {} (map (fn [t] [t turns])) threads)
                 :else           {threads turns})]
-     (doseq [[t ts] pins] (mem/use-provider! (str t) (fake/scripted ts)))
+     (doseq [[t ts] pins] (providers/use-provider! (str t) (fake/scripted ts)))
      (let [stop (http/start! {:port port})]
-       (try (f) (finally (stop) (doseq [t (keys pins)] (mem/use-provider! (str t) nil))))))))
+       (try (f) (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
@@ -314,10 +315,10 @@
   assert the provider was never called: a drained script is a provider that ran."
   [port thread-id declared turns f]
   (let [script (atom (vec turns))]
-    (mem/use-provider! thread-id (assoc (fake/scripted turns) :input declared
+    (providers/use-provider! thread-id (assoc (fake/scripted turns) :input declared
                                         :script script))
     (let [stop (http/start! {:port port})]
-      (try (f script) (finally (stop) (mem/use-provider! thread-id nil))))))
+      (try (f script) (finally (stop) (providers/use-provider! thread-id nil))))))
 
 (deftest a-text-only-model-refuses-an-image-by-name-and-never-calls-the-vendor
   ;; The declaration is only worth anything if something enforces it. The vendor's
@@ -612,16 +613,16 @@
                                  (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
        (try
          (testing "aimed at the text-only model, it is refused by name"
-           (mem/set-override! id {:provider :beta})
+           (providers/set-override! id {:provider :beta})
            (let [e (error (.body (post-run 8088 id image)))]
              (is (some? e))
              (is (str/includes? (:message e) "beta-plain") "names the model")
              (is (str/includes? (:message e) "image") "and the modality it will not take")))
          (testing "the SAME input is served by a model that declares images"
-           (mem/set-override! id {:provider :alpha})
-           (is (= #{:text :image} (:input (mem/active-provider id))))
+           (providers/set-override! id {:provider :alpha})
+           (is (= #{:text :image} (:input (providers/active-provider id))))
            (is (nil? (error (.body (post-run 8088 id image))))))
-         (finally (stop) (mem/set-override! id nil)))))))
+         (finally (stop) (providers/set-override! id nil)))))))
 
 (deftest a-run-naming-a-count-is-refused-rather-than-silently-dropped
   ;; The third entry, over the real edge. A run may name the three knobs; naming a
@@ -646,7 +647,7 @@
            (is (str/includes? (:message e) "providers.edn")
                "and the run says where it belongs instead"))
          (testing "and nothing was resolved or recorded for it"
-           (is (nil? (mem/override-for id)))
+           (is (nil? (providers/override-for id)))
            (let [lines (str/split-lines (slurp (io/file (log-dir) (str id ".jsonl")) :encoding "UTF-8"))]
              (is (not-any? #(str/includes? % "provider/init") lines)
                  "a run that could not resolve writes no init line")))
@@ -718,7 +719,7 @@
        (try
          (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
          ;; Seed the session with a baseline the change can stand on.
-         (mem/set-override! id {:model "alpha-big"})
+         (providers/set-override! id {:model "alpha-big"})
          ;; Drive the change the way a run would: park, approve, resume-transit.
          (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
                                         :function {:name "session-configure"
@@ -728,7 +729,7 @@
            (mem/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session now serves the changed value"
-           (is (= "high" (:reasoning-effort (mem/active-provider id)))))
+           (is (= "high" (:reasoning-effort (providers/active-provider id)))))
          ;; Run once so the edge drains the outbox to the log.
          (post-run 8102 id)
          (let [lines (wait-for-recorded
@@ -781,7 +782,7 @@
                    "the first change's override is the full session slice")
                (is (= "low" (get-in (:override b) [:reasoning-effort]))
                    "the second change's override reflects the latest session state"))))
-         (finally (stop) (mem/set-override! id nil)))))))
+         (finally (stop) (providers/set-override! id nil)))))))
 
 (deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
   ;; The end-to-end proof of the feature: an agent naming a vendor gets that
@@ -803,7 +804,7 @@
            (mem/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session's served endpoint moved with the vendor"
-           (let [a (mem/active-provider id)]
+           (let [a (providers/active-provider id)]
              (is (= :beta (:provider a)))
              (is (= "https://y/v1" (:base-url a)))
              (is (= "beta-plain" (:model a)) "and its default model came along")))
@@ -823,7 +824,7 @@
            (testing "and the counts moved with the model, not left at alpha's"
              (is (= 128000 (get-in changed [:resolved :context-window])))
              (is (= 4096 (get-in changed [:resolved :max-output-tokens])))))
-         (finally (stop) (mem/set-override! id nil)))))))
+         (finally (stop) (providers/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
   (with-server
@@ -957,7 +958,7 @@
                (is (not-any? #(str/includes? (str %) "api-key")
                              (tree-seq coll? seq body))))))
          (testing "a session can move to a text-only model and the answer follows"
-           (mem/set-override! id {:provider :beta})
+           (providers/set-override! id {:provider :beta})
            (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
              (is (= "beta" (:provider body)))
              (is (= "beta-plain" (:model body)))
@@ -968,7 +969,7 @@
                (is (= 128000 (:context-window body)))
                (is (= 4096 (:max-output-tokens body))))))
          (testing "a model that declares no counts reports NONE -- absent, not null"
-           (mem/set-override! id {:provider :alpha :model "alpha-bare"})
+           (providers/set-override! id {:provider :alpha :model "alpha-bare"})
            (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
              (is (= "alpha-bare" (:model body)))
              (is (not (contains? body :context-window))
@@ -987,7 +988,7 @@
            (let [f (io/file (log-dir) (str id ".jsonl"))]
              (is (not (.exists f))
                  "asking a question must not write to the session's log")))
-         (finally (stop) (mem/set-override! id nil)))))))
+         (finally (stop) (providers/set-override! id nil)))))))
 
 (deftest the-model-endpoint-reports-a-sparse-configuration-as-sparse
   ;; Absent is a fact, not a failure. A provider described inline that declared no
