@@ -127,4 +127,115 @@ provider，`:model` 只是其中一个字符串字段。
   是人做的）。
 - README「配置」整段（家目录文件树、解析优先级、示例）与 `providers.edn.example` / `config.edn.example`
   随 01 改写。
+
+## 状态
+
+六张票全部落地并验证（2026-09-14，见下）。票已删除——本仓的票目录不是 changelog，做了的事记在这里与
+git 历史里。
+
+## 已验证到什么程度（2026-09-14）
+
+**全量**：`harness.test-runner` **175 tests / 835 assertions**，连续两轮同样结果。唯一红的是
+`bash-runs-git-bash-not-wsl`（`uname` 断言 MINGW，macOS 上恒红，与本特征无关）。基线为
+130 tests / 642 assertions，**净增 45 tests / 193 assertions**。
+
+**提交**：`cefab3d`（01+02）、`80f9f4d`（03+04）、`0959805`（05）、`414de48`（06），另加文档/措辞收口。
+
+### 01 / 02 —— 目录形状与内置表
+
+- **实测到的原始 bug**：旧形状下 `session override {:provider "smart"}` 解析后仍是
+  `{:model "small" ...}` —— `:provider` 不在 `fields` 向量里，第三、四档写它会被静默丢弃。
+  现在 `switching-provider-alone-really-switches-vendors` 钉住「只写 :provider = 该厂商 endpoint +
+  该厂商默认 model + 该 model 的模态」，三样一起动。
+- **内置表**（`harness.models/builtin-raw`，`:as-of 2026-09-14`）覆盖 openrouter / deepseek / ollama，
+  **model id 逐条读自厂商现网列表**：openrouter 的 445 条 `/api/v1/models`、DeepSeek 官方文档、
+  ollama library 页。这一核对直接改掉了凭记忆会写错的部分——`deepseek/deepseek-chat` 已是旧 id，
+  直连 API 现在答 `deepseek-flash` / `deepseek-v4-pro`。模态以**本 harness 搬得动的类型**记
+  （`:input` ⊆ `#{:text :image}`、`:output` ⊆ `#{:text}`）：nemotron 那个 omni 模型在厂商处还收
+  audio/video，表里只记 text/image，因为那才是能被送出去的。
+- **未收 openai / xai / groq**：它们的 model 列表对未鉴权请求答 403，本表不带没核对过的 id——这是
+  诚实边界，写进表本身的文档串。
+- 用户 `providers.edn` 按字段、按 model id **merge** 在内置之上（不是替换）。有测试钉住
+  「给内置厂商加一个 model，原有 model 仍在」——整体替换会要求重抄整张表，而重抄的表就会漂移。
+- 开发机真实家目录已手工改写并实测：`(mem/active-provider "real-check")` →
+  `{:provider :openrouter :model "nvidia/nemotron-...free" :reasoning-effort "low" :protocol
+  :openai-completions :base-url "https://openrouter.ai/api/v1" :input #{:image :text} :output #{:text}}`。
+
+### 03 —— 图片输入端到端
+
+**最强证据（真子进程 + 真 HTTP 厂商 stub）**：起一个 http-kit stub 当厂商，把
+`home/*root-override*` 指向一份 inline 声明 `#{:text :image}` 的临时家，POST 一条带 `url` 图与
+`data` 图的 AG-UI run。stub **实际收到**的 messages：
+
+```
+{:role "user"
+ :content [{:type "text" :text "what is this"}
+           {:type "image_url" :image_url {:url "https://x/a.png"}}
+           {:type "image_url" :image_url {:url "data:image/jpeg;base64,AAAB"}}]}
+```
+
+而该 run 落盘的 `message` 行**逐字相同**——「日志如实记录 LLM 看到了什么」这条契约被实测钉住，
+不是靠断言自证。测试里另有 `an-image-part-reaches-the-model-translated-and-the-log-says-so`
+（含 replay 重建路径与 live 逐字一致）。
+
+认不出的 part 类型（`:document`）与认不出的 image source（`:file`）均指名报错，测试覆盖。
+
+### 04 —— 模态守卫
+
+- 单元：`undeclared-input` 读的是**用户消息**（模型的输入），只认 user 角色——assistant 自己的历史
+  turn 带图不是对模型的请求。
+- 端到端（pinned）：声明 `#{:text}` 的模型收到图片 → `RUN_ERROR`，消息点名 model id 与模态；
+  **scripted provider 的 script 未被消费 = 厂商一次都没被调用**，这是「拦在调用之前」的直接证据。
+- 端到端（真解析路径）：`the-guard-reads-the-catalogs-declaration-not-a-pin` —— 同一份带图输入，
+  `:beta`（纯文本）被拒、`:alpha`（收图）通过。守卫读的必须是目录声明，否则「pinned 测试全绿、生产
+  什么都不拦」。
+- **未声明即不拦**：`nil` 声明 → 空越界集，有测试（inline 无声明配置照常跑图）。真实家目录实测：
+  `deepseek/deepseek-v4-pro` 声明 `#{:text}` → 图片被拒；nemotron 声明 `#{:image :text}` → 放行。
+
+### 05 —— 能力端点
+
+`GET /api/model?threadId=` 实测（真家目录、真 HTTP）：200 + `{"provider":"openrouter", ...
+"input":["image","text"],"output":["text"]}`，无 api-key。测试覆盖：会话切到纯文本厂商后答案随之改变
+（含 endpoint）、未知 thread 仍是 200（默认档解析）、无 threadId 走进程级槽、**只读不落审计行**
+（该 thread 的日志文件根本不存在）、inline 稀疏配置如实报 absent。
+
+### 06 —— session-configure 与 provider/changed
+
+- `an-approved-vendor-switch-moves-the-endpoint`（provider 层）与
+  `a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint`（真边缘层）钉住换厂商真的搬 endpoint。
+- `a-vendor-switch-with-no-model-lands-on-the-new-vendors-default`：旧 model id 属于旧厂商，不跨厂商携带。
+- **不改不动的写**：`a-configure-naming-a-model-the-provider-cannot-serve-is-refused` 与
+  `...-a-provider-that-does-not-exist-is-refused` —— 指名失败、`override-for` 仍为 nil、outbox 空
+  （既不写配置也不落变更行）。
+- `a-vendor-switch-is-not-recorded-as-an-empty-change`：旧形状下换厂商会写成 `{:before {} :after {}}`
+  （`:provider` 不在审计切片里），现在 `:after` 带着厂商名。
+- 工具描述与结果都改了：描述说明 provider 是厂商、model 是该厂商的 id；结果报出「现在服务的是哪个
+  model」。
+
+### 落地中的判断（记在案）
+
+1. **`:model` 随 `:provider` 作用域化，是折叠里唯一的例外。** 折叠本是纯逐旋钮覆盖，但 model id 的
+   含义是「该厂商服务的 id」：一档换了厂商而没同时给 model，旧 id 在新厂商名下**什么都不指**。
+   于是换厂商时 model 被丢弃、落到新厂商默认档——这是**明示的**动作（记录在案、有测试），
+   不是这条形状要杀的静默丢弃：那种是**调用方明确写了却被丢**、还报告成功。
+2. **provider/changed 的 `:before/:after` 语义从「四个解析字段」改成「三个选择旋钮」。** 否则换厂商
+   会被记成空变更——审计行记录了「什么都没有」。
+3. **`resolve-override` 在写之前先解析。** 改不动的配置不该成为 session 的配置：先写后败会让每轮都
+   跑不起来，而报错要到下一次 run 才出现，离按下它的那次调用很远。
+4. **翻译放 `ag-ui/inbound` 而非 `llm.clj`**：`message` 行的契约决定，实测两处逐字一致（见上）。
+5. **内置表在 ns 加载时验证一次，用户的文件每次读都验证。** 编译进去的数据运行时改不坏，每次重验买不到
+   什么；而表里一个 typo 应该让进程**在加载时**停下，而不是在第一次命名该 provider 的 run 上。
+6. **测试夹具的厂商名不能用内置名**（`alpha`/`beta`/`gamma`）：撞名会让「测试文件里的条目」被内置表
+   满足，测试于是绿得没有意义。这条是写测试时才发现的。
+7. **`wait-for-recorded` 修了一个偶发红**：它把「读到正在增长的文件的半行」当成损坏日志
+   （`the-log-the-server-writes-is-one-replay-can-read` 会偶发报 "the log is truncated or corrupt"）。
+   现在只有**非最后一行**解不开才算损坏——严格判定留给 `replay/lines->records` 那个真正的读侧。
+
+### 未做 / 未验证
+
+- **UI 侧未动**：能力端点（05）与图片输入是给 UI 将来用的接缝，本特征不实现选择器。UI 的
+  `verify-*.mjs` / vitest 套件未跑（工作树里没有 `ui/node_modules`，且这些脚本在本分支上是未跟踪的
+  WIP，不属于本特征）。
+- `:output` 仍只有 `:text`（见非目标）。
+
 - `prompt.md` 的 secrets 纪律条款里「四个描述字段」的措辞随 01 更新（它是冻结的代码资产，改它必须走提交）。

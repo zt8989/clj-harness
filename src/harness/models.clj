@@ -12,7 +12,7 @@
                   :model    \"anthropic/claude-sonnet-4.5\"   ; the default model id
                   :models   {\"anthropic/claude-sonnet-4.5\" {:input #{:text :image}
                                                              :output #{:text}}
-                             \"deepseek/deepseek-chat\"      {:input #{:text}
+                             \"deepseek/deepseek-v4-pro\"    {:input #{:text}
                                                              :output #{:text}}}}
      :ollama     {:protocol :openai-completions
                   :base-url \"http://localhost:11434/v1\"
@@ -21,20 +21,21 @@
 
   :model is the id a provider serves unless a tier picks another one, and it must
   be a key of :models. :input / :output are required of every model entry and
-  speak the vocabulary this harness actually carries (INPUT-TYPES / OUTPUT-TYPES).
+  speak the vocabulary this harness actually carries (input-types / output-types).
 
   WHAT THIS NAMESPACE OWNS
   ------------------------
-  The shape, and nothing else: reading providers.edn, validating it, and turning
-  a SELECTION into a resolved provider. It does not own which tier wins (that is
-  the fold in harness.memory) and it never touches the api-key -- the key is
-  memory's, and memory's alone.
+  The shape: the built-in table, reading and validating providers.edn, merging the
+  two, and turning a SELECTION into a resolved provider. It does NOT own which tier
+  wins -- that is the fold in harness.memory -- and it never touches the api-key:
+  the key is memory's, and memory's alone.
 
   WHY A PROVIDER IS NOT A MODEL. The old shape made one entry do both: :cheap was
-  an endpoint AND a model, so :protocol and :model moved together and 'switch
-  vendor' had no expression at all. Splitting them is what makes the three knobs
-  (:provider / :model / :reasoning-effort) enough to describe every run, and what
-  gives a model anywhere to declare what it can receive.
+  an endpoint AND a model, so the endpoint and the model id moved together and
+  'switch vendor' had no expression at all -- a tier could name a provider and
+  have the name silently dropped, because it was not one of the fields being
+  merged. Splitting vendor from model is what makes three knobs enough to describe
+  every run, and it is what gives a model somewhere to declare what it can receive.
 
   The old flat shape is neither read nor migrated: it fails by name, saying what
   to write instead."
