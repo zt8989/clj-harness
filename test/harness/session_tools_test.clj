@@ -38,20 +38,20 @@
 (defn- base-count [] (count (base-names)))
 
 (deftest session-add-and-remove-are-scoped-to-one-thread
-  (mem/session-register! "t-scope" "echo" (echo-tool "session echo"))
+  (tools/session-register! "t-scope" "echo" (echo-tool "session echo"))
   (testing "the added tool is visible to its thread and to nobody else"
     (is (contains? (set (spec-names "t-scope")) "echo"))
     (is (= (base-count) (count (spec-names "t-other")))))
   (testing "unregistering a base tool is a no-op -- base tools cannot be removed"
-    (mem/session-unregister! "t-scope" "read")
+    (tools/session-unregister! "t-scope" "read")
     (is (contains? (set (spec-names "t-scope")) "read"))
     (is (contains? (set (spec-names "t-other")) "read")))
   (testing "unregistering a name nobody knows is a no-op"
-    (mem/session-unregister! "t-scope" "no-such-tool")
+    (tools/session-unregister! "t-scope" "no-such-tool")
     ;; base plus the added echo. Nothing was hidden.
     (is (= (inc (base-count)) (count (spec-names "t-scope")))))
   (testing "retracting an addition is the only undo for presence"
-    (mem/session-unregister! "t-scope" "echo")
+    (tools/session-unregister! "t-scope" "echo")
     (is (= (base-names) (spec-names "t-scope")))
     (is (= (base-names) (spec-names "t-other"))
         "and another thread was never touched")))
@@ -59,68 +59,68 @@
 ;; ----------------------------------------------------------------- toggles
 
 (deftest disabling-a-tool-keeps-it-in-the-toolset
-  (mem/session-disable! "t-off" "read")
+  (tools/session-disable! "t-off" "read")
   (testing "the disabled tool is still offered to the model"
     (is (contains? (set (spec-names "t-off")) "read"))
     (is (= (base-names) (spec-names "t-off")))
     (is (= (spec-description nil "read") (spec-description "t-off" "read"))
         "and its definition is untouched"))
   (testing "the session can see that it is off"
-    (is (true? (mem/session-disabled? "t-off" "read")))
-    (is (false? (mem/session-disabled? "t-off" "write"))))
+    (is (true? (tools/session-disabled? "t-off" "read")))
+    (is (false? (tools/session-disabled? "t-off" "write"))))
   (testing "another session is unaffected"
-    (is (false? (mem/session-disabled? "t-off-other" "read")))
-    (is (not (mem/session-disabled? "t-off-other" "read"))))
+    (is (false? (tools/session-disabled? "t-off-other" "read")))
+    (is (not (tools/session-disabled? "t-off-other" "read"))))
   (testing "enabling brings it back, and the toolset never changed"
-    (mem/session-enable! "t-off" "read")
-    (is (false? (mem/session-disabled? "t-off" "read")))
+    (tools/session-enable! "t-off" "read")
+    (is (false? (tools/session-disabled? "t-off" "read")))
     (is (= (base-names) (spec-names "t-off")))))
 
 (deftest toggles-are-idempotent-and-never-invent-a-tool
   (testing "disabling twice is one mark"
-    (mem/session-disable! "t-idem" "bash")
-    (mem/session-disable! "t-idem" "bash")
-    (is (true? (mem/session-disabled? "t-idem" "bash"))))
+    (tools/session-disable! "t-idem" "bash")
+    (tools/session-disable! "t-idem" "bash")
+    (is (true? (tools/session-disabled? "t-idem" "bash"))))
   (testing "enabling a name that was never disabled is a no-op"
-    (mem/session-enable! "t-idem" "edit")
-    (is (false? (mem/session-disabled? "t-idem" "edit"))))
+    (tools/session-enable! "t-idem" "edit")
+    (is (false? (tools/session-disabled? "t-idem" "edit"))))
   (testing "disabling a name the session cannot see never invents a mark"
-    (mem/session-disable! "t-idem" "no-such-tool")
-    (is (false? (mem/session-disabled? "t-idem" "no-such-tool")))
+    (tools/session-disable! "t-idem" "no-such-tool")
+    (is (false? (tools/session-disabled? "t-idem" "no-such-tool")))
     (is (= (base-names) (spec-names "t-idem")))))
 
 (deftest a-session-added-tool-can-be-disabled-too
-  (mem/session-register! "t-own" "echo" (echo-tool "session echo"))
-  (mem/session-disable! "t-own" "echo")
+  (tools/session-register! "t-own" "echo" (echo-tool "session echo"))
+  (tools/session-disable! "t-own" "echo")
   (testing "disabling does not retract the definition"
     (is (contains? (set (spec-names "t-own")) "echo"))
-    (is (true? (mem/session-disabled? "t-own" "echo"))))
+    (is (true? (tools/session-disabled? "t-own" "echo"))))
   (testing "enabling it again leaves the definition in place"
-    (mem/session-enable! "t-own" "echo")
+    (tools/session-enable! "t-own" "echo")
     (is (contains? (set (spec-names "t-own")) "echo"))))
 
 (deftest retracting-an-addition-clears-its-disabled-mark
   ;; Otherwise re-adding the same name would inherit a zombie: present, but
   ;; silently switched off by a state from a definition that no longer exists.
-  (mem/session-register! "t-zombie" "echo" (echo-tool "first"))
-  (mem/session-disable! "t-zombie" "echo")
-  (is (true? (mem/session-disabled? "t-zombie" "echo")))
-  (mem/session-unregister! "t-zombie" "echo")
-  (is (false? (mem/session-disabled? "t-zombie" "echo"))
+  (tools/session-register! "t-zombie" "echo" (echo-tool "first"))
+  (tools/session-disable! "t-zombie" "echo")
+  (is (true? (tools/session-disabled? "t-zombie" "echo")))
+  (tools/session-unregister! "t-zombie" "echo")
+  (is (false? (tools/session-disabled? "t-zombie" "echo"))
       "the mark went with the definition")
-  (mem/session-register! "t-zombie" "echo" (echo-tool "second"))
-  (is (false? (mem/session-disabled? "t-zombie" "echo"))
+  (tools/session-register! "t-zombie" "echo" (echo-tool "second"))
+  (is (false? (tools/session-disabled? "t-zombie" "echo"))
       "a freshly added tool starts enabled")
   (is (contains? (set (spec-names "t-zombie")) "echo")))
 
 (deftest a-session-shadow-leaves-the-base-untouched
-  (let [base-read (@mem/registry "read")]
-    (mem/session-register! "t-shadow" "read" (echo-tool "shadow read"))
+  (let [base-read (@tools/registry "read")]
+    (tools/session-register! "t-shadow" "read" (echo-tool "shadow read"))
     (is (= "shadow read" (spec-description "t-shadow" "read")))
-    (is (not= "shadow read" (:description (@mem/registry "read")))
+    (is (not= "shadow read" (:description (@tools/registry "read")))
         "the base registry is never mutated at runtime")
-    (is (= (:description base-read) (:description (@mem/registry "read"))))
-    (mem/session-unregister! "t-shadow" "read")
+    (is (= (:description base-read) (:description (@tools/registry "read"))))
+    (tools/session-unregister! "t-shadow" "read")
     (is (= (:description base-read) (spec-description "t-shadow" "read")))))
 
 ;; ------------------------------------------------------------------ integration
@@ -146,7 +146,7 @@
 (deftest the-run-serves-the-threads-effective-toolset
   (is (= "t-spy-plain" (:thread-id (first (spy-run "t-spy-plain")))))
   (is (= (base-count) (count (:tools (first (spy-run "t-spy-plain"))))))
-  (mem/session-register! "t-spy" "echo" (echo-tool "session echo"))
+  (tools/session-register! "t-spy" "echo" (echo-tool "session echo"))
   (let [[plain with-echo other] [(last (spy-run "t-spy-plain"))
                                  (last (spy-run "t-spy"))
                                  (last (spy-run "t-spy-other"))]]
@@ -168,11 +168,11 @@
         acc))))
 
 (deftest the-seam-reports-a-lifetime-for-every-call
-  (mem/session-register! "t-life" "ok-tool"
+  (tools/session-register! "t-life" "ok-tool"
                          (tool "ok" (fn [_] "fine") []))
-  (mem/session-register! "t-life" "boom"
+  (tools/session-register! "t-life" "boom"
                          (tool "boom" (fn [_] (throw (ex-info "kaboom" {}))) []))
-  (mem/session-register! "t-life" "needs-arg"
+  (tools/session-register! "t-life" "needs-arg"
                          (tool "needs-arg" (fn [_] "no") [:x]))
   (let [events (drain-events (fake/scripted
                               [{:content ""
@@ -209,9 +209,9 @@
                                                     (= "c4" (:id %)))
                                               events))))
                          "missing required argument")))
-    (mem/session-unregister! "t-life" "ok-tool")
-    (mem/session-unregister! "t-life" "boom")
-    (mem/session-unregister! "t-life" "needs-arg")))
+    (tools/session-unregister! "t-life" "ok-tool")
+    (tools/session-unregister! "t-life" "boom")
+    (tools/session-unregister! "t-life" "needs-arg")))
 
 ;; ---------------------------------------------------------------- introspection
 
@@ -224,7 +224,7 @@
                              thread-id))
         {:keys [content error]}
         (eval! "t-e2e"
-               "(do (harness.memory/session-register! harness.memory/*thread-id* \"note\"
+               "(do (harness.tools/session-register! harness.tools/*thread-id* \"note\"
                       {:description \"note\"
                        :parameters {:type \"object\" :properties {\"text\" {:type \"string\"}}}
                        :required [:text]
@@ -246,7 +246,7 @@
                                           "(keys (harness.providers/config))"))
                          ":protocol")))
     (testing "disabling a base tool is reported as disabled, not as unknown"
-      (mem/session-disable! "t-e2e" "read")
+      (tools/session-disable! "t-e2e" "read")
       (let [events (drain-events
                     (fake/scripted [{:content ""
                                      :tool-calls [{:id "c2" :name "read" :arguments {:path "deps.edn"}}]}
@@ -260,7 +260,7 @@
         (is (true? (:error result)))
         (is (str/includes? (str (:content result)) "disabled"))
         (is (not (str/includes? (str (:content result)) "unknown")))))
-    (mem/session-enable! "t-e2e" "read")
+    (tools/session-enable! "t-e2e" "read")
     (testing "enabling it again restores dispatch in the same run shape"
       (let [events (drain-events
                     (fake/scripted [{:content ""
@@ -291,10 +291,10 @@
                   content))
         seen  (fn [thread-id]
                 (call thread-id
-                      "(sort (keys (harness.memory/effective-tools
-                                     harness.memory/*thread-id*)))"))]
+                      "(sort (keys (harness.tools/effective-tools
+                                     harness.tools/*thread-id*)))"))]
     (testing "the toolset the agent reads reflects its OWN session, not the base"
-      (call "t-tog" "(harness.memory/session-register! harness.memory/*thread-id*
+      (call "t-tog" "(harness.tools/session-register! harness.tools/*thread-id*
                        \"probe\" {:description \"probe\"
                                   :parameters {:type \"object\" :properties {}}
                                   :required [] :run (fn [_] \"pong\")})")
@@ -304,7 +304,7 @@
         (is (not (str/includes? (seen "t-tog-other") "probe"))
             "another session's read does not")))
     (testing "a disabled tool is still in the toolset the agent reads"
-      (call "t-tog" "(harness.memory/session-disable! harness.memory/*thread-id* \"bash\")")
+      (call "t-tog" "(harness.tools/session-disable! harness.tools/*thread-id* \"bash\")")
       (is (str/includes? (seen "t-tog") "bash")
           "disabling never removes it from what the agent sees"))
     (testing "calling it reports disabled, never unknown"
@@ -319,7 +319,7 @@
         (is (str/includes? (str (:content result)) "disabled"))
         (is (not (str/includes? (str (:content result)) "unknown")))))
     (testing "and the agent can turn it back on itself"
-      (call "t-tog" "(harness.memory/session-enable! harness.memory/*thread-id* \"bash\")")
+      (call "t-tog" "(harness.tools/session-enable! harness.tools/*thread-id* \"bash\")")
       (let [events (drain-events
                     (fake/scripted [{:content ""
                                      :tool-calls [{:id "d2" :name "bash"

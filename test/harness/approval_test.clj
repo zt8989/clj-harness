@@ -85,7 +85,7 @@
 (deftest a-tool-can-declare-its-own-approval-requirement
   (let [thr "thr-park-flag"
         ran (atom false)]
-    (mem/session-register! thr "probe"
+    (tools/session-register! thr "probe"
       {:description "A probe." :requires-approval true
        :parameters {:type "object" :properties {} :required []} :required []
        :run (fn [_] (reset! ran true) "ran")})
@@ -233,7 +233,7 @@
 (deftest a-decision-cannot-be-spent-twice
   (let [thr "thr-resume-once"
         n   (atom 0)]
-    (mem/session-register! thr "tick"
+    (tools/session-register! thr "tick"
       {:description "Counts." :parameters {:type "object" :properties {} :required []}
        :required [] :run (fn [_] (swap! n inc) "tick")})
     (mem/session-require-approval! thr "tick")

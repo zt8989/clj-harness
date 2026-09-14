@@ -27,7 +27,6 @@
             [harness.frames :as frames]
             [harness.home :as home]
             [harness.llm :as llm]
-            [harness.memory :as mem]
             [harness.providers :as providers]
             [harness.loop :as loop]))
 

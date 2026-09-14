@@ -3,7 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.loop :as loop]
-            [harness.memory :as mem]))
+            [harness.tools :as tools]))
 
 (defn- drain-chan [ch]
   (loop [acc []]
@@ -79,7 +79,7 @@
 (deftest a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
   ;; The slow tool lives on a session overlay, not the base registry: runtime
   ;; registration must never mutate the base other tests read.
-  (mem/session-register! "t-slow" "slow"
+  (tools/session-register! "t-slow" "slow"
                          {:description "Sleep MS then return."
                           :parameters  {:type "object"
                                         :properties {"ms" {:type "integer" :description "Millis."}}}
@@ -104,7 +104,7 @@
     (testing "and the run still terminates with a well-formed history"
       (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))
       (is (= "done" (:content (last history))))))
-  (mem/session-unregister! "t-slow" "slow"))
+  (tools/session-unregister! "t-slow" "slow"))
 
 (deftest transport-failure-ends-the-run
   (let [{:keys [seen]}

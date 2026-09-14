@@ -5,7 +5,7 @@
     (stream! provider messages on-event thread-id) -> assistant message
 
   THREAD-ID is the session the run serves; it selects the thread's effective
-  toolset (harness.memory base + session overlay) for the request's tools array
+  toolset (harness.tools base + session overlay) for the request's tools array
   and is otherwise opaque to the methods.
 
   ON-EVENT is called with each harness.event value as it is produced. The returned

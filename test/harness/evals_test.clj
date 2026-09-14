@@ -37,7 +37,7 @@
 ;; ------------------------------------------------------------------- happy path
 
 (def ^:private spaced-code
-  "(do (harness.memory/session-register! harness.memory/*thread-id* \"note\"
+  "(do (harness.tools/session-register! harness.tools/*thread-id* \"note\"
          {:description \"note\"
           :required    []
           :run         (fn [_] \"hi\")})

@@ -1,5 +1,8 @@
 (ns harness.tools
-  "The five tools. A tool is
+  "The tool table: the immutable base of five built-ins, the per-session overlay
+  over it, the parked calls a human still has to answer, and the execution seam.
+
+  A tool is
      {:description string :parameters JSON-Schema :required [kw..] :run (fn [args] string)}
 
   RUN gets a keyword-keyed argument map and returns a string.
@@ -7,7 +10,12 @@
   run! takes a tool call in the PROVIDER's shape -- {:id .. :type \"function\"
   :function {:name .. :arguments json-string}} -- because the kernel keeps messages
   in the provider shape and never converts. It never throws and never returns nil:
-  a tool failure is information for the model, not a failure of the run."
+  a tool failure is information for the model, not a failure of the run.
+
+  THE TABLE LIVES HERE, with the seam that reads it, because they are two halves
+  of one thing: the seam decides what a call means and the table says what exists
+  to be called. It is also where a session's own additions and switches land, all
+  per-thread and gone on restart."
   (:refer-clojure :exclude [run!])
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -19,14 +27,110 @@
             [harness.project :as project])
   (:import [java.util.regex Pattern]))
 
-;; The tool registry itself lives in harness.memory (the introspectable
-;; surface): the agent reads and extends its own toolset through eval. This
-;; namespace owns only the tool SHAPE, the five built-ins, and dispatch.
-
 ;; A resident namespace, so `def`s in eval persist across calls. This is what lets
 ;; the agent build itself a toolset -- and hot-swap the kernel with (require .. :reload).
 (create-ns 'harness.user)
 (binding [*ns* (the-ns 'harness.user)] (clojure.core/refer-clojure))
+
+;; ------------------------------------------------------------------- the base
+
+(defonce registry (atom {}))
+
+(defn- register!
+  "Put NAME->TOOL into the process-wide base. PRIVATE, and it should stay that
+  way: this is how the six built-ins below are declared, and the base is
+  immutable at runtime -- nothing outside this namespace registers anything. A
+  session's own definitions go through session-register!, which lands in the
+  overlay instead and never touches this atom."
+  [name tool]
+  (swap! registry assoc name tool))
+
+;; ------------------------------------------------------------ session tools
+
+(def ^:dynamic *thread-id*
+  "Bound by the execution seam (harness.tools/run!) to the thread whose run the
+  current tool call serves, so code inside a tool -- eval above all -- can
+  address its own session. Unbound outside a run.")
+
+(defonce ^:private overlays
+  (atom {}))
+;; thread-id -> {:added {name tool} :disabled #{name}}
+;;
+;; Two orthogonal axes over one immutable base:
+;;   :added     the presence half -- definitions this session contributed.
+;;   :disabled  the availability half -- names this session switched off. The
+;;              definition is untouched and the tool STAYS in the toolset; the
+;;              execution seam (harness.tools/run!) is what refuses the call.
+;; There is deliberately no :removed: nothing may vanish from a toolset, because
+;; a model that cannot see a tool reads its absence as "this capability does not
+;; exist" and goes looking for a way around it. Disabled is honest; hidden is not.
+
+(declare effective-tools)
+
+(defn session-register!
+  "Add NAME->TOOL for THREAD-ID's session only. Registering over a base tool's
+  name SHADOWS it for this session -- the base definition is untouched -- and
+  the change is visible to the next run of this thread, never to another.
+
+  Re-adding a name that was retracted starts it ENABLED: retraction clears the
+  disabled mark, so a fresh definition never inherits a stale one."
+  [thread-id name tool]
+  (swap! overlays assoc-in [thread-id :added name] tool))
+
+(defn session-unregister!
+  "Retract NAME from THREAD-ID's session -- the presence half only. This undoes
+  a session-register! and nothing else: a base tool's name is a no-op, because
+  base tools cannot be removed (as of tool-toggles, nothing leaves a toolset;
+  use session-disable! to take one's availability away). A name that was never
+  added is also a no-op. The base registry is never mutated.
+
+  Retracting also drops NAME's disabled mark, so re-adding it later is enabled."
+  [thread-id name]
+  (swap! overlays
+         (fn [ov]
+           (if (contains? (get-in ov [thread-id :added]) name)
+             (-> ov
+                 (update-in [thread-id :added] dissoc name)
+                 (update-in [thread-id :disabled] (fnil disj #{}) name))
+             ov))))
+
+(defn session-disable!
+  "Switch NAME off for THREAD-ID's session only -- the availability half. The
+  tool remains in the session's toolset and its definition is untouched; the
+  execution seam refuses calls of it with a :disabled outcome, and
+  session-enable! brings it straight back. Reversible, idempotent, and a no-op
+  for a name the session cannot see -- disabling never invents a tool.
+
+  This is a policy switch, NOT a security boundary: hiding a capability is not
+  the same as forbidding the behaviour (disabling `write` does not stop `bash`
+  from writing a file). The enforced bounds are the approval park and the
+  sandbox, not the toolset."
+  [thread-id name]
+  (when (contains? (effective-tools thread-id) name)
+    (swap! overlays update-in [thread-id :disabled] (fnil conj #{}) name)))
+
+(defn session-enable!
+  "Undo session-disable! for NAME. A name that was never disabled is a no-op."
+  [thread-id name]
+  (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
+
+(defn session-disabled?
+  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call."
+  [thread-id name]
+  (contains? (get-in @overlays [thread-id :disabled] #{}) name))
+
+(defn effective-tools
+  "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
+  additions. A thread with no overlay sees the pure base; nil THREAD-ID (no
+  session context) also means the base.
+
+  DELIBERATELY NOT the set of tools that will run: a disabled tool is still in
+  here. Availability is a separate question, answered per call by
+  session-disabled? at the execution seam."
+  [thread-id]
+  (if (nil? thread-id)
+    @registry
+    (into @registry (get-in @overlays [thread-id :added] {}))))
 
 ;; ------------------------------------------------------------------- helpers
 
@@ -67,15 +171,15 @@
 ;; happened, wherever the model's relative path ended up landing.
 
 (defn- t-read [{:keys [path]}]
-  (slurp (project/resolve-path mem/*thread-id* path) :encoding "UTF-8"))
+  (slurp (project/resolve-path *thread-id* path) :encoding "UTF-8"))
 
 (defn- t-write [{:keys [path content]}]
-  (let [p (project/resolve-path mem/*thread-id* path)]
+  (let [p (project/resolve-path *thread-id* path)]
     (write-file! p content)
     (str "wrote " (count content) " chars to " p)))
 
 (defn- t-edit [{:keys [path old_string new_string]}]
-  (let [p (project/resolve-path mem/*thread-id* path)
+  (let [p (project/resolve-path *thread-id* path)
         s (slurp p :encoding "UTF-8")
         n (count (re-seq (re-pattern (Pattern/quote old_string)) s))]
     (when (zero? n) (throw (ex-info (str "old_string not found in " p) {})))
@@ -85,7 +189,7 @@
     (str "edited " p)))
 
 (defn- t-bash [{:keys [command]}]
-  (let [dir (project/binding-for mem/*thread-id*)
+  (let [dir (project/binding-for *thread-id*)
         {:keys [exit out err]} (apply shell/sh shell-binary "-lc" command :out-enc "UTF-8"
                                       (when dir [:dir dir]))
         body (str out err)]
@@ -136,7 +240,7 @@
                            " declared in providers.edn, not chosen per session")
                       {:unknown (vec extras)}))))
   (let [{:keys [provider model reasoning-effort]} args
-        thread-id mem/*thread-id*
+        thread-id *thread-id*
         change    (cond-> {}
                     (some? provider)         (assoc :provider provider)
                     (some? model)            (assoc :model model)
@@ -172,7 +276,7 @@
                       :function {:name n
                                  :description (:description t)
                                  :parameters (:parameters t)}})
-         (sort-by key (mem/effective-tools thread-id)))))
+         (sort-by key (effective-tools thread-id)))))
 
 ;; ------------------------------------------------------------------ registry
 
@@ -182,20 +286,20 @@
 ;; untouched: the fence is a property of the tool MARKER, engaged only by a
 ;; binding, and the park itself is the ordinary approval flow.
 
-(mem/register! "read"
+(register! "read"
   (assoc (tool "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
          :fence-paths true))
 
-(mem/register! "write"
+(register! "write"
   (assoc (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
                {"path"    {:type "string" :description "File path."}
                 "content" {:type "string" :description "Full new contents."}}
                [:path :content] t-write)
          :fence-paths true))
 
-(mem/register! "edit"
+(register! "edit"
   (assoc (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
                {"path"       {:type "string" :description "File path."}
                 "old_string" {:type "string" :description "Exact text to replace."}
@@ -203,12 +307,12 @@
                [:path :old_string :new_string] t-edit)
          :fence-paths true))
 
-(mem/register! "bash"
+(register! "bash"
   (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
         [:command] t-bash))
 
-(mem/register! "eval"
+(register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."
         {"code" {:type "string" :description "Clojure source."}}
         [:code] t-eval))
@@ -222,7 +326,7 @@
 ;; catalog does not know, or an id the named provider does not declare, is
 ;; refused inside the body -- before anything is written, so a proposed change
 ;; that cannot be served never becomes the session's configuration.
-(mem/register! "session-configure"
+(register! "session-configure"
   (assoc (tool (str "Change this session's provider, model, or reasoning effort. "
                     "Parks for human approval; only an approved change takes effect. "
                     "Each argument is independent -- pass only what you mean to change. "
@@ -272,7 +376,8 @@
   would only send the model hunting for a workaround."
   [name]
   (str "disabled in this session: " name
-       " is switched off. Re-enable it with harness.memory/session-enable!."))
+       " is switched off. Re-enable it with (harness.tools/session-enable!"
+       " harness.tools/*thread-id* \"" name "\")."))
 
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
@@ -296,7 +401,7 @@
     - vetoed               -> :vetoed: no execution; the answer is the veto,
                               fed back to the model like any tool failure.
 
-  The verdict is taken from harness.memory by interrupt id and consumed on the
+  The verdict is taken from the parked record by interrupt id and consumed on the
   way through, so a replayed interrupt can never run its call twice.
 
   WHY a call parks is computed once per transit (approval-reason) and rides
@@ -310,7 +415,7 @@
   ([{:keys [id function] :as _call} thread-id on-phase]
    (let [report (fn [e] (when on-phase (on-phase e)))
          {:keys [name arguments]} function]
-     (if-let [tool (get (mem/effective-tools thread-id) name)]
+     (if-let [tool (get (effective-tools thread-id) name)]
        (try
          (let [parsed  (json/read-str (if (str/blank? arguments) "{}" arguments)
                                       :key-fn keyword)
@@ -319,9 +424,9 @@
                execute (fn []
                          ;; *thread-id* is bound around the tool body so code
                          ;; running inside a tool -- eval above all -- can address
-                         ;; its own session (harness.memory).
+                         ;; its own session (this namespace).
                          (let [[result err]
-                               (try [(binding [mem/*thread-id* thread-id] ((:run tool) parsed)) nil]
+                               (try [(binding [*thread-id* thread-id] ((:run tool) parsed)) nil]
                                     (catch Throwable t [nil t]))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
                                _ (report (ev/tool-post-execute id name))]
@@ -345,7 +450,7 @@
            (cond
              ;; Disabled is checked FIRST: it is a hard refusal, and there is no
              ;; point parking a call that is never going to execute.
-             (mem/session-disabled? thread-id name)
+             (session-disabled? thread-id name)
              (do (report (ev/tool-pre-execute id name :disabled []))
                  (report (ev/tool-post-execute id name))
                  {:content (disabled-message name) :error true})

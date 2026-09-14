@@ -802,7 +802,7 @@
   ;; name from providers.edn (e.g. \"cheap\")") described a scheme where those
   ;; were the same thing -- precisely the confusion this shape removed. A model
   ;; reading it would try to pass a model id as a provider name.
-  (let [t     (get @mem/registry "session-configure")
+  (let [t     (get @tools/registry "session-configure")
         props (-> t :parameters :properties)]
     (is (str/includes? (get-in props ["provider" :description]) "vendor")
         "the provider argument says it names a VENDOR")

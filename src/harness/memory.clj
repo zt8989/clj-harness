@@ -1,125 +1,30 @@
 (ns harness.memory
-  "The introspectable surface: the tool registry (the immutable base plus this
-  session's overlay), the calls parked for a human's approval, and two facts
-  about now (this thread's log path, the project directory it is bound to).
+  "What is left of the introspectable surface: the calls parked for a human's
+  approval, and two facts about now (this thread's log path, the project
+  directory it is bound to).
 
-  This namespace is on its way out. The provider half -- config.edn, the api-key,
-  the tier fold, the session overrides, the provider/changed outbox -- moved to
-  harness.providers, and the frozen prompt to harness.llm. What remains above is
-  the part that is genuinely about a SESSION's own machinery rather than about
-  providers; it will follow them out.
+  This namespace is on its way out. Everything that was here when the surface was
+  argued into being has a better owner:
 
-  The provider half's docstring used to argue a STRUCTURAL boundary -- a
-  non-introspectable namespace that eval was not invited to -- and that argument
-  was retired when the two were merged: Clojure cannot actually wall a namespace
-  off from eval, since var-quote and resolve reach any var, so the split guarded
-  nothing. The boundary is a WRITTEN DISCIPLINE in prompt.md instead: the api-key
-  is resolved in harness.providers and must never be read, printed, or returned,
-  and self-inspection answers with the selection and the resolved endpoint, never
-  the key.
+    the frozen prompt          -> harness.llm, with the prefix-cache reason it exists
+    the tool table + overlay   -> harness.tools, beside the seam that reads it
+    config.edn, the api-key,   -> harness.providers
+    the tier fold, the outbox
 
-  Where files ARE is harness.home's business: the config root is ~/.clj-harness
-  (relocatable via CLJ_HARNESS_HOME), and prompt.md is the one file that stays in
-  the repository.
+  and the two remaining pieces follow in the next ticket: the log path to
+  harness.home, whose path derivation it already is, and the project binding to
+  harness.project, which is where the binding lives and where it is re-read from.
 
-  What is deliberately NOT here: a copy of a thread's history. The jsonl log
+  WHY THE SURFACE IS GOING, in one line: it existed so that eval could READ the
+  harness from inside a run. That reading is gone -- it answered questions the
+  files on disk answer better -- and what replaced it, a session growing itself
+  hooks at runtime, has no use for a namespace whose point was introspection.
+
+  What is deliberately still NOT here: a copy of a thread's history. The jsonl log
   already holds the conversation, and a second copy in memory can only drift
   from it -- so the log is the record, read it there."
   (:require [harness.home :as home]
             [harness.project :as project]))
-
-;; -------------------------------------------------------------------- tools
-
-(defonce registry (atom {}))
-
-(defn register! [name tool] (swap! registry assoc name tool))
-
-;; ------------------------------------------------------------ session tools
-
-(def ^:dynamic *thread-id*
-  "Bound by the execution seam (harness.tools/run!) to the thread whose run the
-  current tool call serves, so code inside a tool -- eval above all -- can
-  address its own session. Unbound outside a run.")
-
-(defonce ^:private overlays
-  (atom {}))
-;; thread-id -> {:added {name tool} :disabled #{name}}
-;;
-;; Two orthogonal axes over one immutable base:
-;;   :added     the presence half -- definitions this session contributed.
-;;   :disabled  the availability half -- names this session switched off. The
-;;              definition is untouched and the tool STAYS in the toolset; the
-;;              execution seam (harness.tools/run!) is what refuses the call.
-;; There is deliberately no :removed: nothing may vanish from a toolset, because
-;; a model that cannot see a tool reads its absence as "this capability does not
-;; exist" and goes looking for a way around it. Disabled is honest; hidden is not.
-
-(declare effective-tools)
-
-(defn session-register!
-  "Add NAME->TOOL for THREAD-ID's session only. Registering over a base tool's
-  name SHADOWS it for this session -- the base definition is untouched -- and
-  the change is visible to the next run of this thread, never to another.
-
-  Re-adding a name that was retracted starts it ENABLED: retraction clears the
-  disabled mark, so a fresh definition never inherits a stale one."
-  [thread-id name tool]
-  (swap! overlays assoc-in [thread-id :added name] tool))
-
-(defn session-unregister!
-  "Retract NAME from THREAD-ID's session -- the presence half only. This undoes
-  a session-register! and nothing else: a base tool's name is a no-op, because
-  base tools cannot be removed (as of tool-toggles, nothing leaves a toolset;
-  use session-disable! to take one's availability away). A name that was never
-  added is also a no-op. The base registry is never mutated.
-
-  Retracting also drops NAME's disabled mark, so re-adding it later is enabled."
-  [thread-id name]
-  (swap! overlays
-         (fn [ov]
-           (if (contains? (get-in ov [thread-id :added]) name)
-             (-> ov
-                 (update-in [thread-id :added] dissoc name)
-                 (update-in [thread-id :disabled] (fnil disj #{}) name))
-             ov))))
-
-(defn session-disable!
-  "Switch NAME off for THREAD-ID's session only -- the availability half. The
-  tool remains in the session's toolset and its definition is untouched; the
-  execution seam refuses calls of it with a :disabled outcome, and
-  session-enable! brings it straight back. Reversible, idempotent, and a no-op
-  for a name the session cannot see -- disabling never invents a tool.
-
-  This is a policy switch, NOT a security boundary: hiding a capability is not
-  the same as forbidding the behaviour (disabling `write` does not stop `bash`
-  from writing a file). The enforced bounds are the approval park and the
-  sandbox, not the toolset."
-  [thread-id name]
-  (when (contains? (effective-tools thread-id) name)
-    (swap! overlays update-in [thread-id :disabled] (fnil conj #{}) name)))
-
-(defn session-enable!
-  "Undo session-disable! for NAME. A name that was never disabled is a no-op."
-  [thread-id name]
-  (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
-
-(defn session-disabled?
-  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call."
-  [thread-id name]
-  (contains? (get-in @overlays [thread-id :disabled] #{}) name))
-
-(defn effective-tools
-  "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
-  additions. A thread with no overlay sees the pure base; nil THREAD-ID (no
-  session context) also means the base.
-
-  DELIBERATELY NOT the set of tools that will run: a disabled tool is still in
-  here. Availability is a separate question, answered per call by
-  session-disabled? at the execution seam."
-  [thread-id]
-  (if (nil? thread-id)
-    @registry
-    (into @registry (get-in @overlays [thread-id :added] {}))))
 
 ;; --------------------------------------------------------------- approvals
 
