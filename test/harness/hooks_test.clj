@@ -284,7 +284,7 @@
     (hooks/session-disable! "hs-fire" id)
     (let [audits (atom [])
           r (dispatch/fire {:point :stop :thread-id "hs-fire" :fact {}
-                            :audit #(swap! audits conj %) :run-id "r"})]
+                            :audit #(swap! audits conj %)})]
       (testing "a switched-off hook does not spawn, and is not even an event"
         (is (= :allow (:verdict r)))
         (is (zero? (:matched r)))
@@ -293,7 +293,7 @@
       (testing "switching it back on resumes it"
         (hooks/session-enable! "hs-fire" id)
         (let [r (dispatch/fire {:point :stop :thread-id "hs-fire" :fact {}
-                                :audit identity :run-id "r"})]
+                                :audit identity})]
           (is (= 1 (:matched r)))
           (is (.exists (io/file marker))))))))
 
@@ -312,7 +312,7 @@
                               :function {:name "eval"
                                          :arguments (json/write-str {:code code})}}
                              tid))
-        fire   (fn [] (dispatch/fire {:point :stop :thread-id tid :fact {} :run-id "r"}))]
+        fire   (fn [] (dispatch/fire {:point :stop :thread-id tid :fact {}}))]
     (testing "adding one is a tool call, and the id comes back readable"
       (let [r (call (str "(harness.hooks/session-add! \"" tid
                          "\" :stop {:command \"echo grew > " marker "; exit 0\"})"))]

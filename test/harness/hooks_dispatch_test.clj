@@ -48,8 +48,7 @@
    (dispatch/fire {:point point
                    :thread-id thread-id
                    :fact fact
-                   :audit audit
-                   :run-id "r-1"})))
+                   :audit audit})))
 
 ;; ----------------------------------------------------- nothing means nothing
 
@@ -141,8 +140,7 @@
 
 (deftest the-hook-is-told-what-happened-on-stdin-as-json
   (let [capture (str root "/payload.json")
-        out     (str root "/payload.out")
-        cmd     (script! "capture.sh" (str "cat > " capture "; cp " capture " " out))]
+        cmd     (script! "capture.sh" (str "cat > " capture "; exit 0"))]
     (declared! :pre-tool-use [{:command cmd}])
     (project/bind! "h-payload" root)
     (try

@@ -162,9 +162,9 @@
   answers simply ignores this field; nothing about the base protocol changes.
 
   AUDIT is called exactly once per trigger that had matching declarations --
-  nothing matched, nothing written -- and RUN-ID rides the line the way every
-  other audit line does."
-  [{:keys [point thread-id fact audit run-id]}]
+  nothing matched, nothing written. The line's runId is the sink's business
+  (harness.http binds it), not something this returns."
+  [{:keys [point thread-id fact audit]}]
   (let [point-kw point
         p        (hooks/point-for point-kw)
         _        (when-not p
@@ -221,5 +221,4 @@
         {:verdict (if blocked :block :allow)
          :reason (:reason (or blocked failed))
          :answer (:answer answered)
-         :matched (count decls)
-         :run-id run-id}))))
+         :matched (count decls)}))))
