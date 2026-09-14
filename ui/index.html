@@ -8,20 +8,13 @@
   <body>
     <div id="root"></div>
     <!--
-      Two imports, and that is the whole entry.
+      One import, and that is the whole entry.
 
-      `/src/main.tsx` is the app, and it mounts itself on load, so there is
-      nothing to call from here.
-
-      The stylesheet is named rather than inherited. CopilotKit's module does import
-      its own CSS, and its package.json does list `**/*.css` under sideEffects -- but
-      that import does not survive the production pipeline, so relying on it ships an
-      unstyled chat. Naming it costs one line and Vite still owns the bundling: the
-      sheet lands in dist as a hashed asset, no copying involved.
+      `/src/main.tsx` is the app: it mounts itself on load, so there is nothing
+      to call from here, and it imports the stylesheet (./styles.css) itself, so
+      the styles are named in exactly one place -- the entry module that owns
+      them -- rather than split across this file and that one.
     -->
-    <script type="module">
-      import "@copilotkit/react-core/v2/styles.css";
-      import "/src/main.tsx";
-    </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

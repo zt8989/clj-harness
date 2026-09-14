@@ -78,6 +78,24 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
    `agent.threadId`（缺省落到 `"main"`），自己不铸 id——若如此，归属不变，本节结论直接沿用；若走了
    `adapters.threadList`，主人就挪到我们手里，那时必须回来改本节。
 
+   **03 的浏览器验收把这个「若如此」钉成了事实，归属不变**。03 没走 `adapters.threadList`（那是 06 的选择），
+   所以两个问题分开回答：
+
+   - **铸造点**：仍然是 **`HttpAgent` 的构造函数**。`new HttpAgent({url})` 当场铸一个 UUID 写进
+     `agent.threadId`，`threadId` 是可写的普通属性。实测两次构造得到两个不同 UUID。
+   - **谁读它**：适配器**只读**，从不铸。`AgUiThreadRuntimeCore` 里两处取值都是
+     `this.agent.threadId || "main"`，随后把算出的值写回那次 run 的实例（`runAgentInstance.threadId = input.threadId`）。
+     因为 `HttpAgent` 一定有 id，`|| "main"` 这条兜底在这个仓库里永不触发。
+   - **写在哪个对象上**：**agent 对象**，没有第二个持有者。页面用 `useMemo(() => new HttpAgent(...), [])`
+     构造它，于是一张页面挂载期 = 一个 agent = 一个线程（依赖数组是空的，重渲染不会换 agent）。
+   - **下一轮 run 如何带上它**：`prepareRunAgentInput` 从 `this.threadId` + `this.messages` 组装
+     `RunAgentInput`，**两轮之间无需任何显式传递**——这就是「续同一线程」的全部机制。
+   - **实测两条**：同一页面连发两轮 → 同一个日志文件从 4 939 字节长到 507 708 字节，会话总数不变（第二轮的
+     `input.threadId` 与第一轮逐字相同）；刷新页面（新 agent）→ 出现全新 id 与新文件，会话数 5 → 6。
+
+   06 若改走 `adapters.threadList`，主人会从 agent 挪到我们的状态，那时按本节最后一段更新；只要仍走
+   「agent 自持」这条路，本节就是终稿。
+
 7. **分票顺序：01 → 02 → 03 → 扇出 04–07 → 08 扇入。** 承认 03 与 07 之间 main 上的页面短暂变薄
    （聊天先能用，工具卡、审批、会话、项目面板一票一票接回来）。把 04–07 塞进 03 会让首张高风险票
    大到不成比例——03 已经背着「新库 + threadId 未知」两件事，不该再加四张面板。
@@ -138,4 +156,11 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
   未解决的客户端工具调用，不管中断）。这是 05 里一个具体的失败形态，界面必须处理而不是撞上。
 - **审批门压在实验性 API 上**：AG-UI 适配器读待决中断、提交答复的接口带 `unstable_` 前缀，升级会破，
   且破的方式是审批静默失灵——最坏的失败模式。05 里点名，并写下升级时的检查方式。
+
+  **03 读包时先碰到了这条，结论对 05 有直接影响：`unstable_getPendingInterrupts()` 与
+  `unstable_submitInterruptResponses()` 在 `@assistant-ui/react-ag-ui@0.0.59` 里已经标了 `@deprecated`**
+  ——类型注释写着「改用 `useAgUiInterrupts()` / `useAgUiSubmitInterruptResponses()`，保留只是为了向后兼容，
+  将在下一个大版本移除」。也就是说这两个方法**不是新口子，是行将删除的旧口子**。05 落地时应优先用那对
+  hooks；若最终仍用了 `unstable_*`，升级检查就变成「下一个大版本会直接编译失败」——比静默失灵好抓，
+  但同样是 breaking。这两条路都要在 05 的验收里点名。
 - **threadId 归属与恢复路径未定**：见决策 6，由 03 收口。

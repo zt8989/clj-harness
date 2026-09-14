@@ -7,6 +7,12 @@
     "jsx": "react-jsx",
     "types": ["vite/client", "node"],
 
+    // The assistant-ui components are copied in verbatim and import through
+    // `@/...`; the alias has to resolve here the same way it does in vite.config.js.
+    // No `baseUrl`: TypeScript 7 removed it, and `paths` resolves relative to this
+    // file on its own.
+    "paths": { "@/*": ["./src/*"] },
+
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
