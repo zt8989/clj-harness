@@ -204,16 +204,25 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 用户在配置家（或绑定项目的 `.harness/`）写 `hooks.edn`，声明某个 hook 点上要跑的命令：
 
 ```edn
-{:pre-tool-use  [{:matcher "bash|write" :command "scripts/gate.sh" :timeout 10000}]
- :post-tool-use [{:command "scripts/note.sh"}]
- :stop          [{:command "scripts/notify.sh"}]}
+{:pre-tool-use      [{:matcher "bash|write" :command "scripts/gate.sh" :timeout 10000}]
+ :permission-request [{:command "scripts/auto-approve.sh"}]
+ :post-tool-use     [{:command "scripts/note.sh"}]
+ :stop              [{:command "scripts/notify.sh"}]}
 ```
 
-**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有四个**：三个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）；一个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）。其余的点声明了就永不触发——这是设计，不是遗漏：审批代答（`PermissionRequest`）在下一票，P3 的点等各自的子系统。
+**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有五个**：三个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）；两个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）与 `PermissionRequest`（一个规则**代答**本该打断人的悬置调用）。其余的点声明了就永不触发——这是设计，不是遗漏：P3 的点等各自的子系统。
 
-**门禁的次序是写死的**（`harness.tools/run!`）：被**关闭**的工具先被硬拒、**不过 PreToolUse**——「关掉」要真的一点活都不干，包括不问 hook；**缺参数**的调用也不问（命令自己会拒，问了只是把模型读到的理由搅浑）；**已 park** 的调用是人的，hook 不能推翻（那是 `PermissionRequest` 的活）。工具被 hook 拒绝时，`tools/pre-execute` 的 `outcome` 是 **`hook-blocked`**，工具结果里明说是 hook 拦的、以及 hook 自己写的理由。
+**一次工具调用有三个出口**，判定的**次序是写死的**（`harness.tools/run!`）：
 
-**契约**：命令经钉住的 Git Bash spawn，payload 走 **stdin JSON**（`{hook, thread_id, project_dir, ...}`，键名 snake_case 按 payload 约定）；退出码 **0 = 放行，2 = 阻断（stderr 即理由，回喂给模型）**，其他非零按点定的失败语义（门禁 `:block`、观察者 `:proceed`）——**超时与起不来的命令也走这一条**：没能替你判断不等于判断为是。超时与崩溃都不炸 run。
+1. **放行（allow）** —— 执行。没有任何东西拦它。
+2. **阻断（block）** —— 不执行，理由作为这次调用的工具结果回喂给模型，run 继续。工具被 `PreToolUse` 拒绝时 `tools/pre-execute` 的 `outcome` 是 **`hook-blocked`**，工具结果里明说是 hook 拦的、以及 hook 自己写的理由（读到「人工否决」的模型会不敢再要东西，读到「hook 拦的」的模型知道去看规则）。
+3. **悬置（suspend）** —— 不执行、**先问**：run 以 interrupt 收尾，这次调用在有人回答之前属于人。不发 `:tool/result`、不写 tool 消息；工具消息落在 resume 那一轮。
+
+判定次序：**关闭**的工具先被硬拒、**不过 PreToolUse**——「关掉」要真的一点活都不干，包括不问 hook；**缺参数**的调用也不问（命令自己会拒，问了只是把模型读到的理由搅浑）；**审批规则**（工具自带 `:requires-approval` 或会话级 `session-require-approval!`）；**最后**才是 `PreToolUse` 门禁——前面几条是 harness 自己的判断，不该拿一个根本跑不起来的调用去问用户的规则。
+
+**悬置的调用先问规则、再问人。** `PermissionRequest` 的 hook 可以在 stdout 上给一个 JSON 答案——`{"decision":"approve"|"deny","reason":".."}`。它的效力与人的答案相同（approve 就执行、deny 就用 hook 的理由回答这次调用），**声明了但没给答案就照旧 park 等人**。没有声明任何 hook 的会话因此与 hook 存在之前逐字节相同。
+
+**契约**：命令经钉住的 Git Bash spawn，payload 走 **stdin JSON**（`{hook, thread_id, project_dir, ...}`，键名 snake_case 按 payload 约定）；退出码 **0 = 放行，2 = 阻断（stderr 即理由，回喂给模型）**，其他非零按点定的失败语义（门禁 `:block`、观察者 `:proceed`）——**超时与起不来的命令也走这一条**：没能替你判断不等于判断为是。超时与崩溃都不炸 run。**stdout 可以再带一个 JSON 对象**作为「退出码说不出来的那个决定」——今天只有 `PermissionRequest` 用得上（`{"decision":"approve"|"deny"}`），且只在退出 0 时读；读不懂或不是对象就不算答案（一个 hook 打印一行日志不该被读成做了决定）。
 
 **没声明任何 hook 时整条路径是 no-op**：不 spawn、不等待、不落行，帧与审计线与没有这个能力时逐字节相同。hook 只在**边**绑定了 run 的 sink 时触发，所以离线工具、replay、直接驱动内核的测试一个 hook 都不跑。
 

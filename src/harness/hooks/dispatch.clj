@@ -65,22 +65,46 @@
         subject (get fact (:matches point))]
     (filterv #(matches? % subject) (hooks/declarations-at thread-id point-kw))))
 
+(defn- answer-in
+  "The advanced decision a command put on STDOUT, as a map -- or nil.
+
+  Exit codes are the base protocol (0 allow, 2 block); this is how a hook says
+  something the code cannot, which only PermissionRequest needs today: an ANSWER
+  to a parked call, \"approve\" or \"deny\", instead of bothering a human.
+
+  Read only when the command exited 0 -- a hook that failed cannot also be
+  answering -- and only when stdout is a JSON OBJECT. Unparseable, or JSON of
+  another shape, is not an answer: a hook that prints a log line must not be
+  read as having decided something."
+  [run]
+  (when (and (zero? (or (:exit run) -1))
+             (not (str/blank? (str/trim (str (:out run))))))
+    (try
+      (let [v (json/read-str (str/trim (str (:out run))))]
+        (when (map? v) v))
+      (catch Exception _ nil))))
+
 (defn- verdict-of
-  "One declaration's run -> {:outcome :allow|:block|:error :reason ..}.
+  "One declaration's run -> {:outcome :allow|:block|:error :reason .. :answer ..}.
 
   The reason is always the command's OWN output, never ours: on a block it is
   the stderr the author wrote (that is what gets fed back to the model), and on a
   failure it is stderr when there is any, else a line saying what went wrong.
-  An author's message beats a message about the author."
+  An author's message beats a message about the author.
+
+  :answer carries what the command put on stdout as JSON, if anything -- read
+  even when the point does not use answers, so a caller can report that a hook
+  said something. Only the caller knows whether an answer means anything there."
   [point run]
   (let [{:keys [exit out err timeout]} run
-        why (if (str/blank? (str/trim (str err))) (str/trim (str out)) (str/trim (str err)))]
+        why (if (str/blank? (str/trim (str err))) (str/trim (str out)) (str/trim (str err)))
+        answer (answer-in run)]
     (cond
       timeout       {:outcome :error :reason (str "hook timed out after its timeout: " why)
                      :on-error (:on-error point)}
       (nil? exit)   {:outcome :error :reason (str "hook could not be run: " why)
                      :on-error (:on-error point)}
-      (zero? exit)  {:outcome :allow :reason why}
+      (zero? exit)  {:outcome :allow :reason why :answer answer}
       (= 2 exit)    {:outcome :block :reason why}
       :else         {:outcome :error
                      :reason (str "hook exited " exit ": " why)
@@ -131,6 +155,12 @@
   say a hook was broken; the verdict still says :allow, because it is not theirs
   to act on.
 
+  :answer is what a command put on stdout as a JSON object, from the first one
+  that did. It is a THIRD thing to say -- neither allow nor block, but a decision
+  about something else -- and today only PermissionRequest has a use for it: an
+  answer to a parked call, so a human need not be asked. A point that ignores
+  answers simply ignores this field; nothing about the base protocol changes.
+
   AUDIT is called exactly once per trigger that had matching declarations --
   nothing matched, nothing written -- and RUN-ID rides the line the way every
   other audit line does."
@@ -164,6 +194,7 @@
                                   outcome (verdict-of p run)]
                               (merge (outcome->verdict p outcome)
                                      {:outcome (:outcome outcome)
+                                      :answer (:answer outcome)
                                       :exit (:exit run)
                                       :timeout (boolean (:timeout run))})))
                           decls)
@@ -173,15 +204,22 @@
             ;; changes the verdict -- an observer's failure is not the caller's
             ;; to act on -- but dropping it here would make the engine the only
             ;; place that knew a hook was broken, and the caller unable to say so.
-            failed (first (filter #(= :error (:outcome %)) results))]
+            failed (first (filter #(= :error (:outcome %)) results))
+            ;; The FIRST declaration that answered. One answer is the decision:
+            ;; two hooks both answering a park is a configuration question, and
+            ;; taking the earliest keeps it the same rule as the first block wins.
+            answered (first (filter :answer results))]
         (when audit
           (audit {:point (:name p)
                   :thread_id thread-id
                   :matched (count decls)
                   :verdict (if blocked :block :allow)
                   :reason (:reason (or blocked failed))
-                  :results (mapv #(select-keys % [:exit :timeout :outcome :verdict :reason]) results)}))
+                  :answer (:answer answered)
+                  :results (mapv #(select-keys % [:exit :timeout :outcome :verdict :reason :answer])
+                                 results)}))
         {:verdict (if blocked :block :allow)
          :reason (:reason (or blocked failed))
+         :answer (:answer answered)
          :matched (count decls)
          :run-id run-id}))))

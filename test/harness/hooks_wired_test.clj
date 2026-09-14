@@ -11,7 +11,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.fake :as fake]
             [harness.home :as home]
             [harness.http :as http]
@@ -76,6 +76,12 @@
 (defn- wipe! []
   (io/delete-file (io/file (home/root) "hooks.edn") true)
   (io/delete-file (io/file (home/root) "hooks-fired.txt") true))
+
+;; A hooks.edn this namespace wrote is a hook EVERY LATER TEST IN THE PROCESS
+;; would fire -- including harness.http-test's parked-call test, which would find
+;; its call answered by a rule it never declared. So both levels are wiped around
+;; every test, the same discipline project_test applies to harness.edn.
+(use-fixtures :each (fn [f] (wipe!) (f) (wipe!)))
 
 (defn- marker-script [marker label]
   (let [dir (str (home/root) "/hook-scripts")]
@@ -322,3 +328,106 @@
              (is (empty? (filter #(= "hook/PreToolUse" (:kind %)) ls)))
              (is (not (.exists (io/file marker))))))))
       (finally (tools/session-enable! "hw-disabled" "read")))))
+
+;; ------------------------------- PermissionRequest: a rule answering the park
+
+(defn- answer-script [decision reason]
+  (let [dir (str (home/root) "/hook-scripts")]
+    (.mkdirs (io/file dir))
+    (let [f (io/file dir (str "answer-" decision ".sh"))]
+      (spit f (str "#!/bin/sh\ncat > /dev/null\n"
+                   "echo '{\"decision\":\"" decision "\",\"reason\":\"" reason "\"}'\nexit 0\n")
+            :encoding "UTF-8")
+      (.setExecutable f true)
+      (str f))))
+
+(deftest a-permission-request-hook-can-approve-a-parked-call
+  (wipe!)
+  (write-hooks! {:permission-request [{:command (answer-script "approve" "the rule says yes")}]})
+  (tools/session-require-approval! "hw-delegate-ok" "read")
+  (try
+    (with-server
+     8131 "hw-delegate-ok"
+     (fn []
+       (io/delete-file (log-file "hw-delegate-ok") true)
+       (let [frames (wire/frames-from-sse (.body (post-run 8131 "hw-delegate-ok")))
+             results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+         (testing "the call RAN -- the hook took the human's place, no interrupt was needed"
+           (is (= 1 (count results)))
+           (is (str/includes? (:content (first results)) ":paths")))
+         (testing "and the run finished normally rather than waiting for anyone"
+           (is (= "RUN_FINISHED" (:type (last frames))))
+           (is (nil? (:outcome (first (filter #(= "RUN_FINISHED" (:type %)) frames))))))
+         (testing "the seam records it as an approval, like a human's"
+           (let [ls (wait-for (log-file "hw-delegate-ok")
+                              (fn [ls] (some #(= "hook/PermissionRequest" (:kind %)) ls))
+                              1500)
+                 pre (first (filter #(= "tools/pre-execute" (:kind %)) ls))
+                 ;; the log reader keywordizes keys, so the hook's own JSON comes
+                 ;; back as :decision rather than "decision"
+                 hook-line (first (filter #(= "hook/PermissionRequest" (:kind %)) ls))]
+             (is (= "approved" (get-in pre [:payload :outcome])))
+             (is (= "approve" (get-in hook-line [:payload :answer :decision])))
+             (is (= 1 (get-in hook-line [:payload :matched]))))))))
+    (finally (tools/session-require-approval! "hw-delegate-ok" "no-such-tool"))))
+
+(deftest a-permission-request-hook-can-deny-a-parked-call
+  (wipe!)
+  (write-hooks! {:permission-request [{:command (answer-script "deny" "not on a tuesday")}]})
+  (tools/session-require-approval! "hw-delegate-no" "read")
+  (try
+    (with-server
+     8132 "hw-delegate-no"
+     (fn []
+       (io/delete-file (log-file "hw-delegate-no") true)
+       (let [frames (wire/frames-from-sse (.body (post-run 8132 "hw-delegate-no")))
+             results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+         (testing "the call did NOT run, and the hook's reason is what the model reads"
+           (is (= 1 (count results)))
+           (is (str/includes? (:content (first results)) "denied by a PermissionRequest hook"))
+           (is (str/includes? (:content (first results)) "not on a tuesday")))
+         (testing "the run carries on -- a denial is information, not a failure"
+           (is (= "RUN_FINISHED" (:type (last frames))))
+           (is (empty? (wire/violations frames)))))))
+    (finally (tools/session-require-approval! "hw-delegate-no" "no-such-tool"))))
+
+(deftest a-hook-that-does-not-answer-leaves-the-call-to-a-person
+  ;; The regression that matters most: a declaration exists at the point but says
+  ;; nothing on stdout, so the call parks exactly as it did before hooks existed.
+  (wipe!)
+  (write-hooks! {:permission-request [{:command (gate-script 0 "just watching")}]})
+  (tools/session-require-approval! "hw-delegate-quiet" "read")
+  (try
+    (with-server
+     8133 "hw-delegate-quiet"
+     (fn []
+       (io/delete-file (log-file "hw-delegate-quiet") true)
+       (let [frames (wire/frames-from-sse (.body (post-run 8133 "hw-delegate-quiet")))
+             term (last (filter #(= "RUN_FINISHED" (:type %)) frames))
+             interrupts (get-in term [:outcome :interrupts])]
+         (testing "no tool result: the call was never answered"
+           (is (empty? (filter #(= "TOOL_CALL_RESULT" (:type %)) frames))))
+         (testing "the run ended on an interrupt, with the call parked for a human"
+           (is (= "interrupt" (get-in term [:outcome :type])))
+           (is (= "tool-approval" (:reason (first interrupts))))
+           (is (= "c1" (:toolCallId (first interrupts))))))))
+    (finally (tools/session-require-approval! "hw-delegate-quiet" "no-such-tool"))))
+
+(deftest an-approval-with-no-hooks-at-all-still-parks
+  ;; Byte-for-byte the pre-hook behaviour, asserted here because this is the ticket
+  ;; that put a hook call in the middle of the park path.
+  (wipe!)
+  (tools/session-require-approval! "hw-plain" "read")
+  (try
+    (with-server
+     8134 "hw-plain"
+     (fn []
+       (io/delete-file (log-file "hw-plain") true)
+       (let [frames (wire/frames-from-sse (.body (post-run 8134 "hw-plain")))
+             term (last (filter #(= "RUN_FINISHED" (:type %)) frames))
+             interrupt (first (get-in term [:outcome :interrupts]))]
+         (is (= "interrupt" (get-in term [:outcome :type])))
+         (is (some? interrupt))
+         (testing "and nothing about a hook appears anywhere on the wire"
+           (is (empty? (filter #(str/includes? (str (:type %)) "CUSTOM") frames)))))))
+    (finally (tools/session-require-approval! "hw-plain" "no-such-tool"))))

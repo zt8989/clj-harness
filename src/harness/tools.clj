@@ -448,6 +448,16 @@
   (str "blocked by a PreToolUse hook: the call was not executed."
        (when (seq (str reason)) (str " reason: " reason))))
 
+(defn- delegated-veto-message
+  "What the model is told when a PermissionRequest hook answered \"deny\". Same
+  shape as a human veto -- the call did not run, and the reason is information --
+  but it says the answer came from a rule, not from the person whose name a veto
+  would otherwise put on it."
+  [{:keys [answer reason]}]
+  (let [why (or (get answer "reason") reason)]
+    (str "denied by a PermissionRequest hook: the call was not executed."
+         (when (seq (str why)) (str " reason: " why)))))
+
 (defn- veto-message
   "What the model is told when a human vetoed the call. It is information, not a
   failure of the run: the loop carries on with this as the tool's answer."
@@ -470,7 +480,7 @@
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
                            :disabled, :missing-args (with the missing names),
-                           :needs-approval, :approved, or :vetoed
+                           :hook-blocked, :needs-approval, :approved, or :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
   A call that never passes pre-execute (unknown tool, disabled tool, missing
@@ -478,24 +488,42 @@
   arrives -- the lifecycle is always closed. :disabled is checked before
   approval: a tool this session switched off is refused outright, never parked.
 
-  A call marked for approval takes one of three transits:
-    - no decision yet      -> :needs-approval: parked, the tool body does NOT
-                              run, no :tool/result, and this transit closes at
-                              once (the seam looked; the call is the human's).
-                              The returned map carries :parked for the loop.
-    - approved             -> :approved, then it executes exactly like :pass.
-    - vetoed               -> :vetoed: no execution; the answer is the veto,
-                              fed back to the model like any tool failure.
+  EVERY CALL ENDS IN ONE OF THREE OUTCOMES, and the order they are decided in is
+  the point of the whole pre phase:
 
-  The verdict is taken from the parked record by interrupt id and consumed on the
-  way through, so a replayed interrupt can never run its call twice.
+    ALLOW     it runs. Nothing refused it: no switch, no missing argument, no
+              gate, no rule that says a human has to look.
+    BLOCK     it does not run, and the reason goes back to the model as the
+              call's result -- a veto, a hook's exit 2, a disabled switch. The
+              run carries on; the model gets to try something else.
+    SUSPEND   it does not run YET: the run ends on an interrupt and the call is
+              the human's until they answer. Nothing executes, no :tool/result
+              is emitted, and the tool message lands on the resume run.
 
-  WHY a call parks is computed once per transit (approval-reason) and rides
-  the parked record: :tool-declares (the tool's own :requires-approval),
+  The decisions are taken in ONE order, first match wins (the cond below):
+    disabled -> missing args -> approval rule -> PreToolUse gate
+  The gate is LAST because everything before it is this harness deciding, and a
+  gate should not be asked about a call that cannot run anyway.
+
+  A call that must be suspended asks TWO things before it bothers a person. It
+  first takes any decision already on the parked record -- the resume path --
+  and only if there is none does it fire PermissionRequest, the point that lets a
+  RULE answer what would otherwise interrupt somebody. A hook's answer has the
+  same standing as a human's: \"approve\" runs the call, \"deny\" answers it with
+  the hook's reason. A point that says nothing -- no declaration, or a
+  declaration that puts no decision on stdout -- leaves the call exactly where it
+  was: parked, waiting for a person. That is why a session with no hooks behaves
+  byte for byte as it did before hooks existed.
+
+  WHY a call is suspended is computed once per transit (approval-reason) and
+  rides the parked record: :tool-declares (the tool's own :requires-approval),
   :session-asks (this session required it), or :out-of-bounds (a fence-marked
   file tool whose path resolves outside the session's project directory and
-  the configuration home -- only when a project is bound). The verdict of a
-  human override stands: an approved out-of-bounds call executes like :pass."
+  the configuration home -- only when a project is bound). Those two switches are
+  NOT a separate mechanism from the hook engine -- they are this session's way of
+  installing a suspend-type rule of its own, alongside the ones a hooks.edn gate
+  installs. The verdict of a human override stands: an approved out-of-bounds call
+  executes like :pass."
   ([call] (run! call nil nil))
   ([call thread-id] (run! call thread-id nil))
   ([{:keys [id function] :as _call} thread-id on-phase]
@@ -528,14 +556,14 @@
                            (if err
                              {:content (ex-message err) :error true}
                              {:content (str result) :error false})))
-               park (fn [reason]
-                      (let [existing (parked-for-call thread-id id)
-                            interrupt-id (or (:interrupt-id existing)
+               park (fn [reason interrupt-id]
+                      (let [interrupt-id (or interrupt-id
+                                             (:interrupt-id (parked-for-call thread-id id))
                                              (str (java.util.UUID/randomUUID)))]
                         (park-approval! interrupt-id (cond-> {:thread-id thread-id
-                                                                  :tool-call-id id
-                                                                  :name name :args arguments}
-                                                           reason (assoc :reason reason)))
+                                                              :tool-call-id id
+                                                              :name name :args arguments}
+                                                       reason (assoc :reason reason)))
                         (report (ev/tool-pre-execute id name :needs-approval []))
                         (report (ev/tool-post-execute id name))
                         {:content "" :error false
@@ -566,9 +594,29 @@
                  :vetoed   (do (report (ev/tool-pre-execute id name :vetoed []))
                                (report (ev/tool-post-execute id name))
                                {:content (veto-message decision) :error true})
-                 ;; nothing decided yet (or the verdict was already spent):
-                 ;; the call is the human's until they answer.
-                 (park reason)))
+                 ;; Nothing decided yet (or the verdict was already spent, which
+                 ;; a replay of the same interrupt would be). ASK THE HOOKS
+                 ;; before asking a person: this is PermissionRequest, the point
+                 ;; that exists so a rule can answer what would otherwise
+                 ;; interrupt somebody. Its answer has the same standing as a
+                 ;; human's -- approve runs the call, deny answers it with the
+                 ;; hook's reason -- and a point that says nothing (no
+                 ;; declaration, no answer on stdout) leaves the call exactly
+                 ;; where it was: parked, waiting for a person.
+                 (let [interrupt-id (or (:interrupt-id existing)
+                                        (str (java.util.UUID/randomUUID)))
+                       answer (hook/emit :permission-request
+                                         {:tool_name name
+                                          :tool_input parsed
+                                          :interrupt_id interrupt-id})
+                       decision (get (:answer answer) "decision")]
+                   (case decision
+                     "approve" (do (report (ev/tool-pre-execute id name :approved []))
+                                   (execute))
+                     "deny"    (do (report (ev/tool-pre-execute id name :vetoed []))
+                                   (report (ev/tool-post-execute id name))
+                                   {:content (delegated-veto-message answer) :error true})
+                     (park reason interrupt-id)))))
 
              ;; THE GATE, last of the refusals. Everything above is this harness
              ;; deciding; this is the user's own rulebooks deciding, and it comes
