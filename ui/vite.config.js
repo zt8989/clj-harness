@@ -1,19 +1,18 @@
 import { defineConfig } from "vite";
-import { cljs } from "./vite-plugin-cljs.js";
+import react from "@vitejs/plugin-react";
 
-// Two compilers, one dev server.
+// One build, one dev server.
 //
-//   shadow-cljs  compiles ClojureScript (and hot-reloads it over its own socket)
-//   Vite         bundles npm and serves the page
+//   @vitejs/plugin-react  compiles the TSX and drives Fast Refresh
+//   tsc --noEmit          is the type gate, and runs as part of `npm run build`
 //
-// `virtual:shadow-cljs/app` is the seam: the compiled build reaches Vite as an
-// ordinary module, so React, CopilotKit and CopilotKit's own stylesheet all arrive
-// through Vite's normal dependency graph. shadow-cljs never has to understand npm --
-// which is the only reason this works at all.
+// Vite bundles npm and serves the page; there is no second compiler in the loop
+// any more, so the page's dependencies all arrive through Vite's normal
+// dependency graph.
 //
 // The port is a contract, not a preference: the harness CORS-allows exactly
 // http://localhost:5173 (src/harness/http.clj).
 export default defineConfig({
-  plugins: [cljs()],
+  plugins: [react()],
   server: { port: 5173, strictPort: true },
 });

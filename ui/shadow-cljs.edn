@@ -1,18 +1,14 @@
 {
- :source-paths ["src" "test"]
-
- ;; helix is the React wrapper; shadow-cljs itself rides in on the npm CLI's classpath.
- :dependencies [[lilactown/helix "0.2.2"]]
+ ;; src/ is TypeScript now, so the :app build is gone and with it the helix
+ ;; dependency and the Vite bridge (vite-plugin-cljs.js). What is left is the
+ ;; suite of ClojureScript test cases under test/ -- they drive @ag-ui/client
+ ;; directly, never the page, which is what keeps them usable as a regression net
+ ;; while the UI is rewritten. They move to TypeScript in ticket 02, and this file
+ ;; goes with them.
+ :source-paths ["test"]
 
  :builds
- {:app {:target :esm
-        :js-options {:js-provider :import}
-        :output-dir "cljs-out"
-        :modules {:main {:entries [harness.ui.main]}}}
-
-  ;; The test build. Its source path is the mirror of src/ -- ui/test/harness/ui
-  ;; holds the suites for ui/src/harness/ui -- and it is NOT part of :app, so
-  ;; nothing test-shaped can reach the browser bundle.
+ {;; The test build.
   ;;
   ;; :node-library, not :node-test: shadow's :node-test target owns the whole
   ;; run (it discovers namespaces, runs them and calls process.exit), and vitest
@@ -31,9 +27,7 @@
   ;; defaults), which is why the build is driven by `compile` rather than
   ;; `release` -- and why the option is also stated here: relying on a mode
   ;; default for the one setting that decides whether the tests exist at all is
-  ;; how a suite silently becomes zero tests. This is also why the suites are not
-  ;; part of :app: :app's output is optimized, so the same namespaces there would
-  ;; contain no tests at all.
+  ;; how a suite silently becomes zero tests.
   :test {:target :node-library
          :js-options {:js-provider :require}
          :compiler-options {:load-tests true}
