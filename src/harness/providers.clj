@@ -1,6 +1,6 @@
-(ns harness.models
-  "The model catalog: which providers exist, which models each one serves, and
-  what every model can take in and give out.
+(ns harness.providers
+  "Providers: which vendors this process can reach, which models each one
+  serves, and what every model can take in and give out.
 
   SHAPE
   -----
@@ -29,10 +29,14 @@
 
   WHAT THIS NAMESPACE OWNS
   ------------------------
-  The shape: the built-in table, reading and validating providers.edn, merging the
-  two, and turning a SELECTION into a resolved provider. It does NOT own which tier
-  wins -- that is the fold in harness.memory -- and it never touches the api-key:
-  the key is memory's, and memory's alone.
+  The catalog: the built-in table, reading and validating providers.edn, merging
+  the two, and turning a SELECTION into a resolved provider.
+
+  It does NOT own which tier wins, and it never touches the api-key. Both of
+  those are the neighbouring half of 'what is this session served from' -- which
+  provider the config, the session and the request agree on, and where the secret
+  comes from -- and they do not live here yet. This namespace answers about
+  providers in general; it does not know what a SESSION is.
 
   WHY A PROVIDER IS NOT A MODEL. The old shape made one entry do both: :cheap was
   an endpoint AND a model, so the endpoint and the model id moved together and
@@ -419,7 +423,7 @@
   -- while a typo in the table SHOULD stop the process at load rather than surface
   on the first run that happens to name that provider. Validating here also means
   the merge below only ever validates the user's half."
-  (into {} (map (fn [[n e]] [(->kw n "a provider name" "harness.models/builtin-raw")
+  (into {} (map (fn [[n e]] [(->kw n "a provider name" "harness.providers/builtin-raw")
                              (check-provider n e)]))
         builtin-raw))
 
@@ -641,9 +645,9 @@
   "Fields this shape refuses to carry, whatever a caller asks for. :api-key is
   here so that naming it -- by a future call site, by a mistake, by a helper that
   renders 'everything' -- still produces a shape without it. That is a guardrail
-  against an accident, not a security boundary: the rule that the key never
-  leaves harness.memory is prompt.md's discipline, and this only means the
-  serializer is not a place it can leak from."
+  against an accident, not a security boundary: the rule that the key is resolved
+  in one place and never surfaces through a self-inspection answer is prompt.md's
+  discipline, and this only means the serializer is not a place it can leak from."
   #{:api-key})
 
 (defn wire

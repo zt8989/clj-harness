@@ -1,6 +1,6 @@
-(ns harness.provider-test
-  "The model catalog, the tier fold, the session-state introspection surface, and
-  the authorised session-configure tool.
+(ns harness.providers-test
+  "The provider catalog, the tier fold, the session-state introspection surface,
+  and the authorised session-configure tool.
 
   Everything here runs under the runner's isolated config root, so the fixtures
   write their own config.edn / providers.edn into a temp home rather than
@@ -11,7 +11,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.home :as home]
             [harness.memory :as mem]
-            [harness.models :as models]
+            [harness.providers :as providers]
             [harness.tools :as tools]))
 
 ;; ------------------------------------------------------------------ fixtures
@@ -248,7 +248,7 @@
         (let [a (mem/active-provider "p-counts")]
           (is (= 200000 (:context-window a)))
           (is (integer? (:context-window a))))
-        (let [w (models/wire (mem/active-provider "p-counts"))]
+        (let [w (providers/wire (mem/active-provider "p-counts"))]
           (is (= 200000 (:context-window w)))
           (is (= 8192 (:max-output-tokens w)))))
       (testing "and they follow the MODEL, not the provider"
@@ -267,7 +267,7 @@
     (fn []
       (mem/set-override! "p-silent" {:model "alpha-quiet"})
       (let [p (mem/effective-provider "p-silent")
-            w (models/wire p)]
+            w (providers/wire p)]
         (is (not (contains? p :context-window)))
         (is (not (contains? p :max-output-tokens)))
         (is (not (contains? w :context-window)) "nor on the wire")
@@ -610,16 +610,16 @@
   ;; identical runs produce log lines that differ, and a reader diffing a
   ;; timeline would see changes that never happened.
   (let [m {:provider :alpha :model "m" :input #{:text :image} :output #{:text}}]
-    (is (= ["image" "text"] (:input (models/wire m))) "a set becomes a sorted vector of names")
-    (is (= ["text"] (:output (models/wire m))))
+    (is (= ["image" "text"] (:input (providers/wire m))) "a set becomes a sorted vector of names")
+    (is (= ["text"] (:output (providers/wire m))))
     (testing "and naming fields renders only those fields"
-      (is (= {:input ["image" "text"]} (models/wire m [:input])))
-      (is (= #{:provider :model} (set (keys (models/wire m [:provider :model]))))))))
+      (is (= {:input ["image" "text"]} (providers/wire m [:input])))
+      (is (= #{:provider :model} (set (keys (providers/wire m [:provider :model]))))))))
 
 (deftest a-value-no-tier-named-stays-absent-on-the-wire
   ;; Absent is a fact -- 'nothing chose this'. null would read as 'chose nothing',
   ;; which is a different thing and a worse one.
-  (let [w (models/wire {:provider :alpha :model "m"})]
+  (let [w (providers/wire {:provider :alpha :model "m"})]
     (is (not (contains? w :reasoning-effort)))
     (is (not (contains? w :input)))))
 
@@ -628,7 +628,7 @@
   ;; HTTP body or a tool result. Naming :api-key in the fields still produces a
   ;; shape without it, so a future call site -- or a helper rendering
   ;; 'everything' -- cannot leak one by accident.
-  (let [w (models/wire {:provider :alpha :model "m" :api-key "SECRET" :protocol :p}
+  (let [w (providers/wire {:provider :alpha :model "m" :api-key "SECRET" :protocol :p}
                        [:provider :model :protocol :api-key])]
     (is (not (contains? w :api-key)))
     (is (not (str/includes? (pr-str w) "SECRET")))

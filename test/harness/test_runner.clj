@@ -25,7 +25,7 @@
     harness.ag-ui-test
     harness.replay-test
     harness.evals-test
-    harness.provider-test
+    harness.providers-test
     harness.project-test
     harness.http-test])
 

@@ -46,7 +46,7 @@
             [harness.home :as home]
             [harness.llm :as llm]
             [harness.memory :as mem]
-            [harness.models :as models]
+            [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.replay :as replay]
@@ -164,12 +164,12 @@
   self-describing, and it is exactly why provider/changed carries its override
   rather than leaving a reader to reconstruct the tier.
 
-  Sets render as sorted string vectors (harness.models/wire): two otherwise
+  Sets render as sorted string vectors (harness.providers/wire): two otherwise
   identical runs must not produce lines differing only in set ordering. The
   api-key is present as the fact that it was STRIPPED, never as a value -- so a
   reader sees it is not a leak rather than wondering whether it was forgotten."
   [provider source]
-  (assoc (models/wire provider) :source source :api-key :stripped))
+  (assoc (providers/wire provider) :source source :api-key :stripped))
 
 (defn- guard-input-modalities!
   "Refuse a run whose messages carry a modality the selected model never declared
@@ -262,11 +262,11 @@
           (doseq [c (mem/take-provider-changes! thread-id)]
             (log! thread-id run-id "provider/changed"
                   {:verdict  (:verdict c :approved)
-                   :before   (models/wire (:before c)   models/knobs)
-                   :after    (models/wire (:after c)    models/knobs)
+                   :before   (providers/wire (:before c)   providers/knobs)
+                   :after    (providers/wire (:after c)    providers/knobs)
                    :trigger  (:trigger c)
-                   :override (models/wire (:override c) models/knobs)
-                   :resolved (models/wire (:resolved c))}))
+                   :override (providers/wire (:override c) providers/knobs)
+                   :resolved (providers/wire (:resolved c))}))
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a
@@ -511,7 +511,7 @@
   configuration rather than a failure it has to interpret."
   [req]
   (let [thread-id (get (query-params (:query-string req)) "threadId")]
-    (api-response 200 (models/wire (mem/active-provider thread-id)))))
+    (api-response 200 (providers/wire (mem/active-provider thread-id)))))
 
 (defn handler [req]
   (cond

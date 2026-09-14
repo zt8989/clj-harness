@@ -105,7 +105,7 @@ Copy-Item .env.example ~/.clj-harness/.env
 2. `:max-output-tokens` **不写进请求体**，实际输出上限仍是厂商默认值；
 3. 读它们的人是**选模型的人**：`GET /api/model`、日志里的 `provider/init` 与 `provider/changed`、`active-provider`。这些数字随 model 走：换 model，答案随之改变。
 
-内置表（`harness.models`）里的主流模型已带真实数字，逐条读自厂商现网列表（`:as-of` 标在表上）；核对不到的一律留空，不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次（`deepseek-chat` 早已作废，现在的 id 是 `deepseek-flash` / `deepseek-v4-pro`）。
+内置表（`harness.providers`）里的主流模型已带真实数字，逐条读自厂商现网列表（`:as-of` 标在表上）；核对不到的一律留空，不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次（`deepseek-chat` 早已作废，现在的 id 是 `deepseek-flash` / `deepseek-v4-pro`）。
 
 `config.edn` 只写**三个旋钮**：
 

@@ -13,8 +13,11 @@
   read, printed, or returned; introspection answers with the selection and the
   resolved endpoint, never the key; and the two override atoms below stay private.
 
-  WHAT ANNOUNCES A MODEL now lives in harness.models: the catalog's shape, its
-  validation, and the assembly of a selection into a provider. This namespace
+  The prompt is no longer here either: harness.llm carries it, with the freezing
+  discipline it belongs to.
+
+  WHAT ANNOUNCES A PROVIDER now lives in harness.providers: the catalog's shape,
+  its validation, and the assembly of a selection into a provider. This namespace
   keeps the one thing that is genuinely a precedence question -- which TIER wins
   -- and the one thing that must never leave it -- the key. Splitting them is
   what let a provider stop being a model: the catalog says which vendor serves
@@ -32,7 +35,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [harness.home :as home]
-            [harness.models :as models]
+            [harness.providers :as providers]
             [harness.project :as project]))
 
 ;; -------------------------------------------------------------------- tools
@@ -345,7 +348,7 @@
   nil. Separate from use-provider! because a session override is PARTIAL --
   naming only what changes -- while a pin is a whole provider.
 
-  OV is canonicalized into a selection on the way in (see models/selection), so a
+  OV is canonicalized into a selection on the way in (see providers/selection), so a
   provider named by a JSON string and one named by an EDN keyword are the SAME
   override. Storing the raw spelling would let one provider be selected twice and
   show up in a timeline as a change that changed nothing.
@@ -363,7 +366,7 @@
   [thread-id ov]
   (if (nil? ov)
     (do (swap! session-overrides dissoc thread-id) nil)
-    (let [sel (models/selection ov)]
+    (let [sel (providers/selection ov)]
       (swap! session-overrides assoc thread-id sel)
       sel)))
 
@@ -411,7 +414,7 @@
 ;; ---------------------------------------------- the selection and its tiers
 ;;
 ;; A provider is no longer described field by field across the tiers. It is
-;; SELECTED: the three knobs in harness.models/knobs (:provider / :model /
+;; SELECTED: the three knobs in harness.providers/knobs (:provider / :model /
 ;; :reasoning-effort) are folded down the tiers, and the selected provider's
 ;; entry in the catalog ASSEMBLES the endpoint and the model's modalities.
 ;;
@@ -428,7 +431,7 @@
   will not use, so a malformed catalog fails on the run that reads it rather than
   intermittently on the run that names it."
   []
-  (models/catalog))
+  (providers/catalog))
 
 (defn- default-selection
   "config.edn, the default tier. Two shapes:
@@ -441,14 +444,14 @@
         which is a statement that this entry declares nothing (nothing then
         guards its input), not an error.
 
-  A config that does neither fails by name in models/assemble, saying which of
+  A config that does neither fails by name in providers/assemble, saying which of
   the two shapes to write."
   [cfg]
   (if (contains? cfg :provider)
-    (models/selection cfg)
-    (let [desc (select-keys cfg models/inline-fields)]
+    (providers/selection cfg)
+    (let [desc (select-keys cfg providers/inline-fields)]
       (when (seq desc)
-        (assoc (models/selection cfg) :provider desc)))))
+        (assoc (providers/selection cfg) :provider desc)))))
 
 (defn- fold-and-assemble
   "A folded SELECTION -> the provider it names, assembled from the catalog. The
@@ -460,7 +463,7 @@
   and only resolve-provider performs the second. Validation has no business
   reading a secret to answer a question about a model id."
   [folded]
-  (models/assemble (providers) folded))
+  (providers/assemble (providers) folded))
 
 (defn resolve-provider
   "The effective provider for THREAD-ID, plus where it came from.
@@ -492,9 +495,9 @@
    (let [base   (default-selection (config))
          ses    (or (override-for thread-id) {})
          run    (or request {})
-         folded (models/fold-selection base ses run)
+         folded (providers/fold-selection base ses run)
          source (cond
-                  (seq (models/selection run)) :request
+                  (seq (providers/selection run)) :request
                   (map? (:provider base))      :inline
                   :else                        :default)]
      {:provider  (assoc (fold-and-assemble folded) :api-key (api-key))
@@ -517,7 +520,7 @@
   no api-key: this answers a question about a configuration, and a secret is not
   part of that answer."
   [ov]
-  (let [folded (models/fold-selection (default-selection (config)) ov)]
+  (let [folded (providers/fold-selection (default-selection (config)) ov)]
     {:selection folded
      :resolved  (fold-and-assemble folded)}))
 
@@ -579,7 +582,7 @@
 
   A nil THREAD-ID answers for the process-wide slot (no session in play), which
   is what an offline tool wants. Sets, not wire strings: this is the in-process
-  answer, and harness.models/wire is what renders it for a log, an HTTP body or
+  answer, and harness.providers/wire is what renders it for a log, an HTTP body or
   a tool result."
   [thread-id]
   (let [p (effective-provider thread-id)]
