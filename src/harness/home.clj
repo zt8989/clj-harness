@@ -38,6 +38,7 @@
 
 (defn config-file    [] (io/file (root) "config.edn"))
 (defn providers-file [] (io/file (root) "providers.edn"))
+(defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 (defn logs-dir       [] (io/file (root) "logs"))
 

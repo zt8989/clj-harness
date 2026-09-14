@@ -56,6 +56,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ~/.clj-harness/
 ├── config.edn        模型默认档（每轮重读，可运行期编辑）
 ├── providers.edn     provider 目录：厂商 endpoint + 其 model 表（每轮重读）
+├── hooks.edn         hook 声明：hook 点 -> [{matcher, command, timeout}]（每轮重读）
 ├── .env              HARNESS_API_KEY
 └── logs/*.jsonl      会话日志
 ```
@@ -76,6 +77,8 @@ Copy-Item providers.edn.example ~/.clj-harness/providers.edn
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
+
+`hooks.edn` 也可以不存在——不存在等于「这个点没人监听」，属于正常态（全新安装就是这样）。但**存在却写坏**（EDN 语法坏 / 不是 map / 点了不存在的 hook 点 / 声明的字段拼错）会指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别，而那个区别正是这个文件的全部意义。
 
 `config.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。`providers.edn` 不同：它**可以不存在**——不命名 provider（用 inline 形式描述一个）就不需要它；而命名了内置目录里已有的 provider 时它也不需要。
 

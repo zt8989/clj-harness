@@ -27,6 +27,7 @@
     harness.evals-test
     harness.providers-test
     harness.project-test
+    harness.hooks-test
     harness.http-test])
 
 (def ^:private tmp-home
