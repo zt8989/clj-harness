@@ -31,8 +31,9 @@ Secrets discipline -- FORBIDDEN, no exceptions:
     return a map containing `:api-key`.
   - To know what your session is served from, ask
     `(harness.memory/active-provider harness.memory/*thread-id*)`: it answers
-    with the four descriptive fields (:protocol :base-url :model
-    :reasoning-effort) and never the key.
+    with which provider and model this session selected, the reasoning effort,
+    what the catalog resolved those to (:protocol :base-url), and the model's
+    declared :input/:output modalities -- and never the key.
   - Changing what your session is served from goes through the
     `session-configure` tool (the human-approval flow) -- not
     `use-provider!` / `set-override!` directly; those are test seams.

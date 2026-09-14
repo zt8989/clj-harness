@@ -16,11 +16,15 @@
                    post-execute), keyed by toolCallId. No wire frame at all.
     \"approval/decided\" -- a human's answer to a parked call, with the interrupt
                    id and whatever payload the client attached.
-    \"provider/init\"   -- once per thread, on its first run: the provider the
-                   session serves from (four fields + source) and the fact that
-                   the api-key was stripped. Never a per-run snapshot.
-    \"provider/changed\" -- a mid-session provider change, before -> after, once
-                   the approving human's decision has been consumed.
+    \"provider/init\"   -- once per thread, on its first run: which provider and
+                   model this session serves from, the source that chose them,
+                   what the catalog resolved that to (endpoint + the model's
+                   input/output modalities), and the fact that the api-key was
+                   stripped. Never a per-run snapshot.
+    \"provider/changed\" -- a mid-session change of the selection, before ->
+                   after, with the session's whole tier afterwards and what it
+                   resolved to, once the approving human's decision has been
+                   consumed.
     \"project/bound\" -- a session's project-directory binding, BEFORE ->
                    AFTER (a first bind's before is null; rebinding moves the
                    root and lands another line, so the directory timeline
@@ -40,6 +44,7 @@
             [harness.event :as ev]
             [harness.home :as home]
             [harness.memory :as mem]
+            [harness.models :as models]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.replay :as replay]
@@ -146,14 +151,23 @@
         resume))
 
 (defn- provider-line
-  "The provider a run is serving from, in the shape the jsonl records: the four
-  descriptive fields, and an explicit statement that the api-key was STRIPPED
-  rather than a value. A field no tier ever named is simply absent -- the
-  resolution is field-by-field, so a missing :reasoning-effort is a fact, not an
-  error."
-  [provider]
-  (merge (select-keys provider [:protocol :base-url :model :reasoning-effort])
-         {:api-key :stripped}))
+  "A provider, in the shape the jsonl records: the SELECTION (which provider,
+  which model, what reasoning effort) and what the catalog RESOLVED it to (the
+  endpoint and the model's modalities), plus the selection's source.
+
+  RESOLVED IS RECORDED, NOT RE-DERIVED. The catalog is a living thing -- a
+  built-in table gains a model, someone moves a base-url -- so a reader
+  re-resolving an old init line months later would read today's answer as if it
+  were that run's. Writing the resolution down is what keeps the log
+  self-describing, and it is exactly why provider/changed carries its override
+  rather than leaving a reader to reconstruct the tier.
+
+  Sets render as sorted string vectors (harness.models/wire): two otherwise
+  identical runs must not produce lines differing only in set ordering. The
+  api-key is present as the fact that it was STRIPPED, never as a value -- so a
+  reader sees it is not a leak rather than wondering whether it was forgotten."
+  [provider source]
+  (assoc (models/wire provider) :source source :api-key :stripped))
 
 (defn- run-agent! [ch input]
   (let [thread-id (str (:threadId input))
@@ -189,7 +203,7 @@
           (when (and (nil? (mem/pinned-provider thread-id))
                      (not (mem/init-logged? thread-id)))
             (log! thread-id run-id "provider/init"
-                  (assoc (provider-line provider) :source (:source resolved)))
+                  (provider-line provider (:source resolved)))
             (mem/mark-init-logged! thread-id))
           ;; The decision record: what the human answered, next to the input that
           ;; carried it. The same verdict also lands on the resumed call's
@@ -202,13 +216,20 @@
           ;; because the change is only written once the human's approval has
           ;; been consumed -- so the two lines read together as "approved, and
           ;; here is what it changed".
+          ;;
+          ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
+          ;; are what the change moved (a session can only move a knob), and
+          ;; :override is the session's whole tier afterwards. The endpoint that
+          ;; resulted is on :resolved, so a reader stepping the timeline sees
+          ;; both "what was chosen" and "what that meant" at each step.
           (doseq [c (mem/take-provider-changes! thread-id)]
             (log! thread-id run-id "provider/changed"
                   {:verdict  (:verdict c :approved)
-                   :before   (select-keys (:before c) [:protocol :base-url :model :reasoning-effort])
-                   :after    (select-keys (:after c)  [:protocol :base-url :model :reasoning-effort])
+                   :before   (models/wire (:before c)   models/knobs)
+                   :after    (models/wire (:after c)    models/knobs)
                    :trigger  (:trigger c)
-                   :override (select-keys (:override c) [:protocol :base-url :model :reasoning-effort])}))
+                   :override (models/wire (:override c) models/knobs)
+                   :resolved (models/wire (:resolved c))}))
           ;; The message record, submitted side: what the first LLM call is about
           ;; to see. The FROZEN system prompt plus every inbound message in the
           ;; provider's shape, one line each, VERBATIM. Context rides as a

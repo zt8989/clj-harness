@@ -122,10 +122,31 @@
   "Poll the thread's log, parsed, until PRED holds over the parsed lines or MS
   elapses. Needed because the returned side of the message record lands one beat
   after the terminal frame -- :run/done reaches the consumer only after the SSE
-  has closed -- so a reader that races the consumer sees a file without it."
+  has closed -- so a reader that races the consumer sees a file without it.
+
+  A TRAILING LINE THAT DOES NOT PARSE IS SKIPPED, NOT AN ERROR. The file is being
+  appended to while this reads it, so its last line may be half-written; that is a
+  fact about reading a live log, not a corrupt log. Only an unparseable line
+  BEFORE the last one is worth failing on, and the strict reader
+  (harness.replay/lines->records) is the one that makes that call -- this helper
+  only polls, so it reports what it could parse and lets the assertions judge."
   [f pred ms]
-  (let [read   (fn [] (mapv #(json/read-str % :key-fn keyword)
-                            (str/split-lines (slurp f :encoding "UTF-8"))))
+  (let [read   (fn []
+                 (let [raw (try (slurp f :encoding "UTF-8") (catch Throwable _ ""))
+                       ls  (str/split-lines raw)
+                       n   (count ls)]
+                   (into []
+                         (keep-indexed
+                          (fn [i line]
+                            (try
+                              (json/read-str line :key-fn keyword)
+                              (catch Throwable t
+                                ;; The LAST line may be half-written: the file is
+                                ;; still growing. Anywhere else it is corruption,
+                                ;; and swallowing that would turn this helper into
+                                ;; a way to make a broken log look readable.
+                                (when (< i (dec n)) (throw t))))))
+                         ls)))
         finish (+ (System/currentTimeMillis) ms)]
     (loop []
       (let [lines (read)]
@@ -207,26 +228,38 @@
   ;; through the real edge -- real server, real request, real file -- because that is
   ;; the only way to catch a disagreement about the log's name or its line format, and
   ;; the two sides live in different namespaces on different sides of dev/src.
+  ;;
+  ;; It WAITS for the run's returned message lines before reading: the write that
+  ;; ends a run lands after the SSE has closed, so reading straight afterwards
+  ;; races the writer and can catch the log mid-line. (It used to do exactly that,
+  ;; and failed intermittently with 'the log is truncated or corrupt' -- which is
+  ;; what a reader racing an append-only file looks like.)
   (with-server
    8095
    "replay-e2e"
    (fn []
-     (io/delete-file (io/file (log-dir) "replay-e2e.jsonl") true)
-     (post-run 8095 "replay-e2e")
-     (let [history (replay/history (log-dir) "replay-e2e")]
-       (testing "the reader found the file the writer wrote, and rebuilt a conversation"
-         (is (= "system" (:role (first history))))
-         (is (some #(= "user" (:role %)) history)))
-       (testing "the reasoning the server emitted is folded back for the model"
-         (is (= reasoning
-                (:reasoning_content
-                 (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
-       (testing "and the tools the server actually ran are in the rebuilt conversation"
-         ;; Match c1 by its own id: README.md also contains ":paths", so content
-         ;; alone could be satisfied by the other call's result.
-         (is (some #(and (= "c1" (:tool_call_id %))
-                         (str/includes? (str (:content %)) ":paths"))
-                   (filter #(= "tool" (:role %)) history))))))))
+     (let [log (io/file (log-dir) "replay-e2e.jsonl")]
+       (io/delete-file log true)
+       (post-run 8095 "replay-e2e")
+       (wait-for-recorded
+        log
+        (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
+                      (>= (count (filter #(= "message" (:kind %)) ls)) 4)))
+        3000)
+       (let [history (replay/history (log-dir) "replay-e2e")]
+         (testing "the reader found the file the writer wrote, and rebuilt a conversation"
+           (is (= "system" (:role (first history))))
+           (is (some #(= "user" (:role %)) history)))
+         (testing "the reasoning the server emitted is folded back for the model"
+           (is (= reasoning
+                  (:reasoning_content
+                   (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history))))))
+         (testing "and the tools the server actually ran are in the rebuilt conversation"
+           ;; Match c1 by its own id: README.md also contains ":paths", so content
+           ;; alone could be satisfied by the other call's result.
+           (is (some #(and (= "c1" (:tool_call_id %))
+                           (str/includes? (str (:content %)) ":paths"))
+                     (filter #(= "tool" (:role %)) history)))))))))
 
 (deftest records-the-tool-lifecycle-as-jsonl
   ;; ApplePi's ADR-0021 audit trio, keyed by toolCallId: every call enters
@@ -370,14 +403,17 @@
 ;; ----------------------------------------------------- the provider timeline
 
 (defn- with-resolved-config
-  "Install a config root that RESOLVES its provider -- a registry plus a default
-  tier, no scripted pin -- and restore the previous one after. The registry's
-  entries use :protocol :fake (and live in the shared test-script atom -- an
-  atom cannot cross EDN), so the RESOLVED provider is a working fake:
-  resolution runs for real while the LLM stays offline.
+  "Install a config root that RESOLVES its provider -- a catalog plus a default
+  tier, no scripted pin -- and restore the previous one after. The catalog's
+  providers use :protocol :fake (and live in the shared test-script atom -- an
+  atom cannot cross EDN), so the RESOLVED provider is a working fake: resolution
+  runs for real while the LLM stays offline.
 
-  Used by the two tests below. A pinned provider skips resolution, and the
-  provider timeline is precisely about resolution, so these must not pin."
+  Two vendors with DIFFERENT endpoints, so a test can see a vendor switch move
+  the endpoint rather than only the model id.
+
+  Used by the tests below. A pinned provider skips resolution, and the provider
+  timeline is precisely about resolution, so these must not pin."
   [turns f]
   (let [cfg-file (io/file (log-dir) ".." "config.edn")
         reg-file (io/file (log-dir) ".." "providers.edn")
@@ -386,10 +422,15 @@
         old-script @fake/test-script]
     (try
       (reset! fake/test-script (vec turns))
-      (spit cfg-file "{:provider :cheap}\n" :encoding "UTF-8")
+      (spit cfg-file "{:provider :alpha}\n" :encoding "UTF-8")
       (spit reg-file
-            (pr-str {:cheap {:protocol :fake :base-url "https://x/v1" :model "small"}
-                     :smart {:protocol :fake :base-url "https://x/v1" :model "big"}})
+            (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
+                             :model "alpha-small"
+                             :models {"alpha-small" {:input #{:text} :output #{:text}}
+                                      "alpha-big"   {:input #{:text} :output #{:text}}}}
+                     :beta  {:protocol :fake :base-url "https://y/v1"
+                             :model "beta-plain"
+                             :models {"beta-plain" {:input #{:text} :output #{:text}}}}})
             :encoding "UTF-8")
       (f)
       (finally
@@ -419,13 +460,19 @@
                (is (= 1 (count (filter #(= "provider/init" %) kinds))))
                (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
                (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
-           (testing "it carries the four fields, the source, and NO api-key value"
+           (testing "it carries the selection, what it resolved to, the source, and NO key value"
              (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
-               (is (= "fake" (:protocol p)))
+               (is (= "alpha" (:provider p)) "the provider that was selected")
+               (is (= "alpha-small" (:model p)) "the model id that was selected")
+               (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
                (is (= "https://x/v1" (:base-url p)))
-               (is (= "small" (:model p)))
+               (is (= ["text"] (:input p)) "the model's modalities, as wire strings")
+               (is (= ["text"] (:output p)))
                (is (= "default" (:source p)))
                (is (= "stripped" (:api-key p)))))
+           ;; The endpoint above is RECORDED, not re-derived: the catalog can
+           ;; change under an old log (a base-url moves, a model is added), so a
+           ;; reader re-resolving would report today's answer as that run's.
            ;; Run two of the same thread: no second init.
            (post-run 8101 id)
            (let [after-second (wait-for-recorded
@@ -437,13 +484,13 @@
          (finally (stop)))))))
 
 (deftest a-session-configure-lands-as-a-changed-line
-  ;; The write half of 04, end to end: the agent changes its reasoning effort,
-  ;; the change is approved, and the jsonl shows a provider/changed line with
-  ;; before -> after. The approval gate is what makes it land only after the
-  ;; human's verdict.
+  ;; The write half, end to end: the agent changes its reasoning effort, the
+  ;; change is approved, and the jsonl shows a provider/changed line with
+  ;; before -> after plus what it resolved to. The approval gate is what makes it
+  ;; land only after the human's verdict.
   ;;
-  ;; A session override holds ONLY the fields the session owns (not the resolved
-  ;; provider's full shape -- that is what the init line is for). So the
+  ;; A session override holds ONLY the knobs the session owns (not the resolved
+  ;; endpoint -- that is what :resolved and the init line are for). So the
   ;; change's before and after show the session's slice, and the chain between
   ;; consecutive changes is exactly the test of "what moved in this session".
   (with-resolved-config
@@ -453,9 +500,8 @@
            stop (http/start! {:port 8102})]
        (try
          (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
-         ;; Seed the session with a baseline the change can stand on. The change
-         ;; line is the session's own slice, not the full provider.
-         (mem/set-override! id {:model "small"})
+         ;; Seed the session with a baseline the change can stand on.
+         (mem/set-override! id {:model "alpha-big"})
          ;; Drive the change the way a run would: park, approve, resume-transit.
          (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
                                         :function {:name "session-configure"
@@ -475,17 +521,22 @@
                changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
            (testing "the change is on disk, before -> after, marked approved"
              (is (= "approved" (:verdict changed)))
-             (is (= "small" (get-in changed [:before :model]))
+             (is (= "alpha-big" (get-in changed [:before :model]))
                  "the session's pre-change slice is the baseline that stood")
-             (is (= "small" (get-in changed [:after :model]))
+             (is (= "alpha-big" (get-in changed [:after :model]))
                  "the model never moved; only the effort did")
              (is (= "high" (get-in changed [:after :reasoning-effort]))
-                 "and the new field is the one the change named")
+                 "and the new knob is the one the change named")
              (is (= "session-configure" (:trigger changed))
                  "the change names the path that pressed it")
-             (is (= {:model "small" :reasoning-effort "high"}
+             (is (= {:model "alpha-big" :reasoning-effort "high"}
                     (select-keys (:override changed) [:model :reasoning-effort]))
-                 "the override is the full session slice after the change"))
+                 "the override is the full session slice after the change")
+             (testing "and it records what that slice resolved to, so a reader
+                       months later is not reading today's catalog"
+               (is (= "https://x/v1" (get-in changed [:resolved :base-url])))
+               (is (= "alpha-big" (get-in changed [:resolved :model])))
+               (is (= ["text"] (get-in changed [:resolved :input])))))
            (testing "consecutive changes chain through the same slice"
              ;; One more approved change: reasoning-effort goes from high to
              ;; low. before on the new line MUST equal after on the previous.
@@ -509,10 +560,49 @@
                (is (= "low" (get-in b [:after :reasoning-effort])))
                (is (every? #(= "session-configure" (:trigger %)) [a b])
                    "every chained change names its trigger")
-               (is (= {:model "small"} (select-keys (:override a) [:model]))
+               (is (= {:model "alpha-big"} (select-keys (:override a) [:model]))
                    "the first change's override is the full session slice")
                (is (= "low" (get-in (:override b) [:reasoning-effort]))
                    "the second change's override reflects the latest session state"))))
+         (finally (stop) (mem/set-override! id nil)))))))
+
+(deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
+  ;; The end-to-end proof of the feature: an agent naming a vendor gets that
+  ;; vendor's ENDPOINT, and the change line says so. Under the old shape this
+  ;; call was accepted, approved, and changed nothing -- the log line even
+  ;; recorded {:before {} :after {}}.
+  (with-resolved-config
+   [{:content "hello"}]
+   (fn []
+     (let [id   "http-vendor"
+           stop (http/start! {:port 8103})]
+       (try
+         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (let [call (fn [] (tools/run! {:id "vsw" :type "function"
+                                        :function {:name "session-configure"
+                                                   :arguments (json/write-str {:provider "beta"})}}
+                                       id))
+               {:keys [parked]} (call)]
+           (mem/decide-approval! (:interrupt-id parked) :approved {})
+           (call))
+         (testing "the session's served endpoint moved with the vendor"
+           (let [a (mem/active-provider id)]
+             (is (= :beta (:provider a)))
+             (is (= "https://y/v1" (:base-url a)))
+             (is (= "beta-plain" (:model a)) "and its default model came along")))
+         (post-run 8103 id)
+         (let [lines (wait-for-recorded
+                      (io/file (log-dir) (str id ".jsonl"))
+                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      2000)
+               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+           (is (= "beta" (get-in changed [:after :provider]))
+               "the change line names the vendor that was selected")
+           (is (not= {} (:after changed))
+               "and is not an empty change -- which is what the old shape wrote")
+           (is (= "https://y/v1" (get-in changed [:resolved :base-url]))
+               "with the endpoint that vendor resolves to")
+           (is (= "beta-plain" (get-in changed [:resolved :model]))))
          (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight

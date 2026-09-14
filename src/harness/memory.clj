@@ -10,8 +10,15 @@
   from eval -- var-quote and resolve reach any var -- so the structural split
   guarded nothing. The boundary it used to mark is now a WRITTEN DISCIPLINE in
   prompt.md instead: the api-key is resolved in this namespace and must never be
-  read, printed, or returned; introspection answers with the four descriptive
-  fields, never the key; and the two override atoms below stay private.
+  read, printed, or returned; introspection answers with the selection and the
+  resolved endpoint, never the key; and the two override atoms below stay private.
+
+  WHAT ANNOUNCES A MODEL now lives in harness.models: the catalog's shape, its
+  validation, and the assembly of a selection into a provider. This namespace
+  keeps the one thing that is genuinely a precedence question -- which TIER wins
+  -- and the one thing that must never leave it -- the key. Splitting them is
+  what let a provider stop being a model: the catalog says which vendor serves
+  which model, the tiers say which of each this run uses.
 
   Where those files ARE is harness.home's business: the config root is
   ~/.clj-harness (relocatable via CLJ_HARNESS_HOME), and prompt.md is the one
@@ -25,6 +32,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [harness.home :as home]
+            [harness.models :as models]
             [harness.project :as project]))
 
 ;; ------------------------------------------------------------------- prompt
@@ -235,8 +243,9 @@
 
 (defonce ^:private provider-changes
   (atom []))
-;; [{:thread-id .. :before <slice> :after <slice>
-;;   :trigger "session-configure" :override <full session override after the change>}]
+;; [{:thread-id .. :before <knob slice> :after <knob slice>
+;;   :trigger "session-configure" :override <session tier afterwards>
+;;   :resolved <what the catalog assembled from that tier>}]
 
 (defn record-provider-change!
   "Note that THREAD-ID's provider moved from BEFORE to AFTER, by an APPROVED
@@ -247,14 +256,21 @@
   the presence of this line (paired with its approval/decided row).
 
   OVERRIDE is the session's OWN tier after the change -- the partial the next
-  resolve-provider would consult as tier 3. :before / :after are slices (only
-  the fields this call moved); :override is the whole tier, so a reader can
-  reconstruct the post-change session from this line alone. Drained, not
-  read: the writer empties this after every run."
-  [thread-id before after trigger override]
+  resolve-provider would consult. :before / :after are slices (only the knobs
+  this call moved); :override is the whole tier, so a reader can reconstruct the
+  post-change session from this line alone.
+
+  RESOLVED is that tier again, assembled -- the endpoint and modalities the
+  session is now served by. Recorded here rather than left to a reader to
+  re-derive, because the catalog moves underneath the log: a built-in table
+  gains a model, a base-url changes, and re-resolving an old line would answer
+  with today's catalog instead of that day's. Drained, not read: the writer
+  empties this after every run."
+  [thread-id before after trigger override resolved]
   (swap! provider-changes conj {:thread-id thread-id
                                 :before before :after after
-                                :trigger trigger :override override}))
+                                :trigger trigger :override override
+                                :resolved resolved}))
 
 (defn take-provider-changes!
   "Every pending provider change recorded for THREAD-ID, in order, clearing them.
@@ -339,21 +355,38 @@
   (get @scripted-pins thread-id))
 
 (defn override-for
-  "THREAD-ID's session configuration override -- a PARTIAL {field value} -- or
-  nil. This is tier 3 of resolve-provider: the session's own change, not a test
-  seam."
+  "THREAD-ID's session configuration override -- a partial SELECTION ({:provider
+  :model :reasoning-effort}) -- or nil. This is the session's own tier of
+  resolve-provider: the session's own change, not a test seam."
   [thread-id]
   (get @session-overrides thread-id))
 
 (defn set-override!
-  "Replace THREAD-ID's session override with OV (a partial {field value} map), or
-  drop it entirely when OV is nil. Separate from use-provider! because a session
-  override is PARTIAL -- naming only what changes -- while a pin is a whole
-  provider."
+  "Replace THREAD-ID's session override with OV, or drop it entirely when OV is
+  nil. Separate from use-provider! because a session override is PARTIAL --
+  naming only what changes -- while a pin is a whole provider.
+
+  OV is canonicalized into a selection on the way in (see models/selection), so a
+  provider named by a JSON string and one named by an EDN keyword are the SAME
+  override. Storing the raw spelling would let one provider be selected twice and
+  show up in a timeline as a change that changed nothing.
+
+  Only the three knobs are kept, and that is the shape, not a lossy filter: a
+  session chooses WHICH provider and model, never an endpoint -- the endpoint is
+  what the catalog answers for the provider it chose. An override naming one
+  therefore has no effect, which is the correct outcome rather than a silent
+  failure: there is nothing for it to mean.
+
+  RETURNS what was stored, canonicalized (nil when cleared). A caller recording
+  the change it just made should record THAT rather than its own copy of the
+  arguments: the stored value is the one the next run will fold, and a caller
+  keeping a parallel version of it is how the log and the session drift apart."
   [thread-id ov]
   (if (nil? ov)
-    (swap! session-overrides dissoc thread-id)
-    (swap! session-overrides assoc thread-id ov)))
+    (do (swap! session-overrides dissoc thread-id) nil)
+    (let [sel (models/selection ov)]
+      (swap! session-overrides assoc thread-id sel)
+      sel)))
 
 (defn- parse-dotenv
   "A .env file's contents -> a {name value} map. Handles the shapes the format
@@ -396,102 +429,123 @@
                                          "HARNESS_API_KEY"))]
     (or from-file (System/getenv "HARNESS_API_KEY"))))
 
-(def ^:private fields
-  "The four fields a provider is described by. Nothing else is inherited, so a
-  partial provider can never silently pick up a stray key from another level."
-  [:protocol :base-url :model :reasoning-effort])
+;; ---------------------------------------------- the selection and its tiers
+;;
+;; A provider is no longer described field by field across the tiers. It is
+;; SELECTED: the three knobs in harness.models/knobs (:provider / :model /
+;; :reasoning-effort) are folded down the tiers, and the selected provider's
+;; entry in the catalog ASSEMBLES the endpoint and the model's modalities.
+;;
+;; That is the whole reason the old four-field merge went away. Under a
+;; field-by-field merge, "which vendor" was expressed by moving :protocol and
+;; :base-url, so a tier could name :provider and have it silently dropped -- the
+;; name was not a field, so nothing carried it. A knob that is folded and then
+;; resolved cannot be dropped without a loud failure: an unknown provider name
+;; and an undeclared model id both stop the run by name.
 
 (defn providers
-  "providers.edn -> {name provider-map}. Re-read every time, like config.edn.
-
-  A MISSING file is an EMPTY registry, not an error: a config.edn that describes
-  its provider inline (the escape hatch) needs no registry at all. The named
-  failure belongs where a name is actually used -- see named."
+  "The catalog this process resolves against, validated. Re-read every time, like
+  config.edn -- and validated in full on every read, including entries this run
+  will not use, so a malformed catalog fails on the run that reads it rather than
+  intermittently on the run that names it."
   []
-  (let [f (home/providers-file)]
-    (if (.exists f)
-      (edn/read-string (slurp f :encoding "UTF-8"))
-      {})))
+  (models/catalog))
 
-(defn- named
-  "Look NAME up in the registry. A name that is not there is a hard, NAMED
-  failure: falling back to nil would serve the run from nowhere and report the
-  problem as a confusing downstream error instead of 'no such provider'."
-  [registry name]
-  (or (get registry name)
-      (throw (ex-info (str "no provider named " (pr-str name) " in providers.edn"
-                           "; it defines " (pr-str (vec (sort (keys registry)))))
-                      {:name name :known (vec (sort (keys registry)))}))))
+(defn- default-selection
+  "config.edn, the default tier. Two shapes:
 
-(defn- default-base
-  "config.edn, the default tier. Three shapes are accepted, in this order:
+    {:provider :openrouter :model \"…\" :reasoning-effort \"high\"}
+        name a provider; the other two knobs are optional
+    {:protocol … :base-url … :model … :input #{…} :output #{…}}
+        DESCRIBE a provider instead of naming one -- the escape hatch, for trying
+        one endpoint without registering it. Modalities may be omitted here,
+        which is a statement that this entry declares nothing (nothing then
+        guards its input), not an error.
 
-    {:provider :cheap}       a registry name; looked up in providers.edn
-    {:provider {..provider}} an inline map -- the escape hatch (try one endpoint
-                             once without registering it)
-    {:protocol .. :model ..} a FLAT provider, every field at the top level
+  A config that does neither fails by name in models/assemble, saying which of
+  the two shapes to write."
+  [cfg]
+  (if (contains? cfg :provider)
+    (models/selection cfg)
+    (let [desc (select-keys cfg models/inline-fields)]
+      (when (seq desc)
+        (assoc (models/selection cfg) :provider desc)))))
 
-  The flat form is last and needs no registry at all: a config that describes
-  its provider directly is complete on its own, and is what a lone-provider
-  deployment naturally writes. Only when :provider is present and names a
-  missing entry does resolution fail -- and it fails NAMING the entry."
-  [registry cfg]
-  (let [base (cond
-               (map? (:provider cfg))  (:provider cfg)
-               (some? (:provider cfg)) (named registry (:provider cfg))
-               :else                   (select-keys cfg fields))]
-    ;; Whatever the shape, the default tier may ALSO override individual fields
-    ;; at the top level. That is why config.edn stays a tier instead of
-    ;; collapsing into the registry: you can tune one knob (usually
-    ;; :reasoning-effort) without minting a new registry entry.
-    (merge base (select-keys cfg fields))))
+(defn- fold-and-assemble
+  "A folded SELECTION -> the provider it names, assembled from the catalog. The
+  one place a selection becomes a provider, so every path that resolves -- a run,
+  an offline tool, a session's own pending change -- agrees on what a selection
+  means and on which failures it can raise.
 
-(defn- overlay
-  "Apply a partial override: only the fields actually present win. A field left
-  out falls back to the tier below, which is what lets the three knobs move
-  independently."
-  [base over]
-  (merge base (select-keys over fields)))
+  Deliberately WITHOUT the api-key: resolution and key-attachment are two steps,
+  and only resolve-provider performs the second. Validation has no business
+  reading a secret to answer a question about a model id."
+  [folded]
+  (models/assemble (providers) folded))
 
 (defn resolve-provider
   "The effective provider for THREAD-ID, plus where it came from.
 
-  Four tiers, each overriding the one before it FIELD BY FIELD (a tier that
-  names no value for a field leaves the one below it standing):
+  Three tiers, each overriding the one before it KNOB BY KNOB:
 
-    1. the named entry in providers.edn          (or an inline map in config.edn)
-    2. config.edn's default-tier field overrides  (:model / :reasoning-effort)
-    3. this session's override                    (the session-configure tool)
-    4. this run's request                         (REQUEST, from the input map)
+    1. config.edn's default tier       (or a provider described inline)
+    2. this session's override         (the session-configure tool)
+    3. this run's request              (REQUEST, from the input map)
 
-  Returns {:provider {.. :api-key ..} :source :default|:request|:inline}, where
-  the api-key is attached LAST and only here. The source is :inline when
-  config.edn describes its provider directly (an inline map or a flat set of
-  fields) rather than naming a registry entry -- the two are worth telling
-  apart in the audit trail. A THREAD-ID of nil resolves tiers 1-2 with no
-  session in play, which is what an offline tool wants.
+  The fold produces a SELECTION, and the catalog assembles it: the selected
+  provider supplies :protocol / :base-url and the model's :input / :output,
+  and a model id no tier named resolves to the provider's default. Because the
+  endpoint follows the provider, a tier that names only :provider really does
+  switch vendors -- under the old field-by-field merge it silently did not.
+
+  Returns {:provider {.. :api-key ..} :selection {..} :source :default|:inline|:request},
+  where the api-key is attached LAST and only here. :source names where the
+  resolution STARTED -- config's default tier, a provider config described
+  inline, or this run's request -- not which tier last moved a knob; a session's
+  own changes are the provider/changed timeline's business, not this field's. A
+  THREAD-ID of nil resolves the default tier with no session in play, which is
+  what an offline tool wants.
 
   REQUEST must not be routed through the prompt context -- it would become a
   trailing user message and poison the provider's prefix cache."
   ([thread-id] (resolve-provider thread-id nil))
   ([thread-id request]
-   (let [registry (providers)
-         cfg      (config)
-         inline?  (not (keyword? (:provider cfg)))
-         base     (default-base registry cfg)
-         with-ses (overlay base (or (override-for thread-id) {}))
-         with-run (overlay with-ses (or (select-keys request fields) {}))
-         source   (cond
-                    (seq (select-keys request fields)) :request
-                    inline?                            :inline
-                    :else                              :default)]
-     {:provider (assoc with-run :api-key (api-key))
-      :source   source})))
+   (let [base   (default-selection (config))
+         ses    (or (override-for thread-id) {})
+         run    (or request {})
+         folded (models/fold-selection base ses run)
+         source (cond
+                  (seq (models/selection run)) :request
+                  (map? (:provider base))      :inline
+                  :else                        :default)]
+     {:provider  (assoc (fold-and-assemble folded) :api-key (api-key))
+      :selection folded
+      :source    source})))
+
+(defn resolve-override
+  "What THREAD-ID's session would be served by if its own tier WERE OV -- the
+  question session-configure asks before it writes anything.
+
+  A change that cannot be served is not a change: a provider name that is not in
+  the catalog, or a model id the selected provider does not declare, has to fail
+  at the moment it is proposed. Writing it first and failing later would leave
+  the override holding a configuration every subsequent run fails on -- and the
+  failure would surface on the NEXT run, nowhere near the call that caused it.
+
+  OV is the session's whole tier afterwards (not just the knobs this call moved),
+  because that is what the next run will fold. Returns
+  {:selection <the tier as folded> :resolved <what the catalog assembled>}, with
+  no api-key: this answers a question about a configuration, and a secret is not
+  part of that answer."
+  [ov]
+  (let [folded (models/fold-selection (default-selection (config)) ov)]
+    {:selection folded
+     :resolved  (fold-and-assemble folded)}))
 
 (defn effective-provider
-  "The provider for THREAD-ID, without a run request: tiers 1-3 plus the
-  ENV-sourced api-key. Offline tools and replay use this -- they run outside a
-  run, so there is no request to layer on top."
+  "The provider for THREAD-ID, without a run request: the default and session
+  tiers plus the ENV-sourced api-key. Offline tools and replay use this -- they
+  run outside a run, so there is no request to layer on top."
   ([] (effective-provider nil))
   ([thread-id] (:provider (resolve-provider thread-id))))
 
@@ -525,19 +579,30 @@
   (str (home/log-file thread-id)))
 
 (defn active-provider
-  "What THREAD-ID's session is serving from right now:
-  {:protocol .. :base-url .. :model .. :reasoning-effort ..}.
+  "What THREAD-ID's session is serving from right now -- the SELECTION and what
+  it resolved to:
 
-  Resolved live through the four-tier resolution above -- the session
-  override included -- but NEVER the api-key: that is copied out, field by
-  field, so a future change to the resolver cannot leak one through here.
+    {:provider :openrouter :model \"anthropic/claude-sonnet-4.5\"
+     :reasoning-effort \"high\" :protocol :openai-completions
+     :base-url \"https://openrouter.ai/api/v1\" :input #{:text :image} :output #{:text}}
+
+  The three knobs are what was CHOSEN; the rest is what the catalog answered.
+  Both are worth reporting: :model is the id, and a reader asking 'what is this
+  session on' wants the name, not just the endpoint it happens to reach.
+
+  Resolved live through the tiers above -- the session override included -- but
+  NEVER the api-key: the fields are named one by one rather than the map being
+  passed through, so a future change to the resolver cannot leak a key through
+  here.
 
   A nil THREAD-ID answers for the process-wide slot (no session in play), which
-  is what an offline tool wants. The three knobs are independently movable, so
-  any of them may be absent if no tier ever named it."
+  is what an offline tool wants. Sets, not wire strings: this is the in-process
+  answer, and harness.models/wire is what renders it for a log, an HTTP body or
+  a tool result."
   [thread-id]
   (let [p (effective-provider thread-id)]
-    (select-keys p [:protocol :base-url :model :reasoning-effort])))
+    (select-keys p [:provider :model :reasoning-effort
+                    :protocol :base-url :input :output])))
 
 (defn active-project
   "The project directory THREAD-ID's session is bound to, as an absolute path

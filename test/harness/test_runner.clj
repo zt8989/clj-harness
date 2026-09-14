@@ -32,14 +32,21 @@
 (def ^:private tmp-home
   (atom nil))
 
-(defn- seed!
+(def ^:private seed-config
   "A minimal config.edn, so a run that resolves a provider from config -- rather
-  than from the scripted override -- has something to resolve. This is a provider
-  that never gets used: every integration test installs a scripted one."
+  than from the scripted override -- has something to resolve. The inline form,
+  so it needs no providers.edn: :protocol :fake is the offline provider, and the
+  endpoint is a URL that is never contacted.
+
+  It declares NO modalities, which is deliberate -- an inline provider that says
+  nothing about what it accepts is not guarded (see harness.ag-ui/undeclared-
+  input?), and a seeded config must not make every text-only integration test
+  fail for a reason the test never stated."
+  "{:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}\n")
+
+(defn- seed!
   [dir]
-  (spit (io/file dir "config.edn")
-        "{:protocol :fake}\n"
-        :encoding "UTF-8"))
+  (spit (io/file dir "config.edn") seed-config :encoding "UTF-8"))
 
 (defn isolate!
   "Point the config root at a fresh temp directory for this process. Returns the

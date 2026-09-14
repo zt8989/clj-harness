@@ -98,6 +98,13 @@
   is independent: pass only what you mean to change, and the rest keep the value
   the tier below gave them.
 
+  A model id means 'this provider serves it' -- a new :provider with no :model
+  moves to that vendor's default model, and a :model the provider does not
+  declare fails HERE, by name, before anything is written. That check is done by
+  resolving the change before committing it: a change that cannot be served is
+  not a change, and letting it land would leave the session's override holding a
+  configuration every later run then fails on.
+
   Marks :requires-approval, so the call parks and a human decides before any of
   it takes effect -- the body only runs on an approved resume, and a veto means
   it never runs at all. The gate is a WORKFLOW convention, not a security
@@ -111,19 +118,18 @@
                     (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
     (when (empty? change)
       (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    ;; :provider names a registry entry (a keyword) or is an inline map (the
-    ;; escape hatch). The resolution validates a name against providers.edn, so a typo
-    ;; fails here, loudly, naming what it looked for.
     (let [before (mem/override-for thread-id)
-          after  (merge before change)]
-      (mem/set-override! thread-id after)
-      ;; Tell the writer what moved. The edge drains this and lands a
-      ;; provider/changed line after the approval/decided line for this call.
-      ;; :trigger names the path that pressed the change (currently always
-      ;; session-configure); :override is the FULL session override after this
-      ;; change, so a reader can reconstruct post-change session state without
-      ;; re-deriving it live.
-      (mem/record-provider-change! thread-id before after "session-configure" after)
+          ;; Resolve BEFORE writing: this proves the change can actually be
+          ;; served and hands the writer the resolved shape, so the log records
+          ;; what the session became rather than what it was asked to become.
+          resolved (mem/resolve-override (merge before change))
+          ;; set-override! answers with what it stored, and THAT is what the
+          ;; change line records -- not `change` plus `before` merged here a
+          ;; second time. The stored value is the one the next run folds; a
+          ;; parallel copy is how a log and a session drift apart.
+          after (mem/set-override! thread-id (merge before change))]
+      (mem/record-provider-change! thread-id before after "session-configure"
+                                   after (:resolved resolved))
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."
            (when (nil? thread-id)
