@@ -41,14 +41,15 @@
 
 (defn- declaration-for
   "The declarations of POINT in force for THREAD-ID that this trigger should run:
-  the point's assembled declarations whose :matcher selects FACT's subject.
+  the point's declarations -- on-disk and session-added, in written order, with
+  the disabled ones already left out -- whose :matcher selects FACT's subject.
 
   Only declarations WITH a matcher can fail to match, and only a point that
   names a match target can have matchers at all -- validation sees to that."
   [thread-id point-kw fact]
   (let [point (hooks/point-for point-kw)
         subject (get fact (:matches point))]
-    (filterv #(matches? % subject) (get (hooks/effective-hooks thread-id) point-kw))))
+    (filterv #(matches? % subject) (hooks/declarations-at thread-id point-kw))))
 
 (defn- verdict-of
   "One declaration's run -> {:outcome :allow|:block|:error :reason ..}.

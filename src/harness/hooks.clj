@@ -28,11 +28,14 @@
   declarations are in force for a thread. It does NOT run anything: spawning,
   exit codes, timeouts and the audit line are `harness.hooks.dispatch`'s, and the
   session-level overlay that lets a running session add or switch off its own
-  declarations is a later layer on top of `effective-hooks`.
+  declarations is the session overlay below.
 
-  Nothing here is a truth source beyond what is on disk: every read re-reads the
-  files (the config.edn discipline), so editing hooks.edn takes effect on the
-  next trigger, not the next restart."
+  TWO LAYERS, ONE READ. `config` answers what the FILES say and re-reads them
+  every call (the config.edn discipline), so editing hooks.edn takes effect on the
+  next trigger, not the next restart. `effective-hooks` folds the session's own
+  layer over that, which is what a running session may add to, remove from, and
+  switch off -- per-thread, in-process, gone on restart. Dispatch reads the
+  folded one and nothing else."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -229,12 +232,124 @@
                        [k (vec (map-indexed #(check-declaration k point %1 %2) decls))])))
               raw)))))
 
+;; ------------------------------------------------- session hooks (the eval face)
+;;
+;; A running session may grow hooks of its own, and switch any declaration off --
+;; the ones it added AND the ones declared on disk. That is what `eval` is FOR
+;; now: not a way to read the harness, but a way to give this session behaviour
+;; it did not start with.
+;;
+;; TWO ORTHOGONAL AXES, the same pair the tool table uses (harness.tools):
+;;
+;;   presence      session-add! / session-remove! -- definitions this session
+;;                 contributed. Removal undoes an add and NOTHING else: a
+;;                 disk-declared hook cannot be removed, only switched off.
+;;   availability  session-disable! / session-enable! -- switched off in this
+;;                 session. The declaration STAYS in the table (so the session can
+;;                 read it, and switch it back on) and simply never fires.
+;;
+;; WHY DISABLE RATHER THAN REMOVE for disk declarations: hiding a hook would make
+;; "there is no such hook" and "this hook is off" the same observation, and the
+;; first is a lie -- the declaration is right there in a file. Off is honest.
+;;
+;; EVERYTHING HERE IS PER-THREAD AND PROCESS-LOCAL. Another session is untouched;
+;; a restart forgets all of it, and the files on disk are what come back. Nothing
+;; is written: a session's hooks are not a truth source, they are this run's
+;; behaviour.
+
+(defonce ^:private overlays
+  (atom {}))
+;; thread-id -> {:added {id declaration} :disabled #{id}}
+
+(defonce ^:private counters
+  (atom {}))
+;; thread-id -> how many hooks this session has added, so an id is short and
+;; legible in a table (pre-tool-use@2) rather than a UUID the reader has to match
+;; by eye. Per-thread for the same reason everything else is.
+
+(declare effective-hooks)
+
+(defn- disabled? [thread-id id]
+  (contains? (get-in @overlays [thread-id :disabled] #{}) id))
+
+(defn- declaration-id
+  "The id an on-disk declaration answers to: its point and its position, e.g.
+  `pre-tool-use#0`. Positional because that is what a file HAS -- there is no
+  name in a declaration -- and it is stable as long as the file is, which is the
+  same guarantee the file gives."
+  [point-kw idx]
+  (str (name point-kw) "#" idx))
+
+(defn session-add!
+  "Add DECL to POINT in THREAD-ID's session only, and return the id it answers
+  to. DECL is validated exactly as a hooks.edn declaration is -- a session hook
+  that cannot run is refused where it was written, not skipped at trigger time --
+  and a point that does not exist is refused by name.
+
+  Session declarations are APPENDED to whatever the files declared: a hook a
+  session grows cannot silently replace the user's, and the id prefix (@ versus
+  #) makes the two readable apart in one table.
+
+  An id is per session and stays put, so a declaration added at the start of a
+  session can be switched off later by the same id."
+  [thread-id point-kw decl]
+  (let [point (point-for point-kw)]
+    (when-not point
+      (fail (str (pr-str point-kw) " is not a hook point; the points are "
+                 (pr-str point-keys))
+            {:point point-kw :reason :unknown-point}))
+    (check-declaration point-kw point 0 decl)
+    (let [n  (get (swap! counters update thread-id (fnil inc 0)) thread-id)
+          id (str (name point-kw) "@" n)]
+      (swap! overlays assoc-in [thread-id :added id] (assoc decl :point point-kw))
+      id)))
+
+(defn session-remove!
+  "Retract the session hook ID from THREAD-ID -- the presence half only, and only
+  for a hook THIS session added. An id naming an on-disk declaration is a no-op:
+  a disk hook cannot be removed, only switched off (session-disable!).
+
+  Removing also drops the id's disabled mark, so a re-added hook does not inherit
+  a stale off state."
+  [thread-id id]
+  (swap! overlays
+         (fn [ov]
+           (if (contains? (get-in ov [thread-id :added]) id)
+             (-> ov
+                 (update-in [thread-id :added] dissoc id)
+                 (update-in [thread-id :disabled] (fnil disj #{}) id))
+             ov))))
+
+(defn session-disable!
+  "Switch ID off for THREAD-ID's session only. The declaration stays in the
+  table and simply never fires -- no spawn, no audit line, no hold on the run.
+
+  The id may name a session hook or an on-disk one; a hook this session cannot
+  see is a no-op, because switching something off must never invent it.
+
+  This is a POLICY switch, like the tool table's: it stops a hook from running,
+  which is not the same as forbidding the behaviour a hook was there to allow."
+  [thread-id id]
+  (when (some? (get (effective-hooks thread-id) id))
+    (swap! overlays update-in [thread-id :disabled] (fnil conj #{}) id)))
+
+(defn session-enable!
+  "Undo session-disable! for ID in THREAD-ID. An id that was never disabled is a
+  no-op."
+  [thread-id id]
+  (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) id))
+
+(defn session-hook-disabled?
+  "Is ID switched off in THREAD-ID's session?"
+  [thread-id id]
+  (disabled? thread-id id))
+
 ;; ------------------------------------------------------------------ the read
 
 (defn config
-  "The hook configuration for THREAD-ID, merged from two levels: the
-  configuration home's hooks.edn (the USER level), overlaid by the bound
-  project's .harness/hooks.edn (the PROJECT level).
+  "The hook configuration for THREAD-ID, ON DISK: the configuration home's
+  hooks.edn (the USER level) overlaid by the bound project's .harness/hooks.edn
+  (the PROJECT level).
 
   A SHALLOW merge of top-level keys, project wins -- naming :pre-tool-use in a
   project REPLACES the user's :pre-tool-use declarations rather than appending
@@ -243,7 +358,10 @@
   two files nest.
 
   An unbound session sees the user level alone. Every call re-reads both files
-  (the config.edn discipline), so an edit takes effect at the next trigger."
+  (the config.edn discipline), so an edit takes effect at the next trigger.
+
+  This is the FILE half only; anything that wants to know what will actually run
+  wants `effective-hooks` below, which folds the session's own overlay in."
   ([] (config nil))
   ([thread-id]
    (merge (read-hooks-edn (home/hooks-file))
@@ -251,16 +369,57 @@
             (read-hooks-edn (io/file dir ".harness" "hooks.edn"))))))
 
 (defn effective-hooks
-  "Point key -> the declarations in force for THREAD-ID, on-disk only: the
-  two-level assembly above, for every point, including the ones with no
-  declarations (an empty vector is a fact worth being able to read: 'this point
-  is wired and nothing is listening').
+  "ID -> the declaration in force for THREAD-ID, over the WHOLE table: every
+  point, with the on-disk declarations and the session's own folded together.
 
-  THIS IS THE SEAM the rest of the engine reads. Dispatch calls it to ask what to
-  run; the session-level overlay that lets a running session add or switch off
-  its own declarations overlays THIS function's answer rather than reaching into
-  the files, so on-disk configuration stays one thing and the per-session
-  additions stay another."
+    {\"stop#0\"        {:point :stop :command \"notify.sh\" :source :config}
+     \"pre-tool-use@1\" {:point :pre-tool-use :command \"gate.sh\" :source :session}
+     ...}
+
+  Every declaration carries :id (what a disable names), :point (which trigger
+  runs it) and :source (:config or :session) -- enough for a session to read its
+  own table and act on it, which is the whole point of exposing it.
+
+  A DISABLED declaration is still in here, with :disabled? true. Availability is
+  a separate question from presence, exactly as in the tool table: the caller
+  that decides whether to run something asks `runnable`, not this.
+
+  THIS IS THE SEAM the engine reads -- dispatch asks here, not of the files -- so
+  a session's edit reaches its next trigger without anything being persisted."
   [thread-id]
-  (let [cfg (config thread-id)]
-    (into {} (map (fn [k] [k (vec (get cfg k))])) point-keys)))
+  (into {}
+        (concat
+         (for [[point-kw decls] (config thread-id)
+               [idx decl] (map-indexed vector decls)
+               :let [id (declaration-id point-kw idx)]]
+           [id (assoc decl :id id :point point-kw :source :config
+                      :disabled? (disabled? thread-id id))])
+         (for [[id decl] (get-in @overlays [thread-id :added])]
+           [id (assoc decl :id id :source :session
+                      :disabled? (disabled? thread-id id))]))))
+
+(defn- declaration-order
+  "The order two declarations of one point were written in: the file's first,
+  in the file's own order, then what the session added. Derived from the id,
+  because a map has no order worth relying on -- and the order is load-bearing:
+  the first block wins, so the reader of a model's refusal can trace it to a
+  specific line."
+  [d]
+  (let [[_ sep n] (re-matches #".*?([#@])(\d+)$" (:id d))]
+    [(if (= "#" sep) 0 1) (Long/parseLong n)]))
+
+(defn declarations-at
+  "The declarations of POINT in force for THREAD-ID that this trigger should
+  consider: session hooks and on-disk ones together, in the order they were
+  written (the file's, then the session's).
+
+  Disabled ones are LEFT OUT here rather than filtered by the caller: a switched
+  off hook is one that does not fire, and that is a fact about the table, not a
+  decision dispatch should have to remember to make. Read `effective-hooks` to
+  see them."
+  [thread-id point-kw]
+  (->> (vals (effective-hooks thread-id))
+       (filter #(and (= point-kw (:point %)) (not (:disabled? %))))
+       (sort-by declaration-order)
+       vec))
+

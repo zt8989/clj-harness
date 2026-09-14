@@ -6,12 +6,15 @@
   business and has its own ticket. What this namespace pins is the DATA the engine
   dispatches over: which points exist, what they may be declared with, and which
   declarations are in force for a thread."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.home :as home]
             [harness.hooks :as hooks]
-            [harness.project :as project]))
+            [harness.hooks.dispatch :as dispatch]
+            [harness.project :as project]
+            [harness.tools :as tools]))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-test"))
 
@@ -79,22 +82,29 @@
 ;; ---------------------------------------------------------- the two-level read
 
 (deftest a-missing-hooks-edn-is-the-empty-configuration
-  (testing "a fresh install has no hooks, and every point is wired with nothing listening"
-    (let [e (hooks/effective-hooks nil)]
-      (is (= 26 (count e)))
-      (is (every? empty? (vals e)))))
-  (testing "the empty case is the same for a bound thread with no files"
+  (testing "a fresh install has no hooks at all"
+    (is (empty? (hooks/effective-hooks nil)))
+    (is (empty? (hooks/declarations-at nil :stop))))
+  (testing "and the same for a bound thread with no files"
     (project/bind! "h-none" root)
-    (try (is (every? empty? (vals (hooks/effective-hooks "h-none"))))
+    (try (is (empty? (hooks/effective-hooks "h-none")))
          (finally (project/bind! "h-none" nil)))))
 
-(deftest a-declaration-loads-and-reports-itself
+(deftest a-declaration-loads-with-an-id-a-session-can-name
   (user-hooks (pr-str {:stop [{:command "notify.sh" :timeout 2000}]}))
-  (let [e (hooks/effective-hooks nil)]
-    (is (= [{:command "notify.sh" :timeout 2000}] (:stop e)))
-    (testing "every other point is still present and empty"
-      (is (= 26 (count e)))
-      (is (empty? (:pre-tool-use e))))))
+  (let [e (hooks/effective-hooks nil)
+        d (first (vals e))]
+    (testing "it reports the fields it was declared with, plus what it answers to"
+      (is (= "notify.sh" (:command d)))
+      (is (= 2000 (:timeout d)))
+      (is (= :stop (:point d)))
+      (is (= :config (:source d)) "it came from a file, not from this session")
+      (is (false? (:disabled? d)) "and it is on")
+      (is (= "stop#0" (:id d)) "the id is its point and its position in the file"))
+    (testing "and declarations-at is the runnable view: the same row"
+      (is (= [{:command "notify.sh" :timeout 2000
+               :point :stop :source :config :disabled? false :id "stop#0"}]
+             (hooks/declarations-at nil :stop))))))
 
 (deftest the-project-level-wins-whole-key-by-whole-key
   (user-hooks (pr-str {:stop [{:command "user.sh"}]
@@ -102,14 +112,12 @@
   (project-hooks (pr-str {:stop [{:command "project.sh"}]}))
   (project/bind! "h-two" root)
   (try
-    (let [e (hooks/effective-hooks "h-two")]
-      (testing "the project's :stop REPLACES the user's -- it does not append"
-        (is (= [{:command "project.sh"}] (:stop e))))
-      (testing "a key the project says nothing about keeps the user's"
-        (is (= [{:command "user-start.sh"}] (:session-start e)))))
+    (testing "the project's :stop REPLACES the user's -- it does not append"
+      (is (= ["project.sh"] (map :command (hooks/declarations-at "h-two" :stop)))))
+    (testing "a key the project says nothing about keeps the user's"
+      (is (= ["user-start.sh"] (map :command (hooks/declarations-at "h-two" :session-start)))))
     (testing "and an unbound thread sees the user level alone"
-      (let [e (hooks/effective-hooks "h-unbound")]
-        (is (= [{:command "user.sh"}] (:stop e)))))
+      (is (= ["user.sh"] (map :command (hooks/declarations-at "h-unbound" :stop)))))
     (finally (project/bind! "h-two" nil))))
 
 (deftest a-broken-file-fails-by-name-with-its-absolute-path
@@ -161,7 +169,7 @@
   (testing "a tool point takes one, and it must compile as a regex"
     (user-hooks (pr-str {:pre-tool-use [{:command "gate.sh" :matcher "bash|write"}]}))
     (is (= [{:command "gate.sh" :matcher "bash|write"}]
-           (:pre-tool-use (hooks/effective-hooks nil)))))
+           (map #(select-keys % [:command :matcher]) (hooks/declarations-at nil :pre-tool-use)))))
   (testing "a broken regex fails at LOAD, not at trigger time"
     (user-hooks (pr-str {:pre-tool-use [{:command "gate.sh" :matcher "bash|("}]}))
     (is (thrown-with-msg? Exception #"not a valid regex"
@@ -176,3 +184,157 @@
     (user-hooks (pr-str {:pre-tool-use [{:command "gate.sh" :matcher ""}]}))
     (is (thrown-with-msg? Exception #":matcher must be a non-empty string"
                           (hooks/effective-hooks nil)))))
+
+;; ------------------------------------------- session hooks (eval's new face)
+
+(deftest a-session-grows-a-hook-and-it-answers-to-an-id
+  (testing "the add returns the id, and the table shows it as the session's own"
+    (let [id (hooks/session-add! "hs-add" :stop {:command "notify.sh"})]
+      (is (= "stop@1" id))
+      (let [d (get (hooks/effective-hooks "hs-add") id)]
+        (is (= :session (:source d)))
+        (is (= :stop (:point d)))
+        (is (false? (:disabled? d))))))
+  (testing "a second add at the same point is a second declaration, not a replacement"
+    (let [id1 (hooks/session-add! "hs-two" :stop {:command "a.sh"})
+          id2 (hooks/session-add! "hs-two" :stop {:command "b.sh"})]
+      (is (not= id1 id2))
+      (is (= ["a.sh" "b.sh"] (map :command (hooks/declarations-at "hs-two" :stop))))))
+  (testing "session hooks append AFTER the file's, so a file's gate still decides first"
+    (user-hooks (pr-str {:stop [{:command "from-file.sh"}]}))
+    (hooks/session-add! "hs-order" :stop {:command "from-session.sh"})
+    (is (= ["from-file.sh" "from-session.sh"]
+           (map :command (hooks/declarations-at "hs-order" :stop))))))
+
+(deftest a-session-hook-is-validated-like-a-file-declaration
+  (testing "a point that does not exist is refused by name"
+    (let [e (try (hooks/session-add! "hs-bad" :not-a-point {:command "x.sh"})
+                 nil (catch Exception e e))]
+      (is (str/includes? (ex-message e) ":not-a-point"))
+      (is (str/includes? (ex-message e) ":pre-tool-use"))))
+  (testing "a declaration that could not run is refused where it was written"
+    (is (thrown-with-msg? Exception #"non-empty string :command"
+                          (hooks/session-add! "hs-bad" :stop {:command ""})))
+    (is (thrown-with-msg? Exception #":timeout must be a positive whole number"
+                          (hooks/session-add! "hs-bad" :stop {:command "x.sh" :timeout 0})))
+    (is (thrown-with-msg? Exception #"unknown key"
+                          (hooks/session-add! "hs-bad" :stop {:command "x.sh" :commnd "y"})))))
+
+(deftest removing-is-for-what-this-session-added-and-nothing-else
+  (testing "removing a session hook takes it out of the table"
+    (let [id (hooks/session-add! "hs-rm" :stop {:command "x.sh"})]
+      (is (some? (get (hooks/effective-hooks "hs-rm") id)))
+      (hooks/session-remove! "hs-rm" id)
+      (is (nil? (get (hooks/effective-hooks "hs-rm") id)))
+      (is (empty? (hooks/declarations-at "hs-rm" :stop)))))
+  (testing "removing an on-disk declaration is a no-op: it can only be switched off"
+    (user-hooks (pr-str {:stop [{:command "from-file.sh"}]}))
+    (hooks/session-remove! "hs-rm2" "stop#0")
+    (is (= ["from-file.sh"] (map :command (hooks/declarations-at "hs-rm2" :stop)))))
+  (testing "removing an id that was never added is a no-op"
+    (hooks/session-remove! "hs-rm3" "stop@99")
+    (is (nil? (get (hooks/effective-hooks "hs-rm3") "stop@99")))))
+
+(deftest disabling-switches-a-hook-off-without-hiding-it
+  (user-hooks (pr-str {:stop [{:command "from-file.sh"}]}))
+  (testing "an on-disk declaration can be switched off, and STAYS readable"
+    (hooks/session-disable! "hs-off" "stop#0")
+    (testing "the table still shows it -- with the off mark"
+      (let [d (get (hooks/effective-hooks "hs-off") "stop#0")]
+        (is (some? d) "hiding it would make 'switched off' and 'does not exist' the same lie")
+        (is (true? (:disabled? d)))))
+    (testing "but nothing at that point will run"
+      (is (empty? (hooks/declarations-at "hs-off" :stop))))
+    (testing "and enabling brings it straight back"
+      (hooks/session-enable! "hs-off" "stop#0")
+      (is (= ["from-file.sh"] (map :command (hooks/declarations-at "hs-off" :stop))))))
+  (testing "switching off twice, and switching on something never off, are both no-ops"
+    (hooks/session-disable! "hs-idem" "stop#0")
+    (hooks/session-disable! "hs-idem" "stop#0")
+    (is (true? (hooks/session-hook-disabled? "hs-idem" "stop#0")))
+    (hooks/session-enable! "hs-idem" "stop#never")
+    (is (false? (hooks/session-hook-disabled? "hs-idem" "stop#never"))))
+  (testing "switching off an id this session cannot see does not invent it"
+    (hooks/session-disable! "hs-ghost" "stop@42")
+    (is (nil? (get (hooks/effective-hooks "hs-ghost") "stop@42")))))
+
+(deftest a-removed-hook-does-not-carry-its-off-mark-back
+  (let [id (hooks/session-add! "hs-zombie" :stop {:command "x.sh"})]
+    (hooks/session-disable! "hs-zombie" id)
+    (is (true? (hooks/session-hook-disabled? "hs-zombie" id)))
+    (hooks/session-remove! "hs-zombie" id)
+    (let [again (hooks/session-add! "hs-zombie" :stop {:command "y.sh"})]
+      (is (false? (hooks/session-hook-disabled? "hs-zombie" again))
+          "a fresh declaration must not inherit a stale off state"))))
+
+(deftest session-hooks-never-reach-another-thread
+  (hooks/session-add! "hs-mine" :stop {:command "mine.sh"})
+  (hooks/session-add! "hs-mine" :pre-tool-use {:command "gate.sh"})
+  (hooks/session-disable! "hs-mine" "stop#0")
+  (testing "another thread sees none of it"
+    (is (empty? (hooks/effective-hooks "hs-other")))
+    (is (empty? (hooks/declarations-at "hs-other" :pre-tool-use)))
+    (is (false? (hooks/session-hook-disabled? "hs-other" "stop#0")))))
+
+(deftest a-disabled-hook-does-not-fire-and-turning-it-back-on-resumes-it
+  (let [marker (str root "/fired.txt")
+        _      (io/delete-file (io/file marker) true)
+        id     (hooks/session-add! "hs-fire" :stop
+                                   {:command (str "echo fired > " marker "; exit 0")})]
+    (hooks/session-disable! "hs-fire" id)
+    (let [audits (atom [])
+          r (dispatch/fire {:point :stop :thread-id "hs-fire" :fact {}
+                            :audit #(swap! audits conj %) :run-id "r"})]
+      (testing "a switched-off hook does not spawn, and is not even an event"
+        (is (= :allow (:verdict r)))
+        (is (zero? (:matched r)))
+        (is (empty? @audits))
+        (is (not (.exists (io/file marker))) "the command really did not run"))
+      (testing "switching it back on resumes it"
+        (hooks/session-enable! "hs-fire" id)
+        (let [r (dispatch/fire {:point :stop :thread-id "hs-fire" :fact {}
+                                :audit identity :run-id "r"})]
+          (is (= 1 (:matched r)))
+          (is (.exists (io/file marker))))))))
+
+;; --------------------------------------------- the whole path, through eval
+
+(deftest the-agent-grows-a-hook-through-eval-and-switches-it-off
+  ;; End to end through the real eval tool call: the model writes Clojure, the
+  ;; session gains a hook, the hook fires, and the model switches it off and back
+  ;; on. This is the capability the whole feature moved eval's reason-for-being
+  ;; onto, so it is asserted down the real path rather than by calling the fns.
+  (let [tid    "t-grow"
+        marker (str root "/grew.txt")
+        _      (io/delete-file (io/file marker) true)
+        call   (fn [code]
+                 (tools/run! {:id "c1" :type "function"
+                              :function {:name "eval"
+                                         :arguments (json/write-str {:code code})}}
+                             tid))
+        fire   (fn [] (dispatch/fire {:point :stop :thread-id tid :fact {} :run-id "r"}))]
+    (testing "adding one is a tool call, and the id comes back readable"
+      (let [r (call (str "(harness.hooks/session-add! \"" tid
+                         "\" :stop {:command \"echo grew > " marker "; exit 0\"})"))]
+        (is (false? (:error r)))
+        (let [id (read-string (:content r))]
+          (is (= "stop@1" id))
+          (testing "and it fires"
+            (is (= 1 (:matched (fire))))
+            (is (.exists (io/file marker))))
+          (testing "switching it off is another call, and it stops firing"
+            (io/delete-file (io/file marker) true)
+            (is (false? (:error (call (str "(harness.hooks/session-disable! \"" tid "\" \"" id "\")")))))
+            (is (= 0 (:matched (fire))))
+            (is (not (.exists (io/file marker))) "the disabled hook really did not run")
+            (testing "another session cannot see or touch it"
+              (is (empty? (hooks/effective-hooks "t-other-session")))
+              (is (empty? (hooks/declarations-at "t-other-session" :stop))))
+            (testing "switching it back on resumes it"
+              (is (false? (:error (call (str "(harness.hooks/session-enable! \"" tid "\" \"" id "\")")))))
+              (is (= 1 (:matched (fire))))
+              (is (.exists (io/file marker)))))
+          (testing "and the session can read its own table back"
+            (let [r (call (str "(keys (harness.hooks/effective-hooks \"" tid "\"))"))]
+              (is (false? (:error r)))
+              (is (str/includes? (:content r) "stop@1")))))))))
