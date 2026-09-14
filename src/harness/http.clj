@@ -169,6 +169,38 @@
   [provider source]
   (assoc (models/wire provider) :source source :api-key :stripped))
 
+(defn- guard-input-modalities!
+  "Refuse a run whose messages carry a modality the selected model never declared
+  it accepts -- an image aimed at a text-only model, typically.
+
+  BEFORE the provider is called, which is the whole point: the vendor's own answer
+  to an undeclared modality is a 400 whose body names nothing useful, arriving
+  after the request has been paid for. This names the model and the modality, and
+  the run never leaves the process.
+
+  A model that declared NOTHING is not guarded (see ag/undeclared-input): no
+  declaration is no promise, and enforcing one would be inventing a rule the
+  configuration never stated.
+
+  PROPERTY, NOT SECURITY. A configuration that declares :image for a text-only
+  model is lying, and nothing here catches that -- the declaration is taken at its
+  word. Same standing as the project fence: this stops a slip, and the failure it
+  prevents is a confusing error message, not an exploit.
+
+  Returns nil when the run may proceed, so the caller reads as a guard clause."
+  [input provider]
+  (let [bad (ag/undeclared-input (:messages input) (:input provider))]
+    (when (seq bad)
+      (throw (ex-info (str "model " (pr-str (or (:model provider) "(unnamed)"))
+                           " does not accept " (pr-str (mapv name bad))
+                           " input; it declares "
+                           (pr-str (mapv name (sort-by name (:input provider))))
+                           (when-let [p (:provider provider)] (str " (provider " p ")"))
+                           " -- change the model, or send only what it declares")
+                      {:model (:model provider)
+                       :undeclared (vec bad)
+                       :declared (vec (sort-by name (:input provider)))})))))
+
 (defn- run-agent! [ch input]
   (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
@@ -179,15 +211,18 @@
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
     (async/go
-      ;; A malformed input, an unreadable prompt, a bad config -- or a resume
-      ;; naming an interrupt this process never parked -- blows up before the run
-      ;; starts. Catch it here and push a well-formed RUN_STARTED..RUN_ERROR pair
-      ;; so the client sees a terminated run rather than a broken stream.
+      ;; A malformed input, an unreadable prompt, a bad config, an image aimed at a
+      ;; text-only model -- or a resume naming an interrupt this process never
+      ;; parked -- blows up before the run starts. Catch it here and push a
+      ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
+      ;; run rather than a broken stream.
       (let [[provider messages decisions resolved]
-            (try [(mem/current-provider thread-id (:provider input))
-                  (ag/inbound (:messages input) (mem/prompt) (:context input))
-                  (resume-decisions (:resume input))
-                  (mem/resolve-provider thread-id (:provider input))]
+            (try (let [provider (mem/current-provider thread-id (:provider input))]
+                   (guard-input-modalities! input provider)
+                   [provider
+                    (ag/inbound (:messages input) (mem/prompt) (:context input))
+                    (resume-decisions (:resume input))
+                    (mem/resolve-provider thread-id (:provider input))])
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]

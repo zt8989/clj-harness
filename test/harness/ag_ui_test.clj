@@ -192,12 +192,103 @@
       (is (not-any? #(contains? % :metadata) sent))
       (is (not-any? #(contains? % :encryptedValue) sent)))))
 
-(deftest user-content-passes-through-untouched
-  (let [parts [{:type "text" :text "看图"} {:type "image" :url "u"}]
-        sent  (ag/inbound [{:id "u1" :role "user" :content parts}] "S" nil)]
-    (testing "multimodal parts are not flattened by a whitelist"
-      (is (= parts (:content (second sent)))))
-    (is (not (contains? (second sent) :id)))))
+(deftest content-parts-are-translated-not-passed-through
+  ;; A user's message may carry PARTS, and the two protocols spell them
+  ;; differently. Passing AG-UI's spelling straight through sends the vendor a
+  ;; shape it does not know, and the 400 that comes back names nothing useful.
+  (testing "a url image becomes the provider's image_url part"
+    (let [sent (ag/inbound [{:id "u1" :role "user"
+                             :content [{:type "text" :text "看图"}
+                                       {:type "image" :source {:type "url" :value "https://x/y.png"}}]}]
+                           "S" nil)
+          parts (:content (second sent))]
+      (is (= [{:type "text" :text "看图"}
+              {:type "image_url" :image_url {:url "https://x/y.png"}}]
+             parts))
+      (testing "and no AG-UI source wrapper survives"
+        (is (not-any? #(contains? % :source) parts)))))
+  (testing "an inline data image becomes a data URL, which is how bytes ride the wire"
+    (let [sent (ag/inbound [{:id "u1" :role "user"
+                             :content [{:type "image"
+                                        :source {:type "data" :value "AAAB"
+                                                 :mimeType "image/png"}}]}]
+                           "S" nil)]
+      (is (= [{:type "image_url"
+               :image_url {:url "data:image/png;base64,AAAB"}}]
+             (:content (second sent))))))
+  (testing "a part type this harness cannot carry fails by name rather than leaking"
+    (let [e (try (ag/inbound [{:id "u1" :role "user"
+                               :content [{:type "document" :source {:type "url"
+                                                                    :value "u"}}]}]
+                             "S" nil)
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "document") "names the part it could not carry")
+      (is (str/includes? (ex-message e) "image") "and what it can")))
+  (testing "an image source this harness cannot resolve fails by name too"
+    (let [e (try (ag/inbound [{:id "u1" :role "user"
+                               :content [{:type "image" :source {:type "file" :value "x"}}]}]
+                             "S" nil)
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "file")))))
+
+(deftest a-string-content-is-untouched
+  ;; The common case, and the one every other test depends on: text in, the same
+  ;; text out. Parts are the exception, not the shape.
+  (let [sent (ag/inbound [{:id "u1" :role "user" :content "看这个项目"} {:id "a1" :role "assistant"
+                                                                        :content "好的"}]
+                         "S" nil)]
+    (is (= ["看这个项目" "好的"] (mapv :content (rest sent))))
+    (is (every? string? (map :content (rest sent))))))
+
+(deftest a-multimodal-assistant-turn-is-translated-too
+  ;; Rare, but a rebuilt conversation can contain one, and 'the assistant path
+  ;; does not need this' is exactly the kind of assumption that leaks a shape.
+  (let [sent (ag/inbound [{:id "a1" :role "assistant"
+                           :content [{:type "text" :text "here"}
+                                     {:type "image" :source {:type "url" :value "https://x/i.png"}}]}]
+                         "S" nil)]
+    (is (= [{:type "text" :text "here"}
+            {:type "image_url" :image_url {:url "https://x/i.png"}}]
+           (:content (second sent))))))
+
+(deftest undeclared-input-reads-what-a-run-is-about-to-send
+  (testing "a text-only message carries text"
+    (is (= #{:text} (ag/carried-input-types [{:role "user" :content "hi"}]))))
+  (testing "parts contribute their own modalities"
+    (is (= #{:text :image}
+           (ag/carried-input-types [{:role "user"
+                                     :content [{:type "text" :text "x"}
+                                               {:type "image" :source {:type "url" :value "u"}}]}]))))
+  (testing "an image with no text still carries only what it carries"
+    (is (= #{:image}
+           (ag/carried-input-types [{:role "user"
+                                     :content [{:type "image" :source {:type "url" :value "u"}}]}]))))
+  (testing "only USER messages count -- the model cannot be blamed for its own words"
+    (is (= #{:text}
+           (ag/carried-input-types [{:role "assistant"
+                                     :content [{:type "image" :source {:type "url" :value "u"}}]}
+                                    {:role "tool" :content "x"}
+                                    {:role "user" :content "hello"}])))))
+
+(deftest undeclared-input-answers-what-a-model-did-not-declare
+  (let [with-image [{:role "user" :content [{:type "text" :text "x"}
+                                            {:type "image" :source {:type "url" :value "u"}}]}]
+        text-only  [{:role "user" :content "just words"}]]
+    (testing "an undeclared modality aimed at a text-only model is reported"
+      (is (= [:image] (ag/undeclared-input with-image #{:text}))))
+    (testing "a modality the model does declare is fine"
+      (is (= [] (ag/undeclared-input with-image #{:text :image}))))
+    (testing "text alone never trips it"
+      (is (= [] (ag/undeclared-input text-only #{:text}))))
+    (testing "NOTHING DECLARED MEANS NOTHING GUARDED"
+      ;; The load-bearing case. A model that never said what it accepts is not
+      ;; silently assumed to accept text and nothing else -- that would make every
+      ;; inline provider start failing runs for a rule nobody wrote down.
+      (is (= [] (ag/undeclared-input with-image nil))))))
 
 (deftest a-leading-system-message-is-replaced
   (is (= [{:role "system" :content "S"}] (ag/inbound [{:role "system" :content "客户端的"}] "S" nil)))

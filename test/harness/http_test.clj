@@ -261,6 +261,146 @@
                            (str/includes? (str (:content %)) ":paths"))
                      (filter #(= "tool" (:role %)) history)))))))))
 
+(deftest an-image-part-reaches-the-model-translated-and-the-log-says-so
+  ;; Images end to end. The AG-UI spelling of a content part is not the provider's,
+  ;; so the translation happens on the way IN -- which is what lets the "message"
+  ;; line stay a truthful record of what the LLM was about to see. A log holding
+  ;; AG-UI parts under a "message" kind would be lying about the one thing it
+  ;; exists to record.
+  ;;
+  ;; The same messages are then rebuilt through replay/history, which re-derives
+  ;; them from the input line: live and replay must agree, or a resumed
+  ;; conversation would send the vendor a shape the live run never did.
+  (with-server
+   8093
+   "images"
+   (fn []
+     (let [log    (io/file (log-dir) "images.jsonl")
+           parts  [{:type "text" :text "what is this"}
+                   {:type "image" :source {:type "url" :value "https://example.test/a.png"}}
+                   {:type "image" :source {:type "data" :value "AAAB" :mimeType "image/jpeg"}}]
+           expect [{:type "text" :text "what is this"}
+                   {:type "image_url" :image_url {:url "https://example.test/a.png"}}
+                   {:type "image_url"
+                    :image_url {:url "data:image/jpeg;base64,AAAB"}}]]
+       (io/delete-file log true)
+       (post-run 8093 "images" {:messages [{:id "u1" :role "user" :content parts}]})
+       (let [lines (wait-for-recorded
+                    log
+                    (fn [ls] (some #(= "message" (:kind %)) ls))
+                    3000)
+             sent  (->> lines
+                        (filter #(= "message" (:kind %)))
+                        (map :payload)
+                        (filter #(= "user" (:role %))))]
+         (testing "what the LLM saw is the provider's part shape, not the client's"
+           (is (= [expect] (mapv :content sent)))
+           (is (not-any? #(str/includes? (json/write-str %) "\"source\"")
+                         sent)
+               "no AG-UI source wrapper survives into the record"))
+         (testing "and replay rebuilds the very same messages from the log"
+           (let [history (replay/history (log-dir) "images")
+                 rebuilt (mapv :content (filter #(= "user" (:role %)) history))]
+             (is (= [expect] rebuilt)
+                 "a resumed conversation sends what the live run sent"))))))))
+
+(defn- with-declaring-server
+  "Like with-server, but the scripted pin DECLARES an input modality set -- which
+  is how a pinned provider can stand in for a model with a stated capability.
+
+  The spec (as opposed to the pin) is what the guard reads, and a pin is a whole
+  provider map, so the declaration rides it. Returns the script atom so a test can
+  assert the provider was never called: a drained script is a provider that ran."
+  [port thread-id declared turns f]
+  (let [script (atom (vec turns))]
+    (mem/use-provider! thread-id (assoc (fake/scripted turns) :input declared
+                                        :script script))
+    (let [stop (http/start! {:port port})]
+      (try (f script) (finally (stop) (mem/use-provider! thread-id nil))))))
+
+(deftest a-text-only-model-refuses-an-image-by-name-and-never-calls-the-vendor
+  ;; The declaration is only worth anything if something enforces it. The vendor's
+  ;; own answer to an undeclared modality is a 400 whose body names nothing useful,
+  ;; arriving after the request was sent -- so the refusal happens here instead,
+  ;; and the provider is not contacted at all.
+  (with-declaring-server
+   8089
+   "guarded"
+   #{:text}
+   [{:content "should never be reached"}]
+   (fn [script]
+     (let [resp   (post-run 8089 "guarded"
+                            {:messages [{:id "u1" :role "user"
+                                         :content [{:type "text" :text "what is this"}
+                                                   {:type "image"
+                                                    :source {:type "url"
+                                                             :value "https://x/i.png"}}]}]})
+           frames (mapv #(json/read-str (str/trim (subs % 5)) :key-fn keyword)
+                        (filter #(str/starts-with? % "data:") (str/split-lines (.body resp))))
+           types  (mapv :type frames)
+           error  (first (filter #(= "RUN_ERROR" (:type %)) frames))]
+       (testing "the run terminates as an error, not as a success"
+         (is (some #(= "RUN_ERROR" %) types))
+         (is (not-any? #(= "RUN_FINISHED" %) types)))
+       (testing "and the refusal names the model and the modality it will not take"
+         (is (str/includes? (:message error) "image"))
+         (is (str/includes? (:message error) "text"))
+         (is (str/includes? (:message error) "does not accept")))
+       (testing "NOTHING WAS SENT -- the scripted provider is untouched"
+         (is (= 1 (count @script))
+             "the vendor would have consumed its turn had the run reached it"))))))
+
+(deftest a-model-that-declares-images-is-not-guarded
+  ;; The other half: the guard must not become a blanket refusal of images.
+  (with-declaring-server
+   8090
+   "unguarded"
+   #{:text :image}
+   [{:content "saw it"}]
+   (fn [script]
+     (let [resp (post-run 8090 "unguarded"
+                          {:messages [{:id "u1" :role "user"
+                                       :content [{:type "text" :text "what is this"}
+                                                 {:type "image"
+                                                  :source {:type "url"
+                                                           :value "https://x/i.png"}}]}]})
+           body (.body resp)]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script) "and the run really did reach the provider")))))
+
+(deftest a-text-only-model-takes-text-as-before
+  ;; Regression: the guard must not touch the ordinary run.
+  (with-declaring-server
+   8091
+   "plain"
+   #{:text}
+   [{:content "hello"}]
+   (fn [script]
+     (let [body (.body (post-run 8091 "plain"))]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script))))))
+
+(deftest a-model-that-declares-nothing-is-not-guarded
+  ;; An inline provider that never stated a capability promises nothing, so there
+  ;; is nothing to enforce. Guarding it would invent a rule the configuration never
+  ;; wrote -- and break every deployment that describes its endpoint directly.
+  (with-declaring-server
+   8092
+   "silent"
+   nil
+   [{:content "went through"}]
+   (fn [script]
+     (let [body (.body (post-run 8092 "silent"
+                                 {:messages [{:id "u1" :role "user"
+                                              :content [{:type "image"
+                                                         :source {:type "url"
+                                                                  :value "https://x/i.png"}}]}]}))]
+       (is (str/includes? body "RUN_FINISHED"))
+       (is (not (str/includes? body "RUN_ERROR")))
+       (is (empty? @script) "and the provider was reached")))))
+
 (deftest records-the-tool-lifecycle-as-jsonl
   ;; ApplePi's ADR-0021 audit trio, keyed by toolCallId: every call enters
   ;; (pre-execute), executes, and closes (post-execute) -- a pass carries no
@@ -410,7 +550,8 @@
   runs for real while the LLM stays offline.
 
   Two vendors with DIFFERENT endpoints, so a test can see a vendor switch move
-  the endpoint rather than only the model id.
+  the endpoint rather than only the model id -- and OPPOSITE declarations, alpha
+  taking images and beta not, so the input guard has a yes and a no to work with.
 
   Used by the tests below. A pinned provider skips resolution, and the provider
   timeline is precisely about resolution, so these must not pin."
@@ -426,8 +567,8 @@
       (spit reg-file
             (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
                              :model "alpha-small"
-                             :models {"alpha-small" {:input #{:text} :output #{:text}}
-                                      "alpha-big"   {:input #{:text} :output #{:text}}}}
+                             :models {"alpha-small" {:input #{:text :image} :output #{:text}}
+                                      "alpha-big"   {:input #{:text :image} :output #{:text}}}}
                      :beta  {:protocol :fake :base-url "https://y/v1"
                              :model "beta-plain"
                              :models {"beta-plain" {:input #{:text} :output #{:text}}}}})
@@ -437,6 +578,37 @@
         (spit cfg-file (or old-cfg "{:protocol :fake}\n") :encoding "UTF-8")
         (io/delete-file reg-file true)
         (reset! fake/test-script old-script)))))
+
+(deftest the-guard-reads-the-catalogs-declaration-not-a-pin
+  ;; Through REAL resolution, unlike the pinned guard tests above: the catalog
+  ;; says beta-plain is text-only, so an image aimed at it is refused. This is the
+  ;; wiring that matters -- a guard reading a declaration nothing populates would
+  ;; pass every pinned test and do nothing in production.
+  (with-resolved-config
+   [{:content "unreachable"}]
+   (fn []
+     (let [id     "http-guard"
+           stop   (http/start! {:port 8088})
+           image  {:messages [{:id "u1" :role "user"
+                               :content [{:type "text" :text "look"}
+                                         {:type "image"
+                                          :source {:type "url" :value "https://x/i.png"}}]}]}
+           error  (fn [body]
+                    (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
+                                    (when (= "RUN_ERROR" (:type f)) f))
+                                 (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
+       (try
+         (testing "aimed at the text-only model, it is refused by name"
+           (mem/set-override! id {:provider :beta})
+           (let [e (error (.body (post-run 8088 id image)))]
+             (is (some? e))
+             (is (str/includes? (:message e) "beta-plain") "names the model")
+             (is (str/includes? (:message e) "image") "and the modality it will not take")))
+         (testing "the SAME input is served by a model that declares images"
+           (mem/set-override! id {:provider :alpha})
+           (is (= #{:text :image} (:input (mem/active-provider id))))
+           (is (nil? (error (.body (post-run 8088 id image))))))
+         (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest the-provider-timeline-is-init-once-then-changes
   ;; Ticket 03, over the real edge. A session's provider history lands as
@@ -466,7 +638,7 @@
                (is (= "alpha-small" (:model p)) "the model id that was selected")
                (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
                (is (= "https://x/v1" (:base-url p)))
-               (is (= ["text"] (:input p)) "the model's modalities, as wire strings")
+               (is (= ["image" "text"] (:input p)) "the model's modalities, as wire strings")
                (is (= ["text"] (:output p)))
                (is (= "default" (:source p)))
                (is (= "stripped" (:api-key p)))))
@@ -536,7 +708,7 @@
                        months later is not reading today's catalog"
                (is (= "https://x/v1" (get-in changed [:resolved :base-url])))
                (is (= "alpha-big" (get-in changed [:resolved :model])))
-               (is (= ["text"] (get-in changed [:resolved :input])))))
+               (is (= ["image" "text"] (get-in changed [:resolved :input])))))
            (testing "consecutive changes chain through the same slice"
              ;; One more approved change: reasoning-effort goes from high to
              ;; low. before on the new line MUST equal after on the previous.
