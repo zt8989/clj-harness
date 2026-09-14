@@ -40,11 +40,38 @@
         (is (true? error))
         (is (str/includes? content "2 times"))))))
 
-(deftest bash-runs-git-bash-not-wsl
+(defn- shell-name-on-this-host
+  "What `uname -s` must report on THIS machine, for the shell the bash tool runs.
+
+  On Windows the tool pins Git Bash by absolute path, because the `bash` on PATH
+  is C:\\WINDOWS\\System32\\bash.exe -- the WSL launcher, a different filesystem
+  entirely, which fails silently from a JVM. So the Windows answer starts MINGW.
+
+  Everywhere else the tool runs the host's own shell: there is no second
+  filesystem to reach by accident, and the answer is simply the host's name. The
+  invariant the assertion below is after is the same on every platform -- the
+  shell belongs to THIS machine -- but the spelling of the answer is not, which
+  is why it is computed rather than written down."
+  []
+  (let [os (str/lower-case (System/getProperty "os.name"))]
+    (cond
+      (str/includes? os "win")   "mingw"
+      (str/includes? os "mac")   "darwin"
+      (str/includes? os "linux") "linux"
+      :else                      os)))
+
+(deftest bash-runs-the-hosts-own-shell-not-wsl
   (let [{:keys [content error]} (call "bash" {:command "uname -s"})]
     (is (false? error))
-    (testing "uname reports MINGW -- Git Bash, not the WSL launcher on PATH"
-      (is (str/includes? content "MINGW"))))
+    (testing "uname names this machine's shell"
+      ;; On Windows: Git Bash (MINGW), pinned by path so the WSL launcher -- a
+      ;; different filesystem, silent from a JVM -- is never reached. Elsewhere
+      ;; the host's own shell. Both are the same claim about which filesystem
+      ;; the shell sees; only the name it answers with differs.
+      (is (str/includes? (str/lower-case content)
+                         (shell-name-on-this-host))
+          (str "uname -s reported " (pr-str content)
+               ", which does not name this host (" (shell-name-on-this-host) ")"))))
   (testing "the working directory is the project"
     ;; Assert the invariant, not a substring of the project's name: bash must be
     ;; sitting in the same directory the JVM considers its own. Git Bash reports

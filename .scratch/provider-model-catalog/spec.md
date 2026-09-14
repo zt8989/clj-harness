@@ -117,8 +117,8 @@ provider，`:model` 只是其中一个字符串字段。
 
 ## 验收主线
 
-离线全量 `harness.test-runner` 全绿（基线 131 tests / 655 assertions，其中 `bash-runs-git-bash-not-wsl`
-在 macOS 上恒红，与本特征无关）。端到端：删掉 `providers.edn`，`config.edn` 只写三个旋钮，run 起得来；
+离线全量 `harness.test-runner` **全绿，零失败**（基线 131 tests / 655 assertions，1 红——那条红后来被修掉，
+见下）。端到端：删掉 `providers.edn`，`config.edn` 只写三个旋钮，run 起得来；
 换 provider 不换 model 时 endpoint 随之改变（打给本地 stub 的服务端能观察到 base-url 真的换了）。
 
 ## 落地后收尾
@@ -135,11 +135,12 @@ git 历史里。
 
 ## 已验证到什么程度（2026-09-14）
 
-**全量**：`harness.test-runner` **175 tests / 835 assertions**，连续两轮同样结果。唯一红的是
-`bash-runs-git-bash-not-wsl`（`uname` 断言 MINGW，macOS 上恒红，与本特征无关）。基线为
-130 tests / 642 assertions，**净增 45 tests / 193 assertions**。
+**全量**：`harness.test-runner` **175 tests / 835 assertions，0 failures，0 errors**，连续两轮同样结果。
+基线为 130 tests / 642 assertions 且**有 1 红**（`bash-runs-git-bash-not-wsl`），所以本特征之后全量第一次
+真正全绿——净增 45 tests / 193 assertions，且把那条历史遗留红修掉了（见「顺带修掉的既有问题」）。
 
-**提交**：`cefab3d`（01+02）、`80f9f4d`（03+04）、`0959805`（05）、`414de48`（06），另加文档/措辞收口。
+**提交**：`cefab3d`（01+02）、`80f9f4d`（03+04）、`0959805`（05）、`414de48`（06），另加文档/措辞收口与
+最后那条测试修复。
 
 ### 01 / 02 —— 目录形状与内置表
 
@@ -231,11 +232,25 @@ git 历史里。
    （`the-log-the-server-writes-is-one-replay-can-read` 会偶发报 "the log is truncated or corrupt"）。
    现在只有**非最后一行**解不开才算损坏——严格判定留给 `replay/lines->records` 那个真正的读侧。
 
+### 顺带修掉的既有问题（收尾时）
+
+- **`bash-runs-git-bash-not-wsl` 不再是恒红。** 它断言 `uname -s` 含 `MINGW`，而那是 Windows 上 Git Bash
+  的答复：在 macOS / Linux 上 shell 跑的是宿主机自己的（`Darwin` / `Linux`），所以这条断言从写下那天起
+  就只能在一个平台上为真，在别的平台上**红得毫无信息**——它红不是因为它发现了问题，是因为它写死了
+  一个平台的拼法。改为断言**同一条不变量**（shell 属于本机）、按宿主机算期望值（`shell-name-on-this-host`），
+  失败信息里带上实际输出。Windows 的语义一字未变（钉路径避开 WSL 启动器、答复以 MINGW 开头），
+  测试改名 `bash-runs-the-hosts-own-shell-not-wsl`。
+- 同一处措辞顺手校准：`git-bash` 这个 defonce 改名为 `shell-binary`，`bash` 工具描述与 `prompt.md` 从
+  「runs Git Bash」改为「Git Bash on Windows, the host's shell elsewhere」——代码本来就一直是后者
+  （找不到 Git Bash 路径就退回 `"bash"`），只有文档与命名在声称前者。README 的依赖项也注明
+  Git Bash 是 **Windows 必需**。
+
 ### 未做 / 未验证
 
 - **UI 侧未动**：能力端点（05）与图片输入是给 UI 将来用的接缝，本特征不实现选择器。UI 的
   `verify-*.mjs` / vitest 套件未跑（工作树里没有 `ui/node_modules`，且这些脚本在本分支上是未跟踪的
   WIP，不属于本特征）。
 - `:output` 仍只有 `:text`（见非目标）。
-
-- `prompt.md` 的 secrets 纪律条款里「四个描述字段」的措辞随 01 更新（它是冻结的代码资产，改它必须走提交）。
+- **Windows 侧未实测**：本机是 macOS，`shell-binary` 的 Git Bash 分支与 `uname` 断言里 MINGW 的那一支
+  都没有在本轮跑过（测试按宿主平台取值，Windows 上取的是 `mingw`）。钉路径的过往实测记在
+  `minimal-kernel/spec.md`，本轮未复验。

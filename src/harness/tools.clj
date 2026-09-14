@@ -43,9 +43,15 @@
     (when-let [p (.getParentFile f)] (.mkdirs p))
     (spit f content :encoding "UTF-8")))
 
-;; `bash` on PATH is C:\WINDOWS\System32\bash.exe -- the WSL launcher, a different
-;; filesystem entirely, which fails silently from a JVM. Pin Git Bash by path.
-(defonce git-bash
+;; On WINDOWS, `bash` on PATH is C:\WINDOWS\System32\bash.exe -- the WSL launcher,
+;; a different filesystem entirely, which fails silently from a JVM. So the Git
+;; Bash install is pinned by absolute path when one is found.
+;;
+;; Elsewhere neither path exists and this is plain "bash", the host's own shell:
+;; there is no second filesystem to be captured by, so nothing needs pinning. The
+;; lookup is the same on every platform and the fallback IS the answer on macOS
+;; and Linux, which is why it is written as a search rather than an os.name test.
+(defonce shell-binary
   (or (first (filter #(.exists (io/file %))
                      ["C:\\Program Files\\Git\\bin\\bash.exe"
                       "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]))
@@ -79,7 +85,7 @@
 
 (defn- t-bash [{:keys [command]}]
   (let [dir (project/binding-for mem/*thread-id*)
-        {:keys [exit out err]} (apply shell/sh git-bash "-lc" command :out-enc "UTF-8"
+        {:keys [exit out err]} (apply shell/sh shell-binary "-lc" command :out-enc "UTF-8"
                                       (when dir [:dir dir]))
         body (str out err)]
     (str (if (str/blank? body) "(no output)" body)
@@ -181,7 +187,7 @@
          :fence-paths true))
 
 (mem/register! "bash"
-  (tool "Run a shell command in Git Bash. The working directory is this session's project directory when one is bound, otherwise the process working directory."
+  (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
         [:command] t-bash))
 

@@ -37,7 +37,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
   ```
 - Clojure CLI（`scoop clj-deps` 安装）
 - Node.js 18+ / npm
-- Git Bash（已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出）
+- Git Bash（Windows 必需：已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出。macOS / Linux 用系统自带的 shell，无需额外安装）
 - `bash` / `rg` 可用
 
 ## 配置
