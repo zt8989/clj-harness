@@ -8,9 +8,15 @@
      :when     \"...\"          ; one line: when this point fires
      :payload  #{..}           ; the payload keys this point adds beyond the
                                ;   common four (hook / thread_id / project_dir)
-     :matches  :tool-name      ; what a declaration's :matcher is compared against,
-                               ;   or nil when the point has no match target
-     :gate?    true}           ; does this point's verdict redirect the run?
+     :matches  :tool_name      ; the PAYLOAD KEY a declaration's :matcher is
+                               ;   compared against, or nil when this point has
+                               ;   nothing to match -- naming a payload key
+                               ;   rather than a concept means the matcher is
+                               ;   always compared against the same string the
+                               ;   command just read on stdin
+     :gate?    true            ; does this point's verdict redirect the run?
+     :on-error :block}         ; what a TIMEOUT or a failed spawn means here:
+                               ;   :block for a gate, :proceed for an observer
 
   ADDING A POINT IS ADDING A ROW. The engine's dispatch reads this table; it has
   no per-point code, which is the property the whole hook design rests on: a new
@@ -51,59 +57,59 @@
   simply never dispatches: that is the design, not an omission, and it is why
   a P3 point costs one row rather than an interface."
   [{:name "SessionStart" :when "a session's first run starts, or a log is rebuilt and resumed"
-    :payload #{:source} :matches nil :gate? false}
+    :payload #{:source} :matches nil :gate? false :on-error :proceed}
    {:name "UserPromptSubmit" :when "a user turn arrives, before the model sees it"
-    :payload #{:prompt} :matches nil :gate? true}
+    :payload #{:prompt} :matches nil :gate? true :on-error :block}
    {:name "PreToolUse" :when "a tool call is about to run, after the disabled and approval checks"
-    :payload #{:tool_name :tool_input} :matches :tool-name :gate? true}
+    :payload #{:tool_name :tool_input} :matches :tool_name :gate? true :on-error :block}
    {:name "PermissionRequest" :when "a call has parked and a human (or a hook) must answer"
-    :payload #{:tool_name :tool_input :interrupt_id} :matches :tool-name :gate? true}
+    :payload #{:tool_name :tool_input :interrupt_id} :matches :tool_name :gate? true :on-error :block}
    {:name "PermissionDenied" :when "a call was refused -- vetoed, disabled, or blocked"
-    :payload #{:tool_name :reason} :matches :tool-name :gate? false}
+    :payload #{:tool_name :reason} :matches :tool_name :gate? false :on-error :proceed}
    {:name "PostToolUse" :when "a tool ran and returned"
-    :payload #{:tool_name :tool_input :result} :matches :tool-name :gate? false}
+    :payload #{:tool_name :tool_input :result} :matches :tool_name :gate? false :on-error :proceed}
    {:name "PostToolUseFailure" :when "a tool ran and threw"
-    :payload #{:tool_name :tool_input :error} :matches :tool-name :gate? false}
+    :payload #{:tool_name :tool_input :error} :matches :tool_name :gate? false :on-error :proceed}
    {:name "Stop" :when "a run finished normally"
-    :payload #{} :matches nil :gate? false}
+    :payload #{} :matches nil :gate? false :on-error :proceed}
    {:name "StopFailure" :when "a run ended in an error"
-    :payload #{:error} :matches nil :gate? false}
+    :payload #{:error} :matches nil :gate? false :on-error :proceed}
    {:name "Notification" :when "the harness has something to tell the user"
-    :payload #{:message} :matches nil :gate? false}
+    :payload #{:message} :matches nil :gate? false :on-error :proceed}
    {:name "InstructionsLoaded" :when "an instruction file is folded into the run's context"
-    :payload #{:path} :matches nil :gate? false}
+    :payload #{:path} :matches nil :gate? false :on-error :proceed}
    {:name "ConfigChange" :when "a session's configuration moved (provider, model, project)"
-    :payload #{:what} :matches nil :gate? false}
+    :payload #{:what} :matches nil :gate? false :on-error :proceed}
    {:name "CwdChanged" :when "a session's project directory moved"
-    :payload #{:project_dir :before} :matches nil :gate? false}
+    :payload #{:project_dir :before} :matches nil :gate? false :on-error :proceed}
    {:name "SessionEnd" :when "a session is closed"
-    :payload #{} :matches nil :gate? false}
+    :payload #{} :matches nil :gate? false :on-error :proceed}
 
    ;; ---- declared, waiting for their subsystem (see the docstring above)
    {:name "FileChanged" :when "a watched file changed"
-    :payload #{:file} :matches :file-name :gate? false}
+    :payload #{:file} :matches :file :gate? false :on-error :proceed}
    {:name "Elicitation" :when "an MCP server asks the user for input"
-    :payload #{:server :request} :matches nil :gate? false}
+    :payload #{:server :request} :matches nil :gate? false :on-error :proceed}
    {:name "ElicitationResult" :when "the user answered an elicitation, before it goes back"
-    :payload #{:server :response} :matches nil :gate? false}
+    :payload #{:server :response} :matches nil :gate? false :on-error :proceed}
    {:name "PreCompact" :when "context compaction is about to run"
-    :payload #{} :matches nil :gate? false}
+    :payload #{} :matches nil :gate? false :on-error :proceed}
    {:name "PostCompact" :when "context compaction finished"
-    :payload #{} :matches nil :gate? false}
+    :payload #{} :matches nil :gate? false :on-error :proceed}
    {:name "SubagentStart" :when "a subagent starts"
-    :payload #{:subagent} :matches nil :gate? false}
+    :payload #{:subagent} :matches nil :gate? false :on-error :proceed}
    {:name "SubagentStop" :when "a subagent finishes"
-    :payload #{:subagent} :matches nil :gate? false}
+    :payload #{:subagent} :matches nil :gate? false :on-error :proceed}
    {:name "TeammateIdle" :when "a team member is about to go idle"
-    :payload #{:teammate} :matches nil :gate? false}
+    :payload #{:teammate} :matches nil :gate? false :on-error :proceed}
    {:name "TaskCreated" :when "a task is created"
-    :payload #{:task} :matches nil :gate? false}
+    :payload #{:task} :matches nil :gate? false :on-error :proceed}
    {:name "TaskCompleted" :when "a task completes"
-    :payload #{:task} :matches nil :gate? false}
+    :payload #{:task} :matches nil :gate? false :on-error :proceed}
    {:name "WorktreeCreate" :when "a git worktree is created"
-    :payload #{:path} :matches nil :gate? false}
+    :payload #{:path} :matches nil :gate? false :on-error :proceed}
    {:name "WorktreeRemove" :when "a git worktree is removed"
-    :payload #{:path} :matches nil :gate? false}])
+    :payload #{:path} :matches nil :gate? false :on-error :proceed}])
 
 (def ^:private by-key
   "The EDN key a user writes -> its point. :pre-tool-use -> the PreToolUse row.

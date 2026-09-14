@@ -6,6 +6,8 @@
 
 - `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
 - `src/harness/llm.clj` — provider 协议层（一个 multimethod，按 `:protocol` 分派）**加 system prompt 的载体**：`prompt.md` 首调读入即冻结，热改需 `(llm/reset-prompt!)` 或重启。冻结点在这里而不是别处，因为理由就是 provider 的前缀缓存
+- `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。**没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
+- `src/harness/shell.clj` — 唯一决定 spawn 哪个 shell 的地方（Windows 上按绝对路径钉 Git Bash，避免被 System32 的 WSL 启动器静默吞掉），以及带上 stdin 与超时的运行方式。bash 工具与 hook 引擎共用它：那个坑是机器的属性，不是调用方的
 - `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
 - `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用

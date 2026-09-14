@@ -48,8 +48,16 @@
                              (string? (:when p))
                              (set? (:payload p))
                              (contains? p :gate?)
-                             (contains? p :matches)))
+                             (contains? p :matches)
+                             (contains? p :on-error)))
                 hooks/points)))
+  (testing "the failure policy says what a TIMEOUT or a bad spawn means, per point"
+    (testing "a gate cannot decide, so it does not decide yes"
+      (is (every? #(= :block (:on-error %))
+                  (filter :gate? hooks/points))))
+    (testing "an observer never changes the run"
+      (is (every? #(= :proceed (:on-error %))
+                  (remove :gate? hooks/points)))))
   (testing "the EDN key is derived from the payload name, both spellings tied in one place"
     (is (= "PreToolUse" (:name (hooks/point-for :pre-tool-use))))
     (is (= "SessionStart" (:name (hooks/point-for :session-start))))

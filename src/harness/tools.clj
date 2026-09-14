@@ -19,11 +19,11 @@
   (:refer-clojure :exclude [run!])
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
-            [clojure.java.shell :as shell]
             [clojure.string :as str]
             [harness.event :as ev]
             [harness.providers :as providers]
-            [harness.project :as project])
+            [harness.project :as project]
+            [harness.shell :as shell])
   (:import [java.util.regex Pattern]))
 
 ;; A resident namespace, so `def`s in eval persist across calls. This is what lets
@@ -147,20 +147,6 @@
     (when-let [p (.getParentFile f)] (.mkdirs p))
     (spit f content :encoding "UTF-8")))
 
-;; On WINDOWS, `bash` on PATH is C:\WINDOWS\System32\bash.exe -- the WSL launcher,
-;; a different filesystem entirely, which fails silently from a JVM. So the Git
-;; Bash install is pinned by absolute path when one is found.
-;;
-;; Elsewhere neither path exists and this is plain "bash", the host's own shell:
-;; there is no second filesystem to be captured by, so nothing needs pinning. The
-;; lookup is the same on every platform and the fallback IS the answer on macOS
-;; and Linux, which is why it is written as a search rather than an os.name test.
-(defonce shell-binary
-  (or (first (filter #(.exists (io/file %))
-                     ["C:\\Program Files\\Git\\bin\\bash.exe"
-                      "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]))
-      "bash"))
-
 ;; --------------------------------------------------------------------- tools
 
 ;; The file tools resolve their path through harness.project first: a session
@@ -189,8 +175,7 @@
 
 (defn- t-bash [{:keys [command]}]
   (let [dir (project/binding-for *thread-id*)
-        {:keys [exit out err]} (apply shell/sh shell-binary "-lc" command :out-enc "UTF-8"
-                                      (when dir [:dir dir]))
+        {:keys [exit out err]} (shell/shell command :dir (when dir dir))
         body (str out err)]
     (str (if (str/blank? body) "(no output)" body)
          (when-not (zero? exit) (str "\n[exit " exit "]")))))
