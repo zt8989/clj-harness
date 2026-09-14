@@ -5,7 +5,6 @@
   (:require [clojure.core.async :as async]
             [harness.event :as ev]
             [harness.llm :as llm]
-            [harness.memory :as mem]
             [harness.tools :as tools]))
 
 (defn- replay!
@@ -26,10 +25,10 @@
   [decisions thread-id emit history]
   (vec
    (keep (fn [{:keys [interrupt-id verdict payload]}]
-           (let [rec (mem/parked interrupt-id)]
+           (let [rec (tools/parked interrupt-id)]
              (when-not rec
                (throw (ex-info (str "unknown interrupt: " interrupt-id) {})))
-             (mem/decide-approval! interrupt-id verdict payload)
+             (tools/decide-approval! interrupt-id verdict payload)
              (let [call-id (:tool-call-id rec)
                    {:keys [content error parked]}
                    (tools/run! {:id call-id

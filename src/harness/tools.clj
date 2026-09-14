@@ -22,7 +22,6 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [harness.event :as ev]
-            [harness.memory :as mem]
             [harness.providers :as providers]
             [harness.project :as project])
   (:import [java.util.regex Pattern]))
@@ -265,7 +264,7 @@
            (when (nil? thread-id)
              " (warning: no session in scope; the change landed on the process-wide slot)")))))
 
-;; ------------------------------------------------------------------ registry
+;; --------------------------------------------------------------------- specs
 
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
@@ -278,7 +277,7 @@
                                  :parameters (:parameters t)}})
          (sort-by key (effective-tools thread-id)))))
 
-;; ------------------------------------------------------------------ registry
+;; -------------------------------------------------------------- the built-ins
 
 ;; read/write/edit carry :fence-paths -- when the session is bound to a
 ;; project directory, a path resolving outside the project directory AND the
@@ -339,6 +338,96 @@
                [] t-configure)
          :requires-approval true))
 
+;; --------------------------------------------------------------- approvals
+;;
+;; Two things a call can be made to wait on, and the record of who is waiting:
+;; a session's own list of tools that need a human, and the parked calls
+;; themselves. Both are PROCESS-LOCAL and per-thread -- a restart loses every
+;; pending decision, and a resume naming an interrupt this process never parked
+;; is refused by name rather than guessed at. Nothing here is persisted.
+
+(defonce ^:private session-approvals
+  (atom {}))
+;; thread-id -> #{name}
+
+(defn session-require-approval!
+  "Make every call of NAME park for a human decision in THREAD-ID's session only.
+  Session-scoped exactly like the tool overlay: another thread is unaffected, and
+  the process-wide base registry is never touched. The union of this set and the
+  tool's own :requires-approval flag is what parks a call."
+  [thread-id name]
+  (swap! session-approvals update thread-id (fnil conj #{}) name))
+
+(defn session-approval-required?
+  "Does THREAD-ID's session require a human decision for NAME?"
+  [thread-id name]
+  (contains? (get @session-approvals thread-id #{}) name))
+
+(defonce ^:private parked-registry
+  (atom {}))
+;; interrupt-id -> {:thread-id .. :tool-call-id .. :name .. :args ..}
+
+(defn park-approval!
+  "Record a parked call under INTERRUPT-ID -- the correlation key a client hands
+  back on resume. Deliberately process-local: a restart loses the parking, and a
+  resume naming an interrupt this process never parked is answered as unknown
+  rather than guessed at. Never persisted, never read back from disk.
+
+  Re-parking the same id reopens it: any earlier decision is cleared, so a call
+  that had to be parked twice cannot inherit the first verdict."
+  [interrupt-id rec]
+  (swap! parked-registry update interrupt-id
+         (fn [old] (merge (dissoc old :verdict :payload :consumed)
+                          (assoc rec :interrupt-id interrupt-id)))))
+
+(defn parked
+  "The parked record for INTERRUPT-ID, or nil -- what the approval endpoint and
+  the resume path look up, and what a test asserts on. Process-local and
+  short-lived: it exists between the park and the verdict being consumed."
+  [interrupt-id]
+  (get @parked-registry interrupt-id))
+
+(defn parked-for-call
+  "The parked record for TOOL-CALL-ID in THREAD-ID, or nil. Call ids are unique
+  per assistant message, so at most one record matches a given call."
+  [thread-id tool-call-id]
+  (->> @parked-registry
+       vals
+       (filter #(and (= thread-id (:thread-id %))
+                     (= tool-call-id (:tool-call-id %))))
+       first))
+
+(defn parked-calls
+  "interrupt-id -> parked record, for THREAD-ID (every thread when nil)."
+  ([] @parked-registry)
+  ([thread-id]
+   (into {} (filter #(= thread-id (:thread-id (val %))) @parked-registry))))
+
+(defn decide-approval!
+  "Record the human's decision for INTERRUPT-ID: :approved or :vetoed, plus any
+  payload the client attached (a reason, typically). Recording decides nothing by
+  itself -- the seam consumes the verdict on the call's next transit through it."
+  [interrupt-id verdict payload]
+  (swap! parked-registry update interrupt-id
+         (fn [rec] (assoc (or rec {}) :interrupt-id interrupt-id
+                          :verdict verdict :payload payload))))
+
+(defn take-decision!
+  "Atomically take -- and mark consumed -- the decision for INTERRUPT-ID. Returns
+  {:verdict .. :payload ..} the first time and nil ever after, so replaying an
+  interrupt cannot execute its call twice."
+  [interrupt-id]
+  (let [[before _]
+        (swap-vals! parked-registry
+                    (fn [reg]
+                      (cond-> reg
+                        (and (get-in reg [interrupt-id :verdict])
+                             (not (get-in reg [interrupt-id :consumed])))
+                        (assoc-in [interrupt-id :consumed] true))))]
+    (let [rec (get before interrupt-id)]
+      (when (and (:verdict rec) (not (:consumed rec)))
+        (select-keys rec [:verdict :payload])))))
+
 ;; ------------------------------------------------------------------ dispatch
 
 (defn- missing-args [{:keys [required]} args]
@@ -356,7 +445,7 @@
   [tool name thread-id parsed]
   (cond
     (:requires-approval tool)                       :tool-declares
-    (mem/session-approval-required? thread-id name) :session-asks
+    (session-approval-required? thread-id name) :session-asks
     (and (:fence-paths tool)
          (project/out-of-bounds? thread-id (:path parsed)))
     :out-of-bounds
@@ -434,10 +523,10 @@
                              {:content (ex-message err) :error true}
                              {:content (str result) :error false})))
                park (fn [reason]
-                      (let [existing (mem/parked-for-call thread-id id)
+                      (let [existing (parked-for-call thread-id id)
                             interrupt-id (or (:interrupt-id existing)
                                              (str (java.util.UUID/randomUUID)))]
-                        (mem/park-approval! interrupt-id (cond-> {:thread-id thread-id
+                        (park-approval! interrupt-id (cond-> {:thread-id thread-id
                                                                   :tool-call-id id
                                                                   :name name :args arguments}
                                                            reason (assoc :reason reason)))
@@ -463,8 +552,8 @@
                   :error true})
 
              reason
-             (let [existing (mem/parked-for-call thread-id id)
-                   decision (when existing (mem/take-decision! (:interrupt-id existing)))]
+             (let [existing (parked-for-call thread-id id)
+                   decision (when existing (take-decision! (:interrupt-id existing)))]
                (case (:verdict decision)
                  :approved (do (report (ev/tool-pre-execute id name :approved []))
                                (execute))

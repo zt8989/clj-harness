@@ -45,11 +45,11 @@
             [harness.event :as ev]
             [harness.home :as home]
             [harness.llm :as llm]
-            [harness.memory :as mem]
             [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.replay :as replay]
+            [harness.tools :as tools]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
 
@@ -157,7 +157,7 @@
                           "cancelled" :vetoed
                           (throw (ex-info (str "unknown resume status: " status) {})))
                 id      (str interruptId)
-                rec     (mem/parked id)]
+                rec     (tools/parked id)]
             (when-not rec
               (throw (ex-info (str "unknown interrupt: " id) {})))
             {:interrupt-id id :verdict verdict :payload payload

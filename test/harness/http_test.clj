@@ -11,7 +11,6 @@
             [harness.fake :as fake]
             [harness.home :as home]
             [harness.http :as http]
-            [harness.memory :as mem]
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.replay :as replay]
@@ -452,8 +451,8 @@
                                        :arguments {:path path :content "written"}}]})
         _    (io/delete-file ok true)
         _    (io/delete-file veto true)
-        _    (mem/session-require-approval! "http-approve" "write")
-        _    (mem/session-require-approval! "http-veto" "write")]
+        _    (tools/session-require-approval! "http-approve" "write")
+        _    (tools/session-require-approval! "http-veto" "write")]
     (with-server
      8093
      {"http-approve" [(call ok) {:content "wrote it"}]
@@ -726,7 +725,7 @@
                                                    :arguments (json/write-str {:reasoning-effort "high"})}}
                                        id))
                {:keys [parked]} (call)]
-           (mem/decide-approval! (:interrupt-id parked) :approved {})
+           (tools/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session now serves the changed value"
            (is (= "high" (:reasoning-effort (providers/active-provider id)))))
@@ -763,7 +762,7 @@
                                                        :arguments (json/write-str {:reasoning-effort "low"})}}
                                            id))
                    {:keys [parked]} (call)]
-               (mem/decide-approval! (:interrupt-id parked) :approved {})
+               (tools/decide-approval! (:interrupt-id parked) :approved {})
                (call))
              (post-run 8102 id)
              (let [lines (wait-for-recorded
@@ -801,7 +800,7 @@
                                                    :arguments (json/write-str {:provider "beta"})}}
                                        id))
                {:keys [parked]} (call)]
-           (mem/decide-approval! (:interrupt-id parked) :approved {})
+           (tools/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session's served endpoint moved with the vendor"
            (let [a (providers/active-provider id)]

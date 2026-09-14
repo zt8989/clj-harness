@@ -7,7 +7,6 @@
             [harness.event :as ev]
             [harness.frames :as frames]
             [harness.llm :as llm]
-            [harness.memory :as mem]
             [harness.replay :as replay]
             [harness.wire :as wire]))
 

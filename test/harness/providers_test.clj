@@ -687,7 +687,7 @@
                                             :arguments (json/write-str args)}}
                                 thread-id))
         {:keys [parked]} (call)
-        _ (mem/decide-approval! (:interrupt-id parked) :approved {})]
+        _ (tools/decide-approval! (:interrupt-id parked) :approved {})]
     (call)))
 
 (defn- veto!
@@ -698,7 +698,7 @@
                                             :arguments (json/write-str args)}}
                                 thread-id))
         {:keys [parked]} (call)]
-    (mem/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
+    (tools/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
     (call)))
 
 (deftest session-configure-parks-rather-than-writing

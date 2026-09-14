@@ -10,7 +10,6 @@
             [harness.fake :as fake]
             [harness.llm :as llm]
             [harness.loop :as loop]
-            [harness.memory :as mem]
             [harness.tools :as tools]))
 
 (defn- echo-tool
