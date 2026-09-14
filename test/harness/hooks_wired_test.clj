@@ -17,6 +17,7 @@
             [harness.http :as http]
             [harness.providers :as providers]
             [harness.project :as project]
+            [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -220,3 +221,104 @@
          (testing "and both are structurally valid runs"
            (is (empty? (wire/violations with-hooks)))
            (is (empty? (wire/violations without)))))))))
+
+;; -------------------------------------------------------- PreToolUse, the gate
+
+(defn- gate-script [exit reason]
+  (let [dir (str (home/root) "/hook-scripts")]
+    (.mkdirs (io/file dir))
+    (let [f (io/file dir (str "gate-" exit ".sh"))]
+      (spit f (str "#!/bin/sh\ncat > /dev/null\necho \"" reason "\" >&2\nexit " exit "\n")
+            :encoding "UTF-8")
+      (.setExecutable f true)
+      (str f))))
+
+(deftest a-pretooluse-gate-can-refuse-a-call-and-the-model-is-told-why
+  (wipe!)
+  (write-hooks! {:pre-tool-use [{:command (gate-script 2 "no reads before breakfast")}]})
+  (with-server
+   8127 "hw-gate"
+   (fn []
+     (io/delete-file (log-file "hw-gate") true)
+     (let [resp (post-run 8127 "hw-gate")
+           frames (wire/frames-from-sse (.body resp))
+           results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+       (testing "the call is refused, and the REFUSAL is what the model reads"
+         (is (= 1 (count results)))
+         (is (str/includes? (:content (first results)) "blocked by a PreToolUse hook"))
+         (is (str/includes? (:content (first results)) "no reads before breakfast")))
+       (testing "the run is NOT a failure -- it carries on and ends normally"
+         (is (= "RUN_FINISHED" (:type (last frames))))
+         (is (empty? (wire/violations frames))))
+       (testing "the tool never ran: no :tool/execute for that call"
+         (let [ls (wait-for (log-file "hw-gate")
+                            (fn [ls] (some #(= "hook/PreToolUse" (:kind %)) ls))
+                            1500)]
+           (is (some? (first (filter #(= "hook/PreToolUse" (:kind %)) ls))))
+           (is (empty? (filter #(and (= "tools/execute" (:kind %))
+                                     (= "c1" (get-in % [:payload :toolCallId])))
+                               ls))
+               "a blocked call is never executed, so it leaves no execute line")))))))
+
+(deftest a-gate-that-allows-changes-nothing-about-the-run
+  (wipe!)
+  (write-hooks! {:pre-tool-use [{:command (gate-script 0 "fine")}]})
+  (with-server
+   8128 "hw-allow"
+   (fn []
+     (io/delete-file (log-file "hw-allow") true)
+     (let [frames (wire/frames-from-sse (.body (post-run 8128 "hw-allow")))
+           results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+       (testing "the tool really ran, with its real output"
+         (is (= 1 (count results)))
+         (is (str/includes? (:content (first results)) ":paths")))
+       (testing "and the run is well-formed end to end"
+         (is (= "RUN_STARTED" (:type (first frames))))
+         (is (= "RUN_FINISHED" (:type (last frames))))
+         (is (empty? (wire/violations frames))))))))
+
+(deftest the-verdict-is-audited-with-the-point-and-the-outcome
+  (wipe!)
+  (write-hooks! {:pre-tool-use [{:command (gate-script 2 "denied")}]})
+  (with-server
+   8129 "hw-audit"
+   (fn []
+     (io/delete-file (log-file "hw-audit") true)
+     (post-run 8129 "hw-audit")
+     (let [ls (wait-for (log-file "hw-audit")
+                        (fn [ls] (some #(= "hook/PreToolUse" (:kind %)) ls))
+                        1500)
+           hook-line (first (filter #(= "hook/PreToolUse" (:kind %)) ls))
+           pre (first (filter #(and (= "tools/pre-execute" (:kind %))
+                                    (= "c1" (get-in % [:payload :toolCallId])))
+                              ls))]
+       (testing "the hook line carries the point, the count and the folded verdict"
+         (is (= 1 (get-in hook-line [:payload :matched])))
+         (is (= "block" (get-in hook-line [:payload :verdict])))
+         (is (= "denied" (get-in hook-line [:payload :reason]))))
+       (testing "and the seam says hook-blocked -- a NEW outcome, documented, not an unknown"
+         (is (= "hook-blocked" (get-in pre [:payload :outcome]))))))))
+
+(deftest a-disabled-tool-is-refused-without-asking-the-gate
+  ;; The ordering claim: "switched off" has to mean no work happens, so the gate
+  ;; must not be spawned for a call that can never run.
+  (wipe!)
+  (let [marker (str (home/root) "/hooks-fired.txt")]
+    (write-hooks! {:pre-tool-use [{:command (marker-script marker "gate")}]})
+    (tools/session-disable! "hw-disabled" "read")
+    (try
+      (with-server
+       8130 "hw-disabled"
+       (fn []
+         (io/delete-file (log-file "hw-disabled") true)
+         (post-run 8130 "hw-disabled")
+         (let [ls (wait-for (log-file "hw-disabled")
+                            (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
+                            1500)]
+           (testing "the call is refused as disabled"
+             (let [pre (first (filter #(= "tools/pre-execute" (:kind %)) ls))]
+               (is (= "disabled" (get-in pre [:payload :outcome])))))
+           (testing "and the gate never ran -- not even its audit line"
+             (is (empty? (filter #(= "hook/PreToolUse" (:kind %)) ls)))
+             (is (not (.exists (io/file marker))))))))
+      (finally (tools/session-enable! "hw-disabled" "read")))))

@@ -437,6 +437,17 @@
     :out-of-bounds
     :else nil))
 
+(defn- hook-block-message
+  "What the model is told when a PreToolUse hook refused the call. Exactly the
+  shape of a veto message, because it IS one: the call was stopped before it ran
+  and the reason is information, not a run failure -- the loop carries on and the
+  model gets to try something else. The only difference is who said no, and it
+  says who: a model that reads \"a human vetoed this\" will stop asking for
+  things, while one that reads \"a hook blocked this\" knows to look at the rule."
+  [reason]
+  (str "blocked by a PreToolUse hook: the call was not executed."
+       (when (seq (str reason)) (str " reason: " reason))))
+
 (defn- veto-message
   "What the model is told when a human vetoed the call. It is information, not a
   failure of the run: the loop carries on with this as the tool's answer."
@@ -559,9 +570,28 @@
                  ;; the call is the human's until they answer.
                  (park reason)))
 
+             ;; THE GATE, last of the refusals. Everything above is this harness
+             ;; deciding; this is the user's own rulebooks deciding, and it comes
+             ;; after them on purpose:
+             ;;   - a DISABLED tool is refused without spawning anything, which is
+             ;;     what "switched off" has to mean to be worth the word;
+             ;;   - a call missing an argument would be refused by the command
+             ;;     too, and asking a hook to judge a call that cannot run wastes
+             ;;     the hook and muddies the reason the model reads;
+             ;;   - a call already PARKED is the human's, and a hook cannot
+             ;;     overrule them -- PermissionRequest is the point that speaks to
+             ;;     a parked call, and it is the next ticket's.
+             ;; The verdict here is :allow or :block. The third outcome a hook
+             ;; could express -- "stop and ask a human" -- is not a hook's to
+             ;; give yet; today a gate either lets a call through or refuses it.
              :else
-             (do (report (ev/tool-pre-execute id name :pass []))
-                 (execute))))
+             (let [gate (hook/emit :pre-tool-use {:tool_name name :tool_input parsed})]
+               (if (= :block (:verdict gate))
+                 (do (report (ev/tool-pre-execute id name :hook-blocked []))
+                     (report (ev/tool-post-execute id name))
+                     {:content (hook-block-message (:reason gate)) :error true})
+                 (do (report (ev/tool-pre-execute id name :pass []))
+                     (execute))))))
          (catch Throwable t
            ;; A malformed argument payload dies before the pass branch even
            ;; starts; the lifecycle still closes on the seam's own terms.

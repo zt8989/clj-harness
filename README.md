@@ -6,7 +6,8 @@
 
 - `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
 - `src/harness/llm.clj` — provider 协议层（一个 multimethod，按 `:protocol` 分派）**加 system prompt 的载体**：`prompt.md` 首调读入即冻结，热改需 `(llm/reset-prompt!)` 或重启。冻结点在这里而不是别处，因为理由就是 provider 的前缀缓存
-- `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。**没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
+- `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。
+**没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
 - `src/harness/shell.clj` — 唯一决定 spawn 哪个 shell 的地方（Windows 上按绝对路径钉 Git Bash，避免被 System32 的 WSL 启动器静默吞掉），以及带上 stdin 与超时的运行方式。bash 工具与 hook 引擎共用它：那个坑是机器的属性，不是调用方的
 - `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
 - `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
@@ -208,7 +209,9 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
  :stop          [{:command "scripts/notify.sh"}]}
 ```
 
-**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的只有三个观察者点**：`SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）。其余的点声明了就永不触发——这是设计，不是遗漏：门禁（`PreToolUse`）与审批（`PermissionRequest`）在接下来的票里接线，P3 的点等各自的子系统。
+**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有四个**：三个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）；一个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）。其余的点声明了就永不触发——这是设计，不是遗漏：审批代答（`PermissionRequest`）在下一票，P3 的点等各自的子系统。
+
+**门禁的次序是写死的**（`harness.tools/run!`）：被**关闭**的工具先被硬拒、**不过 PreToolUse**——「关掉」要真的一点活都不干，包括不问 hook；**缺参数**的调用也不问（命令自己会拒，问了只是把模型读到的理由搅浑）；**已 park** 的调用是人的，hook 不能推翻（那是 `PermissionRequest` 的活）。工具被 hook 拒绝时，`tools/pre-execute` 的 `outcome` 是 **`hook-blocked`**，工具结果里明说是 hook 拦的、以及 hook 自己写的理由。
 
 **契约**：命令经钉住的 Git Bash spawn，payload 走 **stdin JSON**（`{hook, thread_id, project_dir, ...}`，键名 snake_case 按 payload 约定）；退出码 **0 = 放行，2 = 阻断（stderr 即理由，回喂给模型）**，其他非零按点定的失败语义（门禁 `:block`、观察者 `:proceed`）——**超时与起不来的命令也走这一条**：没能替你判断不等于判断为是。超时与崩溃都不炸 run。
 
