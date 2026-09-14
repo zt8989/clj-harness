@@ -102,6 +102,23 @@
 
 (def ^:private error-style {:color "#cf1322" :flex-basis "100%"})
 
+;; A flex row whose children act as the PARENT's flex items: `display: contents`
+;; drops the box and leaves the controls as siblings of the label, which is what
+;; a fragment would do. It is a real element, so it cannot go missing the way a
+;; fragment expression can (below).
+(def ^:private controls-style {:display "contents"})
+
+;; Shared by both panels: the quiet button (session 刷新/新建会话, project
+;; 选择文件夹…). Defined here because the project panel uses it first.
+(def ^:private ghost-style
+  {:border "1px solid #d9d9d9"
+   :background "#fff"
+   :color "#1677ff"
+   :padding "2px 10px"
+   :border-radius 6
+   :cursor "pointer"
+   :font-size 12})
+
 (defn- fetch-binding!
   "GET /api/project for THREAD-ID. on-ok receives the dir string (nil = the
   unbound answer, not an error); on-error receives a message string."
@@ -131,13 +148,36 @@
                               (on-error (or (.-error data) "绑定失败"))))))))
       (.catch (fn [^js e] (on-error (.-message e))))))
 
+(defn- pick-dir!
+  "POST /api/project/pick -- opens the OS folder dialog on the machine the
+  harness runs on and answers the chosen absolute path, or nil when the human
+  cancels. The browser cannot supply this itself: a web file input hands back a
+  File with no real location, so the dialog has to belong to the process.
+
+  Nothing binds here. The path lands in the input for the human to see and
+  confirm, so picking a folder is a way to FILL the field, not a second way to
+  mutate a binding."
+  [on-ok on-error]
+  (-> (js/fetch (str harness-url "/api/project/pick") #js {:method "POST"})
+      (.then (fn [^js resp]
+               (-> (.json resp)
+                   (.then (fn [^js data]
+                            (if (.-ok resp)
+                              (on-ok (.-dir data))
+                              (on-error (or (.-error data) "打开目录选择器失败"))))))))
+      (.catch (fn [^js e] (on-error (.-message e))))))
+
 (defnc project-panel
-  "One row above the chat: the thread's bound project directory, and an input
-  to bind one. The thread id is read off the AGENT (`.-threadId`) -- the agent
+  "One row above the chat: the thread's bound project directory, and the ways to
+  bind one. The thread id is read off the AGENT (`.-threadId`) -- the agent
   is a native AG-UI object, so `.-field` interop is correct here; the
   keyword-destructuring rule in message-view applies to COMPONENT PROPS, which
   this component has none of. No thread yet (before the first message) means
-  nothing to bind and the panel says so."
+  nothing to bind and the panel says so.
+
+  Binding is one route with two ways to fill it: type a path, or pick one from
+  the native dialog. Both end at the same POST, so the padlock -- one route that
+  mutates a binding -- stays a single route."
   []
   (let [^js ctx   (useAgent #js {:agentId "default"
                                  ;; OnMessagesChanged so a session restore (setMessages)
@@ -148,7 +188,8 @@
         thread-id (.-threadId agent)
         [bound set-bound] (hooks/use-state nil)
         [path set-path]   (hooks/use-state "")
-        [error set-error] (hooks/use-state nil)]
+        [error set-error] (hooks/use-state nil)
+        [picking set-picking] (hooks/use-state false)]
 
     ;; A new threadId (first run, or a fresh conversation after a stop) is a
     ;; different session with its own binding -- re-read, never guess.
@@ -158,30 +199,68 @@
         (fetch-binding! thread-id set-bound set-error)
         (set-bound nil)))
 
-    ($ :div {:style panel-style}
-       ($ :span {:style {:font-weight 600}} "项目目录")
-       (cond
-         (not (seq thread-id))
-         ($ :span {:style muted-style} "会话开始后可绑定项目目录")
+    ;; One bind, from either route. The reply carries the ABSOLUTE path the
+    ;; server stored, so the display is set from the answer rather than from a
+    ;; re-read -- and an in-progress path that does not match is never shown.
+    (let [bind!
+          (fn []
+            (if-not (seq path)
+              (set-error "请先输入项目目录路径，或点「选择文件夹…」")
+              (bind-dir! thread-id path
+                         (fn [dir]
+                           (set-error nil)
+                           (set-bound dir)
+                           (set-path ""))
+                         set-error)))
 
-         :else
-         ($ :span (or bound "未绑定（相对路径按进程工作目录解析）")))
-       (when (seq thread-id)
-         ($ :input {:style input-style
-                    :placeholder "输入项目目录的绝对路径，例如 C:\\Users\\me\\my-project"
-                    :value path
-                    :on-change (fn [^js e] (set-path (.. e -target -value)))})
-         ($ :button {:style bind-style
-                     :on-click (fn [_]
-                                 (when (seq path)
-                                   (bind-dir! thread-id path
-                                              (fn [_]
-                                                (set-error nil)
-                                                (set-path ""))
-                                              set-error)))}
-            "绑定"))
-       (when error
-         ($ :span {:style error-style} error)))))
+          pick!
+          (fn []
+            (set-picking true)
+            (set-error nil)
+            (pick-dir! (fn [dir]
+                         (set-picking false)
+                         (if (seq dir)
+                           (set-path dir)
+                           (set-error "已取消选择")))
+                       (fn [msg]
+                         (set-picking false)
+                         (set-error msg))))]
+
+      ($ :div {:style panel-style}
+         ($ :span {:style {:font-weight 600}} "项目目录")
+         (cond
+           (not (seq thread-id))
+           ($ :span {:style muted-style} "会话开始后可绑定项目目录")
+
+           :else
+           ($ :span (or bound "未绑定（相对路径按进程工作目录解析）")))
+         ;; The input and its two buttons MUST sit in one child position. `when`
+         ;; takes any number of body forms but RETURNS ONLY THE LAST, so
+         ;; `(when c ($ :input ...) ($ :button ...))` silently drops the input and
+         ;; renders the button -- which is exactly how this shipped, and why the
+         ;; field was missing while 绑定 was right there. The wrapper is what gives
+         ;; them a single position; `display: contents` keeps them laid out as the
+         ;; panel's own flex items.
+         ;;
+         ;; Not a `<>` fragment: under this build helix's fragment macro compiles to
+         ;; a reference to `helix.core/<>`, which has no runtime var behind it, so it
+         ;; arrives at React as `undefined` ("Element type is invalid").
+         (when (seq thread-id)
+           ($ :div {:style controls-style}
+              ($ :input {:style input-style
+                         :placeholder "项目目录的绝对路径，例如 /Users/me/my-project"
+                         :value path
+                         :on-change (fn [^js e] (set-path (.. e -target -value)))})
+              ($ :button {:style bind-style
+                          :disabled picking
+                          :on-click (fn [_] (bind!))}
+                 "绑定")
+              ($ :button {:style ghost-style
+                          :disabled picking
+                          :on-click (fn [_] (pick!))}
+                 (if picking "选择中…" "选择文件夹…"))))
+         (when error
+           ($ :span {:style error-style} error))))))
 
 ;; ---------------------------------------------------------------- session panel
 
@@ -191,15 +270,6 @@
    :align-items "center"
    :font-size 12
    :flex-basis "100%"})
-
-(def ^:private ghost-style
-  {:border "1px solid #d9d9d9"
-   :background "#fff"
-   :color "#1677ff"
-   :padding "2px 10px"
-   :border-radius 6
-   :cursor "pointer"
-   :font-size 12})
 
 (defn- fmt-bytes [n]
   (cond
@@ -225,8 +295,13 @@
   "POST /api/threads/<stem>/rebuild, then hand the conversation back to the
   CLIENT: the rebuilt thread id and message list both land on the AGENT, which
   is exactly what the next run reads. A 400 (truncated or corrupt log) carries
-  the server's named reason to on-error -- the panel stays alive either way."
-  [agent thread-id on-ok on-error]
+  the server's named reason to on-error -- the panel stays alive either way.
+
+  `^js` on AGENT: both writes below are interop on a native AG-UI object, and
+  without the hint each one draws an infer-warning. `setMessages` in particular
+  is a METHOD (`(.setMessages agent ..)`), so an untyped agent leaves the
+  compiler guessing what it is calling."
+  [^js agent thread-id on-ok on-error]
   (-> (js/fetch (str harness-url "/api/threads/" (js/encodeURIComponent thread-id) "/rebuild")
                 #js {:method "POST"})
       (.then (fn [^js resp]
@@ -333,8 +408,15 @@
   ;; a nested Clojure map would arrive as a PersistentArrayMap. CopilotKit finds its
   ;; agents with `Object.keys({...agents})`, and spreading a Clojure map yields none of
   ;; its entries -- so it reads the registry as empty and throws a ConfigurationError.
+  ;;
+  ;; enableInspector false: that dev tool is a fixed-position overlay pinned to the
+  ;; viewport's top-right corner, which is exactly where the panels above the chat
+  ;; live. It swallows clicks aimed at whatever it floats over -- the
+  ;; 选择文件夹… button, when the window has room for one -- and this app never
+  ;; uses it. Off, rather than moved: it is CopilotKit's, not ours to place.
   ($ CopilotKit {:agents__unsafe_dev_only #js {:default agent}
-                 :renderToolCalls tool-renderers}
+                 :renderToolCalls tool-renderers
+                 :enableInspector false}
      ;; Column layout: the project panel takes its natural height, the chat
      ;; takes the rest. ApprovalGate renders nothing itself -- it MOUNTS here
      ;; so its useInterrupt registers inside the CopilotKit context, and the

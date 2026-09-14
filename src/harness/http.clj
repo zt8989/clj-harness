@@ -1,8 +1,9 @@
 (ns harness.http
   "The AG-UI edge. One POST endpoint, SSE out, CORS so a browser app on :5173 can call
   it directly (there is no proxy in front of us). Alongside it, a small management
-  edge of plain JSON endpoints -- currently /api/project, the session's
-  project-directory binding -- sharing the same CORS and logging.
+  edge of plain JSON endpoints -- /api/project, the session's project-directory
+  binding, plus /api/project/pick, the OS folder dialog that feeds it -- sharing
+  the same CORS and logging.
 
   Also append-only JSONL logging: one file per thread, these line kinds.
 
@@ -331,6 +332,56 @@
           [(java.net.URLDecoder/decode k "UTF-8")
            (java.net.URLDecoder/decode (or v "") "UTF-8")])))
 
+(defn- osascript-directory!
+  "macOS's native folder dialog, as a string path or nil when the human
+  cancels. The browser cannot hand us an absolute path -- a web file input
+  gives a File object with no real location -- so the dialog runs where the
+  process actually lives. It is drawn by the app that owns the window, not by
+  the browser: osascript owns its own window and does not need to borrow the
+  user's focus from whatever they are typing in.
+
+  Output is decoded UTF-8 EXPLICITLY rather than through `slurp`: Java 17 on
+  this machine defaults to GBK, so an implicit byte->String here would mangle
+  any directory whose name is not ASCII. The same reason `api-response` writes
+  bytes, one direction over.
+
+  Any failure -- osascript missing, the script refused, a dialog we cannot
+  answer -- comes back as nil, which the endpoint reports as a cancellation.
+  A picker that cannot open is not worth failing a request over."
+  []
+  (try
+    (let [proc (-> (ProcessBuilder. ["osascript" "-e"
+                                     "POSIX path of (choose folder with prompt \"选择一个项目目录 -- select a project directory\")"])
+                   (.redirectErrorStream true)
+                   (.start))
+          out  (String. (.readAllBytes (.getInputStream proc)) StandardCharsets/UTF_8)
+          code (.waitFor proc)]
+      (when (and (zero? code) (seq (str/trim out)))
+        (str/trim out)))
+    (catch Throwable _ nil)))
+
+(def ^:dynamic *directory-chooser*
+  "The picker itself, as a seam. Tests BIND this to a stub: the real one opens
+  a window and waits for a human, which no test run may do. Production leaves
+  it at the real dialog -- a var holding the default, exactly like
+  harness.home/*root-override* is a var holding a test override."
+  osascript-directory!)
+
+(defn- project-pick
+  "POST /api/project/pick -- open the native folder dialog and answer the
+  chosen absolute path, or {:dir nil} when the human cancels. A question asked
+  with POST because the call has a side effect the human sees: a window opens,
+  which is not something a cache or a prefetch may trigger.
+
+  Nothing is bound here. The client takes the path, shows it, and binds it
+  through the ordinary /api/project POST -- so there is exactly ONE route that
+  mutates a binding, and picking a folder leaves no trace of its own."
+  [_req]
+  (let [dir (*directory-chooser*)]
+    (if (str/blank? dir)
+      (api-response 200 {:dir nil})
+      (api-response 200 {:dir dir}))))
+
 (defn- project-get
   "GET /api/project?threadId=.. -- the thread's bound project directory, or
   {:dir nil} for an unbound thread. Unbound is an answer, not an error."
@@ -463,6 +514,11 @@
     (= "/api/model" (:uri req))
     (case (:request-method req)
       :get  (model-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/project/pick" (:uri req))
+    (case (:request-method req)
+      :post (project-pick req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/project" (:uri req))

@@ -12,6 +12,7 @@
             [harness.home :as home]
             [harness.http :as http]
             [harness.memory :as mem]
+            [harness.project :as project]
             [harness.replay :as replay]
             [harness.tools :as tools]
             [harness.wire :as wire])
@@ -942,6 +943,68 @@
        (is (not (contains? body :input)) "nothing was declared, so nothing is claimed")
        (is (not (contains? body :output)))
        (is (not (contains? body :provider)) "and no provider was named")))))
+
+(deftest the-directory-picker-answers-but-binds-nothing
+  ;; The picker exists because a browser has no absolute path to give: the file
+  ;; dialog runs on the machine the harness lives on. It is a FILLER, not a
+  ;; second way to mutate a binding -- so the binding it feeds is asserted to
+  ;; be the ordinary POST's doing, with the ordinary audit line.
+  ;; The chooser is stubbed for the whole test: the real one opens a window and
+  ;; waits for a human, which a test run must never do. `alter-var-root`, NOT
+  ;; `binding` -- a dynamic binding does not cross threads, and the server that
+  ;; calls the chooser is running on its own thread, so a `binding` here would
+  ;; leave the real dialog wired up and the stub silently unused (the config-home
+  ;; ticket hit exactly this; see test_runner's root override).
+  (doseq [d [project-dir-2]]
+    (doseq [f (reverse (file-seq (io/file d)))]
+      (io/delete-file f true))
+    (.mkdirs (io/file d)))
+  (let [stub! (fn [f] (alter-var-root #'http/*directory-chooser* (constantly f)))
+        real  http/*directory-chooser*]
+    (try
+      (with-server
+       8111
+       "it-pick"
+       (fn []
+         (let [tid (str "pick-" (java.util.UUID/randomUUID))]
+           (testing "picking answers the chosen absolute path"
+             (stub! (fn [] project-dir-2))
+             (let [resp (api-call 8111 :post "/api/project/pick" nil)]
+               (is (= 200 (.statusCode resp)))
+               (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
+               (is (= project-dir-2 (:dir (read-json resp))))))
+           (testing "cancelling is an answer (dir nil), not an error"
+             (stub! (fn [] nil))
+             (let [resp (api-call 8111 :post "/api/project/pick" nil)]
+               (is (= 200 (.statusCode resp)))
+               (is (= {:dir nil} (read-json resp)))))
+           (testing "a blank answer reads as a cancel too"
+             (stub! (fn [] "   "))
+             (is (= {:dir nil} (read-json (api-call 8111 :post "/api/project/pick" nil)))))
+           (testing "GET is refused -- this call opens a window, so it is not cacheable"
+             (is (= 405 (.statusCode (api-call 8111 :get "/api/project/pick" nil)))))
+           (testing "picking binds NOTHING: the ordinary POST is still the only route"
+             (stub! (fn [] project-dir-2))
+             ;; Compare directories by IDENTITY, not by spelling. Two honest
+             ;; differences are in play: `java.io.tmpdir` ends in a slash on
+             ;; macOS, so the constant spells a doubled one and bind! normalizes
+             ;; it; and /var is a symlink to /private/var, which canonicalization
+             ;; chases and `bind!` deliberately does not (it keeps what was asked
+             ;; for -- see harness.project/absolute). Neither is what this test is
+             ;; about; the session landing in that directory is.
+             (let [canonical (fn [p] (.getCanonicalPath (io/file p)))
+                   picked    (:dir (read-json (api-call 8111 :post "/api/project/pick" nil)))]
+               (is (= (canonical project-dir-2) (canonical picked))
+                   "the picker hands back the directory it was told to")
+               (is (nil? (project/binding-for tid)) "no binding until the POST lands")
+               (is (= 200 (.statusCode (api-call 8111 :post "/api/project"
+                                                 (json/write-str {:threadId tid :dir picked})))))
+               (is (= (canonical picked) (canonical (project/binding-for tid)))
+                   "binding lands the session in that same directory")
+               (let [bounds (bound-lines tid)]
+                 (is (= 1 (count bounds)) "exactly one audit line, from the POST")
+                 (is (= "http" (get-in (first bounds) [:payload :via])))))))))
+      (finally (alter-var-root #'http/*directory-chooser* (constantly real))))))
 
 (deftest rebinding-moves-the-root-and-lands-a-timeline
   ;; Ticket 04: rebinding an already-bound thread is the ordinary case --

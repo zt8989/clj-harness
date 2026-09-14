@@ -192,6 +192,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 - `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
 - `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"]}`——**这个会话现在服务的模型收什么、出什么**，给客户端决定要不要显示图片选择器用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
+- `POST /api/project/pick` → 打开**操作系统原生目录选择框**，答 `{:dir <绝对路径|null>}`（取消即 null，不是错误）。存在的理由：浏览器给不出绝对路径（web file input 只给无真实位置的 File 对象），所以对话框必须跑在 harness 所在的机器上；它由拥有窗口的进程自己绘制，**不抢用户当前的焦点**。用 POST 而非 GET——这个调用有人可见的副作用（开窗），不该被缓存或预取触发。**它不绑定任何东西**：路径回给客户端填进输入框，绑定仍走下面那个唯一的 POST，所以「会改绑定的路由」永远只有一条，选择动作自身不留痕。`harness.http/*directory-chooser*` 是测试缝（真实弹窗要等人，测试里换 stub；`alter-var-root` 而非 `binding`——服务在别的线程上调它）。
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:before <绝对路径|null> :after <绝对路径> :via "http"}`（04 号票，对齐 provider/changed 的 before→after 风格；首次绑定 before 为 null），`runId` 为 null（绑定发生在任何 run 之外）。**对已绑定 thread 重新绑定 = 同一入口的普通调用**：路径解析立即切到新目录，审计行带 before/after，目录变更时间线直接从日志可读；读者以最后一行为准。绑定变更是 CwdChanged hook 点的事件源——payload 形态由 `harness.project/cwd-changed` 锁定（`{:hook "CwdChanged" :thread_id .. :project_dir .. :before ..}`，snake_case 对齐 hook payload 约定），hook 引擎（P2）接线时在变更点直接消费。
 
 ### 图片输入
@@ -211,7 +212,7 @@ AG-UI 入站                                  出网（OpenAI 兼容 chat-comple
 
 **模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，消息里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。**未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的部署开始失败于一条没人写下来的规则。**性质是流程纪律，不是安全边界**——`config.edn` 给一个纯文本模型写 `:input #{:text :image}` 照样打得出去，这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
-agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。
+agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + **选择文件夹…** + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。两条填充路径（手输 / 原生选择框）汇到同一个 POST；空输入点绑定会就地提示而不是静默无声。面板的输入与两个按钮必须包在一个 `display:contents` 的 wrapper 里——`when` 只返回**最后一个** body 形式，`(when c ($ :input ..) ($ :button ..))` 会把输入框静默丢掉（这个 bug 真的上过线）。
 
 ### `.harness/harness.edn` 装配（03 号票）
 
