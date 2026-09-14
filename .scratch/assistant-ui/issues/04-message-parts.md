@@ -157,7 +157,7 @@ cards:  ["write · Done", "bash · Done"]
 | 命令 | 结果 |
 |---|---|
 | `npm run typecheck` | 0 error |
-| `npm run build` | 全绿，CSS 83.85 kB / JS 1244.96 kB（gzip 353.51 kB）。比 03 的 1240.87 kB 多 4.1 kB，就是这张卡 |
+| `npm run build` | 全绿，CSS 83.85 kB / JS 1244.98 kB（gzip 353.52 kB）。比 03 的 1240.87 kB 多 4.1 kB，就是这张卡 |
 | `npm test` | **11 passed**，四组用例的内容一行未改（第 11 节修正后重跑，同样 11 passed） |
 
 真 Chromium（1440×900、light），两台后端都跑过：
@@ -244,7 +244,7 @@ cards:  ["write · Done", "bash · Done"]
 ### 11. 复议（`/code-review` 两条轴）与一处跟进修正
 
 本票的改动过了 `/code-review` 的两条轴：**Standards 轴**无仓库既有标准的硬违规，**Spec 轴**抓到一处
-真问题。改掉了一处，另两处判为保留，理由都在下面。
+真问题。改掉了两处，另两处判为保留，理由都在下面。
 
 **（已改）同一张卡可能把同一次失败说两遍。** 卡同时渲染上游的 `ToolFallbackError`（它读 `status.error`）
 和自写的 `ToolCallResult`。两者分工本来是清楚的：前者说「为什么没跑完」，后者说「拿到了什么」。但自写
@@ -261,10 +261,14 @@ cards:  ["write · Done", "bash · Done"]
 这一支只影响「没跑完」的调用。**工具自身报错不受影响**：那是第 2 节那条反直觉的边界（`Done` +
 一段错误文本，`status.type` 是 `complete`），错误块此时根本不开口，标题仍是 `Error:`——与改动前逐字一致。
 
-**（已改）图标映射的类型名指向了一个具体图标。** 原写成 `Record<CallState, typeof LoaderIcon>`——拿
-`LoaderIcon` 一个图标的名字当五个图标的类型，说不通。改为 `ElementType`，顺带与上游自己的
-`statusIconMap: Record<ToolStatus, React.ElementType>` 写法一致。（查过 `lucide-react@1.46` 并**不**导出
-`LucideIcon` 这个类型，所以那不是个能选的选项。）
+**（已改）状态的两个映射是一对并列的表，且图标那张的类型名指向了一个具体图标。** 原写法是两张同键的
+`Record<CallState, ...>`（词一张、图标一张），图标那张的类型写成 `typeof LoaderIcon`——拿 `LoaderIcon`
+一个图标的名字当五个图标的类型，说不通。两处并成一改：五态合成**一张**
+`CALL_STATES: Record<CallState, { label, icon }>`，一个状态不再可能只拿到词、拿不到图标；类型随之落到
+`ElementType`，顺带与上游自己的 `statusIconMap: Record<ToolStatus, React.ElementType>` 写法一致。
+（查过 `lucide-react@1.46` 并**不**导出 `LucideIcon` 这个类型，所以那不是个能选的选项。）这次是纯结构
+改动，词与图标逐个照搬而不是重打：`git diff` 可逐字核对，构建产物的 CSS 哈希未变、JS 只差 0.02 kB，
+所以没有为此重截任何截图。
 
 **（未改）`ToolCallsGroup` / `ReasoningBlock` 各有一行同形的 `const running = group.status.type ===
 "running"`。** 看着像重复，实际是分属两个槽位的两个独立组件，为一个两行的推导抽公共件，换来的间接层

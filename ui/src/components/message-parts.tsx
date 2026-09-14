@@ -89,10 +89,7 @@ import { cn } from "@/lib/utils";
 
 // ------------------------------------------------------------- tool call card
 
-/// Every state a tool call can be in, in the words the card uses. Upstream draws
-/// the same four states as icons only; this repo spells them out because a
-/// checkmark and a cross are easy to miss and a card whose state is implied is a
-/// card whose state gets misread.
+/// The vocabulary the card draws from: every state a tool call can be in.
 type CallState =
   | "running"
   | "done"
@@ -100,23 +97,24 @@ type CallState =
   | "cancelled"
   | "needs-approval";
 
-const CALL_STATE_LABELS: Record<CallState, string> = {
-  running: "Running",
-  done: "Done",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  "needs-approval": "Needs approval",
-};
-
-/// Typed `ElementType` rather than `typeof LoaderIcon`: the map holds five
-/// different icons, and naming one of them as the type of all of them says the
-/// wrong thing. It is also what upstream's own `statusIconMap` is typed as.
-const CALL_STATE_ICONS: Record<CallState, ElementType> = {
-  running: LoaderIcon,
-  done: CheckIcon,
-  failed: XCircleIcon,
-  cancelled: XCircleIcon,
-  "needs-approval": AlertCircleIcon,
+/// How each state is drawn: the word and the mark, in one table. Two parallel
+/// `Record<CallState, ...>`s would say the same thing in two places; here a
+/// state cannot gain a word without a mark.
+///
+/// Upstream draws these states as icons only. This repo spells them out as well,
+/// because a checkmark and a cross are easy to miss and a card whose state is
+/// implied is a card whose state gets misread.
+///
+/// The icons are typed `ElementType` rather than `typeof LoaderIcon`: the table
+/// holds five different icons, and naming one of them as the type of all of them
+/// says the wrong thing. It is also what upstream's own `statusIconMap` is typed
+/// as, and `lucide-react@1.46` exports no `LucideIcon` to reach for instead.
+const CALL_STATES: Record<CallState, { label: string; icon: ElementType }> = {
+  running: { label: "Running", icon: LoaderIcon },
+  done: { label: "Done", icon: CheckIcon },
+  failed: { label: "Failed", icon: XCircleIcon },
+  cancelled: { label: "Cancelled", icon: XCircleIcon },
+  "needs-approval": { label: "Needs approval", icon: AlertCircleIcon },
 };
 
 /// The state, read from the two places that report one.
@@ -165,7 +163,7 @@ const ToolCallTrigger: FC<{ toolName: string; state: CallState }> = ({
   state,
 }) => {
   const elapsedMs = useToolCallElapsed();
-  const Icon = CALL_STATE_ICONS[state];
+  const { label, icon: Icon } = CALL_STATES[state];
   const isRunning = state === "running";
 
   return (
@@ -192,7 +190,7 @@ const ToolCallTrigger: FC<{ toolName: string; state: CallState }> = ({
         <b className="aui-tool-call-trigger-name break-all">{toolName}</b>
         <span className="aui-tool-call-trigger-state">
           {" · "}
-          {CALL_STATE_LABELS[state]}
+          {label}
         </span>
       </span>
       {elapsedMs !== undefined && (
