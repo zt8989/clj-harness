@@ -553,6 +553,9 @@
   Two vendors with DIFFERENT endpoints, so a test can see a vendor switch move
   the endpoint rather than only the model id -- and OPPOSITE declarations, alpha
   taking images and beta not, so the input guard has a yes and a no to work with.
+  Their models also carry DIFFERENT token counts, so that the answer followed the
+  model is testable for the counts too, and one alpha model declares none at all,
+  which is the entry that makes 'silence is not zero' testable.
 
   Used by the tests below. A pinned provider skips resolution, and the provider
   timeline is precisely about resolution, so these must not pin."
@@ -568,11 +571,20 @@
       (spit reg-file
             (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
                              :model "alpha-small"
-                             :models {"alpha-small" {:input #{:text :image} :output #{:text}}
-                                      "alpha-big"   {:input #{:text :image} :output #{:text}}}}
+                             :models {"alpha-small" {:input #{:text :image} :output #{:text}
+                                                     :context-window 200000
+                                                     :max-output-tokens 8192}
+                                      "alpha-big"   {:input #{:text :image} :output #{:text}
+                                                     :context-window 1000000
+                                                     :max-output-tokens 64000}
+                                      ;; Declares no counts at all -- the entry that
+                                      ;; makes 'silence is not zero' testable.
+                                      "alpha-bare"  {:input #{:text} :output #{:text}}}}
                      :beta  {:protocol :fake :base-url "https://y/v1"
                              :model "beta-plain"
-                             :models {"beta-plain" {:input #{:text} :output #{:text}}}}})
+                             :models {"beta-plain" {:input #{:text} :output #{:text}
+                                                    :context-window 128000
+                                                    :max-output-tokens 4096}}}})
             :encoding "UTF-8")
       (f)
       (finally
@@ -611,6 +623,35 @@
            (is (nil? (error (.body (post-run 8088 id image))))))
          (finally (stop) (mem/set-override! id nil)))))))
 
+(deftest a-run-naming-a-count-is-refused-rather-than-silently-dropped
+  ;; The third entry, over the real edge. A run may name the three knobs; naming a
+  ;; model's counts there is a mistake, and the honest answer is a terminated run
+  ;; that says which field it could not use -- not a run that starts, ignores it,
+  ;; and reports success. The client learns the same way it learns about a bad
+  ;; model id: a RUN_ERROR frame naming the offending field.
+  (with-resolved-config
+   [{:content "unreachable"}]
+   (fn []
+     (let [id    "http-count-in"
+           stop  (http/start! {:port 8089})
+           error (fn [body]
+                   (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
+                                   (when (= "RUN_ERROR" (:type f)) f))
+                                (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
+       (try
+         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (let [e (error (.body (post-run 8089 id {:provider {:context-window 200000}})))]
+           (is (some? e) "the run is terminated rather than served with the field dropped")
+           (is (str/includes? (:message e) "context-window") "the field is named")
+           (is (str/includes? (:message e) "providers.edn")
+               "and the run says where it belongs instead"))
+         (testing "and nothing was resolved or recorded for it"
+           (is (nil? (mem/override-for id)))
+           (let [lines (str/split-lines (slurp (io/file (log-dir) (str id ".jsonl")) :encoding "UTF-8"))]
+             (is (not-any? #(str/includes? % "provider/init") lines)
+                 "a run that could not resolve writes no init line")))
+         (finally (stop)))))))
+
 (deftest the-provider-timeline-is-init-once-then-changes
   ;; Ticket 03, over the real edge. A session's provider history lands as
   ;; exactly one init line and one line per change -- never a snapshot per run.
@@ -641,6 +682,9 @@
                (is (= "https://x/v1" (:base-url p)))
                (is (= ["image" "text"] (:input p)) "the model's modalities, as wire strings")
                (is (= ["text"] (:output p)))
+               (is (= 200000 (:context-window p))
+                   "and the model's counts, recorded rather than left to be re-derived")
+               (is (= 8192 (:max-output-tokens p)))
                (is (= "default" (:source p)))
                (is (= "stripped" (:api-key p)))))
            ;; The endpoint above is RECORDED, not re-derived: the catalog can
@@ -775,7 +819,10 @@
                "and is not an empty change -- which is what the old shape wrote")
            (is (= "https://y/v1" (get-in changed [:resolved :base-url]))
                "with the endpoint that vendor resolves to")
-           (is (= "beta-plain" (get-in changed [:resolved :model]))))
+           (is (= "beta-plain" (get-in changed [:resolved :model])))
+           (testing "and the counts moved with the model, not left at alpha's"
+             (is (= 128000 (get-in changed [:resolved :context-window])))
+             (is (= 4096 (get-in changed [:resolved :max-output-tokens])))))
          (finally (stop) (mem/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
@@ -901,6 +948,11 @@
              (is (= "https://x/v1" (:base-url body)) "the resolved endpoint")
              (is (= ["image" "text"] (:input body)) "the modalities, sorted, as wire strings")
              (is (= ["text"] (:output body)))
+             (testing "and the model's two counts, as NUMBERS rather than strings"
+               (is (= 200000 (:context-window body)))
+               (is (= 8192 (:max-output-tokens body)))
+               (is (number? (:context-window body)))
+               (is (number? (:max-output-tokens body))))
              (testing "and no api-key at any depth"
                (is (not-any? #(str/includes? (str %) "api-key")
                              (tree-seq coll? seq body))))))
@@ -910,7 +962,18 @@
              (is (= "beta" (:provider body)))
              (is (= "beta-plain" (:model body)))
              (is (= "https://y/v1" (:base-url body)) "the endpoint followed the vendor")
-             (is (= ["text"] (:input body)) "and the capability is the new model's")))
+             (is (= ["text"] (:input body)) "and the capability is the new model's")
+             (testing "including the counts -- proving they are read from the catalog,
+                       not written into this endpoint"
+               (is (= 128000 (:context-window body)))
+               (is (= 4096 (:max-output-tokens body))))))
+         (testing "a model that declares no counts reports NONE -- absent, not null"
+           (mem/set-override! id {:provider :alpha :model "alpha-bare"})
+           (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
+             (is (= "alpha-bare" (:model body)))
+             (is (not (contains? body :context-window))
+                 "silence about a number is a fact, not a zero")
+             (is (not (contains? body :max-output-tokens)))))
          (testing "an unbound/unknown thread is still an answer, not a 400"
            (let [resp (api-call 8087 :get "/api/model?threadId=who-is-this" nil)
                  body (read-json resp)]

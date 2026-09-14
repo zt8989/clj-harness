@@ -118,8 +118,24 @@
   it never runs at all. The gate is a WORKFLOW convention, not a security
   boundary: eval can still reach harness.memory/use-provider! directly, and bash
   can still read .env. It is here to stop a slip, and it is labelled as such."
-  [{:keys [provider model reasoning-effort]}]
-  (let [thread-id mem/*thread-id*
+  [args]
+  ;; The three knobs are the only thing this tool may move, and the check below
+  ;; cannot be left to the catalog's own tier guard: the change map is rebuilt
+  ;; from these three names, so a stray :context-window would be dropped by that
+  ;; rebuild and the resolution would never see it -- the tool would answer
+  ;; 'reconfigured' having changed nothing, which is a lie told to whoever called.
+  ;; A call naming a model's counts is refused by name, and told where they live.
+  (let [known  #{:provider :model :reasoning-effort}
+        extras (sort (map name (remove known (keys args))))]
+    (when (seq extras)
+      (throw (ex-info (str "session-configure does not understand "
+                           (pr-str (vec extras))
+                           "; it takes provider, model and reasoning-effort --"
+                           " a model's endpoint, modalities and token counts are"
+                           " declared in providers.edn, not chosen per session")
+                      {:unknown (vec extras)}))))
+  (let [{:keys [provider model reasoning-effort]} args
+        thread-id mem/*thread-id*
         change    (cond-> {}
                     (some? provider)         (assoc :provider provider)
                     (some? model)            (assoc :model model)

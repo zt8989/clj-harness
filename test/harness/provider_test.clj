@@ -227,6 +227,160 @@
         (is (str/includes? (ex-message e) "ghost") "names the id it could not find")
         (is (str/includes? (ex-message e) "real") "and lists what is declared")))))
 
+;; ---------------------------------------------------- the two counts
+
+(def ^:private counted
+  "A catalog whose models declare the two counts -- and one that declares none,
+  so 'silence' has a model to attach to."
+  (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                   :model "alpha-large"
+                   :models {"alpha-large" {:input #{:text :image} :output #{:text}
+                                           :context-window 200000 :max-output-tokens 8192}
+                            "alpha-quiet" {:input #{:text} :output #{:text}}}}}))
+
+(deftest a-model-may-declare-its-context-and-output-counts
+  (with-home (cfg :alpha) counted
+    (fn []
+      (let [p (mem/effective-provider "p-counts")]
+        (is (= 200000 (:context-window p)) "the declared context window")
+        (is (= 8192 (:max-output-tokens p)) "and the declared output ceiling"))
+      (testing "both are plain integers in-process and on the wire -- never strings"
+        (let [a (mem/active-provider "p-counts")]
+          (is (= 200000 (:context-window a)))
+          (is (integer? (:context-window a))))
+        (let [w (models/wire (mem/active-provider "p-counts"))]
+          (is (= 200000 (:context-window w)))
+          (is (= 8192 (:max-output-tokens w)))))
+      (testing "and they follow the MODEL, not the provider"
+        (mem/set-override! "p-counts" {:model "alpha-quiet"})
+        (let [p (mem/effective-provider "p-counts")]
+          (is (not (contains? p :context-window))
+              "the chosen model declared none, so nothing is claimed")
+          (is (not (contains? p :max-output-tokens))))
+        (mem/set-override! "p-counts" nil)))))
+
+(deftest a-model-silent-about-its-counts-says-nothing-about-them
+  ;; Absent, not zero and not null: this harness does not know the number, which
+  ;; is a different fact from knowing it is nothing. The same discipline :output
+  ;; had to pass -- declare only what is actually stated.
+  (with-home (cfg :alpha) counted
+    (fn []
+      (mem/set-override! "p-silent" {:model "alpha-quiet"})
+      (let [p (mem/effective-provider "p-silent")
+            w (models/wire p)]
+        (is (not (contains? p :context-window)))
+        (is (not (contains? p :max-output-tokens)))
+        (is (not (contains? w :context-window)) "nor on the wire")
+        (is (not (contains? w :max-output-tokens))))
+      (mem/set-override! "p-silent" nil))))
+
+(deftest a-count-that-is-not-a-positive-integer-fails-by-name
+  (doseq [[k v] [[:context-window 0]
+                 [:context-window -1]
+                 [:context-window 1.5]
+                 [:context-window "8192"]
+                 [:max-output-tokens 0]]]
+    (with-home (cfg :alpha)
+               (pr-str {:alpha {:protocol :p :base-url "https://a/v1"
+                                :model "m"
+                                :models {"m" {:input #{:text} :output #{:text}
+                                              k v}}}})
+      (fn []
+        (let [e (try (mem/providers) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e) (str k " " (pr-str v) " is not a count"))
+          (is (str/includes? (ex-message e) (name k))
+              "the message names the field")
+          (is (str/includes? (ex-message e) "alpha")
+              "and the provider it is in")
+          (is (str/includes? (ex-message e) "\"m\"")
+              "and the model id, so the reader knows which entry to fix"))))))
+
+(deftest an-output-ceiling-above-the-context-window-fails-and-names-both
+  ;; A model claiming to give back more than it can hold has a stale number in
+  ;; it. The failure reports BOTH rather than picking which one to believe: this
+  ;; harness cannot tell which is wrong, and guessing would be the lie.
+  (with-home (cfg :alpha)
+             (pr-str {:alpha {:protocol :p :base-url "https://a/v1" :model "m"
+                              :models {"m" {:input #{:text} :output #{:text}
+                                            :context-window 8000
+                                            :max-output-tokens 16000}}}})
+    (fn []
+      (let [e (try (mem/providers) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) "16000") "names the output ceiling")
+        (is (str/includes? (ex-message e) "8000") "and the context window")
+        (is (= 8000 (:context-window (ex-data e))) "and carries both in the data"))))
+  (testing "equal is fine -- some vendors allow the ceiling to reach the window"
+    (with-home (cfg :alpha)
+               (pr-str {:alpha {:protocol :p :base-url "https://a/v1" :model "m"
+                                :models {"m" {:input #{:text} :output #{:text}
+                                              :context-window 8000
+                                              :max-output-tokens 8000}}}})
+      (fn [] (is (= 8000 (:max-output-tokens (mem/effective-provider "p-eq"))))))))
+
+(deftest a-misspelled-count-key-fails-by-name
+  ;; model-keys was defined and nobody read it, so :context_window -- the typo
+  ;; every Clojure programmer makes once -- was silently dropped and the entry
+  ;; looked like it had declared nothing. The entry is the one place a model
+  ;; speaks about itself; a silent drop there is the failure this shape kills.
+  (with-home (cfg :alpha)
+             (pr-str {:alpha {:protocol :p :base-url "https://a/v1" :model "m"
+                              :models {"m" {:input #{:text} :output #{:text}
+                                            :context_window 200000}}}})
+    (fn []
+      (let [e (try (mem/providers) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "a key nobody reads is a failure, not a shrug")
+        (is (str/includes? (ex-message e) "context_window") "the stray key is named")
+        (is (str/includes? (ex-message e) "context-window")
+            "and the key it probably meant is listed among the ones it knows")))))
+
+(deftest a-user-may-correct-one-count-without-retyping-the-modalities
+  ;; Model-level merge, field by field. Replacing the entry wholesale would make
+  ;; "this vendor's window is actually 131072" require restating :input/:output --
+  ;; and the restated pair is exactly the copy that goes stale.
+  (with-home (cfg :openrouter)
+             (pr-str {:openrouter {:models {"anthropic/claude-sonnet-4.5"
+                                            {:context-window 131072}}}})
+    (fn []
+      (let [m (get-in (mem/providers) [:openrouter :models "anthropic/claude-sonnet-4.5"])]
+        (is (= 131072 (:context-window m)) "the corrected count wins")
+        (is (= #{:text :image} (:input m)) "and the built-in modalities are still there")
+        (is (= 64000 (:max-output-tokens m)) "along with the count it did not touch"))
+      (mem/set-override! "p-patch" {:model "anthropic/claude-sonnet-4.5"})
+      (is (= 131072 (:context-window (mem/effective-provider "p-patch"))))
+      (mem/set-override! "p-patch" nil))))
+
+(deftest an-inline-provider-may-declare-the-two-counts
+  (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"
+                      :context-window 128000 :max-output-tokens 4096})
+             nil
+    (fn []
+      (let [p (mem/effective-provider "p-inl")]
+        (is (= 128000 (:context-window p)))
+        (is (= 4096 (:max-output-tokens p)))))))
+
+(deftest an-inline-provider-declaring-only-a-count-still-declares-something
+  ;; The counts are the reason the inline branch still builds a model entry when
+  ;; no modality is declared: an entry that states only a context window HAS
+  ;; stated something, and dropping it for saying nothing about modalities would
+  ;; be the silent drop this catalog refuses to perform.
+  (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"
+                      :context-window 128000})
+             nil
+    (fn []
+      (let [p (mem/effective-provider "p-only-ctx")]
+        (is (= 128000 (:context-window p)))
+        (is (not (contains? p :input)) "and nothing was claimed about modalities")))))
+
+(deftest an-inline-count-still-has-to-be-a-count
+  (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"
+                      :context-window "big"})
+             nil
+    (fn []
+      (let [e (try (mem/effective-provider "p-inl-bad") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) "context-window"))))))
 (deftest a-key-nobody-reads-is-reported-not-ignored
   ;; This is the failure mode the whole feature exists to kill: a tier naming
   ;; something the resolution never looks at, and the run succeeding anyway.
@@ -259,6 +413,23 @@
       (let [p (mem/effective-provider "p-default")]
         (is (= "alpha-large" (:model p)) "the provider's default still stands")
         (is (= "low" (:reasoning-effort p)) "and the default tier tuned one knob")))))
+
+(deftest a-tier-that-names-a-catalog-field-fails-by-name
+  ;; The counts (and the endpoint, and the modalities) are the catalog's to
+  ;; declare, not a tier's to choose. select-keys would drop them quietly and the
+  ;; run would succeed having done nothing -- the exact failure this shape was
+  ;; built to kill. The config tier is one of the three entries; the other two are
+  ;; exercised further down (the run request) and in the configure-tool section.
+  (doseq [[k v] [[:context-window 200000] [:max-output-tokens 8192]]]
+    (with-home (pr-str {:provider :alpha :model "alpha-small" k v}) reg
+      (fn []
+        (let [e (try (mem/effective-provider "p-tier-bad") nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e) (str k " is not a tier's to name"))
+          (is (str/includes? (ex-message e) (name k))
+              "the message names the field")
+          (is (str/includes? (ex-message e) "providers.edn")
+              "and says where it belongs instead"))))))
 
 (deftest switching-provider-alone-really-switches-vendors
   ;; THE regression this feature exists for. Under the old field-by-field merge,
@@ -324,6 +495,19 @@
             (is (= "http://localhost:11434/v1" (:base-url provider)))
             (is (= "qwen3" (:model provider)) "the vendor's default, not the session's model")))
         (finally (mem/set-override! "p-req" nil))))))
+
+(deftest a-run-request-that-names-a-catalog-field-fails-by-name
+  ;; The third entry: a run's request. It goes through the same selection
+  ;; boundary, so naming a count here is refused by name rather than folded away.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (let [e (try (mem/resolve-provider "p-req-bad" {:model "alpha-small"
+                                                      :context-window 200000})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) "context-window"))
+        (is (str/includes? (ex-message e) "providers.edn"))))))
 
 (deftest an-inline-provider-needs-no-catalog-at-all
   ;; The escape hatch: describe one endpoint in config.edn and go. Kept because
@@ -584,6 +768,23 @@
           (is (nil? (mem/override-for "t-badmodel")) "nothing was written")))
       (testing "and no change was queued for the writer"
         (is (empty? (mem/take-provider-changes! "t-badmodel")))))))
+
+(deftest a-configure-naming-a-count-is-refused-before-anything-is-written
+  ;; The tool takes three knobs; a count is not one of them and cannot become one.
+  ;; Two things are asserted, and the second is the important one: the refusal is
+  ;; NAMED (not 'reconfigured' while nothing happened), and nothing was written --
+  ;; no override, no queued change line. A configuration that cannot be served
+  ;; must never become the session's, which is the same discipline that makes a
+  ;; bad model id fail here rather than on the next run.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (let [{:keys [content error]} (approve! "t-count" "sc-cnt" {:context-window 200000})]
+        (is (true? error) "a count is not something this tool can change")
+        (is (str/includes? content "context-window") "the field is named")
+        (is (str/includes? content "providers.edn") "and it says where it belongs")
+        (is (nil? (mem/override-for "t-count")) "nothing was written")
+        (is (empty? (mem/take-provider-changes! "t-count"))
+            "and no change line was queued for the writer")))))
 
 (deftest a-configure-naming-a-provider-that-does-not-exist-is-refused
   (with-home (cfg :alpha) reg

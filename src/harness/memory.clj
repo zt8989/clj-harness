@@ -584,11 +584,14 @@
 
     {:provider :openrouter :model \"anthropic/claude-sonnet-4.5\"
      :reasoning-effort \"high\" :protocol :openai-completions
-     :base-url \"https://openrouter.ai/api/v1\" :input #{:text :image} :output #{:text}}
+     :base-url \"https://openrouter.ai/api/v1\" :input #{:text :image} :output #{:text}
+     :context-window 1000000 :max-output-tokens 64000}
 
   The three knobs are what was CHOSEN; the rest is what the catalog answered.
   Both are worth reporting: :model is the id, and a reader asking 'what is this
-  session on' wants the name, not just the endpoint it happens to reach.
+  session on' wants the name, not just the endpoint it happens to reach. The two
+  counts are the model's, and are absent when the catalog says nothing about
+  them -- which is a fact about the entry, not a zero.
 
   Resolved live through the tiers above -- the session override included -- but
   NEVER the api-key: the fields are named one by one rather than the map being
@@ -602,7 +605,8 @@
   [thread-id]
   (let [p (effective-provider thread-id)]
     (select-keys p [:provider :model :reasoning-effort
-                    :protocol :base-url :input :output])))
+                    :protocol :base-url :input :output
+                    :context-window :max-output-tokens])))
 
 (defn active-project
   "The project directory THREAD-ID's session is bound to, as an absolute path

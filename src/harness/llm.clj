@@ -18,9 +18,13 @@
   (harness.memory/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key ..
      :reasoning-effort ..}
-  :reasoning-effort is present only when some tier chose one, and :input/:output
-  are not read here at all -- they describe what a model accepts, which is the
-  edge's business (harness.http/guard-input-modalities!), not the wire's."
+  :reasoning-effort is present only when some tier chose one. :input/:output and
+  the two counts (:context-window / :max-output-tokens) are not read here at all:
+  they describe what a model is, which is the edge's business
+  (harness.http/guard-input-modalities!) and the catalog's, not the wire's. In
+  particular :max-output-tokens is NOT sent as max_tokens -- the vendor's own
+  default decides how much a response may hold, and this harness does not
+  second-guess it."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]

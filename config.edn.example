@@ -7,21 +7,31 @@
 ;;                      out uses the provider's default)
 ;;   :reasoning-effort  forwarded to providers that understand it
 ;;
+;; THREE KNOBS, and only three: a model's context window and its maximum output
+;; tokens are NOT here. Those describe what a model IS, so they live on that
+;; model's entry in providers.edn, and writing one here is a named failure rather
+;; than a value somebody quietly drops.
+;;
 ;; Everything else about a provider -- its endpoint, its protocol, what each of
-;; its models accepts -- comes from the catalog, not from here. To add a model,
-;; edit providers.edn (or use one the built-in table already knows); to change an
-;; endpoint, edit the provider's entry. Naming an endpoint here is only meaningful
-;; in the INLINE form below, which describes a provider instead of naming one.
+;; its models accepts and how much they hold -- comes from the catalog, not from
+;; here. To add a model, edit providers.edn (or use one the built-in table already
+;; knows); to change an endpoint, edit the provider's entry. Naming an endpoint
+;; here is only meaningful in the INLINE form below, which describes a provider
+;; instead of naming one.
 
 {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
 
 ;; THE INLINE FORM (the escape hatch): describe a provider instead of naming one,
 ;; for trying an endpoint without registering it. Requires :protocol, :base-url
 ;; and :model; :input/:output are optional and declaring nothing means the entry
-;; promises nothing (nothing then checks its input).
+;; promises nothing (nothing then checks its input). The two counts are optional
+;; here too, and are REPORTED rather than enforced -- see providers.edn.example:
+;; :max-output-tokens is not sent to the vendor and :context-window blocks no run.
 ;;
 ;;   {:protocol :openai-completions
 ;;    :base-url "https://some-endpoint/v1"
 ;;    :model    "some-model"
 ;;    :input    #{:text :image}
-;;    :output   #{:text}}
+;;    :output   #{:text}
+;;    :context-window 128000
+;;    :max-output-tokens 4096}

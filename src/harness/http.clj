@@ -479,12 +479,18 @@
     {:provider :openrouter :model \"anthropic/claude-sonnet-4.5\"
      :reasoning-effort \"high\"
      :protocol :openai-completions :base-url \"https://openrouter.ai/api/v1\"
-     :input [\"image\" \"text\"] :output [\"text\"]}
+     :input [\"image\" \"text\"] :output [\"text\"]
+     :context-window 1000000 :max-output-tokens 64000}
 
   Answered from the LIVE resolution (mem/active-provider): a session override
   made a moment ago is already reflected, and nothing is cached between calls.
   The api-key is not in the answer at any depth -- active-provider names its
   fields one by one rather than passing the resolved map through.
+
+  The two counts are REPORTED, not enforced: nothing here counts tokens, and
+  nothing here is going to send :max-output-tokens as max_tokens. They exist so
+  a client choosing a model -- or a human reading a log -- can see what it is
+  buying before it asks for it.
 
   THE SHAPE IS THIS HARNESS'S, NOT AG-UI's. AG-UI describes capabilities as
   MultimodalCapabilities ({input.{image,audio,video,pdf,file}, ...}) for its

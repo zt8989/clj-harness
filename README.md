@@ -85,8 +85,10 @@ Copy-Item .env.example ~/.clj-harness/.env
 {:openrouter {:protocol :openai-completions
               :base-url "https://openrouter.ai/api/v1"
               :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
-              :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}}
-                         "deepseek/deepseek-chat"      {:input #{:text}       :output #{:text}}}}
+              :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
+                                                        :context-window 1000000
+                                                        :max-output-tokens 64000}
+                         "deepseek/deepseek-v4-pro"    {:input #{:text}       :output #{:text}}}}
  :local      {:protocol :openai-completions
               :base-url "http://localhost:11434/v1"
               :model    "qwen3"
@@ -94,6 +96,16 @@ Copy-Item .env.example ~/.clj-harness/.env
 ```
 
 每个 model **必须**声明 `:input` / `:output`，词汇表就是本 harness 真搬得动的类型：`:input` ⊆ `#{:text :image}`、`:output` ⊆ `#{:text}`（响应里的文本、推理与工具调用是全部被读出来的东西）。集合外的值指名报错。
+
+**`context-window` 与 `max-output-tokens` 是每个 model 可选的两个数字**——上下文多大、最多能吐多少 token，正整数；不写即「本目录对它一无所知」，这与「知道它是零」不是一回事（未声明时字段**缺席**，不是 `null`）。两者都写时校验 `max-output-tokens ≤ context-window`，越界指名报错并把两个数都报出来；非正整数（`0`、`-1`、`1.5`、`"8192"`）同样指名报错。model 条目里没人读的键也报错——`:context_window` 这种拼错今天会指名失败，而不是静默丢掉。
+
+**它们是「报告用」，不是「执行用」**，这条边界要写清楚，否则下一个读者会以为它在执行什么规则：
+
+1. 本仓**不数 token**，所以 `:context-window` **不拦任何 run**——拿近似值去拦 run 是把一句谎话写进错误信息；
+2. `:max-output-tokens` **不写进请求体**，实际输出上限仍是厂商默认值；
+3. 读它们的人是**选模型的人**：`GET /api/model`、日志里的 `provider/init` 与 `provider/changed`、`active-provider`。这些数字随 model 走：换 model，答案随之改变。
+
+内置表（`harness.models`）里的主流模型已带真实数字，逐条读自厂商现网列表（`:as-of` 标在表上）；核对不到的一律留空，不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次（`deepseek-chat` 早已作废，现在的 id 是 `deepseek-flash` / `deepseek-v4-pro`）。
 
 `config.edn` 只写**三个旋钮**：
 
@@ -116,9 +128,9 @@ Copy-Item .env.example ~/.clj-harness/.env
 {:provider :local :model "qwen3-vl"}    ; 想连 model 一起定就一起写
 ```
 
-写了一个该 provider 未声明的 model id → **指名报错**并列出它声明的 id（不回落、不猜）。命名了不存在的 provider → 同样指名报错并列出已有 provider。**没被任何一档读的键会被报出来**，不会静默忽略。
+写了一个该 provider 未声明的 model id → **指名报错**并列出它声明的 id（不回落、不猜）。命名了不存在的 provider → 同样指名报错并列出已有 provider。**没被任何一档读的键会被报出来**，不会静默忽略——`:context-window` / `:max-output-tokens` 也在这条纪律里：它们是目录属性（「这个 model 是什么」），不是第四个旋钮，写进档位、写进 `session-configure` 调用、或写进一次 run 的入参，三处都是**指名报错**，并说明该写在 providers.edn 里那个 model 的条目下。
 
-**inline 逃生门**：不命名 provider，直接在 `config.edn` 里描述一个，用来试一次没登记过的 endpoint。`:protocol` / `:base-url` / `:model` 必填，`:input` / `:output` 可选（声明了就必须声明全；什么都不声明即「这个条目什么都不承诺」）：
+**inline 逃生门**：不命名 provider，直接在 `config.edn` 里描述一个，用来试一次没登记过的 endpoint。`:protocol` / `:base-url` / `:model` 必填，`:input` / `:output` 与那两个数字可选（模态声明了就必须声明全；什么都不声明即「这个条目什么都不承诺」）：
 
 ```edn
 {:protocol :openai-completions :base-url "https://some-endpoint/v1" :model "some-model"}
@@ -180,7 +192,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 
 会话的 provider 历史落成两种新行——**不是**每 run 一行快照，时间线 init + changes 已能完整重建：
 
-- **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含**选择**（`:provider` / `:model` / `:reasoning-effort`）、**选择来源** `:source`（`default` / `request` / `inline`）、以及**解析结果** `:resolved`（该 provider 的 `:protocol` / `:base-url` 与所选 model 的 `:input` / `:output`），另有 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。**解析结果是记下来的，不是事后重算的**：目录会变（某厂商的 base-url 改了、新增了 model），拿今天的目录去重算旧日志，读出来的就是今天的答案而非那天的。
+- **`provider/init`** —— 每 thread 第一次 run 落**恰好一行**，含**选择**（`:provider` / `:model` / `:reasoning-effort`）、**选择来源** `:source`（`default` / `request` / `inline`）、以及**解析结果** `:resolved`（该 provider 的 `:protocol` / `:base-url` 与所选 model 的 `:input` / `:output` / `:context-window` / `:max-output-tokens`），另有 `:api-key :stripped` 标记（值永不入行）。落点在 `input` 之后、第一条 `message` 之前。**解析结果是记下来的，不是事后重算的**：目录会变（某厂商的 base-url 改了、新增了 model），拿今天的目录去重算旧日志，读出来的就是今天的答案而非那天的——两个数字也在同一条理由里：内置表以后改了，旧日志仍说得出「当时这个模型声称多大窗口」。
 - **`provider/changed`** —— 每次 mid-session 变更落一行，`{:verdict :approved, :before <选择 slice> :after <选择 slice> :trigger "session-configure" :override <完整 session 档> :resolved <该档解析到什么>}`。`:before`/`:after` 是本次按下的 slice（仅命中的旋钮），`:override` 是按完之后 session 这一档的完整 shape——回放者拿到这一字段即可还原「按完 session 长什么样」。`:trigger` 标注是哪条路径按下的 change（当前唯一合法值 `"session-configure"`）。落点在 `approval/decided` 之后。被人工否决的变更**不落此行**——通过该行是否存在可与批准区分。**换厂商不会被记成空变更**：slice 装的就是三个旋钮，而 `:provider` 是其中之一。
 
 读日志的代码（如 `dev/harness/replay.clj`）只认 `input` / `event` 两种行，其余行不参与回放——它们是审计轨迹，不是对话的一部分。
@@ -194,7 +206,7 @@ $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
 - `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
-- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"]}`——**这个会话现在服务的模型收什么、出什么**，给客户端决定要不要显示图片选择器用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
+- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"] :context-window 1000000 :max-output-tokens 64000}`——**这个会话现在服务的模型收什么、出什么、装得下多少**，给客户端决定要不要显示图片选择器、以及估算这段对话还塞得下多少用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。两个数字是整数（不是字符串），随 model 走；未声明时字段**缺席**，不是 `null`。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
 - `POST /api/project/pick` → 打开**操作系统原生目录选择框**，答 `{:dir <绝对路径|null>}`（取消即 null，不是错误）。存在的理由：浏览器给不出绝对路径（web file input 只给无真实位置的 File 对象），所以对话框必须跑在 harness 所在的机器上；它由拥有窗口的进程自己绘制，**不抢用户当前的焦点**。用 POST 而非 GET——这个调用有人可见的副作用（开窗），不该被缓存或预取触发。**它不绑定任何东西**：路径回给客户端填进输入框，绑定仍走下面那个唯一的 POST，所以「会改绑定的路由」永远只有一条，选择动作自身不留痕。`harness.http/*directory-chooser*` 是测试缝（真实弹窗要等人，测试里换 stub；`alter-var-root` 而非 `binding`——服务在别的线程上调它）。
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:before <绝对路径|null> :after <绝对路径> :via "http"}`（04 号票，对齐 provider/changed 的 before→after 风格；首次绑定 before 为 null），`runId` 为 null（绑定发生在任何 run 之外）。**对已绑定 thread 重新绑定 = 同一入口的普通调用**：路径解析立即切到新目录，审计行带 before/after，目录变更时间线直接从日志可读；读者以最后一行为准。绑定变更是 CwdChanged hook 点的事件源——payload 形态由 `harness.project/cwd-changed` 锁定（`{:hook "CwdChanged" :thread_id .. :project_dir .. :before ..}`，snake_case 对齐 hook payload 约定），hook 引擎（P2）接线时在变更点直接消费。
 
@@ -238,6 +250,8 @@ jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**�
 
 agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread 的 provider / model / reasoning-effort。**三旋钮各自独立可选**——只传要改的，其余保持当前值；空调用直接拒绝。**经人工审批后**生效（park 走 AG-UI 原生 interrupt，与工具审批同一条路径），否决则不生效且无 `provider/changed` 落盘。
 
+**它只认这三个旋钮**：传 `:context-window` 这类目录属性会**当场指名拒绝**（并说明该写在 providers.edn 里那个 model 的条目下），受理的调用若被批准会**原样回灌一套配置而什么都没改**——那等于对调用方撒谎。换 model 仍然只靠 `:model` 一个旋钮：两个数字跟着 model 走，不需要、也不允许单独覆盖。
+
 **改不动的东西当场拒绝，不落盘。** body 在写之前先把「改完之后这一档」拿去解析一遍：provider 名不在目录里、或 model id 不是所选 provider 声明的，都会**指名失败**并带回工具结果，session 保持原样、`provider/changed` 一行不落。先写后败会把一个每轮都跑不起来的配置钉在 session 上，而报错要等到**下一次** run 才出现，离按下它的那次调用很远。
 
 **性质：流程约定，不是安全边界。** `harness.memory/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
@@ -266,7 +280,7 @@ UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 131 tests / 655 assertions（其中 1 条 bash-runs-git-bash-not-wsl 是 Windows 时代断言，在 macOS 上必红）
+# 189 tests / 930 assertions，全绿
 
 # UI（ClojureScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
