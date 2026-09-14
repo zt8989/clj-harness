@@ -4,12 +4,16 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
+- `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
+- `src/harness/llm.clj` — provider 协议层（一个 multimethod，按 `:protocol` 分派）**加 system prompt 的载体**：`prompt.md` 首调读入即冻结，热改需 `(llm/reset-prompt!)` 或重启。冻结点在这里而不是别处，因为理由就是 provider 的前缀缓存
+- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
 - `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
-- `src/harness/memory.clj` — 自省面**最薄的一层**：只剩两问一答的现算事实（本 thread 的日志路径、绑定的项目目录）。冻结 prompt 在 `harness.llm`，工具表与审批在 `harness.tools`，provider 那半在 `harness.providers`；这最后两问随后各回 `home` 与 `project`
-- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
+- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用
+- `src/harness/project.clj` — 会话的项目目录绑定：thread-id → 目录（问出来，不抄副本）、相对路径重根、出界判定、`.harness/harness.edn` 两级装配
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
 - `dev/harness/{wire,evals,repl,e2e_server}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`；`e2e_server` 是 `npm test` 起的那个后端（脚本 provider + OS 分配端口）。
+
+**曾经有一个 `harness.memory`（"单一可自省面"），它已经不存在了。** 那是为 agent 在 run 里**读** harness 而立的门面；读自省撤销之后门面就没有存在理由，于是各段回了原主：prompt 回 `llm`、工具表与审批回 `tools`、provider 解析与密钥回 `providers`、日志路径回 `home`、项目绑定回 `project`。现在每个问题都问它真正的主人，没有一个"什么都能问"的入口。
 
 ### 会话级自我扩展与晋升路径
 
@@ -227,7 +231,7 @@ AG-UI 入站                                  出网（OpenAI 兼容 chat-comple
 
 **模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，消息里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。**未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的部署开始失败于一条没人写下来的规则。**性质是流程纪律，不是安全边界**——`config.edn` 给一个纯文本模型写 `:input #{:text :image}` 照样打得出去，这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
-agent 自省：`(harness.memory/active-project harness.tools/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + **选择文件夹…** + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。两条填充路径（手输 / 原生选择框）汇到同一个 POST；空输入点绑定会就地提示而不是静默无声。面板的输入与两个按钮必须包在一个 `display:contents` 的 wrapper 里——`when` 只返回**最后一个** body 形式，`(when c ($ :input ..) ($ :button ..))` 会把输入框静默丢掉（这个 bug 真的上过线）。
+agent 自省：`(harness.project/binding-for harness.tools/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + **选择文件夹…** + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。两条填充路径（手输 / 原生选择框）汇到同一个 POST；空输入点绑定会就地提示而不是静默无声。面板的输入与两个按钮必须包在一个 `display:contents` 的 wrapper 里——`when` 只返回**最后一个** body 形式，`(when c ($ :input ..) ($ :button ..))` 会把输入框静默丢掉（这个 bug 真的上过线）。
 
 ### `.harness/harness.edn` 装配（03 号票）
 

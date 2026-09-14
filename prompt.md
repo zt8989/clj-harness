@@ -13,7 +13,7 @@ which is only the base. Anything you define takes effect only in THIS session an
 is gone when the process restarts -- and every `eval` call, its code and its
 result, is appended to this thread's log.
 
-Your project: ask `(harness.memory/active-project harness.tools/*thread-id*)`
+Your project: ask `(harness.project/binding-for harness.tools/*thread-id*)`
 for the directory this session is bound to -- nil means none, which is normal.
 When bound, relative paths in read/write/edit resolve against that directory
 and bash runs with it as its working directory; absolute paths are never

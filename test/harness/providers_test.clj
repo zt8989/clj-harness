@@ -10,7 +10,6 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.home :as home]
-            [harness.memory :as mem]
             [harness.providers :as providers]
             [harness.tools :as tools]))
 
@@ -638,10 +637,10 @@
 
 (deftest log-path-names-the-file-the-writer-writes
   (testing "and it is derived from harness.home, so a relocated root follows"
-    (is (= (str (home/log-file "t-logpath")) (mem/log-path "t-logpath")))
-    (is (str/ends-with? (mem/log-path "t-logpath") "t-logpath.jsonl")))
+    (is (= (str (home/log-file "t-logpath")) (home/log-path "t-logpath")))
+    (is (str/ends-with? (home/log-path "t-logpath") "t-logpath.jsonl")))
   (testing "the sanitize rule is shared, so the reader and writer agree"
-    (is (= "a_b_c.jsonl" (str/replace (mem/log-path "a/b c") #".*[\\/]" "")))))
+    (is (= "a_b_c.jsonl" (str/replace (home/log-path "a/b c") #".*[\\/]" "")))))
 
 (deftest active-provider-answers-both-what-was-chosen-and-what-it-resolved-to
   (with-home (cfg :alpha :reasoning-effort "high") reg

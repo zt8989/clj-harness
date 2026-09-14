@@ -1,16 +1,17 @@
 (ns harness.project
   "A session's project directory. thread-id -> binding is this namespace's
-  whole state, and it is deliberately shaped like the rest of the session-scoped
-  surface (harness.memory): an atom keyed by thread-id, asked rather than
-  copied, nil meaning the normal case of NO binding.
+  whole state: an atom keyed by thread-id, asked rather than copied, nil meaning
+  the normal case of NO binding. It is also the whole answer to 'where is this
+  session rooted', which is why asking about it needs nothing beyond this
+  namespace.
 
   The binding re-roots the file tools and the shell for one session:
 
     - resolve-path maps a RELATIVE path into the project directory; an
       absolute path passes through untouched.
-    - binding-for answers the directory (or nil), which is what bash needs
-      for its working directory and what introspection surfaces as
-      harness.memory/active-project.
+    - binding-for answers the directory (or nil), which is what bash needs for
+      its working directory, what the project endpoints report, and what a
+      session asking about itself is told.
 
   A binding is a DEFAULT, not a fence -- the enforcement question is a separate,
   explicit boolean: out-of-bounds? answers whether a resolved path stays inside

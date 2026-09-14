@@ -60,6 +60,15 @@
   ([thread-id]     (io/file (logs-dir) (str (sanitize thread-id) ".jsonl")))
   ([dir thread-id] (io/file dir (str (sanitize thread-id) ".jsonl"))))
 
+(defn log-path
+  "The same file as a STRING -- what asks like 'where is this conversation's log'
+  want to hear, since the answer usually goes into a message rather than into a
+  file operation. Computed fresh every call, like everything else here: the root
+  can move (CLJ_HARNESS_HOME, a test binding) between calls, and a cached path
+  would silently point at the wrong file."
+  [thread-id]
+  (str (log-file thread-id)))
+
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs.
   A missing file is a hard, NAMED failure: the message carries the absolute
