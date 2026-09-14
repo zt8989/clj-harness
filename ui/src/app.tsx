@@ -29,6 +29,12 @@
 // now, only the thread. Nothing was lost: the retired versions are in the
 // history, and their absence here is the price of doing the high-risk swap on
 // its own.
+//
+// The `components` prop is where this repo's own rendering of tool calls and
+// reasoning enters the copied element -- see `components/message-parts.tsx`,
+// which also carries the one deliberate difference from upstream's defaults
+// (everything arrives collapsed). It is a module-level constant so the object
+// identity survives re-renders.
 import { HttpAgent } from "@ag-ui/client";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
@@ -36,6 +42,7 @@ import { useMemo } from "react";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { THREAD_COMPONENTS } from "@/components/message-parts";
 
 /// The AG-UI endpoint. The trailing slash is the server's route; the origin is
 /// also where the management endpoints live (project binding, the thread list),
@@ -55,7 +62,7 @@ export function App() {
             height -- `h-dvh` is the viewport. Tickets 06 and 07 add their panels
             above this line and must not steal that height from it. */}
         <div className="h-dvh">
-          <Thread />
+          <Thread components={THREAD_COMPONENTS} />
         </div>
       </TooltipProvider>
     </AssistantRuntimeProvider>
