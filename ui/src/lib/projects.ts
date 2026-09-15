@@ -118,6 +118,33 @@ export async function bindThread(threadId: string, dir: string): Promise<string>
   return body.dir;
 }
 
+/// Take a directory out of this home's project list
+/// (POST /api/projects/<canonical path>/remove). Answers the path and how many
+/// sessions it released.
+///
+/// THE PATH IS THE PROJECT'S IDENTITY, not its `projectId`, and that is what this
+/// client has: every project row carries `path`, the canonical form, and the
+/// route is keyed the way the thing is known. It is encoded as ONE path segment,
+/// which the server decodes back into a path -- a directory with slashes in it is
+/// ordinary, so the encoding is not optional.
+///
+/// A REMOVAL, NOT A DELETION. The row goes, its sessions become unbound, and
+/// nothing under `projects/<workspace>/` is opened -- the jsonl files keep their
+/// bytes and their mtimes. Re-adding the same directory adopts the sessions back.
+/// So a caller must not follow this with anything file-shaped either, and the
+/// answer's `unbound` count is the only thing that changed that is worth saying
+/// out loud.
+export type RemovedProject = { path: string; unbound: number };
+
+export async function removeProject(path: string): Promise<RemovedProject> {
+  const res = await fetch(
+    `${AGENT_URL}api/projects/${encodeURIComponent(path)}/remove`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  return res.json();
+}
+
 /// Archive THREAD-ID's session, or bring it back (POST /api/threads/<id>/archive).
 /// One call for both directions, because they are one column write -- the path
 /// names the action, the body names the direction.

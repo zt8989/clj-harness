@@ -712,24 +712,42 @@
   be answered 405 by a route that was never about it."
   #{"rebuild" "archive"})
 
-(defn- thread-verb-route
-  "/api/threads/<stem>/<verb> -> {:verb .. :stem ..} when the path has exactly
-  that shape and names a verb from `thread-verbs`, else nil.
+(def ^:private project-verbs
+  "The verbs this edge serves under /api/projects/<stem>/. The other half of the
+  pair above, and closed for the same reason -- these two namespaces are the two
+  nouns the sidebar manages, and a path segment is not a good place to discover
+  that."
+  #{"remove"})
 
-  ONE MATCHER FOR BOTH VERBS, because they share a shape and the shape is the
-  fiddly part: a second copy would be a second chance to disagree about how many
-  segments there are, where the stem sits, or whether decoding happens before or
-  after the split. It happens AFTER -- an id containing an encoded slash is
-  decoded into a path segment, never allowed to jump out of one.
+(defn- stem-verb-route
+  "/api/<collection>/<stem>/<verb>, matched on: an exact segment count, the
+  segment that names the collection, a verb in that collection's closed set, and
+  a non-empty stem -- else nil.
 
-  The stem is the SESSION's id, which is also its log's file stem: /api/projects
-  hands those out and the sidebar copies the one it has."
-  [uri]
+  ONE MATCHER FOR BOTH COLLECTIONS, because the shape is the fiddly part and the
+  collections differ in nothing else: a second copy would be a second chance to
+  disagree about how many segments there are, where the stem sits, or whether
+  decoding happens before or after the split. It happens AFTER -- an id containing
+  an encoded slash is decoded into a path segment, never allowed to jump out of
+  one.
+
+  The stem is whatever the collection names its rows by: for a thread, the
+  SESSION id, which is also its log's file stem and what /api/projects hands out;
+  for a project, the DIRECTORY's canonical path, because that -- not the integer
+  id -- is the project's identity everywhere else in this edge (see the listing's
+  :path, and `workspace-for`, which is a function of it).
+
+  A NON-EMPTY STEM is checked with `seq` rather than by comparing against the
+  empty string: seq of an empty string is nil and so fails the `and`, which is the
+  intended answer for a path like /api/threads//archive -- there is no session
+  called nothing, and falling through to the run endpoint is how that spelling
+  behaved before this route existed."
+  [collection verbs uri]
   (let [parts (str/split (str uri) #"/")]
     (when (and (= 5 (count parts))
                (= "api" (nth parts 1))
-               (= "threads" (nth parts 2))
-               (contains? thread-verbs (nth parts 4))
+               (= collection (nth parts 2))
+               (contains? verbs (nth parts 4))
                (seq (nth parts 3)))
       {:verb (nth parts 4)
        :stem (java.net.URLDecoder/decode (nth parts 3) "UTF-8")})))
@@ -854,7 +872,48 @@
         (if-some [error (:error added)]
           (api-response 400 {:error error})
           (api-response 200 {:projectId (:project-id (:ok added))
-                             :path      (:path (:ok added))}))))))
+                             :path      (:path (:ok added))
+                             ;; Sessions that remembered this directory, coming
+                             ;; back with it -- see `remove-project!`. On a
+                             ;; fresh add it is 0, which is the truthful answer
+                             ;; rather than a field nobody sets.
+                             :adopted   (:adopted (:ok added))}))))))
+
+(defn- remove-project-post
+  "POST /api/projects/<canonical path>/remove -- take that directory out of this
+  home's project list. Answers {:path .. :unbound <n>}.
+
+  THE PATH IS THE PROJECT'S IDENTITY, not its integer id, and that is what the
+  sidebar has in hand: every project row is drawn with `:path` on it (the listing
+  hands out the canonical form), while `projectId` is a store detail no client
+  needs. So the route is keyed the way the client knows the thing -- and the
+  matcher decodes an encoded path into one segment, which is what makes a path
+  with slashes in it addressable at all.
+
+  A REMOVAL, NOT A DELETION, and the route's job is only to say so honestly. The
+  verb deletes the `projects` ROW: the directory stops being one this home lists,
+  its sessions are unbound by the schema's own trigger, and NOTHING under
+  `projects/<workspace>/` is opened -- the jsonl files stay byte-for-byte and
+  mtime-for-mtime where they were. Re-adding the same directory adopts the
+  sessions back, archive flags included.
+
+  NO AUDIT LINE, and here the reason is structural rather than a choice: an audit
+  line is written to a SESSION's log, the workspace is a function of the project,
+  and this verb is removing the project. There is no file this action owns, and
+  inventing one -- the .unbound workspace, say -- would land a line where the
+  session does not live. The acceptance pins every file under the workspace in
+  any case, so a helpful line written anywhere would fail it.
+
+  An unknown directory is a NAMED 404: the sidebar needs a sentence for the row
+  the click landed on, and a 200 about a project that was not there would tell the
+  caller their stale list is current."
+  [stem]
+  (let [removed (try {:ok (project/remove-project! stem)}
+                     (catch Throwable t {:error (ex-message t)}))]
+    (if-some [error (:error removed)]
+      (api-response 404 {:error error :path stem})
+      (api-response 200 {:path    (:path (:ok removed))
+                         :unbound (:unbound (:ok removed))}))))
 
 (defn- model-get
   "GET /api/model?threadId=.. -- what this session is served by and what that
@@ -929,7 +988,7 @@
       (api-response 405 {:error "method not allowed"}))
 
     :else
-    (if-some [{:keys [verb stem]} (thread-verb-route (:uri req))]
+    (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
       ;; The verb-carrying routes: one shape, two verbs, and every one of them is
       ;; a POST because every one of them has an effect. A GET on this shape is
       ;; answered 405 HERE rather than falling through to the run endpoint --
@@ -939,7 +998,11 @@
         [:post "rebuild"] (rebuild-post req stem)
         [:post "archive"] (archive-post req stem)
         (api-response 405 {:error "method not allowed"}))
-      (handle-run req))))
+      (if-some [{:keys [verb stem]} (stem-verb-route "projects" project-verbs (:uri req))]
+        (case [(:request-method req) verb]
+          [:post "remove"] (remove-project-post stem)
+          (api-response 405 {:error "method not allowed"}))
+        (handle-run req)))))
 
 ;; ---------------------------------------------------------------------- start
 

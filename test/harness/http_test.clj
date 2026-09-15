@@ -1580,6 +1580,201 @@
                    (mapv #(json/read-str % :key-fn keyword)
                          (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
 
+(def ^:private remove-dir-a
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-remove-a"))
+(def ^:private remove-dir-b
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-remove-b"))
+
+(defn- workspace-of
+  "The workspace directory for a project's CANONICAL path -- the naming rule read
+  the way the server reads it.
+
+  Derived rather than asked, and that is forced: the test below is about what
+  happens AFTER the project row is gone, when `identity-for` has nothing to answer
+  with and `log-dir-for` would hand back the unbound workspace. The files did not
+  move, so the directory a person would go look in is still this one."
+  [canonical]
+  (str (io/file (home/projects-dir) (home/sanitize canonical))))
+
+(defn- file-facts
+  "Every regular file under DIR as {absolute path [bytes mtime]}, read the way the
+  test runner reads a home it must not disturb. TWO numbers rather than 'exists',
+  because neither alone is evidence: a rewrite that kept the length still moves
+  the mtime, and a truncation that kept the mtime still moves the length."
+  [dir]
+  (let [root (io/file dir)]
+    (if-not (.exists root)
+      {}
+      (into {} (for [f (file-seq root) :when (.isFile ^java.io.File f)]
+                 [(.getAbsolutePath ^java.io.File f)
+                  [(.length ^java.io.File f) (.lastModified ^java.io.File f)]])))))
+
+(deftest removing-a-project-unbinds-it-and-leaves-every-log-where-it-was
+  ;; Ticket 07, at the edge. The ticket's hard claim is a NEGATIVE one -- the jsonl
+  ;; under projects/<workspace>/ keeps its bytes AND its mtime -- so the assertions
+  ;; are those two numbers, taken around the call, for every file in the tree. A
+  ;; route that helpfully tidied up, or that carried the logs back into the unbound
+  ;; workspace, would answer 200 and unbind its sessions exactly as this one does;
+  ;; only the snapshot catches it.
+  ;;
+  ;; Its own directory pair, for the reason the listing and archive tests have
+  ;; theirs: the assertions are about the WHOLE content of a project's session list
+  ;; and of a workspace tree, so a shared directory would make this pass or fail
+  ;; depending on which test ran first.
+  (doseq [d [remove-dir-a remove-dir-b]]
+    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
+    (.mkdirs (io/file d)))
+  (with-server
+   8115
+   {"rm-a" script "rm-b" script "rm-other" script "rm-never-run" script}
+   (fn []
+     (let [canon    (fn [d] (.getCanonicalPath (io/file d)))
+           remove!  (fn [d]
+                      (api-call 8115 :post
+                                (str "/api/projects/"
+                                     (java.net.URLEncoder/encode (canon d) "UTF-8")
+                                     "/remove")
+                                nil))
+           add!     (fn [d] (api-call 8115 :post "/api/projects" (json/write-str {:dir d})))
+           bind!    (fn [tid d]
+                      (api-call 8115 :post "/api/project"
+                                (json/write-str {:threadId tid :dir d})))
+           archive! (fn [tid flag]
+                      (api-call 8115 :post (str "/api/threads/" tid "/archive")
+                                (json/write-str {:archived flag})))
+           listing  (fn [] (json/read-str (.body (api-call 8115 :get "/api/projects" nil))
+                                          :key-fn keyword))
+           project  (fn [d] (first (filter #(= (canon d) (:path %)) (listing))))
+           session  (fn [d tid] (first (filter #(= tid (:threadId %))
+                                               (:sessions (project d)))))
+           ws-a     (workspace-of (canon remove-dir-a))
+           ws-b     (workspace-of (canon remove-dir-b))
+           unbound  (str (io/file (home/projects-dir) http/unbound-workspace))]
+
+       (is (= 200 (.statusCode (bind! "rm-a" remove-dir-a))))
+       (is (= 200 (.statusCode (bind! "rm-b" remove-dir-a))))
+       (is (= 200 (.statusCode (bind! "rm-other" remove-dir-b))))
+       (is (= 200 (.statusCode (add! remove-dir-a))))
+       (post-run 8115 "rm-a")
+       (post-run 8115 "rm-b")
+       (post-run 8115 "rm-other")
+       ;; A session with NO log at all. Binding one writes an audit line, so the
+       ;; file would otherwise exist -- it is removed by hand, which is the state
+       ;; the listing calls "null facts" rather than a zero-byte file. The removal
+       ;; must not special-case it: the verb is about a project row, and whether a
+       ;; conversation has a file is not that row's business.
+       (is (= 200 (.statusCode (add! remove-dir-b))))
+       (is (= 200 (.statusCode (bind! "rm-never-run" remove-dir-b))))
+       (is (.delete (log-file-for "rm-never-run")) "the file is removed by hand")
+       (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
+           "the listing calls that null facts, not a zero-byte file")
+       (is (= 200 (.statusCode (archive! "rm-b" true))))
+       (Thread/sleep 20)                        ; so a file write would move an mtime
+
+       (let [before-a (file-facts ws-a)
+             before-b (file-facts ws-b)]
+         (is (seq before-a) "the first project has logs on disk to protect")
+         (is (seq before-b))
+
+         (testing "the removal answers with the path and the count it released"
+           (let [resp  (remove! remove-dir-a)
+                 reply (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= (canon remove-dir-a) (:path reply)))
+             (is (= 2 (:unbound reply)) "both of its sessions, and no others")))
+
+         (testing "the project is gone from the listing"
+           (is (nil? (project remove-dir-a)))
+           (is (some? (project remove-dir-b)) "the other project is untouched"))
+
+         (testing "and its sessions are listed nowhere -- they are unbound now"
+           ;; Not "gone from the sidebar": the sessions still exist as ROWS, they
+           ;; simply belong to no project, and the listing is grouped BY project.
+           ;; GET /api/threads is the raw tree view and still finds their files --
+           ;; an unowned jsonl is not a session this interface claims, but it is
+           ;; still a file.
+           (let [everywhere (set (mapcat #(map :threadId (:sessions %)) (listing)))]
+             (is (not (contains? everywhere "rm-a")))
+             (is (not (contains? everywhere "rm-b")))
+             (is (contains? everywhere "rm-other"))
+             (is (contains? everywhere "rm-never-run")))
+           (is (some #(= "rm-a" (:threadId %))
+                     (json/read-str (.body (api-call 8115 :get "/api/threads" nil))
+                                    :key-fn keyword))))
+
+         (testing "EVERY FILE is byte-for-byte and mtime-for-mtime what it was"
+           (is (= before-a (file-facts ws-a))
+               "the removed project's whole workspace, untouched")
+           (is (= before-b (file-facts ws-b))
+               "and a project nobody removed is no more touched than it was")
+           (is (every? #(.exists (home/log-file ws-a %)) ["rm-a" "rm-b"])
+               "the named files are still there, which is what 'keeps the logs' means")
+           (is (not (.exists (home/log-file unbound "rm-a")))
+               "and nothing was carried into the unbound workspace on the way out")
+           (is (not (.exists (home/log-file unbound "rm-b")))))
+
+         (testing "a directory this home does not know is a NAMED 404"
+           (let [resp  (remove! (str remove-dir-a "/never-added"))
+                 reply (read-json resp)]
+             (is (= 404 (.statusCode resp)))
+             (is (str/includes? (:error reply) "never-added")
+                 "the reason names the path the caller asked about")))
+         (testing "removing it a second time is that same refusal, not a silent 200"
+           ;; The list somebody was looking at can be stale, and a 200 about a
+           ;; project that is not there would tell them their click worked.
+           (let [resp (remove! remove-dir-a)]
+             (is (= 404 (.statusCode resp)))
+             (is (str/includes? (:error (read-json resp)) "nothing to remove"))))
+
+         (testing "GET on the remove shape is refused -- this route has an effect"
+           ;; The same guard the thread verbs needed: without it a GET falls
+           ;; through to the AG-UI run endpoint and dies in a body that is not
+           ;; there.
+           (is (= 405 (.statusCode
+                       (api-call 8115 :get
+                                 (str "/api/projects/"
+                                      (java.net.URLEncoder/encode (canon remove-dir-b) "UTF-8")
+                                      "/remove")
+                                 nil)))))
+
+         (testing "a session that has never run is released like any other"
+           (let [reply (read-json (remove! remove-dir-b))]
+             (is (= (canon remove-dir-b) (:path reply)))
+             (is (= 2 (:unbound reply)) "the session that ran and the one that never did"))
+           (is (nil? (project remove-dir-b))))
+
+         (testing "re-adding the same directory brings the sessions back"
+           (let [reply (read-json (add! remove-dir-a))]
+             (is (= (canon remove-dir-a) (:path reply)))
+             (is (= 2 (:adopted reply)) "both of them remembered where they were"))
+           (is (= #{"rm-a" "rm-b"}
+                  (set (map :threadId (:sessions (project remove-dir-a))))))
+           (testing "INCLUDING the archive flag, which the removal never touched"
+             (is (true? (:archived (session remove-dir-a "rm-b"))))
+             (is (false? (:archived (session remove-dir-a "rm-a")))))
+           (testing "and with the disk facts read off the very same files"
+             (is (= before-a (file-facts ws-a))
+                 "re-adding is a row write too: not one byte moved either way")
+             (is (pos? (:bytes (session remove-dir-a "rm-a"))))
+             (is (= (.length (log-file-for "rm-a")) (:bytes (session remove-dir-a "rm-a"))))))
+         (testing "and so does the pair where one of them never ran"
+           (is (= 2 (:adopted (read-json (add! remove-dir-b)))))
+           (is (= #{"rm-other" "rm-never-run"}
+                  (set (map :threadId (:sessions (project remove-dir-b))))))
+           (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
+               "still no log facts -- null, which is not a zero-byte file")
+           (is (pos? (:bytes (session remove-dir-b "rm-other")))))
+
+         (testing "and the history is intact -- the same file rebuilds the conversation"
+           ;; The ticket's last promise, and the one a "tidy up while we are here"
+           ;; implementation would break invisibly: same directory, same file name,
+           ;; same run inside it.
+           (let [resp  (api-call 8115 :post "/api/threads/rm-a/rebuild" "")
+                 reply (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (seq (:messages reply))
+                 "the conversation came back out of the file the removal left alone"))))))))
+
 (deftest adding-a-project-makes-a-project-with-no-session
   ;; Ticket 05's other half. Without this verb the ONLY way to get a project was
   ;; to bind a session to a directory -- backwards for a product whose sessions

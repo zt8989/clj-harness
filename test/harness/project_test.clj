@@ -26,6 +26,13 @@
 
 (defn- tmp [name] (str root "/" name))
 
+(defn- canonical-of
+  "The identity of a scratch directory, as the store keys it. Derived the way the
+  server derives it rather than hard-coded, so a change to the canonical rule
+  shows up as a failing test instead of a test that agrees with itself."
+  [dir]
+  (.getCanonicalPath (io/file dir)))
+
 ;; Tests in this namespace write a USER-level harness.edn into the (shared,
 ;; test-runner-owned) config home. Wipe it around every test: a leftover would
 ;; leak into the NEXT namespace's fence assertions (http-test runs after this
@@ -476,6 +483,110 @@
     (project/bind! "pr-stranger" nil)
     (is (not-any? #(= "pr-stranger" (:id %)) (project/sessions))
         "a conversation nobody ever started must not appear in the listing")))
+
+(deftest removing-a-project-unbinds-it-and-forgets-nothing-else
+  ;; Ticket 07's server half. Removing a project is a statement about a
+  ;; DIRECTORY, so the verb deletes one row and lets the schema's BEFORE DELETE
+  ;; trigger unbind that project's sessions -- which is what makes "removed" mean
+  ;; the same thing to every reader: an unbound session, byte-for-byte the
+  ;; behaviour of one that never had a project.
+  (let [dir (tmp "pr-removed")]
+    (.mkdirs (io/file dir))
+    (project/bind! "pr-rm-1" dir)
+    (project/bind! "pr-rm-2" dir)
+    (project/archive! "pr-rm-2" true)
+    (let [before (project/projects)]
+      (is (= 2 (:unbound (project/remove-project! (canonical-of dir))))
+          "the answer counts the sessions it released")
+      (testing "the directory is no longer a project"
+        (is (not-any? #(= (canonical-of dir) (:canonical-path %)) (project/projects)))
+        (is (= (dec (count before)) (count (project/projects)))))
+      (testing "and its sessions are unbound -- the one state every reader knows"
+        (doseq [id ["pr-rm-1" "pr-rm-2"]]
+          (is (nil? (project/binding-for id)))
+          (is (nil? (project/identity-for id)))
+          (is (= "/somewhere/else.txt" (project/resolve-path id "/somewhere/else.txt")))
+          (is (false? (project/out-of-bounds? id "/etc/passwd"))
+              "the fence is off, exactly as for a session that never had a project")))
+      (testing "the rows survive -- a removal is not a deletion of conversations"
+        (let [by-id (into {} (map (juxt :id identity) (project/sessions)))]
+          (is (contains? by-id "pr-rm-1"))
+          (is (contains? by-id "pr-rm-2"))))
+      (testing "and the archive flag is part of the conversation, so it stays"
+        (is (true? (:archived? (first (filter #(= "pr-rm-2" (:id %)) (project/sessions)))))))
+      (testing "re-adding the directory brings the sessions back, flags and all"
+        (let [added (project/add-project! dir)]
+          (is (= (canonical-of dir) (:path added)))
+          (is (= 2 (:adopted added)) "both sessions remembered where they were")
+          ;; The binding comes back as the project's CANONICAL path, which is the
+          ;; one spelling a re-add has: the session's own spelling was released by
+          ;; the removal (the trigger clears `path` with `project_id`). Same
+          ;; directory, same workspace, same log -- a spelling is not a fact about
+          ;; which folder this is.
+          (is (= (canonical-of dir) (project/binding-for "pr-rm-1")))
+          (is (= (canonical-of dir) (project/binding-for "pr-rm-2")))
+          (is (= (canonical-of dir) (project/identity-for "pr-rm-1")))
+          (is (true? (:archived? (first (filter #(= "pr-rm-2" (:id %)) (project/sessions))))))))
+      (testing "a directory this home does not know is refused by name"
+        (let [thrown (try (project/remove-project! "/nowhere/at/all") nil (catch Exception e e))]
+          (is (some? thrown))
+          (is (= :no-such-project (:reason (ex-data thrown))))
+          (is (str/includes? (ex-message thrown) "/nowhere/at/all")))))))
+
+(deftest a-folded-subdirectory-goes-with-its-project
+  ;; The boundary of "one removal releases this project's sessions". A binding is
+  ;; per-session and lives on the session's row, so a session bound to `dir/sub`
+  ;; belongs to a DIFFERENT project than one bound to `dir` -- and `if the
+  ;; directory exists, add it as a project too` is exactly what the sidebar's own
+  ;; add does. Collapsing the two would be redefining bind, not removing a project.
+  (let [dir (tmp "pr-folded")
+        sub (str dir "/sub")]
+    (.mkdirs (io/file sub))
+    (project/bind! "pr-fold-1" sub)
+    (project/add-project! dir)
+    (is (= 0 (:unbound (project/remove-project! (canonical-of dir))))
+        "the project had no sessions of its own -- the subdirectory's is not one")
+    (is (= (str (.getAbsoluteFile (io/file sub))) (project/binding-for "pr-fold-1"))
+        "the subdirectory's own binding is untouched")
+    (testing "and removing the subdirectory releases it"
+      (is (= 1 (:unbound (project/remove-project! (canonical-of sub)))))
+      (is (nil? (project/binding-for "pr-fold-1"))))))
+
+(deftest a-session-remembering-removed-work-is-not-dragged-back-into-it
+  ;; The memory a re-add matches on is deliberately narrow. A session that was
+  ;; MOVED after the removal -- or released by hand -- must stay where it is; a
+  ;; re-add is not a request to reorganize anybody's conversations.
+  (let [gone (tmp "pr-gone")
+        home (tmp "pr-home")
+        hand (tmp "pr-hand")]
+    (doseq [d [gone home hand]] (.mkdirs (io/file d)))
+    (project/bind! "pr-loyal" gone)
+    (project/bind! "pr-hand" gone)
+    (project/remove-project! (canonical-of gone))
+    (project/bind! "pr-loyal" home)     ; moved somewhere else, deliberately
+    (project/bind! "pr-hand" nil)       ; released by hand
+    (let [added (project/add-project! gone)]
+      (is (= 0 (:adopted added))
+          "neither session comes back: one is bound elsewhere, one was released")
+      (is (= (str (.getAbsoluteFile (io/file home))) (project/binding-for "pr-loyal")))
+      (is (nil? (project/binding-for "pr-hand"))))
+    (testing "and a session still remembering it does come back"
+      (project/bind! "pr-waiting" gone)
+      (project/remove-project! (canonical-of gone))
+      (is (nil? (project/binding-for "pr-waiting")))
+      (is (= 1 (:adopted (project/add-project! gone))))
+      (is (= (canonical-of gone) (project/binding-for "pr-waiting"))))))
+
+(deftest adding-a-directory-that-is-already-a-project-adopts-nothing
+  ;; `add-project!` is find-or-create, and its adoption must inherit that: a
+  ;; project that was never removed has its sessions already bound, so a second
+  ;; add is a no-op rather than a second write.
+  (let [dir (tmp "pr-double-add")]
+    (.mkdirs (io/file dir))
+    (project/bind! "pr-dbl" dir)
+    (is (= 0 (:adopted (project/add-project! dir))))
+    (is (= (str (.getAbsoluteFile (io/file dir))) (project/binding-for "pr-dbl")))
+    (is (false? (:archived? (first (filter #(= "pr-dbl" (:id %)) (project/sessions))))))))
 
 (deftest two-threads-binding-at-once-do-not-lose-each-others-writes
   ;; The store is opened per call, so two threads binding concurrently are two

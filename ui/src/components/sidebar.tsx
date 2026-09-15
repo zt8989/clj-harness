@@ -85,6 +85,40 @@
 // left unable to move. A flag written while the page cannot leave is precisely
 // the state the paragraph above forbids.
 //
+// ------------------------------------------------------------------- removal
+//
+// REMOVING A PROJECT IS A REMOVAL, NOT A DELETION, and there is no delete
+// anywhere in this file. The project's row leaves the list; the sessions' logs do
+// not move, do not shrink, and are not touched at all. Re-adding the same
+// directory brings the sessions back with their archive flags, which is the
+// server's adoption (see `add-project!`) and the reason the confirmation can
+// honestly promise it.
+//
+// THE CONFIRMATION SAYS WHAT HAPPENS, NOT WHAT IT FEELS LIKE. It names the
+// directory, says the sessions stay on disk, and says re-adding returns them --
+// in those words, because a dialog that said "delete" would be describing an
+// action this product does not have. Irreversible things get a scary dialog;
+// this one is reversible, and a scary dialog here would train people to ignore
+// the one that matters.
+//
+// THE "MORE" MENU IS A SIBLING OF THE PROJECT ROW, not a child of it, and that is
+// load-bearing: the row's click both selects the project and folds it, so a menu
+// trigger nested inside would toggle the folder open every time somebody reached
+// for the menu. Opening the menu must not change what the row says about the
+// project.
+//
+// A PROJECT ON SCREEN CANNOT BE REMOVED WHILE A RUN IS IN FLIGHT, because the
+// page has to move off it (below) and every other switch in this file refuses
+// mid-run. The guard reads the runtime's `isRunning`, so it lifts by itself.
+//
+// THE PAGE NEVER STAYS ON A REMOVED PROJECT. If the session being read belonged
+// to the project that just went away, the sidebar moves: to the most recent
+// unarchived session of another project, or -- when this was the last project --
+// to a fresh session with no project at all, which is the one state the server
+// tolerates and the sidebar simply does not list. What it must not do is leave
+// the chat open on a project that is gone, and it must not invent a project to
+// put the new session in.
+//
 // ------------------------------------------------------------------- refusals
 //
 // Two things are refused while a run is in flight, and both are shown where the
@@ -100,8 +134,10 @@ import {
   ArchiveRestoreIcon,
   ChevronRightIcon,
   FolderIcon,
+  FolderMinusIcon,
   FolderPlusIcon,
   FolderSearchIcon,
+  MoreHorizontalIcon,
   RefreshCwIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -113,11 +149,26 @@ import {
 } from "@/components/assistant-ui/elements/thread-list.aui";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   addProject,
   bindThread,
   listProjects,
   pickFolder,
   projectName,
+  removeProject,
   setArchived,
   type ProjectSummary,
   type SessionSummary,
@@ -138,6 +189,12 @@ type SidebarProps = {
 /// click landed and a click somewhere else stops showing it.
 type RowError = { id: string; message: string } | null;
 
+/// The same thing for a PROJECT row, kept separate rather than folded into
+/// `RowError` because the key would be a path where the other's is a session id,
+/// and one map keyed two ways is one lookup that will eventually match the wrong
+/// thing.
+type ProjectError = { path: string; message: string } | null;
+
 /// The refusals about STARTING a session, which have no row to land on. They go
 /// under the New task button, which is the thing that was clicked.
 export const NO_PROJECT_REFUSAL =
@@ -150,6 +207,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const [listError, setListError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [rowError, setRowError] = useState<RowError>(null);
+  const [projectError, setProjectError] = useState<ProjectError>(null);
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The project a new task will land in. Derived rather than owned: see the
@@ -256,6 +314,65 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     } catch (failure: unknown) {
       setRowError({
         id: threadId,
+        message: failure instanceof Error ? failure.message : String(failure),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /// Remove a project from the list -- and move the page off it if that is where
+  /// the page was. See this file's header: the server does the unbinding, the log
+  /// files are not touched, and the only thing left for the UI is to not be left
+  /// standing in a project that no longer exists.
+  const remove = async (project: ProjectSummary): Promise<void> => {
+    if (busy) return;
+    const movesThePage = project.sessions.some((s) => s.threadId === currentThreadId);
+    if (movesThePage && runInProgress(runtime)) {
+      // The same sentence the session rows use, because it is the same reason --
+      // the page would have to move off a running conversation -- but rendered on
+      // the PROJECT row, where the click landed. A paraphrase would be a second
+      // wording of one rule, and this file's header is explicit about where that
+      // ends up.
+      setProjectError({ path: project.path, message: RUN_IN_PROGRESS_REFUSAL });
+      return;
+    }
+    setBusy(true);
+    setProjectError(null);
+    setRowError(null);
+    try {
+      await removeProject(project.path);
+      if (movesThePage) {
+        // SOMEWHERE ELSE, in this order: the most recent unarchived session of
+        // any remaining project (the lists are already newest-first), and --
+        // when this was the last project -- a BRAND-NEW thread with no project
+        // at all. That last branch goes through `switchToNewThread`, which is
+        // the one thing in this app that does: there is nothing left to bind to,
+        // and the server tolerates a session with no project by design. What
+        // neither branch does is leave the chat on the project just removed, or
+        // invent a project to hold the new session.
+        const rest = projects.filter((p) => p.path !== project.path);
+        const next = rest
+          .flatMap((p) => p.sessions.filter((s) => !s.archived).map((s) => ({ p, s })))
+          .sort(
+            (a, b) =>
+              (b.s.lastActivity ?? Number.MAX_VALUE) -
+              (a.s.lastActivity ?? Number.MAX_VALUE),
+          )[0];
+        if (next !== undefined) {
+          setPinned(next.p.path);
+          await runtime.threads.switchToThread(next.s.threadId);
+        } else {
+          setPinned(null);
+          await runtime.threads.switchToNewThread();
+        }
+      }
+      await refresh();
+    } catch (failure: unknown) {
+      // The server's reason, on the row the click landed on -- the project's row
+      // is the one thing on screen that names what failed.
+      setProjectError({
+        path: project.path,
         message: failure instanceof Error ? failure.message : String(failure),
       });
     } finally {
@@ -397,8 +514,10 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             busy={busy}
             running={running}
             rowError={rowError}
+            removeError={projectError?.path === project.path ? projectError.message : null}
             onOpen={(threadId) => void openThread(threadId, project.path)}
             onArchive={(threadId, archived) => void archive(project, threadId, archived)}
+            onRemove={() => void remove(project)}
           />
         ))}
 
@@ -579,6 +698,12 @@ const AddProject: FC<{
 /// One project and the sessions in it: the project's row, then its conversations
 /// in last-activity order (the server's order -- see `newest-first`), then -- when
 /// there are any -- an Archived group collapsed by default.
+///
+/// The row carries two hits: the row itself, which selects the project and folds
+/// it, and a "more" button that appears on hover and opens the menu holding
+/// "Remove project…". They are SIBLINGS for the reason this file's header gives:
+/// a trigger nested in the row would fold the folder open every time somebody
+/// reached for the menu.
 const ProjectSection: FC<{
   project: ProjectSummary;
   currentThreadId: string;
@@ -587,8 +712,10 @@ const ProjectSection: FC<{
   busy: boolean;
   running: boolean;
   rowError: RowError;
+  removeError: string | null;
   onOpen: (threadId: string) => void;
   onArchive: (threadId: string, archived: boolean) => void;
+  onRemove: () => void;
 }> = ({
   project,
   currentThreadId,
@@ -597,8 +724,10 @@ const ProjectSection: FC<{
   busy,
   running,
   rowError,
+  removeError,
   onOpen,
   onArchive,
+  onRemove,
 }) => {
   // If the session on screen is in this project -- among the ones the project
   // draws in its main list -- the project opens with it. A collapsed project
@@ -624,6 +753,13 @@ const ProjectSection: FC<{
       setArchivedOpen(true);
     }
   }, [project.sessions, currentThreadId]);
+  // Whether the confirmation is up. Held here rather than in the sidebar because
+  // the menu item that opens it belongs to this row, and a row that has been
+  // removed -- or is being removed -- cannot have a dialog of its own.
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    if (removeError !== null) setConfirming(false);
+  }, [removeError]);
 
   const name = projectName(project.path);
   const sessions: readonly SessionSummary[] = project.sessions;
@@ -673,43 +809,145 @@ const ProjectSection: FC<{
       data-selected={selected ? "" : undefined}
       className="mt-1"
     >
-      <button
-        type="button"
-        data-slot="sidebar-project-trigger"
-        aria-expanded={open}
-        // The full path on hover, because the visible name is the last segment --
-        // and two directories named `foo` are told apart by nothing else.
-        title={project.path}
-        onClick={() => {
-          // Select AND toggle in one click, because the two are the same
-          // intention here: pointing at a project is how you say "here". The
-          // selection is what a new task uses.
-          onSelect();
-          setOpen((was) => !was);
-        }}
+      <div
+        data-slot="sidebar-project-row"
+        // `group` so the "more" button is revealed by hovering anywhere on the
+        // row, and `focus-within` so it is there for the keyboard too -- a hover
+        // affordance with no keyboard path is a verb half the people cannot use.
         className={
           selected
-            ? "bg-muted/70 hover:bg-muted flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start"
-            : "hover:bg-muted/60 flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start"
+            ? "group bg-muted/70 flex w-full items-center rounded-md"
+            : "group hover:bg-muted/60 flex w-full items-center rounded-md"
         }
       >
-        <FolderIcon
-          data-slot="sidebar-project-icon"
-          className="text-muted-foreground size-4 shrink-0"
-        />
-        <span
-          data-slot="sidebar-project-name"
-          className="min-w-0 flex-1 truncate text-sm font-medium"
+        <button
+          type="button"
+          data-slot="sidebar-project-trigger"
+          aria-expanded={open}
+          // The full path on hover, because the visible name is the last segment
+          // -- and two directories named `foo` are told apart by nothing else.
+          title={project.path}
+          onClick={() => {
+            // Select AND toggle in one click, because the two are the same
+            // intention here: pointing at a project is how you say "here". The
+            // selection is what a new task uses.
+            onSelect();
+            setOpen((was) => !was);
+          }}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-start"
         >
-          {name}
-        </span>
-        {/* The count is of the sessions you can SEE, which is the unarchived
-            ones: a badge that counted the archived too would make "3" mean
-            "3 rows once you go looking for them". */}
-        <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-          {active.length}
-        </span>
-      </button>
+          <FolderIcon
+            data-slot="sidebar-project-icon"
+            className="text-muted-foreground size-4 shrink-0"
+          />
+          <span
+            data-slot="sidebar-project-name"
+            className="min-w-0 flex-1 truncate text-sm font-medium"
+          >
+            {name}
+          </span>
+          {/* The count is of the sessions you can SEE, which is the unarchived
+              ones: a badge that counted the archived too would make "3" mean
+              "3 rows once you go looking for them". */}
+          <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+            {active.length}
+          </span>
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              data-slot="sidebar-project-more"
+              disabled={busy}
+              title="More — actions for this project"
+              className="text-muted-foreground hover:text-foreground me-1 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100"
+            >
+              <MoreHorizontalIcon
+                data-slot="sidebar-project-more-icon"
+                className="size-3.5"
+              />
+              <span className="sr-only">More</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent data-slot="sidebar-project-menu" align="end">
+            <DropdownMenuItem
+              data-slot="sidebar-project-remove"
+              // The menu item's own `disabled` is what the ticket asks for: the
+              // request is in flight, so every action in this sidebar is off.
+              disabled={busy}
+              onSelect={() => setConfirming(true)}
+            >
+              <FolderMinusIcon data-slot="sidebar-project-remove-icon" />
+              Remove project…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {/* The server's reason, on the row whose click raised it. Moved here from
+          the session list because the thing that failed is now the project. */}
+      {removeError !== null && (
+        <p
+          role="alert"
+          data-slot="sidebar-project-error"
+          className="text-destructive px-2.5 pb-1 text-xs"
+        >
+          {removeError}
+        </p>
+      )}
+
+      {/* WHAT THE CONFIRMATION SAYS, AND WHY IT SAYS IT THAT WAY. It does not use
+          the word "delete", because this dialog does not delete anything: the
+          sessions' logs stay on disk, and re-adding the directory brings the
+          sessions -- and their archive flags -- back. A confirmation that
+          described a deletion would be describing a product that does not exist,
+          and one that exaggerated the danger would train people to click through
+          the dialogs that are not exaggerating. */}
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent data-slot="sidebar-remove-confirm" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Remove this project?</DialogTitle>
+            <DialogDescription>
+              <span data-slot="sidebar-remove-name" className="font-medium">
+                {name}
+              </span>{" "}
+              leaves the sidebar. Its sessions are kept on disk — nothing under{" "}
+              <code className="font-mono text-xs">{project.path}</code> is deleted
+              or moved — and adding this directory again brings them back, as they
+              were.
+            </DialogDescription>
+          </DialogHeader>
+          <p
+            data-slot="sidebar-remove-count"
+            className="text-muted-foreground text-xs"
+          >
+            {sessions.length === 0
+              ? "It has no sessions."
+              : `${sessions.length} session${sessions.length === 1 ? "" : "s"} will stop being listed here.`}
+          </p>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              data-slot="sidebar-remove-cancel"
+              onClick={() => setConfirming(false)}
+            >
+              Keep it
+            </Button>
+            <Button
+              variant="destructive"
+              data-slot="sidebar-remove-submit"
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false);
+                onRemove();
+              }}
+            >
+              Remove project
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {open && (
         <>

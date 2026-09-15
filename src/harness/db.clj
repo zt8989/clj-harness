@@ -430,6 +430,44 @@
                 WHERE project_id = old.id;
              END"))
 
+(defn- sessions-remember-the-project-path
+  "Version 1 -> 2: `sessions.last_project_path`, the project a session most
+  recently belonged to, kept so that REMOVING a project can be undone.
+
+  Removing a project deletes its row, and the BEFORE DELETE trigger from version
+  1 unbinds its sessions in the same statement -- that is decision 4, and it is
+  what makes 'removed' mean the same thing to every reader (`binding-for` answers
+  nil and the fence is off, exactly as for a session that never had a project).
+  What that alone cannot do is bring the sessions BACK: the link is gone, and the
+  sidebar's promise is that re-adding the same directory returns them, archive
+  flags and history with them.
+
+  So the session carries a second, quieter path: the CANONICAL form of the
+  project it last belonged to. It is not a binding -- nothing resolves a tool path
+  through it, `binding-for` never reads it, and a session whose project was
+  removed is genuinely unbound -- it is the memory a re-add matches on. The
+  trigger is deliberately left as it is: it clears `project_id` and `path`, and
+  this column survives the removal untouched, which is the whole reason it exists.
+
+  EXPLICIT UNBIND DOES CLEAR IT (`bind! .. nil`), and the difference is the
+  point: asking for a session to be released means released, while removing a
+  project is a statement about the DIRECTORY, so the sessions remember where they
+  were and a re-add is lossless.
+
+  Backfilled from the join, so a store written by version 1 has the memory too:
+  without it, every session bound before this migration would be forgotten by the
+  first removal, which is exactly the loss this step is here to prevent.
+
+  The column is a PATH and not a project id, and that is forced rather than
+  chosen: the id it would name is deleted by the removal, so an id would be a
+  dangling reference by construction."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN last_project_path TEXT")
+  (ddl! c "UPDATE sessions
+              SET last_project_path = (SELECT canonical_path FROM projects
+                                        WHERE projects.id = sessions.project_id)
+            WHERE project_id IS NOT NULL"))
+
 (def migrations
   "The forward migration chain. (nth migrations i) takes the store from schema
   version i to i+1, and (count migrations) is the version this harness speaks.
@@ -453,7 +491,8 @@
   A test may pass its own chain as the first argument to migrate!,
   with-connection or with-transaction -- that is how the walk across several
   versions is exercised without waiting for the features that bring them."
-  [projects-and-sessions])
+  [projects-and-sessions
+   sessions-remember-the-project-path])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

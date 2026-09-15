@@ -84,6 +84,7 @@ import { Sidebar } from "@/components/sidebar";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
+  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
   RUN_IN_PROGRESS_REFUSAL,
   runInProgress,
 } from "@/lib/run-state";
@@ -149,13 +150,26 @@ export function App() {
     [adoptThread],
   );
 
-  // NOTE THERE IS NO `onSwitchToNewThread`. A new task is started by the sidebar,
-  // which mints the id, binds it to a project and then switches to it through
-  // `switchToThread` -- because the id is exactly what the bind needs, and an id
-  // the runtime minted behind our back would be out of the sidebar's reach. See
-  // sidebar.tsx's header. The adapter's `onSwitchToNewThread` is OPTIONAL
-  // upstream, so leaving it out is the honest description of this page: nothing
-  // here opens a session that has no home.
+  // `onSwitchToNewThread` IS HERE, and only one thing calls it: removing the last
+  // project. Everywhere else a new task goes through the sidebar's mint-bind-
+  // switch, because a session belongs to a project and the id is what the bind
+  // needs. Removing the last project is the one moment when there is nothing left
+  // to bind to -- and the page must still get off the project that just went away
+  // -- so this mints an id, adopts it, and lets the runtime show an empty thread.
+  //
+  // NO REBUILD, and that is the point rather than an omission: there is no
+  // conversation under a brand-new id, so asking the server to rebuild one would
+  // be asking it to find a file that is not there (a 404), and inventing an empty
+  // conversation on the SERVER is exactly what `harness.replay/locate` refuses to
+  // do. The client knows this thread is empty -- it just made the id up -- so the
+  // empty conversation belongs here.
+  const onSwitchToNewThread = useCallback(async () => {
+    if (runtimeRef.current && runInProgress(runtimeRef.current)) {
+      throw new Error(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
+    }
+    adoptThread(crypto.randomUUID());
+  }, [adoptThread]);
+
   const runtime = useAgUiRuntime({
     agent,
     isSendDisabled: gateOpen,
@@ -163,6 +177,7 @@ export function App() {
       threadList: {
         threadId,
         onSwitchToThread,
+        onSwitchToNewThread,
       },
     },
   });

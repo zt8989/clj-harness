@@ -93,13 +93,50 @@
   "Record that SESSION-ID now belongs to project PROJECT-ID, storing the absolute
   PATH this session was bound with. Creates the row if this home has not seen
   that conversation before. The archived flag is left alone: rebinding is not a
-  change of archival state."
-  [^Connection c session-id project-id ^String path]
-  (db/execute! c "INSERT INTO sessions (id, project_id, path, created_at)
-                  VALUES (?, ?, ?, ?)
-                  ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id,
-                                                path       = excluded.path"
-               session-id project-id path (System/currentTimeMillis)))
+  change of archival state.
+
+  `last_project_path` is set alongside, and that is not a second copy of the same
+  fact: it is the CANONICAL form, which is what a later re-add matches on -- see
+  `adopt-remembered-sessions!` for what reads it. Both are written from the one
+  place a binding is ever made, so a session that is bound cannot end up with a
+  memory that disagrees with its binding."
+  [^Connection c session-id project-id ^String path ^String canonical]
+  (db/execute! c "INSERT INTO sessions (id, project_id, path, last_project_path, created_at)
+                  VALUES (?, ?, ?, ?, ?)
+                  ON CONFLICT(id) DO UPDATE SET project_id        = excluded.project_id,
+                                                path              = excluded.path,
+                                                last_project_path = excluded.last_project_path"
+               session-id project-id path canonical (System/currentTimeMillis)))
+
+(defn- adopt-remembered-sessions!
+  "Rebind every session that remembers CANONICAL as its last project, and answer
+  how many there were.
+
+  THIS IS WHAT MAKES REMOVING A PROJECT REVERSIBLE, and it is the only reason
+  `sessions.last_project_path` exists. A removal deletes the project row and the
+  version 1 trigger unbinds its sessions -- after which those sessions are, to
+  every reader, sessions that were never bound: `binding-for` answers nil and the
+  fence is off. What they kept is the memory of where they were, and this is the
+  other half of that pair: the moment a directory becomes a project again, the
+  sessions that remember it come back with it. Their archive flags were never
+  touched, so those come back too, and their logs never moved, so the history
+  does.
+
+  A session that is ALREADY bound elsewhere is left alone. Rebinding it would
+  quietly pull a conversation out of the project a person moved it to, on the
+  strength of an older memory -- and re-adding a directory is not a request to
+  reorganize anything.
+
+  Called from `add-project!`, which is exactly where a directory becomes a
+  project: a bind to an already-existing project must not adopt (the sessions
+  there are already bound), and there is no third way into this table."
+  [^Connection c ^String canonical]
+  (db/execute! c "UPDATE sessions
+                     SET project_id = (SELECT id FROM projects WHERE canonical_path = ?),
+                         path       = last_project_path
+                   WHERE last_project_path = ?
+                     AND project_id IS NULL"
+               canonical canonical))
 
 (defn- checked-directory
   "DIR as a File, having established that it IS a directory. A typo'd path must
@@ -118,7 +155,7 @@
 
 (defn add-project!
   "DIR becomes a project of this home, with no session in it yet. Returns
-  {:project-id .. :path <canonical>}.
+  {:project-id .. :path <canonical> :adopted <n>}.
 
   THIS IS THE ONE VERB THAT CREATES A PROJECT WITHOUT A CONVERSATION, and it is
   what the sidebar's 'add a project' is. Without it the only way to get a project
@@ -133,6 +170,12 @@
   and a 'duplicate' refusal would be worse than useless: there is nothing for them
   to fix.
 
+  IT ALSO ADOPTS THE SESSIONS THAT REMEMBER THIS DIRECTORY, which is the other
+  half of `remove-project!`: the directory becomes a project again and the
+  conversations that were in it come back, archive flags and logs included. Nil
+  for a project that was never removed, because nothing remembers a directory the
+  sidebar has never let go of.
+
   Validation happens before anything is written, and it is the same check `bind!`
   runs -- see `checked-directory`."
   [dir]
@@ -140,8 +183,10 @@
         canon (canonical-path f)]
     (db/with-transaction
       (fn [^Connection c]
-        {:project-id (upsert-project! c canon)
-         :path       canon}))))
+        (let [id (upsert-project! c canon)]
+          {:project-id id
+           :path       canon
+           :adopted    (long (adopt-remembered-sessions! c canon))})))))
 
 (defn bind!
   "Bind THREAD-ID's session to directory DIR, which must exist and be a
@@ -154,6 +199,15 @@
   a session row: a conversation this home has never heard of is not one it
   should start keeping, and the drop is a no-op on it exactly as the old
   dissoc was.
+
+  DROPPING ALSO CLEARS THE REMEMBERED PROJECT, and that is the line between this
+  verb and removing a project. `(bind! id nil)` is a REQUEST to release this
+  session -- normally because it is about to be bound somewhere else -- so the
+  session is released, memory and all, and removing a project later cannot drag
+  it back. `remove-project!` says nothing about any session: it deletes one
+  directory's row and leaves the conversations in it remembering where they were,
+  which is what lets re-adding the directory bring them home. One is a statement
+  about a conversation, the other about a directory.
 
   Validation happens BEFORE anything is written, so a refused bind leaves the
   store exactly as it was -- the same 'no trace on failure' the HTTP edge
@@ -174,14 +228,17 @@
    (if (nil? dir)
      (do (db/with-transaction
            (fn [^Connection c]
-             (db/execute! c "UPDATE sessions SET project_id = NULL, path = NULL WHERE id = ?"
+             (db/execute! c "UPDATE sessions
+                                SET project_id = NULL, path = NULL, last_project_path = NULL
+                              WHERE id = ?"
                           thread-id)))
          nil)
-     (let [f   (checked-directory dir)
-           abs (absolute dir)]
+     (let [f     (checked-directory dir)
+           canon (canonical-path f)
+           abs   (absolute dir)]
        (db/with-transaction
          (fn [^Connection c]
-           (touch-session! c thread-id (upsert-project! c (canonical-path f)) abs)))
+           (touch-session! c thread-id (upsert-project! c canon) abs canon)))
        abs))))
 
 (defn binding-for
@@ -285,6 +342,55 @@
                            " was either never created here or belongs to another home")
                       {:thread-id thread-id :reason :no-such-session})))
     (boolean archived?)))
+
+(defn remove-project!
+  "Take directory CANONICAL out of this home's project list. Answers
+  {:path .. :unbound <n>} -- how many sessions stopped being bound.
+
+  THIS IS A REMOVAL, NOT A DELETION, and the whole verb is the difference. What
+  goes is the `projects` ROW: the directory is no longer one this home's sidebar
+  draws, which is what 'removed' has to mean to be worth doing. What stays is
+  everything that is not the row -- the conversation logs under
+  `projects/<workspace>/` are never opened, let alone moved or deleted, and each
+  session keeps the memory of where it was (`last_project_path`).
+
+  UNBINDING IS DONE BY THE SCHEMA, not here: the BEFORE DELETE trigger from
+  version 1 clears `project_id` and `path` on this project's sessions in the same
+  statement, so no session can be left half-bound and the CHECK is never asked to
+  judge a row mid-change (see harness.db's migration docstring). Doing it here as
+  well would be a second implementation of the same invariant, free to disagree.
+
+  THE SESSIONS THEREFORE BECOME ORDINARY UNBOUND SESSIONS: `binding-for` answers
+  nil, `out-of-bounds?` answers false, and their paths resolve unchanged --
+  byte-for-byte the behaviour of a session that never had a project. That is the
+  honest state and it is why 'removed' needs no special case anywhere else: every
+  reader already knows what an unbound session is. The one thing they keep is the
+  memory, which is what `add-project!` adopts when the directory comes back.
+
+  A DIRECTORY THIS HOME DOES NOT KNOW IS REFUSED BY NAME, for the reason
+  `archive!` refuses an unknown session: the sidebar needs a sentence it can show
+  on the row the click landed on, and 'removed' about something that was never
+  there tells the caller their click worked when the list they were looking at
+  was stale.
+
+  NO AUDIT LINE and no timestamp: nothing here happens to a log. There is no
+  per-session line to write -- the workspace is a function of the project, and the
+  project is going away -- and the log directory is not this verb's to touch."
+  [canonical]
+  (db/with-transaction
+    (fn [^Connection c]
+      (let [row (first (db/query c "SELECT id FROM projects WHERE canonical_path = ?" canonical))]
+        (when (nil? row)
+          (throw (ex-info (str "no project at " canonical " in this home, so there is nothing to remove")
+                          {:path canonical :reason :no-such-project})))
+        (let [id      (:id row)
+              ;; Counted BEFORE the delete, because the trigger is about to clear
+              ;; the column this counts on -- and the count is the answer the
+              ;; caller reports, so reading it afterwards would always be zero.
+              unbound (:n (first (db/query c "SELECT COUNT(*) AS n FROM sessions WHERE project_id = ?" id)))]
+          (db/execute! c "DELETE FROM projects WHERE id = ?" id)
+          {:path    canonical
+           :unbound (long unbound)})))))
 
 (defn cwd-changed
   "The CwdChanged hook-event FACTS for a binding change: BEFORE (the previous

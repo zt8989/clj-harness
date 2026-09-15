@@ -349,6 +349,51 @@
           (is (= ["step_1" "step_2" "step_3"] @log))
           (is (= ["step_1" "step_2" "step_3"] (db/tables v3))))))))
 
+(deftest a-store-written-before-the-removal-memory-still-has-it
+  ;; The version 1 -> 2 step, and the reason it is a step rather than a column in
+  ;; the CREATE TABLE above: a store that predates it holds sessions whose project
+  ;; was bound the ordinary way, and those are exactly the ones a removal would
+  ;; silently forget if the new column arrived empty. Any older store is a store
+  ;; somebody is using.
+  ;;
+  ;; Built by running TODAY'S first step and then stopping -- `migrations` is
+  ;; public for this, and using the real step is the point: a hand-written copy of
+  ;; the version 1 DDL would drift from the thing it claims to be. The rows go in
+  ;; through `raw-connection`, NOT through harness.db's own helpers, and that is
+  ;; load-bearing rather than incidental: db/select and db/with-transaction open
+  ;; the store the normal way, which migrates it first, so seeding with them would
+  ;; add the column while the table was still empty and leave nothing to backfill.
+  (let [dir   (fresh-root)
+        one   [(first db/migrations)]
+        bound "bound-before-the-migration"
+        free  "never-bound"]
+    (with-root
+      dir
+      (fn []
+        (is (= 1 (db/migrate! one)) "a store one version behind")
+        (with-open [c (raw-connection (home/db-file))]
+          (doseq [sql [(str "INSERT INTO projects (id, canonical_path, created_at)
+                               VALUES (1, '/before/the/migration', 1)")
+                      (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                               VALUES ('" bound "', 1, '/before/the/migration', 1, 1)")
+                      (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                               VALUES ('" free "', NULL, NULL, 0, 2)")]]
+            (with-open [st (.createStatement c)] (.execute st sql))))
+        (is (= (db/target-version) (db/migrate!))
+            "today's harness walks it up")
+        (let [remembered (fn [id]
+                           (:last-project-path
+                            (first (db/select "SELECT last_project_path FROM sessions WHERE id = ?" id))))]
+          (testing "the session that had a project remembers it, from the join"
+            (is (= "/before/the/migration" (remembered bound))))
+          (testing "and a session that never had one stays empty -- nothing to remember"
+            (is (nil? (remembered free)))))
+        (testing "the backfill changed no binding and no flag"
+          (let [row (first (db/select "SELECT project_id, path, archived FROM sessions WHERE id = ?" bound))]
+            (is (= 1 (:project-id row)))
+            (is (= "/before/the/migration" (:path row)))
+            (is (= 1 (:archived row)))))))))
+
 (deftest a-store-from-a-newer-harness-is-refused-by-name
   (let [dir (fresh-root)
         log (atom [])
@@ -617,7 +662,8 @@
       (fn []
         (let [declared-state-columns
               {"projects" #{"id" "canonical_path" "created_at"}
-               "sessions" #{"id" "project_id" "path" "archived" "created_at"}}
+               "sessions" #{"id" "project_id" "path" "archived" "created_at"
+                            "last_project_path"}}
               forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
           (is (pos? (db/target-version)) "the store has a schema to inspect")
           (doseq [[table columns] declared-state-columns]
