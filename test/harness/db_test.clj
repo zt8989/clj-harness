@@ -175,7 +175,12 @@
           (is (= (db/target-version) (db/migrate!)))
           (is (= (db/target-version) (db/schema-version))))
         (testing "with exactly the tables the home's entities declared"
-          (is (= ["projects" "schema_steps" "sessions"] (db/tables))))
+          ;; Both feature sets now: this store runs BOTH chains' steps -- the
+          ;; project/session tables (with `schema_steps` recording them) and the
+          ;; four anchor tables.
+          (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+                  "hashline_undo" "projects" "schema_steps" "sessions"]
+                 (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
           (is (= 0x6861726E (pragma (home/db-file) "application_id"))))
@@ -326,7 +331,9 @@
               (let [fact (last (db/recoveries))]
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
-              (is (= ["projects" "schema_steps" "sessions"] (db/tables))
+              (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+                      "hashline_undo" "projects" "schema_steps" "sessions"]
+                     (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
                 (fn [^Connection c]
@@ -716,9 +723,23 @@
       dir
       (fn []
         (let [declared-state-columns
-              {"projects" #{"id" "canonical_path" "created_at"}
-               "sessions" #{"id" "project_id" "path" "archived" "created_at"
-                            "last_project_path"}}
+              {"projects"           #{"id" "canonical_path" "created_at"}
+               "sessions"           #{"id" "project_id" "path" "archived" "created_at"
+                                      "last_project_path"}
+               ;; The anchor store (harness.hashline.store).
+               "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
+                                      "anchors" "line_checksums" "served" "updated_at"}
+               "hashline_ownership" #{"thread_id" "anchor" "path"}
+               "hashline_sessions"  #{"thread_id" "probe" "updated_at"}
+               ;; `prior_text`/`resulting_text` are the file's own text on either
+               ;; side of one edit, which is why they are named that and not
+               ;; `content`: they are the ONE place in this store that holds a
+               ;; document, and the name says which document and which side of the
+               ;; edit it is. `served` and `mode` are here because an undo restores
+               ;; the ANCHORS and the permission bits as well as the text -- see
+               ;; harness.hashline.undo.
+               "hashline_undo"      #{"path" "prior_text" "bom" "ending" "anchors"
+                                      "served" "resulting_text" "mode" "updated_at"}}
               forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
           (is (pos? (db/target-version)) "the store has a schema to inspect")
           (doseq [[table columns] declared-state-columns]
@@ -745,7 +766,9 @@
     (with-root
       dir
       (fn []
-        (let [declared-state-tables #{"projects" "sessions" "schema_steps"}
+        (let [declared-state-tables #{"projects" "sessions" "schema_steps"
+                                      "hashline_snapshots" "hashline_ownership"
+                                      "hashline_sessions" "hashline_undo"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))

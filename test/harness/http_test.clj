@@ -24,6 +24,17 @@
 
 (def ^:private ui-origin "http://localhost:5173")
 
+(defn- read-lines
+  "What `read` returned, as plain lines -- with the `anchor|` prefix stripped when
+  this session's mode puts one there. The row shape is the mode's business and has
+  its own tests; a case about the LOG or the WIRE wants the content."
+  [content]
+  (mapv (fn [line]
+          (if-let [i (str/index-of line "\u2502")]
+            (subs line (inc i))
+            line))
+        (str/split-lines content)))
+
 (def ^:private reasoning "\u9700\u8981\u5148\u770b\u4e00\u773c deps.edn\u3002")
 
 (def ^:private script
@@ -271,9 +282,13 @@
          ;; the completion order on the wire was.
          (let [tools (filter #(= "tool" (:role %)) msgs)]
            (is (= ["c1" "c2"] (mapv :tool_call_id tools)))
-           ;; The content is what the read tool actually returned.
+           ;; The content is what the read tool actually returned -- compared as
+           ;; LINES WITH THE ROW PREFIX STRIPPED, so this case stays a case about
+           ;; the log holding the tool result rather than about the shape of a
+           ;; row, which the default mode changed.
            (is (some #(and (= "c1" (:tool_call_id %))
-                           (= (slurp "deps.edn" :encoding "UTF-8") (:content %)))
+                           (= (str/split-lines (slurp "deps.edn" :encoding "UTF-8"))
+                              (read-lines (:content %))))
                      tools))))))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read

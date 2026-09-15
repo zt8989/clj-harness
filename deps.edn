@@ -1,4 +1,8 @@
-{:paths ["src"]
+;; "resources" holds DATA the code reads off the classpath rather than source:
+;; today that is the vendored anchor table (harness.hashline.anchors), 85 KB
+;; gzipped. It is on :paths for every alias, because the thing that needs it is
+;; src/ and not a test.
+{:paths ["src" "resources"]
  ;; Java 17 on Chinese Windows defaults to a GBK charset, which silently mangles
  ;; implicit byte<->String conversions. Two consequences:
  ;;   1. VERIFIED: the deps.clj launcher installed here (scoop clj-deps) IGNORES

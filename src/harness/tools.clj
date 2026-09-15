@@ -37,7 +37,15 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [harness.editing :as editing]
             [harness.event :as ev]
+            [harness.hashline.edit :as edit]
+            [harness.hashline.grep :as grep]
+            [harness.hashline.replace :as replace]
+            [harness.hashline.serve :as serve]
+            [harness.hashline.store :as store]
+            [harness.hashline.undo :as undo]
+            [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
             [harness.project :as project]
@@ -174,13 +182,95 @@
 ;; byte for byte). The tool's answer reports the RESOLVED path -- what actually
 ;; happened, wherever the model's relative path ended up landing.
 
-(defn- t-read [{:keys [path]}]
-  (slurp (project/resolve-path *thread-id* path) :encoding "UTF-8"))
+;; ------------------------------------------------------------------- read
+;;
+;; ONE TOOL, TWO FACES. The same tool name serves both editing modes because that
+;; is what was asked for, and because a model that reads a file has not thereby
+;; chosen how to edit it. What differs is what a row IS:
+;;
+;;   :str-replace  the file's text, unchanged since before any of this existed.
+;;   :hashline     `anchor│content` rows, where the anchor is the ONLY safe way to
+;;                 address a line -- by content cannot tell two identical lines
+;;                 apart, and by line number is a number the model has to count.
+;;
+;; The parameters differ with it, so neither mode's description mentions a field
+;; the other does not have. What does NOT differ: the path fence (both faces are
+;; fence-marked), the project re-rooting, and the fact that this is where a
+;; session first learns a file's anchors.
 
-(defn- t-write [{:keys [path content]}]
+(def ^:private read-anchor-description
+  (str "Read a file and return one row per line, each line prefixed by its 4-character anchor, "
+       "like `Hasu│(defn f [])`. Edit by ANCHOR, never by content and never by line number: "
+       "anchors are unique even for identical lines, and an anchor from a stale read is refused "
+       "rather than applied to the wrong line. "
+       "Paging: use `offset` (1-based, default 1) and `limit` to read part of a large file; when "
+       "the output says it stopped early it names the `offset` that continues. "
+       "A line too long to show still gets its anchor, so it can be replaced whole. "
+       "Binary files, images, directories and UTF-16/32 text are refused by name. "
+       "A relative path resolves against this session's project directory when one is bound. "
+       "When bound, a path resolving outside the project directory and the configuration home "
+       "parks for human approval first. "
+       "After an edit the tool that made it hands back the anchors for the changed lines, so a "
+       "follow-up edit needs no new read."))
+
+(def ^:private read-anchor-params
+  {:type "object"
+   :properties
+   {"path"   {:type "string" :description "File path."}
+    "offset" {:type "integer" :minimum 1
+              :description "Line number to start from (1-based). Default 1."}
+    "limit"  {:type "integer" :minimum 1
+              :description "How many lines to return at most."}}})
+
+(def ^:private read-plain-description
+  "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first.")
+
+(def ^:private read-plain-params
+  {:type "object" :properties {"path" {:type "string" :description "File path."}}})
+
+(defn- positive-int
+  "V as a positive integer, or a NAMED failure. `offset`/`limit` arrive from JSON,
+  so 0, -3 and 1.5 are all things a model can actually send -- and each of them
+  means something specific enough to say back."
+  [k v]
+  (when (some? v)
+    (when-not (and (integer? v) (pos? v))
+      (throw (ex-info (str "`" (name k) "` must be a positive integer (1 or more); got "
+                           (pr-str v) ".")
+                      {:argument k :value v :reason :not-a-positive-integer})))
+    v))
+
+(defn- anchored-read
+  "The hashline face of `read`: resolve, serve, and answer with the rows."
+  [{:keys [path offset limit]}]
+  (let [p (project/resolve-path *thread-id* path)
+        {:keys [text]} (serve/read! *thread-id* p
+                                    {:offset (positive-int :offset offset)
+                                     :limit  (positive-int :limit limit)})]
+    text))
+
+(defn- t-read
+  "`read`'s body, dispatched on this session's editing mode."
+  [{:keys [path] :as args}]
   (let [p (project/resolve-path *thread-id* path)]
-    (write-file! p content)
-    (str "wrote " (count content) " chars to " p)))
+    (if (= :hashline (:mode (editing/editing-mode *thread-id*)))
+      (anchored-read (assoc args :path p))
+      (slurp p :encoding "UTF-8"))))
+
+(defn- t-write
+  "`write`'s body, dispatched on this session's editing mode.
+
+  In anchor mode the file's anchors are not merely stale -- they address lines
+  that are gone -- so the write RELEASES them, clears the file's undo record, and
+  hands back anchored rows for what it wrote (harness.hashline.write). In
+  str-replace mode none of that exists and this is the write it always was."
+  [{:keys [path content] :as args}]
+  (if (= :hashline (:mode (editing/editing-mode *thread-id*)))
+    (hashline-write/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                             (editing/editing-mode *thread-id*))
+    (let [p (project/resolve-path *thread-id* path)]
+      (write-file! p content)
+      (str "wrote " (count content) " chars to " p))))
 
 (defn- t-edit [{:keys [path old_string new_string]}]
   (let [p (project/resolve-path *thread-id* path)
@@ -329,37 +419,115 @@
 
 ;; --------------------------------------------------------------------- specs
 
+(defn- tool-face
+  "The two fields a model actually reads -- :description and :parameters -- for
+  NAME's tool in THREAD-ID's session.
+
+  A tool's face is STATIC unless it declares a `:describe` fn, and that escape
+  hatch exists for one situation: a tool whose NAME stays the same across the two
+  editing modes while what it DOES does not. Two of them do -- `read` (plain text
+  in str-replace mode, `anchor│content` rows in hashline mode) and `write` (which
+  releases a file's anchors in the mode that has them). The alternative was
+  differently-named tools per mode, and the user asked for these to be the same
+  tool either way.
+
+  The face varies because the BEHAVIOUR does, and only where it does: a
+  description is the model's only view of what a call will do, so a session with
+  no anchors is not read a paragraph about releasing them.
+
+  Everything else about a tool -- :required, :run, the markers the seam reads --
+  is untouched by this: only what the MODEL sees varies, which keeps the call's
+  behaviour a function of the session rather than of the description."
+  [thread-id [n t]]
+  (if-let [describe (:describe t)]
+    (describe thread-id)
+    {:description (:description t) :parameters (:parameters t)}))
+
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
-  effective toolset (base overlaid with its session additions/removals)."
+  effective toolset (base overlaid with its session additions/removals).
+
+  THE EDITING MODE SUBTRACTS FROM THIS LIST, and it is the only thing that does.
+  A session is served ONE editing toolset -- the mode's -- so the other mode's
+  tools never reach the model. Everything else stays in, including tools this
+  session has switched OFF: availability is enforced per call at the execution
+  seam, not by omission, and a model that cannot see a switched-off tool would
+  read its absence as 'this does not exist'.
+
+  That distinction is worth keeping straight, because the mode's subtraction
+  looks like the same trick. It is not, and the difference is what the model
+  learns: a disabled tool is VISIBLE and its calls are refused, while an unserved
+  tool is absent from the list and its calls are refused by name with the
+  substitute and the config key to switch (harness.editing/unserved-message).
+  Either way nobody is left guessing -- which is the property both mechanisms are
+  actually for."
   ([] (specs nil))
   ([thread-id]
    (mapv (fn [[n t]] {:type "function"
-                      :function {:name n
-                                 :description (:description t)
-                                 :parameters (:parameters t)}})
-         (sort-by key (effective-tools thread-id)))))
+                      :function (assoc (tool-face thread-id [n t])
+                                       :name n)})
+         (sort-by key (into {}
+                            (filter (fn [[n _]] (editing/served? thread-id n))
+                                    (effective-tools thread-id)))))))
 
 ;; -------------------------------------------------------------- the built-ins
 
-;; read/write/edit carry :fence-paths -- when the session is bound to a
+;; The file tools carry :fence-paths -- when the session is bound to a
 ;; project directory, a path resolving outside the project directory AND the
 ;; configuration home parks for approval before it runs. Unbound sessions are
 ;; untouched: the fence is a property of the tool MARKER, engaged only by a
 ;; binding, and the park itself is the ordinary approval flow.
 
 (register! "read"
-  (assoc (tool "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+  (assoc (tool read-plain-description
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
-         :fence-paths true))
+         :fence-paths true
+         ;; `read` and `write` are the two tools whose face follows the editing
+         ;; mode: both keep their NAME (the user asked for one `read`, one `write`)
+         ;; while what they do differs, so the description has to say which of the
+         ;; two behaviours THIS session gets. Both read faces keep :required
+         ;; [:path] -- offset and limit are optional in the anchored one, and
+         ;; nothing else about the call moves (see tool-face).
+         :describe (fn [thread-id]
+                     (if (= :hashline (:mode (editing/editing-mode thread-id)))
+                       {:description read-anchor-description :parameters read-anchor-params}
+                       {:description read-plain-description :parameters read-plain-params}))))
+
+(def ^:private write-anchor-description
+  (str "Write a file, overwriting it. "
+       "This session edits by anchor, so a successful write RELEASES the file's"
+       " anchors: the content is no longer what they were minted against. The"
+       " answer shows the top of the file it just wrote with the anchors that name"
+       " those lines now, so you can edit what you wrote without reading it back. "
+       "Content that begins a line with an anchor of this file followed by `│` is"
+       " refused -- that is read's markup copied back in, not text. "
+       "A relative path resolves against this session's project directory when one"
+       " is bound. When bound, a path resolving outside the project directory and"
+       " the configuration home parks for human approval first."))
+
+(def ^:private write-plain-description
+  "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first.")
+
+(defn- write-face
+  "`write`'s description in THREAD-ID's session. The parameters do not vary -- the
+  arguments are the same two either way -- so only the text does; see tool-face for
+  why the two modes share one tool name at all."
+  [thread-id]
+  {:description (if (= :hashline (:mode (editing/editing-mode thread-id)))
+                  write-anchor-description
+                  write-plain-description)
+   :parameters  {:type "object"
+                 :properties {"path"    {:type "string" :description "File path."}
+                              "content" {:type "string" :description "Full new contents."}}}})
 
 (register! "write"
-  (assoc (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+  (assoc (tool write-plain-description
                {"path"    {:type "string" :description "File path."}
                 "content" {:type "string" :description "Full new contents."}}
                [:path :content] t-write)
-         :fence-paths true))
+         :fence-paths true
+         :describe write-face))
 
 (register! "edit"
   (assoc (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
@@ -367,6 +535,205 @@
                 "old_string" {:type "string" :description "Exact text to replace."}
                 "new_string" {:type "string" :description "Replacement text."}}
                [:path :old_string :new_string] t-edit)
+         :fence-paths true))
+
+;; ------------------------------------------------------------------ replace
+;;
+;; The anchor-addressed edit. Prompt text lives here rather than in replace.clj
+;; because it is what the MODEL reads, and this is the file where a tool's face is
+;; declared -- the two must not be able to drift apart.
+;;
+;; It describes what the tool DOES TODAY, and nothing more. It carried two
+;; sentences that outran their tickets for a while -- the healing answer and the
+;; one-commit batch -- and both are now true, so both are back below. The habit is
+;; worth keeping: a model told to expect what does not happen learns to distrust the
+;; whole description.
+
+(def ^:private replace-description
+  (str "Replace a range of lines in a file, addressed by 4-character ANCHORS from "
+       "read output: `remove_from` and `remove_to` are the first and last line of the "
+       "range (the same anchor twice for one line), and `replacement_lines` is an "
+       "array with one string per new line -- bare lines, no `│`, no embedded "
+       "newlines. An empty array deletes the range; an array holding one empty string "
+       "inserts one blank line. "
+       "Every line of the range must still be what read showed. A refusal is not a "
+       "dead end: a file that changed under the session, or a range that runs into a "
+       "line you were never shown, comes back with those lines and their CURRENT "
+       "anchors, so retry with those instead of re-reading. "
+       "The answer shows the changed region as `+`, `-` and context rows, each with "
+       "the CURRENT anchor for its line -- `+` and context rows are immediately "
+       "editable, so a follow-up edit needs no read. A `-` row's anchor column is "
+       "blank because that line is gone. "
+       "A replacement that repeats the line just outside the range has that line "
+       "deduplicated (reported as a `dedup│` row), so re-including a boundary line is "
+       "safe but unnecessary. "
+       "SEVERAL replace calls on ONE file in ONE message are applied as ONE commit: "
+       "they are checked against the same state, written together or not at all, and "
+       "ONE undo takes the whole message back. Their line ranges must not overlap -- "
+       "an overlap is refused (nothing is written) and you get the current anchors to "
+       "retry with; send the second edit in a later message if you meant both. "
+       "A relative path resolves against this session's project directory when one is "
+       "bound. When bound, a path resolving outside the project directory and the "
+       "configuration home parks for human approval first."))
+
+(def ^:private replace-params
+  {:type "object"
+   :properties
+   {"remove_from"       {:type "string"
+                         :description (str "Anchor of the FIRST line to remove: the four "
+                                           "characters before the `│` of a read row. "
+                                           "Never the row's content, never a line number.")}
+    "remove_to"         {:type "string"
+                         :description (str "Anchor of the LAST line to remove, inclusive. "
+                                           "Omit it to change a single line.")}
+    "replacement_lines" {:type "array"
+                         :items {:type "string"}
+                         :description (str "One string per replacement line. No `│`, no "
+                                           "embedded newlines. [] deletes the range; "
+                                           "[""] inserts one blank line.")}}})
+
+(defn- anchor-replace
+  "The body `replace` and `insert` share: resolve the path for the session and hand
+  the rest to the engine, which tells the two apart by their payload. The fence
+  looked at the same path before this ran (see `:path-for`)."
+  [args]
+  (replace/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                    (editing/editing-mode *thread-id*)))
+
+(register! "replace"
+  (assoc (tool replace-description
+               (get replace-params :properties)
+               [:remove_from :replacement_lines] anchor-replace)
+         :fence-paths true
+         ;; The fence has no `path` argument to look at when the model omits it, so
+         ;; the target is derived here -- the same derivation the body uses, so the
+         ;; call that parks and the call that runs are about the same file.
+         :path-for (fn [thread-id parsed]
+                     (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
+
+(def ^:private insert-description
+  (str "Insert new lines next to a line, addressed by the 4-character ANCHOR from"
+       " read output. `direction` is \"after\" to add them below that line or"
+       " \"before\" to add them above it; `lines` is an array with one string per"
+       " new line -- bare lines, no `│`, no embedded newlines. An array holding one"
+       " empty string inserts one blank line. "
+       "THE ANCHORED LINE IS LEFT EXACTLY AS IT IS -- you never retype it, so you"
+       " cannot change it by accident -- and IT KEEPS ITS ANCHOR, so the anchors you"
+       " already hold stay valid after an insert and no re-read is needed. An empty"
+       " `lines` array changes nothing. "
+       "Inserting a line that reads like its neighbour is fine here: unlike replace,"
+       " insert never deduplicates what you asked for. "
+       "The answer shows the changed region as `+` and context rows with their"
+       " current anchors, so a follow-up edit needs no read. "
+       "A relative path resolves against this session's project directory when one is"
+       " bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(def ^:private insert-params
+  {:type "object"
+   :properties
+   {"anchor"    {:type "string"
+                 :description (str "Anchor of the line to insert next to: the four"
+                                   " characters before the `│` of a read row.")}
+    "direction" {:type "string"
+                 :enum ["before" "after"]
+                 :description (str "\"after\" adds the lines below the anchored line,"
+                                   " \"before\" above it.")}
+    "lines"     {:type "array"
+                 :items {:type "string"}
+                 :description (str "One string per new line. No `│`, no embedded"
+                                   " newlines. [\"\"] inserts one blank line; []"
+                                   " changes nothing.")}}})
+
+(register! "insert"
+  (assoc (tool insert-description
+               (get insert-params :properties)
+               [:anchor :direction :lines] anchor-replace)
+         :fence-paths true
+         ;; Same derivation as `replace`: the fence has no `path` to look at when
+         ;; the model omits it, so the target comes from the anchor.
+         :path-for (fn [thread-id parsed]
+                     (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
+
+(def ^:private undo-description
+  (str "Undo the LAST edit made to a file by replace or insert, restoring the file's"
+       " text, its line endings, its encoding and the anchors that named those lines"
+       " -- so you can go straight on editing, no read needed. "
+       "ONE edit, not a stack: a second call says there is nothing left to undo, and"
+       " a write clears the history (what it wrote is what is there). "
+       "It REFUSES rather than overwrites when the file has changed since that edit"
+       " (an editor, another tool, a bash command): nothing is written, the history"
+       " is kept, and the answer says to read the file instead. A file that was"
+       " deleted is restored from the history. "
+       "A relative path resolves against this session's project directory when one is"
+       " bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(defn- t-undo
+  "`undo_last_replace`'s body. It takes the path through the same resolution the
+  other file tools use, so the fence and the re-root are the same ones."
+  [args]
+  (undo/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                 (editing/editing-mode *thread-id*)))
+
+(register! "undo_last_replace"
+  (assoc (tool undo-description
+               {"path" {:type "string"
+                        :description (str "The file whose last edit should be taken"
+                                          " back.")}}
+               [:path] t-undo)
+         :fence-paths true))
+
+(def ^:private grep-description
+  (str "Search files for a pattern (ripgrep), and get every match back as an ANCHORED"
+       " row: a line number for reading, and a 4-character anchor that can be edited"
+       " directly. No read afterwards is needed -- the anchors in the answer are"
+       " current and already usable, by replace or insert. "
+       "The line number is for you to talk about a hit, never to edit by: `replace`"
+       " takes anchors. "
+       "Results respect .gitignore and skip binary files. `literal: true` searches for"
+       " plain text, which is both faster and the way out when a pattern is refused"
+       " for being able to hang a regex engine. "
+       "A relative `path` resolves against this session's project directory when one"
+       " is bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(defn- t-grep
+  "`anchor_grep`'s body. The search root is resolved for the session exactly as the
+  file tools' paths are, so a relative root means what it means everywhere else."
+  [args]
+  (grep/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                 (editing/editing-mode *thread-id*)))
+
+(register! "anchor_grep"
+  (assoc (tool grep-description
+               {"pattern"     {:type "string"
+                               :description (str "Regular expression to search for"
+                                                 " (or literal text, with"
+                                                 " literal: true).")}
+                "path"        {:type "string"
+                               :description (str "File or directory to search;"
+                                                 " defaults to this session's project"
+                                                 " directory (or the process working"
+                                                 " directory when none is bound).")}
+                "glob"        {:type "string"
+                               :description (str "Only search files matching this glob,"
+                                                 " e.g. \"*.clj\".")}
+                "ignore-case" {:type "boolean" :description "Case-insensitive search."}
+                "literal"     {:type "boolean"
+                               :description (str "Treat `pattern` as plain text (no"
+                                                 " regex). The way out when a pattern"
+                                                 " is refused as too complex.")}
+                "context"     {:type "integer" :minimum 0
+                               :description (str "Lines of context to show around each"
+                                                 " match (0 by default). Context rows"
+                                                 " carry anchors too.")}
+                "limit"       {:type "integer" :minimum 1
+                               :description (str "Max matches per file (default "
+                                                 grep/default-limit ").")}}
+               [:pattern] t-grep)
+         ;; A search reads files, so the fence applies: when a project is bound, a
+         ;; root outside it parks for a human exactly as a read does.
          :fence-paths true))
 
 (register! "bash"
@@ -516,21 +883,49 @@
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
+(defn- fenced-path
+  "The path the fence should judge for this call, or nil when there is nothing to
+  judge.
+
+  Usually that is the `path` argument. A tool may declare `:path-for` instead, for
+  the calls whose target is DERIVED rather than given -- `replace` addresses a line
+  by anchor, and the anchor is what names the file (see
+  harness.hashline.replace/target-path). Without this, an anchor-addressed edit to a
+  file outside the project would run with no fence at all, because there is no path
+  argument to look at.
+
+  Either way this is best-effort: it runs BEFORE the argument checks, so a malformed
+  payload must come back as nil (no path to judge) rather than as an exception from
+  a derivation that was handed nonsense. The argument check is what reports the
+  malformed payload, one line later, with the useful message."
+  [tool name thread-id parsed]
+  (or (:path parsed)
+      (when-let [derive (:path-for tool)]
+        (try (derive thread-id parsed) (catch Throwable _ nil)))))
+
 (defn- approval-reason
   "WHY this call parks -- nil meaning it does not. The same union
   approval-required? answered, now with the reason attached, in the order the
   or short-circuited: the tool's own declaration first, then the session's
   ask, then the project fence (a fence-marked tool whose path, resolved for
-  this session, lands outside the project directory and the configuration
-  home). The reason rides the parked record, so the human deciding -- and any
-  reader of the audit trail -- can tell a declared-approval call from a fence
-  catch without re-deriving either."
+  this session and possibly derived from its arguments, lands outside the project
+  directory and the configuration home). The reason rides the parked record, so the
+  human deciding -- and any reader of the audit trail -- can tell a declared-approval
+  call from a fence catch without re-deriving either.
+
+  A call with NO PATH AT ALL is not a fence case, whatever else it is. The fence is
+  a question about a path, and asking it about a missing one would answer with an
+  exception from deep inside java.io rather than with the useful fact -- that the
+  argument is absent, which the missing-arguments check says a line later. Reading
+  'no path' as 'not out of bounds' keeps that check reachable, which is what a call
+  with no arguments should be told."
   [tool name thread-id parsed]
   (cond
     (:requires-approval tool)                       :tool-declares
-    (session-approval-required? thread-id name) :session-asks
+    (session-approval-required? thread-id name)     :session-asks
     (and (:fence-paths tool)
-         (project/out-of-bounds? thread-id (:path parsed)))
+         (some? (fenced-path tool name thread-id parsed))
+         (project/out-of-bounds? thread-id (fenced-path tool name thread-id parsed)))
     :out-of-bounds
     :else nil))
 
@@ -566,41 +961,194 @@
   "What the model is told when it calls a tool this session switched off. Like a
   veto, this is information rather than a run failure -- and it says DISABLED,
   never unknown: the tool exists and is on offer, so calling its absence a lie
-  would only send the model hunting for a workaround."
-  [name]
+  would only send the model hunting for a workaround.
+
+  When the session's editing mode does not serve NAME either, the last sentence
+  is not offered, because it would be a false promise: re-enabling a tool the
+  mode subtracts changes nothing about the next call. Both facts are true at
+  once, so both are stated -- the refusal is the session's own switch AND the
+  mode's subtraction, and a reader who acts on only half of that will try the
+  same call again and be told the same thing."
+  [thread-id name]
   (str "disabled in this session: " name
-       " is switched off. Re-enable it with (harness.tools/session-enable!"
-       " harness.tools/*thread-id* \"" name "\")."))
+       " is switched off."
+       (if (editing/served? thread-id name)
+         (str " Re-enable it with (harness.tools/session-enable!"
+              " harness.tools/*thread-id* \"" name "\").")
+         (str " Re-enabling it will not make it run, either: "
+              (editing/unserved-message thread-id name)))))
+
+;; ------------------------------------------------------------------- the batch
+
+;; SEVERAL ANCHOR EDITS TO ONE FILE IN ONE MESSAGE ARE ONE COMMIT.
+;;
+;; The reason is not tidiness, it is that the alternative LOSES DATA. A turn's tool
+;; calls run concurrently (`harness.loop/drive!`), and two edits to one file each
+;; validate against the state the session was shown and each compute their own new
+;; content. Run independently, the later write wins and the earlier one is gone --
+;; with BOTH reporting success. No lock around a single edit fixes that, because
+;; the two edits are individually correct; what is wrong is applying them apart.
+;;
+;; So the edits of one message are applied as one patch: validated against the
+;; state BEFORE the message, required to have disjoint line ranges (an overlap is a
+;; REFUSAL, not a question about which ran first), and landed as one write, one
+;; anchor advance and one undo record. The model gets one diff, one set of current
+;; anchors and one undo for the thought it had.
+;;
+;; WHICH CALL APPLIES IT is decided here, because this is the only place that sees
+;; a whole turn at once. The last of a group applies it; the others answer
+;; immediately, having touched nothing, and say where the outcome appears. No call
+;; waits on another, so a refusal or a park anywhere in the message cannot strand
+;; the rest.
+
+(defn- batchable?
+  "May this call be merged with its siblings? Only `replace` -- see the batch section
+  above for why splicing two of them into one patch is possible at all, and
+  `insert`'s own registration for the same treatment when ticket 10 lands."
+  [name]
+  (contains? #{"replace" "insert"} name))
+
+(defn- group-key
+  "The file a call addresses, as a canonical path -- or nil when it cannot be worked
+  out. Best effort on purpose: a call whose target cannot be derived does not join a
+  batch, it runs on its own and reports its own error. Refusing a whole message
+  because one of its calls is malformed would refuse edits that are perfectly fine.
+
+  DELIBERATELY NOT the full payload parse. This asks one question -- which file? --
+  and a call with a broken `replacement_lines` still answers it; making the answer
+  depend on the rest of the payload would silently exclude exactly the calls whose
+  refusals a batch most needs to report."
+  [thread-id parsed]
+  (try
+    (let [anchor (edit/bare-anchor (or (:remove_from parsed) (:replace_from parsed)
+                                       (:anchor parsed)))
+          owner  (when anchor (store/owner-of thread-id anchor))
+          p      (or owner (:path parsed))]
+      (when (and (string? p) (not (str/blank? p)))
+        (store/canonical (project/resolve-path thread-id p))))
+    (catch Throwable _ nil)))
+
+(defn- call-args
+  "A call's arguments as a keyword-keyed map, or nil when the JSON is malformed.
+  Nil rather than an exception because the only caller is deciding whether this call
+  JOINS A BATCH -- and a call whose arguments cannot be read is one that should run
+  on its own and produce the bad-argument message, not one that should take the
+  message down."
+  [{:keys [function]}]
+  (try (json/read-str (if (str/blank? (:arguments function)) "{}"
+                          (:arguments function))
+                      :key-fn keyword)
+       (catch Throwable _ nil)))
+
+(defn- plan-turn
+  "The turn's calls as a plan: TOOL-CALL-ID -> {:role :applier|:member, :group n,
+  :index i, :path p, :members [args ..]}, for every call that shares its target
+  file with another.
+
+  Only groups of MORE THAN ONE appear: a lone edit is not a batch, and routing it
+  through the batch path would change what its answer looks like for no reason."
+  [thread-id calls]
+  (let [parsed (keep (fn [{:keys [id function] :as call}]
+                       (let [{:keys [name]} function]
+                         (when (and (batchable? name)
+                                    (editing/served? thread-id name)
+                                    ;; ...and a name that exists, or the plan would
+                                    ;; be promising work to a tool the seam is about
+                                    ;; to answer with "unknown tool"
+                                    (contains? (effective-tools thread-id) name))
+                           (when-let [args (call-args call)]
+                             (when-let [k (group-key thread-id args)]
+                               {:id id :name name :k k :args args})))))
+                     calls)
+        groups (into {} (filter (fn [[_ g]] (> (count g) 1))
+                                (group-by :k parsed)))]
+    (into {}
+          (for [[path g] groups
+                :let [members (vec g)
+                      n (count members)]]
+            (into {} (map-indexed
+                      (fn [i m]
+                        [(:id m) {:role    (if (= i (dec n)) :applier :member)
+                                  :group   n
+                                  :index   i
+                                  :path    path
+                                  :name    (:name m)
+                                  :members (mapv :args members)}])
+                      members))))))
+
+(defonce ^:private turn-plan (atom {}))
+
+(defn register-turn!
+  "Hand the seam the calls of the turn about to run, so each can be told who its
+  siblings are. Called by the run loop -- the only place that sees a whole turn at
+  once -- and best effort throughout: a turn whose calls were never registered (a
+  direct `run!`, a replayed approval) behaves exactly as it did before batching
+  existed, which is one call, one edit."
+  [thread-id calls]
+  (reset! turn-plan (try (plan-turn thread-id calls) (catch Throwable _ {}))))
+
+(defn forget-turn!
+  "Drop the plan once the turn's calls have all answered. Without this the map grows
+  with the process, one entry per anchor edit ever made."
+  []
+  (reset! turn-plan {}))
+
+(defn- batch-role
+  "What this call's part in its message is, or nil when it is an ordinary edit."
+  [id]
+  (get @turn-plan id))
+
+(defn- run-batch!
+  "The APPOINTED call of a group runs the whole group. The members are the same
+  calls' arguments, in call order, and every one of them addresses this file -- see
+  the batch section of harness.hashline.replace for the arithmetic, and `plan-turn`
+  for who decided that these calls belong together."
+  [{:keys [members]} thread-id]
+  (binding [*thread-id* thread-id]
+    (replace/perform-edits! thread-id #(project/resolve-path thread-id %) members
+                            (editing/editing-mode thread-id))))
 
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
-                           :disabled, :missing-args (with the missing names),
-                           :hook-blocked, :needs-approval, :approved, or :vetoed
+                           :unserved, :disabled, :missing-args (with the missing
+                           names), :hook-blocked, :needs-approval, :approved, or
+                           :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
-  A call that never passes pre-execute (unknown tool, disabled tool, missing
-  arguments) skips the :tool/execute phase, but its :tool/post-execute still
-  arrives -- the lifecycle is always closed. :disabled is checked before
-  approval: a tool this session switched off is refused outright, never parked.
+  A call that never passes pre-execute (unknown tool, unserved tool, disabled
+  tool, missing arguments) skips the :tool/execute phase, but its
+  :tool/post-execute still arrives -- the lifecycle is always closed. :disabled
+  is checked before approval: a tool this session switched off is refused
+  outright, never parked.
 
   EVERY CALL ENDS IN ONE OF THREE OUTCOMES, and the order they are decided in is
   the point of the whole pre phase:
 
-    ALLOW     it runs. Nothing refused it: no switch, no missing argument, no
-              gate, no rule that says a human has to look.
+    ALLOW     it runs. Nothing refused it: no switch, no mode subtraction, no
+              missing argument, no gate, no rule that says a human has to look.
     BLOCK     it does not run, and the reason goes back to the model as the
-              call's result -- a veto, a hook's exit 2, a disabled switch. The
-              run carries on; the model gets to try something else.
+              call's result -- a veto, a hook's exit 2, a disabled switch, a mode
+              that does not serve this tool. The run carries on; the model gets
+              to try something else.
     SUSPEND   it does not run YET: the run ends on an interrupt and the call is
               the human's until they answer. Nothing executes, no :tool/result
               is emitted, and the tool message lands on the resume run.
 
   The decisions are taken in ONE order, first match wins (the cond below):
-    disabled -> missing args -> approval rule -> PreToolUse gate
+    disabled -> mode -> missing args -> approval rule -> PreToolUse gate
   The gate is LAST because everything before it is this harness deciding, and a
   gate should not be asked about a call that cannot run anyway.
+
+  `disabled` BEFORE `mode` is the order tool-toggles asked for and it says
+  something real: a switch the session threw itself outranks a policy it
+  inherited, so the answer a doubly-refused call gets names the thing the caller
+  can undo. It does not hide the second refusal -- disabled-message states both
+  when both are true. `mode` is second and still ahead of the argument and
+  approval checks, because a call this session does not serve is not going to
+  run whatever its arguments look like, and there is no reason to park it for a
+  human or to read the file it names.
 
   A call that must be suspended asks TWO things before it bothers a person. It
   first takes any decision already on the parked record -- the resume path --
@@ -636,8 +1184,21 @@
                          ;; *thread-id* is bound around the tool body so code
                          ;; running inside a tool -- eval above all -- can address
                          ;; its own session (this namespace).
-                         (let [[result err]
-                               (try [(binding [*thread-id* thread-id] ((:run tool) parsed)) nil]
+                         (let [body (fn []
+                                      (if-let [role (batch-role id)]
+                                        ;; A call in a batch: either it runs the
+                                        ;; whole group (the last of them) or it
+                                        ;; answers with a note and touches nothing.
+                                        ;; See the batch section above.
+                                        (if (= :applier (:role role))
+                                          (run-batch! role thread-id)
+                                          (replace/merged-note
+                                           {:index (:index role)
+                                            :size  (:group role)
+                                            :path  (:path role)}))
+                                        ((:run tool) parsed)))
+                               [result err]
+                               (try [(binding [*thread-id* thread-id] (body)) nil]
                                     (catch Throwable t [nil t]))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
                                ;; PostToolUse is an OBSERVER: its verdict is
@@ -673,7 +1234,18 @@
              (session-disabled? thread-id name)
              (do (report (ev/tool-pre-execute id name :disabled []))
                  (report (ev/tool-post-execute id name))
-                 {:content (disabled-message name) :error true})
+                 {:content (disabled-message thread-id name) :error true})
+
+             ;; ...then the editing mode's subtraction, which is the only other
+             ;; thing that can take a registered tool out of a session's set. It
+             ;; is still AHEAD of the argument and approval checks: a call this
+             ;; session does not serve will not run whatever its arguments are,
+             ;; and parking it would ask a person about a call that could not
+             ;; have executed anyway.
+             (not (editing/served? thread-id name))
+             (do (report (ev/tool-pre-execute id name :unserved []))
+                 (report (ev/tool-post-execute id name))
+                 {:content (editing/unserved-message thread-id name) :error true})
 
              (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))

@@ -33,7 +33,8 @@
 | `event` | 内核的全部词汇：11 种事件 |
 | `loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
 | `llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system prompt 的冻结载体** |
-| `tools` | **工具表与唯一执行缝**：内建表（七个，含 `skill`）、会话 overlay（两轴）、待决审批、三相执行 |
+| `tools` | **工具表与唯一执行缝**：内建表（**哪些在表里取决于本会话的编辑模式**，见 `editing`）、会话 overlay（两轴）、待决审批、三相执行 |
+| `editing` + `hashline/*` | **文件编辑的两套实现与它们的开关**：`editing` 解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套；`hashline/{anchors,store,serve,reading,edit,replace,insert,undo,write,grep,files}` 是按锚点编辑的全部实现（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**开场块**由它拼在 system 消息之后 |
 | `http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入 |
 | `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
@@ -42,7 +43,7 @@
 | `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`） |
 | `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 | `preamble` | **开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
-| `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，三张表 |
+| `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令、读退出码、超时、落审计行 |
 | `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
@@ -91,4 +92,3 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
   中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。
   代码里**一行都没有**：没有 `call!` 这个入口，内层调用的相位事件没有去处，`prompt.md` 里
   `eval` 仍只被写成 hook 的入口。
-- **hashline 编辑**：在 `hashline-edit` 分支上，不在 `main`。

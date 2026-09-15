@@ -481,6 +481,123 @@
   (boolean (some #(= name (:name %))
                  (query c (str "SELECT name FROM pragma_table_info(?)") table))))
 
+(defn- hashline-store
+  "What anchor-based editing has to remember between calls, and between
+  restarts.
+
+  FOUR TABLES, each a different question about the same idea -- a four-letter name
+  for a line (see harness.hashline.anchors):
+
+    hashline_snapshots  A FILE AS ONE SESSION LAST SAW IT: its whole-file
+                        checksum, its line count, and for each line the anchor
+                        that names it and the checksum it was named against.
+                        Keyed by (path, thread_id) -- see below.
+    hashline_ownership  WHICH ANCHORS A SESSION HAS OUT: anchor -> the one file
+                        that anchor names. This is what makes an anchor exclusive:
+                        minting walks past anything in here, and a stale or
+                        borrowed anchor is refused by looking it up.
+    hashline_sessions   WHERE A SESSION'S ANCHOR PROBE STANDS. The probe is the
+                        pool position the next mint walks from; keeping it means a
+                        session does not re-walk from its seed every time, and
+                        that a restart resumes where it left off.
+    hashline_undo       THE ONE EDIT THAT CAN BE TAKEN BACK, per file: the text
+                        before it, the encoding that text had, the anchors that
+                        named it, and the text it produced. Written by the edit,
+                        read by undo -- and cleared by `write`, the boundary where
+                        a file stops being the file the model was looking at.
+
+  WHY THE SNAPSHOT IS KEYED BY (path, thread_id) AND NOT BY PATH. Upstream keys it
+  by path, which reads naturally until you notice what the row holds: the anchors.
+  An anchor is minted for ONE session and is not a name another session may use,
+  so a snapshot keyed by path alone would hand session B the very anchors session
+  A is holding for that file, and B's edits would be addressed by names A owns.
+  Splitting the key is what makes 'two sessions read one file' two rows instead of
+  a race -- the cost is one duplicated file checksum per session.
+
+  WHY THE ANCHORS AND CHECKSUMS ARE JSON IN A COLUMN rather than a row per line. A
+  row per line is ten thousand rows for one large file, per session, and the
+  schema's own rule is that a table is a decision somebody has to make (see
+  harness.db-test). Each of these columns is ONE VALUE -- an array, written and
+  read whole, never queried by element -- so a table for them would buy nothing
+  and cost a row count proportional to every file the session has ever read.
+
+  THE COLUMN NAMES ARE CHOSEN AGAINST A REGEX. harness.db-test forbids any column
+  that looks like conversation content, and `prior_text`/`resulting_text` name
+  plainly what they hold -- the file's text, before and after -- where `content`
+  would both trip that guard and be vaguer about which text is meant. They are
+  state in the sense that decides it here: they are REWRITTEN on every edit, and
+  undo cannot exist without them."
+  [^Connection c]
+  (ddl! c "CREATE TABLE hashline_snapshots (
+              path           TEXT NOT NULL,
+              thread_id      TEXT NOT NULL,
+              file_checksum  TEXT NOT NULL,
+              line_count     INTEGER NOT NULL,
+              anchors        TEXT NOT NULL,
+              line_checksums TEXT NOT NULL,
+              updated_at     INTEGER NOT NULL,
+              PRIMARY KEY (path, thread_id))")
+  (ddl! c "CREATE TABLE hashline_ownership (
+              thread_id TEXT NOT NULL,
+              anchor    TEXT NOT NULL,
+              path      TEXT NOT NULL,
+              PRIMARY KEY (thread_id, anchor))")
+  (ddl! c "CREATE TABLE hashline_sessions (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              probe      INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL)")
+  (ddl! c "CREATE TABLE hashline_undo (
+              path           TEXT PRIMARY KEY NOT NULL,
+              prior_text     TEXT NOT NULL,
+              bom            INTEGER NOT NULL,
+              ending         TEXT NOT NULL,
+              anchors        TEXT NOT NULL,
+              resulting_text TEXT NOT NULL,
+              mode           INTEGER,
+              updated_at     INTEGER NOT NULL)"))
+
+(defn- hashline-served
+  "Which of a file's anchors that session has actually SHOWN the model.
+
+  A separate step rather than a column added to `hashline-store`'s DDL, because
+  that step has already run in stores that exist: the chain is append-only, and
+  editing a landed step would leave those stores holding a schema the harness no
+  longer agrees with. ALTER TABLE is what an appended step does.
+
+  WHY THIS IS STATE AND NOT DERIVABLE. An anchor can be owned without ever having
+  been displayed: `read` pages a long file, and the anchors it minted for the pages
+  it did not return are real anchors for real lines -- but the model has never seen
+  them. Letting an edit address one would mean the model is changing a line it has
+  never looked at, which is exactly the guess this feature exists to prevent. So
+  'shown' has to be recorded, and the array is pruned to the live anchor set on
+  every edit (see harness.hashline.store), so it cannot grow past one file."
+  [^Connection c]
+  (ddl! c "ALTER TABLE hashline_snapshots
+             ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
+
+(defn- hashline-undo-served
+  "Which anchors were SHOWN to the session, recorded with the undo record as well
+  as with the file's view.
+
+  UNDO HAS TO PUT BACK THE ANCHORS, not only the text. A model that undoes an edit
+  is usually about to edit the file again -- and the anchors it holds are the ones
+  it had before, which are exactly the ones this record names. Restoring the text
+  while leaving the live anchor set alone would produce a file whose anchors
+  describe the state the undo just removed, and the model's very next call would be
+  refused for addressing lines that 'moved'.
+
+  So the record carries the shown set too, and for the same reason the view does:
+  it is not derivable from the anchors (a paged read mints anchors for lines it
+  never returned), so a restored anchor set without it would mark every line
+  never-shown and refuse the retry the undo exists to enable.
+
+  AN APPENDED STEP, like `hashline-served` and for the same reason: that step has
+  already run in stores that exist, and the chain does not get edited once it has
+  landed."
+  [^Connection c]
+  (ddl! c "ALTER TABLE hashline_undo
+             ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
+
 (def migrations
   "The forward migration chain, as NAMED steps.
 
@@ -513,13 +630,31 @@
   (that is the bug above). So the probe answers instead: a step whose work is
   already in the schema is RECORDED as done rather than run again. That is what
   lets one store be opened by both chains, and it is why the column that went
-  missing earlier now heals itself instead of needing a hand-written ALTER."
+  missing earlier now heals itself instead of needing a hand-written ALTER.
+
+  THE ANCHOR STEPS ARE APPENDED HERE, AFTER THE PROJECT ONES, and their probes are
+  what make that safe in both directions: a store migrated by `hashline-edit`'s own
+  chain already has the four tables and the two `served` columns, so those steps are
+  RECORDED rather than run, and a store that never saw them gets them now.
+
+  A test may pass its own chain as the first argument to migrate!,
+  with-connection or with-transaction -- that is how the walk across several
+  versions is exercised without waiting for the features that bring them."
   [{:name     "projects-and-sessions"
     :present? #(table? % "projects")
     :run      projects-and-sessions}
    {:name     "sessions-remember-the-project-path"
     :present? #(column? % "sessions" "last_project_path")
-    :run      sessions-remember-the-project-path}])
+    :run      sessions-remember-the-project-path}
+   {:name     "hashline-store"
+    :present? #(table? % "hashline_snapshots")
+    :run      hashline-store}
+   {:name     "hashline-served"
+    :present? #(column? % "hashline_snapshots" "served")
+    :run      hashline-served}
+   {:name     "hashline-undo-served"
+    :present? #(column? % "hashline_undo" "served")
+    :run      hashline-undo-served}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

@@ -48,6 +48,18 @@
     harness.project-test
     harness.log-test
     harness.git-test
+    harness.editing-test
+    harness.editing-mode-tools-test
+    harness.hashline-anchors-test
+    harness.hashline-store-test
+    harness.hashline-read-test
+    harness.hashline-replace-test
+    harness.hashline-refusals-test
+    harness.hashline-write-test
+    harness.hashline-undo-test
+    harness.hashline-batch-test
+    harness.hashline-insert-test
+    harness.hashline-grep-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

@@ -29,10 +29,10 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 ~/.clj-harness/
 ├── config.edn        模型默认档：三个旋钮（每轮重读，可运行期编辑）
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读，可以不存在）
-├── harness.edn       用户级 harness 配置（可选；围栏的 allow / strict、技能根、指令文件都在这）
+├── harness.edn       用户级 harness 配置（可选；编辑模式、围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：项目 / 会话归属 / 归档（home 的元数据层；将来 hashline 的锚点同库）
+├── harness.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
 
@@ -40,9 +40,11 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 它们在 **OS 家目录**下，**不跟随 `CLJ_HARNESS_HOME`**：搬家搬的是 harness 的配置，不是这台机器的家目录。
 把配置家目录挪到别处不该让另一批技能凭空消失（见「技能与指令」）。
 
-**库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记（将来还有
-hashline 的锚点）。日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的
-时候现问文件。判别标准是「能不能被改写」，不是「改得勤不勤」：
+**库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记，以及按
+锚点编辑的行锚点（`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` 三张表，外加
+`hashline_undo` 存最近一次撤销）。**锚点不在某个目录里**，它与项目、会话共用同一个库、同一条迁移链。
+日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的时候现问文件。判别
+标准是「能不能被改写」，不是「改得勤不勤」：
 
 - `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **仍是文件、仍是现读**，改完不用重启
   （「设置」那一版生效配置每次打开都重读，就是这条纪律看得见的地方）。
@@ -56,15 +58,19 @@ $env:CLJ_HARNESS_HOME = "D:\harness-config"
 clojure -M:run
 ```
 
-首次使用先建目录并放三份配置：
+首次使用先建目录并放三份配置（第四份可选）：
 
 ```pwsh
 New-Item -ItemType Directory -Force ~/.clj-harness
 Copy-Item config.edn.example ~/.clj-harness/config.edn
 Copy-Item providers.edn.example ~/.clj-harness/providers.edn
+Copy-Item harness.edn.example ~/.clj-harness/harness.edn   # 可选：不复制就是全默认（含按锚点编辑）
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
+
+`harness.edn.example` 把 `:editing` 与 `:approval` 的每个键都写在**它的默认值**上并逐条注释，所以它同时
+是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
 
 **`prompt.md` 是唯一的例外**：它留在仓库里，不进家目录——那是被 review 的代码资产，每次改动都需要
 git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.llm/reset-prompt!)` 或重启。
@@ -161,6 +167,25 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 [`docs/architecture/hooks.md`](docs/architecture/hooks.md) 与
 [`docs/architecture/projects.md`](docs/architecture/projects.md)。
 
+### 文件编辑的两种实现（`harness.edn` 的 `:editing`）
+
+`read` / `replace` / `insert` / `anchor_grep` / `undo_last_replace`（**默认**）与 `read` / `edit`（原版）
+是两套编辑实现，一次只会有一套装在本会话的工具表里。切换就是 `harness.edn` 里一行：
+
+```clojure
+{:editing {:mode :hashline}}    ; 默认：按锚点编辑
+{:editing {:mode :str-replace}} ; 原版：edit 按 old_string 替换
+```
+
+两种模式都是一等公民，各有完整用例；`edit` 的行为一个字没变，只是不再默认在场。`:editing` 是
+`harness.edn` 里**唯一逐键合成**的块（其余顶层键是整键替换），所以项目级只写 `{:auto-read false}`
+不会把用户级的 `:mode` 一起抹掉；全部七个键与它们的默认值都在 `harness.edn.example` 里。自省：
+`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+
+两套各自是什么、为什么默认换了、锚点存在哪，见
+[`docs/architecture/kernel.md`](docs/architecture/kernel.md) 与
+[`docs/architecture/home-and-storage.md`](docs/architecture/home-and-storage.md)。
+
 ## 启动
 
 ### 1) 后端 :8080
@@ -201,7 +226,8 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 325 tests / 1827 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# 569 tests / 9574 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
