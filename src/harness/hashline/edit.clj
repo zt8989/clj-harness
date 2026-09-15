@@ -251,17 +251,42 @@
   [{:keys [lines trailing?]}]
   (str (str/join "\n" lines) (when (and trailing? (pos? (count lines))) "\n")))
 
+(defn- range-map
+  "The range [I, J] (0-based, inclusive) of VIEW: which lines, their anchors, their
+  checksums, and which of those anchors the model has never been shown.
+
+  One constructor for the one idea, because three things read this map -- an edit,
+  the healing answer, and the content fallback -- and a range that meant something
+  slightly different to any one of them would be a range that is wrong in a way
+  nobody can see."
+  [view i j]
+  (let [as   (vec (:anchors view))
+        serv (:served view)]
+    {:start      i
+     :end        (inc j)
+     :anchors    as
+     :checksums  (vec (:line-checksums view))
+     :served     serv
+     ;; Both the anchors and the LINE INDICES of the unshown lines: the anchors are
+     ;; what a message names when it is talking about what to re-send, and the
+     ;; indices are what the healing answer needs to page the file to the right
+     ;; place. Computing either from the other later would mean searching, and a
+     ;; search can find a different line with the same anchor -- which only happens
+     ;; if something is already wrong.
+     :not-shown  (vec (remove serv (subvec as i (inc j))))
+     :not-shown-idx (vec (filter #(not (contains? serv (nth as %))) (range i (inc j))))}))
+
 (defn resolve-range
   "The half-open line range [start, end) that FROM..TO addresses in the file's
   stored view.
 
   Refusals here are about the anchors not being usable -- not owned by this
   session, not shown to it, or not describing the line any more. Each one names
-  what is wrong and what to do; enriching them is ticket 06's, and this is the
-  shape it enriches.
+  what is wrong and what to do; turning them into answers the model can act on
+  without a round trip is ticket 06's, and this is the shape it enriches.
 
   WARNINGS collects the fixes made along the way, so the answer can say what was
-  interpreted -- the reversal above is one of them."
+  interpreted -- the reversal below is one of them."
   [thread-id path from to warnings]
   (let [st (store/state thread-id path)]
     (when-not st
@@ -291,12 +316,34 @@
                                              " swapped them."))
                                  [j i true])
                              [i j false])]
-        {:start i :end (inc j)
-         :swapped? swapped?
-         :anchors as
-         :checksums (vec (:line-checksums st))
-         :served (:served st)
-         :not-shown (vec (remove (:served st) (subvec as i (inc j))))}))))
+        (assoc (range-map st i j) :swapped? swapped?)))))
+
+(defn range-from-view
+  "The range FROM..TO names in VIEW, located by CONTENT rather than by ownership.
+
+  This is the fallback for an anchor the session no longer holds -- the name was
+  handed out, the ownership row is gone (a cleared anchor table, a file the session
+  stopped tracking), and the model is still holding it. The anchor's position in
+  the stored view says WHICH LINE was meant, and that line's checksum says what to
+  look for in the file as it is now: exactly one line carries it, or nothing here
+  can tell which line the model means and the honest answer is to read the file.
+
+  Returns nil when there is no stored view, when the anchor is not in it, when the
+  line is gone from the file, or when the file has more than one line that matches
+  -- every one of which ends in the same refusal, because none of them can be
+  turned into a guess worth making."
+  [view from to]
+  (let [as  (vec (:anchors view))
+        cs  (vec (:line-checksums view))
+        idx (fn [a]
+              (when-let [i (some (fn [[k v]] (when (= a v) k)) (map-indexed vector as))]
+                (let [c    (nth cs i)
+                      hits (keep-indexed (fn [k lc] (when (= c lc) k)) cs)]
+                  (when (= 1 (count hits)) (first hits)))))]
+    (when-let [i (idx from)]
+      (when-let [j (if (= from to) i (idx to))]
+        (when (<= i j)
+          (range-map view i j))))))
 
 (defn apply-range
   "TEXT with lines [START, END) replaced by LINES. Returns [new-text span].
@@ -387,7 +434,7 @@
 
 ;; ------------------------------------------------------------- the answer
 
-(defn- row-of
+(defn row-of
   "One diff row: PREFIX, then the anchor column, then the line.
 
   PREFIX is \"+\" for a line this edit added, \" \" for context, and \"-\" for a

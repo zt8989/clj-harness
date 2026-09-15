@@ -434,11 +434,10 @@
 ;; declared -- the two must not be able to drift apart.
 ;;
 ;; It describes what the tool DOES TODAY, and nothing more. Two sentences that used
-;; to stand here promised behaviour no ticket had landed yet -- that a drifted file
-;; comes back with fresh anchors ready to retry (ticket 06), and that several
-;; replace calls in one message are one commit (ticket 09). A model told to expect
-;; what does not happen learns to distrust the whole description, so those sentences
-;; wait for the tickets that make them true.
+;; to stand here outran the tickets that could make them true: the healing answer
+;; (ticket 06, now landed, and its sentence is back below) and one commit per
+;; message (ticket 09, still to come). A model told to expect what does not happen
+;; learns to distrust the whole description.
 
 (def ^:private replace-description
   (str "Replace a range of lines in a file, addressed by 4-character ANCHORS from "
@@ -447,9 +446,10 @@
        "array with one string per new line -- bare lines, no `│`, no embedded "
        "newlines. An empty array deletes the range; an array holding one empty string "
        "inserts one blank line. "
-       "Every line of the range must still be what read showed; an edit addressed at a "
-       "file that has moved underneath the session is refused, and the answer names "
-       "what to do about it. "
+       "Every line of the range must still be what read showed. A refusal is not a "
+       "dead end: a file that changed under the session, or a range that runs into a "
+       "line you were never shown, comes back with those lines and their CURRENT "
+       "anchors, so retry with those instead of re-reading. "
        "The answer shows the changed region as `+`, `-` and context rows, each with "
        "the CURRENT anchor for its line -- `+` and context rows are immediately "
        "editable, so a follow-up edit needs no read. A `-` row's anchor column is "

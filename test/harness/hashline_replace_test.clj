@@ -418,7 +418,13 @@
                                              :replacement_lines ["X"]})]
       (is (true? error))
       (is (str/includes? content "never shown"))
-      (is (str/includes? content "Read the range you mean")))))
+      (testing "and the lines come back with their anchors, so the retry is a retry"
+        (let [row (first (filter #(str/includes? % "│line6") (str/split-lines content)))
+              anchor (subs row 1 5)]
+          (is (anchors/anchor? anchor) (str "row: " row))
+          (is (false? (:error (replace! {:remove_from anchor
+                                         :replacement_lines ["LINE6"]})))
+              "the second call needs no read"))))))
 
 ;; ------------------------------------------------------ the no-op and title
 
@@ -436,6 +442,23 @@
         ;; before it -- which is what writing the same text back would do.
         (is (= "one\ntwo\nthree\n" (:prior-text (store/undo-for (path)))))))))
 
+(deftest an-edit-does-not-unshow-the-lines-it-did-not-touch
+  ;; The `served` set answers 'has this session seen this line', and an edit only
+  ;; ever ADDS to it: the answer the edit handed back shows a couple of lines, and
+  ;; a session that let that short list REPLACE ten lines' worth of seen-ness would
+  ;; start refusing the lines the model read and never touched -- 'this line was
+  ;; never shown to you' about a line it is looking at.
+  (use-mode!)
+  (write! (str/join "\n" (map #(str "line" %) (range 1 11))))
+  (let [[_ b _ _ _ _ _ _ _ i] (read!)]
+    (replace! {:remove_from b :replacement_lines ["LINE2"]})
+    (let [{:keys [content error]} (replace! {:remove_from i
+                                             :replacement_lines ["LINE10"]})]
+      (is (false? error) (str "editing a line the first read showed: " content))
+      (is (= ["line1" "LINE2" "line3" "line4" "line5"
+              "line6" "line7" "line8" "line9" "LINE10"]
+             (str/split-lines (slurp file :encoding "UTF-8")))))))
+
 (deftest a-read-after-an-edit-still-agrees-with-the-store
   ;; The anchors the edit handed out and the anchors a fresh read hands out have to
   ;; be the same ones, or the model is being told two different things about one
@@ -450,13 +473,14 @@
 ;; ------------------------------------------------------------ what the model sees
 
 (deftest the-described-tool-is-the-tool-that-runs
-  ;; The description is the ONLY thing a model has to go on. This asserts the four
-  ;; claims the ticket requires it to make -- where anchors come from, that `[]`
-  ;; deletes, that a new line carries no `│`, and that the answer's anchors are
-  ;; immediately usable -- and the parameter shape they describe. It deliberately
-  ;; does NOT assert the two promises tickets 06 and 09 will make true later: those
-  ;; sentences were removed from the description rather than shipped as promises
-  ;; nothing keeps, and this is where that shows.
+  ;; The description is the ONLY thing a model has to go on. This asserts the claims
+  ;; the ticket requires it to make -- where anchors come from, that `[]` deletes,
+  ;; that a new line carries no `│`, that the answer's anchors are immediately
+  ;; usable, and that a refusal hands back what to retry with -- plus the parameter
+  ;; shape they describe. It deliberately does NOT assert the one promise still
+  ;; outstanding, that several replace calls in one message are one commit: that
+  ;; sentence is absent from the description rather than shipped as a promise nothing
+  ;; keeps, and this is where that shows.
   (use-mode!)
   (let [spec   (first (filter #(= "replace" (get-in % [:function :name]))
                               (tools/specs tid)))
@@ -473,6 +497,11 @@
     (testing "and that the answer's anchors are usable without a re-read"
       (is (str/includes? desc "no read"))
       (is (str/includes? desc "CURRENT anchor")))
+    (testing "and that a refusal comes back with something to retry with"
+      (is (str/includes? desc "refusal"))
+      (is (str/includes? desc "CURRENT"))
+      (is (not (str/includes? desc "one commit"))
+          "the batch promise waits for the ticket that makes it true"))
     (testing "every parameter's description is where the model reads the syntax"
       (is (str/includes? (get-in props ["remove_from" :description]) "│"))
       (is (str/includes? (get-in props ["remove_to" :description]) "Omit"))

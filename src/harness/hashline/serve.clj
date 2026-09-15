@@ -47,6 +47,40 @@
            :served         (or served #{})
            :served?        true)))
 
+(defn sync!
+  "Bring THREAD-ID's stored view of PATH up to CONTENT, and return it -- the same
+  shape `store/state` returns, or nil-proof: this always answers with a view.
+
+  Split out of `serve!` because hands out anchors are not the only caller. An edit
+  that finds the file has moved underneath it needs the same thing -- the view
+  re-aligned to what is on disk and landed -- without a page being emitted; the
+  refusal it is about to write does the showing (`harness.hashline.replace`). One
+  function for 'what does this session now know about this file', so a healing
+  answer and a read can never disagree about it.
+
+  THE VIEW IS REUSED WHEN THE FILE DID NOT MOVE: the stored file checksum is
+  compared against the file on disk, and equal means every anchor would be minted
+  the same way again. That is what makes reading the same file twice cheap AND
+  stable -- the second read does not walk the anchor table at all."
+  [thread-id path content]
+  (store/with-path-lock
+   path
+   (fn []
+     (let [stored  (store/state thread-id path)
+           checks  (anchors/line-checksums content)
+           current (anchors/file-checksum checks)
+           live    (when (and stored (= current (:file-checksum stored)))
+                     stored)]
+       (if live
+         live
+         (do
+           ;; Persist the alignment BEFORE anything is emitted or decided on it. If
+           ;; the write fails the caller gets the failure and no anchors were shown.
+           ;; The other order -- show, then persist -- would hand out anchors the
+           ;; store does not know about, and the next edit would reject every one.
+           (store/advance! thread-id path (fresh-change thread-id path content stored))
+           (store/state thread-id path)))))))
+
 (defn serve!
   "THREAD-ID reads PATH, which must already be resolved and classified. Returns
   `harness.hashline.reading/preview`'s map, with `:anchors` added -- the file's
@@ -56,31 +90,14 @@
   anchors for the WHOLE file are stored regardless, because an edit is addressed
   by an anchor and must not depend on which page happened to be read."
   [thread-id path content {:keys [offset limit] :as opts}]
-  (store/with-path-lock
-   path
-   (fn []
-     (let [stored  (store/state thread-id path)
-           checks  (anchors/line-checksums content)
-           current (anchors/file-checksum checks)
-           live    (when (and stored (= current (:file-checksum stored)))
-                     stored)
-           change  (if live
-                     {:anchors        (:anchors live)
-                      :line-checksums (:line-checksums live)}
-                     (fresh-change thread-id path content stored))]
-       (when-not live
-         ;; Persist the alignment BEFORE the rows go out. If the write fails the
-         ;; caller gets the failure and no anchors were shown; the other order
-         ;; would hand out anchors the store does not know about, and the next
-         ;; edit would reject every one of them.
-         (store/advance! thread-id path change))
-       (let [page (reading/preview content (:anchors change)
-                                   {:offset offset :limit limit :path path})]
-         ;; ...and record WHICH of those anchors the model actually saw. This is
-         ;; the half that makes 'owned' and 'shown' different facts: the page that
-         ;; was not returned holds anchors that exist and were never displayed.
-         (store/mark-served! thread-id path (:shown page))
-         (assoc page :anchors (:anchors change)))))))
+  (let [view (sync! thread-id path content)
+        page (reading/preview content (:anchors view)
+                              {:offset offset :limit limit :path path})]
+    ;; ...and record WHICH of those anchors the model actually saw. This is the half
+    ;; that makes 'owned' and 'shown' different facts: the page that was not
+    ;; returned holds anchors that exist and were never displayed.
+    (store/mark-served! thread-id path (:shown page))
+    (assoc page :anchors (:anchors view))))
 
 (defn read!
   "The whole anchored read: classify PATH, take its text, serve it. Returns

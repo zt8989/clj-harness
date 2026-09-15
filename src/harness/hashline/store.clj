@@ -9,12 +9,14 @@
   in memory to lose. It is also why the tables are keyed the way they are (see
   harness.db/hashline-store) rather than by anything process-local.
 
-  WHAT LIVES HERE, and the one thing that does not. Here: the stored view of a
-  file (its anchors and their checksums), which anchors a session has out, where
-  its allocation probe stands, and the single edit that can still be undone. NOT
-  here: which lines a request has actually SHOWN the model -- that is a fact about
-  one call, not about the session, and the tools that emit rows are where it
-  belongs.
+  WHAT LIVES HERE: the stored view of a file (its anchors and their checksums,
+  including which of them the model has actually SEEN), which anchors a session has
+  out, where its allocation probe stands, and the single edit that can still be
+  undone. Four tables, and the reason `:served` is one of them rather than a fact
+  about a call is ticket 04's finding: a paged read mints anchors for lines it did
+  not return, so 'this anchor exists' and 'this anchor was shown' are different
+  facts, and an edit addressed at an unshown line is the guess this scheme exists
+  to prevent.
 
   THE CRITICAL SECTION, and why the mutex is here rather than in the tools. An
   edit reads a file, checks it against the stored view, writes it, advances the
@@ -89,6 +91,26 @@
                               WHERE thread_id = ? AND anchor = ?"
                             (str thread-id) anchor))
           :path))
+
+(defn claim-anchors!
+  "Record ANCHORS as owned by THREAD-ID for PATH, leaving rows that already exist
+  alone.
+
+  `advance!` claims what an edit ADDED and knows those rows cannot exist yet -- a
+  collision there is a broken exclusivity invariant and is refused by the schema,
+  which is what `claim!`'s bare INSERT is for. This one is for a caller holding
+  anchors it has established ARE this session's (harness.hashline.replace's
+  content fallback), where some are already recorded and re-claiming them is not an
+  exception but the expected case."
+  [thread-id path anchors]
+  (when (seq anchors)
+    (db/with-transaction
+      (fn [c]
+        (doseq [a anchors]
+          (db/execute! c "INSERT INTO hashline_ownership (thread_id, anchor, path)
+                          VALUES (?, ?, ?)
+                          ON CONFLICT(thread_id, anchor) DO NOTHING"
+                       (str thread-id) a path))))))
 
 (defn probe-of
   "Where THREAD-ID's allocation probe stands, or nil when it has never minted --
@@ -176,21 +198,28 @@
   "The statements `advance!`/`advance-with-undo!` share, on a connection they have
   already opened a transaction on.
 
-  `:served` is carried through as an INTERSECTION with the new anchor set: an
-  anchor that survived the edit stays shown, one that was freed was shown and is
-  gone, and one that was minted was not shown to anyone yet. The rows an edit hands
-  back are added by the caller with `mark-served!`, because only the caller knows
-  which rows it actually emitted."
+  `:served` is INTERSECTED with the new anchor set here rather than taken as given:
+  an anchor that survived the edit stays shown, one that was freed was shown and is
+  gone, and one that was minted was not shown to anyone yet. The intersection is
+  done in Clojure because SQL has no set operation over a JSON column, and it is
+  done AT ALL because the stored set is otherwise append-only in a world where
+  anchors come and go -- it would grow for the life of the session with names that
+  no longer address anything.
+
+  The rows an edit hands back are added afterwards by the caller, with
+  `mark-served!`, because only the caller knows which rows it actually emitted."
   [c thread-id path {:keys [added freed probe file-checksum line-checksums anchors served served?]}]
-  (put-state! c thread-id path {:file-checksum  file-checksum
-                                :line-count     (count line-checksums)
-                                :anchors        anchors
-                                :line-checksums line-checksums
-                                :served         (when served? served)
-                                :served?        served?})
-  (release! c thread-id path freed)
-  (claim!   c thread-id path added)
-  (put-probe! c thread-id probe))
+  (let [surviving (set anchors)
+        served    (when served? (into #{} (filter surviving) served))]
+    (put-state! c thread-id path {:file-checksum  file-checksum
+                                  :line-count     (count line-checksums)
+                                  :anchors        anchors
+                                  :line-checksums line-checksums
+                                  :served         served
+                                  :served?        served?})
+    (release! c thread-id path freed)
+    (claim!   c thread-id path added)
+    (put-probe! c thread-id probe)))
 
 (defn advance!
   "Land the database half of one edit for THREAD-ID on PATH, in ONE transaction:
@@ -215,18 +244,30 @@
   `nth`, so it throws on a set rather than de-duplicating it. A set is already
   distinct; `vec` is the whole conversion needed.
 
-  Kept apart from `advance!` on purpose. Advancing INTERSECTS the shown set with
-  the surviving anchors -- correct for an alignment, since it is pruning to what
-  still exists -- whereas this only ever adds. An edit does both, in order:
-  advance, then mark the rows it handed back."
+  IT ADDS, IT NEVER REPLACES, and that is the whole difference between this and the
+  `:served` that `advance!` writes. Advancing INTERSECTS the shown set with the
+  surviving anchors -- correct for an alignment, since it is pruning to what still
+  exists -- whereas this unions. An edit does both, in order: advance, then mark the
+  rows it handed back.
+
+  Reading the stored set and writing the union happens INSIDE the transaction, so
+  two calls marking the same file at once cannot each add their own half and lose
+  the other's -- which is exactly what 'set the column to my set' would do. The
+  earlier version of this did set, and the symptom was not subtle: after one edit,
+  every line the edit's few answer rows did not happen to mention became 'never
+  shown to you', including the lines the model had just read."
   [thread-id path anchors]
   (when (seq anchors)
     (db/with-transaction
       (fn [c]
-        (db/execute! c "UPDATE hashline_snapshots
-                           SET served = ?
-                         WHERE path = ? AND thread_id = ?"
-                     (render (vec anchors)) path (str thread-id))))))
+        (let [stored (first (db/query c "SELECT served FROM hashline_snapshots
+                                          WHERE path = ? AND thread_id = ?"
+                                      path (str thread-id)))
+              before (if stored (set (parse (:served stored))) #{})]
+          (db/execute! c "UPDATE hashline_snapshots
+                             SET served = ?
+                           WHERE path = ? AND thread_id = ?"
+                       (render (vec (into before anchors))) path (str thread-id)))))))
 
 (defn advance-with-undo!
   "The whole database half of an edit, in ONE transaction: everything `advance!`
