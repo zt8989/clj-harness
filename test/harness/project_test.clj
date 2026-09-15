@@ -2,13 +2,19 @@
   "harness.project's external behavior: bind validates, resolve roots relative
   paths at the binding, out-of-bounds? answers the fence's containment question
   -- and, the regression guarantee, an unbound session is the identity function
-  on paths and never out of bounds."
+  on paths and never out of bounds.
+
+  Since the sqlite ticket the binding is a ROW in the home's store rather than an
+  atom entry, so this namespace also carries the tests that would fail if
+  somebody reintroduced a cache: the second half of the file asks the store
+  through a FOREIGN connection and checks that the answers track the file."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.home :as home]
             [harness.project :as project])
-  (:import (java.io File)))
+  (:import (java.io File)
+           (java.sql DriverManager)))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-project-test"))
 
@@ -237,3 +243,266 @@
       "a first bind has no previous directory")
   (is (= "/b" (:project_dir (project/cwd-changed "t" "/a" "/b")))
       "project_dir is where the working directory moved TO"))
+
+;; ------------------------------------------- the binding is a ROW, not an atom
+;;
+;; The ticket's reason for existing: a binding that outlives the process. These
+;; tests are written so that a CACHE would fail them -- the atom version would,
+;; and so would any in-process copy somebody adds later to save a query.
+
+(defn- foreign-rows
+  "Rows of SQL read through a connection the TEST owns, with none of
+  harness.db's settings -- an outside program's view of the store's file."
+  [sql]
+  (with-open [c (DriverManager/getConnection (str "jdbc:sqlite:" (.getAbsolutePath (home/db-file))))]
+    (with-open [st (.createStatement c)
+                rs (.executeQuery st sql)]
+      (loop [acc []]
+        (if-not (.next rs)
+          acc
+          (let [n (.getColumnCount (.getMetaData rs))]
+            (recur (conj acc (mapv #(.getObject rs (int %)) (range 1 (inc n)))))))))))
+
+(defn- foreign-exec!
+  "Write to the store's file from outside harness.db entirely."
+  [sql]
+  (with-open [c (DriverManager/getConnection (str "jdbc:sqlite:" (.getAbsolutePath (home/db-file))))]
+    (with-open [st (.createStatement c)]
+      (.execute st sql))))
+
+(deftest a-binding-outlives-the-process-that-made-it
+  (testing "the binding is IN the store's file -- an outside reader can see it"
+    (project/bind! "pr-durable" root)
+    (let [rows (foreign-rows "SELECT s.path FROM sessions s
+                                JOIN projects p ON p.id = s.project_id
+                               WHERE s.id = 'pr-durable'")]
+      (is (= 1 (count rows)) "one row, on disk, readable without this namespace")
+      (is (= (project/binding-for "pr-durable") (first (first rows)))
+          "and it is the same string this namespace answers with")))
+  (testing "nothing is cached in memory: change the row behind the door, and
+            the next question answers the NEW value"
+    ;; This is what 'the binding survives a restart' reduces to once there is no
+    ;; in-memory state to lose. An atom (or any cache added later to save a
+    ;; query) fails here by answering the old path.
+    (foreign-exec! "UPDATE sessions SET path = '/moved/by/somebody/else'
+                     WHERE id = 'pr-durable'")
+    (is (= "/moved/by/somebody/else" (project/binding-for "pr-durable"))
+        "the answer tracks the file, not a copy of the file")))
+
+(defn- in-a-fresh-jvm
+  "Run FORM -- a string of Clojure -- in a NEW JVM whose home is DIR, and return
+  {:exit :out}.
+
+  A real second process, not a second `with-redefs`: what a restart has to prove
+  is that a store written by one JVM opens, migrates and answers in another, and
+  that is precisely the part an in-process test cannot see. The identity stamp,
+  the WAL switch and the migration walk all run again in there. This process
+  needs no api-key and no model -- the form is ordinary Clojure -- so the child
+  is a plain JVM.
+
+  DIR travels as the ENVIRONMENT VARIABLE, never inside FORM: the repo's standing
+  rule is that no byte crosses a process boundary without an explicit charset
+  (deps.edn's comment block -- this machine's default is GBK), and a path
+  interpolated into an argv string would be exactly that fault. `clojure` is
+  looked up on PATH rather than pinned, the way the UI suite spawns it; a missing
+  CLI is a broken environment, not a case to skip."
+  [^File dir ^String form]
+  (let [pb (doto (ProcessBuilder. ^java.util.List (vec ["clojure" "-M" "-e" form]))
+             (.directory (io/file (System/getProperty "user.dir")))
+             (.redirectErrorStream true))]
+    (.put (.environment pb) "CLJ_HARNESS_HOME" (.getAbsolutePath dir))
+    (let [p (.start pb)
+          out (slurp (.getInputStream p) :encoding "UTF-8")]
+      (when-not (.waitFor p 120 java.util.concurrent.TimeUnit/SECONDS)
+        (.destroyForcibly p)
+        (throw (ex-info "a fresh JVM did not finish in 120s" {:form form})))
+      {:exit (.exitValue p) :out out})))
+
+(deftest a-binding-survives-a-real-restart
+  ;; THE ticket's reason for existing, and the one claim no in-process test can
+  ;; make: bind here, then let a brand-new JVM answer for the same home.
+  ;;
+  ;; The child derives the directory from its OWN environment variable, which is
+  ;; also what makes the second half a genuine test: it is told a home, not a
+  ;; project, and has to find the binding the first process left there.
+  (let [dir  (io/file (System/getProperty "java.io.tmpdir")
+                      (str "harness-project-restart-" (System/nanoTime)))
+        proj (io/file dir "workspace")]
+    (.mkdirs proj)
+    (try
+      (let [write (in-a-fresh-jvm dir "(require '[harness.project :as p]) (println (p/bind! \"restart-thread\" (str (System/getenv \"CLJ_HARNESS_HOME\") \"/workspace\")))")
+            read  (in-a-fresh-jvm dir "(require '[harness.project :as p]) (println (pr-str (p/binding-for \"restart-thread\")))")]
+        (testing "the first process bound the directory and said so"
+          (is (zero? (:exit write)) (str "first JVM failed:\n" (:out write)))
+          (is (= (.getAbsolutePath proj) (str/trim (:out write)))))
+        (testing "a SECOND process, which never saw the binding, answers it"
+          (is (zero? (:exit read)) (str "second JVM failed:\n" (:out read)))
+          (is (= (str "\"" (.getAbsolutePath proj) "\"") (str/trim (:out read)))
+              "the binding was read back out of the store by a fresh JVM")))
+      (finally
+        (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
+
+(deftest a-relative-spelling-is-the-same-project-as-an-absolute-one
+  ;; The last of the three spellings the ticket names. `..` and symlinks are
+  ;; covered above; a RELATIVE path is the one that also has to survive being
+  ;; resolved against the process's working directory before it can be compared
+  ;; with anything.
+  (let [canon (fn [p] (.getCanonicalPath (io/file p)))]
+    (testing "binding a directory by a path relative to the cwd"
+      ;; "test" is a directory of this repo and the JVM's cwd during a test run,
+      ;; which is the same fixture the pre-existing relative-path test uses.
+      (project/bind! "pr-rel" "test")
+      (is (= (canon "test") (canon (project/binding-for "pr-rel")))
+          "a relative bind lands on the directory it names")
+      (is (= 1 (count (filter #(= (canon "test") (:canonical-path %)) (project/projects))))
+          "and it did not create a second row for a directory already known"))))
+
+(deftest the-same-directory-is-one-project-whatever-it-is-called
+  ;; The ticket's naming rule: identity is the CANONICAL path, so every honest
+  ;; spelling of one directory lands in one row. `binding-for` then answers the
+  ;; spelling each caller used -- both halves matter, and they pull in opposite
+  ;; directions, which is why they are asserted together.
+  ;;
+  ;; Assertions here are SCOPED to this test's own directory: the store is the
+  ;; whole test-runner home's, and earlier namespaces (tools, approval) have
+  ;; already put their own projects in it.
+  (let [canon (fn [p] (.getCanonicalPath (io/file p)))
+        mine  (fn [] (filter #(= (canon root) (:canonical-path %)) (project/projects)))]
+    (.mkdirs (io/file root "sub"))
+    (let [plain  (project/bind! "pr-dedup-1" root)
+          dotted (project/bind! "pr-dedup-2" (str root "/sub/.."))]
+      (testing "two spellings of one directory are one project row"
+        (is (= 1 (count (mine)))
+            "one row for that directory, not one per spelling")
+        (is (= (:id (first (mine)))
+               (:project-id (first (filter #(= "pr-dedup-2" (:id %)) (project/sessions)))))
+            "and both sessions point at it"))
+      (testing "each session is still answered its OWN spelling"
+        (is (= plain (project/binding-for "pr-dedup-1")))
+        (is (= dotted (project/binding-for "pr-dedup-2")))
+        (is (not= plain dotted) "the two spellings really are different strings")))))
+
+(deftest a-symlinked-directory-is-the-same-project-as-its-target
+  (let [alias (io/file root "link-to-root")
+        canon (fn [p] (.getCanonicalPath (io/file p)))]
+    (let [created? (try (java.nio.file.Files/createSymbolicLink
+                         (.toPath alias) (.toPath (io/file root))
+                         (make-array java.nio.file.attribute.FileAttribute 0))
+                        true
+                        (catch Exception _ false))]
+      (when created?
+        (project/bind! "pr-sym" (str alias))
+        (is (= (canon alias) (canon root)) "the fixture really is a symlink to the project")
+        (is (= 1 (count (filter #(= (canon root) (:canonical-path %))
+                                (project/projects))))
+            "binding through a symlink did not create a second project")
+        (is (= (str alias) (project/binding-for "pr-sym"))
+            "while the session still reports the path it was given")))))
+
+(deftest two-sessions-under-one-directory-move-independently
+  (let [dir-a (tmp "pr-indep-a")
+        dir-b (tmp "pr-indep-b")]
+    (.mkdirs (io/file dir-a))
+    (.mkdirs (io/file dir-b))
+    (project/bind! "pr-ind-1" dir-a)
+    (project/bind! "pr-ind-2" dir-a)
+    (testing "two sessions, one project"
+      (is (= (project/binding-for "pr-ind-1") (project/binding-for "pr-ind-2"))))
+    (testing "rebinding one leaves the other alone"
+      (project/bind! "pr-ind-1" dir-b)
+      (is (= (str (.getAbsoluteFile (io/file dir-b))) (project/binding-for "pr-ind-1")))
+      (is (= (str (.getAbsoluteFile (io/file dir-a))) (project/binding-for "pr-ind-2"))))
+    (testing "and dropping one leaves the other alone"
+      (project/bind! "pr-ind-1" nil)
+      (is (nil? (project/binding-for "pr-ind-1")))
+      (is (= (str (.getAbsoluteFile (io/file dir-a))) (project/binding-for "pr-ind-2"))))))
+
+(deftest one-sessions-flags-are-its-own
+  ;; "Two sessions under one directory do not interfere", the other half. The
+  ;; VERB belongs to the archive ticket; what this one owes is that the state is
+  ;; per-session, so that when the verb lands it cannot reach across rows. Writing
+  ;; the flag directly is the point: it tests the row, not the (absent) API.
+  (let [dir-a (tmp "pr-flags-a")
+        dir-b (tmp "pr-flags-b")]
+    (.mkdirs (io/file dir-a))
+    (.mkdirs (io/file dir-b))
+    (project/bind! "pr-flag-1" dir-a)
+    (project/bind! "pr-flag-2" dir-a)
+    (project/bind! "pr-flag-3" dir-b)
+    (foreign-exec! "UPDATE sessions SET archived = 1 WHERE id = 'pr-flag-2'")
+    (let [by-id (into {} (map (juxt :id identity) (project/sessions)))]
+      (testing "the flagged session is flagged, and its sibling is not"
+        (is (true?  (:archived? (by-id "pr-flag-2"))))
+        (is (false? (:archived? (by-id "pr-flag-1"))))
+        (is (false? (:archived? (by-id "pr-flag-3")))))
+      (testing "a flag does not move a session between projects"
+        (is (= (str (.getAbsoluteFile (io/file dir-a))) (project/binding-for "pr-flag-1")))
+        (is (= (str (.getAbsoluteFile (io/file dir-a))) (project/binding-for "pr-flag-2")))
+        (is (= (str (.getAbsoluteFile (io/file dir-b))) (project/binding-for "pr-flag-3"))))
+      (testing "nor does a rebind of its sibling disturb it"
+        (project/bind! "pr-flag-1" dir-b)
+        (is (true? (:archived? (first (filter #(= "pr-flag-2" (:id %)) (project/sessions))))))))))
+
+(deftest the-one-arity-bind-is-refused-by-name
+  ;; The old `(bind! dir)` wrote into the no-session slot. A row keyed by nothing
+  ;; is a row this schema will not hold, so the signature stays and the call is
+  ;; refused with a reason -- rather than being deleted, which would turn a
+  ;; caller's mistake into an arity error somewhere unrelated.
+  (let [err (try (project/bind! root) nil (catch Exception e e))]
+    (is (some? err))
+    (is (= :no-session-slot (:reason (ex-data err))))
+    (is (str/includes? (ex-message err) "thread id"))))
+
+(deftest dropping-a-binding-keeps-the-project-and-the-session
+  (let [dir (tmp "pr-keep")]
+    (.mkdirs (io/file dir))
+    (project/bind! "pr-keep" dir)
+    (let [before (project/projects)]
+      (project/bind! "pr-keep" nil)
+      (testing "the session is still known -- only its project link is gone"
+        (is (nil? (project/binding-for "pr-keep")))
+        (let [row (first (filter #(= "pr-keep" (:id %)) (project/sessions)))]
+          (is (some? row) "the row survives the unbind")
+          (is (nil? (:project-id row)) "with no project")
+          (is (false? (:archived? row)) "and its flag is untouched")))
+      (testing "the project is still known -- one unbind does not remove a directory"
+        (is (= (:id (first before)) (:id (first (project/projects)))))
+        (is (= (count before) (count (project/projects))))))))
+
+(deftest a-session-this-home-has-never-seen-has-no-binding-and-cannot-be-unbound
+  (testing "asking about a stranger answers nil -- the everyday no-binding answer"
+    (is (nil? (project/binding-for "pr-stranger"))))
+  (testing "and unbinding one does not invent a session row for it"
+    (project/bind! "pr-stranger" nil)
+    (is (not-any? #(= "pr-stranger" (:id %)) (project/sessions))
+        "a conversation nobody ever started must not appear in the listing")))
+
+(deftest two-threads-binding-at-once-do-not-lose-each-others-writes
+  ;; The store is opened per call, so two threads binding concurrently are two
+  ;; real connections contending for the same file -- and a lost update here
+  ;; would mean a session silently pointing at the wrong directory.
+  (let [dirs    (mapv (fn [i] (let [d (tmp (str "pr-conc-" i))] (.mkdirs (io/file d)) d))
+                      (range 6))
+        canon   (fn [p] (.getCanonicalPath (io/file p)))
+        fails   (atom [])
+        workers (mapv (fn [i]
+                        (Thread.
+                         (fn []
+                           (try
+                             (dotimes [n 8]
+                               (project/bind! (str "pr-conc-" i "-" n) (nth dirs i)))
+                             (catch Throwable t (swap! fails conj (ex-message t)))))))
+                      (range (count dirs)))]
+    (doseq [w workers] (.start w))
+    (doseq [w workers] (.join w 30000))
+    (is (empty? @fails))
+    (is (= (set (map canon dirs))
+           (set (map :canonical-path
+                     (filter #(contains? (set (map canon dirs)) (:canonical-path %))
+                             (project/projects)))))
+        "one project row per directory, however the binds interleaved")
+    (doseq [i (range (count dirs))
+            n (range 8)]
+      (is (= (str (.getAbsoluteFile (io/file (nth dirs i))))
+             (project/binding-for (str "pr-conc-" i "-" n)))
+          (str "pr-conc-" i "-" n " kept its directory through the contention")))))

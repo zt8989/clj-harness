@@ -1,11 +1,16 @@
 (ns harness.project
-  "A session's project directory. thread-id -> binding is this namespace's
-  whole state: an atom keyed by thread-id, asked rather than copied, nil meaning
-  the normal case of NO binding. It is also the whole answer to 'where is this
-  session rooted', which is why asking about it needs nothing beyond this
-  namespace.
+  "A session's project directory. thread-id -> binding is this namespace's whole
+  state, and since the sqlite ticket it is a ROW rather than an atom entry: the
+  home's store holds one `projects` row per directory and one `sessions` row per
+  conversation, and a session's project is a foreign key on the second. What that
+  buys is the thing the atom could not do -- the binding is still there after the
+  process is gone -- and what it costs is that a binding is now a database read.
 
-  The binding re-roots the file tools and the shell for one session:
+  Both tables' DDL lives in harness.db/migrations (the store owns the schema);
+  the QUERIES over them live here, with the entity they are about.
+
+  A BINDING IS STILL A DEFAULT, NOT A FENCE. The binding re-roots the file tools
+  and the shell for one session:
 
     - resolve-path maps a RELATIVE path into the project directory; an
       absolute path passes through untouched.
@@ -13,28 +18,34 @@
       its working directory, what the project endpoints report, and what a
       session asking about itself is told.
 
-  A binding is a DEFAULT, not a fence -- the enforcement question is a separate,
-  explicit boolean: out-of-bounds? answers whether a resolved path stays inside
-  the directories a bound session is allowed to touch. The fence engages ONLY
-  when a binding exists, so an unbound session gets false for everything -- the
-  same regression guarantee resolve-path makes. What to DO about an
-  out-of-bounds answer (park it, ask a human) is the tool seam's business, not
-  this namespace's: here it is still only the WHERE question, now also stated
-  as containment.
+  out-of-bounds? is the separate, explicit enforcement question: whether a
+  resolved path stays inside the directories a bound session may touch. The
+  fence engages ONLY when a binding exists, so an unbound session gets false for
+  everything -- the same regression guarantee resolve-path makes. What to DO
+  about an out-of-bounds answer (park it, ask a human) is the tool seam's
+  business, not this namespace's.
 
   The allowed set is itself configurable per project: .harness/harness.edn in
   the bound project (overlaid on the configuration home's user-level
   harness.edn) can add allow paths and tighten the fence. See harness-config
-  for the two-level shape, and out-of-bounds? for what the fence does with it."
+  for the two-level shape, and out-of-bounds? for what the fence does with it.
+
+  TWO QUESTIONS, TWO COLUMNS, and the difference is load-bearing enough to argue
+  once, here. The `projects` row carries IDENTITY -- `canonical_path`, the one
+  form every spelling of a directory collapses to, so the same folder can never
+  become two projects. The `sessions` row carries the SPELLING that session was
+  bound with, because `bind!` hands back the string it was given, `binding-for`
+  answers it, and the shell runs in it: all of that is about this session's
+  binding, and none of it should change because some other session bound the same
+  directory through a different spelling. One column of each kind is what lets
+  both statements be true at once -- identity shared, spelling not."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [harness.db :as db]
             [harness.home :as home])
-  (:import (java.io File)))
-
-(defonce ^:private bindings
-  (atom {}))
-;; thread-id -> absolute path string of the project directory
+  (:import (java.io File IOException)
+           (java.sql Connection)))
 
 (defn- absolute
   "DIR as an absolute path string. Kept as the input's own form where possible
@@ -44,6 +55,52 @@
   [dir]
   (str (.getAbsoluteFile (io/file dir))))
 
+(defn- canonical-path
+  "F's canonical form -- symlinks chased, `..` collapsed, absolute -- which is how
+  this namespace decides that two spellings name ONE directory.
+
+  Failure is a NAMED error rather than a fallback to the spelling as given:
+  falling back would make one directory two projects whenever canonicalization
+  hiccuped, and 'why do I have two entries for one folder' is a far worse thing
+  to have to debug than this message. The message carries the ABSOLUTE path, like
+  every other refusal in this repo, so it names a file the reader can go look at
+  rather than a string whose meaning still depends on where they are standing."
+  [^File f]
+  (try
+    (.getCanonicalPath (.getAbsoluteFile f))
+    (catch IOException e
+      (throw (ex-info (str "could not resolve " (.getAbsolutePath f)
+                           " to a canonical path (" (ex-message e) "), so it cannot be"
+                           " told apart from another spelling of the same directory")
+                      {:path (.getAbsolutePath f) :reason :uncanonical})))))
+
+(defn- upsert-project!
+  "The project row for CANONICAL, created if this home has not seen that
+  directory before. Returns its id.
+
+  A directory gets exactly one row however it was spelled, which is the whole
+  point of keying on the canonical form -- and why nothing about the spelling
+  belongs in this table: two sessions bound through two spellings share this row
+  and must not fight over what it says."
+  [^Connection c ^String canonical]
+  (if-some [row (first (db/query c "SELECT id FROM projects WHERE canonical_path = ?" canonical))]
+    (:id row)
+    (:id (first (db/query c "INSERT INTO projects (canonical_path, created_at)
+                             VALUES (?, ?) RETURNING id"
+                          canonical (System/currentTimeMillis))))))
+
+(defn- touch-session!
+  "Record that SESSION-ID now belongs to project PROJECT-ID, storing the absolute
+  PATH this session was bound with. Creates the row if this home has not seen
+  that conversation before. The archived flag is left alone: rebinding is not a
+  change of archival state."
+  [^Connection c session-id project-id ^String path]
+  (db/execute! c "INSERT INTO sessions (id, project_id, path, created_at)
+                  VALUES (?, ?, ?, ?)
+                  ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id,
+                                                path       = excluded.path"
+               session-id project-id path (System/currentTimeMillis)))
+
 (defn bind!
   "Bind THREAD-ID's session to directory DIR, which must exist and be a
   directory -- anything else throws a NAMED error, because a typo'd path must
@@ -51,11 +108,32 @@
   Returns the absolute path the binding stored.
 
   DIR of nil DROPS the binding (the unbind direction; rebinding to another
-  directory is just binding again -- the last bind wins)."
-  ([dir] (bind! nil dir))
+  directory is just binding again -- the last bind wins). Dropping never creates
+  a session row: a conversation this home has never heard of is not one it
+  should start keeping, and the drop is a no-op on it exactly as the old
+  dissoc was.
+
+  Validation happens BEFORE anything is written, so a refused bind leaves the
+  store exactly as it was -- the same 'no trace on failure' the HTTP edge
+  promises about the audit line it lands afterwards.
+
+  THE ONE-ARITY FORM IS REFUSED, by name, and the refusal is the honest news
+  rather than an oversight: `(bind! dir)` used to write a binding into the
+  no-session slot, and a row keyed by nothing is a row this schema will not hold
+  (sessions.id is NOT NULL). The signature is kept because removing it would turn
+  a caller's mistake into an arity error at some unrelated call site; refusing it
+  here says which argument is missing and why it matters."
+  ([dir]
+   (throw (ex-info (str "bind! needs a thread id to bind " dir
+                        ": a binding belongs to a conversation, and the no-session"
+                        " slot (nil) cannot hold one")
+                   {:path (str dir) :reason :no-session-slot})))
   ([thread-id dir]
    (if (nil? dir)
-     (do (swap! bindings dissoc thread-id)
+     (do (db/with-transaction
+           (fn [^Connection c]
+             (db/execute! c "UPDATE sessions SET project_id = NULL, path = NULL WHERE id = ?"
+                          thread-id)))
          nil)
      (let [f (io/file dir)]
        (when-not (.exists f)
@@ -64,27 +142,64 @@
        (when-not (.isDirectory f)
          (throw (ex-info (str "not a directory: " dir)
                          {:path (str dir) :reason :not-a-directory})))
-       (let [abs (absolute dir)]
-         (swap! bindings assoc thread-id abs)
+       (let [abs   (absolute dir)
+             canon (canonical-path f)]
+         (db/with-transaction
+           (fn [^Connection c]
+             (touch-session! c thread-id (upsert-project! c canon) abs)))
          abs)))))
 
 (defn binding-for
   "The project directory THREAD-ID's session is bound to, as an absolute path
   string -- or nil. Nil is the explicit, everyday answer for NO binding, never
   an error: most sessions are unbound, and an unbound session must behave
-  exactly as it did before this namespace existed."
+  exactly as it did before this namespace existed.
+
+  The answer is the spelling THIS session was bound with, which is what the
+  binding returned when it was made -- not the project's canonical form, and not
+  some other session's spelling of the same directory. No join onto `projects`
+  is needed for that: the session's own row carries it, and an unbound session's
+  is NULL by the schema's CHECK.
+
+  The nil THREAD-ID case is the deliberate no-session slot the rest of the
+  session-scoped surface has: offline tools and replay run outside any session,
+  ask with nil, and get the identity treatment. It is answered here rather than
+  by the query, so no row can ever be found for it."
   [thread-id]
-  (get @bindings thread-id))
+  (when (some? thread-id)
+    (:path (first (db/select "SELECT path FROM sessions WHERE id = ?" thread-id)))))
+
+(defn projects
+  "Every project this home knows: {:id :canonical-path :created-at}, oldest
+  first. One row per DIRECTORY, so this is the deduplication made visible --
+  binding one directory twice, or through two spellings of it, does not grow
+  this list."
+  []
+  (db/select "SELECT id, canonical_path, created_at FROM projects ORDER BY created_at, id"))
+
+(defn sessions
+  "Every session this home knows: {:id :project-id :path :archived? :created-at},
+  oldest first. `:archived?` is a BOOLEAN, converted here rather than left as
+  the column's 0/1 -- Clojure's `boolean` says 0 is true, and a flag that means
+  the opposite of what it looks like is the kind of bug that survives review.
+
+  Reading the flag is this namespace's; SETTING it is the archive ticket's
+  business, so there is deliberately no `archive!` here yet."
+  []
+  (mapv (fn [row] (-> row
+                      (assoc :archived? (pos? (long (:archived row))))
+                      (dissoc :archived)))
+        (db/select "SELECT id, project_id, path, archived, created_at FROM sessions ORDER BY created_at, id")))
 
 (defn cwd-changed
   "The CwdChanged hook-event FACTS for a binding change: BEFORE (the previous
   directory, nil for a first bind) -> AFTER (the directory now bound). This is
-  the event source the hook engine (P2) will wire at the binding-change point
-  -- the payload shape is locked here, with a test, so it cannot drift between
-  this ticket and the wiring. Field names follow the hook-payload convention
-  (snake_case, aligned with the CodeBuddy list). What to DO with the event --
-  spawning commands, timeouts, gating -- is the hook engine's business, not
-  this namespace's: here it is only the fact that the working directory moved."
+  the event source the hook engine wires at the binding-change point -- the
+  payload shape is locked here, with a test, so it cannot drift. Field names
+  follow the hook-payload convention (snake_case, aligned with the CodeBuddy
+  list). What to DO with the event -- spawning commands, timeouts, gating -- is
+  the hook engine's business, not this namespace's: here it is only the fact
+  that the working directory moved."
   [thread-id before after]
   {:hook        "CwdChanged"
    :thread_id   thread-id
@@ -103,9 +218,11 @@
   ([path] (resolve-path nil path))
   ([thread-id path]
    (let [f (io/file path)]
-     (if (or (.isAbsolute f) (nil? (binding-for thread-id)))
+     (if (.isAbsolute f)
        path
-       (str (io/file (binding-for thread-id) path))))))
+       (if-let [dir (binding-for thread-id)]
+         (str (io/file dir path))
+         path)))))
 
 (defn- under?
   "Canonical containment: PATH's canonical form is DIR's canonical form or
@@ -165,7 +282,13 @@
   :approval {:allow [..]} adds paths to the fence's allowed set,
   :approval {:strict true} removes the project directory from it. The
   skills/mcp/hooks subdirectories of .harness/ are RESERVED for their own
-  consumers -- this reader only ever opens harness.edn."
+  consumers -- this reader only ever opens harness.edn.
+
+  NOTE THE MIXED SOURCE, which is the home's boundary rather than an accident
+  (.scratch/project-sidebar/spec.md decision 2): the BINDING comes from the
+  store, the CONFIGURATION from files. State is rewritten, config is edited by
+  hand -- so editing harness.edn still needs no restart, and no part of this
+  call writes to the store."
   ([] (harness-config nil))
   ([thread-id]
    (merge (read-harness-edn (io/file (home/root) "harness.edn"))

@@ -154,17 +154,17 @@
 
 ;; ------------------------------------------------------------------ first open
 
-(deftest a-first-open-claims-the-file-and-then-does-nothing
+(deftest a-first-open-builds-the-schema-and-a-second-changes-nothing
   (let [dir (fresh-root)]
     (with-root
       dir
       (fn []
-        (testing "a store with no tenant has no tables"
-          (is (zero? (db/target-version))
-              "this ticket brings no table: the first one arrives with the ticket that reads it")
+        (testing "the store arrives at the version this harness speaks"
+          (is (pos? (db/target-version)))
           (is (= (db/target-version) (db/migrate!)))
-          (is (= (db/target-version) (db/schema-version)))
-          (is (empty? (db/tables))))
+          (is (= (db/target-version) (db/schema-version))))
+        (testing "with exactly the tables the home's entities declared"
+          (is (= ["projects" "sessions"] (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
           (is (= 0x6861726E (pragma (home/db-file) "application_id"))))
@@ -314,14 +314,16 @@
               (is (str/includes? (str said) "damaged"))
               (let [fact (last (db/recoveries))]
                 (is (= (str db-file) (:path fact)))
-                (is (seq (:moved fact)))))
-            (testing "the rebuilt store is empty of the old table and usable"
-              (is (empty? (db/tables)))
+                (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
+              (is (= ["projects" "sessions"] (db/tables))
+                  "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
                 (fn [^Connection c]
                   (with-open [st (.createStatement c)]
-                    (.execute st "CREATE TABLE after_the_rebuild (x INTEGER)"))))
-              (is (= ["after_the_rebuild"] (db/tables))))))))))
+                    (.execute st "INSERT INTO projects (canonical_path, created_at)
+                                  VALUES ('/rebuilt', 1)"))))
+              (is (= 1 (:n (first (db/select "SELECT COUNT(*) AS n FROM projects"))))
+                  "and it is writable"))))))))
 
 ;; ------------------------------------------------------------------ migrations
 
@@ -500,7 +502,132 @@
             (is (= [[(* threads rounds)]]
                    (rows "SELECT n FROM counter WHERE id = 1")))))))))
 
+;; ------------------------------------------------------------------ the schema
+
+(defn- seed-a-bound-session!
+  "One project with one bound session, written through the schema's own rules.
+  Returns the project id."
+  [^String project-path ^String session-id]
+  (db/with-transaction
+    (fn [^Connection c]
+      (let [pid (:id (first (db/query c "INSERT INTO projects (canonical_path, created_at)
+                                          VALUES (?, 1) RETURNING id"
+                                     project-path)))]
+        (db/execute! c "INSERT INTO sessions (id, project_id, path, created_at)
+                        VALUES (?, ?, ?, 1)"
+                     session-id pid project-path)
+        pid))))
+
+(deftest unbound-is-one-state-and-the-schema-keeps-it-that-way
+  ;; `project_id` and `path` are null together or neither is. A half-bound row
+  ;; would say two different things depending on who read it -- `binding-for`
+  ;; would answer nothing while the session still carried a path -- so the
+  ;; schema refuses it rather than every reader having to decide which half wins.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (let [pid (seed-a-bound-session! "/proj" "schema-half")]
+          (testing "the bound state is accepted"
+            (is (= [["schema-half" pid "/proj"]]
+                   (mapv (juxt :id :project-id :path)
+                         (db/select "SELECT id, project_id, path FROM sessions")))))
+          (testing "a row with a path but no project is refused"
+            (is (thrown? Exception
+                         (db/with-transaction
+                           (fn [^Connection c]
+                             (db/execute! c "INSERT INTO sessions (id, project_id, path, created_at)
+                                             VALUES ('half', NULL, '/orphan', 1)"))))))
+          (testing "and so is a row with a project but no path"
+            (is (thrown? Exception
+                         (db/with-transaction
+                           (fn [^Connection c]
+                             (db/execute! c "INSERT INTO sessions (id, project_id, path, created_at)
+                                             VALUES ('half2', ?, NULL, 1)"
+                                          pid))))))
+          (testing "unbinding through the schema's own path clears both, not one"
+            ;; What the FK does when a project is removed. Written as raw SQL
+            ;; because the route that removes projects belongs to a later ticket;
+            ;; what THIS ticket owes is the guarantee that when it lands, the
+            ;; sessions it unbinds are in the unbound state and not a state
+            ;; halfway between.
+            (db/with-transaction
+              (fn [^Connection c] (db/execute! c "DELETE FROM projects WHERE id = ?" pid)))
+            (is (= [["schema-half" nil nil]]
+                   (mapv (juxt :id :project-id :path)
+                         (db/select "SELECT id, project_id, path FROM sessions")))
+                "the path went with the project_id: no orphaned spelling is left")
+            (is (not-any? #(= pid (:project-id %)) (db/select "SELECT project_id FROM sessions")))))))))
+
+(deftest a-session-id-cannot-be-null-even-though-sqlite-would-allow-it
+  ;; SQLite does not imply NOT NULL from PRIMARY KEY on a text column, and NULLs
+  ;; count as distinct in a unique index -- so without the explicit NOT NULL,
+  ;; every bind of a nil thread id would quietly add another row.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (seed-a-bound-session! "/proj" "anchored")
+        (is (thrown? Exception
+                     (db/with-transaction
+                       (fn [^Connection c]
+                         (db/execute! c "INSERT INTO sessions (id, created_at) VALUES (NULL, 1)"))))
+            "a NULL session id is refused, twice over if it were allowed")))))
+
+(deftest binding-types-this-store-does-not-have-are-named-failures
+  ;; The alternative -- stringifying whatever arrives -- would store \":hashline\"
+  ;; for a keyword and \"1.5\" for a Double, and both rows would read back as
+  ;; plausible strings. A type the schema has no column for is a caller bug, and
+  ;; it is told so where the statement is.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (db/with-transaction
+          (fn [^Connection c]
+            (db/execute! c "CREATE TABLE probe (x TEXT)")))
+        (doseq [bad [:a-keyword 1.5 [1 2] {'a 1}]]
+          (let [thrown (try (db/with-transaction
+                              (fn [^Connection c]
+                                (db/execute! c "INSERT INTO probe (x) VALUES (?)" bad)))
+                            nil
+                            (catch Exception e e))]
+            (is (some? thrown) (str (pr-str bad) " must not be silently stringified"))
+            (is (str/includes? (ex-message thrown) "cannot bind")
+                (str (pr-str bad) ": the refusal says what went wrong"))))
+        (testing "and the supported types all still bind"
+          (db/with-transaction
+            (fn [^Connection c]
+              (db/execute! c "INSERT INTO probe (x) VALUES (?)" "a string")))
+          (is (= [["a string"]] (mapv (juxt :x) (db/select "SELECT x FROM probe")))))))))
+
 ;; --------------------------------------------------------------- the boundary
+(deftest sessions-hold-no-conversation-content
+  ;; The column-level half of the boundary `no-table-in-the-store-mirrors-a-log`
+  ;; guards at table level. That test catches a whole new table; this one catches
+  ;; the cheaper mistake -- adding a `title` or a `summary` column to `sessions`
+  ;; so the sidebar can show something prettier. A title IS conversation content,
+  ;; and copying it here would be the second truth this store may not hold.
+  ;;
+  ;; The list is exact, like the table list: a column arrives here only when
+  ;; somebody writes down why it is state and not a record.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (let [declared-state-columns
+              {"projects" #{"id" "canonical_path" "created_at"}
+               "sessions" #{"id" "project_id" "path" "archived" "created_at"}}
+              forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
+          (is (pos? (db/target-version)) "the store has a schema to inspect")
+          (doseq [[table columns] declared-state-columns]
+            (let [actual (set (map :name (db/select (str "PRAGMA table_info(" table ")"))))]
+              (testing (str table " carries exactly the columns it declared")
+                (is (= columns actual)))
+              (testing (str "and none of " table "'s columns holds conversation content")
+                (is (empty? (filter #(re-find forbidden %) actual))
+                    (str "these columns look like records rather than state: "
+                         (pr-str (filter #(re-find forbidden %) actual))))))))))))
 
 (deftest no-table-in-the-store-mirrors-a-log
   ;; .scratch/project-sidebar decision 2, stated as something a machine checks.
@@ -517,9 +644,9 @@
     (with-root
       dir
       (fn []
-        (let [declared-state-tables #{}
+        (let [declared-state-tables #{"projects" "sessions"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
-          (testing "the store's tables today"
+          (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))
           (testing "and none of them is a place a log could be mirrored into"
             (is (empty? (filter #(re-find forbidden %) (db/tables)))

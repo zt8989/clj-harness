@@ -255,12 +255,79 @@
       (.next rs)
       (.getInt rs 1))))
 
-(defn- exec!
-  "One statement, no result expected. The migration steps and the transaction
-  bodies speak through this."
+(defn- ddl!
+  "One statement, no parameters, no result -- the migration steps speak through
+  this. DDL specifically: named apart from `execute!` because the two differ by
+  more than a letter, and a DDL statement is the one kind of write here that
+  cannot take a placeholder at all."
   [^Connection c ^String sql]
   (with-open [st (.createStatement c)]
     (.execute st sql)))
+
+(defn- bind-params!
+  "Fill a prepared statement's placeholders from PARAMS, in order. Clojure's
+  Integer/Long/Boolean are not java.sql's, and a driver left to guess would bind
+  a Long as DECIMAL -- so the types this store actually uses are named one by
+  one, and anything else is a NAMED failure.
+
+  The failure is the point: a silent `(str v)` would bind a keyword as the string
+  \":editing\" and a Double as \"1.5\", and the store would accept both. A value
+  that has a type the schema does not have a column for is a bug in the caller,
+  and it should be told so where the statement is, not discovered later by
+  reading a row that looks almost right."
+  [^java.sql.PreparedStatement st params]
+  (doseq [[i v] (map-indexed vector params)]
+    (let [idx (int (inc i))]
+      (cond
+        (nil? v)         (.setObject st idx nil)
+        (boolean? v)     (.setBoolean st idx v)
+        (integer? v)     (.setLong st idx (long v))
+        (string? v)      (.setString st idx v)
+        :else            (throw (ex-info (str "cannot bind a " (.getName (class v))
+                                              " (" (pr-str v) ") to parameter " idx
+                                              "; this store binds nil, booleans,"
+                                              " integers and strings")
+                                         {:param idx :value v :type (class v)}))))))
+
+(defn- column-key
+  "A column label as the keyword a Clojure caller expects: lower-cased, with
+  underscores turned into hyphens. SQL spells `canonical_path`; every map in this
+  repo spells `:canonical-path`. Converting here, once, is what keeps the store's
+  rows from reading like a foreign dialect at every call site -- and what stops
+  the two spellings from quietly disagreeing, since a caller who guesses wrong
+  gets a key that is simply absent rather than an error."
+  [^String label]
+  (keyword (str/replace (str/lower-case label) "_" "-")))
+
+(defn query
+  "Run SQL with PARAMS on a connection you already hold, and return the rows as
+  maps of column keywords (see `column-key`). `select` is the one-shot form of
+  the same thing -- use this one when you are INSIDE a transaction, where opening
+  a second connection would ask a different one and miss your own uncommitted
+  writes. Shared rather than re-written per caller: two namespaces each
+  hand-rolling ResultSet walking is two places to get the closed-resource and the
+  column-index details right."
+  [^Connection c ^String sql & params]
+  (with-open [st (.prepareStatement c sql)]
+    (bind-params! st params)
+    (with-open [rs (.executeQuery st)]
+      (let [cols (mapv (fn [i] (column-key (.getColumnLabel (.getMetaData rs) (int i))))
+                       (range 1 (inc (.getColumnCount (.getMetaData rs)))))]
+        (loop [acc []]
+          (if-not (.next rs)
+            acc
+            (recur (conj acc (zipmap cols (map #(.getObject rs (int %))
+                                               (range 1 (inc (count cols)))))))))))))
+
+(defn execute!
+  "Run SQL with PARAMS on a connection you already hold and return the update
+  count -- for a write whose only result is 'how many rows did that touch'. This
+  is the writing counterpart of `query`, and shares its rule: inside a
+  transaction, use the connection the transaction gave you."
+  [^Connection c ^String sql & params]
+  (with-open [st (.prepareStatement c sql)]
+    (bind-params! st params)
+    (.executeUpdate st)))
 
 (defn- damage?
   "SQLite's own verdict that the file it was handed is unusable. The two codes
@@ -297,6 +364,72 @@
 
 ;; ------------------------------------------------------------------- migrations
 
+(defn- projects-and-sessions
+  "Version 0 -> 1: the home's two entities, and the columns are the whole
+  contract.
+
+    projects  one row per DIRECTORY, identified by `canonical_path`: symlinks,
+              `..` and differing separators collapse to one form, so two
+              spellings of one directory are one project and never two rows.
+
+    sessions  one row per conversation: which project it belongs to (NULL for
+              none), the absolute path THIS session was bound with (`path`),
+              and whether it is archived. Deliberately NO message column of any
+              kind -- a conversation lives in its jsonl log, and a second copy
+              here would be a second truth that rots.
+
+  WHY THE PATH IS ON THE SESSION RATHER THAN THE PROJECT is the one part of this
+  shape worth arguing, and harness.project's namespace docstring does: identity
+  is shared between sessions, the spelling is not.
+
+  UNBOUND IS ONE STATE, NOT TWO, and the schema keeps it that way. `project_id`
+  and `path` are null together or neither is: the CHECK refuses a half-bound row,
+  and the BEFORE DELETE trigger on `projects` clears both columns of its sessions
+  in one statement, so the CHECK is never asked to judge a row mid-change.
+
+  The trigger is BEFORE DELETE rather than the obvious AFTER UPDATE, and that
+  ordering is forced by the CHECK. FK ON DELETE SET NULL clears `project_id`
+  alone -- a row with a NULL project and a live path, which is precisely the
+  half-bound state the CHECK exists to refuse, so the cascade fails and the
+  delete with it. Clearing both first means the cascade finds nothing left to do.
+  Without the pair, removing a project would leave sessions whose `binding-for`
+  answered nothing while `path` still named a directory: one row saying two
+  different things depending on who reads it.
+
+  ON DELETE SET NULL is then also the schema saying what the sidebar's 'remove
+  project' says in words: removing a project unbinds its sessions, it does not
+  delete them. The two tables arrive together because a session with nowhere to
+  point is not a state this home has any use for.
+
+  `sessions.id` is NOT NULL, which SQLite does not imply from PRIMARY KEY on a
+  text column -- a quirk worth pinning down, because 'bind the nil session' would
+  otherwise write a row with a NULL id, and NULLs count as distinct in a unique
+  index, so every such bind would add another one.
+
+  A plain INTEGER PRIMARY KEY on `projects`, not AUTOINCREMENT: it is a rowid
+  alias, so it gets ids assigned the same way without SQLite adding a
+  `sqlite_sequence` bookkeeping table of its own. That table would show up in the
+  store's table list, and the store's table list is part of its contract (see
+  harness.db-test/no-table-in-the-store-mirrors-a-log)."
+  [^Connection c]
+  (ddl! c "CREATE TABLE projects (
+              id             INTEGER PRIMARY KEY,
+              canonical_path TEXT NOT NULL UNIQUE,
+              created_at     INTEGER NOT NULL)")
+  (ddl! c "CREATE TABLE sessions (
+              id         TEXT PRIMARY KEY NOT NULL,
+              project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+              path       TEXT,
+              archived   INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL,
+              CHECK ((project_id IS NULL) = (path IS NULL)))")
+  (ddl! c "CREATE TRIGGER projects_forget_their_sessions
+             BEFORE DELETE ON projects
+             BEGIN
+               UPDATE sessions SET project_id = NULL, path = NULL
+                WHERE project_id = old.id;
+             END"))
+
 (def migrations
   "The forward migration chain. (nth migrations i) takes the store from schema
   version i to i+1, and (count migrations) is the version this harness speaks.
@@ -306,17 +439,21 @@
   Each step runs in its own transaction together with the version bump, so a step
   that throws leaves the store exactly where it was -- never half-migrated.
 
-  EMPTY ON PURPOSE, and the honest state of things: this store has no tenant yet,
-  so it has no table to hold. The claim itself -- the application id -- is not a
-  migration step; it is what makes a file this store's, stamped when the file is
-  created (see migrate-connection!). Inventing tables ahead of the feature that
-  reads them would be a guess to be migrated away later.
+  The claim itself -- the application id -- is not a step; it is what makes a
+  file this store's, stamped when the file is created (see migrate-connection!).
 
-  The first step arrives with the first table. A test may pass its own chain as
-  the first argument to migrate!, with-connection or with-transaction -- that is
-  how the walk across several versions is exercised today, without waiting for
-  the features that will bring those versions."
-  [])
+  WHY ONE CHAIN AND NOT ONE PER TENANT. A schema version is a totally ordered
+  fact about a file, so the steps that produce it have to be in one list in one
+  order; assembling that list from fragments at load time is the registration
+  machinery the store was built to avoid (and it would make 'which version is
+  this file at' depend on load order). So the DDL lives here -- the store owns
+  the SCHEMA -- while the queries over each tenant's tables live with the entity
+  that owns them (harness.project, and later the anchor store).
+
+  A test may pass its own chain as the first argument to migrate!,
+  with-connection or with-transaction -- that is how the walk across several
+  versions is exercised without waiting for the features that bring them."
+  [projects-and-sessions])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."
@@ -341,17 +478,17 @@
       ;; namespace docstring on why that ordering is load-bearing. Not a numbered
       ;; step, because it is the file's identity rather than a version of its
       ;; schema -- every version of this store has it.
-      (in-transaction c (fn [] (exec! c (str "PRAGMA application_id = " magic)))))
+      (in-transaction c (fn [] (ddl! c (str "PRAGMA application_id = " magic)))))
     (doseq [version (range (inc on-disk) (inc target))]
       (in-transaction c
                       (fn []
                         ((nth steps (dec version)) c)
-                        (exec! c (str "PRAGMA user_version = " version)))))
+                        (ddl! c (str "PRAGMA user_version = " version)))))
     (when created?
       ;; Only ever on the way IN to WAL, never back out: a store left in rollback
       ;; mode by a creation that died here is perfectly usable, just coarser about
       ;; concurrency, and downgrading a WAL store would be a pointless write.
-      (exec! c "PRAGMA journal_mode = WAL"))
+      (ddl! c "PRAGMA journal_mode = WAL"))
     (pragma-int c "user_version")))
 
 (defn- connect-and-migrate!
@@ -469,6 +606,14 @@
    (let [c (ensure-connection! steps)]
      (try (f c) (finally (.close c))))))
 
+(defn select
+  "One-shot read: run SQL with PARAMS against the store, opening and closing a
+  connection for this one question. The shape most callers want -- `query` is for
+  the ones already inside a connection, where a second open would ask a different
+  connection and miss writes the current transaction has not committed."
+  [sql & params]
+  (with-connection (fn [c] (apply query c sql params))))
+
 (defn with-transaction
   "Run F inside one transaction on an open store connection: everything F writes
   commits together, or nothing does. F takes the java.sql.Connection and may run
@@ -525,10 +670,5 @@
   ([steps]
    (with-connection
      steps
-     (fn [^Connection c]
-       (with-open [st (.createStatement c)
-                   rs (.executeQuery st "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
-         (loop [acc []]
-           (if (.next rs)
-             (recur (conj acc (.getString rs 1)))
-             acc)))))))
+     (fn [c] (mapv :name (query c "SELECT name FROM sqlite_master
+                                    WHERE type = 'table' ORDER BY name"))))))
