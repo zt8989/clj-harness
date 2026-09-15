@@ -196,7 +196,7 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 282 tests / 1604 assertions，全绿（基线随分支变，报数时带上分支与提交）
+# 325 tests / 1827 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
