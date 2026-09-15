@@ -1,7 +1,8 @@
 (ns harness.home
   "The one place that decides where this process keeps its files: config,
-  providers, the .env that holds the api-key, and the jsonl logs. Everything
-  else derives its paths from here -- no bare relative slurp anywhere.
+  providers, the .env that holds the api-key, the jsonl logs, and the metadata
+  store. Everything else derives its paths from here -- no bare relative slurp
+  anywhere.
 
   The root is, in order of precedence:
 
@@ -41,6 +42,12 @@
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 (defn logs-dir       [] (io/file (root) "logs"))
+(defn db-file
+  "The home's metadata store -- see harness.db. It lives beside the configuration
+  files rather than under any one feature's directory: it is this home's store,
+  and it has more than one tenant."
+  []
+  (io/file (root) "harness.db"))
 
 (defn sanitize
   "A thread id -> a filename-safe stem. The ONE rule the writer (harness.http)

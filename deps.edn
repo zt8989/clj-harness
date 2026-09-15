@@ -12,7 +12,13 @@
  :deps {org.clojure/clojure   {:mvn/version "1.12.6"}
         org.clojure/core.async {:mvn/version "1.6.681"}
         http-kit/http-kit     {:mvn/version "2.8.0"}
-        org.clojure/data.json {:mvn/version "2.5.2"}}
+        org.clojure/data.json {:mvn/version "2.5.2"}
+        ;; The home's metadata store (harness.db). The ONE binary dependency in
+        ;; this repo, and a deliberate one: the store's whole reason to exist is
+        ;; a critical section that commits several facts at once, which is what
+        ;; a transaction is for. See harness.db's docstring and
+        ;; .scratch/project-sidebar/spec.md decision 2.
+        org.xerial/sqlite-jdbc {:mvn/version "3.53.4.0"}}
  :aliases
  ;; :test carries dev/ because the replay tool lives there and has tests of its own.
  {:test  {:extra-paths ["test" "dev"]}

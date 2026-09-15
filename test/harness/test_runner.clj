@@ -10,13 +10,21 @@
   alter-var-root, not binding: a test run starts a server whose logging happens on
   other threads, and a dynamic binding would not reach them. This process is a
   throwaway, so making the override global here is exactly the intent -- production
-  code never touches it."
+  code never touches it.
+
+  The claim is checked at the END rather than assumed: the developer's real store
+  is fingerprinted before the root moves and again after the suite runs, and any
+  appearance or change fails the run. A file that simply sits there untouched --
+  which is the normal state of a working install, and the case a bare exists?
+  check would stop noticing -- passes, because an untouched file is exactly what
+  the assertion is about."
   (:require [clojure.java.io :as io]
             [clojure.test :as t]
             [harness.home :as home]))
 
 (def test-namespaces
   '[harness.event-test
+    harness.db-test
     harness.llm-test
     harness.tools-test
     harness.session-tools-test
@@ -74,10 +82,53 @@
         (binding [*out* *err*]
           (println "warning: could not remove test home" dir ":" (ex-message e)))))))
 
+(defn- store-state
+  "F as [bytes mtime], or nil when it is not there. Two numbers rather than a bare
+  exists?: once the developer HAS a store -- the normal state of a working install
+  -- `exists?` is true before and after and would notice nothing, while a byte
+  count and an mtime still move if anything wrote to it. The store is rewritten in
+  place and grown by appends, so any write moves at least one of the two."
+  [^java.io.File f]
+  (when (.exists f)
+    [(.length f) (.lastModified f)]))
+
+(defn- isolation-verdict
+  "The post-run half of the isolation claim. A store in the developer's real home
+  that APPEARED during this run, or changed while it ran, means some path resolved
+  there -- and the run must not report green, because a suite that quietly writes
+  to the real home is the exact failure the whole fixture exists to prevent (see
+  this namespace's docstring for how that was discovered). The file is left where
+  it is: tidying away evidence of the bug would be the second mistake.
+
+  F is the File captured before `isolate!` ran, never one recomputed from
+  harness.home here -- by now the root points at the temp home, so asking again
+  would compare the temp store against itself and pass while the real home was
+  being written."
+  [^java.io.File f before]
+  (let [after (store-state f)]
+    (when-not (= before after)
+      (binding [*out* *err*]
+        (println (str "ISOLATION FAILURE: " (.getAbsolutePath f)
+                      " changed during this run: " (pr-str before) " -> " (pr-str after)
+                      " ([bytes mtime], nil meaning absent) -- some code path resolved"
+                      " the store against the developer's real home instead of through"
+                      " harness.home.")))
+      false)))
+
 (defn -main [& _]
-  (let [dir (isolate!)]
+  ;; The store's path is resolved through harness.home BEFORE the root moves, so
+  ;; it comes from the one place that decides paths rather than a second copy of
+  ;; the precedence rule -- and so the File in hand still names the developer's
+  ;; real home for the rest of this run.
+  (let [store  (home/db-file)
+        before (store-state store)
+        dir    (isolate!)]
     (println "test config root:" dir)
+    (println "developer home store before this run:"
+             (if before (str "present (" (first before) " bytes, left alone)") "absent"))
     (apply require test-namespaces)
-    (let [{:keys [fail error]} (apply t/run-tests test-namespaces)]
+    (let [{:keys [fail error]} (apply t/run-tests test-namespaces)
+          isolated?            (isolation-verdict store before)
+          broken               (+ (or fail 0) (or error 0) (if isolated? 0 1))]
       (cleanup!)
-      (System/exit (if (zero? (+ (or fail 0) (or error 0))) 0 1)))))
+      (System/exit (if (zero? broken) 0 1)))))
