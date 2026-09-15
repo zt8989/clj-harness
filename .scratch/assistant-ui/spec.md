@@ -139,7 +139,7 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
 - 02 四组用例跟着搬到 TypeScript，CLJS 工具链整体离场（阻塞于 01）
 - 03 assistant-ui 运行时接管页面骨架与文本对话（阻塞于 02）
 - 04 消息部件：工具调用卡与默认折叠的 reasoning（阻塞于 03，已落地）
-- 05 审批门（阻塞于 03）
+- 05 审批门（阻塞于 03，已落地）
 - 06 会话：列表 / 恢复 / 新建（阻塞于 03）
 - 07 项目目录面板（阻塞于 03）
 - 08 CopilotKit 出局与文档收口（阻塞于 04, 05, 06, 07）
@@ -165,6 +165,18 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
   将在下一个大版本移除」。也就是说这两个方法**不是新口子，是行将删除的旧口子**。05 落地时应优先用那对
   hooks；若最终仍用了 `unstable_*`，升级检查就变成「下一个大版本会直接编译失败」——比静默失灵好抓，
   但同样是 breaking。这两条路都要在 05 的验收里点名。
+
+  **05 落地后的结论：用的是那对稳定 hooks（`useAgUiInterrupts` / `useAgUiSubmitInterruptResponses`），
+  `unstable_*` 一处未引。** 升级检查随之变轻：这两个 hooks 若改名，`tsc` 直接编译失败，不会静默失灵；
+  真正仍需人工看的只剩行为契约——`useAgUiInterrupts` 读的是 `RUN_FINISHED.outcome.interrupts` 快照、
+  提交侧仍按「每个开着的 interrupt 一条应答」校验。判法：升级后跑一遍批准/否决，若卡出现但点击后
+  composer 永不复原，就是提交缝断了。
+- **05 落地后给 06 留的接点**：park 的中断只活在客户端内存，刷新即失，而服务端的 park 记录还在进程里；
+  06 的恢复要么把 park 状态一并恢复，要么明确「刷新即弃」并保证重放不出无法回答的卡。另外 05 的
+  composer 拦截由 `ApprovalBatchProvider` 的 hold 驱动 `isSendDisabled`，06 若加线程切换，切走时 hold
+  要跟着断。批次路径还有一个已修复的坑要 06 知道：一发多 park 的调用会落进多条客户端消息，只有最后
+  一条带 interrupt 元数据——任何「按 part status 找停泊调用」的逻辑都会漏掉前面的（05 在
+  `ToolCallCard` 里用中断缝补的，正是这个）。
 - **04 落地后给 05 留的两个接点**：① 停泊调用（`requires-action`）在 04 里**不自动展开**——04 的卡是一张
   折叠的工具卡，`Needs approval` 只是折叠头上的一个状态词，批准/否决的按钮一个都没有，05 要么沿用折叠
   （点一下才看见按钮），要么自己控制 `open`；② 上游 `tool-fallback.aui.tsx` 里**已经带了一整套

@@ -35,13 +35,30 @@
 // which also carries the one deliberate difference from upstream's defaults
 // (everything arrives collapsed). It is a module-level constant so the object
 // identity survives re-renders.
+//
+// `ApprovalBatchProvider` sits above the thread because a parked turn is
+// answered as a batch, not a card at a time: AG-UI resumes with one response per
+// open interrupt, so the decisions have to be collected somewhere that outlives
+// the individual cards, and the cards are siblings with no owner of their own.
+// It is above the thread, not inside it, because the thread is a copied file and
+// this is ours -- and it has to be BELOW the runtime provider, since that is
+// where it reads the pending interrupts from. See `components/approval-gate.tsx`.
+//
+// It also reports back up whether a gate is holding the run, and that closes the
+// composer (`isSendDisabled`). The reason is in `approval-gate.tsx` and it is
+// measured rather than assumed: a message sent while a gate is open is refused by
+// the runtime and the refusal is silent -- the text is cleared from the composer
+// and never arrives anywhere. Blocking is the only handling that does not eat
+// what somebody typed. The state lives here, not in the provider, because
+// `isSendDisabled` is an option of the hook called here.
 import { HttpAgent } from "@ag-ui/client";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ApprovalBatchProvider } from "@/components/approval-gate";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 
 /// The AG-UI endpoint. The trailing slash is the server's route; the origin is
@@ -51,7 +68,9 @@ const AGENT_URL = "http://localhost:8080/";
 
 export function App() {
   const agent = useMemo(() => new HttpAgent({ url: AGENT_URL }), []);
-  const runtime = useAgUiRuntime({ agent });
+  // Set by the approval gate below, read by the runtime on the next render.
+  const [gateOpen, setGateOpen] = useState(false);
+  const runtime = useAgUiRuntime({ agent, isSendDisabled: gateOpen });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -61,9 +80,11 @@ export function App() {
         {/* Thread's root is `h-full`, so it needs a parent that actually has a
             height -- `h-dvh` is the viewport. Tickets 06 and 07 add their panels
             above this line and must not steal that height from it. */}
-        <div className="h-dvh">
-          <Thread components={THREAD_COMPONENTS} />
-        </div>
+        <ApprovalBatchProvider onHoldChange={setGateOpen}>
+          <div className="h-dvh">
+            <Thread components={THREAD_COMPONENTS} />
+          </div>
+        </ApprovalBatchProvider>
       </TooltipProvider>
     </AssistantRuntimeProvider>
   );

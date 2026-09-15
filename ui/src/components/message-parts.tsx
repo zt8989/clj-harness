@@ -43,6 +43,15 @@
 // the switch that turns THINKING_*/REASONING_* events into parts at all, so
 // turning it off would leave the reasoning slot with nothing to draw.
 //
+// ------------------------------------------------- and one thing beside them
+//
+// A tool call the run parked for approval gets a card of its own, drawn under
+// the (still folded) tool card -- `approval-gate.tsx` mounts from `ToolCallCard`
+// and carries the argument for where the buttons live, which seam answers them
+// and why that card is written here instead of reused from the copied kit. It
+// is not a fourth slot: it hangs off the same part, so it arrives with the same
+// signal (`requires-action`) that tells the tool card what state it is in.
+//
 // Nothing in `components/assistant-ui/elements/` was edited to get this. A slot
 // override keeps this file ours and the copied files byte-comparable on the
 // next registry pull; the upstream pieces used are the copied atoms and
@@ -58,12 +67,17 @@ import {
   LoaderIcon,
   XCircleIcon,
 } from "lucide-react";
+import { useAgUiInterrupts } from "@assistant-ui/react-ag-ui";
 import {
   useToolCallElapsed,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
 
+import {
+  ApprovalGate,
+  isApprovalInterrupt,
+} from "@/components/approval-gate";
 import {
   ReasoningContent,
   ReasoningRoot,
@@ -324,13 +338,34 @@ const ToolCallResult: FC<{
 /// arguments and its status arrive -- that is every delta of the call -- so a
 /// shallow compare would buy nothing and would risk holding a stale state.
 const ToolCallCard: ToolCallMessagePartComponent = ({
+  toolCallId,
   toolName,
   argsText,
   result,
   status,
   isError,
 }) => {
-  const state = callState(status, isError);
+  // Parked is read from TWO places, and the second one is not a belt-and-
+  // braces duplication. The runtime opens a new client-side assistant message
+  // for every server TEXT_MESSAGE, finalizing the previous one as `complete`
+  // (its `beginDistinctTextMessage` wipes its accumulation and the interrupt
+  // metadata rides only on the LAST message of a run). A turn that parks two
+  // calls therefore lands its first parked call in an already-finalized
+  // message, where the part's status says `complete` -- "Done", by the table
+  // above -- while the server holds the run open for exactly that call.
+  // Trusting the status alone would draw that card as finished and mount no
+  // gate on it, and since the runtime refuses a partial resume, the batch
+  // could never be answered: a deadlock the user can see only as a composer
+  // that never reopens. Found by running the two-call batch in a real
+  // browser, not by reading this code; the pending-interrupt check is what
+  // makes the card honest again.
+  const parkedByInterrupt = useAgUiInterrupts().some(
+    (candidate) =>
+      isApprovalInterrupt(candidate) && candidate.toolCallId === toolCallId,
+  );
+  const state = parkedByInterrupt
+    ? "needs-approval"
+    : callState(status, isError);
 
   // While the call is still in flight -- running, or parked for a decision --
   // there is no result to report, and "No result" would be a lie: the answer is
@@ -342,26 +377,43 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   const failureExplained = statusErrorText(status) !== null;
 
   return (
-    // Uncontrolled, and `defaultOpen` stays at its default of false: this is the
-    // whole of "collapsed by default" for a tool call. Nothing here opens the
-    // card on its own, including a call that parks for approval -- ticket 05
-    // owns that card and decides whether a parked call should announce itself.
-    <ToolFallbackRoot>
-      <ToolCallTrigger toolName={toolName} state={state} />
-      <ToolFallbackContent>
-        <ToolFallbackError status={status} />
-        <ToolCallArgs argsText={argsText} />
-        {/* A cancelled call shows its reason, not a result -- there is none to
-            show, and upstream's card drew the same line. */}
-        {settled ? (
-          <ToolCallResult
-            result={result}
-            failed={isError === true || state === "failed"}
-            failureExplained={failureExplained}
-          />
-        ) : null}
-      </ToolFallbackContent>
-    </ToolFallbackRoot>
+    <>
+      {/* Uncontrolled, and `defaultOpen` stays at its default of false: this is
+          the whole of "collapsed by default" for a tool call. Nothing here opens
+          the card on its own, and that is now true of a parked call too -- the
+          card that says `Needs approval` is as folded as any other, and the
+          decision it is waiting for is a block of its own underneath (below),
+          drawn at full width so it cannot be missed. */}
+      <ToolFallbackRoot>
+        <ToolCallTrigger toolName={toolName} state={state} />
+        <ToolFallbackContent>
+          <ToolFallbackError status={status} />
+          <ToolCallArgs argsText={argsText} />
+          {/* A cancelled call shows its reason, not a result -- there is none to
+              show, and upstream's card drew the same line. */}
+          {settled ? (
+            <ToolCallResult
+              result={result}
+              failed={isError === true || state === "failed"}
+              failureExplained={failureExplained}
+            />
+          ) : null}
+        </ToolFallbackContent>
+      </ToolFallbackRoot>
+
+      {/* The approval card, OUTSIDE the disclosure: a gate whose buttons need a
+          click to reveal is a gate that can be overlooked, and this one is
+          holding a run. `requires-action` is the protocol's own "a human has to
+          decide" signal -- see `approval-gate.tsx`, which also argues why this
+          is written here rather than reused from the copied kit. */}
+      {state === "needs-approval" ? (
+        <ApprovalGate
+          toolCallId={toolCallId}
+          toolName={toolName}
+          argsText={argsText}
+        />
+      ) : null}
+    </>
   );
 };
 
