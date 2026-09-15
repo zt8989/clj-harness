@@ -39,7 +39,7 @@
 | `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
 | `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`） |
 | `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
-| `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入** |
+| `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`） |
 | `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 | `preamble` | **开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，三张表 |

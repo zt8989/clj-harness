@@ -82,10 +82,15 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 | --- | --- | --- |
 | 指令 | `<OS 家目录>/AGENTS.md`；绑定时再加 `<项目>/AGENTS.md` | 每个文件**一条 user 消息**，`<instructions path="…">…</instructions>` 包裹 |
 | 技能清单 | `<OS 家目录>/.agents/skills/*/SKILL.md`；绑定时再加 `<项目>/.agents/skills/*/SKILL.md` | **一条 user 消息**，`<skills>` 包裹，每技能一行 |
-| 技能正文 | 同上 | 模型调用 `skill` 后，`<skill name="…">` 包裹的 **user 消息**，插在加载它的那次工具结果之后 |
+| 技能正文 | 同上 | **加载**后出现：模型调 `skill`，或**人打 `/name `**；`<skill name="…">` 包裹的 **user 消息**，紧跟「要求加载」的那条消息之后 |
 
 **前端一个字都不出现**：这些消息**从不产生任何 AG-UI 帧**，客户端永远收不到它们——界面上只有一张普通的
-`skill` 工具卡。它们照旧写进 jsonl 的 `message` 行（模型看到了什么，日志就有什么）。
+`skill` 工具卡；人打 `/name ` 加载时连那张卡都没有，因为那条消息本来就是他自己打的字。它们照旧写进 jsonl
+的 `message` 行（模型看到了什么，日志就有什么）。
+
+**「只加载，不创作」也说清了两种加载**：模型调 `skill`，或人在输入框里打 `/name `。打错了不是失败——
+注入位换成一句点名说明（收到什么名字、能加载哪些）。**`disable-model-invocation: true` 的技能只有人能加载**：
+文件说这条不该由模型决定，所以清单里没有、工具也拒绝，而人打 `/name` 就是人在决定。
 
 两个键都写在 `harness.edn`（用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
 
