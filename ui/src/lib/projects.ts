@@ -52,3 +52,68 @@ export function projectName(path: string): string {
   const parts = path.split(/[/\\]/).filter((part) => part !== "");
   return parts.length === 0 ? path : parts[parts.length - 1];
 }
+
+/// The server's `{:error ..}` reason, when the body carries one. Every
+/// management route answers a refusal that way, and the reason is the sentence
+/// the UI is supposed to show -- a wrapper's paraphrase would be one more thing
+/// to distrust, so this only digs it out.
+async function reasonFrom(res: Response): Promise<string> {
+  const body: unknown = await res.json().catch(() => undefined);
+  return body !== undefined &&
+    typeof body === "object" &&
+    body !== null &&
+    "error" in body &&
+    typeof body.error === "string"
+    ? body.error
+    : `HTTP ${res.status}`;
+}
+
+/// Make DIR a project of this home. Answers the project's CANONICAL path and its
+/// id, and answers the SAME project when the directory is already listed -- the
+/// server's find-or-create, so re-adding something a person forgot was there is
+/// not an error they have to fix.
+///
+/// This is the SINGULAR/PLURAL distinction at the client end: this adds a
+/// DIRECTORY (POST /api/projects, plural), while binding a session to one is
+/// POST /api/project (singular) -- see `bindThread` below.
+export type AddedProject = { projectId: number; path: string };
+
+export async function addProject(dir: string): Promise<AddedProject> {
+  const res = await fetch(`${AGENT_URL}api/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  return res.json();
+}
+
+/// The native folder dialog, opened by the server. Answers the chosen absolute
+/// path, or null when the human cancelled -- and CANCELLING IS NOT AN ERROR, so
+/// it is a null rather than a rejection: nothing failed, someone changed their
+/// mind.
+///
+/// The chosen path is only ever FILLED IN. Nothing is bound or created here: the
+/// person still submits the form, which is what keeps "picking a folder" from
+/// being an accidental one-step commit.
+export async function pickFolder(): Promise<string | null> {
+  const res = await fetch(`${AGENT_URL}api/project/pick`, { method: "POST" });
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  const body = (await res.json()) as { dir?: string | null };
+  return body.dir ?? null;
+}
+
+/// Bind THREAD-ID's session to DIR (POST /api/project, singular). This is what
+/// makes a session belong to a project, and for a brand-new session it is also
+/// what makes the session exist at all: the store learns about a conversation
+/// when something asks for it to belong somewhere.
+export async function bindThread(threadId: string, dir: string): Promise<string> {
+  const res = await fetch(`${AGENT_URL}api/project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId, dir }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  const body = (await res.json()) as { dir: string };
+  return body.dir;
+}

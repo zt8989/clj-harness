@@ -465,7 +465,7 @@
 
 (defn- assistant-with-call
   "The assistant message a client holds after a run parked: its tool call, never
-  answered. A resume request carries it back, exactly as CopilotKit does."
+  answered. A resume request carries it back, the way the browser client does."
   [id name args]
   {:id "m1" :role "assistant" :content ""
    :toolCalls [{:id id :type "function"
@@ -1453,6 +1453,64 @@
          (is (some #(= "project/bound" (:kind %))
                    (mapv #(json/read-str % :key-fn keyword)
                          (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
+
+(deftest adding-a-project-makes-a-project-with-no-session
+  ;; Ticket 05's other half. Without this verb the ONLY way to get a project was
+  ;; to bind a session to a directory -- backwards for a product whose sessions
+  ;; must belong to a project, because the first project would need a session
+  ;; that had nowhere to go. So this route makes the DIRECTORY the project.
+  (let [adir (str (System/getProperty "java.io.tmpdir") "/harness-http-added")]
+    (run! #(io/delete-file % true) (reverse (file-seq (io/file adir))))
+    (.mkdirs (io/file adir))
+    (with-server
+     8113
+     "add-project-unused"
+     (fn []
+       (let [add!  (fn [dir] (api-call 8113 :post "/api/projects" (json/write-str {:dir dir})))
+             named (fn [dir]
+                     (let [want (last (str/split (.getCanonicalPath (io/file dir)) #"/"))]
+                       (first (filterv #(= want (last (str/split (:path %) #"/")))
+                                       (json/read-str (.body (api-call 8113 :get "/api/projects" nil))
+                                                      :key-fn keyword)))))]
+         (testing "a real directory becomes a project with NO sessions in it"
+           (let [resp  (add! adir)
+                 reply (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= (.getCanonicalPath (io/file adir)) (:path reply))
+                 "the answer is the CANONICAL path -- the identity, not the spelling")
+             (is (some? (:projectId reply)))
+             (let [project (named adir)]
+               (is (some? project))
+               (is (= [] (:sessions project))
+                   "an empty list, not a missing key: the project exists and holds nothing"))))
+         (testing "adding the SAME directory again answers the same project, not a second row"
+           (let [first-id  (:projectId (read-json (add! adir)))
+                 second-id (:projectId (read-json (add! adir)))]
+             (is (= first-id second-id) "find-or-create, keyed on the canonical path")
+             (is (= 1 (count (filterv #(= (.getCanonicalPath (io/file adir)) (:path %))
+                                      (json/read-str
+                                       (.body (api-call 8113 :get "/api/projects" nil))
+                                       :key-fn keyword)))))))
+         (testing "a different SPELLING of the same directory is still the same project"
+           ;; The whole point of keying on the canonical form: `dir/.` is the same
+           ;; directory, and a person typing it must not get a second project.
+           (is (= (:projectId (read-json (add! adir)))
+                  (:projectId (read-json (add! (str adir "/.")))))))
+         (testing "a missing directory is a NAMED 400 and writes nothing"
+           (let [resp  (add! (str adir "/nope"))
+                 reply (read-json resp)]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error reply) "no such directory"))
+             (is (nil? (named (str adir "/nope"))) "and no row appeared for the path it was given")))
+         (testing "a FILE is not a directory, and is refused in its own words"
+           (let [f (io/file adir "a-file.txt")]
+             (spit f "x" :encoding "UTF-8")
+             (let [resp (add! (str f))]
+               (is (= 400 (.statusCode resp)))
+               (is (str/includes? (:error (read-json resp)) "not a directory")))))
+         (testing "no dir and a malformed body are each a 400"
+           (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" (json/write-str {})))))
+           (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" "{not json"))))))))))
 
 (deftest the-retired-logs-directory-is-invisible-three-ways
   ;; Ticket 03's other half: `~/.clj-harness/logs/` retires. NOT imported, NOT

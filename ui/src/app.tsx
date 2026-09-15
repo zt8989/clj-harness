@@ -84,7 +84,6 @@ import { Sidebar } from "@/components/sidebar";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
-  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
   RUN_IN_PROGRESS_REFUSAL,
   runInProgress,
 } from "@/lib/run-state";
@@ -138,13 +137,6 @@ export function App() {
     [agent],
   );
 
-  const onSwitchToNewThread = useCallback(() => {
-    if (runtimeRef.current && runInProgress(runtimeRef.current)) {
-      throw new Error(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
-    }
-    adoptThread(crypto.randomUUID());
-  }, [adoptThread]);
-
   const onSwitchToThread = useCallback(
     async (id: string) => {
       if (runtimeRef.current && runInProgress(runtimeRef.current)) {
@@ -157,13 +149,19 @@ export function App() {
     [adoptThread],
   );
 
+  // NOTE THERE IS NO `onSwitchToNewThread`. A new task is started by the sidebar,
+  // which mints the id, binds it to a project and then switches to it through
+  // `switchToThread` -- because the id is exactly what the bind needs, and an id
+  // the runtime minted behind our back would be out of the sidebar's reach. See
+  // sidebar.tsx's header. The adapter's `onSwitchToNewThread` is OPTIONAL
+  // upstream, so leaving it out is the honest description of this page: nothing
+  // here opens a session that has no home.
   const runtime = useAgUiRuntime({
     agent,
     isSendDisabled: gateOpen,
     adapters: {
       threadList: {
         threadId,
-        onSwitchToNewThread,
         onSwitchToThread,
       },
     },

@@ -750,6 +750,48 @@
                            :messages messages
                            :context  (or context [])})))))
 
+(defn- add-project-post
+  "POST /api/projects {dir} -- DIR becomes a project of this home, with no
+  session in it yet. Answers {:projectId .. :path <canonical>}.
+
+  THE SINGULAR/PLURAL PAIR IS THE WHOLE DISTINCTION, so it is worth stating
+  plainly: POST /api/project (singular) binds a SESSION to a directory and is
+  how an existing conversation moves; POST /api/projects (plural) makes the
+  DIRECTORY a project and is how the list grows. A session's bind needs the
+  directory to exist too, so the two share the validation and the same
+  find-or-create inside harness.project -- what differs is which fact the caller
+  has in hand. The sidebar's 'add a project' has a directory and no conversation;
+  'new task' has a conversation and a project already.
+
+  FIND-OR-CREATE, so adding a directory that is already listed answers the SAME
+  project rather than failing: re-adding something a person forgot was already
+  there is not a mistake they can act on, and a 'duplicate' refusal would be a
+  dead end. The caller (the sidebar) switches to whatever comes back.
+
+  Validation failure is a NAMED 400 carrying the server's reason -- the path as
+  typed -- and nothing is written; the route lands no audit line either, exactly
+  as the singular route does not (a project is not a session and has no log to
+  write to)."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                     (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (str (:dir ok)))
+      (api-response 400 {:error "missing dir"})
+
+      :else
+      (let [added (try {:ok (project/add-project! (str (:dir ok)))}
+                       (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error added)]
+          (api-response 400 {:error error})
+          (api-response 200 {:projectId (:project-id (:ok added))
+                             :path      (:path (:ok added))}))))))
+
 (defn- model-get
   "GET /api/model?threadId=.. -- what this session is served by and what that
   model accepts, for a client deciding whether to offer an image picker:
@@ -819,6 +861,7 @@
     (= "/api/projects" (:uri req))
     (case (:request-method req)
       :get  (projects-get req)
+      :post (add-project-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (and (= :post (:request-method req)) (thread-rebuild-stem (:uri req)))

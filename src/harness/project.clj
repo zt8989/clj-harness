@@ -101,6 +101,48 @@
                                                 path       = excluded.path"
                session-id project-id path (System/currentTimeMillis)))
 
+(defn- checked-directory
+  "DIR as a File, having established that it IS a directory. A typo'd path must
+  fail where it was typed, not surface later as a confusing read failure, so both
+  refusals are NAMED and carry the path as given. Shared by every verb that
+  accepts a directory, so a new verb cannot accidentally skip the check."
+  [dir]
+  (let [f (io/file dir)]
+    (when-not (.exists f)
+      (throw (ex-info (str "no such directory: " dir)
+                      {:path (str dir) :reason :missing})))
+    (when-not (.isDirectory f)
+      (throw (ex-info (str "not a directory: " dir)
+                      {:path (str dir) :reason :not-a-directory})))
+    f))
+
+(defn add-project!
+  "DIR becomes a project of this home, with no session in it yet. Returns
+  {:project-id .. :path <canonical>}.
+
+  THIS IS THE ONE VERB THAT CREATES A PROJECT WITHOUT A CONVERSATION, and it is
+  what the sidebar's 'add a project' is. Without it the only way to get a project
+  was to bind a session to a directory, which is backwards for a product whose
+  sessions must belong to a project: the first project would need a session that
+  had nowhere to go.
+
+  FIND-OR-CREATE, keyed on the canonical path, so adding a directory that is
+  already listed is not an error and does not produce a second row -- it answers
+  the SAME project, and the caller (the sidebar) switches to it. That is the
+  behaviour a person gets by re-adding something they forgot was already there,
+  and a 'duplicate' refusal would be worse than useless: there is nothing for them
+  to fix.
+
+  Validation happens before anything is written, and it is the same check `bind!`
+  runs -- see `checked-directory`."
+  [dir]
+  (let [f     (checked-directory dir)
+        canon (canonical-path f)]
+    (db/with-transaction
+      (fn [^Connection c]
+        {:project-id (upsert-project! c canon)
+         :path       canon}))))
+
 (defn bind!
   "Bind THREAD-ID's session to directory DIR, which must exist and be a
   directory -- anything else throws a NAMED error, because a typo'd path must
@@ -135,19 +177,12 @@
              (db/execute! c "UPDATE sessions SET project_id = NULL, path = NULL WHERE id = ?"
                           thread-id)))
          nil)
-     (let [f (io/file dir)]
-       (when-not (.exists f)
-         (throw (ex-info (str "no such directory: " dir)
-                         {:path (str dir) :reason :missing})))
-       (when-not (.isDirectory f)
-         (throw (ex-info (str "not a directory: " dir)
-                         {:path (str dir) :reason :not-a-directory})))
-       (let [abs   (absolute dir)
-             canon (canonical-path f)]
-         (db/with-transaction
-           (fn [^Connection c]
-             (touch-session! c thread-id (upsert-project! c canon) abs)))
-         abs)))))
+     (let [f   (checked-directory dir)
+           abs (absolute dir)]
+       (db/with-transaction
+         (fn [^Connection c]
+           (touch-session! c thread-id (upsert-project! c (canonical-path f)) abs)))
+       abs))))
 
 (defn binding-for
   "The project directory THREAD-ID's session is bound to, as an absolute path
