@@ -39,8 +39,10 @@
             [clojure.string :as str]
             [harness.editing :as editing]
             [harness.event :as ev]
+            [harness.hashline.edit :as edit]
             [harness.hashline.replace :as replace]
             [harness.hashline.serve :as serve]
+            [harness.hashline.store :as store]
             [harness.hashline.undo :as undo]
             [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
@@ -480,11 +482,11 @@
 ;; because it is what the MODEL reads, and this is the file where a tool's face is
 ;; declared -- the two must not be able to drift apart.
 ;;
-;; It describes what the tool DOES TODAY, and nothing more. Two sentences that used
-;; to stand here outran the tickets that could make them true: the healing answer
-;; (ticket 06, now landed, and its sentence is back below) and one commit per
-;; message (ticket 09, still to come). A model told to expect what does not happen
-;; learns to distrust the whole description.
+;; It describes what the tool DOES TODAY, and nothing more. It carried two
+;; sentences that outran their tickets for a while -- the healing answer and the
+;; one-commit batch -- and both are now true, so both are back below. The habit is
+;; worth keeping: a model told to expect what does not happen learns to distrust the
+;; whole description.
 
 (def ^:private replace-description
   (str "Replace a range of lines in a file, addressed by 4-character ANCHORS from "
@@ -504,6 +506,11 @@
        "A replacement that repeats the line just outside the range has that line "
        "deduplicated (reported as a `dedup│` row), so re-including a boundary line is "
        "safe but unnecessary. "
+       "SEVERAL replace calls on ONE file in ONE message are applied as ONE commit: "
+       "they are checked against the same state, written together or not at all, and "
+       "ONE undo takes the whole message back. Their line ranges must not overlap -- "
+       "an overlap is refused (nothing is written) and you get the current anchors to "
+       "retry with; send the second edit in a later message if you meant both. "
        "A relative path resolves against this session's project directory when one is "
        "bound. When bound, a path resolving outside the project directory and the "
        "configuration home parks for human approval first."))
@@ -799,6 +806,134 @@
          (str " Re-enabling it will not make it run, either: "
               (editing/unserved-message thread-id name)))))
 
+;; ------------------------------------------------------------------- the batch
+
+;; SEVERAL ANCHOR EDITS TO ONE FILE IN ONE MESSAGE ARE ONE COMMIT.
+;;
+;; The reason is not tidiness, it is that the alternative LOSES DATA. A turn's tool
+;; calls run concurrently (`harness.loop/drive!`), and two edits to one file each
+;; validate against the state the session was shown and each compute their own new
+;; content. Run independently, the later write wins and the earlier one is gone --
+;; with BOTH reporting success. No lock around a single edit fixes that, because
+;; the two edits are individually correct; what is wrong is applying them apart.
+;;
+;; So the edits of one message are applied as one patch: validated against the
+;; state BEFORE the message, required to have disjoint line ranges (an overlap is a
+;; REFUSAL, not a question about which ran first), and landed as one write, one
+;; anchor advance and one undo record. The model gets one diff, one set of current
+;; anchors and one undo for the thought it had.
+;;
+;; WHICH CALL APPLIES IT is decided here, because this is the only place that sees
+;; a whole turn at once. The last of a group applies it; the others answer
+;; immediately, having touched nothing, and say where the outcome appears. No call
+;; waits on another, so a refusal or a park anywhere in the message cannot strand
+;; the rest.
+
+(defn- batchable?
+  "May this call be merged with its siblings? Only `replace` -- see the batch section
+  above for why splicing two of them into one patch is possible at all, and
+  `insert`'s own registration for the same treatment when ticket 10 lands."
+  [name]
+  (contains? #{"replace"} name))
+
+(defn- group-key
+  "The file a call addresses, as a canonical path -- or nil when it cannot be worked
+  out. Best effort on purpose: a call whose target cannot be derived does not join a
+  batch, it runs on its own and reports its own error. Refusing a whole message
+  because one of its calls is malformed would refuse edits that are perfectly fine.
+
+  DELIBERATELY NOT the full payload parse. This asks one question -- which file? --
+  and a call with a broken `replacement_lines` still answers it; making the answer
+  depend on the rest of the payload would silently exclude exactly the calls whose
+  refusals a batch most needs to report."
+  [thread-id parsed]
+  (try
+    (let [anchor (edit/bare-anchor (or (:remove_from parsed) (:replace_from parsed)))
+          owner  (when anchor (store/owner-of thread-id anchor))
+          p      (or owner (:path parsed))]
+      (when (and (string? p) (not (str/blank? p)))
+        (store/canonical (project/resolve-path thread-id p))))
+    (catch Throwable _ nil)))
+
+(defn- call-args
+  "A call's arguments as a keyword-keyed map, or nil when the JSON is malformed.
+  Nil rather than an exception because the only caller is deciding whether this call
+  JOINS A BATCH -- and a call whose arguments cannot be read is one that should run
+  on its own and produce the bad-argument message, not one that should take the
+  message down."
+  [{:keys [function]}]
+  (try (json/read-str (if (str/blank? (:arguments function)) "{}"
+                          (:arguments function))
+                      :key-fn keyword)
+       (catch Throwable _ nil)))
+
+(defn- plan-turn
+  "The turn's calls as a plan: TOOL-CALL-ID -> {:role :applier|:member, :group n,
+  :index i, :path p, :members [args ..]}, for every call that shares its target
+  file with another.
+
+  Only groups of MORE THAN ONE appear: a lone edit is not a batch, and routing it
+  through the batch path would change what its answer looks like for no reason."
+  [thread-id calls]
+  (let [parsed (keep (fn [{:keys [id function] :as call}]
+                       (let [{:keys [name]} function]
+                         (when (and (batchable? name)
+                                    (editing/served? thread-id name)
+                                    ;; ...and a name that exists, or the plan would
+                                    ;; be promising work to a tool the seam is about
+                                    ;; to answer with "unknown tool"
+                                    (contains? (effective-tools thread-id) name))
+                           (when-let [args (call-args call)]
+                             (when-let [k (group-key thread-id args)]
+                               {:id id :name name :k k :args args})))))
+                     calls)
+        groups (into {} (filter (fn [[_ g]] (> (count g) 1))
+                                (group-by :k parsed)))]
+    (into {}
+          (for [[path g] groups
+                :let [members (vec g)
+                      n (count members)]]
+            (into {} (map-indexed
+                      (fn [i m]
+                        [(:id m) {:role    (if (= i (dec n)) :applier :member)
+                                  :group   n
+                                  :index   i
+                                  :path    path
+                                  :name    (:name m)
+                                  :members (mapv :args members)}])
+                      members))))))
+
+(defonce ^:private turn-plan (atom {}))
+
+(defn register-turn!
+  "Hand the seam the calls of the turn about to run, so each can be told who its
+  siblings are. Called by the run loop -- the only place that sees a whole turn at
+  once -- and best effort throughout: a turn whose calls were never registered (a
+  direct `run!`, a replayed approval) behaves exactly as it did before batching
+  existed, which is one call, one edit."
+  [thread-id calls]
+  (reset! turn-plan (try (plan-turn thread-id calls) (catch Throwable _ {}))))
+
+(defn forget-turn!
+  "Drop the plan once the turn's calls have all answered. Without this the map grows
+  with the process, one entry per anchor edit ever made."
+  []
+  (reset! turn-plan {}))
+
+(defn- batch-role
+  "What this call's part in its message is, or nil when it is an ordinary edit."
+  [id]
+  (get @turn-plan id))
+
+(defn- run-batch!
+  "The APPOINTED call of a group runs the group. The members are the same calls'
+  arguments, in call order, and the whole group is one file -- see the batch section
+  of harness.hashline.replace for the arithmetic and for what a refusal says."
+  [{:keys [members group index path]} thread-id]
+  (binding [*thread-id* thread-id]
+    (replace/perform-batch! thread-id #(project/resolve-path thread-id %) members
+                            (editing/editing-mode thread-id))))
+
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
@@ -875,8 +1010,21 @@
                          ;; *thread-id* is bound around the tool body so code
                          ;; running inside a tool -- eval above all -- can address
                          ;; its own session (this namespace).
-                         (let [[result err]
-                               (try [(binding [*thread-id* thread-id] ((:run tool) parsed)) nil]
+                         (let [body (fn []
+                                      (if-let [role (batch-role id)]
+                                        ;; A call in a batch: either it runs the
+                                        ;; whole group (the last of them) or it
+                                        ;; answers with a note and touches nothing.
+                                        ;; See the batch section above.
+                                        (if (= :applier (:role role))
+                                          (run-batch! role thread-id)
+                                          (replace/merged-note
+                                           {:index (:index role)
+                                            :size  (:group role)
+                                            :path  (:path role)}))
+                                        ((:run tool) parsed)))
+                               [result err]
+                               (try [(binding [*thread-id* thread-id] (body)) nil]
                                     (catch Throwable t [nil t]))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
                                ;; PostToolUse is an OBSERVER: its verdict is

@@ -101,6 +101,14 @@
                                          ch))
                                      calls)
                           done (atom {})]
+                      ;; THE SEAM IS TOLD ABOUT THE WHOLE TURN BEFORE ANY OF IT
+                      ;; RUNS, and this is the only place that can do it: a tool
+                      ;; sees one call, and the anchor tools need to know which of
+                      ;; their siblings address the same file (see the batch
+                      ;; section of harness.tools). Unregistered -- a direct run!,
+                      ;; a replayed approval -- every call is on its own, which is
+                      ;; what it was before batching existed.
+                      (tools/register-turn! thread-id calls)
                       (dotimes [_ (count chs)]
                         ;; alts!! returns [value port]; the value carries its own
                         ;; id, so completion order needs no bookkeeping. A parked
@@ -109,6 +117,9 @@
                           (when (nil? (:parked result))
                             (emit (ev/tool-result (:id result) (:content result) (:error result))))
                           (swap! done assoc (:id result) result)))
+                      ;; ...and forgotten once every call has answered, so the plan
+                      ;; does not accumulate for the life of the process.
+                      (tools/forget-turn!)
                       (let [results (mapv #(get @done (:id %)) calls)
                             parked  (vec (keep :parked results))]
                         ;; Answer every call that actually ran; a parked call

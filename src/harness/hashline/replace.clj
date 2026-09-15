@@ -226,39 +226,38 @@
 
 ;; ------------------------------------------------------------------ the edit
 
-(defn perform!
-  "Run one edit for THREAD-ID.
+(defn- wrapped
+  "An edit's error, said in the terms of the BATCH it arrived in: which call of how
+  many, and what was wrong with it.
 
-  ARGS is the tool's argument map; CONFIG is the session's resolved :editing map
-  (see harness.editing). Returns a STRING -- what the model reads -- or throws a
-  named error. The caller resolves the returned path for the session, exactly as
-  `read` does -- a fence-marked call parks before this ever runs, and what runs
-  inside is the same path arithmetic the read used.
+  A batch is refused WHOLE when any of its edits is refused -- the ticket's rule,
+  and the honest one: the model asked for several changes to one file as one
+  thought, and applying the legal half of a thought is not a service. So the
+  refusal has to say which edit it was, or the model has to guess which of its
+  three calls to rewrite."
+  [i n path t]
+  (ex-info (str "edit " (inc i) " of " n " (addressed at " path ") was refused, so"
+                " NOTHING was written -- this message's edits to that file are one"
+                " commit: " (ex-message t))
+           (assoc (ex-data t) :batch-index i :batch-size n :reason :batch-refused)))
 
-  PATH-FN is `(fn [p] p)` in production and a harness's own indirection in tests;
-  it exists so the file operations are not spelled twice."
-  [thread-id resolve-path args config]
-  (let [warnings (atom [])
-        {:keys [from to lines]} (edit/parse args {:strict?       (:strict-input config)
-                                                  :require-path? (:require-path config)
-                                                  :warnings      warnings})
-        ;; Every branch above answers with a path resolved for this session and then
-        ;; CANONICALIZED, because the store books anchors by path: the view, the
-        ;; ownership rows and the alignment's notion of 'this file' all have to be
-        ;; the same string, or a second spelling of the same path mints a second set
-        ;; of anchors for it.
-        owner (store/owner-of thread-id from)
-        ;; The given path is RESOLVED FOR THE SESSION before it is compared with
-        ;; the owner: a relative path means nothing until the binding is applied,
-        ;; and comparing `g.txt` with `/proj/g.txt` refuses every edit that names
-        ;; its file the way the model actually names it.
+(defn- resolve-target
+  "The file this call edits, as a canonical path -- from the anchors when they name
+  one, from the argument otherwise, and refused when the two disagree.
+
+  A named file that disagrees with the anchor is refused rather than reconciled:
+  editing the file you named while addressing lines in another is the mistake this
+  check exists for."
+  [thread-id resolve-path args from]
+  (let [owner (store/owner-of thread-id from)
+        ;; Resolved for the SESSION before it is compared with the owner: a relative
+        ;; path means nothing until the binding is applied, and comparing `g.txt`
+        ;; with `/proj/g.txt` would refuse every edit that names its file the way
+        ;; the model actually names it.
         given (let [p (:path args)]
                 (when (and (string? p) (not (str/blank? p)))
                   (store/canonical (resolve-path p))))
         path  (cond
-                ;; A named file that disagrees with the anchor is refused rather
-                ;; than reconciled: editing the file you named while addressing
-                ;; lines in another is the mistake this check exists for.
                 (and owner given (not= given (store/canonical owner)))
                 (throw (ex-info (str "`path` says " given ", but that anchor names a"
                                      " line in " owner " in this session. Anchors"
@@ -269,95 +268,353 @@
                 owner owner
                 given given
                 :else (throw (unresolvable! from)))]
+    (store/canonical (resolve-path path))))
+
+(defn- guard!
+  "The checks that decide one edit may go ahead, against TEXT as the base:
+
+    * the range's anchors are this session's (or are rescued by content, ticket 06)
+    * the file is still the file the session was shown (else the healing refusal)
+    * no line of the range is one the model has never been shown
+
+  Returns the range, with the rescue's warning collected. Refusals THROW, which for
+  a batch means the caller wraps them with the edit's index -- see `wrapped`."
+  [thread-id path from to text config warnings owner?]
+  (let [[range rescued?] (locate thread-id path from to warnings owner?)]
+    (when rescued?
+      (swap! warnings conj
+             (str "These anchors were not in this session's ownership table; the"
+                  " file you named was confirmed by the content of the lines they"
+                  " point at.")))
+    ;; The file moving is checked FIRST: it is the failure that invalidates the
+    ;; range itself, so a range that drifts AND includes an unshown line is a
+    ;; drift, not an unshown line.
+    (when-let [d (drift range text)]
+      (drifted! thread-id path range text config (drift-said path d)))
+    (when (seq (:not-shown-idx range))
+      (unseen! thread-id path range text config))
+    (when rescued?
+      ;; The ownership rows are what the NEXT edit derives its path from, so a
+      ;; rescue that did not restore them would work once and then fail.
+      (store/claim-anchors! thread-id path (:anchors range)))
+    range))
+
+(defn- undo-record
+  "What undo needs to put this file back, gathered once: the text on both sides,
+  the encoding it had, the anchors that named it, which of those the model had
+  SEEN, and the permission bits.
+
+  `served` and `mode` are here because an undo restores the anchors and the
+  permission bits as well as the text -- see harness.hashline.store and
+  harness.hashline.undo."
+  [text text' range bom ending mode]
+  {:prior-text     text
+   :bom            bom
+   :ending         ending
+   :anchors        (:anchors range)
+   :served         (:served range)
+   :resulting-text text'
+   :mode           (files/mode-bits mode)})
+
+(defn- write-and-land!
+  "The critical section's second half: record the undo, write the file, land the
+  store -- and if the write throws, take the undo record back with it.
+
+  A batch and a single edit do exactly this, in exactly this order, which is why
+  it is one function: an edit whose store half landed but whose file write did not
+  would describe a change that did not happen."
+  [thread-id path change undo text' bom ending mode]
+  (store/record-undo! path undo)
+  (try
+    (files/write-file! path text' {:bom bom :ending ending :mode mode})
+    (catch Throwable t
+      ;; The file is still the file it was (the write is a temp+rename), so the
+      ;; undo record describing the edit that did not happen is taken back with it.
+      (store/clear-undo! path)
+      (throw t)))
+  (store/advance-with-undo! thread-id path change undo))
+
+(defn perform!
+  "Run one edit for THREAD-ID.
+
+  ARGS is the tool's argument map; CONFIG is the session's resolved :editing map
+  (see harness.editing). Returns a STRING -- what the model reads -- or throws a
+  named error. The caller resolves the returned path for the session, exactly as
+  `read` does -- a fence-marked call parks before this ever runs, and what runs
+  inside is the same path arithmetic the read used.
+
+  RESOLVE-PATH is `harness.project/resolve-path` partialled on the thread in
+  production and a harness's own indirection in tests; it exists so the file
+  operations are not spelled twice.
+
+  ONE EDIT. Several edits to one file in one message arrive here as
+  `perform-batch!` instead -- see that function for why they cannot simply be
+  called one after another."
+  [thread-id resolve-path args config]
+  (let [warnings (atom [])
+        {:keys [from to lines]} (edit/parse args {:strict?       (:strict-input config)
+                                                  :require-path? (:require-path config)
+                                                  :warnings      warnings})
+        owner? (some? (store/owner-of thread-id from))
+        path   (resolve-target thread-id resolve-path args from)]
     (store/with-path-lock
      path
      (fn []
        (let [{:keys [text bom ending mode]} (files/read-file path)
-             [range rescued?] (locate thread-id path from to warnings (some? owner))
-             d (drift range text)]
-         (when rescued?
-           (swap! warnings conj
-                  (str "These anchors were not in this session's ownership table; the"
-                       " file you named was confirmed by the content of the lines they"
-                       " point at.")))
-         ;; The file moving is checked FIRST: it is the failure that invalidates the
-         ;; range itself, so a range that drifts AND includes an unshown line is a
-         ;; drift, not an unshown line.
-         (when d
-           (drifted! thread-id path range text config (drift-said path d)))
-         (when (seq (:not-shown-idx range))
-           (unseen! thread-id path range text config))
-         (when rescued?
-           ;; The ownership rows are what the NEXT edit derives its path from, so a
-           ;; rescue that did not restore them would work once and then fail.
-           (store/claim-anchors! thread-id path (:anchors range)))
-         (let [;; Dedup first, then compose: the lines that survive dedup are what
-               ;; the file actually receives, and the span has to describe the edit
-               ;; that was MADE, not the one that was asked for.
-               dedup  (edit/dedup-edges (vec (:lines (edit/lines-of text))) range lines
-                                        (:boundary-dedup config))
-               lines  (:lines dedup)
-               [text' span] (edit/apply-range text range lines)
-               _      (edit/check-not-empty! text text')
-               after   (anchors/split-lines text')
-               checks  (anchors/line-checksums text')
-               change  (assoc (anchors/align {:old-anchors   (:anchors range)
-                                              :old-checksums (:checksums range)
-                                              :new-checksums checks
-                                              :spans         [span]
-                                              :path          path
-                                              :owned         (store/ownership thread-id)
-                                              :probe         (or (store/probe-of thread-id)
-                                                                 (anchors/seed thread-id))})
-                              :file-checksum (anchors/file-checksum checks)
-                              :line-checksums checks
-                              :served        (:served range)
-                              :served?       true)]
-           (if (= text text')
-             ;; Nothing changed: no write, no undo record, and the undo history that
-             ;; was there stays there -- a no-op must not cost the model its ability
-             ;; to take back the edit before it.
-             (str "No change: the replacement is identical to what is already there, so"
-                  " nothing was written to " path ".")
-             (let [;; What undo needs to put this file back, gathered once: the text on
-                   ;; both sides, the encoding it had, the anchors that named it, which
-                   ;; of those the model had SEEN, and the permission bits. `served`
-                   ;; and `mode` are here because an undo restores the anchors too --
-                   ;; see harness.hashline.store and harness.hashline.undo.
-                   undo {:prior-text     text
-                         :bom            bom
-                         :ending         ending
-                         :anchors        (:anchors range)
-                         :served         (:served range)
-                         :resulting-text text'
-                         :mode           (files/mode-bits mode)}]
-               (store/record-undo! path undo)
-               (try
-                 (files/write-file! path text' {:bom bom :ending ending :mode mode})
-                 (catch Throwable t
-                   ;; The file is still the file it was (the write is a temp+rename),
-                   ;; so the undo record describing the edit that did not happen is
-                   ;; taken back with it.
-                   (store/clear-undo! path)
-                   (throw t)))
-               (store/advance-with-undo! thread-id path change undo)
-               (let [{:keys [text shown]}
-                     (edit/ok-message path
-                                      {:before   (:before span)
-                                       :after    after
-                                       :anchors  (:anchors change)
-                                       :span     span
-                                       :context  (context-lines config)
-                                       :stripped (:stripped dedup)
-                                       :added    (count lines)
-                                       :removed  (- (:end range) (:start range))})]
-                 ;; ...and tell the store which anchors that answer put in the model's
-                 ;; hands. Without it the very next edit is refused, because a freshly
-                 ;; minted anchor is owned but has not been SHOWN to anyone until the
-                 ;; row carrying it goes out -- and these rows just did.
-                 (store/mark-served! thread-id path shown)
-                 ;; Any fix made along the way is REPORTED. A silent interpretation is
-                 ;; how a model learns to keep making the slip -- it never found out.
-                 (if (seq @warnings)
-                   (str "Note: " (str/join " " @warnings) "\n\n" text)
-                   text))))))))))
+             range (guard! thread-id path from to text config warnings owner?)
+             ;; Dedup first, then compose: the lines that survive dedup are what
+             ;; the file actually receives, and the span has to describe the edit
+             ;; that was MADE, not the one that was asked for.
+             dedup (edit/dedup-edges (vec (:lines (edit/lines-of text))) range lines
+                                     (:boundary-dedup config))
+             lines (:lines dedup)
+             [text' span] (edit/apply-range text range lines)
+             _     (edit/check-not-empty! text text')
+             after (anchors/split-lines text')
+             checks (anchors/line-checksums text')
+             change (assoc (anchors/align {:old-anchors   (:anchors range)
+                                           :old-checksums (:checksums range)
+                                           :new-checksums checks
+                                           :spans         [span]
+                                           :path          path
+                                           :owned         (store/ownership thread-id)
+                                           :probe         (or (store/probe-of thread-id)
+                                                              (anchors/seed thread-id))})
+                           :file-checksum (anchors/file-checksum checks)
+                           :line-checksums checks
+                           :served        (:served range)
+                           :served?       true)]
+         (if (= text text')
+           ;; Nothing changed: no write, no undo record, and the undo history that
+           ;; was there stays there -- a no-op must not cost the model its ability
+           ;; to take back the edit before it.
+           (str "No change: the replacement is identical to what is already there, so"
+                " nothing was written to " path ".")
+           (do
+             (write-and-land! thread-id path change
+                              (undo-record text text' range bom ending mode)
+                              text' bom ending mode)
+             (let [{:keys [text shown]}
+                   (edit/ok-message path
+                                    {:before   (:before span)
+                                     :after    after
+                                     :anchors  (:anchors change)
+                                     :spans    [span]
+                                     :context  (context-lines config)
+                                     :stripped (:stripped dedup)
+                                     :added    (count lines)
+                                     :removed  (- (:end range) (:start range))})]
+               ;; ...and tell the store which anchors that answer put in the model's
+               ;; hands. Without it the very next edit is refused, because a freshly
+               ;; minted anchor is owned but has not been SHOWN to anyone until the
+               ;; row carrying it goes out -- and these rows just did.
+               (store/mark-served! thread-id path shown)
+               ;; Any fix made along the way is REPORTED. A silent interpretation is
+               ;; how a model learns to keep making the slip -- it never found out.
+               (if (seq @warnings)
+                 (str "Note: " (str/join " " @warnings) "\n\n" text)
+                 text)))))))))
+
+;; ------------------------------------------------------------------ the batch
+
+;; SEVERAL EDITS TO ONE FILE IN ONE MESSAGE ARE ONE COMMIT, and this is where that
+;; is carried out. The reason is not tidiness: a turn's tool calls run
+;; CONCURRENTLY (`harness.loop/drive!`), and two edits to one file each validate
+;; against the state the session was shown and each compute their own new content.
+;; Run independently, the later write wins and the earlier one vanishes -- with
+;; BOTH reporting success. That is silent data loss, and no amount of locking
+;; around one edit fixes it, because the two edits are individually correct.
+;;
+;; So the edits of one message are applied as one patch. Every edit is validated
+;; against the state BEFORE the message (not against the previous edit's result),
+;; the ranges must not overlap -- which makes "both edits touched one line" a
+;; REFUSAL rather than a question about which ran first -- and the whole thing is
+;; one write, one anchor advance and one undo record. The model therefore gets one
+;; diff, one set of anchors, and one undo for the thought it had.
+;;
+;; WHO APPLIES IT is decided by `harness.tools/batch-plan`, which is where the
+;; message's calls are all visible: the LAST call of a group returns the merged
+;; answer, and the earlier ones say they were merged. Same node, same decision --
+;; no call has to wait for another, so a refusal or a park anywhere in the message
+;; cannot strand the rest.
+
+(defn merged-note
+  "What a batch member that is not the applier answers with: enough to say the edit
+  was not dropped, and where its outcome will appear."
+  [{:keys [index size path]}]
+  (str "Edit " (inc index) " of " size " on " path " is part of ONE commit with the"
+       " other edits in this message: they were checked against the same state, and"
+       " they are written together (or not at all). The merged diff, the resulting"
+       " anchors and the undo record are in the answer to the last of them."))
+
+(defn- plan-edit
+  "ONE edit of a batch, resolved against the batch's base TEXT: {:range :lines
+  :span ...} ready for the arithmetic.
+
+  Every refusal carries the edit's index (see `wrapped`), because a batch is
+  refused whole and the model has to know which of its calls to rewrite."
+  [thread-id path text args config warnings i n owner?]
+  (try
+    (let [{:keys [from to lines]} (edit/parse args {:strict?       (:strict-input config)
+                                                    :require-path? (:require-path config)
+                                                    :warnings      warnings})
+          range (guard! thread-id path from to text config warnings owner?)
+          dedup (edit/dedup-edges (vec (:lines (edit/lines-of text))) range lines
+                                  (:boundary-dedup config))
+          lines (:lines dedup)]
+      {:range    range
+       :lines    lines
+       :stripped (:stripped dedup)
+       :args     args
+       :path     path})
+    (catch Throwable t
+      (throw (wrapped i n path t)))))
+
+(defn- spans-of
+  "The batch's edits as `harness.hashline.anchors/align` reads them: ascending,
+  disjoint, and in BOTH coordinate systems.
+
+  The new-side offsets are the running delta -- each edit shifts everything after
+  it by (new length - old length) -- and that is the whole of 'apply several edits
+  at once': the base is indexed by OLD positions, and every edit's place in the
+  result depends on how much the edits before it added or removed."
+  [plans]
+  (loop [ps (sort-by (comp :start :range) plans), delta 0, out []]
+    (if-not (seq ps)
+      out
+      (let [{:keys [range lines]} (first ps)
+            {:keys [start end]} range
+            len (count lines)]
+        (recur (rest ps)
+               (+ delta (- len (- end start)))
+               (conj out {:old-start start :old-end end
+                          :new-start (+ start delta) :new-end (+ start delta len)}))))))
+
+(defn- disjoint!
+  "Refuse a batch whose ranges overlap, naming the two edits and the lines they both
+  claim.
+
+  AN OVERLAP IS AN ERROR, NOT AN ORDERING. Two edits to the same line, arriving in
+  one message, are a mistake the model can fix -- and could not be resolved by
+  picking a winner, because nothing in the payload says which was meant. So this is
+  the one place a batch is refused for a reason that is about the batch rather than
+  about one of its edits, and the message says so: which two, and where."
+  [plans path]
+  (let [sorted (sort-by (comp :start :range) plans)]
+    (doseq [[{:keys [range]} {next-range :range}] (partition 2 1 sorted)
+            ;; Half-open [start, end): two ranges touch without overlapping when one
+            ;; begins exactly where the other ends, which is an insert before a line
+            ;; -- legal, and worth being precise about because this is the check that
+            ;; decides whether the whole message is refused.
+            :when (>= (:end range) (:start next-range))]
+      (throw (ex-info (str "two edits in this message both claim lines "
+                           (inc (:start next-range)) "-" (:end range) " of " path
+                           ", so NOTHING was written. Edits in one message are one"
+                           " commit and their line ranges must not overlap; send"
+                           " them as separate messages (the first one's answer"
+                           " gives you current anchors for the second), or address"
+                           " the whole region with one edit.")
+                      {:path path :reason :batch-overlap
+                       :ranges [range next-range]}))))
+  plans)
+
+(defn- assemble
+  "The batch's whole effect on TEXT, as [text' spans].
+
+  Built by walking the spans in order and copying the untouched lines between them
+  -- NOT by applying edit after edit, because each edit's positions are OLD
+  positions and applying them one at a time would index a text they were never
+  computed against. The new lines of each span come from the plan that owns it,
+  found by old-start, which is unique precisely because the ranges are disjoint.
+
+  The trailing-newline fact is carried over the same way the single edit carries
+  it: a file that ended in a newline still does, and one that did not still does
+  not."
+  [text plans spans]
+  (let [lines (vec (anchors/split-lines text))
+        owner (into {} (map (fn [p] [(:start (:range p)) (:lines p)])) plans)
+        out   (loop [ss spans, cursor 0, acc []]
+                (if-not (seq ss)
+                  (into acc (subvec lines cursor))
+                  (let [{:keys [old-start old-end]} (first ss)]
+                    (recur (rest ss) old-end
+                           (into (into acc (subvec lines cursor old-start))
+                                 (get owner old-start))))))]
+    [(str (str/join "\n" out)
+          (when (and (str/ends-with? text "\n") (pos? (count out))) "\n"))
+     spans]))
+
+(defn perform-batch!
+  "Run SEVERAL edits to one file as ONE commit. ARGS-VEC is the message's edits in
+  call order; returns the merged answer, or throws a refusal naming the edit that
+  failed.
+
+  THE BASE IS THE STATE BEFORE THE MESSAGE. Every edit is resolved against the text
+  as the message found it, so an edit's anchors mean what they meant when the model
+  wrote them -- which is what makes overlapping ranges detectable instead of a
+  question about scheduling."
+  [thread-id resolve-path args-vec config]
+  (let [n          (count args-vec)
+        warnings   (atom [])
+        first-args (first args-vec)
+        {:keys [from]} (try (edit/parse first-args {:strict?       false
+                                                    :require-path? (:require-path config)})
+                            (catch Throwable t
+                              (throw (wrapped 0 n (or (:path first-args) "?") t))))
+        owner? (some? (store/owner-of thread-id from))
+        path   (resolve-target thread-id resolve-path first-args from)]
+    (store/with-path-lock
+     path
+     (fn []
+       (let [{:keys [text bom ending mode]} (files/read-file path)
+             plans (disjoint! (vec (map-indexed
+                                    (fn [i a]
+                                      (plan-edit thread-id path text a config warnings
+                                                 i n owner?))
+                                    args-vec))
+                              path)
+             spans (spans-of plans)
+             [text' spans] (assemble text plans spans)
+             base  (:range (first plans))
+             _     (edit/check-not-empty! text text')
+             after  (anchors/split-lines text')
+             checks (anchors/line-checksums text')
+             change (assoc (anchors/align {:old-anchors   (:anchors base)
+                                           :old-checksums (:checksums base)
+                                           :new-checksums checks
+                                           :spans         spans
+                                           :path          path
+                                           :owned         (store/ownership thread-id)
+                                           :probe         (or (store/probe-of thread-id)
+                                                              (anchors/seed thread-id))})
+                           :file-checksum (anchors/file-checksum checks)
+                           :line-checksums checks
+                           :served        (:served base)
+                           :served?       true)]
+         (if (= text text')
+           (str "No change: the " n " edits in this message add up to what is already"
+                " there, so nothing was written to " path " (and the undo history is"
+                " untouched).")
+           (do
+             (write-and-land! thread-id path change
+                              (undo-record text text' base bom ending mode)
+                              text' bom ending mode)
+             (let [{:keys [text shown]}
+                   (edit/ok-message
+                    path
+                    {:before   (vec (anchors/split-lines text))
+                     :after    after
+                     :anchors  (:anchors change)
+                     :spans    spans
+                     :context  (context-lines config)
+                     :stripped (reduce + 0 (map :stripped plans))
+                     :added    (reduce + 0 (map (comp count :lines) plans))
+                     :removed  (reduce + 0 (map (fn [p] (- (:end (:range p))
+                                                           (:start (:range p))))
+                                                plans))})]
+               (store/mark-served! thread-id path shown)
+               (if (seq @warnings)
+                 (str "Note: " (str/join " " @warnings) "\n\n" text)
+                 text)))))))))
+
+

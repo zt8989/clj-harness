@@ -78,6 +78,19 @@
                  true (conj (str "a pasted `" row "│...` row")))]
           [nil []])))))
 
+(defn bare-anchor
+  "The anchor a raw FIELD value names, or nil -- tolerant where `parse` is strict.
+
+  Two callers want this and they want different things from it. `parse` refuses
+  anything that is not an anchor and says why, which is `anchor-arg` below. A caller
+  that only needs to know WHICH FILE a call is about (harness.tools's batch planner)
+  wants the opposite: the anchor if there is one, nil otherwise -- because a call it
+  cannot place should run on its own and produce its own error, not take a whole
+  message down with it."
+  [v]
+  (when (string? v)
+    (first (extract-anchor v))))
+
 (defn- anchor-arg
   "One of the two anchor fields, as a bare anchor, with whatever was pasted around
   it stripped and reported."
@@ -445,12 +458,18 @@
   (str prefix (if anchor anchor "    ") "│" (str/replace line "\r" "")))
 
 (defn render-diff
-  "The row-shaped answer for an edit, read top to bottom like the file:
+  "The row-shaped answer for an edit, read top to bottom like the file.
 
-      lead    up to CONTEXT untouched lines before the range, with their anchors
+  SPANS is what the edit did, as the half-open pairs `apply-range` produces --
+  usually one, more when a whole message's edits were merged into one commit
+  (ticket 09). They are ascending and disjoint, and that is what makes the layout
+  below well defined:
+
+      lead    up to CONTEXT untouched lines before the first change, with anchors
       -       every line the edit removed, its anchor column blanked
       +       every line it added, with the anchor that now names it
-      trail   up to CONTEXT untouched lines after it
+      context up to CONTEXT untouched lines between one change and the next
+      trail   up to CONTEXT untouched lines after the last change
 
   A `+   │... N line(s) before/after` row stands in for anything skipped, and a
   `dedup│...` row -- the one row that is NOT an anchor, and says so by not looking
@@ -461,43 +480,49 @@
   store has to be told about them or the very next edit would be refused as
   addressing a line nobody was shown. Computing that set anywhere else would be a
   second list of index ranges to keep in step with this one."
-  [{:keys [before after anchors span context stripped]}]
-  (let [{:keys [old-start old-end new-start new-end]} span
-        ;; Context rows are cut from AFTER by their NEW index, which is the index
-        ;; the anchor array is in as well: a lead row's line is unchanged by an edit
-        ;; that starts at or after it, so its old index and its new one agree.
-        lead-from (max 0 (- old-start context))
-        lead      (mapv (fn [i] (row-of " " (nth anchors i nil) (nth (vec after) i)))
-                        (range lead-from old-start))
-        added     (mapv (fn [i] (row-of "+" (nth anchors i nil) (nth (vec after) i)))
-                        (range new-start new-end))
-        trail-to  (min (count after) (+ new-end context))
-        trail     (mapv (fn [i] (row-of " " (nth anchors i nil) (nth (vec after) i)))
-                        (range new-end trail-to))
-        removed   (mapv (fn [i] (row-of "-" nil (nth (vec before) i))) (range old-start old-end))]
-    {:text  (str/join
-             "\n"
-             (concat
-              (when (pos? lead-from)
-                [(str "+   │... " lead-from " line(s) before the change")])
-              lead
-              (when (and (empty? removed) (empty? added)) ["    │(no lines changed)"])
-              removed
-              added
-              trail
-              (when (< trail-to (count after))
-                [(str "+   │... " (- (count after) trail-to) " line(s) after the change")])
-              (when (pos? stripped)
-                [(str "dedup│" stripped " line(s) at the boundary were not added again")])))
-     ;; The rows that carry a usable anchor: the `+` rows and the context rows.
-     ;; The `-` rows carry none (their lines are gone) and the ellipsis and dedup
-     ;; rows are not rows of the file at all.
-     :shown (into #{} (comp (remove nil?)) (concat (map (fn [i] (nth anchors i nil))
-                                                       (range lead-from old-start))
-                                                  (map (fn [i] (nth anchors i nil))
-                                                       (range new-start new-end))
-                                                  (map (fn [i] (nth anchors i nil))
-                                                       (range new-end trail-to))))}))
+  [{:keys [before after anchors spans context stripped]}]
+  (let [after  (vec after)
+        before (vec before)
+        spans  (vec (sort-by :old-start spans))
+        n      (count after)
+        ;; ONE PASS, one cursor. `cursor` is the new-side index the rows have
+        ;; reached: everything before it has been printed, so the lead of each span
+        ;; is the gap between the cursor and where that span starts, trimmed to
+        ;; CONTEXT -- and the ellipsis row appears exactly when the trim skipped
+        ;; something.
+        {:keys [rows shown]}
+        (loop [ss spans, cursor 0, rows [], shown #{}]
+          (if-not (seq ss)
+            ;; ...and the trail after the last change, trimmed the same way.
+            (let [to (min n (+ cursor context))
+                  ctx (mapv (fn [i] (row-of " " (nth anchors i nil) (nth after i)))
+                            (range cursor to))]
+              {:rows (into rows (concat ctx
+                                        (when (< to n)
+                                          [(str "+   │... " (- n to)
+                                                " line(s) after the change")])))
+               :shown (into shown (keep #(nth anchors % nil)) (range cursor to))})
+            (let [{:keys [old-start old-end new-start new-end]} (first ss)
+                  from (max cursor (- new-start context))
+                  gap  (when (> from cursor)
+                         [(str "+   │... " (- from cursor) " line(s) before")])
+                  ctxt (mapv (fn [i] (row-of " " (nth anchors i nil) (nth after i)))
+                             (range from new-start))
+                  rm   (mapv (fn [i] (row-of "-" nil (nth before i)))
+                             (range old-start old-end))
+                  add  (mapv (fn [i] (row-of "+" (nth anchors i nil) (nth after i)))
+                             (range new-start new-end))]
+              (recur (rest ss) new-end
+                     (into rows (concat gap ctxt rm add))
+                     (into shown (keep #(nth anchors % nil))
+                           (concat (range from new-start) (range new-start new-end)))))))
+        text (str/join
+              "\n"
+              (concat rows
+                      (when (pos? stripped)
+                        [(str "dedup│" stripped
+                              " line(s) at the boundary were not added again")])))]
+    {:text text :shown shown}))
 
 (defn ok-message
   "The success line and the diff, plus the anchors the diff made addressable. See
