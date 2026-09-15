@@ -911,12 +911,25 @@ const ProjectSection: FC<{
         <DialogContent data-slot="sidebar-remove-confirm" showCloseButton={false}>
           <DialogHeader>
             <DialogTitle>Remove this project?</DialogTitle>
-            <DialogDescription>
+            {/* min-w-0 AND A BREAKABLE PATH ARE LOAD-BEARING, not tidiness.
+                `DialogContent` is a CSS GRID, and a grid's implicit column is
+                `auto` -- which cannot shrink below its items' MIN-CONTENT width.
+                A project path is one unbreakable token, so a long one (a temp
+                directory, a deep checkout) pushed the column wider than the
+                dialog's own 384px box: every child stretched to the column,
+                including the full-bleed `-mx-4` footer, while the dialog's
+                background painted only its border box. That is the misalignment
+                -- a footer sticking out past the white pane with a rounded
+                corner of its own.
+                `[overflow-wrap:anywhere]` collapses the path's min-content width
+                to a single character, so the column can no longer be widened by
+                it, and `min-w-0` lets this block shrink as well. */}
+            <DialogDescription className="min-w-0">
               <span data-slot="sidebar-remove-name" className="font-medium">
                 {name}
               </span>{" "}
               leaves the sidebar. Its sessions are kept on disk — nothing under{" "}
-              <code className="font-mono text-xs">{project.path}</code> is deleted
+              <code className="font-mono text-xs [overflow-wrap:anywhere]">{project.path}</code> is deleted
               or moved — and adding this directory again brings them back, as they
               were.
             </DialogDescription>
