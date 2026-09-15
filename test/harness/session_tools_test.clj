@@ -81,8 +81,11 @@
     (tools/session-disable! "t-idem" "bash")
     (is (true? (tools/session-disabled? "t-idem" "bash"))))
   (testing "enabling a name that was never disabled is a no-op"
-    (tools/session-enable! "t-idem" "edit")
-    (is (false? (tools/session-disabled? "t-idem" "edit"))))
+    ;; `bash`, not `edit`: this case is about the overlay axis, and `edit` is only
+    ;; in ONE of the two editsets (ticket 12). A name both modes serve keeps the
+    ;; case about the axis -- which is independent of which editor is installed.
+    (tools/session-enable! "t-idem" "bash")
+    (is (false? (tools/session-disabled? "t-idem" "bash"))))
   (testing "disabling a name the session cannot see never invents a mark"
     (tools/session-disable! "t-idem" "no-such-tool")
     (is (false? (tools/session-disabled? "t-idem" "no-such-tool")))
@@ -120,7 +123,14 @@
         "the base registry is never mutated at runtime")
     (is (= (:description base-read) (:description (@tools/registry "read"))))
     (tools/session-unregister! "t-shadow" "read")
-    (is (= (:description base-read) (spec-description "t-shadow" "read")))))
+    (testing "with the shadow gone the session sees the base's read again"
+      ;; Compared against an UNBOUND session's `read` rather than against the
+      ;; registry's description: `read`'s face follows the editing mode (ticket
+      ;; 04), so the registry holds the str-replace text while an unbound session
+      ;; -- anchor mode since ticket 12 -- is served the anchored one. What this
+      ;; case is about is that the overlay is per-thread and the base is not
+      ;; touched, and both of those are stated above and below it.
+      (is (= (spec-description nil "read") (spec-description "t-shadow" "read"))))))
 
 ;; ------------------------------------------------------------------ integration
 

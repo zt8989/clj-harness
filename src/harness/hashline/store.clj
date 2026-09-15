@@ -360,9 +360,10 @@
       (db/execute! c "DELETE FROM hashline_snapshots WHERE thread_id = ? AND path = ?"
                    (str thread-id) path))))
 
-;; ------------------------------------------------------------------ the lock
+;; ------------------------------------------------------------------ the locks
 
 (defonce ^:private path-locks (ConcurrentHashMap.))
+(defonce ^:private session-locks (ConcurrentHashMap.))
 
 (defn canonical
   "PATH as the identity this namespace keys locks and rows by: absolute, symlinks
@@ -374,10 +375,10 @@
     (.getCanonicalPath (io/file path))
     (catch Exception _ (str path))))
 
-(defn- lock-for ^Lock [^String canon]
-  (or (.get ^ConcurrentHashMap path-locks canon)
+(defn- lock-for ^Lock [^ConcurrentHashMap m ^String k]
+  (or (.get m k)
       (let [fresh (ReentrantLock.)]
-        (or (.putIfAbsent path-locks canon fresh) fresh))))
+        (or (.putIfAbsent m k fresh) fresh))))
 
 (defn with-path-lock
   "Run F holding the lock for PATH's canonical form.
@@ -388,6 +389,28 @@
   by the files a session actually touches and is the price of not having a
   registry to invalidate."
   [path f]
-  (let [^Lock l (lock-for (canonical path))]
+  (let [^Lock l (lock-for path-locks (canonical path))]
+    (.lock l)
+    (try (f) (finally (.unlock l)))))
+
+(defn with-session-lock
+  "Run F holding THREAD-ID's lock -- the one that guards MINTING.
+
+  THE PROBE IS SESSION STATE, and that is what makes this necessary rather than
+  tidy. Allocation walks the pool from where the session's probe stands, and the
+  probe is read at the start of the walk and written at the end: two files minted
+  at the same time for one session start from the same position and produce the
+  SAME anchors for DIFFERENT lines. The schema then refuses the second claim --
+  the ownership primary key is (thread_id, anchor) -- which is the invariant doing
+  its job, but the user-visible result was a `read` failing with a sqlite error.
+
+  And it happens: `harness.loop/drive!` runs a turn's tool calls concurrently, so
+  'read two files in one message' is the ordinary case. `with-path-lock` does not
+  cover it -- two different files are two different locks, on purpose.
+
+  ALWAYS THE OUTER LOCK, before any `with-path-lock`. A fixed order is what keeps
+  two callers from deadlocking against each other."
+  [thread-id f]
+  (let [^Lock l (lock-for session-locks (str thread-id))]
     (.lock l)
     (try (f) (finally (.unlock l)))))

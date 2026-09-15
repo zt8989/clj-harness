@@ -9,10 +9,11 @@
 - `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。
 **没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
 - `src/harness/shell.clj` — 唯一决定 spawn 哪个 shell 的地方（Windows 上按绝对路径钉 Git Bash，避免被 System32 的 WSL 启动器静默吞掉），以及带上 stdin 与超时的运行方式。bash 工具与 hook 引擎共用它：那个坑是机器的属性，不是调用方的
-- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
+- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起。**基座里有几件取决于本会话的编辑模式**（见「文件编辑的两种实现」）
 - `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
 - `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用
 - `src/harness/project.clj` — 会话的项目目录绑定：thread-id → 目录（问出来，不抄副本）、相对路径重根、出界判定、`.harness/harness.edn` 两级装配
+- `src/harness/editing.clj` + `src/harness/hashline/*` — **文件编辑的两种实现与它们的开关**（见「文件编辑的两种实现」）：`editing` 解析 `:editing` 配置、决定本会话被服务哪一套编辑工具；`hashline/{anchors,edit,apply…,grep}` 是按锚点编辑的全部实现
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
 - `dev/harness/{wire,evals,repl,e2e_server}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`；`e2e_server` 是 `npm test` 起的那个后端（脚本 provider + OS 分配端口）。
 
@@ -55,10 +56,16 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ~/.clj-harness/
 ├── config.edn        模型默认档（每轮重读，可运行期编辑）
 ├── providers.edn     provider 目录：厂商 endpoint + 其 model 表（每轮重读）
+├── harness.edn       编辑实现与围栏（:editing / :approval，每轮重读）
 ├── hooks.edn         hook 声明：hook 点 -> [{matcher, command, timeout}]（每轮重读）
 ├── .env              HARNESS_API_KEY
+├── harness.db        家目录元数据库：项目、会话、以及**锚点**（sqlite）
 └── logs/*.jsonl      会话日志
 ```
+
+`harness.edn` 与 `hooks.edn` 一样可以不存在——不存在等于「什么都没说」，各键取默认值。注意锚点**不在
+某个目录里**：它落在 `harness.db` 的 `hashline_snapshots` / `hashline_ownership` / `hashline_sessions`
+三张表上（外加 `hashline_undo` 存最近一次撤销），与项目、会话共用同一个库、同一条迁移链。
 
 想换位置就设 `CLJ_HARNESS_HOME`——这是唯一的旋钮，测试也用它把自己的读写隔离到临时目录：
 
@@ -73,9 +80,13 @@ clojure -M:run
 New-Item -ItemType Directory -Force ~/.clj-harness
 Copy-Item config.edn.example ~/.clj-harness/config.edn
 Copy-Item providers.edn.example ~/.clj-harness/providers.edn
+Copy-Item harness.edn.example ~/.clj-harness/harness.edn   # 可选：不复制就是全默认（含按锚点编辑）
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
+
+`harness.edn.example` 把 `:editing` 与 `:approval` 的每个键都写在**它的默认值**上并逐条注释，所以它同时
+是参考手册——只想改一个旋钮的话，照抄那一行就行（`:editing` 是逐键合成的，见下）。
 
 `hooks.edn` 也可以不存在——不存在等于「这个点没人监听」，属于正常态（全新安装就是这样）。但**存在却写坏**（EDN 语法坏 / 不是 map / 点了不存在的 hook 点 / 声明的字段拼错）会指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别，而那个区别正是这个文件的全部意义。
 
@@ -268,9 +279,9 @@ npm run build    # tsc --noEmit + vite build → dist/
 
 ### 项目目录绑定（`/api/project` 与 `project/bound`）
 
-每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：read/write/edit 的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。
+每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：文件工具（read/write/replace/insert/edit…）的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。
 
-**出界审批（02 号票）**：绑定后 read/write/edit 的目标在允许集之外 → 工具调用 park 待人工批准（`project/out-of-bounds?`）。允许集 = canonical 项目目录 ∪ canonical 配置家（读自己的 config/providers/.env 不算出界，这是围栏刻意留的自留地）∪ 项目配置声明的额外路径；未绑定 thread 恒 false（回归保证）。批准 = 人 override 围栏照常执行。bash 只换 cwd 不判命令内容——明示接受的逃逸面。
+**出界审批（02 号票）**：绑定后文件工具的目标在允许集之外 → 工具调用 park 待人工批准（`project/out-of-bounds?`）。允许集 = canonical 项目目录 ∪ canonical 配置家（读自己的 config/providers/.env 不算出界，这是围栏刻意留的自留地）∪ 项目配置声明的额外路径；未绑定 thread 恒 false（回归保证）。批准 = 人 override 围栏照常执行。bash 只换 cwd 不判命令内容——明示接受的逃逸面。
 
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
@@ -299,6 +310,31 @@ AG-UI 入站                                  出网（OpenAI 兼容 chat-comple
 agent 自省：`(harness.project/binding-for harness.tools/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。
 UI 面板此前由前端特征拆除（assistant-ui 特征的 07 号票置 `wontfix`：项目绑定改在**建会话时**完成，由
 `.scratch/project-sidebar` 落地）；本节的三条路由与契约不变，`curl` 即可驱动，面板照契约复用。
+
+### 文件编辑的两种实现
+
+`read` / `replace` / `insert` / `anchor_grep` / `undo_last_replace`（**默认**）与 `read` / `edit`（原版）
+是两套编辑实现，一次只会有一套装在本会话的工具表里。切换在 `harness.edn`：
+
+```clojure
+{:editing {:mode :hashline}}    ; 默认：按锚点编辑
+{:editing {:mode :str-replace}} ; 原版：edit 按 old_string 替换
+```
+
+- **按锚点**：`read` 每行回成 `锚点│内容`，`replace` / `insert` 用那个锚点定位，**改完的答复带着改动
+  区间与当前锚点**，所以下一笔不需要重读；被拒时（文件在脚下变过、区间里有没展示过的行）拒绝里同样带
+  着当前锚点。同一个回合里对同一文件的多次编辑**合成一次提交、一次撤销**，区间重叠则整批拒绝。搜索走
+  `anchor_grep`（ripgrep），命中行直接带锚点。
+- **按 old_string**：原样。`edit` 的行为一个字没变，只是不再默认在场。
+
+`:editing` 是 `harness.edn` 里**唯一逐键合成**的块（其余顶层键是整键替换），所以项目级只写
+`{:auto-read false}` 不会把用户级的 `:mode` 一起抹掉。其他旋钮：`:auto-read`（write 之后附一段带锚点的
+读，默认开）、`:anchor-grep`（关掉搜索工具）、`:require-path`、`:strict-input`、`:boundary-dedup`、
+`:diff-context-lines`。**坏配置指名失败**，不静默退回默认值——一份被忽略的配置与一份什么都没说的配置
+从外部看没有区别。自省：`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+
+锚点**跨进程重启可用**（库是共用 sqlite，表见上面的家目录），一个会话的锚点不会被另一个会话误用，
+两行内容相同也绝不共用一个锚点。
 
 ### `.harness/harness.edn` 装配（03 号票）
 
@@ -356,7 +392,9 @@ interrupt 各一条 resume，所以决定必须收在比单张卡活得久的地
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 189 tests / 930 assertions，全绿
+# 477 tests / 8908 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# 这是 hashline-edit 分支上的数；断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），
+# 不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test

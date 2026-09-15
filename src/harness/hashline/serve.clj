@@ -70,24 +70,30 @@
   that 'stop working' when it addresses the same file the other way."
   [thread-id path content]
   (let [path (store/canonical path)]
-    (store/with-path-lock
-     path
+    ;; SESSION FIRST, PATH SECOND -- a fixed order (see store/with-session-lock).
+    ;; Minting walks the session's probe, so two files served at once for one
+    ;; session are not independent even though their paths are.
+    (store/with-session-lock
+     thread-id
      (fn []
-       (let [stored  (store/state thread-id path)
-             checks  (anchors/line-checksums content)
-             current (anchors/file-checksum checks)
-             live    (when (and stored (= current (:file-checksum stored)))
-                       stored)]
-         (if live
-           live
-           (do
-             ;; Persist the alignment BEFORE anything is emitted or decided on it.
-             ;; If the write fails the caller gets the failure and no anchors were
-             ;; shown. The other order -- show, then persist -- would hand out
-             ;; anchors the store does not know about, and the next edit would
-             ;; reject every one.
-             (store/advance! thread-id path (fresh-change thread-id path content stored))
-             (store/state thread-id path))))))))
+       (store/with-path-lock
+        path
+        (fn []
+          (let [stored  (store/state thread-id path)
+                checks  (anchors/line-checksums content)
+                current (anchors/file-checksum checks)
+                live    (when (and stored (= current (:file-checksum stored)))
+                          stored)]
+            (if live
+              live
+              (do
+                ;; Persist the alignment BEFORE anything is emitted or decided on it.
+                ;; If the write fails the caller gets the failure and no anchors were
+                ;; shown. The other order -- show, then persist -- would hand out
+                ;; anchors the store does not know about, and the next edit would
+                ;; reject every one.
+                (store/advance! thread-id path (fresh-change thread-id path content stored))
+                (store/state thread-id path))))))))))
 
 (defn serve!
   "THREAD-ID reads PATH, which must already be resolved and classified. Returns

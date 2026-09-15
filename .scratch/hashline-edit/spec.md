@@ -142,21 +142,33 @@
 
 ## 验收主线
 
-离线全量 `harness.test-runner` 全绿。**开发期 hashline 是 opt-in**（`harness.edn` 里显式写
-`:editing {:mode :hashline}`），默认仍走 str-replace，因此逐票落地时既有断言不动；**最后一票翻默认**，
-那时才改写既有断言，逐条列在那一票里。
+离线全量 `harness.test-runner` 全绿，**连跑两次结果一致**。**默认现在就是 hashline**（12 已落地，
+2026-09-15）；01–11 期间它是 opt-in，逐票落地时既有断言不动，最后一票翻默认并逐条改写——改写清单在
+12 的落地记录里。
 
-端到端要覆盖三段真实路径（真实 HTTP 端点 + 脚本化模型）：
+三段真实路径各有对账用例，走**工具缝**（`harness.tools/run!`，与模型调用同一个入口）：
 
-1. read 拿到锚点 → 按锚点改 → 改动区间的新锚点直接用于下一笔编辑（不重读）；
-2. 文件在 read 之后被外部改过 → 编辑被拒且当场拿到新锚点 → 用新锚点重试成功；
-3. 撤销把文件与锚点一起退回前一态；重启进程后（清内存、从 `harness.db` 重读）同一批锚点仍然可用。
+1. read 拿到锚点 → 按锚点改 → 改动区间的新锚点直接用于下一笔编辑（不重读）
+   —— `hashline_replace_test/the-anchors-in-the-answer-are-immediately-usable` 与 `a-context-row-is-usable-too`；
+2. 文件在 read 之后被外部改过 → 编辑被拒且当场拿到新锚点 → 用新锚点重试成功
+   —— `hashline_refusals_test/a-drifted-file-comes-back-with-the-anchors-to-retry-with`
+   （并钉住「拒绝里印出来的行也算已展示」，否则重试会被以「没展示过」再拒一次）；
+3. 撤销把文件与锚点一起退回前一态 —— `hashline_undo_test/the-anchors-come-back-and-are-usable`；
+   重启进程后同一批锚点仍可用 —— `hashline_store_test/anchors-survive-a-restart`（不模拟重启：库是唯一
+   持有者，重新读一遍库就是重启后的全部动作）。
+
+两者各自的「read → 改 → 撤销」整条路径在 `editing_mode_tools_test/each-mode-runs-its-own-whole-path`
+里再走一遍，那是**同一模式下的一次性确认**，不是上面那些分步用例的替代。
 
 ## 状态
 
-**01–11 是 opt-in 落地**（`:editing {:mode :hashline}` 才生效），既有断言一条不动；**12 翻默认**，
-那时才改写既有断言（届时只动编辑工具那几个名字）。当前 **474 tests / 8879 assertions 全绿**，断言数
-被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是新增测试变多了。
+**十二票全部落地，默认已经是按锚点编辑。** 01–11 是 opt-in 落地（`:editing {:mode :hashline}` 才生效），
+既有断言一条不动；12 翻默认，那时才改写既有断言（只动了编辑工具那几个名字，逐条见 12 的记录）。当前
+**477 tests / 8908 assertions 全绿，连跑两次一致**，断言数被锚点表的 rank/select 往返与去重用例拉高
+（各自数千条），不是新增测试变多了。
+
+**退回去只有一步**：`harness.edn` 里写 `:editing {:mode :str-replace}`。两种模式都是一等公民，都有完整
+用例，翻默认不是删掉旧的。
 
 | # | 票 | 阻塞于 | 状态 |
 | --- | --- | --- | --- |
@@ -171,7 +183,7 @@
 | 09 | 同一回合的多笔编辑：合成一次提交，或者一次都不提交 | 05, 07, 08 | **已完成** |
 | 10 | `insert`：插在哪一行前后，锚点不动 | 05, 06 | **已完成** |
 | 11 | `anchor_grep`：搜出来的结果行可以直接改 | 04 | **已完成** |
-| 12 | 翻默认：hashline 成为默认实现，prompt 与文档跟上，既有断言重写 | 03–11 全部 | 未开始 |
+| 12 | 翻默认：hashline 成为默认实现，prompt 与文档跟上，既有断言重写 | 03–11 全部 | **已完成** |
 
 ### 11 之后：01–11 全部落地，12 只剩「翻默认」
 
@@ -181,7 +193,7 @@
 
 12 要做的是把 `defaults` 的 `:mode` 改成 `:hashline`，并**重写既有的那几条断言**（`tools.specs` 的
 六个名字、`editing_mode_tools_test` 的默认表），加上 `prompt.md` 与文档。11 之前不能翻默认的原因在 05
-那条中期状态里写过，现在都不成立了。
+那条中期状态里写过，现在都不成立了。**——12 已落地，记录见下。**
 
 02 起一直挂着的那条 `write` 副作用（write 后旧锚点仍算「已拥有」）在 07 落地后**已经消除**。
 
@@ -632,3 +644,66 @@ public，因为「锚点抄成了 `Hasu│...` 整行」和「整个 JSON 数组
 gitignore 与二进制跳过（不报错）、glob 与 `path` 收窄、忽略 `.git`、大小写开关、无匹配是信息不是崩溃、
 每文件 `limit` 与「还有更多」、超长行保锚点且可整行替换、宽结果集的预算截断、`:anchor-grep false` 关掉
 这个工具（并说清是哪个键关的）、以及描述里必须写明的三件事。
+
+### 12 落地记录
+
+**翻默认本身是一行**：`editing/defaults` 的 `:mode` 从 `:str-replace` 改成 `:hashline`。改完两种模式都是
+一等公民——`edit` 的注册、实现、用例一个字没动，`{:editing {:mode :str-replace}}` 就把它放回工具表。
+**这一票买的不是能力，是默认值**，所以它的价值全在「这个默认是被断言钉住的」上：现在有一条元断言拿
+两种模式的工具表**互相比**（非编辑工具两边是同一个集合、差集恰好是那五个名字、各自无重复名且有描述），
+将来谁手滑改了 `defaults`，先红的是它。
+
+**翻完才第一次真正跑到的那条路径，暴露了一个真 bug：`store/with-session-lock`。** 两个文件在同一个
+回合里被读——`harness.loop/drive!` 让一个回合的多个调用并发跑，所以「一次读两个文件」是日常而不是
+边角——**同一个会话的两次铸造从同一个位置起步，给不同的行铸出了同一批锚点**，第二次 claim 撞上
+`hashline_ownership` 的主键 `(thread_id, anchor)`，模型看到的是一次 `read` 报 sqlite 错误。
+不变式本身没写错（锚点对一个会话唯一），错的是**铸造的临界区不够宽**：probe 是会话状态，读它的不只是
+一个路径。`with-path-lock` 按设计盖不住这件事——两个不同的文件本来就该是两把锁。于是新增
+`with-session-lock`，**永远是最外层**，`with-path-lock` 在里层：固定顺序是「两个调用不会互相死锁」的
+全部依据。这个 bug 在 opt-in 期间没露头，因为只有 `editing_mode_tools_test` 里的用例才会连续读两个
+文件，而它们当时读的是同一份内容——**默认一翻，全仓的 read 都走这条路**。
+
+**既有的断言逐条改写，没有一条因为「反正默认变了」被删掉：**
+
+- `tools_test/specs-expose-every-base-tool` 拆成两条（默认的表九件、str-replace 的表六件），两条都在；
+- `tools_test/edit-requires-an-exact-unique-match` 改为**显式在 str-replace 模式下**跑，并补了另一半：
+  默认模式下同一个调用会被指名拒绝、信息里点出 `replace`、**文件一个字节没写**。`edit` 的行为一条
+  都没变，变的是「它在不在场」，所以用例要说清它测的是哪一种；
+- `write-then-read-roundtrips` / `a-bound-session-roots-relative-paths-at-its-project` / `approval_test`
+  两处 / `http_test` 一处：加了一个 `read-lines`（把 `锚点│` 前缀剥掉再逐行比）——**断言行背后的内容**，
+  于是这些用例在两种模式下都成立，而「行长什么样」归 04/05 自己的用例去钉。`a-bound-session-...` 里
+  「相对路径 edit 重根」那半改成按锚点改，因为它要测的是路径算术，不是哪种编辑器；
+- `session_tools_test` 的幂等性检查从 `edit` 换成 `bash`——**两种模式下都在场的名字**才是这条用例想说
+  的（叠加轴与装的是哪个编辑器无关）；同一文件里 `read` 描述的比较对象从「注册表里的 base」改成
+  「未绑定会话看到的 read」，因为 `read` 的描述**跟着模式走**（04），注册表里那份是 str-replace 的；
+- `editing_test/the-default-is-anchor-editing`、`editing_mode_tools_test` 的默认表与自省用例跟进，
+  并新增上面那条元断言与一条**两种模式各自跑通 read→改→撤销**的端到端用例（含「本模式没有的那一步
+  会被指名拒绝，且文件没被动过」）。
+
+**写那条端到端用例时我自己先写错了一条断言**：str-replace 模式下拒绝 `undo_last_replace` 时，我以为
+信息里会出现 `:str-replace`。实际不会——`unserved-message` 是**站在本会话的角度**说话的：「本会话按
+old_string 编辑，undo_last_replace 是锚点那套，请用 replace；要切换就写
+`:editing {:mode :hashline}`」。它说**现在是什么**和**怎么走到另一边**，不复述这个会话的模式名——因为
+名字它刚刚才说过（「edits by an exact old_string」）。断言跟着改成它真正承诺的三件事。
+
+**prompt.md 改成模式中立，并点出自省入口。** 工具清单不再列 `edit`，改成「read / write / bash / eval
+加上**一套**编辑实现」，说清两套的地址方式（锚点 vs 精确 old_string）、工具描述里写着本会话用哪一套、
+以及 `(harness.editing/editing-mode harness.tools/*thread-id*)` 可以问出模式与它的旋钮。项目绑定那两段
+从「read/write/edit」改成「文件工具」。**锚点语法不进 prompt**——prompt 是冻结的代码资产（provider
+前缀缓存的前提），锚点语法归按 thread 送达的工具描述。冻结行为本身由既有的 `prompt-is-frozen` 守着，
+本票没动它。
+
+**术语进 CONTEXT.md**（新文件）：锚点 / 已展示行 / 漂移 / 拒绝即交付 / 批 / 撤销记录 / 编辑模式 / 工具表，
+每个词带「别叫成什么」；`read`、`replace`、`insert`、`undo_last_replace` 一律不给别名。文件里也写下
+「库装状态、文件装记录」这条边界与「prompt 冻结所以不按模式拼两套」。
+
+**README 与示例配置**：新增 `harness.edn.example`（`:editing` 七个键的全量默认值加注释，外加顶层
+`:approval`），README 的家目录清单补上 `harness.edn` / `harness.db`（并写清锚点落在
+`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` / `hashline_undo` 四张表上，**不是**
+一个目录），新增「文件编辑的两种实现」一节。**写示例配置时我把 `:approval` 嵌进了 `:editing`**，发现它
+的方式是把它塞进临时 `CLJ_HARNESS_HOME` 加载一遍：`harness-config` 回了 `{}`，说明整块被当成未知键——
+这正是「坏配置指名失败」那条纪律在替我兜底。
+
+**测试**：全量 **476 tests / 8894 assertions 全绿，连跑两次结果一致**（锚点表与落盘状态不引入顺序
+依赖）。这一票新增/重写的用例分布在 `editing_mode_tools_test`（元断言 + 两种模式各自的端到端）、
+`editing_test`、`tools_test`、`session_tools_test`、`approval_test`、`http_test`。

@@ -412,7 +412,7 @@
 
 ;; -------------------------------------------------------------- the built-ins
 
-;; read/write/edit carry :fence-paths -- when the session is bound to a
+;; The file tools carry :fence-paths -- when the session is bound to a
 ;; project directory, a path resolving outside the project directory AND the
 ;; configuration home parks for approval before it runs. Unbound sessions are
 ;; untouched: the fence is a property of the tool MARKER, engaged only by a

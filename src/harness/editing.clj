@@ -4,14 +4,22 @@
 
   TWO IMPLEMENTATIONS, ONE OF THEM IN EFFECT PER SESSION:
 
-    :str-replace  the original `edit` -- an exact `old_string` replaced, refused
-                  when it is absent or not unique. The DEFAULT, because it is
-                  what this harness already did; moving off it is its own
-                  deliberate act, not a side effect of this namespace existing.
     :hashline     anchor-based editing: `read` returns `anchor│content` rows and
                   `replace`/`insert` address anchors, so a line is named by a
                   token nobody has to guess at, and a stale one is refused
-                  instead of fuzzy-matched.
+                  instead of fuzzy-matched. THE DEFAULT since 2026-09-15.
+    :str-replace  the original `edit` -- an exact `old_string` replaced, refused
+                  when it is absent or not unique. Still first-class, still fully
+                  tested, and one line of harness.edn away.
+
+  WHY THE DEFAULT MOVED, and why it is one line to move back. Anchor editing is
+  what the session does unless somebody says otherwise, because the thing it fixes
+  is not a matter of taste: `old_string` makes the model retype the text it is
+  changing, which is both where the mistakes come from and why an edit costs a
+  re-read of the file afterwards. Nothing about the old mode was removed -- `edit`
+  is registered, its behaviour is unchanged, and `:editing {:mode :str-replace}`
+  puts it back in the toolset -- so a flip of this default is a decision somebody
+  can reverse without losing a capability.
 
   WHY A CONFIGURATION AND NOT A CHOICE THE MODEL MAKES. The two are not
   variations of one thing -- they hand the model different workspaces
@@ -61,8 +69,12 @@
 (def defaults
   "What a session is served by when nobody has said anything. Every key here is
   one the two implementations actually read -- a default for a knob nothing
-  consults would be a promise this namespace cannot keep."
-  {:mode               :str-replace
+  consults would be a promise this namespace cannot keep.
+
+  `:mode` is the one that decides which EDITION of this harness a session gets:
+  anchor editing, or the exact-string editor it had before. See the namespace
+  docstring for why it moved and what moves it back."
+  {:mode               :hashline
    :auto-read          true
    :anchor-grep        true
    :require-path       false

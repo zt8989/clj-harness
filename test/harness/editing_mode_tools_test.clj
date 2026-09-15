@@ -26,6 +26,7 @@
 (def ^:private other-root
   (str (System/getProperty "java.io.tmpdir") "/harness-editing-mode-tools-other"))
 
+
 (io/delete-file root true)
 (io/delete-file other-root true)
 (.mkdirs (io/file root))
@@ -61,6 +62,19 @@
 (defn- spec-names
   ([thread-id] (mapv #(get-in % [:function :name]) (tools/specs thread-id))))
 
+(def ^:private anchor-tools
+  #{"replace" "insert" "anchor_grep" "undo_last_replace"})
+
+(def ^:private str-replace-tools
+  #{"edit"})
+
+(defn- non-editing-names
+  "The names in a session's toolset that belong to NO editing implementation --
+  the ones BOTH modes serve, so a mode assertion can be stated as 'everything
+  else is untouched' without listing the editing tools at all."
+  [thread-id]
+  (remove (into anchor-tools str-replace-tools) (spec-names thread-id)))
+
 (defn- call [thread-id name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}} thread-id))
 
@@ -79,16 +93,80 @@
    :required    []
    :run         (fn [_] (swap! ran conj :ran) "ran")})
 
-;; ------------------------------------------------ the default is unmoved
+;; ------------------------------------------------------- which mode is default
 
-(deftest the-default-toolset-is-what-it-always-was
-  ;; The regression guarantee this whole opt-in plan rests on. Ticket 03 has to
-  ;; land without moving a single existing assertion, and this is the one that
-  ;; would move first if the filter were wired wrong.
-  (is (= ["bash" "edit" "eval" "read" "session-configure" "write"] (spec-names nil))
-      "an unconfigured process is served the base, `edit` and all")
+(deftest the-default-toolset-is-the-anchor-one
+  ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
+  ;; anchor editing, and this is the assertion that would move first if somebody
+  ;; changed it back by accident -- or changed it to something that is neither.
+  (is (= ["anchor_grep" "bash" "eval" "insert" "read" "replace" "session-configure"
+          "undo_last_replace" "write"]
+         (spec-names nil))
+      "an unconfigured process is served the anchor toolset")
   (testing "and a thread with no project file is served the same"
     (is (= (spec-names nil) (spec-names "emt-default")))))
+
+(deftest both-modes-are-complete-and-differ-by-exactly-the-editing-tools
+  ;; The meta-assertion the flip needs: each mode's toolset is WELL-FORMED (no
+  ;; duplicates, every entry named and described), and the two differ by the
+  ;; editing tools and nothing else. Stated as a comparison rather than as two
+  ;; hard-coded lists, so a tool added to neither family shows up as belonging to
+  ;; both -- which is what it should.
+  (set-mode! "emt-meta-anchor" root ":hashline")
+  (let [anchor-names (spec-names "emt-meta-anchor")
+        specs        (tools/specs "emt-meta-anchor")]
+    (testing "no duplicate names, and every entry has a name and a description"
+      (is (= (count anchor-names) (count (set anchor-names))))
+      (is (every? #(seq (get-in % [:function :description])) specs)))
+    (set-mode! "emt-meta-strrep" other-root ":str-replace")
+    (let [strrep-names (spec-names "emt-meta-strrep")]
+      (is (= (count strrep-names) (count (set strrep-names))))
+      (testing "the difference is exactly the editing tools, both directions"
+        (is (= (set (remove (into anchor-tools str-replace-tools) anchor-names))
+               (set (remove (into anchor-tools str-replace-tools) strrep-names)))
+            "the non-editing tools are the same set in both modes")
+        (is (= anchor-tools (set (remove (set strrep-names) anchor-names))))
+        (is (= str-replace-tools (set (remove (set anchor-names) strrep-names))))))))
+
+(deftest each-mode-runs-its-own-whole-path
+  ;; The spec's end-to-end mainline, run once per mode through the SAME seam the
+  ;; model uses: a real file, real answers, nothing else in the session. The
+  ;; per-tool suites already cover each step in depth; what this adds is that a
+  ;; session in either mode can get from a read to a change and back, and that the
+  ;; mode it is NOT in is refused rather than half-working.
+  (let [p (io/file root "mode-path.txt")]
+    (testing "anchor mode: read -> replace -> undo_last_replace"
+      (set-mode! "emt-path" root ":hashline")
+      (spit p "alpha\nbeta\ngamma\n" :encoding "UTF-8")
+      (let [out     (:content (call "emt-path" "read" {:path (str p)}))
+            rows    (str/split-lines out)
+            anchors (mapv #(subs % 0 (str/index-of % "│")) rows)]
+        (is (= 3 (count rows)))
+        (is (every? #(re-matches #"[A-Za-z0-9]{4}│.*" %) rows)
+            "the read came back as anchor rows")
+        (is (false? (:error (call "emt-path" "replace" {:remove_from (second anchors)
+                                                        :replacement_lines ["BETA"]}))))
+        (is (= "alpha\nBETA\ngamma\n" (slurp p :encoding "UTF-8")))
+        (is (false? (:error (call "emt-path" "undo_last_replace" {:path (str p)}))))
+        (is (= "alpha\nbeta\ngamma\n" (slurp p :encoding "UTF-8"))
+            "and the file is back where it started")))
+    (testing "str-replace mode: read -> edit, and the anchor tools are not served"
+      (set-mode! "emt-path" root ":str-replace")
+      (is (= "alpha\nbeta\ngamma\n" (:content (call "emt-path" "read" {:path (str p)})))
+          "plain text, no anchor column")
+      (is (false? (:error (call "emt-path" "edit" {:path (str p)
+                                                   :old_string "beta"
+                                                   :new_string "BETA"}))))
+      (is (= "alpha\nBETA\ngamma\n" (slurp p :encoding "UTF-8")))
+      (testing "and the step this mode does not have is named as such"
+        (let [{:keys [content error]} (call "emt-path" "undo_last_replace" {:path (str p)})]
+          (is (true? error))
+          (is (str/includes? content "not served"))
+          (is (str/includes? content "old_string")
+              "saying what THIS session edits by")
+          (is (str/includes? content ":editing") "and which key switches the mode")
+          (is (= "alpha\nBETA\ngamma\n" (slurp p :encoding "UTF-8"))
+              "and nothing was undone behind the refusal"))))))
 
 ;; ------------------------------------------------- hashline subtracts edit
 
@@ -98,24 +176,34 @@
     (is (not (contains? (set names) "edit")))
     (testing "and everything that is not an editing tool is untouched"
       (is (= ["bash" "eval" "read" "session-configure" "write"]
-             (remove #{"edit" "replace" "insert" "anchor_grep" "undo_last_replace"} names))))))
+             (non-editing-names "emt-anchor"))))))
 
 (deftest str-replace-mode-does-not-serve-the-anchor-tools
-  ;; Exercised through stand-ins: the anchor tools land in 04-07, and this test
-  ;; is about the FILTER, not about those tools' bodies. Registering them by name
-  ;; for one session is the honest way to prove the rule without shipping a tool
-  ;; that cannot yet do its job -- which would be the worse lie.
+  ;; The other direction, and it is not symmetry for its own sake: `edit` is the
+  ;; only editor available in this mode, so a session that chose it must not be
+  ;; served a second, incompatible one alongside.
+  (set-mode! "emt-strrep" root ":str-replace")
+  (let [names (spec-names "emt-strrep")]
+    (testing "none of the anchor tools reach the model"
+      (is (not-any? #(contains? (set names) %) anchor-tools)))
+    (testing "and `edit` does"
+      (is (contains? (set names) "edit")))
+    (testing "with everything else untouched"
+      (is (= ["bash" "eval" "read" "session-configure" "write"]
+             (non-editing-names "emt-strrep"))))))
+
+(deftest a-session-added-tool-is-served-by-the-filter-not-by-the-mode
+  ;; The stand-in half of this file's original shape, kept because it proves a
+  ;; property the real tools cannot: the filter works on NAMES. A session that
+  ;; registers its own tool under an anchor-mode name gets it served in anchor
+  ;; mode and withheld in string mode, with no code anywhere that knows about it.
   (let [ran (atom [])]
-    (doseq [n ["replace" "insert" "anchor_grep" "undo_last_replace"]]
-      (tools/session-register! "emt-strrep" n (stub ran)))
-    (testing "in the default mode none of them reach the model"
-      (is (not-any? #(contains? (set (spec-names "emt-strrep")) %)
-                    ["replace" "insert" "anchor_grep" "undo_last_replace"])))
-    (testing "in hashline mode the same registrations are served"
-      (set-mode! "emt-strrep" root ":hashline")
-      (is (every? #(contains? (set (spec-names "emt-strrep")) %)
-                  ["replace" "insert" "anchor_grep" "undo_last_replace"]))
-      (is (not (contains? (set (spec-names "emt-strrep")) "edit"))))))
+    (set-mode! "emt-standin" root ":hashline")
+    (tools/session-register! "emt-standin" "anchor_grep" (stub ran))
+    (is (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+    (set-mode! "emt-standin" root ":str-replace")
+    (is (not (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+        "the mode subtracts it by name, having no idea what it is")))
 
 (deftest the-mode-sees-every-registered-tool-even-the-ones-it-does-not-serve
   ;; 'Not in the toolset' and 'not in the registry' are different claims: the
@@ -249,10 +337,10 @@
   (is (= :hashline (:mode (binding [tools/*thread-id* "emt-ask"]
                             (editing/editing-mode tools/*thread-id*)))))
   (testing "unbound, the same call answers for no session at all -- the default"
-    (is (= :str-replace (:mode (editing/editing-mode tools/*thread-id*)))))
+    (is (= :hashline (:mode (editing/editing-mode tools/*thread-id*)))))
   (testing "and unbinding the thread drops the project level"
     (project/bind! "emt-ask" nil)
-    (is (= :str-replace (:mode (editing/editing-mode "emt-ask"))))))
+    (is (= :hashline (:mode (editing/editing-mode "emt-ask"))))))
 
 (deftest a-broken-harness-edn-fails-where-it-is-read-not-silently-the-other-way
   ;; The mode is read while the provider request is BUILT, so a broken block now

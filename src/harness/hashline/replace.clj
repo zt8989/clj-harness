@@ -548,9 +548,15 @@
                                   t))))
         path     (resolve-target thread-id resolve-path (first args-vec)
                                  (anchor-of first-))]
-    (store/with-path-lock
-     path
+    ;; SESSION FIRST, PATH SECOND -- the fixed order store/with-session-lock
+    ;; describes. An edit MINTS for the lines it adds, so it is not independent of
+    ;; a read of another file in the same turn: both walk the session's probe.
+    (store/with-session-lock
+     thread-id
      (fn []
+       (store/with-path-lock
+        path
+        (fn []
        (let [{:keys [text bom ending mode]} (files/read-file path)
              plans (disjoint! (vec (map-indexed
                                     (fn [i a]
@@ -605,7 +611,7 @@
                (store/mark-served! thread-id path shown)
                (if (seq @warnings)
                  (str "Note: " (str/join " " @warnings) "\n\n" text)
-                 text)))))))))
+                 text)))))))))))
 (defn perform!
   "Run ONE anchor edit for THREAD-ID -- a `replace` or an `insert`, told apart by the
   payload (see `plan-edit`).

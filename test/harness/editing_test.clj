@@ -50,13 +50,21 @@
 
 ;; ------------------------------------------------------------------ defaults
 
-(deftest the-default-is-str-replace
-  ;; The regression guarantee the whole opt-in plan rests on: landing ticket 01
-  ;; must not move any existing session off the `edit` it already had.
-  (is (= :str-replace (:mode (editing/editing-mode))))
-  (is (= :str-replace (:mode (editing/editing-mode "ed-default"))))
+(deftest the-default-is-anchor-editing
+  ;; Ticket 12 flipped this from :str-replace. The assertion is worth keeping
+  ;; pointed at the CURRENT default rather than at the value it happened to have
+  ;; when ticket 01 landed: what it is for is catching a change nobody meant, and
+  ;; the flip was a change somebody did mean.
+  (is (= :hashline (:mode (editing/editing-mode))))
+  (is (= :hashline (:mode (editing/editing-mode "ed-default"))))
   (testing "and the whole block is answered, every key defaulted"
-    (is (= editing/defaults (editing/editing-mode "ed-default")))))
+    (is (= editing/defaults (editing/editing-mode "ed-default"))))
+  (testing "and a session that wants the exact-string editor says so, one key"
+    (project/bind! "ed-default" root)
+    (write-project! "{:editing {:mode :str-replace}}")
+    (is (= :str-replace (:mode (editing/editing-mode "ed-default"))))
+    (is (= :on (:boundary-dedup (editing/editing-mode "ed-default")))
+        "and the other keys keep their defaults -- the block composes by key")))
 
 (deftest a-local-dir-without-the-file-is-just-as-empty
   (.mkdirs (io/file root ".harness"))

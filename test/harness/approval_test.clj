@@ -30,6 +30,20 @@
 
 (defn- phases [seen] (filterv #(contains? lifecycle (:type %)) seen))
 (defn- results [seen] (filterv #(= :tool/result (:type %)) seen))
+
+(defn- read-lines
+  "What `read` returned, as plain lines -- with the `anchor|` prefix stripped when
+  this session's mode puts one there.
+
+  Cases here are about the FENCE -- did the call run, was it parked, was it freed --
+  and not about what a row looks like, so they assert the content the rows carry.
+  The row shape has its own tests."
+  [content]
+  (mapv (fn [line]
+          (if-let [i (str/index-of line "\u2502")]
+            (subs line (inc i))
+            line))
+        (str/split-lines content)))
 (defn- tool-msgs [history] (filterv #(= "tool" (:role %)) history))
 (defn- run
   ([provider messages thread-id] (run provider messages thread-id nil))
@@ -405,7 +419,7 @@
                                {:content "done"}])
                [] "thr-never-bound")]
       (is (= :run/end (:type (last seen))))
-      (is (= "reachable" (:content (first (results seen)))))
+      (is (= ["reachable"] (read-lines (:content (first (results seen))))))
       (is (= 1 (count (tool-msgs history)))))))
 
 ;; ------------------------------------------------- the fence, configurable
@@ -441,7 +455,7 @@
              [] thr)]
     (testing "a path that was out of bounds runs, because the project freed it"
       (is (= :run/end (:type (last seen))))
-      (is (= "free to read" (:content (first (results seen)))))
+      (is (= ["free to read"] (read-lines (:content (first (results seen))))))
       (is (= 1 (count (tool-msgs history)))))))
 
 (deftest strict-tightens-the-fence-over-the-project-itself

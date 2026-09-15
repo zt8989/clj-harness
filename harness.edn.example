@@ -1,0 +1,80 @@
+;; harness.edn -- the knobs that are NOT about a provider, model or key.
+;;
+;; Copy this to ~/.clj-harness/harness.edn (the configuration home) and edit.
+;; A project can also carry its own at <project>/.harness/harness.edn, and the
+;; two compose: the project wins for what it says, the user level answers for
+;; the rest.
+;;
+;; EXCEPT FOR :editing, which composes KEY BY KEY -- see below. Every other
+;; top-level key is replaced WHOLE by the project level, so a project that
+;; mentions :approval decides all of it.
+;;
+;; Everything here is read FRESH on every call: edit this file and the session
+;; obeys it without a restart. A MISSING file is "nothing was said" and every key
+;; takes its default; a file that EXISTS and cannot be read is a named failure,
+;; never a quiet fallback -- a config that was ignored and a config that said
+;; nothing look identical from outside, and that difference is the whole point of
+;; this file.
+;;
+;; Every key below is shown at its DEFAULT value, so this doubles as the
+;; reference. Delete anything you have not changed.
+
+{:editing
+ {;; Which file-editing implementation this session is served. One per session,
+  ;; never both: the two hand the model different workspaces (a per-line anchor
+  ;; versus an exact old_string), and a model that can see both reaches for
+  ;; whichever it recognises first.
+  ;;
+  ;;   :hashline     read returns `anchor│content` rows; replace / insert address
+  ;;                 those anchors; the answer to an edit carries the changed
+  ;;                 region WITH its current anchors, so the next edit needs no
+  ;;                 re-read. THE DEFAULT.
+  ;;   :str-replace  the original `edit`: an exact old_string, refused when it is
+  ;;                 absent or not unique.
+  ;;
+  ;; Switching is one line and loses nothing -- both are first-class and both
+  ;; have complete test coverage.
+  :mode :hashline
+
+  ;; A successful `write` is followed by an anchored read of the file's head, so
+  ;; the model can edit what it just wrote without reading it back. false leaves
+  ;; it a sentence saying to read the file instead.
+  :auto-read true
+
+  ;; The `anchor_grep` tool (ripgrep, every hit back as an anchored row). false
+  ;; takes the tool out of the session's toolset; nothing replaces it, and `bash`
+  ;; is there if you need a search.
+  :anchor-grep true
+
+  ;; Require `path` on replace / insert, and check it against the anchor's owner.
+  ;; Off by default: an anchor already names exactly one file in one session, so
+  ;; the path is redundant unless a caller wants it said out loud.
+  :require-path false
+
+  ;; Refuse the slips an edit's payload can carry (a pasted row, an embedded
+  ;; newline, a whole JSON array in one element) instead of fixing them. false --
+  ;; the default -- fixes them and SAYS what it fixed.
+  :strict-input false
+
+  ;; What to do when a replacement re-includes the line just outside its range:
+  ;;   :on      strip it and report it (default)
+  ;;   :strict  refuse the edit and say which lines to drop
+  ;;   :off     apply it literally
+  :boundary-dedup :on
+
+  ;; How many untouched lines an edit's answer shows either side of the change
+  ;; (0-10).
+  :diff-context-lines 1}
+
+ ;; The project fence. When a session is bound to a project directory, a file
+ ;; tool whose path resolves outside the project directory AND the configuration
+ ;; home parks for human approval before it runs.
+ :approval
+ {;; Extra paths to treat as inside the fence. Relative paths resolve against
+  ;; the project root.
+  :allow []
+
+  ;; true takes the project directory ITSELF out of the allowed set: every file
+  ;; tool parks, even for files in the project. The configuration home is never
+  ;; tightened.
+  :strict false}}
