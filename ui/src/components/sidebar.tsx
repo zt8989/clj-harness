@@ -54,6 +54,19 @@
 // feature rests on: every session belongs to a project, so the first one needs a
 // project to exist first.
 //
+// THE SAME THREE STEPS ALSO RUN FROM A PROJECT'S OWN ROW. The header button
+// starts a session in the SELECTED project -- derived, because "another task
+// here" is what a person usually means -- and the row's button starts one in THAT
+// project, which is the unambiguous version of the same wish. Both are guarded
+// the same way and both land on the same helper; only the project differs, and
+// only the refusal's destination differs (the header for the button with no row,
+// the row itself for the one that has it).
+//
+// The row's button REPLACES THE SESSION COUNT that used to sit there. The count
+// was a number you could read and do nothing with, drawn where an action belongs,
+// and the sessions it counted are listed one line below it anyway. What is lost
+// is the at-a-glance "how many are in here"; the answer is now the list itself.
+//
 // ------------------------------------------------------- adding a project's shape
 //
 // ONE CLICK, ONE OS DIALOG, ONE ROW. The folder button opens the native picker
@@ -446,6 +459,20 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     }
   };
 
+  /// The shared core of every "new session": mint, bind, switch. See this file's
+  /// header for why in that order -- and note that an id whose bind FAILED is
+  /// never adopted, because the session does not exist and switching to it would
+  /// leave the page on a thread with no home. Throws what the server threw; which
+  /// slot that lands in is the caller's business, since only the caller knows
+  /// which button was clicked.
+  const startSessionIn = async (project: ProjectSummary): Promise<void> => {
+    const id = crypto.randomUUID();
+    await bindThread(id, project.path);
+    await runtime.threads.switchToThread(id);
+  };
+
+  /// A new session from the header button: in the derived selection, with the
+  /// refusals landing under the header because that button has no row of its own.
   const newTask = async () => {
     if (busy) return;
     if (runInProgress(runtime)) {
@@ -468,16 +495,44 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     setBusy(true);
     setNewTaskError(null);
     setRowError(null);
+    setProjectError(null);
     try {
-      // Mint, then bind, then switch -- see this file's header for why in that
-      // order. An id whose bind FAILED is never adopted: the session does not
-      // exist, and switching to it would leave the page on a thread with no home.
-      const id = crypto.randomUUID();
-      await bindThread(id, project.path);
-      await runtime.threads.switchToThread(id);
+      await startSessionIn(project);
       await refresh();
     } catch (failure: unknown) {
       setNewTaskError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /// A new session from a PROJECT'S OWN ROW: the same three steps in the project
+  /// that was clicked, and the refusal lands on that row -- which is the whole
+  /// reason this exists next to `newTask` rather than inside it. The project is
+  /// not pinned: the switch makes this session the current one, and the selection
+  /// is derived from that (see the effect above), so a pin would be a second
+  /// opinion about a fact already settled.
+  const newSession = async (project: ProjectSummary): Promise<void> => {
+    if (busy) return;
+    if (runInProgress(runtime)) {
+      // The same sentence the header button uses, because it is the same reason
+      // -- a run belongs to the thread it started on -- said on the row whose
+      // click raised it. A paraphrase would be a second wording of one rule.
+      setProjectError({ path: project.path, message: RUN_IN_PROGRESS_NEW_THREAD_REFUSAL });
+      return;
+    }
+    setBusy(true);
+    setProjectError(null);
+    setRowError(null);
+    setNewTaskError(null);
+    try {
+      await startSessionIn(project);
+      await refresh();
+    } catch (failure: unknown) {
+      setProjectError({
+        path: project.path,
+        message: failure instanceof Error ? failure.message : String(failure),
+      });
     } finally {
       setBusy(false);
     }
@@ -579,6 +634,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             removeError={projectError?.path === project.path ? projectError.message : null}
             onOpen={(threadId) => void openThread(threadId, project.path)}
             onArchive={(threadId, archived) => void archive(project, threadId, archived)}
+            onNewSession={() => void newSession(project)}
             onRemove={() => void remove(project)}
           />
         ))}
@@ -625,11 +681,18 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 /// in last-activity order (the server's order -- see `newest-first`), then -- when
 /// there are any -- an Archived group collapsed by default.
 ///
-/// The row carries two hits: the row itself, which selects the project and folds
-/// it, and a "more" button that appears on hover and opens the menu holding
-/// "Remove project…". They are SIBLINGS for the reason this file's header gives:
-/// a trigger nested in the row would fold the folder open every time somebody
-/// reached for the menu.
+/// The row carries THREE hits: the row itself, which selects the project and
+/// folds it; a new-session button; and a "more" button that appears on hover and
+/// opens the menu holding "Remove project…". The last two are SIBLINGS of the
+/// row rather than children of it, for the reason this file's header gives: a
+/// trigger nested in the row would fold the folder open every time somebody
+/// reached for it.
+///
+/// The new-session button is a sibling for exactly that reason too -- it is where
+/// the session count used to be, which only looked like part of the row because a
+/// number cannot be clicked. It stays VISIBLE rather than appearing on hover, the
+/// way the count did: it is the row's primary verb, and an action you have to go
+/// looking for is one people do not find.
 const ProjectSection: FC<{
   project: ProjectSummary;
   currentThreadId: string;
@@ -641,6 +704,7 @@ const ProjectSection: FC<{
   removeError: string | null;
   onOpen: (threadId: string) => void;
   onArchive: (threadId: string, archived: boolean) => void;
+  onNewSession: () => void;
   onRemove: () => void;
 }> = ({
   project,
@@ -653,6 +717,7 @@ const ProjectSection: FC<{
   removeError,
   onOpen,
   onArchive,
+  onNewSession,
   onRemove,
 }) => {
   // If the session on screen is in this project -- among the ones the project
@@ -772,13 +837,25 @@ const ProjectSection: FC<{
           >
             {name}
           </span>
-          {/* The count is of the sessions you can SEE, which is the unarchived
-              ones: a badge that counted the archived too would make "3" mean
-              "3 rows once you go looking for them". */}
-          <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-            {active.length}
-          </span>
         </button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          data-slot="sidebar-project-new-session"
+          // Disabled only while a request is in flight. A run in flight is NOT
+          // this button's disabled state: it is a refusal WITH A SENTENCE, and
+          // the click is how you get to read it (see `newSession`).
+          disabled={busy}
+          onClick={onNewSession}
+          title="New session — starts an empty conversation in this project"
+          className="text-muted-foreground hover:text-foreground shrink-0"
+        >
+          <SquarePenIcon
+            data-slot="sidebar-project-new-session-icon"
+            className="size-3.5"
+          />
+          <span className="sr-only">New session</span>
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
