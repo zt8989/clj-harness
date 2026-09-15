@@ -259,7 +259,8 @@
   cost of not caching is one small file read per run."
   [thread-id]
   (let [gathered (preamble/gather
-                  {:files (project/preamble-files thread-id)})]
+                  {:files (project/preamble-files thread-id)
+                   :roots (project/skill-roots thread-id)})]
     (doseq [{:keys [path]} (:instructions gathered)]
       (hook/emit :instructions-loaded {:path path}))
     (preamble/messages gathered)))

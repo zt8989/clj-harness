@@ -32,13 +32,24 @@
     (spit f content :encoding "UTF-8")
     path))
 
+(defn- wipe-conventions!
+  "Clear what the tests above wrote into the pinned OS home. The pinned home is
+  ONE directory for the whole process, so a file one test left behind would be
+  read by every later one -- the discipline project_test applies to harness.edn."
+  []
+  (doseq [f (reverse (file-seq (io/file (home/user-home))))]
+    (when-not (= (str (io/file (home/user-home))) (str f))
+      (io/delete-file f true))))
+
 (use-fixtures :each
   (fn [f]
     (reset! tmp-dirs [])
+    (wipe-conventions!)
     (try (f)
          (finally
            (doseq [d @tmp-dirs] (io/delete-file d true))
-           (doseq [t ["pr-1" "pr-2" "pr-3" "pr-4"]]
+           (wipe-conventions!)
+           (doseq [t ["pr-1" "pr-2" "pr-3" "pr-4" "pr-5" "pr-6"]]
              (project/bind! t nil))))))
 
 (deftest the-two-defaults-are-the-host-conventions
@@ -219,3 +230,38 @@
         (is (= [f] (mapv :path (:instructions (preamble/report g)))))
         (is (= [(count "trimmed")] (mapv :chars (:instructions (preamble/report g)))))
         (is (= (count "trimmed") (count (:content (first (:instructions g))))))))))
+
+(deftest the-catalog-goes-last-of-the-opening-blocks
+  (let [proj  (tmp-project! "order")
+        _     (project/bind! "pr-6" proj)
+        u     (user-agents)
+        p     (project-agents proj "project rules\n")
+        root  (let [r (str (io/file (home/user-home) ".agents" "skills"))]
+                (.mkdirs (io/file r "alpha"))
+                (spit! (str (io/file r "alpha" "SKILL.md"))
+                       "---\nname: alpha\ndescription: alpha does a thing\n---\n\nBODY\n")
+                r)]
+    (try
+      (let [msgs (preamble/messages (preamble/gather {:files [u p] :roots [root]}))]
+        (testing "rules first, then the menu of what else is available"
+          (is (= 3 (count msgs)))
+          (is (str/includes? (:content (first msgs)) "user rules"))
+          (is (str/includes? (:content (second msgs)) "project rules"))
+          (is (str/starts-with? (:content (nth msgs 2)) "<skills>")))
+
+        (testing "and the catalog body never leaks the skill's text"
+          (is (str/includes? (:content (nth msgs 2)) "- alpha: alpha does a thing"))
+          (is (not (str/includes? (:content (nth msgs 2)) "BODY")))))
+
+      (testing "no usable skills: no third block at all"
+        (let [msgs (preamble/messages (preamble/gather {:files [u p] :roots []}))]
+          (is (= 2 (count msgs)))))
+
+      (testing "the report counts the catalog too, so its weight is visible"
+        (let [g (preamble/gather {:files [u p] :roots [root]})]
+          (is (pos? (get-in (preamble/report g) [:skills :chars]))))
+        (let [g (preamble/gather {:files [u p] :roots []})]
+          (is (nil? (:skills (preamble/report g))))))
+      (finally
+        (io/delete-file (io/file (home/user-home) ".agents") true)
+        (project/bind! "pr-6" nil)))))

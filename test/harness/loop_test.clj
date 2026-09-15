@@ -1,8 +1,10 @@
 (ns harness.loop-test
   (:require [clojure.core.async :as async]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.loop :as loop]
+            [harness.project :as project]
             [harness.tools :as tools]))
 
 (defn- drain-chan [ch]
@@ -111,3 +113,39 @@
         (drive {:protocol :explodes} [])]
     (is (= [:run/start :run/error] (mapv :type seen)))
     (is (string? (:message (last seen))))))
+
+;; ------------------------------------------------------------- skill injection
+
+(deftest a-loaded-skill-body-is-in-the-very-next-request
+  ;; The point of deriving rather than remembering: a load has to be visible to
+  ;; the NEXT call, because the model asked for the instructions in order to
+  ;; follow them now. This asserts that through the real loop, not the function.
+  (let [root (str (System/getProperty "java.io.tmpdir")
+                  "/harness-loop-skills-" (System/nanoTime))]
+    ;; Under .agents/skills, which is the convention directory the default roots
+    ;; point at -- laying it at the project root would make it a skill this
+    ;; session never looks for.
+    (.mkdirs (java.io.File. root ".agents/skills/alpha"))
+    (spit (str root "/.agents/skills/alpha/SKILL.md")
+          "---\nname: alpha\ndescription: a thing\n---\n\n# alpha\n\nALPHA BODY\n"
+          :encoding "UTF-8")
+    (project/bind! "t-skills" root)
+    (let [{:keys [history]}
+          (drain-chan (loop/run-chan (fake/scripted [{:content ""
+                                                      :tool-calls [{:id "c1" :name "skill"
+                                                                    :arguments {:name "alpha"}}]}
+                                                     {:content "done"}])
+                                     [{:role "user" :content "load alpha"}]
+                                     {:thread-id "t-skills"}))]
+      (testing "the body is in the history, as a user message right after the tool result"
+        (let [roles (mapv :role history)
+              idx   (.indexOf roles "tool")]
+          (is (some? idx))
+          (is (str/includes? (str (:content (nth history (inc idx)))) "ALPHA BODY"))
+          (is (str/starts-with? (str (:content (nth history (inc idx)))) "<skill name=")))))
+    (project/bind! "t-skills" nil)))
+
+(deftest a-run-with-no-skill-loads-is-untouched
+  (let [{:keys [history]} (drive (fake/scripted [{:content "hi"}]) [{:role "user" :content "go"}])]
+    (testing "nothing is spliced in when nothing was loaded"
+      (is (= ["user" "assistant"] (mapv :role history))))))

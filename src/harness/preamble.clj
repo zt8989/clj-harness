@@ -23,7 +23,8 @@
   different floors."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [harness.home :as home])
+            [harness.home :as home]
+            [harness.skills :as skills])
   (:import [java.nio ByteBuffer]
            [java.nio.charset CharacterCodingException CodingErrorAction StandardCharsets]
            [java.nio.file Files]))
@@ -98,6 +99,7 @@
 
     {:instructions [{:path .. :content ..}]   in the order given, so the more
                                               specific file comes last
+     :skills       <the catalog text, or nil> when ROOTS is given
      :skipped      [{:path .. :reason ..}]}
 
   Two failures, two policies, and the split is deliberate:
@@ -115,7 +117,7 @@
   inconsistency: a skill is one entry on a menu and a broken one must not sink a
   session, while an instruction file is a standing statement about how the
   session must work."
-  [{:keys [files]}]
+  [{:keys [files roots]}]
   (reduce
    (fn [acc path]
      (let [f (io/file path)]
@@ -138,20 +140,35 @@
            (if (str/blank? content)
              (update acc :skipped conj {:path path :reason :empty})
              (update acc :instructions conj {:path path :content content}))))))
-   {:instructions [] :skipped []}
+   {:instructions [] :skipped [] :skills (some-> roots skills/catalog-text)}
    files))
+
+(defn- skills-message
+  "The catalog block, or nil when this session has no usable skills. Same shape
+  as an instruction message and for the same reason: a user message and nothing
+  else, so it never becomes an AG-UI frame."
+  [text]
+  (when (seq text)
+    {:role "user" :content (str "<skills>\n" text "\n</skills>")}))
 
 (defn messages
   "GATHERED -> the ordered user messages a run opens with.
 
   THE ORDER IS THE DECISION THIS FUNCTION EXISTS TO MAKE, and it is semantics
-  rather than typography: the files are presented in the order they were
-  resolved (the OS home's first, the project's second), so the more specific
-  statement is the nearer one. Whatever else joins the opening -- the skills
-  catalog -- goes after them and before the conversation: standing rules first,
-  then the menu of what else is available."
-  [{:keys [instructions]}]
-  (mapv instruction-message instructions))
+  rather than typography:
+
+    1. the instruction files, in the order they were resolved -- the OS home's
+       first, the project's second, so the more specific statement is the nearer
+       one;
+    2. the skills catalog, last of the opening blocks and still ahead of the
+       conversation.
+
+  Standing rules first, then the menu of what else is available: a model that
+  reads in order meets the constraints it must always honour before the optional
+  capabilities it may reach for."
+  [{:keys [instructions skills]}]
+  (cond-> (mapv instruction-message instructions)
+    (seq skills) (conj (skills-message skills))))
 
 (defn report
   "GATHERED -> what a session (or a human) asking 'what does this run open with'
@@ -162,8 +179,9 @@
   the files: the model's cost is the text it is handed, and trimmed whitespace
   is not handed to it. Nothing is truncated to fit here -- an oversized
   AGENTS.md goes in whole -- which is exactly why the number is worth reporting."
-  [{:keys [instructions skipped]}]
-  {:instructions (mapv (fn [{:keys [path content]}]
-                         {:path path :chars (count content)})
-                       instructions)
-   :skipped (mapv identity skipped)})
+  [{:keys [instructions skills skipped]}]
+  (cond-> {:instructions (mapv (fn [{:keys [path content]}]
+                                 {:path path :chars (count content)})
+                               instructions)
+           :skipped (mapv identity skipped)}
+    (seq skills) (assoc :skills {:chars (count skills)})))
