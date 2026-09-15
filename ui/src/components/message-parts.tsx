@@ -15,7 +15,7 @@
 // registered for `read`, and the `read` calls drew it while `write` and `bash`
 // still fell through to the card below.) No tool in this repo needs its own
 // presentation today: all six are a name, some arguments and a result, and the
-// old CopilotKit page used a single wildcard renderer for exactly the same
+// the pre-runtime page used a single wildcard renderer for exactly the same
 // reason. So the fallback is the only renderer registered, and a new tool shows
 // up in the transcript with no front-end change -- which is the property worth
 // keeping.

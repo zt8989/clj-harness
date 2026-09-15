@@ -1,4 +1,4 @@
-// The real @ag-ui/client -- the same HttpAgent CopilotKit runs on underneath --
+// The real @ag-ui/client -- the same HttpAgent the runtime drives underneath --
 // driving a live harness. From ui/verify.mjs.
 //
 // What this proves that an offline test structurally cannot: the frames the

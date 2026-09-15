@@ -151,7 +151,32 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
 
 ## 状态
 
-七票（原八票，07 作废），票在 `issues/`：
+**特征收口（2026-09-15）：七票全部走完——01–06 已落地，07 置 `wontfix`，08 已落地。**
+
+各票验到的程度与证据：
+
+- **01 构建换 TypeScript，页面直译**：真 Chromium 逐条对位（聊天/工具卡/reasoning/审批/会话/项目面板六项）。
+  截图在 `.scratch/cljs-ui/` 时代已建立的对位基准上比对。浏览器实测答案：threadId 主人是 agent（当时装配）。
+- **02 用例搬 TS、CLJS 离场**：`tsc` 0 error + build 绿 + 11 tests passed；仓库 0 个 `.cljs`、无 shadow-cljs
+  配置、构建不再需要 Java。未覆盖：无。
+- **03 运行时接管页面**：真 Chromium 验收（文本对话 + threadId 三条实测），截图与证据见 issues/03。
+  产量是决策 6 的中段结论（适配器只读 agent.threadId，归属不变——当时还没走 threadList）。
+- **04 工具卡与折叠 reasoning**：真 Chromium（read/write 卡与 reasoning 默认折叠），截图 issues/04 留档。
+- **05 审批门**：真 Chromium 双路验收（批准/否决 + 一发多 park 的死锁修复回归），t05-01..06 截图。
+  产量：稳定 hooks 结论写进已知风险（`unstable_*` 一处未引）。
+- **06 会话面板**：真 Chromium 全主线（起两轮同文件 / 新建 T2 新文件 / 恢复 T1 历史回屏 + 日志审计行 /
+  续聊追加 15 800→28 127 B / run 中拒绝 / 损坏日志原话 / 刷新与 current 标记），t06-01/02/03 截图在
+  `.scratch/assistant-ui/evidence/`。未覆盖：恢复 parked 会话审批卡不回来——已实测确认根因在服务端
+  `frames.clj`（折掉 RUN_FINISHED），属 JVM 侧禁区，结论写进已知风险。
+- **07 项目目录面板**：置 `wontfix`（被 `.scratch/project-sidebar` 取代），无验收产物；票面里仍成立的部分
+  与三条 `/api/project` 路由的去向见该票文件。
+- **08 CopilotKit 出局与文档收口**：依赖移除（`npm install` 清掉 408 个传递包）；`ui/src` 与 `ui/test` 下的
+  CopilotKit 字样清零（含注释）；CLJS 复核清零（`.cljs` / shadow-cljs.edn / `cljs-test/` / helix 全无）；
+  build 绿 + 11 tests passed；`dist/` 产物 grep `copilotkit`（大小写不敏感）0 命中——03 起页面无引用，
+  Vite 本就未打包它，bundle hash 不变恰好是旁证；README 前端章节重写（语言/依赖/启动/构建/5173 契约/
+  样式体系/验收方式）；`cljs-ui/spec.md` 记下作废的决策与仍然有效的决策 6。
+
+票在 `issues/`：
 
 - 01 构建换成 TypeScript，页面直译后行为零变化（无阻塞，可立即开始）
 - 02 四组用例跟着搬到 TypeScript，CLJS 工具链整体离场（阻塞于 01）
@@ -161,7 +186,7 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
 - 06 会话：列表 / 恢复 / 新建（阻塞于 03，已落地）
 - 07 ~~项目目录面板（阻塞于 03）~~ **2026-09-15 置 `wontfix`**：被 `.scratch/project-sidebar`
   取代（项目搬进侧边栏、绑定挪到建会话时）。它要的三条路由已经落地，行为契约搬去了那份特征的 05
-- 08 CopilotKit 出局与文档收口（阻塞于 04, 05, 06——原为 04, 05, 06, 07，07 作废后去掉）
+- 08 CopilotKit 出局与文档收口（阻塞于 04, 05, 06——原为 04, 05, 06, 07，07 作废后去掉），**已落地**
 
 ## 已知风险
 
@@ -174,6 +199,8 @@ assistant-ui 是 TS 库，它的渲染函数、状态选择器、part 形状都�
   TSX。不是意外，但不要装完不看。
 - **`adapters.threadList` 是 experimental**：06 压在它上面，文档自己写着「可能在不通知的情况下更改」。
   它同时是 06 的两条路之一（另一条是 `adapters.history` + `fromAgUiMessages`），哪条可用要实测。
+  **这条风险随 06 一起有退役日期**：会话面板（顶部横排）将被 `.scratch/project-sidebar` 搬进侧边栏，
+  搬完后本条风险跟着这段实现一起消失，不要在它退役后还留在风险清单里。
 
   **06 落地后的结论：用了它**（多线程来回切正是它的形状；`adapters.history` 是单线程页载恢复的形状，
   撑不起切换）。它的 `onSwitchToThread` 在 ag-ui 包装层与 core 声明**返回值类型不同**（ag-ui 要求返回

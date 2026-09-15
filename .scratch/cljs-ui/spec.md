@@ -1,5 +1,23 @@
 # spec: cljs-ui
 
+> **被取代（2026-09-15）。** 本特征已被 `.scratch/assistant-ui`（ui 换语言 + 换库）整体取代，本文件留作记录。
+> 对应关系：
+>
+> - **决策 1（保留 CopilotKit v1.71）作废**——CopilotKit 已从仓库彻底出局：页面装配换 `@assistant-ui/react-ag-ui`
+>   的 `useAgUiRuntime`，验收客户端不再是它，依赖与产物里都搜不到（assistant-ui 08 号票）。
+> - **决策 2（helix）作废**——前端回到 TypeScript + React，无 helix。
+> - **决策 3（shadow-cljs 桥，含自写 `vite-plugin-cljs`）作废**——仓库里没有第二个编译器了：Vite 单工具链
+>   （`@vitejs/plugin-react` + `@tailwindcss/vite`），构建不再需要 Java 21。
+> - **决策 5（删掉 TS 版本）被反向执行**——assistant-ui 特征 01/02 把语言搬回 TypeScript，CLJS 整体离场；
+>   本特征「只留一份实现」的原则保留，只是留下的那份是 TS。
+> - **「刻意不引样式体系」的立场被反转**——本特征引入 Tailwind v4 + shadcn（assistant-ui 决策 3）。理由：
+>   assistant-ui 官方组件按 Tailwind 工具类写成，抄源码路线没有样式体系就无法落地；接线与对账基准见
+>   README「样式体系」一节。
+> - **决策 8（`ui/*.mjs` 验证脚本不动）本身已过期**——那批脚本今天已不在仓库里，其覆盖面由 `ui/test/suites/`
+>   的四组 TypeScript 套件接走（assistant-ui 02 号票）。
+> - **仍然有效的一条**：决策 6（dev server 钉 5173 是 CORS 契约不是偏好）在新特征里原样保留，README 与
+>   `vite.config.js`（`strictPort: true`）都还写着这句话。
+
 把 `ui/` 的胶水层从 TypeScript 译成 ClojureScript，让这个仓库里不再有 TypeScript。
 
 ## 背景与定位

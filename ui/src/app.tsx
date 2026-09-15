@@ -31,13 +31,15 @@
 // run is in flight, from the runtime's own `isRunning`, with the reason
 // surfaced on the row that was clicked.
 //
-// This ticket swaps the assembly: CopilotKit's provider and its chat are gone
+// This ticket swaps the assembly: the old provider and its chat are gone
 // from the page. Four things that used to sit above the chat retired with it --
 // the approval gate, the reasoning message, the session panel and the project
-// panel -- and tickets 04-07 bring them back one at a time. So the page is, for
-// now, only the thread. Nothing was lost: the retired versions are in the
-// history, and their absence here is the price of doing the high-risk swap on
-// its own.
+// panel -- and tickets 04-06 bring the first three back one at a time. The
+// project panel is not coming back here: its ticket was retired in favor of a
+// sidebar feature (.scratch/project-sidebar), which also moves the session
+// panel into that sidebar later. So the page is, for now, the session panel
+// and the thread. Nothing was lost: the retired versions are in the history,
+// and their absence here is the price of doing the high-risk swap on its own.
 //
 // The `components` prop is where this repo's own rendering of tool calls and
 // reasoning enters the copied element -- see `components/message-parts.tsx`,

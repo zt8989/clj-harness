@@ -1,6 +1,6 @@
 # clj-harness
 
-极简 Clojure agent 内核，唯一对外接口为 AG-UI 协议，验收用 CopilotKit v2 客户端。
+极简 Clojure agent 内核，唯一对外接口为 AG-UI 协议；前端是 TypeScript + React + assistant-ui，经 `@ag-ui/client` 直连后端。
 
 ## 架构
 
@@ -22,8 +22,8 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ```
 
 写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
-- `ui/src/harness/ui/{main,app,approval_gate,reasoning_message}.cljs` — ClojureScript 客户端（helix + React 19 + CopilotKit v2）；`ui/vite-plugin-cljs.js` 把 shadow-cljs 编出的 ESM 交给 Vite 打包
-- `ui/test/` — UI 端到端测试：用例是 ClojureScript（与 `ui/src` 同构），`test/cljs.test.js` 把它接进 vitest（`cd ui && npm test`，自带脚本 provider 后端）
+- `ui/` — TypeScript + React 客户端：`@assistant-ui/react-ag-ui` 的 `useAgUiRuntime` 接管页面装配（AG-UI 帧解析与消息重建都在适配器里），`@ag-ui/client` 的 `HttpAgent` 直连 8080。审批门（`src/components/approval-gate.tsx`）、工具卡与默认折叠的 reasoning（`src/components/message-parts.tsx`）、会话面板（`src/components/session-panel.tsx`）是自建组件；抄自上游的元素在 `src/components/assistant-ui/elements/` 与 `src/components/ui/`，见下方「样式体系」
+- `ui/test/` — UI 端到端测试：TypeScript 套件（`test/suites/{frames,client,turn,approval}.ts`）驱动真 `@ag-ui/client`，`test/ui.test.ts` 负责起后端与注册（`cd ui && npm test`，自带脚本 provider 后端）
 - `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
 详见 `.scratch/minimal-kernel/spec.md`。
@@ -31,12 +31,6 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ## 前置
 
 - Java 17（本机默认字符集 GBK，代码所有字节↔字符串边界显式 UTF-8；`deps.clj` 启动器不读 `:jvm-opts`）
-- **OpenJDK 21**（`scoop install openjdk21`）——**只给 `ui/` 构建用**：shadow-cljs 3.x 编译要 Java 21，而全局默认仍是 17。构建时给子进程单独换 PATH，`scoop reset openjdk17` 保证全局不被改：
-  ```pwsh
-  cd ui
-  $env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
-  ```
-  测试不用手改：`npm test` 的构建步骤（`ui/test/support/java.js`）自己找 Java 21——先认 `JAVA_HOME`，再试常见安装位置；找不到就警告并回落到 PATH 上的 `java`（那种情况下 shadow-cljs 会以 `UnsupportedClassVersionError` 失败，不是静默出错）。
 - Clojure CLI（`scoop clj-deps` 安装）
 - Node.js 18+ / npm
 - Git Bash（Windows 必需：已钉 `C:\Program Files\Git\bin\bash.exe`，`System32\bash.exe` 为 WSL 启动器，从 JVM 调用会静默空输出。macOS / Linux 用系统自带的 shell，无需额外安装）
@@ -161,20 +155,44 @@ clojure -M:run
 ```pwsh
 cd ui
 npm install      # 首次
-npm run dev      # 拉起 shadow-cljs watch 并起 Vite 于 5173
+npm run dev      # 起 Vite 于 5173
 npm test         # 端到端测试：自带后端，不需要上面这个 dev server
 # 浏览器打开 http://localhost:5173
 ```
 
-构建要 Java 21（见"前置"），所以实际命令是：
+构建不再需要 Java：
 
 ```pwsh
 cd ui
-$env:PATH = "$HOME\scoop\apps\openjdk21\current\bin;$env:PATH"; npm run dev
-# 生产构建：$env:PATH = "..."; npm run build   → dist/
+npm run build    # tsc --noEmit + vite build → dist/
 ```
 
-`ui/src/harness/ui/app.cljs` 的 `HttpAgent({ url: "http://localhost:8080/" })` 经 `CopilotKit` 直连后端，无代理。CLJS 改动由 shadow-cljs watch 自动重编译，Vite 感知到 `ui/cljs-out/` 变化即整页重载；首次编译约 25s，dev server 会等它落地再放行第一屏。
+`ui/src/app.tsx` 构造 `HttpAgent({ url: "http://localhost:8080/" })` 交给 `useAgUiRuntime` 直连后端，无代理。
+**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`（`src/harness/http.clj:18`），`ui/vite.config.js`
+里 `server.port: 5173, strictPort: true` 把这句话钉死——换端口不是改配置，是同时改两处契约。
+
+### 样式体系（Tailwind v4 + shadcn）
+
+本特征**有意引入**的两套接线，不是遗留：
+
+- **Tailwind v4，CSS-first**：样式入口是 `ui/src/styles.css`（`@import "tailwindcss"` + 主题变量 +
+  `@custom-variant dark`），**没有** `tailwind.config.js`——v4 的配置就写在 CSS 里。构建由
+  `@tailwindcss/vite` 插件接进 `vite.config.js`，扫描源码树里的工具类。
+- **shadcn，抄源码路线**：`ui/components.json` 声明别名（`@/components`、`@/lib/utils` 等，与
+  `vite.config.js` 里的 `@` alias 对齐）与 registry：`@assistant-ui` 指向
+  `https://r.assistant-ui.com/styles/{style}/{name}.json`。`npx shadcn@latest add "@assistant-ui/thread"`
+  由此把 `thread.aui.tsx` 连带 11 个 registryDependencies 抄进仓库。
+
+抄进来的组件清单与对账基准：
+
+- `src/components/assistant-ui/elements/` — 11 份抄自 assistant-ui registry（thread、tool-fallback、
+  tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button），
+  **一字未改**；与上游对账用 `npx shadcn@latest add` 重装后 diff 即可。
+- `src/components/ui/` — 7 份 shadcn 基件（button、dialog、textarea、tooltip、avatar、collapsible、skeleton）
+  与 `src/hooks/` 的 2 份 hook，同样未改。
+- 本地差异全部走两个自建注入点，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`（经
+  `components` prop 覆盖工具卡与 reasoning 的默认渲染——全部默认折叠是**有意的差异**，实现见该文件头注释）
+  与自建面板（`approval-gate.tsx`、`session-panel.tsx`）。
 
 ### 停止
 
@@ -227,7 +245,9 @@ AG-UI 入站                                  出网（OpenAI 兼容 chat-comple
 
 **模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，消息里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。**未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的部署开始失败于一条没人写下来的规则。**性质是流程纪律，不是安全边界**——`config.edn` 给一个纯文本模型写 `:input #{:text :image}` 照样打得出去，这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
-agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。UI：`app.cljs` 顶部的项目面板（输入路径 + 绑定 + **选择文件夹…** + 当前绑定显示），threadId 从 agent 实例读（CopilotKit 写入）。两条填充路径（手输 / 原生选择框）汇到同一个 POST；空输入点绑定会就地提示而不是静默无声。面板的输入与两个按钮必须包在一个 `display:contents` 的 wrapper 里——`when` 只返回**最后一个** body 形式，`(when c ($ :input ..) ($ :button ..))` 会把输入框静默丢掉（这个 bug 真的上过线）。
+agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。
+UI 面板此前由前端特征拆除（assistant-ui 特征的 07 号票置 `wontfix`：项目绑定改在**建会话时**完成，由
+`.scratch/project-sidebar` 落地）；本节的三条路由与契约不变，`curl` 即可驱动，面板照契约复用。
 
 ### `.harness/harness.edn` 装配（03 号票）
 
@@ -244,7 +264,7 @@ jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**�
 - `POST /api/threads/<stem>/rebuild` → `{:threadId .. :messages [..] :context [..]}`。messages = 种子（第一条 input 的 messages）+ 全部 event 帧折叠（`harness.frames/apply-frames`，reasoning、tool calls、tool results 都在），即客户端可重新持有并直接续聊的 AG-UI 形态；context 是会话启动时的 context。后续输入多份 input 只取第一份做种子——客户端的第二次 input 本就重述了此前全部历史，折叠进去只会重复。
 - **拒绝而非猜**：截断日志（末帧非 RUN_FINISHED/RUN_ERROR）、坏 JSON 行（指名行号）、无日志的 thread，一律指名 400——重建半截对话是最坏的失败模式。
 - 重建动作在**被重建的日志自身**落一行 `session/rebuilt` 审计线 `{:messages <count> :via "http"}`，`runId` null（重建发生在任何 run 之外）。重建只读日志，这一行是它唯一的痕迹。
-- UI 侧（06 号票，`app.cljs` 会话面板）：列出会话（stem/最后活动/大小）+ 刷新 + 新建会话；**恢复** = POST rebuild → 把 `threadId` 与 `messages` 写上 agent 实例。这在 agent 侧就是全部：`AbstractAgent.prepareRunAgentInput` 用 agent 自身的 `threadId`/`messages` 构造 `RunAgentInput`，所以下一条输入续写**同一个日志**，服务端零会话状态。刻意不走 CopilotKit 的 `setActiveThreadId` 显式线程路径——那会牵入 connectAgent 握手与消息清空规则，直连后端的客户端用不上。截断/损坏的指名 400 内联展示，面板不崩、可换会话/新建。
+- UI 侧（06 号票，`ui/src/components/session-panel.tsx`）：列出会话（id / 最后活动 / 大小）+ 刷新 + 新建会话；**恢复** = `rebuildThread`（POST rebuild）→ `fromAgUiMessages` + `fromThreadMessageLike` 转换 → `adapters.threadList` 的 `onSwitchToThread` 把重建消息灌回运行时。threadId 的主人是 **React state**（`app.tsx` 的 `useState`），agent 只在 `adoptThread` 一处被回写，而 `prepareRunAgentInput` 照旧从 agent 读——所以下一条输入续写**同一个日志**，服务端零会话状态。run 进行中拒绝切换与新建（原话落在所点的行下）；截断/损坏的指名 400 内联展示，面板不崩、可换会话/新建。实测限制：恢复 parked 会话审批卡不回来（服务端 `frames.clj` 折掉 RUN_FINISHED，重建消息不带 interrupts 元数据；恢复后发送被 `@ag-ui/client` 的 pending-interrupt 检查拒绝，不会有假续聊）——细节见 `.scratch/assistant-ui/spec.md` 已知风险。
 
 ## 授权变更（session-configure）
 
@@ -273,7 +293,12 @@ agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread
 
 被 park 的调用不发 `:tool/result`、不写 tool 消息——它还没被回答；它的工具消息落在 resume run 上。一份决定只消费一次；客户端拿未知 interruptId 来 resume 会被明确拒绝（猜一个批准是这里最坏的失败模式）。不做超时、不做跨进程持久化：人工一直不响应，该 thread 就一直待决。
 
-UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 渲染聊天内审批卡（`ApprovalGate` 挂在 `app.cljs` 里 `CopilotChat` 之前）；批准 `resolve({decision:"approved"})`、否决 `cancel()`。卡片自行按 `reason === "tool-approval"` 认领属于它的 interrupt，工具名与参数从客户端自己的 `toolCalls` 里读，不让服务端回显。
+UI 侧 `ui/src/components/approval-gate.tsx`：`useAgUiInterrupts` 读待决中断（稳定 hooks，非 `unstable_*`），
+`ApprovalBatchProvider` 按 toolCallId 批次收集决定、逐中断提交应答——AG-UI 恢复时一个 run 带每条开着的
+interrupt 各一条 resume，所以决定必须收在比单张卡活得久的地方。卡片按 `reason === "tool-approval"` 认领
+属于它的 interrupt，工具名与参数从客户端自己的 `toolCalls` 里读，不让服务端回显。审批门开着时 composer
+由 `isSendDisabled` 关闭：gate 开着时发的消息会被运行时静默吃掉（文本清空、哪儿都不落地），堵死发送是
+唯一不吞用户输入的处理。
 
 ## 验证
 
@@ -282,14 +307,14 @@ UI 侧 `ui/src/harness/ui/approval_gate.cljs` 用 CopilotKit 的 `useInterrupt` 
 clojure -M:test -m harness.test-runner
 # 189 tests / 930 assertions，全绿
 
-# UI（ClojureScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
+# UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
 # 11 tests，含 4 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
 ```
 
 `npm test` 自己起后端：`dev/harness/e2e_server.clj`（`harness.e2e-server`）用 `harness.fake` 的**脚本 provider** 在 `--port 0`（OS 分配）上开服务，日志写进临时 `CLJ_HARNESS_HOME`，所以跑多少次结果都一样，也不会写进你真实的 `~/.clj-harness`。测什么由**脚本文件**决定：服务端在遇到**新的 threadId** 时重读它，测试写这个文件就相当于说"模型下一句回什么"——控制通道是文件而不是端点，生产 HTTP 边因此一个测试专用路由都不长。
 
-测试代码是 ClojureScript，与 `src/` 同构放在 `ui/test/harness/ui/*_test.cljs`；`ui/test/cljs.test.js` 负责起后端、把每个 `deftest` 注册成一个 vitest 用例、逐条跑 `cljs.test` 并把失败重新抛出（见 `ui/test/harness/ui/test_runner.{clj,cljs}` 的桥接层，以及 `npm run test:build`）。
+测试代码是 TypeScript（`ui/test/suites/{frames,client,turn,approval}.ts`）；`ui/test/ui.test.ts` 负责起后端、把每个套件注册成 vitest 用例，并守住两种「绿而无用」：某个套件一条用例都没贡献、某个套件被从清单里漏掉——两者都在 collection 时抛错，不存在"0 条用例也算通过"的窗口。
 
 **这套测试替换了原来的四个手跑脚本**（`verify.mjs` / `verify-real.mjs` / `verify-approval.mjs` / `check-frames.mjs`），内容一一对应，但丢掉了它们的两处依赖：真模型（原来是 free 模型，弱模型不合规时脚本对每轮最多重试 3 次并打印 `note`）和"必须先在 8080 起个后端"。断言数与覆盖面不减——审批那条从 13 条变成 14 条，多出的正是"resume 一个本进程没 park 过的 interrupt 会被指名拒绝"。
 

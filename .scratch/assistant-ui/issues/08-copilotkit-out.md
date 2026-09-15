@@ -13,29 +13,32 @@ CLJS 一侧已经在 02 清干净了，本票只复核，不重做。Tailwind �
 连同顶部会话横排一并清掉，所以本票不再等它，扇入面小了一路。若 `project-sidebar` 先落地，本票的
 "`ui/src` 下不再出现 CopilotKit"一条自然会连它一起扫过。）
 
-**Status:** ready-for-agent
+**Status:** done（2026-09-15）
 
-- [ ] `ui/src` 下不再出现 CopilotKit；只服务它的那几处胶水（旧页面装配、旧审批门、旧 reasoning 组件
-      的 TS 版本）删除，不留双份、不留注释掉的尸体
-- [ ] 依赖清单里移除 CopilotKit 的包；`index.html` 里那行 CopilotKit 样式导入删除
-- [ ] 打包产物里搜不到 CopilotKit 的样式前缀，也搜不到它的包名——证明不是「还在打包只是没人用」
-- [ ] 复核 CLJS 侧确实清零：`ui/` 下没有 `.cljs`、没有 shadow-cljs 配置、没有 `cljs-test/`、
-      依赖里没有 `shadow-cljs` 与 `helix`
-- [ ] 样式侧成文：Tailwind 与 shadcn 的接线写进 README（`components.json` 的 registry 指向、样式入口
-      文件、构建怎么接上），并列出抄进来的组件清单与各自被本地改过哪里
-- [ ] `npm run build` 全绿：`tsc --noEmit` 0 error 加 Vite 打包成功
-- [ ] `npm test` 全绿：四组用例仍驱动真 `@ag-ui/client`，审批那条链路仍端到端通过
-- [ ] README 前端章节与新工具链一致：语言、依赖、启动、构建、5173 契约、样式体系、验收方式；开篇
-      「验收用 CopilotKit v2 客户端」的表述改掉——它已经不再是真的
-- [ ] `cljs-ui` 的 `spec.md` 里记下本特征作废了它的哪几条决策，并指向本特征：至少是决策 1
-      （保留 CopilotKit v1.71）、决策 2（helix）、决策 3（shadow-cljs 桥）、决策 5（删掉 TS 版本）。
-      同时注明 `cljs-ui` 那份「刻意不引样式体系」的立场也被本特征反转（本特征引入了 Tailwind + shadcn），
-      并给出理由。顺带注明决策 8 提到的 `ui/*.mjs` 验证脚本今天已不在仓库里，那条决策本身已过期
-- [ ] 决策 6（5173 是 CORS 契约不是偏好）在新特征里仍然有效，README 与代码都要留着这句话
-- [ ] 本特征 `spec.md` 的「状态」补齐：每票验到了哪一步、留下哪些截图、哪些没覆盖；决策 6 补上 03 与 06
-      的实测结论（threadId 到底归谁）；**并记下 07 的去向**（置 `wontfix`、由 `.scratch/project-sidebar`
-      取代，决策 7 的"两个自建面板按对位还原"一句随之收窄成只剩会话面板）
-- [ ] 点名遗留风险：审批门压在实验性 `unstable_*` 接口上、会话面板压在 experimental 的
-      `adapters.threadList` 上——升级 assistant-ui 时这两处是最可能的断点。**再加一条**：会话面板本身
-      也被 `project-sidebar` 取代（顶部横排 → 侧边栏），所以它的这部分风险要注明"随 06 一起退役"，
-      不要把一条已经要拆掉的风险留在风险清单里
+**落地说明**
+
+- [x] `ui/src` 下不再出现 CopilotKit：三处历史注释（`app.tsx` / `message-parts.tsx` / `test/suites/client.ts`）
+      改写为不点名包名的表述；旧装配、旧审批门、旧 reasoning 的 TS 胶水早在 03 已删，无残留、无尸体
+- [x] 依赖清单移除 `@copilotkit/react-core`（`npm install` 随之清掉 408 个传递包）；`index.html` 里的
+      CopilotKit 样式导入在 03 重写时已不存在，复核确认
+- [x] 产物证明：`dist/` 下 grep `copilotkit`（大小写不敏感）与 `copilot` 均 0 命中。bundle hash 与 06 收拢后
+      完全相同（`index-DlXUdPw-.js`）恰好是旁证——03 起页面就无引用，Vite 从未打包它，「还在打包只是没人用」
+      从一开始就不成立
+- [x] CLJS 复核清零：`ui/` 下 0 个 `.cljs`、无 `shadow-cljs.edn`、无 `cljs-test/`、`package.json` 无
+      `shadow-cljs` 与 `helix`（02 号票的成果，本票只复核）
+- [x] 样式侧成文：README 新增「样式体系（Tailwind v4 + shadcn）」一节——`src/styles.css` 是样式入口
+      （CSS-first，无 tailwind.config）、`@tailwindcss/vite` 接进 `vite.config.js`、`components.json` 的
+      registry 指向与别名约定、抄来的组件清单（elements 11 份 + ui 基件 7 份 + hooks 2 份）与对账基准
+      （重装后 diff；本地差异只走 `THREAD_COMPONENTS` prop 与自建面板两个注入点）
+- [x] `npm run build` 全绿：`tsc --noEmit` 0 error + Vite 打包成功
+- [x] `npm test` 全绿：11 tests，四组用例仍驱动真 `@ag-ui/client`，审批链路端到端通过
+- [x] README 前端章节与新工具链一致：开篇表述、架构条目、前置（Java 21/shadow-cljs 条目删除）、
+      启动与构建、5173 CORS 契约成文（README + `vite.config.js` `strictPort: true` 双处保留）、
+      会话/审批/项目三节的 UI 侧描述全部指向新组件路径
+- [x] `cljs-ui/spec.md` 顶部记下作废记录：决策 1/2/3/5 作废、决策 8 已过期、
+      「刻意不引样式体系」立场反转及理由；决策 6（5173 契约）仍然有效并注明
+- [x] 本特征 `spec.md`：状态段补齐每票证据与未覆盖面；决策 6 的 03/06 实测结论已在其小节内；
+      07 的去向已在状态/非目标/验收主线三处成文
+- [x] 遗留风险点名：审批门（稳定 hooks，升级破法是编译失败而非静默失灵）、`adapters.threadList`
+      （experimental + 双包返回值类型不一致）——均带「会话面板随 project-sidebar 搬侧边栏后，
+      threadList 这条风险随之退役」的注明
