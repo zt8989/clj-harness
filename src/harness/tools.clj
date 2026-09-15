@@ -39,6 +39,7 @@
             [clojure.string :as str]
             [harness.editing :as editing]
             [harness.event :as ev]
+            [harness.hashline.serve :as serve]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
             [harness.project :as project]
@@ -174,8 +175,80 @@
 ;; byte for byte). The tool's answer reports the RESOLVED path -- what actually
 ;; happened, wherever the model's relative path ended up landing.
 
-(defn- t-read [{:keys [path]}]
-  (slurp (project/resolve-path *thread-id* path) :encoding "UTF-8"))
+;; ------------------------------------------------------------------- read
+;;
+;; ONE TOOL, TWO FACES. The same tool name serves both editing modes because that
+;; is what was asked for, and because a model that reads a file has not thereby
+;; chosen how to edit it. What differs is what a row IS:
+;;
+;;   :str-replace  the file's text, unchanged since before any of this existed.
+;;   :hashline     `anchor│content` rows, where the anchor is the ONLY safe way to
+;;                 address a line -- by content cannot tell two identical lines
+;;                 apart, and by line number is a number the model has to count.
+;;
+;; The parameters differ with it, so neither mode's description mentions a field
+;; the other does not have. What does NOT differ: the path fence (both faces are
+;; fence-marked), the project re-rooting, and the fact that this is where a
+;; session first learns a file's anchors.
+
+(def ^:private read-anchor-description
+  (str "Read a file and return one row per line, each line prefixed by its 4-character anchor, "
+       "like `Hasu│(defn f [])`. Edit by ANCHOR, never by content and never by line number: "
+       "anchors are unique even for identical lines, and an anchor from a stale read is refused "
+       "rather than applied to the wrong line. "
+       "Paging: use `offset` (1-based, default 1) and `limit` to read part of a large file; when "
+       "the output says it stopped early it names the `offset` that continues. "
+       "A line too long to show still gets its anchor, so it can be replaced whole. "
+       "Binary files, images, directories and UTF-16/32 text are refused by name. "
+       "A relative path resolves against this session's project directory when one is bound. "
+       "When bound, a path resolving outside the project directory and the configuration home "
+       "parks for human approval first. "
+       "After an edit the tool that made it hands back the anchors for the changed lines, so a "
+       "follow-up edit needs no new read."))
+
+(def ^:private read-anchor-params
+  {:type "object"
+   :properties
+   {"path"   {:type "string" :description "File path."}
+    "offset" {:type "integer" :minimum 1
+              :description "Line number to start from (1-based). Default 1."}
+    "limit"  {:type "integer" :minimum 1
+              :description "How many lines to return at most."}}})
+
+(def ^:private read-plain-description
+  "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first.")
+
+(def ^:private read-plain-params
+  {:type "object" :properties {"path" {:type "string" :description "File path."}}})
+
+(defn- positive-int
+  "V as a positive integer, or a NAMED failure. `offset`/`limit` arrive from JSON,
+  so 0, -3 and 1.5 are all things a model can actually send -- and each of them
+  means something specific enough to say back."
+  [k v]
+  (when (some? v)
+    (when-not (and (integer? v) (pos? v))
+      (throw (ex-info (str "`" (name k) "` must be a positive integer (1 or more); got "
+                           (pr-str v) ".")
+                      {:argument k :value v :reason :not-a-positive-integer})))
+    v))
+
+(defn- anchored-read
+  "The hashline face of `read`: resolve, serve, and answer with the rows."
+  [{:keys [path offset limit]}]
+  (let [p (project/resolve-path *thread-id* path)
+        {:keys [text]} (serve/read! *thread-id* p
+                                    {:offset (positive-int :offset offset)
+                                     :limit  (positive-int :limit limit)})]
+    text))
+
+(defn- t-read
+  "`read`'s body, dispatched on this session's editing mode."
+  [{:keys [path] :as args}]
+  (let [p (project/resolve-path *thread-id* path)]
+    (if (= :hashline (:mode (editing/editing-mode *thread-id*)))
+      (anchored-read (assoc args :path p))
+      (slurp p :encoding "UTF-8"))))
 
 (defn- t-write [{:keys [path content]}]
   (let [p (project/resolve-path *thread-id* path)]
@@ -270,6 +343,25 @@
 
 ;; --------------------------------------------------------------------- specs
 
+(defn- tool-face
+  "The two fields a model actually reads -- :description and :parameters -- for
+  NAME's tool in THREAD-ID's session.
+
+  A tool's face is STATIC unless it declares a `:describe` fn, and that escape
+  hatch exists for exactly one situation: a tool whose NAME stays the same across
+  the two editing modes while what it DOES does not, which today means `read` --
+  plain text in str-replace mode, `anchor│content` rows in hashline mode. The
+  alternative was two differently-named tools, and the user asked for `read` to be
+  the same tool either way.
+
+  Everything else about a tool -- :required, :run, the markers the seam reads --
+  is untouched by this: only what the MODEL sees varies, which keeps the call's
+  behaviour a function of the session rather than of the description."
+  [thread-id [n t]]
+  (if-let [describe (:describe t)]
+    (describe thread-id)
+    {:description (:description t) :parameters (:parameters t)}))
+
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
   effective toolset (base overlaid with its session additions/removals).
@@ -291,9 +383,8 @@
   ([] (specs nil))
   ([thread-id]
    (mapv (fn [[n t]] {:type "function"
-                      :function {:name n
-                                 :description (:description t)
-                                 :parameters (:parameters t)}})
+                      :function (assoc (tool-face thread-id [n t])
+                                       :name n)})
          (sort-by key (into {}
                             (filter (fn [[n _]] (editing/served? thread-id n))
                                     (effective-tools thread-id)))))))
@@ -307,10 +398,18 @@
 ;; binding, and the park itself is the ordinary approval flow.
 
 (register! "read"
-  (assoc (tool "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+  (assoc (tool read-plain-description
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
-         :fence-paths true))
+         :fence-paths true
+         ;; The ONE tool whose face depends on the session's editing mode: what a
+         ;; row IS differs, so the description and the parameters do too (see
+         ;; tool-face). Both faces keep :required [:path] -- offset and limit are
+         ;; optional in the anchored one, and nothing else about the call moves.
+         :describe (fn [thread-id]
+                     (if (= :hashline (:mode (editing/editing-mode thread-id)))
+                       {:description read-anchor-description :parameters read-anchor-params}
+                       {:description read-plain-description :parameters read-plain-params}))))
 
 (register! "write"
   (assoc (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
