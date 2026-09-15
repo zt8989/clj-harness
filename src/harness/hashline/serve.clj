@@ -26,8 +26,13 @@
   (:import [java.io File]))
 
 (defn- fresh-change
-  "An alignment for CONTENT against whatever the session already knew."
-  [thread-id path content {:keys [anchors line-checksums]}]
+  "An alignment for CONTENT against whatever the session already knew.
+
+  `:served` is carried through as it stands and then INTERSECTED with the new
+  anchors by the store: an anchor whose line survived is still something the model
+  has seen, and one that was freed or replaced was seen and is gone. Anchors minted
+  here were not shown to anybody until the page that contains them goes out."
+  [thread-id path content {:keys [anchors line-checksums served]}]
   (let [checks (anchors/line-checksums content)]
     (assoc (anchors/align {:old-anchors   anchors
                            :old-checksums line-checksums
@@ -37,7 +42,9 @@
                            :probe         (or (store/probe-of thread-id)
                                               (anchors/seed thread-id))})
            :file-checksum (anchors/file-checksum checks)
-           :line-checksums checks)))
+           :line-checksums checks
+           :served         (or served #{})
+           :served?        true)))
 
 (defn serve!
   "THREAD-ID reads PATH, which must already be resolved and classified. Returns
@@ -66,9 +73,13 @@
          ;; would hand out anchors the store does not know about, and the next
          ;; edit would reject every one of them.
          (store/advance! thread-id path change))
-       (assoc (reading/preview content (:anchors change)
-                               {:offset offset :limit limit :path path})
-              :anchors (:anchors change))))))
+       (let [page (reading/preview content (:anchors change)
+                                   {:offset offset :limit limit :path path})]
+         ;; ...and record WHICH of those anchors the model actually saw. This is
+         ;; the half that makes 'owned' and 'shown' different facts: the page that
+         ;; was not returned holds anchors that exist and were never displayed.
+         (store/mark-served! thread-id path (:shown page))
+         (assoc page :anchors (:anchors change)))))))
 
 (defn read!
   "The whole anchored read: classify PATH, take its text, serve it. Returns

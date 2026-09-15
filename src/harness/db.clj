@@ -505,6 +505,26 @@
               mode           INTEGER,
               updated_at     INTEGER NOT NULL)"))
 
+(defn- hashline-served
+  "Version 2 -> 3: which of a file's anchors that session has actually SHOWN the
+  model.
+
+  A separate step rather than a column added to `hashline-snapshots`'s DDL, because
+  that step has already run in stores that exist: the chain is append-only, and
+  editing a landed step would leave those stores holding a schema the harness no
+  longer agrees with. ALTER TABLE is what an appended step does.
+
+  WHY THIS IS STATE AND NOT DERIVABLE. An anchor can be owned without ever having
+  been displayed: `read` pages a long file, and the anchors it minted for the pages
+  it did not return are real anchors for real lines -- but the model has never seen
+  them. Letting an edit address one would mean the model is changing a line it has
+  never looked at, which is exactly the guess this feature exists to prevent. So
+  'shown' has to be recorded, and the array is pruned to the live anchor set on
+  every edit (see harness.hashline.store), so it cannot grow past one file."
+  [^Connection c]
+  (ddl! c "ALTER TABLE hashline_snapshots
+             ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
+
 (def migrations
   "The forward migration chain. (nth migrations i) takes the store from schema
   version i to i+1, and (count migrations) is the version this harness speaks.
@@ -529,7 +549,8 @@
   with-connection or with-transaction -- that is how the walk across several
   versions is exercised without waiting for the features that bring them."
   [projects-and-sessions
-   hashline-store])
+   hashline-store
+   hashline-served])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

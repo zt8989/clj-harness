@@ -45,19 +45,25 @@
 
 (defn state
   "THREAD-ID's stored view of PATH -- {:file-checksum :line-count :anchors
-  :line-checksums} -- or nil when this session has never been shown that file.
+  :line-checksums :served} -- or nil when this session has never been shown that
+  file.
 
-  Nil is the everyday answer for the first read of a file, and the tools read it
-  as 'there is nothing to validate against, so hand out fresh anchors'."
+  Nil is the everyday answer for the first read of a file, and the callers read it
+  as 'there is nothing to validate against, so hand out fresh anchors'.
+
+  `:served` is the anchors the model has actually SEEN (a set), which is not the
+  same as the anchors that exist: a paged read mints anchors for lines it did not
+  return, and an edit must not be addressed by one of those."
   [thread-id path]
-  (when-let [row (first (db/select "SELECT file_checksum, line_count, anchors, line_checksums
+  (when-let [row (first (db/select "SELECT file_checksum, line_count, anchors, line_checksums, served
                                       FROM hashline_snapshots
                                      WHERE path = ? AND thread_id = ?"
                                    path (str thread-id)))]
     {:file-checksum  (:file-checksum row)
      :line-count     (:line-count row)
      :anchors        (vec (parse (:anchors row)))
-     :line-checksums (vec (parse (:line-checksums row)))}))
+     :line-checksums (vec (parse (:line-checksums row)))
+     :served         (set (parse (:served row)))}))
 
 (defn ownership
   "THREAD-ID's anchors, as anchor -> the path each one currently names. What
@@ -91,19 +97,25 @@
 ;; ------------------------------------------------------------------- writing
 
 (defn- put-state!
-  "Upsert the file's stored view on an open connection."
-  [c thread-id path {:keys [file-checksum line-count anchors line-checksums]}]
+  "Upsert the file's stored view on an open connection. SERVED is an optional set
+  of anchors to record as shown; omitting it LEAVES THE STORED ONE ALONE, which is
+  what an edit wants -- the rows it showed are added, not the whole set restated."
+  [c thread-id path {:keys [file-checksum line-count anchors line-checksums served served?]}]
   (db/execute! c "INSERT INTO hashline_snapshots
-                    (path, thread_id, file_checksum, line_count, anchors, line_checksums, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (path, thread_id, file_checksum, line_count, anchors, line_checksums, served, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                   ON CONFLICT(path, thread_id) DO UPDATE SET
                     file_checksum  = excluded.file_checksum,
                     line_count     = excluded.line_count,
                     anchors        = excluded.anchors,
                     line_checksums = excluded.line_checksums,
+                    served         = CASE WHEN ? THEN excluded.served ELSE hashline_snapshots.served END,
                     updated_at     = excluded.updated_at"
                path (str thread-id) file-checksum line-count
-               (render anchors) (render line-checksums) (System/currentTimeMillis)))
+               (render anchors) (render line-checksums)
+               (render (vec (or served [])))
+               (System/currentTimeMillis)
+               (if served? 1 0)))
 
 (defn- claim!
   "Record the anchors this edit ADDED. A plain INSERT on (thread_id, anchor): the
@@ -144,29 +156,61 @@
                path prior-text (if bom 1 0) ending (render anchors) resulting-text
                mode (System/currentTimeMillis)))
 
+(defn- advance-on!
+  "The statements `advance!`/`advance-with-undo!` share, on a connection they have
+  already opened a transaction on.
+
+  `:served` is carried through as an INTERSECTION with the new anchor set: an
+  anchor that survived the edit stays shown, one that was freed was shown and is
+  gone, and one that was minted was not shown to anyone yet. The rows an edit hands
+  back are added by the caller with `mark-served!`, because only the caller knows
+  which rows it actually emitted."
+  [c thread-id path {:keys [added freed probe file-checksum line-checksums anchors served served?]}]
+  (put-state! c thread-id path {:file-checksum  file-checksum
+                                :line-count     (count line-checksums)
+                                :anchors        anchors
+                                :line-checksums line-checksums
+                                :served         (when served? served)
+                                :served?        served?})
+  (release! c thread-id path freed)
+  (claim!   c thread-id path added)
+  (put-probe! c thread-id probe))
+
 (defn advance!
   "Land the database half of one edit for THREAD-ID on PATH, in ONE transaction:
   the file's new stored view, the anchors it added, the anchors it freed, and
   where its probe now stands.
 
   CHANGE is `harness.hashline.anchors/align`'s answer, plus the file's new
-  :file-checksum and :line-checksums. One transaction because the ownership and
-  the view are two halves of one fact -- a view that names an anchor the session
-  does not own, or ownership of an anchor no view names, is a state no reader
-  could act on."
+  :file-checksum and :line-checksums, optionally :served (the shown set to record,
+  intersected with the surviving anchors). One transaction because the ownership
+  and the view are two halves of one fact -- a view that names an anchor the
+  session does not own, or ownership of an anchor no view names, is a state no
+  reader could act on."
   [thread-id path change]
-  (let [thread-id (str thread-id)
-        {:keys [added freed probe file-checksum line-checksums anchors]} change]
+  (let [thread-id (str thread-id)]
+    (db/with-transaction (fn [c] (advance-on! c thread-id path change)))
+    change))
+
+(defn mark-served!
+  "Record ANCHORS as shown to the model for THREAD-ID's view of PATH. ANCHORS is a
+  SET of anchors, which is what the rows emitter produces and why this does not
+  call `distinct`: in Clojure 1.12 `(distinct coll)` destructures its argument with
+  `nth`, so it throws on a set rather than de-duplicating it. A set is already
+  distinct; `vec` is the whole conversion needed.
+
+  Kept apart from `advance!` on purpose. Advancing INTERSECTS the shown set with
+  the surviving anchors -- correct for an alignment, since it is pruning to what
+  still exists -- whereas this only ever adds. An edit does both, in order:
+  advance, then mark the rows it handed back."
+  [thread-id path anchors]
+  (when (seq anchors)
     (db/with-transaction
       (fn [c]
-        (put-state! c thread-id path {:file-checksum  file-checksum
-                                      :line-count     (count line-checksums)
-                                      :anchors        anchors
-                                      :line-checksums line-checksums})
-        (release! c thread-id path freed)
-        (claim!   c thread-id path added)
-        (put-probe! c thread-id probe)))
-    change))
+        (db/execute! c "UPDATE hashline_snapshots
+                           SET served = ?
+                         WHERE path = ? AND thread_id = ?"
+                     (render (vec anchors)) path (str thread-id))))))
 
 (defn advance-with-undo!
   "The whole database half of an edit, in ONE transaction: everything `advance!`
@@ -183,17 +227,10 @@
   which one to call based on whether it has an undo record would be a caller that
   can get the choice wrong."
   [thread-id path change undo]
-  (let [thread-id (str thread-id)
-        {:keys [added freed probe file-checksum line-checksums anchors]} change]
+  (let [thread-id (str thread-id)]
     (db/with-transaction
       (fn [c]
-        (put-state! c thread-id path {:file-checksum  file-checksum
-                                      :line-count     (count line-checksums)
-                                      :anchors        anchors
-                                      :line-checksums line-checksums})
-        (release! c thread-id path freed)
-        (claim!   c thread-id path added)
-        (put-probe! c thread-id probe)
+        (advance-on! c thread-id path change)
         (when undo (put-undo! c path undo))))
     change))
 

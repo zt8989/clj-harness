@@ -628,7 +628,7 @@
                ;; they are the ONE place in this store that holds a document, and
                ;; the name says which document and which side of the edit it is.
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
-                                      "anchors" "line_checksums" "updated_at"}
+                                      "anchors" "line_checksums" "served" "updated_at"}
                "hashline_ownership" #{"thread_id" "anchor" "path"}
                "hashline_sessions"  #{"thread_id" "probe" "updated_at"}
                "hashline_undo"      #{"path" "prior_text" "bom" "ending" "anchors"
