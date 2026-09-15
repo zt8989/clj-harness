@@ -124,20 +124,28 @@
   this namespace's docstring for how that was discovered). The file is left where
   it is: tidying away evidence of the bug would be the second mistake.
 
+  It answers TRUE OR FALSE, not 'nil-or-false': -main folds this into the exit
+  code with `(if isolated? 0 1)`, and a `when-not` that let the good path fall off
+  the end would answer NIL -- which that test reads as failure. The suite then
+  exits 1 on a run with no failures at all, and an exit code that is 1 either way
+  says nothing; a signal that cannot distinguish green from red is worse than no
+  signal, because it is read as one.
+
   F is the File captured before `isolate!` ran, never one recomputed from
   harness.home here -- by now the root points at the temp home, so asking again
   would compare the temp store against itself and pass while the real home was
   being written."
   [^java.io.File f before]
   (let [after (store-state f)]
-    (when-not (= before after)
-      (binding [*out* *err*]
-        (println (str "ISOLATION FAILURE: " (.getAbsolutePath f)
-                      " changed during this run: " (pr-str before) " -> " (pr-str after)
-                      " ([bytes mtime], nil meaning absent) -- some code path resolved"
-                      " the store against the developer's real home instead of through"
-                      " harness.home.")))
-      false)))
+    (if (= before after)
+      true
+      (do (binding [*out* *err*]
+            (println (str "ISOLATION FAILURE: " (.getAbsolutePath f)
+                          " changed during this run: " (pr-str before) " -> " (pr-str after)
+                          " ([bytes mtime], nil meaning absent) -- some code path resolved"
+                          " the store against the developer's real home instead of through"
+                          " harness.home.")))
+          false))))
 
 (defn -main [& _]
   ;; The store's path is resolved through harness.home BEFORE the root moves, so

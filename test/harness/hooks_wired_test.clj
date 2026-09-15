@@ -30,17 +30,27 @@
     :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
    {:content "done"}])
 
-(defn- with-server [port thread f]
-  (providers/use-provider! thread (fake/scripted script))
-  (let [stop (http/start! {:port port})]
-    (try (f) (finally (stop) (providers/use-provider! thread nil)))))
+(def ^:dynamic *port*
+  "The port the server under test is listening on, bound by `with-server`.
 
-(defn- post-run [port thread-id]
+  THE OS PICKS IT (`{:port 0}`), so no test names a port and two runs on one
+  machine -- a session beside a suite, a leftover e2e server, two worktrees --
+  cannot collide; see AGENTS.md."
+  nil)
+
+(defn- with-server [thread f]
+  (providers/use-provider! thread (fake/scripted script))
+  (let [stop (http/start! {:port 0})
+        port (:local-port (meta stop))]
+    (try (binding [*port* port] (f))
+         (finally (stop) (providers/use-provider! thread nil)))))
+
+(defn- post-run [thread-id]
   (let [body (json/write-str {:threadId thread-id
                               :runId (str (java.util.UUID/randomUUID))
                               :messages [{:id "u1" :role "user" :content "go"}]
                               :tools [] :context []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/")))
+        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
                  (.header "Content-Type" "application/json")
                  (.header "Accept" "text/event-stream")
                  (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
@@ -119,10 +129,10 @@
 (deftest a-session-with-no-hooks-behaves-exactly-as-before
   (wipe!)
   (with-server
-   8121 "hw-none"
+   "hw-none"
    (fn []
      (io/delete-file (log-file "hw-none") true)
-     (post-run 8121 "hw-none")
+     (post-run "hw-none")
      (let [ls (wait-for (log-file "hw-none")
                         (fn [ls] (some #(= "Stop" (:kind %)) (hook-lines ls)))
                         1500)]
@@ -139,10 +149,10 @@
   (write-hooks! {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
                                                           "session-start")}]})
   (with-server
-   8122 "hw-start"
+   "hw-start"
    (fn []
      (io/delete-file (log-file "hw-start") true)
-     (post-run 8122 "hw-start")
+     (post-run "hw-start")
      (let [ls (wait-for (log-file "hw-start")
                         (fn [ls] (some #(= "hook/SessionStart" (:kind %)) ls))
                         1500)
@@ -155,7 +165,7 @@
        (testing "the command really ran"
          (is (str/includes? (slurp (str (home/root) "/hooks-fired.txt")) "session-start")))
        (testing "a SECOND run of the same thread does not repeat it"
-         (post-run 8122 "hw-start")
+         (post-run "hw-start")
          (Thread/sleep 600)
          (let [ls2 (log-lines (log-file "hw-start"))]
            (is (= 1 (count (filter #(= "hook/SessionStart" (:kind %)) ls2))))))))))
@@ -168,10 +178,10 @@
     (write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
                                     :matcher "read"}]})
     (with-server
-     8123 "hw-post"
+     "hw-post"
      (fn []
        (io/delete-file (log-file "hw-post") true)
-       (post-run 8123 "hw-post")
+       (post-run "hw-post")
        (let [ls (wait-for (log-file "hw-post")
                           (fn [ls] (some #(= "hook/PostToolUse" (:kind %)) ls))
                           1500)
@@ -191,10 +201,10 @@
     (write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
                                     :matcher "bash"}]})
     (with-server
-     8124 "hw-nomatch"
+     "hw-nomatch"
      (fn []
        (io/delete-file (log-file "hw-nomatch") true)
-       (post-run 8124 "hw-nomatch")
+       (post-run "hw-nomatch")
        (let [ls (wait-for (log-file "hw-nomatch")
                           (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
                           1500)]
@@ -210,10 +220,10 @@
   (let [marker (str (home/root) "/hooks-fired.txt")]
     (write-hooks! {:stop [{:command (marker-script marker "stop")}]})
     (with-server
-     8125 "hw-stop"
+     "hw-stop"
      (fn []
        (io/delete-file (log-file "hw-stop") true)
-       (post-run 8125 "hw-stop")
+       (post-run "hw-stop")
        (let [ls (wait-for (log-file "hw-stop")
                           (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
                           1500)
@@ -237,13 +247,13 @@
                                                           "stop")}]})
   (providers/use-provider! "hw-frames-off" (fake/scripted script))
   (with-server
-   8126 "hw-frames-on"
+   "hw-frames-on"
    (fn []
      (let [with-hooks (wire/frames-from-sse
-                       (.body (post-run 8126 "hw-frames-on")))]
+                       (.body (post-run "hw-frames-on")))]
        (wipe!)
        (let [without (try
-                       (wire/frames-from-sse (.body (post-run 8126 "hw-frames-off")))
+                       (wire/frames-from-sse (.body (post-run "hw-frames-off")))
                        (finally (providers/use-provider! "hw-frames-off" nil)))]
          (testing "an observer's verdict is not the run's: same frame TYPES either way"
            (is (= (map :type with-hooks) (map :type without))))
@@ -266,10 +276,10 @@
   (wipe!)
   (write-hooks! {:pre-tool-use [{:command (gate-script 2 "no reads before breakfast")}]})
   (with-server
-   8127 "hw-gate"
+   "hw-gate"
    (fn []
      (io/delete-file (log-file "hw-gate") true)
-     (let [resp (post-run 8127 "hw-gate")
+     (let [resp (post-run "hw-gate")
            frames (wire/frames-from-sse (.body resp))
            results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
        (testing "the call is refused, and the REFUSAL is what the model reads"
@@ -293,10 +303,10 @@
   (wipe!)
   (write-hooks! {:pre-tool-use [{:command (gate-script 0 "fine")}]})
   (with-server
-   8128 "hw-allow"
+   "hw-allow"
    (fn []
      (io/delete-file (log-file "hw-allow") true)
-     (let [frames (wire/frames-from-sse (.body (post-run 8128 "hw-allow")))
+     (let [frames (wire/frames-from-sse (.body (post-run "hw-allow")))
            results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
        (testing "the tool really ran, with its real output"
          (is (= 1 (count results)))
@@ -310,10 +320,10 @@
   (wipe!)
   (write-hooks! {:pre-tool-use [{:command (gate-script 2 "denied")}]})
   (with-server
-   8129 "hw-audit"
+   "hw-audit"
    (fn []
      (io/delete-file (log-file "hw-audit") true)
-     (post-run 8129 "hw-audit")
+     (post-run "hw-audit")
      (let [ls (wait-for (log-file "hw-audit")
                         (fn [ls] (some #(= "hook/PreToolUse" (:kind %)) ls))
                         1500)
@@ -337,10 +347,10 @@
     (tools/session-disable! "hw-disabled" "read")
     (try
       (with-server
-       8130 "hw-disabled"
+       "hw-disabled"
        (fn []
          (io/delete-file (log-file "hw-disabled") true)
-         (post-run 8130 "hw-disabled")
+         (post-run "hw-disabled")
          (let [ls (wait-for (log-file "hw-disabled")
                             (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
                             1500)]
@@ -370,10 +380,10 @@
   (tools/session-require-approval! "hw-delegate-ok" "read")
   (try
     (with-server
-     8131 "hw-delegate-ok"
+     "hw-delegate-ok"
      (fn []
        (io/delete-file (log-file "hw-delegate-ok") true)
-       (let [frames (wire/frames-from-sse (.body (post-run 8131 "hw-delegate-ok")))
+       (let [frames (wire/frames-from-sse (.body (post-run "hw-delegate-ok")))
              results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
          (testing "the call RAN -- the hook took the human's place, no interrupt was needed"
            (is (= 1 (count results)))
@@ -400,10 +410,10 @@
   (tools/session-require-approval! "hw-delegate-no" "read")
   (try
     (with-server
-     8132 "hw-delegate-no"
+     "hw-delegate-no"
      (fn []
        (io/delete-file (log-file "hw-delegate-no") true)
-       (let [frames (wire/frames-from-sse (.body (post-run 8132 "hw-delegate-no")))
+       (let [frames (wire/frames-from-sse (.body (post-run "hw-delegate-no")))
              results (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
          (testing "the call did NOT run, and the hook's reason is what the model reads"
            (is (= 1 (count results)))
@@ -422,10 +432,10 @@
   (tools/session-require-approval! "hw-delegate-quiet" "read")
   (try
     (with-server
-     8133 "hw-delegate-quiet"
+     "hw-delegate-quiet"
      (fn []
        (io/delete-file (log-file "hw-delegate-quiet") true)
-       (let [frames (wire/frames-from-sse (.body (post-run 8133 "hw-delegate-quiet")))
+       (let [frames (wire/frames-from-sse (.body (post-run "hw-delegate-quiet")))
              term (last (filter #(= "RUN_FINISHED" (:type %)) frames))
              interrupts (get-in term [:outcome :interrupts])]
          (testing "no tool result: the call was never answered"
@@ -443,10 +453,10 @@
   (tools/session-require-approval! "hw-plain" "read")
   (try
     (with-server
-     8134 "hw-plain"
+     "hw-plain"
      (fn []
        (io/delete-file (log-file "hw-plain") true)
-       (let [frames (wire/frames-from-sse (.body (post-run 8134 "hw-plain")))
+       (let [frames (wire/frames-from-sse (.body (post-run "hw-plain")))
              term (last (filter #(= "RUN_FINISHED" (:type %)) frames))
              interrupt (first (get-in term [:outcome :interrupts]))]
          (is (= "interrupt" (get-in term [:outcome :type])))
@@ -477,10 +487,10 @@
     (project/bind! "hw-instructions" proj)
     (write-hooks! {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
     (with-server
-     8130 "hw-instructions"
+     "hw-instructions"
      (fn []
        (io/delete-file (log-file-for "hw-instructions") true)
-       (post-run 8130 "hw-instructions")
+       (post-run "hw-instructions")
        (let [ls (wait-for (log-file-for "hw-instructions")
                           (fn [ls] (>= (count (filter #(= "hook/InstructionsLoaded" (:kind %)) ls)) 2))
                           1500)
@@ -522,10 +532,10 @@
   (write-hooks! {:instructions-loaded [{:command (marker-script (str (home/root) "/hooks-fired.txt")
                                                                "should-not-run")}]})
   (with-server
-   8131 "hw-noinstructions"
+   "hw-noinstructions"
    (fn []
      (io/delete-file (log-file "hw-noinstructions") true)
-     (post-run 8131 "hw-noinstructions")
+     (post-run "hw-noinstructions")
      (let [ls (wait-for (log-file "hw-noinstructions")
                         (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
                         1500)]

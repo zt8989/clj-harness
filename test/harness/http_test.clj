@@ -31,9 +31,25 @@
                  {:id "c2" :name "read" :arguments {:path "README.md"}}]}
    {:content "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"}])
 
+(def ^:dynamic *port*
+  "The port the server under test is listening on, bound by `with-server` for the
+  body of a test.
+
+  THE OS PICKS IT (`{:port 0}`), so no test names a port. A literal would mean two
+  runs on one machine cannot coexist -- and they routinely do: a developer with a
+  session open beside a test run, an e2e server left up by an earlier ticket, two
+  worktrees running the suite at once. Those collisions arrive as
+  `BindException: Address already in use` in a test that has nothing to do with
+  the culprit, which is the worst way to learn about them.
+
+  The var rather than a threaded argument because tests define helper closures
+  that call `api-call`/`post-run`; those would each need the port passed down.
+  A test that wants the port to build a URL by hand reads this var. See AGENTS.md."
+  nil)
+
 (defn- with-server
-  "Run F against a live server on PORT, with a scripted provider pinned to each
-  thread the test serves.
+  "Run F against a live server, with a scripted provider pinned to each thread
+  the test serves.
 
   THREADS names them and is one of:
 
@@ -45,31 +61,36 @@
   The pin is PER-THREAD, matching harness.providers' resolution: a provider
   override is a session's, and the server looks it up by the request's threadId.
   There is deliberately no process-wide slot to fall back on -- a test that
-  pinned globally would pass while the per-thread wiring was broken."
-  ([port threads f]
-   (with-server port threads script f))
-  ([port threads turns f]
+  pinned globally would pass while the per-thread wiring was broken.
+
+  The port is ASKED OF THE OS after the bind, which is why it can be neither an
+  argument nor a literal -- see *port*."
+  ([threads f]
+   (with-server threads script f))
+  ([threads turns f]
    (let [pins (cond
                 (map? threads) threads
                 (coll? threads) (into {} (map (fn [t] [t turns])) threads)
                 :else           {threads turns})]
      (doseq [[t ts] pins] (providers/use-provider! (str t) (fake/scripted ts)))
-     (let [stop (http/start! {:port port})]
-       (try (f) (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
+     (let [stop (http/start! {:port 0})
+           port (:local-port (meta stop))]
+       (try (binding [*port* port] (f))
+            (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
 
 (defn- post-run
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
   different threads or for the same thread at different times -- never share frame ids.
   A repeated run id would make two runs' frames collide in a rebuilt conversation.
   EXTRA is merged into the body, which is how a resume is sent."
-  ([port thread-id] (post-run port thread-id {}))
-  ([port thread-id extra]
+  ([thread-id] (post-run thread-id {}))
+  ([thread-id extra]
    (let [body (json/write-str (merge {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
                                       :messages [{:id "u1" :role "user"
                                                   :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
                                       :tools [] :context []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/")))
+         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
                   (.header "Content-Type" "application/json")
                   (.header "Accept" "text/event-stream")
                   (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
@@ -121,10 +142,9 @@
 
 (deftest serves-a-well-formed-run-over-real-http
   (with-server
-   8097
    "it-1"
    (fn []
-     (let [resp   (post-run 8097 "it-1")
+     (let [resp   (post-run "it-1")
            body   (.body resp)
            frames (wire/frames-from-sse body)]
        (testing "the headers a browser client needs, given it calls us directly"
@@ -189,14 +209,13 @@
 
 (deftest records-the-run-as-jsonl
   (with-server
-   8098
    "it-1"
    (fn []
      ;; Delete first, like the replay e2e does: the assertions below use
      ;; first/last over the parsed lines, so leftover runs from earlier test
      ;; executions must not bleed in.
      (io/delete-file (log-file "it-1") true)
-     (post-run 8098 "it-1")
+     (post-run "it-1")
      (let [f     (log-file "it-1")
            lines (wait-for-recorded f
                                     ;; The returned tail lands one line at a
@@ -268,12 +287,11 @@
   ;; and failed intermittently with 'the log is truncated or corrupt' -- which is
   ;; what a reader racing an append-only file looks like.)
   (with-server
-   8095
    "replay-e2e"
    (fn []
      (let [log (log-file "replay-e2e")]
        (io/delete-file log true)
-       (post-run 8095 "replay-e2e")
+       (post-run "replay-e2e")
        (wait-for-recorded
         log
         (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
@@ -305,7 +323,6 @@
   ;; them from the input line: live and replay must agree, or a resumed
   ;; conversation would send the vendor a shape the live run never did.
   (with-server
-   8093
    "images"
    (fn []
      (let [log    (log-file "images")
@@ -317,7 +334,7 @@
                    {:type "image_url"
                     :image_url {:url "data:image/jpeg;base64,AAAB"}}]]
        (io/delete-file log true)
-       (post-run 8093 "images" {:messages [{:id "u1" :role "user" :content parts}]})
+       (post-run "images" {:messages [{:id "u1" :role "user" :content parts}]})
        (let [lines (wait-for-recorded
                     log
                     (fn [ls] (some #(= "message" (:kind %)) ls))
@@ -344,12 +361,14 @@
   The spec (as opposed to the pin) is what the guard reads, and a pin is a whole
   provider map, so the declaration rides it. Returns the script atom so a test can
   assert the provider was never called: a drained script is a provider that ran."
-  [port thread-id declared turns f]
+  [thread-id declared turns f]
   (let [script (atom (vec turns))]
     (providers/use-provider! thread-id (assoc (fake/scripted turns) :input declared
                                         :script script))
-    (let [stop (http/start! {:port port})]
-      (try (f script) (finally (stop) (providers/use-provider! thread-id nil))))))
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try (binding [*port* port] (f script))
+           (finally (stop) (providers/use-provider! thread-id nil))))))
 
 (deftest a-text-only-model-refuses-an-image-by-name-and-never-calls-the-vendor
   ;; The declaration is only worth anything if something enforces it. The vendor's
@@ -357,12 +376,11 @@
   ;; arriving after the request was sent -- so the refusal happens here instead,
   ;; and the provider is not contacted at all.
   (with-declaring-server
-   8089
    "guarded"
    #{:text}
    [{:content "should never be reached"}]
    (fn [script]
-     (let [resp   (post-run 8089 "guarded"
+     (let [resp   (post-run "guarded"
                             {:messages [{:id "u1" :role "user"
                                          :content [{:type "text" :text "what is this"}
                                                    {:type "image"
@@ -386,12 +404,11 @@
 (deftest a-model-that-declares-images-is-not-guarded
   ;; The other half: the guard must not become a blanket refusal of images.
   (with-declaring-server
-   8090
    "unguarded"
    #{:text :image}
    [{:content "saw it"}]
    (fn [script]
-     (let [resp (post-run 8090 "unguarded"
+     (let [resp (post-run "unguarded"
                           {:messages [{:id "u1" :role "user"
                                        :content [{:type "text" :text "what is this"}
                                                  {:type "image"
@@ -405,12 +422,11 @@
 (deftest a-text-only-model-takes-text-as-before
   ;; Regression: the guard must not touch the ordinary run.
   (with-declaring-server
-   8091
    "plain"
    #{:text}
    [{:content "hello"}]
    (fn [script]
-     (let [body (.body (post-run 8091 "plain"))]
+     (let [body (.body (post-run "plain"))]
        (is (str/includes? body "RUN_FINISHED"))
        (is (not (str/includes? body "RUN_ERROR")))
        (is (empty? @script))))))
@@ -420,12 +436,11 @@
   ;; is nothing to enforce. Guarding it would invent a rule the configuration never
   ;; wrote -- and break every deployment that describes its endpoint directly.
   (with-declaring-server
-   8092
    "silent"
    nil
    [{:content "went through"}]
    (fn [script]
-     (let [body (.body (post-run 8092 "silent"
+     (let [body (.body (post-run "silent"
                                  {:messages [{:id "u1" :role "user"
                                               :content [{:type "image"
                                                          :source {:type "url"
@@ -439,11 +454,10 @@
   ;; (pre-execute), executes, and closes (post-execute) -- a pass carries no
   ;; outcome key, and the wire is untouched by any of it.
   (with-server
-   8094
    "lifecycle"
    (fn []
      (io/delete-file (log-file "lifecycle") true)
-     (post-run 8094 "lifecycle")
+     (post-run "lifecycle")
      (let [f     (log-file "lifecycle")
            lines (wait-for-recorded f
                                     (fn [ls]
@@ -486,11 +500,10 @@
         _    (tools/session-require-approval! "http-approve" "write")
         _    (tools/session-require-approval! "http-veto" "write")]
     (with-server
-     8093
      {"http-approve" [(call ok) {:content "wrote it"}]
       "http-veto"    [(call veto) {:content "understood"}]}
      (fn []
-       (let [asked   (wire/frames-from-sse (.body (post-run 8093 "http-approve")))
+       (let [asked   (wire/frames-from-sse (.body (post-run "http-approve")))
              term    (last asked)
              iid     (get-in term [:outcome :interrupts 0 :id])]
          (testing "the first run ends on an interrupt the client can act on"
@@ -503,7 +516,7 @@
            (is (false? (.exists (io/file ok)))))
 
          (let [resumed (wire/frames-from-sse
-                        (.body (post-run 8093 "http-approve"
+                        (.body (post-run "http-approve"
                                          {:messages [{:id "u1" :role "user" :content "go"}
                                                      (assistant-with-call
                                                       "c1" "write" {:path ok :content "written"})]
@@ -520,10 +533,10 @@
              (is (some #(= "TOOL_CALL_RESULT" (:type %)) resumed))))
 
          ;; Second thread: same shape, a veto instead. Its parked run is turn 3.
-         (let [asked-v (wire/frames-from-sse (.body (post-run 8093 "http-veto")))
+         (let [asked-v (wire/frames-from-sse (.body (post-run "http-veto")))
                iid-v   (get-in (last asked-v) [:outcome :interrupts 0 :id])
                vetoed  (wire/frames-from-sse
-                        (.body (post-run 8093 "http-veto"
+                        (.body (post-run "http-veto"
                                          {:messages [{:id "u1" :role "user" :content "go"}
                                                      (assistant-with-call
                                                       "c1" "write" {:path veto :content "written"})]
@@ -562,12 +575,11 @@
   ;; A restart loses the parking; a client resuming an interrupt this process
   ;; never parked must be told so, never quietly granted.
   (with-server
-   8092
    "http-unknown"
    [{:content "never reached"}]
    (fn []
      (let [frames (wire/frames-from-sse
-                   (.body (post-run 8092 "http-unknown"
+                   (.body (post-run "http-unknown"
                                     {:resume [{:interruptId "never-parked"
                                                :status "resolved"}]})))]
        (is (= ["RUN_STARTED" "RUN_ERROR"] (mapv :type frames)))
@@ -590,7 +602,12 @@
   which is the entry that makes 'silence is not zero' testable.
 
   Used by the tests below. A pinned provider skips resolution, and the provider
-  timeline is precisely about resolution, so these must not pin."
+  timeline is precisely about resolution, so these must not pin.
+
+  IT ALSO STARTS THE SERVER, on a port the OS picks, and binds *port* for F. Every
+  use of this wrapper needs exactly one server and none of them should name a port;
+  owning the lifecycle next to the config it is paired with keeps the tests about
+  what they are actually testing. See *port* for why no port is written down."
   [turns f]
   ;; The config files live in the HOME, not beside the logs; ask harness.home for
   ;; it rather than walking up from the log directory, whose depth is the tree's
@@ -621,7 +638,10 @@
                                                     :context-window 128000
                                                     :max-output-tokens 4096}}}})
             :encoding "UTF-8")
-      (f)
+      (let [stop (http/start! {:port 0})
+            port (:local-port (meta stop))]
+        (try (binding [*port* port] (f))
+             (finally (stop))))
       (finally
         (spit cfg-file (or old-cfg "{:protocol :fake}\n") :encoding "UTF-8")
         (io/delete-file reg-file true)
@@ -636,7 +656,6 @@
    [{:content "unreachable"}]
    (fn []
      (let [id     "http-guard"
-           stop   (http/start! {:port 8088})
            image  {:messages [{:id "u1" :role "user"
                                :content [{:type "text" :text "look"}
                                          {:type "image"
@@ -648,15 +667,15 @@
        (try
          (testing "aimed at the text-only model, it is refused by name"
            (providers/set-override! id {:provider :beta})
-           (let [e (error (.body (post-run 8088 id image)))]
+           (let [e (error (.body (post-run id image)))]
              (is (some? e))
              (is (str/includes? (:message e) "beta-plain") "names the model")
              (is (str/includes? (:message e) "image") "and the modality it will not take")))
          (testing "the SAME input is served by a model that declares images"
            (providers/set-override! id {:provider :alpha})
            (is (= #{:text :image} (:input (providers/active-provider id))))
-           (is (nil? (error (.body (post-run 8088 id image))))))
-         (finally (stop) (providers/set-override! id nil)))))))
+           (is (nil? (error (.body (post-run id image))))))
+         (finally (providers/set-override! id nil)))))))
 
 (deftest a-run-naming-a-count-is-refused-rather-than-silently-dropped
   ;; The third entry, over the real edge. A run may name the three knobs; naming a
@@ -668,24 +687,21 @@
    [{:content "unreachable"}]
    (fn []
      (let [id    "http-count-in"
-           stop  (http/start! {:port 8089})
            error (fn [body]
                    (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
                                    (when (= "RUN_ERROR" (:type f)) f))
                                 (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
-       (try
-         (io/delete-file (log-file id) true)
-         (let [e (error (.body (post-run 8089 id {:provider {:context-window 200000}})))]
-           (is (some? e) "the run is terminated rather than served with the field dropped")
-           (is (str/includes? (:message e) "context-window") "the field is named")
-           (is (str/includes? (:message e) "providers.edn")
-               "and the run says where it belongs instead"))
-         (testing "and nothing was resolved or recorded for it"
-           (is (nil? (providers/override-for id)))
-           (let [lines (str/split-lines (slurp (log-file id) :encoding "UTF-8"))]
-             (is (not-any? #(str/includes? % "provider/init") lines)
-                 "a run that could not resolve writes no init line")))
-         (finally (stop)))))))
+       (io/delete-file (log-file id) true)
+       (let [e (error (.body (post-run id {:provider {:context-window 200000}})))]
+         (is (some? e) "the run is terminated rather than served with the field dropped")
+         (is (str/includes? (:message e) "context-window") "the field is named")
+         (is (str/includes? (:message e) "providers.edn")
+             "and the run says where it belongs instead"))
+       (testing "and nothing was resolved or recorded for it"
+         (is (nil? (providers/override-for id)))
+         (let [lines (str/split-lines (slurp (log-file id) :encoding "UTF-8"))]
+           (is (not-any? #(str/includes? % "provider/init") lines)
+               "a run that could not resolve writes no init line")))))))
 
 (deftest the-provider-timeline-is-init-once-then-changes
   ;; Ticket 03, over the real edge. A session's provider history lands as
@@ -693,47 +709,44 @@
   (with-resolved-config
    [{:content "hello"} {:content "hello"}]
    (fn []
-     (let [id   "http-prov"
-           stop (http/start! {:port 8101})]
-       (try
-         (io/delete-file (log-file id) true)
-         ;; Run one: the init line lands. The scripted turn is a plain reply,
-         ;; so the run does not touch the provider.
-         (post-run 8101 id)
-         (let [after-first (wait-for-recorded
-                            (log-file id)
-                            (fn [ls] (some #(= "provider/init" (:kind %)) ls))
-                            2000)]
-           (testing "the first run lands exactly one init line, before any message"
-             (let [kinds (mapv :kind after-first)]
-               (is (= 1 (count (filter #(= "provider/init" %) kinds))))
-               (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
-               (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
-           (testing "it carries the selection, what it resolved to, the source, and NO key value"
-             (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
-               (is (= "alpha" (:provider p)) "the provider that was selected")
-               (is (= "alpha-small" (:model p)) "the model id that was selected")
-               (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
-               (is (= "https://x/v1" (:base-url p)))
-               (is (= ["image" "text"] (:input p)) "the model's modalities, as wire strings")
-               (is (= ["text"] (:output p)))
-               (is (= 200000 (:context-window p))
-                   "and the model's counts, recorded rather than left to be re-derived")
-               (is (= 8192 (:max-output-tokens p)))
-               (is (= "default" (:source p)))
-               (is (= "stripped" (:api-key p)))))
-           ;; The endpoint above is RECORDED, not re-derived: the catalog can
-           ;; change under an old log (a base-url moves, a model is added), so a
-           ;; reader re-resolving would report today's answer as that run's.
-           ;; Run two of the same thread: no second init.
-           (post-run 8101 id)
-           (let [after-second (wait-for-recorded
-                               (log-file id)
-                               (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
-                               2000)]
-             (testing "a later run of the same thread does not repeat the init"
-               (is (= 1 (count (filter #(= "provider/init" (:kind %)) after-second)))))))
-         (finally (stop)))))))
+     (let [id   "http-prov"]
+       (io/delete-file (log-file id) true)
+       ;; Run one: the init line lands. The scripted turn is a plain reply,
+       ;; so the run does not touch the provider.
+       (post-run id)
+       (let [after-first (wait-for-recorded
+                          (log-file id)
+                          (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                          2000)]
+         (testing "the first run lands exactly one init line, before any message"
+           (let [kinds (mapv :kind after-first)]
+             (is (= 1 (count (filter #(= "provider/init" %) kinds))))
+             (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
+             (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
+         (testing "it carries the selection, what it resolved to, the source, and NO key value"
+           (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
+             (is (= "alpha" (:provider p)) "the provider that was selected")
+             (is (= "alpha-small" (:model p)) "the model id that was selected")
+             (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
+             (is (= "https://x/v1" (:base-url p)))
+             (is (= ["image" "text"] (:input p)) "the model's modalities, as wire strings")
+             (is (= ["text"] (:output p)))
+             (is (= 200000 (:context-window p))
+                 "and the model's counts, recorded rather than left to be re-derived")
+             (is (= 8192 (:max-output-tokens p)))
+             (is (= "default" (:source p)))
+             (is (= "stripped" (:api-key p)))))
+         ;; The endpoint above is RECORDED, not re-derived: the catalog can
+         ;; change under an old log (a base-url moves, a model is added), so a
+         ;; reader re-resolving would report today's answer as that run's.
+         ;; Run two of the same thread: no second init.
+         (post-run id)
+         (let [after-second (wait-for-recorded
+                             (log-file id)
+                             (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
+                             2000)]
+           (testing "a later run of the same thread does not repeat the init"
+             (is (= 1 (count (filter #(= "provider/init" (:kind %)) after-second)))))))))))
 
 (deftest a-session-configure-lands-as-a-changed-line
   ;; The write half, end to end: the agent changes its reasoning effort, the
@@ -748,8 +761,7 @@
   (with-resolved-config
    [{:content "hello"}]
    (fn []
-     (let [id   "http-change"
-           stop (http/start! {:port 8102})]
+     (let [id   "http-change"]
        (try
          (io/delete-file (log-file id) true)
          ;; Seed the session with a baseline the change can stand on.
@@ -765,7 +777,7 @@
          (testing "the session now serves the changed value"
            (is (= "high" (:reasoning-effort (providers/active-provider id)))))
          ;; Run once so the edge drains the outbox to the log.
-         (post-run 8102 id)
+         (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
                       (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
@@ -799,7 +811,7 @@
                    {:keys [parked]} (call)]
                (tools/decide-approval! (:interrupt-id parked) :approved {})
                (call))
-             (post-run 8102 id)
+             (post-run id)
              (let [lines (wait-for-recorded
                           (log-file id)
                           (fn [ls] (>= (count (filter #(= "provider/changed" (:kind %)) ls)) 2))
@@ -816,7 +828,7 @@
                    "the first change's override is the full session slice")
                (is (= "low" (get-in (:override b) [:reasoning-effort]))
                    "the second change's override reflects the latest session state"))))
-         (finally (stop) (providers/set-override! id nil)))))))
+         (finally (providers/set-override! id nil)))))))
 
 (deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
   ;; The end-to-end proof of the feature: an agent naming a vendor gets that
@@ -826,8 +838,7 @@
   (with-resolved-config
    [{:content "hello"}]
    (fn []
-     (let [id   "http-vendor"
-           stop (http/start! {:port 8103})]
+     (let [id   "http-vendor"]
        (try
          (io/delete-file (log-file id) true)
          (let [call (fn [] (tools/run! {:id "vsw" :type "function"
@@ -842,7 +853,7 @@
              (is (= :beta (:provider a)))
              (is (= "https://y/v1" (:base-url a)))
              (is (= "beta-plain" (:model a)) "and its default model came along")))
-         (post-run 8103 id)
+         (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
                       (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
@@ -858,14 +869,13 @@
            (testing "and the counts moved with the model, not left at alpha's"
              (is (= 128000 (get-in changed [:resolved :context-window])))
              (is (= 4096 (get-in changed [:resolved :max-output-tokens])))))
-         (finally (stop) (providers/set-override! id nil)))))))
+         (finally (providers/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
   (with-server
-   8099
    "preflight"
    (fn []
-     (let [req  (-> (HttpRequest/newBuilder (URI/create "http://127.0.0.1:8099/"))
+     (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
                     (.method "OPTIONS" (HttpRequest$BodyPublishers/noBody))
                     (.build))
            resp (.send (HttpClient/newHttpClient) req (HttpResponse$BodyHandlers/discarding))]
@@ -901,8 +911,8 @@
 (defn- api-call
   "A plain JSON call to the management edge -- the /api/* endpoints, not the
   AG-UI run endpoint. Returns the raw HttpResponse."
-  [port method path body]
-  (let [b (.header (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+  [method path body]
+  (let [b (.header (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
                    "Content-Type" "application/json")
         b (if (= :post method)
             (.POST b (HttpRequest$BodyPublishers/ofString (str body) StandardCharsets/UTF_8))
@@ -927,19 +937,18 @@
   (io/delete-file project-dir true)
   (.mkdirs (io/file project-dir))
   (with-server
-   8103
    "it-proj"
    (fn []
      (let [tid (str "proj-" (java.util.UUID/randomUUID))]
        (testing "an unbound thread answers with dir nil, not an error"
-         (let [resp (api-call 8103 :get (str "/api/project?threadId=" tid) nil)]
+         (let [resp (api-call :get (str "/api/project?threadId=" tid) nil)]
            (is (= 200 (.statusCode resp)))
            (is (= {:threadId tid :dir nil} (read-json resp)))
            (is (= ui-origin (header resp "Access-Control-Allow-Origin")))))
        (testing "a GET without threadId is a 400"
-         (is (= 400 (.statusCode (api-call 8103 :get "/api/project" nil)))))
+         (is (= 400 (.statusCode (api-call :get "/api/project" nil)))))
        (testing "binding a real directory answers with its absolute path"
-         (let [resp  (api-call 8103 :post "/api/project"
+         (let [resp  (api-call :post "/api/project"
                                (json/write-str {:threadId tid :dir project-dir}))
                reply (read-json resp)]
            (is (= 200 (.statusCode resp)))
@@ -947,15 +956,15 @@
            (is (str/ends-with? (:dir reply) "harness-http-project"))
            (testing "a GET now sees the binding"
              (is (= (:dir reply)
-                    (:dir (read-json (api-call 8103 :get (str "/api/project?threadId=" tid) nil))))))))
+                    (:dir (read-json (api-call :get (str "/api/project?threadId=" tid) nil))))))))
        (testing "binding a missing directory is a NAMED 400"
-         (let [resp (api-call 8103 :post "/api/project"
+         (let [resp (api-call :post "/api/project"
                               (json/write-str {:threadId tid :dir (str project-dir "/nope")}))
                reply (read-json resp)]
            (is (= 400 (.statusCode resp)))
            (is (str/includes? (:error reply) "no such directory"))))
        (testing "a malformed body is a 400"
-         (is (= 400 (.statusCode (api-call 8103 :post "/api/project" "{not json")))))
+         (is (= 400 (.statusCode (api-call :post "/api/project" "{not json")))))
        (let [bound (bound-lines tid)]
          (testing "exactly ONE project/bound audit line is on disk"
            (is (= 1 (count bound)))
@@ -1005,10 +1014,9 @@
     (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
     (.mkdirs (io/file d)))
   (with-server
-   8110
    {"listing-a" script "listing-b" script "listing-unbound" script}
    (fn []
-     (let [list-projects (fn [] (json/read-str (.body (api-call 8110 :get "/api/projects" nil))
+     (let [list-projects (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
                                                :key-fn keyword))
            project-named (fn [dir]
                            ;; By last path segment, matched EXACTLY: `-2` is a
@@ -1022,7 +1030,7 @@
                                 (filter #(= tid (:threadId %)))
                                 first))
            bind!         (fn [tid dir]
-                           (api-call 8110 :post "/api/project"
+                           (api-call :post "/api/project"
                                      (json/write-str {:threadId tid :dir dir})))]
        (testing "before anything is bound, this directory is not a project at all"
          (is (nil? (project-named listing-dir))))
@@ -1044,7 +1052,7 @@
        (testing "after a real run the facts follow the file, read fresh from disk"
          (let [before (:bytes (row-for listing-dir "listing-a"))]
            (is (= "RUN_FINISHED"
-                  (:type (last (wire/frames-from-sse (.body (post-run 8110 "listing-a")))))))
+                  (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
            (let [session (row-for listing-dir "listing-a")
                  f       (log-file-for "listing-a")]
              (is (< before (:bytes session)) "the run appended to the same file")
@@ -1070,7 +1078,7 @@
          ;; any activity, however recent. So a just-created session stays at the
          ;; top of its project instead of sinking under a busy conversation.
          (Thread/sleep 20)
-         (post-run 8110 "listing-a")
+         (post-run "listing-a")
          (is (= ["listing-b" "listing-a"]
                 (map :threadId (:sessions (project-named listing-dir))))))
        (testing "a different directory is a different project"
@@ -1084,11 +1092,11 @@
          ;; tree view that shows it; the sidebar's listing is about projects, and a
          ;; session nobody owns has no project to be listed under.
          (is (= "RUN_FINISHED"
-                (:type (last (wire/frames-from-sse (.body (post-run 8110 "listing-unbound")))))))
+                (:type (last (wire/frames-from-sse (.body (post-run "listing-unbound")))))))
          (is (not-any? #(= "listing-unbound" (:threadId %))
                        (mapcat :sessions (list-projects))))
          (is (some #(= "listing-unbound" (:threadId %))
-                   (json/read-str (.body (api-call 8110 :get "/api/threads" nil)) :key-fn keyword))
+                   (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))
              "and the raw tree view still shows it, so nothing is hidden, only unowned"))))))
 
 (deftest archiving-a-session-is-a-row-write-and-never-a-file-write
@@ -1105,17 +1113,16 @@
     (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
     (.mkdirs (io/file d)))
   (with-server
-   8114
    {"arch-a" script "arch-b" script "arch-other" script}
    (fn []
      (let [archive! (fn [tid flag]
-                      (api-call 8114 :post (str "/api/threads/" tid "/archive")
+                      (api-call :post (str "/api/threads/" tid "/archive")
                                 (json/write-str {:archived flag})))
            bind!    (fn [tid dir]
-                      (api-call 8114 :post "/api/project"
+                      (api-call :post "/api/project"
                                 (json/write-str {:threadId tid :dir dir})))
            sessions (fn [dir]
-                      (->> (json/read-str (.body (api-call 8114 :get "/api/projects" nil))
+                      (->> (json/read-str (.body (api-call :get "/api/projects" nil))
                                           :key-fn keyword)
                            (filter #(= (.getCanonicalPath (io/file dir)) (:path %)))
                            first
@@ -1132,7 +1139,7 @@
        (bind! "arch-a" archive-dir)
        (bind! "arch-b" archive-dir)
        (bind! "arch-other" archive-dir-2)
-       (post-run 8114 "arch-a")
+       (post-run "arch-a")
        (Thread/sleep 20)                         ; so a file write would move the mtime
 
        (testing "the flag round-trips through the listing"
@@ -1192,20 +1199,20 @@
                "and the reason names the id the caller asked about")))
 
        (testing "a body that carries no boolean is a 400, not a silent no-op"
-         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+         (is (= 400 (.statusCode (api-call :post "/api/threads/arch-a/archive"
                                            (json/write-str {:archived "yes"})))))
-         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+         (is (= 400 (.statusCode (api-call :post "/api/threads/arch-a/archive"
                                            (json/write-str {})))))
-         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+         (is (= 400 (.statusCode (api-call :post "/api/threads/arch-a/archive"
                                            "{not json")))))
 
        (testing "GET is refused -- this route has an effect"
-         (is (= 405 (.statusCode (api-call 8114 :get "/api/threads/arch-a/archive" nil)))))
+         (is (= 405 (.statusCode (api-call :get "/api/threads/arch-a/archive" nil)))))
 
        (testing "and the archive route does not swallow the rebuild route beside it"
          ;; The two share their path SHAPE. A matcher that answered for the wrong
          ;; verb would show up as a rebuild that archived something.
-         (let [body (read-json (api-call 8114 :post "/api/threads/arch-a/rebuild" ""))]
+         (let [body (read-json (api-call :post "/api/threads/arch-a/rebuild" ""))]
            (is (seq (:messages body)) "the rebuild route still rebuilds")
            (is (true? (flag archive-dir "arch-a")) "and archiving never changed it")))))))
 
@@ -1219,11 +1226,10 @@
   (with-resolved-config
    [{:content "hello"}]
    (fn []
-     (let [id   "http-model"
-           stop (http/start! {:port 8087})]
+     (let [id   "http-model"]
        (try
          (testing "the default: the selection and what the catalog resolved it to"
-           (let [resp (api-call 8087 :get (str "/api/model?threadId=" id) nil)
+           (let [resp (api-call :get (str "/api/model?threadId=" id) nil)
                  body (read-json resp)]
              (is (= 200 (.statusCode resp)))
              (is (= "alpha" (:provider body)))
@@ -1241,7 +1247,7 @@
                              (tree-seq coll? seq body))))))
          (testing "a session can move to a text-only model and the answer follows"
            (providers/set-override! id {:provider :beta})
-           (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
+           (let [body (read-json (api-call :get (str "/api/model?threadId=" id) nil))]
              (is (= "beta" (:provider body)))
              (is (= "beta-plain" (:model body)))
              (is (= "https://y/v1" (:base-url body)) "the endpoint followed the vendor")
@@ -1252,38 +1258,37 @@
                (is (= 4096 (:max-output-tokens body))))))
          (testing "a model that declares no counts reports NONE -- absent, not null"
            (providers/set-override! id {:provider :alpha :model "alpha-bare"})
-           (let [body (read-json (api-call 8087 :get (str "/api/model?threadId=" id) nil))]
+           (let [body (read-json (api-call :get (str "/api/model?threadId=" id) nil))]
              (is (= "alpha-bare" (:model body)))
              (is (not (contains? body :context-window))
                  "silence about a number is a fact, not a zero")
              (is (not (contains? body :max-output-tokens)))))
          (testing "an unbound/unknown thread is still an answer, not a 400"
-           (let [resp (api-call 8087 :get "/api/model?threadId=who-is-this" nil)
+           (let [resp (api-call :get "/api/model?threadId=who-is-this" nil)
                  body (read-json resp)]
              (is (= 200 (.statusCode resp)))
              (is (= "alpha-small" (:model body))
                  "the default tier resolves for any thread with no session in play")))
          (testing "a missing threadId is an answer too -- the process-wide slot"
-           (is (= 200 (.statusCode (api-call 8087 :get "/api/model" nil))))
-           (is (= ["image" "text"] (:input (read-json (api-call 8087 :get "/api/model" nil))))))
+           (is (= 200 (.statusCode (api-call :get "/api/model" nil))))
+           (is (= ["image" "text"] (:input (read-json (api-call :get "/api/model" nil))))))
          (testing "it is READ-ONLY: no audit line of its own"
            (let [f (log-file id)]
              (is (not (.exists f))
                  "asking a question must not write to the session's log")))
-         (finally (stop) (providers/set-override! id nil)))))))
+         (finally (providers/set-override! id nil)))))))
 
 (deftest the-model-endpoint-reports-a-sparse-configuration-as-sparse
   ;; Absent is a fact, not a failure. A provider described inline that declared no
   ;; modalities has nothing to report, and saying so beats inventing a default or
   ;; returning an error the client has to interpret.
   (with-server
-   8086
    "sparse"
    (fn []
      (let [tid  (str "sparse-" (java.util.UUID/randomUUID))
            ;; The seeded test config IS the inline form, and it declares nothing
            ;; -- which is exactly the sparse case.
-           body (read-json (api-call 8086 :get (str "/api/model?threadId=" tid) nil))]
+           body (read-json (api-call :get (str "/api/model?threadId=" tid) nil))]
        (is (= "seeded" (:model body)))
        (is (= "fake" (:protocol body)))
        (is (not (contains? body :input)) "nothing was declared, so nothing is claimed")
@@ -1309,26 +1314,25 @@
         real  http/*directory-chooser*]
     (try
       (with-server
-       8111
        "it-pick"
        (fn []
          (let [tid (str "pick-" (java.util.UUID/randomUUID))]
            (testing "picking answers the chosen absolute path"
              (stub! (fn [] project-dir-2))
-             (let [resp (api-call 8111 :post "/api/project/pick" nil)]
+             (let [resp (api-call :post "/api/project/pick" nil)]
                (is (= 200 (.statusCode resp)))
                (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
                (is (= project-dir-2 (:dir (read-json resp))))))
            (testing "cancelling is an answer (dir nil), not an error"
              (stub! (fn [] nil))
-             (let [resp (api-call 8111 :post "/api/project/pick" nil)]
+             (let [resp (api-call :post "/api/project/pick" nil)]
                (is (= 200 (.statusCode resp)))
                (is (= {:dir nil} (read-json resp)))))
            (testing "a blank answer reads as a cancel too"
              (stub! (fn [] "   "))
-             (is (= {:dir nil} (read-json (api-call 8111 :post "/api/project/pick" nil)))))
+             (is (= {:dir nil} (read-json (api-call :post "/api/project/pick" nil)))))
            (testing "GET is refused -- this call opens a window, so it is not cacheable"
-             (is (= 405 (.statusCode (api-call 8111 :get "/api/project/pick" nil)))))
+             (is (= 405 (.statusCode (api-call :get "/api/project/pick" nil)))))
            (testing "picking binds NOTHING: the ordinary POST is still the only route"
              (stub! (fn [] project-dir-2))
              ;; Compare directories by IDENTITY, not by spelling. Two honest
@@ -1339,11 +1343,11 @@
              ;; for -- see harness.project/absolute). Neither is what this test is
              ;; about; the session landing in that directory is.
              (let [canonical (fn [p] (.getCanonicalPath (io/file p)))
-                   picked    (:dir (read-json (api-call 8111 :post "/api/project/pick" nil)))]
+                   picked    (:dir (read-json (api-call :post "/api/project/pick" nil)))]
                (is (= (canonical project-dir-2) (canonical picked))
                    "the picker hands back the directory it was told to")
                (is (nil? (project/binding-for tid)) "no binding until the POST lands")
-               (is (= 200 (.statusCode (api-call 8111 :post "/api/project"
+               (is (= 200 (.statusCode (api-call :post "/api/project"
                                                  (json/write-str {:threadId tid :dir picked})))))
                (is (= (canonical picked) (canonical (project/binding-for tid)))
                    "binding lands the session in that same directory")
@@ -1368,28 +1372,27 @@
       (io/delete-file f true))
     (.mkdirs (io/file d)))
   (with-server
-   8107
    {"rebind-run" bound-script}
    (fn []
      (let [tid "rebind-run"]
        (testing "the first bind's line carries before nil"
-         (let [resp (api-call 8107 :post "/api/project"
+         (let [resp (api-call :post "/api/project"
                               (json/write-str {:threadId tid :dir project-dir}))]
            (is (= 200 (.statusCode resp))))
          (let [line (first (bound-lines tid))]
            (is (nil? (get-in line [:payload :before])))
            (is (str/ends-with? (get-in line [:payload :after]) "harness-http-project"))))
        (testing "rebinding answers and displays the new directory"
-         (let [resp (api-call 8107 :post "/api/project"
+         (let [resp (api-call :post "/api/project"
                               (json/write-str {:threadId tid :dir project-dir-2}))]
            (is (= 200 (.statusCode resp)))
            (is (str/ends-with? (:dir (read-json resp)) "harness-http-project-2"))
            (testing "GET reflects the switch"
              (is (str/ends-with?
-                  (:dir (read-json (api-call 8107 :get (str "/api/project?threadId=" tid) nil)))
+                  (:dir (read-json (api-call :get (str "/api/project?threadId=" tid) nil)))
                   "harness-http-project-2")))))
        (testing "a relative write after the switch lands in the NEW directory"
-         (let [frames (wire/frames-from-sse (.body (post-run 8107 tid)))]
+         (let [frames (wire/frames-from-sse (.body (post-run tid)))]
            (is (= "RUN_FINISHED" (:type (last frames))))
            (is (empty? (wire/violations frames))))
          (is (= "landed" (slurp (io/file project-dir-2 "e2e.txt") :encoding "UTF-8")))
@@ -1407,13 +1410,12 @@
   (io/delete-file project-dir true)
   (.mkdirs (io/file project-dir))
   (with-server
-   8104
    {"proj-run" bound-script}
    (fn []
-     (let [resp (api-call 8104 :post "/api/project"
+     (let [resp (api-call :post "/api/project"
                           (json/write-str {:threadId "proj-run" :dir project-dir}))]
        (is (= 200 (.statusCode resp))))
-     (let [frames (wire/frames-from-sse (.body (post-run 8104 "proj-run")))]
+     (let [frames (wire/frames-from-sse (.body (post-run "proj-run")))]
        (testing "the run itself completed normally"
          (is (= "RUN_FINISHED" (:type (last frames))))
          (is (empty? (wire/violations frames)))))
@@ -1446,17 +1448,16 @@
     (doseq [d [adir bdir]] (run! #(io/delete-file % true) (reverse (file-seq d))))
     (run! #(.mkdirs ^java.io.File %) [adir bdir])
     (with-server
-     8108
      {"move-run" bound-script}
      (fn []
        (let [tid "move-run"]
-         (api-call 8108 :post "/api/project" (json/write-str {:threadId tid :dir project-dir}))
+         (api-call :post "/api/project" (json/write-str {:threadId tid :dir project-dir}))
          (testing "the run leaves a log in the FIRST project's workspace"
-           (is (= "RUN_FINISHED" (:type (last (wire/frames-from-sse (.body (post-run 8108 tid)))))))
+           (is (= "RUN_FINISHED" (:type (last (wire/frames-from-sse (.body (post-run tid)))))))
            (is (.exists old)))
          (let [before-lines (count (str/split-lines (slurp old :encoding "UTF-8")))]
            (testing "the rebind answers OK and the log MOVED with it"
-             (let [resp (api-call 8108 :post "/api/project"
+             (let [resp (api-call :post "/api/project"
                                   (json/write-str {:threadId tid :dir project-dir-2}))]
                (is (= 200 (.statusCode resp))))
              (is (str/includes? (log-dir-for tid) "harness-http-project-2")
@@ -1468,11 +1469,11 @@
                  (is (< before-lines
                         (count (str/split-lines (slurp moved :encoding "UTF-8"))))))))
            (testing "so the listing sees exactly ONE log for this session, and rebuild works"
-             (let [rows (->> (json/read-str (.body (api-call 8108 :get "/api/threads" nil))
+             (let [rows (->> (json/read-str (.body (api-call :get "/api/threads" nil))
                                             :key-fn keyword)
                              (filterv #(= tid (:threadId %))))]
                (is (= 1 (count rows))))
-             (let [resp (api-call 8108 :post (str "/api/threads/" tid "/rebuild") nil)]
+             (let [resp (api-call :post (str "/api/threads/" tid "/rebuild") nil)]
                (is (= 200 (.statusCode resp))))))
          (testing "a destination that already holds this session's log is refused BY NAME"
            ;; Put a log back where the first project's workspace was -- which is what
@@ -1482,7 +1483,7 @@
            (.mkdirs (.getParentFile old))
            (spit old "{\"ts\":1,\"runId\":\"r0\",\"kind\":\"input\",\"payload\":{}}\n"
                  :encoding "UTF-8")
-           (let [resp  (api-call 8108 :post "/api/project"
+           (let [resp  (api-call :post "/api/project"
                                  (json/write-str {:threadId tid :dir project-dir}))
                  reply (read-json resp)]
              (is (= 400 (.statusCode resp)))
@@ -1498,11 +1499,11 @@
                ;; log is this conversation.
                (is (str/ends-with? (:dir reply) "harness-http-project")))
              (testing "and from here the split is VISIBLE, not silent -- two files, one stem"
-               (let [rows (->> (json/read-str (.body (api-call 8108 :get "/api/threads" nil))
+               (let [rows (->> (json/read-str (.body (api-call :get "/api/threads" nil))
                                               :key-fn keyword)
                                (filterv #(= tid (:threadId %))))]
                  (is (= 2 (count rows))))
-               (let [rb (api-call 8108 :post (str "/api/threads/" tid "/rebuild") nil)]
+               (let [rb (api-call :post (str "/api/threads/" tid "/rebuild") nil)]
                  (is (= 404 (.statusCode rb)))
                  (is (str/includes? (:error (read-json rb)) "harness-http-project")
                      "the refusal names the other half's directory"))))))))))
@@ -1516,15 +1517,14 @@
   ;; produce an empty stream (the per-thread-pin rule, learned the hard way).
   (let [tid (str "rebuild-" (java.util.UUID/randomUUID))]
     (with-server
-     8105
      {tid script}
      (fn []
        ;; The log: one real run of the default script -- reasoning, two tool
        ;; calls, tool results, a final answer.
-       (let [frames (wire/frames-from-sse (.body (post-run 8105 tid)))]
+       (let [frames (wire/frames-from-sse (.body (post-run tid)))]
          (is (= "RUN_FINISHED" (:type (last frames)))))
        (testing "GET /api/threads lists the conversation with its metadata"
-         (let [resp (api-call 8105 :get "/api/threads" nil)
+         (let [resp (api-call :get "/api/threads" nil)
                rows (->> (json/read-str (.body resp) :key-fn keyword)
                          (filterv #(= tid (:threadId %))))]
            (is (= 200 (.statusCode resp)))
@@ -1533,7 +1533,7 @@
            (is (pos? (:bytes (first rows))))
            (is (pos? (:lastActivity (first rows))))))
        (testing "POST rebuild returns a continuable message list"
-         (let [resp  (api-call 8105 :post (str "/api/threads/" tid "/rebuild") nil)
+         (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
            (is (= 200 (.statusCode resp)))
            (is (= tid (:threadId reply)))
@@ -1565,12 +1565,11 @@
     (run! #(io/delete-file % true) (reverse (file-seq (io/file dir))))
     (.mkdirs (io/file dir))
     (with-server
-     8112
      "never-run"
      (fn []
-       (is (= 200 (.statusCode (api-call 8112 :post "/api/project"
+       (is (= 200 (.statusCode (api-call :post "/api/project"
                                          (json/write-str {:threadId "never-run" :dir dir})))))
-       (let [resp  (api-call 8112 :post "/api/threads/never-run/rebuild" nil)
+       (let [resp  (api-call :post "/api/threads/never-run/rebuild" nil)
              reply (json/read-str (.body resp) :key-fn keyword)]
          (is (= 200 (.statusCode resp)))
          (is (= [] (:messages reply)) "nothing has happened in this conversation yet")
@@ -1625,24 +1624,23 @@
     (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
     (.mkdirs (io/file d)))
   (with-server
-   8115
    {"rm-a" script "rm-b" script "rm-other" script "rm-never-run" script}
    (fn []
      (let [canon    (fn [d] (.getCanonicalPath (io/file d)))
            remove!  (fn [d]
-                      (api-call 8115 :post
+                      (api-call :post
                                 (str "/api/projects/"
                                      (java.net.URLEncoder/encode (canon d) "UTF-8")
                                      "/remove")
                                 nil))
-           add!     (fn [d] (api-call 8115 :post "/api/projects" (json/write-str {:dir d})))
+           add!     (fn [d] (api-call :post "/api/projects" (json/write-str {:dir d})))
            bind!    (fn [tid d]
-                      (api-call 8115 :post "/api/project"
+                      (api-call :post "/api/project"
                                 (json/write-str {:threadId tid :dir d})))
            archive! (fn [tid flag]
-                      (api-call 8115 :post (str "/api/threads/" tid "/archive")
+                      (api-call :post (str "/api/threads/" tid "/archive")
                                 (json/write-str {:archived flag})))
-           listing  (fn [] (json/read-str (.body (api-call 8115 :get "/api/projects" nil))
+           listing  (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
                                           :key-fn keyword))
            project  (fn [d] (first (filter #(= (canon d) (:path %)) (listing))))
            session  (fn [d tid] (first (filter #(= tid (:threadId %))
@@ -1655,9 +1653,9 @@
        (is (= 200 (.statusCode (bind! "rm-b" remove-dir-a))))
        (is (= 200 (.statusCode (bind! "rm-other" remove-dir-b))))
        (is (= 200 (.statusCode (add! remove-dir-a))))
-       (post-run 8115 "rm-a")
-       (post-run 8115 "rm-b")
-       (post-run 8115 "rm-other")
+       (post-run "rm-a")
+       (post-run "rm-b")
+       (post-run "rm-other")
        ;; A session with NO log at all. Binding one writes an audit line, so the
        ;; file would otherwise exist -- it is removed by hand, which is the state
        ;; the listing calls "null facts" rather than a zero-byte file. The removal
@@ -1699,7 +1697,7 @@
              (is (contains? everywhere "rm-other"))
              (is (contains? everywhere "rm-never-run")))
            (is (some #(= "rm-a" (:threadId %))
-                     (json/read-str (.body (api-call 8115 :get "/api/threads" nil))
+                     (json/read-str (.body (api-call :get "/api/threads" nil))
                                     :key-fn keyword))))
 
          (testing "EVERY FILE is byte-for-byte and mtime-for-mtime what it was"
@@ -1731,7 +1729,7 @@
            ;; through to the AG-UI run endpoint and dies in a body that is not
            ;; there.
            (is (= 405 (.statusCode
-                       (api-call 8115 :get
+                       (api-call :get
                                  (str "/api/projects/"
                                       (java.net.URLEncoder/encode (canon remove-dir-b) "UTF-8")
                                       "/remove")
@@ -1769,7 +1767,7 @@
            ;; The ticket's last promise, and the one a "tidy up while we are here"
            ;; implementation would break invisibly: same directory, same file name,
            ;; same run inside it.
-           (let [resp  (api-call 8115 :post "/api/threads/rm-a/rebuild" "")
+           (let [resp  (api-call :post "/api/threads/rm-a/rebuild" "")
                  reply (read-json resp)]
              (is (= 200 (.statusCode resp)))
              (is (seq (:messages reply))
@@ -1784,14 +1782,13 @@
     (run! #(io/delete-file % true) (reverse (file-seq (io/file adir))))
     (.mkdirs (io/file adir))
     (with-server
-     8113
      "add-project-unused"
      (fn []
-       (let [add!  (fn [dir] (api-call 8113 :post "/api/projects" (json/write-str {:dir dir})))
+       (let [add!  (fn [dir] (api-call :post "/api/projects" (json/write-str {:dir dir})))
              named (fn [dir]
                      (let [want (last (str/split (.getCanonicalPath (io/file dir)) #"/"))]
                        (first (filterv #(= want (last (str/split (:path %) #"/")))
-                                       (json/read-str (.body (api-call 8113 :get "/api/projects" nil))
+                                       (json/read-str (.body (api-call :get "/api/projects" nil))
                                                       :key-fn keyword)))))]
          (testing "a real directory becomes a project with NO sessions in it"
            (let [resp  (add! adir)
@@ -1810,7 +1807,7 @@
              (is (= first-id second-id) "find-or-create, keyed on the canonical path")
              (is (= 1 (count (filterv #(= (.getCanonicalPath (io/file adir)) (:path %))
                                       (json/read-str
-                                       (.body (api-call 8113 :get "/api/projects" nil))
+                                       (.body (api-call :get "/api/projects" nil))
                                        :key-fn keyword)))))))
          (testing "a different SPELLING of the same directory is still the same project"
            ;; The whole point of keying on the canonical form: `dir/.` is the same
@@ -1830,8 +1827,8 @@
                (is (= 400 (.statusCode resp)))
                (is (str/includes? (:error (read-json resp)) "not a directory")))))
          (testing "no dir and a malformed body are each a 400"
-           (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" (json/write-str {})))))
-           (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" "{not json"))))))))))
+           (is (= 400 (.statusCode (api-call :post "/api/projects" (json/write-str {})))))
+           (is (= 400 (.statusCode (api-call :post "/api/projects" "{not json"))))))))))
 
 (def ^:private settings-sentinel
   "A value shaped like a real key and recognisable anywhere it turns up. It goes
@@ -1868,7 +1865,7 @@
         dotenv   (io/file dir ".env")
         saved    (into {} (for [f [config provs dotenv]]
                             [(.getName f) (when (.exists f) (slurp f :encoding "UTF-8"))]))
-        settings (fn [] (api-call 8116 :get "/api/settings?threadId=set-1" nil))
+        settings (fn [] (api-call :get "/api/settings?threadId=set-1" nil))
         parse    (fn [] (read-json (settings)))
         restore! (fn []
                    (doseq [[nm f] [["config.edn" config] ["providers.edn" provs] [".env" dotenv]]]
@@ -1888,7 +1885,6 @@
       (spit provs settings-providers :encoding "UTF-8")
       (spit dotenv (str "HARNESS_API_KEY=" settings-sentinel "\n") :encoding "UTF-8")
       (with-server
-       8116
        "settings-unused"
        (fn []
            (testing "the live configuration, knob by knob"
@@ -1966,7 +1962,7 @@
                (is (str/includes? (:error (read-json resp)) "config.edn not found"))))
 
            (testing "only GET is served -- this route has no effect to POST"
-             (is (= 405 (.statusCode (api-call 8116 :post "/api/settings" "{}")))))))
+             (is (= 405 (.statusCode (api-call :post "/api/settings" "{}")))))))
       (finally (restore!)))))
 
 (deftest the-retired-logs-directory-is-invisible-three-ways
@@ -1999,19 +1995,18 @@
     ;; is why the store is asked about before the route below can have created
     ;; anything for this id.
     (with-server
-     8109
      "old-logs-list"
      (fn []
        (testing "the store has no row for it -- nothing reads ownership off the disk"
          (is (nil? (project/binding-for tid)))
          (is (nil? (project/identity-for tid))))
        (testing "the listing does not show it -- the walk is rooted at projects/"
-         (let [resp (api-call 8109 :get "/api/threads" nil)
+         (let [resp (api-call :get "/api/threads" nil)
                rows (json/read-str (.body resp) :key-fn keyword)]
            (is (= 200 (.statusCode resp)))
            (is (not-any? #(= tid (:threadId %)) rows))))
        (testing "and its id resolves to nothing, so a rebuild cannot reach it either"
-         (is (= 404 (.statusCode (api-call 8109 :post (str "/api/threads/" tid "/rebuild") nil)))))
+         (is (= 404 (.statusCode (api-call :post (str "/api/threads/" tid "/rebuild") nil)))))
        (testing "the file is exactly as it was left -- unread, unmoved, unimported"
          (is (.exists file))
          (is (= body (slurp file :encoding "UTF-8")))
@@ -2019,7 +2014,6 @@
 
 (deftest rebuild-refuses-truncated-and-corrupt-logs-by-name
   (with-server
-   8106
    "it-refuse"
    (fn []
      (testing "a log that ends mid-run is refused, naming the last frame"
@@ -2036,7 +2030,7 @@
                         :payload {:type "RUN_STARTED" :threadId tid :runId "r1"}})
                       "\n")
                :encoding "UTF-8")
-         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+         (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
            (is (= 400 (.statusCode resp)))
            (is (re-find #"(?i)mid-run|RUN_FINISHED|RUN_ERROR" (:error reply)))
@@ -2048,7 +2042,7 @@
        (let [tid (str "corrupt-" (java.util.UUID/randomUUID))]
          (spit (log-file tid)
                "{\"ts\":1,\"runId\":\"r1\",\"kin" :encoding "UTF-8")
-         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+         (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
            (is (= 400 (.statusCode resp)))
            (is (re-find #"line 1" (:error reply))))))
@@ -2056,7 +2050,7 @@
        ;; NOT a 400: nothing was rebuilt and nothing was wrong with a log -- the
        ;; stem simply names nothing, which is what 404 means. It is also the answer
        ;; a client that deleted its own session and reloaded the page needs.
-       (let [resp  (api-call 8106 :post "/api/threads/no-such-thread-xyz/rebuild" nil)
+       (let [resp  (api-call :post "/api/threads/no-such-thread-xyz/rebuild" nil)
              reply (json/read-str (.body resp) :key-fn keyword)]
          (is (= 404 (.statusCode resp)))
          (is (str/includes? (:error reply) "no-such-thread-xyz"))))
@@ -2077,7 +2071,7 @@
          (.mkdirs (.getParentFile ^java.io.File two))
          (spit one (str line "\n") :encoding "UTF-8")
          (spit two (str line "\n") :encoding "UTF-8")
-         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+         (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
            (is (= 404 (.statusCode resp)))
            (is (str/includes? (:error reply) "harness-http-project"))
@@ -2112,9 +2106,9 @@
     (project/bind! "it-skills" proj)
     (try
       (with-server
-       8117 "it-skills" skill-script
+       "it-skills" skill-script
        (fn []
-         (let [resp      (.body (post-run 8117 "it-skills"))
+         (let [resp      (.body (post-run "it-skills"))
                frames    (wire/frames-from-sse resp)
                lines     (wait-for-recorded
                           (log-file-for "it-skills")
@@ -2166,9 +2160,9 @@
       (if (.canRead f)
         (is true "permission bits do not apply to this user; nothing to assert")
         (with-server
-         8118 "it-badrules" script
+         "it-badrules" script
          (fn []
-           (let [frames (wire/frames-from-sse (.body (post-run 8118 "it-badrules")))]
+           (let [frames (wire/frames-from-sse (.body (post-run "it-badrules")))]
              (testing "the client gets a terminated run carrying the reason"
                (is (= "RUN_ERROR" (:type (last frames))))
                (is (str/includes? (str (:message (last frames)))
