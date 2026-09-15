@@ -36,6 +36,8 @@
 - [x] 文本、工具卡、reasoning 在一轮内按 part 的真实顺序交替出现，不重排、不合并
 - [x] 「默认折叠」与官方默认（流式中自动展开、流结束自动收起）不一致，这一处差异**在代码里注明原因**
 - [x] 抄来的组件**一处都没改**：全部靠覆盖槽位解决，零本地修改
+      ~~**2026-09-15 部分推翻**：第 12 节的复议改了 `thread.aui.tsx`（`LOCAL:` 标注，与 `thread-list.aui.tsx`
+      同一套约定）。槽位覆盖仍是主力路线，但「零本地修改」这句不再成立~~
 - [x] 真 Chromium 验收：脚本化会话让模型调 `read` / `write` / `bash`，卡片与 reasoning 按上述行为
       出现，截图留档；另跑一轮**真模型**（真 provider）端到端
 - [x] 验收方式是逐条对位，不是「看着差不多」：工具名与参数**逐字**与线上帧比对，reasoning 在 run
@@ -51,7 +53,7 @@
 |---|---|---|
 | `ui/src/components/message-parts.tsx` | **新增** | 三个槽位的实现，外加模块级常量 `THREAD_COMPONENTS`。整票只有这一个新文件 |
 | `ui/src/app.tsx` | 改 | 一行 `<Thread components={THREAD_COMPONENTS} />`，加文件头一段说明 |
-| `ui/src/components/assistant-ui/elements/*` | **一处未动** | 20 份抄来的文件保持与上游可逐字节对账 |
+| `ui/src/components/assistant-ui/elements/*` | **一处未动** | 20 份抄来的文件保持与上游可逐字节对账（同日由第 12 节推翻其一：`thread.aui.tsx` 现带 `LOCAL:` 改动） |
 
 三个槽位的定位：`ToolFallback` 是「没有专用 UI 的工具调用长什么样」；`ToolGroup` 与
 `ReasoningGroup` 是「一串连续同类 part 的包壳」。它们在 `thread.aui.tsx` 的 `AssistantMessage` 里
@@ -278,3 +280,90 @@ cards:  ["write · Done", "bash · Done"]
 失败」三态）。都留下：耗时是折叠头上「还在动」的最省事信号，成本一行；那两个状态是**本仓内核真会产生
 的状态**——`requires-action` 就是 05 的停泊调用，`incomplete` 的 `cancelled` 是取消——映射里少一支，
 就等于把两个真实状态显示成别的状态，那是缺陷不是精简。
+
+### 12. 复议（次日的三条要求）与第一次改抄来的文件
+
+2026-09-15 提出三条：
+
+> 从用户会话开始到 reACT 循环结束为一个 turn，turn 结束才展示 copy refresh more 按钮，而不是每个 step
+> 都展示；reasoning 的样式和 read 等工具调用保持一致，不要使用卡片
+
+前两条是本票的展示面，第三条推翻了本票第 1 节表格里那句「20 份抄来的文件保持与上游可逐字节对账」——
+`thread.aui.tsx` 现在带改动，按 `thread-list.aui.tsx` 立下的规矩逐处标 `LOCAL:`。票面首行与第 1 节表格
+已就地划掉，不留下两个都自称成立的版本。
+
+#### 12.1 为什么一票有 N 个动作条：N 是这一轮的 LLM 轮数
+
+答案本票第 8 节第 1 条早就写下了，只是当时读它的人不是今天的我：**一发多调用在线上就是多条助手消息**，
+不是一条消息里的多个 part。第 8 节记的是「4 个调用 = 4 条消息」；同一个机制管着**文字轮**——
+`harness.ag-ui/open-text` 每开一条新助手消息就铸一个新 `messageId`（`(str run-id "-m" n)`），
+适配器据此 `adoptServerMessageId(id, /*startNewMessage*/ true)`，把上一条定为 `complete` 再插一条新的。
+所以「想一下 → read → 再想 → 回答」这一轮是 **4 条助手消息**，而它们在消息列表里**彼此相邻**。
+
+上游的动作条是**每条消息一份**（`ActionBarPrimitive.Root` 的 `autohide="not-last"` 只在 run 跑着时藏，
+`isLast` 只认列表最后一条），于是这一轮显示 4 份 Copy / Refresh / More，后三份贴在答案的碎片下面。
+
+#### 12.2 turn 的边界：两个关于邻居的问题
+
+```
+isTurnEnd(s)          = s.thread.messages[s.message.index + 1]?.role !== "assistant"
+isTurnContinuation(s) = s.thread.messages[s.message.index - 1]?.role === "assistant"
+```
+
+一个 turn = 一串**相邻的**助手消息；两个 turn 之间隔着开启后一轮的那条用户消息。于是「我后面没有自己人」
+就是 turn 的末尾，「我前面有自己人」就是 turn 的中段——两个问题都由**线程自己的消息列表**回答，
+不需要内核给出新的边界信号（内核语义一个字没动，这是纯页面的事）。
+
+落到两处：
+
+- **动作条**：`AssistantActionBar` 包进 `<AuiIf condition={isTurnEnd}>`，且 footer 的高度占位
+  （`ACTION_BAR_HEIGHT`）也只在 turn 末尾留——否则每个 step 下面都空着 30px。中段的消息因此
+  不留位、不画条。
+- **步距**：中段那条加 `-mt-4`，把消息组的 `gap-y-6` 抵掉大半，一轮之内读成一整段回答；
+  turn 与 turn 之间保留原间距。
+
+#### 12.3 reasoning 不再是卡片：一行，且是与工具调用**同一行**
+
+上游 `ReasoningRoot` 的默认 `variant` 是 `outline`，即 `rounded-lg border px-3 py-2`——那圈边框就是
+「卡片」。改法两步，正好对上「样式和 read 等工具调用保持一致」：
+
+1. `variant="ghost"`（去框、去圆角、去内边距）；
+2. 行本身写在 `message-parts.tsx` 里，**逐条照 `ToolCallTrigger` 的形状**：`BrainIcon` + 粗体名 +
+   chevron、`py-1.5 text-sm`、`group-data-open/trigger` 转 chevron。原来用的抄来的 `ReasoningTrigger`
+   不再导入，行是自写的（`ReasoningRoot` / `ReasoningContent` / `ReasoningText` 这三个**壳**仍抄来：
+   滚动锁、淡出、动画不重写）。
+3. 顺带把 `ReasoningText` 的内层 `max-h-64 overflow-y-auto` 用 `max-h-none` 抵掉。工具的结果是整段
+   摊开的，思考若自己滚在一个 256px 的窗口里，就成了这一轮里唯一一条阅读规则不同的步骤。
+
+#### 12.4 实测（真 Chromium + 脚本化后端，一个 turn 两步、两个 turn）
+
+新增截图 `.scratch/assistant-ui/evidence/`：
+
+| 文件 | 内容 |
+|---|---|
+| `t04-08-one-bar-per-turn.png` | 两个 turn：每个 turn 末尾一份动作条（第一轮那条悬停可见），中段 step 一份都没有 |
+| `t04-09-reasoning-row-is-a-tool-row.png` | 同一轮里 reasoning 展开 + `read` 卡展开：两行同左缩进、同形、reasoning 无边框无底色 |
+
+量出来的数（`getBoundingClientRect` / `getComputedStyle`）：
+
+- 两个 turn 共 **4 条助手消息**；`footer` 的子元素数逐个为 `[0, 0, 0, 1]`（只有整个 turn 的最后一条有），
+  footer 高度 `[0, 30, 0, 30]`——一份条 30px，只在 turn 末尾。
+- 中段的消息 `margin-top: -16px`，turn 首位 `0px`。
+- **两行几何逐字段相同**：`reasoning-trigger` 与 `tool-call-trigger` 都是
+  `x=456, h=28, padding 6px/6px, fontSize 14px`，且 `border-width 0px, border-radius 0px,
+  background rgba(0,0,0,0)`——reasoning 一行不再是卡。
+- reasoning 根：`data-variant="ghost"`，`class` 里没有 `border` / `rounded` / `shadow`；展开的内容块
+  是满宽流式块（`[456,116,656,35]`），不是面板。
+
+#### 12.5 一处必须说清的语义变化
+
+**Refresh（`ActionBarPrimitive.Reload`）现在重生成的是这一轮的**最后一条**消息，也就是答案。**
+这正是「重新生成」在读者心里的意思，所以判为改善而非副作用——但它确实是对上游语义的改动：
+上游每条消息各自可重生成，中段那几条从此不可单独重生成（它们的按钮没了）。Copy 同理：复制的是**答案**，
+不是某个 step 的碎片。**中段的 step 本就不是可单独复制/重生成的东西**，这是本条要求成立的前提。
+
+#### 12.6 三关
+
+`tsc --noEmit` 0 error；`vite build` 绿（CSS 89.60 kB / JS 1 277.17 kB，gzip 361.13 kB）；
+`npm test` **11/11 passed**（含 05 的停泊/恢复与 06 的多轮用例——动作条与步距的改动没有碰审批门，
+`t05-*` 的行为不在本节的改动面内，未重截）。测试跑起来的那轮页面控制台除 vite 连接日志外零输出。

@@ -22,17 +22,26 @@
 //
 // ------------------------------------------------------- up front: collapsed
 //
-// Tool cards and reasoning start CLOSED and open only when clicked -- the
+// Tool cards and reasoning rows start CLOSED and open only when clicked -- the
 // content is never on screen until somebody asks for it. For reasoning that is
 // the opposite of upstream, which holds the disclosure open while tokens stream
 // (`streaming`) and snaps it shut when the run ends. We simply never pass
 // `streaming`, so the resting state is closed and the reader is never ambushed
 // by a panel that opened itself.
 //
-// The "still working" signal therefore moves onto the collapsed header: a
-// spinning icon plus a status word for a tool call, a shimmering label for
-// reasoning. Both are visible without opening anything, and both stop when the
-// work stops.
+// The "still working" signal therefore moves onto the collapsed row: a spinning
+// icon plus a status word for a tool call, a shimmering label for reasoning.
+// Both are visible without opening anything, and both stop when the work stops.
+//
+// -------------------------------------------------- one row, two kinds of step
+//
+// Reasoning is NOT a card here. Upstream draws it in one -- `ReasoningRoot`'s
+// default variant is `outline`, a rounded, bordered box -- and a bordered box
+// next to a bare `read` row reads as a different KIND of thing rather than the
+// next step of the same turn. So the reasoning disclosure is `variant="ghost"`
+// and its row is written in this file, deliberately shaped like `ToolCallTrigger`
+// (see `ReasoningTrigger` below). The disclosure SHELL is still the copied kit's:
+// the scroll lock, the fades and the animation are not ours to re-derive.
 //
 // The one thing left open is the tool group, and it is not a contradiction: the
 // group holds no content of its own, only the cards, so opening it reveals the
@@ -57,11 +66,12 @@
 // next registry pull; the upstream pieces used are the copied atoms and
 // disclosure shells -- `ToolFallbackRoot` / `ToolFallbackContent` /
 // `ToolFallbackError` (animation, scroll lock, error block), `ToolGroupRoot` /
-// `ToolGroupTrigger` / `ToolGroupContent`, and `ReasoningRoot` /
-// `ReasoningTrigger` / `ReasoningContent` / `ReasoningText`.
+// `ToolGroupTrigger` / `ToolGroupContent`, and -- for reasoning -- the shell
+// only: `ReasoningRoot` / `ReasoningContent` / `ReasoningText`.
 import { type ElementType, type FC, type PropsWithChildren } from "react";
 import {
   AlertCircleIcon,
+  BrainIcon,
   CheckIcon,
   ChevronDownIcon,
   LoaderIcon,
@@ -82,7 +92,6 @@ import {
   ReasoningContent,
   ReasoningRoot,
   ReasoningText,
-  ReasoningTrigger,
 } from "@/components/assistant-ui/elements/reasoning.aui";
 import type {
   ThreadComponents,
@@ -447,8 +456,62 @@ const ToolCallsGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 };
 
 // ---------------------------------------------------------------- reasoning
+//
+// Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
+// is drawn as: an icon, a bold name, a chevron, `py-1.5 text-sm`, revealed by a
+// click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
+// `outline`, i.e. `rounded-lg border px-3 py-2` -- and this repo does not want a
+// second visual species in one transcript: the things a turn did (thought, read,
+// thought, ran) are a list of steps, and a step that is boxed while the step
+// next to it is not reads as a different KIND of thing rather than a different
+// step.
+//
+// So the trigger below is written here rather than taken from the copied kit,
+// for the same reason `ToolCallTrigger` is: the row is this repo's presentation,
+// and the only way "reasoning looks like a tool call" stays true is if one piece
+// of code says what that row is. The disclosure SHELL still comes from the kit
+// (`ReasoningRoot` / `ReasoningContent` / `ReasoningText`), because the scroll
+// lock, the fades and the animation are not ours to re-derive.
+//
+// `variant="ghost"` is what removes the card, and `className` on the text is
+// what removes the kit's inner `max-h-64` scroll box -- a tool's output is shown
+// whole, so a thought that scrolls inside its own 256px window would be the one
+// step with a different reading rule.
+//
+// `active` (the shimmer) is the live-run signal, exactly as it is on a tool
+// card: the row says "still going" while the work is going, and stops when it
+// stops.
+const ReasoningTrigger: FC<{ active: boolean }> = ({ active }) => (
+  <CollapsibleTrigger
+    data-slot="reasoning-trigger"
+    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit max-w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+  >
+    <BrainIcon
+      data-slot="reasoning-trigger-icon"
+      className="aui-reasoning-trigger-icon size-4 shrink-0"
+    />
+    <span
+      data-slot="reasoning-trigger-label"
+      className={cn(
+        "aui-reasoning-trigger-label inline-block min-w-0 text-start leading-none",
+        active && "shimmer motion-reduce:animate-none",
+      )}
+    >
+      <b className="aui-reasoning-trigger-name">Reasoning</b>
+    </span>
+    <ChevronDownIcon
+      data-slot="reasoning-trigger-chevron"
+      className={cn(
+        "aui-reasoning-trigger-chevron size-4 shrink-0",
+        "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        "-rotate-90",
+        "group-data-open/trigger:rotate-0",
+      )}
+    />
+  </CollapsibleTrigger>
+);
 
-/// A run of adjacent reasoning parts, behind one collapsed header.
+/// A run of adjacent reasoning parts, behind one collapsed row.
 ///
 /// `streaming` is deliberately not passed, and that is the entire difference
 /// from upstream's reasoning group: without it the disclosure's open state is
@@ -461,10 +524,10 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   const running = group.status.type === "running";
 
   return (
-    <ReasoningRoot>
+    <ReasoningRoot variant="ghost" className="mb-0">
       <ReasoningTrigger active={running} />
       <ReasoningContent aria-busy={running}>
-        <ReasoningText>{children}</ReasoningText>
+        <ReasoningText className="max-h-none pt-1">{children}</ReasoningText>
       </ReasoningContent>
     </ReasoningRoot>
   );
@@ -480,9 +543,10 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 /// All three slots the copied element leaves open are filled, and each override
 /// earns its place: the card states a status in words and reports an absent
 /// result instead of showing nothing, the group opens by default so the tool
-/// names are readable, and the reasoning group never streams its disclosure
-/// open. Everything else -- the message list, the text parts, the welcome
-/// screen, the composer -- stays upstream's.
+/// names are readable, and reasoning is drawn as the same bare row a tool call
+/// gets -- never as a card, never streaming its disclosure open. Everything
+/// else -- the message list, the text parts, the welcome screen, the composer --
+/// stays upstream's.
 export const THREAD_COMPONENTS: ThreadComponents = {
   ToolFallback: ToolCallCard,
   ToolGroup: ToolCallsGroup,

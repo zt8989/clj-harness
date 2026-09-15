@@ -109,6 +109,23 @@ const isHistoryLoadingView = (s: AssistantState) =>
   !s.thread.isDisabled &&
   !s.threads.isLoading;
 
+// LOCAL: a TURN, as two questions about one message. One ReAct turn is several
+// assistant messages -- the AG-UI adapter opens a new one for every LLM round,
+// because one TEXT_MESSAGE per assistant message is what the wire says -- and
+// the steps of a turn are therefore adjacent assistant messages, while two turns
+// are separated by the user message that started the second one. `isTurnEnd` is
+// "nothing of mine follows", `isTurnContinuation` is "something of mine came
+// before"; both are answered by the neighbours in the thread's own message list.
+//
+// Upstream never asks either question, because upstream's `AssistantMessage` is
+// written for a runtime whose turns are single messages. The pair is what the
+// action bar (below) and the step spacing are keyed on.
+const isTurnEnd = (s: AssistantState) =>
+  s.thread.messages[s.message.index + 1]?.role !== "assistant";
+
+const isTurnContinuation = (s: AssistantState) =>
+  s.thread.messages[s.message.index - 1]?.role === "assistant";
+
 const ThreadHistorySkeleton: FC = () => (
   <div
     data-slot="aui_thread-history-skeleton"
@@ -378,6 +395,14 @@ const AssistantMessage: FC = () => {
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
 
+  // LOCAL: the two neighbours, read off the thread's message list (see
+  // `isTurnEnd`). `continuation` tightens the gap ABOVE this message so a turn's
+  // steps read as one answer rather than as four separate ones: the message
+  // group's `gap-y-6` stays for the space between turns, and this cancels most
+  // of it between the steps of one turn.
+  const turnEnd = useAuiState(isTurnEnd);
+  const continuation = useAuiState(isTurnContinuation);
+
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
@@ -386,7 +411,10 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        continuation && "-mt-4",
+      )}
     >
       <div
         data-slot="aui_assistant-message-content"
@@ -472,10 +500,24 @@ const AssistantMessage: FC = () => {
 
       <div
         data-slot="aui_assistant-message-footer"
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        className={cn("ms-2 flex items-center", turnEnd && ACTION_BAR_HEIGHT)}
       >
         <BranchPicker />
-        <AssistantActionBar />
+        {/* LOCAL: the action bar belongs to the TURN, not to each step of it. A
+            ReAct turn is several assistant messages (see `isTurnEnd`), and
+            upstream draws one bar per message -- so a turn that thought, read
+            and answered showed three sets of Copy / Refresh / More, two of them
+            under a fragment of the answer. Copying a turn is copying the answer;
+            the steps are not separately copyable things. Drawing the footer only
+            at the end of a turn is the whole fix, and it keeps the buttons where
+            the reader last looked.
+
+            One consequence worth knowing: `ActionBarPrimitive.Reload` regenerates
+            THIS message, which is now the turn's last one -- the answer, which is
+            what "regenerate" means to a reader. */}
+        <AuiIf condition={isTurnEnd}>
+          <AssistantActionBar />
+        </AuiIf>
       </div>
     </MessagePrimitive.Root>
   );
