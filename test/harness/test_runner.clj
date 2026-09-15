@@ -17,7 +17,16 @@
   appearance or change fails the run. A file that simply sits there untouched --
   which is the normal state of a working install, and the case a bare exists?
   check would stop noticing -- passes, because an untouched file is exactly what
-  the assertion is about."
+  the assertion is about.
+
+  THE OS HOME IS PINNED TOO, AND TO A SIBLING OF THE ROOT RATHER THAN TO THE ROOT
+  ITSELF. The host's convention files live there -- ~/AGENTS.md and the skills in
+  ~/.agents/skills -- so a suite that read the developer's real home would depend
+  on one person's dotfiles, and every existing assertion would gain messages it
+  never asked for. The two temp directories are siblings on purpose: making the
+  user home a subdirectory of the root would put it inside the fence's allowed
+  set (the configuration home), which is exactly the question the fence tests
+  ask, so the arrangement would quietly answer one of them for itself."
   (:require [clojure.java.io :as io]
             [clojure.test :as t]
             [harness.home :as home]))
@@ -26,6 +35,8 @@
   '[harness.event-test
     harness.db-test
     harness.llm-test
+    harness.skills-test
+    harness.preamble-test
     harness.tools-test
     harness.session-tools-test
     harness.approval-test
@@ -41,6 +52,9 @@
     harness.http-test])
 
 (def ^:private tmp-home
+  (atom nil))
+
+(def ^:private tmp-user-home
   (atom nil))
 
 (def ^:private seed-config
@@ -60,27 +74,37 @@
   (spit (io/file dir "config.edn") seed-config :encoding "UTF-8"))
 
 (defn isolate!
-  "Point the config root at a fresh temp directory for this process. Returns the
-  directory. Idempotent: a second call reuses the first directory."
+  "Point the config root AND the OS home at fresh temp directories for this
+  process. Returns the root directory. Idempotent: a second call reuses the
+  first pair.
+
+  The two are siblings, never nested -- see the docstring above for why nesting
+  would tamper with what the fence tests are asking."
   []
   (or @tmp-home
-      (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                         (str "clj-harness-test-" (System/currentTimeMillis)))]
+      (let [stamp (System/currentTimeMillis)
+            dir   (io/file (System/getProperty "java.io.tmpdir")
+                           (str "clj-harness-test-" stamp))
+            home' (io/file (System/getProperty "java.io.tmpdir")
+                           (str "clj-harness-test-home-" stamp))]
         (.mkdirs dir)
+        (.mkdirs home')
         (seed! dir)
         (alter-var-root #'home/*root-override* (constantly (str dir)))
+        (alter-var-root #'home/*user-home-override* (constantly (str home')))
         (reset! tmp-home (str dir))
+        (reset! tmp-user-home (str home'))
         (str dir))))
 
 (defn- cleanup! []
-  (when-let [dir @tmp-home]
+  (doseq [dir (remove nil? [@tmp-home @tmp-user-home])]
     (try
       (doseq [f (reverse (file-seq (io/file dir)))]
         (io/delete-file f true))
       (catch Exception e
-        ;; Losing the temp dir is not worth failing a green suite over, but say so.
+        ;; Losing a temp dir is not worth failing a green suite over, but say so.
         (binding [*out* *err*]
-          (println "warning: could not remove test home" dir ":" (ex-message e)))))))
+          (println "warning: could not remove test dir" dir ":" (ex-message e)))))))
 
 (defn- store-state
   "F as [bytes mtime], or nil when it is not there. Two numbers rather than a bare
@@ -124,6 +148,7 @@
         before (store-state store)
         dir    (isolate!)]
     (println "test config root:" dir)
+    (println "test OS home:" @tmp-user-home)
     (println "developer home store before this run:"
              (if before (str "present (" (first before) " bytes, left alone)") "absent"))
     (apply require test-namespaces)

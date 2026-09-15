@@ -25,11 +25,19 @@
   The allowed set is itself configurable per project: .harness/harness.edn in
   the bound project (overlaid on the configuration home's user-level
   harness.edn) can add allow paths and tighten the fence. See harness-config
-  for the two-level shape, and out-of-bounds? for what the fence does with it."
+  for the two-level shape, and out-of-bounds? for what the fence does with it.
+
+  WHAT A SESSION OPENS WITH is answered here too, for a structural reason rather
+  than a topical one: skill-roots and preamble-files pair a harness.edn value
+  with the session's binding, and this is the only namespace that can see the
+  config reader, the binding, and both of their (deliberately pure, deliberately
+  project-free) consumers."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [harness.home :as home])
+            [harness.home :as home]
+            [harness.preamble :as preamble]
+            [harness.skills :as skills])
   (:import (java.io File)))
 
 (defonce ^:private bindings
@@ -171,6 +179,36 @@
    (merge (read-harness-edn (io/file (home/root) "harness.edn"))
           (when-let [dir (binding-for thread-id)]
             (read-harness-edn (io/file dir ".harness" "harness.edn"))))))
+
+;; ------------------------------------------- what a session opens with
+;;
+;; THE COMPOSITION LIVES HERE, and this is the only namespace that can host it.
+;; Two questions -- "which directories hold this session's skills" and "which
+;; instruction files does it read" -- are each answered by a PURE function of
+;; (configured value, project directory), because the namespaces answering them
+;; must not require this one (see harness.skills, whose roots the fence needs).
+;; Somebody has to pair the config with the binding, and that somebody needs to
+;; see harness.edn, the binding, and both readers: only this namespace can.
+;;
+;; It is also the right home by subject matter -- harness.edn is where these keys
+;; come from, and this is the namespace that reads it.
+
+(defn skill-roots
+  "The skill directories THREAD-ID's session reads, in precedence order. The
+  session-facing answer: it does the pairing described above, so a model (or a
+  human, in the REPL) asks one question instead of three.
+
+  Read fresh on every call, like harness-config itself: editing harness.edn or
+  rebinding the project moves the roots on the next call, with no restart."
+  [thread-id]
+  (skills/roots (:skills (harness-config thread-id)) (binding-for thread-id)))
+
+(defn preamble-files
+  "The instruction files THREAD-ID's session reads, in the order they are
+  presented. The same pairing as skill-roots, for the other half."
+  [thread-id]
+  (preamble/instruction-files (:instructions (harness-config thread-id))
+                              (binding-for thread-id)))
 
 (defn out-of-bounds?
   "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every

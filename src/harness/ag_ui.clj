@@ -321,19 +321,46 @@
     []
     (vec (sort (remove (set declared) (carried-input-types messages))))))
 
+(defn- after-system
+  "MSGS with BLOCKS spliced in directly after the leading system message and
+  ahead of the conversation. MSGS always starts with that message -- inbound
+  guarantees it -- so this is a splice, not a search.
+
+  An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path
+  every caller takes when a session has no instruction files and no skills, and
+  the shape of the result is the regression guarantee the whole feature rests on
+  (a session with nothing configured sends byte-for-byte what it sent before)."
+  [msgs blocks]
+  (if (empty? blocks)
+    msgs
+    (into [(first msgs)] (concat blocks (rest msgs)))))
+
 (defn inbound
   "A client's AG-UI messages -> the provider's message vector.
   PROMPT is the FROZEN system prompt text. A leading system message is replaced
   by it; otherwise it is prepended. CONTEXT is per-run and must never touch the
   system message -- the provider's prefill (prompt cache) keys on a stable
   prefix, so a per-run system prompt would miss it every call -- so it rides as
-  a trailing user message instead, after everything the client sent."
-  [messages prompt context]
-  (let [msgs (absorbed messages)
-        sys  {:role "system" :content prompt}
-        msgs (if (= "system" (get-in msgs [0 :role]))
-               (assoc msgs 0 sys)
-               (into [sys] msgs))]
-    (if-let [ctx (context-message context)]
-      (conj msgs ctx)
-      msgs)))
+  a trailing user message instead, after everything the client sent.
+
+  BLOCKS are the messages a run OPENS with -- the session's instruction files and
+  skills catalog (harness.preamble), already rendered. They are spliced in after
+  the system message, so the frozen prefix survives them and the cache keeps
+  hitting; they are ordinary user messages, which is what keeps them off the
+  wire (nothing here becomes an AG-UI frame).
+
+  This namespace stays a CONVERTER: it is handed the blocks rather than reading
+  anything itself. The three-arity is the shape without them -- what the rebuild
+  path and the protocol tests use -- and a session with nothing configured passes
+  the same thing through it."
+  ([messages prompt context] (inbound messages prompt [] context))
+  ([messages prompt blocks context]
+   (let [msgs (absorbed messages)
+         sys  {:role "system" :content prompt}
+         msgs (if (= "system" (get-in msgs [0 :role]))
+                (assoc msgs 0 sys)
+                (into [sys] msgs))
+         msgs (after-system msgs blocks)]
+     (if-let [ctx (context-message context)]
+       (conj msgs ctx)
+       msgs))))

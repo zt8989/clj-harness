@@ -48,6 +48,7 @@
             [harness.llm :as llm]
             [harness.providers :as providers]
             [harness.loop :as loop]
+            [harness.preamble :as preamble]
             [harness.project :as project]
             [harness.replay :as replay]
             [harness.tools :as tools]
@@ -238,6 +239,31 @@
                        :undeclared (vec bad)
                        :declared (vec (sort-by name (:input provider)))})))))
 
+(defn- opening-blocks!
+  "The messages this run OPENS WITH, other than the frozen system prompt: the
+  session's instruction files, read fresh, and (from the skills ticket) the
+  catalog. Runs INSIDE the edge's hook-sink binding, because folding an
+  instruction file is a hook point and this is where it happens -- see
+  run-agent! for why the binding wraps the set-up.
+
+  Every file that was folded fires InstructionsLoaded with its path, and the
+  verdict is DISCARDED: the point is an observer (:gate? false, :on-error
+  :proceed), and there is nothing sensible for a loader to do about a hook that
+  refused -- the file is already read. A file that was skipped does NOT fire:
+  nothing was folded, and a hook announced for something that did not happen is
+  worse than no hook.
+
+  Reads the session's files on EVERY run rather than caching them per thread.
+  The alternative -- remember what was loaded and only inject what changed -- is
+  how an edited AGENTS.md stops taking effect until somebody restarts, and the
+  cost of not caching is one small file read per run."
+  [thread-id]
+  (let [gathered (preamble/gather
+                  {:files (project/preamble-files thread-id)})]
+    (doseq [{:keys [path]} (:instructions gathered)]
+      (hook/emit :instructions-loaded {:path path}))
+    (preamble/messages gathered)))
+
 (defn- run-agent! [ch input]
   (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
@@ -248,35 +274,42 @@
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
     (async/go
-      ;; A malformed input, an unreadable prompt, a bad config, an image aimed at a
-      ;; text-only model -- or a resume naming an interrupt this process never
-      ;; parked -- blows up before the run starts. Catch it here and push a
-      ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
-      ;; run rather than a broken stream.
-      (let [[provider messages decisions resolved]
-            (try (let [provider (providers/current-provider thread-id (:provider input))]
-                   (guard-input-modalities! input provider)
-                   [provider
-                    (ag/inbound (:messages input) (llm/prompt) (:context input))
-                    (resume-decisions (:resume input))
-                    (providers/resolve-provider thread-id (:provider input))])
-                 (catch Throwable t
-                   (doseq [frame (into (vec (convert (ev/run-start)))
-                                       (convert (ev/run-error (ex-message t))))]
-                     (emit frame))
-                   nil))]
-        ;; THE RUN-SCOPED HOOK SINK. This is the edge, so it is the only place
-        ;; that knows both the thread and where an audit line goes; binding it
-        ;; around the whole run is what lets hooks fire at all -- and every caller
-        ;; BELOW the edge (an offline tool, replay, a scripted test driving the
-        ;; kernel directly) leaves it nil, so nothing fires there.
-        (when provider
-          (binding [hook/*sink* {:thread-id thread-id
-                                 :audit     (fn [payload]
-                                              (log! thread-id run-id
-                                                    (str "hook/" (:point payload))
-                                                    (dissoc payload :point)))
-                                 :run-id    run-id}]
+      ;; THE RUN-SCOPED HOOK SINK, bound around the whole run. This is the edge,
+      ;; so it is the only place that knows both the thread and where an audit
+      ;; line goes; binding it here is what lets hooks fire at all -- and every
+      ;; caller BELOW the edge (an offline tool, replay, a scripted test driving
+      ;; the kernel directly) leaves it nil, so nothing fires there.
+      ;;
+      ;; It wraps the set-up as well as the run, because folding the session's
+      ;; instruction files is itself a hook point (InstructionsLoaded) and that
+      ;; folding happens before the first message is built. Binding it after the
+      ;; set-up would have left that point declared and permanently silent.
+      (binding [hook/*sink* {:thread-id thread-id
+                             :audit     (fn [payload]
+                                          (log! thread-id run-id
+                                                (str "hook/" (:point payload))
+                                                (dissoc payload :point)))
+                             :run-id    run-id}]
+        ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
+        ;; a text-only model -- or a resume naming an interrupt this process never
+        ;; parked -- blows up before the run starts. Catch it here and push a
+        ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
+        ;; run rather than a broken stream.
+        (let [[provider messages decisions resolved]
+              (try (let [provider (providers/current-provider thread-id (:provider input))]
+                     (guard-input-modalities! input provider)
+                     [provider
+                      (ag/inbound (:messages input) (llm/prompt)
+                                  (opening-blocks! thread-id)
+                                  (:context input))
+                      (resume-decisions (:resume input))
+                      (providers/resolve-provider thread-id (:provider input))])
+                   (catch Throwable t
+                     (doseq [frame (into (vec (convert (ev/run-start)))
+                                         (convert (ev/run-error (ex-message t))))]
+                       (emit frame))
+                     nil))]
+          (when provider
             ;; SessionStart fires on a session's FIRST run -- beside the provider
             ;; init line, because both answer "what is this conversation, as it
             ;; begins". It is an observer: its verdict is discarded. Every start is
