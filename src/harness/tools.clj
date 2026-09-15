@@ -532,8 +532,9 @@
                                            "[""] inserts one blank line.")}}})
 
 (defn- anchor-replace
-  "`replace`'s body. It resolves the path for the session and hands the rest to the
-  engine -- the fence looked at the same path before this ran (see `:path-for`)."
+  "The body `replace` and `insert` share: resolve the path for the session and hand
+  the rest to the engine, which tells the two apart by their payload. The fence
+  looked at the same path before this ran (see `:path-for`)."
   [args]
   (replace/perform! *thread-id* #(project/resolve-path *thread-id* %) args
                     (editing/editing-mode *thread-id*)))
@@ -546,6 +547,50 @@
          ;; The fence has no `path` argument to look at when the model omits it, so
          ;; the target is derived here -- the same derivation the body uses, so the
          ;; call that parks and the call that runs are about the same file.
+         :path-for (fn [thread-id parsed]
+                     (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
+
+(def ^:private insert-description
+  (str "Insert new lines next to a line, addressed by the 4-character ANCHOR from"
+       " read output. `direction` is \"after\" to add them below that line or"
+       " \"before\" to add them above it; `lines` is an array with one string per"
+       " new line -- bare lines, no `│`, no embedded newlines. An array holding one"
+       " empty string inserts one blank line. "
+       "THE ANCHORED LINE IS LEFT EXACTLY AS IT IS -- you never retype it, so you"
+       " cannot change it by accident -- and IT KEEPS ITS ANCHOR, so the anchors you"
+       " already hold stay valid after an insert and no re-read is needed. An empty"
+       " `lines` array changes nothing. "
+       "Inserting a line that reads like its neighbour is fine here: unlike replace,"
+       " insert never deduplicates what you asked for. "
+       "The answer shows the changed region as `+` and context rows with their"
+       " current anchors, so a follow-up edit needs no read. "
+       "A relative path resolves against this session's project directory when one is"
+       " bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(def ^:private insert-params
+  {:type "object"
+   :properties
+   {"anchor"    {:type "string"
+                 :description (str "Anchor of the line to insert next to: the four"
+                                   " characters before the `│` of a read row.")}
+    "direction" {:type "string"
+                 :enum ["before" "after"]
+                 :description (str "\"after\" adds the lines below the anchored line,"
+                                   " \"before\" above it.")}
+    "lines"     {:type "array"
+                 :items {:type "string"}
+                 :description (str "One string per new line. No `│`, no embedded"
+                                   " newlines. [\"\"] inserts one blank line; []"
+                                   " changes nothing.")}}})
+
+(register! "insert"
+  (assoc (tool insert-description
+               (get insert-params :properties)
+               [:anchor :direction :lines] anchor-replace)
+         :fence-paths true
+         ;; Same derivation as `replace`: the fence has no `path` to look at when
+         ;; the model omits it, so the target comes from the anchor.
          :path-for (fn [thread-id parsed]
                      (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
 
@@ -834,7 +879,7 @@
   above for why splicing two of them into one patch is possible at all, and
   `insert`'s own registration for the same treatment when ticket 10 lands."
   [name]
-  (contains? #{"replace"} name))
+  (contains? #{"replace" "insert"} name))
 
 (defn- group-key
   "The file a call addresses, as a canonical path -- or nil when it cannot be worked
@@ -848,7 +893,8 @@
   refusals a batch most needs to report."
   [thread-id parsed]
   (try
-    (let [anchor (edit/bare-anchor (or (:remove_from parsed) (:replace_from parsed)))
+    (let [anchor (edit/bare-anchor (or (:remove_from parsed) (:replace_from parsed)
+                                       (:anchor parsed)))
           owner  (when anchor (store/owner-of thread-id anchor))
           p      (or owner (:path parsed))]
       (when (and (string? p) (not (str/blank? p)))
@@ -926,12 +972,13 @@
   (get @turn-plan id))
 
 (defn- run-batch!
-  "The APPOINTED call of a group runs the group. The members are the same calls'
-  arguments, in call order, and the whole group is one file -- see the batch section
-  of harness.hashline.replace for the arithmetic and for what a refusal says."
-  [{:keys [members group index path]} thread-id]
+  "The APPOINTED call of a group runs the whole group. The members are the same
+  calls' arguments, in call order, and every one of them addresses this file -- see
+  the batch section of harness.hashline.replace for the arithmetic, and `plan-turn`
+  for who decided that these calls belong together."
+  [{:keys [members]} thread-id]
   (binding [*thread-id* thread-id]
-    (replace/perform-batch! thread-id #(project/resolve-path thread-id %) members
+    (replace/perform-edits! thread-id #(project/resolve-path thread-id %) members
                             (editing/editing-mode thread-id))))
 
 (defn run!

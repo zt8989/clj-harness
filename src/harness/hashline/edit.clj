@@ -125,6 +125,17 @@
                          " got " (pr-str v) "."))
                   {:argument k :value v :reason :bad-anchor}))))))
 
+(defn anchor-field
+  "One anchor ARGUMENT, fixed up and reported the way `parse` does: a pasted
+  `anchor│content` row or a `+` diff marker is stripped and noted, anything else is
+  refused by name.
+
+  Public because `insert` addresses a line the same way `replace` does -- one anchor
+  instead of two -- and the slips a model makes are the same slips. Two copies of
+  this would be two vocabularies for one idea."
+  [k v warnings]
+  (anchor-arg k v warnings))
+
 (defn- replacement-arg
   "`replacement_lines` as a vector of strings, with the four auto-fixes applied and
   reported."
@@ -180,17 +191,31 @@
                        [(or s2 s)])))
                  (range) v))))
 
-(defn- check-nul!
+(defn replacement-field
+  "One array-of-lines ARGUMENT: one string per line, with the same four auto-fixes
+  `parse` applies to `replacement_lines`, reported the same way.
+
+  Public for the same reason as `anchor-field`: `insert` takes a `lines` array that
+  is the same kind of thing, with the same slips."
+  [v warnings]
+  (replacement-arg v warnings))
+
+(defn check-nul!
   "A NUL byte cannot be written into a text file without breaking every later read
   and edit of it, and no fix makes one acceptable -- so this is a refusal, and the
-  message says why rather than just refusing."
-  [lines]
-  (when-let [i (first (keep-indexed (fn [i l] (when (str/includes? l "\u0000") i)) lines))]
-    (throw (ex-info (str "`replacement_lines` element " (inc i)
-                         " contains a NUL byte (U+0000). A text file cannot hold one:"
-                         " it would make every later read and edit of this file"
-                         " unreliable. Remove it and retry ([] deletes the range).")
-                    {:argument :replacement_lines :index i :reason :nul}))))
+  message says why rather than just refusing.
+
+  Public for the same reason as `anchor-field`: an insert's `lines` are the same kind
+  of thing as a replace's `replacement_lines`, and a NUL is a NUL."
+  ([lines] (check-nul! lines "replacement_lines"))
+  ([lines field]
+   (when-let [i (first (keep-indexed (fn [i l] (when (str/includes? l "\u0000") i))
+                                     lines))]
+     (throw (ex-info (str "`" field "` element " (inc i)
+                          " contains a NUL byte (U+0000). A text file cannot hold one:"
+                          " it would make every later read and edit of this file"
+                          " unreliable. Remove it and retry ([] deletes the range).")
+                     {:argument (keyword field) :index i :reason :nul})))))
 
 (defn parse
   "ARGS (the tool's argument map) as the edit it means: {:from :to :lines
