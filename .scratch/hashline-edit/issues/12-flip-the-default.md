@@ -1,18 +1,18 @@
 # 12 — 翻默认：hashline 成为默认实现，prompt 与文档跟上，既有断言重写
 
 **What to build:** 把默认编辑模式从 `str-replace` 翻到 `hashline`。在此之前每一票都是 opt-in 落地的，
-既有 189 tests / 930 assertions 一条没动；这一票是一次**有意的、可回退的**默认值翻转，所以要一次说清它
+既有 247 tests / 1221 assertions 一条没动；这一票是一次**有意的、可回退的**默认值翻转，所以要一次说清它
 动了什么、以及怎么退回去。
 
 **退回去只有一步。** 在 `harness.edn` 里写 `:editing {:mode :str-replace}`，`edit` 回到工具表，
 锚点工具全部离场——这一票之后两种模式都仍是**一等公民**，都仍有完整用例。翻默认不是删掉旧的。
 
-**prompt.md 改成模式中立的说法。** 系统提示是**冻结**的（`harness.memory/prompt` 读一次就固定，
+**prompt.md 改成模式中立的说法。** 系统提示是**冻结**的（`harness.llm/prompt` 读一次就固定，
 provider 的 prefill 缓存键在这个稳定前缀上），所以不按模式拼两套文本——那会让每次切换模式都冷启一次
 缓存，而且 prompt 是**代码资产**（要进 git 历史、要人 review），不是一个运行时派生的字符串。做法是：
 
 - 第 3–4 行的工具清单与 `edit` 的说明改成模式中立的说法，并**点出自省入口**
-  （`(harness.memory/editing-mode harness.memory/*thread-id*)`），让模型自己问出本会话在哪个模式；
+  （`(harness.editing/editing-mode harness.tools/*thread-id*)`），让模型自己问出本会话在哪个模式；
 - 锚点的具体语法**不进 prompt**，留在工具描述里——工具描述本来就是按 thread 送达的、可以随模式变，
   prompt 不行；
 - 项目绑定那两段里 `read/write/edit` 的措辞跟着改（`edit` 不再是常在的名字）。

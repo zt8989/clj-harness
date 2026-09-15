@@ -265,6 +265,34 @@
                           {:path abs :reason :not-a-map})))
         v))))
 
+(defn harness-edn-levels
+  "The two harness.edn maps THREAD-ID's session is configured by, UNMERGED, with
+  the file each came from:
+
+    {:user    {...}                       ; the config home
+     :project {...}                       ; the bound project, {} when unbound
+     :files   {:user <abs> :project <abs>|nil}}
+
+  harness-config is this pair shallow-merged, and answers the question most
+  consumers are asking. This fn exists for the ones whose overlay is FINER than a
+  top-level key -- the editing mode is the first, composing its block key by key
+  so a project can turn one knob off without restating the block (see
+  harness.editing). It is handed out rather than re-read by that consumer so the
+  reading discipline above stays ONE rule with ONE implementation: 'absent is the
+  empty configuration, broken is a named failure' is exactly the distinction the
+  fence depends on, and a second copy of it would be a second chance to blur it.
+
+  The paths ride along because a broken block has to be actionable, and ':editing
+  is the wrong shape' only becomes actionable once the reader knows which of the
+  two files to open."
+  [thread-id]
+  (let [dir (binding-for thread-id)]
+    {:user    (read-harness-edn (io/file (home/root) "harness.edn"))
+     :project (if dir (read-harness-edn (io/file dir ".harness" "harness.edn")) {})
+     :files   {:user    (.getAbsolutePath (io/file (home/root) "harness.edn"))
+               :project (when dir
+                          (.getAbsolutePath (io/file dir ".harness" "harness.edn")))}}))
+
 (defn harness-config
   "The .harness/harness.edn configuration for THREAD-ID, merged from two
   levels: the configuration home's harness.edn (the USER level), overlaid by
@@ -288,12 +316,17 @@
   (.scratch/project-sidebar/spec.md decision 2): the BINDING comes from the
   store, the CONFIGURATION from files. State is rewritten, config is edited by
   hand -- so editing harness.edn still needs no restart, and no part of this
-  call writes to the store."
+  call writes to the store.
+
+  The shallow merge is THIS key's shape and not a house rule: a key whose
+  consumers want a finer overlay composes the pair itself, from
+  harness-edn-levels above. Whichever way a key is composed, this fn is
+  unchanged -- a caller that wants the fence's answer still gets it the same
+  way it always did."
   ([] (harness-config nil))
   ([thread-id]
-   (merge (read-harness-edn (io/file (home/root) "harness.edn"))
-          (when-let [dir (binding-for thread-id)]
-            (read-harness-edn (io/file dir ".harness" "harness.edn"))))))
+   (let [{:keys [user project]} (harness-edn-levels thread-id)]
+     (merge user project))))
 
 (defn out-of-bounds?
   "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every

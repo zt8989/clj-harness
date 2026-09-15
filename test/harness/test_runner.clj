@@ -35,6 +35,7 @@
     harness.evals-test
     harness.providers-test
     harness.project-test
+    harness.editing-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

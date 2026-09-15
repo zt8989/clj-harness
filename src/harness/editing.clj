@@ -1,0 +1,170 @@
+(ns harness.editing
+  "Which file-editing implementation this session is served by, and the knobs
+  that implementation reads.
+
+  TWO IMPLEMENTATIONS, ONE OF THEM IN EFFECT PER SESSION:
+
+    :str-replace  the original `edit` -- an exact `old_string` replaced, refused
+                  when it is absent or not unique. The DEFAULT, because it is
+                  what this harness already did; moving off it is its own
+                  deliberate act, not a side effect of this namespace existing.
+    :hashline     anchor-based editing: `read` returns `anchor│content` rows and
+                  `replace`/`insert` address anchors, so a line is named by a
+                  token nobody has to guess at, and a stale one is refused
+                  instead of fuzzy-matched.
+
+  WHY A CONFIGURATION AND NOT A CHOICE THE MODEL MAKES. The two are not
+  variations of one thing -- they hand the model different workspaces
+  (`old_string` versus a per-line token) and offering both at once means the
+  model reliably reaches for the wrong one. So the choice is made once, by
+  whoever runs the session, and the toolset is BUILT to match it.
+
+  WHERE IT LIVES, AND WHY NOT config.edn. In harness.edn, beside the fence's
+  :approval, with the same two-level shape -- so a project that wants anchors can
+  say so without the user's home agreeing. config.edn is deliberately NOT the
+  place: its documented shape is exactly three knobs (provider, model,
+  reasoning-effort), and a fourth knob there is a NAMED failure rather than a
+  value somebody quietly drops (see the session-configure tool body). Editing
+  policy is policy; it belongs with the rest of harness.edn.
+
+  THE ONE DEPARTURE FROM harness.edn's SHALLOW MERGE, and it is paid for here.
+  harness-config replaces a top-level key WHOLE, project wins -- right for
+  :approval, where 'what will the fence do' should be legible in one file, and
+  wrong for this one. :editing composes KEY BY KEY, so a project that wants to
+  turn :auto-read off does not have to restate the block and re-decide every
+  default the user chose. harness-config's own behavior is untouched.
+
+  Read fresh on every call, like every other config in this harness: editing
+  harness.edn moves the mode without a restart.
+
+  A BROKEN BLOCK IS A NAMED FAILURE, never a quiet fallback to the defaults. The
+  defaults are what a session gets when nobody SAID anything -- no harness.edn at
+  all, or no :editing key in one. A file that exists and says something
+  unreadable is a different situation, and conflating the two would make 'the
+  project asked for anchors' indistinguishable from 'the project's config was
+  ignored'. That is the same distinction harness.project/read-harness-edn draws
+  for the fence, and it is reused rather than reinvented: one rule, one
+  implementation.
+
+  KEYS NOBODY READS ARE A FAILURE IN EITHER FILE, even when shadowed. A typo'd
+  :modes is not a value that loses a merge -- it is a request that was never
+  going to be honoured by either level, so it is reported against the level that
+  wrote it. The check therefore walks both blocks rather than the merged result.
+  The VALUES, by contrast, are checked as EFFECTIVE: a project overriding a
+  broken user value has to be able to fix it, so a shadowed-and-overridden value
+  is not itself an error."
+  (:require [clojure.string :as str]
+            [harness.project :as project]))
+
+;; ------------------------------------------------------------------ defaults
+
+(def defaults
+  "What a session is served by when nobody has said anything. Every key here is
+  one the two implementations actually read -- a default for a knob nothing
+  consults would be a promise this namespace cannot keep."
+  {:mode               :str-replace
+   :auto-read          true
+   :anchor-grep        true
+   :require-path       false
+   :strict-input       false
+   :boundary-dedup     :on
+   :diff-context-lines 1})
+
+(def ^:private vocab
+  "Key -> how to recognise a legal value, and the phrase naming what IS legal.
+  DATA rather than a cond, because every failure message has to state the legal
+  set and a hand-written message per key is exactly how the two drift apart:
+  adding a value to a predicate and forgetting the sentence beside it would make
+  the error tell the reader to do something that then fails again."
+  {:mode               {:ok    #(contains? #{:hashline :str-replace} %)
+                        :legal ":hashline or :str-replace"}
+   :auto-read          {:ok    boolean? :legal "true or false"}
+   :anchor-grep        {:ok    boolean? :legal "true or false"}
+   :require-path       {:ok    boolean? :legal "true or false"}
+   :strict-input       {:ok    boolean? :legal "true or false"}
+   :boundary-dedup     {:ok    #(contains? #{:on :strict :off} %)
+                        :legal ":on, :strict or :off"}
+   :diff-context-lines {:ok    #(and (integer? %) (<= 0 % 10))
+                        :legal "an integer 0-10"}})
+
+(defn- known-keys-phrase []
+  (str/join ", " (map pr-str (sort-by str (keys defaults)))))
+
+;; ------------------------------------------------------------------- reading
+
+(defn- blocks
+  "The two :editing blocks as [{:level :path :block} ..], user first. Each level
+  is TAGGED with the file it came from, because every failure below has to name a
+  file: ':editing is the wrong shape' and 'that key is unknown' are only
+  actionable once the reader knows which of the two harness.edn files to open.
+
+  A block that is not a map is refused HERE, before anything merges: it is a
+  statement about the file, not a value that loses a precedence contest."
+  [thread-id]
+  (let [{:keys [user project files]} (project/harness-edn-levels thread-id)]
+    (mapv (fn [level]
+            (let [path  (get files level)
+                  block (:editing (get {:user user :project project} level))]
+              (cond
+                (nil? block) {:level level :path path :block {}}
+                (map? block) {:level level :path path :block block}
+                :else (throw (ex-info (str "harness.edn :editing must be an EDN map, but the "
+                                           (name level) " level at " path
+                                           " says " (pr-str block))
+                                      {:path path :level level
+                                       :reason :editing-not-a-map})))))
+          [:user :project])))
+
+(defn- origin
+  "Key -> {:level .. :path ..} for every key that was SAID, later levels
+  overwriting earlier ones exactly as the merge does. Keys nobody said are
+  absent, which is how the value check below tells a stated value from a default
+  -- the defaults are legal by construction and must never be re-validated."
+  [ls]
+  (reduce (fn [m {:keys [level path block]}]
+            (reduce (fn [m k] (assoc m k {:level level :path path})) m (keys block)))
+          {} ls))
+
+(defn- check-known-keys! [ls]
+  (doseq [{:keys [level path block]} ls
+          k                          (keys block)]
+    (when-not (contains? defaults k)
+      (throw (ex-info (str "harness.edn :editing does not understand " (pr-str k)
+                           " (the " (name level) " level at " path "); it takes "
+                           (known-keys-phrase))
+                      {:key k :path path :level level
+                       :reason :unknown-editing-key})))))
+
+(defn- check-values! [merged origin]
+  (doseq [[k v] merged
+          :when (contains? origin k)]
+    (let [spec (vocab k)]
+      (when-not ((:ok spec) v)
+        (let [{:keys [level path]} (origin k)]
+          (throw (ex-info (str "harness.edn :editing " k " must be " (:legal spec)
+                               ", but the " (name level) " level at " path
+                               " says " (pr-str v))
+                          {:key k :value v :path path :level level
+                           :reason :bad-editing-value})))))))
+
+;; ---------------------------------------------------------------- resolution
+
+(defn editing-mode
+  "The editing configuration THREAD-ID's session is served by: `defaults` with
+  the two harness.edn levels applied :editing-key by :editing-key, project
+  winning. An unbound session composes the user level alone.
+
+  Throws on a broken block, an unknown key, or an illegal effective value, each
+  naming the file it came from. A missing file is not a broken one: an unbound
+  session, or a home with no harness.edn at all, is the everyday case and
+  answers with the defaults.
+
+  Re-read on every call, so harness.edn edits take effect on the next ask."
+  ([] (editing-mode nil))
+  ([thread-id]
+   (let [ls     (blocks thread-id)
+         origin (origin ls)
+         merged (merge defaults (:block (first ls)) (:block (second ls)))]
+     (check-known-keys! ls)
+     (check-values! merged origin)
+     merged)))

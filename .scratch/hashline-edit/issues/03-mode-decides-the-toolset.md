@@ -26,7 +26,7 @@
       `undo_last_replace` 在（这四个工具本体在 04–07 落地，本票用占位定义把「表由模式决定」
       这件事先钉住；若那一票尚未落地，本票的断言以「`edit` 不在」为主）
 - [ ] str-replace 模式下 `replace` / `insert` / `anchor_grep` / `undo_last_replace` 都不在
-- [ ] 自省面（`harness.memory/effective-tools`）在两套模式下都能看到**全部**已注册的工具——
+- [ ] 自省面（`harness.tools/effective-tools`）在两套模式下都能看到**全部**已注册的工具——
       「表里没有」与「注册表里没有」是两件事，前者是策略，后者是事实
 - [ ] 被模式挡住的调用返回**指名拒绝**，信息里含：该名字、本会话的模式、替代工具名、改配置的写法。
       `:error` 为真（与 `disabled` 同等对待：这是信息，不是运行失败）
@@ -36,5 +36,5 @@
       而不是模式拒绝
 - [ ] 两套模式各自的工具表**按会话隔离**：A 会话 hashline、B 会话 str-replace，同时存在互不干扰
       （编辑模式是按 thread-id 解析的）
-- [ ] 自省得到模式：`(harness.memory/editing-mode harness.memory/*thread-id*)` 在两套模式下各回其值
+- [ ] 自省得到模式：`(harness.editing/editing-mode harness.tools/*thread-id*)` 在两套模式下各回其值
 - [ ] 离线全量 `harness.test-runner` 全绿
