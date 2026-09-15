@@ -1,0 +1,76 @@
+# 客户端：TypeScript + React + assistant-ui
+
+`ui/` 是纯 TypeScript：`.tsx` 是 React 源码，`.ts` 是测试与非渲染代码，`.js` 只剩 Vite 配置。
+**没有第二套工具链**——构建与开发都是 Vite（`@vitejs/plugin-react` + `@tailwindcss/vite`），
+不需要 Java，也没有 shadow-cljs。
+
+**它曾经是 ClojureScript + helix + CopilotKit。** 那次换语言换库的完整记录在
+`.scratch/assistant-ui/`（历史文档，记的是当时）。协议侧一字未改——
+AG-UI 帧的形状、interrupt/resume 的语义、以及「服务端不持有会话」这条，换客户端都没有碰。
+
+## 装配
+
+```
+main.tsx            React root
+app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntime → <Thread/>
+                    侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
+components/
+  sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
+  approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
+  message-parts.tsx 工具卡与 reasoning 的注入点（THREAD_COMPONENTS）
+  assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
+  ui/               9 份 shadcn 基件，同样未改
+lib/
+  threads.ts        AGENT_URL + rebuild 调用
+  projects.ts       GET /api/projects 的类型化薄封装
+  run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
+```
+
+**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`vite.config.js` 里
+`server.port: 5173, strictPort: true` 把这句话钉死——换端口要同时改两处契约。
+
+## 状态的归属
+
+- **`threadId` 的主人是 React state**（`app.tsx` 的 `useState`）。agent 只在 `adoptThread` 一处被回写，
+  而 `prepareRunAgentInput` 照旧从 agent 读——所以下一条输入续写**同一个日志**，服务端零会话状态。
+- **恢复** = `rebuildThread`（POST rebuild）→ `fromAgUiMessages` + `fromThreadMessageLike`
+  → `onSwitchToThread` 把重建消息灌回运行时。转换与 runtime 自己的快照导入路径**逐字相同**（引上游，不另写）。
+- **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目，
+  也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
+  界面上明说这一点。
+- **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
+
+## 样式体系：Tailwind v4 + shadcn，抄源码路线
+
+- **Tailwind v4，CSS-first**：入口是 `ui/src/styles.css`（`@import "tailwindcss"` + 主题变量 +
+  `@custom-variant dark`），**没有** `tailwind.config.js`——v4 的配置就写在 CSS 里。
+- **shadcn**：`ui/components.json` 声明别名（`@/components`、`@/lib/utils`，与 `vite.config.js` 的
+  `@` alias 对齐）与 registry（`@assistant-ui` → `r.assistant-ui.com`）。
+  `npx shadcn@latest add "@assistant-ui/thread"` 由此把源码**抄进仓库**。
+
+**对账基准**：抄来的文件与上游 diff 即可（重装后对比）。唯一的例外是
+`thread-list.aui.tsx`——上游那份是扁平的、按日期分组的线程列表，本仓要的是按**项目**分组、
+行上带日志体积与 mtime。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
+其余的本地差异走两个**自建注入点**（`message-parts.tsx` 的 `THREAD_COMPONENTS` 与自建面板），
+不动抄来的文件。
+
+## 测试
+
+`cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
+`test/suites/{frames,client,turn,approval}.ts` 是被它 import 的普通模块：
+
+- **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
+- **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
+  或「丢了用例」变成**失败**而不是静默变绿。
+- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.http`，在 `--port 0`（OS 分配）上，
+  provider 是 `harness.fake` 的脚本替身，日志写进临时 `CLJ_HARNESS_HOME`。
+  所以跑多少次结果都一样，也不会写进真实的 `~/.clj-harness`。
+- **控制通道是文件不是端点**：服务端在遇到**新的 threadId** 时重读脚本文件。
+  测试写这个文件就相当于说「模型下一句回什么」——**生产 HTTP 边因此一个测试专用路由都不长**。
+- 套件驱动真的 `@ag-ui/client`，所以它测的是协议与运行时的真实行为，不是替身。
+
+## 一条从后端来的注意
+
+`harness.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
+**服务跑在另一个线程上**，`binding` 只改当前线程的动态栈，stub 会被静默忽略。
+凡是给「服务端在别的线程上调用」的缝注入替身，都得用 `alter-var-root`。
