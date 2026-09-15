@@ -2084,6 +2084,12 @@
     :tool-calls [{:id "s1" :name "skill" :arguments {:name "alpha"}}]}
    {:content "followed it"}])
 
+(def ^:private slash-script
+  "One plain reply and NO tool call: a slash-load has to reach the conversation
+  without the model asking for anything, which is the whole difference between it
+  and the load above."
+  [{:content "done"}])
+
 (defn- wipe-conventions! []
   (io/delete-file (io/file (home/user-home) ".agents") true)
   (io/delete-file (io/file (home/user-home) "AGENTS.md") true))
@@ -2170,3 +2176,62 @@
              (testing "and no LLM call was made at all"
                (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames)))))))
       (finally (wipe-conventions!)))))
+
+(deftest a-slash-load-reaches-the-model-and-never-the-client
+  ;; The SECOND source of an injected body, asserted at the edge for the reason the
+  ;; first one is: "the client never sees it" is nowhere a filter -- it is the
+  ;; absence of a frame -- and a new way for a body to enter is exactly what could
+  ;; reintroduce one. The provider here is scripted with NO tool call, so anything
+  ;; in the conversation got there because a person typed it.
+  (let [proj      (str (System/getProperty "java.io.tmpdir")
+                       "/harness-http-slash-" (System/nanoTime))
+        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))]
+    (.mkdirs (io/file proj))
+    (.mkdirs (io/file skill-dir))
+    (spit (str skill-dir "/SKILL.md")
+          "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
+          :encoding "UTF-8")
+    (project/bind! "it-slash" proj)
+    (try
+      (with-server
+       "it-slash" slash-script
+       (fn []
+         (let [resp      (.body (post-run "it-slash"
+                                          {:messages [{:id "u1" :role "user"
+                                                       :content "/alpha fix the bug"}]}))
+               frames    (wire/frames-from-sse resp)
+               lines     (wait-for-recorded
+                          (log-file-for "it-slash")
+                          (fn [ls] (some #(and (= "message" (:kind %))
+                                               (= "done" (get-in % [:payload :content])))
+                                         ls))
+                          2000)
+               texts     (mapv #(str (get-in % [:payload :content]))
+                               (filter #(= "message" (:kind %)) lines))
+               wire-text (json/write-str frames)]
+
+           (testing "the person's own words reach the model exactly as typed"
+             ;; NOT asserted against the frames: the client sent those words, so
+             ;; the AG-UI stream has nothing to echo -- an assertion that they
+             ;; appear there would be asserting an invention. "The trigger is not
+             ;; rewritten" is a claim about the MODEL's record, and it has to hold
+             ;; there because that record is what the next turn re-reads to know
+             ;; this skill was loaded.
+             (is (some #(= "/alpha fix the bug" %) texts)))
+
+           (testing "the body is a USER message in the run's record, right after the ask"
+             (is (some #(and (str/includes? % "ALPHA BODY")
+                             (str/starts-with? % "<skill name=\"alpha\">"))
+                       texts)))
+
+           (testing "and not one frame carries it -- same invisibility as the tool's load"
+             (is (not (str/includes? wire-text "ALPHA BODY")))
+             (is (not (str/includes? wire-text "<skill name="))))
+
+           (testing "no skill tool call happened -- nothing asked the model for anything"
+             (is (not-any? #(= "skill" (:toolCallName %))
+                           (filter #(= "TOOL_CALL_START" (:type %)) frames)))))))
+      (finally
+        (project/bind! "it-slash" nil)
+        (io/delete-file (io/file proj) true)
+        (wipe-conventions!)))))

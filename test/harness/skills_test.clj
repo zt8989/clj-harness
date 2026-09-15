@@ -1,7 +1,9 @@
 (ns harness.skills-test
   "Where a session's skills come from: the two default roots, the `:skills` key's
   whole-list replacement, the relative-path rule, and the named failures a bad
-  value earns.
+  value earns -- plus the two ways a skill gets LOADED (the `skill` tool and a
+  person's `/name`), which are two sources for one derivation and so are tested
+  against each other as much as against themselves.
 
   Every fixture here writes into the temp OS home the runner pins
   (harness.test-runner/isolate!), never the developer's real one -- which is the
@@ -13,7 +15,8 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.home :as home]
             [harness.project :as project]
-            [harness.skills :as skills]))
+            [harness.skills :as skills]
+            [harness.tools :as tools]))
 
 (def ^:private tmp-dirs (atom []))
 
@@ -462,5 +465,158 @@
       (io/delete-file (io/file root "alpha" "SKILL.md") true)
       (let [text (:content (last (skills/derived-injections msgs [root])))]
         (is (str/starts-with? text "<skill name=\"alpha\">"))
-        (is (str/includes? text "no longer"))
+        ;; The wording is the SAME sentence an unknown name gets (absent-notice):
+        ;; the question is the same question, and a second sentence for it would be
+        ;; a second answer free to disagree. What it must keep saying is the part
+        ;; that matters -- these instructions are not here, do not assume them.
+        (is (str/includes? text "no skill named"))
         (is (str/includes? text "should not be assumed"))))))
+
+;; ------------------------------------------------- the slash form, by a person
+
+(deftest a-slash-request-is-read-off-the-front-of-the-message
+  ;; The trigger's shape, as a table. It is anchored and needs its separator, which
+  ;; is what keeps prose and paths from loading anything by accident.
+  (doseq [[text expected] [["/alpha"                      "alpha"]
+                           ["/alpha do the thing"          "alpha"]
+                           ["/alpha\nsecond line"          "alpha"]
+                           ["/alpha\twith a tab"           "alpha"]
+                           ["/alpha-beta.v2_x"             "alpha-beta.v2_x"]
+                           ["/../etc/passwd"               nil]
+                           ["  /alpha"                     nil]
+                           ["see /alpha"                   nil]
+                           ["/alpha/beta"                  nil]
+                           ["/alpha,then"                  nil]
+                           ["/ alpha"                      nil]
+                           ["/"                            nil]
+                           ["alpha"                        nil]
+                           [""                             nil]]]
+    (is (= expected (skills/slash-request text)) (pr-str text)))
+
+  (testing "and nothing that is not a string asks for anything"
+    (is (nil? (skills/slash-request nil)))
+    (is (nil? (skills/slash-request 42)))
+    (is (nil? (skills/slash-request [{:type "text" :text "/alpha"}]))
+        "a parts vector is a caller's problem -- see the derivation, which reads it")))
+
+(deftest a-slash-load-splices-the-body-after-the-message-that-asked
+  (let [root (lay-user-skills! "alpha")
+        msgs [{:role "user" :content "/alpha go"}
+              {:role "assistant" :content "on it"}]
+        out  (skills/derived-injections msgs [root])]
+    (testing "one more message, and it is a USER message carrying the whole body"
+      (is (= 3 (count out)))
+      (is (= "user" (:role (nth out 1))))
+      (is (str/starts-with? (:content (nth out 1)) "<skill name=\"alpha\">"))
+      (is (str/includes? (:content (nth out 1)) "Body of alpha")))
+
+    (testing "the person's own words are left exactly as typed"
+      ;; The trigger is not consumed: stripping it would need somewhere to
+      ;; remember that it had been stripped, and there is nowhere to remember.
+      (is (= "/alpha go" (:content (first out)))))
+
+    (testing "and the assistant's reply still follows it"
+      (is (= ["user" "user" "assistant"] (mapv :role out))))))
+
+(deftest a-slash-load-is-idempotent-and-shares-one-load-per-name
+  (let [root (lay-user-skills! "alpha")
+        msgs [{:role "user" :content "/alpha go"}]]
+    (testing "applying it again changes nothing"
+      (let [once   (skills/derived-injections msgs [root])
+            twice  (skills/derived-injections once [root])
+            thrice (skills/derived-injections twice [root])]
+        (is (= once twice))
+        (is (= twice thrice))))
+
+    (testing "the slash and the tool are two ways to ASK, not two gets of the body"
+      (let [slash-then-tool (skills/derived-injections
+                             [{:role "user" :content "/alpha go"}
+                              (assistant-with-skill-call "c1" "alpha")
+                              (skill-result "c1" "alpha")]
+                             [root])
+            tool-then-slash (skills/derived-injections
+                             [{:role "user" :content "go"}
+                              (assistant-with-skill-call "c1" "alpha")
+                              (skill-result "c1" "alpha")
+                              {:role "user" :content "/alpha again"}]
+                             [root])]
+        (doseq [out [slash-then-tool tool-then-slash]]
+          (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out)))
+              "the body arrives once whichever path asked first"))))
+
+    (testing "two different names both arrive, each after the message that asked"
+      (lay-skill! root "beta" (skill-md "beta" "b"))
+      (let [out      (skills/derived-injections [{:role "user" :content "/alpha go"}
+                                                 {:role "user" :content "/beta too"}]
+                                                [root])
+            injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
+        (is (= 2 (count injected)))
+        (is (str/starts-with? (:content (first injected)) "<skill name=\"alpha\">"))
+        (is (str/starts-with? (:content (second injected)) "<skill name=\"beta\">"))))))
+
+(deftest a-slash-load-of-a-name-nobody-has-is-a-notice-not-a-silence
+  (let [root (lay-user-skills! "alpha")
+        out  (skills/derived-injections [{:role "user" :content "/nope go"}] [root])]
+    (testing "the body slot is filled with a sentence rather than left empty"
+      ;; A typo that loaded nothing must not be indistinguishable from a skill that
+      ;; loaded something with nothing to say.
+      (is (= 2 (count out)))
+      (let [text (:content (second out))]
+        (is (str/starts-with? text "<skill name=\"nope\">"))
+        (is (str/includes? text "no skill named"))
+        (is (str/includes? text "alpha") "and it lists what this session CAN load"))))
+
+  (testing "a BROKEN skill says which reason, and where to look"
+    (let [root (lay-user-skills! "alpha")]
+      (lay-skill! root "nodesc" "---\nname: nodesc\n---\n\nbody\n")
+      (let [text (:content (second (skills/derived-injections
+                                    [{:role "user" :content "/nodesc go"}] [root])))]
+        (is (str/includes? text "cannot be loaded"))
+        (is (str/includes? text "no-description"))
+        (is (str/includes? text "nodesc/SKILL.md"))))))
+
+(deftest an-image-beside-a-slash-request-does-not-hide-it
+  ;; A person can attach a picture and type the skill name in the same message.
+  ;; The trigger is read from the message's TEXT parts, so that message still asks.
+  (let [root (lay-user-skills! "alpha")
+        out  (skills/derived-injections
+              [{:role "user"
+                :content [{:type "text" :text "/alpha look at this"}
+                          {:type "image" :image_url {:url "data:image/png;base64,AA"}}]}]
+              [root])]
+    (is (= 2 (count out)))
+    (is (str/starts-with? (:content (second out)) "<skill name=\"alpha\">"))))
+
+(deftest a-conversation-that-asks-for-nothing-is-returned-untouched
+  ;; The regression the whole feature rests on, in the form this second source
+  ;; could break: no tool load, no slash, so the vector comes back as ITSELF.
+  (let [root (lay-user-skills! "alpha")
+        msgs [{:role "user" :content "prose about alpha, and about /alpha even"}
+              {:role "assistant" :content "sure"}]]
+    (is (identical? msgs (skills/derived-injections msgs [root])))))
+
+(deftest a-person-can-load-a-skill-the-model-may-not
+  ;; `disable-model-invocation: true` is the file saying this is not the model's to
+  ;; reach for. Two paths, one difference -- and each half has to be asserted on
+  ;; its own, because either one alone would pass while the pair was backwards.
+  (let [root (lay-user-skills! "automatic")]
+    (lay-skill! root "manual-only"
+                (skill-md "manual-only" "only a human runs this" "disable-model-invocation: true\n"))
+
+    (testing "the catalog does not offer it to the model"
+      (is (not (str/includes? (skills/catalog-text [root]) "manual-only"))))
+
+    (testing "the tool refuses it, by name, and says who can"
+      (let [r (tools/run! {:function {:name "skill"
+                                      :arguments (json/write-str {:name "manual-only"})}}
+                          "sk-2")]
+        (is (true? (:error r)))
+        (is (str/includes? (str (:content r)) "not for the model to load"))
+        (is (str/includes? (str (:content r)) "/manual-only")
+            "and it names the way a person can")))
+
+    (testing "a person typing it gets the body"
+      (let [out (skills/derived-injections [{:role "user" :content "/manual-only go"}] [root])]
+        (is (= 2 (count out)))
+        (is (str/includes? (:content (second out)) "Body of manual-only"))
+        (is (not (str/includes? (:content (second out)) "cannot be loaded")))))))

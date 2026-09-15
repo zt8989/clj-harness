@@ -217,6 +217,11 @@
   names an actual directory listing produced, so '../../etc/passwd' is refused
   as an unknown skill rather than resolved into anything.
 
+  THE MODEL'S HALF OF A TWO-WAY LOAD. A person loads a skill by typing `/name` in
+  the composer (harness.skills/slash-request); this tool is the model's way, and
+  the two differ in exactly one place: `disable-model-invocation` is refused here
+  and allowed there.
+
   NOT marked :requires-approval. Reading instructions is not a side effect, and
   everything the body goes on to ask for is gated by its own seam: the fence
   still parks a file path, a declared approval still parks its tool. Gating the
@@ -224,18 +229,35 @@
   describe, which is backwards."
   [{:keys [name]}]
   (let [roots (project/skill-roots *thread-id*)
-        entry (skills/skill-for roots name)
-        known (keep #(when (:available? %) (:name %)) (skills/scan roots))]
+        entry (skills/skill-for roots name)]
     (cond
       (nil? entry)
-      (throw (ex-info (str "no skill named " (pr-str name) "; this session can load "
-                           (if (seq known) (pr-str (vec known)) "nothing"))
-                      {:name name :known (vec known)}))
+      (throw (ex-info (skills/absent-notice roots name)
+                      {:name name :known (skills/known-names roots)}))
 
       (not (:available? entry))
-      (throw (ex-info (str "skill " (pr-str name) " cannot be loaded: " (name (:reason entry))
-                           " (see " (:path entry) ")")
+      ;; The sentence comes from harness.skills/broken-notice, which spells it once
+      ;; for both load paths. That move also retired a latent bug: this branch used
+      ;; to inline `(name (:reason entry))` with `name` bound to the SKILL'S NAME,
+      ;; so the shadowing made it call a String as a function -- a broken skill got
+      ;; a ClassCastException instead of the refusal. Nothing exercised the branch,
+      ;; which is the only reason it survived; skills_test reaches it now.
+      (throw (ex-info (skills/broken-notice name entry)
                       {:name name :reason (:reason entry) :path (:path entry)}))
+
+      ;; THE FLAG, FINALLY ENFORCED. `disable-model-invocation: true` is the file
+      ;; saying this one is not the model's to reach for -- and leaving the name
+      ;; out of the catalog was concealment, not a refusal: a guessed name loaded
+      ;; it. Now the guess is refused by name. A PERSON still can (that is what
+      ;; the flag reserves), which is the one thing the two load paths do
+      ;; differently, and the refusal says so rather than leaving the model to
+      ;; read a missing catalog entry as an oversight.
+      (:disable-model-invocation? entry)
+      (throw (ex-info (str "skill " (pr-str name) " is not for the model to load: its"
+                           " SKILL.md sets disable-model-invocation, so it is kept out of"
+                           " the catalog on purpose. A person can still load it by typing"
+                           " /" name " in the composer.")
+                      {:name name :reason :model-invocation-disabled}))
 
       :else
       (let [{:keys [body missing]} (skills/body entry)]

@@ -242,7 +242,10 @@
                          ""
                          "A skill is a set of instructions for a kind of task. Load one with the `skill`"
                          " tool when its description matches what you are about to do; its full text then"
-                         " joins this conversation, and it stays available for the rest of the session."]
+                         " joins this conversation, and it stays available for the rest of the session."
+                         " A PERSON can load one too, by starting a message with `/name ` -- when that"
+                         " happens the message keeps the `/name` as typed and the full text is the"
+                         " message right after it, so it is already in this conversation."]
                         (map (fn [{:keys [name description]}] (str "- " name ": " description))
                              usable))))))
 
@@ -347,28 +350,157 @@
   {:role "user"
    :content (str "<skill name=\"" (escape-attr name) "\">\n" body "\n</skill>")})
 
+;; ------------------------------------------------------------ the slash form
+;;
+;; THE HUMAN'S WAY IN. A skill is loaded by the model through the `skill` tool,
+;; and by a person by typing "/name ..." in the composer -- and those are the only
+;; two ways. They are not two mechanisms: both are SOURCES for the same
+;; derivation, both end as a `<skill name=..>` user message spliced in after the
+;; message that asked, and both obey the same one-load-per-name rule. Keeping them
+;; one derivation is what stops the two paths from drifting apart.
+;;
+;; The trigger lives in the conversation rather than in a server-side record, for
+;; the reason the whole design is derived rather than accumulated: the client owns
+;; the history, so the "/name" a person typed is still there to be re-read on every
+;; turn -- no bookkeeping, and nothing to lose on a refresh.
+
+(def slash-pattern
+  "What a slash-load looks like: the slash, the name, then a space, a newline, or
+  the end of the message.
+
+  The name is read in the charset a frontmatter key uses, because that is the
+  charset a directory listing produces. ANCHORED AT THE START and the separator is
+  REQUIRED, which is what keeps prose and paths out of it: `/alpha/beta` is a path,
+  `see /alpha` is a sentence about a skill, and `/alphax` is a different (probably
+  unknown) name rather than a prefix match on `alpha`."
+  #"(?s)^/([A-Za-z0-9._-]+)(?:\s|$)")
+
+(defn slash-request
+  "TEXT -> the skill name TEXT asks to load by slash, or nil when it asks for
+  nothing.
+
+  It answers only WHICH NAME was asked for. Everything after that is the
+  derivation the tool path shares, so a second copy of 'how a body gets injected'
+  does not exist.
+
+  THE TEXT IS NOT REWRITTEN, and that is a decision rather than an omission: what
+  the model reads as this message's own words is what the person typed, slash and
+  all, and the body arrives beside it as its own message. Leaving the trigger in
+  place costs one short line of context and buys the re-readability above --
+  a trigger that had to be stripped to be recognized would need somewhere to
+  remember that it had been."
+  [text]
+  (when (string? text)
+    (second (re-find slash-pattern text))))
+
+(defn- leading-text
+  "A message's own words, as the string a slash-request is looked for in. A string
+  is itself; a parts vector is its TEXT parts joined, so an image sent beside
+  `/alpha` does not hide the request. Nil for content that carries no text."
+  [content]
+  (cond
+    (string? content)     content
+    (sequential? content) (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) content))
+    :else                 nil))
+
+(defn- slash-of
+  "The name MESSAGE asks to load by slash, or nil. One place answers it, so the
+  caller's guard ('did anything ask?') and its walk cannot disagree."
+  [m]
+  (when (= "user" (:role m))
+    (slash-request (leading-text (:content m)))))
+
+;; --------------------------------------------------- why a name has no body
+;;
+;; ONE WORDING FOR BOTH PATHS. 'Give me the body of NAME' is the same question
+;; whether a model asked through the tool or a person asked with a slash, so the
+;; two answers are spelled once here: a distinction written down twice is a
+;; distinction free to disagree with itself.
+
+(defn known-names
+  "The skill names this session can load, in scan order. The list a refusal quotes
+  and the list a notice quotes, so 'what can I load' has one answer.
+
+  `disable-model-invocation` skills are NOT in it: they are loadable by a person
+  who knows the name (see slash-request) but this list is what to answer a MODEL
+  with, and the flag is the file saying the model may not have it."
+  [roots]
+  (vec (keep #(when (:available? %) (:name %)) (scan roots))))
+
+(defn absent-notice
+  "The sentence for a name no root holds: what was asked for, and what this
+  session can load instead. A typo is the everyday way to read this."
+  [roots skill-name]
+  (let [known (known-names roots)]
+    (str "no skill named " (pr-str skill-name) "; this session can load "
+         (if (seq known) (pr-str known) "nothing"))))
+
+(defn broken-notice
+  "The sentence for a skill that is THERE and unusable, naming the reason and the
+  file. Same shape as absent-notice's job: say which one and why, because 'the
+  file is there and the capability is not' must never be a mystery.
+
+  SKILL-NAME and not `name`: a parameter called `name` shadows clojure.core/name
+  for the whole body, and this one needs it for the REASON, which is a keyword.
+  That shadowing threw a ClassCastException here rather than returning a refusal
+  -- see the note in harness.tools/t-skill, where the same expression used to
+  live."
+  [skill-name entry]
+  (str "skill " (pr-str skill-name) " cannot be loaded: " (name (:reason entry))
+       " (see " (:path entry) ")"))
+
+(defn- load-text
+  "ROOTS + NAME -> the text to splice for NAME: a skill's body, or a notice saying
+  why there is none.
+
+  The notice is the whole reason this is a function rather than a `cond` at the
+  splice site: `derived-injections` can be reached with a name that was loadable
+  when it was asked for and is not now, and 'the instructions you believe you are
+  following are gone' is the last thing that may happen silently."
+  [roots name]
+  (let [entry (skill-for roots name)]
+    (cond
+      (nil? entry)
+      (str (absent-notice roots name)
+           " -- its instructions cannot be read here, and should not be assumed")
+
+      (not (:available? entry))
+      (broken-notice name entry)
+
+      :else
+      (or (:body (body entry)) (:missing (body entry))))))
+
 (defn derived-injections
   "MESSAGES + ROOTS -> MESSAGES with the skill bodies this conversation has
-  loaded spliced in, each directly after the tool result that loaded it.
+  loaded spliced in, each directly after the message that asked for it.
 
-  THIS IS WHERE THE DESIGN DIFFERS FROM THE REFERENCE IMPLEMENTATION, and the
-  difference is forced rather than chosen. applepi's server holds the session, so
-  its tool can push a message into history and persist it. Here the CLIENT owns
-  the conversation and the server is stateless per run: an injection held
-  server-side dies on refresh, and one sent to the client gets rendered. So the
-  body has to be DERIVED -- recomputed from the conversation itself, every time
-  -- and the two properties that makes possible are the ones that matter:
+  IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
+  applepi's server holds the session, so its tool can push a message into history
+  and persist it. Here the CLIENT owns the conversation and the server is
+  stateless per run: an injection held server-side dies on refresh, and one sent
+  to the client gets rendered. So the body is recomputed from the conversation
+  itself, every time, and the two properties that makes possible are the ones that
+  matter:
 
     - IDEMPOTENT. Applying this to its own output changes nothing, because the
       body is already in place where it belongs. That is what lets the kernel
       apply it before every LLM call with no bookkeeping at all.
-    - FIRST LOAD WINS. A skill loaded twice contributes its body once; the point
-      of loading it was to have the instructions, and having them twice costs
-      context for nothing.
+    - FIRST LOAD WINS, ACROSS SOURCES. A name contributes one body however many
+      times it is asked for, and it does not matter whether the ask was the
+      model's tool call or a person's slash -- they are two ways to ask the same
+      question, not two gets of the same instructions.
 
-  A skill that has since been removed from every root plants a one-line notice
-  instead of vanishing -- instructions the model believes it is following are
-  the last thing to drop silently.
+  TWO SOURCES, and keeping them here together is the point:
+
+    - a tool result that IS a skill load -- judged by the shared confirmation
+      prefix, never by re-deriving which of veto/disabled/missing-argument
+      happened (see load-confirmations);
+    - a user message opening with `/name` -- the human's path (see slash-request).
+
+  A name that can no longer be read plants a one-line notice instead of vanishing,
+  and an unknown name gets the same treatment: instructions the model believes it
+  is following are the last thing to drop silently, and a typo that loaded nothing
+  must not look like a skill that loaded nothing TO SAY.
 
   The result is a message vector and nothing else: no AG-UI frame is produced for
   any of this, which is exactly why a client never sees these messages."
@@ -384,23 +516,14 @@
                                                    (catch Throwable _ {}))]
                                   :when (contains? confirmations (:id tc))]
                               [(:id tc) (str (:name args))]))]
-    (if (empty? confirmations)
+    (if (and (empty? confirmations) (not-any? slash-of messages))
       messages
       (let [present (set (loaded-names messages))]
         (loop [out [] seen present [m & more :as ms] messages]
           (if (empty? ms)
             out
             (let [out (conj out m)
-                  id  (:tool_call_id m)
-                  nm  (get name-of id)]
+                  nm  (or (get name-of (:tool_call_id m)) (slash-of m))]
               (if (and nm (not (contains? seen nm)))
-                (let [entry (skill-for roots nm)
-                      text  (cond
-                              (nil? entry) (str "skill " (pr-str nm)
-                                                " is no longer in any skill root; its instructions"
-                                                " cannot be read here, and should not be assumed")
-                              (not (:available? entry)) (str "skill " (pr-str nm) " cannot be loaded: "
-                                                             (name (:reason entry)))
-                              :else (or (:body (body entry)) (:missing (body entry))))]
-                  (recur (conj out (skill-message nm text)) (conj seen nm) more))
+                (recur (conj out (skill-message nm (load-text roots nm))) (conj seen nm) more)
                 (recur out seen more)))))))))

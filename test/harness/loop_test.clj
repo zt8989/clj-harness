@@ -149,3 +149,27 @@
   (let [{:keys [history]} (drive (fake/scripted [{:content "hi"}]) [{:role "user" :content "go"}])]
     (testing "nothing is spliced in when nothing was loaded"
       (is (= ["user" "assistant"] (mapv :role history))))))
+
+(deftest a-slash-load-is-in-the-very-first-request
+  ;; The human's path, and the same "now" requirement the model's has: the person
+  ;; asked in the message they just sent, so the body has to be in the FIRST call
+  ;; of that turn -- not after a round of tool calls, and not next turn.
+  (let [root (str (System/getProperty "java.io.tmpdir")
+                  "/harness-loop-slash-" (System/nanoTime))]
+    (.mkdirs (java.io.File. root ".agents/skills/alpha"))
+    (spit (str root "/.agents/skills/alpha/SKILL.md")
+          "---\nname: alpha\ndescription: a thing\n---\n\n# alpha\n\nALPHA BODY\n"
+          :encoding "UTF-8")
+    (project/bind! "t-slash" root)
+    (let [{:keys [history]}
+          ;; A script with NO tool call: nothing here asks the model for anything,
+          ;; which is the point -- the load came from the person.
+          (drain-chan (loop/run-chan (fake/scripted [{:content "done"}])
+                                     [{:role "user" :content "/alpha go"}]
+                                     {:thread-id "t-slash"}))]
+      (testing "the body rides right behind the message that asked, both user-side"
+        (is (= ["user" "user" "assistant"] (mapv :role history)))
+        (is (= "/alpha go" (:content (first history))) "and the person's text is untouched")
+        (is (str/starts-with? (str (:content (second history))) "<skill name=\"alpha\">"))
+        (is (str/includes? (str (:content (second history))) "ALPHA BODY"))))
+    (project/bind! "t-slash" nil)))
