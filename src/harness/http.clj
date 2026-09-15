@@ -52,6 +52,7 @@
             [harness.home :as home]
             [harness.llm :as llm]
             [harness.log :as log]
+            [harness.logging :as logging]
             [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.preamble :as preamble]
@@ -1263,13 +1264,28 @@
 ;; ---------------------------------------------------------------------- start
 
 (defn start!
-  "Start the server and return its stop fn. Default port is 8080."
+  "Start the server and return its stop fn. Default port is 8080.
+
+  LOGGING COMES UP FIRST, BEFORE THE SOCKET. A server that cannot bind -- the
+  port is taken, which on this machine is the ordinary case of a session already
+  running -- failed to START, and that is precisely the kind of failure somebody
+  wants in a file rather than in whatever console the process happened to have.
+  Configuring after `run-server` meant the one error worth recording at startup
+  was the one error that could not be: found by starting this on a busy port and
+  watching a bare BindException go past with no log file."
   [& [opts]]
-  (let [opts   (merge {:port port} opts)
-        server (hk/run-server handler opts)]
-    (println (str "harness listening on http://localhost:" (:port opts))
-             "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
-    server))
+  (let [opts (merge {:port port} opts)
+        root (logging/configure!)]
+    (println (str "logging to " root "/logs/harness.log (rotated by date and size)"))
+    (try
+      (let [server (hk/run-server handler opts)]
+        (println (str "harness listening on http://localhost:" (:port opts))
+                 "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
+        (log/started root (:port opts))
+        server)
+      (catch Throwable t
+        (log/error! :start-failed t {:port (:port opts) :root root})
+        (throw t)))))
 
 (defn -main [& _]
   (start!)
