@@ -9,18 +9,27 @@
 // thread -- messages, composer, auto-scroll, the welcome screen and the running
 // state all come from <Thread/> off that runtime.
 //
-// The agent is built in a `useMemo`, not at module scope. It is the object that
-// owns the conversation: HttpAgent mints a threadId at construction and holds
-// it, and every run reads threadId + messages off it (prepareRunAgentInput).
-// The adapter never mints one either -- it reads `agent.threadId`, falling back
-// to "main" only if that is empty (AgUiThreadRuntimeCore). One agent per mounted
-// page is therefore one thread per page, and that is the whole threadId story
-// for this ticket; spec.md decision 6 carries the verification.
+// The agent is built in a `useMemo`, not at module scope. Since ticket 06 it no
+// longer owns the threadId: React state does (`threadId`, below), because the
+// thread-list adapter's contract puts the id in the host's hands -- the runtime
+// only reads it. The agent is written back before anything async happens, and
+// every run still reads threadId off the agent (prepareRunAgentInput), so the
+// wire is unchanged. The empty dependency list is load-bearing: rebuilding the
+// agent on a re-render would throw the thread away mid-run. Module scope would
+// look equivalent and would not be -- it survives Fast Refresh, quietly
+// carrying a thread across edits while the developer believes they are looking
+// at a fresh page.
 //
-// The empty dependency list is load-bearing: rebuilding the agent on a re-render
-// would throw the thread away mid-run. Module scope would look equivalent and
-// would not be -- it survives Fast Refresh, quietly carrying a thread across
-// edits while the developer believes they are looking at a fresh page.
+// The `threadList` adapter is the session panel's spine, chosen over
+// `adapters.history` because the page's job is "many threads, switch between
+// them", which is exactly the adapter's shape; the reasoning is recorded once,
+// in spec.md's decision 6. Its callbacks are where the ownership change is
+// visible: both mint-or-adopt an id into React state and onto the agent BEFORE
+// awaiting anything -- the adapter's hard rule -- and `onSwitchToThread` hands
+// the runtime the rebuilt messages converted through `fromAgUiMessages`, the
+// same conversion a history adapter would run. Restoring is refused while a
+// run is in flight, from the runtime's own `isRunning`, with the reason
+// surfaced on the row that was clicked.
 //
 // This ticket swaps the assembly: CopilotKit's provider and its chat are gone
 // from the page. Four things that used to sit above the chat retired with it --
@@ -52,25 +61,103 @@
 // what somebody typed. The state lives here, not in the provider, because
 // `isSendDisabled` is an option of the hook called here.
 import { HttpAgent } from "@ag-ui/client";
+import { fromThreadMessageLike, type AssistantRuntime } from "@assistant-ui/core";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
-import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
-import { useMemo, useState } from "react";
+import { fromAgUiMessages, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApprovalBatchProvider } from "@/components/approval-gate";
+import {
+  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
+  RUN_IN_PROGRESS_REFUSAL,
+  SessionPanel,
+  runInProgress,
+} from "@/components/session-panel";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
+import { AGENT_URL, rebuildThread } from "@/lib/threads";
 
-/// The AG-UI endpoint. The trailing slash is the server's route; the origin is
-/// also where the management endpoints live (project binding, the thread list),
-/// which tickets 06 and 07 read back out of here.
-const AGENT_URL = "http://localhost:8080/";
+/// The converted history a restore hands the runtime: `fromAgUiMessages`
+/// rebuilds text, reasoning and tool calls -- and reads back
+/// `metadata.custom.agui.interrupts` when the log carried them -- but its
+/// output is still the loose `ThreadMessageLike` shape; the repository wants
+/// the finished one. The runtime's own snapshot-import path runs this exact
+/// pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is
+/// upstream's, quoted rather than reinvented.
+function toThreadMessages(agUiMessages: readonly unknown[]) {
+  return fromAgUiMessages(agUiMessages).map((message) =>
+    fromThreadMessageLike(message, message.id ?? crypto.randomUUID(), {
+      type: "complete",
+      reason: "unknown",
+    }),
+  );
+}
 
 export function App() {
-  const agent = useMemo(() => new HttpAgent({ url: AGENT_URL }), []);
+  // The threadId's owner since ticket 06. Minted here, written back to the
+  // agent below, and adopted by `onSwitchToThread` when a session from the
+  // list is opened.
+  const [threadId, setThreadId] = useState<string>(() => crypto.randomUUID());
+  // `threadId` is read once, at birth -- afterwards the adapter callbacks keep
+  // the two in step, and the memo's empty deps keep the agent (and with it any
+  // in-flight run) alive across re-renders.
+  const agent = useMemo(() => {
+    const created = new HttpAgent({ url: AGENT_URL });
+    created.threadId = threadId;
+    return created;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Set by the approval gate below, read by the runtime on the next render.
   const [gateOpen, setGateOpen] = useState(false);
-  const runtime = useAgUiRuntime({ agent, isSendDisabled: gateOpen });
+  // The switching guards read `isRunning` off the runtime, but the runtime
+  // does not exist yet while the adapter object is being built -- the ref
+  // closes that loop. Assigned right after the hook, before anything can click.
+  const runtimeRef = useRef<AssistantRuntime | null>(null);
+
+  // Id first, then await -- the thread-list adapter's hard rule: the selected
+  // id is set before history is waited for, because the runtime discards the
+  // messages of a switch that a later one superseded, and the id must already
+  // name the winner when that verdict lands.
+  const adoptThread = useCallback(
+    (id: string) => {
+      agent.threadId = id;
+      setThreadId(id);
+    },
+    [agent],
+  );
+
+  const onSwitchToNewThread = useCallback(() => {
+    if (runtimeRef.current && runInProgress(runtimeRef.current)) {
+      throw new Error(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
+    }
+    adoptThread(crypto.randomUUID());
+  }, [adoptThread]);
+
+  const onSwitchToThread = useCallback(
+    async (id: string) => {
+      if (runtimeRef.current && runInProgress(runtimeRef.current)) {
+        throw new Error(RUN_IN_PROGRESS_REFUSAL);
+      }
+      adoptThread(id);
+      const rebuilt = await rebuildThread(id);
+      return { messages: toThreadMessages(rebuilt.messages) };
+    },
+    [adoptThread],
+  );
+
+  const runtime = useAgUiRuntime({
+    agent,
+    isSendDisabled: gateOpen,
+    adapters: {
+      threadList: {
+        threadId,
+        onSwitchToNewThread,
+        onSwitchToThread,
+      },
+    },
+  });
+  runtimeRef.current = runtime;
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -80,9 +167,16 @@ export function App() {
         {/* Thread's root is `h-full`, so it needs a parent that actually has a
             height -- `h-dvh` is the viewport. Tickets 06 and 07 add their panels
             above this line and must not steal that height from it. */}
+        {/* Tickets 06/07 put their panels beside the thread. The column is the
+            viewport; the panel takes what it needs and the thread's `h-full`
+            root reads the rest -- `min-h-0` is what lets it shrink instead of
+            overflowing. */}
         <ApprovalBatchProvider onHoldChange={setGateOpen}>
-          <div className="h-dvh">
-            <Thread components={THREAD_COMPONENTS} />
+          <div className="flex h-dvh flex-col">
+            <SessionPanel runtime={runtime} currentThreadId={threadId} />
+            <div className="min-h-0 flex-1">
+              <Thread components={THREAD_COMPONENTS} />
+            </div>
           </div>
         </ApprovalBatchProvider>
       </TooltipProvider>

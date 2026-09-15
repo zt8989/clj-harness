@@ -1,50 +1,73 @@
 # 06 — 会话：列表、恢复、新建
 
-**What to build:** 界面上能看见日志目录里有哪些会话，能回到其中任何一个并接着聊，也能开一个全新的。
-恢复的验收点是**日志而不是屏幕**：屏幕上出现历史不算通过，续聊之后旧的那个日志文件被追加才算——这条
-区分了「客户端手里真的持有这段对话」和「只是把消息画了一遍」。
+**Status: done** — `ui/src/components/session-panel.tsx`（新）、`ui/src/lib/threads.ts`（新：两个管理端点的
+瘦封装 + `AGENT_URL` 归一处）、`ui/src/app.tsx`（threadList 适配器 + threadId 归主变更 + 布局改列）。
+**服务端零改动**（e2e server 本就复用 `harness.http/start!`，`/api/threads` 与 rebuild 是生产 handler 自带）。
+三关全绿，真 Chromium 全主线走完，截图 `t06-01..03`。
 
-数据来自仓库已有的两个端点：列日志目录里的会话（threadId、最后活动时间、体积），以及让服务端把一个
-日志重建成消息（重建端点已经在，且会往日志里落一行审计）。
+## 路的取舍：adapters.threadList，理由一次说清
 
-**运行时给的口子有两条，不是一条，这一票要挑一条并说明为什么。**
+两条路里 `adapters.history` 是「一个线程、页面加载时恢复」的形状，多线程来回切要在它上面手搓一切；
+`adapters.threadList` 就是「多个线程、来回切」本形——runtime 负责清场、调出、灌回，我们只供
+「id → 消息」一个函数。代价是它标着 experimental（core 类型注释原话 "might change without notice"），
+已按票面写进 spec.md 已知风险。
 
-- `adapters.threadList`（**experimental**，文档明说可能在不通知的情况下更改）：吃 `{threadId,
-  onSwitchToNewThread, onSwitchToThread}`。注意它的形状——**threadId 由我们持有并传进去**，运行时只读。
-  这直接连着 03 定下的 threadId 归属：走这条路，id 的主人从 agent 对象挪到我们的状态，agent 上的 id 要
-  被同步地写回去。文档有一条硬约束：**必须先把选中的 id 设好再去等历史**，运行时会把被取代的那次切换
-  返回的消息/状态丢掉。
-- `adapters.history`：`load()` 返回 `ExportedMessageRepository.fromArray(fromAgUiMessages(messages))`。
-  这条路更适合「一个线程、页面加载时恢复」，我们这里是「多个线程来回切」，所以它更可能是配角而不是主角。
+- 列表**不走** adapter 的 `threads` 字段：面板要显示最后活动时间与体积，adapter 的线程形状没有这两个
+  字段。砍显示凑组件是本末倒置，所以面板自己 `GET /api/threads`，adapter 只当切换的脊椎。
+- 恢复的转换是 `fromAgUiMessages` → `fromThreadMessageLike` 两步，与 runtime 自己的快照导入路径
+  （`importMessagesSnapshot`）逐字相同，引上游而非另写。
 
-另有官方抄来的 `thread-list` 元素可用，但我们的列表要显示体积与最后活动时间、要就地显示重建失败的原因，
-数据形状不一样。评估一下能不能改，改不动就自建一个面板——**别为了用官方组件把要显示的信息砍掉**。
+## threadId 归主变更（决策 6 的续篇）
 
-`fromAgUiMessages` 会重建文本、推理与工具调用，并且**会读回 `metadata.custom.agui.interrupts` 把
-`requires-action` / 中断状态重建出来**——也就是说恢复一个当时正 park 着的会话，审批卡应该还会在。这条
-值得单独验一次。
+id 的主人从 agent 挪到了 **`App` 的 React state**：新建时 `crypto.randomUUID()` 铸新 id（与 HttpAgent
+自铸的形状一致），agent 被写回——`adoptThread` 在**任何 await 之前**同步写 `agent.threadId` 并
+setState，这是 adapter 文档的硬规则（先设 id 再等历史，被取代的切换其消息会被丢弃）。运行时每个
+run 仍从 agent 读 id（`buildRunInput`），线上的形状一个字没变。spec.md 决策 6 已补终稿段。
 
-**Blocked by:** 03
+## 验收主线（全在日志上对账）
 
-**Status:** ready-for-agent
+| 步 | 结果 |
+|---|---|
+| 起一轮、再起一轮 | 一个 agent 一个文件，页面 id 与文件名逐字相同 |
+| 新建会话 | 新 id、空消息，下一轮落在**新文件**（7 KB，旧文件未动） |
+| 恢复旧会话 | 两条历史回屏，服务端 rebuild 落 `session/rebuilt` 审计行（日志 +294 B） |
+| **续聊追加** | 恢复后发一句 → **旧文件** 15 800 → 28 127 B（bash 帧 13 处），新会话文件未动——验收主线达成 |
+| run 进行中点恢复 | 行下原话拒绝："A run is in progress; switching is refused until it settles."（`t06-01` 顶部可见） |
+| 损坏日志 | 服务端 400 的原话逐字显示在该行下："line 25 of the log is not valid JSON (JSON error (end-of-file inside string)) -- the log is truncated or corrupt"；其余行仍可点、点后仍能恢复（`t06-03`） |
+| 刷新 | Refresh 后新文件出现、审计行使体积与顺序跟着变；切换与线程变化也各自触发刷新 |
+| 当前会话可辨认 | 当前行高亮、标 `· current`、禁点；头部横排当前 id 全文 |
 
-- [ ] 列出日志目录里的会话：threadId、最后活动时间、体积；时间是人类可读的本地时间
-- [ ] 列表可刷新，刷新后反映最新状态（含刚恢复 / 新建造成的变化，重建端点会往日志落审计行，体积与顺序
-      要跟着变）
-- [ ] 恢复：服务端重建出的 threadId 与消息一起灌回运行时，屏幕上出现这段历史
-- [ ] **续聊追加到同一个日志文件**：恢复 → 发一句 → 旧文件被追加，而不是新起一个文件。此为验收主线
-- [ ] 恢复后**审批状态也回来了**：一个当时正 park 着的会话，恢复后审批卡仍然可操作（`fromAgUiMessages`
-      读回 `metadata.custom.agui.interrupts` 的结果）；如果实测不支持，把结论写进 `spec.md` 已知风险，
-      不要假装它支持
-- [ ] 走的是两条路里的哪一条、为什么，写进 `spec.md`；如果用了 `adapters.threadList`，`spec.md` 已知
-      风险里要点名它是 experimental
-- [ ] 服务端拒绝重建（日志截断或损坏）时，把服务端给的原因原样显示在该行，其余行仍可点、仍可用
-- [ ] 有 run 正在进行时拒绝恢复，并说明原因——不静默排队、不吞掉这个请求
-- [ ] 新建会话：新 id、空消息，之后的 run 落在新文件里
-- [ ] 当前会话在列表里可辨认（与正在用的 threadId 对得上）
-- [ ] **threadId 的归属在这一票可能易主**：若走 `adapters.threadList`，id 的主人从 agent 变成我们的状态。
-      真如此就把 `spec.md` 决策 6 更新到新结论，说明谁铸 id、写在哪个对象上、两处如何保持同步——不许
-      留下两个都自称是主人
-- [ ] 恢复与新建都不引入中间层握手：客户端仍是自己线程的主人，续聊照常是一轮普通 AG-UI run
-- [ ] 真 Chromium 验收：起一轮 → 停下 → 新建会话 → 恢复旧会话 → 续聊 → 核对旧日志文件确被追加，
-      截图留档
+三关：tsc 0 error；build 绿（CSS 84.72 kB / JS 1 253.41 kB，gzip 355.58 kB）；11 tests passed。控制台
+除 vite 连接日志外零输出。
+
+## 恢复 parked 会话：实测不支持，按票面如实记录
+
+票面预期 `fromAgUiMessages` 会把审批状态读回来。**实测不成立**，链条每一环都验过：
+
+1. 服务端重建时 `frames.clj` 的 `apply-frames` **忽略 RUN_FINISHED**——中断只存在于该帧的 outcome 里，
+   重建出的消息不带 `metadata.custom.agui.interrupts`。折进去是 JVM 侧改动，被非目标
+   「JVM 侧一行不动」禁止，所以不是客户端能补的洞。
+2. 恢复后：parked write 的卡显示 `Needs approval`（由「part 无 result → requires-action/tool-calls」推导，
+   恰好读起来是对的），但**审批卡不出、composer 不 hold**——中断缝是空的，卡拒绝假装有门可批
+   （`t06-02` 截图）。
+3. 恢复后发送，两道真实的防线接住：本地 runtime 把这个无结果调用按未决客户端工具调用自动取消
+   （卡翻 `Failed`），且 **@ag-ui/client 拒发该 run**——agent 层记着 park（页面没换，agent 活着），
+   `onInitialize` 抛 "Thread has 1 pending interrupt(s) not addressed by resume: <id>"，即上游错误横幅。
+   没有任何假续聊发生；但「恢复即无法再批」是事实，修法是服务端折叠中断，属下一特征的决定。
+
+一个推论（未实测，明确标注）：换新页面（新 agent）再恢复同一 parked 会话，agent 层的这道防线不在，
+run 大概率照常起、park 悬在服务端进程内存里——与 05 落地说明「刷新即弃决定」一致。
+
+## 两个已知的形状代价（都试过、都记录）
+
+- **失败恢复清空当前视图。** wrapper 先清后取（上游行为）：rebuild 被拒时当前 transcript 已经空了。
+  行上原因仍在，重开别行或重试同一行即可回来（失败后恢复 T1 实测正常）。
+- **列表是快照不是流。** 切换线程那一刻刷一次；新会话的第一轮 run 在刷新之后落地的话，要点一次
+  Refresh 才出现。自动跟平需要订阅日志目录，那不是这张面板的事。
+
+## 给 07 的接点
+
+面板列占了 `flex h-dvh flex-col` 的头部，thread 的 `h-full` 根在 `min-h-0 flex-1` 里——07 的项目面板
+照这个模式加一行即可，别再嵌套 `h-dvh`。另外 `/api/project/pick`（原生对话框）与 `/api/project` 的
+形状我已在 `http.clj` 读过：pick 返回 `{threadId, dir}`（在 `project-post` 里绑定并落审计），07 的
+「只填字段不直接改绑定」要从 pick 的 200 里拿路径自己填，别替用户点绑定。
