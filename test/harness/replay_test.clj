@@ -7,7 +7,6 @@
             [harness.event :as ev]
             [harness.frames :as frames]
             [harness.llm :as llm]
-            [harness.memory :as mem]
             [harness.replay :as replay]
             [harness.wire :as wire]))
 
@@ -122,7 +121,7 @@
   (let [history (replay/history dir "t-shape")]
     (testing "the system prompt leads, freshly read rather than stored in the log"
       (is (= "system" (:role (first history))))
-      (is (str/starts-with? (:content (first history)) (mem/prompt))))
+      (is (str/starts-with? (:content (first history)) (llm/prompt))))
     (testing "reasoning is folded back onto the assistant message -- the whole point"
       (is (= reasoning-text (:reasoning_content (assistant-with-calls history)))))
     (testing "calls are in the provider's casing, not AG-UI's"

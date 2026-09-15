@@ -38,6 +38,7 @@
 
 (defn config-file    [] (io/file (root) "config.edn"))
 (defn providers-file [] (io/file (root) "providers.edn"))
+(defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 (defn logs-dir       [] (io/file (root) "logs"))
 
@@ -59,6 +60,15 @@
   the filename without the reader depending on the writer's home."
   ([thread-id]     (io/file (logs-dir) (str (sanitize thread-id) ".jsonl")))
   ([dir thread-id] (io/file dir (str (sanitize thread-id) ".jsonl"))))
+
+(defn log-path
+  "The same file as a STRING -- what asks like 'where is this conversation's log'
+  want to hear, since the answer usually goes into a message rather than into a
+  file operation. Computed fresh every call, like everything else here: the root
+  can move (CLJ_HARNESS_HOME, a test binding) between calls, and a cached path
+  would silently point at the wrong file."
+  [thread-id]
+  (str (log-file thread-id)))
 
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs.

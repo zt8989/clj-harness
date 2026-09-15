@@ -12,7 +12,6 @@
             [harness.fake :as fake]
             [harness.home :as home]
             [harness.loop :as loop]
-            [harness.memory :as mem]
             [harness.project :as project]
             [harness.tools :as tools]
             [harness.wire :as wire]))
@@ -49,7 +48,7 @@
   (let [thr  "thr-park-1"
         path (str dir "/parked.txt")
         _    (io/delete-file path true)
-        _    (mem/session-require-approval! thr "write")
+        _    (tools/session-require-approval! thr "write")
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
                               :tool-calls [(call "c1" "write" {:path path :content "hello"})]}
@@ -74,9 +73,9 @@
         (is (= "c1" (:tool-call-id int)))
         (is (= "write" (:name int)))
         (is (string? (:id int)))
-        (is (= thr (:thread-id (mem/parked (:id int)))))
-        (is (= "c1" (:tool-call-id (mem/parked (:id int)))))
-        (is (= 1 (count (mem/parked-calls thr))))))
+        (is (= thr (:thread-id (tools/parked (:id int)))))
+        (is (= "c1" (:tool-call-id (tools/parked (:id int)))))
+        (is (= 1 (count (tools/parked-calls thr))))))
 
     (testing "the parked call is left unanswered in the history"
       (is (some #(seq (:tool_calls %)) history))
@@ -85,7 +84,7 @@
 (deftest a-tool-can-declare-its-own-approval-requirement
   (let [thr "thr-park-flag"
         ran (atom false)]
-    (mem/session-register! thr "probe"
+    (tools/session-register! thr "probe"
       {:description "A probe." :requires-approval true
        :parameters {:type "object" :properties {} :required []} :required []
        :run (fn [_] (reset! ran true) "ran")})
@@ -117,7 +116,7 @@
   (let [thr  "thr-park-mixed"
         path (str dir "/mixed.txt")
         _    (io/delete-file path true)
-        _    (mem/session-require-approval! thr "write")
+        _    (tools/session-require-approval! thr "write")
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
                               :tool-calls [(call "c1" "read" {:path "deps.edn"})
@@ -135,9 +134,9 @@
       (is (= 1 (count (tool-msgs history)))))))
 
 (deftest approval-is-session-scoped
-  (mem/session-require-approval! "thr-a" "read")
-  (is (true? (mem/session-approval-required? "thr-a" "read")))
-  (is (false? (mem/session-approval-required? "thr-b" "read")))
+  (tools/session-require-approval! "thr-a" "read")
+  (is (true? (tools/session-approval-required? "thr-a" "read")))
+  (is (false? (tools/session-approval-required? "thr-b" "read")))
   (let [{:keys [seen]}
         (run (fake/scripted [{:content ""
                               :tool-calls [(call "c1" "read" {:path "deps.edn"})]}
@@ -149,7 +148,7 @@
   (let [thr    "thr-park-wire"
         emit   (ag/outbound thr "run-w")
         frames (atom [])
-        _      (mem/session-require-approval! thr "read")]
+        _      (tools/session-require-approval! thr "read")]
     (doseq [event (:seen (run (fake/scripted [{:content ""
                                                :tool-calls [(call "c1" "read" {:path "deps.edn"})]}])
                               [] thr))]
@@ -167,7 +166,7 @@
   (let [thr  "thr-resume-yes"
         path (str dir "/resumed.txt")
         _    (io/delete-file path true)
-        _    (mem/session-require-approval! thr "write")
+        _    (tools/session-require-approval! thr "write")
         park (run (fake/scripted [{:content ""
                                    :tool-calls [(call "c1" "write" {:path path :content "approved!"})]}
                                   {:content "never reached"}])
@@ -203,7 +202,7 @@
   (let [thr  "thr-resume-no"
         path (str dir "/vetoed.txt")
         _    (io/delete-file path true)
-        _    (mem/session-require-approval! thr "write")
+        _    (tools/session-require-approval! thr "write")
         park (run (fake/scripted [{:content ""
                                    :tool-calls [(call "c1" "write" {:path path :content "nope"})]}])
                   [] thr)
@@ -233,10 +232,10 @@
 (deftest a-decision-cannot-be-spent-twice
   (let [thr "thr-resume-once"
         n   (atom 0)]
-    (mem/session-register! thr "tick"
+    (tools/session-register! thr "tick"
       {:description "Counts." :parameters {:type "object" :properties {} :required []}
        :required [] :run (fn [_] (swap! n inc) "tick")})
-    (mem/session-require-approval! thr "tick")
+    (tools/session-require-approval! thr "tick")
     (let [park   (run (fake/scripted [{:content "" :tool-calls [(call "c1" "tick" {})]}]) [] thr)
           iid    (interrupt-id park)
           decide (fn [] (run (fake/scripted [{:content "ok"}]) (:history park) thr
@@ -259,8 +258,8 @@
   (let [thr  "thr-resume-mixed"
         path (str dir "/mixed-resume.txt")
         _    (io/delete-file path true)
-        _    (mem/session-require-approval! thr "read")
-        _    (mem/session-require-approval! thr "write")
+        _    (tools/session-require-approval! thr "read")
+        _    (tools/session-require-approval! thr "write")
         park (run (fake/scripted [{:content ""
                                    :tool-calls [(call "c1" "read" {:path "deps.edn"})
                                                 (call "c2" "write" {:path path :content "ok"})]}])
@@ -282,8 +281,8 @@
       (is (= ["c1" "c2"] (mapv :tool_call_id (tool-msgs history)))))))
 
 (deftest unknown-interrupts-are-not-invented
-  (is (nil? (mem/parked "no-such-interrupt")))
-  (is (empty? (mem/parked-calls "thr-that-never-parked"))))
+  (is (nil? (tools/parked "no-such-interrupt")))
+  (is (empty? (tools/parked-calls "thr-that-never-parked"))))
 
 ;; ----------------------------------------------------------------- the fence
 ;;
@@ -334,7 +333,7 @@
       (is (empty? (tool-msgs history))))
     (testing "the interrupt carries the same facts as any approval"
       (let [[int]  (:interrupts term)
-            parked (mem/parked (:id int))]
+            parked (tools/parked (:id int))]
         (is (= "c1" (:tool-call-id int)))
         (is (= "read" (:name int)))
         (is (string? (:id int)))
@@ -459,7 +458,7 @@
       (is (= :run/interrupt (:type term)))
       (is (empty? (results seen)))
       (is (empty? (tool-msgs history)))
-      (is (= :out-of-bounds (:reason (mem/parked (:id (first (:interrupts term))))))))))
+      (is (= :out-of-bounds (:reason (tools/parked (:id (first (:interrupts term))))))))))
 
 (deftest the-project-level-replaces-the-user-level-whole
   ;; The user level freed the whole project (:allow on pdir); the project's

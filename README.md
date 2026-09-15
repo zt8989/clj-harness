@@ -4,27 +4,36 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,memory,models,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
-- `src/harness/models.clj` — **provider 目录**：厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与三档折叠、把选择装配成 provider。目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移
-- `src/harness/memory.clj` — 单一可自省面：冻结 prompt、工具注册表、config.edn、待决审批，外加**三档选择**的折叠与 api-key 解析（目录的验证与装配交给 `models`，api-key 只在这一处挂上）。api-key 的禁读禁暴露由 `prompt.md` 的 secrets 纪律条款约束——Clojure 结构上挡不住 eval，屏障是写下来的规矩（2026-09-13 由 memory/opaque 对偶合并而来）
-- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走
+- `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
+- `src/harness/llm.clj` — provider 协议层（一个 multimethod，按 `:protocol` 分派）**加 system prompt 的载体**：`prompt.md` 首调读入即冻结，热改需 `(llm/reset-prompt!)` 或重启。冻结点在这里而不是别处，因为理由就是 provider 的前缀缓存
+- `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。
+**没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
+- `src/harness/shell.clj` — 唯一决定 spawn 哪个 shell 的地方（Windows 上按绝对路径钉 Git Bash，避免被 System32 的 WSL 启动器静默吞掉），以及带上 stdin 与超时的运行方式。bash 工具与 hook 引擎共用它：那个坑是机器的属性，不是调用方的
+- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
+- `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
+- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用
+- `src/harness/project.clj` — 会话的项目目录绑定：thread-id → 目录（问出来，不抄副本）、相对路径重根、出界判定、`.harness/harness.edn` 两级装配
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
 - `dev/harness/{wire,evals,repl,e2e_server}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`；`e2e_server` 是 `npm test` 起的那个后端（脚本 provider + OS 分配端口）。
 
+**曾经有一个 `harness.memory`（"单一可自省面"），它已经不存在了。** 那是为 agent 在 run 里**读** harness 而立的门面；读自省撤销之后门面就没有存在理由，于是各段回了原主：prompt 回 `llm`、工具表与审批回 `tools`、provider 解析与密钥回 `providers`、日志路径回 `home`、项目绑定回 `project`。现在每个问题都问它真正的主人，没有一个"什么都能问"的入口。
+
 ### 会话级自我扩展与晋升路径
 
-agent 可以在运行期通过 `eval` 给**本会话**长出新的工具（`session-register!`），也可以把已有工具**关掉/打开**（`session-disable!` / `session-enable!`，关闭后工具仍在工具表里、只是调用被拒）。
-
-这些能力**仅本会话生效，进程重启即失**。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness` 的正式工具表 → git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+`eval` 是本会话给自己长**行为**的地方，而今天的那个行为是 **hook**：本会话可以在运行期加一条 hook、撤掉自己加的、把任意一条（包括磁盘上声明的）关掉再打开（见下面的「Hook 引擎」）。
 
 ```pwsh
 clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code 与返回值
 ```
 
+**为什么是 hook。** 原先这个位置写的是"自我扩展 = 长出新的工具"。工具表那套入口（`session-register!` / `session-disable!` 等）一个都没删、测试还在跑，只是不再是对模型的承诺：它能表达的东西止于"又一个工具定义"，而 hook 能表达作者没枚举过的事情——拦住一次调用、替人回答一次审批、在 run 收尾时做点什么，且不需要有人先把那个点写进工具表。`eval` 因此仍能执行任意 Clojure（prompt.md 明说这一点）：收敛的是它的**定位与承诺**，不是它的能力。
+
+这些能力**仅本会话生效，进程重启即失**——这是特性而非缺陷：没落过盘的东西天然可回滚。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness`（正式工具表，或 hooks.edn 的一份默认声明）→ git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+
 写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
 - `ui/` — TypeScript + React 客户端：`@assistant-ui/react-ag-ui` 的 `useAgUiRuntime` 接管页面装配（AG-UI 帧解析与消息重建都在适配器里），`@ag-ui/client` 的 `HttpAgent` 直连 8080。审批门（`src/components/approval-gate.tsx`）、工具卡与默认折叠的 reasoning（`src/components/message-parts.tsx`）、会话面板（`src/components/session-panel.tsx`）是自建组件；抄自上游的元素在 `src/components/assistant-ui/elements/` 与 `src/components/ui/`，见下方「样式体系」
 - `ui/test/` — UI 端到端测试：TypeScript 套件（`test/suites/{frames,client,turn,approval}.ts`）驱动真 `@ag-ui/client`，`test/ui.test.ts` 负责起后端与注册（`cd ui && npm test`，自带脚本 provider 后端）
-- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
+- `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(harness.llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
 详见 `.scratch/minimal-kernel/spec.md`。
 
@@ -46,6 +55,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 ~/.clj-harness/
 ├── config.edn        模型默认档（每轮重读，可运行期编辑）
 ├── providers.edn     provider 目录：厂商 endpoint + 其 model 表（每轮重读）
+├── hooks.edn         hook 声明：hook 点 -> [{matcher, command, timeout}]（每轮重读）
 ├── .env              HARNESS_API_KEY
 └── logs/*.jsonl      会话日志
 ```
@@ -66,6 +76,8 @@ Copy-Item providers.edn.example ~/.clj-harness/providers.edn
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
 ```
+
+`hooks.edn` 也可以不存在——不存在等于「这个点没人监听」，属于正常态（全新安装就是这样）。但**存在却写坏**（EDN 语法坏 / 不是 map / 点了不存在的 hook 点 / 声明的字段拼错）会指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别，而那个区别正是这个文件的全部意义。
 
 `config.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。`providers.edn` 不同：它**可以不存在**——不命名 provider（用 inline 形式描述一个）就不需要它；而命名了内置目录里已有的 provider 时它也不需要。
 
@@ -99,7 +111,7 @@ Copy-Item .env.example ~/.clj-harness/.env
 2. `:max-output-tokens` **不写进请求体**，实际输出上限仍是厂商默认值；
 3. 读它们的人是**选模型的人**：`GET /api/model`、日志里的 `provider/init` 与 `provider/changed`、`active-provider`。这些数字随 model 走：换 model，答案随之改变。
 
-内置表（`harness.models`）里的主流模型已带真实数字，逐条读自厂商现网列表（`:as-of` 标在表上）；核对不到的一律留空，不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次（`deepseek-chat` 早已作废，现在的 id 是 `deepseek-flash` / `deepseek-v4-pro`）。
+内置表（`harness.providers`）里的主流模型已带真实数字，逐条读自厂商现网列表（`:as-of` 标在表上）；核对不到的一律留空，不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次（`deepseek-chat` 早已作废，现在的 id 是 `deepseek-flash` / `deepseek-v4-pro`）。
 
 `config.edn` 只写**三个旋钮**：
 
@@ -203,8 +215,47 @@ npm run build    # tsc --noEmit + vite build → dist/
 - `message` — LLM 真实看到/返回的 provider 形态消息原样（system prompt、入站消息、assistant 返回、tool 结果，按序构成完整消息数组）
 - `tools/pre-execute` | `tools/execute` | `tools/post-execute` — 工具执行三相，按 `toolCallId` 键控，**不上 wire**，纯审计行。pre-execute 的 `outcome` ∈ `pass` / `unknown-tool` / `disabled` / `missing-args` / `needs-approval` / `approved` / `vetoed`；`disabled` 是会话开关（工具仍可见、调用被拒），先于审批检查
 - `approval/decided` — 人工对某个 park 调用的答复（含 interruptId 与客户端 payload）
+- `hook/<Point>` — 一次 hook 触发（`hook/PostToolUse`、`hook/Stop`…），见下
 
-只 append 永不读。
+只 append 永不读。append 由一把锁串起来：大多数写入来自 run 的单个消费线程，但 hook 在它自己的点上触发（PostToolUse 跑在那次调用的线程上），两条线可能同时在飞——半行不是更短的记录，是一个坏掉的文件。
+
+### Hook 引擎（`hooks.edn`）
+
+用户在配置家（或绑定项目的 `.harness/`）写 `hooks.edn`，声明某个 hook 点上要跑的命令：
+
+```edn
+{:pre-tool-use      [{:matcher "bash|write" :command "scripts/gate.sh" :timeout 10000}]
+ :permission-request [{:command "scripts/auto-approve.sh"}]
+ :post-tool-use     [{:command "scripts/note.sh"}]
+ :stop              [{:command "scripts/notify.sh"}]}
+```
+
+**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有五个**：三个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）；两个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）与 `PermissionRequest`（一个规则**代答**本该打断人的悬置调用）。其余的点声明了就永不触发——这是设计，不是遗漏：P3 的点等各自的子系统。
+
+**一次工具调用有三个出口**，判定的**次序是写死的**（`harness.tools/run!`）：
+
+1. **放行（allow）** —— 执行。没有任何东西拦它。
+2. **阻断（block）** —— 不执行，理由作为这次调用的工具结果回喂给模型，run 继续。工具被 `PreToolUse` 拒绝时 `tools/pre-execute` 的 `outcome` 是 **`hook-blocked`**，工具结果里明说是 hook 拦的、以及 hook 自己写的理由（读到「人工否决」的模型会不敢再要东西，读到「hook 拦的」的模型知道去看规则）。
+3. **悬置（suspend）** —— 不执行、**先问**：run 以 interrupt 收尾，这次调用在有人回答之前属于人。不发 `:tool/result`、不写 tool 消息；工具消息落在 resume 那一轮。
+
+判定次序：**关闭**的工具先被硬拒、**不过 PreToolUse**——「关掉」要真的一点活都不干，包括不问 hook；**缺参数**的调用也不问（命令自己会拒，问了只是把模型读到的理由搅浑）；**审批规则**（工具自带 `:requires-approval` 或会话级 `session-require-approval!`）；**最后**才是 `PreToolUse` 门禁——前面几条是 harness 自己的判断，不该拿一个根本跑不起来的调用去问用户的规则。
+
+**悬置的调用先问规则、再问人。** `PermissionRequest` 的 hook 可以在 stdout 上给一个 JSON 答案——`{"decision":"approve"|"deny","reason":".."}`。它的效力与人的答案相同（approve 就执行、deny 就用 hook 的理由回答这次调用），**声明了但没给答案就照旧 park 等人**。没有声明任何 hook 的会话因此与 hook 存在之前逐字节相同。
+
+**契约**：命令经钉住的 Git Bash spawn，payload 走 **stdin JSON**（`{hook, thread_id, project_dir, ...}`，键名 snake_case 按 payload 约定）；退出码 **0 = 放行，2 = 阻断（stderr 即理由，回喂给模型）**，其他非零按点定的失败语义（门禁 `:block`、观察者 `:proceed`）——**超时与起不来的命令也走这一条**：没能替你判断不等于判断为是。超时与崩溃都不炸 run。**stdout 可以再带一个 JSON 对象**作为「退出码说不出来的那个决定」——今天只有 `PermissionRequest` 用得上（`{"decision":"approve"|"deny"}`），且只在退出 0 时读；读不懂或不是对象就不算答案（一个 hook 打印一行日志不该被读成做了决定）。
+
+**没声明任何 hook 时整条路径是 no-op**：不 spawn、不等待、不落行，帧与审计线与没有这个能力时逐字节相同。hook 只在**边**绑定了 run 的 sink 时触发，所以离线工具、replay、直接驱动内核的测试一个 hook 都不跑。
+
+**会话级 overlay（`eval` 的新面）**：本会话可以在运行期给自己加 hook、撤掉自己加的、把任意一条（**包括磁盘上声明的**）关掉再打开，只影响本 thread、进程重启即失：
+
+```clojure
+(harness.hooks/session-add! harness.tools/*thread-id* :stop {:command "notify.sh"})  ; => "stop@1"
+(harness.hooks/session-disable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-enable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-remove! harness.tools/*thread-id* "stop@1")
+```
+
+两条正交轴，与工具表同一套词汇：**presence**（add/remove，remove 只撤本会话加的，磁盘声明只能关）与 **availability**（disable/enable）。**关闭不是隐藏**：被关的声明仍在本会话的表里、带 `:disabled? true`，只是不再触发——藏起来会让「没有这条 hook」和「这条 hook 关着」变成同一个观察，而前者是谎话，声明就摆在文件里。
 
 ### Provider 时间线（`provider/init` 与 `provider/changed`）
 
@@ -224,7 +275,7 @@ npm run build    # tsc --noEmit + vite build → dist/
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
 - `GET /api/project?threadId=..` → `{:threadId .. :dir <绝对路径|null>}`；
-- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"] :context-window 1000000 :max-output-tokens 64000}`——**这个会话现在服务的模型收什么、出什么、装得下多少**，给客户端决定要不要显示图片选择器、以及估算这段对话还塞得下多少用。答案走**活解析**（`mem/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。两个数字是整数（不是字符串），随 model 走；未声明时字段**缺席**，不是 `null`。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
+- `GET /api/model?threadId=..` → `{:provider .. :model .. :reasoning-effort .. :protocol .. :base-url .. :input ["image" "text"] :output ["text"] :context-window 1000000 :max-output-tokens 64000}`——**这个会话现在服务的模型收什么、出什么、装得下多少**，给客户端决定要不要显示图片选择器、以及估算这段对话还塞得下多少用。答案走**活解析**（`harness.providers/active-provider`：刚做的会话覆盖立刻反映，不缓存），**任何深度都不含 api-key**。两个数字是整数（不是字符串），随 model 走；未声明时字段**缺席**，不是 `null`。缺的字段就是缺（未绑定 thread、inline provider 没声明模态、没人给过 reasoning-effort 都是**答案而非错误**）。只读，**不落任何审计行**——与 `GET /api/project` 同一规矩：只有能改东西的路由才留痕。**形状是本仓自己的**（`:text` / `:image`），不是 AG-UI 的 `MultimodalCapabilities`；将来接 AG-UI connect/能力握手时由那边做映射，本端点不做。
 - `POST /api/project/pick` → 打开**操作系统原生目录选择框**，答 `{:dir <绝对路径|null>}`（取消即 null，不是错误）。存在的理由：浏览器给不出绝对路径（web file input 只给无真实位置的 File 对象），所以对话框必须跑在 harness 所在的机器上；它由拥有窗口的进程自己绘制，**不抢用户当前的焦点**。用 POST 而非 GET——这个调用有人可见的副作用（开窗），不该被缓存或预取触发。**它不绑定任何东西**：路径回给客户端填进输入框，绑定仍走下面那个唯一的 POST，所以「会改绑定的路由」永远只有一条，选择动作自身不留痕。`harness.http/*directory-chooser*` 是测试缝（真实弹窗要等人，测试里换 stub；`alter-var-root` 而非 `binding`——服务在别的线程上调它）。
 - `POST /api/project {"threadId" .., "dir" ..}` → 校验目录存在且是目录（否则指名 400，不留痕）→ 绑定 → 落一行 `project/bound` 审计线 `{:before <绝对路径|null> :after <绝对路径> :via "http"}`（04 号票，对齐 provider/changed 的 before→after 风格；首次绑定 before 为 null），`runId` 为 null（绑定发生在任何 run 之外）。**对已绑定 thread 重新绑定 = 同一入口的普通调用**：路径解析立即切到新目录，审计行带 before/after，目录变更时间线直接从日志可读；读者以最后一行为准。绑定变更是 CwdChanged hook 点的事件源——payload 形态由 `harness.project/cwd-changed` 锁定（`{:hook "CwdChanged" :thread_id .. :project_dir .. :before ..}`，snake_case 对齐 hook payload 约定），hook 引擎（P2）接线时在变更点直接消费。
 
@@ -245,7 +296,7 @@ AG-UI 入站                                  出网（OpenAI 兼容 chat-comple
 
 **模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，消息里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。**未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的部署开始失败于一条没人写下来的规则。**性质是流程纪律，不是安全边界**——`config.edn` 给一个纯文本模型写 `:input #{:text :image}` 照样打得出去，这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
-agent 自省：`(harness.memory/active-project harness.memory/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。
+agent 自省：`(harness.project/binding-for harness.tools/*thread-id*)` 问出自己绑定的目录（问，不抄副本）。
 UI 面板此前由前端特征拆除（assistant-ui 特征的 07 号票置 `wontfix`：项目绑定改在**建会话时**完成，由
 `.scratch/project-sidebar` 落地）；本节的三条路由与契约不变，`curl` 即可驱动，面板照契约复用。
 
@@ -274,7 +325,7 @@ agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread
 
 **改不动的东西当场拒绝，不落盘。** body 在写之前先把「改完之后这一档」拿去解析一遍：provider 名不在目录里、或 model id 不是所选 provider 声明的，都会**指名失败**并带回工具结果，session 保持原样、`provider/changed` 一行不落。先写后败会把一个每轮都跑不起来的配置钉在 session 上，而报错要等到**下一次** run 才出现，离按下它的那次调用很远。
 
-**性质：流程约定，不是安全边界。** `harness.memory/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
+**性质：流程约定，不是安全边界。** `harness.providers/use-provider!` 与 `set-override!` 是 public，eval 可绕过；`bash` 可读 `.env` 的 api-key。这道闸只防手滑，不承诺安全围栏——本仓 `bash` 已是任意代码执行，安全论据在更外层（部署环境）。
 
 ## 人工审批（pre-tool HITL）
 
@@ -286,7 +337,7 @@ agent 调 `session-configure`（带 `:requires-approval true`）可改本 thread
 2. 会话级集合，在会话里经 `eval` 打开（只影响本 thread）：
 
 ```clojure
-(harness.memory/session-require-approval! harness.memory/*thread-id* "write")
+(harness.tools/session-require-approval! harness.tools/*thread-id* "write")
 ```
 
 暂停走 **AG-UI 原生 interrupt**，不自造帧：内核发第 11 种事件 `:run/interrupt`（与 `:run/end` 互斥），ag_ui 把它映射为 `RUN_FINISHED` + `outcome{type:"interrupt", interrupts:[{id, reason:"tool-approval", message, toolCallId}]}`；客户端从 `outcome.interrupts` 落 `pendingInterrupts`，下一次 run 用 `resume:[{interruptId, status}]` 回传，`resolved` ⇒ 批准、`cancelled` ⇒ 否决，**同一个 POST 端点**，不做第二个。

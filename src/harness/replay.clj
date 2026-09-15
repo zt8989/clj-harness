@@ -26,7 +26,8 @@
             [harness.ag-ui :as ag]
             [harness.frames :as frames]
             [harness.home :as home]
-            [harness.memory :as mem]
+            [harness.llm :as llm]
+            [harness.providers :as providers]
             [harness.loop :as loop]))
 
 (defn- log-file
@@ -117,7 +118,7 @@
   folded onto its assistant message, calls in the provider's casing."
   [dir thread-id]
   (let [records (lines->records (read-lines dir thread-id))]
-    (ag/inbound (records->messages records) (mem/prompt) (:context (first-input records)))))
+    (ag/inbound (records->messages records) (llm/prompt) (:context (first-input records)))))
 
 (defn threads
   "The conversations a log DIRECTORY holds: one entry per *.jsonl file --
@@ -151,7 +152,7 @@
   It does NOT append to the log. The writer lives at the http edge, and this namespace
   is deliberately the read side only; a resumed conversation therefore leaves no new
   trace on disk. An author-side action, not a run path."
-  ([dir thread-id text] (resume! dir thread-id text (mem/effective-provider thread-id)))
+  ([dir thread-id text] (resume! dir thread-id text (providers/effective-provider thread-id)))
   ([dir thread-id text provider]
      (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)

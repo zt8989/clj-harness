@@ -43,12 +43,14 @@
             [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
+            [harness.hooks.dispatch :as hook]
             [harness.home :as home]
-            [harness.memory :as mem]
-            [harness.models :as models]
+            [harness.llm :as llm]
+            [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.replay :as replay]
+            [harness.tools :as tools]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
 
@@ -62,12 +64,46 @@
 
 ;; ------------------------------------------------------------------- logging
 
+(defonce ^:private log-lock
+  ;; One line is one JSON object, and a reader parses the file line by line --
+  ;; so a half-written line is not a smaller record, it is a broken file. Most
+  ;; writers are the run's single consumer thread, but a hook fires where its
+  ;; point is (a tool call's PostToolUse runs on that call's own thread), so two
+  ;; lines can now be in flight at once. Serializing the append is what keeps the
+  ;; writer's guarantee true without asking every caller to know about it.
+  (Object.))
+
 (defn- log! [thread-id run-id kind payload]
-  (let [f (home/log-file thread-id)]
+  (let [f (home/log-file thread-id)
+        line (str (json/write-str {:ts (System/currentTimeMillis)
+                                   :runId run-id :kind kind :payload payload}) "\n")]
     (.mkdirs (.getParentFile f))
-    (spit f (str (json/write-str {:ts (System/currentTimeMillis)
-                                  :runId run-id :kind kind :payload payload}) "\n")
-          :append true :encoding "UTF-8")))
+    (locking log-lock
+      (spit f line :append true :encoding "UTF-8"))))
+
+(defonce ^:private init-logged
+  (atom #{}))
+;; thread-ids whose provider/init line has already been written. Writer-side
+;; state, and it lives with its only writer: deliberately NOT re-derived from the
+;; log, because the edge must not read its own log, so "have I written the init
+;; line yet" has to be remembered somewhere. It is a fact about the FILE, not a
+;; copy of the conversation or of the provider.
+
+(defn- init-logged? [thread-id] (contains? @init-logged thread-id))
+
+(defn- mark-init-logged! [thread-id] (swap! init-logged conj thread-id))
+
+(defonce ^:private session-started
+  (atom #{}))
+;; thread-ids whose SessionStart has already fired. A SECOND writer-side fact,
+;; kept apart from init-logged? on purpose: the provider init LINE is not written
+;; when a scripted pin serves the session (there is no resolution to record), but
+;; the session still started, and a hook bound to SessionStart must fire once for
+;; it either way. One atom per fact, each named for the fact it holds.
+
+(defn- session-started? [thread-id] (contains? @session-started thread-id))
+
+(defn- mark-session-started! [thread-id] (swap! session-started conj thread-id))
 
 (defn- log-messages!
   "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
@@ -144,7 +180,7 @@
                           "cancelled" :vetoed
                           (throw (ex-info (str "unknown resume status: " status) {})))
                 id      (str interruptId)
-                rec     (mem/parked id)]
+                rec     (tools/parked id)]
             (when-not rec
               (throw (ex-info (str "unknown interrupt: " id) {})))
             {:interrupt-id id :verdict verdict :payload payload
@@ -163,12 +199,12 @@
   self-describing, and it is exactly why provider/changed carries its override
   rather than leaving a reader to reconstruct the tier.
 
-  Sets render as sorted string vectors (harness.models/wire): two otherwise
+  Sets render as sorted string vectors (harness.providers/wire): two otherwise
   identical runs must not produce lines differing only in set ordering. The
   api-key is present as the fact that it was STRIPPED, never as a value -- so a
   reader sees it is not a leak rather than wondering whether it was forgotten."
   [provider source]
-  (assoc (models/wire provider) :source source :api-key :stripped))
+  (assoc (providers/wire provider) :source source :api-key :stripped))
 
 (defn- guard-input-modalities!
   "Refuse a run whose messages carry a modality the selected model never declared
@@ -218,87 +254,106 @@
       ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
       ;; run rather than a broken stream.
       (let [[provider messages decisions resolved]
-            (try (let [provider (mem/current-provider thread-id (:provider input))]
+            (try (let [provider (providers/current-provider thread-id (:provider input))]
                    (guard-input-modalities! input provider)
                    [provider
-                    (ag/inbound (:messages input) (mem/prompt) (:context input))
+                    (ag/inbound (:messages input) (llm/prompt) (:context input))
                     (resume-decisions (:resume input))
-                    (mem/resolve-provider thread-id (:provider input))])
+                    (providers/resolve-provider thread-id (:provider input))])
                  (catch Throwable t
                    (doseq [frame (into (vec (convert (ev/run-start)))
                                        (convert (ev/run-error (ex-message t))))]
                      (emit frame))
                    nil))]
+        ;; THE RUN-SCOPED HOOK SINK. This is the edge, so it is the only place
+        ;; that knows both the thread and where an audit line goes; binding it
+        ;; around the whole run is what lets hooks fire at all -- and every caller
+        ;; BELOW the edge (an offline tool, replay, a scripted test driving the
+        ;; kernel directly) leaves it nil, so nothing fires there.
         (when provider
-          ;; The provider timeline, part 1: ONE init line per session, on its
-          ;; first run. It lands after the input line and before the first
-          ;; message line, so a reader meets "here is what this conversation is
-          ;; served by" before it meets the conversation. Later runs of the same
-          ;; thread do not repeat it -- the timeline is init plus changes, not a
-          ;; snapshot per run.
-          (when (and (nil? (mem/pinned-provider thread-id))
-                     (not (mem/init-logged? thread-id)))
-            (log! thread-id run-id "provider/init"
-                  (provider-line provider (:source resolved)))
-            (mem/mark-init-logged! thread-id))
-          ;; The decision record: what the human answered, next to the input that
-          ;; carried it. The same verdict also lands on the resumed call's
-          ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
-          ;; that carries the interrupt id and the client's payload.
-          (doseq [d decisions]
-            (log! thread-id run-id "approval/decided" d))
-          ;; The provider timeline, part 2: any change a tool made during this
-          ;; run, drained from the outbox. It lands after approval/decided
-          ;; because the change is only written once the human's approval has
-          ;; been consumed -- so the two lines read together as "approved, and
-          ;; here is what it changed".
-          ;;
-          ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
-          ;; are what the change moved (a session can only move a knob), and
-          ;; :override is the session's whole tier afterwards. The endpoint that
-          ;; resulted is on :resolved, so a reader stepping the timeline sees
-          ;; both "what was chosen" and "what that meant" at each step.
-          (doseq [c (mem/take-provider-changes! thread-id)]
-            (log! thread-id run-id "provider/changed"
-                  {:verdict  (:verdict c :approved)
-                   :before   (models/wire (:before c)   models/knobs)
-                   :after    (models/wire (:after c)    models/knobs)
-                   :trigger  (:trigger c)
-                   :override (models/wire (:override c) models/knobs)
-                   :resolved (models/wire (:resolved c))}))
-          ;; The message record, submitted side: what the first LLM call is about
-          ;; to see. The FROZEN system prompt plus every inbound message in the
-          ;; provider's shape, one line each, VERBATIM. Context rides as a
-          ;; trailing user message -- it must never touch the system prompt, or
-          ;; the provider's prefill (prompt cache) would miss every call.
-          (log-messages! thread-id run-id messages)
-          ;; Drain run-chan and convert each kernel event to AG-UI frames. The
-          ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
-          ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
-          ;; :run/done history itself is never converted -- it is the returned
-          ;; side of the message record instead.
-          (let [events (loop/run-chan provider messages {:thread-id thread-id
-                                                         :resume decisions})]
-            (loop []
-              (when-let [ev (async/<! events)]
-                (if (= :run/done (:type ev))
-                  ;; Returned side of the message record: every message the kernel
-                  ;; appended after the initial vector -- assistant replies
-                  ;; VERBATIM (the history holds the provider message unrebuilt,
-                  ;; reasoning and tool calls intact) and each tool result as the
-                  ;; tool message submitted on the next call. :run/done follows
-                  ;; RUN_ERROR too, so any run the kernel started leaves its full
-                  ;; message tail on disk -- but it lands one beat AFTER the
-                  ;; terminal frame, so a reader racing the consumer may not see
-                  ;; it yet.
-                  (log-messages! thread-id run-id
-                                 (subvec (:history ev) (count messages)))
-                  (do ;; Tool-lifecycle events are audit lines, not wire frames:
-                      ;; each lands as its own jsonl line, keyed by toolCallId.
-                      (when-let [[kind payload] (lifecycle-record ev)]
-                        (log! thread-id run-id kind payload))
-                      (doseq [frame (convert ev)] (emit frame))
-                      (recur)))))))))))
+          (binding [hook/*sink* {:thread-id thread-id
+                                 :audit     (fn [payload]
+                                              (log! thread-id run-id
+                                                    (str "hook/" (:point payload))
+                                                    (dissoc payload :point)))
+                                 :run-id    run-id}]
+            ;; SessionStart fires on a session's FIRST run -- beside the provider
+            ;; init line, because both answer "what is this conversation, as it
+            ;; begins". It is an observer: its verdict is discarded. Every start is
+            ;; a "new" one today; the rebuild path (:source "resume") is a later
+            ;; ticket's.
+            (when-not (session-started? thread-id)
+              (hook/emit :session-start {:source "new"})
+              (mark-session-started! thread-id))
+            ;; The provider timeline, part 1: ONE init line per session, on its
+            ;; first run. It lands after the input line and before the first
+            ;; message line, so a reader meets "here is what this conversation is
+            ;; served by" before it meets the conversation. Later runs of the same
+            ;; thread do not repeat it -- the timeline is init plus changes, not a
+            ;; snapshot per run.
+            (when (and (nil? (providers/pinned-provider thread-id))
+                       (not (init-logged? thread-id)))
+              (log! thread-id run-id "provider/init"
+                    (provider-line provider (:source resolved)))
+              (mark-init-logged! thread-id))
+            ;; The decision record: what the human answered, next to the input that
+            ;; carried it. The same verdict also lands on the resumed call's
+            ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
+            ;; that carries the interrupt id and the client's payload.
+            (doseq [d decisions]
+              (log! thread-id run-id "approval/decided" d))
+            ;; The provider timeline, part 2: any change a tool made during this
+            ;; run, drained from the outbox. It lands after approval/decided
+            ;; because the change is only written once the human's approval has
+            ;; been consumed -- so the two lines read together as "approved, and
+            ;; here is what it changed".
+            ;;
+            ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
+            ;; are what the change moved (a session can only move a knob), and
+            ;; :override is the session's whole tier afterwards. The endpoint that
+            ;; resulted is on :resolved, so a reader stepping the timeline sees
+            ;; both "what was chosen" and "what that meant" at each step.
+            (doseq [c (providers/take-provider-changes! thread-id)]
+              (log! thread-id run-id "provider/changed"
+                    {:verdict  (:verdict c :approved)
+                     :before   (providers/wire (:before c)   providers/knobs)
+                     :after    (providers/wire (:after c)    providers/knobs)
+                     :trigger  (:trigger c)
+                     :override (providers/wire (:override c) providers/knobs)
+                     :resolved (providers/wire (:resolved c))}))
+            ;; The message record, submitted side: what the first LLM call is about
+            ;; to see. The FROZEN system prompt plus every inbound message in the
+            ;; provider's shape, one line each, VERBATIM. Context rides as a
+            ;; trailing user message -- it must never touch the system prompt, or
+            ;; the provider's prefill (prompt cache) would miss every call.
+            (log-messages! thread-id run-id messages)
+            ;; Drain run-chan and convert each kernel event to AG-UI frames. The
+            ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
+            ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
+            ;; :run/done history itself is never converted -- it is the returned
+            ;; side of the message record instead.
+            (let [events (loop/run-chan provider messages {:thread-id thread-id
+                                                           :resume decisions})]
+              (loop []
+                (when-let [ev (async/<! events)]
+                  (if (= :run/done (:type ev))
+                    ;; Returned side of the message record: every message the kernel
+                    ;; appended after the initial vector -- assistant replies
+                    ;; VERBATIM (the history holds the provider message unrebuilt,
+                    ;; reasoning and tool calls intact) and each tool result as the
+                    ;; tool message submitted on the next call. :run/done follows
+                    ;; RUN_ERROR too, so any run the kernel started leaves its full
+                    ;; message tail on disk -- but it lands one beat AFTER the
+                    ;; terminal frame, so a reader racing the consumer may not see
+                    ;; it yet.
+                    (log-messages! thread-id run-id
+                                   (subvec (:history ev) (count messages)))
+                    (do ;; Tool-lifecycle events are audit lines, not wire frames:
+                        ;; each lands as its own jsonl line, keyed by toolCallId.
+                        (when-let [[kind payload] (lifecycle-record ev)]
+                          (log! thread-id run-id kind payload))
+                        (doseq [frame (convert ev)] (emit frame))
+                        (recur))))))))))))
 
 
 (defn- handle-run [req]
@@ -482,7 +537,7 @@
      :input [\"image\" \"text\"] :output [\"text\"]
      :context-window 1000000 :max-output-tokens 64000}
 
-  Answered from the LIVE resolution (mem/active-provider): a session override
+  Answered from the LIVE resolution (providers/active-provider): a session override
   made a moment ago is already reflected, and nothing is cached between calls.
   The api-key is not in the answer at any depth -- active-provider names its
   fields one by one rather than passing the resolved map through.
@@ -510,7 +565,7 @@
   configuration rather than a failure it has to interpret."
   [req]
   (let [thread-id (get (query-params (:query-string req)) "threadId")]
-    (api-response 200 (models/wire (mem/active-provider thread-id)))))
+    (api-response 200 (providers/wire (providers/active-provider thread-id)))))
 
 (defn handler [req]
   (cond

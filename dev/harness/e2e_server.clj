@@ -34,7 +34,7 @@
             [clojure.java.io :as io]
             [harness.fake :as fake]
             [harness.http :as http]
-            [harness.memory :as mem]))
+            [harness.providers :as providers]))
 
 (defn- turns-in [file]
   (let [f (io/file file)]
@@ -63,7 +63,7 @@
   [script-file]
   (let [per-thread (atom {})]
     (alter-var-root
-     #'mem/pinned-provider
+     #'providers/pinned-provider
      (constantly
       (fn [thread-id]
         (when (seq (str thread-id))

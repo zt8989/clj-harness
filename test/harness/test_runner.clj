@@ -25,8 +25,11 @@
     harness.ag-ui-test
     harness.replay-test
     harness.evals-test
-    harness.provider-test
+    harness.providers-test
     harness.project-test
+    harness.hooks-test
+    harness.hooks-dispatch-test
+    harness.hooks-wired-test
     harness.http-test])
 
 (def ^:private tmp-home
