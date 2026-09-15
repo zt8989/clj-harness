@@ -77,6 +77,14 @@ export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
+  // LOCAL: the two insertion points the composer chrome needs. `ComposerFrame`
+  // wraps the composer, so a caller can put something ABOVE it inside the same
+  // rounded container; `ComposerTools` renders inside the composer's own action
+  // row, on the right. Upstream has neither, and a composer that can only be
+  // replaced wholesale would have meant rewriting this file rather than adding a
+  // seam to it -- see composer-chrome.tsx.
+  ComposerFrame?: ComponentType<PropsWithChildren> | undefined;
+  ComposerTools?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -92,6 +100,10 @@ export type ThreadProps = {
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
+
+// LOCAL: what the frame slot does when nobody overrides it. A passthrough, so
+// the default rendering of this file is byte-for-byte upstream's.
+const PassthroughFrame: FC<PropsWithChildren> = ({ children }) => <>{children}</>;
 
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
@@ -164,7 +176,8 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   isEmpty,
   autoFocus,
 }) => {
-  const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  const { Welcome = ThreadWelcome, ComposerFrame = PassthroughFrame } =
+    useContext(ThreadComponentsContext);
 
   return (
     <ThreadPrimitive.Root
@@ -212,7 +225,11 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer autoFocus={autoFocus} />
+            {/* LOCAL: the frame wraps the composer rather than replacing it, so
+                the default above still renders exactly what upstream renders. */}
+            <ComposerFrame>
+              <Composer autoFocus={autoFocus} />
+            </ComposerFrame>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -309,10 +326,16 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
 };
 
 const ComposerAction: FC = () => {
+  // LOCAL: whatever the caller wants on the right of the composer's action row,
+  // before the dictate and send buttons.
+  const { ComposerTools } = useContext(ThreadComponentsContext);
+
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <ComposerAddAttachment />
       <div className="flex items-center gap-1.5">
+        {/* LOCAL: the caller's tools, left of dictate and send. */}
+        {ComposerTools !== undefined && <ComposerTools />}
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>
           <AuiIf condition={(s) => s.composer.dictation == null}>
             <ComposerPrimitive.Dictate asChild>

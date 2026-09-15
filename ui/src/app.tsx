@@ -78,6 +78,7 @@ import { fromAgUiMessages, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
+import { ThreadIdContext } from "@/components/composer-chrome";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApprovalBatchProvider } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
@@ -198,7 +199,12 @@ export function App() {
           <div className="flex h-dvh">
             <Sidebar runtime={runtime} currentThreadId={threadId} />
             <div className="min-h-0 flex-1">
-              <Thread components={THREAD_COMPONENTS} />
+              {/* The composer's chrome needs to know which session it is
+                  configuring -- the model override and the branch are both
+                  per-session -- and the id's owner is this component's state. */}
+              <ThreadIdContext.Provider value={threadId}>
+                <Thread components={THREAD_COMPONENTS} />
+              </ThreadIdContext.Provider>
             </div>
           </div>
         </ApprovalBatchProvider>

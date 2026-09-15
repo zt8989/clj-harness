@@ -104,12 +104,23 @@
 
 (defn- step
   "A migration step that records itself and leaves a table behind, so both the
-  order of a walk and its effects are observable."
+  order of a walk and its effects are observable.
+
+  A step is a MAP now -- {:name :present? :run} -- and the probe is not
+  ceremony: it is what lets a chain recognise work that is already there, which
+  is how one store is opened by two chains. A table named after the step is what
+  this one leaves, so `sqlite_master` is what it asks."
   [label log]
-  (fn [^Connection c]
-    (swap! log conj label)
-    (with-open [st (.createStatement c)]
-      (.execute st (str "CREATE TABLE " label " (x INTEGER)")))))
+  {:name label
+   :present? (fn [^Connection c]
+               (boolean (seq (db/query c
+                                       "SELECT name FROM sqlite_master
+                                         WHERE type = 'table' AND name = ?"
+                                       label))))
+   :run (fn [^Connection c]
+          (swap! log conj label)
+          (with-open [st (.createStatement c)]
+            (.execute st (str "CREATE TABLE " label " (x INTEGER)"))))})
 
 ;; ------------------------------------------------------------------ the home
 
@@ -164,7 +175,7 @@
           (is (= (db/target-version) (db/migrate!)))
           (is (= (db/target-version) (db/schema-version))))
         (testing "with exactly the tables the home's entities declared"
-          (is (= ["projects" "sessions"] (db/tables))))
+          (is (= ["projects" "schema_steps" "sessions"] (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
           (is (= 0x6861726E (pragma (home/db-file) "application_id"))))
@@ -315,7 +326,7 @@
               (let [fact (last (db/recoveries))]
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
-              (is (= ["projects" "sessions"] (db/tables))
+              (is (= ["projects" "schema_steps" "sessions"] (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
                 (fn [^Connection c]
@@ -337,17 +348,17 @@
       (fn []
         (testing "a store built by an older harness, one step behind"
           (is (= 1 (db/migrate! v1)))
-          (is (= ["step_1"] (db/tables v1)))
+          (is (= ["schema_steps" "step_1"] (db/tables v1)))
           (is (= ["step_1"] @log)))
         (testing "today's harness walks it up, running only the steps it lacks"
           (is (= 3 (db/migrate! v3)))
-          (is (= ["step_1" "step_2" "step_3"] (db/tables v3)))
+          (is (= ["schema_steps" "step_1" "step_2" "step_3"] (db/tables v3)))
           (is (= ["step_1" "step_2" "step_3"] @log)
               "each step ran exactly once, in order, and step_1 did not run again"))
         (testing "and there is nothing left to do the next time"
           (is (= 3 (db/migrate! v3)))
           (is (= ["step_1" "step_2" "step_3"] @log))
-          (is (= ["step_1" "step_2" "step_3"] (db/tables v3))))))))
+          (is (= ["schema_steps" "step_1" "step_2" "step_3"] (db/tables v3))))))))
 
 (deftest a-store-written-before-the-removal-memory-still-has-it
   ;; The version 1 -> 2 step, and the reason it is a step rather than a column in
@@ -394,7 +405,18 @@
             (is (= "/before/the/migration" (:path row)))
             (is (= 1 (:archived row)))))))))
 
-(deftest a-store-from-a-newer-harness-is-refused-by-name
+(deftest two-chains-share-one-store-without-either-refusing-it
+  ;; THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the fix.
+  ;;
+  ;; A schema version was the LENGTH of a chain, so a store built by a longer
+  ;; chain looked "newer" to a shorter one and was refused outright. The chains in
+  ;; this repository are longer than this one on another branch, appended at the
+  ;; same index, and the number the file carried was written by whichever chain
+  ;; touched it last -- so the store in the developer's real home went 2 -> 4 under
+  ;; one chain and could not be opened by the other AT ALL. Refusing is what broke.
+  ;;
+  ;; Now each chain runs the steps it recognises and has no opinion about the rest,
+  ;; and a step whose work is already present is RECORDED rather than run.
   (let [dir (fresh-root)
         log (atom [])
         v5  (mapv #(step (str "step_" %) log) [1 2 3 4 5])
@@ -402,13 +424,44 @@
     (with-root
       dir
       (fn []
-        (is (= 5 (db/migrate! v5)))
-        (let [before (fingerprint dir "harness.db")
-              thrown (try (db/migrate! v3) nil (catch Exception e e))]
-          (is (some? thrown) "downgrading a schema must not be attempted")
-          (is (= :too-new (:reason (ex-data thrown))))
-          (is (str/includes? (ex-message thrown) "only knows 3"))
-          (is (= before (fingerprint dir "harness.db"))))))))
+        (testing "a store built by the longer chain"
+          (is (= 5 (db/migrate! v5)))
+          (is (= ["schema_steps" "step_1" "step_2" "step_3" "step_4" "step_5"] (db/tables v5))))
+        (let [walked @log
+              before (fingerprint dir "harness.db")]
+          (testing "the shorter chain OPENS it -- it does not refuse it"
+            (is (= 3 (db/migrate! v3)) "the steps this chain knows about")
+            (is (= walked @log)
+                "and it ran nothing: every step it names was already there"))
+          (testing "leaving the longer chain's work alone"
+            (is (= ["schema_steps" "step_1" "step_2" "step_3" "step_4" "step_5"] (db/tables v3))
+                "including the tables only the other chain knows how to make")))
+        (testing "and the longer chain still works afterwards"
+          (is (= 5 (db/migrate! v5))))))))
+
+(deftest a-store-missing-a-steps-work-gets-it-applied-even-if-its-number-disagrees
+  ;; The self-healing half, and the case that used to need a hand-written ALTER:
+  ;; a store whose breadcrumb says it is up to date while the column a step adds is
+  ;; simply not there. The number is not consulted -- the PROBE is.
+  (let [dir (fresh-root)
+        log (atom [])
+        chain [(step "step_1" log) (step "step_2" log)]]
+    (with-root
+      dir
+      (fn []
+        (is (= 2 (db/migrate! chain)))
+        ;; Take step_2's table away and forget that it ran, leaving a store that
+        ;; claims to be finished and is not.
+        (db/with-transaction
+         (fn [c]
+           (db/execute! c "DROP TABLE step_2")
+           (db/execute! c "DELETE FROM schema_steps WHERE name = 'step_2'")))
+        (is (= 2 (db/migrate! chain)) "both steps are recorded once the missing one is done")
+        (is (= ["step_1" "step_2"]
+               (filterv #(clojure.string/starts-with? % "step_") (db/tables chain)))
+            "and the missing work was done, without being asked twice")
+        (is (= ["step_1" "step_2" "step_2"] @log)
+            "step_1 was not re-run; step_2 was, because its probe said so")))))
 
 (deftest a-migration-step-that-throws-leaves-the-store-where-it-was
   ;; Each step and its version bump commit together, so a step that dies leaves
@@ -419,11 +472,13 @@
         log       (atom [])
         one-step  [(step "step_1" log)]
         broken    [(step "step_1" log)
-                   (fn [^Connection c]
-                     (swap! log conj "step_2")
-                     (with-open [st (.createStatement c)]
-                       (.execute st "CREATE TABLE step_2 (x INTEGER)"))
-                     (throw (ex-info "this step is broken" {})))]
+                   {:name     "step_2"
+                    :present? (fn [_] false)
+                    :run      (fn [^Connection c]
+                                (swap! log conj "step_2")
+                                (with-open [st (.createStatement c)]
+                                  (.execute st "CREATE TABLE step_2 (x INTEGER)"))
+                                (throw (ex-info "this step is broken" {})))}]
         two-steps [(step "step_1" log) (step "step_2" log)]]
     (with-root
       dir
@@ -432,12 +487,12 @@
         (is (some? (try (db/migrate! broken) nil (catch Exception e e)))
             "a broken step surfaces rather than being swallowed")
         (testing "the failed step left neither its table nor its version"
-          (is (= ["step_1"] (db/tables one-step)))
+          (is (= ["schema_steps" "step_1"] (db/tables one-step)))
           (is (= ["step_1" "step_2"] @log)
               "step_1 did not run a second time; step_2 ran and was rolled back"))
         (testing "and the store took the retry"
           (is (= 2 (db/migrate! two-steps)))
-          (is (= ["step_1" "step_2"] (db/tables two-steps))))))))
+          (is (= ["schema_steps" "step_1" "step_2"] (db/tables two-steps))))))))
 
 ;; ---------------------------------------------------------------- transactions
 
@@ -690,7 +745,7 @@
     (with-root
       dir
       (fn []
-        (let [declared-state-tables #{"projects" "sessions"}
+        (let [declared-state-tables #{"projects" "sessions" "schema_steps"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))

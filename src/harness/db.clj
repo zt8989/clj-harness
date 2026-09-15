@@ -468,67 +468,134 @@
                                         WHERE projects.id = sessions.project_id)
             WHERE project_id IS NOT NULL"))
 
+(defn- table?
+  "Does this store have a table called NAME? The probe half of a migration step:
+  a step that leaves a table behind can be recognised by it."
+  [^Connection c ^String name]
+  (boolean (seq (query c "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+                      name))))
+
+(defn- column?
+  "Does TABLE have a column called NAME? The probe for a step that adds one."
+  [^Connection c ^String table ^String name]
+  (boolean (some #(= name (:name %))
+                 (query c (str "SELECT name FROM pragma_table_info(?)") table))))
+
 (def migrations
-  "The forward migration chain. (nth migrations i) takes the store from schema
-  version i to i+1, and (count migrations) is the version this harness speaks.
-  APPEND ONLY: a landed step is never edited, because stores somewhere have
-  already run it, and a step that changes meaning silently corrupts them.
+  "The forward migration chain, as NAMED steps.
 
-  Each step runs in its own transaction together with the version bump, so a step
-  that throws leaves the store exactly where it was -- never half-migrated.
+  A STEP IS `{:name .. :present? .. :run ..}`. `:run` takes the connection and
+  does the work; `:present?` answers whether this store has ALREADY had that work
+  done to it. The second field is the whole point -- see below.
 
-  The claim itself -- the application id -- is not a step; it is what makes a
-  file this store's, stamped when the file is created (see migrate-connection!).
+  APPEND ONLY, AND THE NAME IS THE IDENTITY. A step's `:name` is what the store
+  records as done, so renaming one re-runs it; add steps, never edit them.
 
-  WHY ONE CHAIN AND NOT ONE PER TENANT. A schema version is a totally ordered
-  fact about a file, so the steps that produce it have to be in one list in one
-  order; assembling that list from fragments at load time is the registration
-  machinery the store was built to avoid (and it would make 'which version is
-  this file at' depend on load order). So the DDL lives here -- the store owns
-  the SCHEMA -- while the queries over each tenant's tables live with the entity
-  that owns them (harness.project, and later the anchor store).
+  WHY A NAME AND NOT A POSITION, WHICH IS WHAT THIS USED TO BE. The schema version
+  was the LENGTH of this vector -- a position -- and a position is only meaningful
+  against ONE chain. Two branches that each append a step at the same index give
+  the same number two meanings, and then a store migrated by one is misread by the
+  other. That is not hypothetical: `hashline-edit` appends `hashline-store` where
+  this branch appends `sessions-remember-the-project-path`, so 'version 2' meant
+  two different schemas, and the store in this home went 2 -> 4 under one chain and
+  could not be opened by the other AT ALL -- the version-number guard refused it as
+  'a newer harness wrote it'. The number was never the fact; the steps are.
 
-  A test may pass its own chain as the first argument to migrate!,
-  with-connection or with-transaction -- that is how the walk across several
-  versions is exercised without waiting for the features that bring them."
-  [projects-and-sessions
-   sessions-remember-the-project-path])
+  SO NOTHING IS REFUSED FOR BEING 'TOO NEW'. A chain that does not know a step
+  simply has no step to run for it, and an unrecognised table is inert. What the
+  old guard protected -- writing rows into a schema this code does not understand
+  -- is a real hazard, and it is now bounded by the same thing that makes the walk
+  work: a chain only ever runs the steps it names, and only where its own probe
+  says the work is missing.
+
+  `:present?` IS ALSO HOW AN EXISTING STORE IS ADOPTED. A store written before this
+  table existed has no record of what ran, and the number cannot be trusted to say
+  (that is the bug above). So the probe answers instead: a step whose work is
+  already in the schema is RECORDED as done rather than run again. That is what
+  lets one store be opened by both chains, and it is why the column that went
+  missing earlier now heals itself instead of needing a hand-written ALTER."
+  [{:name     "projects-and-sessions"
+    :present? #(table? % "projects")
+    :run      projects-and-sessions}
+   {:name     "sessions-remember-the-project-path"
+    :present? #(column? % "sessions" "last_project_path")
+    :run      sessions-remember-the-project-path}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."
   []
   (count migrations))
 
+(def ^:private steps-table
+  "The record of which named steps a store has had. CREATED HERE RATHER THAN AS A
+  STEP, for the same reason the application id is not one: every store has it,
+  including the ones written before it existed, and a step that creates the table
+  recording steps is a step whose own record has nowhere to go."
+  "CREATE TABLE IF NOT EXISTS schema_steps (
+     name       TEXT PRIMARY KEY NOT NULL,
+     applied_at INTEGER NOT NULL)")
+
+(defn- applied-steps
+  "The step names this store has recorded."
+  [^Connection c]
+  (set (map :name (query c "SELECT name FROM schema_steps"))))
+
+(defn- record-step!
+  "Claim NAME as done. `INSERT OR IGNORE` because the claim is a fact about the
+  file, not a counter: a step recorded twice is the same fact stated twice, and
+  the primary key is what says so."
+  [^Connection c ^String name]
+  (execute! c "INSERT OR IGNORE INTO schema_steps (name, applied_at) VALUES (?, ?)"
+            name (System/currentTimeMillis)))
+
 (defn- migrate-connection!
   "Bring the open connection up to STEPS, claiming the file first when it is new.
   CREATED? says the file was not a recognizable store before this call, which
-  decides both the claim and whether WAL is switched on at the end."
+  decides both the claim and whether WAL is switched on at the end.
+
+  EACH STEP RUNS IN ONE TRANSACTION WITH ITS OWN RECORD, so a step that throws
+  leaves neither its work nor the claim that it happened -- never half-migrated,
+  and never a store that says it did something it did not.
+
+  A STEP WHOSE PROBE SAYS THE WORK IS ALREADY THERE IS RECORDED, NOT RUN. That is
+  the adoption path for every store written before `schema_steps` existed, and it
+  is also what makes two chains able to share one file: each records the steps it
+  recognises and has no opinion about the rest."
   [^Connection c ^File f steps created?]
-  (let [on-disk (pragma-int c "user_version")
-        target  (count steps)]
-    (when (> on-disk target)
-      (throw (ex-info (str "the store at " (.getAbsolutePath f) " is at schema version "
-                           on-disk ", but this harness only knows " target
-                           " -- a newer harness wrote it; upgrade this one, or move the file aside")
-                      {:path (.getAbsolutePath f) :reason :too-new
-                       :version on-disk :target target})))
-    (when created?
-      ;; The claim, made before WAL is ever enabled on this file: see the
-      ;; namespace docstring on why that ordering is load-bearing. Not a numbered
-      ;; step, because it is the file's identity rather than a version of its
-      ;; schema -- every version of this store has it.
-      (in-transaction c (fn [] (ddl! c (str "PRAGMA application_id = " magic)))))
-    (doseq [version (range (inc on-disk) (inc target))]
+  (when created?
+    ;; The claim, made before WAL is ever enabled on this file: see the
+    ;; namespace docstring on why that ordering is load-bearing. Not a step,
+    ;; because it is the file's identity rather than a version of its schema.
+    (in-transaction c (fn [] (ddl! c (str "PRAGMA application_id = " magic)))))
+  (ddl! c steps-table)
+  (let [done (applied-steps c)
+        todo (remove #(contains? done (:name %)) steps)]
+    (doseq [{:keys [name present? run]} todo]
       (in-transaction c
                       (fn []
-                        ((nth steps (dec version)) c)
-                        (ddl! c (str "PRAGMA user_version = " version)))))
-    (when created?
-      ;; Only ever on the way IN to WAL, never back out: a store left in rollback
-      ;; mode by a creation that died here is perfectly usable, just coarser about
-      ;; concurrency, and downgrading a WAL store would be a pointless write.
-      (ddl! c "PRAGMA journal_mode = WAL"))
-    (pragma-int c "user_version")))
+                        (if (present? c)
+                          (record-step! c name)
+                          (do (run c)
+                              (record-step! c name))))))
+    ;; `user_version` is kept as a BREADCRUMB and never read as a gate: it counts
+    ;; the steps of the chain that is running, so it means different numbers under
+    ;; different chains -- which is exactly why nothing decides anything from it
+    ;; any more. `schema_steps` is the truth.
+    ;;
+    ;; WRITTEN ONLY WHEN SOMETHING HAPPENED, because "a second open changes
+    ;; nothing" is a promise this store keeps to everything that watches it -- the
+    ;; test that fingerprints the file, and any backup or sync that reads an mtime
+    ;; as a signal. A pragma written on every open would move the mtime of an
+    ;; untouched store on every single request.
+    (when (seq todo)
+      (ddl! c (str "PRAGMA user_version = "
+                   (count (filter #(contains? (applied-steps c) (:name %)) steps))))))
+  (when created?
+    ;; Only ever on the way IN to WAL, never back out: a store left in rollback
+    ;; mode by a creation that died here is perfectly usable, just coarser about
+    ;; concurrency, and downgrading a WAL store would be a pointless write.
+    (ddl! c "PRAGMA journal_mode = WAL"))
+  (pragma-int c "user_version"))
 
 (defn- connect-and-migrate!
   "Open F and bring it up to STEPS. Either a live connection, or {:damage why}
@@ -670,7 +737,15 @@
   store on a chain of their own (the STEPS arity), which is how the walk across
   several versions is exercised without waiting for the features that bring them."
   ([] (migrate! migrations))
-  ([steps] (with-connection steps (fn [c] (pragma-int c "user_version")))))
+  ([steps]
+   ;; HOW MANY OF *THIS* CHAIN'S STEPS THE STORE HAS, which is the question the
+   ;; caller is asking -- and NOT `user_version`, which is a breadcrumb written by
+   ;; whichever chain ran last and therefore means different numbers to different
+   ;; chains. A store built by a longer chain answers the longer chain's count to
+   ;; the longer chain and this chain's count to this one; neither is misled.
+   (with-connection
+     steps
+     (fn [c] (count (filter #(contains? (applied-steps c) (:name %)) steps))))))
 
 (defn schema-version
   "The schema version of the store AS THE FILE REPORTS IT, or nil when there is

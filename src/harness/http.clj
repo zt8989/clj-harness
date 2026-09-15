@@ -47,9 +47,12 @@
             [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
+            [harness.git :as git]
             [harness.hooks.dispatch :as hook]
             [harness.home :as home]
             [harness.llm :as llm]
+            [harness.log :as log]
+            [harness.logging :as logging]
             [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.preamble :as preamble]
@@ -418,6 +421,13 @@
                       (resume-decisions (:resume input))
                       (providers/resolve-provider thread-id (:provider input))])
                    (catch Throwable t
+                     ;; A run that could not even be set up -- no provider, a
+                     ;; refused model -- is reported to the client as a
+                     ;; RUN_ERROR frame AND written down, because the frame
+                     ;; scrolls past in a browser and the reason somebody is
+                     ;; staring at is often a configuration mistake they will
+                     ;; want to read twice.
+                     (log/error! :run-refused t {:thread-id thread-id})
                      (doseq [frame (into (vec (convert (ev/run-start)))
                                          (convert (ev/run-error (ex-message t))))]
                        (emit frame))
@@ -1018,7 +1028,153 @@
       (api-response 400 {:error error})
       (api-response 200 (providers/wire (:ok answer) (keys (:ok answer)))))))
 
-(defn handler [req]
+(defn- model-post
+  "POST /api/model {threadId, provider?, model?, reasoning-effort?, clear?} --
+  change THIS session's selection, and answer the resolution that is now in force.
+
+  THE HTTP TWIN OF THE `session-configure` TOOL, and deliberately its twin rather
+  than a second implementation of the same idea: the three knobs are the same
+  three, the unknown-key refusal is the same refusal, and the change is validated
+  by RESOLVING IT before anything is written -- a change that cannot be served is
+  not a change, and writing first would leave the session holding a configuration
+  every later run fails on.
+
+  WHAT IT DOES NOT SHARE IS THE ROAD TO THE LOG. The tool cannot write a log line,
+  so it leaves the change in the provider outbox for the run that will drain it;
+  this route IS the edge, so it writes its own line, at the moment of the change,
+  exactly as POST /api/project does. Using the outbox here would be worse than
+  redundant: nothing drains it outside a run, so a change made in the composer of
+  an idle session would surface in the log attached to the NEXT run -- a timeline
+  that says the model changed after it did.
+
+  `clear: true` DROPS THE SESSION'S OWN TIER, putting the session back on
+  config.edn and the catalog. It is a knob rather than an empty body because
+  'change nothing' and 'stop choosing' are different requests, and only one of
+  them has something to say.
+
+  ONLY THE SESSION IS TOUCHED. config.edn, providers.edn and every other thread
+  are read and left alone; the override lives in this process's memory keyed by
+  thread id, which is what makes 'only the current session' true rather than
+  merely intended -- and what makes it not survive a restart, which the panel is
+  the place to read."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (str (:threadId ok)))
+      (api-response 400 {:error "missing threadId"})
+
+      :else
+      (let [thread-id (str (:threadId ok))
+            allowed   #{:threadId :provider :model :reasoning-effort :clear}
+            extras    (sort (map name (remove allowed (keys ok))))]
+        (cond
+          (seq extras)
+          (api-response 400 {:error (str "does not understand " (pr-str (vec extras))
+                                         "; it takes provider, model, reasoning-effort and clear")})
+
+          (:clear ok)
+          (let [before (providers/override-for thread-id)]
+            (providers/set-override! thread-id nil)
+            (log! thread-id nil "provider/session-changed"
+                  {:before before :after nil :via "http"})
+            (api-response 200 (providers/wire (providers/active-provider thread-id))))
+
+          :else
+          (let [change (cond-> {}
+                         (some? (:provider ok))         (assoc :provider (:provider ok))
+                         (some? (:model ok))            (assoc :model (:model ok))
+                         (some? (:reasoning-effort ok)) (assoc :reasoning-effort (:reasoning-effort ok)))]
+            (if (empty? change)
+              (api-response 400 {:error "nothing to change: give at least one of provider, model, reasoning-effort"})
+              (let [before (providers/override-for thread-id)
+                    answer (try {:ok (providers/resolve-override (merge before change))}
+                                (catch Throwable t {:error (ex-message t)}))]
+                (if-some [error (:error answer)]
+                  (api-response 400 {:error error})
+                  (let [after (providers/set-override! thread-id (merge before change))]
+                    (log! thread-id nil "provider/session-changed"
+                          {:before before :after after :via "http"
+                           :resolved (:ok answer)})
+                    (api-response 200 (providers/wire (providers/active-provider thread-id)))))))))))))
+
+(defn- choices-get
+  "GET /api/choices?threadId=.. -- what the session's pickers may offer: the three
+  knobs as they stand, the providers and models the catalog declares, and the
+  reasoning efforts worth putting on a menu. See providers/choices for the shape
+  and for why the answer is built field by field rather than passed through
+  `wire`.
+
+  READ-ONLY, and therefore leaves no trace: it resolves and returns. A thread id
+  it does not recognise is not refused -- an unbound thread still has a
+  configuration (the process-wide one), and the picker for it is the same picker."
+  [req]
+  (api-response 200 (providers/choices (get (query-params (:query-string req)) "threadId"))))
+
+(defn- git-get
+  "GET /api/git?threadId=.. -- the session's directory as a working tree: the
+  branch it is on, the branches it could be on, and how many changes are in the
+  way. `:dir` is the binding the answer is about, echoed so a strip can draw the
+  directory and the branch from one call.
+
+  A SESSION WITH NO DIRECTORY ANSWERS `{:dir nil :repo? false}`, not a 400: most
+  sessions have no project, the strip simply shows nothing, and a caller drawing
+  chrome should not have to treat 'nothing to show' as a failure."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")
+        dir       (project/binding-for thread-id)]
+    (api-response 200 (assoc (git/state dir) :dir dir))))
+
+(defn- git-post
+  "POST /api/git {threadId, branch} -- move the session's directory onto BRANCH,
+  and answer the state afterwards.
+
+  THE ONE THING HERE THAT CHANGES A DIRECTORY RATHER THAN A ROW, and it is
+  confined to what was asked for: `git checkout` with no --force, so a dirty tree
+  or a branch held by another worktree is refused IN GIT'S OWN WORDS, and the
+  refusal is a 400 carrying that sentence rather than a paraphrase of it. Nothing
+  is written to the store or to any log on the way in; on the way out there is one
+  audit line, because this changed something a person would want to find later.
+
+  A REFUSED SWITCH WRITES NOTHING, which is why the line is written after the
+  checkout succeeds -- the same 'no trace on failure' POST /api/project keeps for
+  a refused move."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (str (:threadId ok)))
+      (api-response 400 {:error "missing threadId"})
+
+      :else
+      (let [thread-id (str (:threadId ok))
+            dir       (project/binding-for thread-id)]
+        (if (str/blank? (str dir))
+          (api-response 400 {:error "this session has no project directory, so it has no branch to switch"})
+          (let [before   (git/state dir)
+                answer   (git/switch! dir (:branch ok))]
+            (if-some [error (:error answer)]
+              (api-response 400 {:error error})
+              (do (log! thread-id nil "git/branch"
+                        {:before (:branch before) :after (:branch (:ok answer))
+                         :dir dir :via "http"})
+                  (api-response 200 (assoc (:ok answer) :dir dir))))))))))
+
+(defn- dispatch
+  "The route table, with no safety net -- see `handler` for the one wrapped
+  around it. Split out so the net is a single line of indentation around the
+  whole thing rather than a `try` re-indenting every route."
+  [req]
   (cond
     (= :options (:request-method req))
     {:status 204 :headers cors}
@@ -1026,6 +1182,18 @@
     (= "/api/model" (:uri req))
     (case (:request-method req)
       :get  (model-get req)
+      :post (model-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/choices" (:uri req))
+    (case (:request-method req)
+      :get  (choices-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/git" (:uri req))
+    (case (:request-method req)
+      :get  (git-get req)
+      :post (git-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/settings" (:uri req))
@@ -1072,16 +1240,52 @@
           (api-response 405 {:error "method not allowed"}))
         (handle-run req)))))
 
+(defn handler
+  "Every request, with a net under it.
+
+  WITHOUT THIS, AN UNHANDLED EXCEPTION IS INVISIBLE: it goes to http-kit, which
+  answers the client a 500 and prints to a console nobody is reading, and the
+  one fact worth having -- which route, which thread, what threw -- is gone. So
+  the net reports through harness.log, which puts the same sentence on the
+  console and in ~/.clj-harness/harness.log, and answers the client a 500 whose
+  body is the server's own sentence rather than an empty one.
+
+  THE ROUTES ARE NOT REWRITTEN TO THROW. Most of them already catch what they
+  expect and answer a 400 with a reason; this is for what they did not expect,
+  and it deliberately does not try to tell the two apart -- a route that
+  answered a 400 never reaches here."
+  [req]
+  (try
+    (dispatch req)
+    (catch Throwable t
+      (log/error! :request-failed t {:method (:request-method req) :uri (:uri req)})
+      (api-response 500 {:error (or (ex-message t) "the request failed")}))))
+
 ;; ---------------------------------------------------------------------- start
 
 (defn start!
-  "Start the server and return its stop fn. Default port is 8080."
+  "Start the server and return its stop fn. Default port is 8080.
+
+  LOGGING COMES UP FIRST, BEFORE THE SOCKET. A server that cannot bind -- the
+  port is taken, which on this machine is the ordinary case of a session already
+  running -- failed to START, and that is precisely the kind of failure somebody
+  wants in a file rather than in whatever console the process happened to have.
+  Configuring after `run-server` meant the one error worth recording at startup
+  was the one error that could not be: found by starting this on a busy port and
+  watching a bare BindException go past with no log file."
   [& [opts]]
-  (let [opts   (merge {:port port} opts)
-        server (hk/run-server handler opts)]
-    (println (str "harness listening on http://localhost:" (:port opts))
-             "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
-    server))
+  (let [opts (merge {:port port} opts)
+        root (logging/configure!)]
+    (println (str "logging to " root "/logs/harness.log (rotated by date and size)"))
+    (try
+      (let [server (hk/run-server handler opts)]
+        (println (str "harness listening on http://localhost:" (:port opts))
+                 "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
+        (log/started root (:port opts))
+        server)
+      (catch Throwable t
+        (log/error! :start-failed t {:port (:port opts) :root root})
+        (throw t)))))
 
 (defn -main [& _]
   (start!)

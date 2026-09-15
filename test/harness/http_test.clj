@@ -14,6 +14,7 @@
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.replay :as replay]
+            [harness.shell :as shell]
             [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
@@ -2235,3 +2236,186 @@
         (project/bind! "it-slash" nil)
         (io/delete-file (io/file proj) true)
         (wipe-conventions!)))))
+
+;; ------------------------------------------------- the composer's own edge
+;;
+;; The routes the composer strip is built on: what it may offer (/api/choices),
+;; what it may change (/api/model), and the working tree it draws (/api/git).
+;; Exercised WITHOUT a scripted pin, deliberately -- a pin answers for the
+;; provider outright, and every one of these asks a question about resolution.
+
+(defn- with-bare-server
+  "Like `with-server`, but pins NOTHING: real resolution, from the seeded
+  config.edn upwards."
+  [f]
+  (let [stop (http/start! {:port 0})
+        port (:local-port (meta stop))]
+    (try (binding [*port* port] (f))
+         (finally (stop)))))
+
+(defn- log-lines-for
+  "Every line of THREAD-ID's log, in order, read from wherever its log IS."
+  [tid]
+  (mapv #(json/read-str % :key-fn keyword)
+        (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))))
+
+(deftest the-choices-endpoint-offers-the-catalog-and-no-secret
+  (with-bare-server
+   (fn []
+     (let [resp (api-call :get "/api/choices?threadId=composer-choices" nil)
+           body (read-json resp)
+           raw  (.body resp)
+           by-name (into {} (map (juxt :name identity) (:providers body)))]
+       (is (= 200 (.statusCode resp)))
+       (testing "the whole built-in catalog, by provider, each with its models"
+         (is (contains? by-name "deepseek"))
+         (is (contains? (set (:models (by-name "deepseek"))) "deepseek-flash"))
+         (is (contains? by-name "ollama"))
+         (is (contains? by-name "openrouter")))
+       (testing "the efforts worth offering, which are a menu and not a guard"
+         (is (= ["low" "medium" "high"] (:reasoning-efforts body))))
+       (testing "and no secret anywhere in the body"
+         (is (not (str/includes? raw "api-key")))
+         (is (not (str/includes? raw "api_key"))))))))
+
+(deftest the-model-endpoint-changes-this-session-and-nothing-else
+  (with-bare-server
+   (fn []
+     (let [id "composer-model"]
+       (testing "before any choice, the session has no tier of its own"
+         (is (nil? (providers/override-for id))))
+       (testing "choosing a provider and model takes effect on THIS thread"
+         (let [resp (api-call :post "/api/model"
+                              (json/write-str {:threadId id :provider "deepseek"
+                                               :model "deepseek-flash"}))
+               body (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (= "deepseek" (:provider body)))
+           (is (= "deepseek-flash" (:model body)))
+           (is (= {:provider :deepseek :model "deepseek-flash"}
+                  (providers/override-for id)))))
+       (testing "and a DIFFERENT thread is untouched -- 'only this session' is a fact"
+         (is (nil? (providers/override-for "composer-other"))))
+       (testing "choosing an effort leaves the model where it was"
+         (let [body (read-json (api-call :post "/api/model"
+                                         (json/write-str {:threadId id
+                                                          :reasoning-effort "high"})))]
+           (is (= "high" (:reasoning-effort body)))
+           (is (= "deepseek-flash" (:model body)))))))))
+
+(deftest the-model-endpoint-refuses-what-it-cannot-serve-and-writes-nothing
+  (with-bare-server
+   (fn []
+     (let [id "composer-refuse"]
+       (testing "a model the chosen provider does not declare"
+         (let [resp (api-call :post "/api/model"
+                              (json/write-str {:threadId id :provider "deepseek"
+                                               :model "no-such-model"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "no-such-model"))
+           (is (nil? (providers/override-for id))
+               "a refused change leaves the session exactly where it was")))
+       (testing "a provider that is not in the catalog"
+         (is (= 400 (.statusCode (api-call :post "/api/model"
+                                           (json/write-str {:threadId id
+                                                            :provider "nope"}))))))
+       (testing "a knob outside the three -- a model's counts are the catalog's"
+         (let [resp (api-call :post "/api/model"
+                              (json/write-str {:threadId id :model "x"
+                                               :context-window 1000}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "context-window"))))
+       (testing "nothing named at all"
+         (let [resp (api-call :post "/api/model" (json/write-str {:threadId id}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "nothing to change"))))
+       (testing "no thread"
+         (is (= 400 (.statusCode (api-call :post "/api/model"
+                                           (json/write-str {:model "x"}))))))
+       (testing "and a body that is not JSON"
+         (is (= 400 (.statusCode (api-call :post "/api/model" "not json at all")))))))))
+
+(deftest clearing-the-session-tier-puts-it-back-on-the-tiers-below
+  (with-bare-server
+   (fn []
+     (let [id "composer-clear"]
+       (api-call :post "/api/model" (json/write-str {:threadId id :provider "deepseek"
+                                                     :model "deepseek-flash"}))
+       (is (some? (providers/override-for id)))
+       (let [resp (api-call :post "/api/model" (json/write-str {:threadId id :clear true}))
+             body (read-json resp)]
+         (is (= 200 (.statusCode resp)))
+         (is (nil? (providers/override-for id)) "the session's own tier is gone")
+         (is (= "seeded" (:model body))
+             "back on the config.edn provider the seed put there")
+         (is (nil? (:reasoning-effort body))))))))
+
+(def ^:private git-repo
+  ;; UNIQUE PER JVM, and never deleted. `io/delete-file` cannot reliably remove a
+  ;; `.git` directory -- it reports failure, and with `:silently true` that failure
+  ;; is swallowed -- so a fixture that cleared a fixed path would sometimes run
+  ;; `git init` inside the previous run's repository and assert against its
+  ;; leftovers. A fresh name costs one directory in the temp dir and removes the
+  ;; only thing this test could have been flaky about.
+  (str (io/file (System/getProperty "java.io.tmpdir")
+                (str "clj-harness-http-git-" (System/currentTimeMillis)))))
+
+(defn- make-git-repo
+  "A real repository, so the route meets git rather than a story about git.
+  Renamed rather than `init -b`: see harness.git-test for why."
+  []
+  (let [dir git-repo
+        run (fn [c] (shell/shell c :dir dir))]
+    (.mkdirs (io/file dir))
+    (run "git init -q")
+    (run "git config user.email test@example.invalid")
+    (run "git config user.name 'harness test'")
+    (run "git config commit.gpgsign false")
+    (spit (io/file dir "README.md") "hello\n" :encoding "UTF-8")
+    (run "git add README.md")
+    (run "git commit -q -m first")
+    (run "git branch -m main")
+    (run "git branch side")
+    dir))
+
+(deftest the-git-endpoint-reads-and-moves-the-sessions-working-tree
+  (make-git-repo)
+  (with-bare-server
+   (fn []
+     (let [id "composer-git"]
+       (testing "a session with no directory has no branch, and that is not an error"
+         (let [body (read-json (api-call :get (str "/api/git?threadId=" id) nil))]
+           (is (false? (:repo? body)))
+           (is (nil? (:dir body)))))
+       (testing "and switching is refused by name, because there is nothing to switch"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:threadId id :branch "main"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "no project directory"))))
+       (api-call :post "/api/project" (json/write-str {:threadId id :dir git-repo}))
+       (testing "bound, the strip reads the branch and the branches"
+         (let [body (read-json (api-call :get (str "/api/git?threadId=" id) nil))]
+           (is (true? (:repo? body)))
+           (is (= "main" (:branch body)))
+           (is (= #{"main" "side"} (set (:branches body))))
+           (is (zero? (:dirty body)))))
+       (testing "switching moves the real repository"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:threadId id :branch "side"}))
+               body (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (= "side" (:branch body)))
+           (is (= "side" (str/trim (:out (shell/shell "git rev-parse --abbrev-ref HEAD"
+                                                   :dir git-repo)))))))
+       (testing "and the audit line records the move, before -> after"
+         (let [lines (filterv #(= "git/branch" (:kind %)) (log-lines-for id))]
+           (is (= 1 (count lines)))
+           (is (= "main" (get-in (first lines) [:payload :before])))
+           (is (= "side" (get-in (first lines) [:payload :after])))))
+       (testing "a branch the worktree does not have is refused, and writes no line"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:threadId id :branch "nope"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "nope")))
+         (is (= 1 (count (filterv #(= "git/branch" (:kind %)) (log-lines-for id))))
+             "the refusal left no trace on disk"))))))

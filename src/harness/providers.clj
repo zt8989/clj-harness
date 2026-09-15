@@ -1220,3 +1220,53 @@
                  acc))
              sel
              [:input :output]))))
+
+;; ------------------------------------------------------- what a picker offers
+
+(def reasoning-efforts
+  "The reasoning efforts a session may pick, as the composer's picker offers
+  them.
+
+  A CLOSED LIST HERE AND NOWHERE ELSE, and that asymmetry is deliberate: nothing
+  in this namespace validates :reasoning-effort -- the value travels to the wire
+  as `reasoning_effort` and each vendor decides what it means, so refusing a name
+  here would refuse one a vendor accepts. The list is therefore not a guard, it is
+  an OFFER: the three OpenAI-compatible values, which is what the providers in the
+  built-in table speak. A session that wants something else can still be given it
+  by `session-configure` or by config.edn; the picker just does not put it on the
+  menu."
+  ["low" "medium" "high"])
+
+(defn choices
+  "What a session may be switched to, for the composer's model picker:
+
+    {:provider \"openrouter\" :model \"…\" :reasoning-effort \"high\"
+     :reasoning-efforts [\"low\" \"medium\" \"high\"]
+     :providers [{:name \"deepseek\" :models [\"deepseek-flash\" \"…\"]} …]}
+
+  THE THREE CURRENT VALUES ARE SCALARS PICKED BY NAME, and the provider list is
+  built here rather than passed through `wire`. That is not a shortcut around the
+  secret rule -- it is the same rule the other way round: `wire` renders a
+  resolution by SELECTING FIELDS, and handing it a list of maps would run its
+  modality step over them (it sorts and `name`s every value of the keys it is
+  asked about) and mangle a nested shape. So nothing here merges a resolution in;
+  every value is one this function chose, and :api-key is not among them at any
+  depth.
+
+  THE LIST IS THE CATALOG, NOT THE RESOLUTION: every provider that declares at
+  least one model, sorted by name so the menu has one order. A provider with no
+  :models cannot be switched TO (naming it would fail in `assemble`), so offering
+  it would be offering a refusal."
+  [thread-id]
+  (let [current (wire (active-provider thread-id))]
+    {:provider (:provider current)
+     :model (:model current)
+     :reasoning-effort (:reasoning-effort current)
+     :reasoning-efforts reasoning-efforts
+     :providers (->> (catalog)
+                     (keep (fn [[n entry]]
+                             (let [models (keys (:models entry))]
+                               (when (seq models)
+                                 {:name (name n) :models (sortable models)}))))
+                     (sort-by :name)
+                     vec)}))

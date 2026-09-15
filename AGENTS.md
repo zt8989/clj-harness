@@ -18,16 +18,23 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 
 ## 测试
 
+### 家目录必须隔离，不许碰真实环境
+
+**测试不得读写真实的 `~/.clj-harness`、`~/AGENTS.md`、`~/.agents/skills`。**
+
+- config root 指向临时目录：`CLJ_HARNESS_HOME`，Clojure 侧由 `harness.test-runner/isolate!`
+  统一做掉（临时目录、`harness.home/*root-override*` 都归它），测试体内不要再自己设。
+- OS home 指向另一个临时目录：`harness.home/*user-home-override*`。Clojure 侧归 `isolate!`，
+  e2e 侧起服务时自动做（`harness.e2e-server`）。它和 root 是**平级的两个临时目录，不要嵌套**。
+- 自己拉 JVM 的测试（fork 子进程、`ui/test/support/harness.ts`）要自己把两个都指过去：
+  `CLJ_HARNESS_HOME` 给 root，`-Duser.home` 给 OS home。
+- 改这两处用 `alter-var-root`，不要 `binding`——服务在别的线程上跑。
+- 跑完删掉临时目录。
+
 ### 端口由 OS 分配，永不写死
 
-**测试不许写死端口。** `with-server` / `with-declaring-server` / `with-resolved-config` 用 `{:port 0}`
-让 OS 分配，再把 `(:local-port (meta stop))` 绑到 `*port*`；`api-call` / `post-run` 默认读它，
-测试要自己拼 URL 时也读它，而不是写一个字面量。
-
-理由不是洁癖：写死的端口要求「这台机器上此刻只有我在跑这套测试」。而实际不是——开发者的会话
-就在旁边、上一张票留下的 e2e server 还开着、另一个 worktree 同时在跑同一套 suite。撞上时你收到的是
-`java.net.BindException: Address already in use`，报在一个**跟肇事者毫无关系**的用例上
-（一度是 `answers-the-cors-preflight` 要的 8099），而那个用例的代码与被测的东西都没错。
-
-新增一个测试要起服务时，用现成的 wrapper；确实需要自己安排 config/provider 时，让 wrapper 起服务
-（`with-resolved-config` 就是这么做的）——不要在测试体内写 `(http/start! {:port 8080})`。
+- `with-server` / `with-declaring-server` / `with-resolved-config` 一律 `{:port 0}`，
+  再把 `(:local-port (meta stop))` 绑到 `*port*`。
+- `api-call` / `post-run` 默认读 `*port*`；测试要自己拼 URL 时也读它，不写字面量。
+- 新增测试要起服务时用现成的 wrapper；需要自己安排 config/provider 时，让 wrapper 起服务
+  （`with-resolved-config` 就是这么做的），不要在测试体内写 `(http/start! {:port 8080})`。
