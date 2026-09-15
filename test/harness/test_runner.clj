@@ -46,6 +46,7 @@
     harness.evals-test
     harness.providers-test
     harness.project-test
+    harness.log-test
     harness.git-test
     harness.hooks-test
     harness.hooks-dispatch-test

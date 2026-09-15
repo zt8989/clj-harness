@@ -51,6 +51,7 @@
             [harness.hooks.dispatch :as hook]
             [harness.home :as home]
             [harness.llm :as llm]
+            [harness.log :as log]
             [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.preamble :as preamble]
@@ -419,6 +420,13 @@
                       (resume-decisions (:resume input))
                       (providers/resolve-provider thread-id (:provider input))])
                    (catch Throwable t
+                     ;; A run that could not even be set up -- no provider, a
+                     ;; refused model -- is reported to the client as a
+                     ;; RUN_ERROR frame AND written down, because the frame
+                     ;; scrolls past in a browser and the reason somebody is
+                     ;; staring at is often a configuration mistake they will
+                     ;; want to read twice.
+                     (log/error! :run-refused t {:thread-id thread-id})
                      (doseq [frame (into (vec (convert (ev/run-start)))
                                          (convert (ev/run-error (ex-message t))))]
                        (emit frame))
@@ -1161,7 +1169,11 @@
                          :dir dir :via "http"})
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
-(defn handler [req]
+(defn- dispatch
+  "The route table, with no safety net -- see `handler` for the one wrapped
+  around it. Split out so the net is a single line of indentation around the
+  whole thing rather than a `try` re-indenting every route."
+  [req]
   (cond
     (= :options (:request-method req))
     {:status 204 :headers cors}
@@ -1226,6 +1238,27 @@
           [:post "remove"] (remove-project-post stem)
           (api-response 405 {:error "method not allowed"}))
         (handle-run req)))))
+
+(defn handler
+  "Every request, with a net under it.
+
+  WITHOUT THIS, AN UNHANDLED EXCEPTION IS INVISIBLE: it goes to http-kit, which
+  answers the client a 500 and prints to a console nobody is reading, and the
+  one fact worth having -- which route, which thread, what threw -- is gone. So
+  the net reports through harness.log, which puts the same sentence on the
+  console and in ~/.clj-harness/harness.log, and answers the client a 500 whose
+  body is the server's own sentence rather than an empty one.
+
+  THE ROUTES ARE NOT REWRITTEN TO THROW. Most of them already catch what they
+  expect and answer a 400 with a reason; this is for what they did not expect,
+  and it deliberately does not try to tell the two apart -- a route that
+  answered a 400 never reaches here."
+  [req]
+  (try
+    (dispatch req)
+    (catch Throwable t
+      (log/error! :request-failed t {:method (:request-method req) :uri (:uri req)})
+      (api-response 500 {:error (or (ex-message t) "the request failed")}))))
 
 ;; ---------------------------------------------------------------------- start
 
