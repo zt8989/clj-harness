@@ -40,6 +40,7 @@
     harness.hashline-anchors-test
     harness.hashline-store-test
     harness.hashline-read-test
+    harness.hashline-replace-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

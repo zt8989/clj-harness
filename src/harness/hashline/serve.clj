@@ -21,6 +21,7 @@
   The stores are consulted under the file's own lock, so a read racing an edit of
   the same file sees one of the two states and never a mixture."
   (:require [harness.hashline.anchors :as anchors]
+            [harness.hashline.files :as files]
             [harness.hashline.reading :as reading]
             [harness.hashline.store :as store])
   (:import [java.io File]))
@@ -87,9 +88,16 @@
 
   Classification happens here rather than in the tool so that `read` stays a
   dispatch and this stays a function over (session, path) -- which is what the
-  tests drive."
+  tests drive.
+
+  THE TEXT COMES FROM `harness.hashline.files`, not from a bare slurp, and that is
+  load-bearing rather than tidy: the checksums an edit validates against are
+  computed over the text WITHOUT its byte-order mark and with line endings
+  normalized. A read that slurped raw would checksum the BOM as part of line 1 and
+  the first edit of every BOM'd file would be refused as drifted -- a refusal about
+  a file nobody touched. One reading of a file, one set of bytes to agree on."
   [thread-id path opts]
   (let [f (File. ^String path)]
     (reading/classify f)
-    (serve! thread-id path (reading/read-text f) opts)))
+    (serve! thread-id path (:text (files/read-file path)) opts)))
 

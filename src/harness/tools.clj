@@ -39,6 +39,7 @@
             [clojure.string :as str]
             [harness.editing :as editing]
             [harness.event :as ev]
+            [harness.hashline.replace :as replace]
             [harness.hashline.serve :as serve]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
@@ -426,6 +427,74 @@
                [:path :old_string :new_string] t-edit)
          :fence-paths true))
 
+;; ------------------------------------------------------------------ replace
+;;
+;; The anchor-addressed edit. Prompt text lives here rather than in replace.clj
+;; because it is what the MODEL reads, and this is the file where a tool's face is
+;; declared -- the two must not be able to drift apart.
+;;
+;; It describes what the tool DOES TODAY, and nothing more. Two sentences that used
+;; to stand here promised behaviour no ticket had landed yet -- that a drifted file
+;; comes back with fresh anchors ready to retry (ticket 06), and that several
+;; replace calls in one message are one commit (ticket 09). A model told to expect
+;; what does not happen learns to distrust the whole description, so those sentences
+;; wait for the tickets that make them true.
+
+(def ^:private replace-description
+  (str "Replace a range of lines in a file, addressed by 4-character ANCHORS from "
+       "read output: `remove_from` and `remove_to` are the first and last line of the "
+       "range (the same anchor twice for one line), and `replacement_lines` is an "
+       "array with one string per new line -- bare lines, no `│`, no embedded "
+       "newlines. An empty array deletes the range; an array holding one empty string "
+       "inserts one blank line. "
+       "Every line of the range must still be what read showed; an edit addressed at a "
+       "file that has moved underneath the session is refused, and the answer names "
+       "what to do about it. "
+       "The answer shows the changed region as `+`, `-` and context rows, each with "
+       "the CURRENT anchor for its line -- `+` and context rows are immediately "
+       "editable, so a follow-up edit needs no read. A `-` row's anchor column is "
+       "blank because that line is gone. "
+       "A replacement that repeats the line just outside the range has that line "
+       "deduplicated (reported as a `dedup│` row), so re-including a boundary line is "
+       "safe but unnecessary. "
+       "A relative path resolves against this session's project directory when one is "
+       "bound. When bound, a path resolving outside the project directory and the "
+       "configuration home parks for human approval first."))
+
+(def ^:private replace-params
+  {:type "object"
+   :properties
+   {"remove_from"       {:type "string"
+                         :description (str "Anchor of the FIRST line to remove: the four "
+                                           "characters before the `│` of a read row. "
+                                           "Never the row's content, never a line number.")}
+    "remove_to"         {:type "string"
+                         :description (str "Anchor of the LAST line to remove, inclusive. "
+                                           "Omit it to change a single line.")}
+    "replacement_lines" {:type "array"
+                         :items {:type "string"}
+                         :description (str "One string per replacement line. No `│`, no "
+                                           "embedded newlines. [] deletes the range; "
+                                           "[""] inserts one blank line.")}}})
+
+(defn- anchor-replace
+  "`replace`'s body. It resolves the path for the session and hands the rest to the
+  engine -- the fence looked at the same path before this ran (see `:path-for`)."
+  [args]
+  (replace/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                    (editing/editing-mode *thread-id*)))
+
+(register! "replace"
+  (assoc (tool replace-description
+               (get replace-params :properties)
+               [:remove_from :replacement_lines] anchor-replace)
+         :fence-paths true
+         ;; The fence has no `path` argument to look at when the model omits it, so
+         ;; the target is derived here -- the same derivation the body uses, so the
+         ;; call that parks and the call that runs are about the same file.
+         :path-for (fn [thread-id parsed]
+                     (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
+
 (register! "bash"
   (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
@@ -559,29 +628,49 @@
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
+(defn- fenced-path
+  "The path the fence should judge for this call, or nil when there is nothing to
+  judge.
+
+  Usually that is the `path` argument. A tool may declare `:path-for` instead, for
+  the calls whose target is DERIVED rather than given -- `replace` addresses a line
+  by anchor, and the anchor is what names the file (see
+  harness.hashline.replace/target-path). Without this, an anchor-addressed edit to a
+  file outside the project would run with no fence at all, because there is no path
+  argument to look at.
+
+  Either way this is best-effort: it runs BEFORE the argument checks, so a malformed
+  payload must come back as nil (no path to judge) rather than as an exception from
+  a derivation that was handed nonsense. The argument check is what reports the
+  malformed payload, one line later, with the useful message."
+  [tool name thread-id parsed]
+  (or (:path parsed)
+      (when-let [derive (:path-for tool)]
+        (try (derive thread-id parsed) (catch Throwable _ nil)))))
+
 (defn- approval-reason
   "WHY this call parks -- nil meaning it does not. The same union
   approval-required? answered, now with the reason attached, in the order the
   or short-circuited: the tool's own declaration first, then the session's
   ask, then the project fence (a fence-marked tool whose path, resolved for
-  this session, lands outside the project directory and the configuration
-  home). The reason rides the parked record, so the human deciding -- and any
-  reader of the audit trail -- can tell a declared-approval call from a fence
-  catch without re-deriving either.
+  this session and possibly derived from its arguments, lands outside the project
+  directory and the configuration home). The reason rides the parked record, so the
+  human deciding -- and any reader of the audit trail -- can tell a declared-approval
+  call from a fence catch without re-deriving either.
 
-  A call that names NO PATH is not a fence case, whatever else it is. The fence
-  is a question about a path, and asking it about a missing one would answer with
-  an exception from deep inside java.io rather than with the useful fact -- that
-  the argument is absent, which the missing-arguments check says a line later.
-  Reading 'no path' as 'not out of bounds' keeps that check reachable, which is
-  what a call with no arguments should be told."
+  A call with NO PATH AT ALL is not a fence case, whatever else it is. The fence is
+  a question about a path, and asking it about a missing one would answer with an
+  exception from deep inside java.io rather than with the useful fact -- that the
+  argument is absent, which the missing-arguments check says a line later. Reading
+  'no path' as 'not out of bounds' keeps that check reachable, which is what a call
+  with no arguments should be told."
   [tool name thread-id parsed]
   (cond
     (:requires-approval tool)                       :tool-declares
-    (session-approval-required? thread-id name) :session-asks
+    (session-approval-required? thread-id name)     :session-asks
     (and (:fence-paths tool)
-         (some? (:path parsed))
-         (project/out-of-bounds? thread-id (:path parsed)))
+         (some? (fenced-path tool name thread-id parsed))
+         (project/out-of-bounds? thread-id (fenced-path tool name thread-id parsed)))
     :out-of-bounds
     :else nil))
 

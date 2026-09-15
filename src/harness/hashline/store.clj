@@ -74,6 +74,22 @@
         (db/select "SELECT anchor, path FROM hashline_ownership WHERE thread_id = ?"
                    (str thread-id))))
 
+(defn owner-of
+  "The file ANCHOR currently names in THREAD-ID's session, or nil when this session
+  does not hold it.
+
+  This is how `replace` finds the file to edit when it was called without a path:
+  an anchor is unique to one file for one session, so the anchor IS the address and
+  the path is derived rather than asked for. It is also the check behind
+  `:require-path` -- a caller-supplied path that disagrees with the anchor is
+  refused, because editing the file you named while addressing lines in another is
+  exactly the mistake that mode exists to catch."
+  [thread-id anchor]
+  (some-> (first (db/select "SELECT path FROM hashline_ownership
+                              WHERE thread_id = ? AND anchor = ?"
+                            (str thread-id) anchor))
+          :path))
+
 (defn probe-of
   "Where THREAD-ID's allocation probe stands, or nil when it has never minted --
   in which case the caller seeds it from the session key (see anchors/seed)."
