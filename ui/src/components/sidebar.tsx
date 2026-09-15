@@ -148,6 +148,7 @@ import {
   ThreadListItemAction,
 } from "@/components/assistant-ui/elements/thread-list.aui";
 import { Button } from "@/components/ui/button";
+import { SettingsPanel } from "@/components/settings-panel";
 import {
   Dialog,
   DialogContent,
@@ -214,6 +215,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   // effect below. Only an explicit click pins it.
   const [pinned, setPinned] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // The settings report is a MODAL rather than a fourth region: it is read
+  // once and closed, it does not compete with the list for the middle strip, and
+  // it is drawn over the page so that reading it cannot be mistaken for
+  // navigating away from the conversation behind it.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -529,24 +535,32 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         )}
       </div>
 
-      {/* The third region, pinned like the first. It holds a position rather
-          than a verb for now: the read-only configuration view is ticket 08's,
-          and this button is the seat it will fill. */}
+      {/* The third region, pinned like the first. "Settings" opens the read-only
+          report -- what this session is running on, where each choice came from,
+          and whether a key is configured. It is a REPORT and not a form: nothing
+          in it writes anything, which is why opening it is safe while a run is
+          in flight and why it never touches the current session. */}
       <footer
         data-slot="sidebar-footer"
         className="shrink-0 border-t px-2 py-2"
       >
         <Button
           variant="ghost"
-          disabled
           data-slot="sidebar-settings"
-          title="The read-only configuration view arrives with ticket 08"
-          className="text-muted-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
+          onClick={() => setSettingsOpen(true)}
+          title="What this session is running on — read-only"
+          className="text-muted-foreground hover:text-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
         >
           <SettingsIcon data-slot="sidebar-settings-icon" className="size-4 shrink-0" />
           Settings
         </Button>
       </footer>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        threadId={currentThreadId}
+      />
     </aside>
   );
 };

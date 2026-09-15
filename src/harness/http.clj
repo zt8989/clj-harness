@@ -955,6 +955,35 @@
   (let [thread-id (get (query-params (:query-string req)) "threadId")]
     (api-response 200 (providers/wire (providers/active-provider thread-id)))))
 
+(defn- settings-get
+  "GET /api/settings?threadId=.. -- the read-only settings panel's answer: what
+  configuration is in force for this session, where each choice came from, where
+  the api-key WOULD be read from, and which files make up this home. See
+  providers/settings for the shape and for why every field is read live.
+
+  THE WHOLE ANSWER IS RENDERED THROUGH `wire` WITH ITS OWN KEYS, and that is the
+  second half of the key's treatment rather than bookkeeping: `wire` refuses to
+  render :api-key at any position it is asked about, so a resolution that
+  somehow reached this body whole would lose its secret on the way out.
+
+  The reason a failed resolution is a 400 with the server's own sentence: the
+  panel shows that sentence. An unknown provider or an undeclared model is a
+  configuration a person is in the middle of fixing, and 'could not resolve: no
+  provider named :beta; the registry defines ...' is a far better thing to be
+  looking at than an empty panel. A missing config.edn lands here too, with
+  harness.home's message carrying the path and the knob that moves it.
+
+  READ-ONLY, and therefore leaves no trace: like GET /api/model, only a route
+  that can CHANGE something writes an audit line. This one cannot even change the
+  session it is asked about -- it resolves and returns."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")
+        answer    (try {:ok (providers/settings thread-id)}
+                       (catch Throwable t {:error (ex-message t)}))]
+    (if-some [error (:error answer)]
+      (api-response 400 {:error error})
+      (api-response 200 (providers/wire (:ok answer) (keys (:ok answer)))))))
+
 (defn handler [req]
   (cond
     (= :options (:request-method req))
@@ -963,6 +992,11 @@
     (= "/api/model" (:uri req))
     (case (:request-method req)
       :get  (model-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/settings" (:uri req))
+    (case (:request-method req)
+      :get  (settings-get req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/project/pick" (:uri req))

@@ -66,6 +66,7 @@
   to write instead."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [harness.home :as home]))
 
 ;; ------------------------------------------------------------- the vocabulary
@@ -882,6 +883,21 @@
   [folded]
   (assemble (catalog) folded))
 
+(defn- resolve-tiers
+  "The three tiers resolve-provider folds, LOWEST first, as the raw maps they
+  arrive as: config's default tier (or an inline description), this session's
+  override, and this run's request.
+
+  ONE DEFINITION, so the fold and anything that has to say WHERE a knob came
+  from cannot disagree about which tiers were in play or in what order. The
+  request tier is `{}` when there is no run in hand -- an offline tool, or the
+  read-only settings panel, which is asking about the configuration rather than
+  about any one run."
+  [thread-id request]
+  [(default-selection (config))
+   (or (override-for thread-id) {})
+   (or request {})])
+
 (defn resolve-provider
   "The effective provider for THREAD-ID, plus where it came from.
 
@@ -909,9 +925,7 @@
   trailing user message and poison the provider's prefix cache."
   ([thread-id] (resolve-provider thread-id nil))
   ([thread-id request]
-   (let [base   (default-selection (config))
-         ses    (or (override-for thread-id) {})
-         run    (or request {})
+   (let [[base ses run] (resolve-tiers thread-id request)
          folded (fold-selection base ses run)
          source (cond
                   (seq (selection run)) :request
@@ -988,16 +1002,196 @@
                     :protocol :base-url :input :output
                     :context-window :max-output-tokens])))
 
-;; -------------------------------------------------------------------- wire
-
 (def ^:private never-rendered
   "Fields this shape refuses to carry, whatever a caller asks for. :api-key is
   here so that naming it -- by a future call site, by a mistake, by a helper that
   renders 'everything' -- still produces a shape without it. That is a guardrail
   against an accident, not a security boundary: the rule that the key is resolved
   in one place and never surfaces through a self-inspection answer is prompt.md's
-  discipline, and this only means the serializer is not a place it can leak from."
+  discipline, and this only means the serializer is not a place it can leak from.
+
+  IT IS ALSO THE ONE LIST `settings` SUBTRACTS (see `unsecret`), and that reuse
+  is the point: a field that may not be RENDERED and a field that may not be
+  INSPECTED are the same set of fields, and two lists would be two places to
+  forget."
   #{:api-key})
+
+;; ------------------------------------------------------------------ settings
+;;
+;; The read-only half of this namespace: what configuration is in force RIGHT
+;; NOW, where each choice came from, where the key would be read from, and which
+;; files make up this home. It is the one answer meant to be shown to a person,
+;; which is why the key's treatment is spelled out at every step below.
+
+(def ^:private tier-names
+  "The three tiers a selection is folded down, LOWEST first, named as the panel
+  shows them. The vec is the order; the keyword is what an answer carries."
+  [:config :session :request])
+
+(defn- tier-sources
+  "Which tier supplied each of the three knobs, as RESOLVED sees them --
+  {:provider :config :model :session :reasoning-effort :request}, plus :catalog
+  for a knob no tier named.
+
+  DERIVED FROM THE FOLD ITSELF rather than by re-reading the tiers: for each
+  knob, the winner is the LAST tier that named it whose prefix still folds to the
+  final value. Reimplementing the fold here would be a second copy of its one
+  special rule (:model is scoped to :provider -- a tier that switches vendor and
+  names no model drops it), and a second copy is how the panel comes to explain a
+  choice the resolution did not make.
+
+  :catalog is a real answer and not a shrug, and it covers two cases that look
+  different and are not: a provider's DEFAULT model (nobody named one, the
+  catalog's entry does), and the vendor switch above (the model a tier named was
+  dropped on purpose, so what is in force is again the new entry's default). Both
+  are 'no tier chose this', which is exactly what a person debugging 'why am I
+  talking to this model' needs to hear. The knobs are read off RESOLVED as well
+  as off the fold for that reason: a dropped model is absent from the fold and
+  present in what the run will actually use."
+  [tiers resolved]
+  (let [folded (apply fold-selection tiers)
+        named  (vec (map vector tier-names tiers))
+        ;; A knob can be in force without being in the fold -- see the vendor
+        ;; switch above -- so the knob set comes from both sides.
+        ks     (into #{} (concat (keys folded) (filter #(contains? resolved %) knobs)))]
+    (into {}
+          (keep (fn [k]
+                  (when (contains? resolved k)
+                    [k (if-not (contains? folded k)
+                         :catalog
+                         (or (last (for [[i [_ m]] (map-indexed vector named)
+                                         :when (contains? (selection m) k)
+                                         :let  [upto (map second (subvec named 0 (inc i)))]
+                                         :when (= (get (apply fold-selection upto) k)
+                                                  (get folded k))]
+                                     (first (nth named i))))
+                             :catalog))])))
+          ks)))
+
+(defn api-key-source
+  "Where the api-key WOULD be read from, as facts that carry no value:
+
+    {:present? true|false :source :env-file|:environment|nil}
+
+  THE PRECEDENCE IS `api-key`'s, not a guess: a value in the home's .env wins
+  over a real environment variable, so a home with both is a home whose key comes
+  from the file. Reporting the other one would send a person to edit a variable
+  that is being ignored.
+
+  THE VALUE, ITS LENGTH AND ITS PREFIX ARE ALL ABSENT, and this is a separate
+  function from `api-key` rather than a wrapper over it: a wrapper would have the
+  secret in hand and would have to remember not to return it, while this one
+  never reads the value out of the map it parses. A nil :source means nobody
+  supplies one, which is a normal state -- offline tools run without a key, and a
+  run that needs one fails by name at the vendor."
+  []
+  (let [f (home/dotenv-file)
+        from-file (when (.exists f)
+                    (get (parse-dotenv (slurp f :encoding "UTF-8")) "HARNESS_API_KEY"))
+        from-env  (System/getenv "HARNESS_API_KEY")]
+    (cond
+      (some? from-file) {:present? true  :source :env-file}
+      (some? from-env)  {:present? true  :source :environment}
+      :else             {:present? false :source nil})))(defn home-origin
+  "Which of harness.home's three rules produced the config root:
+
+    :environment  CLJ_HARNESS_HOME said so
+    :override     a test bound *root-override* (normally invisible, and truthful
+                  if it ever is not)
+    :default      ~/.clj-harness
+
+  WHICH RULE WON IS THE POINT of showing the path at all: a home the environment
+  moved and a home nobody moved are debugged in completely different places, and
+  a bare path does not say which one this is."
+  []
+  (cond
+    (some? home/*root-override*)               :override
+    (some? (System/getenv "CLJ_HARNESS_HOME")) :environment
+    :else                                      :default))
+
+(defn- home-files
+  "Every FILE this home is made of, named as a person would say it, in the order
+  harness.home declares them. The log tree is a directory and is not listed: the
+  panel answers 'which of the things I edit are here', and a tree of conversations
+  is not one of them."
+  []
+  (mapv (fn [[nm ^java.io.File f]]
+          {:name nm :path (.getAbsolutePath f) :present? (.exists f)})
+        [["config.edn"    (home/config-file)]
+         ["providers.edn" (home/providers-file)]
+         ["hooks.edn"     (home/hooks-file)]
+         [".env"          (home/dotenv-file)]
+         ["harness.db"    (home/db-file)]]))
+
+(defn- unsecret
+  "M with every field in `never-rendered` removed -- AT EVERY DEPTH.
+
+  THE DIFFERENCE RATHER THAN A LIST OF WHAT MAY BE SHOWN, and that is the shape
+  the ticket asks for: a whitelist has to be extended every time the resolution
+  learns a new fact, so the failure it invites is 'a field was added and nobody
+  judged it', which surfaces as a panel quietly missing something. Subtracting a
+  short, named set of SECRETS inverts that: a new fact appears by itself, and the
+  only way to leak is to add a secret to the resolution without adding it to
+  `never-rendered`.
+
+  Walking all the way down matters because a resolution carries nested maps -- the
+  inline form's provider description lives inside :selection -- and a secret one
+  level deeper is exactly as secret."
+  [m]
+  (walk/postwalk (fn [x] (if (map? x) (apply dissoc x never-rendered) x)) m))
+
+(defn settings
+  "The read-only settings panel's whole answer for THREAD-ID: what is in force,
+  where each choice came from, where the key would come from, and which files make
+  up this home.
+
+    {:protocol :openai-completions :base-url \"https://…\" :model \"…\"
+     :reasoning-effort \"low\" :input [\"image\" \"text\"] :output [\"text\"]
+     :context-window 256000 :max-output-tokens 65536
+     :selection {:provider \"openrouter\" :model \"…\"}
+     :source :default|:inline|:request
+     :tiers {:provider :config :model :catalog :reasoning-effort :session}
+     :key {:present? true :source :env-file}
+     :home {:path \"/Users/…/.clj-harness\" :origin :default
+            :files [{:name \"config.edn\" :path \"…\" :present? true} …]}}
+
+  EVERYTHING COMES FROM FILES AND LIVE MEMORY, NEVER FROM THE STORE, and
+  re-reading is the whole contract: config.edn, providers.edn, .env and the
+  session's own override are each read at call time, so editing one and asking
+  again shows the new answer with no restart and nothing written. That is the
+  discipline this namespace follows everywhere, and this is the one place a
+  person can SEE it.
+
+  READ-ONLY IN EVERY DIRECTION: nothing here writes a file, touches the store, or
+  moves a session -- asking what the configuration is must not be able to change
+  it, including while a run is in flight, which this is safe to call during
+  because it resolves and returns rather than registering anything.
+
+  A configuration that cannot be resolved FAILS BY NAME (an unknown provider, an
+  undeclared model, a missing config.edn), and that failure is the ANSWER's
+  replacement rather than a bug: the caller shows the reason, which is of far
+  more use than an empty panel. See the http route for how it is carried.
+
+  Sets, not wire strings, exactly like `active-provider`; `wire` is what renders
+  this for a body. The KEY is subtracted rather than omitted field by field (see
+  `unsecret`), and its presence and origin are reported instead -- under :key,
+  NOT under :api-key, so that the report cannot be confused with the secret at
+  any layer and `never-rendered` stays a guard instead of a naming hazard: were a
+  raw resolution ever merged into this answer, `wire` would strip its :api-key
+  and leave the report standing."
+  [thread-id]
+  (let [[base session request] (resolve-tiers thread-id nil)
+        {:keys [provider selection source]} (resolve-provider thread-id)]
+    (merge (unsecret provider)
+           {:selection (unsecret selection)
+            :source    source
+            :tiers     (tier-sources [base session request] provider)
+            :key       (api-key-source)
+            :home      {:path   (home/root)
+                        :origin (home-origin)
+                        :files  (home-files)}})))
+
+;; -------------------------------------------------------------------- wire
 
 (defn wire
   "M -> the shape that may leave this process: the fields in KS, with modality

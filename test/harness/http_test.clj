@@ -1833,6 +1833,142 @@
            (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" (json/write-str {})))))
            (is (= 400 (.statusCode (api-call 8113 :post "/api/projects" "{not json"))))))))))
 
+(def ^:private settings-sentinel
+  "A value shaped like a real key and recognisable anywhere it turns up. It goes
+  into the SHARED test home's .env for the length of the test below and comes back
+  out again in a finally: leaving it there would be a key every later namespace's
+  run would carry, which is a fact no later assertion should have to know about."
+  "sk-or-v1-SENTINEL-DO-NOT-PUBLISH-9f3c2a")
+
+(def ^:private settings-providers
+  "Two vendors, so a config edit can be seen to change BOTH the name and the
+  endpoint it resolves to."
+  (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                   :model "alpha-large"
+                   :models {"alpha-large" {:input #{:text :image} :output #{:text}
+                                           :context-window 1000 :max-output-tokens 100}}}
+           :beta  {:protocol :openai-completions :base-url "https://beta/v1"
+                   :model "beta-plain"
+                   :models {"beta-plain" {:input #{:text} :output #{:text}}}}}))
+
+(deftest the-settings-endpoint-reports-the-live-config-and-never-the-key
+  ;; Ticket 08 at the edge. Three claims, and each one is a thing that could be
+  ;; true of the code and false of the running process: the endpoint answers the
+  ;; configuration THE FILES hold right now, every knob says which tier chose it,
+  ;; and the key does not appear in the response body in any form.
+  ;;
+  ;; It edits the SHARED test home (there is one root, and the server thread reads
+  ;; it through harness.home like everything else), saving and restoring both
+  ;; files around the test. A second home would need a second server, and the
+  ;; point here is the route, not the isolation -- harness.providers-test covers
+  ;; the answer itself against homes of its own.
+  (let [dir      (home/root)
+        config   (io/file dir "config.edn")
+        provs    (io/file dir "providers.edn")
+        dotenv   (io/file dir ".env")
+        saved    (into {} (for [f [config provs dotenv]]
+                            [(.getName f) (when (.exists f) (slurp f :encoding "UTF-8"))]))
+        settings (fn [] (api-call 8116 :get "/api/settings?threadId=set-1" nil))
+        parse    (fn [] (read-json (settings)))
+        restore! (fn []
+                   (doseq [[nm f] [["config.edn" config] ["providers.edn" provs] [".env" dotenv]]]
+                     (if-some [was (get saved nm)]
+                       (spit f was :encoding "UTF-8")
+                       (io/delete-file f true))))
+        facts    (fn [] (into {} (for [f (reverse (file-seq (io/file dir)))
+                                       :when (.isFile ^java.io.File f)]
+                                  [(.getName ^java.io.File f)
+                                   [(.length ^java.io.File f) (.lastModified ^java.io.File f)]])))]
+    (try
+      ;; EDN, not JSON: config.edn is read by clojure.edn like every other
+      ;; config file here, and `{"provider":"alpha"}` in it is a parse error
+      ;; rather than a configuration. The providers file below is EDN for the
+      ;; same reason.
+      (spit config (pr-str {:provider :alpha :reasoning-effort "low"}) :encoding "UTF-8")
+      (spit provs settings-providers :encoding "UTF-8")
+      (spit dotenv (str "HARNESS_API_KEY=" settings-sentinel "\n") :encoding "UTF-8")
+      (with-server
+       8116
+       "settings-unused"
+       (fn []
+           (testing "the live configuration, knob by knob"
+             (let [resp  (settings)
+                   reply (parse)]
+               (is (= 200 (.statusCode resp)))
+               (is (= "alpha" (:provider reply)))
+               (is (= "alpha-large" (:model reply)) "the provider's own default model")
+               (is (= "https://alpha/v1" (:base-url reply)))
+               (is (= "low" (:reasoning-effort reply)))
+               (is (= ["image" "text"] (:input reply))
+                   "modality sets arrive as sorted string vectors, like the model endpoint's")
+               (is (= 1000 (:context-window reply)))
+               (is (= "default" (:source reply)) "config.edn is where this resolution started")
+               (is (= {:provider "config" :reasoning-effort "config" :model "catalog"}
+                      (:tiers reply))
+                   "every knob config named is credited to it, and the model NOBODY
+                    named -- the provider's default -- is credited to the catalog")))
+
+           (testing "asking is read-only: not one byte or mtime under the home moves"
+             ;; Taken here, around pure reads, because the later cases deliberately
+             ;; EDIT config.edn -- which is a write this test does, not one the
+             ;; route did.
+             (let [before (facts)]
+               (dotimes [_ 4] (settings))
+               (is (= before (facts)))))
+
+           (testing "the api-key is presence and origin, and NOTHING else"
+             (let [body  (.body (settings))
+                   reply (parse)]
+               (is (= {:present? true :source "env-file"} (:key reply)))
+               (is (not (contains? reply :api-key)))
+               (is (not (str/includes? body settings-sentinel))
+                   "the whole body, searched as a string -- not a field checked for emptiness")
+               (is (not (str/includes? body (subs settings-sentinel 0 12)))
+                   "not even the prefix")))
+
+           (testing "the home is named, with the rule that produced it and its files"
+             (let [reply (parse)]
+               (is (= dir (:path (:home reply))))
+               (is (contains? #{"override" "environment" "default"} (:origin (:home reply))))
+               (is (= ["config.edn" "providers.edn" "hooks.edn" ".env" "harness.db"]
+                      (mapv :name (:files (:home reply)))))
+               (is (true? (:present? (first (filter #(= ".env" (:name %))
+                                                    (:files (:home reply))))))
+                   "the file the key comes from is on the list, and only its presence is")))
+
+           (testing "editing config.edn is visible on the NEXT call, with no restart"
+             ;; The ticket's sharpest acceptance, and it is the same question the
+             ;; store's namespace asks from the other end: config is files, read
+             ;; fresh -- never a start-up snapshot and never a database row.
+             (spit config (pr-str {:provider :beta :model "beta-plain"
+                                   :reasoning-effort "high"})
+                   :encoding "UTF-8")
+             (let [reply (parse)]
+               (is (= "beta" (:provider reply)) "the by-name choice moved")
+               (is (= "https://beta/v1" (:base-url reply)) "and so did the endpoint it carries")
+               (is (= "high" (:reasoning-effort reply)))
+               (is (= "config" (:provider (:tiers reply)))
+                   "and the tier report follows the file rather than a cached answer")))
+
+           (testing "a configuration that cannot be resolved is a 400 with the reason"
+             ;; A half-edited config.edn is how a person meets this in practice,
+             ;; and the sentence is what the panel will be showing.
+             (spit config (pr-str {:provider :nope}) :encoding "UTF-8")
+             (let [resp  (settings)
+                   reply (parse)]
+               (is (= 400 (.statusCode resp)))
+               (is (str/includes? (:error reply) "no provider named"))))
+
+           (testing "and a config.edn that is not there says so by path"
+             (io/delete-file config true)
+             (let [resp (settings)]
+               (is (= 400 (.statusCode resp)))
+               (is (str/includes? (:error (read-json resp)) "config.edn not found"))))
+
+           (testing "only GET is served -- this route has no effect to POST"
+             (is (= 405 (.statusCode (api-call 8116 :post "/api/settings" "{}")))))))
+      (finally (restore!)))))
+
 (deftest the-retired-logs-directory-is-invisible-three-ways
   ;; Ticket 03's other half: `~/.clj-harness/logs/` retires. NOT imported, NOT
   ;; migrated, NOT migrated away -- the bytes stay exactly where they are, and

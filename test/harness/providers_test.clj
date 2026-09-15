@@ -955,3 +955,241 @@
                         {:model "alpha-vision-free" :reasoning-effort "high"}))
               "the second change's override is the first one plus the new patch"))
         (finally (providers/set-override! "t-ch2" nil))))))
+
+;; ------------------------------------------------------------------ settings
+
+(def ^:private sentinel
+  "A value shaped like a real API key and recognisable anywhere it turns up. The
+  settings tests put it in BOTH places a key can come from (a home's .env and a
+  real environment variable) and then search the whole rendered answer for it: a
+  secret that leaks as a length, a prefix or a digest is still a leak, and only
+  searching for the string catches the ones nobody thought of."
+  "sk-or-v1-SENTINEL-DO-NOT-PUBLISH-9f3c2a")
+
+(defn- with-dotenv [contents f]
+  (let [f*  (home/dotenv-file)
+        old (when (.exists f*) (slurp f* :encoding "UTF-8"))]
+    (try
+      (if (nil? contents)
+        (io/delete-file f* true)
+        (spit f* contents :encoding "UTF-8"))
+      (f)
+      (finally
+        (if (nil? old) (io/delete-file f* true) (spit f* old :encoding "UTF-8"))))))
+
+(defn- fresh-home
+  "A home of this test's OWN, containing exactly CONFIG and PROVIDERS and nothing
+  else -- then point harness.home at it for the duration of F.
+
+  The shared runner home will not do for these tests: the settings answer reports
+  WHICH FILES EXIST, and by the time this namespace runs, the store and whatever
+  else earlier namespaces left are sitting in it. A test whose claim is 'this home
+  has no store' has to own its home."
+  [config providers f]
+  (let [dir (io/file (System/getProperty "java.io.tmpdir")
+                     (str "harness-settings-" (System/nanoTime)))]
+    (.mkdirs dir)
+    (when config (spit (io/file dir "config.edn") config :encoding "UTF-8"))
+    (when providers (spit (io/file dir "providers.edn") providers :encoding "UTF-8"))
+    (with-redefs [home/root (constantly (str dir))]
+      (f dir))))
+
+(defn- settings->json
+  "providers/settings rendered exactly the way the http edge renders it, parsed
+  back -- so a test reads the same bytes a browser would. Keywords arrive as
+  strings here, because that is what crosses the wire."
+  [thread-id]
+  (let [s (providers/settings thread-id)]
+    (json/read-str (json/write-str (providers/wire s (keys s))) :key-fn keyword)))
+
+(deftest settings-answers-the-live-configuration-without-ever-the-key
+  ;; The read-only panel's whole contract: what is in force, where each choice
+  ;; came from, where the key WOULD be read from -- and the key itself, absent
+  ;; from every byte of the rendered answer.
+  (fresh-home (cfg :alpha :reasoning-effort "low") reg
+    (fn [_]
+      (with-dotenv (str "HARNESS_API_KEY=" sentinel "\n")
+        (fn []
+          (try
+            (let [s      (providers/settings "st-1")
+                  body   (json/write-str (providers/wire s (keys s)))
+                  parsed (json/read-str body :key-fn keyword)]
+
+              (testing "the resolved configuration is in the answer"
+                (is (= "alpha-large" (:model parsed)) "the provider's own default model")
+                (is (= "alpha" (:provider parsed)))
+                (is (= "https://alpha/v1" (:base-url parsed)))
+                (is (= "low" (:reasoning-effort parsed)))
+                (is (= ["image" "text"] (:input parsed))
+                    "modality sets render as sorted string vectors, like every other wire shape"))
+
+              (testing "and every knob says which tier chose it"
+                (is (= {:provider "config" :model "catalog" :reasoning-effort "config"}
+                       (:tiers parsed))
+                    ":catalog is the honest answer for a model nobody named"))
+
+              (testing "the session's own tier is credited when it is the one that moved"
+                (providers/set-override! "st-1" {:model "alpha-small"})
+                (let [s2 (settings->json "st-1")]
+                  (is (= "alpha-small" (:model s2)))
+                  (is (= "session" (:model (:tiers s2))))
+                  (is (= "config" (:provider (:tiers s2))) "and the vendor is still config's")))
+
+              (testing "a vendor switch credits the session AND re-attributes the model"
+                ;; The model a tier named is dropped when it switches vendor (see
+                ;; fold-selection), so what ends up in force is the new entry's
+                ;; default -- chosen by nobody, which the panel has to say rather
+                ;; than credit to a tier that no longer has a say.
+                (providers/set-override! "st-1" {:provider :beta})
+                (let [s3 (providers/settings "st-1")]
+                  (is (= "beta-plain" (:model s3)))
+                  (is (= :session (:provider (:tiers s3))))
+                  (is (= :catalog (:model (:tiers s3))))))
+
+              (testing "the key is reported as presence and origin, and NOTHING else"
+                (is (= {:present? true :source "env-file"} (:key parsed))
+                    "the .env wins over the environment, which is api-key's own precedence")
+                (is (not (contains? parsed :api-key))
+                    "and no field is named after the secret at all"))
+
+              (testing "a string search of the WHOLE body does not find it"
+                (is (not (str/includes? body sentinel)))
+                (is (not (str/includes? body (subs sentinel 0 12)))
+                    "not even the prefix: a partially redacted key is still a leak")
+                (is (not (str/includes? body (str (count sentinel))))
+                    "and not its length either")))
+              (finally
+                (providers/set-override! "st-1" nil))))))))
+
+(deftest settings-answers-what-this-home-is-made-of-and-writes-nothing
+  ;; The rest of the panel: the root, which rule produced it, and which files are
+  ;; there. "Read-only" is held by looking -- no store appears, and every file's
+  ;; bytes and mtime are what they were.
+  (fresh-home (cfg :alpha) reg
+    (fn [dir]
+      (let [facts  (fn []
+                     (into {} (for [f (file-seq dir) :when (.isFile ^java.io.File f)]
+                                [(.getName ^java.io.File f)
+                                 [(.length ^java.io.File f) (.lastModified ^java.io.File f)]])))
+            before (facts)]
+        (dotimes [_ 3] (providers/settings "st-ro"))
+        (testing "asking wrote nothing"
+          (is (= before (facts)))
+          (is (not (.exists (home/db-file)))
+              "and asking the configuration a question did not create the store"))
+        (let [parsed (settings->json "st-ro")
+              rows   (:files (:home parsed))
+              row    (fn [n] (first (filter (fn [f] (= n (:name f))) rows)))]
+          (testing "the root is named, with the rule that produced it"
+            (is (= (str dir) (:path (:home parsed))))
+            (is (= "override" (:origin (:home parsed)))
+                "this suite runs under the runner's root override, and the panel
+                says so rather than calling it a default -- which is exactly the
+                honesty the field exists for. The other two rules are covered by
+                the fresh-JVM test below, where neither is bound."))
+          (testing "every file this home is made of is listed, present or not"
+            (is (= ["config.edn" "providers.edn" "hooks.edn" ".env" "harness.db"]
+                   (mapv :name rows)))
+            (is (true?  (:present? (row "config.edn"))))
+            (is (true?  (:present? (row "providers.edn"))) "this home has a catalog")
+            (is (false? (:present? (row "hooks.edn"))) "and no hooks file")
+            (is (false? (:present? (row ".env"))))
+            (is (false? (:present? (row "harness.db")))
+                "the store is a file this home MAY have, not one it does")))))))
+
+(deftest settings-rereads-the-config-every-time
+  ;; The one place a person can SEE the "configuration is files, read fresh"
+  ;; discipline. It is the same question the store asks from the other end:
+  ;; opening harness.db must not read config.edn, and this must not read the store.
+  (fresh-home (cfg :alpha) reg
+    (fn [_]
+      (is (= "alpha-large" (:model (providers/settings "st-r"))))
+      (spit (home/config-file) (cfg :beta) :encoding "UTF-8")
+      (let [after (providers/settings "st-r")]
+        (is (= :beta (:provider after)) "the file's new content is what is in force")
+        (is (= "beta-plain" (:model after)) "including the model it brought with it"))
+      (spit (home/config-file) (pr-str {:provider :alpha :reasoning-effort "high"})
+            :encoding "UTF-8")
+      (is (= "high" (:reasoning-effort (providers/settings "st-r")))
+          "and a second edit is visible too -- nothing is cached between calls")
+      (testing "the panel's own answer changes with it, tiers and all"
+        (let [parsed (settings->json "st-r")]
+          (is (= "alpha" (:provider parsed)))
+          (is (= "config" (:reasoning-effort (:tiers parsed)))
+              "the knob the newer file names is still config's doing"))))))
+
+(deftest settings-refuses-a-configuration-it-cannot-resolve-by-name
+  ;; A half-edited config.edn is the ordinary way a person meets this, and the
+  ;; reason is what the panel shows: "no provider named :nope; the registry
+  ;; defines [...]" is worth more than an empty panel.
+  (fresh-home (cfg :nope) reg
+    (fn [_]
+      (let [e (try (providers/settings "st-bad") nil (catch Exception ex ex))]
+        (is (some? e) "an unresolvable configuration fails rather than answering")
+        (is (str/includes? (ex-message e) "no provider named")))
+      (testing "and so does a config.edn that is not there at all"
+        (io/delete-file (home/config-file) true)
+        (let [e (try (providers/settings "st-bad") nil (catch Exception ex ex))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) "config.edn not found")))))))
+
+(defn- spawn-child
+  "Run FORM in a NEW JVM and return its combined output. DIR is handed over as
+  CLJ_HARNESS_HOME when non-nil, and USER-HOME as the -Duser.home property --
+  which is the only way to exercise the DEFAULT root rule without reading or
+  writing the developer's real ~/.clj-harness.
+
+  A real second process is required for both facts these children report: a JVM
+  reads its environment once, at startup, so System/getenv cannot be moved from
+  inside a test."
+  [dir user-home env form]
+  (let [args (cond-> ["clojure"]
+               user-home (into [(str "-J-Duser.home=" user-home)])
+               true      (into ["-M" "-e" form]))
+        pb   (doto (ProcessBuilder. ^java.util.List (vec args))
+               (.directory (io/file (System/getProperty "user.dir")))
+               (.redirectErrorStream true))]
+    (when dir (.put (.environment pb) "CLJ_HARNESS_HOME" (.getAbsolutePath (io/file dir))))
+    (when (nil? dir) (.remove (.environment pb) "CLJ_HARNESS_HOME"))
+    (when env (.put (.environment pb) "HARNESS_API_KEY" env))
+    (when (nil? env) (.remove (.environment pb) "HARNESS_API_KEY"))
+    (let [p   (.start pb)
+          out (slurp (.getInputStream p) :encoding "UTF-8")]
+      (when-not (.waitFor p 120 java.util.concurrent.TimeUnit/SECONDS)
+        (.destroyForcibly p))
+      out)))
+
+(def ^:private report
+  "(require (quote [harness.home :as h]) (quote [harness.providers :as p]))
+   (let [s (p/settings nil)] (prn {:root (h/root) :origin (:origin (:home s)) :key (:key s)}))")
+
+(deftest the-root-rule-and-the-key-source-are-each-reported-truthfully
+  ;; Two facts, and the second source of each needs a process whose environment
+  ;; and user.home this JVM cannot change: the environment variable for the root
+  ;; and the key, and the DEFAULT root -- which is only reachable when
+  ;; CLJ_HARNESS_HOME is absent, so the child is given a user.home of its own
+  ;; rather than being pointed at the developer's real home.
+  (let [env-home (io/file (System/getProperty "java.io.tmpdir")
+                          (str "harness-settings-env-" (System/nanoTime)))
+        def-user (io/file (System/getProperty "java.io.tmpdir")
+                          (str "harness-settings-user-" (System/nanoTime)))
+        def-home (io/file def-user ".clj-harness")]
+    (doseq [d [(io/file env-home) def-home]] (.mkdirs d))
+    (doseq [d [env-home def-home]]
+      (spit (io/file d "config.edn") (cfg :alpha) :encoding "UTF-8")
+      (spit (io/file d "providers.edn") reg :encoding "UTF-8"))
+
+    (testing "with CLJ_HARNESS_HOME set, that is the rule named -- and the key
+              comes from the environment because that home has no .env"
+      (let [out (spawn-child env-home nil sentinel report)]
+        (is (str/includes? out ":environment") out)
+        (is (str/includes? out (str (.getAbsolutePath env-home))) out)
+        (is (not (str/includes? out sentinel)) "and the key's VALUE is printed nowhere")
+        (is (not (str/includes? out (subs sentinel 0 12))) out)))
+
+    (testing "with no CLJ_HARNESS_HOME, the default rule is named"
+      (let [out (spawn-child nil (.getAbsolutePath def-user) nil report)]
+        (is (str/includes? out ":default") out)
+        (is (str/includes? out (str (.getAbsolutePath def-home))) out)
+        (is (str/includes? out ":present? false")
+            "and a home with neither .env nor the variable reports no key at all")))))
