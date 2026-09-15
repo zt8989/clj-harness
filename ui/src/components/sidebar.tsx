@@ -683,7 +683,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 ///
 /// The row carries THREE hits: the row itself, which selects the project and
 /// folds it; a new-session button; and a "more" button that appears on hover and
-/// opens the menu holding "Remove project…". The last two are SIBLINGS of the
+/// opens the menu holding "Remove". The last two are SIBLINGS of the
 /// row rather than children of it, for the reason this file's header gives: a
 /// trigger nested in the row would fold the folder open every time somebody
 /// reached for it.
@@ -882,7 +882,15 @@ const ProjectSection: FC<{
               onSelect={() => setConfirming(true)}
             >
               <FolderMinusIcon data-slot="sidebar-project-remove-icon" />
-              Remove project…
+              {/* ONE WORD, BECAUSE THE MENU IS ONLY AS WIDE AS ITS TRIGGER.
+                  `DropdownMenuContent` is `w-(--radix-dropdown-menu-trigger-width)
+                  min-w-32`, and this trigger is a 24px icon button -- so the menu
+                  is 128px wide and the content clips its overflow. "Remove
+                  project…" did not fit and wrapped onto two lines inside a
+                  one-line row. What this menu offers, in a menu that is about a
+                  project, needs no qualifier; the dialog it opens says the rest,
+                  at a width that has room for it. */}
+              Remove
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
