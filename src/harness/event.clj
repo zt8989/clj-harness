@@ -22,17 +22,20 @@
 
 (defn tool-pre-execute
   "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool,
-  :disabled, :missing-args, :hook-blocked, :needs-approval, :approved, or
-  :vetoed. :disabled is a session's switch: the tool exists and is on offer, but
-  this session turned its availability off, so the call is refused outright --
-  never parked, never executed. :hook-blocked is the user's own rulebook saying
-  no: a PreToolUse hook exited 2, the tool does NOT run, and the hook's stderr is
-  what the model reads. :needs-approval parks the call for a human decision: it
-  does not execute, and its :tool/post-execute still closes this transit of the
-  seam immediately. A decided call crosses the seam a SECOND time -- :approved
-  executes it, :vetoed answers it without executing -- so one toolCallId can
-  carry two pre-execute lines; read them in time order. MISSING names the absent
-  required arguments on :missing-args."
+  :unserved, :disabled, :missing-args, :hook-blocked, :needs-approval, :approved,
+  or :vetoed. :disabled is a session's switch: the tool exists and is on offer,
+  but this session turned its availability off, so the call is refused outright
+  -- never parked, never executed. :unserved is the editing mode's subtraction:
+  the tool exists and is registered, but this session's editing mode serves the
+  OTHER editing toolset, so the call is refused by name with the substitute and
+  the config key that switches back (see harness.editing). :hook-blocked is the
+  user's own rulebook saying no: a PreToolUse hook exited 2, the tool does NOT
+  run, and the hook's stderr is what the model reads. :needs-approval parks the
+  call for a human decision: it does not execute, and its :tool/post-execute
+  still closes this transit of the seam immediately. A decided call crosses the
+  seam a SECOND time -- :approved executes it, :vetoed answers it without
+  executing -- so one toolCallId can carry two pre-execute lines; read them in
+  time order. MISSING names the absent required arguments on :missing-args."
   [id name outcome missing]
   {:type :tool/pre-execute :id id :name name :outcome outcome :missing missing})
 

@@ -36,6 +36,7 @@
     harness.providers-test
     harness.project-test
     harness.editing-test
+    harness.editing-mode-tools-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

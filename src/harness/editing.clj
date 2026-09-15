@@ -168,3 +168,82 @@
      (check-known-keys! ls)
      (check-values! merged origin)
      merged)))
+
+;; ------------------------------------------------- which tools the mode serves
+
+;; TWO IMPLEMENTATIONS, TWO TOOLSETS, AND ONE PLACE THAT DECIDES. A session is
+;; served ONE editing toolset, never both: the two hand the model different
+;; workspaces (an exact `old_string` versus a per-line anchor), and a model that
+;; can see both will reach for whichever it recognises first -- after which the
+;; file is being edited by two schemes whose bookkeeping disagrees.
+;;
+;; THIS OVERTURNS tool-toggles' "a tool never disappears from a toolset", and the
+;; overturning is PAID FOR here rather than assumed. That ruling's argument was
+;; that a model which cannot see a capability reads its absence as "this does not
+;; exist" and goes looking for a way around it. The answer is that the absence is
+;; never silent: a call to an unserved name is refused BY NAME, and the refusal
+;; says what this session edits with instead and which harness.edn key switches
+;; back. So the model learns the capability exists, learns what replaced it, and
+;; learns how to get it -- which is more than the visible-but-refused version
+;; ever told it.
+;;
+;; A tool named in NEITHER family belongs to no editing implementation and is
+;; served always (bash, read, write, eval, hooks...). Membership is by tool NAME
+;; and the table is data, so the mechanism has no per-tool code: adding an
+;; anchor-mode tool is adding a name here.
+
+(def families
+  "Editing mode -> the tool NAMES it is served by, plus the phrases a refusal
+  needs. `:edits-by` says what this mode's editing is, in the form the refusal
+  reads out loud ('this session edits by anchor'); `:label` names the OTHER
+  mode's tool as a thing rather than a command; `:substitute` names the tool to
+  reach for instead. Kept beside the names rather than derived, because a message
+  assembled from parts that live in three places is how an error ends up telling
+  the reader to do something that does not work."
+  {:str-replace {:tools      #{"edit"}
+                 :edits-by   "an exact old_string"
+                 :label      "the exact-string editor"
+                 :substitute "edit"}
+   :hashline    {:tools      #{"replace" "insert" "anchor_grep" "undo_last_replace"}
+                 :edits-by   "anchor"
+                 :label      "the anchor-based editor"
+                 :substitute "replace"}})
+
+
+(def ^:private family-of
+  "Tool NAME -> the editing mode it belongs to. Derived from `families`, which is
+  the only place a tool's allegiance is declared."
+  (into {} (for [[mode {:keys [tools]}] families, n tools] [n mode])))
+
+(def ^:private config-key-phrase
+  ":editing {:mode %s} in harness.edn")
+
+(defn served?
+  "Is tool NAME served in THREAD-ID's session? True for a tool that belongs to no
+  editing implementation (ask `family-of`) and for one belonging to the mode in
+  force; false for the other mode's tools, which is what keeps a session's
+  toolset down to ONE editing scheme.
+
+  The mode is resolved per call, so a session that changes its harness.edn changes
+  its toolset on the next ask -- there is no cache to invalidate and no restart to
+  perform."
+  [thread-id name]
+  (let [family (get family-of name)]
+    (or (nil? family) (= family (:mode (editing-mode thread-id))))))
+
+(defn unserved-message
+  "What the model is told when it calls a tool this session's editing mode does
+  not serve. It answers three questions in one sentence each: which capability
+  this is, what replaced it, and how to get it back. Never 'unknown tool' -- the
+  tool exists and is a real way to edit files; it is simply not this session's
+  way, and saying otherwise would send the model hunting for a workaround to a
+  restriction that is one config line deep."
+  [thread-id name]
+  (let [mode  (:mode (editing-mode thread-id))
+        other (if (= mode :hashline) :str-replace :hashline)]
+    (str name " is not served in this session: this session edits by "
+         (get-in families [mode :edits-by])
+         ", and " name " is " (get-in families [other :label]) "."
+         " Use " (get-in families [other :substitute]) " instead."
+         " To switch, write " (format config-key-phrase (pr-str other))
+         ".")))

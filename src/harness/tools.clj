@@ -37,6 +37,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [harness.editing :as editing]
             [harness.event :as ev]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
@@ -271,14 +272,31 @@
 
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
-  effective toolset (base overlaid with its session additions/removals)."
+  effective toolset (base overlaid with its session additions/removals).
+
+  THE EDITING MODE SUBTRACTS FROM THIS LIST, and it is the only thing that does.
+  A session is served ONE editing toolset -- the mode's -- so the other mode's
+  tools never reach the model. Everything else stays in, including tools this
+  session has switched OFF: availability is enforced per call at the execution
+  seam, not by omission, and a model that cannot see a switched-off tool would
+  read its absence as 'this does not exist'.
+
+  That distinction is worth keeping straight, because the mode's subtraction
+  looks like the same trick. It is not, and the difference is what the model
+  learns: a disabled tool is VISIBLE and its calls are refused, while an unserved
+  tool is absent from the list and its calls are refused by name with the
+  substitute and the config key to switch (harness.editing/unserved-message).
+  Either way nobody is left guessing -- which is the property both mechanisms are
+  actually for."
   ([] (specs nil))
   ([thread-id]
    (mapv (fn [[n t]] {:type "function"
                       :function {:name n
                                  :description (:description t)
                                  :parameters (:parameters t)}})
-         (sort-by key (effective-tools thread-id)))))
+         (sort-by key (into {}
+                            (filter (fn [[n _]] (editing/served? thread-id n))
+                                    (effective-tools thread-id)))))))
 
 ;; -------------------------------------------------------------- the built-ins
 
@@ -450,12 +468,20 @@
   this session, lands outside the project directory and the configuration
   home). The reason rides the parked record, so the human deciding -- and any
   reader of the audit trail -- can tell a declared-approval call from a fence
-  catch without re-deriving either."
+  catch without re-deriving either.
+
+  A call that names NO PATH is not a fence case, whatever else it is. The fence
+  is a question about a path, and asking it about a missing one would answer with
+  an exception from deep inside java.io rather than with the useful fact -- that
+  the argument is absent, which the missing-arguments check says a line later.
+  Reading 'no path' as 'not out of bounds' keeps that check reachable, which is
+  what a call with no arguments should be told."
   [tool name thread-id parsed]
   (cond
     (:requires-approval tool)                       :tool-declares
     (session-approval-required? thread-id name) :session-asks
     (and (:fence-paths tool)
+         (some? (:path parsed))
          (project/out-of-bounds? thread-id (:path parsed)))
     :out-of-bounds
     :else nil))
@@ -492,41 +518,64 @@
   "What the model is told when it calls a tool this session switched off. Like a
   veto, this is information rather than a run failure -- and it says DISABLED,
   never unknown: the tool exists and is on offer, so calling its absence a lie
-  would only send the model hunting for a workaround."
-  [name]
+  would only send the model hunting for a workaround.
+
+  When the session's editing mode does not serve NAME either, the last sentence
+  is not offered, because it would be a false promise: re-enabling a tool the
+  mode subtracts changes nothing about the next call. Both facts are true at
+  once, so both are stated -- the refusal is the session's own switch AND the
+  mode's subtraction, and a reader who acts on only half of that will try the
+  same call again and be told the same thing."
+  [thread-id name]
   (str "disabled in this session: " name
-       " is switched off. Re-enable it with (harness.tools/session-enable!"
-       " harness.tools/*thread-id* \"" name "\")."))
+       " is switched off."
+       (if (editing/served? thread-id name)
+         (str " Re-enable it with (harness.tools/session-enable!"
+              " harness.tools/*thread-id* \"" name "\").")
+         (str " Re-enabling it will not make it run, either: "
+              (editing/unserved-message thread-id name)))))
 
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
-                           :disabled, :missing-args (with the missing names),
-                           :hook-blocked, :needs-approval, :approved, or :vetoed
+                           :unserved, :disabled, :missing-args (with the missing
+                           names), :hook-blocked, :needs-approval, :approved, or
+                           :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
-  A call that never passes pre-execute (unknown tool, disabled tool, missing
-  arguments) skips the :tool/execute phase, but its :tool/post-execute still
-  arrives -- the lifecycle is always closed. :disabled is checked before
-  approval: a tool this session switched off is refused outright, never parked.
+  A call that never passes pre-execute (unknown tool, unserved tool, disabled
+  tool, missing arguments) skips the :tool/execute phase, but its
+  :tool/post-execute still arrives -- the lifecycle is always closed. :disabled
+  is checked before approval: a tool this session switched off is refused
+  outright, never parked.
 
   EVERY CALL ENDS IN ONE OF THREE OUTCOMES, and the order they are decided in is
   the point of the whole pre phase:
 
-    ALLOW     it runs. Nothing refused it: no switch, no missing argument, no
-              gate, no rule that says a human has to look.
+    ALLOW     it runs. Nothing refused it: no switch, no mode subtraction, no
+              missing argument, no gate, no rule that says a human has to look.
     BLOCK     it does not run, and the reason goes back to the model as the
-              call's result -- a veto, a hook's exit 2, a disabled switch. The
-              run carries on; the model gets to try something else.
+              call's result -- a veto, a hook's exit 2, a disabled switch, a mode
+              that does not serve this tool. The run carries on; the model gets
+              to try something else.
     SUSPEND   it does not run YET: the run ends on an interrupt and the call is
               the human's until they answer. Nothing executes, no :tool/result
               is emitted, and the tool message lands on the resume run.
 
   The decisions are taken in ONE order, first match wins (the cond below):
-    disabled -> missing args -> approval rule -> PreToolUse gate
+    disabled -> mode -> missing args -> approval rule -> PreToolUse gate
   The gate is LAST because everything before it is this harness deciding, and a
   gate should not be asked about a call that cannot run anyway.
+
+  `disabled` BEFORE `mode` is the order tool-toggles asked for and it says
+  something real: a switch the session threw itself outranks a policy it
+  inherited, so the answer a doubly-refused call gets names the thing the caller
+  can undo. It does not hide the second refusal -- disabled-message states both
+  when both are true. `mode` is second and still ahead of the argument and
+  approval checks, because a call this session does not serve is not going to
+  run whatever its arguments look like, and there is no reason to park it for a
+  human or to read the file it names.
 
   A call that must be suspended asks TWO things before it bothers a person. It
   first takes any decision already on the parked record -- the resume path --
@@ -599,7 +648,18 @@
              (session-disabled? thread-id name)
              (do (report (ev/tool-pre-execute id name :disabled []))
                  (report (ev/tool-post-execute id name))
-                 {:content (disabled-message name) :error true})
+                 {:content (disabled-message thread-id name) :error true})
+
+             ;; ...then the editing mode's subtraction, which is the only other
+             ;; thing that can take a registered tool out of a session's set. It
+             ;; is still AHEAD of the argument and approval checks: a call this
+             ;; session does not serve will not run whatever its arguments are,
+             ;; and parking it would ask a person about a call that could not
+             ;; have executed anyway.
+             (not (editing/served? thread-id name))
+             (do (report (ev/tool-pre-execute id name :unserved []))
+                 (report (ev/tool-post-execute id name))
+                 {:content (editing/unserved-message thread-id name) :error true})
 
              (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))
