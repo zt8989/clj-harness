@@ -480,3 +480,43 @@
             "the project's :approval replaced the user's -- the allow is gone"))
       (finally
         (io/delete-file uf true)))))
+
+(deftest reading-a-skills-reference-file-does-not-park
+  ;; End to end through the seam that actually decides: a skill body says "read
+  ;; references/x.md", that path resolves next to the skill and outside the
+  ;; project, and a park per reference file would make loading a skill useless.
+  (let [proj      (str (System/getProperty "java.io.tmpdir")
+                       "/harness-approval-proj-" (System/nanoTime))
+        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))
+        ref-file  (str (io/file skill-dir "references" "x.md"))
+        elsewhere (str (System/getProperty "java.io.tmpdir")
+                       "/harness-approval-elsewhere-" (System/nanoTime))]
+    (.mkdirs (io/file proj))
+    (.mkdirs (io/file (io/file skill-dir "references")))
+    (.mkdirs (io/file elsewhere))
+    (spit ref-file "reference material\n" :encoding "UTF-8")
+    (spit (str (io/file elsewhere "x.md")) "not a skill file\n" :encoding "UTF-8")
+    (project/bind! "thr-skill-fence" proj)
+    (try
+      (testing "a read of a file under a skill root runs without parking"
+        (let [{:keys [history]}
+              (run (fake/scripted [{:content ""
+                                    :tool-calls [(call "c1" "read" {:path ref-file})]}
+                                   {:content "ok"}])
+                   [] "thr-skill-fence")
+              results (filter #(= "tool" (:role %)) history)]
+          (is (= 1 (count results)))
+          (is (str/includes? (:content (first results)) "reference material"))
+          (is (not (str/includes? (:content (first results)) "vetoed")))))
+
+      (testing "and the same read one directory over still parks"
+        (let [{:keys [history]}
+              (run (fake/scripted [{:content ""
+                                    :tool-calls [(call "c2" "read" {:path (str (io/file elsewhere "x.md"))})]}
+                                   {:content "ok"}])
+                   [] "thr-skill-fence")]
+          ;; Parked calls are left unanswered -- no tool message at all.
+          (is (empty? (filter #(= "tool" (:role %)) history)))))
+      (finally
+        (project/bind! "thr-skill-fence" nil)
+        (doseq [d [proj skill-dir elsewhere]] (io/delete-file (io/file d) true))))))

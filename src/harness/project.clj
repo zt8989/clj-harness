@@ -223,7 +223,18 @@
       the project's);
     - :approval {:allow [..]} -- extra paths the project declares free of
       the fence, each resolved for the session like any tool path (relative
-      to the project root, absolute passes through).
+      to the project root, absolute passes through);
+    - the session's SKILL ROOTS (skill-roots, below), for the same reason the
+      configuration home is here and with the same status: they are not project
+      files, they are what the host and the human installed for their agents. A
+      skill's body routinely says 'read references/x.md', and a path like that
+      resolves NEXT TO THE SKILL -- so without this every reference file would
+      park a human, which would make loading a skill useless.
+
+      Note what is NOT here and must not be: the CONTENT of an instruction file.
+      An AGENTS.md that says 'read ~/notes/x.md' does not make ~/notes/x.md
+      allowed. The roots are places the harness was configured to look, not
+      capabilities a document can grant itself.
 
   The config is read fresh per call, so harness.edn edits take effect on the
   next tool call. The fence engages ONLY when a binding exists: an unbound
@@ -239,5 +250,6 @@
            resolved (resolve-path thread-id path)
            allowed  (concat (when-not strict [dir])
                             [(home/root)]
+                            (skill-roots thread-id)
                             (map #(resolve-path thread-id %) (or allow [])))]
        (not (some #(under? resolved %) allowed))))))
