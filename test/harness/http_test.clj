@@ -986,6 +986,14 @@
 
 (def ^:private listing-dir-2 (str listing-dir "-2"))
 
+(def ^:private archive-dir
+  ;; Its own pair as well -- see listing-dir's note. This test asserts on the whole
+  ;; session list of a project, so a shared directory would make it pass or fail
+  ;; depending on which test ran first.
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-archive"))
+
+(def ^:private archive-dir-2 (str archive-dir "-2"))
+
 (deftest the-projects-listing-joins-the-store-with-the-disk
   ;; Ticket 04's data source. The sidebar cannot be built from either side alone:
   ;; the store says which projects and sessions exist and which are archived, the
@@ -1082,6 +1090,124 @@
          (is (some #(= "listing-unbound" (:threadId %))
                    (json/read-str (.body (api-call 8110 :get "/api/threads" nil)) :key-fn keyword))
              "and the raw tree view still shows it, so nothing is hidden, only unowned"))))))
+
+(deftest archiving-a-session-is-a-row-write-and-never-a-file-write
+  ;; Ticket 06. The whole claim is a NEGATIVE one -- archiving touches no log --
+  ;; so the assertions are the two disk numbers, taken around the call. A route
+  ;; that helpfully wrote an audit line (the habit every other mutating route here
+  ;; has) would still flip the flag and still answer 200; only those two numbers
+  ;; catch it.
+  ;;
+  ;; Its own directory pair, for the same reason the listing test has one: this
+  ;; asserts on the WHOLE content of a project's session list, so a shared
+  ;; directory would make it pass or fail depending on which test ran first.
+  (doseq [d [archive-dir archive-dir-2]]
+    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
+    (.mkdirs (io/file d)))
+  (with-server
+   8114
+   {"arch-a" script "arch-b" script "arch-other" script}
+   (fn []
+     (let [archive! (fn [tid flag]
+                      (api-call 8114 :post (str "/api/threads/" tid "/archive")
+                                (json/write-str {:archived flag})))
+           bind!    (fn [tid dir]
+                      (api-call 8114 :post "/api/project"
+                                (json/write-str {:threadId tid :dir dir})))
+           sessions (fn [dir]
+                      (->> (json/read-str (.body (api-call 8114 :get "/api/projects" nil))
+                                          :key-fn keyword)
+                           (filter #(= (.getCanonicalPath (io/file dir)) (:path %)))
+                           first
+                           :sessions))
+           row      (fn [dir tid]
+                      (first (filter #(= tid (:threadId %)) (sessions dir))))
+           flag     (fn [dir tid] (:archived (row dir tid)))
+           ;; [bytes mtime] by IDENTITY, like the test runner's own isolation
+           ;; check: a rewrite that kept the length would still move the mtime,
+           ;; and vice versa.
+           snap     (fn [tid]
+                      (let [f (log-file-for tid)]
+                        [(.length f) (.lastModified f)]))]
+       (bind! "arch-a" archive-dir)
+       (bind! "arch-b" archive-dir)
+       (bind! "arch-other" archive-dir-2)
+       (post-run 8114 "arch-a")
+       (Thread/sleep 20)                         ; so a file write would move the mtime
+
+       (testing "the flag round-trips through the listing"
+         (is (false? (flag archive-dir "arch-a")) "a fresh session is not archived")
+         (let [body (read-json (archive! "arch-a" true))]
+           (is (= "arch-a" (:threadId body)))
+           (is (true? (:archived body)) "the answer is the value now on disk"))
+         (is (true? (flag archive-dir "arch-a")))
+         (is (= 200 (.statusCode (archive! "arch-a" true)))
+             "idempotent: asking twice is not an error")
+         (is (true? (flag archive-dir "arch-a")))
+         (is (false? (:archived (read-json (archive! "arch-a" false))))
+             "and the direction goes back")
+         (is (false? (flag archive-dir "arch-a"))))
+
+       (testing "one session's flag is its own -- neither of the other two moves"
+         (is (false? (flag archive-dir "arch-b")) "the sibling in the SAME project")
+         (is (false? (flag archive-dir-2 "arch-other")) "and a session in ANOTHER project")
+         (archive! "arch-other" true)
+         (is (true? (flag archive-dir-2 "arch-other")))
+         (archive! "arch-other" false)
+         (is (false? (flag archive-dir-2 "arch-other")))
+         (is (false? (flag archive-dir "arch-b"))
+             "and none of that reached back into the first project"))
+
+       (testing "the log is byte-for-byte and mtime-for-mtime what it was"
+         (let [before (snap "arch-a")]
+           (archive! "arch-a" true)
+           (archive! "arch-a" false)
+           (archive! "arch-a" true)
+           (is (= before (snap "arch-a"))
+               "three writes to the ROW, and not one to the file")))
+
+       (testing "an archived session still lists -- flagged -- with its disk facts"
+         ;; The server does not decide what to DO with the flag: grouping is the
+         ;; screen's business, and a listing that dropped archived rows would make
+         ;; 'where did my session go' a question with no server-side answer.
+         (let [r (row archive-dir "arch-a")]
+           (is (true? (:archived r)))
+           (is (pos? (:bytes r)))
+           (is (= (.length (log-file-for "arch-a")) (:bytes r)))))
+
+       (testing "archiving a session with no log at all is legal"
+         ;; The flag is a property of the CONVERSATION, not of the file -- and a
+         ;; session created on the sidebar has not run yet, so it has no file.
+         (let [f (log-file-for "arch-b")]
+           (is (.delete f) "the file is removed by hand")
+           (is (true? (:archived (read-json (archive! "arch-b" true))))))
+         (is (true? (flag archive-dir "arch-b")))
+         (archive! "arch-b" false))
+
+       (testing "a session this home has never heard of is refused BY NAME"
+         (let [resp (archive! "no-such-session-here" true)
+               body (read-json resp)]
+           (is (= 404 (.statusCode resp)) "nothing to archive is not a malformed request")
+           (is (str/includes? (:error body) "no-such-session-here")
+               "and the reason names the id the caller asked about")))
+
+       (testing "a body that carries no boolean is a 400, not a silent no-op"
+         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+                                           (json/write-str {:archived "yes"})))))
+         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+                                           (json/write-str {})))))
+         (is (= 400 (.statusCode (api-call 8114 :post "/api/threads/arch-a/archive"
+                                           "{not json")))))
+
+       (testing "GET is refused -- this route has an effect"
+         (is (= 405 (.statusCode (api-call 8114 :get "/api/threads/arch-a/archive" nil)))))
+
+       (testing "and the archive route does not swallow the rebuild route beside it"
+         ;; The two share their path SHAPE. A matcher that answered for the wrong
+         ;; verb would show up as a rebuild that archived something.
+         (let [body (read-json (api-call 8114 :post "/api/threads/arch-a/rebuild" ""))]
+           (is (seq (:messages body)) "the rebuild route still rebuilds")
+           (is (true? (flag archive-dir "arch-a")) "and archiving never changed it")))))))
 
 (deftest the-model-endpoint-answers-what-this-session-can-send
   ;; The capability endpoint. A client asks what this session is served by and

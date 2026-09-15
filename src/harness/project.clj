@@ -235,13 +235,56 @@
   the column's 0/1 -- Clojure's `boolean` says 0 is true, and a flag that means
   the opposite of what it looks like is the kind of bug that survives review.
 
-  Reading the flag is this namespace's; SETTING it is the archive ticket's
-  business, so there is deliberately no `archive!` here yet."
+  Reading AND setting the flag live here: both are statements about the same
+  column, and a reader in another namespace would have to re-state the 0/1
+  conversion to write it. See `archive!`."
   []
   (mapv (fn [row] (-> row
                       (assoc :archived? (pos? (long (:archived row))))
                       (dissoc :archived)))
         (db/select "SELECT id, project_id, path, archived, created_at FROM sessions ORDER BY created_at, id")))
+
+(defn archive!
+  "Mark THREAD-ID's session archived (true) or not (false), and answer the flag
+  coming back out of the store -- which is the value now on disk, not the one
+  that was asked for.
+
+  ONE VERB FOR BOTH DIRECTIONS, because they are one state change: archive and
+  unarchive differ only in the boolean, and two functions would be two chances
+  for the two directions to drift. It is IDEMPOTENT for the same reason --
+  archiving an already-archived session answers true and changes nothing, so a
+  double click or a retried request is not an error anybody has to handle.
+
+  NOTHING HERE TOUCHES THE LOG, and this is the one state change in this
+  namespace where a caller could plausibly get that wrong: every other verb
+  leaves marks on purpose (a bind lands an audit line through the HTTP edge), and
+  the habit of writing one would be exactly backwards here. The archive ticket's
+  acceptance pins the jsonl's byte count AND mtime before and after, so an audit
+  line would fail the very assertion that proves archiving is not a deletion. The
+  flag is in the store because that is what the store is for.
+
+  A SESSION THIS HOME HAS NEVER HEARD OF IS REFUSED BY NAME, rather than answered
+  cheerfully: '0 rows updated' plus a true-looking flag would be a lie about a
+  conversation that does not exist here, and the sidebar needs a reason it can
+  show on the row the click landed on. An UNBOUND session (a row with no project)
+  is accepted -- the flag is a property of the conversation, and one that is
+  bound later keeps it.
+
+  No audit line, and no timestamp either: an archive is a rewrite of a row, and
+  `sessions` carries no `archived_at` because nothing in this feature reads one
+  back."
+  [thread-id archived?]
+  (let [updated (db/with-transaction
+                  (fn [^Connection c]
+                    (db/execute! c "UPDATE sessions SET archived = ? WHERE id = ?"
+                                 (if archived? 1 0) thread-id)))]
+    (when (zero? (long updated))
+      (throw (ex-info (str "no session " thread-id " in this home, so there is nothing to "
+                           (if archived? "archive" "unarchive")
+                           " -- the sidebar only draws rows the store knows about, so this id"
+                           " was either never created here or belongs to another home")
+                      {:thread-id thread-id :reason :no-such-session})))
+    (boolean archived?)))
 
 (defn cwd-changed
   "The CwdChanged hook-event FACTS for a binding change: BEFORE (the previous

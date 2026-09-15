@@ -54,6 +54,37 @@
 // feature rests on: every session belongs to a project, so the first one needs a
 // project to exist first.
 //
+// ------------------------------------------------------------- archiving's shape
+//
+// ARCHIVING IS A FLAG, NOT A DELETION, and the whole of the UI's part is to draw
+// the flag as a place: archived sessions move out of the project's list and into
+// an "Archived" group at its bottom, which is COLLAPSED BY DEFAULT -- the point of
+// archiving is to stop being asked about a conversation, so the group must not
+// take the same room the sessions did. Expanding it is one click, and every row in
+// it offers the way back.
+//
+// THE EMPTY GROUP IS NOT DRAWN. A project with nothing archived shows no
+// "Archived" header at all: an empty container is furniture, and furniture that
+// appears and disappears is worse than furniture that simply is not there.
+//
+// ARCHIVING THE CURRENT SESSION IS ALLOWED, AND IT MOVES YOU. The forbidden state
+// is the one where the page is open on a session the sidebar has just filed away
+// -- that is the kind of wrong-looking-right state nobody notices until they type
+// into it. So archiving what you are reading switches to the project's most
+// recent UNARCHIVED session, and when the project has none left, it does what
+// "New task" does: mints an id, binds it to this project and switches to it. That
+// is the honest landing place, because it is exactly where pressing New task
+// would have left you -- on an empty conversation in the project you are standing
+// in. It is also why there is no "you archived the last one" special case: the
+// rule is "never be reading an archived session", and that rule needs no
+// exception.
+//
+// A RUN IN FLIGHT REFUSES IT. Archiving the current session requires switching
+// away from it, and a switch mid-run is refused everywhere else in this file --
+// so the archive is refused BEFORE it is written, rather than written and then
+// left unable to move. A flag written while the page cannot leave is precisely
+// the state the paragraph above forbids.
+//
 // ------------------------------------------------------------------- refusals
 //
 // Two things are refused while a run is in flight, and both are shown where the
@@ -65,6 +96,9 @@
 import { useCallback, useEffect, useState, type FC } from "react";
 import type { AssistantRuntime } from "@assistant-ui/react";
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  ChevronRightIcon,
   FolderIcon,
   FolderPlusIcon,
   FolderSearchIcon,
@@ -73,7 +107,10 @@ import {
   SquarePenIcon,
 } from "lucide-react";
 
-import { ThreadListItem } from "@/components/assistant-ui/elements/thread-list.aui";
+import {
+  ThreadListItem,
+  ThreadListItemAction,
+} from "@/components/assistant-ui/elements/thread-list.aui";
 import { Button } from "@/components/ui/button";
 import {
   addProject,
@@ -81,6 +118,7 @@ import {
   listProjects,
   pickFolder,
   projectName,
+  setArchived,
   type ProjectSummary,
   type SessionSummary,
 } from "@/lib/projects";
@@ -170,6 +208,52 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       // names two files -- arrives as the rejection's message and is shown
       // as-is under the row that asked for it. The other rows were never
       // touched, and a wrapper's paraphrase would be one more thing to distrust.
+      setRowError({
+        id: threadId,
+        message: failure instanceof Error ? failure.message : String(failure),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /// Archive a session, or bring it back. Refused while a run is in flight ONLY
+  /// when it would have to move the page -- see the header: archiving a session
+  /// you are NOT reading is a pure row write from the UI's point of view, and a
+  /// running conversation elsewhere has no say in it.
+  const archive = async (
+    project: ProjectSummary,
+    threadId: string,
+    archived: boolean,
+  ): Promise<void> => {
+    if (busy) return;
+    const movesThePage = archived && threadId === currentThreadId;
+    if (movesThePage && runInProgress(runtime)) {
+      refuse(threadId, RUN_IN_PROGRESS_REFUSAL);
+      return;
+    }
+    setBusy(true);
+    setRowError(null);
+    try {
+      await setArchived(threadId, archived);
+      if (movesThePage) {
+        // "Never be reading an archived session": the project's most recent
+        // unarchived session, which is the first one the server listed (the
+        // listing is newest-first), or -- when there is none -- the same three
+        // steps the New task button runs.
+        const next = project.sessions.find((s) => !s.archived && s.threadId !== threadId);
+        if (next !== undefined) {
+          setPinned(project.path);
+          await runtime.threads.switchToThread(next.threadId);
+        } else {
+          const id = crypto.randomUUID();
+          await bindThread(id, project.path);
+          setPinned(project.path);
+          await runtime.threads.switchToThread(id);
+        }
+      }
+      await refresh();
+    } catch (failure: unknown) {
       setRowError({
         id: threadId,
         message: failure instanceof Error ? failure.message : String(failure),
@@ -314,6 +398,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             running={running}
             rowError={rowError}
             onOpen={(threadId) => void openThread(threadId, project.path)}
+            onArchive={(threadId, archived) => void archive(project, threadId, archived)}
           />
         ))}
 
@@ -492,7 +577,8 @@ const AddProject: FC<{
 };
 
 /// One project and the sessions in it: the project's row, then its conversations
-/// in last-activity order (the server's order -- see `newest-first`).
+/// in last-activity order (the server's order -- see `newest-first`), then -- when
+/// there are any -- an Archived group collapsed by default.
 const ProjectSection: FC<{
   project: ProjectSummary;
   currentThreadId: string;
@@ -502,18 +588,83 @@ const ProjectSection: FC<{
   running: boolean;
   rowError: RowError;
   onOpen: (threadId: string) => void;
-}> = ({ project, currentThreadId, selected, onSelect, busy, running, rowError, onOpen }) => {
-  // If the session on screen is in this project, the project opens with it. A
-  // collapsed project hiding the conversation being read would make the highlight
-  // invisible exactly when it matters most.
-  const holdsCurrent = project.sessions.some((s) => s.threadId === currentThreadId);
+  onArchive: (threadId: string, archived: boolean) => void;
+}> = ({
+  project,
+  currentThreadId,
+  selected,
+  onSelect,
+  busy,
+  running,
+  rowError,
+  onOpen,
+  onArchive,
+}) => {
+  // If the session on screen is in this project -- among the ones the project
+  // draws in its main list -- the project opens with it. A collapsed project
+  // hiding the conversation being read would make the highlight invisible exactly
+  // when it matters most. An ARCHIVED current session is not this case: it is the
+  // Archived group's business below, because that is the list it is drawn in.
+  const holdsCurrent = project.sessions.some(
+    (s) => !s.archived && s.threadId === currentThreadId,
+  );
   const [open, setOpen] = useState(true);
   useEffect(() => {
     if (holdsCurrent) setOpen(true);
   }, [holdsCurrent]);
+  // The Archived group's own state, and it does NOT follow the project's: a
+  // session you filed away is one you asked not to be shown, so nothing here
+  // reopens it for you. It does open itself when the CURRENT session is in there
+  // -- which happens either because it was archived from elsewhere (another
+  // window, the API) or because you deliberately opened a row from this group.
+  // Either way, hiding it would be hiding the answer to "what am I reading".
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  useEffect(() => {
+    if (project.sessions.some((s) => s.archived && s.threadId === currentThreadId)) {
+      setArchivedOpen(true);
+    }
+  }, [project.sessions, currentThreadId]);
 
   const name = projectName(project.path);
   const sessions: readonly SessionSummary[] = project.sessions;
+  // The split is the client's because the SERVER sends both, flagged and in one
+  // order -- see the endpoint's docstring: which group to draw them in is the
+  // screen's decision, and a listing that dropped them would make "where did my
+  // session go" a question with no server-side answer.
+  const active = sessions.filter((s) => !s.archived);
+  const archived = sessions.filter((s) => s.archived);
+
+  const row = (session: SessionSummary) => (
+    <ThreadListItem
+      key={session.threadId}
+      session={session}
+      current={session.threadId === currentThreadId}
+      busy={busy}
+      running={running && session.threadId === currentThreadId}
+      onOpen={() => onOpen(session.threadId)}
+      error={rowError?.id === session.threadId ? rowError.message : null}
+      actions={
+        <ThreadListItemAction
+          data-slot="thread-list-item-archive"
+          data-archived={session.archived ? "" : undefined}
+          disabled={busy}
+          title={
+            session.archived
+              ? "Unarchive — put this session back with the project's other sessions"
+              : "Archive — keep this session and its log, but move it out of the way"
+          }
+          onClick={() => onArchive(session.threadId, !session.archived)}
+        >
+          {session.archived ? (
+            <ArchiveRestoreIcon className="size-3.5" />
+          ) : (
+            <ArchiveIcon className="size-3.5" />
+          )}
+          <span className="sr-only">{session.archived ? "Unarchive" : "Archive"}</span>
+        </ThreadListItemAction>
+      }
+    />
+  );
 
   return (
     <section
@@ -552,30 +703,55 @@ const ProjectSection: FC<{
         >
           {name}
         </span>
+        {/* The count is of the sessions you can SEE, which is the unarchived
+            ones: a badge that counted the archived too would make "3" mean
+            "3 rows once you go looking for them". */}
         <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-          {sessions.length}
+          {active.length}
         </span>
       </button>
 
       {open && (
-        <ul data-slot="sidebar-sessions" className="flex flex-col gap-0.5">
-          {sessions.map((session: SessionSummary) => (
-            <ThreadListItem
-              key={session.threadId}
-              session={session}
-              current={session.threadId === currentThreadId}
-              busy={busy}
-              running={running && session.threadId === currentThreadId}
-              onOpen={() => onOpen(session.threadId)}
-              error={rowError?.id === session.threadId ? rowError.message : null}
-            />
-          ))}
-          {sessions.length === 0 && (
-            <li className="text-muted-foreground px-2.5 py-1 text-xs">
-              No sessions in this project yet.
-            </li>
+        <>
+          <ul data-slot="sidebar-sessions" className="flex flex-col gap-0.5">
+            {active.map(row)}
+            {active.length === 0 && (
+              <li className="text-muted-foreground px-2.5 py-1 text-xs">
+                {archived.length === 0
+                  ? "No sessions in this project yet."
+                  : "Every session here is archived."}
+              </li>
+            )}
+          </ul>
+
+          {/* The whole group is one conditional: a project with nothing archived
+              draws no header, no chevron and no empty list. */}
+          {archived.length > 0 && (
+            <div data-slot="sidebar-archived" className="mt-0.5">
+              <button
+                type="button"
+                data-slot="sidebar-archived-trigger"
+                aria-expanded={archivedOpen}
+                onClick={() => setArchivedOpen((was) => !was)}
+                className="text-muted-foreground hover:bg-muted/60 hover:text-foreground flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-start text-xs"
+              >
+                <ChevronRightIcon
+                  aria-hidden
+                  className={
+                    archivedOpen ? "size-3.5 shrink-0 rotate-90" : "size-3.5 shrink-0"
+                  }
+                />
+                <span className="flex-1">Archived</span>
+                <span className="shrink-0 tabular-nums">{archived.length}</span>
+              </button>
+              {archivedOpen && (
+                <ul data-slot="sidebar-archived-sessions" className="flex flex-col gap-0.5">
+                  {archived.map(row)}
+                </ul>
+              )}
+            </div>
           )}
-        </ul>
+        </>
       )}
     </section>
   );

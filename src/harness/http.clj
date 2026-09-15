@@ -704,19 +704,83 @@
                                                (get by-project id)))}))
                         (project/projects)))))
 
-(defn- thread-rebuild-stem
-  "/api/threads/<stem>/rebuild -> <stem>, else nil. The stem is the sanitized
-  FILE stem -- the same id /api/threads lists -- so a client can copy it
-  straight from the listing. Percent-decoding happens after the path split, so
-  an id that contains an encoded slash cannot jump out of its path segment."
+(def ^:private thread-verbs
+  "The verbs this edge serves under /api/threads/<stem>/. A CLOSED SET, and that
+  is load-bearing rather than tidiness: the handler dispatches on this shape
+  BEFORE the run endpoint, so a path that merely looks like it -- and names a verb
+  nobody serves -- has to fall through to the ordinary AG-UI handler rather than
+  be answered 405 by a route that was never about it."
+  #{"rebuild" "archive"})
+
+(defn- thread-verb-route
+  "/api/threads/<stem>/<verb> -> {:verb .. :stem ..} when the path has exactly
+  that shape and names a verb from `thread-verbs`, else nil.
+
+  ONE MATCHER FOR BOTH VERBS, because they share a shape and the shape is the
+  fiddly part: a second copy would be a second chance to disagree about how many
+  segments there are, where the stem sits, or whether decoding happens before or
+  after the split. It happens AFTER -- an id containing an encoded slash is
+  decoded into a path segment, never allowed to jump out of one.
+
+  The stem is the SESSION's id, which is also its log's file stem: /api/projects
+  hands those out and the sidebar copies the one it has."
   [uri]
   (let [parts (str/split (str uri) #"/")]
     (when (and (= 5 (count parts))
                (= "api" (nth parts 1))
                (= "threads" (nth parts 2))
-               (= "rebuild" (nth parts 4))
+               (contains? thread-verbs (nth parts 4))
                (seq (nth parts 3)))
-      (java.net.URLDecoder/decode (nth parts 3) "UTF-8"))))
+      {:verb (nth parts 4)
+       :stem (java.net.URLDecoder/decode (nth parts 3) "UTF-8")})))
+
+(defn- archive-post
+  "POST /api/threads/<stem>/archive {archived: true|false} -- set one session's
+  archive flag. Answers {:threadId .. :archived <bool>}.
+
+  ONE ROUTE, BOTH DIRECTIONS, because archiving and unarchiving are one column
+  write that differ in a boolean; two routes would be two chances for the two
+  halves to drift apart. The path names the action, the body names the direction.
+
+  NOTHING IS LOCATED AND NOTHING IS READ, which is the one place this route
+  differs from its rebuild sibling in a way worth stating: a rebuild has to find
+  the log because it reconstructs a conversation FROM it, while an archive is a
+  rewrite of a row and never opens the file. The stem is the session's id, the
+  store is the only authority on whether it exists, and a session whose log was
+  moved or deleted by hand is still archiv-able -- deliberately, because the flag
+  describes the conversation, not the file. That also means an archive works for
+  a session that has never run and therefore has no file at all.
+
+  NO AUDIT LINE, AND THAT IS THE POINT. Every other mutating route here writes one
+  because it happens to a log; an archive must not, because it must leave the log
+  BYTE-FOR-BYTE and mtime-for-mtime untouched, and the ticket's acceptance asserts
+  exactly those two numbers. Writing a line would fail the assertion that proves
+  archiving is not a deletion.
+
+  An id this home has never seen is a NAMED 404: the sidebar needs a reason for
+  the row the click landed on, and 'we archived it' about a session that does not
+  exist here would be a lie the client cannot detect. The 400 is reserved for a
+  body that is not valid JSON or that carries no boolean at all -- the difference
+  between 'I cannot understand you' and 'that thing is not here'."
+  [req stem]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                     (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed
+        archived (:archived ok)]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (boolean? archived))
+      (api-response 400 {:error "archived must be true or false"})
+
+      :else
+      (let [written (try {:ok (project/archive! stem archived)}
+                         (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error written)]
+          (api-response 404 {:error error :threadId stem})
+          (api-response 200 {:threadId stem :archived (:ok written)}))))))
 
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
@@ -864,11 +928,18 @@
       :post (add-project-post req)
       (api-response 405 {:error "method not allowed"}))
 
-    (and (= :post (:request-method req)) (thread-rebuild-stem (:uri req)))
-    (rebuild-post req (thread-rebuild-stem (:uri req)))
-
     :else
-    (handle-run req)))
+    (if-some [{:keys [verb stem]} (thread-verb-route (:uri req))]
+      ;; The verb-carrying routes: one shape, two verbs, and every one of them is
+      ;; a POST because every one of them has an effect. A GET on this shape is
+      ;; answered 405 HERE rather than falling through to the run endpoint --
+      ;; which is where the pre-verb dispatch used to send it, and where it became
+      ;; a 500 from a body that was never there.
+      (case [(:request-method req) verb]
+        [:post "rebuild"] (rebuild-post req stem)
+        [:post "archive"] (archive-post req stem)
+        (api-response 405 {:error "method not allowed"}))
+      (handle-run req))))
 
 ;; ---------------------------------------------------------------------- start
 

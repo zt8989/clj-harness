@@ -117,3 +117,26 @@ export async function bindThread(threadId: string, dir: string): Promise<string>
   const body = (await res.json()) as { dir: string };
   return body.dir;
 }
+
+/// Archive THREAD-ID's session, or bring it back (POST /api/threads/<id>/archive).
+/// One call for both directions, because they are one column write -- the path
+/// names the action, the body names the direction.
+///
+/// NOTHING HERE TOUCHES THE LOG, and that is the whole promise of archiving: the
+/// flag lives in the store, the jsonl is left byte-for-byte and mtime-for-mtime
+/// alone. So this call is small and cheap, and a client must not be tempted to
+/// follow it with anything file-shaped.
+///
+/// The answer is the flag as the STORE now holds it, echoed back rather than
+/// assumed -- see `project/archive!` for why the value coming out, not the one
+/// going in, is what a caller should believe.
+export async function setArchived(threadId: string, archived: boolean): Promise<boolean> {
+  const res = await fetch(`${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ archived }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  const body = (await res.json()) as { archived: boolean };
+  return body.archived;
+}
