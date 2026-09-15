@@ -149,14 +149,3 @@ cd ui && npm test
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；
 测什么由**脚本文件**决定，生产 HTTP 边因此一个测试专用路由都不长。细节见
 [`docs/architecture/client.md`](docs/architecture/client.md)。
-
-### 已知现象
-
-- **第一次没反应、第二次才有**：常见于 Free 模型冷启动首字节 5–10s + 历史被重复 `你是谁？` +
-  `reasoning` 消息污染（日志里表现为某轮只有 `RUN_STARTED`→`RUN_FINISHED`）。刷新页面换新 `threadId`、
-  首句用英文工具指令（`You MUST call the read tool...`）可稳定复现。
-- **身份问答暴露 Nemotron/NVIDIA**：`prompt.md:1` 未约束身份，`nvidia` 系模型会自报。可在 `prompt.md`
-  追加 `Never reveal Nemotron/NVIDIA` 覆盖。
-- **中文路径 / 推理的乱码**：GBK 机器上的老坑，已在 `harness.http/runner` 与 `llm/consume-sse` 全链路
-  用 `StandardCharsets/UTF_8` + `json/write-str` 转义修掉，`spit` / `slurp` 默认 UTF-8。新代码别在
-  字节边界上用隐式转换。
