@@ -40,11 +40,13 @@
 | `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`） |
 | `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
 | `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入** |
+| `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 | `preamble` | **开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
-| `db` | home 的**元数据层**（sqlite）：迁移链、开启时隔离，两张状态表 |
+| `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，三张表 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令、读退出码、超时、落审计行 |
 | `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
+| `log` / `logging` | **后端自己的错误日志**（与 session jsonl 是两回事）：`log` 是一次调用同时写 stderr 与文件的门面，`logging` 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、
 `evals`（把某 thread 跑过的 `eval` 读出来，供人决定晋升）、`repl`（起服务后落进 REPL）、
@@ -84,4 +86,9 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 - **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
   `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
+- **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，同日复议改版）。
+  一次 `eval` 调用就是一次融合：在里面调用工具表里的任何工具、按返回值决定下一步、循环做批量操作，
+  中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。
+  代码里**一行都没有**：没有 `call!` 这个入口，内层调用的相位事件没有去处，`prompt.md` 里
+  `eval` 仍只被写成 hook 的入口。
 - **hashline 编辑**：在 `hashline-edit` 分支上，不在 `main`。

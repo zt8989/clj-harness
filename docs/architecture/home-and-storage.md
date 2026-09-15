@@ -56,7 +56,11 @@
 两个事实在**写入侧**（`harness.http/log-dir-for`）合起来。读侧（`harness.replay`）只走文件系统、
 由调用方递目录进去——**这是「内核 run 中永不读自己的日志」在代码结构上的样子**。
 
-**旧版的 `~/.clj-harness/logs/` 退了役，而且不导入。** 那个平铺目录下的会话在本产品里**一律不可见**：
+**`~/.clj-harness/logs/` 现在住着另一样东西，别和上面那棵树混起来。** 它是**后端自己的
+运行日志**（`harness.log`，按日期与大小 rotate，见 `harness.logging`），不是会话日志：会话日志是
+`projects/<workspace>/<thread>.jsonl`，是**记录**；`logs/harness.log` 是**诊断**，没有任何会话读它，
+删掉也不会丢一段对话。旧版那种**平铺的会话** jsonl 也曾经住在这个目录名下，
+**那批退了役，而且不导入**。
 不迁移、不从文件名反推归属、不为了「看起来没丢」把它们塞进某个项目。理由在库与文件的分工里——文件名
 不含项目身份，自动迁移只能猜，而猜错的表现是一个会话**悄悄挂到别的项目下**，比看不见更难发现。
 字节和 mtime 一个都不动（它们只是不再是本产品的视图），要接着用就手动挪进 `projects/<workspace>/`。
@@ -105,7 +109,13 @@
 - **库不是日志索引**：jsonl 里的任何内容都不进库——没有消息表、没有全文索引、没有会话摘要。
 - 库也不镜像文件大小与 mtime：那是**记录**的属性，读的时候现问文件。
 
-### 两张表（schema version 2）
+### 三张表
+
+**第一张是记账的，不是状态的**：`schema_steps` 记这个库跑过哪些**具名**迁移步骤。它取代了
+`user_version` 作为判断依据——版本号是迁移链的**下标**，只对一条链有意义，而两个分支会各自在同一个
+下标追加步骤（`hashline-edit` 在下标 1 追加 `hashline-store`，main 在那里追加
+`sessions-remember-the-project-path`），于是同一个数字有了两个意思，而本机真 home 的库正是被其中一条链
+迁过之后，**另一条再也打不开**。`user_version` 还在写，但只是面包屑，没有任何代码从它做决定。
 
 ```sql
 CREATE TABLE projects (
@@ -120,7 +130,11 @@ CREATE TABLE sessions (
     archived   INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     CHECK ((project_id IS NULL) = (path IS NULL)),
-    last_project_path TEXT);                -- v2 加的
+    last_project_path TEXT);                -- 由 sessions-remember-the-project-path 加
+
+CREATE TABLE schema_steps (
+    name       TEXT PRIMARY KEY NOT NULL,   -- 步骤的**名字**即身份，改名字等于重跑
+    applied_at INTEGER NOT NULL);
 ```
 
 **两个表各答一个问题，一个装身份、一个装拼写**：`projects.canonical_path` 是**身份**
