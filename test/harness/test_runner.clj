@@ -37,6 +37,8 @@
     harness.project-test
     harness.editing-test
     harness.editing-mode-tools-test
+    harness.hashline-anchors-test
+    harness.hashline-store-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

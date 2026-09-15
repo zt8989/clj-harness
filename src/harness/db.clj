@@ -430,6 +430,81 @@
                 WHERE project_id = old.id;
              END"))
 
+(defn- hashline-store
+  "Version 1 -> 2: what anchor-based editing has to remember between calls, and
+  between restarts.
+
+  FOUR TABLES, each a different question about the same idea -- a four-letter name
+  for a line (see harness.hashline.anchors):
+
+    hashline_snapshots  A FILE AS ONE SESSION LAST SAW IT: its whole-file
+                        checksum, its line count, and for each line the anchor
+                        that names it and the checksum it was named against.
+                        Keyed by (path, thread_id) -- see below.
+    hashline_ownership  WHICH ANCHORS A SESSION HAS OUT: anchor -> the one file
+                        that anchor names. This is what makes an anchor exclusive:
+                        minting walks past anything in here, and a stale or
+                        borrowed anchor is refused by looking it up.
+    hashline_sessions   WHERE A SESSION'S ANCHOR PROBE STANDS. The probe is the
+                        pool position the next mint walks from; keeping it means a
+                        session does not re-walk from its seed every time, and
+                        that a restart resumes where it left off.
+    hashline_undo       THE ONE EDIT THAT CAN BE TAKEN BACK, per file: the text
+                        before it, the encoding that text had, the anchors that
+                        named it, and the text it produced. Written by the edit,
+                        read by undo -- and cleared by `write`, the boundary where
+                        a file stops being the file the model was looking at.
+
+  WHY THE SNAPSHOT IS KEYED BY (path, thread_id) AND NOT BY PATH. Upstream keys it
+  by path, which reads naturally until you notice what the row holds: the anchors.
+  An anchor is minted for ONE session and is not a name another session may use,
+  so a snapshot keyed by path alone would hand session B the very anchors session
+  A is holding for that file, and B's edits would be addressed by names A owns.
+  Splitting the key is what makes 'two sessions read one file' two rows instead of
+  a race -- the cost is one duplicated file checksum per session.
+
+  WHY THE ANCHORS AND CHECKSUMS ARE JSON IN A COLUMN rather than a row per line. A
+  row per line is ten thousand rows for one large file, per session, and the
+  schema's own rule is that a table is a decision somebody has to make (see
+  harness.db-test). Each of these columns is ONE VALUE -- an array, written and
+  read whole, never queried by element -- so a table for them would buy nothing
+  and cost a row count proportional to every file the session has ever read.
+
+  THE COLUMN NAMES ARE CHOSEN AGAINST A REGEX. harness.db-test forbids any column
+  that looks like conversation content, and `prior_text`/`resulting_text` name
+  plainly what they hold -- the file's text, before and after -- where `content`
+  would both trip that guard and be vaguer about which text is meant. They are
+  state in the sense that decides it here: they are REWRITTEN on every edit, and
+  undo cannot exist without them."
+  [^Connection c]
+  (ddl! c "CREATE TABLE hashline_snapshots (
+              path           TEXT NOT NULL,
+              thread_id      TEXT NOT NULL,
+              file_checksum  TEXT NOT NULL,
+              line_count     INTEGER NOT NULL,
+              anchors        TEXT NOT NULL,
+              line_checksums TEXT NOT NULL,
+              updated_at     INTEGER NOT NULL,
+              PRIMARY KEY (path, thread_id))")
+  (ddl! c "CREATE TABLE hashline_ownership (
+              thread_id TEXT NOT NULL,
+              anchor    TEXT NOT NULL,
+              path      TEXT NOT NULL,
+              PRIMARY KEY (thread_id, anchor))")
+  (ddl! c "CREATE TABLE hashline_sessions (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              probe      INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL)")
+  (ddl! c "CREATE TABLE hashline_undo (
+              path           TEXT PRIMARY KEY NOT NULL,
+              prior_text     TEXT NOT NULL,
+              bom            INTEGER NOT NULL,
+              ending         TEXT NOT NULL,
+              anchors        TEXT NOT NULL,
+              resulting_text TEXT NOT NULL,
+              mode           INTEGER,
+              updated_at     INTEGER NOT NULL)"))
+
 (def migrations
   "The forward migration chain. (nth migrations i) takes the store from schema
   version i to i+1, and (count migrations) is the version this harness speaks.
@@ -453,7 +528,8 @@
   A test may pass its own chain as the first argument to migrate!,
   with-connection or with-transaction -- that is how the walk across several
   versions is exercised without waiting for the features that bring them."
-  [projects-and-sessions])
+  [projects-and-sessions
+   hashline-store])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."
