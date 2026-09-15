@@ -39,11 +39,17 @@
 
 | 状态 | 点 |
 |---|---|
-| **已接线（5）** | `SessionStart`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop` |
-| 已登记、无触发源（21） | `UserPromptSubmit`、`PermissionDenied`、`PostToolUseFailure`、`StopFailure`、`Notification`、`InstructionsLoaded`、`ConfigChange`、`CwdChanged`、`SessionEnd`、`FileChanged`、`Elicitation`、`ElicitationResult`、`PreCompact`、`PostCompact`、`SubagentStart/Stop`、`TeammateIdle`、`TaskCreated/Completed`、`WorktreeCreate/Remove` |
+| **已接线（6）** | `SessionStart`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`、`InstructionsLoaded` |
+| 已登记、无触发源（20） | `UserPromptSubmit`、`PermissionDenied`、`PostToolUseFailure`、`StopFailure`、`Notification`、`ConfigChange`、`CwdChanged`、`SessionEnd`、`FileChanged`、`Elicitation`、`ElicitationResult`、`PreCompact`、`PostCompact`、`SubagentStart/Stop`、`TeammateIdle`、`TaskCreated/Completed`、`WorktreeCreate/Remove` |
 
 **没有触发源的点永不触发——这是设计，不是遗漏。** 这就是为什么一个 P3 点的代价是一行数据，
 而不是一个接口。它们等各自的子系统（文件监视、上下文压缩、子代理、任务、worktree）落地时再接。
+
+`InstructionsLoaded` 是这套说法最近一次被兑现的例子：它自引擎落地起就声明着（`payload #{:path}`），
+触发源是一个指令文件被折进 run 的上下文——见
+[skills-and-instructions](skills-and-instructions.md#instructionsloaded-接线)。接线时撞出来的约束值得写在这里，
+因为它是**接线层面**的事而不是那个特征的事：run 作用域的 sink 由 http 边绑定，而折叠发生在第一条消息
+组装之前，所以那个 `binding` 必须包住 set-up 而不只是 run，否则这个点拿到 nil sink、永远静默。
 
 `EDN 键 ↔ 点的名字`由 `point-for` 一处对应（`:pre-tool-use` ↔ `"PreToolUse"`），
 payload 里带的与审计行里写的都是后者（CodeBuddy 的拼法，迁移心智零成本）。

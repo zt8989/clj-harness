@@ -49,7 +49,16 @@
 1. **项目目录本身**——除非项目的 `harness.edn` 写了 `:approval {:strict true}`（项目内也要审批）；
 2. **配置家**（读自己的 `config.edn` / `providers.edn` / `.env` 是围栏刻意留的自留地，
    **strict 不收紧它**——配置家是 harness 自己的地盘，不是项目的）；
-3. `:approval {:allow [..]}` 声明的额外路径，各自按工具路径的规矩解析（相对项目根）。
+3. **本会话的技能根**（`skill-roots`，默认 `<user-home>/.agents/skills` 与 `<项目>/.agents/skills`），
+   与配置家**同级、同一条理由**，`:approval {:strict true}` 同样收不走；
+4. `:approval {:allow [..]}` 声明的额外路径，各自按工具路径的规矩解析（相对项目根）。
+
+**技能根为什么在里面，而指令内容为什么不在。** 技能正文常写「读 `references/x.md`」，那个路径就落在
+技能目录里、项目目录之外——不放行的话每读一份参考文件都要人点一次批准，技能等于白装。
+反过来，**一份 AGENTS.md 里提到的路径照常停泊**：允许的是「配置里说过的根」，不是「某份文档说可以读的
+东西」——文档能给自己扩权是另一套安全故事。同一条边界还有一个推论：指令文件本身**不经过围栏**，
+它们是服务端读的，不是 `read` 工具调的。（`out-of-bounds?` 因此 require `harness.skills`，
+而 `skills` 不许反向 require `project`——那条环见 [skills-and-instructions](skills-and-instructions.md)。）
 
 几条性质：
 
@@ -71,8 +80,17 @@
 `.harness/harness.edn` 两级装配（用户级 + 项目级），逐键替换、每次现读、坏文件指名硬失败——
 详细规则见 [home-and-storage](home-and-storage.md#配置文件的两级装配)。
 
-`.harness/` 下的 `skills/`、`mcp/`、`hooks/` 子目录**留给各自的消费者**；
+`.harness/` 下的 `mcp/`、`hooks/` 子目录**留给各自的消费者**；
 `harness-config` 只认 `harness.edn` 一个文件（`hooks.edn` 由 `harness.hooks` 自己读）。
+
+**技能与指令不在 `.harness/` 下。** 它们的项目级位置是**宿主自己的约定**——`<项目>/.agents/skills/`
+与 `<项目>/AGENTS.md`——因为同一个技能目录要同时服务于在场的每个 agent，而不只是 clj-harness；
+`.harness/` 里放的仍然是「本产品的配置」。要改用别的路径就写 `:skills {:roots ..}` /
+`:instructions {:files ..}`，见 [skills-and-instructions](skills-and-instructions.md#配置skills-与-instructions)。
+
+`harness.project/skill-roots` 与 `preamble-files` 是这两个键的**会话级答案**：位置解析本身是纯函数
+（`(配置值, 项目目录)`，不查绑定），配对做在这里——只有 `project` 同时看得见配置读取、绑定、
+以及两个刻意的纯函数消费方。
 
 **注意这里源是混的**，而这是 home 的边界不是意外：**绑定来自库，配置来自文件**。
 状态被改写，配置被手编——所以改 `harness.edn` 仍然不需要重启，而这次调用任何一步都不写库。

@@ -29,12 +29,16 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 ~/.clj-harness/
 ├── config.edn        模型默认档：三个旋钮（每轮重读，可运行期编辑）
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读，可以不存在）
-├── harness.edn       用户级 harness 配置（可选；围栏的 allow / strict 在这）
+├── harness.edn       用户级 harness 配置（可选；围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
 ├── harness.db        sqlite：项目 / 会话归属 / 归档（home 的元数据层；将来 hashline 的锚点同库）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
+
+**这不是唯一的 floor。** 技能与指令读的是**宿主自己的约定位置**——`~/AGENTS.md` 与 `~/.agents/skills/`——
+它们在 **OS 家目录**下，**不跟随 `CLJ_HARNESS_HOME`**：搬家搬的是 harness 的配置，不是这台机器的家目录。
+把配置家目录挪到别处不该让另一批技能凭空消失（见「技能与指令」）。
 
 **库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记（将来还有
 hashline 的锚点）。日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的
@@ -69,6 +73,37 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 `providers.edn` / `hooks.edn` / `harness.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
 `.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
 键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。
+
+### 技能与指令（一场会话开场拿到什么）
+
+会话开场时，模型除了冻结的 `prompt.md`，还会拿到两样东西，**都从约定目录现读**：
+
+| | 默认位置 | 变成什么 |
+| --- | --- | --- |
+| 指令 | `<OS 家目录>/AGENTS.md`；绑定时再加 `<项目>/AGENTS.md` | 每个文件**一条 user 消息**，`<instructions path="…">…</instructions>` 包裹 |
+| 技能清单 | `<OS 家目录>/.agents/skills/*/SKILL.md`；绑定时再加 `<项目>/.agents/skills/*/SKILL.md` | **一条 user 消息**，`<skills>` 包裹，每技能一行 |
+| 技能正文 | 同上 | 模型调用 `skill` 后，`<skill name="…">` 包裹的 **user 消息**，插在加载它的那次工具结果之后 |
+
+**前端一个字都不出现**：这些消息**从不产生任何 AG-UI 帧**，客户端永远收不到它们——界面上只有一张普通的
+`skill` 工具卡。它们照旧写进 jsonl 的 `message` 行（模型看到了什么，日志就有什么）。
+
+两个键都写在 `harness.edn`（用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
+
+```edn
+{:instructions {:files ["AGENTS.md"]}          ; 只要项目那一份
+ :skills       {:roots ["/abs/skills" ".agents/skills"]}}
+```
+
+两键都**整表替换**默认值（不是追加），所以「只要项目那份」是写 `["AGENTS.md"]` 而不是别的；
+相对路径按工具路径的规矩解析（相对项目根）。改配置不需要重启——每次调用现读。
+
+**缺文件 / 空文件不注入那一条**，属于日常（多数项目没有 AGENTS.md，占位文件什么都没说）。**反过来，
+AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开始**：它是对这场会话的显式配置，与
+`config.edn` 同一族，静默跳过等于按没人写过的规矩跑。技能里坏掉一条则是**诊断而不是失败**——那份技能
+不进清单，但自省里看得见原因、被调用时得到同一句话；菜单上坏掉一项不该拖垮一场会话。
+
+只加载，不创作：不写技能、不装技能、不做授权。**内部怎么转、为什么这样设计、代价是什么**，见
+[`docs/architecture/skills-and-instructions.md`](docs/architecture/skills-and-instructions.md)。
 
 ### provider 与 model
 

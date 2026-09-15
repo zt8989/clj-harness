@@ -131,7 +131,7 @@
     ;; Sorted, so this doubles as a check that the session-configure tool is
     ;; registered like any other -- it is only special in being marked for
     ;; approval, which is a property of the tool, not of the list.
-    (is (= ["bash" "edit" "eval" "read" "session-configure" "write"] names))
+    (is (= ["bash" "edit" "eval" "read" "session-configure" "skill" "write"] names))
     (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project

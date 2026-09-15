@@ -305,3 +305,30 @@
     (testing "with no context nothing is appended"
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))
+
+(deftest opening-blocks-are-spliced-in-after-the-system-message
+  (let [blocks [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
+                {:role "user" :content "<skills>\n- t: t\n</skills>"}]]
+    (testing "they sit between the frozen prompt and the conversation"
+      (is (= ["system" "user" "user" "user"]
+             (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}]
+                                     "S" blocks nil))))
+      (is (= "S" (:content (first (ag/inbound [] "S" blocks nil))))))
+
+    (testing "and the per-run context still lands LAST, after them"
+      (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
+                             "S" blocks [{:description "repo" :value "x"}])]
+        (is (= "<skills>\n- t: t\n</skills>" (:content (nth sent 2))))
+        (is (= "- repo: x" (:content (last sent))))))
+
+    (testing "a client's own lead system message is still replaced, not displaced"
+      (let [sent (ag/inbound [{:role "system" :content "theirs"} {:role "user" :content "hi"}]
+                             "S" blocks nil)]
+        (is (= ["system" "user" "user" "user"] (mapv :role sent)))
+        (is (= "S" (:content (first sent))))))
+
+    (testing "no blocks: byte-for-byte what the three-arity produced before"
+      (let [msgs [{:id "u1" :role "user" :content "hi"}]
+            ctx  [{:description "repo" :value "x"}]]
+        (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" [] ctx)))
+        (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" nil ctx)))))))

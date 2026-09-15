@@ -1,6 +1,6 @@
 # 配置根与存储
 
-## 一个根，三层优先级
+## 配置根：一个根，三层优先级
 
 `harness.home/root` 每次现读（读环境变量很便宜），顺序：
 
@@ -12,13 +12,30 @@
 
 **唯一的例外是 `prompt.md`**：它留在仓库里，因为它是被 review 的代码资产，每次改动都需要 git 历史。
 
+## 第二层 floor：OS 家目录
+
+`harness.home/user-home` 是 `(System/getProperty "user.home")`，**它不跟随 `CLJ_HARNESS_HOME`，
+也不跟随任何配置**。住在那儿的是**宿主自己的约定文件**：`~/AGENTS.md` 与 `~/.agents/skills/`——
+与 ZCode / Claude 读的是同一份。
+
+**为什么是两层而不是一层。** 配置根是 harness 自己的地盘，`CLJ_HARNESS_HOME` 说的是「把这个产品的
+配置搬到别处」；把技能目录挂在它下面，等于「换一次配置路径就让另一批技能凭空消失」。两层的答案不同，
+所以它们是**兄弟而不是嵌套**。这条在测试缝上还有第二个后果：`*user-home-override*` 是与
+`*root-override*` 并列的独立绑定，把用户家目录放进配置根里会让它落进围栏的允许集，
+而「围栏放行哪些路径」正是围栏测试要问的问题——安排本身就会替它回答。
+
+`user-home` 与 `root` 一样**每次现读、不缓存**：测试夹具会在进程中途移动它，缓存了那个绑定就失效了。
+
+两个消费者，默认位置各一处（见 [skills-and-instructions](skills-and-instructions.md)）：
+`skills/roots` 取 `<user-home>/.agents/skills`，`preamble/instruction-files` 取 `<user-home>/AGENTS.md`。
+
 ## 家目录里有什么
 
 ```
 ~/.clj-harness/
 ├── config.edn        模型默认档（三个旋钮，每轮重读）
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读）
-├── harness.edn       用户级 harness 配置（围栏的 allow/strict 在这）
+├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
 ├── harness.db        sqlite：home 的元数据层
@@ -58,6 +75,13 @@
 
 **都不深合并、都不做并集**，理由相同：「实际会跑什么」应该在一个文件里读得出来，
 而不是从两个文件怎么嵌套里推。代价照旧的接受：项目只想加一条声明，得把它要的那些一起写出来。
+
+**`harness.edn` 还有一个方向更远的替换：`:skills {:roots ..}` 与 `:instructions {:files ..}`
+整表替换的是那两个半边的「内置默认」**——不是用户级对项目级，而是「配置说了什么」对「宿主约定位置」。
+写 `{:instructions {:files ["AGENTS.md"]}}` 的会话只读项目那一份，`<user-home>/AGENTS.md` 整个退出画面。
+空向量 `[]` 是合法的，意思就是「什么都不读」。两个键的段本身必须是 map：`{:skills 42}` 在问它要 `:roots`
+**之前**就指名失败，因为 `contains?` 撞上非 map 抛的是一句既不说键也不说文件的 JVM 错误。
+细节见 [skills-and-instructions](skills-and-instructions.md#配置skills-与-instructions)。
 
 纪律也是一致的：**缺失 = `{}`（不是错误），存在却坏 = 指名绝对路径硬失败**。
 一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别——而那个区别正是这些文件的全部意义。

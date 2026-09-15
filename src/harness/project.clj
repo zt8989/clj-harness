@@ -38,12 +38,20 @@
   answers it, and the shell runs in it: all of that is about this session's
   binding, and none of it should change because some other session bound the same
   directory through a different spelling. One column of each kind is what lets
-  both statements be true at once -- identity shared, spelling not."
+  both statements be true at once -- identity shared, spelling not.
+
+  WHAT A SESSION OPENS WITH is answered here too, for a structural reason rather
+  than a topical one: skill-roots and preamble-files pair a harness.edn value
+  with the session's binding, and this is the only namespace that can see the
+  config reader, the binding, and both of their (deliberately pure, deliberately
+  project-free) consumers."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.db :as db]
-            [harness.home :as home])
+            [harness.home :as home]
+            [harness.preamble :as preamble]
+            [harness.skills :as skills])
   (:import (java.io File IOException)
            (java.sql Connection)))
 
@@ -496,6 +504,36 @@
           (when-let [dir (binding-for thread-id)]
             (read-harness-edn (io/file dir ".harness" "harness.edn"))))))
 
+;; ------------------------------------------- what a session opens with
+;;
+;; THE COMPOSITION LIVES HERE, and this is the only namespace that can host it.
+;; Two questions -- "which directories hold this session's skills" and "which
+;; instruction files does it read" -- are each answered by a PURE function of
+;; (configured value, project directory), because the namespaces answering them
+;; must not require this one (see harness.skills, whose roots the fence needs).
+;; Somebody has to pair the config with the binding, and that somebody needs to
+;; see harness.edn, the binding, and both readers: only this namespace can.
+;;
+;; It is also the right home by subject matter -- harness.edn is where these keys
+;; come from, and this is the namespace that reads it.
+
+(defn skill-roots
+  "The skill directories THREAD-ID's session reads, in precedence order. The
+  session-facing answer: it does the pairing described above, so a model (or a
+  human, in the REPL) asks one question instead of three.
+
+  Read fresh on every call, like harness-config itself: editing harness.edn or
+  rebinding the project moves the roots on the next call, with no restart."
+  [thread-id]
+  (skills/roots (:skills (harness-config thread-id)) (binding-for thread-id)))
+
+(defn preamble-files
+  "The instruction files THREAD-ID's session reads, in the order they are
+  presented. The same pairing as skill-roots, for the other half."
+  [thread-id]
+  (preamble/instruction-files (:instructions (harness-config thread-id))
+                              (binding-for thread-id)))
+
 (defn out-of-bounds?
   "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every
   directory a bound session may touch. The allowed set:
@@ -509,7 +547,18 @@
       the project's);
     - :approval {:allow [..]} -- extra paths the project declares free of
       the fence, each resolved for the session like any tool path (relative
-      to the project root, absolute passes through).
+      to the project root, absolute passes through);
+    - the session's SKILL ROOTS (skill-roots, below), for the same reason the
+      configuration home is here and with the same status: they are not project
+      files, they are what the host and the human installed for their agents. A
+      skill's body routinely says 'read references/x.md', and a path like that
+      resolves NEXT TO THE SKILL -- so without this every reference file would
+      park a human, which would make loading a skill useless.
+
+      Note what is NOT here and must not be: the CONTENT of an instruction file.
+      An AGENTS.md that says 'read ~/notes/x.md' does not make ~/notes/x.md
+      allowed. The roots are places the harness was configured to look, not
+      capabilities a document can grant itself.
 
   The config is read fresh per call, so harness.edn edits take effect on the
   next tool call. The fence engages ONLY when a binding exists: an unbound
@@ -525,5 +574,6 @@
            resolved (resolve-path thread-id path)
            allowed  (concat (when-not strict [dir])
                             [(home/root)]
+                            (skill-roots thread-id)
                             (map #(resolve-path thread-id %) (or allow [])))]
        (not (some #(under? resolved %) allowed))))))

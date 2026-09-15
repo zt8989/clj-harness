@@ -29,10 +29,20 @@
 
   CLJ_HARNESS_HOME must be set by the SPAWNER: the config root is read live, but
   a JVM reads its environment once, at startup. A test run must never write into
-  the developer's real ~/.clj-harness."
+  the developer's real ~/.clj-harness.
+
+  THE OS HOME IS PINNED HERE TOO, to a SIBLING of that root. The host's
+  convention files live there -- ~/AGENTS.md and the skills under
+  ~/.agents/skills -- and both are folded into every run's opening messages. A
+  suite that read the developer's real home would therefore depend on one
+  person's dotfiles: their AGENTS.md would ride every request, and their skill
+  list would appear in every catalog. There is no environment variable for it
+  (it is the JVM's own user.home), so the override is set here, by the process
+  that is already the test's backend."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [harness.fake :as fake]
+            [harness.home :as home]
             [harness.http :as http]
             [harness.providers :as providers]))
 
@@ -75,9 +85,24 @@
 (defn- arg [args name]
   (some (fn [[k v]] (when (= name k) v)) (partition 2 1 args)))
 
+(defn- isolate-os-home!
+  "Point the host's convention directory at a fresh temp dir for this process,
+  so a run's opening blocks come from a home this test made rather than the
+  developer's. Sibling, never nested: the configuration root's own isolation is
+  the spawner's (CLJ_HARNESS_HOME), and putting the user home inside it would
+  place it within the fence's allowed set, quietly answering a question the
+  fence tests ask."
+  []
+  (let [dir (io/file (System/getProperty "java.io.tmpdir")
+                     (str "clj-harness-e2e-home-" (System/nanoTime)))]
+    (.mkdirs dir)
+    (alter-var-root #'home/*user-home-override* (constantly (str dir)))
+    (str dir)))
+
 (defn -main [& args]
   (let [script-file (or (arg args "--script-file")
                         (throw (ex-info "missing --script-file" {})))]
+    (isolate-os-home!)
     (install-pin! script-file)
     (let [stop (http/start! {:port (Integer/parseInt (str (or (arg args "--port") "0")))})]
       (println (str "PRINT-READY {:port " (:local-port (meta stop)) "}"))

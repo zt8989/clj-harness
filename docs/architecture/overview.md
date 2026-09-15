@@ -11,19 +11,21 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
   ├─ log!  "input"        收到的 RunAgentInput 原样
   │
   ├─ providers/current-provider    三档解析（config → 会话 → 本次请求），挂上 api-key
-  ├─ ag_ui/inbound                 客户端的消息 → provider 形状；context 变尾部 user 消息
+  ├─ preamble/gather + messages     开场块：指令文件（每个折叠一次 InstructionsLoaded）+ 技能清单
+  ├─ ag_ui/inbound                 客户端的消息 → provider 形状；开场块拼在 system 之后，context 变尾部 user 消息
   ├─ resume-decisions              客户端的 resume → 内核要重放的决定（未知 interrupt ⇒ 直接失败）
   │
-  ├─ binding hook/*sink*           run 作用域的 hook sink（线程 + 审计写入者），见 hooks
+  ├─ binding hook/*sink*           run 作用域的 hook sink（线程 + 审计写入者），**包住 set-up**，见 edge
   │   ├─ SessionStart（仅本会话第一次 run）
   │   ├─ log! "provider/init"      首次 run 落一行
   │   ├─ log! "approval/decided"   本次 resume 带的决定
   │   ├─ log! "provider/changed"   上一轮工具改过的 provider 档（outbox 排空）
-  │   └─ log! "message" × n        冻结的 prompt + 每条入站消息，逐字
+  │   └─ log! "message" × n        冻结的 prompt + 开场块 + 每条入站消息，逐字
   │
   ├─ loop/run-chan                 内核跑起来了；下面全是「事件 → 帧 + 审计行」
   │   │
   │   │  ┌─ 循环 ────────────────────────────────────────────────┐
+  │   │  │ skills/derived-injections  已加载技能的正文（幂等，可重算）
   │   │  │ llm/stream!      流式一轮；tool_calls 累积在 assistant 消息里
   │   │  │ tools/run! × n   本轮每个工具调用并发跑（各自一个线程）
   │   │  │                  pre / execute / post 三相事件骑同一条通道出去
@@ -52,6 +54,8 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
 2. **system prompt 冻结。** `prompt.md` 首调读入即冻（`harness.llm/prompt`），因为 provider 的前缀缓存
    （prefill）靠的是逐字节稳定的前缀。改它要显式 `(llm/reset-prompt!)` 或重启。
    推论：per-run 的 context、指令文件、技能清单**一律不进 system 消息**——它们是尾部或前置的 user 消息。
+   这条推论今天有实现：[skills-and-instructions](skills-and-instructions.md) 把开场块与技能正文全部
+   落在 user 侧，`prompt.md` 仍是唯一的 system 消息。
 3. **客户端持有会话。** 服务端不建会话状态权威：每轮从请求里现收全部历史，算完把新消息交回去。
    threadId 的主人在 React state 里，服务端只按它决定「日志写哪个文件」。
 
@@ -78,6 +82,8 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
 | 项目 / 会话归属 / 归档 | **sqlite**（`harness.db`） | 会被**改写**的状态 |
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录 |
 | 配置 | **文件**（每轮现读） | 手编、改了不重启 |
+| 开场块（指令文件、技能清单） | **不存**：每轮现读现拼 | 配置与技能根是真相源，缓存一份就会「改了没生效」 |
+| 技能正文 | **不存**：每轮从会话自身重算 | 对话归客户端所有，注入只能是派生的（见 [skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)） |
 | 待决审批、会话 overlay、hook 连接 | **进程内存** | 重启即失是特性不是缺陷 |
 
 判据不是「改得勤不勤」，是**能不能被改写**：归档标记一年改一次也是状态，它必须进库；

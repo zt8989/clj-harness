@@ -1,8 +1,9 @@
 (ns harness.hooks-wired-test
-  "The three hook points that are wired, through the real HTTP edge: SessionStart
+  "The four hook points that are wired, through the real HTTP edge: SessionStart
   on a session's first run, PostToolUse after a successful tool, Stop when a run
-  ends normally -- plus the regression that matters most, that a session which
-  declares nothing behaves exactly as it did before hooks existed.
+  ends normally, and InstructionsLoaded once per instruction file folded -- plus
+  the regression that matters most, that a session which declares nothing behaves
+  exactly as it did before hooks existed.
 
   The edge is the layer that has to be exercised here, because it is the edge that
   binds the run's hook sink: everything below it (offline tools, replay) fires
@@ -56,6 +57,20 @@
   cannot drift from the writer."
   [thread]
   (home/log-file (io/file (home/projects-dir) http/unbound-workspace) thread))
+
+(defn- log-file-for
+  "The same question for a thread that IS bound: its log lives in the workspace
+  its project owns, so the reserved workspace is the wrong answer and the
+  difference is exactly what the instruction-file tests are checking. Asked the
+  way the writer asks it -- the session's project identity, sanitized -- rather
+  than composed by hand, so a change to the naming rule fails here instead of
+  agreeing with itself."
+  [thread]
+  (home/log-file (io/file (home/projects-dir)
+                          (if-let [identity (project/identity-for thread)]
+                            (home/sanitize identity)
+                            http/unbound-workspace))
+                 thread))
 
 (defn- log-lines [f]
   ;; A LIVE file: its last line can be half-written, and that is a fact about
@@ -439,3 +454,84 @@
          (testing "and nothing about a hook appears anywhere on the wire"
            (is (empty? (filter #(str/includes? (str (:type %)) "CUSTOM") frames)))))))
     (finally (tools/session-require-approval! "hw-plain" "no-such-tool"))))
+
+;; ------------------------------------------------------------ InstructionsLoaded
+
+(defn- wipe-instructions! []
+  (io/delete-file (io/file (home/user-home) "AGENTS.md") true))
+
+(use-fixtures :each (fn [f] (wipe!) (wipe-instructions!) (f) (wipe!) (wipe-instructions!)))
+
+(deftest instructions-loaded-fires-once-per-file-folded
+  ;; The point had been declared since the hook engine landed and had no trigger
+  ;; source until this feature: nothing in the codebase folded an instruction
+  ;; file. Now something does, and it has to fire THERE -- which is why the edge's
+  ;; hook-sink binding had to start wrapping the set-up, not just the run.
+  (wipe!)
+  (let [marker (str (home/root) "/hooks-fired.txt")
+        proj   (str (home/root) "/hw-instructions-project")]
+    (.mkdirs (io/file (home/user-home)))
+    (.mkdirs (io/file proj))
+    (spit (str (home/user-home) "/AGENTS.md") "user rules\n" :encoding "UTF-8")
+    (spit (str proj "/AGENTS.md") "project rules\n" :encoding "UTF-8")
+    (project/bind! "hw-instructions" proj)
+    (write-hooks! {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
+    (with-server
+     8130 "hw-instructions"
+     (fn []
+       (io/delete-file (log-file-for "hw-instructions") true)
+       (post-run 8130 "hw-instructions")
+       (let [ls (wait-for (log-file-for "hw-instructions")
+                          (fn [ls] (>= (count (filter #(= "hook/InstructionsLoaded" (:kind %)) ls)) 2))
+                          1500)
+             lines (filter #(= "hook/InstructionsLoaded" (:kind %)) ls)]
+         (testing "one line per folded file -- and NOT for the one that is missing"
+           (is (= 2 (count lines))))
+         (testing "each was an observer, allowed, and named the point the way the payload does"
+           (is (every? #(= "allow" (get-in % [:payload :verdict])) lines))
+           (is (every? #(= 1 (get-in % [:payload :matched])) lines)))
+
+         (testing "the hook command really received each path on stdin"
+           ;; The marker script cats its stdin, so the payload lines are in the
+           ;; file -- parsed rather than substring-matched, because JSON escapes
+           ;; the path separators.
+           (let [fired (slurp marker)
+                 payloads (into []
+                                (keep (fn [l]
+                                        (when (str/starts-with? l "{")
+                                          (json/read-str l :key-fn keyword))))
+                                (str/split-lines fired))]
+             (is (str/includes? fired "instructions-loaded"))
+             (is (= #{(str (io/file (home/user-home) "AGENTS.md"))
+                      (str (io/file proj "AGENTS.md"))}
+                    (set (map :path payloads))))
+             (is (every? #(= "InstructionsLoaded" (:hook %)) payloads))))
+
+         (testing "and the folded text really reached the model, as user messages"
+           (let [texts (map #(str (get-in % [:payload :content]))
+                            (filter #(= "message" (:kind %)) ls))]
+             (is (some #(str/includes? % "user rules") texts))
+             (is (some #(str/includes? % "project rules") texts))
+             (testing "tagged with an absolute path, not a bare filename"
+               (is (some #(str/includes? % (str "<instructions path=\"" (io/file proj "AGENTS.md") "\">"))
+                         texts))))))))))
+
+(deftest a-session-with-no-instruction-files-fires-nothing
+  (wipe!)
+  (wipe-instructions!)
+  (write-hooks! {:instructions-loaded [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                                               "should-not-run")}]})
+  (with-server
+   8131 "hw-noinstructions"
+   (fn []
+     (io/delete-file (log-file "hw-noinstructions") true)
+     (post-run 8131 "hw-noinstructions")
+     (let [ls (wait-for (log-file "hw-noinstructions")
+                        (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+                        1500)]
+       (testing "nothing was folded, so the point does not fire"
+         (is (empty? (filter #(= "hook/InstructionsLoaded" (:kind %)) ls))))
+       (testing "and no hook line of any kind is written for it"
+         (is (empty? (filter #(str/starts-with? (str (:kind %)) "hook/InstructionsLoaded") ls))))
+       (testing "the run itself is complete -- a missing file is not a failure"
+         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))

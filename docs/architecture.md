@@ -33,12 +33,14 @@
 | `event` | 内核的全部词汇：11 种事件 |
 | `loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
 | `llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system prompt 的冻结载体** |
-| `tools` | **工具表与唯一执行缝**：内建表、会话 overlay（两轴）、待决审批、三相执行 |
-| `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换） |
+| `tools` | **工具表与唯一执行缝**：内建表（七个，含 `skill`）、会话 overlay（两轴）、待决审批、三相执行 |
+| `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**开场块**由它拼在 system 消息之后 |
 | `http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入 |
 | `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
-| `home` | 配置根：决定每个文件落在哪 |
-| `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配 |
+| `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`） |
+| `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
+| `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入** |
+| `preamble` | **开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `db` | home 的**元数据层**（sqlite）：迁移链、开启时隔离，两张状态表 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令、读退出码、超时、落审计行 |
@@ -57,7 +59,8 @@
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 26 个点、契约、两级装配、会话 overlay、eval 与晋升
-8. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
+8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
+9. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 
@@ -76,5 +79,4 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 - **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
   `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
-- **hashline 编辑**、**skills/instructions**：分别在 `hashline-edit` 与 `skills-and-instructions`
-  分支上，不在 `main`。
+- **hashline 编辑**：在 `hashline-edit` 分支上，不在 `main`。

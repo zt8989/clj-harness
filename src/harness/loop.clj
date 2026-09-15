@@ -6,6 +6,8 @@
             [harness.event :as ev]
             [harness.hooks.dispatch :as hook]
             [harness.llm :as llm]
+            [harness.project :as project]
+            [harness.skills :as skills]
             [harness.tools :as tools]))
 
 (defn- replay!
@@ -64,9 +66,25 @@
 
   OPTS may carry :resume, the decisions a human handed back for this thread's
   parked calls; they are replayed at the top of the run, before the first LLM
-  call, so the provider sees a complete turn again."
+  call, so the provider sees a complete turn again.
+
+  SKILL BODIES ARE RE-DERIVED BEFORE EVERY LLM CALL (harness.skills/derived-
+  injections). This is the ONE place they can enter the conversation: a load has
+  to be visible to the very next call, because the model asked for the
+  instructions in order to follow them now, and a load that only took effect on
+  the following turn would have been pointless to issue. Re-deriving rather than
+  remembering is what makes that free -- the function is idempotent, so applying
+  it to a history that already has the bodies changes nothing, and there is no
+  bookkeeping to get out of step with the conversation.
+
+  The roots are read fresh at each LLM call, so editing harness.edn mid-run moves
+  them, matching every other configuration read in this codebase."
   [provider messages emit {:keys [thread-id resume] :as _opts}]
-  (let [history (atom (vec messages))]
+  (let [history (atom (vec messages))
+        ;; The session's roots, resolved once per run: the binding and the
+        ;; configuration are both per-session facts, and a run serves one session.
+        roots (project/skill-roots thread-id)
+        with-skills (fn [] (swap! history skills/derived-injections roots))]
     (emit (ev/run-start))
     (try
       (let [replayed (when (seq resume)
@@ -77,7 +95,8 @@
               ;; unanswered, so there is no provider call to make.
               replayed
               (loop []
-                (let [assistant (llm/stream! provider @history emit thread-id)
+                (let [_         (with-skills)
+                      assistant (llm/stream! provider @history emit thread-id)
                       calls     (:tool_calls assistant)]
                   (swap! history conj assistant)
                   (if (seq calls)

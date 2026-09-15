@@ -617,3 +617,59 @@
       (is (= (str (.getAbsoluteFile (io/file (nth dirs i))))
              (project/binding-for (str "pr-conc-" i "-" n)))
           (str "pr-conc-" i "-" n " kept its directory through the contention")))))
+
+(deftest the-fence-lets-a-skill-reach-its-own-reference-files
+  ;; A skill body routinely says "read references/x.md", and that path resolves
+  ;; NEXT TO THE SKILL -- outside the project. Without this allowance every
+  ;; reference file would park a human, which is the same as making the skill
+  ;; unusable. The roots get the configuration home's standing, and no other.
+  (let [proj (str (System/getProperty "java.io.tmpdir")
+                  "/harness-project-skills-" (System/nanoTime))
+        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))
+        elsewhere (str (System/getProperty "java.io.tmpdir")
+                       "/harness-project-elsewhere-" (System/nanoTime))]
+    (.mkdirs (io/file proj))
+    (.mkdirs (io/file skill-dir))
+    (.mkdirs (io/file elsewhere))
+    (project/bind! "pt-skills" proj)
+    ;; This test's project is its own directory, so its harness.edn goes THERE --
+    ;; write-project-harness! targets the namespace's shared root, which this
+    ;; thread is not bound to.
+    (let [proj-edn! (fn [text]
+                      (.mkdirs (io/file proj ".harness"))
+                      (spit (str (io/file proj ".harness" "harness.edn")) text :encoding "UTF-8"))]
+    (try
+      (testing "a file inside a skill root is free of the fence"
+        (is (false? (project/out-of-bounds? "pt-skills"
+                                            (str (io/file skill-dir "references" "x.md"))))))
+
+      (testing "and it stays free under :strict, exactly like the config home"
+        (proj-edn! "{:approval {:strict true}}")
+        (is (false? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md")))))
+        (proj-edn! "{}"))
+
+      (testing "but the world outside the roots still parks -- the allowance is the roots, not everything"
+        (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "x.md"))))))
+
+      (testing "and a CONFIGURED root is what is allowed, not a hardcoded pair"
+        (let [custom (str (io/file (System/getProperty "java.io.tmpdir")
+                                   (str "harness-custom-skills-" (System/nanoTime))))]
+          (.mkdirs (io/file custom))
+          (proj-edn! (str "{:skills {:roots [\"" custom "\"]}}"))
+          (is (false? (project/out-of-bounds? "pt-skills" (str (io/file custom "x.md")))))
+          (is (true? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md"))))
+              "the default root is no longer in force, so it is no longer free")
+          (proj-edn! "{}")))
+
+      (testing "an INSTRUCTION file's content grants nothing: a path it merely mentions still parks"
+        ;; The point of the boundary. AGENTS.md is READ BY harness, not by the
+        ;; `read` tool -- and a document that could widen the fence would be a
+        ;; capability granting itself, which is a different security story.
+        (spit (str (io/file (home/user-home) "AGENTS.md"))
+              (str "Go read " elsewhere "/notes.md\n") :encoding "UTF-8")
+        (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "notes.md"))))))
+
+      (finally
+        (project/bind! "pt-skills" nil)
+        (doseq [d [proj skill-dir elsewhere]]
+          (io/delete-file (io/file d) true)))))))

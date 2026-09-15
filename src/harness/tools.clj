@@ -41,6 +41,7 @@
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
             [harness.project :as project]
+            [harness.skills :as skills]
             [harness.shell :as shell])
   (:import [java.util.regex Pattern]))
 
@@ -206,6 +207,43 @@
     (clip (str (when (seq printed) (str printed "\n"))
                (pr-str v)))))
 
+(defn- t-skill
+  "Load a skill into the conversation. Answers with the confirmation that
+  harness.skills/derived-injections then looks for -- that string is the ONLY
+  record that a load happened, which is why it is shared rather than written
+  twice (see harness.skills/loaded-prefix).
+
+  The name never becomes a path: harness.skills/skill-for looks it up among the
+  names an actual directory listing produced, so '../../etc/passwd' is refused
+  as an unknown skill rather than resolved into anything.
+
+  NOT marked :requires-approval. Reading instructions is not a side effect, and
+  everything the body goes on to ask for is gated by its own seam: the fence
+  still parks a file path, a declared approval still parks its tool. Gating the
+  read would make the instructions harder to obtain than the actions they
+  describe, which is backwards."
+  [{:keys [name]}]
+  (let [roots (project/skill-roots *thread-id*)
+        entry (skills/skill-for roots name)
+        known (keep #(when (:available? %) (:name %)) (skills/scan roots))]
+    (cond
+      (nil? entry)
+      (throw (ex-info (str "no skill named " (pr-str name) "; this session can load "
+                           (if (seq known) (pr-str (vec known)) "nothing"))
+                      {:name name :known (vec known)}))
+
+      (not (:available? entry))
+      (throw (ex-info (str "skill " (pr-str name) " cannot be loaded: " (name (:reason entry))
+                           " (see " (:path entry) ")")
+                      {:name name :reason (:reason entry) :path (:path entry)}))
+
+      :else
+      (let [{:keys [body missing]} (skills/body entry)]
+        (if missing
+          (throw (ex-info missing {:name name :path (:path entry)}))
+          (str (skills/loaded-summary name (count body))
+               "\n" (:dir entry) " is the skill's directory; read files under it by absolute path."))))))
+
 (defn- t-configure
   "Change THIS session's provider / model / reasoning-effort. Each of the three
   is independent: pass only what you mean to change, and the rest keep the value
@@ -318,6 +356,20 @@
   (tool "Evaluate Clojure in this process. Defs persist across calls."
         {"code" {:type "string" :description "Clojure source."}}
         [:code] t-eval))
+
+;; The skills this session can load, by name, are announced in the run's opening
+;; messages (harness.preamble) -- one line each, with the description their own
+;; SKILL.md declares. The catalog is NOT repeated here: the tool's schema is part
+;; of the request on every call, and a per-session catalog would make it differ
+;; between sessions for a reason that has nothing to do with the tool's shape.
+(register! "skill"
+  (tool (str "Load a skill -- a set of instructions for a kind of task -- into this conversation. "
+             "The skills available to this session are listed in the message tagged <skills> at the "
+             "start of the conversation; call this with one of those names when its description "
+             "matches what you are about to do. The full text is added to the conversation and "
+             "stays available for the rest of the session.")
+        {"name" {:type "string" :description "The skill's name, as listed in <skills>."}}
+        [:name] t-skill))
 
 ;; Configure this session's provider. Marked :requires-approval so a model
 ;; cannot repoint its own session at another endpoint without a human saying so

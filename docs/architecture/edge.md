@@ -23,6 +23,11 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 (binding [hook/*sink* {:thread-id .. :audit (fn [payload] (log! ..)) :run-id ..}] ...)
 ```
 
+**这个 binding 包住 set-up，不只是包住 run。** 折叠会话的指令文件本身就是 hook 点
+（`InstructionsLoaded`），而那次折叠发生在第一条消息组装**之前**——binding 摆在 set-up 之后，
+那个点会拿到 nil sink、永远静默。这是「点声明了却永不触发」在接线层面唯一的一次近失，
+记在 [hooks](hooks.md#26-个点全部是数据)。
+
 **没绑 = hook 不触发**，这是刻意的默认值：离线工具、replay、直接驱动内核的测试都没有审计写入者，
 而一个没人记录的 hook 判定比没有 hook 更糟——它会**静默地**改变一次 run。
 
@@ -75,14 +80,14 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 |---|---|
 | `input` | 收到的 RunAgentInput，原样 |
 | `event` | 发出的每个 AG-UI 帧 |
-| `message` | LLM 真实看到/返回的 provider 形状消息，**逐字** |
+| `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**（含开场块：指令文件与技能清单都在里面） |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
 | `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |
 | `project/bound` | 绑定变更，before → after（可读成目录时间线） |
 | `session/rebuilt` | 重建动作，落**被重建的那份日志**上 |
-| `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`…） |
+| `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`、`hook/InstructionsLoaded`…） |
 
 几条支撑性的事实：
 
@@ -102,6 +107,11 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 入站消息的 `content` 可以是字符串，也可以是 parts，而两个协议对 parts 的拼法不同。
 **翻译发生在 `harness.ag_ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
 到协议层才翻会让那条日志撒谎。
+
+它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在 system 消息之后、客户端消息之前。
+它自己不读任何文件（块是递进来的），所以这个命名空间仍是个转换器；空块时它返回**原向量本身**，
+而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
+见 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
 
 ```
 AG-UI 入站                                        出网（OpenAI 兼容 chat-completions）

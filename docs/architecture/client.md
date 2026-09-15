@@ -87,6 +87,11 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 （经 `components` prop 覆盖工具卡与 reasoning 的默认渲染——**全部默认折叠是有意的差异**，实现见该文件
 头注释）与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
 
+**`skill` 也是一张普通工具卡，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
+上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
+界面上只有一次普通的 `skill` 调用与它的返回。见
+[skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
+
 ## 测试
 
 `cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），

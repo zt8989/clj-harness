@@ -30,12 +30,18 @@ drive! :
   emit :run/start
   [有 resume 就先 replay! —— 把人的决定重放进缝]
   loop:
+    施加 skills/derived-injections（技能正文，按会话自身重算；幂等）
     llm/stream!      流式一轮（事件边流边发）
     tool_calls 非空 → 并发跑，收齐结果，追加 tool 消息，再来一轮
     tool_calls 为空 → 结束
   有 parked → emit :run/interrupt，否则 emit :run/end
   然后 emit :run/done（携带最终 history），通道关闭
 ```
+
+**技能正文在每次 `llm/stream!` 之前重算一次**，就在这一行：模型调用 `skill` 是为了**现在**照着做，
+等下一轮等于白调；而它是**派生**的（从会话自己扫出加载过的技能，见
+[skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)），
+所以每轮施加不需要任何簿记。
 
 几个不显然的地方：
 
@@ -80,14 +86,18 @@ drive! :
 
 **表与读表的缝住在一起**，因为它们是同一件事的两半：缝决定一次调用意味着什么，表说有什么可调。
 
-### 六个内建
+### 七个内建
 
-`read` / `write` / `edit`（三个带 `:fence-paths`）、`bash`、`eval`、`session-configure`（带 `:requires-approval`）。
+`read` / `write` / `edit`（三个带 `:fence-paths`）、`bash`、`eval`、`session-configure`（带 `:requires-approval`）、
+`skill`（两个标记都不带）。
 
 `read` / `write` / `edit` 的相对路径经 `project/resolve-path` 重根到会话的项目目录，**回报的是已解析路径**。
 `bash` 的 cwd 是绑定的目录；**命令内容永不判定**（这是明示接受的逃逸面）。
 `eval` 在常驻的 `harness.user` 命名空间里执行，`def` 跨调用保留。
 `session-configure` 改本会话的 provider/model/reasoning-effort，**先解析后写**——改不动的配置不会被写进会话。
+`skill` 只按名字查表（表由目录列举产生，所以名字永远变不成路径），**不标审批**：读一份指令不是副作用，
+而正文里让人做的事各自过各自那道缝。它唯一的效果是把那份正文带进对话，施加点在循环里那一步
+（见 [skills-and-instructions](skills-and-instructions.md#skill-工具)）。
 
 ### 会话 overlay：两条正交轴
 
