@@ -31,15 +31,24 @@
 // run is in flight, from the runtime's own `isRunning`, with the reason
 // surfaced on the row that was clicked.
 //
-// This ticket swaps the assembly: the old provider and its chat are gone
-// from the page. Four things that used to sit above the chat retired with it --
-// the approval gate, the reasoning message, the session panel and the project
-// panel -- and tickets 04-06 bring the first three back one at a time. The
-// project panel is not coming back here: its ticket was retired in favor of a
-// sidebar feature (.scratch/project-sidebar), which also moves the session
-// panel into that sidebar later. So the page is, for now, the session panel
-// and the thread. Nothing was lost: the retired versions are in the history,
-// and their absence here is the price of doing the high-risk swap on its own.
+// This ticket swaps the assembly again: the session panel's top strip is gone
+// and the sidebar takes its place, beside the chat rather than above it. The
+// sidebar owns the project grouping, the session rows and their refusals; this
+// file keeps the two things it alone can do -- the agent and the runtime's
+// thread-list adapter.
+//
+// Nothing about the ownership of the threadId changes here: React state still
+// holds it, the adapter callbacks still mint-or-adopt an id BEFORE awaiting
+// anything (the adapter's hard rule), and `onSwitchToThread` still hands the
+// runtime the rebuilt messages converted through `fromAgUiMessages`. The refusal
+// sentences moved to `lib/run-state.ts`, because the sidebar shows them and the
+// adapter raises them -- the same reason a run in flight cannot be switched away
+// from, worded once.
+//
+// The `threadList` adapter still carries ONLY the switching verbs. The list
+// itself is the sidebar's own fetch of `GET /api/projects`, which no adapter can
+// express: it is grouped by project and its rows carry a log's size and mtime,
+// neither of which the runtime's thread shape has a field for.
 //
 // The `components` prop is where this repo's own rendering of tool calls and
 // reasoning enters the copied element -- see `components/message-parts.tsx`,
@@ -71,14 +80,14 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApprovalBatchProvider } from "@/components/approval-gate";
+import { Sidebar } from "@/components/sidebar";
+import { THREAD_COMPONENTS } from "@/components/message-parts";
+import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
   RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
   RUN_IN_PROGRESS_REFUSAL,
-  SessionPanel,
   runInProgress,
-} from "@/components/session-panel";
-import { THREAD_COMPONENTS } from "@/components/message-parts";
-import { AGENT_URL, rebuildThread } from "@/lib/threads";
+} from "@/lib/run-state";
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
 /// rebuilds text, reasoning and tool calls -- and reads back
@@ -166,16 +175,15 @@ export function App() {
       {/* The copied icon buttons (scroll-to-bottom, copy, ...) mount a Radix
           tooltip, and Radix throws when no provider sits above it. */}
       <TooltipProvider>
-        {/* Thread's root is `h-full`, so it needs a parent that actually has a
-            height -- `h-dvh` is the viewport. Tickets 06 and 07 add their panels
-            above this line and must not steal that height from it. */}
-        {/* Tickets 06/07 put their panels beside the thread. The column is the
-            viewport; the panel takes what it needs and the thread's `h-full`
-            root reads the rest -- `min-h-0` is what lets it shrink instead of
-            overflowing. */}
         <ApprovalBatchProvider onHoldChange={setGateOpen}>
-          <div className="flex h-dvh flex-col">
-            <SessionPanel runtime={runtime} currentThreadId={threadId} />
+          {/* The ROW is the viewport, and the two children each get their height
+              from it: the sidebar is a fixed-width `shrink-0` column, the chat
+              is `min-h-0 flex-1`. `Thread`'s root is `h-full`, so it reads the
+              height off this wrapper -- which is why `min-h-0` is here and not on
+              the thread: without it a flex child will not shrink below its
+              content, and the whole page scrolls instead of the message list. */}
+          <div className="flex h-dvh">
+            <Sidebar runtime={runtime} currentThreadId={threadId} />
             <div className="min-h-0 flex-1">
               <Thread components={THREAD_COMPONENTS} />
             </div>

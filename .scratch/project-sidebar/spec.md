@@ -145,7 +145,7 @@
 | 01 | 一个 sqlite：home 的元数据层 | — | **已落地**，见下 |
 | 02 | 项目与会话成为持久的一等行 | 01 | **已落地**，见下 |
 | 03 | 日志搬进项目目录 | 02 | **已落地**，见下 |
-| 04 | 侧边栏：三段位，项目与会话取代顶部横排 | 03 | |
+| 04 | 侧边栏：三段位，项目与会话取代顶部横排 | 03 | **已落地**，见下 |
 | 05 | 新建任务必须先有项目（含「添加项目」） | 04 | |
 | 06 | 会话的归档与取消归档 | 04 | |
 | 07 | 移除项目：只解绑，不删日志 | 05 | |
@@ -261,6 +261,44 @@ approval / http / hooks 断言**一条未改**（project_test 只动了 ns docst
 
 验收：**264 tests / 1359 assertions 全绿**（既有断言一条未删，只随签名与路径更新）；`cd ui && npm test`
 **11 条全绿**（含上面那条修复的 `approval`）。
+
+### 04 落地记录
+
+界面换装配。`ui/src/components/sidebar.tsx`（新）三段位，`session-panel.tsx` 删除，`app.tsx` 的列从
+竖排改横排；`lib/projects.ts`（`GET /api/projects` 的类型与取数）、`lib/format.ts`（体积与时间）、
+`lib/run-state.ts`（两句拒绝 + 探针）各自独立出来；抄了一份 `@assistant-ui/thread-list` 并**就地重写**。
+
+- **列表的数据来自新端点 `GET /api/projects`，不是运行时的 thread 形状。** 侧边栏要按项目分组、每行
+  要显示日志的体积与 mtime，而运行时的 thread 形状里没有项目、也没有磁盘事实——把它硬掰成那个形状是
+  尾巴摇狗。所以面板自己取那个端点，适配器只留切换动词（`adapters.threadList` 的 `onSwitchToThread` /
+  `onSwitchToNewThread`），threadId 的归属不变（仍是 React state，仍在 await 之前写回）。
+- **端点是"库 + 文件系统"的合成，而这是它存在的理由。** 库答"有哪些项目与会话、谁属于谁、谁被归档"，
+  文件答"每份日志多大、什么时候改的"。两个问题各自只有一边答得了（一个目录的 jsonl 说不出归属，库也
+  不该镜像文件大小），所以字段来源在端点上写清：`projectId`/`path`/`archived` 来自库，
+  `bytes`/`lastActivity` 现读文件。
+- **两个字段可以是 `null`，而且这是有意义的。** 刚建出来还没跑过的会话就是没有磁盘事实。**不显示成
+  0 字节**：0 字节是一份坏掉的日志，不是"还没有日志"。排序上"没有日志"算最新（它是刚刚才被创建的状态，
+  每个会话都从这里开始），所以新建的会话会出现在项目顶部而不是被压在老会话下面。
+- **`ensure-complete!` 的判据收窄了，因为侧边栏一点就会踩到。** 原先"日志里有记录且末帧不终结"就拒绝；
+  而绑定会往日志里写一行 `project/bound`，于是一个刚建好、一次都没跑过的会话**打不开**——重建会用一个
+  根本不存在的"截断 run"名义拒掉它。现在的判据是**输入开一段 run、终结帧收一段 run**：审计行多的日志
+  是合法的空对话（`{:messages []}`）。这同时修好了另一个旧 bug：第一轮跑完、第二个 input 落盘、然后
+  进程被杀——末行是 RUN_FINISHED 但那段 run 没结束，旧判据会放它过去。
+- **抄来的 `thread-list.aui.tsx` 是这份清单里唯一被改过的一份，改动逐处有 `LOCAL:` 标注。**
+  上游那份是给另一种产品形态的扁平、按日期分组的线程列表；本仓要的是按项目分组、行上带体积与 mtime。
+  删掉的是重命名/删除菜单项（本仓没有这两个动词，一个点了会抛的菜单项比没有更糟）与
+  `ThreadListItemPrimitive.Trigger`——它的 action 是 `() => aui.threadListItem.switchTo()`，**Promise 被
+  丢掉**（见上游的 useThreadListItemTrigger 与 createActionButton），所以被拒的切换只会变成一条无主的
+  未处理拒绝；而本票要求"原因显示在所点的行上"，那需要我们自己持有那个 Promise，于是行的点击走组件
+  收到的回调，守卫与错误都归侧边栏。
+- **三段位的高度契约写在类名上也在注释里**：视口是 `h-dvh` 的行，侧边栏 `shrink-0`、聊天区
+  `min-h-0 flex-1`（`Thread` 的根是 `h-full`，`min-h-0` 才让它真的能收缩而不是把整页撑出滚动条）。
+  实测：10 个项目、视口压到 1400×420 时 `document.scrollHeight === clientHeight`，项目区
+  `scrollTop` 可动，头部 `getBoundingClientRect().top` 滚动前后都是 0。
+
+验收：**268 tests / 1399 assertions 全绿**；`cd ui && npm run typecheck` 0 error，`npm run build` 通过，
+`npm test` 11 条全绿。真 Chromium 四张截图在 `evidence/`：三段位、当前会话高亮（行 disabled 且带
+`current`）、只有项目区滚动（1400×420）、运行中拒绝落在所点的行下。
 
 ### 一条与本题无关的既有 flake（记下来，不在本票修）
 

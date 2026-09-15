@@ -64,14 +64,45 @@
         (range)
         lines))
 
-(defn- ensure-complete! [records frames]
-  (when (and (seq records)
-             (not (and (seq frames) (frames/terminal? (peek frames)))))
-    (throw (ex-info (str "the log ends mid-run: the last recorded frame is "
-                         (if-let [t (:type (peek frames))] (str t) "absent")
-                         ", not RUN_FINISHED or RUN_ERROR. Replaying a truncated log "
-                         "would produce half a conversation, so it is refused.")
-                    {:last-frame (peek frames)}))))
+(defn- ensure-complete!
+  "Refuse a log whose last RUN did not finish.
+
+  AN INPUT IS WHAT OPENS A RUN, AND ONLY AN INPUT. A log can hold lines that are
+  not a run at all -- a `project/bound` audit line is written the moment a
+  session is bound, and `provider/changed` can land outside any run -- and such a
+  log is COMPLETE as it stands: it records no conversation because none has
+  happened yet. Reading it must yield an empty message list, which is the honest
+  answer for a session that exists but has never run. Judging by 'the log has
+  records' would refuse exactly the state a fresh session is in, and the refusal
+  would name a truncated run that never existed.
+
+  So the walk is: an `input` line opens a run, a terminal frame closes it, and
+  the run must be closed at the end. That covers the harder case a
+  'peek at the last frame' rule misses -- the first run finished, a second input
+  was recorded, and the process died before that run's first frame -- which is a
+  truncated log even though the last line in it is a RUN_FINISHED. Trailing
+  `message` lines do NOT reopen a run: the returned tail is written after the
+  terminal frame, so closing on the frame and letting the tail follow is what the
+  writer actually does.
+
+  Frames are the source of truth within a run: a log killed mid-run must not be
+  mistaken for a shorter conversation."
+  [records]
+  (let [last-input (reduce (fn [seen {:keys [kind]}]
+                             (if (= "input" kind) (inc seen) seen))
+                           0 records)
+        terminals  (reduce (fn [n {:keys [kind payload]}]
+                             (if (and (= "event" kind) (frames/terminal? payload))
+                               (inc n)
+                               n))
+                           0 records)]
+    (when (> last-input terminals)
+      (let [frames (->> records (filter #(= "event" (:kind %))) (mapv :payload))]
+        (throw (ex-info (str "the log ends mid-run: the last recorded frame is "
+                             (if-let [t (:type (peek frames))] (str t) "absent")
+                             ", not RUN_FINISHED or RUN_ERROR. Replaying a truncated log "
+                             "would produce half a conversation, so it is refused.")
+                        {:last-frame (peek frames)}))))))
 
 (defn records->messages
   "Parsed log records -> the AG-UI message list they describe."
@@ -84,7 +115,7 @@
         frames (->> records
                     (filter #(= "event" (:kind %)))
                     (mapv :payload))]
-    (ensure-complete! records frames)
+    (ensure-complete! records)
     (into (vec seed) (frames/apply-frames frames))))
 
 (defn lines->messages

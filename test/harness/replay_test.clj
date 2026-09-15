@@ -104,6 +104,30 @@
       (is (some? e) "expected a failure, got a silently shortened log")
       (is (re-find #"(?i)line" (str (ex-message e)))))))
 
+(deftest a-log-that-holds-no-run-is-an-empty-conversation
+  ;; The state every session passes through: bound, or configured, or archived --
+  ;; but never run. Its log holds audit lines and no input, and reading it must
+  ;; give an empty conversation rather than a refusal. The refusal would name a
+  ;; truncated run that does not exist, and the caller that hit it would be the
+  ;; sidebar opening a session a person just created.
+  (let [audit-lines [(json/write-str {:ts 1 :runId nil :kind "project/bound"
+                                      :payload {:before nil :after "/tmp/a" :via "http"}})
+                     (json/write-str {:ts 2 :runId nil :kind "provider/changed"
+                                      :payload {:after {:provider :alpha}}})]]
+    (testing "no input anywhere means there is nothing to be halfway through"
+      (is (= [] (replay/lines->messages audit-lines))))
+    (testing "but the SAME log with an input whose run never ended is still refused"
+      ;; The line that separates the two cases is the input, and only the input:
+      ;; it is the record that says a run began.
+      (let [e (try (replay/lines->messages
+                    (concat audit-lines
+                            [(input-line "r1" [seed])]
+                            (event-lines "r1" [(ev/run-start) (ev/text-delta "半句话")])))
+                   nil
+                   (catch Exception e e))]
+        (is (some? e))
+        (is (re-find #"(?i)terminat|incomplete|truncat" (str (ex-message e))))))))
+
 ;; ------------------------------------------------------------------ seam B
 
 (def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-replay-test"))

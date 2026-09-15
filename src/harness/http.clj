@@ -87,28 +87,37 @@
   one directory is exactly the confusion this tree exists to remove."
   ".unbound")
 
+(defn- workspace-for
+  "The workspace directory for a project IDENTITY -- a canonical path, or nil for
+  a session that belongs to no project.
+
+  THIS IS THE ONE EXPRESSION THAT TURNS A PROJECT INTO A DIRECTORY. Two callers
+  need it and they must not drift: the writer, which asks it about a session's
+  project, and the sidebar's listing, which asks it about every project at once
+  and then looks in the result. It reads from the CANONICAL path -- the project's
+  identity, not the spelling a session was bound with -- so every session of one
+  project lands in one workspace however that directory was spelled."
+  [identity]
+  (str (io/file (home/projects-dir)
+                (if (some? identity)
+                  (home/sanitize identity)
+                  unbound-workspace))))
+
 (defn- log-dir-for
   "The workspace directory THREAD-ID's log belongs in.
 
-  ONE CALLER, DELIBERATELY: the writer below. Which workspace a session writes
-  into needs the session's project, and the project comes from the store -- so
-  this is the single place where 'where things are' (harness.home) and 'who this
-  session is' (harness.project) are joined. Keeping the join here, on the writing
-  side, is what leaves harness.home knowing only the root and the naming rule;
-  the reading side never needs it, because a listing and a lookup both walk the
-  tree and ask the FILESYSTEM where a log is.
+  The join between 'where things are' (harness.home) and 'who this session is'
+  (harness.project) is made here, on the writing side: the project's identity
+  comes from the store and the directory comes from the rule above. Keeping the
+  join here is what leaves harness.home knowing only the root and the naming rule,
+  and what lets the reading side stay filesystem-only -- a listing and a lookup
+  both walk the tree and ask the FILESYSTEM where a log is.
 
-  The workspace is derived from the project's CANONICAL path -- its identity, not
-  the spelling this session was bound with -- so every session of one project
-  lands in one workspace however that directory was spelled when it was bound. A
-  session the store has never heard of is normal here, not an error: the AG-UI
+  A session the store has never heard of is normal here, not an error: the AG-UI
   edge accepts an id the client owns and the store has not been told about, and
   its log goes to the reserved workspace."
   [thread-id]
-  (str (io/file (home/projects-dir)
-                (if-let [identity (project/identity-for thread-id)]
-                  (home/sanitize identity)
-                  unbound-workspace))))
+  (workspace-for (project/identity-for thread-id)))
 
 (defn- log-file-for
   "The log file the writer owns for THREAD-ID."
@@ -631,6 +640,70 @@
                                :bytes        (:bytes t)})
                       (replay/threads (home/projects-dir)))))
 
+(defn- session-row
+  "One session as the SIDEBAR reads it: what the store owns (its id, its archive
+  flag) plus what the tree says about its file.
+
+  The store decides which sessions are listed -- not the filesystem -- and that
+  is the whole point of the sidebar: a session belongs to a project because
+  something asked for it to, and an unowned jsonl sitting in the tree is not a
+  session this interface will show. It is also why a session with NO file is a
+  row rather than a problem: a session that has never run has no log yet, and one
+  just created on the sidebar has not run by definition. Its two disk facts are
+  null, which is a fact about the disk and not a zero-byte file.
+
+  The two facts are read FRESH from the file every time rather than kept in the
+  store, because they are the two things the store deliberately does not hold: a
+  size and an mtime are properties of a record, and the record lives in the file."
+  [workspace {:keys [id archived?]}]
+  (let [f (home/log-file workspace id)
+        exists? (.exists f)]
+    {:threadId     id
+     :archived     (boolean archived?)
+     :lastActivity (when exists? (.lastModified f))
+     :bytes        (when exists? (.length f))}))
+
+(defn- newest-first
+  "The sidebar's order within a project: most recent activity first, and a session
+  that has never run treated as the most recent of all -- it was created a moment
+  ago, and 'no log' is the state every session begins in, so burying those at the
+  bottom would hide the one a person just asked for.
+
+  `sort` with a reversed comparator, and Clojure's sort is STABLE, so sessions
+  that tie keep the store's order (oldest created first)."
+  [rows]
+  (let [key-of (fn [row] (or (:lastActivity row) Long/MAX_VALUE))]
+    (vec (sort (fn [a b] (compare (key-of b) (key-of a))) rows))))
+
+(defn- projects-get
+  "GET /api/projects -- the sidebar's listing: every project this home knows, each
+  with its sessions.
+
+  TWO SOURCES, ONE ANSWER, AND THAT IS THE POINT OF THE ENDPOINT. The store says
+  which projects and sessions exist, which session belongs where and which are
+  archived; the tree says how big each log is and when it last changed. Neither
+  question can be answered from the other side alone -- a directory of jsonl files
+  cannot say which project a conversation belongs to (that was the whole reason
+  not to migrate the old logs/), and the store must not mirror file sizes. So the
+  two are joined here, on the reading side, and each field comes from its owner.
+
+  Archived sessions are INCLUDED and flagged, not filtered: which group to draw
+  them in is a decision for the screen, and a listing that quietly dropped them
+  would make 'where did my session go' a question with no server-side answer.
+  Unbound sessions are NOT included -- they belong to no project, so they have no
+  row here; GET /api/threads is the raw tree view for anyone diagnosing."
+  [_req]
+  (let [by-project (group-by :project-id (project/sessions))]
+    (api-response 200
+                  (mapv (fn [{:keys [id canonical-path]}]
+                          (let [ws (workspace-for canonical-path)]
+                            {:projectId id
+                             :path      canonical-path
+                             :sessions  (newest-first
+                                         (mapv #(session-row ws %)
+                                               (get by-project id)))}))
+                        (project/projects)))))
+
 (defn- thread-rebuild-stem
   "/api/threads/<stem>/rebuild -> <stem>, else nil. The stem is the sanitized
   FILE stem -- the same id /api/threads lists -- so a client can copy it
@@ -741,6 +814,11 @@
     (= "/api/threads" (:uri req))
     (case (:request-method req)
       :get  (threads-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/projects" (:uri req))
+    (case (:request-method req)
+      :get  (projects-get req)
       (api-response 405 {:error "method not allowed"}))
 
     (and (= :post (:request-method req)) (thread-rebuild-stem (:uri req)))

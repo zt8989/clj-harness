@@ -977,6 +977,112 @@
                                     (catch java.io.FileNotFoundException _ []))))
                "the reserved workspace holds no binding line for this thread")))))))
 
+(def ^:private listing-dir
+  ;; Its own directory pair, not the shared project-dir: other tests in this
+  ;; namespace bind sessions into those, and this one asserts on the WHOLE content
+  ;; of a project's session list. Sharing would make it pass or fail depending on
+  ;; which tests ran first.
+  (str (System/getProperty "java.io.tmpdir") "/harness-http-listing"))
+
+(def ^:private listing-dir-2 (str listing-dir "-2"))
+
+(deftest the-projects-listing-joins-the-store-with-the-disk
+  ;; Ticket 04's data source. The sidebar cannot be built from either side alone:
+  ;; the store says which projects and sessions exist and which are archived, the
+  ;; tree says how big each log is and when it last changed. So this checks the
+  ;; join -- and the states that only exist BECAUSE the two sides are different:
+  ;; a session in the store whose file is not there, and a log in the tree that no
+  ;; session owns.
+  (doseq [d [listing-dir listing-dir-2]]
+    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
+    (.mkdirs (io/file d)))
+  (with-server
+   8110
+   {"listing-a" script "listing-b" script "listing-unbound" script}
+   (fn []
+     (let [list-projects (fn [] (json/read-str (.body (api-call 8110 :get "/api/projects" nil))
+                                               :key-fn keyword))
+           project-named (fn [dir]
+                           ;; By last path segment, matched EXACTLY: `-2` is a
+                           ;; different project, and "ends with" would confuse the
+                           ;; two -- which is the collision sanitize exists to avoid.
+                           (let [want (last (str/split (.getCanonicalPath (io/file dir)) #"/"))]
+                             (first (filterv #(= want (last (str/split (:path %) #"/")))
+                                             (list-projects)))))
+           row-for       (fn [dir tid]
+                           (->> (:sessions (project-named dir))
+                                (filter #(= tid (:threadId %)))
+                                first))
+           bind!         (fn [tid dir]
+                           (api-call 8110 :post "/api/project"
+                                     (json/write-str {:threadId tid :dir dir})))]
+       (testing "before anything is bound, this directory is not a project at all"
+         (is (nil? (project-named listing-dir))))
+       (testing "binding a session makes a project row for its directory"
+         (is (= 200 (.statusCode (bind! "listing-a" listing-dir))))
+         (let [project (project-named listing-dir)
+               session (row-for listing-dir "listing-a")]
+           (is (= (.getCanonicalPath (io/file listing-dir)) (:path project))
+               "the project is named by its canonical path -- its identity, not a spelling")
+           (is (some? (:projectId project)))
+           (is (= "listing-a" (:threadId session)))
+           (is (false? (:archived session)))
+           (testing "and the bind itself wrote the session's first line -- its own audit trail"
+             ;; Worth locking, because it is WHY a freshly bound session already has
+             ;; a file: the audit line lands in the workspace the bind just created
+             ;; (see project-post's ordering note). So the disk facts are present.
+             (is (pos? (:bytes session)))
+             (is (= (.length (log-file-for "listing-a")) (:bytes session))))))
+       (testing "after a real run the facts follow the file, read fresh from disk"
+         (let [before (:bytes (row-for listing-dir "listing-a"))]
+           (is (= "RUN_FINISHED"
+                  (:type (last (wire/frames-from-sse (.body (post-run 8110 "listing-a")))))))
+           (let [session (row-for listing-dir "listing-a")
+                 f       (log-file-for "listing-a")]
+             (is (< before (:bytes session)) "the run appended to the same file")
+             (is (= (.length f) (:bytes session)))
+             (is (= (.lastModified f) (:lastActivity session))))))
+       (testing "a session whose file is NOT there is still a row, with null facts"
+         ;; The state the sidebar must survive: the store says this session exists,
+         ;; the disk says nothing about it. Null is the honest answer and it is NOT
+         ;; a zero-byte file -- a real 0-byte log would be a broken one.
+         (bind! "listing-b" listing-dir)
+         (let [f (log-file-for "listing-b")]
+           (is (.delete f) "the file is removed by hand, as a person tidying the tree would")
+           (let [session (row-for listing-dir "listing-b")]
+             (is (= "listing-b" (:threadId session)) "the row is still there")
+             (is (nil? (:bytes session)))
+             (is (nil? (:lastActivity session)))
+             (testing "and it sorts FIRST, because 'no log yet' is the newest state there is"
+               (is (= ["listing-b" "listing-a"]
+                      (map :threadId (:sessions (project-named listing-dir)))))))))
+       (testing "a run does NOT outrank a session that has never started"
+         ;; The rule is 'no log sorts first', not 'newest file wins', because a
+         ;; session with no log is one that has not started -- which is newer than
+         ;; any activity, however recent. So a just-created session stays at the
+         ;; top of its project instead of sinking under a busy conversation.
+         (Thread/sleep 20)
+         (post-run 8110 "listing-a")
+         (is (= ["listing-b" "listing-a"]
+                (map :threadId (:sessions (project-named listing-dir))))))
+       (testing "a different directory is a different project"
+         (bind! "listing-other" listing-dir-2)
+         (is (= (.getCanonicalPath (io/file listing-dir-2)) (:path (project-named listing-dir-2))))
+         (is (= 1 (count (:sessions (project-named listing-dir-2))))))
+       (testing "an unbound session is in no project -- there is no row to put it in"
+         (is (nil? (row-for listing-dir "not-bound-anywhere"))))
+       (testing "and an unbound session that RUNS is in no project either"
+         ;; It has a log, in the reserved workspace. GET /api/threads is the raw
+         ;; tree view that shows it; the sidebar's listing is about projects, and a
+         ;; session nobody owns has no project to be listed under.
+         (is (= "RUN_FINISHED"
+                (:type (last (wire/frames-from-sse (.body (post-run 8110 "listing-unbound")))))))
+         (is (not-any? #(= "listing-unbound" (:threadId %))
+                       (mapcat :sessions (list-projects))))
+         (is (some #(= "listing-unbound" (:threadId %))
+                   (json/read-str (.body (api-call 8110 :get "/api/threads" nil)) :key-fn keyword))
+             "and the raw tree view still shows it, so nothing is hidden, only unowned"))))))
+
 (deftest the-model-endpoint-answers-what-this-session-can-send
   ;; The capability endpoint. A client asks what this session is served by and
   ;; what that model accepts, so it can decide whether to offer an image picker.
@@ -1323,6 +1429,30 @@
            (is (nil? (:runId (first rb))) "a rebuild happens outside any run")
            (is (pos? (get-in (first rb) [:payload :messages])))
            (is (= "http" (get-in (first rb) [:payload :via])))))))))
+
+(deftest rebuilding-a-session-that-has-never-run-answers-an-empty-conversation
+  ;; The sidebar's very first click on a brand-new session. Binding wrote an audit
+  ;; line and nothing else, so the log exists and holds no run -- and a 400 here
+  ;; would make the session a person just created un-openable, for a reason
+  ;; ('truncated') that is not true of it.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/harness-http-unrun")]
+    (run! #(io/delete-file % true) (reverse (file-seq (io/file dir))))
+    (.mkdirs (io/file dir))
+    (with-server
+     8112
+     "never-run"
+     (fn []
+       (is (= 200 (.statusCode (api-call 8112 :post "/api/project"
+                                         (json/write-str {:threadId "never-run" :dir dir})))))
+       (let [resp  (api-call 8112 :post "/api/threads/never-run/rebuild" nil)
+             reply (json/read-str (.body resp) :key-fn keyword)]
+         (is (= 200 (.statusCode resp)))
+         (is (= [] (:messages reply)) "nothing has happened in this conversation yet")
+         (is (= [] (:context reply))))
+       (testing "and the audit line it did write is still on disk, untouched"
+         (is (some #(= "project/bound" (:kind %))
+                   (mapv #(json/read-str % :key-fn keyword)
+                         (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
 
 (deftest the-retired-logs-directory-is-invisible-three-ways
   ;; Ticket 03's other half: `~/.clj-harness/logs/` retires. NOT imported, NOT

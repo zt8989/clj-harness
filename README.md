@@ -31,7 +31,7 @@ clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code
 这些能力**仅本会话生效，进程重启即失**——这是特性而非缺陷：没落过盘的东西天然可回滚。要把某段值得留的东西固化下来，走人工晋升：读日志 → 判断哪段值得留 → 抄进 `src/harness`（正式工具表，或 hooks.edn 的一份默认声明）→ git 提交。**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
 
 写工具表时注意：`eval` 调用的 code 在 assistant message 的 `tool_calls[].function.arguments`（JSON **字符串**，需二次解码取 `:code`）；返回值在对应 `tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
-- `ui/` — TypeScript + React 客户端：`@assistant-ui/react-ag-ui` 的 `useAgUiRuntime` 接管页面装配（AG-UI 帧解析与消息重建都在适配器里），`@ag-ui/client` 的 `HttpAgent` 直连 8080。审批门（`src/components/approval-gate.tsx`）、工具卡与默认折叠的 reasoning（`src/components/message-parts.tsx`）、会话面板（`src/components/session-panel.tsx`）是自建组件；抄自上游的元素在 `src/components/assistant-ui/elements/` 与 `src/components/ui/`，见下方「样式体系」
+- `ui/` — TypeScript + React 客户端：`@assistant-ui/react-ag-ui` 的 `useAgUiRuntime` 接管页面装配（AG-UI 帧解析与消息重建都在适配器里），`@ag-ui/client` 的 `HttpAgent` 直连 8080。侧边栏（`src/components/sidebar.tsx`：新建任务 / 项目与会话 / 设置三段位，项目分组与行骨架见 `src/components/assistant-ui/elements/thread-list.aui.tsx`）、审批门（`src/components/approval-gate.tsx`）、工具卡与默认折叠的 reasoning（`src/components/message-parts.tsx`）是自建组件；抄自上游的元素在 `src/components/assistant-ui/elements/` 与 `src/components/ui/`，见下方「样式体系」
 - `ui/test/` — UI 端到端测试：TypeScript 套件（`test/suites/{frames,client,turn,approval}.ts`）驱动真 `@ag-ui/client`，`test/ui.test.ts` 负责起后端与注册（`cd ui && npm test`，自带脚本 provider 后端）
 - `prompt.md` — system prompt，生成一次即冻结（provider prefill/前缀缓存的前提）；热改后需 `(harness.llm/reset-prompt!)` 或重启生效。per-run context 不进 system 消息，以尾部 user 消息提交。**它留在仓库里**，是唯一一个不进家目录的配置（见下）
 
@@ -200,11 +200,17 @@ npm run build    # tsc --noEmit + vite build → dist/
 - `src/components/assistant-ui/elements/` — 11 份抄自 assistant-ui registry（thread、tool-fallback、
   tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button），
   **一字未改**；与上游对账用 `npx shadcn@latest add` 重装后 diff 即可。
-- `src/components/ui/` — 7 份 shadcn 基件（button、dialog、textarea、tooltip、avatar、collapsible、skeleton）
-  与 `src/hooks/` 的 2 份 hook，同样未改。
-- 本地差异全部走两个自建注入点，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`（经
+- `src/components/ui/` — 8 份 shadcn 基件（button、dialog、input、textarea、tooltip、avatar、collapsible、
+  skeleton）与 `src/hooks/` 的 2 份 hook，同样未改。
+- **一处例外，且改动逐处标注**：`thread-list.aui.tsx`（`npx shadcn@latest add "@assistant-ui/thread-list"`）
+  就地重写过——上游那份是给另一种产品形态的扁平、按日期分组的线程列表，本仓要的是按**项目**分组、
+  行上带日志体积与 mtime 的列表。保留的是行的骨架与它那条 running 指示，删掉的是重命名 / 删除菜单项
+  （本仓没有这两个动词）与把 Promise 丢掉的 `ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在
+  所点的行上，那需要我们自己持有 switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，与上游
+  对账就是读这些标注块。
+- 其余的本地差异走两个自建注入点，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`（经
   `components` prop 覆盖工具卡与 reasoning 的默认渲染——全部默认折叠是**有意的差异**，实现见该文件头注释）
-  与自建面板（`approval-gate.tsx`、`session-panel.tsx`）。
+  与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
 
 ### 停止
 
@@ -307,15 +313,16 @@ UI 面板此前由前端特征拆除（assistant-ui 特征的 07 号票置 `wont
 - 缺失 = `{}`，不报错（含 `.harness` 目录在而文件缺）；坏文件（EDN 语法坏或非 map）指名绝对路径硬失败（`:invalid-edn` / `:not-a-map`），不静默回退——配置没生效和配置被忽略是两回事。
 - 首个消费者 `:approval`：`{:allow ["../shared"]}` 把相对项目根解析的路径加进允许集（免审）；`{:strict true}` 把项目目录本身移出允许集——项目内也 park。**配置家永不收紧**（strict 只作用于项目目录）。
 
-### 会话列表与重建（`/api/threads` 与 `session/rebuilt`）
+### 会话列表与重建（`/api/projects`、`/api/threads` 与 `session/rebuilt`）
 
 jsonl 恢复是一等能力（05 号票）：**重建 = 交还，不是接管**——服务端把对话重建出来交还客户端持有，之后照常走 AG-UI，服务端不因此成为会话状态权威，重建也不引入第二条流式路径。
 
-- `GET /api/threads` → 扫描日志目录，`[{:threadId <文件名 stem> :lastActivity <epoch ms> :bytes <n>}...]` 按最后活动降序；空/缺失目录返回 `[]`（全新安装是正常态）。清单对日志完整性**不表态**，截断的日志在 rebuild 时被拒。
+- `GET /api/threads` → 原始树视图：走一遍 `~/.clj-harness/projects/`，`[{:threadId <文件名 stem> :lastActivity <epoch ms> :bytes <n>}...]` 按最后活动降序；空/缺失返回 `[]`（全新安装是正常态）。**它不表态谁属于谁**——一个 stem 可能在两个 workspace 里各有一份文件，所以它只报文件名（重建路由会把这种 stem 拒掉，见下）。给诊断用；界面读的是下面那个。
+- `GET /api/projects` → 侧边栏的那一份数据：库里知道的每个项目，各带自己的会话。**两个来源合成一个答案**：库回答有哪些项目与会话、谁属于谁、谁被归档；文件系统回答每份日志多大、最后什么时候改的。两个问题各自只有一边答得了——一个目录的 jsonl 说不出它属于哪个项目（正是不迁移旧 `logs/` 的理由），库也不该镜像文件大小。字段归属因此很明确：`:projectId`/`:path`/`:archived` 来自库，`:bytes`/`:lastActivity` 来自文件、每次现读。两个字段**可为 null**：还没跑过的会话（刚建出来、第一次 run 之前）没有磁盘事实，null 就是诚实答案，绝不是"0 字节的假文件"。归档的会话**照列不误**（带 `:archived` 标记，怎么分组是界面的事）；未绑定的会话**不列**——它不属于任何项目，没有行可放。
 - `POST /api/threads/<stem>/rebuild` → `{:threadId .. :messages [..] :context [..]}`。messages = 种子（第一条 input 的 messages）+ 全部 event 帧折叠（`harness.frames/apply-frames`，reasoning、tool calls、tool results 都在），即客户端可重新持有并直接续聊的 AG-UI 形态；context 是会话启动时的 context。后续输入多份 input 只取第一份做种子——客户端的第二次 input 本就重述了此前全部历史，折叠进去只会重复。
-- **拒绝而非猜**：截断日志（末帧非 RUN_FINISHED/RUN_ERROR）、坏 JSON 行（指名行号）、无日志的 thread，一律指名 400——重建半截对话是最坏的失败模式。
+- **拒绝而非猜**：坏 JSON 行（指名行号）、跑到一半就断的日志（有 input 而无终结帧）→ 指名 400；stem 什么都指不到（404）、或指向两个 workspace 里同名的两份日志（404，两份都指名）——重建半截对话是最坏的失败模式，而"没找到"什么也没重建，那是 404 不是 400。**只有审计行、没有任何 run 的日志是合法的空对话**（`{:messages []}`）：每个会话都从那个状态开始，把它当成"截断"会让刚建的会话打不开。<｜end▁of▁thinking｜>### 会话列表与重建（`/api/projects`、`/api/threads` 与 `session/rebuilt`）
 - 重建动作在**被重建的日志自身**落一行 `session/rebuilt` 审计线 `{:messages <count> :via "http"}`，`runId` null（重建发生在任何 run 之外）。重建只读日志，这一行是它唯一的痕迹。
-- UI 侧（06 号票，`ui/src/components/session-panel.tsx`）：列出会话（id / 最后活动 / 大小）+ 刷新 + 新建会话；**恢复** = `rebuildThread`（POST rebuild）→ `fromAgUiMessages` + `fromThreadMessageLike` 转换 → `adapters.threadList` 的 `onSwitchToThread` 把重建消息灌回运行时。threadId 的主人是 **React state**（`app.tsx` 的 `useState`），agent 只在 `adoptThread` 一处被回写，而 `prepareRunAgentInput` 照旧从 agent 读——所以下一条输入续写**同一个日志**，服务端零会话状态。run 进行中拒绝切换与新建（原话落在所点的行下）；截断/损坏的指名 400 内联展示，面板不崩、可换会话/新建。实测限制：恢复 parked 会话审批卡不回来（服务端 `frames.clj` 折掉 RUN_FINISHED，重建消息不带 interrupts 元数据；恢复后发送被 `@ag-ui/client` 的 pending-interrupt 检查拒绝，不会有假续聊）——细节见 `.scratch/assistant-ui/spec.md` 已知风险。
+- UI 侧（`ui/src/components/sidebar.tsx`）：三段位——钉住的「New task」、唯一滚动的项目区、底部钉住的「设置」；项目行显示末段文件夹名（悬停给全路径），下面挂它的会话，当前会话高亮且不可点。侧边栏的列表**自己的**数据来自 `GET /api/projects`（`ui/src/lib/projects.ts`），不是运行时的 thread 形状——那个形状里没有「项目」，也没有日志的体积与 mtime。**恢复** = `rebuildThread`（POST rebuild）→ `fromAgUiMessages` + `fromThreadMessageLike` 转换 → `adapters.threadList` 的 `onSwitchToThread` 把重建消息灌回运行时。threadId 的主人是 **React state**（`app.tsx` 的 `useState`），agent 只在 `adoptThread` 一处被回写，而 `prepareRunAgentInput` 照旧从 agent 读——所以下一条输入续写**同一个日志**，服务端零会话状态。run 进行中拒绝切换与新建（原话落在所点的行下，句子在 `ui/src/lib/run-state.ts` 里与适配器共用一份）；截断/损坏的指名 400 内联展示，列表不崩、可换会话/新建。**列表是快照**：切换会话后、当前会话变化后、或按刷新键时重取（一轮 run 落盘不会自己让列表变）。实测限制：恢复 parked 会话审批卡不回来（服务端 `frames.clj` 折掉 RUN_FINISHED，重建消息不带 interrupts 元数据；恢复后发送被 `@ag-ui/client` 的 pending-interrupt 检查拒绝，不会有假续聊）——细节见 `.scratch/assistant-ui/spec.md` 已知风险。
 
 ## 授权变更（session-configure）
 
