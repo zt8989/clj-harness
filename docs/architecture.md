@@ -3,7 +3,7 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`main` @ `9abe083`（2026-09-15）。** 工作树里的在办改动不算现状，见文末「在办」。
+**快照：`main` @ `90a45bb`（2026-09-15）。** 工作树里的在办改动不算现状，见文末「在办」。
 
 ## 与另外两处文档的分工
 
@@ -36,10 +36,10 @@
 | `tools` | **工具表与唯一执行缝**：内建表、会话 overlay（两轴）、待决审批、三相执行 |
 | `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换） |
 | `http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入 |
-| `providers` | provider 目录（厂商 → model 表）、三档解析、api-key |
+| `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
 | `home` | 配置根：决定每个文件落在哪 |
 | `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配 |
-| `db` | home 的**元数据层**（sqlite）：迁移链、开启时隔离，两张表 |
+| `db` | home 的**元数据层**（sqlite）：迁移链、开启时隔离，两张状态表 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令、读退出码、超时、落审计行 |
 | `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
@@ -74,9 +74,6 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 写下这一节是为了让「文档没写」与「还没做」不会被读成同一件事。
 
-- **`GET /api/settings`**：只读的生效配置（provider/model/来源/家目录/有没有 key），
-  工作树里已有路由与 `providers/settings`，**尚未提交**。
-- **provider 来源追踪**：解析三档时记住每个旋钮来自哪一档（`resolve-tiers`），同一批未提交改动。
 - **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
   `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
 - **hashline 编辑**、**skills/instructions**：分别在 `hashline-edit` 与 `skills-and-instructions`

@@ -15,6 +15,15 @@
 | 绑定 / 换绑 | `bind! thread-id dir` | 路径经校验（存在且是目录，否则**指名**抛错）；写 `sessions.project_id` + `path` |
 | 解绑 | `bind! thread-id nil` | 清两列，**并清 `last_project_path`**（放掉就是放掉） |
 | 添加项目 | `add-project! dir` | find-or-create 一行 `projects`，**并把「记得这个目录」的会话接回来** |
+| 移除项目 | `remove-project! canonical` | 删掉那一行 `projects`，**schema 的触发器**把它的会话解绑；`projects/` 下的日志一个字节不动 |
+
+**移除一个项目 ≠ 删除一段对话**，而且这一点写在 schema 里而不是某个动词里：FK 的
+`ON DELETE SET NULL` 明说「解除隶属」，`projects` 上的 `BEFORE DELETE` 触发器在同一句 DELETE 里把
+`project_id` 与 `path` 一起清掉（只清一个会撞上 `CHECK`，级联会失败）。会话于是变成**普通的未绑定
+会话**——`binding-for` 答 nil、围栏关掉，与从未绑过项目的会话逐字节同一种行为，这就是「移除」不需要
+在任何别处加特例的原因。这条路显式**不写审计行**：审计行写在某个会话的日志里，而 workspace 是项目的
+函数，它移除的正是那个项目。界面那一侧：行悬停出「更多」，确认框说的是「会话留在磁盘上」而不是
+「删除」，页面绝不停在一个已被移除的项目上。
 
 绑定是**默认值，不是围栏**——它重根文件工具与 shell：
 
@@ -75,3 +84,10 @@
 snake_case 对齐 hook payload 约定）。
 
 它**只产事实**：spawn 命令、超时、门禁都是 hook 引擎的事。
+
+**「移除」可撤销的凭据是 `sessions.last_project_path`（schema v2）**：会话上一个项目的 canonical
+路径，**不是绑定**（`binding-for` 永不读它，工具路径永不经它解析）。移除时触发器只清 `project_id`
+与 `path`，这一列存活，所以**重新添加同一个目录会把会话接回来**——归档标记与历史都在（日志从没动过）。
+**「已绑定」的会话不会被接回来**：`add-project!` 只收养 `project_id IS NULL` 的行，所以一个在移除
+之后被搬到别处的会话不会因为一次「重新添加」而被拽回来。而**显式解绑会把这个记忆一起清掉**——差别
+就是重点：让人把会话放掉就是放掉，移除项目则是对**目录**的陈述。

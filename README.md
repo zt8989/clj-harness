@@ -32,9 +32,18 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 ├── harness.edn       用户级 harness 配置（可选；围栏的 allow / strict 在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：项目 / 会话归属 / 归档（home 的元数据层）
+├── harness.db        sqlite：项目 / 会话归属 / 归档（home 的元数据层；将来 hashline 的锚点同库）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
+
+**库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记（将来还有
+hashline 的锚点）。日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的
+时候现问文件。判别标准是「能不能被改写」，不是「改得勤不勤」：
+
+- `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **仍是文件、仍是现读**，改完不用重启
+  （「设置」那一版生效配置每次打开都重读，就是这条纪律看得见的地方）。
+- **旧的 `~/.clj-harness/logs/` 不导入、也不迁移**：那个平铺目录下的会话在本产品里一律不可见（文件名
+  不含项目身份，自动归属只能猜）。字节一个都不动，要接着用就手动挪进 `projects/<workspace>/`。
 
 想换位置就设 `CLJ_HARNESS_HOME`——这是唯一的旋钮，测试也用它把读写隔离到临时目录：
 
@@ -93,6 +102,11 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 {:protocol :openai-completions :base-url "https://some-endpoint/v1" :model "some-model"}
 ```
 
+**想知道此刻实际在用什么**：侧边栏底部「设置」打开一版**只读**的生效配置——三个旋钮各是**哪一档**
+选的、家目录的绝对路径是哪条规则给的、home 里哪几份文件在、有没有 api-key（**只有有没有与来源，
+值永不出现在响应里**）。它每次调用都重读配置文件，所以改完 `config.edn` 按「Re-read」就是新值，
+不用重启。
+
 **形状与校验的细节**（哪些键必需、哪些值会指名报错、两个数字为什么是「报告用」不是「执行用」、
 旧扁平形状为什么不读不迁移）见 [`docs/architecture/providers.md`](docs/architecture/providers.md)。
 
@@ -120,6 +134,14 @@ clojure -M:run          # 项目根
 
 ### 2) 前端 :5173
 
+侧边栏是三个段位：「新建任务」与「设置」钉在上下，**中间的项目区是唯一滚动的东西**（窗口拉高拉矮
+都不出现整页滚动）。一个项目 = 一个目录，显示成它最后一个文件夹名；悬停出「更多」，里面有
+**移除项目**——那只是解绑，`projects/` 下的日志一个字节不动，重新添加同一目录会话就都回来。
+项目下面是它的会话，每行可以**归档**（归档 = 行上的一个布尔，日志同样不动，进「已归档」分组）。
+
+**新建任务必须先有项目**：一个项目都没有时，它说的是「先添加一个项目」并给出入口。会话的记录落在
+`~/.clj-harness/projects/<workspace>/<threadId>.jsonl`。
+
 ```pwsh
 cd ui
 npm install      # 首次
@@ -139,7 +161,7 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 276 tests / 1533 assertions，全绿（基线随分支变，报数时带上分支与提交）
+# 282 tests / 1604 assertions，全绿（基线随分支变，报数时带上分支与提交）
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test

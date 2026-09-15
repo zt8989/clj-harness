@@ -16,13 +16,15 @@ app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntim
                     侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
+  settings-panel.tsx 「设置」打开的只读报告（生效配置 / 各来自哪一档 / 家目录 / 有没有 key）
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 工具卡与 reasoning 的注入点（THREAD_COMPONENTS）
   assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
   threads.ts        AGENT_URL + rebuild 调用
-  projects.ts       GET /api/projects 的类型化薄封装
+  projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
+  settings.ts       GET /api/settings 的类型化薄封装
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
 ```
 
@@ -38,6 +40,9 @@ lib/
 - **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目，
   也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
   界面上明说这一点。
+- **侧边栏管的不只是切换**：新建任务（**先有项目**，没有就先去添加一个）、归档 / 取消归档、
+  移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那份只读报告。
+  这些动作都在**请求进行中一起禁用**，失败的服务端原话落在**被点的那一行**下面。
 - **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
 
 ## 审批门
@@ -96,6 +101,9 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 - **控制通道是文件不是端点**：服务端在遇到**新的 threadId** 时重读脚本文件。
   测试写这个文件就相当于说「模型下一句回什么」——**生产 HTTP 边因此一个测试专用路由都不长**。
 - 套件驱动真的 `@ag-ui/client`，所以它测的是协议与运行时的真实行为，不是替身。
+
+界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
+（三段位、归档、移除、设置的哨兵搜索），不是自动化套件。
 
 ## 一条从后端来的注意
 
