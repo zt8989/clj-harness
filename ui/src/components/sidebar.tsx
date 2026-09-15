@@ -54,6 +54,28 @@
 // feature rests on: every session belongs to a project, so the first one needs a
 // project to exist first.
 //
+// ------------------------------------------------------- adding a project's shape
+//
+// ONE CLICK, ONE OS DIALOG, ONE ROW. The folder button opens the native picker
+// immediately, and the directory it answers is added there and then: no field to
+// type into, no submit to press, no form to cancel.
+//
+// THIS DELIBERATELY OVERTURNS WHAT TICKET 05 DECIDED. 05 put a form in front of
+// the dialog and kept submission explicit, arguing that an OS dialog is one
+// keystroke from a stray selection and the store has no undo. The first half of
+// that is still true; the second half is not, and it was the load-bearing half --
+// removing a project is one row (`remove`), every log stays where it is, and
+// re-adding the same directory brings its sessions back. A mis-pick therefore
+// costs one click in the sidebar to undo, which does not buy a confirmation step
+// whose only reachable content was "yes, the directory I just picked".
+//
+// A CANCELLED PICK SAYS NOTHING. The form used to report it -- "Selection
+// cancelled — nothing was added." -- because a form left sitting there would
+// otherwise look stuck. With no form, there is nothing to un-stick, and the
+// person who just dismissed the window does not need to be told that dismissing
+// it did nothing. A FAILURE still needs a line, and it goes under the button that
+// raised it, in the server's own words, exactly as the New task refusals do.
+//
 // ------------------------------------------------------------- archiving's shape
 //
 // ARCHIVING IS A FLAG, NOT A DELETION, and the whole of the UI's part is to draw
@@ -136,7 +158,6 @@ import {
   FolderIcon,
   FolderMinusIcon,
   FolderPlusIcon,
-  FolderSearchIcon,
   MoreHorizontalIcon,
   RefreshCwIcon,
   SettingsIcon,
@@ -210,11 +231,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const [rowError, setRowError] = useState<RowError>(null);
   const [projectError, setProjectError] = useState<ProjectError>(null);
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
+  // The Add project button's own failure -- a picker that will not open, or an
+  // add the server refused. Separate from `newTaskError` because they belong to
+  // two different buttons, and one firing must not answer for the other.
+  const [addError, setAddError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The project a new task will land in. Derived rather than owned: see the
   // effect below. Only an explicit click pins it.
   const [pinned, setPinned] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
   // The settings report is a MODAL rather than a fourth region: it is read
   // once and closed, it does not compete with the list for the middle strip, and
   // it is drawn over the page so that reading it cannot be mistaken for
@@ -386,6 +410,42 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     }
   };
 
+  /// Add a project: open the folder picker, and add whatever it answers. The
+  /// whole of the interaction is this one function -- see the header for why the
+  /// form that used to sit here is gone.
+  ///
+  /// CANCELLED IS NOT AN ERROR AND NOT A NOTICE: `pickFolder` answers null, and
+  /// the right response to somebody dismissing a window is to do nothing. Only a
+  /// rejection -- the picker could not open, or the add was refused -- earns a
+  /// line, and it lands under the button that raised it.
+  ///
+  /// `busy` covers the whole thing, including the time the native dialog is up.
+  /// That is the honest state: while a modal window is waiting on a human, every
+  /// other click in this sidebar would be a second write racing the first.
+  const addProjectNow = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setAddError(null);
+    try {
+      const picked = await pickFolder();
+      if (picked === null) return;
+      const added = await addProject(picked);
+      // The refusal under the New task button named a state that adding a
+      // project has just ended; leaving it up would have the sidebar
+      // contradicting itself one line above the new project's row.
+      setNewTaskError(null);
+      // The server answers the CANONICAL path, and that is what gets pinned --
+      // so adding `~/proj` and then re-adding `~/proj/.` end on the same row
+      // rather than two selections that look different and are not.
+      setPinned(added.path);
+      await refresh();
+    } catch (failure: unknown) {
+      setAddError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const newTask = async () => {
     if (busy) return;
     if (runInProgress(runtime)) {
@@ -393,8 +453,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       return;
     }
     if (projects.length === 0) {
+      // The refusal names the state; it does NOT open the picker. Popping a
+      // modal OS window out of the button that says "New task" would be an
+      // answer nobody asked for, and the folder button that does want it is
+      // sitting next to this one.
       setNewTaskError(NO_PROJECT_REFUSAL);
-      setAdding(true);
       return;
     }
     if (selected === null) {
@@ -444,13 +507,10 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         <Button
           variant="ghost"
           size="icon"
-          data-slot="sidebar-add-project-toggle"
+          data-slot="sidebar-add-project"
           disabled={busy}
-          onClick={() => {
-            setAdding((was) => !was);
-            setNewTaskError(null);
-          }}
-          title="Add a project — a directory this home's sessions can live in"
+          onClick={() => void addProjectNow()}
+          title="Add a project — opens a folder picker, and the directory you choose becomes a project"
           className="text-muted-foreground hover:text-foreground size-8 p-0"
         >
           <FolderPlusIcon data-slot="sidebar-add-project-icon" className="size-4" />
@@ -474,7 +534,8 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       </header>
 
       {/* The refusals about starting a session go under the header, where the
-          button that raised them is. */}
+          button that raised them is -- and so does the Add project button's own
+          failure, for the same reason. */}
       {newTaskError !== null && (
         <p
           role="alert"
@@ -485,25 +546,20 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         </p>
       )}
 
+      {addError !== null && (
+        <p
+          role="alert"
+          data-slot="sidebar-add-project-error"
+          className="text-destructive shrink-0 px-2.5 pb-1 text-xs"
+        >
+          {addError}
+        </p>
+      )}
+
       <div
         data-slot="sidebar-scroll"
         className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
       >
-        <AddProject
-          open={adding}
-          busy={busy}
-          onOpenChange={setAdding}
-          onAdded={async (path) => {
-            setAdding(false);
-            // The refusal under the New task button named a state that adding a
-            // project has just ended; leaving it up would have the sidebar
-            // contradicting itself one line above the new project's row.
-            setNewTaskError(null);
-            setPinned(path);
-            await refresh();
-          }}
-        />
-
         {listError !== null && (
           <p role="alert" data-slot="sidebar-list-error" className="text-destructive px-1.5 py-1 text-xs">
             {listError}
@@ -527,7 +583,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           />
         ))}
 
-        {loaded && projects.length === 0 && listError === null && !adding && (
+        {loaded && projects.length === 0 && listError === null && (
           <p data-slot="sidebar-empty" className="text-muted-foreground px-1.5 py-4 text-xs">
             No projects yet. A session belongs to a project, so one has to be
             added before a task can start.
@@ -562,150 +618,6 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         threadId={currentThreadId}
       />
     </aside>
-  );
-};
-
-/// Adding a project: a directory path, typed or picked, and an explicit submit.
-///
-/// TWO FILLS, ONE SUBMIT, AND THE SUBMIT IS ALWAYS EXPLICIT. The folder dialog
-/// only fills the field -- picking a folder is not a one-step commit, because the
-/// OS dialog is one keystroke from a stray selection and the store has no undo.
-/// Cancelling the dialog is reported as what it is (nothing happened), not as an
-/// error.
-///
-/// The form stays open on failure with the server's own reason under it, so the
-/// path that failed is still there to fix. On success the caller closes it.
-const AddProject: FC<{
-  open: boolean;
-  busy: boolean;
-  onOpenChange: (open: boolean) => void;
-  onAdded: (path: string) => Promise<void>;
-}> = ({ open, busy, onOpenChange, onAdded }) => {
-  const [dir, setDir] = useState("");
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [inFlight, setInFlight] = useState(false);
-
-  if (!open) return null;
-
-  const submit = async () => {
-    if (inFlight || busy) return;
-    if (dir.trim() === "") {
-      setError("Give an absolute path to a directory.");
-      return;
-    }
-    setInFlight(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const added = await addProject(dir.trim());
-      setDir("");
-      // The server answers the CANONICAL path, and that is what the caller
-      // selects -- so adding `~/proj` and then re-adding `~/proj/.` end on the
-      // same row rather than two selections that look different and are not.
-      await onAdded(added.path);
-    } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setInFlight(false);
-    }
-  };
-
-  const browse = async () => {
-    if (inFlight || busy) return;
-    setInFlight(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const picked = await pickFolder();
-      if (picked === null) {
-        setNotice("Selection cancelled — nothing was added.");
-      } else {
-        setDir(picked);
-        setNotice(null);
-      }
-    } catch (failure: unknown) {
-      setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setInFlight(false);
-    }
-  };
-
-  const pending = inFlight || busy;
-
-  return (
-    <section
-      data-slot="sidebar-add-project"
-      className="mt-1 mb-2 rounded-md border px-2 py-2"
-    >
-      <h3 className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
-        Add project
-      </h3>
-      <input
-        type="text"
-        data-slot="sidebar-add-project-path"
-        aria-label="Project directory"
-        placeholder="/absolute/path/to/a/directory"
-        value={dir}
-        disabled={pending}
-        onChange={(event) => setDir(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-        className="border-input focus-visible:ring-ring/50 h-8 w-full rounded-md border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 disabled:opacity-60"
-      />
-      {/* The two fills side by side, and BOTH are disabled while either is in
-          flight: two clicks landing together would be two writes. */}
-      <div className="mt-1 flex items-center gap-1">
-        <Button
-          size="sm"
-          variant="ghost"
-          data-slot="sidebar-add-project-submit"
-          disabled={pending}
-          onClick={() => void submit()}
-          className="h-7 px-2 text-xs"
-        >
-          Add
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          data-slot="sidebar-add-project-browse"
-          disabled={pending}
-          onClick={() => void browse()}
-          className="h-7 px-2 text-xs"
-        >
-          <FolderSearchIcon
-            data-slot="sidebar-add-project-browse-icon"
-            className="size-3.5"
-          />
-          Choose folder…
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          data-slot="sidebar-add-project-cancel"
-          disabled={pending}
-          onClick={() => onOpenChange(false)}
-          className="text-muted-foreground ml-auto h-7 px-2 text-xs"
-        >
-          Cancel
-        </Button>
-      </div>
-      {error !== null && (
-        <p role="alert" data-slot="sidebar-add-project-error" className="text-destructive mt-1 text-xs">
-          {error}
-        </p>
-      )}
-      {notice !== null && (
-        <p data-slot="sidebar-add-project-notice" className="text-muted-foreground mt-1 text-xs">
-          {notice}
-        </p>
-      )}
-    </section>
   );
 };
 
