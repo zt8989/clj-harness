@@ -705,5 +705,13 @@ old_string 编辑，undo_last_replace 是锚点那套，请用 replace；要切�
 这正是「坏配置指名失败」那条纪律在替我兜底。
 
 **测试**：全量 **476 tests / 8894 assertions 全绿，连跑两次结果一致**（锚点表与落盘状态不引入顺序
-依赖）。这一票新增/重写的用例分布在 `editing_mode_tools_test`（元断言 + 两种模式各自的端到端）、
-`editing_test`、`tools_test`、`session_tools_test`、`approval_test`、`http_test`。
+依赖）——这是本票落地时的数；补完下面那条端到端用例后是 **477 / 8908**。新增/重写的用例分布在
+`editing_mode_tools_test`（元断言 + 两种模式各自的端到端）、`editing_test`、`tools_test`、
+`session_tools_test`、`approval_test`、`http_test`。
+
+**顺带修掉一条与本案无关、但挡着这条分支的陈旧引用。** `cd ui && npm test` 里
+`approval/a-parked-write-runs-only-after-approval` 是红的，红在「这一轮应该以 interrupt 结束」上
+——看着像审批坏了。实际是 `ui/test/suites/approval.ts` 里那句用来把会话标成「write 需要审批」的
+`eval` 还写着 `harness.memory`（那个命名空间早已解散，API 回了 `harness.tools`），于是标记本身抛错、
+write 不 park 而是直接跑完。**红得很像 flaky，其实是那一行名字过期**：改成 `harness.tools/...` 之后
+11/11 全绿。main 上早已是同一个名字、同一行，两边不会打架。
