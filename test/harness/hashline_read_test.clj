@@ -45,7 +45,6 @@
   (io/delete-file user-file true)
   (io/delete-file project-file true))
 
-(use-fixtures :each wipe)
 
 (defn- use-mode! [thread-id mode]
   (project/bind! thread-id root)
@@ -81,7 +80,7 @@
         (doseq [t ["hashline_snapshots" "hashline_ownership" "hashline_sessions" "hashline_undo"]]
           (db/execute! c (str "DELETE FROM " t)))))))
 
-(use-fixtures :each (fn [f] (clean-tables) (f) (clean-tables)))
+(use-fixtures :each wipe (fn [f] (clean-tables) (f) (clean-tables)))
 
 ;; ------------------------------------------------------------------ the rows
 

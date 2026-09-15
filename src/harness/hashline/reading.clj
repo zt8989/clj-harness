@@ -196,7 +196,7 @@
 (defn- utf8-length ^long [^String s]
   (alength (.getBytes s "UTF-8")))
 
-(defn- row-for
+(defn row-for
   "The row for line N in PATH, whatever its size. A line over the per-line cap is
   replaced by a SHORT row that keeps its anchor: the line is still perfectly
   editable, the model just cannot see all of it in this view, and it is told how
@@ -205,7 +205,11 @@
   Computing the row BEFORE measuring it is what keeps the byte budget honest. The
   budget is about what the model RECEIVES, and an oversized line's row is a couple
   of hundred bytes -- so measuring the LINE instead would stop the page short for a
-  reason the model never sees, and hide the anchors of the lines after it."
+  reason the model never sees, and hide the anchors of the lines after it.
+
+  Public because `anchor_grep` needs exactly this: its rows carry a line number
+  column in front, and an oversized line has to become the same short row there as
+  it does here, with the same anchor and the same advice."
   [^String path ^String line anchor ^long n]
   (if (> (utf8-length line) row-cap)
     (row anchor (str "[Line " n " is " (utf8-length line) " bytes, over the "

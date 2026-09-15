@@ -40,6 +40,7 @@
             [harness.editing :as editing]
             [harness.event :as ev]
             [harness.hashline.edit :as edit]
+            [harness.hashline.grep :as grep]
             [harness.hashline.replace :as replace]
             [harness.hashline.serve :as serve]
             [harness.hashline.store :as store]
@@ -621,6 +622,58 @@
                         :description (str "The file whose last edit should be taken"
                                           " back.")}}
                [:path] t-undo)
+         :fence-paths true))
+
+(def ^:private grep-description
+  (str "Search files for a pattern (ripgrep), and get every match back as an ANCHORED"
+       " row: a line number for reading, and a 4-character anchor that can be edited"
+       " directly. No read afterwards is needed -- the anchors in the answer are"
+       " current and already usable, by replace or insert. "
+       "The line number is for you to talk about a hit, never to edit by: `replace`"
+       " takes anchors. "
+       "Results respect .gitignore and skip binary files. `literal: true` searches for"
+       " plain text, which is both faster and the way out when a pattern is refused"
+       " for being able to hang a regex engine. "
+       "A relative `path` resolves against this session's project directory when one"
+       " is bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(defn- t-grep
+  "`anchor_grep`'s body. The search root is resolved for the session exactly as the
+  file tools' paths are, so a relative root means what it means everywhere else."
+  [args]
+  (grep/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                 (editing/editing-mode *thread-id*)))
+
+(register! "anchor_grep"
+  (assoc (tool grep-description
+               {"pattern"     {:type "string"
+                               :description (str "Regular expression to search for"
+                                                 " (or literal text, with"
+                                                 " literal: true).")}
+                "path"        {:type "string"
+                               :description (str "File or directory to search;"
+                                                 " defaults to this session's project"
+                                                 " directory (or the process working"
+                                                 " directory when none is bound).")}
+                "glob"        {:type "string"
+                               :description (str "Only search files matching this glob,"
+                                                 " e.g. \"*.clj\".")}
+                "ignore-case" {:type "boolean" :description "Case-insensitive search."}
+                "literal"     {:type "boolean"
+                               :description (str "Treat `pattern` as plain text (no"
+                                                 " regex). The way out when a pattern"
+                                                 " is refused as too complex.")}
+                "context"     {:type "integer" :minimum 0
+                               :description (str "Lines of context to show around each"
+                                                 " match (0 by default). Context rows"
+                                                 " carry anchors too.")}
+                "limit"       {:type "integer" :minimum 1
+                               :description (str "Max matches per file (default "
+                                                 grep/default-limit ").")}}
+               [:pattern] t-grep)
+         ;; A search reads files, so the fence applies: when a project is bound, a
+         ;; root outside it parks for a human exactly as a read does.
          :fence-paths true))
 
 (register! "bash"

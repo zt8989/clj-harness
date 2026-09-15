@@ -46,6 +46,7 @@
     harness.hashline-undo-test
     harness.hashline-batch-test
     harness.hashline-insert-test
+    harness.hashline-grep-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test

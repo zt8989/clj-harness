@@ -36,7 +36,6 @@
   (io/delete-file user-file true)
   (io/delete-file project-file true))
 
-(use-fixtures :each wipe)
 
 (defn- clean-tables [f]
   (let [wipe-tables (fn []
@@ -48,7 +47,7 @@
                               (db/execute! c (str "DELETE FROM " t)))))))]
     (wipe-tables) (f) (wipe-tables)))
 
-(use-fixtures :each clean-tables)
+(use-fixtures :each wipe clean-tables)
 
 (def ^:private tid "wt")
 

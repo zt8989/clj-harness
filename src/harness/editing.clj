@@ -218,32 +218,55 @@
 (def ^:private config-key-phrase
   ":editing {:mode %s} in harness.edn")
 
+(def ^:private search-tool
+  "The one tool inside a family that has a knob of its own, and the knob.
+
+  `anchor_grep` searches rather than edits, so a session can reasonably want
+  `replace`/`insert`/`undo_last_replace` without it -- and `:anchor-grep false`
+  means exactly that: the tool is not served, and nothing takes its place. (The
+  str-replace mode has no search tool of its own to fall back to; the alternative
+  is `bash`, which the model may use whenever it likes.)"
+  {"anchor_grep" :anchor-grep})
+
 (defn served?
   "Is tool NAME served in THREAD-ID's session? True for a tool that belongs to no
   editing implementation (ask `family-of`) and for one belonging to the mode in
   force; false for the other mode's tools, which is what keeps a session's
-  toolset down to ONE editing scheme.
+  toolset down to ONE editing scheme -- and false for a tool this session has
+  switched off with its own knob.
 
-  The mode is resolved per call, so a session that changes its harness.edn changes
-  its toolset on the next ask -- there is no cache to invalidate and no restart to
-  perform."
+  The configuration is resolved per call, so a session that changes its
+  harness.edn changes its toolset on the next ask -- there is no cache to
+  invalidate and no restart to perform."
   [thread-id name]
-  (let [family (get family-of name)]
-    (or (nil? family) (= family (:mode (editing-mode thread-id))))))
+  (let [config (editing-mode thread-id)
+        family (get family-of name)
+        knob   (get search-tool name)]
+    (and (not (and knob (false? (get config knob))))
+         (or (nil? family) (= family (:mode config))))))
 
 (defn unserved-message
-  "What the model is told when it calls a tool this session's editing mode does
-  not serve. It answers three questions in one sentence each: which capability
-  this is, what replaced it, and how to get it back. Never 'unknown tool' -- the
-  tool exists and is a real way to edit files; it is simply not this session's
-  way, and saying otherwise would send the model hunting for a workaround to a
-  restriction that is one config line deep."
+  "What the model is told when it calls a tool this session does not serve. It
+  answers three questions in one sentence each: which capability this is, what
+  takes its place, and how to get it back. Never 'unknown tool' -- the tool exists
+  and is a real way to work with files; it is simply not this session's way, and
+  saying otherwise would send the model hunting for a workaround to a restriction
+  that is one config line deep."
   [thread-id name]
-  (let [mode  (:mode (editing-mode thread-id))
-        other (if (= mode :hashline) :str-replace :hashline)]
-    (str name " is not served in this session: this session edits by "
-         (get-in families [mode :edits-by])
-         ", and " name " is " (get-in families [other :label]) "."
-         " Use " (get-in families [other :substitute]) " instead."
-         " To switch, write " (format config-key-phrase (pr-str other))
-         ".")))
+  (let [mode   (:mode (editing-mode thread-id))
+        other  (if (= mode :hashline) :str-replace :hashline)
+        knob   (get search-tool name)]
+    (if (and knob (false? (get (editing-mode thread-id) knob)))
+      ;; Switched off by its own key rather than taken away by the mode: saying
+      ;; 'this session edits by anchor, and anchor_grep is the anchor-based
+      ;; editor' would be nonsense, and the way back is a different key.
+      (str name " is switched off in this session: harness.edn says "
+           (pr-str knob) " false. Nothing takes its place -- use `bash` if you"
+           " need a search. To switch it back, write :editing {" knob " true} in"
+           " harness.edn.")
+      (str name " is not served in this session: this session edits by "
+           (get-in families [mode :edits-by])
+           ", and " name " is " (get-in families [other :label]) "."
+           " Use " (get-in families [other :substitute]) " instead."
+           " To switch, write " (format config-key-phrase (pr-str other))
+           "."))))
