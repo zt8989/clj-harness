@@ -40,19 +40,47 @@ lib/
   界面上明说这一点。
 - **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
 
+## 审批门
+
+`approval-gate.tsx` 接的是 AG-UI 的 **interrupt 缝**：`useAgUiInterrupts` 读待决中断，
+`useAgUiSubmitInterruptResponses` 把 `resume` 数组写回去。它按 `reason === "tool-approval"` 认领属于
+自己的 interrupt，工具名与参数从**客户端自己的 `toolCalls`** 里读（不让服务端回显）。
+
+- **不走上游的 approval seam**：`ToolCallMessagePart.approval` 那条路只收 `reason === "tool_call"` 的闸，
+  本仓的 reason 不是它，接上去会画不出任何东西（该文件头注释完整记了这次核对）。
+- **卡片要收成批**：AG-UI 恢复时一个 run 要为**每条开着的** interrupt 各带一条 resume，
+  只回答一部分会被运行时按名拒绝；所以决定存在一张比单张卡活得久的 store 里，最后一张卡交完才提交。
+- **审批门开着时 composer 由 `isSendDisabled` 关掉**：那时发的消息会被运行时静默吃掉
+  （文本清空、哪儿都不落地），堵死发送是唯一不吞用户输入的处理。
+
 ## 样式体系：Tailwind v4 + shadcn，抄源码路线
 
 - **Tailwind v4，CSS-first**：入口是 `ui/src/styles.css`（`@import "tailwindcss"` + 主题变量 +
-  `@custom-variant dark`），**没有** `tailwind.config.js`——v4 的配置就写在 CSS 里。
-- **shadcn**：`ui/components.json` 声明别名（`@/components`、`@/lib/utils`，与 `vite.config.js` 的
-  `@` alias 对齐）与 registry（`@assistant-ui` → `r.assistant-ui.com`）。
-  `npx shadcn@latest add "@assistant-ui/thread"` 由此把源码**抄进仓库**。
+  `@custom-variant dark`），**没有** `tailwind.config.js`——v4 的配置就写在 CSS 里。构建由
+  `@tailwindcss/vite` 插件接进 `vite.config.js`，扫源码树里的工具类。
+- **shadcn，抄源码路线**：`ui/components.json` 声明别名（`@/components`、`@/lib/utils` 等，与
+  `vite.config.js` 的 `@` alias 对齐）与 registry：`@assistant-ui` 指向
+  `https://r.assistant-ui.com/styles/{style}/{name}.json`。
+  `npx shadcn@latest add "@assistant-ui/thread"` 由此把 `thread.aui.tsx` 连同 11 个
+  registryDependencies **抄进仓库**。
 
-**对账基准**：抄来的文件与上游 diff 即可（重装后对比）。唯一的例外是
-`thread-list.aui.tsx`——上游那份是扁平的、按日期分组的线程列表，本仓要的是按**项目**分组、
-行上带日志体积与 mtime。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
-其余的本地差异走两个**自建注入点**（`message-parts.tsx` 的 `THREAD_COMPONENTS` 与自建面板），
-不动抄来的文件。
+抄进来的清单（对账就是不重装直接 diff）：
+
+| 位置 | 是什么 |
+|---|---|
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button，**一字未改** |
+| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
+| `src/hooks/` | 2 份 hook，同样未改 |
+
+**一处例外，改动逐处标注**：`thread-list.aui.tsx` 就地重写过——上游那份是给另一种产品形态的扁平、
+按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
+它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
+`ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有
+switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
+
+其余的本地差异走两个**自建注入点**，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`
+（经 `components` prop 覆盖工具卡与 reasoning 的默认渲染——**全部默认折叠是有意的差异**，实现见该文件
+头注释）与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
 
 ## 测试
 

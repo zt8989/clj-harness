@@ -68,10 +68,41 @@ thread-id → {:added {id decl}    ; presence：本会话贡献的
 - **关闭不是隐藏**：被关的声明仍在 `effective-hooks` 里、带 `:disabled? true`，只是不再触发。
   藏起来会让「没有这条 hook」和「这条 hook 关着」变成同一个观察，而前者是谎话——声明就摆在文件里。
 
+在会话里经 `eval` 这么用（工具表那套 `session-require-approval!` 是同一形状）：
+
+```clojure
+(harness.hooks/session-add! harness.tools/*thread-id* :stop {:command "notify.sh"})  ; => "stop@1"
+(harness.hooks/session-disable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-enable! harness.tools/*thread-id* "stop@1")
+(harness.hooks/session-remove! harness.tools/*thread-id* "stop@1")
+```
+
 `effective-hooks` 是**引擎唯一读的那一面**：它把磁盘与会话两层折在一起，
 每条声明带 `:id`（关闭时用哪个名字）、`:point`、`:source`（`:config` / `:session`）、`:disabled?`。
 `declarations-at` 已经**滤掉**被关的——一个被关掉的 hook 就是「不触发」，那是表的事实，
 不该让 dispatch 记得去判断。
+
+## eval 的定位，与晋升路径
+
+`eval` 是本会话给自己长**行为**的地方，而今天那个行为是 **hook**——不是「长出新工具」。
+工具表那套入口（`session-register!` / `session-disable!` 等）一个都没删、测试还在跑，
+只是不再是对模型的承诺：它能表达的止于「又一个工具定义」，而 hook 能表达作者没枚举过的事
+（拦住一次调用、替人回答一次审批、在 run 收尾时做点什么），不需要有人先把那个点写进工具表。
+`eval` 仍能执行任意 Clojure（`prompt.md` 明说这一点）：收敛的是它的**定位与承诺**，不是它的能力。
+
+**会话级的一切都是进程内的，重启即失**——这是特性不是缺陷：没落过盘的东西天然可回滚。
+要把一段值得留的东西固化下来，走**人工晋升**：读日志 → 判断哪段值得留 →
+抄进 `src/harness`（正式工具表，或 `hooks.edn` 里一份默认声明）→ git 提交。
+
+```
+clojure -M:evals <thread-id> [log-dir]   # 列出该 thread 每次 eval 的 code 与返回值
+```
+
+**绝不自动重放历史 eval**——那等于把日志变成可执行输入，确定性与安全一起崩。
+
+读日志找 eval 的配方（写工具时用得上）：`eval` 的 **code** 在 assistant message 的
+`tool_calls[].function.arguments`（JSON **字符串**，要二次解码取 `:code`），**返回值**在对应
+`tool_call_id` 的 tool message 的 `:content`。审计三行 `tools/*` **不带 args**，别去那里找 code。
 
 ## dispatch：谁在跑
 

@@ -60,7 +60,11 @@ drive! :
 
 - **`reasoning_content` 必须原样留在历史里。** 带 `tools` 的请求，后续每一轮都要回传它，
   否则 DeepSeek 直接 400。所以 `loop` 把 assistant 消息**逐字**追加，从不重建。
+  **推理字段两个拼法都认**：`llm/consume-sse` 同时读 `reasoning_content`（DeepSeek）与 `reasoning`
+  （OpenRouter 代理），回来时按 OpenAI 形状写成 `reasoning_content`。
 - **`line-seq` 是惰性的**，必须在 `with-open` 里强制求值，否则响应体泄漏、调用方死等一个没人读的流。
+
+`:reasoning-effort` 只有某一档真的选了才出现（`reasoning_effort` 仅部分厂商需要，不给就是厂商默认）。
 
 **`prompt.md` 的载体也在这里**（`prompt` / `reset-prompt!`），因为「冻结」这件事的理由就是 provider 的
 前缀缓存——它是 provider 的约束，放在 provider 层。
@@ -139,5 +143,26 @@ thread-id → {:added {name tool}   ; presence：本会话贡献的定义
 
 审批状态全在进程内存（`parked-registry`：interrupt-id → 记录），重启即失；
 拿一个本进程没 park 过的 interruptId 来 resume 会被**明确拒绝**，不猜。
+
+**不做超时，也不做跨进程持久化**：人一直不响应，这个 thread 就一直待决——这是可接受的语义，
+不是缺陷（interrupt 也不填 `expiresAt`，延续本仓「不写 sleep、不重试」的纪律）。
+两个开启悬置的来源都不删：工具自带 `:requires-approval` 与 `session-require-approval!`，
+它们是「给这个工具装一条悬置型判定」的两种来源，与 `hooks.edn` 里写的门禁同一族。
+**默认全放行**：没有任何工具被标记时，帧序列与这套能力存在之前逐字节相同。
+
+**wire 上的形状**（客户端那一侧）：
+
+```
+内核 :run/interrupt
+  → ag_ui 映射为 RUN_FINISHED + outcome{type:"interrupt",
+      interrupts:[{id, reason:"tool-approval", message, toolCallId}]}
+  → 客户端从 outcome.interrupts 落 pendingInterrupts
+  → 下一次 run 的 RunAgentInput.resume:[{interruptId, status, payload?}]
+      status "resolved" ⇒ 批准   "cancelled" ⇒ 否决   （同一个 POST 端点，不做第二个）
+```
+
+interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败），所以内核只往外带四件事实；
+给**人**看的那句话是 `message`，不是 `reason`。一次 run 里有多条开着的 interrupt 时，
+客户端必须一次把它们**全部** resume——「只回答一部分」会被运行时按名拒绝。
 
 `*thread-id*` 在工具体外面被绑定，所以工具内部的代码（`eval` 尤其是）能问到自己属于哪个会话。

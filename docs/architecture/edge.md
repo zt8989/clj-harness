@@ -76,8 +76,8 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 | `message` | LLM 真实看到/返回的 provider 形状消息，**逐字** |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
-| `provider/init` | 每 thread 恰好一行，首次 run |
-| `provider/changed` | 会话中 provider 档变更，before → after |
+| `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
+| `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |
 | `project/bound` | 绑定变更，before → after（可读成目录时间线） |
 | `session/rebuilt` | 重建动作，落**被重建的那份日志**上 |
 | `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`…） |
@@ -87,9 +87,40 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 - **append 由一把锁串起来。** 大多数写入来自 run 的单个消费线程，但 hook 在它自己的点上触发
   （`PostToolUse` 跑在那次调用的线程上），两条线可能同时在飞。半行不是更短的记录，是一个坏掉的文件。
 - **`provider/init` 记的是「解析结果」，不是事后重算的结果。** 目录会变（base-url 改了、model 表更新），
-  拿今天的目录去重算旧日志，读出来的就是今天的答案而不是那天的。
+  拿今天的目录去重算旧日志，读出来的就是今天的答案而不是那天的——两个数字（上下文窗口、最大输出）
+  也在同一条理由里：内置表以后改了，旧日志仍说得出「当时这个模型声称多大窗口」。
+- **两行都记「选择」而不是「端点」**：`:before` / `:after` 是本次按下的那一刀，`:override` 才是按完之后
+  整个会话档的样子——回放者拿到 `:override` 就能还原「按完 session 长什么样」。
+  被人工**否决**的变更**不落此行**，所以「有没有这一行」就是批准与否的判据。
 - **api-key 只以 `:api-key :stripped` 出现**——是「被剥掉了」这个事实，永不出现值。
 - 读日志的代码只认 `input` / `event` 两种行；其余是审计轨迹，不是对话的一部分。
+
+## 入站翻译：parts 与图片
+
+入站消息的 `content` 可以是字符串，也可以是 parts，而两个协议对 parts 的拼法不同。
+**翻译发生在 `harness.ag_ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
+到协议层才翻会让那条日志撒谎。
+
+```
+AG-UI 入站                                        出网（OpenAI 兼容 chat-completions）
+{:type "text" :text "…"}                        → {:type "text" :text "…"}          同形，原样
+{:type "image" :source {:type "url"  :value u}}
+                                                → {:type "image_url" :image_url {:url u}}
+{:type "image" :source {:type "data" :value b64 :mimeType "image/png"}}
+                                                → {:type "image_url" :image_url
+                                                   {:url "data:image/png;base64,<b64>"}}
+```
+
+**认不出的 part 类型（如 `:document`）指名报错**——既不静默丢弃，也不原样发出
+（原样发出等于把问题推给厂商那个什么都不指名的 400）。第二个协议出现时，这里是拆分接缝。
+
+**模态守卫**：模型声明 `:input #{:text}` 而入站消息带图片 → 在**调用厂商之前**以 RUN_ERROR 终止，
+错误里点名 model id 与越界模态（厂商自己的答复是请求已发出之后的一个 400，body 里什么都不指名）。
+
+- **未声明即不拦**：inline provider 没写 `:input` 就是什么都没承诺，替它猜会让每个直接描述 endpoint 的
+  部署开始失败于一条没人写下来的规则。
+- **性质是流程纪律，不是安全边界**：给一个纯文本模型写 `:input #{:text :image}` 照样打得出去。
+  这道闸省下的是一次白跑的请求与一个看不懂的错误，不是防住谁（与项目围栏同一定性）。
 
 ## 不在生产路由里的东西
 

@@ -50,14 +50,14 @@
 
 ## 章节
 
-1. **[overview](architecture/overview.md)** — 一次请求的完整路径，端到端；三条铁律
-2. **[kernel](architecture/kernel.md)** — event / loop / llm / tools：一轮 run 与那个唯一执行缝
-3. **[edge](architecture/edge.md)** — `harness.http`：AG-UI 流、管理端点、jsonl 审计行
+1. **[overview](architecture/overview.md)** — 一次请求的完整路径，端到端；三条铁律；状态存在哪
+2. **[kernel](architecture/kernel.md)** — event / loop / llm / tools：一轮 run、执行缝的三个出口、悬置与它的 wire 形状
+3. **[edge](architecture/edge.md)** — `harness.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫
 4. **[home-and-storage](architecture/home-and-storage.md)** — 配置根、配置文件、sqlite、日志树、重建
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
-7. **[hooks](architecture/hooks.md)** — 26 个点、契约、两级装配、会话 overlay
-8. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、测试
+7. **[hooks](architecture/hooks.md)** — 26 个点、契约、两级装配、会话 overlay、eval 与晋升
+8. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 
