@@ -52,8 +52,10 @@ export interface Harness {
 }
 
 function seedHome(dir: string): void {
+  // Only the config. The store (`harness.db`) and the projects tree are both
+  // created on demand by whichever side writes first, so seeding either here
+  // would be this file guessing at a layout that already has one owner.
   fs.writeFileSync(path.join(dir, "config.edn"), SEED_CONFIG, "utf8");
-  fs.mkdirSync(path.join(dir, "logs"), { recursive: true });
 }
 
 interface Ready {
@@ -100,9 +102,11 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<Ready> {
  *
  * `url` and `scriptPath` are what the suites consume: the e2e helpers post to the
  * former and write the latter as a case decides what the model should say.
- * `home` is handed back too, because the server's jsonl lands under `<home>/logs`
- * should a test ever want to read it; `startup` and `stderr` are the child's
- * captured output, kept for a failure message rather than a test's assertion.
+ * `home` is handed back too, because the server's jsonl lands under
+ * `<home>/projects/<workspace>` -- one workspace per project, plus `.unbound` for
+ * a session that has no project -- should a test ever want to read it; `startup`
+ * and `stderr` are the child's captured output, kept for a failure message rather
+ * than a test's assertion.
  */
 export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number } = {}): Promise<Harness> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "clj-harness-ui-test-"));

@@ -6,6 +6,7 @@
             [harness.ag-ui :as ag]
             [harness.event :as ev]
             [harness.frames :as frames]
+            [harness.home :as home]
             [harness.llm :as llm]
             [harness.replay :as replay]
             [harness.wire :as wire]))
@@ -113,12 +114,19 @@
     (.mkdirs (.getParentFile f))
     (spit f (str (str/join "\n" lines) "\n") :encoding "UTF-8")))
 
+(defn- log-file
+  "The file a thread's log lives in, built the way the writer builds it. The
+  directory is the caller's now, so this test composes the two -- which is the
+  same division of labour the routes use."
+  [thread-id]
+  (home/log-file dir thread-id))
+
 (defn- assistant-with-calls [history]
   (first (filter #(and (= "assistant" (:role %)) (:tool_calls %)) history)))
 
 (deftest history-is-shaped-for-the-provider
   (write-log! "t-shape" (one-run-lines))
-  (let [history (replay/history dir "t-shape")]
+  (let [history (replay/history (log-file "t-shape"))]
     (testing "the system prompt leads, freshly read rather than stored in the log"
       (is (= "system" (:role (first history))))
       (is (str/starts-with? (:content (first history)) (llm/prompt))))
@@ -137,7 +145,7 @@
 
 (deftest history-carries-non-ascii-through-unchanged
   (write-log! "t-utf8" (one-run-lines))
-  (let [history (replay/history dir "t-utf8")]
+  (let [history (replay/history (log-file "t-utf8"))]
     (testing "the reasoning text survives the log round trip byte for byte"
       (is (= reasoning-text (:reasoning_content (assistant-with-calls history)))))
     (testing "so does the tool output"
@@ -147,13 +155,54 @@
              (:content (first (filter #(= "user" (:role %)) history))))))))
 
 (deftest a-missing-log-says-which-file
-  (let [e (try (replay/history dir "no-such-thread") nil (catch Exception e e))]
+  ;; The refusal names the FILE, not the thread: since the logs became a tree, the
+  ;; file is the whole identity of a conversation's record -- a stem can name two
+  ;; files in two workspaces, and this reader has no way to pick between them. So
+  ;; the assertion is the absolute path, which is what a reader can go look at.
+  (let [f (log-file "no-such-thread")
+        e (try (replay/history f) nil (catch Exception e e))]
     (is (some? e))
-    (is (str/includes? (str (ex-message e)) "no-such-thread"))))
+    (is (str/includes? (str (ex-message e)) (.getAbsolutePath f)))))
 
-(deftest the-thread-listing-reads-the-directory
-  ;; A directory of its OWN: the other tests in this namespace write logs into
-  ;; dir, and a listing test that shares it would count their lines.
+(deftest locate-finds-a-stem-anywhere-in-the-tree
+  (let [tdir (str (System/getProperty "java.io.tmpdir") "/harness-replay-locate")
+        ;; java.io.tmpdir outlives this JVM, so a previous run's tree would still
+        ;; be here and this test would count another run's files -- which is
+        ;; exactly the two-workspaces case it is about to create on purpose.
+        ;; Deepest-first, then fresh, the same discipline the listing test uses.
+        _    (run! #(.delete ^java.io.File %)
+                   (sort-by (fn [^java.io.File f] (count (.getPath f))) >
+                            (file-seq (io/file tdir))))
+        nested (io/file tdir "_Users_me_proj")]
+    (.mkdirs nested)
+    (spit (io/file nested "t-deep.jsonl") "x" :encoding "UTF-8")
+    (testing "a stem is found at depth, without the caller knowing the workspace name"
+      (is (= (.getCanonicalPath (io/file nested "t-deep.jsonl"))
+             (.getCanonicalPath ^java.io.File (replay/locate tdir "t-deep")))))
+    (testing "a stem that is nowhere is refused BY NAME, naming where it looked"
+      (let [e (try (replay/locate tdir "t-nowhere") nil (catch Exception e e))]
+        (is (some? e))
+        (is (str/includes? (str (ex-message e)) "t-nowhere"))))
+    (testing "logs-for answers the same question without throwing -- none is an answer"
+      (is (= [] (replay/logs-for tdir "t-nowhere")))
+      (is (= 1 (count (replay/logs-for tdir "t-deep")))))
+    (testing "a stem in TWO workspaces is refused rather than guessed at"
+      ;; The split conversation. Neither half is the whole, and quietly choosing
+      ;; the newest would hand back half a conversation looking like a clean
+      ;; rebuild.
+      (let [other (io/file tdir "_Users_me_other")]
+        (.mkdirs other)
+        (spit (io/file other "t-deep.jsonl") "y" :encoding "UTF-8"))
+      (let [e (try (replay/locate tdir "t-deep") nil (catch Exception e e))]
+        (is (some? e))
+        (is (str/includes? (str (ex-message e)) "_Users_me_proj"))
+        (is (str/includes? (str (ex-message e)) "_Users_me_other")))
+      (testing "and logs-for hands BOTH back, so a mover can refuse for its own reason"
+        (is (= 2 (count (replay/logs-for tdir "t-deep"))))))))
+
+(deftest the-thread-listing-reads-the-tree
+  ;; A tree of its OWN: the other tests in this namespace write logs into dir, and
+  ;; a listing test that shared it would count their lines.
   (let [ldir (str (System/getProperty "java.io.tmpdir") "/harness-replay-listing")]
     ;; io/delete-file cannot remove a NON-EMPTY directory, and java.io.tmpdir
     ;; outlives this JVM -- the files this test writes on one run would sit
@@ -163,19 +212,21 @@
           (sort-by (fn [^java.io.File f] (count (.getPath f))) >
                    (file-seq (io/file ldir))))
     (.mkdirs (io/file ldir))
-    (testing "an empty directory is an empty list, not an error"
+    (testing "an empty tree is an empty list, not an error"
       (is (= [] (replay/threads ldir))))
-    (testing "a MISSING directory is also an empty list -- a fresh install is normal"
+    (testing "a MISSING tree is also an empty list -- a fresh install is normal"
       (is (= [] (replay/threads (str ldir "/does-not-exist")))))
-    ;; Two logs, written in order: newest first.
-    (let [write (fn [tid]
-                  (spit (io/file ldir (str tid ".jsonl"))
-                        (str (str/join "\n" (one-run-lines)) "\n") :encoding "UTF-8"))]
-      (write "t-list-a")
+    ;; Two logs in two DIFFERENT workspaces, written in order: newest first, and
+    ;; the walk covers the whole tree rather than its top level.
+    (let [write (fn [workspace tid]
+                  (let [f (io/file ldir workspace (str tid ".jsonl"))]
+                    (.mkdirs (.getParentFile f))
+                    (spit f (str (str/join "\n" (one-run-lines)) "\n") :encoding "UTF-8")))]
+      (write "ws-a" "t-list-a")
       (Thread/sleep 20)
-      (write "t-list-b")
+      (write "ws-b" "t-list-b")
       (let [rows (replay/threads ldir)]
-        (testing "every .jsonl file is a row carrying its stem and its size"
+        (testing "every .jsonl file at any depth is a row carrying its stem and its size"
           (is (= ["t-list-b" "t-list-a"] (mapv :thread-id rows)))
           (is (every? #(pos? (:bytes %)) rows))
           (is (every? #(pos? (:last-activity %)) rows))
@@ -198,7 +249,7 @@
 (deftest resume-continues-an-interrupted-conversation
   (write-log! "t-resume" (one-run-lines))
   (let [provider (recording-provider "\u7ee7\u7eed\u7684\u56de\u7b54")
-        frames   (replay/resume! dir "t-resume" "\u518d\u89e3\u91ca\u4e00\u4e0b" provider)
+        frames   (replay/resume! (log-file "t-resume") "t-resume" "\u518d\u89e3\u91ca\u4e00\u4e0b" provider)
         seen     @(:seen provider)]
     (testing "the model was handed the rebuilt history, not a blank slate"
       (is (some? seen))
@@ -222,7 +273,7 @@
 (deftest resume-refuses-a-truncated-log-rather-than-half-continuing
   (write-log! "t-cut" (concat [(input-line "r1" [seed])]
                               (event-lines "r1" [(ev/run-start) (ev/text-delta "\u534a\u53e5")])))
-  (let [e (try (replay/resume! dir "t-cut" "继续" (recording-provider "x"))
+  (let [e (try (replay/resume! (log-file "t-cut") "t-cut" "继续" (recording-provider "x"))
                nil
                (catch Exception e e))]
     (is (some? e) "a truncated log must not be silently resumed")

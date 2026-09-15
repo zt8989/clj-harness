@@ -1,8 +1,16 @@
 (ns harness.home
   "The one place that decides where this process keeps its files: config,
-  providers, the .env that holds the api-key, the jsonl logs, and the metadata
-  store. Everything else derives its paths from here -- no bare relative slurp
-  anywhere.
+  providers, the .env that holds the api-key, the metadata store, and the tree
+  the logs live in. Everything else derives its paths from here -- no bare
+  relative slurp anywhere.
+
+  TWO PATHS IN THE LOG TREE, TWO NAMESPACES, ONE DIRECTION. This namespace knows
+  the tree's root (projects-dir) and the rule that turns an id into a filename
+  (sanitize). Which WORKSPACE -- which project's directory -- a session's log
+  belongs in needs the session's project, and that comes from the store, so the
+  join lives in harness.http (log-dir-for) and requires this namespace, never the
+  reverse. Keeping it that way is what stops the kernel's knowledge of 'where
+  things are' from depending on the database.
 
   The root is, in order of precedence:
 
@@ -41,41 +49,51 @@
 (defn providers-file [] (io/file (root) "providers.edn"))
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
-(defn logs-dir       [] (io/file (root) "logs"))
 (defn db-file
   "The home's metadata store -- see harness.db. It lives beside the configuration
   files rather than under any one feature's directory: it is this home's store,
   and it has more than one tenant."
   []
   (io/file (root) "harness.db"))
+(defn projects-dir
+  "The tree the logs live in: one workspace directory per project, plus one
+  reserved workspace for sessions that belong to none. This is the ROOT of that
+  tree and nothing more -- which workspace a given session writes into is not a
+  question about the root, so it is not answered here (see harness.http's
+  log-dir-for, which resolves the session's project first and is the only place
+  the two facts are joined)."
+  []
+  (io/file (root) "projects"))
 
 (defn sanitize
-  "A thread id -> a filename-safe stem. The ONE rule the writer (harness.http)
-  and the reader (harness.replay) must agree on: it is shared here so they
-  cannot drift, while the paths around it stay separate -- replay takes its
-  directory from the caller and never learns about this namespace, because the
-  kernel must not read its own log."
+  "A thread id -> a filename-safe stem, AND a project path -> a directory name.
+  The ONE rule the writer (harness.http) and the readers (harness.replay) must
+  agree on: it is shared here so they cannot drift, while the paths around it
+  stay separate -- replay takes its directory from the caller and never learns
+  about this namespace, because the kernel must not read its own log."
   [thread-id]
   (str/replace (str thread-id) #"[^A-Za-z0-9._-]" "_"))
 
 (defn log-file
-  "The jsonl file for THREAD-ID.
+  "The jsonl file for THREAD-ID, inside DIR.
 
-  Two arities on purpose: the writer under this root, and replay's -- which is
-  handed a DIRECTORY by its caller and must stay a pure reader that knows
-  nothing of harness.home. Both go through sanitize, so the two sides agree on
-  the filename without the reader depending on the writer's home."
-  ([thread-id]     (io/file (logs-dir) (str (sanitize thread-id) ".jsonl")))
-  ([dir thread-id] (io/file dir (str (sanitize thread-id) ".jsonl"))))
+  DIR is the CALLER's, and that is the whole shape of this function: which
+  directory a session's log belongs in is a question about the session's project,
+  which this namespace deliberately does not know (see projects-dir). The two
+  sides that must agree are the filename rule -- shared here -- and the tree
+  layout, which belongs to the writers and readers of the log tree. So the
+  writer asks harness.http for the directory and hands it in, and replay is
+  handed one by its caller and stays a pure reader that knows nothing of this
+  home."
+  [dir thread-id]
+  (io/file dir (str (sanitize thread-id) ".jsonl")))
 
 (defn log-path
   "The same file as a STRING -- what asks like 'where is this conversation's log'
-  want to hear, since the answer usually goes into a message rather than into a
-  file operation. Computed fresh every call, like everything else here: the root
-  can move (CLJ_HARNESS_HOME, a test binding) between calls, and a cached path
-  would silently point at the wrong file."
-  [thread-id]
-  (str (log-file thread-id)))
+  want, since the answer usually goes into a message rather than into a file
+  operation. Computed fresh every call, like everything else here."
+  [dir thread-id]
+  (str (log-file dir thread-id)))
 
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs.

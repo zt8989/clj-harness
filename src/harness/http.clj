@@ -5,7 +5,10 @@
   binding, plus /api/project/pick, the OS folder dialog that feeds it -- sharing
   the same CORS and logging.
 
-  Also append-only JSONL logging: one file per thread, these line kinds.
+  Also append-only JSONL logging: one file per thread, under the session's
+  project's workspace in the home's projects tree -- the path is the one place
+  where 'where things are' and 'who this session is' are joined (see
+  log-dir-for). These line kinds.
 
     \"input\"   -- the client's RunAgentInput as received.
     \"event\"   -- every AG-UI frame we emitted.
@@ -40,6 +43,7 @@
   and the server never reads the file back."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.ag-ui :as ag]
             [harness.event :as ev]
@@ -73,13 +77,112 @@
   ;; writer's guarantee true without asking every caller to know about it.
   (Object.))
 
+(def unbound-workspace
+  "The workspace for sessions that belong to no project. RESERVED BY
+  CONSTRUCTION, not by convention: sanitize maps everything outside
+  [A-Za-z0-9._-] to an underscore and the path it is handed is always absolute,
+  so a workspace name derived from a project begins with an underscore on Unix
+  and with a drive letter on Windows -- never with a dot. A literal `_unbound`
+  would collide with a project at /unbound, and two populations of logs sharing
+  one directory is exactly the confusion this tree exists to remove."
+  ".unbound")
+
+(defn- log-dir-for
+  "The workspace directory THREAD-ID's log belongs in.
+
+  ONE CALLER, DELIBERATELY: the writer below. Which workspace a session writes
+  into needs the session's project, and the project comes from the store -- so
+  this is the single place where 'where things are' (harness.home) and 'who this
+  session is' (harness.project) are joined. Keeping the join here, on the writing
+  side, is what leaves harness.home knowing only the root and the naming rule;
+  the reading side never needs it, because a listing and a lookup both walk the
+  tree and ask the FILESYSTEM where a log is.
+
+  The workspace is derived from the project's CANONICAL path -- its identity, not
+  the spelling this session was bound with -- so every session of one project
+  lands in one workspace however that directory was spelled when it was bound. A
+  session the store has never heard of is normal here, not an error: the AG-UI
+  edge accepts an id the client owns and the store has not been told about, and
+  its log goes to the reserved workspace."
+  [thread-id]
+  (str (io/file (home/projects-dir)
+                (if-let [identity (project/identity-for thread-id)]
+                  (home/sanitize identity)
+                  unbound-workspace))))
+
+(defn- log-file-for
+  "The log file the writer owns for THREAD-ID."
+  [thread-id]
+  (home/log-file (log-dir-for thread-id) thread-id))
+
 (defn- log! [thread-id run-id kind payload]
-  (let [f (home/log-file thread-id)
+  (let [f (log-file-for thread-id)
         line (str (json/write-str {:ts (System/currentTimeMillis)
                                    :runId run-id :kind kind :payload payload}) "\n")]
     (.mkdirs (.getParentFile f))
     (locking log-lock
       (spit f line :append true :encoding "UTF-8"))))
+
+(defn- move-log!
+  "Carry THREAD-ID's log from one workspace into another, because a rebind moved
+  the session.
+
+  A CONVERSATION IS ONE FILE, and that is why this exists rather than letting the
+  log stay where it started. Replay, rebuild and the eval reader all reconstruct
+  a conversation from a single file; a session whose binding moved and whose
+  history was therefore split in two would be unreadable by every one of them --
+  and the rebind that caused it is an ordinary action, not an exotic one. So the
+  bind carries the file with it.
+
+  THE WHOLE TREE IS ASKED WHERE THIS SESSION'S LOGS ARE, not just the two
+  workspaces involved. If the only file is the one being moved, the move is safe.
+  If there is any other file under the same name -- the destination already holds
+  one, or a copy sits in some third workspace -- the move is REFUSED BY NAME.
+  Appending two files would read as one conversation in the wrong order (replay
+  folds frames in FILE order), and overwriting would destroy a run's record;
+  neither is acceptable, so the human is asked which file is the conversation.
+  Asking the tree rather than `to` is what makes the refusal cover every way a
+  home can arrive in that state, not just a repeat bind: a store that was
+  quarantined and rebuilt no longer knows where a log belongs, a tree can be
+  restored from a backup, and a process killed between the bind's commit and this
+  rename leaves the file where it was.
+
+  FROM-DIR nil means there is nowhere to move from (a first bind); that is the
+  ordinary case, as is a session whose log does not exist yet because it has
+  never run."
+  [thread-id ^String from-dir ^String to-dir]
+  (if (or (nil? from-dir) (= from-dir to-dir))
+    nil
+    (let [from  (home/log-file from-dir thread-id)
+          to    (home/log-file to-dir thread-id)
+          found (replay/logs-for (home/projects-dir) thread-id)]
+      (when (.exists from)
+        (when-some [other (first (remove #(and (= (.getCanonicalPath ^java.io.File from)
+                                                   (.getCanonicalPath ^java.io.File %)))
+                                         found))]
+          (throw (ex-info (str "this session's log is being moved from "
+                               (.getAbsolutePath ^java.io.File from)
+                               " to " (.getAbsolutePath ^java.io.File to)
+                               ", but it already has a log at "
+                               (.getAbsolutePath ^java.io.File other)
+                               ". Moving one onto the other would either lose a"
+                               " run's record or read as one conversation in the"
+                               " wrong order; move or remove one of them first, then"
+                               " bind again")
+                          {:thread-id thread-id
+                           :paths [(.getAbsolutePath ^java.io.File from)
+                                   (.getAbsolutePath ^java.io.File other)]})))
+        (.mkdirs (.getParentFile to))
+        (when-not (.renameTo from to)
+          ;; A rename between two directories under one home does not fail for
+          ;; want of a filesystem, so this is a real refusal and not a warning:
+          ;; leaving the log behind would do the one thing this function exists
+          ;; to prevent.
+          (throw (ex-info (str "could not move the log " (.getAbsolutePath ^java.io.File from)
+                               " to " (.getAbsolutePath ^java.io.File to))
+                          {:thread-id thread-id
+                           :paths [(.getAbsolutePath ^java.io.File from)
+                                   (.getAbsolutePath ^java.io.File to)]})))))))
 
 (defonce ^:private init-logged
   (atom #{}))
@@ -455,7 +558,28 @@
   one now stored, so a session's directory timeline is readable off the log.
   runId is nil on that line because a binding happens OUTSIDE any run. The
   previous binding is read BEFORE binding: bind! overwrites, and the audit
-  line is the only place the old value would survive."
+  line is the only place the old value would survive.
+
+  THE LOG TRAVELS WITH THE BINDING. Which workspace a session's log belongs in
+  is decided by its project, so a rebind that did not carry the file would split
+  one conversation across two directories -- and replay, rebuild and the eval
+  reader each reconstruct a conversation from a single file. The before-
+  directory is therefore read while the OLD binding is still in force; after a
+  successful bind the file is moved. A move that cannot happen (the session
+  already has a log where it is going) is refused by name, and the binding is NOT
+  rolled back: the store and the tree would then disagree about where the session
+  lives, and the human's task is the same in either case -- decide which log is
+  the conversation. The 400 says so, and the response carries the directory the
+  store actually holds so the client is not left guessing which of the two it
+  ended up with.
+
+  ORDER MATTERS, AND THE AUDIT LINE GOES LAST. The move happens before the line is
+  written for two reasons: the line must land in the workspace the session has
+  just moved to, so the whole timeline stays in one file; and a REFUSED move must
+  leave no line at all -- writing one first would append it to the very file the
+  refusal just declared ambiguous, corrupting a record the refusal exists to
+  protect. So a refused move is traced by its 400 and by nothing on disk, which
+  is the same 'no trace on failure' the validation above already promises."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
@@ -474,25 +598,38 @@
       :else
       (let [thread-id (str (:threadId ok))
             before    (project/binding-for thread-id)
+            from-dir  (log-dir-for thread-id)
             bound     (try {:ok (project/bind! thread-id (str (:dir ok)))}
                            (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error bound)]
           (api-response 400 {:error error})
-          (let [abs (:ok bound)]
-            (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
-            (api-response 200 {:threadId thread-id :dir abs})))))))
+          (let [abs   (:ok bound)
+                moved (try {:ok (move-log! thread-id from-dir (log-dir-for thread-id))}
+                           (catch Throwable t {:error (ex-message t)}))]
+            (if-some [move-error (:error moved)]
+              (api-response 400 {:error move-error :threadId thread-id :dir abs})
+              (do (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
+                  (api-response 200 {:threadId thread-id :dir abs})))))))))
 
 (defn- threads-get
-  "GET /api/threads -- the conversations the log directory holds, newest
-  first. The listing is a DIRECTORY SCAN of files, so it knows nothing about
-  whether a conversation is complete; a truncated one is refused at rebuild
-  time, not listed differently here."
+  "GET /api/threads -- the conversations the projects tree holds, newest first.
+  The listing is a DIRECTORY SCAN of files, so it knows nothing about whether a
+  conversation is complete; a truncated one is refused at rebuild time, not
+  listed differently here.
+
+  One row per FILE, and the id is that file's stem. Two files in DIFFERENT
+  workspaces can share a stem, and the ordinary cause is a bind whose log move
+  was REFUSED (the session returned to a project whose workspace still held its
+  earlier log): the store then points at the new project while the file stayed
+  behind, so the next run starts a second file. The listing therefore speaks
+  filenames, and the rebuild route refuses a stem that resolves to more than one
+  (see replay/locate)."
   [_req]
   (api-response 200
                 (mapv (fn [t] {:threadId     (:thread-id t)
                                :lastActivity (:last-activity t)
                                :bytes        (:bytes t)})
-                      (replay/threads (home/logs-dir)))))
+                      (replay/threads (home/projects-dir)))))
 
 (defn- thread-rebuild-stem
   "/api/threads/<stem>/rebuild -> <stem>, else nil. The stem is the sanitized
@@ -515,12 +652,25 @@
   its next ordinary run; the server holds no rebuilt state. A truncated or
   corrupt log is refused with the reason on the 400. The rebuild action lands
   a session/rebuilt audit line on the log it rebuilt -- runId nil, because a
-  rebuild happens OUTSIDE any run."
+  rebuild happens OUTSIDE any run.
+
+  The stem is located BEFORE anything else happens, and that ordering is why a
+  rebuild never writes half a trace: a stem that resolves to nothing, or to more
+  than one file, is refused without landing its audit line anywhere."
   [req stem]
-  (let [result (try {:ok (replay/rebuild (home/logs-dir) stem)}
-                    (catch Throwable t {:error (ex-message t)}))]
-    (if-some [error (:error result)]
-      (api-response 400 {:error error})
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))
+        result  (when (nil? (:error located))
+                  (try {:ok (replay/rebuild (:ok located))}
+                       (catch Throwable t {:error (ex-message t)})))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located)})
+
+      (some? (:error result))
+      (api-response 400 {:error (:error result)})
+
+      :else
       (let [{:keys [messages context]} (:ok result)]
         (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"})
         (api-response 200 {:threadId stem

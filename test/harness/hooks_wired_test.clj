@@ -47,7 +47,15 @@
     (.send (HttpClient/newHttpClient) req
            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
 
-(defn- log-file [thread] (io/file (str (home/logs-dir)) (str thread ".jsonl")))
+(defn- log-file
+  "A thread's log, in the tree's reserved workspace.
+
+  Every thread this namespace runs is UNBOUND -- it exercises hooks, not project
+  bindings -- so that is where their logs land. The directory is composed from
+  harness.home and harness.http/unbound-workspace rather than spelled out, so it
+  cannot drift from the writer."
+  [thread]
+  (home/log-file (io/file (home/projects-dir) http/unbound-workspace) thread))
 
 (defn- log-lines [f]
   ;; A LIVE file: its last line can be half-written, and that is a fact about

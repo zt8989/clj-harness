@@ -636,11 +636,19 @@
 ;; ------------------------------------------------------------- introspection
 
 (deftest log-path-names-the-file-the-writer-writes
-  (testing "and it is derived from harness.home, so a relocated root follows"
-    (is (= (str (home/log-file "t-logpath")) (home/log-path "t-logpath")))
-    (is (str/ends-with? (home/log-path "t-logpath") "t-logpath.jsonl")))
-  (testing "the sanitize rule is shared, so the reader and writer agree"
-    (is (= "a_b_c.jsonl" (str/replace (home/log-path "a/b c") #".*[\\/]" "")))))
+  ;; The DIRECTORY is the caller's now -- which workspace a session belongs in
+  ;; follows from its project, which harness.home deliberately does not know. So
+  ;; the claim here is the part home still owns: one rule turns an id into a
+  ;; filename, and log-path and log-file agree about it.
+  (let [d (io/file (home/projects-dir) "a-workspace")]
+    (testing "log-path names exactly the file log-file points at"
+      (is (= (str (home/log-file d "t-logpath")) (home/log-path d "t-logpath")))
+      (is (str/ends-with? (home/log-path d "t-logpath") "t-logpath.jsonl")))
+    (testing "and it lands inside the directory it was handed, not under the root"
+      (is (= (.getCanonicalPath d)
+             (.getCanonicalPath (.getParentFile (home/log-file d "t-logpath"))))))
+    (testing "the sanitize rule is shared, so the reader and writer agree"
+      (is (= "a_b_c.jsonl" (str/replace (home/log-path d "a/b c") #".*[\\/]" ""))))))
 
 (deftest active-provider-answers-both-what-was-chosen-and-what-it-resolved-to
   (with-home (cfg :alpha :reasoning-effort "high") reg

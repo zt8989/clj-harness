@@ -16,9 +16,19 @@
   starting point.
 
   The DIRECTORY is the caller's -- this namespace stays a pure reader and never
-  learns where the process keeps its home. The FILENAME rule, though, is shared
-  with the writer through harness.home/sanitize: that one expression is the part
-  the two sides must agree on, and sharing it is what stops them drifting."
+  learns where the process keeps its home. That is why every entry point but the
+  listing takes one: the routes locate a stem through `locate` (which workspace a
+  conversation lives in follows from its project) and hand this namespace the
+  directory they found. The FILENAME rule is shared with the writer through
+  harness.home/sanitize: that one expression is the part the two sides must agree
+  on, and sharing it is what stops them drifting.
+
+  THE LISTING IS A TREE WALK. `threads` used to take one directory, because there
+  was one; the logs are now a tree -- one workspace per project plus a reserved
+  one -- so a listing has to walk it, and `locate` exists because a stem is no
+  longer unique across it. Both are the reading side's answer to the tree. What
+  this namespace still refuses to learn is where the tree starts: the caller
+  passes the root in, exactly as it passes one directory in for a rebuild."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -30,20 +40,15 @@
             [harness.providers :as providers]
             [harness.loop :as loop]))
 
-(defn- log-file
-  "The file the writer in harness.http would have produced for this thread."
-  [dir thread-id]
-  (home/log-file dir thread-id))
-
 (defn read-lines
-  "A thread's raw log lines. A missing log is a NAMED failure, not an empty
-  conversation: continuing from nothing would silently drop a whole history."
-  [dir thread-id]
-  (let [f (log-file dir thread-id)]
-    (when-not (.exists f)
-      (throw (ex-info (str "no log for thread " (pr-str thread-id) " at " f)
-                      {:thread-id thread-id :path (str f)})))
-    (str/split-lines (slurp f :encoding "UTF-8"))))
+  "A log FILE's raw lines (see harness.home/log-file). A missing log is a NAMED
+  failure, not an empty conversation: continuing from nothing would silently drop
+  a whole history."
+  [^java.io.File f]
+  (when-not (.exists f)
+    (throw (ex-info (str "no log at " (.getAbsolutePath f))
+                    {:path (.getAbsolutePath f)})))
+  (str/split-lines (slurp f :encoding "UTF-8")))
 
 (defn lines->records
   "Parse a log's lines. A line that will not parse is a hard failure that names the
@@ -102,37 +107,49 @@
   plus the context the conversation was started with. The client takes both
   into its next ordinary RunAgentInput -- the server holds no rebuilt state,
   exactly as it holds no conversation state ever."
-  [dir thread-id]
-  (let [records (lines->records (read-lines dir thread-id))
+  [^java.io.File f]
+  (let [records (lines->records (read-lines f))
         input   (first-input records)]
     {:messages (records->messages records)
      :context  (:context input)}))
 
 (defn history
-  "A thread's log -> the provider-shaped messages you can hand straight to
+  "A log FILE -> the provider-shaped messages you can hand straight to
   loop/run-chan.
 
   This is the whole point of the namespace: after the process that wrote the log is
   gone, this rebuilds the conversation that was in flight, reasoning and tool results
   included, and it comes back in exactly the shape the model expects -- the reasoning
   folded onto its assistant message, calls in the provider's casing."
-  [dir thread-id]
-  (let [records (lines->records (read-lines dir thread-id))]
+  [^java.io.File f]
+  (let [records (lines->records (read-lines f))]
     (ag/inbound (records->messages records) (llm/prompt) (:context (first-input records)))))
 
-(defn threads
-  "The conversations a log DIRECTORY holds: one entry per *.jsonl file --
-  {:thread-id .. :last-activity <epoch millis> :bytes <file size>} -- newest
-  first. The thread-id is the FILE's stem: the writer sanitizes thread ids into
-  filenames, and this listing speaks filenames. An empty or MISSING directory is
-  an empty list, not an error -- no logs yet is the normal state of a fresh
-  install.
-
-  The listing says nothing about whether a log is complete; rebuilding a
-  truncated one is refused, and the refusal names why."
+(defn- logs-under
+  "Every *.jsonl file at any depth under DIR, in no particular order. The tree is
+  what 'the logs' means now: one workspace per project plus a reserved one, so a
+  listing is a walk rather than a single directory scan -- and it stays a
+  FILESYSTEM fact rather than a database query, because a log that was moved by
+  hand is still a log."
   [dir]
   (->> (file-seq (io/file dir))
-       (filter #(and (.isFile %) (str/ends-with? (.getName %) ".jsonl")))
+       (filter #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".jsonl")))))
+
+(defn threads
+  "The conversations a log TREE holds: one entry per *.jsonl file --
+  {:thread-id .. :last-activity <epoch millis> :bytes <file size>} -- newest
+  first. DIR is the tree's root (harness.home/projects-dir); the walk is
+  recursive, so its workspaces are covered without this namespace knowing how
+  they are named. The thread-id is the FILE's stem, and this listing speaks
+  filenames.
+
+  An empty or MISSING tree is an empty list, not an error -- no logs yet is the
+  normal state of a fresh install. The listing says nothing about whether a log
+  is complete; rebuilding a truncated one is refused, and the refusal names why.
+  Nor does it say whether a stem is UNIQUE: one conversation whose binding moved
+  between runs has a log in each workspace, and that is what `locate` refuses."
+  [dir]
+  (->> (logs-under dir)
        (mapv (fn [^java.io.File f]
                (let [name (.getName f)]
                  {:thread-id     (subs name 0 (- (count name) (count ".jsonl")))
@@ -140,6 +157,66 @@
                   :bytes         (.length f)})))
        (sort-by :last-activity >)
        vec))
+
+(defn logs-for
+  "EVERY log file under DIR whose name is the one a STEM gets: none, one, or
+  several. A stem comes from `threads`, so it is already a file stem; a full path
+  works too, since sanitizing it leaves only the final segment changed -- and
+  sanitize is the one rule for turning an id into a filename, so it is used rather
+  than restated.
+
+  The whole vector is the answer, rather than one file, because the callers
+  disagree about what to do with more than one and neither may guess: rebuilding
+  refuses (no half is the conversation), and a log move refuses too (whichever
+  file it carried, the other would be left behind as a second half). Returning the
+  list is what lets each say so in its own words instead of one caller
+  re-interpreting the other's refusal.
+
+  None is an ordinary answer: a session that has never run has no log."
+  [dir stem]
+  (let [want (str (home/sanitize stem) ".jsonl")]
+    (->> (logs-under dir)
+         (filter #(= want (.getName ^java.io.File %)))
+         (sort-by #(str %))
+         vec)))
+
+(defn find-log
+  "THE log file a STEM names anywhere under DIR -- nil when there is none.
+  Several is a NAMED failure: a conversation whose log landed in two workspaces is
+  not one this function can hand back (see logs-for)."
+  [dir stem]
+  (let [found (logs-for dir stem)]
+    (case (count found)
+      0 nil
+      1 (first found)
+      (throw (ex-info (str "thread " (pr-str stem) " has " (count found)
+                           " logs, in different workspaces: "
+                           (str/join ", " (map #(.getAbsolutePath ^java.io.File %) found))
+                           ". Neither one is the whole of it")
+                      {:thread-id stem
+                       :paths (mapv #(.getAbsolutePath ^java.io.File %) found)})))))
+
+(defn locate
+  "The log file a STEM names, found anywhere under DIR -- the same answer as
+  find-log, with 'nothing found' made a failure too, for the callers that must be
+  handed a file:
+
+    one match   that file
+    none        a NAMED failure saying so, with where it looked
+    several     a NAMED failure naming every file, and what to do about it
+
+  A rebuild must not guess and must not invent an empty conversation: rebuilding
+  from nothing would silently drop a whole history, which is why 'nothing found'
+  is an exception here and an answer in find-log."
+  [dir stem]
+  (if-some [found (find-log dir stem)]
+    found
+    (throw (ex-info (str "no log for thread " (pr-str stem) " under "
+                         (.getAbsolutePath (io/file dir))
+                         " -- nothing there is named "
+                         (str (home/sanitize stem) ".jsonl"))
+                    {:thread-id stem
+                     :path (str (io/file dir (str (home/sanitize stem) ".jsonl")))}))))
 
 (defn resume!
   "Rebuild a thread from its log, append TEXT as a new user turn, and run the agent on.
@@ -152,13 +229,13 @@
   It does NOT append to the log. The writer lives at the http edge, and this namespace
   is deliberately the read side only; a resumed conversation therefore leaves no new
   trace on disk. An author-side action, not a run path."
-  ([dir thread-id text] (resume! dir thread-id text (providers/effective-provider thread-id)))
-  ([dir thread-id text provider]
+  ([f thread-id text] (resume! f thread-id text (providers/effective-provider thread-id)))
+  ([f thread-id text provider]
      (let [run-id (str (java.util.UUID/randomUUID))
          emit   (ag/outbound thread-id run-id)
          frames (atom [])
          events (loop/run-chan provider
-                               (conj (history dir thread-id) {:role "user" :content text})
+                               (conj (history f) {:role "user" :content text})
                                {:thread-id thread-id})]
      (loop []
        (when-let [event (async/<!! events)]

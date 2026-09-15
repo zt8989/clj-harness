@@ -169,6 +169,23 @@
   (when (some? thread-id)
     (:path (first (db/select "SELECT path FROM sessions WHERE id = ?" thread-id)))))
 
+(defn identity-for
+  "The CANONICAL path of the project THREAD-ID's session belongs to -- the
+  project's identity, or nil for a session with no project.
+
+  Separate from `binding-for` because they answer different questions and one
+  caller needs each: `binding-for` answers the spelling this session was bound
+  with, which is what gets echoed back and run in, while THIS answers the shared
+  identity, which is what a name derived from the project must use -- the
+  workspace a session's log lands in must be the same for every session of one
+  project however each of them spelled it."
+  [thread-id]
+  (when (some? thread-id)
+    (:canonical-path (first (db/select "SELECT p.canonical_path AS canonical_path
+                                          FROM sessions s JOIN projects p ON p.id = s.project_id
+                                         WHERE s.id = ?"
+                                       thread-id)))))
+
 (defn projects
   "Every project this home knows: {:id :canonical-path :created-at}, oldest
   first. One row per DIRECTORY, so this is the deduplication made visible --

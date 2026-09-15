@@ -88,13 +88,19 @@
           calls)))
 
 (defn evals
-  "A thread's log -> its eval history: (evals-in records) over the log's records.
+  "A log FILE -> its eval history: (evals-in records) over the log's records.
+
+  Takes the file, not a directory and a thread id: since the logs became a projects
+  tree, 'which workspace this conversation lives in' is a question with an owner
+  (the /api/threads listing answers it by walking), and reimplementing that lookup
+  here would be a third copy of a rule with two callers already. Use
+  `replay/locate`, or a path you already have.
 
   Uses harness.replay for reading, so a corrupt log fails the same way it does
   everywhere else -- naming the offending line -- and the filename rule is not
   reimplemented a third time."
-  [dir thread-id]
-  (evals-in (replay/lines->records (replay/read-lines dir thread-id))))
+  [^java.io.File f]
+  (evals-in (replay/lines->records (replay/read-lines f))))
 
 (defn describe
   "One eval as a human-readable block: the code it ran and what came back. For a
@@ -110,16 +116,23 @@
   "  clojure -M:evals <thread-id> [log-dir]
 
   Prints every eval THREAD-ID ran, in order: the code verbatim, then its result.
-  LOG-DIR defaults to the process's log directory (harness.home); pass one to read
-  a log from elsewhere.
+
+  LOG-DIR is the TREE's root and defaults to the process's projects directory
+  (harness.home/projects-dir); the thread's file is LOCATED under it, because the
+  logs are a tree of workspaces now and this tool has no business knowing which
+  project a session belonged to. Pass a directory to search somewhere else
+  entirely.
 
   What this is FOR: promoting runtime growth into the repository. Read the output,
   decide which eval is worth keeping, copy its code into src/harness as a real
   tool, and commit it -- version control is the rollback story. Nothing here ever
   re-runs the code."
   [thread-id & [dir]]
-  (let [dir   (or dir (str (harness.home/logs-dir)))
-        found (evals dir thread-id)]
-    (if (empty? found)
-      (println (str "no eval calls recorded for thread " thread-id " in " dir))
-      (doseq [e found] (print (describe e))))))
+  (let [dir   (or dir (str (harness.home/projects-dir)))
+        found (try {:ok (evals (replay/locate dir thread-id))}
+                   (catch Exception e {:error (ex-message e)}))]
+    (if-some [error (:error found)]
+      (binding [*out* *err*] (println error))
+      (if (empty? (:ok found))
+        (println (str "no eval calls recorded for thread " thread-id " in " dir))
+        (doseq [e (:ok found)] (print (describe e)))))))

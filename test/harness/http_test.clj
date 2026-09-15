@@ -78,11 +78,43 @@
             (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
 
 (defn- log-dir
-  "Where the server under test writes its logs. Derived from harness.home so it
-  follows the config root -- which the test fixture rebinds to a temp directory,
-  so these tests never touch the real one."
+  "Where the server under test writes its logs, for a thread with NO project
+  binding: the tree's reserved workspace.
+
+  Derived from harness.home, so it follows the config root -- which the test
+  fixture rebinds to a temp directory, so these tests never touch the real one.
+  Almost every thread in this namespace is unbound (the routes under test are not
+  the project one), so this is where their logs land; a test that BINDS a project
+  computes that project's workspace itself, because that is the thing it is
+  checking."
   []
-  (str (home/logs-dir)))
+  (str (io/file (home/projects-dir) http/unbound-workspace)))
+
+(defn- log-dir-for
+  "The workspace THREAD-ID's log is in, asked the way the server asks it: the
+  session's project identity, sanitized, or the reserved workspace. For a thread
+  whose binding changes mid-test, ask this AFTER the change -- which is exactly
+  the behaviour under test in the project routes."
+  [thread-id]
+  (str (io/file (home/projects-dir)
+                (if-let [identity (project/identity-for thread-id)]
+                  (home/sanitize identity)
+                  http/unbound-workspace))))
+
+(defn- log-file
+  "The file an UNBOUND thread's log lives in -- which is every thread in this
+  namespace except the ones the project routes bind. Derived the way the writer
+  derives it rather than hard-coded, so a change to the naming rule shows up
+  here as a failure instead of a test that agrees with itself."
+  [thread-id]
+  (home/log-file (log-dir) thread-id))
+
+(defn- log-file-for
+  "The file THREAD-ID's log is in, wherever its binding says that is. The only
+  difference from log-file is the workspace, and that difference is the thing the
+  project routes are tested for."
+  [thread-id]
+  (home/log-file (log-dir-for thread-id) thread-id))
 
 (defn- header [resp name]
   (str (.orElse (.firstValue (.headers resp) name) "")))
@@ -163,9 +195,9 @@
      ;; Delete first, like the replay e2e does: the assertions below use
      ;; first/last over the parsed lines, so leftover runs from earlier test
      ;; executions must not bleed in.
-     (io/delete-file (io/file (log-dir) "it-1.jsonl") true)
+     (io/delete-file (log-file "it-1") true)
      (post-run 8098 "it-1")
-     (let [f     (io/file (log-dir) "it-1.jsonl")
+     (let [f     (log-file "it-1")
            lines (wait-for-recorded f
                                     ;; The returned tail lands one line at a
                                     ;; time after the terminal frame -- wait
@@ -239,7 +271,7 @@
    8095
    "replay-e2e"
    (fn []
-     (let [log (io/file (log-dir) "replay-e2e.jsonl")]
+     (let [log (log-file "replay-e2e")]
        (io/delete-file log true)
        (post-run 8095 "replay-e2e")
        (wait-for-recorded
@@ -247,7 +279,7 @@
         (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
                       (>= (count (filter #(= "message" (:kind %)) ls)) 4)))
         3000)
-       (let [history (replay/history (log-dir) "replay-e2e")]
+       (let [history (replay/history (log-file "replay-e2e"))]
          (testing "the reader found the file the writer wrote, and rebuilt a conversation"
            (is (= "system" (:role (first history))))
            (is (some #(= "user" (:role %)) history)))
@@ -276,7 +308,7 @@
    8093
    "images"
    (fn []
-     (let [log    (io/file (log-dir) "images.jsonl")
+     (let [log    (log-file "images")
            parts  [{:type "text" :text "what is this"}
                    {:type "image" :source {:type "url" :value "https://example.test/a.png"}}
                    {:type "image" :source {:type "data" :value "AAAB" :mimeType "image/jpeg"}}]
@@ -300,7 +332,7 @@
                          sent)
                "no AG-UI source wrapper survives into the record"))
          (testing "and replay rebuilds the very same messages from the log"
-           (let [history (replay/history (log-dir) "images")
+           (let [history (replay/history (log-file "images"))
                  rebuilt (mapv :content (filter #(= "user" (:role %)) history))]
              (is (= [expect] rebuilt)
                  "a resumed conversation sends what the live run sent"))))))))
@@ -410,9 +442,9 @@
    8094
    "lifecycle"
    (fn []
-     (io/delete-file (io/file (log-dir) "lifecycle.jsonl") true)
+     (io/delete-file (log-file "lifecycle") true)
      (post-run 8094 "lifecycle")
-     (let [f     (io/file (log-dir) "lifecycle.jsonl")
+     (let [f     (log-file "lifecycle")
            lines (wait-for-recorded f
                                     (fn [ls]
                                       (>= (count (filter #(= "tools/post-execute" (:kind %)) ls)) 2))
@@ -511,7 +543,7 @@
 
            (testing "both decisions are on disk: the audit line and the resumed transit"
              (let [lines (wait-for-recorded
-                          (io/file (log-dir) "http-approve.jsonl")
+                          (log-file "http-approve")
                           (fn [ls] (some #(= "approval/decided" (:kind %)) ls))
                           2000)
                    decided (filter #(= "approval/decided" (:kind %)) lines)
@@ -560,8 +592,11 @@
   Used by the tests below. A pinned provider skips resolution, and the provider
   timeline is precisely about resolution, so these must not pin."
   [turns f]
-  (let [cfg-file (io/file (log-dir) ".." "config.edn")
-        reg-file (io/file (log-dir) ".." "providers.edn")
+  ;; The config files live in the HOME, not beside the logs; ask harness.home for
+  ;; it rather than walking up from the log directory, whose depth is the tree's
+  ;; business and has already changed once.
+  (let [cfg-file (home/config-file)
+        reg-file (home/providers-file)
         read-back (fn [f] (when (.exists f) (slurp f :encoding "UTF-8")))
         old-cfg (read-back cfg-file) old-reg (read-back reg-file)
         old-script @fake/test-script]
@@ -639,7 +674,7 @@
                                    (when (= "RUN_ERROR" (:type f)) f))
                                 (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
        (try
-         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (io/delete-file (log-file id) true)
          (let [e (error (.body (post-run 8089 id {:provider {:context-window 200000}})))]
            (is (some? e) "the run is terminated rather than served with the field dropped")
            (is (str/includes? (:message e) "context-window") "the field is named")
@@ -647,7 +682,7 @@
                "and the run says where it belongs instead"))
          (testing "and nothing was resolved or recorded for it"
            (is (nil? (providers/override-for id)))
-           (let [lines (str/split-lines (slurp (io/file (log-dir) (str id ".jsonl")) :encoding "UTF-8"))]
+           (let [lines (str/split-lines (slurp (log-file id) :encoding "UTF-8"))]
              (is (not-any? #(str/includes? % "provider/init") lines)
                  "a run that could not resolve writes no init line")))
          (finally (stop)))))))
@@ -661,12 +696,12 @@
      (let [id   "http-prov"
            stop (http/start! {:port 8101})]
        (try
-         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (io/delete-file (log-file id) true)
          ;; Run one: the init line lands. The scripted turn is a plain reply,
          ;; so the run does not touch the provider.
          (post-run 8101 id)
          (let [after-first (wait-for-recorded
-                            (io/file (log-dir) (str id ".jsonl"))
+                            (log-file id)
                             (fn [ls] (some #(= "provider/init" (:kind %)) ls))
                             2000)]
            (testing "the first run lands exactly one init line, before any message"
@@ -693,7 +728,7 @@
            ;; Run two of the same thread: no second init.
            (post-run 8101 id)
            (let [after-second (wait-for-recorded
-                               (io/file (log-dir) (str id ".jsonl"))
+                               (log-file id)
                                (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
                                2000)]
              (testing "a later run of the same thread does not repeat the init"
@@ -716,7 +751,7 @@
      (let [id   "http-change"
            stop (http/start! {:port 8102})]
        (try
-         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (io/delete-file (log-file id) true)
          ;; Seed the session with a baseline the change can stand on.
          (providers/set-override! id {:model "alpha-big"})
          ;; Drive the change the way a run would: park, approve, resume-transit.
@@ -732,7 +767,7 @@
          ;; Run once so the edge drains the outbox to the log.
          (post-run 8102 id)
          (let [lines (wait-for-recorded
-                      (io/file (log-dir) (str id ".jsonl"))
+                      (log-file id)
                       (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
                       2000)
                changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
@@ -766,7 +801,7 @@
                (call))
              (post-run 8102 id)
              (let [lines (wait-for-recorded
-                          (io/file (log-dir) (str id ".jsonl"))
+                          (log-file id)
                           (fn [ls] (>= (count (filter #(= "provider/changed" (:kind %)) ls)) 2))
                           2000)
                    changes (filter #(= "provider/changed" (:kind %)) lines)
@@ -794,7 +829,7 @@
      (let [id   "http-vendor"
            stop (http/start! {:port 8103})]
        (try
-         (io/delete-file (io/file (log-dir) (str id ".jsonl")) true)
+         (io/delete-file (log-file id) true)
          (let [call (fn [] (tools/run! {:id "vsw" :type "function"
                                         :function {:name "session-configure"
                                                    :arguments (json/write-str {:provider "beta"})}}
@@ -809,7 +844,7 @@
              (is (= "beta-plain" (:model a)) "and its default model came along")))
          (post-run 8103 id)
          (let [lines (wait-for-recorded
-                      (io/file (log-dir) (str id ".jsonl"))
+                      (log-file id)
                       (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
                       2000)
                changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
@@ -847,10 +882,19 @@
   (str (System/getProperty "java.io.tmpdir") "/harness-http-project-2"))
 
 (defn- bound-lines
-  "The thread's project/bound audit lines, oldest first."
+  "The thread's project/bound audit lines, oldest first, read from wherever the
+  thread's log IS.
+
+  Since the logs became a projects tree, a bound thread's file lives in its
+  project's workspace -- which is why the audit line for a bind is written INTO
+  the new directory: the bind moved the session, and the very next line it writes
+  is already in the place it moved to. So this asks the same question the server
+  asks (harness.project/identity-for, then sanitize), rather than assuming the
+  reserved workspace. A test that assumed would pass while the audit trail was in
+  the wrong project."
   [tid]
   (->> (str/split-lines
-        (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8"))
+        (slurp (log-file-for tid) :encoding "UTF-8"))
        (mapv #(json/read-str % :key-fn keyword))
        (filterv #(= "project/bound" (:kind %)))))
 
@@ -912,10 +956,7 @@
            (is (str/includes? (:error reply) "no such directory"))))
        (testing "a malformed body is a 400"
          (is (= 400 (.statusCode (api-call 8103 :post "/api/project" "{not json")))))
-       (let [lines (mapv #(json/read-str % :key-fn keyword)
-                         (str/split-lines
-                          (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8")))
-             bound (filterv #(= "project/bound" (:kind %)) lines)]
+       (let [bound (bound-lines tid)]
          (testing "exactly ONE project/bound audit line is on disk"
            (is (= 1 (count bound)))
            (is (nil? (:runId (first bound))) "a binding happens outside any run")
@@ -924,7 +965,17 @@
            (is (str/ends-with? (get-in (first bound) [:payload :after]) "harness-http-project"))
            (is (= "http" (get-in (first bound) [:payload :via]))))
          (testing "the two failed binds added no second line"
-           (is (= 1 (count (filter #(= "project/bound" (:kind %)) lines))))))))))
+           (is (= 1 (count (filter #(= "project/bound" (:kind %)) bound)))))
+         (testing "and the line landed in the workspace the bind moved the session to"
+           ;; The audit line is written AFTER the bind, so it is the first thing
+           ;; this session writes in its new home -- which is the whole reason the
+           ;; log is moved rather than left behind: a session's timeline is one file.
+           (is (empty? (filter #(= "project/bound" (:kind %))
+                               (try (mapv #(json/read-str % :key-fn keyword)
+                                          (str/split-lines
+                                           (slurp (log-file tid) :encoding "UTF-8")))
+                                    (catch java.io.FileNotFoundException _ []))))
+               "the reserved workspace holds no binding line for this thread")))))))
 
 (deftest the-model-endpoint-answers-what-this-session-can-send
   ;; The capability endpoint. A client asks what this session is served by and
@@ -984,7 +1035,7 @@
            (is (= 200 (.statusCode (api-call 8087 :get "/api/model" nil))))
            (is (= ["image" "text"] (:input (read-json (api-call 8087 :get "/api/model" nil))))))
          (testing "it is READ-ONLY: no audit line of its own"
-           (let [f (io/file (log-dir) (str id ".jsonl"))]
+           (let [f (log-file id)]
              (is (not (.exists f))
                  "asking a question must not write to the session's log")))
          (finally (stop) (providers/set-override! id nil)))))))
@@ -1137,6 +1188,93 @@
      (testing "the relative write landed INSIDE the project directory"
        (is (= "landed" (slurp (io/file project-dir "e2e.txt") :encoding "UTF-8")))))))
 
+(deftest a-rebind-carries-the-log-because-a-conversation-is-one-file
+  ;; The reason move-log! exists. A session that has already RUN and is then
+  ;; rebound would otherwise leave its history in the old project's workspace and
+  ;; start a new file in the new one -- and replay, rebuild and the eval reader
+  ;; each reconstruct a conversation from a SINGLE file, so the split conversation
+  ;; would be unreadable by all three. So the bind carries the file.
+  ;;
+  ;; The second half is the refusal: a destination that ALREADY holds a log for
+  ;; this session. Merging is not an option (replay folds frames in file order, so
+  ;; appending would read as one conversation out of order) and neither is
+  ;; overwriting (it would destroy a run's record), so the move is refused by name
+  ;; and the human decides which file is the conversation.
+  (let [adir  (io/file project-dir)
+        bdir  (io/file project-dir-2)
+        ;; The two workspaces' files for this one session stem, computed the way
+        ;; the server computes them (canonical path -> sanitize), so this test
+        ;; names the same paths the route does.
+        in-ws (fn [^java.io.File d tid]
+                (home/log-file (io/file (home/projects-dir)
+                                        (home/sanitize (.getCanonicalPath d)))
+                               tid))
+        old   (in-ws adir "move-run")
+        moved (in-ws bdir "move-run")]
+    (doseq [d [adir bdir]] (run! #(io/delete-file % true) (reverse (file-seq d))))
+    (run! #(.mkdirs ^java.io.File %) [adir bdir])
+    (with-server
+     8108
+     {"move-run" bound-script}
+     (fn []
+       (let [tid "move-run"]
+         (api-call 8108 :post "/api/project" (json/write-str {:threadId tid :dir project-dir}))
+         (testing "the run leaves a log in the FIRST project's workspace"
+           (is (= "RUN_FINISHED" (:type (last (wire/frames-from-sse (.body (post-run 8108 tid)))))))
+           (is (.exists old)))
+         (let [before-lines (count (str/split-lines (slurp old :encoding "UTF-8")))]
+           (testing "the rebind answers OK and the log MOVED with it"
+             (let [resp (api-call 8108 :post "/api/project"
+                                  (json/write-str {:threadId tid :dir project-dir-2}))]
+               (is (= 200 (.statusCode resp))))
+             (is (str/includes? (log-dir-for tid) "harness-http-project-2")
+                 "the workspace the server reports is the new project's")
+             (is (.exists moved) "the log is in the NEW project's workspace")
+             (testing "and nothing was left behind in the old one -- no second half"
+               (is (not (.exists old)))
+               (testing "one file still holds the whole conversation"
+                 (is (< before-lines
+                        (count (str/split-lines (slurp moved :encoding "UTF-8"))))))))
+           (testing "so the listing sees exactly ONE log for this session, and rebuild works"
+             (let [rows (->> (json/read-str (.body (api-call 8108 :get "/api/threads" nil))
+                                            :key-fn keyword)
+                             (filterv #(= tid (:threadId %))))]
+               (is (= 1 (count rows))))
+             (let [resp (api-call 8108 :post (str "/api/threads/" tid "/rebuild") nil)]
+               (is (= 200 (.statusCode resp))))))
+         (testing "a destination that already holds this session's log is refused BY NAME"
+           ;; Put a log back where the first project's workspace was -- which is what
+           ;; a quarantined-and-rebuilt store, a hand-edited tree or a restored
+           ;; backup all look like: a file in a workspace the store no longer knows
+           ;; about. Now bind there, and both ends are occupied.
+           (.mkdirs (.getParentFile old))
+           (spit old "{\"ts\":1,\"runId\":\"r0\",\"kind\":\"input\",\"payload\":{}}\n"
+                 :encoding "UTF-8")
+           (let [resp  (api-call 8108 :post "/api/project"
+                                 (json/write-str {:threadId tid :dir project-dir}))
+                 reply (read-json resp)]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error reply) "harness-http-project"))
+             (testing "neither file was touched"
+               (is (.exists moved) "the conversation is still where the last bind put it")
+               (is (= "{\"ts\":1,\"runId\":\"r0\",\"kind\":\"input\",\"payload\":{}}\n"
+                      (slurp old :encoding "UTF-8"))
+                   "the destination is byte-for-byte what was there -- nothing appended"))
+             (testing "the binding is NOT rolled back -- the 400 carries where the store went"
+               ;; Rolling back would leave the store and the tree disagreeing anyway,
+               ;; and the human's next step is the same in both cases: decide which
+               ;; log is this conversation.
+               (is (str/ends-with? (:dir reply) "harness-http-project")))
+             (testing "and from here the split is VISIBLE, not silent -- two files, one stem"
+               (let [rows (->> (json/read-str (.body (api-call 8108 :get "/api/threads" nil))
+                                              :key-fn keyword)
+                               (filterv #(= tid (:threadId %))))]
+                 (is (= 2 (count rows))))
+               (let [rb (api-call 8108 :post (str "/api/threads/" tid "/rebuild") nil)]
+                 (is (= 404 (.statusCode rb)))
+                 (is (str/includes? (:error (read-json rb)) "harness-http-project")
+                     "the refusal names the other half's directory"))))))))))
+
 (deftest threads-listing-and-rebuild-over-the-real-edge
   ;; Ticket 05 over the real edge: a real run writes a real log; the listing
   ;; finds it with its metadata; the rebuild endpoint hands the conversation
@@ -1179,13 +1317,60 @@
                (is (= "assistant" (:role (last msgs))))))))
        (testing "the rebuild action landed its audit line"
          (let [lines (mapv #(json/read-str % :key-fn keyword)
-                           (str/split-lines
-                            (slurp (io/file (log-dir) (str tid ".jsonl")) :encoding "UTF-8")))
+                           (str/split-lines (slurp (log-file tid) :encoding "UTF-8")))
                rb    (filterv #(= "session/rebuilt" (:kind %)) lines)]
            (is (= 1 (count rb)))
            (is (nil? (:runId (first rb))) "a rebuild happens outside any run")
            (is (pos? (get-in (first rb) [:payload :messages])))
            (is (= "http" (get-in (first rb) [:payload :via])))))))))
+
+(deftest the-retired-logs-directory-is-invisible-three-ways
+  ;; Ticket 03's other half: `~/.clj-harness/logs/` retires. NOT imported, NOT
+  ;; migrated, NOT migrated away -- the bytes stay exactly where they are, and
+  ;; those files simply stop being part of this product's view. The three ways
+  ;; that could quietly stop being true are checked one by one, because each has
+  ;; a different mechanism that could resurrect it:
+  ;;
+  ;;   1. a listing that scans too widely (the walk is rooted at projects/);
+  ;;   2. a store that back-fills itself from the disk (nothing derives ownership
+  ;;      from a filename -- a session row only exists because something asked
+  ;;      for it);
+  ;;   3. a startup scan with the same effect, one process later.
+  ;;
+  ;; And the file itself is checked afterwards, byte for byte: a refusal that
+  ;; still rewrote or moved the file would be no refusal at all.
+  (let [tid  "old-logs-thread"
+        old  (io/file (home/root) "logs")
+        file (io/file old (str tid ".jsonl"))
+        body (str (json/write-str
+                   {:ts 1 :runId "r0" :kind "input"
+                    :payload {:threadId tid :runId "r0"
+                              :messages [{:id "u1" :role "user" :content "old"}]
+                              :tools [] :context []}})
+                  "\n")]
+    (.mkdirs old)
+    (spit file body :encoding "UTF-8")
+    ;; A FRESH server: this is the "started a process" half of the claim, and it
+    ;; is why the store is asked about before the route below can have created
+    ;; anything for this id.
+    (with-server
+     8109
+     "old-logs-list"
+     (fn []
+       (testing "the store has no row for it -- nothing reads ownership off the disk"
+         (is (nil? (project/binding-for tid)))
+         (is (nil? (project/identity-for tid))))
+       (testing "the listing does not show it -- the walk is rooted at projects/"
+         (let [resp (api-call 8109 :get "/api/threads" nil)
+               rows (json/read-str (.body resp) :key-fn keyword)]
+           (is (= 200 (.statusCode resp)))
+           (is (not-any? #(= tid (:threadId %)) rows))))
+       (testing "and its id resolves to nothing, so a rebuild cannot reach it either"
+         (is (= 404 (.statusCode (api-call 8109 :post (str "/api/threads/" tid "/rebuild") nil)))))
+       (testing "the file is exactly as it was left -- unread, unmoved, unimported"
+         (is (.exists file))
+         (is (= body (slurp file :encoding "UTF-8")))
+         (is (not (.exists (io/file (log-dir) (str tid ".jsonl"))))))))))
 
 (deftest rebuild-refuses-truncated-and-corrupt-logs-by-name
   (with-server
@@ -1194,7 +1379,7 @@
    (fn []
      (testing "a log that ends mid-run is refused, naming the last frame"
        (let [tid (str "trunc-" (java.util.UUID/randomUUID))
-             f   (io/file (log-dir) (str tid ".jsonl"))]
+             f   (log-file tid)]
          (spit f (str (json/write-str
                        {:ts 1 :runId "r1" :kind "input"
                         :payload {:threadId tid :runId "r1"
@@ -1216,14 +1401,39 @@
                                  (str/split-lines (slurp f :encoding "UTF-8")))))))))
      (testing "a half-written line is refused, naming the line"
        (let [tid (str "corrupt-" (java.util.UUID/randomUUID))]
-         (spit (io/file (log-dir) (str tid ".jsonl"))
+         (spit (log-file tid)
                "{\"ts\":1,\"runId\":\"r1\",\"kin" :encoding "UTF-8")
          (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
            (is (= 400 (.statusCode resp)))
            (is (re-find #"line 1" (:error reply))))))
-     (testing "a thread with no log at all is refused, naming the thread"
+     (testing "a thread with no log anywhere in the tree is a 404, naming the thread"
+       ;; NOT a 400: nothing was rebuilt and nothing was wrong with a log -- the
+       ;; stem simply names nothing, which is what 404 means. It is also the answer
+       ;; a client that deleted its own session and reloaded the page needs.
        (let [resp  (api-call 8106 :post "/api/threads/no-such-thread-xyz/rebuild" nil)
              reply (json/read-str (.body resp) :key-fn keyword)]
-         (is (= 400 (.statusCode resp)))
-         (is (str/includes? (:error reply) "no-such-thread-xyz")))))))
+         (is (= 404 (.statusCode resp)))
+         (is (str/includes? (:error reply) "no-such-thread-xyz"))))
+     (testing "a stem with a log in TWO workspaces is a 404 too, naming both files"
+       ;; The split conversation. Quietly rebuilding the newest would hand back
+       ;; half a conversation looking like a clean rebuild, so the route refuses
+       ;; and says where both halves are.
+       (let [tid  (str "split-" (java.util.UUID/randomUUID))
+             one  (log-file tid)
+             two  (home/log-file (io/file (home/projects-dir)
+                                          (home/sanitize (.getCanonicalPath (io/file project-dir))))
+                                 tid)
+             line (json/write-str
+                   {:ts 1 :runId "r1" :kind "input"
+                    :payload {:threadId tid :runId "r1"
+                              :messages [{:id "u1" :role "user" :content "hi"}]
+                              :tools [] :context []}})]
+         (.mkdirs (.getParentFile ^java.io.File two))
+         (spit one (str line "\n") :encoding "UTF-8")
+         (spit two (str line "\n") :encoding "UTF-8")
+         (let [resp  (api-call 8106 :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (json/read-str (.body resp) :key-fn keyword)]
+           (is (= 404 (.statusCode resp)))
+           (is (str/includes? (:error reply) "harness-http-project"))
+           (is (str/includes? (:error reply) "unbound"))))))))
