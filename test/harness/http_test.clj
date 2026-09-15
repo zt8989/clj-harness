@@ -1227,3 +1227,97 @@
              reply (json/read-str (.body resp) :key-fn keyword)]
          (is (= 400 (.statusCode resp)))
          (is (str/includes? (:error reply) "no-such-thread-xyz")))))))
+
+;; ------------------------------------------------- skills and instructions, end to end
+
+(def ^:private skill-script
+  [{:content ""
+    :tool-calls [{:id "s1" :name "skill" :arguments {:name "alpha"}}]}
+   {:content "followed it"}])
+
+(defn- wipe-conventions! []
+  (io/delete-file (io/file (home/user-home) ".agents") true)
+  (io/delete-file (io/file (home/user-home) "AGENTS.md") true))
+
+(deftest an-opening-block-reaches-the-model-and-never-the-client
+  ;; The whole shape, through the real edge: the instruction files and the skills
+  ;; catalog are in the RUN's message record (the model reads them) and absent
+  ;; from every AG-UI frame (the client never does). "The front end shows
+  ;; nothing" is not a filtering decision anywhere -- it is this.
+  (let [proj      (str (System/getProperty "java.io.tmpdir")
+                       "/harness-http-skills-" (System/nanoTime))
+        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))]
+    (.mkdirs (io/file proj))
+    (.mkdirs (io/file skill-dir))
+    (spit (str (io/file (home/user-home) "AGENTS.md")) "STANDING RULE\n" :encoding "UTF-8")
+    (spit (str (io/file proj "AGENTS.md")) "PROJECT RULE\n" :encoding "UTF-8")
+    (spit (str skill-dir "/SKILL.md")
+          "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
+          :encoding "UTF-8")
+    (project/bind! "it-skills" proj)
+    (try
+      (with-server
+       8112 "it-skills" skill-script
+       (fn []
+         (let [resp      (.body (post-run 8112 "it-skills"))
+               frames    (wire/frames-from-sse resp)
+               lines     (wait-for-recorded
+                          (str (io/file (log-dir) "it-skills.jsonl"))
+                          (fn [ls] (some #(and (= "message" (:kind %))
+                                               (= "followed it" (get-in % [:payload :content])))
+                                         ls))
+                          2000)
+               texts     (mapv #(str (get-in % [:payload :content]))
+                               (filter #(= "message" (:kind %)) lines))
+               wire-text (json/write-str frames)]
+
+           (testing "the model is handed the rules and then the catalog, in that order"
+             (let [user-texts (mapv #(get-in % [:payload :content])
+                                    (filter #(and (= "message" (:kind %))
+                                                  (= "user" (get-in % [:payload :role])))
+                                            lines))]
+               (is (str/includes? (first user-texts) "STANDING RULE"))
+               (is (str/includes? (second user-texts) "PROJECT RULE"))
+               (is (str/starts-with? (nth user-texts 2) "<skills>"))
+               (is (str/includes? (nth user-texts 2) "- alpha: alpha does a thing"))))
+
+           (testing "loading it mid-run puts the BODY into the conversation"
+             (is (some #(and (str/includes? % "ALPHA BODY")
+                             (str/starts-with? % "<skill name=\"alpha\">"))
+                       texts)))
+
+           (testing "and not one frame carries any of it -- a client cannot draw what it never receives"
+             (is (not (str/includes? wire-text "STANDING RULE")))
+             (is (not (str/includes? wire-text "PROJECT RULE")))
+             (is (not (str/includes? wire-text "ALPHA BODY")))
+             (is (not (str/includes? wire-text "- alpha:"))))
+
+           (testing "the skill call itself IS on the wire, as an ordinary tool card"
+             (is (some #(= "skill" (:toolCallName %))
+                       (filter #(= "TOOL_CALL_START" (:type %)) frames)))))))
+      (finally
+        (project/bind! "it-skills" nil)
+        (io/delete-file (io/file proj) true)
+        (wipe-conventions!)))))
+
+(deftest an-unreadable-instruction-file-stops-the-run-by-name
+  ;; The contrast with a broken skill, asserted where it matters: at the edge, as
+  ;; a RUN_ERROR the client sees, rather than a silently rule-less run.
+  (let [f (io/file (home/user-home) "AGENTS.md")]
+    (.mkdirs (io/file (home/user-home)))
+    (spit (str f) "rules\n" :encoding "UTF-8")
+    (.setReadable f false false)
+    (try
+      (if (.canRead f)
+        (is true "permission bits do not apply to this user; nothing to assert")
+        (with-server
+         8113 "it-badrules" script
+         (fn []
+           (let [frames (wire/frames-from-sse (.body (post-run 8113 "it-badrules")))]
+             (testing "the client gets a terminated run carrying the reason"
+               (is (= "RUN_ERROR" (:type (last frames))))
+               (is (str/includes? (str (:message (last frames)))
+                                  "cannot read the instruction file")))
+             (testing "and no LLM call was made at all"
+               (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames)))))))
+      (finally (wipe-conventions!)))))

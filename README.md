@@ -4,14 +4,15 @@
 
 ## 架构
 
-- `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 重建读侧
+- `src/harness/{event,llm,loop,tools,ag_ui,http,providers,home,project,skills,preamble,frames,replay}.clj` — 内核 + AG-UI 适配 + HTTP 边 + 项目目录 + 技能与开场块 + 重建读侧
 - `src/harness/llm.clj` — provider 协议层（一个 multimethod，按 `:protocol` 分派）**加 system prompt 的载体**：`prompt.md` 首调读入即冻结，热改需 `(llm/reset-prompt!)` 或重启。冻结点在这里而不是别处，因为理由就是 provider 的前缀缓存
 - `src/harness/hooks.clj` + `src/harness/hooks/dispatch.clj` — **hook 引擎**：点表是数据（26 个点各有名字/时机/payload/是否门禁/失败语义）、hooks.edn 两级装配与逐字段校验；dispatch 按 matcher 选中声明、把 payload 作为 stdin JSON 喂给命令、读退出码（0 放行 / 2 阻断且 stderr 回喂 / 其他按点定的 :on-error）、超时与崩溃都不炸 run，每次真触发的落一行 `hook/<point>` 审计线。
 **没声明任何 hook 时整条路径是 no-op**，帧与审计线与没有这个能力时逐字节相同
 - `src/harness/shell.clj` — 唯一决定 spawn 哪个 shell 的地方（Windows 上按绝对路径钉 Git Bash，避免被 System32 的 WSL 启动器静默吞掉），以及带上 stdin 与超时的运行方式。bash 工具与 hook 引擎共用它：那个坑是机器的属性，不是调用方的
-- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（六个内建）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
+- `src/harness/tools.clj` — **工具表与执行缝**：不可变的基座（七个内建：bash / edit / eval / read / session-configure / skill / write）、会话级 overlay（新增/撤回 + 关闭/打开两条正交轴）、待决审批（park / 人的决定 / 一次性取用）、以及那个唯一的三相执行缝。表与读表的缝是一件事的两半，所以住一起
 - `src/harness/providers.clj` — **provider 的两半合成一个**：① 目录——厂商 endpoint + 每个厂商的 model 表（每个 model 声明自己的 `:input` / `:output`）、选择形状（三个旋钮）与把选择装配成 provider，目录会**验证**（未知键、未声明的 model、搬不动的模态类型都指名报错），旧扁平形状不读不迁移；② 谁赢——config / 会话 / 本次请求三档折叠，以及 api-key 的解析与挂载。api-key 只在 `resolve-provider` 的返回里挂上、自省回答里任何深度都不出现，这条**由 `prompt.md` 的 secrets 纪律与测试守着**——Clojure 结构上挡不住 eval，屏障是写下来的规矩
-- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用
+- `src/harness/home.clj` — 配置根：决定 config / .env / 日志落在哪，可用 `CLJ_HARNESS_HOME` 整个搬走；日志路径与文件名清洗规则也在这一处派生，写入者与读取者共用。**另有第二层 floor：`user-home`（OS 家目录）**——宿主约定文件（`~/AGENTS.md`、`~/.agents/skills`）住那儿，它**不跟随 `CLJ_HARNESS_HOME`**：搬家搬的是 harness 的配置，不是这台机器的家目录。两个挂在这层下的目录各自一条测试缝
+- `src/harness/skills.clj` + `src/harness/preamble.clj` — **一场会话开场拿到什么**。skills 管技能（默认根、目录名即身份、frontmatter 只读三个键、坏技能是诊断），preamble 管开场那几条 user 消息的**顺序**（指令 → 清单 → 会话消息）并读指令文件（在但读不出来是硬失败）。两者的位置解析都是**纯函数** `(配置值, 项目目录)`：围栏要问技能根，所以 `project` require 它们，反过来 require 就是环
 - `src/harness/project.clj` — 会话的项目目录绑定：thread-id → 目录（问出来，不抄副本）、相对路径重根、出界判定、`.harness/harness.edn` 两级装配
 - `src/harness/frames.clj` + `src/harness/replay.clj` — 日志的**读侧**（05 号票晋升）：frames 把记录的 AG-UI 帧折叠回消息列表，replay 重建对话（列表 / 重建 / provider 形态历史 / 作者续跑）。铁律不动：内核 run 中永不读自己的日志；重建是显式管理动作，runId null 的审计行落盘
 - `dev/harness/{wire,evals,repl,e2e_server}.clj` — 测试工具与作者工具：wire 只剩 SSE 解析 + 结构校验（violations，测试断言用），applier 已晋升 src；`evals` 是**作者**的工具，不是给 agent 的：把某个 thread 跑过的每次 `eval`（code + 返回值）从日志里读出来，供人决定哪段值得晋升进 `src/`；`e2e_server` 是 `npm test` 起的那个后端（脚本 provider + OS 分配端口）。
@@ -82,6 +83,45 @@ Copy-Item .env.example ~/.clj-harness/.env
 `config.edn` / `.env` 缺失时报错会**指名绝对路径**，不会静默用默认值。`providers.edn` 不同：它**可以不存在**——不命名 provider（用 inline 形式描述一个）就不需要它；而命名了内置目录里已有的 provider 时它也不需要。
 
 **为什么 `prompt.md` 不搬进去**：它是被 review 的代码资产，每次改动都需要 git 历史；放进家目录就脱离了版本控制。它是这个规则唯一的例外。
+
+### 技能与指令（一场会话开场拿到什么）
+
+会话开场时，模型除了冻结的 `prompt.md`，还会拿到两样东西，**都从约定目录现读**：
+
+| | 默认位置 | 变成什么 |
+| --- | --- | --- |
+| 指令 | `<OS 家目录>/AGENTS.md`；绑定时再加 `<项目>/AGENTS.md` | 每个文件**一条 user 消息**，`<instructions path="…">…</instructions>` 包裹 |
+| 技能清单 | `<OS 家目录>/.agents/skills/*/SKILL.md`；绑定时再加 `<项目>/.agents/skills/*/SKILL.md` | **一条 user 消息**，`<skills>` 包裹，每技能一行 |
+| 技能正文 | 同上 | 模型调用 `skill` 后，`<skill name="…">` 包裹的 **user 消息**，插在加载它的那次工具结果之后 |
+
+**`prompt.md` 是整场会话唯一的 system 消息，一字不动**（冻结是为了前缀缓存），其余全部落在 **user 侧**。顺序也是定死的：**指令 → 清单 → 会话消息**，常驻规则在前、能力菜单在后——这一条是有意的语义，不是排版，所以它只在一个函数里决定（`harness.preamble/messages`）。
+
+**前端一个字都不出现**——不是靠前端过滤，而是这些消息**从不产生任何 AG-UI 帧**，客户端永远收不到它们；界面上只有一张普通的 `skill` 工具卡。它们只存在于服务端面向模型的那一侧，并照旧写进 jsonl 的 `message` 行（模型看到了什么，日志就有什么）。
+
+**技能正文是派生的，不是累积的。** 参考实现（applepi）的服务端自己持有会话，所以它的工具能把注入物推进历史；本仓反过来——对话归客户端所有、服务端每轮现收现算，存服务端内存则刷新即失，发给客户端则前端会画出来。于是每轮从会话自身扫出成功的 `skill` 调用，把正文补在它的工具结果之后：**幂等**（反复施加不改变结果，所以每轮施加不需要任何簿记）且**同名只注一次**。施加点在 `harness.loop/drive!`，**每次 LLM 调用之前**——模型加载技能就是为了**现在**照着做，等下一轮等于白调。
+
+**正文从根现读**，与 config.edn / harness.edn 同一条纪律：改一份技能，下一轮就生效。代价如实记：技能在会话中途被删掉时，注入位换成一句点名说明，**绝不静默少一段指令**。
+
+配置（`harness.edn`，用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
+
+```edn
+{:instructions {:files ["AGENTS.md"]}          ; 只要项目那一份
+ :skills       {:roots ["/abs/skills" ".agents/skills"]}}
+```
+
+两个键都**整表替换**默认值（不是追加），所以「只要项目那份」是写 `["AGENTS.md"]` 而不是别的；相对路径按工具路径的规矩解析（相对项目根）。改配置不需要重启——每次调用现读。
+
+**用户级那两处取 OS 家目录，不跟随 `CLJ_HARNESS_HOME`**：它们是宿主的约定位置（与 ZCode / Claude 读的是同一份文件），不是 harness 的配置家目录；把配置家目录挪到别处不该让另一批技能凭空消失。
+
+**缺文件 / 空文件不注入那一条**，属于日常（多数项目没有 AGENTS.md，占位文件什么都没说）。**技能里坏掉一条是诊断，不是失败**：读不动 / 没有 frontmatter / 缺 `description` / 名字与目录名不符——该技能**不进清单**，但仍在自省里可见并带原因，被调用时得到同一句话。菜单上坏掉一项不该拖垮一场会话。**反过来，AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开始**：它是对这场会话的显式配置，与 config.edn 同一族，静默跳过等于按没人写过的规矩跑。
+
+技能的身份是**目录名**，调用**只按名字查表**（表只由目录列举产生），所以 `../../etc/passwd` 不是被拒绝，而是根本不在表里。清单里的 description **原样不截断**——触发词（"Use when…"）大多落在 80 字符之后，而它正是模型据以选择的依据。正文同理不裁剪：被裁的技能是坏指令，与 `eval` 那个 8000 字符裁剪不是一回事。
+
+`frontmatter` 只读三个键（`name` / `description` / `disable-model-invocation`），其余（`allowed-tools` / `license` / `metadata` / `hidden` …）**属于宿主，读了也不报错**。**`disable-model-invocation: true` 的技能不进清单**——文件自己说这条不该由模型决定去用，而本会话没有别的入口；它仍在自省里可见并注明原因。「文件在、能力没了、没人说得清为什么」是最坏的那种形态，所以宁可多给一行解释。**`allowed-tools` 刻意不信**：工具表由会话与编辑模式决定，不让一个技能文件给自己扩权。
+
+**`skill` 工具不标审批**：读一份指令不是副作用，而正文里让人做的事，各自过各自那道缝（围栏、工具自己的 `:requires-approval`）。给读指令加门，比它描述的动作还难拿到，是反的。
+
+**`InstructionsLoaded` 钩子点每折叠一个指令文件触发一次**（观察者，verdict 丢弃）。这个点自 hook 引擎落地起就声明着，一直没有触发源——本特征就是它的子系统。实现上有一条容易漏的约束：run 作用域的 sink 由 http 边 binding，而折叠发生在第一条消息组装之前，所以**那个 binding 必须包住 set-up**，否则点会永远静默（一个点声明了却永不触发，比没有这个点更难查）。
 
 ### provider 与 model
 
@@ -230,7 +270,7 @@ npm run build    # tsc --noEmit + vite build → dist/
  :stop              [{:command "scripts/notify.sh"}]}
 ```
 
-**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有五个**：三个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）；两个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）与 `PermissionRequest`（一个规则**代答**本该打断人的悬置调用）。其余的点声明了就永不触发——这是设计，不是遗漏：P3 的点等各自的子系统。
+**26 个 hook 点全部登记为数据**（名字 / 时机 / payload / 是否有匹配对象 / 是否门禁 / 失败语义）。**今天真接线的有六个**：四个观察者 —— `SessionStart`（会话第一次 run）、`PostToolUse`（工具跑完）、`Stop`（run 正常收尾）、`InstructionsLoaded`（**每折叠一个指令文件一次**，payload 只有 `:path`，见「技能与指令」）；两个门禁 —— `PreToolUse`（工具执行前，退出 2 即拒绝该次调用，stderr 作为工具结果回喂给模型，run 继续）与 `PermissionRequest`（一个规则**代答**本该打断人的悬置调用）。其余的点声明了就永不触发——这是设计，不是遗漏：P3 的点等各自的子系统。
 
 **一次工具调用有三个出口**，判定的**次序是写死的**（`harness.tools/run!`）：
 
@@ -270,7 +310,9 @@ npm run build    # tsc --noEmit + vite build → dist/
 
 每个 thread 可绑定一个**项目目录**（`harness.project`，thread-id → 绑定的会话状态）。绑定后：read/write/edit 的**相对路径**解析到项目目录，bash 以项目目录为 cwd；绝对路径永不改道。**未绑定的 thread 行为与从前逐字节一致**——nil 是明确的「无绑定」答案，不是错误。
 
-**出界审批（02 号票）**：绑定后 read/write/edit 的目标在允许集之外 → 工具调用 park 待人工批准（`project/out-of-bounds?`）。允许集 = canonical 项目目录 ∪ canonical 配置家（读自己的 config/providers/.env 不算出界，这是围栏刻意留的自留地）∪ 项目配置声明的额外路径；未绑定 thread 恒 false（回归保证）。批准 = 人 override 围栏照常执行。bash 只换 cwd 不判命令内容——明示接受的逃逸面。
+**出界审批（02 号票）**：绑定后 read/write/edit 的目标在允许集之外 → 工具调用 park 待人工批准（`project/out-of-bounds?`）。允许集 = canonical 项目目录 ∪ canonical 配置家（读自己的 config/providers/.env 不算出界，这是围栏刻意留的自留地）∪ **本会话的技能根** ∪ 项目配置声明的额外路径；未绑定 thread 恒 false（回归保证）。批准 = 人 override 围栏照常执行。bash 只换 cwd 不判命令内容——明示接受的逃逸面。
+
+**技能根为什么在里面，而指令内容为什么不在。** 技能正文常写「读 `references/x.md`」，那个路径就落在技能目录里、项目目录之外——不放行的话每读一份参考文件都要人点一次批准，技能等于白装；技能根因此与配置家同级，`:approval {:strict true}` 也收不走。反过来，**一份 AGENTS.md 里提到的路径照常停泊**：允许的是「配置里说过的根」，不是「某份文档说可以读的东西」——文档能给自己扩权是另一套安全故事。
 
 管理边（与 AG-UI 流式边并列的普通 JSON 端点）：
 
@@ -306,6 +348,9 @@ UI 面板此前由前端特征拆除（assistant-ui 特征的 07 号票置 `wont
 
 - 缺失 = `{}`，不报错（含 `.harness` 目录在而文件缺）；坏文件（EDN 语法坏或非 map）指名绝对路径硬失败（`:invalid-edn` / `:not-a-map`），不静默回退——配置没生效和配置被忽略是两回事。
 - 首个消费者 `:approval`：`{:allow ["../shared"]}` 把相对项目根解析的路径加进允许集（免审）；`{:strict true}` 把项目目录本身移出允许集——项目内也 park。**配置家永不收紧**（strict 只作用于项目目录）。
+- 另三个键：`:skills {:roots [..]}`、`:instructions {:files [..]}`（各自**整表替换**默认值，见「技能与指令」）。三者都遵循同一条纪律：**顶层键整键替换**，键**内部**才按键合并——`{:skills {:auto-read false}}` 这种半份写法在 `:skills` 里是合法的，在顶层则不是。
+- `:skills` / `:instructions` 的**段本身必须是 map**（`{:skills 42}`、`{:skills "a"}`）——在问它要 `:roots` 之前就指名失败。`contains?` 撞上非 map 会抛一句既不说键也不说文件的 JVM 错误，而一个读者定位不到的配置错误正是这套纪律要消灭的东西；失败信息会说出收到的值、该写成什么、以及去哪个文件改。
+- `harness.project/skill-roots` 与 `preamble-files` 是这两个键的**会话级答案**（配置 + 绑定的配对做在 `project` 里，因为只有它同时看得见配置读取、绑定、以及两个刻意的纯函数消费方）。
 
 ### 会话列表与重建（`/api/threads` 与 `session/rebuilt`）
 
@@ -356,7 +401,7 @@ interrupt 各一条 resume，所以决定必须收在比单张卡活得久的地
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 189 tests / 930 assertions，全绿
+# 288 tests / 1431 assertions，全绿
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
