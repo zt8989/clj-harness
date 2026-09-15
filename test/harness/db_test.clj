@@ -622,17 +622,20 @@
         (let [declared-state-columns
               {"projects"           #{"id" "canonical_path" "created_at"}
                "sessions"           #{"id" "project_id" "path" "archived" "created_at"}
-               ;; The anchor store (harness.hashline.store). Its two text columns
-               ;; are the file's own text on either side of one edit, which is why
-               ;; they are named `prior_text`/`resulting_text` and not `content`:
-               ;; they are the ONE place in this store that holds a document, and
-               ;; the name says which document and which side of the edit it is.
+               ;; The anchor store (harness.hashline.store).
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
                                       "anchors" "line_checksums" "served" "updated_at"}
                "hashline_ownership" #{"thread_id" "anchor" "path"}
                "hashline_sessions"  #{"thread_id" "probe" "updated_at"}
+               ;; `prior_text`/`resulting_text` are the file's own text on either
+               ;; side of one edit, which is why they are named that and not
+               ;; `content`: they are the ONE place in this store that holds a
+               ;; document, and the name says which document and which side of the
+               ;; edit it is. `served` and `mode` are here because an undo restores
+               ;; the ANCHORS and the permission bits as well as the text -- see
+               ;; harness.hashline.undo.
                "hashline_undo"      #{"path" "prior_text" "bom" "ending" "anchors"
-                                      "resulting_text" "mode" "updated_at"}}
+                                      "served" "resulting_text" "mode" "updated_at"}}
               forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
           (is (pos? (db/target-version)) "the store has a schema to inspect")
           (doseq [[table columns] declared-state-columns]

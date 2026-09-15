@@ -242,13 +242,24 @@
         {:keys [from to lines]} (edit/parse args {:strict?       (:strict-input config)
                                                   :require-path? (:require-path config)
                                                   :warnings      warnings})
+        ;; Every branch above answers with a path resolved for this session and then
+        ;; CANONICALIZED, because the store books anchors by path: the view, the
+        ;; ownership rows and the alignment's notion of 'this file' all have to be
+        ;; the same string, or a second spelling of the same path mints a second set
+        ;; of anchors for it.
         owner (store/owner-of thread-id from)
-        given (let [p (:path args)] (when (and (string? p) (not (str/blank? p))) p))
+        ;; The given path is RESOLVED FOR THE SESSION before it is compared with
+        ;; the owner: a relative path means nothing until the binding is applied,
+        ;; and comparing `g.txt` with `/proj/g.txt` refuses every edit that names
+        ;; its file the way the model actually names it.
+        given (let [p (:path args)]
+                (when (and (string? p) (not (str/blank? p)))
+                  (store/canonical (resolve-path p))))
         path  (cond
                 ;; A named file that disagrees with the anchor is refused rather
                 ;; than reconciled: editing the file you named while addressing
                 ;; lines in another is the mistake this check exists for.
-                (and owner given (not= (store/canonical given) (store/canonical owner)))
+                (and owner given (not= given (store/canonical owner)))
                 (throw (ex-info (str "`path` says " given ", but that anchor names a"
                                      " line in " owner " in this session. Anchors"
                                      " resolve the target; drop the path, or name the"
@@ -257,12 +268,7 @@
 
                 owner owner
                 given given
-                :else (throw (unresolvable! from)))
-        ;; CANONICAL, because the store books anchors by path: the view, the
-        ;; ownership rows and the alignment's notion of 'this file' all have to be
-        ;; the same string, or a second spelling of the same path mints a second
-        ;; set of anchors for it.
-        path  (store/canonical (resolve-path path))]
+                :else (throw (unresolvable! from)))]
     (store/with-path-lock
      path
      (fn []
@@ -313,13 +319,19 @@
              ;; to take back the edit before it.
              (str "No change: the replacement is identical to what is already there, so"
                   " nothing was written to " path ".")
-             (do
-               (store/record-undo! path {:prior-text     text
-                                         :bom            bom
-                                         :ending         ending
-                                         :anchors        (:anchors range)
-                                         :resulting-text text'
-                                         :mode           nil})
+             (let [;; What undo needs to put this file back, gathered once: the text on
+                   ;; both sides, the encoding it had, the anchors that named it, which
+                   ;; of those the model had SEEN, and the permission bits. `served`
+                   ;; and `mode` are here because an undo restores the anchors too --
+                   ;; see harness.hashline.store and harness.hashline.undo.
+                   undo {:prior-text     text
+                         :bom            bom
+                         :ending         ending
+                         :anchors        (:anchors range)
+                         :served         (:served range)
+                         :resulting-text text'
+                         :mode           (files/mode-bits mode)}]
+               (store/record-undo! path undo)
                (try
                  (files/write-file! path text' {:bom bom :ending ending :mode mode})
                  (catch Throwable t
@@ -328,14 +340,7 @@
                    ;; taken back with it.
                    (store/clear-undo! path)
                    (throw t)))
-               (store/advance-with-undo!
-                thread-id path change
-                {:prior-text     text
-                 :bom            bom
-                 :ending         ending
-                 :anchors        (:anchors range)
-                 :resulting-text text'
-                 :mode           nil})
+               (store/advance-with-undo! thread-id path change undo)
                (let [{:keys [text shown]}
                      (edit/ok-message path
                                       {:before   (:before span)

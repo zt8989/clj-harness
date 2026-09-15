@@ -465,6 +465,37 @@
               "line6" "line7" "line8" "line9" "LINE10"]
              (str/split-lines (slurp file :encoding "UTF-8")))))))
 
+(deftest a-path-that-agrees-with-the-anchor-is-not-a-mismatch
+  ;; `:require-path true` makes the file's name an argument the session insists on,
+  ;; and the model will give it the way it gives every other path -- relative to the
+  ;; project. The agreement check therefore has to compare RESOLVED paths: comparing
+  ;; the raw argument with the anchor's owner refuses every call in the mode that
+  ;; exists to be given one. (It did, for one commit, and no other case noticed
+  ;; because they all dropped `path` -- which is exactly what this case is for.)
+  (use-mode! :hashline {:require-path true})
+  (write! "one\ntwo\nthree\n")
+  (let [[_ b _] (read!)]
+    (testing "a relative path that names the right file goes through"
+      (let [out (replace! {:path "f.txt" :remove_from b
+                           :replacement_lines ["TWO"]})]
+        (is (false? (:error out)) (:content out))
+        (is (= "one\nTWO\nthree\n" (slurp file :encoding "UTF-8")))))
+    (testing "and one that names a different file is still refused"
+      (spit (io/file root "g.txt") "x\n" :encoding "UTF-8")
+      ;; A FRESH anchor: the edit above freed `b`, and an anchor nobody owns takes
+      ;; the 'not read' road instead of the mismatch one -- which would be a
+      ;; different test wearing this one's name.
+      (let [live (first (read!))
+            {:keys [content error]} (replace! {:path "g.txt" :remove_from live
+                                               :replacement_lines ["X"]})]
+        (is (true? error))
+        (is (str/includes? content "names a line in") content)))
+    (testing "and omitting it is refused, because this session asked for it"
+      (let [{:keys [content error]} (replace! {:remove_from b
+                                               :replacement_lines ["X"]})]
+        (is (true? error))
+        (is (str/includes? content "required"))))))
+
 (deftest a-read-after-an-edit-still-agrees-with-the-store
   ;; The anchors the edit handed out and the anchors a fresh read hands out have to
   ;; be the same ones, or the model is being told two different things about one

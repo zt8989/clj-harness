@@ -525,6 +525,28 @@
   (ddl! c "ALTER TABLE hashline_snapshots
              ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
 
+(defn- hashline-undo-served
+  "Version 3 -> 4: which anchors were SHOWN to the session, recorded with the undo
+  record as well as with the file's view.
+
+  UNDO HAS TO PUT BACK THE ANCHORS, not only the text. A model that undoes an edit
+  is usually about to edit the file again -- and the anchors it holds are the ones
+  it had before, which are exactly the ones this record names. Restoring the text
+  while leaving the live anchor set alone would produce a file whose anchors
+  describe the state the undo just removed, and the model's very next call would be
+  refused for addressing lines that 'moved'.
+
+  So the record carries the shown set too, and for the same reason the view does:
+  it is not derivable from the anchors (a paged read mints anchors for lines it
+  never returned), so a restored anchor set without it would mark every line
+  never-shown and refuse the retry the undo exists to enable.
+
+  AN APPENDED STEP, like v3 and for the same reason: v2's step has already run in
+  stores that exist, and the chain does not get edited once it has landed."
+  [^Connection c]
+  (ddl! c "ALTER TABLE hashline_undo
+             ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
+
 (def migrations
   "The forward migration chain. (nth migrations i) takes the store from schema
   version i to i+1, and (count migrations) is the version this harness speaks.
@@ -550,7 +572,8 @@
   versions is exercised without waiting for the features that bring them."
   [projects-and-sessions
    hashline-store
-   hashline-served])
+   hashline-served
+   hashline-undo-served])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

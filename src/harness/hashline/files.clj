@@ -13,10 +13,16 @@
   The model never sees any of it. `read` shows lines with their carriage returns
   stripped (the checksum ignores them anyway, so showing them would be showing
   something the anchor does not describe); the edit puts back the ending the file
-  actually had."
+  actually had.
+
+  THE THREE FACTS ARE CAPTURED FOR THE UNDO RECORD TOO, which is why `mode-bits`
+  and its inverse live here rather than at the one call site that needs them: an
+  undo restores what an edit captured, and the encoding of a permission set into a
+  column and back out again is this namespace's kind of problem."
   (:require [clojure.string :as str])
   (:import [java.io File]
-           [java.nio.file CopyOption Files LinkOption StandardCopyOption]))
+           [java.nio.file CopyOption Files LinkOption StandardCopyOption]
+           [java.nio.file.attribute PosixFilePermission]))
 
 (def ^:private bom-char \uFEFF)
 
@@ -66,6 +72,28 @@
       (when (.exists f)
         (Files/getPosixFilePermissions (.toPath f) (make-array LinkOption 0))))
     (catch Exception _ nil)))
+
+(defn mode-bits
+  "PERMISSIONS as an integer, for the undo record to carry. Nil stays nil, which
+  is what tells 'this platform has no such thing' apart from 'nothing is allowed'
+  -- the same distinction `mode-of` draws, preserved through the round trip."
+  [permissions]
+  (when permissions
+    (reduce (fn [^long acc ^PosixFilePermission p]
+              (bit-or acc (bit-shift-left 1 (.ordinal p))))
+            0
+            permissions)))
+
+(defn mode-from-bits
+  "The permissions `mode-bits` encoded, or nil. The inverse, so what an undo puts
+  back is what the edit captured rather than whatever the file has now."
+  [bits]
+  (when (some? bits)
+    (let [es (java.util.EnumSet/noneOf PosixFilePermission)]
+      (doseq [^PosixFilePermission p (PosixFilePermission/values)]
+        (when (pos? (bit-and (long bits) (bit-shift-left 1 (.ordinal p))))
+          (.add es p)))
+      es)))
 
 (defn- restore-mode!
   [^File f mode]

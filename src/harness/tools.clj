@@ -41,6 +41,7 @@
             [harness.event :as ev]
             [harness.hashline.replace :as replace]
             [harness.hashline.serve :as serve]
+            [harness.hashline.undo :as undo]
             [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
@@ -540,6 +541,35 @@
          ;; call that parks and the call that runs are about the same file.
          :path-for (fn [thread-id parsed]
                      (replace/target-path thread-id parsed (editing/editing-mode thread-id)))))
+
+(def ^:private undo-description
+  (str "Undo the LAST edit made to a file by replace or insert, restoring the file's"
+       " text, its line endings, its encoding and the anchors that named those lines"
+       " -- so you can go straight on editing, no read needed. "
+       "ONE edit, not a stack: a second call says there is nothing left to undo, and"
+       " a write clears the history (what it wrote is what is there). "
+       "It REFUSES rather than overwrites when the file has changed since that edit"
+       " (an editor, another tool, a bash command): nothing is written, the history"
+       " is kept, and the answer says to read the file instead. A file that was"
+       " deleted is restored from the history. "
+       "A relative path resolves against this session's project directory when one is"
+       " bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(defn- t-undo
+  "`undo_last_replace`'s body. It takes the path through the same resolution the
+  other file tools use, so the fence and the re-root are the same ones."
+  [args]
+  (undo/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                 (editing/editing-mode *thread-id*)))
+
+(register! "undo_last_replace"
+  (assoc (tool undo-description
+               {"path" {:type "string"
+                        :description (str "The file whose last edit should be taken"
+                                          " back.")}}
+               [:path] t-undo)
+         :fence-paths true))
 
 (register! "bash"
   (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."

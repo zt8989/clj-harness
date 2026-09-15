@@ -122,13 +122,20 @@
 
 (defn undo-for
   "The one edit PATH can still take back, or nil. The record names the text on
-  both sides of it, so an undo can both restore and refuse -- see ticket 08."
+  both sides of it, so an undo can both restore and refuse.
+
+  `:served` rides along because an undo has to put back the ANCHORS as well as the
+  text: the model undoes an edit in order to make a different one, and the anchors
+  it holds are the ones from before. Without the shown set the restored view would
+  mark every line never-seen and refuse the very edit the undo was making room
+  for."
   [path]
   (when-let [row (first (db/select "SELECT * FROM hashline_undo WHERE path = ?" path))]
     {:prior-text     (:prior-text row)
      :bom            (not (zero? (long (:bom row))))
      :ending         (:ending row)
      :anchors        (vec (parse (:anchors row)))
+     :served         (set (parse (:served row)))
      :resulting-text (:resulting-text row)
      :mode           (:mode row)}))
 
@@ -182,16 +189,18 @@
                (str thread-id) probe (System/currentTimeMillis)))
 
 (defn- put-undo!
-  [c path {:keys [prior-text bom ending anchors resulting-text mode]}]
+  [c path {:keys [prior-text bom ending anchors served resulting-text mode]}]
   (db/execute! c "INSERT INTO hashline_undo
-                    (path, prior_text, bom, ending, anchors, resulting_text, mode, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (path, prior_text, bom, ending, anchors, served, resulting_text, mode, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                   ON CONFLICT(path) DO UPDATE SET
                     prior_text = excluded.prior_text, bom = excluded.bom,
                     ending = excluded.ending, anchors = excluded.anchors,
+                    served = excluded.served,
                     resulting_text = excluded.resulting_text, mode = excluded.mode,
                     updated_at = excluded.updated_at"
-               path prior-text (if bom 1 0) ending (render anchors) resulting-text
+               path prior-text (if bom 1 0) ending (render anchors)
+               (render (vec (or served []))) resulting-text
                mode (System/currentTimeMillis)))
 
 (defn- advance-on!
@@ -289,6 +298,30 @@
       (fn [c]
         (advance-on! c thread-id path change)
         (when undo (put-undo! c path undo))))
+    change))
+
+(defn restore!
+  "Put THREAD-ID's session back where UNDO says it was, in ONE transaction: the
+  file's stored view, its anchors, its probe, and the shown set -- and the undo
+  record is cleared in the same act, because an edit can be taken back once.
+
+  CHANGE is a `harness.hashline.anchors/align`-shaped map whose `:anchors` are the
+  OLD ones (the record's), whose `:added` are the old anchors that are not owned
+  any more and whose `:freed` are the current ones the record does not name. So
+  this is `advance!` with the arithmetic done backwards, and deliberately NOT a
+  'write these anchors down' call: an anchor the record names may have been handed
+  to another line since it was freed, and `claim!`'s bare INSERT is what refuses
+  that rather than double-booking it.
+
+  The caller computes that arithmetic under the file's lock, because it needs the
+  current view to do it -- see harness.hashline.undo, which holds the lock across
+  the whole read-check-write either way."
+  [thread-id path undo change]
+  (let [thread-id (str thread-id)]
+    (db/with-transaction
+      (fn [c]
+        (advance-on! c thread-id path change)
+        (db/execute! c "DELETE FROM hashline_undo WHERE path = ?" path)))
     change))
 
 (defn record-undo!
