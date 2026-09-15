@@ -14,18 +14,20 @@
             [harness.project :as project]
             [harness.tools :as tools]))
 
-;; NORMALIZED through io/file rather than string-concatenated: java.io.tmpdir ends
-;; with a separator on macOS, so `(str tmpdir "/name")` produces a DOUBLE slash --
-;; which the tools never see, because project/resolve-path builds its answer with
-;; io/file. A test that compared the two spellings would get nil back and look like
-;; a missing row.
+;; CANONICALIZED through harness.hashline.store, because that is how the store
+;; books a file. Two things make this necessary and they are the same thing twice:
+;; java.io.tmpdir ends with a separator on macOS, so `(str tmpdir "/name")` produces
+;; a DOUBLE slash; and on macOS the temp directory itself is reached through the
+;; `/var` -> `/private/var` symlink, so even `(io/file tmpdir name)` is a different
+;; string from what the store keys on. A test that compared either spelling would
+;; get nil back and look like a missing row.
 (def ^:private root
   (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-read-test")))
 
 (defn- path-of
   "A file in the scratch project, spelled the way the tools resolve it."
   [name]
-  (str (io/file root name)))
+  (store/canonical (str (io/file root name))))
 
 ;; One scratch project directory for the whole namespace, started clean at load
 ;; time so test ordering cannot break it (the tools-test precedent: a directory

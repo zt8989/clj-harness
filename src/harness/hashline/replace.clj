@@ -258,7 +258,11 @@
                 owner owner
                 given given
                 :else (throw (unresolvable! from)))
-        path  (resolve-path path)]
+        ;; CANONICAL, because the store books anchors by path: the view, the
+        ;; ownership rows and the alignment's notion of 'this file' all have to be
+        ;; the same string, or a second spelling of the same path mints a second
+        ;; set of anchors for it.
+        path  (store/canonical (resolve-path path))]
     (store/with-path-lock
      path
      (fn []

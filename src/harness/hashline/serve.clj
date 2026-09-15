@@ -61,25 +61,33 @@
   THE VIEW IS REUSED WHEN THE FILE DID NOT MOVE: the stored file checksum is
   compared against the file on disk, and equal means every anchor would be minted
   the same way again. That is what makes reading the same file twice cheap AND
-  stable -- the second read does not walk the anchor table at all."
+  stable -- the second read does not walk the anchor table at all.
+
+  PATH IS TAKEN AS ITS CANONICAL SELF, and so is every other entry point in this
+  namespace. The store books anchors BY PATH, so two spellings of one file have to
+  collapse to one key before anything is minted for it -- otherwise `a/f.txt` and
+  `a/../a/f.txt` are two files with two anchor sets, and the model is handed names
+  that 'stop working' when it addresses the same file the other way."
   [thread-id path content]
-  (store/with-path-lock
-   path
-   (fn []
-     (let [stored  (store/state thread-id path)
-           checks  (anchors/line-checksums content)
-           current (anchors/file-checksum checks)
-           live    (when (and stored (= current (:file-checksum stored)))
-                     stored)]
-       (if live
-         live
-         (do
-           ;; Persist the alignment BEFORE anything is emitted or decided on it. If
-           ;; the write fails the caller gets the failure and no anchors were shown.
-           ;; The other order -- show, then persist -- would hand out anchors the
-           ;; store does not know about, and the next edit would reject every one.
-           (store/advance! thread-id path (fresh-change thread-id path content stored))
-           (store/state thread-id path)))))))
+  (let [path (store/canonical path)]
+    (store/with-path-lock
+     path
+     (fn []
+       (let [stored  (store/state thread-id path)
+             checks  (anchors/line-checksums content)
+             current (anchors/file-checksum checks)
+             live    (when (and stored (= current (:file-checksum stored)))
+                       stored)]
+         (if live
+           live
+           (do
+             ;; Persist the alignment BEFORE anything is emitted or decided on it.
+             ;; If the write fails the caller gets the failure and no anchors were
+             ;; shown. The other order -- show, then persist -- would hand out
+             ;; anchors the store does not know about, and the next edit would
+             ;; reject every one.
+             (store/advance! thread-id path (fresh-change thread-id path content stored))
+             (store/state thread-id path))))))))
 
 (defn serve!
   "THREAD-ID reads PATH, which must already be resolved and classified. Returns
@@ -92,7 +100,8 @@
   [thread-id path content {:keys [offset limit] :as opts}]
   (let [view (sync! thread-id path content)
         page (reading/preview content (:anchors view)
-                              {:offset offset :limit limit :path path})]
+                              {:offset offset :limit limit
+                               :path (store/canonical path)})]
     ;; ...and record WHICH of those anchors the model actually saw. This is the half
     ;; that makes 'owned' and 'shown' different facts: the page that was not
     ;; returned holds anchors that exist and were never displayed.
@@ -114,7 +123,8 @@
   the first edit of every BOM'd file would be refused as drifted -- a refusal about
   a file nobody touched. One reading of a file, one set of bytes to agree on."
   [thread-id path opts]
-  (let [f (File. ^String path)]
+  (let [path (store/canonical path)
+        f    (File. ^String path)]
     (reading/classify f)
     (serve! thread-id path (:text (files/read-file path)) opts)))
 

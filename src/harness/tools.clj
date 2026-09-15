@@ -41,6 +41,7 @@
             [harness.event :as ev]
             [harness.hashline.replace :as replace]
             [harness.hashline.serve :as serve]
+            [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
             [harness.providers :as providers]
             [harness.project :as project]
@@ -251,10 +252,20 @@
       (anchored-read (assoc args :path p))
       (slurp p :encoding "UTF-8"))))
 
-(defn- t-write [{:keys [path content]}]
-  (let [p (project/resolve-path *thread-id* path)]
-    (write-file! p content)
-    (str "wrote " (count content) " chars to " p)))
+(defn- t-write
+  "`write`'s body, dispatched on this session's editing mode.
+
+  In anchor mode the file's anchors are not merely stale -- they address lines
+  that are gone -- so the write RELEASES them, clears the file's undo record, and
+  hands back anchored rows for what it wrote (harness.hashline.write). In
+  str-replace mode none of that exists and this is the write it always was."
+  [{:keys [path content] :as args}]
+  (if (= :hashline (:mode (editing/editing-mode *thread-id*)))
+    (hashline-write/perform! *thread-id* #(project/resolve-path *thread-id* %) args
+                             (editing/editing-mode *thread-id*))
+    (let [p (project/resolve-path *thread-id* path)]
+      (write-file! p content)
+      (str "wrote " (count content) " chars to " p))))
 
 (defn- t-edit [{:keys [path old_string new_string]}]
   (let [p (project/resolve-path *thread-id* path)
@@ -349,11 +360,16 @@
   NAME's tool in THREAD-ID's session.
 
   A tool's face is STATIC unless it declares a `:describe` fn, and that escape
-  hatch exists for exactly one situation: a tool whose NAME stays the same across
-  the two editing modes while what it DOES does not, which today means `read` --
-  plain text in str-replace mode, `anchor│content` rows in hashline mode. The
-  alternative was two differently-named tools, and the user asked for `read` to be
-  the same tool either way.
+  hatch exists for one situation: a tool whose NAME stays the same across the two
+  editing modes while what it DOES does not. Two of them do -- `read` (plain text
+  in str-replace mode, `anchor│content` rows in hashline mode) and `write` (which
+  releases a file's anchors in the mode that has them). The alternative was
+  differently-named tools per mode, and the user asked for these to be the same
+  tool either way.
+
+  The face varies because the BEHAVIOUR does, and only where it does: a
+  description is the model's only view of what a call will do, so a session with
+  no anchors is not read a paragraph about releasing them.
 
   Everything else about a tool -- :required, :run, the markers the seam reads --
   is untouched by this: only what the MODEL sees varies, which keeps the call's
@@ -403,21 +419,51 @@
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
          :fence-paths true
-         ;; The ONE tool whose face depends on the session's editing mode: what a
-         ;; row IS differs, so the description and the parameters do too (see
-         ;; tool-face). Both faces keep :required [:path] -- offset and limit are
-         ;; optional in the anchored one, and nothing else about the call moves.
+         ;; `read` and `write` are the two tools whose face follows the editing
+         ;; mode: both keep their NAME (the user asked for one `read`, one `write`)
+         ;; while what they do differs, so the description has to say which of the
+         ;; two behaviours THIS session gets. Both read faces keep :required
+         ;; [:path] -- offset and limit are optional in the anchored one, and
+         ;; nothing else about the call moves (see tool-face).
          :describe (fn [thread-id]
                      (if (= :hashline (:mode (editing/editing-mode thread-id)))
                        {:description read-anchor-description :parameters read-anchor-params}
                        {:description read-plain-description :parameters read-plain-params}))))
 
+(def ^:private write-anchor-description
+  (str "Write a file, overwriting it. "
+       "This session edits by anchor, so a successful write RELEASES the file's"
+       " anchors: the content is no longer what they were minted against. The"
+       " answer shows the top of the file it just wrote with the anchors that name"
+       " those lines now, so you can edit what you wrote without reading it back. "
+       "Content that begins a line with an anchor of this file followed by `│` is"
+       " refused -- that is read's markup copied back in, not text. "
+       "A relative path resolves against this session's project directory when one"
+       " is bound. When bound, a path resolving outside the project directory and"
+       " the configuration home parks for human approval first."))
+
+(def ^:private write-plain-description
+  "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first.")
+
+(defn- write-face
+  "`write`'s description in THREAD-ID's session. The parameters do not vary -- the
+  arguments are the same two either way -- so only the text does; see tool-face for
+  why the two modes share one tool name at all."
+  [thread-id]
+  {:description (if (= :hashline (:mode (editing/editing-mode thread-id)))
+                  write-anchor-description
+                  write-plain-description)
+   :parameters  {:type "object"
+                 :properties {"path"    {:type "string" :description "File path."}
+                              "content" {:type "string" :description "Full new contents."}}}})
+
 (register! "write"
-  (assoc (tool "Write a file, overwriting it. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."
+  (assoc (tool write-plain-description
                {"path"    {:type "string" :description "File path."}
                 "content" {:type "string" :description "Full new contents."}}
                [:path :content] t-write)
-         :fence-paths true))
+         :fence-paths true
+         :describe write-face))
 
 (register! "edit"
   (assoc (tool "Replace an exact string in a file. Fails if old_string is absent or not unique. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first."

@@ -24,7 +24,13 @@
 (def ^:private project-file (io/file root ".harness" "harness.edn"))
 (def ^:private file (io/file root "f.txt"))
 
-(defn- path [] (str file))
+(defn- path
+  "The path the store books f.txt under: the canonical one, which on macOS is not
+  the string `(str file)` produces (the temp directory is reached through a
+  symlink). Asking the store with the other spelling returns nil and reads as 'no
+  row', which is the kind of near-miss a test should not be able to make."
+  []
+  (store/canonical (str file)))
 
 (defn- config
   "Write the project's harness.edn, so the session's resolved :editing map is what

@@ -27,7 +27,11 @@
 (def ^:private project-file (io/file root ".harness" "harness.edn"))
 (def ^:private file (io/file root "f.txt"))
 
-(defn- path [] (str file))
+(defn- path
+  "The path the store books f.txt under -- canonical, which on macOS is not the
+  string `(str file)` produces (the temp directory is reached through a symlink)."
+  []
+  (store/canonical (str file)))
 
 (defn- wipe [f]
   (io/delete-file user-file true)
