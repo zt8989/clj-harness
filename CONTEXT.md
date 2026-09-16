@@ -62,15 +62,24 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 *别叫成* 备份、历史（都不保留多次）。
 
 **工具名的写法**：`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` /
-`anchor_grep` / `bash` / `eval` —— 就是这些名字，不给它们起别名，也不把 `edit` 叫成"旧编辑"、
-把 `replace` 叫成"锚点编辑"。
+`anchor_grep` / `bash` / `eval` / `glob` / `todo_write` / `web_fetch` / `web_search` —— 就是这些名字，
+不给它们起别名，也不把 `edit` 叫成"旧编辑"、把 `replace` 叫成"锚点编辑"。
+一律小写、多词用下划线（`undo_last_replace` 就是那个先例）：不写 `camelCase`、不写 `PascalCase`
+——别人家的清单里写 `WebFetch`、`TodoWrite`，那是别人家的写法。
 
 ## 状态住在哪
 
-**库装状态、文件装记录。** `~/.clj-harness/harness.db`（sqlite）装"现在是什么"：项目、会话，以及锚点
+**库装状态、文件装记录。** `~/.clj-harness/harness.db`（sqlite）装"现在是什么"：项目、会话、
+**任务清单**（`todos` 一行一个会话），以及锚点
 （`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` / `hashline_undo` 四张表）。
 日志 jsonl 装"发生过什么"：每一帧、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
 是状态还是记录（守着这条边界的是 `harness.db-test` 的元断言）。
+
+**任务清单** —— 本会话的待办，由 `todo_write` 写。一次调用送的是**完整清单**，不是增量：整份替换
+（空数组即清空），顺序本身就是信息。**正因为它每次被整份改写**，它是状态而不是记录，所以它进库
+（`todos`：一个会话一行，清单整存整取，读它的人渲染整个列表）。一个回合只写一次——两条
+"整份替换"之间不存在合并，而并发跑会让后写的赢、两个都报成功。
+*别叫成* TODO list、待办、task list（中文一律写"任务清单"）。
 
 **冻结的开头** —— `prompt.md` 是**一条 system 消息的开头**，不是整条消息。它装的是**承诺**：与任何
 会话都成立的话（身份、secrets 纪律、「其余自己读」），首调读入即冻结（provider 前缀缓存的前提），

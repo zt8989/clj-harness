@@ -223,6 +223,26 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 [`docs/architecture/kernel.md`](docs/architecture/kernel.md) 与
 [`docs/architecture/home-and-storage.md`](docs/architecture/home-and-storage.md)。
 
+### 另外四只手：找文件、记清单、上网（`glob` / `todo_write` / `web_fetch` / `web_search`）
+
+这四个**不属于任何编辑模式**——两种模式都服务它们，因为它们是关于路径、关于这次运行、关于网的，
+与「按什么寻址一行」无关：
+
+| 工具 | 一句话 | 为什么是这个形状 |
+|---|---|---|
+| `glob` | 按**名字**找文件：一列能直接交给 `read` 的绝对路径，按路径排序 | 答案是 `rg` 两次列举的**交集**，因为 `rg --glob` 的优先级**高于** `.gitignore`——直接交给它，`**/*` 会把 `node_modules` 整棵树列出来。交集说的是「在**这个树里**按模式找」 |
+| `todo_write` | 记本会话的任务清单：一次送**完整**清单，空数组即清空 | 清单**进库**（`todos`，一行一个会话）：它每次被整份改写，而「能被改写的」正是这个库收状态、不收记录的那条判据。一条消息里只许写一次——两次整份替换之间不存在合并，所以那样的消息两条都**不落盘** |
+| `web_fetch` | 取一个 http(s) URL 的**正文**（`<script>`/`<style>` 丢掉、块级标签换行、实体解开） | 它是**有损的文本抽取器，不是渲染器**：JS 渲染的页面会如实回一句「没有可读正文」，而不是假装那一页是空的 |
+| `web_search` | 搜索并拿回标题 / URL / 摘要 | 需要 `HARNESS_SEARCH_API_KEY`（配置家的 `.env` 或环境；与 provider 的键走**同一个** `harness.home/env-value`）。没配就**指名拒绝**，别的功能一概不受影响 |
+
+**出网的两个都不带审批——这是决定，不是疏忽。** `bash` 今天就能 `curl` 任何地址且不带审批，
+所以给它们挂个 park 是**装样子**：「关闭不是禁止」这句在这里同样成立，一个看起来像护栏、
+一步就能绕过去的东西比没有护栏更坏。要这道坎的会话自己装规则：
+
+```clojure
+(harness.tools/session-require-approval! harness.tools/*thread-id* "web_fetch")
+```
+
 ## 启动
 
 ### 1) 后端 :8080
@@ -263,7 +283,11 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 607 tests / 9774 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# 664 tests / 9996 assertions（基线随分支变，报数时带上分支与提交）
+# 2 failures，两条都是**本机环境**、与代码无关：`project_test/a-binding-survives-a-real-restart`
+#   逐字比较 fork 出来的 JVM 的 stdout，而这台机器的 JDK 25 在 sqlite-jdbc 加载原生库时
+#   会往 stdout 打四行 "a restricted method in java.lang.System has been called"。
+#   新建一个 JVM 就能看见那四行，所以与本仓库的代码无关。
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型

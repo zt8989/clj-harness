@@ -105,6 +105,9 @@ import {
   CheckIcon,
   FilePenLineIcon,
   FileTextIcon,
+  FolderSearchIcon,
+  GlobeIcon,
+  ListTodoIcon,
   LoaderIcon,
   PencilIcon,
   ReplaceIcon,
@@ -112,6 +115,7 @@ import {
   SlidersHorizontalIcon,
   SparklesIcon,
   SquareTerminalIcon,
+  TelescopeIcon,
   Undo2Icon,
   WrenchIcon,
   XCircleIcon,
@@ -236,10 +240,14 @@ const TOOL_ICONS: Record<string, ElementType> = {
   insert: BetweenHorizontalStartIcon,
   undo_last_replace: Undo2Icon,
   anchor_grep: SearchIcon,
+  glob: FolderSearchIcon,
   bash: SquareTerminalIcon,
   eval: BracesIcon,
   skill: SparklesIcon,
   "session-configure": SlidersHorizontalIcon,
+  todo_write: ListTodoIcon,
+  web_fetch: GlobeIcon,
+  web_search: TelescopeIcon,
 };
 
 /// What a tool this page has never heard of gets: MCP tools registered at
@@ -299,8 +307,9 @@ function firstLine(text: string): string {
 
 /// What this call is about, in one line.
 ///
-/// This is a CLOSED table -- the feature's spec holds the same list, and the two
-/// are meant to be read together. A tool that is not in it falls through to the
+/// The tool names this table knows are the ones `docs/architecture/client.md`
+/// lists -- that page is where this file's current state is written down, and the
+/// two are meant to be read together. A tool that is not in it falls through to the
 /// last branch rather than to nothing, which is the property that lets a new
 /// tool (or an MCP one) appear in the transcript with a readable row and no
 /// front-end change.
@@ -349,6 +358,31 @@ function subjectOf(toolName: string, args: Args): string | null {
           })
           .join(" ") || null
       );
+    case "glob": {
+      const pattern = stringArg(args, "pattern");
+      if (pattern === undefined) return null;
+      const root = stringArg(args, "path");
+      return root === undefined ? pattern : `${pattern} · ${root}`;
+    }
+    case "todo_write": {
+      const todos = args["todos"];
+      if (!Array.isArray(todos)) return null;
+      if (todos.length === 0) return "清空";
+      const done = todos.filter(
+        (item) =>
+          item !== null &&
+          typeof item === "object" &&
+          (item as Args)["status"] === "completed",
+      ).length;
+      return `${done}/${todos.length} 完成`;
+    }
+    case "web_fetch":
+      // The whole URL, however long: the row ellipsises, and shortening it here
+      // would cut the same end the CSS does -- the path -- while spending a second
+      // rule on the same question.
+      return stringArg(args, "url") ?? null;
+    case "web_search":
+      return stringArg(args, "query") ?? null;
     default:
       // The first string argument, in the order the model wrote them. Nested
       // objects are not searched: a row that dug through an MCP tool's payload

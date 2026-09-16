@@ -39,6 +39,7 @@
             [clojure.string :as str]
             [harness.editing :as editing]
             [harness.event :as ev]
+            [harness.glob :as glob]
             [harness.hashline.edit :as edit]
             [harness.hashline.grep :as grep]
             [harness.hashline.replace :as replace]
@@ -50,7 +51,10 @@
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.skills :as skills]
-            [harness.shell :as shell])
+            [harness.shell :as shell]
+            [harness.todos :as todos]
+            [harness.web :as web]
+            [harness.web.search :as search])
   (:import [java.util.regex Pattern]))
 
 ;; A resident namespace, so `def`s in eval persist across calls. This is what lets
@@ -736,6 +740,113 @@
          ;; root outside it parks for a human exactly as a read does.
          :fence-paths true))
 
+;; ---------------------------------------------------------------------- glob
+;;
+;; THE OTHER SEARCH QUESTION. `anchor_grep` answers "which lines say this"; this
+;; answers "which files are named this", and its answer is a list of PATHS rather
+;; than anchored rows -- there is no line here to name. So it carries no anchors,
+;; belongs to neither editing family, and is served in BOTH modes (see
+;; harness.editing/families: a tool named in neither family is served always).
+
+(def ^:private glob-description
+  (str "Find files by name, with a glob pattern, and get their paths back -- ready to"
+       " hand to `read`. Use this for \"which files are there\" questions; use"
+       " `anchor_grep` when you are looking for content. "
+       "Results respect .gitignore and never include `.git`; hidden files (dotfiles)"
+       " ARE listed. One absolute path per line, sorted by path. "
+       "`path` narrows the search to a file or directory, and defaults to this"
+       " session's project directory (or the process working directory when none is"
+       " bound). "
+       "A relative `path` resolves against this session's project directory when one"
+       " is bound. When bound, a path resolving outside the project directory and the"
+       " configuration home parks for human approval first."))
+
+(defn- t-glob
+  "`glob`'s body. The search root is resolved for the session exactly as the file
+  tools' paths are, so a relative root means what it means everywhere else."
+  [args]
+  (glob/perform! *thread-id* #(project/resolve-path *thread-id* %) args))
+
+(register! "glob"
+  (assoc (tool glob-description
+               {"pattern" {:type "string"
+                           :description (str "Glob to match file names against, e.g."
+                                             " \"**/*.clj\" or \"src/**/*.ts\".")}
+                "path"    {:type "string"
+                           :description (str "File or directory to search; defaults to"
+                                             " this session's project directory (or"
+                                             " the process working directory when none"
+                                             " is bound).")}}
+               [:pattern] t-glob)
+         ;; A listing reads the tree, so the fence applies exactly as it does to a
+         ;; search: a root outside the project parks for a human.
+         :fence-paths true))
+
+;; ------------------------------------------------------------------ web_fetch
+;;
+;; The only tool here whose subject is neither the tree nor the run: it leaves the
+;; machine. NOT MARKED :requires-approval, and that is a decision rather than an
+;; oversight -- `bash` reaches the network today with no gate at all, so a park on
+;; this one would be a speed bump that reads as a wall. A session that wants the
+;; gate installs one (see harness.web's docstring).
+
+(def ^:private web-fetch-description
+  (str "Fetch an http(s) URL and return the page's TEXT -- markup removed, so it is"
+       " something to read. `<script>` and `<style>` contents are dropped and"
+       " block-level tags become line breaks: this is a text extractor, NOT a"
+       " renderer, so a page built by JavaScript comes back empty. "
+       "The answer says where the request ended up (redirects are followed and"
+       " reported), the HTTP status, the content type and the page title."
+       " `text/plain` and `application/json` come back unchanged. "
+       "At most " web/max-bytes " bytes of text are returned, and a truncated answer"
+       " says so. "
+       "A URL that is not http(s) is refused, as are a status of 400 or worse and a"
+       " content type that is not text."))
+
+(defn- t-web-fetch
+  "`web_fetch`'s body. The fetching, the redirect rules and the lossy extraction are
+  harness.web's -- this is the tool's face, not a second implementation of them."
+  [{:keys [url]}]
+  (web/fetch-text url))
+
+(register! "web_fetch"
+  (tool web-fetch-description
+        {"url" {:type "string"
+                :description (str "The full address to fetch, including the https://"
+                                  " prefix.")}}
+        [:url] t-web-fetch))
+
+;; ----------------------------------------------------------------- web_search
+;;
+;; The other half of reading the web: `web_fetch` reads a URL you already have, this
+;; finds one. Its destination is fixed by harness.web.search, not chosen per call by
+;; the model -- see that namespace for why neither of them is marked for approval.
+
+(def ^:private web-search-description
+  (str "Search the web and get a few results back -- a title, a URL and a snippet"
+       " for each. Read one of them with `web_fetch`. "
+       "Use it when you do not already know the address; when you do, `web_fetch` is"
+       " one call instead of two. "
+       "Needs " search/api-key-env " set in the configuration home's .env (or the"
+       " environment). Without it the call is refused by name and nothing else breaks. "
+       "`count` defaults to " search/default-count " and may be at most "
+       search/max-count "."))
+
+(defn- t-web-search
+  "`web_search`'s body. The vendor's wire -- request, key, response -- is
+  harness.web.search's; this is the tool's face."
+  [args]
+  (search/perform args))
+
+(register! "web_search"
+  (tool web-search-description
+        {"query" {:type "string" :description "What to search for."}
+         "count" {:type "integer" :minimum 1
+                  :description (str "How many results to ask for (default "
+                                    search/default-count ", at most "
+                                    search/max-count ").")}}
+        [:query] t-web-search))
+
 (register! "bash"
   (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
         {"command" {:type "string" :description "Command line."}}
@@ -759,6 +870,65 @@
              "stays available for the rest of the session.")
         {"name" {:type "string" :description "The skill's name, as listed in <skills>."}}
         [:name] t-skill))
+
+;; ------------------------------------------------------------------- todo_write
+;;
+;; The session's task list, and the only tool here whose subject is the run rather
+;; than the tree. It belongs to NEITHER editing family (it touches no file), so it
+;; is served in both modes.
+;;
+;; The list REPLACES rather than appends, which is what makes it state -- and what
+;; makes two calls in one message meaningless. `sole-call-of-its-name?` is the
+;; check, and it is the seam's own turn plan rather than anything tool-specific:
+;; the run loop is the only place that sees a whole message (see `plan-turn`).
+
+(def ^:private todo-write-description
+  (str "Record this session's task list: the items you are working through, in order,"
+       " with the state of each one. Use it when the work has several steps, so the"
+       " plan is visible and you can see what is left. "
+       "`todos` is the COMPLETE list, each item {\"content\": \"..\", \"status\": \"..\"}"
+       " where status is one of \"pending\", \"in_progress\", \"completed\"; an empty"
+       " array clears the list. There is no append and no partial update -- send the"
+       " whole list every time. At most one item may be \"in_progress\": the list has"
+       " to say what you are doing NOW. "
+       "The list belongs to this session and is stored with it, so it outlives this"
+       " run. Call this at most ONCE per message: a list is replaced whole, so two"
+       " calls in one message have nothing to merge and NEITHER is applied."))
+
+(declare sole-call-of-its-name?)
+
+(defn- t-todo-write
+  "`todo_write`'s body. Its rules live in harness.todos (one place, shared with any
+  other caller); the one thing here is the per-MESSAGE rule, because this is the
+  layer that can see a whole message.
+
+  The argument is read out of ARGS rather than destructured: the natural binding
+  name for it is `todos`, which is what this namespace calls harness.todos."
+  [args]
+  (when-not (sole-call-of-its-name? "todo_write")
+    (throw (ex-info (str "this message holds more than one todo_write. A task list is"
+                         " replaced WHOLE, so two calls in one message have nothing to"
+                         " merge -- neither was applied. Send the list once, and the"
+                         " next update in a later message.")
+                    {:reason :second-todo-write-in-turn})))
+  (todos/render (todos/write! *thread-id* (:todos args))))
+
+(register! "todo_write"
+  (tool todo-write-description
+        {"todos" {:type "array"
+                  :items {:type "object"
+                          :properties {"content" {:type "string"
+                                                  :description (str "What the item is,"
+                                                                    " in one line.")}
+                                       "status"  {:type "string"
+                                                  :enum ["pending" "in_progress" "completed"]
+                                                  :description (str "Where it stands."
+                                                                    " At most one item in"
+                                                                    " the list may be"
+                                                                    " \"in_progress\".")}}
+                          :required ["content" "status"]}
+                  :description (str "The COMPLETE list, in order. [] clears it.")}}
+        [:todos] t-todo-write))
 
 ;; Configure this session's provider. Marked :requires-approval so a model
 ;; cannot repoint its own session at another endpoint without a human saying so
@@ -1077,6 +1247,23 @@
                       members))))))
 
 (defonce ^:private turn-plan (atom {}))
+;; {:plan {call-id -> role} :counts {tool-name -> how many times it is called}}
+;;
+;; TWO FACTS ABOUT ONE TURN, in one atom, because both are answers to 'what else is
+;; in this message' and a second atom would be a second thing to reset. The plan is
+;; the anchor-edit batching above; the counts are what `sole-call-of-its-name?`
+;; reads.
+
+(defn- plan-counts
+  "How many times each tool NAME is called in this turn. Only names the session can
+  actually call are counted: a call of a name that does not exist is answered
+  'unknown tool' by the seam and cannot be a sibling of anything."
+  [thread-id calls]
+  (->> calls
+       (keep (fn [{:keys [function]}]
+               (let [n (:name function)]
+                 (when (contains? (effective-tools thread-id) n) n))))
+       frequencies))
 
 (defn register-turn!
   "Hand the seam the calls of the turn about to run, so each can be told who its
@@ -1085,7 +1272,9 @@
   direct `run!`, a replayed approval) behaves exactly as it did before batching
   existed, which is one call, one edit."
   [thread-id calls]
-  (reset! turn-plan (try (plan-turn thread-id calls) (catch Throwable _ {}))))
+  (reset! turn-plan (try {:plan   (plan-turn thread-id calls)
+                          :counts (plan-counts thread-id calls)}
+                         (catch Throwable _ {}))))
 
 (defn forget-turn!
   "Drop the plan once the turn's calls have all answered. Without this the map grows
@@ -1093,10 +1282,25 @@
   []
   (reset! turn-plan {}))
 
+(defn sole-call-of-its-name?
+  "Is the call being run the ONLY call of NAME in its turn?
+
+  TWO CALLS OF THE SAME NAME IN ONE MESSAGE are usually fine -- two edits to two
+  files, two reads -- but they are not for a tool that REPLACES a whole value:
+  `todo_write` sends the complete list every time, so a second call in the same
+  message has no meaning to merge. A turn's calls run concurrently, so the later
+  write would win while BOTH reported success -- the silent data loss the batch
+  section above exists to prevent, arrived at from the other direction.
+
+  TRUE WHEN THE TURN WAS NEVER REGISTERED (a direct `run!`, a replayed approval):
+  those callers run one call at a time, which is the case the rule is about."
+  [name]
+  (<= (long (get (:counts @turn-plan) name 0)) 1))
+
 (defn- batch-role
   "What this call's part in its message is, or nil when it is an ordinary edit."
   [id]
-  (get @turn-plan id))
+  (get-in @turn-plan [:plan id]))
 
 (defn- run-batch!
   "The APPOINTED call of a group runs the whole group. The members are the same

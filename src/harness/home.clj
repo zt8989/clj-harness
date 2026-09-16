@@ -80,6 +80,66 @@
 (defn providers-file [] (io/file (root) "providers.edn"))
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
+
+(defn parse-dotenv
+  "A .env file's contents -> a {name value} map. Handles the shapes the format
+  actually uses: `export` prefixes, surrounding single or double quotes, `#`
+  comments, blank lines, and values that themselves contain `=` (only the first
+  `=` splits).
+
+  We parse it ourselves rather than lean on the dotenv library because that library
+  resolves `.env` from the CURRENT DIRECTORY at namespace-load time and caches it in
+  a def -- so it cannot be pointed at harness.home, and it would miss an edit made
+  while the process runs. Both of those matter here.
+
+  PUBLIC because there is a second reader with a different question:
+  harness.providers/api-key-source reports WHERE a key comes from and must not have
+  the value itself, so it asks this for the map and only tests a name's presence in
+  it. Everything that wants a value uses `env-value` instead, which is where the
+  precedence between the file and the environment is decided -- once."
+  [raw]
+  (into {}
+        (->> (str/split-lines raw)
+             (map str/trim)
+             (remove #(or (empty? %) (str/starts-with? % "#")))
+             (map #(str/split % #"=" 2))
+             (filter #(= 2 (count %)))
+             (map (fn [[k v]]
+                    [(str/replace (str/trim k) #"^export\s+" "")
+                     (let [v (str/trim v)]
+                       (if (and (>= (count v) 2)
+                                (or (and (str/starts-with? v "\"") (str/ends-with? v "\""))
+                                    (and (str/starts-with? v "'") (str/ends-with? v "'"))))
+                         (subs v 1 (dec (count v)))
+                         v))])))))
+
+(defn env-value
+  "NAME's value from the home's .env, then from the environment -- nil when neither
+  has it.
+
+  ONE PLACE, TWO USERS, and that is why it is here rather than in either of them: a
+  provider's api-key and a search vendor's key are the same kind of fact (a secret
+  the person running this put somewhere OUTSIDE the repository), and two copies of
+  the lookup would eventually disagree about precedence -- which is the only part of
+  it anybody ever has to reason about.
+
+  .ENV WINS OVER A REAL ENVIRONMENT VARIABLE, which is the dotenv library's
+  documented precedence and what the provider key has always done: the home's file
+  is the single place that decides, and a shell variable does not override it.
+
+  The file lives in the CONFIGURATION HOME (harness.home/root), which is not the OS
+  home -- and is re-read on every call, like config.edn, so editing it takes effect
+  without a restart.
+
+  NEVER LOGGED, NEVER RETURNED. What a caller does with the value is the caller's
+  discipline; the api-key rule in prompt.md is what makes it a rule rather than a
+  convention."
+  [name]
+  (let [f (dotenv-file)
+        from-file (when (.exists f)
+                    (get (parse-dotenv (slurp f :encoding "UTF-8")) name))]
+    (or from-file (System/getenv name))))
+
 (defn db-file
   "The home's metadata store -- see harness.db. It lives beside the configuration
   files rather than under any one feature's directory: it is this home's store,

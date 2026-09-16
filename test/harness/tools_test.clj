@@ -196,14 +196,16 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "eval" "insert" "read" "replace"
-              "session-configure" "skill" "undo_last_replace" "write"]
+      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "read" "replace"
+              "session-configure" "skill" "todo_write" "undo_last_replace"
+              "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "edit" "eval" "read" "session-configure" "skill" "write"]
+      (is (= ["bash" "edit" "eval" "glob" "read" "session-configure" "skill"
+              "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project

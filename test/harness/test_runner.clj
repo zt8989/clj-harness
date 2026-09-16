@@ -60,6 +60,10 @@
     harness.hashline-batch-test
     harness.hashline-insert-test
     harness.hashline-grep-test
+    harness.glob-test
+    harness.todos-test
+    harness.web-test
+    harness.web-search-test
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test
