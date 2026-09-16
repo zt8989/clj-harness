@@ -1557,6 +1557,10 @@
     ;; to edit. The reader does not do this -- `home/config` reads a missing file as an
     ;; empty one and creates nothing -- so an offline tool or a test asking what a home
     ;; says still leaves the home exactly as it found it.
+    (when (:migrated? (providers/migrate-config!))
+      (println (str "config.edn in " root " was in the shape from before :default and"
+                    " :providers -- moved it under :default (the old file is"
+                    " config.edn.bak)")))
     (when (:created? (providers/ensure-config!))
       (println (str "no config.edn in " root " -- wrote an empty one; the settings panel"
                     " (or an editor) can fill it in")))

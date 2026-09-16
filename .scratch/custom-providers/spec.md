@@ -461,3 +461,24 @@ Save / Cancel / Remove 都在，弹窗没长）。
 `docs/architecture.md` 的「在办」那一条、`client.md` 与 `README.md` 的正文都已经按两页改过；
 `t06-key-page.png` 与 `t06-home-page.png` 那两张截图**留着不删**——它们记的是那两页存在过的样子，
 而 `.scratch/` 是历史。
+
+### 复议（二）：旧形状的 config.edn 由开机搬过去，而不是拒绝
+
+决策 1 里写着「旧扁平形状同样当场失败，说清 `:default` 这一节」，理由是「不读两种形状、不迁移」。
+**这一条被真实的家推翻了。** 主人自己那台机器的 `config.edn` 正是旧形状（顶层就是一段 inline 描述：
+openrouter 的 endpoint、那个 free model、`reasoning-effort "low"`、两个计数），于是：
+
+1. 新版起来后它**指名失败**；
+2. 主人按前一轮报错的指路去 `touch config.edn`，文件成了 0 字节；
+3. 空文件先报 `not nil`、后报 `no provider`——**一个能用的配置，被一路报错逼成了空文件**。
+
+所以现在：**开机时 `migrate-config!` 把旧顶层整体搬进 `:default` 写回去**（旧内容留 `config.edn.bak`，
+打印一行说明）。判据收得很紧——顶层既没有 `:default` 也没有 `:providers`，**而且**带一个旧键
+（`:provider` / `:model` / `:reasoning-effort` / `:protocol` / `:base-url`）才算旧形状；写之前用读侧
+同一个形状判据核过，所以「说了话但不是配置」的坏文件仍然原样留着，由读侧的句子解释。
+读侧本身**仍然不读两种形状**——升级是开机这一次的事，文件一次性收敛到新形状。
+
+顺手把主人那台机器修好了：把他自己的 `config.edn.bak` 拷回 `config.edn`，跑一次迁移（走代码，
+不是手改），现在那个家解析出 openrouter + 他那个 model + `reasoning-effort "low"`，
+密钥仍从 `.env` 的 `HARNESS_API_KEY` 兜底拿到（inline 描述没有名字，只有全局那一档，见 02），
+而他原来的配置仍然一字不动地留在 `config.edn.bak` 里。

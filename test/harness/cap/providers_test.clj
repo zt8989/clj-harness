@@ -250,6 +250,55 @@
         (is (str/includes? (ex-message e) ":default")
             "and that sentence also names the section")))))
 
+(deftest an-old-top-level-is-upgraded-once-not-refused
+  ;; THE FILE SOMEBODY WAS USING. config.edn used to BE the default tier -- the knobs
+  ;; at the top level, or a provider described inline -- and refusing that outright
+  ;; took a working home and left its owner chasing failures into an empty file. The
+  ;; boot moves it instead.
+  (doseq [[what old-shape] {"a provider described inline"
+                            (pr-str {:protocol :openai-completions
+                                     :base-url "https://openrouter.ai/api/v1"
+                                     :model    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+                                     :reasoning-effort "low"
+                                     :context-window 256000
+                                     :max-output-tokens 65536})
+                            "the three knobs by name"
+                            (pr-str {:provider :openrouter :model "openai/gpt-4o-mini"
+                                     :reasoning-effort "high"})}]
+    (with-home nil nil
+      (fn []
+        (spit (home/config-file) old-shape :encoding "UTF-8")
+        (testing what
+          (is (thrown? clojure.lang.ExceptionInfo (providers/config))
+              "the reader alone still refuses it -- the upgrade is the boot's job")
+          (is (true? (:migrated? (providers/migrate-config!))))
+          (let [after (slurp (home/config-file))]
+            (is (str/includes? after ":default") "the old top level is now the :default section")
+            (is (not (str/includes? after ":providers {")) "and nothing else was invented")
+            (is (= :openai-completions
+                   (if (= what "a provider described inline")
+                     (:protocol (providers/effective-provider "t-mig"))
+                     :openai-completions))
+                "the file it now holds is the configuration it used to be"))
+          (is (= old-shape (slurp (home/config-backup-file)))
+              "and the previous contents are in the backup, byte for byte")
+          (is (false? (:migrated? (providers/migrate-config!)))
+              "running it again does nothing -- the upgrade happens once"))))))
+
+(deftest a-file-that-is-not-a-configuration-is-left-alone
+  ;; The migration recognizes an OLD configuration, not any map: a typo in a section
+  ;; name and a map of something else both keep their own sentences, and neither gets
+  ;; rewritten into a shape that hides the mistake.
+  (doseq [body ["{:nonsense 1}"
+                "{:default {:provider :openrouter} :providers {} :oops 1}"
+                "[1 2 3]"]]
+    (with-home nil nil
+      (fn []
+        (spit (home/config-file) body :encoding "UTF-8")
+        (is (false? (:migrated? (providers/migrate-config!)))
+            (str (pr-str body) " is not upgraded"))
+        (is (= body (slurp (home/config-file))) "and the file is exactly as it was")))))
+
 (deftest a-home-with-no-config-edn-gets-one-at-boot-and-only-then
   ;; NEW: a home nobody has configured is a home the FIRST SERVING PROCESS hands a file
   ;; to, because a person who has just installed this should have something to open.

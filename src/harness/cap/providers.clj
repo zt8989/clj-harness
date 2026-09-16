@@ -414,6 +414,32 @@
   :providers section now -- see `catalog`."
   #{:default :providers})
 
+(defn- check-config
+  "A parsed config.edn -> the same map, or a named failure about its SHAPE.
+
+  SEPARATE FROM THE READ, because `migrate-config!` has to ask the same question about
+  a map that is not on disk yet: 'would this pass when it is read back'. One checker,
+  so the answer cannot differ between the two."
+  [raw path]
+  (when-not (map? raw)
+    (fail (str path " must be a map of the two sections (:default and :providers), not "
+               (pr-str (type raw)))
+          {:path path}))
+  (let [unknown (sortable (remove config-sections (keys raw)))]
+    (when (seq unknown)
+      (fail (str path " carries " (pr-str unknown) " at its top level; it is made of two"
+                 " sections -- :default (the three knobs a session starts from:"
+                 " :provider / :model / :reasoning-effort) and :providers (the vendors,"
+                 " {name entry}). The knobs used to sit at the top level themselves:"
+                 " start the server once and it moves them under :default for you,"
+                 " or move them yourself.")
+            {:path path :unknown unknown})))
+  (doseq [k (sortable (keys raw))]
+    (when-not (map? (get raw k))
+      (fail (str path "'s " (pr-str k) " must be a map, not " (pr-str (get raw k)))
+            {:path path :section k})))
+  raw)
+
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs ->
   the two sections it is made of, checked as such.
@@ -436,27 +462,13 @@
   says which shape to write. A file that SAYS something which is not a map (a vector,
   a string, a number) is a different matter and stays a named failure.
 
-  The path comes from harness.infra.home; a missing file is a named failure there."
+  A previously-working file is not refused, either: the top level the knobs used to
+  live at is UPGRADED at boot see `migrate-config!`.
+
+  The path comes from harness.infra.home."
   []
-  (let [raw  (or (edn/read-string (home/config)) {})
-        path (.getAbsolutePath (home/config-file))]
-    (when-not (map? raw)
-      (fail (str path " must be a map of the two sections (:default and :providers), not "
-                 (pr-str (type raw)))
-            {:path path}))
-    (let [unknown (sortable (remove config-sections (keys raw)))]
-      (when (seq unknown)
-        (fail (str path " carries " (pr-str unknown) " at its top level; it is made of two"
-                   " sections -- :default (the three knobs a session starts from:"
-                   " :provider / :model / :reasoning-effort) and :providers (the vendors,"
-                   " {name entry}). The knobs used to sit at the top level themselves:"
-                   " move them under :default.")
-              {:path path :unknown unknown})))
-    (doseq [k (sortable (keys raw))]
-      (when-not (map? (get raw k))
-        (fail (str path "'s " (pr-str k) " must be a map, not " (pr-str (get raw k)))
-              {:path path :section k})))
-    raw))
+  (check-config (or (edn/read-string (home/config)) {})
+                (.getAbsolutePath (home/config-file))))
 
 (def builtin-raw
   "The providers this harness knows out of the box, so a config.edn naming one
@@ -1718,6 +1730,53 @@
     (when (and old (not (str/blank? old)) (not= old text))
       (spit (home/config-backup-file) old :encoding "UTF-8"))
     (home/spit-atomically! f text)))
+
+(defn- legacy-top-level?
+  "Is RAW the shape config.edn had BEFORE it was sectioned -- the three knobs, or a
+  whole provider described inline, written at the top level?
+
+  Recognized by ABSENCE PLUS ONE LEGACY KEY: a file that names neither :default nor
+  :providers is a file from before those existed, and it has to look like a
+  configuration (a knob, an endpoint, a model) rather than a map of something else. A
+  file that names one of the sections and something else is a DIFFERENT case -- a typo
+  in a section name -- and stays the named failure it already is."
+  [raw]
+  (and (map? raw)
+       (seq raw)
+       (not (contains? raw :default))
+       (not (contains? raw :providers))
+       (some #(contains? raw %) #{:provider :model :reasoning-effort :protocol :base-url})))
+
+(defn migrate-config!
+  "Bring an older config.edn forward, ONCE, and leave every other file alone.
+
+  THE FILE THIS MOVES AWAY FROM IS ONE SOMEBODY WAS USING. `config.edn` used to BE the
+  default tier -- the knobs at the top level, or a whole provider described inline --
+  and the sectioned shape refused that outright. For a home that already existed,
+  'refused outright' meant a working configuration stopped working with no path back:
+  the first real home this met ended up an EMPTY file, its owner chasing one failure
+  into the next.
+
+  So the boot upgrades it instead: the whole old top level becomes the :default
+  section, and the result is checked with the reader's own shape check (`check-config`)
+  before anything is written -- a file that was broken for some other reason is left
+  exactly as it was, for the reader's sentence to explain. `write-config!` leaves the
+  previous contents in config.edn.bak on the way past.
+
+  A file that already has its sections is not touched; neither is a missing or empty
+  one (`ensure-config!` handles those). Returns {:migrated? .. :file ..}."
+  []
+  (let [f (home/config-file)]
+    (if-not (.exists f)
+      {:file f :migrated? false}
+      (let [raw (edn/read-string (slurp f :encoding "UTF-8"))]
+        (if-not (legacy-top-level? raw)
+          {:file f :migrated? false}
+          (try
+            (let [forwarded (check-config {:default raw} (.getAbsolutePath f))]
+              (write-config! forwarded)
+              {:file f :migrated? true})
+            (catch Throwable _ {:file f :migrated? false})))))))
 
 (defn- change-providers!
   "CHANGE -- a function of the parsed config map -> the config to write -- validated
