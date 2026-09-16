@@ -65,7 +65,6 @@
   The old flat shape is neither read nor migrated: it fails by name, saying what
   to write instead."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]
             [clojure.walk :as walk]
             [harness.infra.home :as home]))
 
@@ -796,46 +795,21 @@
       (swap! session-overrides assoc thread-id sel)
       sel)))
 
-(defn- parse-dotenv
-  "A .env file's contents -> a {name value} map. Handles the shapes the format
-  actually uses: `export` prefixes, surrounding single or double quotes,
-  `#` comments, blank lines, and values that themselves contain `=` (only the
-  first `=` splits).
-
-  We parse it ourselves rather than lean on the dotenv library because that
-  library resolves `.env` from the CURRENT DIRECTORY at namespace-load time and
-  caches it in a def -- so it cannot be pointed at harness.infra.home, and it would
-  miss an edit made while the process runs. Both of those matter here."
-  [raw]
-  (into {}
-        (->> (str/split-lines raw)
-             (map str/trim)
-             (remove #(or (empty? %) (str/starts-with? % "#")))
-             (map #(str/split % #"=" 2))
-             (filter #(= 2 (count %)))
-             (map (fn [[k v]]
-                    [(str/replace (str/trim k) #"^export\s+" "")
-                     (let [v (str/trim v)]
-                       (if (and (>= (count v) 2)
-                                (or (and (str/starts-with? v "\"") (str/ends-with? v "\""))
-                                    (and (str/starts-with? v "'") (str/ends-with? v "'"))))
-                         (subs v 1 (dec (count v)))
-                         v))])))))
-
 (defn- api-key
   "The API key, following the dotenv library's documented precedence: a value in
   .env wins over a real environment variable. So .env is the single place that
   decides, and setting a shell variable will NOT override it.
 
-  The file is harness.infra.home's .env -- and is re-read every time, like config.edn,
-  so editing it takes effect without a restart. PRIVATE, and doubly so by
-  discipline: the key flows ONLY into resolve-provider's result, and prompt.md
-  forbids reaching for it any other way."
+  The lookup itself is harness.infra.home/env-value -- the home's .env first, then
+  the environment, re-read every time like config.edn. It is the same lookup the
+  three search keys go through, because 'a secret the person put outside the
+  repository' is one kind of fact and two lookups would eventually disagree about
+  precedence.
+
+  PRIVATE, and doubly so by discipline: the key flows ONLY into resolve-provider's
+  result, and prompt.md forbids reaching for it any other way."
   []
-  (let [f (home/dotenv-file)
-        from-file (when (.exists f) (get (parse-dotenv (slurp f :encoding "UTF-8"))
-                                         "HARNESS_API_KEY"))]
-    (or from-file (System/getenv "HARNESS_API_KEY"))))
+  (home/env-value "HARNESS_API_KEY"))
 
 ;; ---------------------------------------------- the selection and its tiers
 ;;
@@ -1087,7 +1061,7 @@
   []
   (let [f (home/dotenv-file)
         from-file (when (.exists f)
-                    (get (parse-dotenv (slurp f :encoding "UTF-8")) "HARNESS_API_KEY"))
+                    (get (home/parse-dotenv (slurp f :encoding "UTF-8")) "HARNESS_API_KEY"))
         from-env  (System/getenv "HARNESS_API_KEY")]
     (cond
       (some? from-file) {:present? true  :source :env-file}

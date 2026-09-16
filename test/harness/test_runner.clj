@@ -61,6 +61,10 @@
     harness.cap.hashline.batch-test
     harness.cap.hashline.insert-test
     harness.cap.hashline.grep-test
+    harness.cap.glob-test
+    harness.cap.todos-test
+    harness.cap.web-test
+    harness.cap.web-search-test
     harness.kernel.hooks.install-test
     harness.kernel.hooks-test
     harness.kernel.hooks.dispatch-test

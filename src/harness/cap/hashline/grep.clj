@@ -21,6 +21,12 @@
   directories, because a search that got ten times slower without saying so is a
   mystery to whoever has to work out why.
 
+  RUNNING IT IS NOT THIS NAMESPACE'S BUSINESS ANY MORE: the executable, the timeout
+  and the three refusals a spawned search can produce live in harness.infra.rg, because
+  `glob` searches with the same program. What stays here is the READING of rg's
+  `--json` stream -- a hit is a LINE, and a line is the thing this namespace has to
+  hand an anchor to.
+
   REGEXES THAT CAN HANG ARE REFUSED. This is not a general regex engine's problem to
   solve: a pattern the model wrote by accident (`(a+)+b`) can take exponential time
   on a line that does not match, and the session would sit inside a subprocess until
@@ -35,17 +41,7 @@
             [harness.cap.hashline.reading :as reading]
             [harness.cap.hashline.serve :as serve]
             [harness.cap.hashline.store :as store]
-            [harness.infra.shell :as shell]))
-
-(def ^:private binary
-  "The executable this searches with. Named so the refusal below can say what to
-  install, and so there is one place to change it."
-  "rg")
-
-(def timeout-ms
-  "How long a search may take. Ten seconds, upstream's number: long enough for a
-  real tree, short enough that a pathological pattern does not hold the session."
-  10000)
+            [harness.infra.rg :as rg]))
 
 (def max-bytes
   "How much search output one call may return, in bytes of rendered rows. A search
@@ -139,44 +135,21 @@
 (defn run-rg
   "Run the search and return `rg`'s parsed events.
 
-  Throws a NAMED failure when the executable is not there, and another when it
-  timed out -- both of which are things the model can act on, unlike an empty
-  result, which is what a silent fallback would have produced."
+  The running is harness.infra.rg's -- the executable, the timeout, and the three
+  refusals a spawned search can produce are shared with `glob` now. What is left
+  here is the one thing that is THIS tool's: reading the `--json` stream, where a
+  `match` event means a line that has to be given an anchor.
+
+  A line that is not JSON is DROPPED rather than reported: rg's protocol puts one
+  JSON object per line, so a non-object line is not a hit, and the malformed-payload
+  case that a model can act on is the refusal harness.infra.rg raises, not this."
   [args dir]
-  (let [{:keys [exit out err timeout]}
-        (shell/run {:command (str binary " "
-                                  (str/join " " (map (fn [a]
-                                                       (str "'"
-                                                            (str/replace a "'" "'\\''")
-                                                            "'"))
-                                                     (rg-args args))))
-                    :dir dir
-                    :timeout-ms timeout-ms})]
-    (when (and timeout (not= 1 exit) (str/blank? out))
-      (throw (ex-info (str "the search did not finish within " timeout-ms "ms and was"
-                           " stopped. Narrow it: give a `path` or a `glob`, or search"
-                           " for a plainer pattern.")
-                      {:reason :search-timeout})))
-    (cond
-      ;; rg exits 1 for 'no matches', which is an answer, not a failure.
-      (contains? #{0 1} exit)
-      (vec (keep (fn [line]
-                   (when-not (str/blank? line)
-                     (try (json/read-str line :key-fn keyword)
-                          (catch Exception _ nil))))
-                 (str/split-lines out)))
-
-      (str/includes? (str err) "No such file or directory")
-      (throw (ex-info (str "`" binary "` is not on this process's PATH, so nothing was"
-                           " searched. Install ripgrep (`brew install ripgrep`,"
-                           " `apt install ripgrep`) or use `bash` with the tools you"
-                           " have.")
-                      {:reason :rg-missing :executable binary}))
-
-      :else
-      (throw (ex-info (str "the search failed (exit " exit "): "
-                           (str/trim (str err)))
-                      {:exit exit :reason :rg-failed :stderr (str/trim (str err))})))))
+  (let [out (:out (rg/run (rg-args args) dir))]
+    (vec (keep (fn [line]
+                 (when-not (str/blank? line)
+                   (try (json/read-str line :key-fn keyword)
+                        (catch Exception _ nil))))
+               (str/split-lines out)))))
 
 ;; --------------------------------------------------------------- the hits
 

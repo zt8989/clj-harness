@@ -54,7 +54,7 @@
 
 (defn with-builtins
   "Install THE APP'S CAPABILITIES for the duration of ONE test namespace, and
-  withdraw them afterwards: harness.cap.tools' eleven tools, the hook-file reader
+  withdraw them afterwards: harness.cap.tools' fifteen tools, the hook-file reader
   (harness.cap.hooks) and the kernel's own three SystemPrompt rows
   (harness.cap.system-prompt) -- the same three the composition root installs.
 

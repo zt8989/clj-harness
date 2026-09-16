@@ -1,7 +1,7 @@
 (ns harness.kernel.tools
   "The tool table's SEAM: the per-session overlay, the parked calls a human still
   has to answer, and the three-phase execution. It knows what a tool IS and what
-  a call MEANS; it knows no particular tool. `harness.cap.tools` holds the eleven
+  a call MEANS; it knows no particular tool. `harness.cap.tools` holds the fifteen
   this harness ships, and they arrive through `install!`.
 
   A tool is
@@ -544,18 +544,39 @@
 ;; namespace stop requiring harness.cap.hashline at all.
 
 (defonce ^:private turn-plan (atom {}))
+;; {:plan {call-id -> the part that call plays} :counts {tool-name -> how many calls}}
+;;
+;; TWO FACTS ABOUT ONE TURN, in one atom, because both answer 'what else is in this
+;; message' and a second atom would be a second thing to reset. The plan is the
+;; installed planner's (the anchor-edit batching above); the counts are the seam's
+;; own, and `sole-call-of-its-name?` is what reads them.
+
+(defn- plan-counts
+  "How many times each tool NAME is called in this turn.
+
+  A COUNT OF NAMES RATHER THAN OF CALL IDS, so a tool BODY can ask the question:
+  bodies receive parsed arguments and nothing else -- no call id -- so a rule that
+  a body enforces has to be answerable from the turn alone. Names are what a body
+  knows about itself.
+
+  A name that does not exist is counted too, and it cannot matter: the counts are
+  keyed by name, so a call of some unknown name never changes the answer for a
+  known one."
+  [calls]
+  (frequencies (keep (fn [call] (get-in call [:function :name])) calls)))
 
 (defn register-turn!
   "Hand the seam the calls of the turn about to run, so each can be told who its
   siblings are. Called by the run loop -- the only place that sees a whole turn at
   once -- and best effort throughout: a planner that throws, or none at all, leaves
   a turn that behaves exactly as it did before batching existed, which is one call,
-  one edit."
+  one edit. The counts do not depend on any planner, so they are taken either way."
   [thread-id calls]
   (reset! turn-plan
-          (if-let [plan @installed-planner]
-            (try (plan thread-id calls) (catch Throwable _ {}))
-            {})))
+          {:plan   (if-let [plan @installed-planner]
+                     (try (plan thread-id calls) (catch Throwable _ {}))
+                     {})
+           :counts (plan-counts calls)}))
 
 (defn forget-turn!
   "Drop the plan once the turn's calls have all answered. Without this the map grows
@@ -563,10 +584,29 @@
   []
   (reset! turn-plan {}))
 
+(defn sole-call-of-its-name?
+  "Is the call being run the ONLY call of NAME in its turn?
+
+  TWO CALLS OF THE SAME NAME IN ONE MESSAGE are usually fine -- two edits to two
+  files, two reads -- but not for a tool that REPLACES a whole value: such a tool
+  sends its complete value every time, so a second call in the same message has no
+  meaning to merge. A turn's calls run concurrently, so the later write would win
+  while BOTH reported success -- silent data loss, arrived at from the other
+  direction than the batch above.
+
+  A TOOL THAT CARES ASKS THIS FROM ITS OWN BODY, which is why the answer is a fact
+  about the turn rather than a routing decision here: the seam has no idea which
+  tools those are, and it should not.
+
+  TRUE WHEN THE TURN WAS NEVER REGISTERED (a direct `run!`, a replayed approval):
+  those callers run one call at a time, which is the case the rule is about."
+  [name]
+  (<= (long (get (:counts @turn-plan) name 0)) 1))
+
 (defn- batch-role
   "What this call's part in its message is, or nil when it is an ordinary call."
   [id]
-  (get @turn-plan id))
+  (get-in @turn-plan [:plan id]))
 
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE

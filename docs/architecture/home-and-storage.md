@@ -39,8 +39,8 @@
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读）
 ├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
-├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：home 的元数据层
+├── .env              HARNESS_API_KEY 与三个搜索键（Brave/Exa/Tavily）——优先于真实环境变量，见 harness.infra.home/env-value
+├── harness.infra.db        sqlite：home 的元数据层
 └── projects/
     ├── <sanitized-project-canonical-path>/
     │   └── <sanitized-thread-id>.jsonl
@@ -96,7 +96,7 @@
 
 ## sqlite：home 的元数据层
 
-`harness.db` 是本仓**唯一的二进制依赖**，而且是刻意引的：它存在的理由是**一次写入多个事实**——
+`harness.infra.db` 是本仓**唯一的二进制依赖**，而且是刻意引的：它存在的理由是**一次写入多个事实**——
 一个临界区里推进若干条状态，这正是事务要做的事。
 
 ### 库与文件的边界
@@ -120,7 +120,7 @@
 迁过之后，**另一条再也打不开**。`user_version` 还在写，但只是面包屑，没有任何代码从它做决定。
 
 **合并之后这两条链合成了一条**：`projects-and-sessions`、`sessions-remember-the-project-path`、
-`hashline-store`、`hashline-served`、`hashline-undo-served`。每一步还带一个 `:present?` 探针回答
+`hashline-store`、`hashline-served`、`hashline-undo-served`、`todos`。每一步还带一个 `:present?` 探针回答
 「这份 schema 里已经有了吗」，所以被**任一**条旧链迁过的库都打得开：认识的步骤**记为已做**而不是重跑，
 不认识的表是惰性的。本机真 home 那个库就是这么被治好的——它缺的列由探针发现并补上，不再需要手写 ALTER。
 
@@ -186,6 +186,23 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
 **列名是对着正则挑的。** `harness.infra.db-test` 禁止任何看起来像对话内容的列名，`prior_text` /
 `resulting_text` 直说里面装的是什么（文件正文，改前 / 改后），而 `content` 既会踩那条守卫、又说不清
 是哪一份正文。它们在这里算**状态**的判据是：**每次编辑都重写**，而且没有它们撤销就不存在。
+
+### 任务清单的表
+
+`todos` 装**一个会话的待办**（`harness.cap.todos`，写它的工具是 `todo_write`）：
+
+| 表 | 装什么 |
+|---|---|
+| `todos` | **一个会话的清单，一行**：`thread_id`（主键）、`items`（清单本身，JSON 数组）、`updated_at` |
+
+**它是状态的判据在「写」里，不在「行」里。** `todo_write` 每次都送**完整**清单并**整份替换**，
+没有追加、没有部分更新——所以「能被整份改写」这条判据在这里成立，而「改过几次」没有任何人需要。
+这也是它进库、而不是留在对话里的理由：清单要活过一次 run（重启、另一个进程、将来某个面板读它），
+而对话是客户端手里的东西。
+
+**一行而不是一项一行**，与上面锚点那两张表同一条理由：`items` 是**一个值**，整写整读、从不按元素查，
+读它的人渲染整个列表。逐项建表买不到任何东西，还要多一个「位置」列来维护——而读写它的调用本来就
+是整份的。`items` 这个列名同样是对着那条正则挑的：叫 `content` 会既踩守卫、又说不清是哪一份内容。
 
 ### 迁移
 

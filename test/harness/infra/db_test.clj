@@ -179,7 +179,7 @@
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "sessions"]
+                  "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
@@ -332,7 +332,7 @@
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                      "hashline_undo" "projects" "schema_steps" "sessions"]
+                      "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
@@ -739,7 +739,16 @@
                ;; the ANCHORS and the permission bits as well as the text -- see
                ;; harness.cap.hashline.undo.
                "hashline_undo"      #{"path" "prior_text" "bom" "ending" "anchors"
-                                      "served" "resulting_text" "mode" "updated_at"}}
+                                      "served" "resulting_text" "mode" "updated_at"}
+               ;; The session's task list (harness.todos). STATE, and the reason is
+               ;; in the write rather than in the row: `todo_write` sends the
+               ;; COMPLETE list every time and the stored value is replaced whole,
+               ;; so there is no append and no history to keep. `items` is the list
+               ;; as one JSON value -- written whole, read whole, never queried by
+               ;; element -- which is why it is one column and not a row per item;
+               ;; the name is chosen against the guard below, where `content` would
+               ;; both trip it and say less.
+               "todos"              #{"thread_id" "items" "updated_at"}}
               forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
           (is (pos? (db/target-version)) "the store has a schema to inspect")
           (doseq [[table columns] declared-state-columns]
@@ -768,7 +777,7 @@
       (fn []
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
-                                      "hashline_sessions" "hashline_undo"}
+                                      "hashline_sessions" "hashline_undo" "todos"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))

@@ -38,6 +38,7 @@
 | `infra.logging` | 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 | `infra.log` | 一次调用同时写 stderr 与文件的门面（**后端自己的错误日志**，与 session jsonl 是两回事） |
 | `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
+| `infra.rg` | **怎么跑 ripgrep**：二进制名、超时、以及「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句字符串——后者也是 `rg` 对**不存在的搜索根**说的话）。`cap.hashline.grep` 与 `cap.glob` 共用它，而 `--json` 的解析留在 `grep` 自己手里 |
 
 ### `harness.kernel` —— 机制：只说得清「怎么做」
 
@@ -55,9 +56,13 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `cap.tools` | **十一个内建工具的定义**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `bash` / `eval` / `skill` / `session-configure`）与它们的 `install!`；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.tools` | **十五个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`；批的计划器与编辑模式的收窄策略也从这里装上 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
+| `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
+| `cap.todos` | **本会话的任务清单**：校验、整份替换、渲染，落在 `infra.db` 的 `todos` 表（一行一个会话，清单整存整取）。判据是「能被整份改写的是状态」 |
+| `cap.web` | **出网**：唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、301/302/303 变 GET 而 307/308 保留方法与 body、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）。抽取器是纯函数，所以它不靠 socket 也能测 |
+| `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
 | `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那三条行（工具集合 / 工程目录 / provider 档）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这三条要 `kernel.tools` / `cap.project` / `kernel.hooks.dispatch` |
 | `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的技能注入） |

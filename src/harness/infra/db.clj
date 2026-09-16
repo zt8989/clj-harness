@@ -7,8 +7,9 @@
   check the code against:
 
     1. The store holds STATE, not records. Projects, session ownership, archive
-       flags, and the editing mode's anchor bookkeeping are all things rewritten
-       in place. A session's jsonl log, config.edn, providers.edn and harness.edn
+       flags, the editing mode's anchor bookkeeping, and a session's task list are
+       all things rewritten in place. A session's jsonl log, config.edn,
+       providers.edn and harness.edn
        are append-only or hand-edited and stay FILES. The criterion is not 'how
        often does it change' but 'can it be rewritten': an archive flag moves
        once a year and needs a row, because there is nowhere else to put it; a
@@ -598,6 +599,30 @@
   (ddl! c "ALTER TABLE hashline_undo
              ADD COLUMN served TEXT NOT NULL DEFAULT '[]'"))
 
+(defn- todos-table
+  "A SESSION'S TASK LIST: the one list `todo_write` replaces whole.
+
+  ONE ROW PER SESSION, WITH THE LIST AS ONE VALUE, which is the same shape
+  `hashline_snapshots` keeps its anchors and line checksums in and for the same
+  reason: the column is written and read WHOLE and never queried by element. A row
+  per item would buy nothing here and cost a position column nobody reads -- and
+  the tool call it comes from REPLACES the list rather than appending to it, so
+  there is no per-item history to keep in the first place.
+
+  THAT REPLACEMENT IS WHY THIS IS STATE AND NOT A RECORD. The store's boundary
+  (this namespace's docstring, point 1) is 'can it be rewritten': a message cannot,
+  and a list the model rewrites on every call can. It is also why the table is
+  named for the THING and not for the writing of it -- `todos`, not `todo_events`.
+
+  `items` is JSON text, and the name is chosen against harness.db-test's guard on
+  column names: it holds the list, and calling it `content` would both trip that
+  guard and say less about what it is."
+  [^Connection c]
+  (ddl! c "CREATE TABLE todos (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              items      TEXT NOT NULL,
+              updated_at INTEGER NOT NULL)"))
+
 (def migrations
   "The forward migration chain, as NAMED steps.
 
@@ -654,7 +679,10 @@
     :run      hashline-served}
    {:name     "hashline-undo-served"
     :present? #(column? % "hashline_undo" "served")
-    :run      hashline-undo-served}])
+    :run      hashline-undo-served}
+   {:name     "todos"
+    :present? #(table? % "todos")
+    :run      todos-table}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

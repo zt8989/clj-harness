@@ -102,6 +102,19 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
 （含 MCP 的）不改前端就能看见它的调用。
 
+**两张按工具名开的表就是「认得它」的全部**（都在 `message-parts.tsx`；键是 `harness.kernel.tools` 注册的那个
+名字，`CONTEXT.md` 说不许起别名——改了名，图标会**静默**丢回扳手）：
+
+| 表 | 答什么 | 认得的名字 |
+|---|---|---|
+| `TOOL_ICONS` | **这是哪一只手**（kind，不是状态） | `read` `write` `edit` `replace` `insert` `undo_last_replace` `anchor_grep` `glob` `bash` `eval` `skill` `session-configure` `todo_write` `web_fetch` `web_search`；认不出的给 `WrenchIcon`，刻意不长得像其中任何一个 |
+| `subjectOf` | **这一步在干什么**（只读参数，不做解析） | 同上一列。各自的形状：`glob` 是模式（给了根就带上根）、`todo_write` 是进度（`2/3 完成`，空清单是「清空」）、`web_fetch` 是 URL、`web_search` 是查询串；认不出的是「第一个字符串参数」 |
+
+新增一个工具**不动**这两张表也能用（默认分支与扳手图标就是留好的口子）；动它们是**可读性**，
+不是可用性：一行是「扳手 + 一段 JSON」还是「一眼看出这是按名字找文件、进度 2/3」。
+真机证据（四条新工具的步骤行与各自展开后的参数、结果）在
+`.scratch/tool-parity/evidence/`。
+
 **`skill` 也是一次普通工具调用，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
 上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
 界面上只有一次普通的 `skill` 调用与它的返回。见
