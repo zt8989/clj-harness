@@ -35,11 +35,13 @@
 
 ```
 ~/.clj-harness/
-├── config.edn        模型默认档（三个旋钮，每轮重读）
-├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读）
+├── config.edn        **唯一一份配置**，两节：:default（三个旋钮的默认档）与
+│                     :providers（厂商 endpoint + 它的 model 表）；每轮重读
 ├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
-├── .env              HARNESS_API_KEY 与三个搜索键（Brave/Exa/Tavily）——优先于真实环境变量，见 harness.infra.home/env-value
+├── .env              一家厂商一把钥匙：`<ID>_API_KEY`（如 `ACME_GATEWAY_API_KEY`），
+│                     外加全局 `HARNESS_API_KEY` 兜底与三个搜索键（Brave/Exa/Tavily）
+│                     ——优先于真实环境变量，顺序见 harness.infra.home/env-source
 ├── harness.infra.db        sqlite：home 的元数据层
 └── projects/
     ├── <sanitized-project-canonical-path>/
@@ -104,7 +106,7 @@
 | 进库 | 留在文件 |
 |---|---|
 | 会被**改写**的状态：项目、会话归属、归档、hashline 的锚点 | 只追加的记录：会话 jsonl |
-| | 手编的配置：`config.edn` / `providers.edn` / `harness.edn` |
+| | 手编的配置：`config.edn` / `harness.edn` |
 
 判别标准**不是「改得勤不勤」，是「能不能被改写」**。推论：
 
@@ -242,8 +244,12 @@ stem 什么都指不到、或指向两个 workspace 里同名的两份日志 →
 
 ## 配置不搬进库，而且看得见
 
-`config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
+`config.edn` / `harness.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
 会被**改写**的状态。两边各自现读，所以改配置不需要重启，打开库也不会去读配置文件。
+
+**一份配置一个文件**：厂商目录与默认档是 `config.edn` 的两节（见 [providers](providers.md)）。
+它从前是两份文件（`config.edn` + `providers.edn`），合并的理由是那两节回答的是同一个问题的两半——
+「这台机器能到哪些厂商、从哪一个开始」——而一个人回答它时不该开两个文件。
 
 这条纪律唯一看得见的地方是「设置」那一版只读报告（`GET /api/settings`）：它每次调用重读全部配置，
 所以改一个文件再问一次就是新答案。**「库装状态、文件装记录」这条边界可以这样测**：

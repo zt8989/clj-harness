@@ -116,6 +116,11 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 写下这一节是为了让「文档没写」与「还没做」不会被读成同一件事。
 
+- **custom-providers（自定义提供方）**：票面见 `.scratch/custom-providers/`（10 张），**全部落在这个
+  分支上**，尚未并回 `main`。本目录的页面**已经按这个分支的样子改过**——`config.edn` 一份两节
+  （`:default` + `:providers`，`providers.edn` 退休）、凭据名由 id 派生（`<ID>_API_KEY`，全局兜底）、
+  设置面板两页（General 改默认档、Models 增删改厂商）且**都会写配置**、四条新路由。
+  **快照点按惯例到合并时再动**；合并后这一条删掉。
 - **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
   `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
 - **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，同日复议改版）。

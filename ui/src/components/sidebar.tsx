@@ -660,7 +660,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           variant="ghost"
           data-slot="sidebar-settings"
           onClick={() => setSettingsOpen(true)}
-          title="What this session is running on — read-only"
+          title="Settings: what this session is running on, and what this home can be on"
           className="text-muted-foreground hover:text-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
         >
           <SettingsIcon data-slot="sidebar-settings-icon" className="size-4 shrink-0" />

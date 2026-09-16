@@ -255,8 +255,10 @@
         (is (= "noted hi" (:content result)))))
     (testing "the recorded state is reachable through the same eval surface"
       (is (str/includes? (:content (eval! "t-e2e"
-                                          "(keys (harness.cap.providers/config))"))
-                         ":protocol")))
+                                          "(:protocol (:default (harness.cap.providers/config)))"))
+                         ":fake")
+          "the seeded :default section's inline provider, read back through eval --
+           the map that used to BE the whole file is one section of it"))
     (testing "disabling a base tool is reported as disabled, not as unknown"
       (tools/session-disable! "t-e2e" "read")
       (let [events (drain-events

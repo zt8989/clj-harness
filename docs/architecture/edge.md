@@ -41,7 +41,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
 | `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model、可选的思考档 | 无（只读） |
 | `/api/skills` | GET | **技能列表**：本会话的根分组（每组带层与根路径），每行带名字、描述、能不能用与原因 | 无（只读） |
-| `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有与来源） | 无（只读） |
+| `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有、来源与**凭据名**） | 无（只读） |
+| `/api/providers` | GET | 目录现成一份给设置表单：每条带**来源**（内置 / 你的 / 你的补丁）、endpoint、它声明的 model、凭据名与密钥事实，另带可选协议、思考档与 `:default` 现状 | 无（只读） |
+| `/api/providers` | POST | **新建或改写一条** provider：先校验整份新配置，再原子落盘（密钥写进 `.env` 的一行） | 无（见下） |
+| `/api/providers/<id>/remove` | POST | 从 `:providers` 里去掉一条；`:default` 正指着它就先拒（那会把家变成每轮都跑不起来） | 无 |
+| `/api/providers/models` | POST | 问厂商要它的 model 列表——**本特征唯一出网的路由**，密钥可由表单带；测试缝 `providers/*list-models*` | 无 |
+| `/api/defaults` | POST | 设**默认档**（`:default` 那三个旋钮）：缺席 = 不动那一项，`null` = 清掉那个键；先解析后写 | 无 |
 | `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数 | 无（只读） |
 | `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传） | `git/branch` |
 | `/api/project` | GET | 绑定目录（未绑定答 `null`） | 无 |
@@ -57,19 +62,32 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 规矩三条：
 
 - **审计行跟着「日志」走，不跟着「写入」走。** 会动日志的路由留痕（绑定搬日志、重建读日志）；
-  **只改库里一行的路由一行都不写**——归档 / 取消归档、添加项目、移除项目都属此类。
+  **只改库里一行、或只改一份配置的路由一行都不写**——归档 / 取消归档、添加项目、移除项目都属此类，
+  `config.edn` 的四条写入路由（`/api/providers` 两条、`/api/providers/models`、`/api/defaults`）同理：
+  写配置既不搬日志也不读日志，所以它们与「加一个项目」是同一类。运行时的「我到底被谁服务」
+  由既有的 `provider/init` 行回答，够用。
   归档这条尤其是有意的：它必须让 jsonl **逐字节、逐 mtime 不动**，写一行审计就会毁掉
   「归档不是删除」的那条证明。所有 GET 都是只读，同样一行不写；`/api/settings` 是其中最严格的一个
   ——它连自己问的那个会话都不动。
-- **校验失败不留痕**，而且发生在任何写入之前——一条被拒的绑定不该在磁盘上留下半个痕迹。
+- **校验失败不留痕**，而且发生在任何写入之前——一条被拒的绑定不该在磁盘上留下半个痕迹，
+  一条被拒的 provider 写法同样：一句服务端原话，`config.edn` 逐字节不动。
 - **审计行的 `runId` 为 `null`** 表示这件事发生在任何 run 之外（绑定、重建）。
 
 路径匹配是两段式：先是精确串匹配（上表前几行），然后是**带动词的通用形状**
-（`/api/<collection>/<stem>/<verb>`，跟着一张 verb → handler 的表；两个 collection 的动词都是**闭集**）。
+（`/api/<collection>/<stem>/<verb>`，跟着一张 verb → handler 的表；三个 collection 的动词都是**闭集**）。
+
+**`/api/providers/models` 是精确路由而不是动词，而且这是承重的**：它在 collection 之后只有一段，
+那个通用形状要求两段，所以它永远匹配不到——掉进兜底就是 run 端点，也就是本文上面记着的那个
+「body 根本不存在的 500」。精确匹配先于形状被试，这就是它必须写成精确路由的原因。
 
 那个 stem 是各 collection 给行起的名字：**thread 用会话 id**（它同时是日志的文件名 stem），
-**project 用目录的 canonical 路径**（不是那个整数 id——canonical 路径才是这个边里项目在各处的身份）。
+**project 用目录的 canonical 路径**（不是那个整数 id——canonical 路径才是这个边里项目在各处的身份），
+**provider 用它的 id**（它在 `config.edn` 里就是那个键，也是凭据名的来源）。
 GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那正是它从前会变成一个「body 根本不存在的 500」的原因。
+
+**一个叫 `models` 的 provider 与那条精确路由不冲突**：新建与改写走 collection（`/api/providers`），
+删除走 verb 形状（`/api/providers/<id>/remove`），所以那条路径永远只可能是探询。
+为它留一个保留字是一条没有失败可防的规矩。
 
 `*directory-chooser*` 是测试缝：真实对话框要等人，测试里换 stub。
 用 `alter-var-root` 而不是 `binding`，因为服务在**另一个线程**上跑（见 [client](client.md)）。

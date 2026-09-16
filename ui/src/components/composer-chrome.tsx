@@ -29,7 +29,7 @@
 //
 // The model and the reasoning effort are PER SESSION and nothing else is affected:
 // the server keeps the override in memory keyed by thread id (see POST /api/model),
-// and config.edn, providers.edn and every other thread are left alone. Choosing a
+// and config.edn and every other thread are left alone. Choosing a
 // provider clears the model, because an id that belonged to the old vendor is not
 // one the new one serves -- the server enforces that, and the picker just does not
 // pretend otherwise.
@@ -62,7 +62,7 @@ import type {
 } from "@assistant-ui/core";
 import { BrainIcon, FolderIcon, GitBranchIcon, TriangleAlertIcon } from "lucide-react";
 
-import { choicesFor, gitStateFor, setModel, switchBranch } from "@/lib/composer";
+import { choicesFor, gitStateFor, providerLabel, setModel, switchBranch } from "@/lib/composer";
 import { bindThread, listProjects, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
@@ -292,12 +292,15 @@ const ComposerTools: FC = () => {
 
   // Grouped by provider, so a long catalog reads as a short list of vendors each
   // with its models -- and the value is the MODEL id alone, because the provider
-  // is implied by which group it was chosen from.
+  // is implied by which group it was chosen from. The group's LABEL is the
+  // vendor's display name when it has one and its id otherwise (see
+  // `providerLabel`): the option's value stays the id either way, which is what
+  // the server is sent and what a log line will say.
   const options = data.providers.flatMap((provider) =>
     provider.models.map((model) => ({
       value: model,
       label: model,
-      group: provider.name,
+      group: providerLabel(provider),
     })),
   );
   const currentModel = data.model ?? options[0]?.value ?? "";

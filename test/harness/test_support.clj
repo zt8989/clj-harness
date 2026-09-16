@@ -1,12 +1,16 @@
 (ns harness.test-support
-  "The two pieces of cross-test state several namespaces have to arrange, and that
-  are therefore here rather than written once in each of them.
+  "The pieces of cross-test state several namespaces have to arrange, and that are
+  therefore here rather than written once in each of them.
 
   A HOOKS.EDN DECLARES FOR EVERY THREAD IN THIS PROCESS -- harness.kernel.hooks/config
   reads the file, not a thread -- so a test that writes one has to take it away
   again or the next test in the suite fires a hook it never declared. And the
   kernel's own rows are registered PROCESS-WIDE the moment harness.cap.system-prompt
   loads, so in a full suite they are in every thread's table before any test runs.
+
+  And CONFIG.EDN, which is ONE FILE WITH TWO SECTIONS now: two namespaces write it,
+  and the sections are positional, so getting the pair the wrong way round would
+  still parse -- see `config-file!`.
 
   Nothing here holds state of its own, and none of it is a test-only door:
   switching the built-in rows off is the ordinary per-thread switch, and the whole
@@ -21,6 +25,26 @@
             [harness.cap.tools :as cap-tools]
             [harness.infra.home :as home]
             [harness.kernel.hooks :as hooks]))
+
+(defn config-text
+  "DEFAULT-EDN and PROVIDERS-EDN as the text of the one config.edn a home is
+  configured by: DEFAULT-EDN is its :default section, PROVIDERS-EDN its :providers
+  section. Either may be nil, and is then written as {} -- an empty section, which
+  the readers treat as 'this file says nothing about that'.
+
+  HERE RATHER THAN IN ONE NAMESPACE because two of them write this file
+  (providers-test and http-test) and the two sections are positional: a test that
+  passed them the wrong way round would still parse, and would then be asking
+  about a different file than it meant to.
+
+  TEXT RATHER THAN DATA, and a string rather than a writer, for two reasons: a test
+  can hand over exactly the bytes it is testing, including bytes that are SUPPOSED
+  to fail; and half the callers write into a directory of their own (a fresh home,
+  a child JVM) rather than the one harness.infra.home currently points at."
+  ([default-edn] (config-text default-edn nil))
+  ([default-edn providers-edn]
+   (str "{:default "   (or default-edn "{}")
+        "\n :providers " (or providers-edn "{}") "}\n")))
 
 (defn hooks-file
   "The user-level hooks.edn: the file a declaration is written into."

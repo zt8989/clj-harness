@@ -1,37 +1,130 @@
-;; The DEFAULT tier: the three knobs a session starts from. Anything left out
-;; falls through -- to the provider's own default model, or to no reasoning
-;; effort at all -- so a config naming only a provider is the simplest case.
+;; WRITTEN BY THE SETTINGS FORM, once you use it. The comments this file carries
+;; now are this template's; a write from the settings panel rewrites the file whole
+;; and does not keep them (EDN has no way to), leaving the previous version beside
+;; it as config.edn.bak. Editing by hand is still fine -- the form reads this file
+;; back -- and the next write from the form will reorder it again.
 ;;
-;;   :provider          a provider name from providers.edn or the built-in table
-;;   :model             a model id THAT provider declares (optional; leaving it
-;;                      out uses the provider's default)
+;; THE ONE CONFIG FILE. Its top level is exactly two sections:
+;;
+;;   :default    the three knobs a session starts from (or a provider DESCRIBED
+;;               inline -- the escape hatch, below)
+;;   :providers  the vendor catalog: which vendors this harness can reach, and
+;;               which models each one serves
+;;
+;; TWO SECTIONS, ONE FILE, because they answer two halves of one question -- which
+;; vendors can this machine reach, and which one does it start on -- and a person
+;; answering either should not have to open two files. (What used to be
+;; providers.edn is the :providers section. A home that still has that file is
+;; refused by name, with a sentence saying to move its entries here and delete it.)
+;;
+;; THE TOP LEVEL IS CLOSED: a key that is neither section is a named failure. The
+;; case that matters is the shape this file used to have -- :provider / :model /
+;; :reasoning-effort sitting at the top, with no sections at all. There is no
+;; migration and no second shape read: the failure says to put them under :default.
+
+{:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+
+ :providers
+ {:openrouter
+  {:protocol :openai-completions
+   :base-url "https://openrouter.ai/api/v1"
+   :model    "anthropic/claude-sonnet-4.5"                 ; the DEFAULT model id
+   :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
+                                             :context-window 1000000
+                                             :max-output-tokens 64000}
+              "anthropic/claude-haiku-4.5"  {:input #{:text :image} :output #{:text}
+                                             :context-window 200000
+                                             :max-output-tokens 64000}
+              "deepseek/deepseek-v4-pro"    {:input #{:text}       :output #{:text}
+                                             :context-window 1048576
+                                             :max-output-tokens 393216}
+              "openai/gpt-4o-mini"          {:input #{:text :image} :output #{:text}
+                                             :context-window 128000
+                                             :max-output-tokens 16384}}}
+
+  :local
+  {:protocol :openai-completions
+   :base-url "http://localhost:11434/v1"   ; ollama, or any OpenAI-compatible
+   :model    "qwen3"                       ; endpoint you run yourself
+   :models   {"qwen3"    {:input #{:text}       :output #{:text}
+                          :context-window 40960}
+              ;; a tag like :30b carries 256K -- the built-in entry records the
+              ;; `latest` tag's window, so a different tag is a line like this one
+              "qwen3-vl" {:input #{:text :image} :output #{:text}
+                          :context-window 262144}}}}}
+
+;; :default -- THE THREE KNOBS, and only three. Anything left out falls through:
+;; to the provider's own default model, or to no reasoning effort at all, so
+;; naming only a provider is the simplest working case.
+;;
+;;   :provider          a vendor from :providers, or from the built-in table
+;;   :model             a model id THAT vendor declares (optional; leaving it out
+;;                      uses the vendor's default)
 ;;   :reasoning-effort  forwarded to providers that understand it
 ;;
-;; THREE KNOBS, and only three: a model's context window and its maximum output
-;; tokens are NOT here. Those describe what a model IS, so they live on that
-;; model's entry in providers.edn, and writing one here is a named failure rather
-;; than a value somebody quietly drops.
+;; A model's context window and maximum output tokens are NOT here: those describe
+;; what a model IS, so they live on that model's entry in :providers, and writing
+;; one here is a named failure rather than a value somebody quietly drops.
 ;;
-;; Everything else about a provider -- its endpoint, its protocol, what each of
-;; its models accepts and how much they hold -- comes from the catalog, not from
-;; here. To add a model, edit providers.edn (or use one the built-in table already
-;; knows); to change an endpoint, edit the provider's entry. Naming an endpoint
-;; here is only meaningful in the INLINE form below, which describes a provider
-;; instead of naming one.
-
-{:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
-
 ;; THE INLINE FORM (the escape hatch): describe a provider instead of naming one,
 ;; for trying an endpoint without registering it. Requires :protocol, :base-url
-;; and :model; :input/:output are optional and declaring nothing means the entry
+;; and :model; :input/:output are optional, and declaring nothing means the entry
 ;; promises nothing (nothing then checks its input). The two counts are optional
-;; here too, and are REPORTED rather than enforced -- see providers.edn.example:
+;; here too, and like everywhere else they are REPORTED rather than enforced --
 ;; :max-output-tokens is not sent to the vendor and :context-window blocks no run.
 ;;
-;;   {:protocol :openai-completions
-;;    :base-url "https://some-endpoint/v1"
-;;    :model    "some-model"
-;;    :input    #{:text :image}
-;;    :output   #{:text}
-;;    :context-window 128000
-;;    :max-output-tokens 4096}
+;;   {:default {:protocol :openai-completions
+;;              :base-url "https://some-endpoint/v1"
+;;              :model    "some-model"
+;;              :input    #{:text :image}
+;;              :output   #{:text}
+;;              :context-window 128000
+;;              :max-output-tokens 4096}}
+
+;; :providers -- A PROVIDER IS A VENDOR: one protocol, one endpoint, listing the
+;; models reachable there.
+;;
+;; :model is the id served unless a tier picks another one, and it must be a key of
+;; :models. :input / :output are REQUIRED of every model, and the vocabulary is
+;; what this harness can actually move:
+;;
+;;   :input   :text and/or :image    (a model declaring :audio is claiming a
+;;                                    capability the wire cannot deliver)
+;;   :output  :text only             (harness reads text, reasoning and tool
+;;                                    calls out of a response, and nothing else)
+;;
+;; :context-window / :max-output-tokens are OPTIONAL counts a model may state --
+;; how much context it holds and how much it may give back, both positive
+;; integers. They are REPORTED, NOT ENFORCED, and that is worth knowing before
+;; writing one:
+;;
+;;   * nothing here counts tokens, so :context-window never blocks a run -- an
+;;     estimate used as a rule is a guess wearing a rule's clothes;
+;;   * :max-output-tokens is NOT sent as max_tokens -- the vendor's own default
+;;     decides, and this harness does not second-guess it.
+;;
+;; They are for whoever is CHOOSING a model: GET /api/model, the provider/init and
+;; provider/changed lines in the session log. Omit a count you have not verified --
+;; an absent field means 'this catalog does not know', which is honest, while a
+;; plausible guess would be the same class of lie as an unverified model id.
+;; Declaring both? :max-output-tokens must not exceed :context-window.
+;;
+;; THIS SECTION IS OPTIONAL. A :default naming a provider from the built-in table
+;; (harness.cap.providers) needs no entry at all, and the inline form above needs
+;; neither. What you write here is merged OVER the built-in table: same provider
+;; field by field, same provider's :models model by model -- and an individual
+;; MODEL merges field by field too, so correcting one count does not mean restating
+;; that model's modalities. Your entries win. That is also what makes a one-line
+;; patch legitimate:
+;;
+;;   {:providers {:openrouter {:base-url "https://my-proxy/v1"}}}
+;;
+;; Every entry is validated whenever the file is read, so a malformed one fails on
+;; the next run BY NAME rather than quietly serving something else.
+;;
+;; A LOCAL ENDPOINT NEEDS NO KEY, but harness.cap.providers still resolves
+;; HARNESS_API_KEY (from .env, then the environment) and attaches it -- the
+;; protocol module decides whether to use it. Nothing to configure for localhost.
+;;
+;; reasoning-effort is NOT a provider field. It is one of the three knobs, so it
+;; belongs in :default (or in a session-configure tool call), not here.

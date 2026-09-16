@@ -47,7 +47,7 @@
 允许集：
 
 1. **项目目录本身**——除非项目的 `harness.edn` 写了 `:approval {:strict true}`（项目内也要审批）；
-2. **配置家**（读自己的 `config.edn` / `providers.edn` / `.env` 是围栏刻意留的自留地，
+2. **配置家**（读自己的 `config.edn` / `.env` 是围栏刻意留的自留地，
    **strict 不收紧它**——配置家是 harness 自己的地盘，不是项目的）；
 3. **本会话的技能根**（`skill-roots`，默认 `<user-home>/.agents/skills` 与 `<项目>/.agents/skills`），
    与配置家**同级、同一条理由**，`:approval {:strict true}` 同样收不走；
