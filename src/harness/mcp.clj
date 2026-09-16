@@ -34,7 +34,11 @@
             [clojure.string :as str]
             [harness.home :as home]
             [harness.project :as project]
-            [harness.shell :as shell]))
+            [harness.shell :as shell])
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
+            HttpResponse HttpResponse$BodyHandlers]
+           [java.nio.charset StandardCharsets]))
 
 (def ^:private protocol-version
   "The MCP revision this client speaks. A server may answer with a DIFFERENT one
@@ -396,6 +400,183 @@
   [{:keys [command args]}]
   (str/join " " (cons command (map shell/quote-arg args))))
 
+;; ------------------------------------------------------------ the http client
+;;
+;; THE SAME CONNECTION INTERFACE as the stdio one, because everything above this
+;; line -- the roster, the bridge, the timeout, the failure isolation -- is about
+;; MCP rather than about a pipe. The one thing that genuinely differs is that
+;; there is no process to own: `close!` has nothing to release, `stderr` is empty
+;; because there is no stderr, and a failure is per-request rather than a death.
+
+(def ^:private next-id*
+  "The http client's request counter, in its own atom because it has no per-request
+  closure to live in. Ids only have to be unique within one conversation, and the
+  server echoes them back; a shared counter is therefore fine and simpler than a
+  per-connection one."
+  (atom 0))
+
+(defn- clip-snippet
+  "TEXT, cut to something a log line can carry. A server that answers a 200-byte
+  error with an HTML page should not put the whole page into the audit trail."
+  [text]
+  (let [t (str/trim (str text))]
+    (if (> (count t) 300) (str (subs t 0 300) "...") t)))
+
+(def ^:private sse-data
+  "The prefix an event-stream line carries its payload under. Anything else in
+  that stream (event names, ids, comments, the blank line between events) is
+  framing we do not use."
+  "data:")
+
+(defn- read-sse-message
+  "The first JSON-RPC message on an event stream whose id is ID -- or nil when the
+  stream ends without one.
+
+  ONE message per request is what this client needs: MCP over HTTP answers a POST
+  with the response to that POST (possibly streamed while the server works), so
+  anything else on the stream is either a notification -- which no one here is
+  waiting for -- or something this request does not know about. Reading until OUR
+  id is the whole matching rule."
+  [^java.io.InputStream body id timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) (long timeout-ms))]
+    (with-open [r (io/reader body :encoding "UTF-8")]
+      (loop [data nil]
+        (let [line (try (.readLine r) (catch Exception _ nil))]
+          (cond
+            (nil? line)
+            (when (seq data)
+              (let [m (try (json/read-str data :key-fn keyword) (catch Exception _ nil))]
+                (when (= id (:id m)) m)))
+
+            (> (System/currentTimeMillis) deadline) nil
+
+            (str/starts-with? line sse-data)
+            (let [chunk (str/trim (subs line (count sse-data)))
+                  m (try (json/read-str chunk :key-fn keyword) (catch Exception _ nil))]
+              ;; A complete message on one line (the ordinary case) is answered
+              ;; now; otherwise the pieces are joined for the blank line that
+              ;; ends the event.
+              (if (and (map? m) (= id (:id m)))
+                m
+                (recur (if (str/blank? data) chunk (str data "\n" chunk)))))
+
+            (str/blank? line)
+            (let [m (try (json/read-str data :key-fn keyword) (catch Exception _ nil))]
+              (if (and (map? m) (= id (:id m))) m (recur nil)))
+
+            :else (recur data)))))))
+
+(defn- http-post
+  "One JSON-RPC message to URL, as the server answered it: {:status :type :body}
+  or {:threw message}. Nothing here decides what the answer MEANS -- reading it is
+  the caller's business, because a stateless server and a broken one are told
+  apart by what is in the body, not by whether the request worked."
+  [http url timeout-ms session msg]
+  (let [req (-> (HttpRequest/newBuilder (URI/create url))
+                (.timeout (java.time.Duration/ofMillis (long timeout-ms)))
+                (.header "Content-Type" "application/json")
+                ;; BOTH, because a server may answer either way and which one it
+                ;; picks is its business.
+                (.header "Accept" "application/json, text/event-stream")
+                (.header "MCP-Protocol-Version" protocol-version)
+                (cond-> @session (.header "Mcp-Session-Id" @session))
+                (.POST (HttpRequest$BodyPublishers/ofString
+                        (json/write-str msg) StandardCharsets/UTF_8))
+                (.build))]
+    (try
+      (let [resp (.send http req (HttpResponse$BodyHandlers/ofInputStream))]
+        ;; A session id, if the server minted one: carried on every request after
+        ;; this. Absent is not a problem -- a stateless server has none to mint.
+        (when-let [sid (first (.allValues (.headers resp) "Mcp-Session-Id"))]
+          (reset! session sid))
+        {:status (.statusCode resp)
+         :type   (str (first (.allValues (.headers resp) "Content-Type")))
+         :body   (.body resp)})
+      (catch java.net.http.HttpTimeoutException _
+        ;; THE DECLARATION'S OWN NUMBER, said out loud. The JVM's own sentence for
+        ;; this is 'request timed out', which names neither the server nor the
+        ;; bound that was hit -- and the reader of a tool result needs both to
+        ;; decide whether to raise the timeout or stop using the server.
+        {:threw (str "no answer within " timeout-ms "ms")})
+      (catch Exception e
+        ;; A CONNECTION FAILURE SOMETIMES HAS NO MESSAGE -- a JVM
+        ;; ConnectException can carry nil -- and 'no message' must still be a
+        ;; failure. The class name stands in, so the answer is never an empty map
+        ;; a caller could read as an ordinary response.
+        {:threw (or (ex-message e) (.getName (class e)))}))))
+
+(defn- parse-body
+  "BODY read as the JSON-RPC message it is, or a NAMED failure. TYPE decides how:
+  an event stream is read until the answer to ID, anything else is one document."
+  [url type body id timeout-ms]
+  (if (str/includes? type "text/event-stream")
+    (read-sse-message body id timeout-ms)
+    (let [text (try (slurp body :encoding "UTF-8") (catch Exception _ ""))]
+      (when-not (str/blank? text)
+        (try
+          (json/read-str text :key-fn keyword)
+          (catch Exception e
+            (fail (str url " answered with a body that is not JSON ("
+                       (ex-message e) "): " (clip-snippet text))
+                  {:reason :bad-body :url url})))))))
+
+(defn- http-client
+  "A connection to the MCP server at URL. The same map as `stdio-client`, minus
+  the things a remote server has no equivalent for: no process to own, no stderr,
+  and a failure that belongs to a request rather than to a death."
+  [{:keys [url timeout-ms]}]
+  (let [session (atom nil)
+        dead (atom nil)
+        http (-> (HttpClient/newBuilder)
+                 (.version HttpClient$Version/HTTP_1_1)
+                 (.connectTimeout (java.time.Duration/ofMillis (long timeout-ms)))
+                 (.build))
+        exchange (fn [msg] (http-post http url timeout-ms session msg))
+        request! (fn [method params]
+                   (when-let [why @dead]
+                     (fail (str "the server is not usable: " why) {:reason :dead :why why}))
+                   (let [id (swap! next-id* inc)
+                         answer (exchange (cond-> {:jsonrpc "2.0" :id id :method method}
+                                            (some? params) (assoc :params params)))]
+                     ;; ASKED WITH `contains?`, not `when-let`: a thrown-with-no
+                     ;; -message is still a throw, and treating it as 'no problem'
+                     ;; is how a null status reaches the caller.
+                     (when (contains? answer :threw)
+                       (fail (str "could not reach " url " (" (:threw answer) ")")
+                             {:reason :unreachable :url url}))
+                     (let [{:keys [status type body]} answer]
+                       (when-not (<= 200 status 299)
+                         (let [text (try (slurp body :encoding "UTF-8") (catch Exception _ ""))]
+                           (fail (str url " answered HTTP " status
+                                      (when-not (str/blank? text)
+                                        (str ": " (clip-snippet text))))
+                                 {:reason :http :url url :status status})))
+                       (let [m (parse-body url type body id timeout-ms)]
+                         (cond
+                           (nil? m)
+                           (fail (str url " sent no answer to " method)
+                                 {:reason :no-answer :url url :method method})
+
+                           (map? (:error m))
+                           (fail (str "the server refused " method ": "
+                                      (or (:message (:error m)) (pr-str (:error m))))
+                                 {:reason :rpc :method method :error (:error m)})
+
+                           :else (:result m))))))]
+    {:request! request!
+     :notify!  (fn [method params]
+                 (exchange (cond-> {:jsonrpc "2.0" :method method}
+                             (some? params) (assoc :params params)))
+                 nil)
+     ;; No process, so no stderr to report and nothing to be alive or dead; the
+     ;; session id is the only thing that can go stale, and `drop!` forgets it so
+     ;; the next use shakes hands again.
+     :stderr   (constantly "")
+     :alive?   (constantly (nil? @dead))
+     :why-dead (fn [] @dead)
+     :drop!    (fn [why] (reset! dead why) (reset! session nil))
+     :close!   (fn [] (reset! dead "the connection was closed") nil)}))
+
 ;; ---------------------------------------------------------------- the bridge
 
 (defn- bridge
@@ -459,35 +640,46 @@
                                         {:server server :tool name}))
                         text)))}})))
 
+(defn- open-connection
+  "The connection a declaration names, chosen by WHICH KEY IT CARRIES: `:url`
+  means a remote server, `:command` means a local process. Validation has already
+  refused a declaration with both or neither, so this is a total dispatch rather
+  than a guess -- and it is the only place that knows the difference, which is why
+  nothing above it can accidentally spawn a URL or fetch a command."
+  [decl dir]
+  (if-let [url (:url decl)]
+    (http-client {:url url :timeout-ms (:timeout decl default-timeout-ms)})
+    (stdio-client {:command (stdio-command decl)
+                   :dir dir
+                   :env (:env decl)
+                   :timeout-ms (:timeout decl default-timeout-ms)})))
+
 (defn- connect!
-  "Spawn SERVER, shake hands, and ask what it can do. Everything a connection
-  needs to be usable happens here, so a caller gets either a usable connection or
-  an exception naming what went wrong."
+  "Open SERVER, shake hands, and ask what it can do. Everything a connection needs
+  to be usable happens here, so a caller gets either a usable connection or an
+  exception naming what went wrong -- and the two transports are indistinguishable
+  from this point on."
   [server decl dir]
-  (if (:url decl)
-    (fail (str "server " (pr-str server) " is declared with :url, and the HTTP transport is"
-               " not implemented yet; declare it with :command for now")
-          {:server server :reason :http-not-implemented})
-    (let [client (stdio-client {:command (stdio-command decl)
-                                :dir dir
-                                :env (:env decl)
-                                :timeout-ms (:timeout decl default-timeout-ms)})]
-      (try
-        ((:request! client) "initialize"
-         {:protocolVersion protocol-version
-          :capabilities {}
-          :clientInfo {:name "clj-harness" :version "1"}})
-        ((:notify! client) "notifications/initialized" nil)
-        (let [listed  ((:request! client) "tools/list" {})
-              bridged (mapv #(bridge server client (:timeout decl default-timeout-ms) %)
-                            (:tools listed))]
-          {:decl    decl
-           :client  client
-           :tools   (into {} (map (juxt :tool :def)) (remove :skipped bridged))
-           :skipped (mapv #(select-keys % [:skipped :why]) (filter :skipped bridged))})
-        (catch Throwable t
-          ((:drop! client) (str "the handshake failed: " (ex-message t)))
-          (throw t))))))
+  (let [client (open-connection decl dir)
+        where  (or (:url decl) (:command decl))]
+    (try
+      ((:request! client) "initialize"
+       {:protocolVersion protocol-version
+        :capabilities {}
+        :clientInfo {:name "clj-harness" :version "1"}})
+      ((:notify! client) "notifications/initialized" nil)
+      (let [listed  ((:request! client) "tools/list" {})
+            bridged (mapv #(bridge server client (:timeout decl default-timeout-ms) %)
+                          (:tools listed))]
+        {:decl    decl
+         :client  client
+         :tools   (into {} (map (juxt :tool :def)) (remove :skipped bridged))
+         :skipped (mapv #(select-keys % [:skipped :why]) (filter :skipped bridged))})
+      (catch Throwable t
+        ((:drop! client) (str "the handshake failed: " (ex-message t)))
+        (throw (ex-info (str "server " (pr-str server) " (" where ") could not be used: "
+                             (ex-message t))
+                        (assoc (ex-data t) :server server :where where)))))))
 
 ;; ------------------------------------------------------------- the read side
 

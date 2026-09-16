@@ -6,7 +6,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done（2026-09-16，分支 `mcp`）
 
 ## 决策
 
@@ -31,13 +31,45 @@
 
 ## 验收
 
-- [ ] `{:url ..}` 的服务器被连上、`tools/list` 的工具进表，模型经真 AG-UI run 能调用它并拿到文本结果
-- [ ] 01 的**同一套缝级断言**在 http 服务器上再跑一遍：审批 park/resume、`PreToolUse` 阻断、
+- [x] `{:url ..}` 的服务器被连上、`tools/list` 的工具进表，模型经真 AG-UI run 能调用它并拿到文本结果
+- [x] 01 的**同一套缝级断言**在 http 服务器上再跑一遍：审批 park/resume、`PreToolUse` 阻断、
       `session-disable!`、`PermissionRequest` 代答——断言的是同一个执行缝，所以断言本身应当只是换了个 server 名
-- [ ] `Mcp-Session-Id` 给了就带、没给就不带（两条断言，用假 HTTP 服务器记录收到的头）
-- [ ] 响应是 `text/event-stream` 时也能拿到应答（假服务器两种响应形态各一条用例）
-- [ ] 连不上（连接被拒）与 HTTP 500：工具缺席、别的服务器照常、run 不炸、`mcp/server` 行指名 URL 与状态
-- [ ] 声明的形状校验：`{:command .. :url ..}` 同时给 → 指名失败；http 声明**不会**掉进 stdio 分支
+- [x] `Mcp-Session-Id` 给了就带、没给就不带（两条断言，用假 HTTP 服务器记录收到的头）
+- [x] 响应是 `text/event-stream` 时也能拿到应答（假服务器两种响应形态各一条用例）
+- [x] 连不上（连接被拒）与 HTTP 500：工具缺席、别的服务器照常、run 不炸、`mcp/server` 行指名 URL 与状态
+- [x] 声明的形状校验：`{:command .. :url ..}` 同时给 → 指名失败；http 声明**不会**掉进 stdio 分支
       （反向同理）——两条断言
-- [ ] 超时对 HTTP 同样生效（假服务器挂住不回话）
-- [ ] 离线全量 `harness.test-runner` 全绿
+- [x] 超时对 HTTP 同样生效（假服务器挂住不回话）
+- [x] 离线全量 `harness.test-runner` 全绿
+
+## 落地（2026-09-16）
+
+`harness.mcp` 里新增 http 客户端（`http-post` / `parse-body` / `read-sse-message` / `http-client`），
+外加一个 `open-connection` 做**唯一那处分派**：`{:url ..}` 走 fetch，`{:command ..}` 走 spawn。
+上面所有东西——roster、桥接、超时、失败隔离、审批/关闭——**一行都不分叉**，
+所以「01 的断言在 http 上照样成立」是结构上的结论而不是巧合。测试里也是这么验的：
+同一个 `mcp_test` 文件里两种 fake（stdio 是真进程，http 是本 JVM 里的 http-kit 端点），
+断言写在同一处。
+
+几处决定：
+
+- **会话 id 是服务器的事，不是我们的状态**：它在响应头里出现就带上，不出现就不带。
+  测试从**服务器收到的那一侧**断言（initialize 那次没有、之后每次都有；服务器不发的那个则全程为空）。
+- **两种响应形状都读**：`application/json` 直接解析，`text/event-stream` 读到这条请求的 id 为止。
+  「读到我们的 id」是这里唯一的匹配规则——MCP over HTTP 是对一个 POST 回一个答案，
+  流上别的东西要么没人等（通知），要么与这次请求无关。
+- **`:headers` 明确不做**（票面已定）：它是密钥面，要做就得先有那条「永不入日志/端点」的纪律。
+  未知键本来就指名失败，所以「忘了做」与「故意不做」在配置层看起来是一样的——都是报错。
+- **超时要说出自己那个数**：`java.net.http` 自己抛超时的时候，话是「request timed out」，
+  既没点名服务器也没点出被撞的边界；现在那个 `HttpTimeoutException` 被接住并换成
+  「no answer within <ms>ms」，与 stdio 那条规矩对齐。
+
+**测试抓住的两处**：连接失败时 JVM 的 `ConnectException` 可能**没有 message**
+（`ex-message` = nil），而 `(when-let [threw (:threw answer)])` 于是把「连不上」当成了「没问题」，
+一路走到 `(<= 200 nil 299)` 才炸成一条什么都不指名的 NPE——改成 `contains?` 判断，
+并让 `:threw` 兜住类名。另一处是一阶的：01 那个「:url 还不支持」的测试在票 03 之后过期，
+删掉（它的位置由本票的连接失败断言接住）。
+
+**测数**：本票 +6 tests / +12 assertions（会话/SSE/失败隔离/超时/不分派/缝的复用），
+`mcp_test` 现 30 tests / 139 assertions。全量 **643 / 9932**，2 红仍是
+`project_test/a-binding-survives-a-real-restart` 那两条环境问题。

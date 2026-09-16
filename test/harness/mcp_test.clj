@@ -8,10 +8,17 @@
   difference between a server that refuses a call and one that has stopped
   answering.
 
-  Everything here is offline: no api-key, no model, and the only network is a pipe.
-  The http-level half of the ticket (a real AG-UI run, the audit lines, a hook
-  blocking a server call) lives in harness.http-test, because hooks only fire when
-  the edge has bound the run's sink."
+  TWO TRANSPORTS, TWO KINDS OF FAKE, and the difference is the point of the
+  third ticket: a stdio server is a PROCESS we start (the node script), an HTTP
+  server is an ENDPOINT we call (an http-kit handler in this JVM, on an OS-chosen
+  port). Both are driven through the same client interface, and both end up in
+  this file's table assertions -- which is how 'the transport is invisible above
+  the client' is checked rather than asserted.
+
+  Everything here is offline: no api-key, no model, and the only network is a pipe
+  or a loopback socket. The edge-level half of these tickets (a real AG-UI run, the
+  audit lines, a hook blocking a server call) lives in harness.mcp-wired-test,
+  because hooks only fire when the edge has bound the run's sink."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -20,7 +27,8 @@
             [harness.log :as log]
             [harness.mcp :as mcp]
             [harness.project :as project]
-            [harness.tools :as tools]))
+            [harness.tools :as tools]
+            [org.httpkit.server :as hk]))
 
 (def ^:private fake-server
   "The fake MCP server, by ABSOLUTE path: a client starts it with the project
@@ -261,14 +269,6 @@
       (is (str/includes? (:error failed) "not JSON"))
       (is (str/includes? (:error failed) "fake mcp server starting")))))
 
-(deftest an-http-declaration-is-refused-by-name-for-now
-  (write-servers! {"remote" {:url "https://example.invalid/mcp"}})
-  (let [thread (str "mcp-http-" (System/currentTimeMillis))]
-    (is (= {} (mcp/tools-for thread)))
-    (let [failed (first (mcp/status thread))]
-      (is (= :failed (:status failed)))
-      (is (str/includes? (:error failed) "HTTP transport is not implemented")))))
-
 ;; ------------------------------------------------------------------- the edges
 
 (deftest the-env-values-never-reach-the-state-surface
@@ -482,3 +482,213 @@
       (is (not-any? #(str/starts-with? % "mcp__bad__") (keys table)))
       (testing "the good one still answers, in the same turn the bad one failed"
         (is (= "echo: fine" (:content (call! thread "mcp__good__echo" {:text "fine"}))))))))
+
+;; ------------------------------- 03: the same thing, over HTTP
+
+(def ^:private http-tools
+  "The roster the fake HTTP server offers: the same names the stdio fake has, so
+  the two sides of this file are comparable line for line."
+  [{:name "echo" :description "Answer with the text it was given."
+    :inputSchema {:type "object"
+                  :properties {:text {:type "string"}}
+                  :required ["text"]}}
+   {:name "where" :description "Answer with this server's working directory."
+    :inputSchema {:type "object" :properties {}}}
+   {:name "fail" :description "Answer with a failure."
+    :inputSchema {:type "object" :properties {}}}])
+
+(defn- fake-http-response
+  "The JSON-RPC answer to MSG, or nil for a notification."
+  [msg]
+  (let [{:keys [id method params]} msg]
+    (when (some? id)
+      (case method
+        "initialize" {:jsonrpc "2.0" :id id
+                      :result {:protocolVersion "2025-06-18"
+                               :capabilities {:tools {}}
+                               :serverInfo {:name "fake-http" :version "1"}}}
+        "tools/list" {:jsonrpc "2.0" :id id :result {:tools http-tools}}
+        "tools/call" (case (:name params)
+                       "echo" {:jsonrpc "2.0" :id id
+                               :result {:content [{:type "text"
+                                                   :text (str "echo: " (:text (:arguments params)))}]}}
+                       "fail" {:jsonrpc "2.0" :id id
+                               :result {:content [{:type "text" :text "the fake http server refused"}]
+                                        :isError true}}
+                       {:jsonrpc "2.0" :id id
+                        :result {:content [{:type "text" :text "no such tool"}]
+                                 :isError true}})
+        {:jsonrpc "2.0" :id id
+         :error {:code -32601 :message (str "no such method: " method)}}))))
+
+(defn- with-fake-http
+  "A fake MCP server speaking HTTP, on a port the OS picks. MODE is :json or :sse
+  -- the two shapes a server may answer in. OPTS may carry :status to answer
+  everything with that HTTP status instead, and :hold to never answer.
+
+  Every request is recorded ({:session :body}), because two of this ticket's
+  claims are about what the CLIENT SENT: that the session id it was given comes
+  back on later requests, and that it is absent when the server gave none."
+  [mode opts f]
+  (let [seen (atom [])
+        stop (hk/run-server
+              (fn [req]
+                (let [body (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                          :key-fn keyword)
+                      sid  (get-in req [:headers "mcp-session-id"])]
+                  (swap! seen conj {:session sid :body body :path (:uri req)})
+                  (cond
+                    (:hold opts)
+                    ;; Hanging: the handler answers nothing, ever, which is what a
+                    ;; server that has stopped responding looks like.
+                    (hk/as-channel req {:on-open (fn [_] nil)})
+
+                    (:status opts)
+                    {:status (:status opts)
+                     :headers {"Content-Type" "application/json"}
+                     :body "{\"error\":\"nope\"}"}
+
+                    :else
+                    (let [answer (fake-http-response body)]
+                      (if (nil? answer)
+                        {:status 202 :headers {} :body ""}
+                        (case mode
+                          :json {:status 200
+                                 :headers (cond-> {"Content-Type" "application/json"}
+                                            (:session opts) (assoc "Mcp-Session-Id" (:session opts)))
+                                 :body (json/write-str answer)}
+                          :sse  {:status 200
+                                 :headers {"Content-Type" "text/event-stream"}
+                                 :body (str "event: message\ndata: "
+                                            (json/write-str answer) "\n\n")}))))))
+              {:port 0})]
+    (try (f (:local-port (meta stop)) seen)
+         (finally (stop)))))
+
+(defn- http-decl [port & [extra]]
+  (merge {:url (str "http://127.0.0.1:" port "/mcp")} extra))
+
+(deftest an-http-server-s-tools-arrive-and-are-called-the-same-way
+  (with-fake-http :json {}
+    (fn [port _]
+      (write-servers! {"remote" (http-decl port)})
+      (let [thread (str "mcp-http-" (System/currentTimeMillis))
+            table  (mcp/tools-for thread)]
+        (testing "the roster arrives as ordinary rows, exactly as a stdio server's did"
+          (is (= #{"mcp__remote__echo" "mcp__remote__where" "mcp__remote__fail"}
+                 (set (keys table))))
+          (is (every? #(= :mcp (:source %)) (vals table)))
+          (is (= [:text] (:required (get table "mcp__remote__echo")))))
+        (testing "a call is served by the remote tool"
+          (is (= "echo: hi there" (:content (call! thread "mcp__remote__echo" {:text "hi there"})))))
+        (testing "and a refusal is a tool ERROR, not a failed run"
+          (let [{:keys [content error]} (call! thread "mcp__remote__fail" {})]
+            (is (true? error))
+            (is (= "the fake http server refused" content))))))))
+
+(deftest an-sse-answer-is-read-too
+  ;; A server may answer either way, and which one it picks is its business --
+  ;; so both shapes have to end up as the same tool.
+  (with-fake-http :sse {}
+    (fn [port _]
+      (write-servers! {"sse" (http-decl port)})
+      (let [thread (str "mcp-sse-" (System/currentTimeMillis))]
+        (is (contains? (mcp/tools-for thread) "mcp__sse__echo"))
+        (is (= "echo: streamed" (:content (call! thread "mcp__sse__echo" {:text "streamed"}))))))))
+
+(deftest a-session-id-is-carried-back-and-absent-when-none-was-given
+  (testing "the server mints one, so every later request carries it"
+    (with-fake-http :json {:session "sess-abc123"}
+      (fn [port seen]
+        (write-servers! {"sess" (http-decl port)})
+        (let [thread (str "mcp-sess-" (System/currentTimeMillis))]
+          (mcp/tools-for thread)
+          (let [reqs @seen
+                initialize (first (filter #(= "initialize" (get-in % [:body :method])) reqs))
+                later      (remove #(= "initialize" (get-in % [:body :method])) reqs)]
+            (testing "the handshake itself does not carry one -- there is nothing to carry yet"
+              (is (nil? (:session initialize))))
+            (testing "and everything after it does"
+              (is (seq later))
+              (is (every? #(= "sess-abc123" (:session %)) later))))))))
+  (testing "a server that mints none is not a problem"
+    (with-fake-http :json {}
+      (fn [port seen]
+        (write-servers! {"stateless" (http-decl port)})
+        (let [thread (str "mcp-stateless-" (System/currentTimeMillis))]
+          (is (contains? (mcp/tools-for thread) "mcp__stateless__echo"))
+          (is (every? nil? (map :session @seen))))))))
+
+(deftest an-http-failure-is-named-and-costs-only-its-own-tools
+  (testing "an HTTP status that is not 2xx"
+    (with-fake-http :json {:status 500}
+      (fn [port _]
+        (write-servers! {"broken" (http-decl port)})
+        (let [thread (str "mcp-http500-" (System/currentTimeMillis))
+              failed (do (mcp/tools-for thread) (first (mcp/status thread)))]
+          (is (= {} (mcp/tools-for thread)))
+          (is (= :failed (:status failed)))
+          (is (str/includes? (:error failed) "500"))
+          (is (str/includes? (:error failed) (str port)))))))
+  (testing "an endpoint nobody is listening on"
+    (write-servers! {"gone" {:url "http://127.0.0.1:1/mcp" :timeout 900}})
+    (let [thread (str "mcp-nobody-" (System/currentTimeMillis))
+          failed (do (mcp/tools-for thread) (first (mcp/status thread)))]
+      (is (= {} (mcp/tools-for thread)))
+      (is (= :failed (:status failed)))
+      (is (str/includes? (:error failed) "http://127.0.0.1:1/mcp"))))
+  (testing "and a good server beside a bad one still answers"
+    (with-fake-http :json {}
+      (fn [port _]
+        (write-servers! {"good" (http-decl port)
+                         "gone" {:url "http://127.0.0.1:1/mcp" :timeout 900}})
+        (let [thread (str "mcp-http-iso-" (System/currentTimeMillis))]
+          (is (= "echo: alive" (:content (call! thread "mcp__good__echo" {:text "alive"})))))))))
+
+(deftest an-http-server-that-never-answers-times-out-by-the-declaration
+  (with-fake-http :json {:hold true}
+    (fn [port _]
+      (write-servers! {"slow" (http-decl port {:timeout 1500})})
+      (let [thread (str "mcp-http-slow-" (System/currentTimeMillis))
+            table  (mcp/tools-for thread)
+            failed (first (mcp/status thread))]
+        (testing "a handshake that hangs is a named failure, like a process that hangs"
+          (is (= {} table))
+          (is (= :failed (:status failed)))
+          (is (str/includes? (:error failed) "1500ms")))))))
+
+(deftest an-http-declaration-never-reaches-the-spawn-path
+  ;; The ticket's structural claim, and the one worth an assertion of its own: a
+  ;; URL is not a command. If it ever were, this declaration would be run through
+  ;; the shell -- and the failure would name bash rather than the URL.
+  (write-servers! {"mistaken" {:url "http://127.0.0.1:1/mcp" :timeout 900}})
+  (let [thread (str "mcp-nospawn-" (System/currentTimeMillis))
+        failed (do (mcp/tools-for thread) (first (mcp/status thread)))]
+    (is (= :failed (:status failed)))
+    (is (str/includes? (:error failed) "http://127.0.0.1:1/mcp"))
+    (is (not (str/includes? (:error failed) "bash")) "it was fetched, not spawned")
+    (testing "and the declaration's shape is recorded as a url, not a command"
+      (is (nil? (:command failed)))
+      (is (nil? (get failed :url)) "the url is not echoed into the status either"))))
+
+(deftest an-http-server-is-guarded-by-the-same-seam
+  ;; 01's four assertions, re-run on the other transport: the seam reads the
+  ;; TABLE, so a remote tool must be indistinguishable from a local one there.
+  (with-fake-http :json {}
+    (fn [port _]
+      (write-servers! {"remote" (http-decl port)})
+      (let [thread (str "mcp-http-seam-" (System/currentTimeMillis))]
+        (testing "disabled"
+          (tools/session-disable! thread "mcp__remote__echo")
+          (let [{:keys [content error]} (call! thread "mcp__remote__echo" {:text "x"})]
+            (is (true? error))
+            (is (str/includes? content "disabled in this session")))
+          (tools/session-enable! thread "mcp__remote__echo"))
+        (testing "an approval rule parks it, and the reason says whose rule"
+          (tools/session-require-approval! thread "mcp__remote__echo")
+          (let [{:keys [parked]} (call! thread "mcp__remote__echo" {:text "x"})]
+            (is (some? parked))
+            (is (= :session-asks (:reason parked)))
+            (testing "and an approved resume runs it"
+              (tools/decide-approval! (:interrupt-id parked) :approved nil)
+              (is (= "echo: x" (:content (call! thread "mcp__remote__echo" {:text "x"})))))))))))
