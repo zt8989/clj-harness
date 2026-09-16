@@ -375,9 +375,9 @@
       (check-provider :inline entry)
       (do
         (when (empty? entry)
-          (fail (str "config.edn names no provider and describes none: give a name"
-                     " ({:provider :openrouter}) or the inline form"
-                     " ({:protocol … :base-url … :model …})")
+          (fail (str "config.edn's :default names no provider and describes none: give a"
+                     " name ({:default {:provider :openrouter}}) or describe one there"
+                     " ({:default {:protocol … :base-url … :model …}})")
                 {}))
         (unknown-keys! where entry inline-keys)
         (doseq [k [:protocol :base-url :model]]
@@ -428,9 +428,17 @@
   .env/environment in the provider-resolution section below, which is where the
   effective provider is assembled.
 
+  AN EMPTY FILE IS A FILE THAT SAYS NOTHING, which this shape spells `{}`. `touch
+  config.edn` is the ordinary way to meet this -- somebody following the missing-file
+  failure's own advice -- and answering it with 'must be a map ... not nil' told them
+  their empty file was malformed when what it was is silent: the built-in catalog
+  still stands, no default tier is named, and the failure a run meets is the one that
+  says which shape to write. A file that SAYS something which is not a map (a vector,
+  a string, a number) is a different matter and stays a named failure.
+
   The path comes from harness.infra.home; a missing file is a named failure there."
   []
-  (let [raw  (edn/read-string (home/config))
+  (let [raw  (or (edn/read-string (home/config)) {})
         path (.getAbsolutePath (home/config-file))]
     (when-not (map? raw)
       (fail (str path " must be a map of the two sections (:default and :providers), not "
@@ -748,9 +756,14 @@
         inline (map? src)
         found  (cond
                  inline     {:name nil :entry (check-inline src)}
-                 (nil? src) (fail (str "no provider: name one in config.edn"
-                                       " (e.g. {:provider :openrouter}) or describe one inline"
-                                       " ({:protocol … :base-url … :model …})")
+                 ;; THE SHAPE THIS SENTENCE TEACHES IS THE FILE'S OWN, sections and all:
+                 ;; it is the one a person meets on a fresh home, and an example written
+                 ;; against the file's previous shape was advice to write something that
+                 ;; no longer parses.
+                 (nil? src) (fail (str "no provider: name one in config.edn's :default"
+                                       " (e.g. {:default {:provider :openrouter}}) or describe"
+                                       " one inline there"
+                                       " ({:default {:protocol … :base-url … :model …}})")
                                   {})
                  :else      (named registry src))
         entry  (:entry found)
@@ -1643,11 +1656,15 @@
   "The first lines of a config.edn this process WROTE. It is here because the write
   is a rewrite: EDN has no way to keep a person's comments through one, and no
   comment-preserving writer is worth a dependency for a file this small. So the file
-  says so, and the version that had them is beside it."
-  (str ";; WRITTEN BY THE SETTINGS FORM. The comments this file used to carry are gone:\n"
-       ";; an EDN map is rewritten whole. What it held before this write is beside it as\n"
-       ";; config.edn.bak. Editing by hand is still fine -- the form reads this file back\n"
-       ";; -- and the next write from the form will reorder it again.\n\n"))
+  says so, and the version it replaced is beside it.
+
+  WORDED FOR EVERY PREVIOUS FILE, INCLUDING AN EMPTY ONE: `touch config.edn` writes
+  this same header, and a sentence that presumed comments had been lost would have
+  the file telling its reader about something that never happened."
+  (str ";; WRITTEN BY THE SETTINGS FORM. This file is rewritten whole, so comments do not\n"
+       ";; survive a write from the form. What it held before this write is beside it as\n"
+       ";; config.edn.bak, when there was anything to keep. Editing by hand is still fine\n"
+       ";; -- the form reads this file back -- and the next write will reorder it again.\n\n"))
 
 (defn- write-config!
   "M -> config.edn, written atomically, with ONE GENERATION of backup.
@@ -1658,7 +1675,9 @@
   (let [f    (home/config-file)
         old  (when (.exists f) (slurp f :encoding "UTF-8"))
         text (str written-header (with-out-str (pprint/pprint m)))]
-    (when (and old (not= old text))
+    ;; A BLANK PREVIOUS FILE IS NOT A BACKUP: it holds nothing a person could want
+    ;; back, and a zero-byte config.edn.bak would suggest otherwise.
+    (when (and old (not (str/blank? old)) (not= old text))
       (spit (home/config-backup-file) old :encoding "UTF-8"))
     (home/spit-atomically! f text)))
 

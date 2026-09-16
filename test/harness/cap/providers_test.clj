@@ -178,6 +178,78 @@
           "and a session that picks from it is served")
       (providers/set-override! "t-nodefault" nil))))
 
+(deftest an-empty-config-edn-is-a-file-that-says-nothing
+  ;; `touch config.edn` is what a person does after the missing-file failure tells
+  ;; them to create it. An empty file (or one holding only comments) says nothing --
+  ;; which this shape spells `{}` -- so it must not be answered with "not nil": the
+  ;; built-in catalog stands, no default tier is named, and what a run meets is the
+  ;; sentence that says which shape to write.
+  (doseq [[what body] {"an empty file"        ""
+                       "a file of comments"    ";; nothing to see here\n"
+                       "and only whitespace"   "\n\n   \n"}]
+    (with-home nil nil
+      (fn []
+        (spit (home/config-file) body :encoding "UTF-8")
+        (testing what
+          (is (= {} (providers/config)) "it parses as the empty map, not as a failure")
+          (is (contains? (providers/catalog) :openrouter)
+              "and the built-in table stands, as it does with no :providers section")
+          (let [e (try (providers/effective-provider "t-empty") nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+            (is (some? e) "and a run with no default tier fails")
+            (is (str/includes? (ex-message e) ":default")
+                "with the sentence that says WHERE the knobs go")))))))
+
+(deftest an-empty-file-does-not-leave-an-empty-backup
+  ;; The backup's whole meaning is "what it held before this write". A zero-byte file
+  ;; held nothing, so a zero-byte config.edn.bak would be a promise about nothing --
+  ;; and the header would be telling its reader about comments that never existed.
+  (with-home nil nil
+    (fn []
+      (spit (home/config-file) "" :encoding "UTF-8")
+      ;; The runner's home is shared with every other case in this namespace, so a
+      ;; backup left by an earlier one is not evidence about THIS write.
+      (io/delete-file (home/config-backup-file) true)
+      (providers/put-defaults! {:provider "openrouter"})
+      (is (not (.exists (home/config-backup-file)))
+          "nothing to keep, so nothing is kept")
+      (let [written (slurp (home/config-file))]
+        (is (str/includes? written "WRITTEN BY THE SETTINGS FORM"))
+        (is (not (str/includes? written "are gone"))
+            "and the header does not claim comments were lost"))
+      (testing "but a file with anything in it IS backed up"
+        (spit (home/config-file) "{:default {:provider :openrouter}}\n" :encoding "UTF-8")
+        (providers/put-defaults! {:reasoning-effort "high"})
+        (is (str/includes? (slurp (home/config-backup-file)) ":provider :openrouter"))))))
+
+(deftest a-config-that-says-something-which-is-not-a-map-still-fails
+  ;; The other half of the paragraph above: silence is fine, a vector is a mistake.
+  (doseq [body ["[1 2]" "\"a string\"" "42" "{:default []}"]]
+    (with-home nil nil
+      (fn []
+        (spit (home/config-file) body :encoding "UTF-8")
+        (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e) (str (pr-str body) " is refused"))
+          (is (str/includes? (ex-message e) "config.edn")
+              "and the sentence names the file"))))))
+
+(deftest the-no-provider-sentence-teaches-the-files-own-shape
+  ;; It is the sentence a fresh home meets, so its examples have to be writable in the
+  ;; file as it is now: `:default`, not the flat shape this file used to have.
+  (with-home nil nil
+    (fn []
+      (let [e (try (providers/resolve-provider "t-shape2") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) "{:default {:provider :openrouter}}"))
+        (is (not (str/includes? (ex-message e) "e.g. {:provider :openrouter}"))
+            "and not the old flat example, which no longer parses"))
+      (let [e (try (providers/assemble (providers/catalog) {:provider {}}) nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "an inline description with nothing in it is refused too")
+        (is (str/includes? (ex-message e) ":default")
+            "and that sentence also names the section")))))
+
 (deftest a-providers-edn-file-is-a-named-failure
   ;; The file held this section until the catalog moved into config.edn. A home
   ;; that still has one is told to move its entries and delete it -- rather than
