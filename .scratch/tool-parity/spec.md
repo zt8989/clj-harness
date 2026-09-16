@@ -347,3 +347,19 @@ Brave（默认首选，`BRAVE_API_KEY`）、Exa（`EXA_API_KEY`）、Tavily（`T
 - `web_fetch` 一个字没动（除了它走的 `fetch` 多了方法/body 两个参数）。
 - 三个厂商的**端点**仍不是配置：写死在 `endpoints` 那张表里（是 var，理由只有一个——
   测试把它指向自己起的服务）。允许配置一个不同的 host，只会让"按这家厂商的形状解析"这件事悄悄对不上。
+
+### 证据重拍（同一轮，2026-09-16）
+
+改了传输层（`web/call` 取代 `get-text`）之后，`.scratch/tool-parity/evidence/` 那六张**重跑了一遍**
+（四条行仍然读得出来，而且 `web_search` 那条的结果现在带 `(via brave)`）。
+下一次要复现的人会撞到两件事，先写在这里：
+
+1. **两个端口都被别的会话占着。** 8080 是主仓的 dev 后端，5173 是 `skill-picker` worktree 的 vite
+   （同一台机器上的另一个会话在跑）。所以演示后端起在 **8099**、前端起在 **5199**。
+2. **CORS 只认 `http://localhost:5173`**（`harness.http/ui-origin`，而且是**加载时**烘进那张
+   `cors` 映射的，`alter-var-root` 改 `ui-origin` 已经来不及）。前端换端口之后浏览器的预检就被拒
+   （`net::ERR_FAILED`），所以那个一次性浏览器 profile 用 `--disable-web-security` 起——
+   取证用的临时 profile，不是改代码。
+
+`web_search` 那一步仍然用本机假厂商（8123，Brave 形状），端点靠 `alter-var-root` 指过去；
+这次键是真的放进配置家 `.env` 的 `BRAVE_API_KEY`（三厂商之后，**这就是选它的办法**）。
