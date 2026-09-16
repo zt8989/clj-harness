@@ -113,6 +113,28 @@
   [v]
   (= ::timeout v))
 
+(defn- kill-tree!
+  "Stop P and everything it started.
+
+  THE CHILD IS NOT THE SERVER, and that is the whole reason this exists: the
+  process we hold is a SHELL, and the command it runs is often a wrapper -- `npx`
+  is the ordinary case, and npx is a node program that starts the real server
+  itself. Killing the shell leaves the server running with a closed stdin, which
+  is a leak that also outlives the harness that made it.
+
+  So the descendants are collected FIRST (once their parent dies they are
+  reparented, and the tree that was there a moment ago can no longer be walked),
+  then the direct child is asked to stop, and anything still standing is killed
+  outright. Gentle where it can be, conclusive where it must be."
+  [^Process p]
+  (let [kids (try (vec (.toList (.descendants (.toHandle p)))) (catch Exception _ []))]
+    (.destroy p)
+    (when-not (try (.waitFor p 2 TimeUnit/SECONDS) (catch Exception _ true))
+      (.destroyForcibly p))
+    (doseq [^java.lang.ProcessHandle k kids] (.destroy k))
+    (doseq [^java.lang.ProcessHandle k kids :when (.isAlive k)] (.destroyForcibly k))
+    nil))
+
 (defn start
   "Spawn COMMAND as a LONG-LIVED process -- the kind `run` cannot do: a process
   that has to still be there after it answers, and that is talked to line by line.
@@ -180,8 +202,7 @@
      :stderr (fn [] (locking err (.toString err)))
      :alive? (fn [] (.isAlive p))
      :close! (fn []
-               (.destroy p)
-               (when-not (.waitFor p 2 TimeUnit/SECONDS) (.destroyForcibly p))
+               (kill-tree! p)
                (try (.close os) (catch Exception _ nil))
                (future-cancel out-pump)
                (future-cancel err-pump)

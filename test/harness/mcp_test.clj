@@ -136,7 +136,8 @@
   (let [thread (str "mcp-arrive-" (System/currentTimeMillis))
         table  (mcp/tools-for thread)]
     (testing "the roster became rows of the table"
-      (is (= #{"mcp__fake__echo" "mcp__fake__where" "mcp__fake__fail" "mcp__fake__hang"}
+      (is (= #{"mcp__fake__echo" "mcp__fake__where" "mcp__fake__fail" "mcp__fake__hang"
+                      "mcp__fake__exit"}
              (set (keys table)))))
     (testing "and they say where they came from"
       (is (every? #(= :mcp (:source %)) (vals table))))
@@ -306,3 +307,178 @@
     (wipe!)
     (testing "and no declarations is no tools"
       (is (= {} (mcp/tools-for thread))))))
+
+;; ------------------------------- 02: a server that breaks gets back up
+
+(defn- lifecycle-file
+  "A path the fake server appends start/term/exit lines to, so a test can watch a
+  process be born and be collected rather than infer it from behaviour."
+  [label]
+  (let [d (io/file (home/root) "mcp-lifecycle")]
+    (.mkdirs d)
+    (str (io/file d (str label ".txt")))))
+
+(defn- lifecycle [f]
+  (when (.exists (io/file f))
+    (->> (str/split-lines (slurp f :encoding "UTF-8"))
+         (keep #(first (str/split % #" ")))
+         vec)))
+
+(defn- last-pid
+  "The pid the fake server last reported -- the process a test has to be able to
+  prove is gone."
+  [f]
+  (when (.exists (io/file f))
+    (->> (str/split-lines (slurp f :encoding "UTF-8"))
+         (keep #(second (str/split % #" ")))
+         (map #(Long/parseLong %))
+         last)))
+
+(defn- running?
+  "Is PID still a live process? Asked of the OS rather than of our own records:
+  'the server is gone' is a claim about the machine, and a bookkeeping entry we
+  deleted is not evidence about the machine."
+  [pid]
+  (when pid
+    (let [h (java.lang.ProcessHandle/of (long pid))]
+      (and (.isPresent h) (.isAlive (.get h))))))
+
+(defn- wait-gone
+  "True once the OS no longer has PID -- or false if it is still there at the
+  deadline.
+
+  THE CONTRACT IS 'IT IS GONE', NOT 'WE SIGTERMed IT'. A server whose stdin closes
+  may exit by itself before the signal lands, and both are the same outcome; a
+  test that demanded one mechanism would fail on the other while the leak it is
+  guarding against stayed hidden."
+  [pid ms]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (let [alive? (running? pid)]
+        (if (or (not alive?) (> (System/currentTimeMillis) deadline))
+          (not alive?)
+          (do (Thread/sleep 50) (recur)))))))
+
+(deftest a-call-that-hangs-times-out-and-the-connection-is-dropped
+  ;; `hang` never answers, and the declaration's :timeout is what bounds it -- so
+  ;; this is also the test that `:timeout` is read at all.
+  (let [live (lifecycle-file "timeout")]
+    (write-servers! {"slow" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live} :timeout 1500})})
+    (let [thread (str "mcp-timeout-" (System/currentTimeMillis))]
+      (is (contains? (mcp/tools-for thread) "mcp__slow__hang"))
+      (let [{:keys [content error]} (call! thread "mcp__slow__hang" {})]
+        (testing "the model gets a NAMED failure, not an empty answer and not a
+                  thrown run"
+          (is (true? error))
+          (is (str/includes? content "MCP server \"slow\""))
+          (is (str/includes? content "hang"))
+          (is (str/includes? content "1500ms")))
+        (testing "and the connection went with it -- a request still in flight
+                  would put every later message one off"
+          (is (wait-gone (last-pid live) 3000) "and the process is gone"))))))
+
+(deftest a-server-that-dies-reconnects-and-the-roster-is-taken-again
+  (let [live   (lifecycle-file "reconnect")
+        roster (str (io/file (home/root) "mcp-roster.txt"))]
+    (spit roster "" :encoding "UTF-8")
+    (write-servers! {"flaky" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live
+                                               "MCP_FAKE_ROSTER_FILE" roster}})})
+    (let [thread (str "mcp-reconnect-" (System/currentTimeMillis))]
+      (is (contains? (mcp/tools-for thread) "mcp__flaky__echo"))
+      (testing "the server goes away without answering"
+        (let [{:keys [error]} (call! thread "mcp__flaky__exit" {})]
+          (is (true? error) "a dead server is a tool ERROR, not a dead run")))
+      (testing "THE NEXT CALL IS SERVED BY A NEW PROCESS, which is what 'it got
+                back up' means -- not a revived conversation"
+        (is (= "echo: still here" (:content (call! thread "mcp__flaky__echo" {:text "still here"}))))
+        (is (<= 2 (count (filter #{"start"} (lifecycle live))))))
+      (testing "and the roster is taken again, so a tool that arrived while it was
+                down is in the table"
+        ;; A LIVE connection is not re-listed -- that is the cache doing its job,
+        ;; and asking a server its roster on every LLM request would be paying for
+        ;; an answer that has not changed. The roster moves when the CONNECTION
+        ;; does, so this is the same move as above: take the server away first.
+        (spit roster "brand_new\n" :encoding "UTF-8")
+        (call! thread "mcp__flaky__exit" {})
+        (is (contains? (mcp/tools-for thread) "mcp__flaky__brand_new")))
+      (testing "and one that left is not"
+        (spit roster "" :encoding "UTF-8")
+        (call! thread "mcp__flaky__exit" {})
+        (let [again (mcp/tools-for thread)]
+          (is (contains? again "mcp__flaky__echo"))
+          (is (not (contains? again "mcp__flaky__brand_new"))))))))
+
+(deftest a-changed-declaration-is-a-different-server
+  (let [a (lifecycle-file "decl-a")
+        b (lifecycle-file "decl-b")]
+    (write-servers! {"svc" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" a}})})
+    (let [thread (str "mcp-decl-" (System/currentTimeMillis))]
+      (is (= "echo: one" (:content (call! thread "mcp__svc__echo" {:text "one"}))))
+      (testing "the command changed, so the next use is a new process"
+        (write-servers! {"svc" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" b}})})
+        (is (= "echo: two" (:content (call! thread "mcp__svc__echo" {:text "two"}))))
+        (is (= ["start"] (lifecycle b)) "the new declaration was actually used"))
+      (testing "and the old process is gone"
+        (is (wait-gone (last-pid a) 3000)))
+      (testing "changing ONLY the timeout counts as a change too"
+        (let [c (lifecycle-file "decl-c")]
+          (write-servers! {"svc" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" c} :timeout 5000})})
+          (is (contains? (mcp/tools-for thread) "mcp__svc__echo"))
+          (is (= ["start"] (lifecycle c))))))))
+
+(deftest a-declaration-that-goes-away-takes-its-process-with-it
+  (let [live (lifecycle-file "removed")]
+    (write-servers! {"temp" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live}})})
+    (let [thread (str "mcp-removed-" (System/currentTimeMillis))]
+      (is (contains? (mcp/tools-for thread) "mcp__temp__echo"))
+      (is (= ["start"] (lifecycle live)))
+      (wipe!)
+      (testing "its tools leave the table"
+        (is (= {} (mcp/tools-for thread))))
+      (testing "and the process is collected -- the walk only visits what the file
+                still says, so nothing else was ever going to look at this one"
+        (is (wait-gone (last-pid live) 3000)))
+      (testing "it ended of its own accord or on our signal, and either way it is
+                not on this machine any more"
+        (is (some #{"term" "exit"} (lifecycle live)))
+        (is (not (running? (last-pid live))))))))
+
+(deftest a-server-that-speaks-rubbish-is-named-and-then-replaced
+  ;; The protocol half of "a bad server costs only itself": stdout is the
+  ;; protocol's, so a line that is not protocol is the SERVER's error and is
+  ;; quoted back -- never skipped, because the next message would inherit the
+  ;; doubt.
+  (let [live (lifecycle-file "rubbish")]
+    (write-servers! {"noisy" (fake-decl {:env {"MCP_FAKE_BANNER" "1"
+                                               "MCP_FAKE_LIFECYCLE" live}})})
+    (let [thread (str "mcp-rubbish-" (System/currentTimeMillis))
+          table  (mcp/tools-for thread)
+          failed (first (mcp/status thread))]
+      (is (= {} table))
+      (is (= :failed (:status failed)))
+      (is (str/includes? (:error failed) "not JSON"))
+      (is (str/includes? (:error failed) "fake mcp server starting"))
+      (testing "and the process behind the broken conversation is not left running"
+        (is (wait-gone (last-pid live) 3000))))))
+
+(deftest a-server-that-writes-to-stderr-is-not-a-server-that-failed
+  ;; stderr is DIAGNOSTICS. A server that logs a line there must be usable, and
+  ;; its log must not be mistaken for protocol -- the same rule the hook engine
+  ;; holds, for the same reason.
+  (write-servers! {"chatty" {:command (str "node -e 'console.error(\"a log line\"); require(\""
+                                           (.getAbsolutePath (io/file "test/harness/fake_mcp_server.js"))
+                                           "\")'")}})
+  (let [thread (str "mcp-stderr-" (System/currentTimeMillis))]
+    (is (contains? (mcp/tools-for thread) "mcp__chatty__echo"))
+    (is (= "echo: fine" (:content (call! thread "mcp__chatty__echo" {:text "fine"}))))))
+
+(deftest one-broken-server-does-not-cost-another-its-tools
+  (let [live (lifecycle-file "isolation")]
+    (write-servers! {"good" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live}})
+                     "bad"  {:command "definitely-not-a-program-xyz"}})
+    (let [thread (str "mcp-iso-" (System/currentTimeMillis))
+          table  (mcp/tools-for thread)]
+      (is (contains? table "mcp__good__echo"))
+      (is (not-any? #(str/starts-with? % "mcp__bad__") (keys table)))
+      (testing "the good one still answers, in the same turn the bad one failed"
+        (is (= "echo: fine" (:content (call! thread "mcp__good__echo" {:text "fine"}))))))))

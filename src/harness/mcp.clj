@@ -247,7 +247,14 @@
   be started at all; everything after that is this connection's business and comes
   back as a NAMED failure from the request that hit it.
 
-  Returns {:request! :notify! :close! :stderr :alive?}."
+  A CONNECTION IS A CACHE, NOT A FACT. It knows when it has stopped being usable
+  (`:why-dead`), and a caller that finds it dead DROPS it and starts another --
+  which is why `:drop!` exists and why the process is killed with it. A dead
+  process left running would be a leak, and a live process behind a broken
+  conversation cannot be repaired: the messages after the broken one would be
+  answers to questions nobody asked.
+
+  Returns {:request! :notify! :close! :stderr :alive? :why-dead :drop!}."
   [{:keys [command dir env timeout-ms]}]
   (let [handle (shell/start {:command command :dir dir :env env})
         pending (atom {})
@@ -257,6 +264,11 @@
                (when-not @dead
                  (reset! dead why)
                  (doseq [[_ p] @pending] (deliver p {:mcp-dead why}))))
+        ;; A conversation that cannot be trusted AND a process that should not be
+        ;; left running: the two always go together here.
+        drop! (fn [why]
+                (die! why)
+                ((:close! handle)))
         write-line! (:write-line! handle)
         ;; One line from the server, routed. Lines are newline-delimited JSON-RPC
         ;; (the stdio framing), so a line that is NOT JSON is the server's own
@@ -341,8 +353,14 @@
               (swap! pending dissoc id)
               (cond
                 (= ::timeout answer)
-                (fail (str "the server did not answer " method " within " timeout-ms "ms")
-                      {:reason :timeout :method method :timeout-ms timeout-ms})
+                ;; AND THE CONNECTION GOES WITH IT. A request still in flight is
+                ;; not waiting politely: it will answer eventually, and every
+                ;; message after it would then be off by one -- a response read as
+                ;; the next request's. Killing the conversation is the only way the
+                ;; next call can be sure what it is reading.
+                (do (drop! (str "no answer to " method " within " timeout-ms "ms"))
+                    (fail (str "the server did not answer " method " within " timeout-ms "ms")
+                          {:reason :timeout :method method :timeout-ms timeout-ms}))
 
                 (:mcp-dead answer)
                 (fail (str "the server stopped answering: " (:mcp-dead answer))
@@ -359,9 +377,16 @@
                  (write-line! (json/write-str
                                (cond-> {:jsonrpc "2.0" :method method}
                                  (some? params) (assoc :params params)))))
-     :stderr   #(:stderr handle)
-     :alive?   #(:alive? handle)
-     :close!   #(:close! handle)}))
+     ;; EACH OF THESE CALLS THROUGH TO THE HANDLE, with the double parens that
+     ;; make it a call. `#(:close! handle)` would be a fn that RETURNS the
+     ;; handle's fn -- a bug that reads as 'the process is never killed' and
+     ;; hides in plain sight, because every one of these is only ever used by
+     ;; writing `(client :close!)` and expecting something to have happened.
+     :stderr   (fn [] ((:stderr handle)))
+     :alive?   (fn [] ((:alive? handle)))
+     :why-dead (fn [] @dead)
+     :drop!    drop!
+     :close!   (fn [] ((:close! handle)))}))
 
 (defn- stdio-command
   "The command LINE a stdio declaration becomes. The declaration gives a command
@@ -381,8 +406,14 @@
   against. `inputSchema` is already JSON Schema, so the first is it verbatim --
   but `required` lives INSIDE that schema as strings, while the seam wants
   keywords, so the second is derived from it rather than guessed. A mismatch here
-  is a model told it forgot an argument it did give."
-  [server client {:keys [name description inputSchema]}]
+  is a model told it forgot an argument it did give.
+
+  TIMEOUT-MS is carried so a failed call can SAY what it waited for. The message
+  the model reads has to name the server, the tool and the number: a tool result
+  that says only 'it did not answer' leaves the reader with nothing to act on --
+  raise the timeout, or stop using that server -- and those are different
+  decisions."
+  [server client timeout-ms {:keys [name description inputSchema]}]
   (let [full (str "mcp__" server "__" name)]
     (if-not (re-matches bridged-name-re full)
       {:skipped full
@@ -398,8 +429,20 @@
              :required (mapv keyword (:required inputSchema))
              :source :mcp
              :run (fn [args]
-                    (let [result ((:request! client) "tools/call"
-                                                  {:name name :arguments (or args {})})
+                    (let [result (try
+                                   ((:request! client) "tools/call"
+                                                       {:name name :arguments (or args {})})
+                                   (catch Exception e
+                                     ;; Every failure of a server call is answered
+                                     ;; in the server's and the tool's name, with
+                                     ;; the client's own sentence kept after it --
+                                     ;; an author's message beats a message about
+                                     ;; the author, and the seam turns this into
+                                     ;; the call's ERROR RESULT, not a failed run.
+                                     (throw (ex-info
+                                             (str "MCP server " (pr-str server) " failed on "
+                                                  (pr-str name) ": " (ex-message e))
+                                             (assoc (ex-data e) :server server :tool name)))))
                           ;; Every text part, in order: that is what the model
                           ;; reads. Other part kinds (images, embedded resources)
                           ;; are not this ticket's business and are not invented
@@ -436,35 +479,77 @@
           :clientInfo {:name "clj-harness" :version "1"}})
         ((:notify! client) "notifications/initialized" nil)
         (let [listed  ((:request! client) "tools/list" {})
-              bridged (mapv #(bridge server client %) (:tools listed))]
+              bridged (mapv #(bridge server client (:timeout decl default-timeout-ms) %)
+                            (:tools listed))]
           {:decl    decl
            :client  client
            :tools   (into {} (map (juxt :tool :def)) (remove :skipped bridged))
            :skipped (mapv #(select-keys % [:skipped :why]) (filter :skipped bridged))})
         (catch Throwable t
-          (client :close!)
+          ((:drop! client) (str "the handshake failed: " (ex-message t)))
           (throw t))))))
 
 ;; ------------------------------------------------------------- the read side
 
+
+(defn- usable?
+  "Is CONN still the connection this declaration should be using? Two ways to fail,
+  and they are the two the file cannot tell you about:
+
+    - the DECLARATION moved. The file is read fresh, so a connection still keyed
+      to the old command is a cache lying about what is in force.
+    - the CONVERSATION ended -- the process died, or it wrote something that was
+      not protocol. A roster is only as good as the process that answered it."
+  [conn decl]
+  (and (some? conn)
+       (= decl (:decl conn))
+       (nil? ((:why-dead (:client conn))))))
+
+(defn- forget!
+  "Take KEY's connection out of the cache and make sure its process is gone.
+  Idempotent, and safe on a connection that has already died."
+  [key]
+  (when-let [old (get @connections key)]
+    (swap! connections dissoc key)
+    (try ((:close! (:client old))) (catch Exception _ nil))
+    old))
+
 (defn- server-connection
-  "The connection for SERVER in this project, connecting if there is none or if
-  the declaration has CHANGED since it was made. Reconnecting on a changed
-  declaration is what makes 'the file is read fresh' true of the command and not
-  only of the map: a cache keyed by name alone would keep answering with the old
-  process after an edit."
+  "The connection for SERVER in this project: the cached one when it is still the
+  right one, and otherwise a NEW one.
+
+  RECONNECTING IS THE SAME DECISION AS CONNECTING, taken again. There is no
+  'revive' path, because a broken conversation cannot be resumed -- the only way
+  to be sure what the next message means is to start a new one. The previous
+  connection's death is carried into the new one's report (`:restarted-after`), so
+  the audit trail shows the two facts together instead of a server that silently
+  came back."
   [identity dir server decl]
   (let [key [identity server]
         old (get @connections key)]
-    (if (and old (= decl (:decl old)))
+    (if (usable? old decl)
       old
-      (do
-        (when old
-          (try ((:client old) :close!) (catch Exception _ nil))
-          (swap! connections dissoc key))
+      (let [why (when old ((:why-dead (:client old))))]
+        (forget! key)
         (let [conn (connect! server decl dir)]
-          (swap! connections assoc key conn)
+          (swap! connections assoc key (cond-> conn
+                                         why (assoc :restarted-after why)))
           conn)))))
+
+(defn- reap!
+  "Close and forget the connections for IDENTITY whose server is no longer
+  declared. The third way a connection can stop being the right one, and the one
+  the cache cannot notice by itself: a declaration that has been DELETED leaves
+  nothing left to compare against, so the sweep has to be told what is still live.
+
+  Its tools leave the table for free -- `tools-for` walks the declarations, and a
+  server that is not there is not walked -- so this is only about the PROCESS. A
+  server the file no longer declares must not still be running."
+  [identity live]
+  (doseq [key (keys @connections)
+          :let [[id server] key]
+          :when (and (= id identity) (not (contains? live server)))]
+    (forget! key)))
 
 (defn- note-outcome!
   "Remember what happened to SERVER, and queue the fact for the audit trail WHEN
@@ -480,6 +565,7 @@
         fact (cond-> {:server server :project identity :status (:status outcome)}
                (:error outcome)   (assoc :error (str (:error outcome)))
                (:command decl)    (assoc :command (:command decl))
+               (:restarted outcome) (assoc :restarted-after (:restarted outcome))
                (seq (:tools outcome))   (assoc :tools (vec (sort (keys (:tools outcome)))))
                (seq (:skipped outcome)) (assoc :skipped (:skipped outcome)))
         before (get @states key)]
@@ -495,9 +581,19 @@
   A server that cannot be used contributes nothing and is recorded as a failure
   (see `status` and `take-events!`); every other server is unaffected. Called on
   the way to EVERY LLM request (harness.tools/specs), so a connection and its
-  roster are reused rather than re-established per call."
+  roster are reused rather than re-established per call.
+
+  IT IS ALSO WHERE A BROKEN SERVER IS NOTICED, because assembly is the one thing
+  that happens on every run whatever else the model decided to do: a server that
+  died is found here, replaced here, and its roster taken again -- so a server
+  that gains or loses a tool while it was down has a table that follows."
   [thread-id]
-  (let [identity (project/identity-for thread-id)]
+  (let [identity (project/identity-for thread-id)
+        decls    (config thread-id)]
+    ;; A declaration that is gone leaves its process running otherwise: the walk
+    ;; below only ever visits what the file still says, so nothing else would
+    ;; ever look at what it stopped saying.
+    (reap! identity (set (keys decls)))
     (into {}
           (mapcat (fn [[server decl]]
                     (try
@@ -505,7 +601,8 @@
                         (note-outcome! identity server decl
                                        {:status :connected
                                         :tools (:tools conn)
-                                        :skipped (:skipped conn)})
+                                        :skipped (:skipped conn)
+                                        :restarted (:restarted-after conn)})
                         (:tools conn))
                       (catch Throwable t
                         ;; One server down is one absent source of tools, never a
@@ -514,7 +611,7 @@
                         (note-outcome! identity server decl
                                        {:status :failed :error (ex-message t)})
                         {})))
-                  (config thread-id)))))
+                  decls))))
 
 (defn status
   "What this harness knows about the servers THREAD-ID declares, in name order:

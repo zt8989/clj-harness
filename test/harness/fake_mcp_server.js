@@ -19,14 +19,39 @@
 //   where  answers with its own cwd             -- it was started in the project
 //   fail   answers with isError: true           -- a refused call is a tool ERROR
 //   hang   never answers                        -- a request must time out
+//   exit   dies without answering               -- the server going away mid-call
 //   <long> a name long enough to overflow a provider's function.name limit
 //
 // Environment knobs, so one file covers the failure modes too:
 //
-//   MCP_FAKE_BANNER=1   print a non-JSON line on stdout at startup (a server that
-//                       pollutes the protocol stream -- named, never skipped)
+//   MCP_FAKE_BANNER=1         print a non-JSON line on stdout at startup (a server
+//                             that pollutes the protocol stream -- named, never skipped)
+//   MCP_FAKE_ROSTER_FILE=path read extra tool names from this file on every
+//                             tools/list, so a roster can CHANGE between
+//                             connections and a re-list is observable
+//   MCP_FAKE_LIFECYCLE=path   append start/term/exit lines here, so a test can see
+//                             that a process really was started and really is gone
 
 const readline = require("readline");
+const fs = require("fs");
+
+const lifecycle = process.env.MCP_FAKE_LIFECYCLE;
+
+function note(event) {
+  if (!lifecycle) return;
+  try {
+    fs.appendFileSync(lifecycle, event + " " + process.pid + "\n");
+  } catch (e) {
+    // A diagnostic that cannot be written is not worth dying over.
+  }
+}
+
+note("start");
+process.on("SIGTERM", () => {
+  note("term");
+  process.exit(0);
+});
+process.on("exit", () => note("exit"));
 
 // 60 characters: `mcp__fake__` is 12, so the bridged name is 72 and a provider
 // that allows 64 must refuse it rather than truncate it.
@@ -58,11 +83,41 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "exit",
+    description: "Go away without answering.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: LONG_NAME,
     description: "A name too long to bridge.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
+
+/// The roster this server offers RIGHT NOW: the fixed tools plus whatever the
+/// roster file names. Read per tools/list rather than at startup, so a test can
+/// change the set and see whether a reconnect re-lists.
+function roster() {
+  const file = process.env.MCP_FAKE_ROSTER_FILE;
+  if (!file) return TOOLS;
+  let extra = [];
+  try {
+    extra = fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+  } catch (e) {
+    extra = [];
+  }
+  return TOOLS.concat(
+    extra.map((name) => ({
+      name,
+      description: "From the roster file.",
+      inputSchema: { type: "object", properties: {} },
+    }))
+  );
+}
 
 if (process.env.MCP_FAKE_BANNER === "1") {
   process.stdout.write("fake mcp server starting\n");
@@ -86,6 +141,11 @@ function call(name, args) {
       return { content: [{ type: "text", text: "the fake server refused" }], isError: true };
     case "hang":
       return null; // never answers
+    case "exit":
+      // Goes away mid-call: no answer, no goodbye. This is what a server that
+      // crashed looks like from the client's side.
+      process.exit(0);
+      return null;
     default:
       return { content: [{ type: "text", text: "no such tool: " + name }], isError: true };
   }
@@ -109,7 +169,7 @@ function handle(msg) {
       });
       break;
     case "tools/list":
-      send({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
+      send({ jsonrpc: "2.0", id, result: { tools: roster() } });
       break;
     case "tools/call": {
       const answer = call(params.name, params.arguments || {});
