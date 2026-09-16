@@ -5,7 +5,8 @@
 // leaves open are filled here:
 //
 //   ToolFallback    what an unregistered tool call looks like
-//   ToolGroup       the wrapper around a run of adjacent tool calls
+//   ToolGroup       where a run of adjacent tool calls would be wrapped -- a
+//                   passthrough here, and the reason is below
 //   ReasoningGroup  the wrapper around a run of adjacent reasoning parts
 //
 // A named renderer registered by tool name (`part.toolUI`, resolved from the
@@ -43,10 +44,16 @@
 // (see `ReasoningTrigger` below). The disclosure SHELL is still the copied kit's:
 // the scroll lock, the fades and the animation are not ours to re-derive.
 //
-// The one thing left open is the tool group, and it is not a contradiction: the
-// group holds no content of its own, only the cards, so opening it reveals the
-// tool names while every argument and every result stays folded one level down.
-// `ToolCallsGroup` below carries that argument in full.
+// The tool group draws nothing, and that is the whole of it: a run of tool calls
+// is a run of ROWS, one per call. It used to carry a header -- "N tool calls" --
+// and the count was never anything but 1. `groupPartByType` groups tool calls
+// even when there is only one of them (upstream's own comment says so), and one
+// tool call IS one assistant message on this wire (measured; see
+// `.scratch/assistant-ui/issues/04`, section 8), so the page read "1 tool call"
+// before every single call rather than "4 tool calls" once. The header's stated
+// justification -- open it by default so the tool names stay readable -- was
+// written for a premise that does not hold on the real page: it unfolded to
+// reveal its own one row. `FlatToolGroup` below carries the rest.
 //
 // `showThinking` (a `useAgUiRuntime` option, default true) is left alone: it is
 // the switch that turns THINKING_*/REASONING_* events into parts at all, so
@@ -65,9 +72,10 @@
 // override keeps this file ours and the copied files byte-comparable on the
 // next registry pull; the upstream pieces used are the copied atoms and
 // disclosure shells -- `ToolFallbackRoot` / `ToolFallbackContent` /
-// `ToolFallbackError` (animation, scroll lock, error block), `ToolGroupRoot` /
-// `ToolGroupTrigger` / `ToolGroupContent`, and -- for reasoning -- the shell
-// only: `ReasoningRoot` / `ReasoningContent` / `ReasoningText`.
+// `ToolFallbackError` (animation, scroll lock, error block), and -- for
+// reasoning -- the shell only: `ReasoningRoot` / `ReasoningContent` /
+// `ReasoningText`. The group's own pieces are no longer imported at all: the
+// slot draws nothing.
 import { type ElementType, type FC, type PropsWithChildren } from "react";
 import {
   AlertCircleIcon,
@@ -98,11 +106,6 @@ import type {
   ThreadComponents,
   ThreadGroupPart,
 } from "@/components/assistant-ui/elements/thread.aui";
-import {
-  ToolGroupContent,
-  ToolGroupRoot,
-  ToolGroupTrigger,
-} from "@/components/assistant-ui/elements/tool-group.aui";
 import {
   ToolFallbackContent,
   ToolFallbackError,
@@ -429,32 +432,33 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
 
 // ------------------------------------------------------------------ the group
 
-/// A run of adjacent tool calls: a header that counts them, and then the cards
-/// themselves.
+/// Nothing. The slot is filled only so that no header is drawn.
 ///
-/// This slot is overridden for one prop. Upstream's group starts closed, and
-/// with the cards also starting closed a run of four calls would read as
-/// "4 tool calls" and nothing else -- the tool NAMES would be off screen until
-/// the group was opened. The page this replaces listed every call with its name
-/// and its status and folded only the details, so a transcript you cannot read
-/// the tool names off is a regression dressed up as tidiness. The group
-/// therefore opens by default while each card inside stays folded: names and
-/// statuses at a glance, arguments and results one click each. It can still be
-/// closed by hand, and the wrapper still only wraps -- every call in it renders
-/// through its own card, so concurrent calls are neither merged nor lost.
-const ToolCallsGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
-  group,
+/// ## Why a passthrough rather than no override at all
+///
+/// Leaving the slot empty is not the same as drawing nothing. `thread.aui.tsx`
+/// renders its own group header when no override is given, which is exactly the
+/// "N tool calls" line this file exists to remove. So the override stays and
+/// returns its children.
+///
+/// ## Why the group node is left standing
+///
+/// The honest way to say "these calls are not a group" would be to stop grouping
+/// them -- `groupBy` lives in the copied `thread.aui.tsx`, and dropping
+/// `group-tool` from the `"tool-call"` path there would remove the node. That is
+/// one array element, and it is still a worse trade: it edits a copied registry
+/// file, and this repo keeps those diffable against upstream on the next pull.
+/// The slot can express the same thing, so it does. The cost is a group node of
+/// size one in the tree whose only renderer draws nothing -- a shape, not a
+/// behaviour.
+///
+/// ## What went with it
+///
+/// The inner `gap-1` (4px) was the group content's, so it went too: adjacent
+/// rows are now separated by their own `py-1.5` alone, 12px apart.
+const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   children,
-}) => {
-  const running = group.status.type === "running";
-
-  return (
-    <ToolGroupRoot variant="ghost" defaultOpen>
-      <ToolGroupTrigger count={group.indices.length} active={running} />
-      <ToolGroupContent>{children}</ToolGroupContent>
-    </ToolGroupRoot>
-  );
-};
+}) => <>{children}</>;
 
 // ---------------------------------------------------------------- reasoning
 //
@@ -543,14 +547,14 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 ///
 /// All three slots the copied element leaves open are filled, and each override
 /// earns its place: the card states a status in words and reports an absent
-/// result instead of showing nothing, the group opens by default so the tool
-/// names are readable, and reasoning is drawn as the same bare row a tool call
+/// result instead of showing nothing, the group draws nothing so a run of calls
+/// is a run of rows, and reasoning is drawn as the same bare row a tool call
 /// gets -- never as a card, never streaming its disclosure open. Everything
 /// else -- the message list, the text parts, the welcome screen, the composer --
 /// stays upstream's.
 export const THREAD_COMPONENTS: ThreadComponents = {
   ToolFallback: ToolCallCard,
-  ToolGroup: ToolCallsGroup,
+  ToolGroup: FlatToolGroup,
   ReasoningGroup: ReasoningBlock,
   // The composer's chrome: the directory and branch strip above it, and the
   // model and thinking pickers inside it. See composer-chrome.tsx -- they are
