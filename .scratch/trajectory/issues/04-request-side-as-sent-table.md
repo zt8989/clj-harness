@@ -56,3 +56,18 @@
 - [ ] 真机证据补一张：`工具` 页签里的表与当期会话的工具表对得上（`.scratch/trajectory/evidence/`）。
 - [ ] `clojure -M:test -m harness.test-runner` 与 `cd ui && npm test` 全绿
       （基线以落地当次为准，报数带上分支与提交）。
+
+## 复议（2026-09-16）：两条审计行已由 `.scratch/composer-status/` 01 落地
+
+**加注，不改写上面的话。** `:model/start` / `:model/end` 两个事件、`lifecycle-record` 的两条映射、
+`harness.ag_ui/convert` 里「这两种没有帧」那段注释、以及假 provider 的那一节，都已经由
+`.scratch/composer-status/` 的票 01 落地，**行名与载荷字段与上面要求的一字不差**
+（`:model/start` 带 `{:model … :base-url … :reasoning-effort …}`，`:model/end` 带 `{:usage … :finish-reason … :model …}`）。
+
+**本条票只剩两件事**：① 往那条已经存在的 `model/start` 上**加 `:tools`**（照发出的那张表，
+与 `(tools/specs thread-id)` 是**同一次 resolve** 出来的那个值）；② 右侧面板的 `工具` 页签。
+验收里凡是要「加事件 / 加映射 / 改 convert」的条目，落地时会看到它们**已经在了**——那是这一节说的，
+不是本票漏了。
+
+时间戳与序号那两条纪律（不新记字段、不记调用序号）已经照着做了：行的 `:ts` 就是时间，
+序号由次序定——`composer-status` 的读侧就是这么折的。

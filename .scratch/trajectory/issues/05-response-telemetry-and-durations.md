@@ -45,3 +45,18 @@
       断言 4 个段的起止与重叠关系；`consume-sse` 对 fixture 的用量断言；假 provider 一轮带用量能折出来。
 - [ ] `clojure -M:test -m harness.test-runner` 与 `cd ui && npm test` 全绿
       （基线以落地当次为准，报数带上分支与提交）。
+
+## 复议（2026-09-16）：响应侧（留住用量）已由 `.scratch/composer-status/` 01 落地
+
+**加注，不改写上面的话。** `consume-sse` 留住 `usage` / `finish_reason` / 回声的 `model`、
+`stream!` 的返回形状（`{:message … :telemetry …}`，四个 defmethod 一起改）、
+以及对 `test/harness/fixtures/deepseek_sse.txt` 那份真录下来的响应的断言，都已经由
+`.scratch/composer-status/` 的票 01 落地（769 / 324 / 1093 / 296 与 `finish_reason "tool_calls"` 都读得回来）。
+「中途失败也要发 `:model/end`」也落了：那是 `harness.kernel.loop/model-call!` 里的 `try` / `catch`，
+载荷为空。
+
+**本条票只剩**：读侧把每一段补上起止（`startedAt` / `endedAt` / 排队与执行的分段）、
+`calls[]` 的 `usage` / `finishReason`、以及条上显示耗时与用量。量的分母仍然照上面那条—
+「没报就是没报，别写 0」。
+
+**假 provider 的 `:usage`** 也已经在了（每一轮可选），别再加一遍。

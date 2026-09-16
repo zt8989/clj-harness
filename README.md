@@ -320,16 +320,20 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 664 tests / 9996 assertions（基线随分支变，报数时带上分支与提交）
-# 2 failures，两条都是**本机环境**、与代码无关：`project_test/a-binding-survives-a-real-restart`
+# 734 tests / 10666 assertions（基线随分支变，报数时带上分支与提交）
+# 本机固定失败两条，都与代码无关：`project_test/a-binding-survives-a-real-restart`
 #   逐字比较 fork 出来的 JVM 的 stdout，而这台机器的 JDK 25 在 sqlite-jdbc 加载原生库时
 #   会往 stdout 打四行 "a restricted method in java.lang.System has been called"。
 #   新建一个 JVM 就能看见那四行，所以与本仓库的代码无关。
+#   另有 `http_test/the-projects-listing-joins-the-store-with-the-disk` 是**真竞赛**
+#   （终帧之后服务端还要写返回侧那几行 message），跑多少次不一定撞上——
+#   失败条数每次都可能不同，比对看**名字**。
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
-# 11 tests，含 4 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
+# 19 tests，含 6 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
+#   / 技能列表（两层的根） / 会话统计（那条状态条读的端点与它的五格）
 ```
 
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；

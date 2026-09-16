@@ -38,7 +38,6 @@
     harness.kernel.llm-test
     harness.cap.skills-test
     harness.cap.preamble-test
-    harness.edge.stats-test
     harness.kernel.tools-test
     harness.cap.mcp-test
     harness.cap.mcp-wired-test
@@ -73,6 +72,7 @@
     harness.kernel.hooks.dispatch-test
     harness.kernel.hooks-wired-test
     harness.cap.system-prompt-test
+    harness.edge.stats-test
     harness.edge.http-test
     harness.layers-test])
 

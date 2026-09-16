@@ -44,6 +44,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// shadowed name listed once; asking changes nothing).
 /// 14 -> 18: the `stats` suite's four (the strip's cells, the numbers it leaves
 /// out, a real run folded by the endpoint, and a session that has not run).
+/// 18 -> 24: the `elicitation` suite's five -- one through the whole loop (a
+/// server's question parks the run and the answer finishes it) and four on the
+/// form itself (the four kinds; answers keep the declared type; a field nobody
+/// expected is kept and named; an empty or odd schema is an empty form).
 const EXPECTED_CASES = 24;
 
 let total = 0;
