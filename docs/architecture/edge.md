@@ -38,7 +38,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 |---|---|---|---|
 | `/` | POST | AG-UI run（流式） | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
+| `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
+| `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model、可选的思考档 | 无（只读） |
+| `/api/skills` | GET | **技能列表**：本会话的根分组（每组带层与根路径），每行带名字、描述、能不能用与原因 | 无（只读） |
 | `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有与来源） | 无（只读） |
+| `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数 | 无（只读） |
+| `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传） | `git/branch` |
 | `/api/project` | GET | 绑定目录（未绑定答 `null`） | 无 |
 | `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`） | `project/bound` |
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |

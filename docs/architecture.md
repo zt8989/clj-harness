@@ -3,7 +3,7 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`ded04d5`（2026-09-16）。** 工作树里的在办改动不算现状，见文末「在办」。
+**快照：`91d7ff2`（2026-09-16）。** 工作树里的在办改动不算现状，见文末「在办」。
 
 ## 与另外两处文档的分工
 
@@ -40,7 +40,7 @@
 | `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
 | `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`） |
 | `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
-| `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`） |
+| `skills` | **技能**：默认根与它们的**层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 | `preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本，并注册内核自己那三条内建 hook（工具集合 / 工程目录 / provider 档）。**不并进 `preamble` 是 require 环**：`project` 已 require `preamble`，而这三条要 `tools` / `project` / `hooks.dispatch` |

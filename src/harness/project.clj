@@ -550,15 +550,30 @@
 ;; It is also the right home by subject matter -- harness.edn is where these keys
 ;; come from, and this is the namespace that reads it.
 
+(defn skill-layers
+  "The skill directories THREAD-ID's session reads, each with its layer -- the
+  session-facing answer for anyone that has to SAY where a skill came from (the
+  skill list; see harness.skills/skill-list).
+
+  It is the pairing (configured value, binding) described above, and the one
+  `skill-roots` is derived from, so there is no second place where a root's layer
+  could be decided.
+
+  Read fresh on every call, like harness-config itself: editing harness.edn or
+  rebinding the project moves the roots on the next call, with no restart."
+  [thread-id]
+  (skills/root-layers (:skills (harness-config thread-id)) (binding-for thread-id)))
+
 (defn skill-roots
   "The skill directories THREAD-ID's session reads, in precedence order. The
   session-facing answer: it does the pairing described above, so a model (or a
   human, in the REPL) asks one question instead of three.
 
-  Read fresh on every call, like harness-config itself: editing harness.edn or
-  rebinding the project moves the roots on the next call, with no restart."
+  The paths alone -- what the fence and the `skill` tool body want. Read fresh on
+  every call, like harness-config itself: editing harness.edn or rebinding the
+  project moves the roots on the next call, with no restart."
   [thread-id]
-  (skills/roots (:skills (harness-config thread-id)) (binding-for thread-id)))
+  (mapv :path (skill-layers thread-id)))
 
 (defn preamble-files
   "The instruction files THREAD-ID's session reads, in the order they are

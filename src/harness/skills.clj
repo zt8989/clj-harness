@@ -30,9 +30,47 @@
   is how the two drift apart."
   [".agents" "skills"])
 
+(defn root-layers
+  "The skill directories this session reads, each with the LAYER it came from, in
+  PRECEDENCE ORDER -- earlier entries win a name conflict.
+
+  SAME ARGUMENTS, SAME FRESHNESS as `roots`, which is DERIVED from this: which
+  the defaults are and which of them is which layer is written once, here,
+  because a second spelling of a default is how two answers start to disagree.
+
+  A LAYER IS A FACT ABOUT WHICH DEFAULT ROOT THIS IS, never a name inferred from
+  a position in a list. The two defaults genuinely are the machine's and the
+  project's, so they carry :system and :project. A configured {:roots [..]}
+  carries NO :layer AT ALL (absent rather than nil, so a reader can tell 'no
+  layer' from 'a layer that happens to be nil') -- the configuration never said
+  'system' or 'project' about those paths, and reading one off their order would
+  be a guess dressed as a fact. Every entry carries :path whatever the
+  configuration looks like, and that is what a caller falls back on; see
+  `skill-list`.
+
+  A THIRD LAYER IS ONE MORE ENTRY IN THE DEFAULT BELOW -- a plugin root, say --
+  and not a new branch in whoever renders a list. That is the whole reason the
+  layer travels WITH the root instead of being recomputed downstream."
+  ([] (root-layers nil nil))
+  ([skills-cfg project-dir]
+   (let [cfg (home/as-config-section skills-cfg ":skills" project-dir)]
+     (if (contains? cfg :roots)
+       (mapv (fn [p] {:path (home/resolve-against project-dir p)})
+             (home/path-list (:roots cfg)
+                             "{:skills {:roots [\"/abs/skills\" \"relative/to/project\"]}}"
+                             ":skills {:roots" project-dir))
+       (cond-> [{:path (str (apply io/file (home/user-home) convention-dir))
+                 :layer :system}]
+         project-dir (conj {:path (str (apply io/file project-dir convention-dir))
+                            :layer :project}))))))
+
 (defn roots
   "The skill directories this session reads, as absolute path strings, in
   PRECEDENCE ORDER -- earlier entries win a name conflict.
+
+  The paths alone, for callers that want nothing but a directory to look in (the
+  fence, a tool body). A caller that has to SAY where a skill came from wants
+  `root-layers`, which is where those two are decided.
 
   SKILLS-CFG is the `:skills` value from harness.edn (or nil), which the caller
   takes from (harness.project/harness-config thread-id); PROJECT-DIR is that
@@ -53,14 +91,7 @@
   relative spelling is the tool-path rule; see harness.home/resolve-against."
   ([] (roots nil nil))
   ([skills-cfg project-dir]
-   (let [cfg (home/as-config-section skills-cfg ":skills" project-dir)]
-     (if (contains? cfg :roots)
-       (mapv #(home/resolve-against project-dir %)
-             (home/path-list (:roots cfg)
-                             "{:skills {:roots [\"/abs/skills\" \"relative/to/project\"]}}"
-                             ":skills {:roots" project-dir))
-       (cond-> [(str (apply io/file (home/user-home) convention-dir))]
-         project-dir (conj (str (apply io/file project-dir convention-dir))))))))
+   (mapv :path (root-layers skills-cfg project-dir))))
 
 ;; ------------------------------------------------------------------ the catalog
 ;;
@@ -248,6 +279,54 @@
                          " message right after it, so it is already in this conversation."]
                         (map (fn [{:keys [name description]}] (str "- " name ": " description))
                              usable))))))
+
+(defn- menu-row
+  "A `scan` entry -> the four things a row on the person's list needs. Deliberately
+  not the whole entry: :dir and :root belong to the group that holds the row, and
+  :disable-model-invocation? is not a row's business (see `skill-list`)."
+  [{:keys [name description available? reason]}]
+  {:name name :description description :available? available? :reason reason})
+
+(defn skill-list
+  "ROOT-LAYERS (see `root-layers`) -> the skill list a PERSON sees:
+  {:groups [{:layer ..? :root .. :skills [{:name .. :description .. :available? ..
+  :reason ..}]}]}, empty groups left out.
+
+  ONE GROUP PER ROOT THAT HOLDS SOMETHING, in precedence order, and that order is
+  the mechanism rather than a display choice: `scan` has ALREADY dropped a skill
+  whose name an earlier root supplied, so a name appears once, in the group of the
+  root that won it. A shadowed skill is not here because it cannot be loaded --
+  `scan` is the one place that answers 'whose is this name', and re-deriving the
+  loser would be a second answer to a question that already has one.
+
+  TWO DELIBERATE DIFFERENCES FROM THE MODEL'S CATALOG (`catalog-text`), and they
+  are about who is choosing:
+
+    - `disable-model-invocation` skills ARE here. The file says the MODEL may not
+      decide to use it; a person typing /name is the person deciding, and the
+      server loads it for them -- so a list of what a person can load that left it
+      out would be answering a different question than the one it is asked.
+    - BROKEN skills are here too, with :available? false and their :reason -- the
+      same standing `scan` gives them, and the same rule: a skill that silently
+      vanished and a skill that was never installed look identical from the
+      outside, and the second is much harder to debug. The caller draws them as
+      unpickable; being told WHY is the whole point of their being there.
+
+  Empty groups are left out rather than drawn as a heading over nothing. A session
+  whose roots hold no skills at all answers {:groups []} -- an ordinary state, not
+  an error (contrast `catalog-text`, which answers nil because a block that says
+  nothing should not be injected at all)."
+  [root-layers]
+  (let [entries (scan (mapv :path root-layers))]
+    {:groups
+     (into []
+           (keep (fn [{:keys [path layer]}]
+                   (let [mine (filterv #(= path (:root %)) entries)]
+                     (when (seq mine)
+                       (merge (when layer {:layer layer})
+                              {:root   path
+                               :skills (mapv menu-row mine)})))))
+           root-layers)}))
 
 (defn skill-for
   "ROOTS + NAME -> the skill NAME's directory entry, or nil.

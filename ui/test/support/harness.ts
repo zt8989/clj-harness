@@ -45,7 +45,17 @@ const SEED_CONFIG = '{:protocol :fake :base-url "http://offline.invalid/v1" :mod
 export interface Harness {
   url: string;
   scriptPath: string;
+  /** The config root (CLJ_HARNESS_HOME). The session logs live under it. */
   home: string;
+  /**
+   * The OS home -- the host's convention directory, where `~/AGENTS.md` and
+   * `~/.agents/skills` are read from. Handed back because a check that wants a
+   * SYSTEM-LEVEL skill in the catalogue has to write one before a run reads it,
+   * and the server pins this to a temp directory of its own unless the spawner
+   * names one (see `--user-home`). An empty user home is the normal case: the
+   * suites plant nothing unless they mean to.
+   */
+  userHome: string;
   stop: () => Promise<void>;
   startup: string;
   stderr: () => string;
@@ -98,7 +108,7 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<Ready> {
 }
 
 /**
- * Start one harness. Resolves to {url, scriptPath, home, stop, startup, stderr}.
+ * Start one harness. Resolves to {url, scriptPath, home, userHome, stop, startup, stderr}.
  *
  * `url` and `scriptPath` are what the suites consume: the e2e helpers post to the
  * former and write the latter as a case decides what the model should say.
@@ -107,12 +117,21 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<Ready> {
  * a session that has no project -- should a test ever want to read it; `startup`
  * and `stderr` are the child's captured output, kept for a failure message rather
  * than a test's assertion.
+ *
+ * `userHome` is the SECOND home, and it is a SIBLING of the first rather than a
+ * directory inside it. That is not tidiness: the config root is in the fence's
+ * allowed set, so a user home nested under it would answer a question the fence
+ * checks ask. It is passed to the child as `--user-home`, so the directory this
+ * spawner made is the one the server actually reads -- a check can plant a
+ * system-level skill in it and see that skill arrive.
  */
 export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number } = {}): Promise<Harness> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "clj-harness-ui-test-"));
   const home = path.join(base, "home");
+  const userHome = path.join(base, "user-home");
   const scriptPath = path.join(base, "script.json");
   fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(userHome, { recursive: true });
   seedHome(home);
   fs.writeFileSync(scriptPath, JSON.stringify({ turns: [] }), "utf8");
 
@@ -122,11 +141,15 @@ export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number
   // than streamed, so `npm test` output stays the tests'. Its stderr is kept
   // separate for the same reason -- a Clojure warning must not look like a test
   // problem.
-  const proc = spawn("clojure", [...E2E_ARGS, "--port", "0", "--script-file", scriptPath], {
-    cwd: REPO_ROOT,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const proc = spawn(
+    "clojure",
+    [...E2E_ARGS, "--port", "0", "--script-file", scriptPath, "--user-home", userHome],
+    {
+      cwd: REPO_ROOT,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   let stderr = "";
   if (proc.stderr !== null) {
     proc.stderr.on("data", (chunk: Buffer) => {
@@ -169,6 +192,7 @@ export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number
     url: `http://localhost:${port}/`,
     scriptPath,
     home,
+    userHome,
     stop,
     startup: output,
     stderr: () => stderr,

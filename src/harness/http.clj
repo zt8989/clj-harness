@@ -58,6 +58,7 @@
             [harness.preamble :as preamble]
             [harness.project :as project]
             [harness.replay :as replay]
+            [harness.skills :as skills]
             [harness.system-prompt :as system-prompt]
             [harness.tools :as tools]
             [org.httpkit.server :as hk])
@@ -1128,6 +1129,32 @@
   [req]
   (api-response 200 (providers/choices (get (query-params (:query-string req)) "threadId"))))
 
+(defn- skills-get
+  "GET /api/skills?threadId=.. -- the skill list a PERSON can pick from: this
+  session's roots grouped, each skill with its name, its description, and -- when
+  it cannot be used -- the reason. See harness.skills/skill-list for the shape and
+  for the two places it deliberately differs from the model's catalog.
+
+  THE ANSWER IS THE SERVER'S, and that is the point rather than an implementation
+  note: which roots this session reads, which of them is the machine's and which
+  the project's, who won a name conflict, and why a broken skill is broken are
+  questions `harness.skills` already answers. A client that re-derived any of them
+  would be a second answer, free to drift from the one the model's catalog is
+  built from -- and the two WOULD drift, because they are read at different
+  moments by different code.
+
+  An unbound session is not an error: it has the machine's skills and no project
+  ones, which is exactly what the list shows. A session with no skills at all
+  answers {:groups []} rather than a 404 -- 'nothing to pick' is an ordinary
+  state, and a caller should not have to read it as a failure (the same reason
+  GET /api/git answers {:dir nil} for a session with no directory).
+
+  READ-ONLY, and therefore leaves no trace: like GET /api/choices, only a route
+  that can CHANGE something writes an audit line."
+  [req]
+  (api-response 200 (skills/skill-list
+                     (project/skill-layers (get (query-params (:query-string req)) "threadId")))))
+
 (defn- git-get
   "GET /api/git?threadId=.. -- the session's directory as a working tree: the
   branch it is on, the branches it could be on, and how many changes are in the
@@ -1200,6 +1227,11 @@
     (= "/api/choices" (:uri req))
     (case (:request-method req)
       :get  (choices-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/skills" (:uri req))
+    (case (:request-method req)
+      :get  (skills-get req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/git" (:uri req))

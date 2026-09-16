@@ -126,6 +126,33 @@
     (testing "an empty list is a real answer: no roots at all"
       (is (= [] (skills/roots {:roots []} proj))))))
 
+(deftest the-layers-travel-with-the-roots
+  (testing "unbound: the machine's root, and the machine is the only layer there is"
+    (is (= [{:path (user-skills) :layer :system}]
+           (skills/root-layers))))
+
+  (testing "bound: the project's root joins it, as the project layer, second"
+    (let [proj (tmp-project! "layers")]
+      (is (= [{:path (user-skills) :layer :system}
+              {:path (str (io/file proj ".agents" "skills")) :layer :project}]
+             (skills/root-layers nil proj)))))
+
+  (testing "a configured list has NO layer at all -- the key is absent, not nil"
+    ;; The configuration never said 'system' or 'project' about those paths, so
+    ;; a layer read off their order would be a guess dressed as a fact. The path
+    ;; is there either way, and that is what a list falls back on.
+    (let [proj  (tmp-project! "cfg-layers")
+          roots (skills/root-layers {:roots ["/abs/one" ".agents/skills"]} proj)]
+      (is (= ["/abs/one" (str (io/file proj ".agents" "skills"))] (mapv :path roots)))
+      (is (not-any? #(contains? % :layer) roots))
+      (testing "and an empty list is still a real answer: no roots, no layers"
+        (is (= [] (skills/root-layers {:roots []} nil))))))
+
+  (testing "roots is this same answer with the layers dropped -- one default, not two"
+    (let [proj (tmp-project! "same-answer")]
+      (is (= (mapv :path (skills/root-layers nil proj))
+             (skills/roots nil proj))))))
+
 (deftest a-bad-roots-value-fails-by-name
   (let [proj (tmp-project! "bad")
         check (fn [bad re]
@@ -237,6 +264,73 @@
       (let [by-name (into {} (map (juxt :name identity)) (skills/scan [user-root proj-root]))]
         (is (= "shared does a thing" (:description (by-name "shared"))))
         (is (= user-root (:root (by-name "shared"))))))))
+
+(deftest the-skill-list-is-grouped-by-root-and-each-row-carries-what-a-menu-needs
+  ;; The person's list, not the model's catalog: the same roots, read through the
+  ;; same `scan`, answering the questions a menu row asks.
+  (let [user-root (lay-user-skills! "alpha")
+        proj      (tmp-project! "list")
+        proj-root (str (io/file proj ".agents" "skills"))]
+    (.mkdirs (io/file proj-root))
+    (lay-skill! proj-root "only-project" (skill-md "only-project" "project only"))
+
+    (let [{:keys [groups]} (skills/skill-list (skills/root-layers nil proj))]
+      (testing "one group per root that holds something, in precedence order, layer named"
+        (is (= [:system :project] (mapv :layer groups)))
+        (is (= [user-root proj-root] (mapv :root groups))))
+
+      (testing "a row is the four things a menu needs -- and nothing else"
+        (is (= [{:name "alpha" :description "alpha does a thing"
+                 :available? true :reason nil}]
+               (:skills (first groups))))
+        (is (= ["only-project"] (mapv :name (:skills (second groups)))))))))
+
+(deftest a-skill-shadowed-by-an-earlier-root-is-absent-from-the-list
+  ;; It cannot be loaded, and `scan` already answered whose that name is -- so
+  ;; listing the loser would be a second answer to a settled question.
+  (let [user-root (lay-user-skills! "shared")
+        proj      (tmp-project! "shadowed")
+        proj-root (str (io/file proj ".agents" "skills"))]
+    (.mkdirs (io/file proj-root))
+    (lay-skill! proj-root "shared" (skill-md "shared" "the PROJECT's shared"))
+
+    (let [{:keys [groups]} (skills/skill-list (skills/root-layers nil proj))
+          rows (mapcat :skills groups)]
+      (testing "the name appears once, in the group of the root that won it"
+        (is (= ["shared"] (mapv :name rows)))
+        (is (= "shared does a thing" (:description (first rows)))
+            "the machine's copy is the one that won")
+        (is (= [:system] (mapv :layer groups))
+            "and the project's group has nothing left in it, so it is not drawn")))))
+
+(deftest the-list-holds-what-a-person-may-load-not-what-the-model-may-use
+  (let [root (lay-user-skills! "alpha")]
+    (lay-skill! root "manual-only"
+                (skill-md "manual-only" "only a human runs this" "disable-model-invocation: true\n"))
+    (lay-skill! root "misnamed" (skill-md "something-else" "says a different name"))
+    (let [{:keys [groups]} (skills/skill-list (skills/root-layers))
+          by-name (into {} (map (juxt :name identity)) (mapcat :skills groups))]
+
+      (testing "a skill the MODEL may not invoke is still on the person's list"
+        ;; A person typing /name is the person deciding -- the server loads it for
+        ;; them -- so a list of what a person can load that left it out would be
+        ;; answering a different question than the one it is asked.
+        (is (true? (:available? (by-name "manual-only"))))
+        (is (not (str/includes? (skills/catalog-text [root]) "manual-only"))
+            "and it is still absent from the model's catalog"))
+
+      (testing "a broken skill is on the list too, with the reason it is broken"
+        (is (some? (by-name "misnamed")))
+        (is (false? (:available? (by-name "misnamed"))))
+        (is (= :name-mismatch (:reason (by-name "misnamed"))))))))
+
+(deftest a-session-with-nothing-to-load-has-an-empty-list-rather-than-an-error
+  (testing "no roots at all"
+    (is (= {:groups []} (skills/skill-list []))))
+  (testing "a root with no skills under it"
+    (let [proj (tmp-project! "nothing")]
+      (project/bind! "sk-9" proj)
+      (is (= {:groups []} (skills/skill-list (skills/root-layers nil proj)))))))
 
 (deftest the-catalog-block-lists-names-and-descriptions-and-never-bodies
   (let [root (lay-user-skills! "alpha" "beta")
