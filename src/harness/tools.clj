@@ -1,5 +1,5 @@
 (ns harness.tools
-  "The tool table: the immutable base of six built-ins, the per-session overlay
+  "The tool table: the immutable base of built-ins, the per-session overlay
   over it, the parked calls a human still has to answer, and the execution seam.
 
   A tool is
@@ -64,7 +64,7 @@
 
 (defn- register!
   "Put NAME->TOOL into the process-wide base. PRIVATE, and it should stay that
-  way: this is how the six built-ins below are declared, and the base is
+  way: this is how the built-ins below are declared, and the base is
   immutable at runtime -- nothing outside this namespace registers anything. A
   session's own definitions go through session-register!, which lands in the
   overlay instead and never touches this atom."

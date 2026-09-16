@@ -1,9 +1,9 @@
 (ns harness.hooks-wired-test
-  "The four hook points that are wired, through the real HTTP edge: SessionStart
-  on a session's first run, PostToolUse after a successful tool, Stop when a run
-  ends normally, and InstructionsLoaded once per instruction file folded -- plus
-  the regression that matters most, that a session which declares nothing behaves
-  exactly as it did before hooks existed.
+  "The hook points that are wired, through the real HTTP edge: SessionStart on a
+  session's first run, PostToolUse after a successful tool, Stop when a run ends
+  normally, InstructionsLoaded once per instruction file folded, and SystemPrompt
+  while the system message is assembled -- plus the regression that matters most,
+  that a session which DECLARES nothing fires nothing but the kernel's own rows.
 
   The edge is the layer that has to be exercised here, because it is the edge that
   binds the run's hook sink: everything below it (offline tools, replay) fires
@@ -126,21 +126,36 @@
 
 ;; --------------------------------------------------- nothing declared, nothing
 
-(deftest a-session-with-no-hooks-behaves-exactly-as-before
+(deftest a-session-that-declares-nothing-fires-only-the-kernels-own-rows
+  ;; The regression that matters most, restated for a table that now holds the
+  ;; kernel's own rows: a session which DECLARES nothing leaves the declaration
+  ;; points silent, and the one hook line a run leaves is the SystemPrompt row the
+  ;; kernel registered for itself -- because that row appends text to the system
+  ;; message on every run, and a trigger that did work leaves a line.
   (wipe!)
   (with-server
    "hw-none"
    (fn []
      (io/delete-file (log-file "hw-none") true)
      (post-run "hw-none")
-     (let [ls (wait-for (log-file "hw-none")
-                        (fn [ls] (some #(= "Stop" (:kind %)) (hook-lines ls)))
-                        1500)]
-       (testing "no hook/ line is written at all -- an untouched run leaves no trace"
-         (is (empty? (hook-lines ls))))
-       (testing "and the run itself is complete and well-formed"
-         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type]))
-                   (filter #(= "event" (:kind %)) ls))))))))
+     (let [_  (wait-for (log-file "hw-none")
+                        (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+                        1500)
+           ;; Stop fires as the run ends and the returned message tail lands one
+           ;; beat after the terminal frame, so the run is given a moment to finish
+           ;; writing before the claim "and nothing else fired" is made. Same shape
+           ;; as the second-run check in session-start-fires-once below.
+           _  (Thread/sleep 300)
+           ls (log-lines (log-file "hw-none"))]
+       (testing "the only hook line is the kernel's own SystemPrompt trigger"
+         (is (= ["hook/SystemPrompt"] (mapv :kind (hook-lines ls)))))
+       (testing "and every point a session would have to declare at is silent"
+         (is (empty? (filter #(contains? #{"hook/SessionStart" "hook/PostToolUse"
+                                           "hook/Stop" "hook/InstructionsLoaded"}
+                                         (:kind %))
+                             ls))))
+       (testing "the run itself is complete and well-formed"
+         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))
 
 ;; ------------------------------------------------------------------ SessionStart
 

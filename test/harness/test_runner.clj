@@ -63,6 +63,7 @@
     harness.hooks-test
     harness.hooks-dispatch-test
     harness.hooks-wired-test
+    harness.system-prompt-test
     harness.http-test])
 
 (def ^:private tmp-home

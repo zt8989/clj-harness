@@ -1055,9 +1055,19 @@
               (testing "a string search of the WHOLE body does not find it"
                 (is (not (str/includes? body sentinel)))
                 (is (not (str/includes? body (subs sentinel 0 12)))
-                    "not even the prefix: a partially redacted key is still a leak")
-                (is (not (str/includes? body (str (count sentinel))))
-                    "and not its length either")))
+                    "not even the prefix: a partially redacted key is still a leak"))
+              (testing "and not its length either -- as a VALUE anywhere in the answer"
+                ;; AS A VALUE, not as a substring, and the difference is a bug this
+                ;; assertion used to have. The body always carries this home's
+                ;; ABSOLUTE PATH, whose millisecond stamp is an arbitrary digit
+                ;; run -- so a run whose stamp happened to contain "39" (the
+                ;; sentinel's length) failed the substring form for a reason that
+                ;; had nothing to do with the key, roughly one run in fifty. A path
+                ;; is a string, so it can never be `=` to a number, and the claim
+                ;; -- the length does not appear in the answer -- survives intact.
+                (is (not-any? #(= (count sentinel) %)
+                              (remove coll? (tree-seq coll? seq parsed))))
+                (is (not (contains? parsed (keyword (str (count sentinel))))))))
               (finally
                 (providers/set-override! "st-1" nil))))))))
 

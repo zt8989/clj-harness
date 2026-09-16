@@ -1,11 +1,19 @@
 (ns harness.hooks-test
-  "harness.hooks' external behavior: the point table, the two-level hooks.edn
-  assembly, and the named failures that make a typo loud instead of silent.
+  "harness.hooks' external behavior: the point table, the three sources
+  declarations come from, and the named failures that make a typo loud instead of
+  silent.
 
   Nothing here spawns anything -- running a declaration is harness.hooks.dispatch's
   business and has its own ticket. What this namespace pins is the DATA the engine
   dispatches over: which points exist, what they may be declared with, and which
-  declarations are in force for a thread."
+  declarations are in force for a thread.
+
+  THE KERNEL'S OWN ROWS ARE NOT THIS NAMESPACE'S SUBJECT. They are in every
+  thread's table the moment harness.system-prompt loads, which in a full suite is
+  before a single test here runs -- so the assertions below ask about what a
+  thread DECLARED (`declared`) rather than about the whole table, and the built-in
+  source gets its own namespace (harness.system-prompt-test) where the live rows
+  and their content are the point."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -15,6 +23,13 @@
             [harness.hooks.dispatch :as dispatch]
             [harness.project :as project]
             [harness.tools :as tools]))
+
+(defn- declared
+  "The rows THREAD-ID DECLARED: the file's and its session's own, with the
+  kernel's built-in rows filtered out -- see the docstring above for why they are
+  not this namespace's question."
+  [thread-id]
+  (remove #(= :built-in (:source %)) (vals (hooks/effective-hooks thread-id))))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-test"))
 
@@ -45,8 +60,8 @@
 ;; ------------------------------------------------------------- the point table
 
 (deftest the-point-table-is-data-and-holds-every-point
-  (testing "26 points, each a row of facts rather than a code path"
-    (is (= 26 (count hooks/points)))
+  (testing "27 points, each a row of facts rather than a code path"
+    (is (= 27 (count hooks/points)))
     (is (every? (fn [p] (and (string? (:name p))
                              (string? (:when p))
                              (set? (:payload p))
@@ -69,8 +84,28 @@
     (is (nil? (hooks/point-for :pre-tool-use!)))
     (is (nil? (hooks/point-for "pre-tool-use"))))
   (testing "point-keys is what a failure message lists"
-    (is (= 26 (count hooks/point-keys)))
+    (is (= 27 (count hooks/point-keys)))
     (is (= hooks/point-keys (vec (sort hooks/point-keys))))))
+
+(deftest the-system-prompt-point-was-added-as-one-row-of-the-same-table
+  (let [p (hooks/point-for :system-prompt)]
+    (testing "it is the 27th point, and the key the unknown-point failure now lists"
+      (is (= "SystemPrompt" (:name p)))
+      (is (str/includes? (pr-str hooks/point-keys) ":system-prompt")))
+    (testing "it fires while a run's system message is assembled, before the model sees it"
+      (is (str/includes? (:when p) "system message")))
+    (testing "its payload is the common facts alone -- there is nothing to match"
+      (is (= #{} (:payload p)))
+      (is (nil? (:matches p))))
+    (testing "it is a gate: a declaration that says no stops the run before it starts"
+      (is (:gate? p))
+      (is (= :block (:on-error p))))
+    (testing "and it carries the one cell that makes its stdout mean something"
+      ;; The absence of this cell is the base protocol: exit codes decide, and
+      ;; stdout is read only for a JSON answer. :content says stdout IS the result.
+      (is (= :content (:stdout p)))
+      (testing "no other point claims it"
+        (is (empty? (filter :stdout (remove #(= "SystemPrompt" (:name %)) hooks/points))))))))
 
 (deftest the-points-with-a-match-target-are-the-tool-and-file-ones
   (is (= #{:pre-tool-use :permission-request :permission-denied
@@ -82,18 +117,17 @@
 ;; ---------------------------------------------------------- the two-level read
 
 (deftest a-missing-hooks-edn-is-the-empty-configuration
-  (testing "a fresh install has no hooks at all"
-    (is (empty? (hooks/effective-hooks nil)))
+  (testing "a fresh install has DECLARED no hooks at all"
+    (is (empty? (declared nil)))
     (is (empty? (hooks/declarations-at nil :stop))))
   (testing "and the same for a bound thread with no files"
     (project/bind! "h-none" root)
-    (try (is (empty? (hooks/effective-hooks "h-none")))
+    (try (is (empty? (declared "h-none")))
          (finally (project/bind! "h-none" nil)))))
 
 (deftest a-declaration-loads-with-an-id-a-session-can-name
   (user-hooks (pr-str {:stop [{:command "notify.sh" :timeout 2000}]}))
-  (let [e (hooks/effective-hooks nil)
-        d (first (vals e))]
+  (let [d (get (hooks/effective-hooks nil) "stop#0")]
     (testing "it reports the fields it was declared with, plus what it answers to"
       (is (= "notify.sh" (:command d)))
       (is (= 2000 (:timeout d)))
@@ -164,6 +198,65 @@
     (user-hooks (pr-str {:stop ["x.sh"]}))
     (is (thrown-with-msg? Exception #"must be a map"
                           (hooks/effective-hooks nil)))))
+
+(deftest a-declaration-says-what-it-runs-and-says-it-once
+  (testing "neither :command nor :run -- the row says nothing about what to run"
+    (user-hooks (pr-str {:stop [{:timeout 100}]}))
+    (let [e (try (hooks/effective-hooks nil) nil (catch Exception e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "non-empty string :command"))
+      (is (str/includes? (ex-message e) "callable :run")
+          "the failure names BOTH ways to say it, because either one fixes the row")))
+  (testing "both at once -- the row says two contradictory things"
+    (let [e (try (hooks/session-add! "hs-two-kinds"
+                                     :stop {:command "x.sh" :run (fn [_] nil)})
+                 nil (catch Exception e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "both :command and :run"))
+      (is (str/includes? (ex-message e) "exactly one thing"))))
+  (testing "a :run that is not callable is refused by name"
+    (is (thrown-with-msg? Exception #":run must be callable"
+                          (hooks/session-add! "hs-run" :stop {:run "not-a-fn"})))
+    (is (thrown-with-msg? Exception #":run must be callable"
+                          (hooks/session-add! "hs-run" :stop {:run nil})))))
+
+(deftest a-run-declaration-belongs-to-a-session-not-to-a-file
+  ;; A file cannot hold a function, and that is a fact about FILES rather than a
+  ;; missing feature -- so the refusal has to say where the row can live instead,
+  ;; rather than reading as a misspelling of some field.
+  (testing "hooks.edn refuses :run, by name, and says where it can go"
+    ;; The value here is not a fn because EDN cannot even carry one: the file's
+    ;; reader would fail on the syntax first, which is a different (and louder)
+    ;; failure. What a file CAN write is the key -- and the key is what is refused.
+    (user-hooks (pr-str {:stop [{:run "not-a-fn"}]}))
+    (let [e (try (hooks/effective-hooks nil) nil (catch Exception e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "a file cannot hold a function"))
+      (is (str/includes? (ex-message e) "session-add!"))
+      (is (= :run-in-a-file (:reason (ex-data e))))))
+  (testing "the session is the one source that takes both"
+    ;; The broken file above declares for EVERY thread, so it is cleared first --
+    ;; otherwise the row that cannot be read would take this half down with it.
+    (io/delete-file (io/file (home/root) "hooks.edn") true)
+    (let [by-command (hooks/session-add! "hs-both" :stop {:command "notify.sh"})
+          inline     (hooks/session-add! "hs-both" :stop {:run (fn [_] {:exit 0 :out "" :err ""})})]
+      (is (= "stop@1" by-command))
+      (is (= "stop@2" inline))
+      (let [rows (hooks/declarations-at "hs-both" :stop)]
+        (is (= 2 (count rows)))
+        (is (= "notify.sh" (:command (first rows))))
+        (is (ifn? (:run (second rows))))))))
+
+(deftest a-timeout-is-for-a-spawn-and-a-run-hook-has-none
+  ;; Accepting the field and ignoring it would be the silent no-op the unknown-key
+  ;; check exists to stop: the author wrote a bound and no bound took effect.
+  (user-hooks (pr-str {:stop [{:command "notify.sh" :timeout 5000}]}))
+  (is (= 1 (count (hooks/declarations-at nil :stop))) "the field is real for a command")
+  (let [e (try (hooks/session-add! "hs-t" :stop {:run (fn [_] nil) :timeout 5000})
+               nil (catch Exception e e))]
+    (is (some? e))
+    (is (str/includes? (ex-message e) ":timeout with :run"))
+    (is (= :timeout-on-a-run (:reason (ex-data e))))))
 
 (deftest a-matcher-is-only-for-points-that-match-something
   (testing "a tool point takes one, and it must compile as a regex"
@@ -272,7 +365,7 @@
   (hooks/session-add! "hs-mine" :pre-tool-use {:command "gate.sh"})
   (hooks/session-disable! "hs-mine" "stop#0")
   (testing "another thread sees none of it"
-    (is (empty? (hooks/effective-hooks "hs-other")))
+    (is (empty? (declared "hs-other")))
     (is (empty? (hooks/declarations-at "hs-other" :pre-tool-use)))
     (is (false? (hooks/session-hook-disabled? "hs-other" "stop#0")))))
 
@@ -328,7 +421,7 @@
             (is (= 0 (:matched (fire))))
             (is (not (.exists (io/file marker))) "the disabled hook really did not run")
             (testing "another session cannot see or touch it"
-              (is (empty? (hooks/effective-hooks "t-other-session")))
+              (is (empty? (declared "t-other-session")))
               (is (empty? (hooks/declarations-at "t-other-session" :stop))))
             (testing "switching it back on resumes it"
               (is (false? (:error (call (str "(harness.hooks/session-enable! \"" tid "\" \"" id "\")")))))
@@ -338,3 +431,59 @@
             (let [r (call (str "(keys (harness.hooks/effective-hooks \"" tid "\"))"))]
               (is (false? (:error r)))
               (is (str/includes? (:content r) "stop@1")))))))))
+
+;; ---------------------------- an in-process gate, through the real tool seam
+
+(deftest an-in-process-gate-refuses-a-real-tool-call-and-the-run-carries-on
+  ;; The third source's demonstration, and the reason the run seam exists: a
+  ;; declaration that is a FUNCTION goes through exactly the seam a command does
+  ;; -- the same exit codes, the same stderr-as-reason, the same "the run carries
+  ;; on and the model is told why", the same audit line. Driven through
+  ;; harness.tools/run! (the real execution seam) with a sink bound by the test,
+  ;; because the sink is what makes a trigger fire outside harness.http.
+  (let [tid    "t-inline-gate"
+        audits (atom [])
+        call   (fn [id]
+                 (tools/run! {:id id :type "function"
+                              :function {:name "bash"
+                                         :arguments (json/write-str {:command "echo gate-ran"})}}
+                             tid))
+        eval!  (fn [id code]
+                 (tools/run! {:id id :type "function"
+                              :function {:name "eval"
+                                         :arguments (json/write-str {:code code})}}
+                             tid))]
+    (binding [dispatch/*sink* {:thread-id tid :run-id "r-inline"
+                               :audit #(swap! audits conj %)}]
+      (testing "with nothing installed the call runs"
+        (let [r (call "c1")]
+          (is (false? (:error r)))
+          (is (str/includes? (:content r) "gate-ran"))))
+      (testing "eval installs an in-process gate, and it answers with exit 2"
+        ;; Matched on bash so the installer's own eval calls stay free -- a gate
+        ;; with no matcher refuses every call, including the one that would switch
+        ;; it off again.
+        (let [r (eval! "e1" (str "(harness.hooks/session-add! \"" tid "\" :pre-tool-use"
+                                 " {:matcher \"bash\""
+                                 "  :run (fn [_] {:exit 2 :out \"\" :err \"no bash before breakfast\"})})"))]
+          (is (false? (:error r)))
+          (is (= "pre-tool-use@1" (read-string (:content r))))))
+      (testing "the call does not execute, and the hook's own words are the model's answer"
+        (let [refused (call "c2")]
+          (is (true? (:error refused)))
+          (is (str/includes? (:content refused) "blocked by a PreToolUse hook"))
+          (is (str/includes? (:content refused) "no bash before breakfast"))))
+      (testing "the run carries on -- one refused call is information, not a failure"
+        (is (false? (:error (eval! "e2" "(+ 1 2)")))))
+      (testing "switching the gate off lets the call through again"
+        (is (false? (:error (eval! "e3" (str "(harness.hooks/session-disable! \"" tid
+                                                    "\" \"pre-tool-use@1\")")))))
+        (let [r (call "c3")]
+          (is (false? (:error r)))
+          (is (str/includes? (:content r) "gate-ran"))))
+      (testing "and the gate left the ordinary audit line, with the in-process answer on it"
+        (let [line (first (filter #(= "PreToolUse" (:point %)) @audits))]
+          (is (some? line))
+          (is (= 1 (:matched line)))
+          (is (= :block (:verdict line)))
+          (is (= "no bash before breakfast" (:reason line))))))))

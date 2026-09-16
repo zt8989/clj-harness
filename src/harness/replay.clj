@@ -36,9 +36,9 @@
             [harness.ag-ui :as ag]
             [harness.frames :as frames]
             [harness.home :as home]
-            [harness.llm :as llm]
             [harness.providers :as providers]
-            [harness.loop :as loop]))
+            [harness.loop :as loop]
+            [harness.system-prompt :as system-prompt]))
 
 (defn read-lines
   "A log FILE's raw lines (see harness.home/log-file). A missing log is a NAMED
@@ -144,6 +144,21 @@
     {:messages (records->messages records)
      :context  (:context input)}))
 
+(defn- thread-id-of
+  "The session a log FILE belongs to: its stem. The writer names the file through
+  harness.home/sanitize, so reading the name back is the same 'what is on disk is
+  what there is' stance `threads` takes -- asking the store instead would answer a
+  different question, and would fail for a log that was moved by hand.
+
+  This exists for the system message's sake. Replay has no hook sink, so assembly
+  appends nothing here -- but the DERIVATION is what matters: whoever assembles a
+  system message recomputes it from live facts for THIS thread rather than reading
+  a copy out of the log, and that argument has to name the thread even when the
+  answer is currently 'nothing to append'."
+  [^java.io.File f]
+  (let [n (.getName f)]
+    (subs n 0 (- (count n) (count ".jsonl")))))
+
 (defn history
   "A log FILE -> the provider-shaped messages you can hand straight to
   loop/run-chan.
@@ -151,10 +166,18 @@
   This is the whole point of the namespace: after the process that wrote the log is
   gone, this rebuilds the conversation that was in flight, reasoning and tool results
   included, and it comes back in exactly the shape the model expects -- the reasoning
-  folded onto its assistant message, calls in the provider's casing."
+  folded onto its assistant message, calls in the provider's casing.
+
+  The system message is ASSEMBLED, not read out of the log: prompt.md's frozen
+  opening plus whatever the SystemPrompt hooks append for the thread the file
+  names. Nothing is appended here, because replay has no hook sink (see
+  harness.system-prompt/assemble) -- so what comes back is the frozen opening, byte
+  for byte, which is exactly what the tests below pin."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))]
-    (ag/inbound (records->messages records) (llm/prompt) (:context (first-input records)))))
+    (ag/inbound (records->messages records)
+                (system-prompt/assemble (thread-id-of f))
+                (:context (first-input records)))))
 
 (defn- logs-under
   "Every *.jsonl file at any depth under DIR, in no particular order. The tree is
