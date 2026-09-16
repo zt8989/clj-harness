@@ -335,3 +335,45 @@
             ctx  [{:description "repo" :value "x"}]]
         (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" [] ctx)))
         (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" nil ctx)))))))
+
+(deftest a-field-the-client-carried-itself-is-not-dropped
+  ;; The whitelist rebuild used to keep only the FOLDED reasoning (a preceding
+  ;; `reasoning`-role message) and throw away a field carried on the assistant
+  ;; message itself. Both are the same fact stated by different clients, and the
+  ;; second is what a thinking-mode vendor insists on getting back.
+  (let [inbound (fn [msgs] (ag/inbound msgs "SYS" nil nil))
+        assistant (fn [msgs] (first (filter #(= "assistant" (:role %)) (inbound msgs))))]
+
+    (testing "carried on the message, with no reasoning message before it"
+      (let [m (assistant [{:role "user" :content "hi"}
+                          {:role "assistant" :content "hello"
+                           :reasoning_content "I looked it up"}])]
+        (is (= "I looked it up" (:reasoning_content m))
+            "the field survives the rebuild")))
+
+    (testing "an EMPTY field is a statement too, and survives as one"
+      (let [m (assistant [{:role "user" :content "hi"}
+                          {:role "assistant" :content "hello" :reasoning_content ""}])]
+        (is (= "" (:reasoning_content m))
+            "the vendor said 'this round had no reasoning' -- the client passes that on")))
+
+    (testing "folded from the neighbour, as before"
+      (let [m (assistant [{:role "user" :content "hi"}
+                          {:role "reasoning" :content "I looked it up"}
+                          {:role "assistant" :content "hello"}])]
+        (is (= "I looked it up" (:reasoning_content m)))))
+
+    (testing "both at once: the message's own field wins"
+      ;; It is the more specific statement -- that message's reasoning, rather than
+      ;; its neighbour's -- and the rule is written down here rather than left to
+      ;; whichever branch a future edit happens to run first.
+      (let [m (assistant [{:role "user" :content "hi"}
+                          {:role "reasoning" :content "the neighbour's words"}
+                          {:role "assistant" :content "hello"
+                           :reasoning_content "my own words"}])]
+        (is (= "my own words" (:reasoning_content m)))))
+
+    (testing "and nothing is invented when neither is there"
+      (is (not (contains? (assistant [{:role "user" :content "hi"}
+                                      {:role "assistant" :content "hello"}])
+                          :reasoning_content))))))

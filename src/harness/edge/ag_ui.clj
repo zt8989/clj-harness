@@ -221,10 +221,21 @@
 (defn- provider-assistant
   "Whitelist rebuild. Content is translated (assistant content is a string in
   practice, but a multimodal turn is legal and must not arrive untranslated),
-  everything else is either renamed to the provider's casing or dropped."
+  everything else is either renamed to the provider's casing or dropped.
+
+  `reasoning_content` COMES FROM TWO PLACES AND BOTH ARE KEPT. The shipped client
+  splits reasoning into a separate `reasoning`-role message before the assistant one
+  (that is REASONING, above -- the fold the outbound side relies on), but another
+  client may simply carry the field on the message itself. Dropping the second would
+  be a silent loss of exactly what a thinking-mode vendor demands back: the message's
+  OWN field wins when it is there, because it is the more specific statement about
+  that message, and a message that says 'my reasoning is empty' is saying something."
   [m reasoning]
   (cond-> {:role "assistant" :content (provider-content (or (:content m) ""))}
-    (seq reasoning)      (assoc :reasoning_content reasoning)
+    (or (contains? m :reasoning_content) (seq reasoning))
+    (assoc :reasoning_content (if (contains? m :reasoning_content)
+                                (str (:reasoning_content m))
+                                reasoning))
     (seq (:toolCalls m)) (assoc :tool_calls (mapv provider-tool-call (:toolCalls m)))))
 
 (defn- provider-user

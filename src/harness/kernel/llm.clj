@@ -14,6 +14,14 @@
   tool rounds, which DeepSeek requires whenever the request carries tools
   (omitting it there is a hard HTTP 400).
 
+  VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
+  mentions `reasoning_content` on every round, empty when the round had no reasoning,
+  and it demands the field back -- so an empty mention is kept as an empty value rather
+  than dropped (`consume-sse`). A history that arrives WITHOUT it -- the client sent it
+  back, or a round predates this rule -- is repaired on the way out by
+  `thinking-mode-history`, which the edge applies before the `message` audit line is
+  written. See .scratch/reasoning-round-trip/spec.md for the verified vendor behaviour.
+
   The system prompt's carrier lives here too: prompt.md is read once and frozen
   (see `prompt` / `reset-prompt!` below), because the provider's prefix cache is
   what makes the freezing matter.
@@ -89,15 +97,29 @@
         :when (not= "[DONE]" payload)]
     payload))
 
+(defn- reasoning-field
+  "DELTA's reasoning -> [text present?]. PRESENT? says the vendor MENTIONED the field
+  at all, which is not the same as it carrying text, and the difference matters on
+  the way out: see `consume-sse`.
+
+  Two spellings are accepted, because the vendors disagree and neither is wrong:
+  DeepSeek uses `reasoning_content`, OpenRouter proxies it as `reasoning`. One
+  definition for both the assembly and the emit, so a third spelling would be added
+  in one place."
+  [delta]
+  (cond
+    (contains? delta :reasoning_content) [(str (:reasoning_content delta)) true]
+    (contains? delta :reasoning)         [(str (:reasoning delta)) true]
+    :else                                [nil false]))
+
 (defn- absorb!
   "Fold one chunk's delta into TEXT, THINK and CALLS.
   Tool-call fragments arrive spread across chunks: the first carries id and name,
-  later ones only index plus an arguments fragment. Key by index and concatenate.
-  OpenRouter proxies reasoning as `reasoning` while DeepSeek uses
-  `reasoning_content`; both are accepted."
+  later ones only index plus an arguments fragment. Key by index and concatenate."
   [text think calls delta]
   (when-let [c (:content delta)] (.append text c))
-  (when-let [r (or (:reasoning_content delta) (:reasoning delta))] (.append think r))
+  (let [[r present?] (reasoning-field delta)]
+    (when present? (.append think (or r ""))))
   (doseq [tc (:tool_calls delta)]
     (let [i (:index tc)]
       (when-let [id (:id tc)] (swap! calls assoc-in [i :id] id))
@@ -112,7 +134,7 @@
   adjacency rule ag-ui relies on to fold reasoning back onto its assistant message."
   [delta emit]
   (when (seq (:content delta)) (emit (ev/text-delta (:content delta))))
-  (when-let [r (or (:reasoning_content delta) (:reasoning delta))]
+  (let [[r _] (reasoning-field delta)]
     (when (seq r) (emit (ev/reasoning-delta r)))))
 
 (defn- fold-tool-calls [calls]
@@ -127,9 +149,12 @@
   [lines emit]
   (let [text  (StringBuilder.)
         think (StringBuilder.)
-        calls (atom {})]
+        calls (atom {})
+        seen? (atom false)]
     (doseq [payload (data-payloads lines)]
-      (let [delta (get-in (json/read-str payload :key-fn keyword) [:choices 0 :delta])]
+      (let [delta (get-in (json/read-str payload :key-fn keyword) [:choices 0 :delta])
+            [_ present?] (reasoning-field delta)]
+        (when present? (reset! seen? true))
         (absorb! text think calls delta)
         (speak! delta emit)))
     (let [assembled (fold-tool-calls @calls)]
@@ -138,8 +163,54 @@
       (doseq [{:keys [id function]} assembled]
         (emit (ev/tool-call id (:name function) (:arguments function))))
       (cond-> {:role "assistant" :content (str text)}
-        (pos? (.length think)) (assoc :reasoning_content (str think))
-        (seq assembled)        (assoc :tool_calls assembled)))))
+        ;; THE FIELD IS KEPT WHEN THE VENDOR MENTIONED IT, EMPTY INCLUDED -- which is
+        ;; not the same rule as 'when there is text'. A thinking-mode vendor that has
+        ;; nothing to reason about still sends the field, and it REQUIRES it back on
+        ;; the next request (a DeepSeek-compatible gateway answers HTTP 400 otherwise:
+        ;; 'The reasoning_content in the thinking mode must be passed back to the API').
+        ;; Answering 'the vendor said nothing' with silence is what this used to do,
+        ;; and it is what made the next request impossible: see
+        ;; `thinking-mode-history` and .scratch/reasoning-round-trip/spec.md.
+        @seen?          (assoc :reasoning_content (str think))
+        (seq assembled) (assoc :tool_calls assembled)))))
+
+(defn thinking-mode-history
+  "MESSAGES -> the history a THINKING-MODE vendor must be shown, which is the same
+  history with one requirement met: **every assistant message carries
+  `reasoning_content`**, an empty string when there was none.
+
+  IT IS THE VENDOR'S RULE, NOT OUR TIDINESS. A DeepSeek-compatible gateway refuses a
+  thinking-mode request whose history holds an assistant message without that field
+  -- `The reasoning_content in the thinking mode must be passed back to the API.`,
+  HTTP 400 -- and it refuses even when the round it objects to produced no reasoning
+  at all. That is exactly the case this exists for: the vendor signals 'no reasoning
+  this round' as an EMPTY value on the wire, our assembly reads that as 'nothing to
+  say' and writes no key, and the next request is refused. Verified against a real
+  vendor on 2026-09-16 -- the same history 400s without the key and streams 200 with
+  `\"\"`; the transcripts are in `.scratch/reasoning-round-trip/evidence/`, and
+  `harness.fake`'s strict mode answers with that vendor's own sentence.
+
+  AN EMPTY STRING IS THE HONEST FILL: not reasoning the model did not produce, but
+  the fact that this round had none, said in the shape the vendor demands. Anything
+  else -- the previous round's reasoning, a summary -- would be putting words in the
+  model's mouth and sending them back as if it had thought them.
+
+  A NON-THINKING PROVIDER IS UNTOUCHED, byte for byte: with no :reasoning-effort the
+  vendor never enters thinking mode, the field means nothing to it, and adding one
+  would be our invention rather than its requirement.
+
+  CALLED WHERE THE RUN'S MESSAGES ARE ASSEMBLED rather than inside `stream!`: the
+  `message` audit line's contract is 'what the LLM actually saw, verbatim', so the
+  padding has to happen before that line is written. See harness.edge.http/run-agent!."
+  [messages provider]
+  (if-not (:reasoning-effort provider)
+    messages
+    (mapv (fn [m]
+            (if (and (= "assistant" (:role m))
+                     (not (contains? m :reasoning_content)))
+              (assoc m :reasoning_content "")
+              m))
+          messages)))
 
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort] :as provider} messages on-event thread-id]

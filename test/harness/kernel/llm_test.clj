@@ -74,6 +74,52 @@
 (deftest omits-empty-fields
   (let [{:keys [msg]} (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}"])]
     (is (= "hi" (:content msg)))
-    (testing "no reasoning and no tool calls means no such keys, not empty ones"
+    (testing "a vendor that says nothing about reasoning leaves no key"
+      ;; 'Said nothing' and 'said empty' are DIFFERENT FACTS, and the difference is
+      ;; load-bearing: a thinking-mode vendor mentions the field on every round and
+      ;; requires it back, so its empty value has to survive (see the tests below),
+      ;; while a vendor that never mentions it must not have one invented for it.
       (is (not (contains? msg :reasoning_content)))
-      (is (not (contains? msg :tool_calls))))))
+      (is (not (contains? msg :tool_calls)))))
+
+  (testing "but a vendor that MENTIONS it keeps it, empty and all"
+    (let [{:keys [msg]} (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\"}}]}"
+                                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}"])]
+      (is (= "hi" (:content msg)))
+      (is (= "" (:reasoning_content msg))
+          "the empty value is the vendor telling us this round had no reasoning -- and
+           asking for it back on the next request")))
+  (testing "and the other spelling counts as mentioning it too"
+    (let [{:keys [msg]} (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\",\"reasoning\":\"\"}}]}"])]
+      (is (= "" (:reasoning_content msg))))))
+
+;; ------------------------------------------------- the thinking-mode requirement
+
+(deftest a-thinking-mode-history-carries-the-field-on-every-assistant-message
+  ;; The vendor's rule, and the reason it exists: a DeepSeek-compatible gateway
+  ;; refuses a thinking-mode request whose history holds an assistant message with
+  ;; no `reasoning_content` -- even the rounds that produced none, which is the case
+  ;; that bit a real home (see .scratch/reasoning-round-trip/spec.md).
+  (let [history [{:role "system"    :content "sys"}
+                 {:role "user"      :content "hi"}
+                 {:role "assistant" :content "" :tool_calls [{:id "c1"}]}
+                 {:role "tool"      :tool_call_id "c1" :content "ok"}
+                 {:role "assistant" :content "done" :reasoning_content "I thought about it"}]]
+    (testing "every assistant message gets the field; nothing else is touched"
+      (let [out (llm/thinking-mode-history history {:reasoning-effort "high"})]
+        (is (= "" (:reasoning_content (nth out 2))) "the round with no reasoning gets the empty string")
+        (is (= "I thought about it" (:reasoning_content (nth out 4)))
+            "and a round that HAS reasoning keeps it, byte for byte")
+        (is (nil? (:reasoning_content (nth out 3))) "a tool message is not an assistant message")
+        (is (= (mapv :role history) (mapv :role out)) "and the shape is otherwise untouched")))
+
+    (testing "an empty string is the fill -- never invented text"
+      ;; Anything else would be putting words in the model's mouth and sending them
+      ;; back as if it had thought them.
+      (let [out (llm/thinking-mode-history [{:role "assistant" :content "x"}]
+                                           {:reasoning-effort "low"})]
+        (is (= "" (:reasoning_content (first out))))))
+
+    (testing "a provider with no reasoning effort is untouched, byte for byte"
+      (is (= history (llm/thinking-mode-history history {})))
+      (is (= history (llm/thinking-mode-history history {:reasoning-effort nil}))))))
