@@ -58,3 +58,13 @@
 - [ ] 工具描述写明：结果来自哪一类服务、几条是默认、以及"读某一页用 `web_fetch`"。
 - [ ] `tools_test/specs-expose-every-base-tool` 两份名单各加一个 `web_search`。
 - [ ] `clojure -M:test -m harness.test-runner` 全绿（除基线的两条环境失败）。
+
+---
+
+## 复议（2026-09-16，牛总裁定）
+
+本票面写的是**一个厂商、一个键名**（`HARNESS_SEARCH_API_KEY`）。落地之后牛总推翻了它：
+**三个厂商、三个键、哪个在哪个答**（Brave → Exa → Tavily）。
+完整记录在 `../spec.md` 末尾的「复议」一节；票面按仓库惯例**不改写**，只在这里留一个指路。
+本票里**没有被推翻的**：键的解析抽到 `harness.home/env-value` 一处不复制、缺键是指名拒绝、
+搜索不 park、以及"一家厂商的线写在一个命名空间里"这个形状——正是它让第二、第三家只花了一节。
