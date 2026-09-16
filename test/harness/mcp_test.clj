@@ -898,3 +898,23 @@
       (is (= :connected (:status (first (mcp/status b))))))
     (testing "and so is a TOOL switch: the two axes are independent"
       (is (tools/session-disabled? a "mcp__fake__echo")))))
+
+;; ------------------------------- the fourth way a server can outlive its use
+;;
+;; NO FORKED-JVM TEST HERE, and the reason is worth writing down rather than
+;; leaving as a gap. The fix (a shutdown hook, `ensure-exit-hook!`) was verified
+;; by hand against both the fake server and a REAL one:
+;;
+;;   clojure -M -e "(require 'harness.mcp) (harness.mcp/tools-for \"x\") (shutdown-agents)"
+;;
+;; before it: an `npm exec @playwright/mcp@latest` process survived every run.
+;; after it: the fake server's own lifecycle file shows `term` then `exit`, and
+;; `pgrep` finds nothing.
+;;
+;; The test I first wrote for it forked a JVM against the SAME config home, the
+;; way project_test verifies a cross-process binding -- and the child hung for
+;; thirteen minutes with no output. That is a real and interesting problem
+;; (two JVMs, one home, one store -- the store's cross-process story is exactly
+;; what sqlite was brought in for, so the suspicion is a lock), but it is NOT
+;; this ticket's problem, and a test that can hang is worse than a documented
+;; gap. It is a ticket of its own: "the store is held across processes".

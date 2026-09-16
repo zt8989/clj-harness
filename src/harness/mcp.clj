@@ -101,7 +101,7 @@
   ;; An OUTBOX, drained by the edge: this namespace never writes an audit line.
   (atom []))
 
-(declare connect!)
+(declare connect! ensure-exit-hook! shutdown!)
 
 ;; -------------------------------------------------------------- declarations
 
@@ -886,6 +886,7 @@
                   ((:why-dead client)))]
         (forget! key)
         (let [conn (connect! server decl dir thread-id)]
+          (ensure-exit-hook!)
           (swap! connections assoc key (cond-> conn
                                          why (assoc :restarted-after why)))
           conn)))))
@@ -1097,10 +1098,40 @@
     (swap! events (fn [all] (vec (drop (count mine) all))))
     mine))
 
+(defonce ^:private shut-down-on-exit
+  (atom false))
+
+(defn- ensure-exit-hook!
+  "Make THIS PROCESS take its servers with it when it goes.
+
+  THE FOURTH WAY A SERVER CAN OUTLIVE ITS USE, and the one nothing else here
+  covers. `close!` handles a connection we drop; `reap!` handles a declaration
+  that went away; `session-disable-server!` handles a switch. But a JVM that
+  simply EXITS -- Ctrl+C, a crash, the end of a `clojure -M:test -e` -- runs none
+  of them, and a server is a separate process: it does not go down with us.
+
+  WHAT THAT COSTS, measured rather than imagined: `npx @playwright/mcp@latest`
+  leaves an `npm exec` process behind per harness run, each one holding a browser
+  it may have started. Two test runs left two of them. A shutdown hook is the only
+  place this can be dealt with, because it is the only code the JVM runs on the
+  way out.
+
+  INSTALLED ON THE FIRST CONNECTION rather than at load: a process that never used
+  MCP has nothing to clean up, and registering a hook is a side effect worth not
+  paying for in the abstract."
+  []
+  (when (compare-and-set! shut-down-on-exit false true)
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread. ^Runnable (fn [] (try (shutdown!) (catch Throwable _ nil)))
+                               "mcp-shutdown"))))
+
 (defn shutdown!
-  "Close every connection and forget it. For tests and for a process on its way
-  out; nothing in a running harness calls this, because a server is meant to
-  outlive a run."
+  "Close every connection and forget it: what a process does on its way out, and
+  what a test does between runs so one test's server is not the next one's.
+
+  Called by the shutdown hook `ensure-exit-hook!` installs, so a JVM that exits
+  for any reason takes its servers with it -- they are separate processes and
+  would otherwise outlive everything that knew about them."
   []
   (doseq [[_ {:keys [client]}] @connections]
     (try (client :close!) (catch Exception _ nil)))
