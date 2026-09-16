@@ -47,6 +47,7 @@
             [harness.hashline.undo :as undo]
             [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
+            [harness.mcp :as mcp]
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.skills :as skills]
@@ -67,9 +68,14 @@
   way: this is how the built-ins below are declared, and the base is
   immutable at runtime -- nothing outside this namespace registers anything. A
   session's own definitions go through session-register!, which lands in the
-  overlay instead and never touches this atom."
+  overlay instead and never touches this atom.
+
+  EVERYTHING IN HERE IS `:source :builtin`, and it is stamped in one place
+  instead of written out at eleven call sites: this atom IS the built-in half of
+  the table, so a row in it knows its origin by construction. Rows from other
+  origins carry their own :source (see effective-tools)."
   [name tool]
-  (swap! registry assoc name tool))
+  (swap! registry assoc name (assoc tool :source :builtin)))
 
 ;; ------------------------------------------------------------ session tools
 
@@ -146,17 +152,29 @@
   (contains? (get-in @overlays [thread-id :disabled] #{}) name))
 
 (defn effective-tools
-  "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
-  additions. A thread with no overlay sees the pure base; nil THREAD-ID (no
-  session context) also means the base.
+  "NAME->TOOL for THREAD-ID: the immutable base, overlaid by the tools this
+  session's own CONFIGURATION provides (MCP servers), overlaid by the session's
+  additions. A thread with no overlay and no servers sees the pure base; nil
+  THREAD-ID (no session context) also means the base.
+
+  THREE ORIGINS, ONE TABLE, which is the whole shape of this change: a built-in,
+  a tool an external server provides, and a tool a session registered are the
+  same kind of row, read by the same seam. What differs is only where the row
+  came from, which `:source` records -- and the ORDER, which is precedence: a
+  session's own definition shadows a server's of the same name, exactly as it
+  already shadowed a built-in's.
 
   DELIBERATELY NOT the set of tools that will run: a disabled tool is still in
   here. Availability is a separate question, answered per call by
-  session-disabled? at the execution seam."
+  session-disabled? at the execution seam.
+
+  THIS ASKS THE SERVERS, so it is not free: harness.mcp reads mcp.edn and reuses
+  cached connections, and the callers are only the two that already read a
+  table -- the request's tools array (specs) and the seam (run!)."
   [thread-id]
-  (if (nil? thread-id)
-    @registry
-    (into @registry (get-in @overlays [thread-id :added] {}))))
+  (into @registry
+        (concat (mcp/tools-for thread-id)
+                (when (some? thread-id) (get-in @overlays [thread-id :added] {})))))
 
 ;; ------------------------------------------------------------------- helpers
 

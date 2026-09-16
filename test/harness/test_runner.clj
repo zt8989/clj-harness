@@ -37,6 +37,8 @@
     harness.llm-test
     harness.skills-test
     harness.preamble-test
+    harness.mcp-test
+    harness.mcp-wired-test
     harness.tools-test
     harness.session-tools-test
     harness.approval-test

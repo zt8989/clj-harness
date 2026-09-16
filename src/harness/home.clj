@@ -79,6 +79,7 @@
 (defn config-file    [] (io/file (root) "config.edn"))
 (defn providers-file [] (io/file (root) "providers.edn"))
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
+(defn mcp-file       [] (io/file (root) "mcp.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 (defn db-file
   "The home's metadata store -- see harness.db. It lives beside the configuration

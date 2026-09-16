@@ -53,6 +53,7 @@
             [harness.home :as home]
             [harness.log :as log]
             [harness.logging :as logging]
+            [harness.mcp :as mcp]
             [harness.providers :as providers]
             [harness.loop :as loop]
             [harness.preamble :as preamble]
@@ -505,17 +506,29 @@
               (loop []
                 (when-let [ev (async/<! events)]
                   (if (= :run/done (:type ev))
-                    ;; Returned side of the message record: every message the kernel
-                    ;; appended after the initial vector -- assistant replies
-                    ;; VERBATIM (the history holds the provider message unrebuilt,
-                    ;; reasoning and tool calls intact) and each tool result as the
-                    ;; tool message submitted on the next call. :run/done follows
-                    ;; RUN_ERROR too, so any run the kernel started leaves its full
-                    ;; message tail on disk -- but it lands one beat AFTER the
-                    ;; terminal frame, so a reader racing the consumer may not see
-                    ;; it yet.
-                    (log-messages! thread-id run-id
-                                   (subvec (:history ev) (count messages)))
+                    (do
+                      ;; What happened to this run's MCP servers, drained from the
+                      ;; mcp outbox. IT LANDS AT THE END because that is when the
+                      ;; fact exists: a server is connected on the way to this
+                      ;; run's first LLM call (harness.tools/specs asks for the
+                      ;; roster), so at the provider/changed drain above nothing
+                      ;; has happened yet. A run that never reached the provider
+                      ;; leaves the line for the next one -- which is exactly the
+                      ;; 'assembly inside a run and outside one' the outbox exists
+                      ;; for, and why the mcp layer does not write it itself.
+                      (doseq [e (mcp/take-events!)]
+                        (log! thread-id run-id "mcp/server" e))
+                      ;; Returned side of the message record: every message the kernel
+                      ;; appended after the initial vector -- assistant replies
+                      ;; VERBATIM (the history holds the provider message unrebuilt,
+                      ;; reasoning and tool calls intact) and each tool result as the
+                      ;; tool message submitted on the next call. :run/done follows
+                      ;; RUN_ERROR too, so any run the kernel started leaves its full
+                      ;; message tail on disk -- but it lands one beat AFTER the
+                      ;; terminal frame, so a reader racing the consumer may not see
+                      ;; it yet.
+                      (log-messages! thread-id run-id
+                                     (subvec (:history ev) (count messages))))
                     (do ;; Tool-lifecycle events are audit lines, not wire frames:
                         ;; each lands as its own jsonl line, keyed by toolCallId.
                         (when-let [[kind payload] (lifecycle-record ev)]

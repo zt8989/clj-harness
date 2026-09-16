@@ -34,13 +34,6 @@
   an HTTP request open indefinitely."
   10000)
 
-(defn- quoted
-  "S as a single-quoted POSIX word. The `'\\''` dance is the only way to put a
-  quote inside one -- see the namespace docstring for why a value ever gets here
-  at all."
-  [s]
-  (str "'" (str/replace (str s) "'" "'\\''") "'"))
-
 (defn- git
   "Run `git ARGS` in DIR. Answers {:exit :out :err} from `harness.shell/run`, with
   the output TRIMMED because every caller here compares or prints it and a
@@ -50,7 +43,7 @@
   caller may want to report, and it is not the same fact as git refusing."
   [dir & args]
   (let [{:keys [exit out err timeout]}
-        (shell/run {:command (str/join " " (cons "git" (map quoted args)))
+        (shell/run {:command (str/join " " (cons "git" (map shell/quote-arg args)))
                     :dir dir
                     :timeout-ms timeout-ms})]
     {:exit exit
