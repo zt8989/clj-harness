@@ -64,9 +64,20 @@
 
   The old flat shape is neither read nor migrated: it fails by name, saying what
   to write instead."
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
+            [clojure.pprint :as pprint]
+            [clojure.string :as str]
             [clojure.walk :as walk]
-            [harness.infra.home :as home]))
+            [harness.infra.home :as home]
+            ;; For the implemented-protocol set, READ off the multimethod
+            ;; rather than keeping a list that could disagree with it. cap -> kernel
+            ;; is the allowed direction, and kernel.llm does not require this
+            ;; namespace, so there is no cycle to worry about.
+            [harness.kernel.llm :as llm])
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.nio.charset StandardCharsets]))
 
 ;; ------------------------------------------------------------- the vocabulary
 
@@ -116,20 +127,29 @@
 (def resolved-fields
   "What the catalog answers with, once a selection has been assembled. The two
   counts ride along with the modalities: they are answers about the model that
-  was selected, and a reader asking 'what is this session on' wants them."
-  [:protocol :base-url :model :input :output :context-window :max-output-tokens])
+  was selected, and a reader asking 'what is this session on' wants them. The
+  display name is an answer about the PROVIDER rather than the model, and it
+  rides along for the same reason: it is the catalog's to say, never a tier's."
+  [:protocol :base-url :model :display-name :input :output
+   :context-window :max-output-tokens])
 
 (def catalog-fields
-  "What a TIER may never name: everything the catalog answers about a model once
-  it has been selected -- its endpoint, its modalities, its two counts. A tier
-  chooses provider, model and reasoning effort and nothing else, so a tier
-  naming one of these is either a mistake or a description (the inline form,
-  which is a different shape and not a tier at all).
+  "What a TIER may never name: everything the catalog answers once a selection has
+  been assembled -- the endpoint, the display name, the model's modalities and its
+  two counts. A tier chooses provider, model and reasoning effort and nothing
+  else, so a tier naming one of these is either a mistake or a description (the
+  inline form, which is a different shape and not a tier at all).
 
   NAMING ONE FAILS BY NAME, in `selection` below. select-keys alone would drop
   them quietly, which is the silent no-op this catalog exists to kill: the caller
-  wrote something, the run succeeded, and nothing happened."
-  (into #{:protocol :base-url :input :output} counts))
+  wrote something, the run succeeded, and nothing happened.
+
+  DERIVED FROM `resolved-fields` RATHER THAN LISTED AGAIN, and that is the fix for
+  a trap this list used to be: a field added to the vocabulary and not to this
+  literal set was a field a tier could name and have silently dropped -- the exact
+  failure the paragraph above is about. :model is the one resolved field a tier
+  DOES choose, so it is the one subtraction."
+  (disj (set resolved-fields) :model))
 
 (def inline-fields
   "The fields config.edn may use to DESCRIBE a provider instead of naming one --
@@ -156,6 +176,14 @@
           {:where where :value x})))
 
 (defn- sortable [xs] (vec (sort-by str xs)))
+
+(defn- set->wire
+  "A modality set -> the SORTED STRING vector that may leave this process. One
+  definition, because `wire` and the registry report both render these and a second
+  copy would be a second answer to 'what order do they come in' -- which is the
+  whole point of sorting them (two otherwise identical answers must not differ)."
+  [s]
+  (mapv name (sort-by name s)))
 
 (defn- unknown-keys!
   "Fail if M carries keys outside ALLOWED. A key nobody reads is a silent no-op
@@ -252,7 +280,14 @@
 
 ;; --------------------------------------------------------- one provider entry
 
-(def ^:private provider-keys #{:protocol :base-url :model :models})
+(def ^:private provider-keys
+  "What a named entry may carry. :display-name is the one field here that is not
+  about reaching the vendor: it is what a person calls this vendor, and it exists
+  because the form that creates one asks for it (its reference asks for a Provider
+  ID AND a display name). Everything else -- the credential name, the log lines,
+  the :provider knob -- stays the ID: a display name is a second name for the
+  screen, not a second identity."
+  #{:protocol :base-url :model :models :display-name})
 
 (def ^:private inline-keys
   "What the inline form may carry: its endpoint, its one model id, and then
@@ -286,6 +321,14 @@
       (when (empty? models)
         (fail (str where " lists no models") {:provider name}))
       (unknown-keys! where entry provider-keys)
+      (when (contains? entry :display-name)
+        (let [label (:display-name entry)]
+          (when-not (and (string? label) (not (str/blank? label)))
+            (fail (str where " has :display-name " (pr-str label)
+                       "; it is what a person calls this vendor, so it is a"
+                       " non-empty string -- the ID is the identity, and this is"
+                       " only the label on screen")
+                  {:provider name :display-name label}))))
       (doseq [k [:protocol :base-url :model]]
         (when-not (contains? entry k)
           (fail (str where " names no " (pr-str k)
@@ -301,10 +344,13 @@
           (fail (str where " names default model " (pr-str (:model entry))
                      " but does not declare it; it declares " (pr-str (sortable (keys norm))))
                 {:provider name :model (:model entry) :known (sortable (keys norm))}))
-        {:protocol (:protocol entry)
-         :base-url (:base-url entry)
-         :model    dflt
-         :models   norm}))))
+        (cond-> {:protocol (:protocol entry)
+                 :base-url (:base-url entry)
+                 :model    dflt
+                 :models   norm}
+          ;; ABSENT STAYS ABSENT, like every other optional field: an entry with no
+          ;; display name has none, and a nil here would read as 'named nothing'.
+          (some? (:display-name entry)) (assoc :display-name (:display-name entry)))))))
 
 (defn- check-inline
   "A config.edn that DESCRIBES its provider instead of naming one -> the same
@@ -349,10 +395,64 @@
             (seq dirs) (assoc :models {id dirs})))))))
 
 ;; ------------------------------------------------------------------ the file
+;;
+;; ONE FILE, TWO SECTIONS. config.edn is read here (below), the built-in table is
+;; the floor under it, and `catalog` is the two combined -- in that order, because
+;; that is the order a reader asking "which vendors can this process reach" wants
+;; to meet them in.
+
+(def ^:private config-sections
+  "The two sections config.edn is made of, and the whole of its top level:
+
+    :default    the three knobs a session starts from (:provider / :model /
+                :reasoning-effort), or a provider DESCRIBED inline
+    :providers  the vendor catalog, {name entry}, laid over the built-in table
+
+  TWO SECTIONS IN ONE FILE, which is the point of the shape: which vendors this
+  process can reach and which one it starts on are one question asked twice, so a
+  person answering either opens one file. What used to be providers.edn is the
+  :providers section now -- see `catalog`."
+  #{:default :providers})
+
+(defn config
+  "config.edn, re-read every time so it can be edited while the process runs ->
+  the two sections it is made of, checked as such.
+
+  THE TOP LEVEL IS CLOSED, and that check IS the migration: this file used to BE
+  the default tier, with :provider / :model / :reasoning-effort at the top. Those
+  keys are a named failure now, saying to put them under :default -- rather than
+  a second shape being read, which is the rule this catalog keeps everywhere
+  (see `check-provider` on the far older flat provider shape).
+
+  There is no api-key here and never will be: the key is resolved from
+  .env/environment in the provider-resolution section below, which is where the
+  effective provider is assembled.
+
+  The path comes from harness.infra.home; a missing file is a named failure there."
+  []
+  (let [raw  (edn/read-string (home/config))
+        path (.getAbsolutePath (home/config-file))]
+    (when-not (map? raw)
+      (fail (str path " must be a map of the two sections (:default and :providers), not "
+                 (pr-str (type raw)))
+            {:path path}))
+    (let [unknown (sortable (remove config-sections (keys raw)))]
+      (when (seq unknown)
+        (fail (str path " carries " (pr-str unknown) " at its top level; it is made of two"
+                   " sections -- :default (the three knobs a session starts from:"
+                   " :provider / :model / :reasoning-effort) and :providers (the vendors,"
+                   " {name entry}). The knobs used to sit at the top level themselves:"
+                   " move them under :default.")
+              {:path path :unknown unknown})))
+    (doseq [k (sortable (keys raw))]
+      (when-not (map? (get raw k))
+        (fail (str path "'s " (pr-str k) " must be a map, not " (pr-str (get raw k)))
+              {:path path :section k})))
+    raw))
 
 (def builtin-raw
   "The providers this harness knows out of the box, so a config.edn naming one
-  needs no providers.edn at all.
+  needs no :providers entry at all.
 
   :as-of 2026-09-14. EVERY ID BELOW WAS READ OFF THE VENDOR'S OWN LIVE LISTING
   that day, not written from memory -- and the exercise earned its keep, because
@@ -384,8 +484,8 @@
   through :openrouter, whose table lists them. openai, xai and groq are absent for
   a different and more mundane reason: their model listings answered 403 to an
   unauthenticated check today, and this table does not carry ids nobody verified.
-  Adding one is a single providers.edn entry, which is also where that vendor's
-  list should be consulted.
+  Adding one is a single :providers entry in config.edn, which is also where that
+  vendor's list should be consulted.
 
   A model that ALSO accepts :audio or :video at the vendor is recorded as
   :text/:image only. The declaration says what a run may send, and those are the
@@ -425,7 +525,7 @@
     ;; ollama publishes a context window per tag and no output limit at all: the
     ;; server's num_predict default decides, and a number here would be a guess.
     ;; :qwen3's 40K is the `latest` tag's; a tag like :30b carries 256K, which is
-    ;; what providers.edn is for.
+    ;; what an entry in config.edn's :providers is for.
     :ollama
     {:protocol :openai-completions
      :base-url "http://localhost:11434/v1"
@@ -469,37 +569,56 @@
     (merge builtin-entry user-entry
            {:models (merge-with merge (:models builtin-entry) (:models user-entry))})))
 
+(defn- config-path [] (.getAbsolutePath (home/config-file)))
+
+(defn- user-catalog
+  "RAW -- a parsed :providers section -- -> the validated catalog, laid over the
+  built-in table.
+
+  ONE DEFINITION, and for the writer it is the whole discipline: the file a form is
+  about to write is validated by exactly the code that will validate it on the next
+  read, so 'it validated' cannot come to mean two different things over time."
+  [raw]
+  (if (empty? raw)
+    builtin
+    (let [path (config-path)
+          user (into {}
+                     (map (fn [[n e]]
+                            [(->kw n "a provider name" path) e]))
+                     raw)]
+      (into {}
+            (map (fn [[n e]]
+                   [n (check-provider n (over (get builtin n) e))]))
+            (merge builtin user)))))
+
 (defn catalog
   "The provider registry this process resolves against: {name provider}, with the
-  user's providers.edn laid over the built-in table. Re-read on every call,
-  matching config.edn's rule.
+  :providers section of config.edn laid over the built-in table. Re-read on every
+  call, matching config.edn's rule.
 
-  A missing providers.edn is NOT an error and does not even mean an empty catalog:
-  the built-in table stands on its own, so a config.edn naming :openrouter or
-  :deepseek or :ollama works with no file at all. That is the point of shipping
-  one -- the three knobs in config.edn should be enough to start.
+  A config.edn with NO :providers section is not an error and does not even mean an
+  empty catalog: the built-in table stands on its own, so a :default naming
+  :openrouter or :deepseek or :ollama works with no entry anywhere. That is the
+  point of shipping one -- the three knobs should be enough to start.
+
+  A providers.edn FILE IS A NAMED FAILURE, not a quiet ignore. It held this section
+  until the catalog moved into config.edn, and a file that goes on looking
+  authoritative while none of its entries does anything is exactly the silent
+  no-op this catalog exists to kill. So the reader says which file to empty into
+  :providers and delete, rather than leaving a person to wonder why an edit to it
+  changed nothing.
 
   Every merged entry is validated eagerly, including ones this run will not use: a
   malformed catalog is a configuration mistake, and meeting it on the run that
   happens to name it turns one clear failure into an intermittent one."
   []
   (let [f (home/providers-file)]
-    (if-not (.exists f)
-      builtin
-      (let [raw  (edn/read-string (slurp f :encoding "UTF-8"))
-            path (.getAbsolutePath f)]
-        (when-not (map? raw)
-          (fail (str path " must be a map of provider name -> provider, not "
-                     (pr-str (type raw)))
-                {:path path}))
-        (let [user (into {}
-                         (map (fn [[n e]]
-                                [(->kw n "a provider name" path) e]))
-                         raw)]
-          (into {}
-                (map (fn [[n e]]
-                       [n (check-provider n (over (get builtin n) e))]))
-                (merge builtin user)))))))
+    (when (.exists f)
+      (fail (str (.getAbsolutePath f)
+                 " is no longer read: the provider catalog is the :providers section of"
+                 " config.edn now. Move its entries there and delete this file.")
+            {:path (.getAbsolutePath f)}))
+    (user-catalog (:providers (config)))))
 
 ;; ------------------------------------------------------------- the fold
 ;;
@@ -547,8 +666,8 @@
                    "; those are the catalog's answers about the model a tier"
                    " selected, and a tier chooses only "
                    (pr-str (mapv str knobs))
-                   " -- declare them on the model entry in providers.edn"
-                   " (or describe the whole provider inline in config.edn)")
+                   " -- declare them on the model entry in config.edn's :providers"
+                   " (or describe the whole provider inline in :default)")
               {:unknown bad :knobs knobs}))))
   (let [s (select-keys m knobs)]
     (if (contains? s :provider)
@@ -654,6 +773,11 @@
                      ;; third count would get declared, validated, and then
                      ;; silently left out of every resolution.
                      (select-keys m model-keys))
+        ;; The PROVIDER's label, not the model's: it travels from the entry for the
+        ;; same reason the model's declaration travels from the model entry -- a
+        ;; reader answering 'what is this session on' should read the catalog's
+        ;; answer, not a second lookup that could disagree with it.
+        (some? (:display-name entry))         (assoc :display-name (:display-name entry))
         (:name found)                         (assoc :provider (:name found))
         (some? (:reasoning-effort selection)) (assoc :reasoning-effort (:reasoning-effort selection))))))
 
@@ -704,19 +828,6 @@
   (let [[taken _] (swap-vals! provider-changes
                               (fn [vs] (into [] (remove #(= thread-id (:thread-id %))) vs)))]
     (filterv #(= thread-id (:thread-id %)) taken)))
-
-;; ------------------------------------------------------------------- config
-
-(defn config
-  "config.edn, re-read every time so it can be edited while the process runs.
-  This is the EDN half only (:protocol/:base-url/:model...) -- there is no
-  api-key here and never will be: the key is resolved from .env/environment in
-  the provider-resolution section below, which is where the effective provider
-  is assembled.
-
-  The path comes from harness.infra.home; a missing file is a named failure there."
-  []
-  (edn/read-string (home/config)))
 
 ;; -------------------------------------------------------- provider resolution
 ;;
@@ -795,21 +906,70 @@
       (swap! session-overrides assoc thread-id sel)
       sel)))
 
-(defn- api-key
-  "The API key, following the dotenv library's documented precedence: a value in
-  .env wins over a real environment variable. So .env is the single place that
-  decides, and setting a shell variable will NOT override it.
+(defn credential-name
+  "The `.env` name a provider's api-key lives under: its id uppercased, every
+  character that is not a letter or a digit turned into an underscore, and _API_KEY
+  appended.
 
-  The lookup itself is harness.infra.home/env-value -- the home's .env first, then
-  the environment, re-read every time like config.edn. It is the same lookup the
-  three search keys go through, because 'a secret the person put outside the
-  repository' is one kind of fact and two lookups would eventually disagree about
-  precedence.
+    :acme-gateway   ->  ACME_GATEWAY_API_KEY
+    :acme.gateway   ->  ACME_GATEWAY_API_KEY
+    \"My_Vendor\"    ->  MY_VENDOR_API_KEY
+
+  PUBLIC, AND THAT IS THE POINT: the reader here and whatever WRITES that line -- a
+  person editing .env by hand now, the settings form's route later -- have to agree
+  on the name, and two derivations of one name eventually differ. The precedent is
+  harness.infra.home/sanitize, for exactly this reason.
+
+  TOTAL AND NOT INJECTIVE, both deliberately. Total, because a provider id is a
+  keyword and keywords are not restricted to letters: :My_Vendor resolves a key
+  rather than failing over punctuation nobody chose. Not injective, because
+  uppercasing and collapsing punctuation maps :a-b, :a_b and :a.b onto ONE name --
+  so two providers whose ids differ only in punctuation share a credential. That is
+  a property of any rule that produces a shell-friendly name, not a bug in this one;
+  what keeps it from biting is the ID RULE the settings form enforces
+  (^[a-z][a-z0-9-]*$, one spelling per provider). A hand-written config.edn that
+  spells two ids nearly the same way is told so here rather than left to discover it
+  from a request that goes out with the wrong key.
+
+  ONE NAME, ONE KEY, which is the shape the reference form asks for: the form's own
+  help text says the id derives the credential name, and this is that sentence
+  written down as code."
+  [provider]
+  (str (str/upper-case (str/replace (name provider) #"[^A-Za-z0-9]" "_")) "_API_KEY"))
+
+(defn- credential-names
+  "The names PROVIDER's api-key may live under, in the order they are tried: the
+  provider's own derived name first, then the global HARNESS_API_KEY as the
+  fallback.
+
+  THE FALLBACK IS WHAT MAKES THIS LAND: every home configured before this change has
+  one HARNESS_API_KEY, and the three built-in vendors and any inline description
+  keep working off it with nothing to edit. A provider that says its own name wins;
+  a provider that says nothing still has a key.
+
+  AN INLINE PROVIDER HAS NO NAME (it is a description, not an entry in the catalog),
+  so it has only the global one -- not a derived name invented from its endpoint,
+  which would be a credential nobody could have known to write."
+  [provider]
+  (if (some? provider)
+    [(credential-name provider) "HARNESS_API_KEY"]
+    ["HARNESS_API_KEY"]))
+
+(defn- api-key
+  "PROVIDER's API key: the provider's own derived name first, then the global
+  HARNESS_API_KEY -- and within each name, the home's .env before the environment
+  (harness.infra.home/env-source owns that order; prompt.md owns the discipline that
+  this is the only place a key is ever resolved).
+
+  PROVIDER is the catalog NAME of a provider, or nil for an inline description. A
+  key attached to the wrong provider is indistinguishable from a working one until
+  the vendor answers 401, so the name is asked for rather than guessed from
+  whatever happens to be in the environment.
 
   PRIVATE, and doubly so by discipline: the key flows ONLY into resolve-provider's
   result, and prompt.md forbids reaching for it any other way."
-  []
-  (home/env-value "HARNESS_API_KEY"))
+  [provider]
+  (some-> (home/env-source (credential-names provider)) :name (home/env-value)))
 
 ;; ---------------------------------------------- the selection and its tiers
 ;;
@@ -826,7 +986,7 @@
 ;; and an undeclared model id both stop the run by name.
 
 (defn- default-selection
-  "config.edn, the default tier. Two shapes:
+  "config.edn's :default section, the default tier. Two shapes:
 
     {:provider :openrouter :model \"…\" :reasoning-effort \"high\"}
         name a provider; the other two knobs are optional
@@ -859,8 +1019,8 @@
 
 (defn- resolve-tiers
   "The three tiers resolve-provider folds, LOWEST first, as the raw maps they
-  arrive as: config's default tier (or an inline description), this session's
-  override, and this run's request.
+  arrive as: config.edn's :default section (or an inline description), this
+  session's override, and this run's request.
 
   ONE DEFINITION, so the fold and anything that has to say WHERE a knob came
   from cannot disagree about which tiers were in play or in what order. The
@@ -868,7 +1028,7 @@
   read-only settings panel, which is asking about the configuration rather than
   about any one run."
   [thread-id request]
-  [(default-selection (config))
+  [(default-selection (:default (config)))
    (or (override-for thread-id) {})
    (or request {})])
 
@@ -901,11 +1061,12 @@
   ([thread-id request]
    (let [[base ses run] (resolve-tiers thread-id request)
          folded (fold-selection base ses run)
+         resolved (fold-and-assemble folded)
          source (cond
                   (seq (selection run)) :request
                   (map? (:provider base))      :inline
                   :else                        :default)]
-     {:provider  (assoc (fold-and-assemble folded) :api-key (api-key))
+     {:provider  (assoc resolved :api-key (api-key (:provider resolved)))
       :selection folded
       :source    source})))
 
@@ -925,7 +1086,7 @@
   no api-key: this answers a question about a configuration, and a secret is not
   part of that answer."
   [ov]
-  (let [folded (fold-selection (default-selection (config)) ov)]
+  (let [folded (fold-selection (default-selection (:default (config))) ov)]
     {:selection folded
      :resolved  (fold-and-assemble folded)}))
 
@@ -972,7 +1133,7 @@
   a tool result."
   [thread-id]
   (let [p (effective-provider thread-id)]
-    (select-keys p [:provider :model :reasoning-effort
+    (select-keys p [:provider :model :reasoning-effort :display-name
                     :protocol :base-url :input :output
                     :context-window :max-output-tokens])))
 
@@ -1043,30 +1204,32 @@
           ks)))
 
 (defn api-key-source
-  "Where the api-key WOULD be read from, as facts that carry no value:
+  "Where the api-key for PROVIDER would be read from, as facts that carry no value:
 
-    {:present? true|false :source :env-file|:environment|nil}
+    {:present? true|false :source :env-file|:environment|nil :name \"ACME_GATEWAY_API_KEY\"}
 
-  THE PRECEDENCE IS `api-key`'s, not a guess: a value in the home's .env wins
-  over a real environment variable, so a home with both is a home whose key comes
-  from the file. Reporting the other one would send a person to edit a variable
-  that is being ignored.
+  :name IS THE USEFUL HALF OF THIS ANSWER, and it is present either way: the name
+  that WON when a key is set, and the name that would be read first when none is --
+  which is the line a person has to add. Reporting only presence would leave them to
+  derive the name from the provider id in their heads, which is the one step this
+  feature exists to remove.
+
+  THE PRECEDENCE IS `api-key`'s, not a guess: the provider's own name before the
+  global one, and within a name the home's .env before the environment. So a home
+  with both is a home whose key comes from the file. Reporting the other one would
+  send a person to edit a variable that is being ignored.
 
   THE VALUE, ITS LENGTH AND ITS PREFIX ARE ALL ABSENT, and this is a separate
   function from `api-key` rather than a wrapper over it: a wrapper would have the
-  secret in hand and would have to remember not to return it, while this one
-  never reads the value out of the map it parses. A nil :source means nobody
-  supplies one, which is a normal state -- offline tools run without a key, and a
-  run that needs one fails by name at the vendor."
-  []
-  (let [f (home/dotenv-file)
-        from-file (when (.exists f)
-                    (get (home/parse-dotenv (slurp f :encoding "UTF-8")) "HARNESS_API_KEY"))
-        from-env  (System/getenv "HARNESS_API_KEY")]
-    (cond
-      (some? from-file) {:present? true  :source :env-file}
-      (some? from-env)  {:present? true  :source :environment}
-      :else             {:present? false :source nil})))(defn home-origin
+  secret in hand and would have to remember not to return it, while this one never
+  reads a value out of the map it parses. A nil :source means nobody supplies one,
+  which is a normal state -- offline tools run without a key, and a run that needs
+  one fails by name at the vendor."
+  [provider]
+  (let [{:keys [name source]} (home/env-source (credential-names provider))]
+    {:present? (some? name)
+     :source   source
+     :name     (or name (first (credential-names provider)))}))(defn home-origin
   "Which of harness.infra.home's three rules produced the config root:
 
     :environment  CLJ_HARNESS_HOME said so
@@ -1092,7 +1255,6 @@
   (mapv (fn [[nm ^java.io.File f]]
           {:name nm :path (.getAbsolutePath f) :present? (.exists f)})
         [["config.edn"    (home/config-file)]
-         ["providers.edn" (home/providers-file)]
          ["hooks.edn"     (home/hooks-file)]
          [".env"          (home/dotenv-file)]
          ["harness.db"    (home/db-file)]]))
@@ -1130,8 +1292,8 @@
             :files [{:name \"config.edn\" :path \"…\" :present? true} …]}}
 
   EVERYTHING COMES FROM FILES AND LIVE MEMORY, NEVER FROM THE STORE, and
-  re-reading is the whole contract: config.edn, providers.edn, .env and the
-  session's own override are each read at call time, so editing one and asking
+  re-reading is the whole contract: config.edn (both of its sections) and the
+  session's own override are read at call time, so editing one and asking
   again shows the new answer with no restart and nothing written. That is the
   discipline this namespace follows everywhere, and this is the one place a
   person can SEE it.
@@ -1160,7 +1322,7 @@
            {:selection (unsecret selection)
             :source    source
             :tiers     (tier-sources [base session request] provider)
-            :key       (api-key-source)
+            :key       (api-key-source (:provider provider))
             :home      {:path   (home/root)
                         :origin (home-origin)
                         :files  (home-files)}})))
@@ -1190,7 +1352,7 @@
          sel (into {} (remove (comp nil? val)) (select-keys m ks))]
      (reduce (fn [acc k]
                (if (contains? acc k)
-                 (update acc k #(mapv name (sort-by name %)))
+                 (update acc k set->wire)
                  acc))
              sel
              [:input :output]))))
@@ -1230,7 +1392,15 @@
   THE LIST IS THE CATALOG, NOT THE RESOLUTION: every provider that declares at
   least one model, sorted by name so the menu has one order. A provider with no
   :models cannot be switched TO (naming it would fail in `assemble`), so offering
-  it would be offering a refusal."
+  it would be offering a refusal.
+
+  :name IS THE ID AND :display-name IS THE LABEL, and the two are deliberately
+  different keys rather than one already-decided string: what to SHOW is the
+  client's business (falling back to the id when there is no label, putting it in
+  a title, dropping it), while what to SEND is the id -- the picker sends `name`
+  and nothing else. Handing over a pre-chosen label would make the fallback rule a
+  server detail no client could see, and a client that showed only the label would
+  have no id to send."
   [thread-id]
   (let [current (wire (active-provider thread-id))]
     {:provider (:provider current)
@@ -1241,6 +1411,497 @@
                      (keep (fn [[n entry]]
                              (let [models (keys (:models entry))]
                                (when (seq models)
-                                 {:name (name n) :models (sortable models)}))))
+                                 (cond-> {:name (name n) :models (sortable models)}
+                                   (some? (:display-name entry))
+                                   (assoc :display-name (:display-name entry)))))))
                      (sort-by :name)
                      vec)}))
+
+;; --------------------------------------------- what the settings form reads and writes
+;;
+;; Two halves in one section because they are one conversation: the reader answers
+;; "what is in this home", the writer answers "make this entry so", and both speak
+;; to the SAME validator the file is read through (`user-catalog`). That is what
+;; makes the form's promises true -- "a rejected change writes nothing" is only
+;; checkable if the check and the read are one function.
+
+(defn- implemented-protocols
+  "The protocols this process can actually SPEAK, read off `llm/stream!` itself: the
+  multimethod's dispatch values ARE the set of implemented protocols.
+
+  DERIVED RATHER THAN LISTED, for the reason the whole catalog exists: a second
+  implementation must not need a second edit to become offerable, and a name with no
+  method behind it must not be offerable at all. A hand-written list would go stale
+  in the direction that matters -- the form would offer a protocol nothing can
+  serve, and the run would fail somewhere far from the form.
+
+  A FUNCTION RATHER THAN A def, which is what makes that claim true instead of
+  nearly true: a def would freeze the set at LOAD time, so a method added later --
+  by a test, by a plugin, by anything that runs after this namespace -- would be
+  speakable and unofferable at once. Asking at call time costs one small map lookup
+  and answers about the process as it is now."
+  []
+  (set (keys (methods llm/stream!))))
+
+(defn protocol-names
+  "The protocols as a client spells them: names, sorted."
+  []
+  (set->wire (implemented-protocols)))
+
+(defn- origin-of
+  "Which of the three things this catalog entry is: the built-in table's (nothing in
+  config.edn mentions it), yours alone, or your PATCH of a built-in.
+
+  The distinction is the difference between two edits a person makes in the same
+  form -- 'add my vendor' and 'point openrouter at my proxy' -- and getting it wrong
+  would make the second look like the first, so the panel would offer to delete a
+  built-in provider."
+  [user n]
+  (let [mine?  (contains? user n)
+        built? (contains? builtin n)]
+    (cond
+      (and mine? built?) :builtin-patched
+      built?             :builtin
+      :else              :user)))
+
+(defn- model-row
+  "One model entry -> the row a form edits: the id, its two modality sets as wire
+  strings, and whichever counts it states."
+  [id m]
+  (cond-> {:id     id
+           :input  (set->wire (:input m))
+           :output (set->wire (:output m))}
+    (some? (:context-window m))    (assoc :context-window (:context-window m))
+    (some? (:max-output-tokens m)) (assoc :max-output-tokens (:max-output-tokens m))))
+
+(defn registry-report
+  "The catalog as the settings page needs it:
+
+    {:providers [{:name \"acme-gateway\" :display-name \"Acme Gateway\" :origin :user
+                  :protocol \"openai-completions\" :base-url \"https://…\"
+                  :model \"gpt-x\"
+                  :models [{:id \"gpt-x\" :input [\"text\"] :output [\"text\"]} …]
+                  :credential \"ACME_GATEWAY_API_KEY\"
+                  :key {:present? true :source :env-file :name \"ACME_GATEWAY_API_KEY\"}}
+                 …]
+     :protocols [\"openai-completions\"]
+     :reasoning-efforts [\"low\" \"medium\" \"high\"]
+     :default   {:provider \"acme-gateway\" :model \"gpt-x\"}}
+
+  EVERY FIELD IS ONE THIS FUNCTION CHOSE -- it does not merge a resolution in -- and
+  :api-key is therefore not in it at any depth, at any nesting the rows might grow.
+  The `:key` facts come from `api-key-source`, which never reads a value.
+
+  `:default` IS THE SECTION AS WRITTEN, rendered by `wire`: the three knobs when it
+  names a provider, the endpoint fields when it DESCRIBES one. Which of the two it is
+  is visible the same way the server decides it -- whether :provider is there -- so
+  a client does not need a second rule for a distinction the file already makes.
+
+  `:origin` is what lets the page say 'yours', 'built-in', or 'your patch of a
+  built-in' rather than showing three different things identically.
+
+  READ-ONLY: no file is written, nothing is registered, and no key value is read."
+  []
+  (let [raw  (config)
+        user (:providers raw)]
+    {:providers (->> (catalog)
+                     (map (fn [[n entry]]
+                            (cond-> {:name       (name n)
+                                     :origin     (origin-of user n)
+                                     :protocol   (name (:protocol entry))
+                                     :base-url   (:base-url entry)
+                                     :model      (:model entry)
+                                     :models     (mapv (fn [[id m]] (model-row id m))
+                                                       (sort-by (comp str key) (:models entry)))
+                                     :credential (credential-name n)
+                                     :key        (api-key-source n)}
+                              (some? (:display-name entry))
+                              (assoc :display-name (:display-name entry)))))
+                     (sort-by :name)
+                     vec)
+     :protocols (protocol-names)
+     :reasoning-efforts reasoning-efforts
+     :default   (wire (:default raw))}))
+
+;; ------------------------------------------------------------------ the writer
+;;
+;; Three rules, and every one of them is a promise the form makes to a person:
+;;
+;;   VALIDATE THE WHOLE PROSPECTIVE FILE FIRST   a change that cannot be served is
+;;                                               not a change, and the check is the
+;;                                               reader's own (`user-catalog`).
+;;   WRITE ATOMICALLY, KEEP ONE BACKUP          a half-written config.edn is a home
+;;                                               that cannot start, and the previous
+;;                                               version is one file away.
+;;   TOUCH NOTHING ELSE                          :default and any future section
+;;                                               survive a provider edit untouched.
+
+(def ^:private provider-id-pattern
+  "The id rule the FORM enforces -- and only the form. A hand-written config.edn may
+  name a provider however a keyword can be spelled (see `credential-name`: the
+  derivation is total, so it still resolves a key); what this rule adds is ONE
+  SPELLING PER PROVIDER for the ids a person types into a form, because the id
+  derives the credential name and `:a-b` / `:a_b` would otherwise share one key."
+  #"^[a-z][a-z0-9-]*$")
+
+(defn- check-new-id!
+  "An id the form is CREATING -> a keyword, or a named failure."
+  [id]
+  (let [s (some-> id str/trim)]
+    (when-not (and (string? s) (seq s) (re-matches provider-id-pattern s))
+      (fail (str "a provider id must start with a lowercase letter and hold only"
+                 " lowercase letters, digits and dashes (" (pr-str (or id "nothing"))
+                 " does not): it identifies this vendor in requests AND derives the"
+                 " credential name in .env, so one spelling per provider is what keeps"
+                 " the two in step")
+            {:id id}))
+    (keyword s)))
+
+(defn- existing-key
+  "The key CONFIG.EDN already uses for this id, or nil. Looked up by NAME rather
+  than by keyword so a file that spells its keys as strings is still recognized: an
+  update must not rename an entry that is already there."
+  [user id]
+  (let [want (str/trim (str id))]
+    (some (fn [[n _]] (when (= want (name n)) n)) user)))
+
+(defn- kw-keys
+  "M with string keys turned into keywords, one level deep.
+
+  JSON hands over strings and EDN hands over keywords, and this is the same
+  canonicalization `->kw` performs for a provider NAME -- for the same reason: two
+  spellings of one entry would otherwise fail validation against each other, and the
+  failure would name the very keys the caller wrote ('carries [\"base-url\"], which
+  it does not understand; it knows [:base-url]') which reads as nonsense."
+  [m]
+  (if (map? m)
+    (into {} (map (fn [[k v]] [(if (string? k) (keyword k) k) v])) m)
+    m))
+
+(defn entry-from-wire
+  "The form's JSON provider entry -> a config.edn :providers entry, or a named
+  failure.
+
+  THE INVERSE OF `wire` FOR ONE ENTRY, and it converts only what has to be
+  converted: the protocol comes as a name and must be one this harness implements
+  (`implemented-protocols`), a model row's modalities arrive as vectors and are left for
+  `check-model` to convert and validate -- handing them over unchanged is what keeps
+  ONE validator rather than a second, weaker copy here. Keys may arrive as strings
+  (JSON) or keywords (EDN): see `kw-keys`.
+
+  What it does check is the SHAPE OF THE LIST, because a list is not a table: every
+  row names an :id, and no id appears twice (a duplicate would silently keep the last
+  row, which is a form mistake reported as success)."
+  [entry]
+  (let [m (kw-keys entry)]
+    (when-not (map? m)
+      (fail (str "a provider entry must be a map of fields, not " (pr-str (type entry))) {}))
+    (unknown-keys! "the provider the form submitted" m
+                   #{:display-name :protocol :base-url :model :models})
+    (let [p (:protocol m)
+          proto (cond
+                  (nil? p)
+                  (fail (str "the provider the form submitted names no :protocol; it speaks"
+                             " one of " (pr-str (protocol-names)))
+                        {:protocol nil})
+                  (contains? (implemented-protocols) (keyword p)) (keyword p)
+                  :else
+                  (fail (str "the provider the form submitted speaks " (pr-str p)
+                             ", which this harness has no implementation for; it speaks "
+                             (pr-str (protocol-names)))
+                        {:protocol p}))
+          rows  (:models m)]
+      (when-not (sequential? rows)
+        (fail (str "the provider the form submitted has :models " (pr-str rows)
+                   "; it is a list of rows, each with an :id and its modalities")
+              {:models rows}))
+      (let [models (mapv (fn [row]
+                           (let [row (kw-keys row)]
+                             (when-not (map? row)
+                               (fail (str "a model row is " (pr-str row) ", not a map")
+                                     {:row row}))
+                             (let [id (:id row)]
+                               (when-not (and (string? id) (seq (str/trim id)))
+                                 (fail (str "a model row names no :id: " (pr-str row))
+                                       {:row row}))
+                               [(str/trim id) (dissoc row :id)])))
+                         rows)
+            dupes  (->> (map first models) frequencies
+                        (keep (fn [[id n]] (when (> n 1) id)))
+                        sortable)]
+        (when (seq dupes)
+          (fail (str "the form listed " (pr-str dupes) " more than once; a model id is"
+                     " one row, and a repeated one would silently be the last")
+                {:duplicates dupes}))
+        (cond-> {:protocol proto
+                 :base-url (:base-url m)
+                 :model    (:model m)
+                 :models   (into {} models)}
+          (contains? m :display-name) (assoc :display-name (:display-name m)))))))
+
+(def ^:private written-header
+  "The first lines of a config.edn this process WROTE. It is here because the write
+  is a rewrite: EDN has no way to keep a person's comments through one, and no
+  comment-preserving writer is worth a dependency for a file this small. So the file
+  says so, and the version that had them is beside it."
+  (str ";; WRITTEN BY THE SETTINGS FORM. The comments this file used to carry are gone:\n"
+       ";; an EDN map is rewritten whole. What it held before this write is beside it as\n"
+       ";; config.edn.bak. Editing by hand is still fine -- the form reads this file back\n"
+       ";; -- and the next write from the form will reorder it again.\n\n"))
+
+(defn- write-config!
+  "M -> config.edn, written atomically, with ONE GENERATION of backup.
+
+  The backup is taken only when the file exists and its text actually changes, so a
+  no-op write does not destroy the last interesting version."
+  [m]
+  (let [f    (home/config-file)
+        old  (when (.exists f) (slurp f :encoding "UTF-8"))
+        text (str written-header (with-out-str (pprint/pprint m)))]
+    (when (and old (not= old text))
+      (spit (home/config-backup-file) old :encoding "UTF-8"))
+    (home/spit-atomically! f text)))
+
+(defn- change-providers!
+  "CHANGE -- a function of the parsed config map -> the config to write -- validated
+  as a whole before anything is written. Returns the new config map."
+  [change]
+  (let [raw  (config)
+        next (change raw)]
+    (user-catalog (:providers next))
+    (write-config! next)
+    next))
+
+(defn put-provider!
+  "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the
+  catalog entry that is now in config.edn's :providers.
+
+  CREATE OR REPLACE, one route for both: the form knows which it is doing (its id
+  field is read-only when it is editing), and the file does not care -- an entry is
+  an entry.
+
+  THE ID RULE APPLIES TO A NEW ID ONLY. An entry already in the file keeps the
+  spelling the file gave it, so an update never renames anything: the id is the
+  entry's identity (and its credential name), and 'edit' does not mean 'rename'.
+
+  THE KEY, when given, is written as its own line in .env under the credential name
+  the id derives -- AFTER the config write has succeeded, so a rejected entry cannot
+  leave a key behind for a provider that does not exist. Validated first for the one
+  thing .env cannot hold: a newline.
+
+  VALIDATION IS THE WHOLE FILE'S: a patch of a built-in is checked against what the
+  built-in provides, and an entry this run will not use is checked too.
+
+  THE ENTRY IS STORED AS `check-provider` NORMALIZED IT, not as the wire handed it
+  over. That is not tidiness: `entry-from-wire` accepts a row's modalities as the
+  strings JSON has (`[\"text\"]`), and the catalog speaks keywords in sets
+  (`#{:text}`) -- so writing the raw row would put a shape in the file that the next
+  read normalizes differently from what was validated, and the modality guard (which
+  compares against the catalog's spelling) would read a set of strings as a model
+  that declares nothing."
+  [id entry key]
+  (let [raw      (config)
+        user     (:providers raw)
+        id       (or (existing-key user id) (check-new-id! id))
+        validated (check-provider id (entry-from-wire entry))]
+    (when (some? key)
+      (when (re-find #"[\r\n]" (str key))
+        (fail "an api-key cannot span lines" {:id (name id)})))
+    (let [next (change-providers! (fn [cfg] (assoc-in cfg [:providers id] validated)))]
+      (when (some? key)
+        (home/write-env-line! (credential-name id) key))
+      (get (user-catalog (:providers next)) id))))
+
+(defn remove-provider!
+  "ID -> {:name .. :remaining ..}, after config.edn is written without that entry.
+
+  ONLY WHAT THE FILE HOLDS CAN BE REMOVED, and that is said rather than done
+  silently: a built-in provider is not in config.edn, so there is nothing to remove
+  -- what a person CAN remove is their PATCH of it, and the sentence says so instead
+  of answering 'removed' while the provider is still there.
+
+  Removing a patch restores the built-in, because the merge simply stops happening.
+  Removing the last entry leaves `:providers {}`, which is the same catalog the
+  built-in table alone gives.
+
+  THE DEFAULT TIER IS NOT TOUCHED, AND THAT IS WHY THIS REFUSES WHEN IT NAMES THIS
+  PROVIDER. Clearing the reference as a side effect would be this function writing
+  a section it was not asked about; leaving it would turn one click into a home
+  whose every run fails to resolve. So the refusal names the other step (change the
+  default tier first), and the panel that shows the failure is the same panel that
+  can take it."
+  [id]
+  (let [raw  (config)
+        user (:providers raw)
+        k    (existing-key user id)]
+    (when (nil? k)
+      (fail (str "no provider named " (pr-str id) " is in config.edn's :providers, so"
+                 " there is nothing to remove; a built-in vendor is the built-in"
+                 " table's, and only a patch of one is yours to take back")
+            {:id id :known (sortable (map name (keys user)))}))
+    (when (= k (:provider (:default raw)))
+      (fail (str "config.edn's :default names " (pr-str (name k)) ", so removing it"
+                 " would leave every new session unable to resolve. Point the default"
+                 " tier at another provider first (General), then remove this one.")
+            {:id id :default true}))
+    (let [next (change-providers! (fn [cfg] (update cfg :providers dissoc k)))]
+      {:name      (name k)
+       :remaining (count (:providers next))})))
+
+;; ------------------------------------------------- asking a vendor what it serves
+
+(defn- openai-models
+  "GET <base-url>/models with the key as a bearer token -> the ids it lists.
+
+  The OpenAI-compatible listing shape (`{\"data\": [{\"id\": …}, …]}`), which is
+  what the one protocol this harness implements speaks. ONE PROTOCOL TODAY, so one
+  implementation; a second vendor shape is a second function and a dispatch on
+  `:protocol`, exactly as `llm/stream!` is dispatched -- not a special case bolted
+  into this one.
+
+  A TIMEOUT OF ITS OWN: a form waiting on a vendor that never answers must not hold
+  a request thread open, and the sentence says which half failed (the vendor was
+  reached and refused, versus nobody answered) because those send a person to
+  different places."
+  [provider]
+  (let [base  (str/replace (str (:base-url provider)) #"/+$" "")
+        req   (-> (HttpRequest/newBuilder (URI/create (str base "/models")))
+                  (.header "Authorization" (str "Bearer " (:api-key provider)))
+                  (.header "Accept" "application/json")
+                  (.timeout (java.time.Duration/ofSeconds 15))
+                  (.GET)
+                  (.build))
+        resp  (try
+                (.send (HttpClient/newHttpClient) req (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))
+                (catch java.net.http.HttpTimeoutException _
+                  (fail (str "the vendor at " base " did not answer within 15 seconds")
+                        {:base-url base :timeout true}))
+                (catch java.io.IOException e
+                  ;; NAMING THE ADDRESS IT COULD NOT REACH, because a person with a
+                  ;; half-filled form has several of them and the JVM's own message
+                  ;; ("Remote host terminated the handshake") does not say which.
+                  (fail (str "could not reach " base " — "
+                             (or (ex-message e) "the connection failed"))
+                        {:base-url base :unreachable true})))]
+    (if (<= 200 (.statusCode resp) 299)
+      (let [body   (.body resp)
+            parsed (try (json/read-str body)
+                        (catch Throwable _ (fail (str "the vendor at " base " answered something that is not JSON")
+                                                 {:base-url base})))]
+        (->> (:data parsed)
+             (keep (fn [row] (let [id (get row "id")] (when (string? id) id))))
+             vec))
+      ;; THE VENDOR'S OWN WORDS, trimmed: a 401 that says "invalid api key" is worth
+      ;; more to a person than this harness' paraphrase of it, and the status is
+      ;; carried so a form can tell 'wrong key' from 'wrong address'.
+      (fail (str "the vendor at " base " answered " (.statusCode resp)
+                 (let [b (str/trim (str (.body resp)))]
+                   (if (seq b) (str ": " b) "")))
+            {:base-url base :status (.statusCode resp)}))))
+
+(def ^:dynamic *list-models*
+  "The vendor probe, as a seam: a function of one RESOLVED provider -> a vector of
+  model ids.
+
+  TESTS ALTER-VAR-ROOT THIS to a stub, because the real one makes an outbound HTTP
+  request and no test run may depend on a vendor answering. Production leaves it at
+  the real implementation -- a var holding the default, exactly like
+  `harness.edge.http/*directory-chooser*` and `harness.infra.home/*root-override*`:
+  alter-var-root rather than binding, because the server runs on another thread.
+
+  ONE SHAPE TODAY: `openai-models` speaks the listing shape of the one protocol
+  `implemented-protocols` contains. When a second vendor needs a different shape, this becomes a
+  multimethod dispatched on `:protocol` -- the seam stays a seam, the dispatch
+  arrives underneath it."
+  (fn [provider] (openai-models provider)))
+
+(defn probe-models
+  "What a vendor serves, asked of the vendor itself: {:models [id …]}, or a named
+  failure carrying the vendor's own answer.
+
+  ENDPOINT AND PROTOCOL COME FROM THE CALLER, or from the catalog when the caller
+  names an :id it already holds -- a form editing an unsaved vendor has them in
+  hand, and a form asking about a saved one should not have to repeat them.
+
+  THE KEY IS RESOLVED THE WAY A RUN RESOLVES IT -- the provider's derived credential
+  name, then the global one -- unless the caller has one in hand, which is the case
+  that matters for a form: somebody typing a key into a field means to try THAT key
+  before it is written anywhere.
+
+  THIS IS THE SECOND PLACE A KEY IS EVER ATTACHED, and it is written down rather
+  than left to be noticed: `resolve-provider` attaches one to a resolution, and this
+  attaches one to an outbound request, both through the same private `api-key`.
+  Nothing here returns a key, logs one, or keeps one past the call.
+
+  AND IT IS THE ONE CALL IN THIS FEATURE THAT LEAVES THE MACHINE -- which is the
+  point: an id typed from memory is the mistake the built-in table's own comment
+  records having made once already. It reads nothing it does not need and writes
+  nothing anywhere: no file, no store, no log line."
+  [{:keys [id base-url protocol] :as asked}]
+  (let [k     (when (some? id) (keyword (str/trim (str id))))
+        saved (when (some? k) (get (catalog) k))
+        url   (or base-url (:base-url saved))
+        ;; NOT destructured as `api-key`: that name is the private lookup this
+        ;; falls back to, and a local of the same name would shadow it -- which
+        ;; fails as a null dereference inside an HTTP call rather than as anything
+        ;; readable.
+        proto (or (some-> protocol keyword) (:protocol saved))]
+    (when-not (and (string? url) (seq url))
+      (fail (str "no endpoint to ask: give an :id this home's catalog knows, or a"
+                 " :base-url to ask directly")
+            {:id id}))
+    (when-not (contains? (implemented-protocols) proto)
+      (fail (str "cannot ask a " (pr-str proto) " vendor: this harness speaks "
+                 (pr-str (protocol-names)))
+            {:protocol proto}))
+    {:models (*list-models* {:protocol proto
+                             :base-url url
+                             :api-key  (or (:api-key asked)
+                                           (when (some? k) (api-key k)))})
+     :asked    url}))
+
+(defn put-defaults!
+  "KNOBS (a map over the three knobs) -> the default tier now in config.edn's
+  :default, after validating it by RESOLVING it.
+
+  ABSENT MEANS 'DO NOT TOUCH THAT KNOB'; AN EXPLICIT nil MEANS 'REMOVE THE KEY'.
+  The difference is the same one `POST /api/model` draws for a session, pushed one
+  tier down: 'leave my model alone' and 'stop choosing a model' are different
+  requests, and the second one has a meaning -- the provider's own default model,
+  or no reasoning effort sent at all.
+
+  NAMING A PROVIDER REPLACES THE TIER rather than patching it, and that is the one
+  way out of an INLINE description: the three controls cannot express a described
+  endpoint, so choosing a vendor is a statement that the tier is now a named one.
+  It also makes 'switch vendor' the same one-knob move it is at every other tier --
+  a model the caller did not restate is dropped rather than carried onto a vendor
+  that may not declare it.
+
+  VALIDATED BY RESOLVING, which is `POST /api/model`'s stance one tier down: a
+  default nobody can be served from is not a change, and writing it first would
+  leave config.edn holding a configuration every NEW session fails on.
+
+  Writes config.edn atomically with a backup, touches no other section, and returns
+  the section as written."
+  [knobs]
+  (unknown-keys! "the default tier the form submitted" knobs #{:provider :model :reasoning-effort})
+  (doseq [k [:provider :model :reasoning-effort]]
+    (let [v (get knobs k)]
+      (when (and (contains? knobs k) (some? v) (not (string? v)) (not (keyword? v)) (not (symbol? v)))
+        (fail (str "the default tier's " (pr-str k) " is " (pr-str v)
+                   ", which is not a name; a knob is a name or nothing at all")
+              {k v}))))
+  (let [raw     (config)
+        before  (or (:default raw) {})
+        named?  (some? (:provider knobs))
+        cleared (reduce-kv (fn [m k v] (if (nil? v) (dissoc m k) m)) before knobs)
+        given   (into {} (remove (comp nil? val)) (select-keys knobs [:provider :model :reasoning-effort]))
+        proposed (if named?
+                   (fold-selection given)
+                   (merge cleared given))]
+    ;; Resolving is the check: an unknown provider or an undeclared model fails here,
+    ;; by name, with nothing written.
+    (when (seq proposed)
+      (fold-and-assemble proposed))
+    (write-config! (assoc raw :default proposed))
+    proposed))

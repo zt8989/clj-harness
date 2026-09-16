@@ -77,9 +77,76 @@
       (System/getProperty "user.home")))
 
 (defn config-file    [] (io/file (root) "config.edn"))
-(defn providers-file [] (io/file (root) "providers.edn"))
+
+(defn providers-file
+  "The RETIRED provider catalog file. Nothing reads it as a catalog any more -- the
+  catalog is config.edn's :providers section -- and this accessor survives for two
+  reasons only: the reader that refuses a home still holding one has to name it,
+  and the tests have to plant one to prove that refusal fires. A path is a path;
+  this one is kept so the failure can be about a file rather than a string."
+  []
+  (io/file (root) "providers.edn"))
+
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
+
+(defn config-backup-file
+  "The one-generation backup a rewrite of config.edn leaves behind, so a write that
+  loses something a person wrote is recoverable. NOT listed among the home's files:
+  it is not a thing anyone edits, it is a thing anyone may recover FROM."
+  []
+  (io/file (root) "config.edn.bak"))
+
+(defn spit-atomically!
+  "Write TEXT to F by writing a SIBLING temp file and renaming it over the target,
+  so a failure part-way through leaves the previous contents rather than a truncated
+  file. A sibling, so the rename is atomic on one filesystem -- the same discipline
+  harness.cap.hashline.files/write-file! follows for the files it edits.
+
+  HERE RATHER THAN IN THE ONE CALLER because it is a fact about this home's files
+  rather than about any one of them, and because the next caller should not have to
+  invent a third version of it. Returns F."
+  [^java.io.File f ^String text]
+  (let [tmp (io/file (str (.getAbsolutePath f) ".writing"))]
+    (spit tmp text :encoding "UTF-8")
+    (java.nio.file.Files/move (.toPath tmp) (.toPath f)
+                              (into-array java.nio.file.CopyOption
+                                          [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
+    f))
+
+(defn write-env-line!
+  "NAME=VALUE as one line of this home's .env: the line is REPLACED where it already
+  is, and APPENDED when it is not.
+
+  LINE SURGERY, NOT A REWRITE, and that is the whole point: a .env is hand-written
+  and may carry a paragraph explaining each key, other tools' variables, `export`
+  prefixes and quotes. Every other byte -- other lines, their order, their comments,
+  their quoting -- comes out exactly as it went in, and an existing `export` prefix
+  is kept.
+
+  A VALUE WITH A NEWLINE IS REFUSED: this file is one fact per line, and a value
+  that spans lines would silently become several facts, one of which is
+  `sk-…` with no name. The newline style already in the file is used for anything
+  appended, so a CRLF file does not end up half one and half the other.
+
+  Returns F. The VALUE is not returned, logged or kept: it arrived from the caller,
+  who already had it."
+  [name value]
+  (when (re-find #"[\r\n]" (str value))
+    (throw (ex-info (str "a .env value cannot span lines (writing " (pr-str name) ")")
+                    {:name name})))
+  (let [f     (dotenv-file)
+        old   (when (.exists f) (slurp f :encoding "UTF-8"))
+        nl    (if (and old (str/includes? old "\r\n")) "\r\n" "\n")
+        re    (re-pattern (str "(?m)^(export\\s+)?" (java.util.regex.Pattern/quote name) "\\s*=.*$"))
+        found (when old (re-find re old))
+        entry (str (when (and found (nth found 1)) "export ") name "=" value)]
+    (spit-atomically!
+     f
+     (cond
+       (nil? old) (str entry nl)
+       (some? found) (str/replace-first old re (java.util.regex.Matcher/quoteReplacement entry))
+       :else (str old (when-not (str/ends-with? old nl) nl) entry nl)))))
 
 (defn parse-dotenv
   "A .env file's contents -> a {name value} map. Handles the shapes the format
@@ -95,8 +162,9 @@
   PUBLIC because there is a second reader with a different question:
   harness.cap.providers/api-key-source reports WHERE a key comes from and must not have
   the value itself, so it asks this for the map and only tests a name's presence in
-  it. Everything that wants a value uses `env-value` instead, which is where the
-  precedence between the file and the environment is decided -- once."
+  it. Everything that wants a value uses `env-value` instead, and the precedence
+  between the file and the environment -- and the order among several names -- is
+  decided in `env-source`, once."
   [raw]
   (into {}
         (->> (str/split-lines raw)
@@ -113,6 +181,34 @@
                          (subs v 1 (dec (count v)))
                          v))])))))
 
+(defn env-source
+  "NAMES, in the order they should be tried -> {:name .. :source :env-file|:environment},
+  or {:name nil :source nil} when neither source has any of them.
+
+  SOURCE-MAJOR, and that ordering is the RULE rather than an implementation
+  detail: the home's .env is the single place that decides, so it is asked about
+  EVERY name before the environment is asked about any. Specificity -- a
+  provider's own derived name before the global fallback -- decides WITHIN a
+  source, and only there. Name-major would be the other way round, and it would
+  quietly break the promise this function's neighbour makes: an exported shell
+  variable would override a file the person edited on purpose.
+
+  NEVER THE VALUE, and that is why this exists as well as `env-value`: the
+  settings panel reports WHICH line supplies a key (or which line to add), and
+  reading the secret to answer a question about its presence is a habit worth not
+  forming. `env-value` is this same order for a single name -- one rule, two
+  questions, no second copy to drift.
+
+  The file lives in the CONFIGURATION HOME (this namespace's root), re-read on
+  every call like config.edn, so editing it takes effect without a restart."
+  [names]
+  (let [f (dotenv-file)
+        from-file (when (.exists f)
+                    (parse-dotenv (slurp f :encoding "UTF-8")))]
+    (or (some (fn [n] (when (contains? from-file n) {:name n :source :env-file})) names)
+        (some (fn [n] (when (some? (System/getenv n)) {:name n :source :environment})) names)
+        {:name nil :source nil})))
+
 (defn env-value
   "NAME's value from the home's .env, then from the environment -- nil when neither
   has it.
@@ -126,6 +222,8 @@
   .ENV WINS OVER A REAL ENVIRONMENT VARIABLE, which is the dotenv library's
   documented precedence and what the provider key has always done: the home's file
   is the single place that decides, and a shell variable does not override it.
+  `env-source` owns that order (and extends it across several names); this is it for
+  one name, so a caller with a name in hand does not have to re-derive the rule.
 
   The file lives in the CONFIGURATION HOME (harness.infra.home/root), which is not the OS
   home -- and is re-read on every call, like config.edn, so editing it takes effect

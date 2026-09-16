@@ -81,15 +81,15 @@
 
 (def ^:private seed-config
   "A minimal config.edn, so a run that resolves a provider from config -- rather
-  than from the scripted override -- has something to resolve. The inline form,
-  so it needs no providers.edn: :protocol :fake is the offline provider, and the
-  endpoint is a URL that is never contacted.
+  than from the scripted override -- has something to resolve. The INLINE form in
+  the :default section, so it needs no :providers entry: :protocol :fake is the
+  offline provider, and the endpoint is a URL that is never contacted.
 
   It declares NO modalities, which is deliberate -- an inline provider that says
   nothing about what it accepts is not guarded (see harness.edge.ag-ui/undeclared-
   input?), and a seeded config must not make every text-only integration test
   fail for a reason the test never stated."
-  "{:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}\n")
+  "{:default {:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}}\n")
 
 (defn- seed!
   [dir]

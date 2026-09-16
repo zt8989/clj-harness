@@ -27,11 +27,11 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 
 ```
 ~/.clj-harness/
-├── config.edn        模型默认档：三个旋钮（每轮重读，可运行期编辑）
-├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读，可以不存在）
+├── config.edn        **唯一一份配置**：:default（三个旋钮的默认档）+ :providers（厂商目录）（每轮重读）
 ├── harness.edn       用户级 harness 配置（可选；编辑模式、围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
-├── .env              HARNESS_API_KEY（优先于真实环境变量）
+├── .env              密钥：一家厂商一把 `<ID>_API_KEY`（`acme-gateway` → `ACME_GATEWAY_API_KEY`），
+│                     全局 `HARNESS_API_KEY` 兜底；优先于真实环境变量
 ├── harness.infra.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
@@ -46,7 +46,7 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的时候现问文件。判别
 标准是「能不能被改写」，不是「改得勤不勤」：
 
-- `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **仍是文件、仍是现读**，改完不用重启
+- `config.edn` / `harness.edn` / `hooks.edn` **仍是文件、仍是现读**，改完不用重启
   （「设置」那一版生效配置每次打开都重读，就是这条纪律看得见的地方）。
 - **旧的 `~/.clj-harness/logs/` 不导入、也不迁移**：那个平铺目录下的会话在本产品里一律不可见（文件名
   不含项目身份，自动归属只能猜）。字节一个都不动，要接着用就手动挪进 `projects/<workspace>/`。
@@ -58,16 +58,18 @@ $env:CLJ_HARNESS_HOME = "D:\harness-config"
 clojure -M:run
 ```
 
-首次使用先建目录并放三份配置（第四份可选）：
+首次使用先建目录并放两份配置（后两份可选）：
 
 ```pwsh
 New-Item -ItemType Directory -Force ~/.clj-harness
 Copy-Item config.edn.example ~/.clj-harness/config.edn
-Copy-Item providers.edn.example ~/.clj-harness/providers.edn
 Copy-Item harness.edn.example ~/.clj-harness/harness.edn   # 可选：不复制就是全默认（含按锚点编辑）
 Copy-Item .env.example ~/.clj-harness/.env
-# 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
+# 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY（或某家厂商自己的 <ID>_API_KEY）
 ```
+
+`config.edn.example` 把**两节**都写了出来——`:default` 的三个旋钮与 `:providers` 里的一家厂商——
+所以它既是能直接用的配置，也是这个形状的参考手册。
 
 `harness.edn.example` 把 `:editing` 与 `:approval` 的每个键都写在**它的默认值**上并逐条注释，所以它同时
 是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
@@ -77,9 +79,11 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
 **缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
-`providers.edn` / `hooks.edn` / `harness.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
+`harness.edn` / `hooks.edn` / `.env` 可以不存在——不存在 = 那个配置什么都没说，
 `.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
-键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。
+顶层冒出第三节 / 键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，
+从外部看没有区别。**最常撞上的那一份写坏**是旧形状——三个旋钮直接写在顶层；那个失败的句子会说
+「把它们挪到 `:default` 下面」。
 
 ### system 消息：冻结的开头 + hook 追加的文本
 
@@ -156,23 +160,24 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 **provider 是厂商，model 挂在厂商下面。** 会话由**三个旋钮**描述，写在 `config.edn`：
 
 ```edn
-{:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+{:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}}
 ```
 
 `:model` 可省（省则用该厂商的默认 model）；`:reasoning-effort` 是 provider 不认识的约定。解析低 → 高、
-**逐旋钮**合并：`config.edn` 默认档 → 本会话覆盖（`session-configure` 工具，经人工审批）→ 本次 run 的请求。
-**换厂商而不指定 model，就落在新厂商的默认 model 上。**
+**逐旋钮**合并：`config.edn` 的 `:default` → 本会话覆盖（`session-configure` 工具，经人工审批）→
+本次 run 的请求。**换厂商而不指定 model，就落在新厂商的默认 model 上。**
 
-`providers.edn` 里每个厂商是 endpoint + 一张 model 表：
+`config.edn` 的另一节 `:providers` 里，每个厂商是 endpoint + 一张 model 表：
 
 ```edn
-{:openrouter {:protocol :openai-completions
-              :base-url "https://openrouter.ai/api/v1"
-              :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
-              :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
-                                                        :context-window 1000000
-                                                        :max-output-tokens 64000}
-                         "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}
+{:providers
+ {:openrouter {:protocol :openai-completions
+               :base-url "https://openrouter.ai/api/v1"
+               :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
+               :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
+                                                         :context-window 1000000
+                                                         :max-output-tokens 64000}
+                          "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}}
 ```
 
 每个 model **必须**声明 `:input` / `:output`（词汇表就是本 harness 真搬得动的类型：`:input` ⊆
@@ -183,10 +188,13 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 {:protocol :openai-completions :base-url "https://some-endpoint/v1" :model "some-model"}
 ```
 
-**想知道此刻实际在用什么**：侧边栏底部「设置」打开一版**只读**的生效配置——三个旋钮各是**哪一档**
-选的、家目录的绝对路径是哪条规则给的、home 里哪几份文件在、有没有 api-key（**只有有没有与来源，
-值永不出现在响应里**）。它每次调用都重读配置文件，所以改完 `config.edn` 按「Re-read」就是新值，
-不用重启。
+**加一家厂商不必手编文件**：侧边栏底部「设置」打开两页——**General**（在用什么，以及**默认档**那三个
+控件：厂商、该厂商的一个 model、思考档）、**Models**（厂商列表与表单：新建 / 改写 / 删掉一条，
+填了密钥就写进 `.env` 的一行）。
+General 与 Models **会写** `config.edn`：先校验整份新配置再原子落盘，被拒时一个字节都不动，
+改写前那份留在 `config.edn.bak`。密钥的值**永不出现在任何响应里**——Models 每一行报的是有没有密钥与派生出来的**凭据名**
+（那就是你要编辑的那一行）。面板每次打开都重读文件，所以手改完按「Re-read」
+就是新值，不用重启。
 
 **形状与校验的细节**（哪些键必需、哪些值会指名报错、两个数字为什么是「报告用」不是「执行用」、
 旧扁平形状为什么不读不迁移）见 [`docs/architecture/providers.md`](docs/architecture/providers.md)。

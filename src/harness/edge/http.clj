@@ -786,6 +786,18 @@
   that."
   #{"remove"})
 
+(def ^:private provider-verbs
+  "The verbs this edge serves under /api/providers/<stem>/ -- the catalog's own
+  noun, added because the settings form manages entries the same way the sidebar
+  manages projects. Closed, like the other two: a path that names a verb nobody
+  serves has to fall through to the run endpoint rather than be answered 405 by a
+  route that was never about it.
+
+  ONE VERB, and the other two actions are plain routes rather than verbs: creating
+  and updating are the SAME act on one entry (the body carries the id), and it
+  belongs on the collection."
+  #{"remove"})
+
 (defn- stem-verb-route
   "/api/<collection>/<stem>/<verb>, matched on: an exact segment count, the
   segment that names the collection, a verb in that collection's closed set, and
@@ -1075,7 +1087,7 @@
   'change nothing' and 'stop choosing' are different requests, and only one of
   them has something to say.
 
-  ONLY THE SESSION IS TOUCHED. config.edn, providers.edn and every other thread
+  ONLY THE SESSION IS TOUCHED. config.edn and every other thread
   are read and left alone; the override lives in this process's memory keyed by
   thread id, which is what makes 'only the current session' true rather than
   merely intended -- and what makes it not survive a restart, which the panel is
@@ -1164,6 +1176,177 @@
   [req]
   (api-response 200 (skills/skill-list
                      (project/skill-layers (get (query-params (:query-string req)) "threadId")))))
+
+;; ------------------------------------------------- the provider catalog, as a form
+
+(defn- provider-models-post
+  "POST /api/providers/models {id?, base-url?, protocol?, api-key?} -- ask a vendor
+  what it serves, for the form's model list.
+
+  AN EXACT ROUTE RATHER THAN A VERB, and that is load-bearing rather than
+  stylistic: `/api/providers/models` is ONE segment after the collection, so the
+  /api/<collection>/<stem>/<verb> matcher can never see it -- it would fall through
+  to the run endpoint and become a 500 from a body that was never there, which is
+  the trap edge.md records for a GET on the verb shape. The exact match wins before
+  the shape is tried.
+
+  A PROVIDER MAY BE *NAMED* \"models\" WITHOUT COLLIDING: creating and updating go
+  through /api/providers (the collection), removing through /api/providers/<id>/remove
+  (the verb shape), so this path is only ever the probe. A reserved word would be a
+  rule with no failure to prevent.
+
+  THE KEY MAY COME FROM THE FORM -- somebody typing one into a field means to try
+  that key before it is written anywhere -- and when it does not, it is resolved
+  exactly as a run resolves it. The answer carries model ids and the endpoint that
+  was asked; the key is in neither, and nothing is written: no file, no store, no
+  log line. The vendor's refusal comes back in the vendor's own words (see
+  providers/probe-models), which is what makes a 401 debuggable from the form."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (map? ok))
+      (api-response 400 {:error "request body must be a JSON object naming a vendor to ask"})
+
+      :else
+      (let [answer (try {:ok (providers/probe-models ok)}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error answer)]
+          (api-response 400 {:error error})
+          (api-response 200 (:ok answer)))))))
+
+(defn- defaults-post
+  "POST /api/defaults {provider?, model?, reasoning-effort?} -- set the DEFAULT tier,
+  the one config.edn's :default section holds, and answer the catalog as it now
+  stands.
+
+  THE TIER A NEW SESSION STARTS FROM, which is what makes this different from
+  POST /api/model: that one changes THIS session (memory, gone on restart), and this
+  one changes the file every session reads. The page that shows them side by side is
+  the same page, which is why the distinction is drawn in one place -- the tier
+  report `GET /api/settings` already answers with.
+
+  ABSENT MEANS 'LEAVE THAT KNOB ALONE' AND AN EXPLICIT null MEANS 'REMOVE THE KEY'
+  -- see providers/put-defaults! for why those are different requests. A body that
+  names a provider REPLACES the tier (the one way out of an inline description);
+  one that does not is a patch.
+
+  VALIDATED BY RESOLVING, before anything is written: an unknown provider or a model
+  the vendor does not declare is a 400 with the server's sentence, and config.edn
+  does not move. NO AUDIT LINE, for the reason its provider-writing siblings give:
+  the rule is 审计行跟着日志走, and this neither moves nor reads a log."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (map? ok))
+      (api-response 400 {:error "request body must be a JSON object naming the knobs to set"})
+
+      :else
+      (let [answer (try {:ok (providers/put-defaults! ok)}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error answer)]
+          (api-response 400 {:error error})
+          (api-response 200 (providers/registry-report)))))))
+
+(defn- providers-get
+  "GET /api/providers -- the catalog as the settings form needs it: every vendor
+  with where it came from, its endpoint, the models it declares, whether a key is
+  configured and WHICH line supplies it. See harness.cap.providers/registry-report
+  for the shape and for why every field in it is one that function chose.
+
+  NO THREADID, unlike /api/model and /api/choices: the catalog is this HOME's, the
+  same answer for every session, and a form editing it is not doing anything to a
+  conversation. Asking for one would suggest a per-session answer that does not
+  exist.
+
+  READ-ONLY, and therefore leaves no trace: nothing here writes a file, touches the
+  store, or registers anything -- the api-key's VALUE is absent at every depth,
+  which is what makes this safe to call while a run is in flight."
+  [_req]
+  (api-response 200 (providers/registry-report)))
+
+(defn- provider-post
+  "POST /api/providers {id, …entry, api-key?} -- create or replace ONE entry in
+  config.edn's :providers, and answer with the whole catalog as it now stands.
+
+  THE WHOLE CATALOG, not the row, and the same shape GET answers with: the form
+  refetches the list after every write anyway, and one shape for both means a client
+  has one thing to parse. (It is also the honest answer to 'and what does the file
+  say now'.)
+
+  VALIDATION RUNS BEFORE ANYTHING IS WRITTEN -- see providers/put-provider! -- so a
+  refused change leaves config.edn byte for byte as it was. That is the one thing a
+  form editing a hand-written file owes the person using it, and it is why the
+  refusals below are 400s with the server's own sentence rather than a 500: the
+  sentence names the field, the value, and what to write instead, and the form shows
+  it verbatim.
+
+  THE API-KEY, when the body carries one, becomes its own line in the home's .env
+  under the credential name the id derives -- written after the config write has
+  landed, so a refused entry cannot leave a key behind for a provider that does not
+  exist. It is never echoed back: the answer's key facts are presence, origin and
+  name.
+
+  NO AUDIT LINE, and the rule says why: 审计行跟着日志走，不跟着写入走. Writing
+  config.edn neither moves nor reads a log, so this is in the same class as adding a
+  project. Nothing is cached either -- the catalog is re-read per call, so the next
+  run uses this entry with no restart."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (map? ok))
+      (api-response 400 {:error "request body must be a JSON object describing one provider"})
+
+      (str/blank? (str (:id ok)))
+      (api-response 400 {:error "missing id: a provider entry is identified by one, and its credential name is derived from it"})
+
+      :else
+      (let [id     (:id ok)
+            key    (:api-key ok)
+            entry  (dissoc ok :id :api-key)
+            answer (try {:ok (providers/put-provider! id entry key)}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error answer)]
+          (api-response 400 {:error error})
+          (api-response 200 (providers/registry-report)))))))
+
+(defn- remove-provider-post
+  "POST /api/providers/<id>/remove -- take one entry out of config.edn's :providers,
+  and answer with the catalog as it now stands plus which entry went.
+
+  WHAT CAN BE REMOVED IS WHAT THE FILE HOLDS, and the refusal says so rather than
+  answering 'removed' while the vendor is still there: a built-in provider is the
+  built-in table's, and what a person CAN take back is their patch of one.
+
+  The .env is NOT touched: the key line may be one this route wrote or one somebody
+  typed, and deleting a secret is not a side effect anybody asked for. A line for a
+  provider that no longer exists is inert.
+
+  NO AUDIT LINE, like its write sibling, and for the same reason."
+  [id]
+  (let [answer (try {:ok (providers/remove-provider! id)}
+                    (catch Throwable t {:error (ex-message t)}))]
+    (if-some [error (:error answer)]
+      (api-response 400 {:error error})
+      (api-response 200 (assoc (providers/registry-report)
+                               :removed (:name (:ok answer)))))))
 
 (defn- git-get
   "GET /api/git?threadId=.. -- the session's directory as a working tree: the
@@ -1277,6 +1460,22 @@
       :post (add-project-post req)
       (api-response 405 {:error "method not allowed"}))
 
+    (= "/api/providers" (:uri req))
+    (case (:request-method req)
+      :get  (providers-get req)
+      :post (provider-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/providers/models" (:uri req))
+    (case (:request-method req)
+      :post (provider-models-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/defaults" (:uri req))
+    (case (:request-method req)
+      :post (defaults-post req)
+      (api-response 405 {:error "method not allowed"}))
+
     :else
     (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
       ;; The verb-carrying routes: one shape, two verbs, and every one of them is
@@ -1288,11 +1487,15 @@
         [:post "rebuild"] (rebuild-post req stem)
         [:post "archive"] (archive-post req stem)
         (api-response 405 {:error "method not allowed"}))
-      (if-some [{:keys [verb stem]} (stem-verb-route "projects" project-verbs (:uri req))]
+      (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]
-          [:post "remove"] (remove-project-post stem)
+          [:post "remove"] (remove-provider-post stem)
           (api-response 405 {:error "method not allowed"}))
-        (handle-run req)))))
+        (if-some [{:keys [verb stem]} (stem-verb-route "projects" project-verbs (:uri req))]
+          (case [(:request-method req) verb]
+            [:post "remove"] (remove-project-post stem)
+            (api-response 405 {:error "method not allowed"}))
+          (handle-run req))))))
 
 (defn handler
   "Every request, with a net under it.

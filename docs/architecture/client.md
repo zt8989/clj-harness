@@ -16,7 +16,7 @@ app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntim
                     侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
-  settings-panel.tsx 「设置」打开的只读报告（生效配置 / 各来自哪一档 / 家目录 / 有没有 key）
+  settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
   assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
@@ -25,6 +25,7 @@ lib/
   threads.ts        AGENT_URL + rebuild 调用
   projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
   settings.ts       GET /api/settings 的类型化薄封装
+  providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
 ```
 
@@ -41,7 +42,7 @@ lib/
   也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
   界面上明说这一点。
 - **侧边栏管的不只是切换**：新建任务（**先有项目**，没有就先去添加一个）、归档 / 取消归档、
-  移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那份只读报告。
+  移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那个面板。
   这些动作都在**请求进行中一起禁用**，失败的服务端原话落在**被点的那一行**下面。
 - **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
 
@@ -165,7 +166,35 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
   它**不**断菜单怎么画、哪个键选什么——那部分在真 Chromium 里量（下一段），因为套件**不 import `src/`**。
 
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
-（三段位、归档、移除、设置的哨兵搜索、**技能列表的弹层与键盘**），不是自动化套件。
+（三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**），
+不是自动化套件。
+
+### 设置面板：两页，两页都会写
+
+**General**（本会话在用什么 + **默认档**三个控件）与 **Models**（provider 目录与表单）。
+页面选择是组件里的一个 `useState`，**不是路由**——不引路由依赖，URL 指不到某一页。
+
+- **两页都会写**：General 的 Save 写 `config.edn` 的 `:default`，Models 的表单写 `:providers`
+  （以及，填了密钥时，`.env` 的一行）。
+- **曾经还有两页**（「API key」与「Config home」），主人看过后删掉了：它们报的东西——密钥有没有、
+  从哪来、是哪一行、家目录在哪、哪几份文件在——Models 的每一行（`ACME_GATEWAY_API_KEY` 与 `key ✓`）
+  与 composer 那边已经在眼前，**一页只装已经看得见的东西就是一步多余的路**。
+  （历史与理由在 `.scratch/custom-providers/spec.md` 的复议段，本目录只记现在没有它们。）
+- **表单不问「哪一行是默认 model」**：没有单选钮，**第一行就是这家厂商的默认 model**（目录要求每个
+  provider 声明一个默认 model，而「默认 model」在人心里指的是「一轮跑在哪个 model 上」——
+  那件事在 General 设）。控件旁边写明这一条，免得有人以为顺序只是顺序。
+- **默认档的模型必须从列表里选**：没有「— 厂商自己的默认 —」这一项。厂商一定有一个默认 model
+  （目录不接受没有 model 的 provider），所以那个空选项除了把这句话再说一遍没有别的内容；
+  换厂商时控件直接落在新厂商的默认 model 上——服务端本来也会解析到它，控件只是把它说出来。
+- **弹窗尺寸是定的，滚动发生在页里**：一份 provider 表单比面板高，会自己长大的 modal 会在人打字时
+  把导航与按钮挪走。所以高度定住（`min(30rem, 62vh)`），只有右侧那一页滚。
+- **两个请求、两份失败**：`GET /api/settings` 要**解析**配置，`GET /api/providers` 只读它。
+  「`:default` 指着一个刚被删掉的 provider」正是那个状态——报告拒答，目录照答——
+  所以两边各自失败、各自清空，页面才能既**说出**坏在哪，又留着手把修好它的**控件**。
+  读失败时**不留旧值**：一行陈旧的解析结果摆在拒绝句子旁边，是面板一次说两件事。
+- **首次跑通的顺序**是它们各自的形状决定的：设置面板 → Models → Add provider → 填 → Create
+  → 列表里立刻有它（`catalog` 每轮重读）→ composer 的选择器里也有它（分组标签用**显示名**，
+  发出去的仍是 id）→ General 把默认档指过去 → **新会话**从它开始。
 
 ## 一条从后端来的注意
 

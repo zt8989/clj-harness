@@ -8,8 +8,8 @@
 
     1. The store holds STATE, not records. Projects, session ownership, archive
        flags, the editing mode's anchor bookkeeping, and a session's task list are
-       all things rewritten in place. A session's jsonl log, config.edn,
-       providers.edn and harness.edn
+       all things rewritten in place. A session's jsonl log, config.edn
+       and harness.edn
        are append-only or hand-edited and stay FILES. The criterion is not 'how
        often does it change' but 'can it be rewritten': an archive flag moves
        once a year and needs a row, because there is nowhere else to put it; a

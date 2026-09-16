@@ -31,16 +31,16 @@ const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
 // server requires -- a deliberate dev-only dependency.
 const E2E_ARGS = ["-M:dev", "-m", "harness.e2e-server"];
 
-// A config.edn the server can resolve, in the INLINE form so it needs no
-// providers.edn. It has to be the COMPLETE inline form: the provider catalog
-// validates an inline description and refuses one that names no :base-url or
-// :model, and that validation runs even when a script is pinned -- harness.edge.http
-// resolves the provider for the audit timeline on every run.
+// A config.edn the server can resolve, in the INLINE form in its :default section
+// so it needs no :providers entry. It has to be the COMPLETE inline form: the
+// provider catalog validates an inline description and refuses one that names no
+// :base-url or :model, and that validation runs even when a script is pinned --
+// harness.edge.http resolves the provider for the audit timeline on every run.
 //
 // It declares NO modalities on purpose: an inline provider that says nothing
 // about what it accepts is not guarded (harness.edge.ag-ui/undeclared-input?), and a
 // seed must not make every text-only test fail for a reason the test never stated.
-const SEED_CONFIG = '{:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}\n';
+const SEED_CONFIG = '{:default {:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}}\n';
 
 export interface Harness {
   url: string;

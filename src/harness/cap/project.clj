@@ -603,7 +603,7 @@
       :approval {:strict true}, which tightens the fence until every project
       path needs an approval too (hence :strict?, which says so out loud
       rather than leaving the block to infer it from a missing row);
-    - the configuration home (config.edn, providers.edn, .env -- reading
+    - the configuration home (config.edn, .env -- reading
       one's own configuration is the fence's explicit allowance, and strict
       does not tighten it away: the config home is harness's own ground, not
       the project's);

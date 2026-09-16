@@ -281,7 +281,7 @@
                            (pr-str (vec extras))
                            "; it takes provider, model and reasoning-effort --"
                            " a model's endpoint, modalities and token counts are"
-                           " declared in providers.edn, not chosen per session")
+                           " declared in config.edn's :providers, not chosen per session")
                       {:unknown (vec extras)}))))
   (let [{:keys [provider model reasoning-effort]} args
         thread-id kernel-tools/*thread-id*

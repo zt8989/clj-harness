@@ -11,6 +11,7 @@
             [harness.fake :as fake]
             [harness.infra.home :as home]
             [harness.kernel.hooks :as hooks]
+            [harness.kernel.llm :as llm]
             [harness.edge.http :as http]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
@@ -755,41 +756,45 @@
   owning the lifecycle next to the config it is paired with keeps the tests about
   what they are actually testing. See *port* for why no port is written down."
   [turns f]
-  ;; The config files live in the HOME, not beside the logs; ask harness.infra.home for
+  ;; The config file lives in the HOME, not beside the logs; ask harness.infra.home for
   ;; it rather than walking up from the log directory, whose depth is the tree's
   ;; business and has already changed once.
   (let [cfg-file (home/config-file)
         reg-file (home/providers-file)
         read-back (fn [f] (when (.exists f) (slurp f :encoding "UTF-8")))
-        old-cfg (read-back cfg-file) old-reg (read-back reg-file)
+        old-cfg (read-back cfg-file)
         old-script @fake/test-script]
     (try
       (reset! fake/test-script (vec turns))
-      (spit cfg-file "{:provider :alpha}\n" :encoding "UTF-8")
-      (spit reg-file
-            (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
-                             :model "alpha-small"
-                             :models {"alpha-small" {:input #{:text :image} :output #{:text}
-                                                     :context-window 200000
-                                                     :max-output-tokens 8192}
-                                      "alpha-big"   {:input #{:text :image} :output #{:text}
-                                                     :context-window 1000000
-                                                     :max-output-tokens 64000}
-                                      ;; Declares no counts at all -- the entry that
-                                      ;; makes 'silence is not zero' testable.
-                                      "alpha-bare"  {:input #{:text} :output #{:text}}}}
-                     :beta  {:protocol :fake :base-url "https://y/v1"
-                             :model "beta-plain"
-                             :models {"beta-plain" {:input #{:text} :output #{:text}
-                                                    :context-window 128000
-                                                    :max-output-tokens 4096}}}})
+      ;; ONE FILE, TWO SECTIONS: the default tier names alpha, and the catalog that
+      ;; defines alpha and beta is its :providers section.
+      (spit cfg-file
+            (support/config-text
+             "{:provider :alpha}"
+             (pr-str {:alpha {:protocol :fake :base-url "https://x/v1"
+                              :model "alpha-small"
+                              :models {"alpha-small" {:input #{:text :image} :output #{:text}
+                                                      :context-window 200000
+                                                      :max-output-tokens 8192}
+                                       "alpha-big"   {:input #{:text :image} :output #{:text}
+                                                      :context-window 1000000
+                                                      :max-output-tokens 64000}
+                                       ;; Declares no counts at all -- the entry that
+                                       ;; makes 'silence is not zero' testable.
+                                       "alpha-bare"  {:input #{:text} :output #{:text}}}}
+                      :beta  {:protocol :fake :base-url "https://y/v1"
+                              :model "beta-plain"
+                              :models {"beta-plain" {:input #{:text} :output #{:text}
+                                                     :context-window 128000
+                                                     :max-output-tokens 4096}}}}))
             :encoding "UTF-8")
+      (io/delete-file reg-file true)
       (let [stop (http/start! {:port 0})
             port (:local-port (meta stop))]
         (try (binding [*port* port] (f))
              (finally (stop))))
       (finally
-        (spit cfg-file (or old-cfg "{:protocol :fake}\n") :encoding "UTF-8")
+        (spit cfg-file (or old-cfg "{:default {:protocol :fake}}\n") :encoding "UTF-8")
         (io/delete-file reg-file true)
         (reset! fake/test-script old-script)))))
 
@@ -841,7 +846,7 @@
        (let [e (error (.body (post-run id {:provider {:context-window 200000}})))]
          (is (some? e) "the run is terminated rather than served with the field dropped")
          (is (str/includes? (:message e) "context-window") "the field is named")
-         (is (str/includes? (:message e) "providers.edn")
+         (is (str/includes? (:message e) ":providers")
              "and the run says where it belongs instead"))
        (testing "and nothing was resolved or recorded for it"
          (is (nil? (providers/override-for id)))
@@ -2009,15 +2014,18 @@
         config   (io/file dir "config.edn")
         provs    (io/file dir "providers.edn")
         dotenv   (io/file dir ".env")
-        saved    (into {} (for [f [config provs dotenv]]
+        saved    (into {} (for [f [config dotenv]]
                             [(.getName f) (when (.exists f) (slurp f :encoding "UTF-8"))]))
         settings (fn [] (api-call :get "/api/settings?threadId=set-1" nil))
         parse    (fn [] (read-json (settings)))
         restore! (fn []
-                   (doseq [[nm f] [["config.edn" config] ["providers.edn" provs] [".env" dotenv]]]
+                   (doseq [[nm f] [["config.edn" config] [".env" dotenv]]]
                      (if-some [was (get saved nm)]
                        (spit f was :encoding "UTF-8")
-                       (io/delete-file f true))))
+                       (io/delete-file f true)))
+                   ;; ...and this home holds no retired catalog file, whatever it
+                   ;; held before this test.
+                   (io/delete-file provs true))
         facts    (fn [] (into {} (for [f (reverse (file-seq (io/file dir)))
                                        :when (.isFile ^java.io.File f)]
                                   [(.getName ^java.io.File f)
@@ -2025,10 +2033,15 @@
     (try
       ;; EDN, not JSON: config.edn is read by clojure.edn like every other
       ;; config file here, and `{"provider":"alpha"}` in it is a parse error
-      ;; rather than a configuration. The providers file below is EDN for the
-      ;; same reason.
-      (spit config (pr-str {:provider :alpha :reasoning-effort "low"}) :encoding "UTF-8")
-      (spit provs settings-providers :encoding "UTF-8")
+      ;; rather than a configuration.
+      ;;
+      ;; The default tier and the catalog are the TWO SECTIONS of this one file,
+      ;; and the test edits each in turn below -- which is also why a stray
+      ;; providers.edn would be worse than useless here: the catalog refuses a
+      ;; home that still holds one.
+      (spit config (support/config-text (pr-str {:provider :alpha :reasoning-effort "low"})
+                                        settings-providers)
+            :encoding "UTF-8")
       (spit dotenv (str "HARNESS_API_KEY=" settings-sentinel "\n") :encoding "UTF-8")
       (with-server
        "settings-unused"
@@ -2061,7 +2074,11 @@
            (testing "the api-key is presence and origin, and NOTHING else"
              (let [body  (.body (settings))
                    reply (parse)]
-               (is (= {:present? true :source "env-file"} (:key reply)))
+               (is (= {:present? true :source "env-file" :name "HARNESS_API_KEY"}
+                      (:key reply))
+                   "presence, origin, AND the line: this home's .env sets the global
+                    one, and alpha -- the provider :default names -- has no
+                    ALPHA_API_KEY, so that is the line this session reads")
                (is (not (contains? reply :api-key)))
                (is (not (str/includes? body settings-sentinel))
                    "the whole body, searched as a string -- not a field checked for emptiness")
@@ -2072,7 +2089,7 @@
              (let [reply (parse)]
                (is (= dir (:path (:home reply))))
                (is (contains? #{"override" "environment" "default"} (:origin (:home reply))))
-               (is (= ["config.edn" "providers.edn" "hooks.edn" ".env" "harness.db"]
+               (is (= ["config.edn" "hooks.edn" ".env" "harness.db"]
                       (mapv :name (:files (:home reply)))))
                (is (true? (:present? (first (filter #(= ".env" (:name %))
                                                     (:files (:home reply))))))
@@ -2082,8 +2099,9 @@
              ;; The ticket's sharpest acceptance, and it is the same question the
              ;; store's namespace asks from the other end: config is files, read
              ;; fresh -- never a start-up snapshot and never a database row.
-             (spit config (pr-str {:provider :beta :model "beta-plain"
-                                   :reasoning-effort "high"})
+             (spit config (support/config-text (pr-str {:provider :beta :model "beta-plain"
+                                                        :reasoning-effort "high"})
+                                               settings-providers)
                    :encoding "UTF-8")
              (let [reply (parse)]
                (is (= "beta" (:provider reply)) "the by-name choice moved")
@@ -2095,7 +2113,8 @@
            (testing "a configuration that cannot be resolved is a 400 with the reason"
              ;; A half-edited config.edn is how a person meets this in practice,
              ;; and the sentence is what the panel will be showing.
-             (spit config (pr-str {:provider :nope}) :encoding "UTF-8")
+             (spit config (support/config-text (pr-str {:provider :nope}) settings-providers)
+                   :encoding "UTF-8")
              (let [resp  (settings)
                    reply (parse)]
                (is (= 400 (.statusCode resp)))
@@ -2659,3 +2678,257 @@
            (is (str/includes? (:error (read-json resp)) "nope")))
          (is (= 1 (count (filterv #(= "git/branch" (:kind %)) (log-lines-for id))))
              "the refusal left no trace on disk"))))))
+
+;; ------------------------------------------------ the provider catalog, over HTTP
+
+(def ^:private provider-sentinel "sk-or-v1-PROVIDER-SENTINEL-DO-NOT-PUBLISH-4242")
+
+(defn- home-facts
+  "Every file in this home, by name, with its bytes and mtime -- the shape a claim
+  like 'only these files moved' can be checked against."
+  []
+  (into {} (for [f (reverse (file-seq (io/file (home/root))))
+                 :when (.isFile ^java.io.File f)]
+             [(.getName ^java.io.File f) [(.length ^java.io.File f) (.lastModified ^java.io.File f)]])))
+
+(def ^:private a-provider-body
+  {"id"          "acme-gateway"
+   "display-name" "Acme Gateway"
+   "protocol"    "openai-completions"
+   "base-url"    "https://gateway.example/v1"
+   "model"       "gpt-x"
+   "models"      [{"id" "gpt-x" "input" ["text"] "output" ["text"] "context-window" 128000}]})
+
+(deftest the-provider-catalog-is-readable-and-writable-over-the-edge
+  (with-resolved-config
+   []
+   (fn []
+     (let [get-providers (fn [] (api-call :get "/api/providers" nil))
+           row           (fn [body n] (first (filter #(= n (:name %)) (:providers body))))
+           dotenv        (io/file (home/root) ".env")
+           cfg           (io/file (home/root) "config.edn")
+           ;; The .env is not part of the fixture: it is created here and taken away
+           ;; afterwards so this test does not hand a key to whatever runs next.
+           old-env       (when (.exists dotenv) (slurp dotenv :encoding "UTF-8"))]
+       (try
+         (testing "GET answers the catalog from the files, with no session in the URL"
+           (let [resp (get-providers)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= ["alpha" "beta" "deepseek" "ollama" "openrouter"]
+                    (sort (mapv :name (:providers body))))
+                 "the two from config.edn and the three built-ins")
+             (is (= "user" (:origin (row body "alpha"))) "config.edn's entry is yours")
+             (is (= "builtin" (:origin (row body "openrouter"))))
+             (is (= (sort (map name (keys (methods llm/stream!))))
+                    (:protocols body))
+                 "exactly the protocols this PROCESS implements, read off the
+                  multimethod -- so a new implementation is offerable without a second
+                  edit, and this test process truthfully offers the fake too")
+             (is (some #{"openai-completions"} (:protocols body)))
+             (is (= {:provider "alpha"} (:default body))
+                 "the default tier as the file writes it, for the page that edits it")
+             (is (= "ALPHA_API_KEY" (:credential (row body "alpha"))))
+             (is (false? (get-in (row body "alpha") [:key :present?])))))
+
+         (testing "POST creates one, and answers the catalog it now has"
+           (let [before (home-facts)
+                 resp   (api-call :post "/api/providers"
+                                  (json/write-str (assoc a-provider-body "api-key" provider-sentinel)))
+                 body   (read-json resp)
+                 after  (home-facts)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "user" (:origin (row body "acme-gateway"))))
+             (is (= "Acme Gateway" (:display-name (row body "acme-gateway"))))
+             (is (= [{:id "gpt-x" :input ["text"] :output ["text"] :context-window 128000}]
+                    (:models (row body "acme-gateway"))))
+             (is (true? (get-in (row body "acme-gateway") [:key :present?])))
+             (is (= "ACME_GATEWAY_API_KEY" (get-in (row body "acme-gateway") [:key :name])))
+
+             (testing "the key's VALUE is nowhere in the answer"
+               (is (not (str/includes? (.body resp) provider-sentinel)))
+               (is (not (str/includes? (.body resp) (subs provider-sentinel 0 12)))))
+
+             (testing "and exactly three files moved: the config, its backup, the .env"
+               (is (= #{"config.edn" "config.edn.bak" ".env"}
+                      (set (filter #(not= (get before %) (get after %)) (keys after))))
+                   "no log, no store, no other file -- the route writes configuration"))
+
+             (testing "and the next resolution serves it, with no restart"
+               (providers/set-override! "edge-write" {:provider :acme-gateway})
+               (let [p (providers/effective-provider "edge-write")]
+                 (is (= "https://gateway.example/v1" (:base-url p)))
+                 (is (= provider-sentinel (:api-key p)) "including the key that just landed"))
+               (providers/set-override! "edge-write" nil))))
+
+         (testing "a change that cannot be served is refused, and the file does not move"
+           (let [before (.length cfg)
+                 stamp  (.lastModified cfg)
+                 resp   (api-call :post "/api/providers"
+                                  (json/write-str (assoc a-provider-body "models" [])))
+                 body   (read-json resp)]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error body) "lists no models")
+                 "the server's own sentence, which is what the form will show")
+             (is (= before (.length cfg)))
+             (is (= stamp (.lastModified cfg)) "byte for byte, mtime included")))
+
+         (testing "an id the form may not create is refused with the rule in the sentence"
+           (let [resp (api-call :post "/api/providers"
+                                (json/write-str (assoc a-provider-body "id" "Acme Gateway")))]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error (read-json resp)) "lowercase letter"))))
+
+         (testing "a body that is not JSON, and one that is not an object, are both 400s"
+           (is (= 400 (.statusCode (api-call :post "/api/providers" "{not json"))))
+           (is (= 400 (.statusCode (api-call :post "/api/providers" "[1,2]"))))
+           (is (= 400 (.statusCode (api-call :post "/api/providers" "{}")))
+               "and an entry with no id has nothing to derive a credential name from"))
+
+         (testing "a built-in is not an entry the file holds, so there is nothing to remove"
+           (let [resp (api-call :post "/api/providers/openrouter/remove" nil)]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error (read-json resp)) "nothing to remove"))))
+
+         (testing "and removing what IS there takes it out of the catalog"
+           (let [resp (api-call :post "/api/providers/acme-gateway/remove" nil)
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "acme-gateway" (:removed body)))
+             (is (nil? (row body "acme-gateway")) "the answer already reflects the removal")
+             (is (nil? (row (read-json (get-providers)) "acme-gateway")))
+             (is (not (str/includes? (slurp cfg) "acme-gateway")))))
+
+         (testing "the verb shape is closed"
+           ;; A verb nobody serves is NOT 405'd here: it falls through to the AG-UI
+           ;; run endpoint, which is what the closed verb set is for (see
+           ;; stem-verb-route). What this collection answers is the GET on the
+           ;; collection and the POST on a verb it serves.
+           (is (= 405 (.statusCode (api-call :get "/api/providers/acme-gateway/remove" nil)))))
+
+         (finally
+           (if (nil? old-env)
+             (io/delete-file dotenv true)
+             (spit dotenv old-env :encoding "UTF-8"))))))))
+
+(deftest asking-a-vendor-what-it-serves-stays-offline-in-this-suite
+  ;; The ONE route in this feature that leaves the machine, tested with the seam at
+  ;; a stub -- because the real one would make this suite depend on a vendor
+  ;; answering, and a suite that needs the network is a suite that fails on a train.
+  (with-resolved-config
+   []
+   (fn []
+     (let [real      providers/*list-models*
+           seen      (atom [])
+           stub!     (fn [f] (alter-var-root #'providers/*list-models* (constantly f)))
+           ask       (fn [body] (api-call :post "/api/providers/models" (json/write-str body)))]
+       (try
+         (stub! (fn [vendor]
+                  (swap! seen conj vendor)
+                  ["gpt-x" "gpt-y"]))
+         (testing "the ids the vendor lists come back"
+           (let [resp (ask {"base-url" "https://gateway.example/v1"
+                            "protocol" "openai-completions"
+                            "api-key"  "sk-typed-into-the-form"})
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= ["gpt-x" "gpt-y"] (:models body)))
+             (is (= "https://gateway.example/v1" (:asked body)))
+             (testing "and the key the FORM typed is the one that was sent"
+               (is (= "sk-typed-into-the-form" (:api-key (last @seen))))
+               (testing "while the answer carries it nowhere"
+                 (is (not (str/includes? (.body resp) "sk-typed-into-the-form")))))))
+
+         (testing "an :id alone asks the endpoint the catalog knows, with ITS key"
+           ;; A built-in, so the assertions read as production behaviour rather than
+           ;; as this fixture's offline provider: openrouter's own endpoint, and its
+           ;; own credential name resolved out of .env.
+           (spit (io/file (home/root) ".env") "OPENROUTER_API_KEY=from-the-file\n" :encoding "UTF-8")
+           (let [resp (ask {"id" "openrouter"})
+                 body (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= ["gpt-x" "gpt-y"] (:models body)))
+             (is (= "https://openrouter.ai/api/v1" (:asked body))
+                 "the catalog's endpoint, not one the caller guessed")
+             (is (= :openai-completions (:protocol (last @seen))))
+             (is (= "from-the-file" (:api-key (last @seen)))
+                 "resolved exactly as a run resolves it: the provider's own name first"))
+           (io/delete-file (io/file (home/root) ".env") true))
+
+         (testing "a vendor that refuses comes back in its OWN words"
+           (stub! (fn [_] (throw (ex-info "the vendor at https://x/v1 answered 401: invalid api key"
+                                          {:status 401}))))
+           (let [resp (ask {"base-url" "https://x/v1" "protocol" "openai-completions"})]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error (read-json resp)) "invalid api key")
+                 "the vendor's sentence, not a paraphrase of it")))
+
+         (testing "and a question that cannot be asked is refused before anything is sent"
+           (stub! (fn [_] (throw (ex-info "the stub must not be reached" {}))))
+           (is (= 400 (.statusCode (ask {"protocol" "openai-completions"})))
+               "no endpoint to ask and no id to look one up")
+           (is (= 400 (.statusCode (ask {"base-url" "https://x/v1" "protocol" "anthropic-messages"}))
+               )
+               "and a protocol nothing implements")
+           (is (= 400 (.statusCode (ask "[1,2]"))))
+           (is (= 400 (.statusCode (api-call :post "/api/providers/models" "{not json")))))
+
+         (testing "and it writes nothing: no file, no store, no log line"
+           (stub! (fn [_] ["gpt-x"]))
+           (let [before (home-facts)]
+             (ask {"base-url" "https://x/v1" "protocol" "openai-completions"})
+             (is (= (keys before) (keys (home-facts)))
+                 "not one file appeared")))
+
+         (finally (alter-var-root #'providers/*list-models* (constantly real))))))))
+
+(deftest the-default-tier-is-set-over-the-edge
+  (with-resolved-config
+   []
+   (fn []
+     (let [ask-defaults (fn [knobs] (api-call :post "/api/defaults" (json/write-str knobs)))
+           cfg          (io/file (home/root) "config.edn")]
+       (testing "naming a vendor and a model lands in :default, and the answer says so"
+         (let [resp (ask-defaults {"provider" "beta" "model" "beta-plain"})
+               body (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (= {:provider "beta" :model "beta-plain"} (:default body))
+               "the same answer GET gives, so a client parses one shape")
+           (is (str/includes? (slurp cfg) ":beta"))))
+
+       (testing "a body with no provider patches the tier rather than replacing it"
+         (let [resp (ask-defaults {"reasoning-effort" "high"})]
+           (is (= 200 (.statusCode resp)))
+           (is (= {:provider "beta" :model "beta-plain" :reasoning-effort "high"}
+                  (:default (read-json resp))))))
+
+       (testing "and an explicit null removes that key"
+         (let [resp (ask-defaults {"model" nil})]
+           (is (= 200 (.statusCode resp)))
+           (is (nil? (:model (:default (read-json resp)))))
+           (is (= {:provider :beta :reasoning-effort "high"}
+                  (:default (read-string (slurp cfg))))
+               "the model is gone from the TIER (the provider entry still declares it
+                as one of its models), so a new session lands on the vendor's own
+                default")))
+
+       (testing "a default nobody can be served from is refused, file untouched"
+         (let [before (home-facts)
+               resp   (ask-defaults {"provider" "beta" "model" "no-such-model"})]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "no-such-model"))
+           (is (= before (home-facts))))
+         (let [resp (ask-defaults {"provider" "nope"})]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "no provider named"))))
+
+       (testing "and the tier report follows the file, so the page can show which
+                 tier a knob came from"
+         (ask-defaults {"provider" "alpha" "model" "alpha-small"})
+         (let [reply (read-json (api-call :get "/api/settings?threadId=t-defaults" nil))]
+           (is (= "alpha" (:provider reply)))
+           (is (= "config" (:provider (:tiers reply)))
+               "the file is where this resolution started, and the panel says so")))
+
+       (testing "only POST, and it takes no thread: the default tier is this home's"
+         (is (= 405 (.statusCode (api-call :get "/api/defaults" nil)))))))))

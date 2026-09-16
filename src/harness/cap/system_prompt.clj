@@ -27,8 +27,8 @@
   WHY IT IS ASSEMBLED PER RUN RATHER THAN FROZEN PER SESSION. Every fact a hook
   appends can move mid-session -- tools/session-disable!, project/bind!,
   session-configure -- so a copy taken once would eventually be a sentence that is
-  no longer true. This is the same discipline as config.edn, harness.edn,
-  providers.edn and AGENTS.md, all of which are read fresh on every run. The price
+  no longer true. This is the same discipline as config.edn, harness.edn and
+  AGENTS.md, all of which are read fresh on every run. The price
   of a fact that moved is ONE cold prefix; the price of freezing it is a system
   message that lies.
 
