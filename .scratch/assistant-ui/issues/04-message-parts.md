@@ -367,3 +367,26 @@ isTurnContinuation(s) = s.thread.messages[s.message.index - 1]?.role === "assist
 `tsc --noEmit` 0 error；`vite build` 绿（CSS 89.60 kB / JS 1 277.17 kB，gzip 361.13 kB）；
 `npm test` **11/11 passed**（含 05 的停泊/恢复与 06 的多轮用例——动作条与步距的改动没有碰审批门，
 `t05-*` 的行为不在本节的改动面内，未重截）。测试跑起来的那轮页面控制台除 vite 连接日志外零输出。
+
+### 13. 复议（2026-09-16）：组头被删；`Failed` / `Cancelled` 的实测修正
+
+两处都是**推翻本文件里的旧话**，按仓库规矩追加而不是改写旧段。都指向
+`.scratch/flat-step-rows/spec.md`（「平铺的步骤行」）。
+
+**（一）第 3 节「默认状态一览」里 `1 tool call（组）→ 打开` 这一行不再成立。** 那个头已从页面上删掉。
+它当初的理由在真实页面上站不住：`groupPartByType` 连只有一个 part 的 run 也会分组（上游注释原话
+*Always groups tool calls … even if there's only one*），而一次工具调用在线上就是一条独立的助手消息
+（本文件第 8 节实测），所以那个头**恒为 1**——页面读起来是「每个调用前面多一行」，不是「把 4 个调用
+收成 1 行」。它展开之后露出来的正是它自己那一行，「默认打开以便看见工具名」因此是多余的一步。
+现在：`THREAD_COMPONENTS.ToolGroup` 是个**透传**（槽位不能空着——空着抄来的 `thread.aui.tsx`
+会画它自己那个头），状态从行中间挪到**行尾**（图标 + 耗时），状态词进 `sr-only`。
+本节第 3 节那张「默认状态一览」图里的组那一层，读的时候请按这一条修正。
+
+**（二）第 8 节第 2 条里「没有被走到的分支是 `cancelled`……今天说得出证据的只有 `Failed` 这一支」
+要修正。** 2026-09-16 在真 Chromium 里重跑同一件事（脚本化的 `bash sleep 45`，跑着的时候按
+Stop generating）：行上得到的是 **`Cancelled`**——状态标记的 `title` 是 `Cancelled`、图标是
+`lucide-circle-x`、行文字带 `line-through`——**不是 `Failed`**。所以今天走得出来的四支是
+`running`（转圈 + shimmer）/ `done`（对勾）/ `cancelled`（划掉 + 叉）/ `needs-approval`
+（感叹号 + 审批卡）；`Failed` 反而**没有界面入口**（它要 `status.type === "incomplete"` 且 reason
+不是 `cancelled`，或者 part 上带 `isError`；从界面上能造的只有中止，而中止现在报 cancelled）。
+这是当时的客户端行为与今天的差异，不是当初写错；但「只有 Failed 这一支」这句话今天会把人引偏。

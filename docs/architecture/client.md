@@ -18,7 +18,7 @@ components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
   settings-panel.tsx 「设置」打开的只读报告（生效配置 / 各来自哪一档 / 家目录 / 有没有 key）
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
-  message-parts.tsx 工具卡与 reasoning 的注入点（THREAD_COMPONENTS）
+  message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
   assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
@@ -68,12 +68,20 @@ lib/
   `https://r.assistant-ui.com/styles/{style}/{name}.json`。
   `npx shadcn@latest add "@assistant-ui/thread"` 由此把 `thread.aui.tsx` 连同 11 个
   registryDependencies **抄进仓库**。
+- **字体是平台自己的那一串**：`--font-sans` 是 `-apple-system, BlinkMacSystemFont, "Segoe UI",
+  "PingFang SC", …`，中文直接用系统字体（macOS 上是 PingFang SC）。它换掉了一个要先下载的 webfont
+  ——构建产物里因此少了三份 `.woff2` 与那几条 `@font-face`。`--font-mono` 没动，代码块照旧是等宽。
+- **对话区两档字号，第三个数字是载荷**：正文（助手答案）**14px**，步骤行（工具行、思考行）
+  **13px**，参数与结果块 **12px**。正文那条规则写在 `ui/src/styles.css` 里、按
+  `[data-slot="aui_assistant-message-content"]` 命中——那个元素是抄来的文件里的，它没有 `aui-*`
+  class 可挂，而改那份文件就破坏了「不重装直接 diff」；步骤行的 13px 写在
+  `message-parts.tsx` 的行上（行是我们自己的）。
 
 抄进来的清单（对账就是不重装直接 diff）：
 
 | 位置 | 是什么 |
 |---|---|
-| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button，**一字未改** |
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button，**一字未改**（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
 | `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
 | `src/hooks/` | 2 份 hook，同样未改 |
 
@@ -84,10 +92,17 @@ lib/
 switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
 
 其余的本地差异走两个**自建注入点**，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`
-（经 `components` prop 覆盖工具卡与 reasoning 的默认渲染——**全部默认折叠是有意的差异**，实现见该文件
-头注释）与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
+与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
 
-**`skill` 也是一张普通工具卡，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
+`THREAD_COMPONENTS` 填的是**步骤行**，三个槽位各有分工：`ToolFallback` 是一种调用长什么样，
+`ToolGroup` **什么都不画**（组的头「N tool call」已去掉，而槽位不能空着——空着抄来的
+`thread.aui.tsx` 会画它自己那个头），`ReasoningGroup` 是思考。工具行与思考行是**同一形状的一行**：
+`类型图标 · 名字 · 摘要`，状态（转圈 / 对勾 / 叉 / 感叹号）在**行尾**、词进 `sr-only`，
+参数与结果仍在行里点开才见（**默认折叠是有意的差异**，实现与理由见该文件头注释）。
+「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
+（含 MCP 的）不改前端就能看见它的调用。
+
+**`skill` 也是一次普通工具调用，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
 上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
 界面上只有一次普通的 `skill` 调用与它的返回。见
 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
