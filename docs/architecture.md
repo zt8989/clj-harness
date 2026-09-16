@@ -38,7 +38,7 @@
 | `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
 | `http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入 |
 | `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
-| `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`）。也是**秘密的取用口**：`env-value`（名字 → 值，配置家的 `.env` 优先于环境）是 provider 的 `HARNESS_API_KEY` 与 `HARNESS_SEARCH_API_KEY` 共用的那一个查找 |
+| `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`）。也是**秘密的取用口**：`env-value`（名字 → 值，配置家的 `.env` 优先于环境）是 provider 的 `HARNESS_API_KEY` 与三个搜索键共用的那一个查找 |
 | `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
 | `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`） |
 | `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
@@ -47,7 +47,7 @@
 | `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表、锚点的四张表，以及任务清单的 `todos` |
 | `rg` / `glob` | **按名字找文件**：`rg` 是「怎么跑 ripgrep」的唯一出处（二进制名、超时、`rg` 不在 PATH 上那句点名失败），`glob` 与 `anchor_grep` 共用它。`glob` 的答案是 rg 两次列举的**交集**（`--glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。**不属于任何编辑家族**，所以两种模式都服务它 |
 | `todos` | **本会话的任务清单**，落 `todos` 表：一行一个会话、清单整存整取（`todo_write` 整份替换）。判据是「能被整份改写的是状态」，`db_test` 的两条元断言为此作证 |
-| `web` / `web.search` | **出网**：`web` 是唯一一处取 URL 的地方（超时、手工跟随并封顶的重定向链、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）；`web.search` 是**一家厂商的线**（请求与响应形状、键名 `HARNESS_SEARCH_API_KEY`）。抽取器是纯函数，所以它不靠 socket 也能测 |
+| `web` / `web.search` | **出网**：`web` 是唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）；`web.search` 是**三家厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪、响应形状），厂商由**哪个键在**决定，顺序写在那一张表里。抽取器是纯函数，所以它不靠 socket 也能测 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令（或跑一个进程内的函数）、读退出码、超时、落审计行 |
 | `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |

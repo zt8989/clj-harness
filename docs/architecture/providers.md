@@ -59,7 +59,8 @@
 
 - 密钥在**一个地方**解析（`harness.home/env-value`；私有的 `api-key` 现在只是它的一行调用），
   在**一个地方**挂上（`resolve-provider` 的返回）。**那个取用口有两个用户**：provider 的
-  `HARNESS_API_KEY` 与 `web_search` 的 `HARNESS_SEARCH_API_KEY`——「一个人放在仓库外面的秘密」
+  `HARNESS_API_KEY` 与 `web_search` 的三个厂商键（`BRAVE_API_KEY` / `EXA_API_KEY` /
+  `TAVILY_API_KEY`）——「一个人放在仓库外面的秘密」
   是同一类事实，两处各写一份查找，迟早会对优先级各有一套说法。
 - **自省回答的任何深度都不出现它。** 序列化器有一张 `never-rendered`（`:api-key` 在里面），
   任何调用方——包括将来的调用点、写错的地方、或者一个「渲染一切」的 helper——拿到的形状里都没有它。

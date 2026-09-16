@@ -39,7 +39,7 @@
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读）
 ├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
-├── .env              HARNESS_API_KEY / HARNESS_SEARCH_API_KEY（优先于真实环境变量，见 harness.home/env-value）
+├── .env              HARNESS_API_KEY 与三个搜索键（Brave/Exa/Tavily）——优先于真实环境变量，见 harness.home/env-value
 ├── harness.db        sqlite：home 的元数据层
 └── projects/
     ├── <sanitized-project-canonical-path>/

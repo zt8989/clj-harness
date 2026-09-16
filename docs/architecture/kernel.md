@@ -141,8 +141,9 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 交给 `register-turn!` 的整个回合）。
 `web_fetch` 取回的是一页的**正文**（`<script>` / `<style>` 连同内容丢掉、块级标签换行、实体解码），
 它是**有损的文本抽取器而不是渲染器**，所以 JS 渲染的页面会如实回一句「没有可读正文」；
-`web_search` 只有**一家厂商的线**（`harness.web.search`），键名固定为 `HARNESS_SEARCH_API_KEY`，
-与 provider 的键走同一个 `harness.home/env-value`。
+`web_search` 有**三个厂商的线**（`harness.web.search`：Brave / Exa / Tavily，各自一对请求与响应形状），
+**哪个键在就哪个答**（顺序 Brave → Exa → Tavily，就是这张表里的顺序），
+键与 provider 的键走同一个 `harness.home/env-value`。
 
 ### 会话 overlay：两条正交轴
 

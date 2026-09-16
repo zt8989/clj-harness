@@ -827,13 +827,15 @@
        " for each. Read one of them with `web_fetch`. "
        "Use it when you do not already know the address; when you do, `web_fetch` is"
        " one call instead of two. "
-       "Needs " search/api-key-env " set in the configuration home's .env (or the"
-       " environment). Without it the call is refused by name and nothing else breaks. "
+       "Needs a search key: " (str/join ", " search/key-vars) " are looked for in the"
+       " configuration home's .env and then in the environment, and the FIRST one set"
+       " is the vendor that answers (" (first search/key-vars) " wins if several are)."
+       " With none of them the call is refused by name and nothing else breaks. "
        "`count` defaults to " search/default-count " and may be at most "
        search/max-count "."))
 
 (defn- t-web-search
-  "`web_search`'s body. The vendor's wire -- request, key, response -- is
+  "`web_search`'s body. The vendors' wires -- request, key, response -- are
   harness.web.search's; this is the tool's face."
   [args]
   (search/perform args))

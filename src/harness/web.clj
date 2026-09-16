@@ -84,16 +84,19 @@
   [hdrs wanted]
   (some (fn [[k v]] (when (= (str/lower-case (name k)) wanted) v)) hdrs))
 
-(defn- one-get
-  "One GET with REQUEST-HEADERS, no redirect following. Returns {:status :headers
-  :body} with the body as BYTES -- decoding is the caller's step, so that the charset
-  comes from one place (see `charset-of`) rather than from a client default that is
-  neither."
-  [^String url request-headers]
+(defn- one-call
+  "One request -- METHOD, URL, REQUEST-HEADERS, REQUEST-BODY -- with no redirect
+  following. Returns {:status :headers :body} with the body as BYTES: decoding is the
+  caller's step, so the charset comes from one place (see `charset-of`) rather than
+  from a client default that is neither."
+  [method ^String url request-headers request-body]
   (let [{:keys [status headers body error]}
-        @(http/get url {:timeout          timeout-ms
-                        :follow-redirects false
+        @(http/request {:url              url
+                        :method           method
                         :headers          (or request-headers {})
+                        :body             request-body
+                        :timeout          timeout-ms
+                        :follow-redirects false
                         ;; `:byte-array` rather than `:raw-byte-array`: the former
                         ;; has http-kit undo a gzip/deflate body first, so what comes
                         ;; back is the page rather than its compressed self.
@@ -123,18 +126,25 @@
     {:status status :headers headers :body body}))
 
 (defn- fetch
-  "GET URL with REQUEST-HEADERS, following redirects BY HAND -- which is what makes
-  the answer able to say where it ended up, and what bounds the chain.
+  "Send METHOD + REQUEST-HEADERS + REQUEST-BODY to URL, following redirects BY HAND --
+  which is what makes the answer able to say where it ended up, and what bounds the
+  chain.
 
-  A redirect is followed by resolving its Location against the URL that produced
-  it, so a relative Location (`/next`, `../x`) works; only http(s) is followed, so
-  a page cannot redirect the fetch into `file:`. The chain's length is capped by
+  A redirect is followed by resolving its Location against the URL that produced it,
+  so a relative Location (`/next`, `../x`) works; only http(s) is followed, so a page
+  cannot redirect the fetch into `file:`. The chain's length is capped by
   `max-redirects`, and hitting the cap is a refusal rather than a hang. The headers
   ride along on every hop: a caller that needs a key -- or a version -- needs it at
-  the end of the chain too."
-  [^String url request-headers]
-  (loop [url url, hops 0]
-    (let [{:keys [status headers body]} (one-get url request-headers)
+  the end of the chain too.
+
+  307/308 MEAN 'REPEAT WHAT YOU SENT, ELSEWHERE' AND KEEP THE BODY; 301/302/303 MEAN
+  'GO AND GET THAT' AND DO NOT. That is the standard, and the difference is not
+  bookkeeping: preserving a POST's body across a 303 is how a query ends up at an
+  address that only meant to point at the answer. (The headers -- including a key --
+  stay either way, because it IS the same request aimed somewhere else.)"
+  [method ^String url request-headers request-body]
+  (loop [method method, url url, body request-body, hops 0]
+    (let [{:keys [status headers body]} (one-call method url request-headers body)
           location (header headers "location")]
       (if (contains? redirect-statuses status)
         (do
@@ -149,9 +159,13 @@
                                  " This is usually a loop.")
                             {:url url :status status :hops hops
                              :reason :too-many-redirects})))
-          (let [next-url (str (.resolve (URI. url) (str/trim (str location))))]
+          (let [next-url  (str (.resolve (URI. url) (str/trim (str location))))
+                keep-body? (contains? #{307 308} status)]
             (uri-of next-url)                    ; refuses a non-http(s) target
-            (recur next-url (inc hops))))
+            (recur (if keep-body? method :get)
+                   next-url
+                   (when keep-body? body)
+                   (inc hops))))
         {:url url :status status :headers headers :body body}))))
 
 ;; ---------------------------------------------------------------------- reading
@@ -315,9 +329,9 @@
               " it may be built by JavaScript, which this does not run)")
          text)))
 
-(defn get-text
-  "Fetch URL with REQUEST-HEADERS and answer the whole body as text:
-  {:url :status :content-type :text}.
+(defn call
+  "One outbound call -- METHOD (:get or :post), URL, and REQUEST as {:headers :body} --
+  answered as {:url :status :content-type :text}.
 
   THIS IS THE TRANSPORT WITHOUT THE READING, and it exists for a caller that already
   knows what it asked for -- an API that answers JSON -- where the page rules below
@@ -325,15 +339,22 @@
   A status of 400 or worse is RETURNED rather than refused here: what a 401 means
   depends on what the caller was asking, so the caller says it.
 
-  Redirects are followed and capped exactly as they are below, and the headers ride
-  along, because a key is needed at the end of the chain too."
-  [url request-headers]
-  (let [resp         (fetch (str (uri-of url)) request-headers)
+  GET and POST go through one door because they share everything that decides what a
+  call IS: the timeout, the hand-followed capped chain, the charset rule, the named
+  transport refusals. Only the method, the body and the caller's headers differ."
+  [method url request]
+  (let [resp         (fetch method (str (uri-of url)) (:headers request) (:body request))
         content-type (header (:headers resp) "content-type")]
     {:url          (:url resp)
      :status       (:status resp)
      :content-type content-type
      :text         (String. ^bytes (:body resp) (charset-of content-type))}))
+
+(defn get-text
+  "GET URL with REQUEST-HEADERS and answer the whole body as text. The shape
+  `harness.web.search` needs for the vendor that puts its query in the URL."
+  [url request-headers]
+  (call :get url {:headers request-headers}))
 
 (defn fetch-text
   "Fetch URL and answer with its text, or throw a named refusal.
@@ -344,7 +365,7 @@
   can act on, which is why none of them is an empty string."
   [url]
   (let [requested (str (uri-of url))
-        {:keys [url status headers body]} (fetch requested nil)
+        {:keys [url status headers body]} (fetch :get requested nil nil)
         content-type (header headers "content-type")]
     (when (>= (long status) 400)
       (throw (ex-info (str url " answered HTTP " status ". Nothing was read -- an error"
