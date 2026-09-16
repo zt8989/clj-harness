@@ -372,6 +372,10 @@ function subjectOf(toolName: string, args: Args): string | null {
 /// the lines stay one line high. That also makes the whole width clickable, which
 /// is why the chevron could go: a control this wide does not need an arrow to say
 /// it can be opened, and a column of arrows read as a list of to-dos.
+///
+/// 13px, against the answer's 14px and the payloads' 12px -- the three numbers
+/// and their reading rule are written down in `styles.css`, where the 14px for
+/// the answer lives. The step rows are ours, so their size is stated here.
 const ToolCallTrigger: FC<{
   toolName: string;
   state: CallState;
@@ -385,7 +389,7 @@ const ToolCallTrigger: FC<{
   return (
     <CollapsibleTrigger
       data-slot="tool-call-trigger"
-      className="aui-tool-call-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+      className="aui-tool-call-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-[13px] transition-[color,scale] active:scale-[0.98]"
     >
       <KindIcon
         data-slot="tool-call-trigger-icon"
@@ -671,7 +675,7 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 //
 // Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
 // is drawn as: an icon, a bold name, the subject this step is about, `py-1.5
-// text-sm`, revealed by a click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
+// text-[13px]`, revealed by a click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
 // `outline`, i.e. `rounded-lg border px-3 py-2` -- and this repo does not want a
 // second visual species in one transcript: the things a turn did (thought, read,
 // thought, ran) are a list of steps, and a step that is boxed while the step
@@ -747,7 +751,7 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
 }) => (
   <CollapsibleTrigger
     data-slot="reasoning-trigger"
-    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-[13px] transition-[color,scale] active:scale-[0.98]"
   >
     <BrainIcon
       data-slot="reasoning-trigger-icon"
