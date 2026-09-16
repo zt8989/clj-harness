@@ -199,11 +199,23 @@
 
 ## 落地记录（2026-09-16，分支 `tool-parity`）
 
+**提交**：`a3b24a8`（实现，41 个文件）与 `a544559`（把 `docs/architecture.md` 的快照点指向它——
+快照点不能指向自己所在的提交，所以由紧跟其后的一次小提交写下，先例是 `ded04d5`）。
+
 七张票一次交付。**落地的数**：
 
 - `clojure -M:test -m harness.test-runner` → `Ran 664 tests containing 9996 assertions. 2 failures, 0 errors.`
   与基线相比 **+57 tests / +222 assertions，没有新增失败**；那 2 条仍是上面那条 JDK 25 环境问题
   （位置、原因逐字不变）。
+  落地过程中共跑了三轮全量，逐轮的失败名单如下——**这组数比一句「全绿」有用**：
+  - 第一轮（改完四张票、还没删掉 `providers` 里那个死掉的 `clojure.string` require）：
+    2 failures，就是基线那两条。
+  - 第二轮（提交后的树）：4 failures = 基线那两条 + `http_test/the-projects-listing-joins-the-store-with-the-disk`
+    的两条断言（`.length` / `.lastModified` 与列表里那份对不上，差 433 字节——**run 的最后一行审计
+    在 SSE 流关闭之后才落盘**，而那条用例紧接着就比）。本特征**不写**那条路径上的任何东西。
+  - 第三轮（隔一会儿重跑同一棵树）：2 failures，又是基线那两条。
+  所以那条 http_test 是**既有的一次性竞态**（本仓的基线纪律就是「比失败名单，不只比绿不绿」），
+  与本特征无关；三轮里的**测试数与断言数完全一致**（664 / 9996）。
 - `cd ui && npm test` → 11 passed（`EXPECTED_CASES` **没动**，理由见下）；
   `cd ui && npm run build`（`tsc --noEmit` + vite build）通过。
 - 新增测试命名空间四个：`harness.glob-test`（13 tests / 35 断言）、`harness.todos-test`（14 / 49）、
@@ -219,8 +231,14 @@
 | 03 | `todos` 迁移步骤与表 + `harness.todos`（校验、整份替换、渲染）+ `todo_write` + `harness.todos-test` | 14 tests，含**另起一个 JVM** 读回清单 |
 | 04 | `harness.web`（客户端 + 重定向链 + 字节上限 + 解码 + **有损抽取器**）+ `web_fetch` + `harness.web-test` | 17 tests，全部打本机服务 |
 | 05 | `harness.home/env-value` / `parse-dotenv` 抽出 + `harness.web.search` + `web_search` + `harness.web-search-test` | 13 tests，含哨兵值与"没配就先拒绝、不发请求" |
-| 06 | 前端两张表的四条：`glob` / `todo_write` / `web_fetch` / `web_search` | `.scratch/tool-parity/evidence/`：全景、四行特写、**每一行展开后**的参数与结果 |
-| 07 | `CONTEXT.md`、`docs/architecture.md`、`kernel.md`、`home-and-storage.md`、`client.md`、`README.md` 跟上 | 本文件 + 上面两套全量的数 |
+| 06 | 前端两张表的四条：`glob` / `todo_write` / `web_fetch` / `web_search` | `.scratch/tool-parity/evidence/`：全景、四行特写、**每一行展开后**的参数与结果（六张，真浏览器 + 真后端） |
+| 07 | `CONTEXT.md`、`docs/architecture.md`、`kernel.md`、`home-and-storage.md`、`client.md`、`providers.md`、`README.md` 跟上 | 本文件 + 上面两套全量的数 |
+
+**真机证据怎么跑的**（下一个读者要复现的话）：这台机器的 8080 被主仓的 dev 后端占着，
+而前端的 `AGENT_URL` 是**写死** `http://localhost:8080/` 的，所以演示后端起在 **8099**，
+浏览器里用 `addInitScript` 把 `fetch` 的 `localhost:8080` 改写成 8099（既有做法）。
+`web_search` 那一步要一家厂商，所以另起了一个本机假厂商（8123，Brave 形状的 JSON），
+并用 `alter-var-root` 把 `harness.web.search/endpoint` 指过去——**这正是那个 var 存在的理由**。
 
 ### 与票面的差异（逐条）
 
