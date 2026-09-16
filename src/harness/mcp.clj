@@ -87,6 +87,16 @@
   ;; the same key -> the last outcome, which is what a status surface reports
   (atom {}))
 
+(defonce ^:private switches
+  ;; THE SERVERS THIS SESSION TURNED OFF: thread-id -> #{server-name}.
+  ;;
+  ;; Per-thread and process-local, exactly like the tool overlay and the hook
+  ;; overlay -- a restart forgets it, and it never touches mcp.edn, because the
+  ;; file is the persistent statement and a session's switch is not. ONE THREAD's
+  ;; decision, and the reason it is per-thread rather than per-project: a server
+  ;; belongs to a project, but whether YOU are using it right now is yours.
+  (atom {}))
+
 (defonce ^:private events
   ;; An OUTBOX, drained by the edge: this namespace never writes an audit line.
   (atom []))
@@ -836,6 +846,9 @@
   [conn decl]
   (and (some? conn)
        (= decl (:decl conn))
+       ;; A SWITCHED-OFF SERVER HAS NO CLIENT -- it was closed on purpose -- and
+       ;; that is what makes the next use of it connect afresh.
+       (some? (:client conn))
        (nil? ((:why-dead (:client conn))))))
 
 (defn- forget!
@@ -844,7 +857,10 @@
   [key]
   (when-let [old (get @connections key)]
     (swap! connections dissoc key)
-    (try ((:close! (:client old))) (catch Exception _ nil))
+    ;; No client means there is nothing left to close -- a switched-off server's
+    ;; entry, whose process went when the switch was made.
+    (when-let [client (:client old)]
+      (try ((:close! client)) (catch Exception _ nil)))
     old))
 
 (defn- server-connection
@@ -862,7 +878,12 @@
         old (get @connections key)]
     (if (usable? old decl)
       old
-      (let [why (when old ((:why-dead (:client old))))]
+      (let [why (when-let [client (:client old)]
+                  ;; A KEPT ENTRY (a server this session switched off) has no
+                  ;; client at all: there is nothing to have died, and calling
+                  ;; through a nil one is a NullPointerException dressed as an
+                  ;; anonymous function call.
+                  ((:why-dead client)))]
         (forget! key)
         (let [conn (connect! server decl dir thread-id)]
           (swap! connections assoc key (cond-> conn
@@ -906,6 +927,52 @@
     (when-not (= (dissoc before :at) fact)
       (swap! events conj fact))))
 
+(defn server-of
+  "The server NAME in a bridged tool name, or nil when NAME is not one of ours.
+  The inverse of the naming rule, and the only place it is inverted: `mcp__<server>
+  __<tool>`, with `__` refused inside server names precisely so this can be exact."
+  [name]
+  (let [n (str name)]
+    (when (str/starts-with? n "mcp__")
+      (let [rest' (subs n 5)
+            at (str/index-of rest' "__")]
+        (when at (subs rest' 0 at))))))
+
+(defn session-disable-server!
+  "Turn SERVER off for THREAD-ID's session, and close its connection.
+
+  CLOSING IS THE POINT, not a side effect: 'switched off' has to mean the process
+  is not running, or it is just a label. The roster it had is KEPT (see
+  `tools-for`) so its tools stay in the table -- see the ticket's argument: hiding
+  them would make 'there is no such server' and 'this server is off' the same
+  observation, and the first is a lie. The seam refuses their calls as it refuses
+  any switched-off tool.
+
+  The idempotent no-op for a server this session does not declare."
+  [thread-id server]
+  (swap! switches update thread-id (fnil conj #{}) server)
+  ;; THE ENTRY STAYS, MINUS ITS CLIENT: what it keeps is the ROSTER, which is
+  ;; what keeps this server's tools in the table while it is off. The process
+  ;; itself goes -- see this function's own reasoning above.
+  (let [identity (project/identity-for thread-id)
+        key [identity server]]
+    (when-let [old (get @connections key)]
+      (swap! connections assoc key (dissoc old :client))
+      (try ((:close! (:client old))) (catch Exception _ nil))))
+  nil)
+
+(defn session-enable-server!
+  "Undo `session-disable-server!` for SERVER in THREAD-ID. A server that was never
+  switched off is a no-op."
+  [thread-id server]
+  (swap! switches update thread-id (fnil disj #{}) server)
+  nil)
+
+(defn server-disabled?
+  "Is SERVER switched off in THREAD-ID's session?"
+  [thread-id server]
+  (contains? (get @switches thread-id #{}) server))
+
 (defn tools-for
   "NAME->TOOL for THREAD-ID from every usable MCP server it declares. The tool
   table folds this in beside its built-ins, which is the point: a tool from a
@@ -929,7 +996,19 @@
     (reap! identity (set (keys decls)))
     (into {}
           (mapcat (fn [[server decl]]
-                    (try
+                    (if (server-disabled? thread-id server)
+                      ;; OFF, AND STILL VISIBLE. Its tools are the last roster it
+                      ;; answered with -- the model keeps seeing them and the seam
+                      ;; refuses their calls -- and nothing is started. A server
+                      ;; this session switched off BEFORE it ever connected has no
+                      ;; roster to keep, so it has no tools: that is the honest
+                      ;; state, and `status` says `disabled` rather than pretending
+                      ;; it was never declared.
+                      (let [kept (:tools (get @connections [identity server]))]
+                        (note-outcome! identity server decl
+                                       {:status :disabled :tools kept})
+                        kept)
+                      (try
                       (let [conn (server-connection identity identity server decl thread-id)]
                         (note-outcome! identity server decl
                                        {:status :connected
@@ -943,23 +1022,70 @@
                         ;; missing' has an answer other than a shrug.
                         (note-outcome! identity server decl
                                        {:status :failed :error (ex-message t)})
-                        {})))
+                        {}))))
                   decls))))
 
-(defn status
-  "What this harness knows about the servers THREAD-ID declares, in name order:
-  one entry per declared server, with the outcome of the last time it was used.
+(defn- tool-rows
+  "The tools of SERVER as a panel shows them -- name and description, never the
+  connection behind them. LIVE is the roster the connection answered with (which
+  carries descriptions); NAMES is what a switched-off server kept, and a name with
+  no description is still worth showing."
+  [live names]
+  (let [names (if (map? names) (sort (keys names)) (or names []))]
+    (mapv (fn [name]
+            (let [description (get-in live [name :description])]
+              (cond-> {:name name}
+                description (assoc :description description))))
+          names)))
 
-  A server declared but not yet used is `:idle` rather than absent -- the roster
-  is assembled on the way to a run, so before the first run nothing has been
-  asked, and saying so is the honest answer."
+(defn status
+  "The MCP ledger for THREAD-ID, in name order: ONE ENTRY PER DECLARED SERVER,
+  with what is known about it right now.
+
+    {:server github :transport stdio :status :connected
+     :tools [{:name mcp__github__create_issue :description ..}]}
+
+  FOUR STATES, each an observation rather than a mood:
+
+    :connected  the handshake worked and its tools are in the table;
+    :failed     the last time this server was used, it did not work -- WITH THE
+                REASON, so 'these tools are missing' has an answer;
+    :disabled   this session switched it off (see session-disable-server!): its
+                tools are still in the table and their calls are refused;
+    :idle       declared, not yet used. The roster is assembled on the way to a
+                run, so before the first run nothing has been asked and saying so
+                is the honest answer.
+
+  :transport is the FIRST thing a person diagnosing a server wants to know, and
+  it is read off the declaration rather than remembered -- a URL is not a command.
+  The tools are names and descriptions: what a panel needs, and nothing that could
+  carry a secret.
+
+  A SERVER'S :env NEVER APPEARS HERE AT ANY DEPTH. That is the api-key's rule, and
+  it holds for the same reason: the ledger says a server IS configured, never with
+  what."
   [thread-id]
   (let [decls (config thread-id)
         id    (project/identity-for thread-id)]
-    (mapv (fn [[server _decl]]
-            (merge {:server server :status :idle}
-                   (get @states [id server])))
+    (mapv (fn [[server decl]]
+            (let [known   (get @states [id server])
+                  ;; THE KEY IS ONE VECTOR: [[id server] :tools], not
+                  ;; [id server :tools] -- the latter walks three levels of map
+                  ;; that do not exist, and quietly answers nil.
+                  live    (get-in @connections [[id server] :tools])
+                  names   (or live (:tools known))
+                  status  (if (server-disabled? thread-id server)
+                            :disabled
+                            (:status known :idle))
+                  rows    (tool-rows live names)]
+              (cond-> {:server    server
+                       :transport (if (:url decl) "http" "stdio")
+                       :status    status}
+                (:error known)   (assoc :error (:error known))
+                (seq rows)       (assoc :tools rows)
+                (seq (:skipped known)) (assoc :skipped (:skipped known)))))
           (sort-by key decls))))
+
 
 (defn take-events!
   "Everything that has happened to a server since the last call, oldest first --

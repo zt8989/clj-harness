@@ -806,3 +806,95 @@
                 control for"
         (is (= (json/read-str (json/write-str schema) :key-fn keyword) (:schema rec)))
         (is (= 5 (count (get-in rec [:schema :properties]))))))))
+
+;; ------------------------------- 05: the ledger, and the switch
+
+(deftest the-ledger-names-every-server-and-what-it-is-doing
+  (write-servers! {"good" (fake-decl)
+                   "bad"  {:command "definitely-not-a-program-xyz"}
+                   "remote" {:url "http://127.0.0.1:1/mcp" :timeout 900}})
+  (let [thread (str "mcp-ledger-" (System/currentTimeMillis))]
+    (mcp/tools-for thread)
+    (let [by-name (into {} (map (juxt :server identity) (mcp/status thread)))]
+      (testing "one entry per DECLARED server, whatever happened to it"
+        (is (= #{"good" "bad" "remote"} (set (keys by-name)))))
+      (testing "the transport is read off the declaration -- a URL is not a command"
+        (is (= "stdio" (:transport (by-name "good"))))
+        (is (= "http" (:transport (by-name "remote")))))
+      (testing "connected, with the tools it is providing"
+        (is (= :connected (:status (by-name "good"))))
+        (is (some #(= "mcp__good__echo" (:name %)) (:tools (by-name "good"))))
+        (is (seq (:description (first (:tools (by-name "good")))))))
+      (testing "failed, WITH the reason -- so missing tools have an answer"
+        (is (= :failed (:status (by-name "bad"))))
+        (is (seq (:error (by-name "bad"))))))))
+
+(deftest a-declared-but-unused-server-is-idle-not-absent
+  (write-servers! {"untouched" (fake-decl)})
+  (let [thread (str "mcp-idle-" (System/currentTimeMillis))
+        entry  (first (mcp/status thread))]
+    (is (= :idle (:status entry)))
+    (is (= "untouched" (:server entry)))
+    (is (nil? (:error entry)))))
+
+(deftest the-ledger-carries-no-servers-environment
+  (let [sentinel "SENTINEL-7b2e-do-not-show-me"]
+    (write-servers! {"fake" (fake-decl {:env {"FAKE_TOKEN" sentinel}})})
+    (let [thread (str "mcp-ledger-secret-" (System/currentTimeMillis))]
+      (mcp/tools-for thread)
+      (testing "the whole ledger, searched as a string -- a value that may not be
+                shown must not be anywhere in it, however it got there"
+        (is (not (str/includes? (json/write-str (mcp/status thread)) sentinel)))))))
+
+(deftest switching-a-server-off-keeps-its-tools-and-refuses-their-calls
+  (let [live (lifecycle-file "switched-off")]
+    (write-servers! {"fake" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live}})})
+    (let [thread (str "mcp-off-" (System/currentTimeMillis))]
+      (is (contains? (mcp/tools-for thread) "mcp__fake__echo"))
+      (testing "off: the process goes"
+        (mcp/session-disable-server! thread "fake")
+        (is (wait-gone (last-pid live) 3000)))
+      (testing "and its tools STAY IN THE TABLE -- off is not hidden"
+        (let [table (mcp/tools-for thread)]
+          (is (contains? table "mcp__fake__echo"))
+          (is (some #(= "mcp__fake__echo" (get-in % [:function :name]))
+                    (tools/specs thread))
+              "the model still sees it, which is what makes 'off' honest")))
+      (testing "and a call is refused, said to be the SESSION's decision"
+        (let [{:keys [content error]} (call! thread "mcp__fake__echo" {:text "x"})]
+          (is (true? error))
+          (is (str/includes? content "disabled in this session"))
+          (is (str/includes? content "MCP server"))
+          (is (str/includes? content "fake"))
+          (is (str/includes? content "session-enable-server!"))))
+      (testing "the ledger says disabled, not failed -- the two are different facts"
+        (let [entry (first (mcp/status thread))]
+          (is (= :disabled (:status entry)))
+          (is (nil? (:error entry)))))
+      (testing "and switching it back on connects again and runs"
+        (mcp/session-enable-server! thread "fake")
+        (is (= "echo: back" (:content (call! thread "mcp__fake__echo" {:text "back"}))))
+        (is (= :connected (:status (first (mcp/status thread)))))))))
+
+(deftest switching-off-a-failed-server-works-too
+  ;; The panel draws a switch per declared server, and a server that failed to
+  ;; start is exactly one a person might want to stop retrying.
+  (write-servers! {"bad" {:command "definitely-not-a-program-xyz"}})
+  (let [thread (str "mcp-off-bad-" (System/currentTimeMillis))]
+    ;; It has to have been USED to have failed -- an unused server is idle, and
+    ;; that distinction is the ledger being honest rather than optimistic.
+    (mcp/tools-for thread)
+    (is (= :failed (:status (first (mcp/status thread)))))
+    (mcp/session-disable-server! thread "bad")
+    (is (= :disabled (:status (first (mcp/status thread)))))))
+
+(deftest the-switch-is-one-session-s-business
+  (let [a (str "mcp-off-a-" (System/currentTimeMillis))
+        b (str "mcp-off-b-" (System/currentTimeMillis))]
+    (write-servers! {"fake" (fake-decl)})
+    (mcp/session-disable-server! a "fake")
+    (testing "the other session is untouched"
+      (is (= "echo: fine" (:content (call! b "mcp__fake__echo" {:text "fine"}))))
+      (is (= :connected (:status (first (mcp/status b))))))
+    (testing "and so is a TOOL switch: the two axes are independent"
+      (is (tools/session-disabled? a "mcp__fake__echo")))))

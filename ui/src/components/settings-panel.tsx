@@ -42,6 +42,7 @@ import { Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type FC } from "react";
 
 import { Button } from "@/components/ui/button";
+import { McpPanel } from "@/components/mcp-panel";
 import {
   Dialog,
   DialogContent,
@@ -270,6 +271,16 @@ export const SettingsPanel: FC<{
             </section>
           </div>
         )}
+
+        {/* THE MCP LEDGER, embedded rather than given an entry of its own --
+            which is what the MCP ticket said would happen once this page
+            existed: one place to look at what this session is running on. It
+            brings its OWN switch, because unlike everything else on this panel a
+            server can be turned off, and that is a session decision rather than a
+            report. */}
+        <section data-slot="settings-mcp" className="flex flex-col gap-2">
+          <McpPanel threadId={threadId} />
+        </section>
 
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-foreground text-xs">

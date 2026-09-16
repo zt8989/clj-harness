@@ -413,3 +413,86 @@
                        (is (finished? ls)))
                      (testing "and no elicitation point fired"
                        (is (= [] (of-kind ls "hook/Elicitation")))))))))
+
+;; ------------------------------------------- 05: the ledger and the switch, over HTTP
+
+(defn- api-post [path body]
+  (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/" path)))
+                (.header "Content-Type" "application/json")
+                (.POST (HttpRequest$BodyPublishers/ofString
+                        (if (string? body) body (json/write-str body))
+                        StandardCharsets/UTF_8))
+                (.build))
+        resp (.send (HttpClient/newHttpClient) req
+                    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
+    {:status (.statusCode resp) :body (.body resp)}))
+
+(deftest the-mcp-ledger-answers-over-http-and-leaves-no-trace
+  (let [thread "wired-ledger"]
+    (write-servers! {"fake" (decl)})
+    (with-server thread (ask-script "anything")
+                 (fn []
+                   (let [f (log-file thread)]
+                     (io/delete-file f true)
+                     (post-run thread)
+                     (wait-quiet f 4000)
+                     (let [before (count (log-lines f))
+                           answer (api-get (str "api/mcp?threadId=" thread))
+                           body   (json/read-str (:body answer) :key-fn keyword)]
+                       (testing "an unbound session's declaration is answered, not refused"
+                         (is (= 200 (:status answer)))
+                         (is (= thread (:threadId body)))
+                         (is (= 1 (count (:servers body)))))
+                       (let [server (first (:servers body))]
+                         (testing "what a person diagnosing this needs to know"
+                           (is (= "fake" (:server server)))
+                           (is (= "stdio" (:transport server)))
+                           (is (= "connected" (name (:status server))))
+                           (is (some #(= "mcp__fake__echo" (:name %)) (:tools server))))
+                         (testing "and nothing about a connection, an env, or a command"
+                           (is (nil? (:command server)))
+                           (is (nil? (:env server)))))
+                       (testing "READ-ONLY: asking left no audit line"
+                         (is (= before (count (log-lines f)))))))))))
+
+(deftest the-switch-over-http-changes-the-session-and-leaves-a-line
+  (let [thread "wired-switch"]
+    (write-servers! {"fake" (decl)})
+    (with-server thread (ask-script "anything")
+                 (fn []
+                   (let [f (log-file thread)]
+                     (io/delete-file f true)
+                     (post-run thread)
+                     (wait-quiet f 4000)
+                     (testing "OFF: the tool is still in the model's toolset and a call is refused"
+                       (let [off (api-post "api/mcp" {:threadId thread :server "fake" :enabled false})]
+                         (is (= 200 (:status off)))
+                         (let [answer (api-get (str "api/mcp?threadId=" thread))
+                               server (first (:servers (json/read-str (:body answer)
+                                                                    :key-fn keyword)))]
+                           (is (= "disabled" (name (:status server))))
+                           (is (some #(= "mcp__fake__echo" (:name %)) (:tools server))
+                               "still listed: off is not hidden")))
+                       (testing "the switch landed an mcp/server line, runId null"
+                         (let [lines (of-kind (wait-quiet f 3000) "mcp/server")
+                               last-line (last (filter #(= "fake" (get-in % [:payload :server]))
+                                                       lines))]
+                           (is (some? last-line))
+                           (is (true? (get-in last-line [:payload :disabled])))
+                           (is (nil? (:runId last-line))))))
+                     (testing "ON: it connects again and its tools run"
+                       (is (= 200 (:status (api-post "api/mcp" {:threadId thread
+                                                                :server "fake" :enabled true}))))
+                       (let [answer (api-get (str "api/mcp?threadId=" thread))
+                             server (first (:servers (json/read-str (:body answer)
+                                                                   :key-fn keyword)))]
+                         (is (= "connected" (name (:status server))))))
+                     (testing "a server this session does not declare is a named 404"
+                       (let [nope (api-post "api/mcp" {:threadId thread :server "ghost"
+                                                       :enabled false})]
+                         (is (= 404 (:status nope)))
+                         (is (str/includes? (:body nope) "ghost"))))
+                     (testing "and a body that makes no sense is a named 400, not a guess"
+                       (is (= 400 (:status (api-post "api/mcp" {:threadId thread :server "fake"}))))
+                       (is (= 400 (:status (api-post "api/mcp" {:server "fake" :enabled true}))))
+                       (is (= 400 (:status (api-post "api/mcp" "not json"))))))))))

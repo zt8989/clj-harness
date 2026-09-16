@@ -148,9 +148,23 @@
   (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
 
 (defn session-disabled?
-  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call."
+  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call.
+
+  TWO WAYS TO BE OFF, and the seam does not care which: the session switched this
+  TOOL off (the overlay below), or it switched off the SERVER that provides it
+  (harness.mcp's own per-session switch). The second is asked here rather than in
+  the seam because a switched-off server's tools are STILL IN THE TABLE -- that is
+  the whole point of switching a server off rather than forgetting it -- so they
+  have to be refused where every other switched-off tool is refused."
   [thread-id name]
-  (contains? (get-in @overlays [thread-id :disabled] #{}) name))
+  ;; A BOOLEAN, and it has to stay one: this is a predicate the seam branches on,
+  ;; and `nil` where a caller expects false is the kind of thing that only shows
+  ;; up as a mystery. `(or ..)` of a `contains?` and a `when-let` answers nil when
+  ;; neither holds.
+  (boolean
+   (or (contains? (get-in @overlays [thread-id :disabled] #{}) name)
+       (when-let [server (mcp/server-of name)]
+         (mcp/server-disabled? thread-id server)))))
 
 (defn effective-tools
   "NAME->TOOL for THREAD-ID: the immutable base, overlaid by the tools this
@@ -909,6 +923,12 @@
   (str "vetoed by human: the call was not executed."
        (when (some? payload) (str " reason: " (json/write-str payload)))))
 
+(defn- server-disabled?-here
+  "The server half of `session-disabled?`, asked separately so the MESSAGE can
+  tell the two cases apart."
+  [thread-id _name server]
+  (boolean (and server (mcp/server-disabled? thread-id server))))
+
 (defn- disabled-message
   "What the model is told when it calls a tool this session switched off. Like a
   veto, this is information rather than a run failure -- and it says DISABLED,
@@ -922,13 +942,24 @@
   mode's subtraction, and a reader who acts on only half of that will try the
   same call again and be told the same thing."
   [thread-id name]
-  (str "disabled in this session: " name
-       " is switched off."
-       (if (editing/served? thread-id name)
-         (str " Re-enable it with (harness.tools/session-enable!"
-              " harness.tools/*thread-id* \"" name "\").")
-         (str " Re-enabling it will not make it run, either: "
-              (editing/unserved-message thread-id name)))))
+  ;; A SERVER SWITCH OFFERS A DIFFERENT REMEDY, and it has to: telling a model to
+  ;; re-enable the TOOL when what is off is the server would send it to a call that
+  ;; cannot work. Which one it is, is read from the name -- the same name the
+  ;; switch was made under.
+  (let [server (mcp/server-of name)]
+    (if (server-disabled?-here thread-id name server)
+      (str "disabled in this session: the MCP server " (pr-str server)
+           " is switched off, so none of its tools run -- " name " included."
+           " This is a person's decision, not a missing capability:"
+           " (harness.mcp/session-enable-server! harness.tools/*thread-id* "
+           (pr-str server) ") brings it back.")
+      (str "disabled in this session: " name
+           " is switched off."
+           (if (editing/served? thread-id name)
+             (str " Re-enable it with (harness.tools/session-enable!"
+                  " harness.tools/*thread-id* \"" name "\").")
+             (str " Re-enabling it will not make it run, either: "
+                  (editing/unserved-message thread-id name)))))))
 
 ;; ------------------------------------------------------------------- the batch
 

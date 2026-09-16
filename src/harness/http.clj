@@ -690,6 +690,77 @@
               (do (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
                   (api-response 200 {:threadId thread-id :dir abs})))))))))
 
+(defn- mcp-get
+  "GET /api/mcp?threadId=.. -- this session's MCP ledger: which servers it
+  declares, what each one is doing, and which tools each is providing.
+
+  READ-ONLY, so no audit line -- the same rule GET /api/project and GET /api/model
+  follow. Asking what a server is doing is not part of the record of what it did.
+
+  An unbound (or unknown) thread is an ANSWER, not an error: the declarations come
+  from the configuration home plus, when there is one, the bound project's --
+  every session has an MCP ledger, even the one that has declared nothing (it is
+  empty).
+
+  The ledger carries no server's `:env` at any depth. That is the api-key's rule,
+  and it holds here for the same reason: a person needs to know a server IS
+  configured, never with what."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")]
+    (api-response 200 {:threadId (or thread-id "")
+                       :servers  (mcp/status thread-id)})))
+
+(defn- mcp-post
+  "POST /api/mcp {threadId, server, enabled} -- switch one declared server on or
+  off FOR THIS SESSION.
+
+  NOT A CONFIG EDIT: mcp.edn is untouched, and the switch is gone on restart --
+  the same standing as a session's tool overlay and its hook overlay. Closing a
+  server closes its process, but its tools stay in the table with their calls
+  refused (see harness.mcp/session-disable-server!), because hiding them would
+  make 'there is no such server' and 'that server is off' the same observation.
+
+  A CHANGE WORTH A LINE, unlike the GET above: this one moves what the session can
+  do, so it lands an `mcp/server` audit line with `disabled`, runId null (it
+  happens outside any run). A server this session does not declare is a NAMED 404:
+  the panel draws a switch per DECLARED server, so an unknown name means the
+  screen is out of date, and guessing which server it meant would switch the wrong
+  thing."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed
+        thread-id (str (:threadId ok))
+        server    (:server ok)
+        enabled   (:enabled ok)
+        declared  (set (keys (mcp/config thread-id)))]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? thread-id)
+      (api-response 400 {:error "missing threadId"})
+
+      (not (string? server))
+      (api-response 400 {:error "missing server"})
+
+      (not (boolean? enabled))
+      (api-response 400 {:error "enabled must be true or false"})
+
+      (not (contains? declared server))
+      (api-response 404 {:error (str "this session does not declare an MCP server "
+                                     (pr-str server)
+                                     "; it declares " (pr-str (vec (sort declared))))})
+
+      :else
+      (do (if enabled
+            (mcp/session-enable-server! thread-id server)
+            (mcp/session-disable-server! thread-id server))
+          (log! thread-id nil "mcp/server" {:server server :disabled (not enabled)
+                                            :via "http"})
+          (api-response 200 {:threadId thread-id :server server :enabled enabled})))))
+
 (defn- elicitation-get
   "GET /api/elicitation?interruptId=.. -- the QUESTION behind a parked interrupt:
   which server asked, what it asked, and the JSON Schema it wants filled in.
@@ -1259,6 +1330,12 @@
     (= "/api/settings" (:uri req))
     (case (:request-method req)
       :get  (settings-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/mcp" (:uri req))
+    (case (:request-method req)
+      :get  (mcp-get req)
+      :post (mcp-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/elicitation" (:uri req))
