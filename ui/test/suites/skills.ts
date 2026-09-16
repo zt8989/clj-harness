@@ -137,7 +137,7 @@ const cases: Case[] = [
     run: async () => {
       // Order is the mechanism, not a label: `scan` lets the earlier root keep a
       // name, so the machine's copy is the one both the model's catalog and this
-      // list see -- asserted here over the wire, the way harness.skills-test
+      // list see -- asserted here over the wire, the way harness.cap.skills-test
       // asserts it in-process.
       const tid = threadId("skills-shadow");
       const project = tempProject("skills-shadow");

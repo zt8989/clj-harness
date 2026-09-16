@@ -362,7 +362,7 @@ const TRIGGER_CHAR = "/";
 /// The kit's default matcher accepts any word boundary, which would open this menu
 /// after `see /alpha` -- a sentence ABOUT a skill, which the server does not load.
 /// A menu that offers a load which cannot happen is worse than no menu, so the
-/// matcher is narrowed to the shape `harness.skills/slash-pattern` actually reads:
+/// matcher is narrowed to the shape `harness.cap.skills/slash-pattern` actually reads:
 /// the slash first, then a name with no whitespace after it yet.
 const slashAtStart: Unstable_TriggerMatcher = (text, char, cursorPosition) => {
   const typed = text.slice(0, cursorPosition);

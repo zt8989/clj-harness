@@ -3,8 +3,8 @@
   test/ to stay out of the core line budget."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
-            [harness.event :as ev]
-            [harness.llm :as llm]))
+            [harness.kernel.event :as ev]
+            [harness.kernel.llm :as llm]))
 
 (def ^:private chunk-size 5)
 

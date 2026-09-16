@@ -37,7 +37,7 @@
 ;; ------------------------------------------------------------------- happy path
 
 (def ^:private spaced-code
-  "(do (harness.tools/session-register! harness.tools/*thread-id* \"note\"
+  "(do (harness.kernel.tools/session-register! harness.kernel.tools/*thread-id* \"note\"
          {:description \"note\"
           :required    []
           :run         (fn [_] \"hi\")})
@@ -148,9 +148,9 @@
 ;; ----------------------------------------------------------- the read discipline
 
 (deftest a-corrupt-log-fails-hard-and-names-the-line
-  ;; Delegated to harness.replay -- asserted here so a reader of THIS namespace
+  ;; Delegated to harness.edge.replay -- asserted here so a reader of THIS namespace
   ;; knows the guarantee holds on its path too.
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"line 2"
                         (evals/evals-in
                          (let [good (json/write-str (assistant-with-eval "c1" "(+ 1 2)"))]
-                           (harness.replay/lines->records [good "{truncated"]))))))
+                           (harness.edge.replay/lines->records [good "{truncated"]))))))

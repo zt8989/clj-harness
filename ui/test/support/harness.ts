@@ -34,11 +34,11 @@ const E2E_ARGS = ["-M:dev", "-m", "harness.e2e-server"];
 // A config.edn the server can resolve, in the INLINE form so it needs no
 // providers.edn. It has to be the COMPLETE inline form: the provider catalog
 // validates an inline description and refuses one that names no :base-url or
-// :model, and that validation runs even when a script is pinned -- harness.http
+// :model, and that validation runs even when a script is pinned -- harness.edge.http
 // resolves the provider for the audit timeline on every run.
 //
 // It declares NO modalities on purpose: an inline provider that says nothing
-// about what it accepts is not guarded (harness.ag-ui/undeclared-input?), and a
+// about what it accepts is not guarded (harness.edge.ag-ui/undeclared-input?), and a
 // seed must not make every text-only test fail for a reason the test never stated.
 const SEED_CONFIG = '{:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}\n';
 

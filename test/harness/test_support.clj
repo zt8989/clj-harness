@@ -2,10 +2,10 @@
   "The two pieces of cross-test state several namespaces have to arrange, and that
   are therefore here rather than written once in each of them.
 
-  A HOOKS.EDN DECLARES FOR EVERY THREAD IN THIS PROCESS -- harness.hooks/config
+  A HOOKS.EDN DECLARES FOR EVERY THREAD IN THIS PROCESS -- harness.kernel.hooks/config
   reads the file, not a thread -- so a test that writes one has to take it away
   again or the next test in the suite fires a hook it never declared. And the
-  kernel's own rows are registered PROCESS-WIDE the moment harness.system-prompt
+  kernel's own rows are registered PROCESS-WIDE the moment harness.cap.system-prompt
   loads, so in a full suite they are in every thread's table before any test runs.
 
   Nothing here holds state of its own, and none of it is a test-only door:
@@ -16,8 +16,11 @@
   harness.test-runner lists the namespaces it runs, and this one has nothing to
   run."
   (:require [clojure.java.io :as io]
-            [harness.home :as home]
-            [harness.hooks :as hooks]))
+            [harness.cap.hooks :as cap-hooks]
+            [harness.cap.system-prompt :as system-prompt]
+            [harness.cap.tools :as cap-tools]
+            [harness.infra.home :as home]
+            [harness.kernel.hooks :as hooks]))
 
 (defn hooks-file
   "The user-level hooks.edn: the file a declaration is written into."
@@ -48,3 +51,24 @@
   (doseq [row (vals (hooks/effective-hooks thread-id))
           :when (= :built-in (:source row))]
     (hooks/session-disable! thread-id (:id row))))
+
+(defn with-builtins
+  "Install THE APP'S CAPABILITIES for the duration of ONE test namespace, and
+  withdraw them afterwards: harness.cap.tools' eleven tools, the hook-file reader
+  (harness.cap.hooks) and the kernel's own three SystemPrompt rows
+  (harness.cap.system-prompt) -- the same three the composition root installs.
+
+  A FIXTURE RATHER THAN SOMETHING LOADED FOR YOU, and the change is the point of
+  the install door: before it, requiring harness.kernel.tools put the built-ins in
+  every process that loaded the seam, so 'why does this test have a `read` tool'
+  had no answer inside the test. Now a namespace that drives tools says so in one
+  line, and harness.kernel.install-test -- which asserts what an EMPTY table does
+  -- simply does not use it.
+
+  :once, not :each: the layer is what the namespace needs, not what each test
+  needs, and re-installing per test would churn the registry 600 times for
+  nothing. The teardown runs even when a test throws, so a failing namespace
+  cannot leak a tool table into the next one."
+  [f]
+  (let [teardowns [(cap-tools/install!) (cap-hooks/install!) (system-prompt/install!)]]
+    (try (f) (finally (doseq [td teardowns] (td))))))

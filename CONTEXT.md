@@ -25,7 +25,7 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 **编辑模式** —— 本会话被服务哪一套编辑实现，取值 `:hashline`（默认）或 `:str-replace`，写在
 `harness.edn` 的 `:editing {:mode …}`。它不是开关 API 而是配置；每次调用现读，改它不需要重启，
 而且**按会话解析**（两个项目各选一种，是日常情形）。自省入口是
-`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+`(harness.cap.editing/editing-mode harness.kernel.tools/*thread-id*)`。
 *别叫成* 编辑后端、edit mode（中文一律写"编辑模式"）。
 
 **工具表** —— 一个会话此刻被服务的工具集合（名字 + 描述 + 参数）。编辑模式是它的又一个输入：
@@ -84,12 +84,12 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 **库装状态、文件装记录。** `~/.clj-harness/harness.db`（sqlite）装"现在是什么"：项目、会话，以及锚点
 （`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` / `hashline_undo` 四张表）。
 日志 jsonl 装"发生过什么"：每一帧、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
-是状态还是记录（守着这条边界的是 `harness.db-test` 的元断言）。
+是状态还是记录（守着这条边界的是 `harness.infra.db-test` 的元断言）。
 
 **冻结的开头** —— `prompt.md` 是**一条 system 消息的开头**，不是整条消息。它装的是**承诺**：与任何
 会话都成立的话（身份、secrets 纪律、「其余自己读」），首调读入即冻结（provider 前缀缓存的前提），
-热改要 `(harness.llm/reset-prompt!)` 或重启。消息的其余部分是**本会话的事实**（工具集合、绑定的目录、
-provider 档），由 `harness.system-prompt/assemble` 在每次 run 现算——事实能在会话中途变，冻下来的那句
+热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。消息的其余部分是**本会话的事实**（工具集合、绑定的目录、
+provider 档），由 `harness.cap.system-prompt/assemble` 在每次 run 现算——事实能在会话中途变，冻下来的那句
 就会说一件已经不成立的事。它是**代码资产**：进 git、要人 review，是唯一一个不住在配置家里的配置文件。
 **因为冻结，它不按模式拼两套文本**——锚点语法归工具描述讲（工具描述是 per-thread 的，可以随模式变），
 prompt 只中立地点出自省入口。
@@ -98,7 +98,7 @@ prompt 只中立地点出自省入口。
 **围栏**（fence）—— 绑定了项目的会话里，文件工具可以直接碰、不必 park 的那些目录：项目目录自己
 （除非 `:approval {:strict true}` 把它拿掉）、配置家、技能根（即「技能层」那两档所在的目录）、
 `:approval {:allow [..]}` 声明的路径。
-它**只有一个来源** `harness.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
+它**只有一个来源** `harness.cap.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
 `<project>` 块拿它对模型说规则——两处若是各写一份，模型就会以为某个路径自由而实际被拦。
 
 **park / 审批** —— 一次工具调用在跑之前被挂住等人决定，那个人的决定一次性取用。这是**能力**边界，

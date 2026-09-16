@@ -7,14 +7,17 @@
   (:require [clojure.core.async :as async]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
-            [harness.ag-ui :as ag]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.edge.ag-ui :as ag]
             [harness.fake :as fake]
-            [harness.home :as home]
-            [harness.loop :as loop]
-            [harness.project :as project]
-            [harness.tools :as tools]
-            [harness.wire :as wire]))
+            [harness.infra.home :as home]
+            [harness.kernel.loop :as loop]
+            [harness.cap.project :as project]
+            [harness.kernel.tools :as tools]
+            [harness.wire :as wire]
+            [harness.test-support :as support]))
+
+(use-fixtures :once support/with-builtins)
 
 (def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-approval-test"))
 

@@ -2,7 +2,7 @@
 //
 // ONE QUESTION, ASKED OF THE SERVER. Which roots this session reads, which of them
 // is the machine's and which the project's, who won a name conflict, and why a
-// skill cannot be used are all facts `harness.skills` already holds -- the same
+// skill cannot be used are all facts `harness.cap.skills` already holds -- the same
 // facts the model's catalog is built from. Re-deriving any of them here would be a
 // second answer, free to disagree with the first, and the two WOULD drift: they are
 // read at different moments, by different code, for different readers.

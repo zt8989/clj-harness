@@ -5,12 +5,15 @@
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
-            [harness.event :as ev]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.kernel.event :as ev]
             [harness.fake :as fake]
-            [harness.llm :as llm]
-            [harness.loop :as loop]
-            [harness.tools :as tools]))
+            [harness.kernel.llm :as llm]
+            [harness.kernel.loop :as loop]
+            [harness.kernel.tools :as tools]
+            [harness.test-support :as support]))
+
+(use-fixtures :once support/with-builtins)
 
 (defn- echo-tool
   [label]
@@ -233,7 +236,7 @@
                              thread-id))
         {:keys [content error]}
         (eval! "t-e2e"
-               "(do (harness.tools/session-register! harness.tools/*thread-id* \"note\"
+               "(do (harness.kernel.tools/session-register! harness.kernel.tools/*thread-id* \"note\"
                       {:description \"note\"
                        :parameters {:type \"object\" :properties {\"text\" {:type \"string\"}}}
                        :required [:text]
@@ -252,7 +255,7 @@
         (is (= "noted hi" (:content result)))))
     (testing "the recorded state is reachable through the same eval surface"
       (is (str/includes? (:content (eval! "t-e2e"
-                                          "(keys (harness.providers/config))"))
+                                          "(keys (harness.cap.providers/config))"))
                          ":protocol")))
     (testing "disabling a base tool is reported as disabled, not as unknown"
       (tools/session-disable! "t-e2e" "read")
@@ -300,10 +303,10 @@
                   content))
         seen  (fn [thread-id]
                 (call thread-id
-                      "(sort (keys (harness.tools/effective-tools
-                                     harness.tools/*thread-id*)))"))]
+                      "(sort (keys (harness.kernel.tools/effective-tools
+                                     harness.kernel.tools/*thread-id*)))"))]
     (testing "the toolset the agent reads reflects its OWN session, not the base"
-      (call "t-tog" "(harness.tools/session-register! harness.tools/*thread-id*
+      (call "t-tog" "(harness.kernel.tools/session-register! harness.kernel.tools/*thread-id*
                        \"probe\" {:description \"probe\"
                                   :parameters {:type \"object\" :properties {}}
                                   :required [] :run (fn [_] \"pong\")})")
@@ -313,7 +316,7 @@
         (is (not (str/includes? (seen "t-tog-other") "probe"))
             "another session's read does not")))
     (testing "a disabled tool is still in the toolset the agent reads"
-      (call "t-tog" "(harness.tools/session-disable! harness.tools/*thread-id* \"bash\")")
+      (call "t-tog" "(harness.kernel.tools/session-disable! harness.kernel.tools/*thread-id* \"bash\")")
       (is (str/includes? (seen "t-tog") "bash")
           "disabling never removes it from what the agent sees"))
     (testing "calling it reports disabled, never unknown"
@@ -328,7 +331,7 @@
         (is (str/includes? (str (:content result)) "disabled"))
         (is (not (str/includes? (str (:content result)) "unknown")))))
     (testing "and the agent can turn it back on itself"
-      (call "t-tog" "(harness.tools/session-enable! harness.tools/*thread-id* \"bash\")")
+      (call "t-tog" "(harness.kernel.tools/session-enable! harness.kernel.tools/*thread-id* \"bash\")")
       (let [events (drain-events
                     (fake/scripted [{:content ""
                                      :tool-calls [{:id "d2" :name "bash"
