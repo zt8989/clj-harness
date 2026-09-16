@@ -94,6 +94,22 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 
 `*directory-chooser*` 是测试缝：真实对话框要等人，测试里换 stub。
 用 `alter-var-root` 而不是 `binding`，因为服务在**另一个线程**上跑（见 [client](client.md)）。
+它底下还有一个缝 `*dialog-launcher*`——**画窗的那个进程**（argv 进、`{:out :exit}` 出），
+两个缝是两层而不是一层：`chooser` 是「问人」这个动作，`launcher` 是「起进程」这件事，
+所以 macOS 与 Windows 两支各自的判断可以被测（含起不来进程的那条路），而不需要真有一个人在窗前。
+
+**选择器的答案是三态，而且这不是洁癖**：`:picked`（带路径）/ `:cancelled`（人关了窗）
+/ `:unavailable`（这台机器上没有窗可开）。从前只有两态——打不开也答 `nil`，而 `nil` 在契约里
+是「取消」，于是 Windows 上（那时只有 macOS 一支 osascript）点按钮**什么都不发生**，连一句错都没有。
+`unavailable` 走 **501 + `:error`**（一句给 UI 显示的人话），客户端据此把手输路径那一行放出来；
+`cancelled` 依旧是 200 + `{:dir nil}` 且**不留任何提示**——人关了窗不需要被通知，这条从今天起也没变。
+
+**按平台分派**：macOS 走 `osascript`，Windows 走 PowerShell（`-NoProfile -STA` 里的 WinForms
+`FolderBrowserDialog`），**其余平台在分派表里明说没有**，而不是落到默认支里用别人的命令失败。
+外部进程那一半只有一件事要自己扛——**编码**：字节一律按 UTF-8 显式解码，PowerShell 侧显式设
+`OutputEncoding` 为无 BOM 的 UTF-8，回来再剥一次 BOM（`clojure.string` 把字符串 match 当文本不当正则，
+所以写在 pattern 里的 `^` 是字面量）。中文目录名、带空格目录名、`C:\` 这种带尾分隔符的
+都要原样回来。
 
 **归档为什么一个路由两个方向**：它是同一列的一次写入，两个方向只差一个布尔，两条路由就是两处会漂移的
 机会。路径说动作，body 说方向。**重建与归档的差别也值得知道**：重建必须**找到**日志（它从日志里重建对话），

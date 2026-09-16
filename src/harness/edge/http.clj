@@ -2,8 +2,10 @@
   "The AG-UI edge. One POST endpoint, SSE out, CORS so a browser app on :5173 can call
   it directly (there is no proxy in front of us). Alongside it, a small management
   edge of plain JSON endpoints -- /api/project, the session's project-directory
-  binding, plus /api/project/pick, the OS folder dialog that feeds it -- sharing
-  the same CORS and logging.
+  binding, plus /api/project/pick, the OS folder dialog that feeds it -- which
+  answers THREE things: a directory, a cancellation, or THIS MACHINE HAS NO
+  DIALOG TO OPEN, and that last one is not another way of saying the human said
+  no -- sharing the same CORS and logging.
 
   Also append-only JSONL logging: one file per thread, under the session's
   project's workspace in the home's projects tree -- the path is the one place
@@ -591,55 +593,205 @@
           [(java.net.URLDecoder/decode k "UTF-8")
            (java.net.URLDecoder/decode (or v "") "UTF-8")])))
 
-(defn- osascript-directory!
-  "macOS's native folder dialog, as a string path or nil when the human
-  cancels. The browser cannot hand us an absolute path -- a web file input
-  gives a File object with no real location -- so the dialog runs where the
-  process actually lives. It is drawn by the app that owns the window, not by
-  the browser: osascript owns its own window and does not need to borrow the
-  user's focus from whatever they are typing in.
+;; ------------------------------------------------- the native folder dialog
+;;
+;; The browser cannot hand us an absolute path -- a web file input gives a File
+;; object with no real location -- so the dialog runs where the process lives,
+;; drawn by the platform that owns the window. Which platform that is decides
+;; WHICH dialog: this machine either has one or it does not, and the two facts
+;; a caller must be able to tell apart are "the human said no" and "there was
+;; no dialog to say no to". Cancelled is silence; unavailable is an answer.
 
-  Output is decoded UTF-8 EXPLICITLY rather than through `slurp`: Java 17 on
-  this machine defaults to GBK, so an implicit byte->String here would mangle
-  any directory whose name is not ASCII. The same reason `api-response` writes
-  bytes, one direction over.
+(def ^:dynamic *dialog-launcher*
+  "The process that draws a dialog, as a seam: ARGV in, {:out <text> :exit <int>}
+  out, or a throw when the process could not be started at all. Tests rebind
+  this and answer without a process; the real one starts one and then WAITS
+  FOR A HUMAN, which no test run may do.
 
-  Any failure -- osascript missing, the script refused, a dialog we cannot
-  answer -- comes back as nil, which the endpoint reports as a cancellation.
-  A picker that cannot open is not worth failing a request over."
-  []
-  (try
-    (let [proc (-> (ProcessBuilder. ["osascript" "-e"
-                                     "POSIX path of (choose folder with prompt \"选择一个项目目录 -- select a project directory\")"])
+  Bytes become a String as UTF-8 and only UTF-8: this JVM's default is GBK on
+  Chinese Windows, and a directory's name is not obliged to be ASCII."
+  (fn [argv]
+    (let [proc (-> (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String argv))
                    (.redirectErrorStream true)
                    (.start))
           out  (String. (.readAllBytes (.getInputStream proc)) StandardCharsets/UTF_8)
           code (.waitFor proc)]
-      (when (and (zero? code) (seq (str/trim out)))
-        (str/trim out)))
-    (catch Throwable _ nil)))
+      {:out out :exit code})))
+
+(def ^:private bom
+  "The UTF-8 byte-order mark, as a string so that it can be removed LITERALLY:
+  clojure.string treats a string `match` as text, not as a pattern, so an
+  anchored \"^\\uFEFF\" would look for a caret that is not there. A Windows
+  console writes one even when it was told not to, and PowerShell is no
+  exception -- so it comes off here rather than being trusted downstream."
+  (str (char 0xFEFF)))
+
+(defn- chosen-path
+  "A dialog's output as the path it named. Two things come off it and nothing
+  else: a UTF-8 BOM, and the newline the process added. A directory with a
+  space in it keeps its space, and a Chinese name keeps its characters."
+  [out]
+  (-> (str out)
+      (str/replace-first bom "")
+      str/trim))
+
+(def ^:private unavailable-reason
+  "The folder dialog could not be opened on this machine -- type the directory
+   path instead.")
+
+(defn- osascript-directory!
+  "macOS's native folder dialog, as a CHOICE (see `pick-choice`). Drawn by
+  osascript, which owns its own window and so does not have to borrow the
+  human's focus from whatever they are typing in.
+
+  osascript answers a nonzero exit for Cancel, which is why a nonzero here is
+  a cancellation and not a failure: a person dismissing the window is not an
+  error. A process that could not be STARTED -- no osascript on this machine,
+  which is exactly what happens when some other platform lands here -- is the
+  other thing, and it says so."
+  []
+  (try
+    (let [{:keys [out exit]} (*dialog-launcher*
+                              ["osascript" "-e"
+                               "POSIX path of (choose folder with prompt \"选择一个项目目录 -- select a project directory\")"])
+          path               (chosen-path out)]
+      (cond
+        (not (zero? exit)) {:status :cancelled}
+        (str/blank? path)  {:status :cancelled}
+        :else              {:status :picked :dir path}))
+    (catch Throwable _ {:status :unavailable :reason unavailable-reason})))
+
+(def ^:private powershell-script
+  "Windows' native folder dialog, as one PowerShell command. WinForms'
+  FolderBrowserDialog, because it is the window a Windows person recognises as
+  their own; `-STA` because WinForms insists on a single-threaded apartment;
+  and the OutputEncoding line because PowerShell would otherwise write the
+  path in this console's code page -- GBK here -- and a directory whose name
+  is not ASCII would come back as noise.
+
+  A dialog that cannot be shown (no desktop session to draw into, most often)
+  throws, and the command says which by EXITING 2: an empty output has to keep
+  meaning one thing only, which is that the human pressed Cancel."
+  (str "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+       "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
+       "$d = [System.Windows.Forms.FolderBrowserDialog]::new(); "
+       "$d.Description = '选择一个项目目录 -- select a project directory'; "
+       "$d.ShowNewFolderButton = $true; "
+       "try { if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+       "{ [Console]::Out.Write($d.SelectedPath); [Console]::Out.Flush() } } "
+       "catch { exit 2 }; "
+       "exit 0"))
+
+(defn- powershell-directory!
+  "Windows' native folder dialog, as a CHOICE. `powershell.exe` first, `pwsh`
+  second: either may be the one this machine has, and a missing executable is
+  not an answer -- it is an absence, so the next name is tried. Only when
+  neither is here does this say unavailable."
+  []
+  (let [attempt (fn [exe]
+                  (try
+                    (let [{:keys [out exit]} (*dialog-launcher*
+                                              [exe "-NoProfile" "-STA" "-Command" powershell-script])
+                          path               (chosen-path out)]
+                      (if (zero? exit)
+                        (if (str/blank? path)
+                          {:status :cancelled}
+                          {:status :picked :dir path})
+                        {:status :unavailable :reason unavailable-reason}))
+                    ;; Not here -- try the next name. An IOException from
+                    ;; starting a process is "no such program", not "the
+                    ;; dialog failed".
+                    (catch java.io.IOException _ nil)
+                    (catch Throwable _ {:status :unavailable :reason unavailable-reason})))]
+    (or (attempt "powershell.exe")
+        (attempt "pwsh.exe")
+        {:status :unavailable :reason unavailable-reason})))
+
+(defn- this-platform
+  "Where this JVM is running, as one of three keywords. `os.name` is read
+  rather than a constant because the answer is a fact about the machine, and
+  three keywords is as fine as this ever needs to be: the question is only
+  ever 'which dialog does this platform have'."
+  []
+  (let [os-name (str/lower-case (System/getProperty "os.name" ""))]
+    (cond
+      (str/includes? os-name "win") :windows
+      (str/includes? os-name "mac") :macos
+      :else                         :other)))
+
+(defn- chooser-for
+  "The dialog PLATFORM has, or nil where it has none. Nil is a real answer and
+  not a fallback: a platform with no dialog says so out loud rather than
+  quietly landing on some other platform's command and failing there."
+  [platform]
+  (case platform
+    :windows powershell-directory!
+    :macos   osascript-directory!
+    nil))
+
+(defn- platform-directory!
+  "The default chooser: this platform's dialog, or an explicit 'none here'."
+  []
+  (if-some [choose (chooser-for (this-platform))]
+    (choose)
+    {:status :unavailable :reason unavailable-reason}))
 
 (def ^:dynamic *directory-chooser*
   "The picker itself, as a seam. Tests BIND this to a stub: the real one opens
   a window and waits for a human, which no test run may do. Production leaves
   it at the real dialog -- a var holding the default, exactly like
   harness.infra.home/*root-override* is a var holding a test override."
-  osascript-directory!)
+  platform-directory!)
+
+(defn- pick-choice
+  "A chooser's answer, in the ONE shape the endpoint reads:
+
+    {:status :picked :dir \"<path>\"}   -- a directory was chosen
+    {:status :cancelled}                -- the human dismissed the window
+    {:status :unavailable :reason \"..\"} -- there was no window to dismiss
+
+  THREE, and not two, because collapsing the last into the middle is the bug
+  this whole edge shipped with: a machine that could not open a dialog
+  answered `nil`, which reads as a cancellation, and the human saw nothing at
+  all happen. Unavailable is therefore never an alias for nil, and a bare
+  value from a chooser (a stub's string, say) is read the obvious way -- a
+  path is picked, blank or nothing is cancelled -- which is why the older
+  stubs still mean what they always meant."
+  [answer]
+  (cond
+    (and (map? answer) (#{:picked :cancelled :unavailable} (:status answer)))
+    answer
+
+    ;; A map we do not recognise is read the same way a bare value is: a path
+    ;; is picked, anything else is a cancellation. Never `:unavailable` -- that
+    ;; one has to be said, not inferred.
+    (map? answer)
+    (if (str/blank? (str (:dir answer)))
+      {:status :cancelled}
+      {:status :picked :dir (str (:dir answer))})
+
+    (str/blank? (str answer))
+    {:status :cancelled}
+
+    :else
+    {:status :picked :dir (str answer)}))
 
 (defn- project-pick
   "POST /api/project/pick -- open the native folder dialog and answer the
-  chosen absolute path, or {:dir nil} when the human cancels. A question asked
-  with POST because the call has a side effect the human sees: a window opens,
+  chosen absolute path, {:dir nil} when the human cancels, or a 501 carrying
+  the reason when this machine has no dialog to open. A question asked with
+  POST because the call has a side effect the human sees: a window opens,
   which is not something a cache or a prefetch may trigger.
 
   Nothing is bound here. The client takes the path, shows it, and binds it
   through the ordinary /api/project POST -- so there is exactly ONE route that
   mutates a binding, and picking a folder leaves no trace of its own."
   [_req]
-  (let [dir (*directory-chooser*)]
-    (if (str/blank? dir)
-      (api-response 200 {:dir nil})
-      (api-response 200 {:dir dir}))))
+  (let [{:keys [status dir reason]} (pick-choice (*directory-chooser*))]
+    (case status
+      :picked      (api-response 200 {:dir dir})
+      :cancelled   (api-response 200 {:dir nil})
+      :unavailable (api-response 501 {:error reason}))))
 
 (defn- project-get
   "GET /api/project?threadId=.. -- the thread's bound project directory, or

@@ -1507,6 +1507,125 @@
                  (is (= "http" (get-in (first bounds) [:payload :via])))))))))
       (finally (alter-var-root #'http/*directory-chooser* (constantly real))))))
 
+(deftest the-folder-picker-knows-which-dialog-this-platform-has
+  ;; Which dialog there is, is a fact about the machine -- and so is there being
+  ;; none. The table answers both, because a platform with no dialog must not
+  ;; fall through to another platform's command and fail there: that fall-through
+  ;; is how "cannot open" used to reach the endpoint as "the human cancelled".
+  ;;
+  ;; The process is stubbed for every case: the real one opens a window and waits
+  ;; for a person, which a test run must never do.
+  (let [real   http/*dialog-launcher*
+        calls  (atom [])
+        stub!  (fn [answer]
+                 (reset! calls [])
+                 (alter-var-root #'http/*dialog-launcher*
+                                 (constantly (fn [argv] (swap! calls conj argv) answer))))
+        throw! (fn [ex]
+                 (reset! calls [])
+                 (alter-var-root #'http/*dialog-launcher*
+                                 (constantly (fn [argv] (swap! calls conj argv) (throw ex)))))
+        by-exe! (fn [m]
+                  (reset! calls [])
+                  (alter-var-root #'http/*dialog-launcher*
+                                  (constantly (fn [argv]
+                                                (swap! calls conj argv)
+                                                (let [answer (get m (first argv))]
+                                                  (if (instance? Throwable answer)
+                                                    (throw answer)
+                                                    answer))))))]
+    (try
+      (testing "the table: windows and macOS have a dialog, a third platform has none"
+        (is (some? (#'http/chooser-for :windows)))
+        (is (some? (#'http/chooser-for :macos)))
+        (is (nil? (#'http/chooser-for :linux))
+            "'none' is an answer of its own, not a missing case"))
+      (testing "this JVM's own platform reads as one of the three"
+        (is (contains? #{:windows :macos :other} (#'http/this-platform))))
+      (testing "a platform with no dialog answers UNAVAILABLE, and says why"
+        (let [original @#'http/this-platform]
+          (try
+            (alter-var-root #'http/this-platform (constantly (fn [] :other)))
+            (let [answer (#'http/platform-directory!)]
+              (is (= :unavailable (:status answer)))
+              (is (string? (:reason answer))
+                  "the reason is the sentence the UI shows, not a code"))
+            (finally (alter-var-root #'http/this-platform (constantly original))))))
+
+      (testing "windows: asks PowerShell for the native dialog, in an STA"
+        (stub! {:out "C:\\work\\项目\r\n" :exit 0})
+        (is (= {:status :picked :dir "C:\\work\\项目"} (#'http/powershell-directory!))
+            "a Chinese directory name survives the round trip")
+        (let [argv (first @calls)]
+          (is (= "powershell.exe" (first argv)))
+          (is (contains? (set argv) "-STA")
+              "WinForms needs a single-threaded apartment")
+          (is (str/includes? (last argv) "FolderBrowserDialog"))
+          (is (str/includes? (last argv) "OutputEncoding")
+              "the path is written UTF-8, not in this console's code page")))
+      (testing "windows: a BOM and the trailing newline come off, the spaces stay"
+        (stub! {:out "\uFEFFC:\\work\\my project\r\n" :exit 0})
+        (is (= "C:\\work\\my project" (:dir (#'http/powershell-directory!)))))
+      (testing "windows: empty output is a cancellation -- somebody pressed Cancel"
+        (stub! {:out "" :exit 0})
+        (is (= {:status :cancelled} (#'http/powershell-directory!))))
+      (testing "windows: a dialog that could not be shown is UNAVAILABLE (exit 2)"
+        (stub! {:out "" :exit 2})
+        (is (= :unavailable (:status (#'http/powershell-directory!)))))
+      (testing "windows: a missing powershell.exe tries pwsh before giving up"
+        (by-exe! {"powershell.exe" (java.io.IOException. "CreateProcess error=2")
+                  "pwsh.exe"      {:out "D:\\工作\r\n" :exit 0}})
+        (is (= {:status :picked :dir "D:\\工作"} (#'http/powershell-directory!)))
+        (is (= ["powershell.exe" "pwsh.exe"] (mapv first @calls))
+            "one name's absence is not an answer -- the next is tried"))
+      (testing "windows: neither here is UNAVAILABLE, not a cancellation"
+        (throw! (java.io.IOException. "CreateProcess error=2"))
+        (is (= :unavailable (:status (#'http/powershell-directory!)))))
+
+      (testing "macOS: the chosen path comes back as picked"
+        (stub! {:out "/Users/me/proj\n" :exit 0})
+        (is (= {:status :picked :dir "/Users/me/proj"} (#'http/osascript-directory!))))
+      (testing "macOS: a nonzero exit is a cancellation -- how osascript says Cancel"
+        (stub! {:out "User canceled" :exit 1})
+        (is (= {:status :cancelled} (#'http/osascript-directory!))))
+      (testing "macOS: no osascript on this machine is UNAVAILABLE, not a cancel"
+        (throw! (java.io.IOException. "CreateProcess error=2"))
+        (is (= :unavailable (:status (#'http/osascript-directory!)))
+            "THE OLD BUG: this used to answer nil, which read as a cancellation"))
+      (finally (alter-var-root #'http/*dialog-launcher* (constantly real))))))
+
+(deftest a-machine-with-no-folder-dialog-says-so-instead-of-cancelling
+  ;; Three answers, not two. Cancelled is silence; unavailable is an answer --
+  ;; and the endpoint has to be able to tell a human which one happened,
+  ;; because "the window never appeared" and "you dismissed the window" ask for
+  ;; two different next moves.
+  (let [stub! (fn [f] (alter-var-root #'http/*directory-chooser* (constantly f)))
+        real  http/*directory-chooser*]
+    (try
+      (with-server
+       "it-pick-unavailable"
+       (fn []
+         (testing "no dialog here: 501, and the reason is a sentence for the UI"
+           (stub! (fn [] {:status :unavailable :reason "no dialog here"}))
+           (let [resp (api-call :post "/api/project/pick" nil)
+                 body (read-json resp)]
+             (is (= 501 (.statusCode resp)))
+             (is (= "no dialog here" (:error body)))
+             (is (not (contains? body :dir))
+                 "and it does not also look like a chosen path")))
+         (testing "cancelling is STILL silence: 200, dir nil, nothing said"
+           (stub! (fn [] {:status :cancelled}))
+           (let [resp (api-call :post "/api/project/pick" nil)]
+             (is (= 200 (.statusCode resp)))
+             (is (= {:dir nil} (read-json resp)))))
+         (testing "an unavailable pick binds nothing, exactly like a cancellation"
+           (stub! (fn [] {:status :unavailable :reason "no dialog here"}))
+           (let [tid (str "pick-none-" (java.util.UUID/randomUUID))]
+             (is (= 501 (.statusCode (api-call :post "/api/project/pick" nil))))
+             (is (nil? (project/binding-for tid))
+                 "the ordinary POST is still the only route that binds")))))
+      (finally (alter-var-root #'http/*directory-chooser* (constantly real))))))
+
 (deftest rebinding-moves-the-root-and-lands-a-timeline
   ;; Ticket 04: rebinding an already-bound thread is the ordinary case --
   ;; resolution moves to the new directory immediately (the relative write
