@@ -22,13 +22,24 @@ import path from "node:path";
 /// and the client, not a mock of either.
 const FAKE_SERVER = path.resolve(import.meta.dirname, "..", "..", "..", "test", "harness", "cap", "fake_mcp_server.js");
 
+/// A path as the CONTENTS of an EDN string. Not a nicety, and not a Windows
+/// quirk to paper over: on Windows the path is `C:\Users\...`, and inside an EDN
+/// string a backslash is an escape -- so the raw path is not a path at all, it
+/// is `Unsupported escape character: \U`. The reader rejects the whole file, the
+/// server has no `fake` to call, and the run ends with no question on it. From
+/// the outside that failure reads as an assertion about a question, failing for
+/// a reason the assertion never mentions.
+function ednPath(p: string): string {
+  return p.replace(/\\/g, "\\\\");
+}
+
 /// Declare it in the server's own configuration home. Written fresh because
 /// `mcp.edn` is read on the way to every request, which is what lets a test set
 /// a feature up mid-run.
 function declareFakeServer(): void {
   fs.writeFileSync(
     path.join(homeDir(), "mcp.edn"),
-    `{:servers {"fake" {:command "node ${FAKE_SERVER}"}}}`,
+    `{:servers {"fake" {:command "node ${ednPath(FAKE_SERVER)}"}}}`,
     "utf8",
   );
 }

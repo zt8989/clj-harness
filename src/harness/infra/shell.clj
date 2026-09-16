@@ -12,6 +12,11 @@
   process that is still there after it has answered, and that a caller talks to
   line by line. A hook is the first kind; an MCP server is the second.
 
+  AND ON WINDOWS THE TWO KINDS DO NOT RUN IN THE SAME SHELL: `start` hands the
+  command to Windows' own `cmd /c`, while `run` and `shell` still go through bash.
+  That is not an inconsistency, it is what each kind of command IS -- see
+  `start`'s own note, and `windows-argv` for the reason in full.
+
   THE TRAP. On Windows, `bash` on PATH is C:\\WINDOWS\\System32\\bash.exe -- the
   WSL launcher, which is a different filesystem entirely and, from a JVM, fails
   by producing nothing at all. So where a Git Bash install is found it is pinned
@@ -113,6 +118,53 @@
   [v]
   (= ::timeout v))
 
+(defn- windows?
+  "Is this machine Windows? Asked rather than assumed, because the trap below is
+  one platform's, and a test that wants to reason about the other one can say so."
+  []
+  (str/includes? (str/lower-case (System/getProperty "os.name" "")) "win"))
+
+(def ^:private windows-argv
+  "How a long-lived command is run on Windows, as the `[program flag]` a caller
+  appends the command to -- resolved once, because where `cmd` lives is a fact
+  about the machine and not about the call.
+
+  WHY NOT BASH HERE, when this namespace's whole reason to exist was pinning one:
+  on this platform that shell is Git Bash, and in a shell a backslash is an
+  escape. So an absolute path handed to it is not a path --
+  `C:\\Users\\me\\server.js` arrives as `C:Usersmeserver.js` -- and a server
+  declared the way a Windows person writes one is never found: the command exits
+  127 and the failure reads as 'this server would not start'. A person configuring
+  a server on Windows writes Windows paths; the thing that runs it has to take
+  them literally.
+
+  cmd RATHER THAN pwsh/powershell, though both would also take the backslashes:
+  PowerShell decodes a native command's stdout into strings and re-encodes it on
+  the way out, in the console's code page -- GBK on a Chinese Windows. For a
+  STREAM that is a protocol (a server speaking JSON lines) that is not a neutral
+  choice: it puts a transcoder in the middle of the pipe. `cmd /c` is not a
+  participant -- it starts the program and gets out of the way, so the bytes on
+  the pipe are the bytes the server wrote."
+  (delay
+    (let [root (or (System/getenv "SystemRoot") "C:\\Windows")
+          cmd  (io/file root "System32" "cmd.exe")]
+      [(if (.exists cmd) (.getAbsolutePath cmd) "cmd.exe") "/c"])))
+
+(defn- spawn-argv
+  "COMMAND as the argv to spawn for a LONG-LIVED process. Windows gets its own
+  shell (see `windows-argv`); everywhere else the command goes to bash, which is
+  what a command line written for a server assumes.
+
+  ONLY `start` asks this. `run` and `shell` stay on bash even on Windows, because
+  what they run is written FOR a shell -- a hook is a script, often `.sh`, and the
+  `bash` tool's whole promise is a bash command -- whereas a long-lived server is
+  a PROGRAM TO LAUNCH, and its command is a path plus flags that must survive
+  verbatim."
+  [command]
+  (if (windows?)
+    (conj (vec @windows-argv) command)
+    [binary "-lc" command]))
+
 (defn- kill-tree!
   "Stop P and everything it started.
 
@@ -159,7 +211,7 @@
   `:env` is ADDED to the inherited environment rather than replacing it: a server
   declared with one token still needs PATH to find its own runtime."
   [{:keys [command dir env]}]
-  (let [pb (doto (ProcessBuilder. [binary "-lc" command])
+  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv command)))
              (.redirectErrorStream false))
         _  (when dir (.directory pb (io/file dir)))
         _  (when (seq env) (.putAll (.environment pb) (into {} env)))
