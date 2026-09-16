@@ -2237,7 +2237,15 @@
   [{:content "done"}])
 
 (defn- wipe-conventions! []
-  (io/delete-file (io/file (home/user-home) ".agents") true)
+  ;; BOTTOM-UP, because io/delete-file does NOT recurse: on a non-empty directory
+  ;; its `silently` flag turns the failure into a scheduled deleteOnExit, so the
+  ;; one-line version of this leaves the tree exactly where it was. That went
+  ;; unnoticed while the only thing written here was ~/AGENTS.md (one file, which
+  ;; deletes fine) -- but a SKILL is a directory holding a SKILL.md, so as soon as
+  ;; one test plants a skill, every LATER test in this namespace inherits it and
+  ;; asserts against a home it never made.
+  (doseq [f (reverse (file-seq (io/file (home/user-home) ".agents")))]
+    (io/delete-file f true))
   (io/delete-file (io/file (home/user-home) "AGENTS.md") true))
 
 (deftest an-opening-block-reaches-the-model-and-never-the-client
@@ -2322,6 +2330,93 @@
              (testing "and no LLM call was made at all"
                (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames)))))))
       (finally (wipe-conventions!)))))
+
+(deftest the-skill-list-endpoint-answers-what-a-person-may-pick
+  ;; The person's way in is a menu, and this is the one question it asks: which
+  ;; roots does this session read, which of them is which layer, and who won a name
+  ;; conflict. Every one of those is a fact only the server has -- a client that
+  ;; re-derived any of them from the wire would be a second answer, free to drift
+  ;; from the one the model's catalog is built from.
+  (let [proj      (str (System/getProperty "java.io.tmpdir")
+                       "/harness-http-picker-" (System/nanoTime))
+        user-root (str (io/file (home/user-home) ".agents" "skills"))
+        proj-root (str (io/file proj ".agents" "skills"))
+        ;; spit does not make parents, and a skill IS a directory holding a
+        ;; SKILL.md -- so the fixture makes both, the way lay-skill! does in
+        ;; harness.skills-test.
+        skill!    (fn [root name frontmatter]
+                    (let [f (io/file root name "SKILL.md")]
+                      (.mkdirs (.getParentFile f))
+                      (spit (str f) frontmatter :encoding "UTF-8")))]
+    (skill! user-root "shared"
+            "---\nname: shared\ndescription: the MACHINE's shared\n---\n\nbody\n")
+    (skill! user-root "manual-only"
+            "---\nname: manual-only\ndescription: only a human runs this\ndisable-model-invocation: true\n---\n\nbody\n")
+    (skill! user-root "misnamed"
+            "---\nname: something-else\ndescription: says a different name\n---\n\nbody\n")
+    (skill! proj-root "shared"
+            "---\nname: shared\ndescription: the PROJECT's shared\n---\n\nbody\n")
+    (skill! proj-root "only-project"
+            "---\nname: only-project\ndescription: project only\n---\n\nbody\n")
+    (project/bind! "it-picker" proj)
+    (try
+      (with-server
+       "it-picker" script
+       (fn []
+         (let [body   (read-json (api-call :get "/api/skills?threadId=it-picker" nil))
+               groups (:groups body)
+               rows   (fn [group] (into {} (map (juxt :name identity)) (:skills group)))]
+
+           (testing "one group per root, in precedence order, each naming its layer and its path"
+             (is (= ["system" "project"] (mapv :layer groups)))
+             (is (= [user-root proj-root] (mapv :root groups))))
+
+           (testing "a row is what a menu draws: a name, a description, and whether it can be used"
+             (is (= {:name "shared" :description "the MACHINE's shared"
+                     :available? true :reason nil}
+                    ((rows (first groups)) "shared"))
+                 "the machine's copy won the name conflict...")
+             (is (not (contains? (rows (second groups)) "shared"))
+                 "...so the project's copy is not on the list -- it cannot be loaded")
+             (is (= ["only-project"] (keys (rows (second groups))))))
+
+           (testing "the list holds what a PERSON may load, not what the model may use"
+             (let [machine (rows (first groups))]
+               (is (true? (:available? (machine "manual-only")))
+                   "a person typing /name is the person deciding; the server loads it for them")
+               (is (false? (:available? (machine "misnamed")))
+                   "a broken skill is still listed -- it says why it cannot be used")
+               (is (= "manual-only" (:name (machine "manual-only"))))
+               ;; Over the wire a reason is a STRING: read-json keywordizes the
+               ;; keys and leaves the values alone, and `scan`'s vocabulary is
+               ;; what the client compares against.
+               (is (= "name-mismatch" (:reason (machine "misnamed"))))))
+
+           (testing "an unbound session is not an error: the machine's skills, and no project ones"
+             (let [unbound (read-json (api-call :get "/api/skills?threadId=it-picker-unbound" nil))]
+               (is (= ["system"] (mapv :layer (:groups unbound))))
+               (is (= [user-root] (mapv :root (:groups unbound))))))
+
+           (testing "the route is read-only, and a GET that changes nothing leaves no trace"
+             (is (not (.exists (io/file (log-dir) "it-picker-unbound.jsonl")))))
+
+           (testing "only GET is served, and the refusal has the shape every other route's has"
+             (let [resp (api-call :post "/api/skills?threadId=it-picker" "{}")]
+               (is (= 405 (.statusCode resp)))
+               (is (= "method not allowed" (:error (read-json resp))))))
+
+           (testing "a session with no skills at all answers an empty list, not a 404"
+             ;; An UNBOUND thread, because that is the session with no project root:
+             ;; the machine's is now empty (wiped above), so there is nothing to
+             ;; pick and the route still says so in the ordinary way.
+             (wipe-conventions!)
+             (let [resp (api-call :get "/api/skills?threadId=it-picker-empty" nil)]
+               (is (= 200 (.statusCode resp)))
+               (is (= [] (:groups (read-json resp)))))))))
+      (finally
+        (project/bind! "it-picker" nil)
+        (io/delete-file (io/file proj) true)
+        (wipe-conventions!)))))
 
 (deftest a-slash-load-reaches-the-model-and-never-the-client
   ;; The SECOND source of an injected body, asserted at the edge for the reason the

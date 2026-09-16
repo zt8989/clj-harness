@@ -25,18 +25,22 @@ import { startHarness } from "./support/harness";
 import { approvalSuite } from "./suites/approval";
 import { clientSuite } from "./suites/client";
 import { framesSuite } from "./suites/frames";
+import { skillsSuite } from "./suites/skills";
 import { turnSuite } from "./suites/turn";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
 /// of the list above -- or losing its cases -- fail the run instead of quietly
 /// shrinking a green one. Bump it deliberately when a case is genuinely added or
 /// removed.
-const EXPECTED_CASES = 11;
+///
+/// 11 -> 14: the `skills` suite's three cases (both layers from the real roots; a
+/// shadowed name listed once; asking changes nothing).
+const EXPECTED_CASES = 14;
 
 let total = 0;
 for (const suite of SUITES) {
@@ -55,7 +59,15 @@ let harness: Awaited<ReturnType<typeof startHarness>> | null = null;
 
 beforeAll(async () => {
   harness = await startHarness();
-  configure({ url: harness.url, scriptPath: harness.scriptPath });
+  // Both homes go to the suites: a case that wants a system-level skill, or an
+  // instruction file, writes into the OS home first -- and a case that wants to
+  // read a session log looks under the config root.
+  configure({
+    url: harness.url,
+    scriptPath: harness.scriptPath,
+    home: harness.home,
+    userHome: harness.userHome,
+  });
   console.log(`harness for this run: ${harness.url}`);
 });
 
