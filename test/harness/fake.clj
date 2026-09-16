@@ -20,7 +20,8 @@
 (defonce test-script (atom []))
 
 (defn- script-provider [script on-event]
-  (let [{:keys [reasoning content tool-calls]} (first @script)]
+  (let [turn (first @script)
+        {:keys [reasoning content tool-calls]} turn]
     (swap! script #(vec (rest %)))
     (emit! ev/reasoning-delta reasoning on-event)
     (emit! ev/text-delta content on-event)
@@ -31,17 +32,65 @@
                            :function {:name name :arguments args}}))
                       tool-calls)]
       (cond-> {:role "assistant" :content (or content "")}
-        (seq reasoning) (assoc :reasoning_content reasoning)
-        (seq calls)     (assoc :tool_calls calls)))))
+        ;; MENTIONED IS NOT THE SAME AS NON-EMPTY, and a thinking-mode vendor needs
+        ;; the difference kept: it sends the field on every round -- empty when the
+        ;; round had no reasoning -- and requires it back on the next request. A turn
+        ;; that says `:reasoning ""` is that vendor; one that omits it is a vendor
+        ;; with nothing to say about reasoning at all. See
+        ;; harness.kernel.llm/consume-sse, which keeps the same distinction on the
+        ;; real wire.
+        (contains? turn :reasoning) (assoc :reasoning_content (or reasoning ""))
+        (seq calls)                 (assoc :tool_calls calls)))))
 
 (defn scripted
   "Provider over a vector of turns. A turn is
      {:reasoning s, :content s, :tool-calls [{:id s :name s :arguments map}]}
   The assistant message it returns is deliberately OpenAI-shaped, because that is
-  what the history holds."
-  [turns]
-  {:protocol :fake :script (atom (vec turns))})
+  what the history holds.
+
+  OPTS:
+    :thinking  be a THINKING-MODE VENDOR on the way in as well as on the way out --
+               refuse any request whose assistant messages do not carry
+               `reasoning_content`, with the real vendor's own 400. See
+               `refuse-unless-echoed!`."
+  ([turns] (scripted turns {}))
+  ([turns {:keys [thinking]}]
+   {:protocol :fake :script (atom (vec turns)) :thinking (boolean thinking)}))
+
+(def ^:private thinking-mode-refusal
+  "The real vendor's 400, byte for byte -- what a DeepSeek-compatible gateway answers
+  when a thinking-mode request carries an assistant message with no
+  `reasoning_content` (verified against one on 2026-09-16; both requests and both
+  responses are in `.scratch/reasoning-round-trip/evidence/`).
+
+  COPIED RATHER THAN PARAPHRASED, because the whole point of the strict mode is that a
+  test meets what production meets. `harness.kernel.llm` reports a failed vendor by
+  throwing `HTTP <status>: <body>`, so this is thrown the same way."
+  (json/write-str {:error {:message "The `reasoning_content` in the thinking mode must be passed back to the API."
+                           :type "invalid_request_error"
+                           :param ""
+                           :code "invalid_request_error"}}))
+
+(defn- refuse-unless-echoed!
+  "Every assistant message in MESSAGES must carry `reasoning_content`, or this vendor
+  answers 400.
+
+  EVERY ONE, not only the tool-calling ones: that is what the vendor's sentence says
+  ('in the thinking mode'), and it is the mirror of `llm/thinking-mode-history`, which
+  pads every one. A double stricter than the vendor would fail us for something
+  production accepts; a looser one would let the bug this exists for through."
+  [messages]
+  (when (some #(and (= "assistant" (:role %))
+                    (not (contains? % :reasoning_content)))
+              messages)
+    (throw (ex-info (str "HTTP 400: " thinking-mode-refusal) {:status 400}))))
 
 (defmethod llm/stream! :fake
-  [{:keys [script]} _messages on-event _thread-id]
+  [{:keys [script thinking] :as provider} messages on-event _thread-id]
+  ;; TWO FACTS, not one: `:thinking` says this is the KIND of vendor that enforces
+  ;; the rule, and :reasoning-effort says THIS request is in thinking mode -- which
+  ;; is what the vendor's sentence is conditioned on ("in the thinking mode"). A
+  ;; request without it is a different mode and gets no refusal, so the boundary
+  ;; between the two is testable.
+  (when (and thinking (:reasoning-effort provider)) (refuse-unless-echoed! messages))
   (script-provider (or script test-script) on-event))

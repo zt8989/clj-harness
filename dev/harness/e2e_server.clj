@@ -46,12 +46,20 @@
             [harness.edge.http :as http]
             [harness.cap.providers :as providers]))
 
-(defn- turns-in [file]
+(defn- script-in
+  "The script file -> {:turns [..] :thinking bool}.
+
+  :thinking makes the served provider a THINKING-MODE VENDOR on the way in as well
+  as on the way out (see harness.fake): a request whose assistant messages do not
+  carry `reasoning_content` is answered with a DeepSeek-compatible gateway's own 400.
+  A suite sets it when the case is about a conversation continuing -- the defect that
+  mode reproduces only shows up on the SECOND request."
+  [file]
   (let [f (io/file file)]
     (if (.exists f)
       (let [parsed (json/read-str (slurp f :encoding "UTF-8") :key-fn keyword)]
-        (vec (or (:turns parsed) [])))
-      [])))
+        {:turns (vec (or (:turns parsed) [])) :thinking (boolean (:thinking parsed))})
+      {:turns [] :thinking false})))
 
 (defn- install-pin!
   "Serve EVERY thread from SCRIPT-FILE, whatever its threadId.
@@ -78,7 +86,13 @@
       (fn [thread-id]
         (when (seq (str thread-id))
           (or (get @per-thread thread-id)
-              (let [provider (fake/scripted (turns-in script-file))]
+              (let [{:keys [turns thinking]} (script-in script-file)
+                    ;; A thinking-mode vendor comes WITH a reasoning effort: that is
+                    ;; the knob that puts the REQUEST in thinking mode, and both halves
+                    ;; of the rule are conditioned on it (the refusal, and the padding
+                    ;; that satisfies it). Without it a case would exercise neither.
+                    provider (cond-> (fake/scripted turns {:thinking thinking})
+                               thinking (assoc :reasoning-effort "high"))]
                 (swap! per-thread assoc thread-id provider)
                 provider))))))))
 

@@ -40,7 +40,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 ///
 /// 11 -> 14: the `skills` suite's three cases (both layers from the real roots; a
 /// shadowed name listed once; asking changes nothing).
-const EXPECTED_CASES = 14;
+const EXPECTED_CASES = 15;
 
 let total = 0;
 for (const suite of SUITES) {

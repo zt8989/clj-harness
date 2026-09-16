@@ -2962,3 +2962,126 @@
 
        (testing "only POST, and it takes no thread: the default tier is this home's"
          (is (= 405 (.statusCode (api-call :get "/api/defaults" nil)))))))))
+
+;; ---------------------------------------- a thinking-mode vendor, end to end
+
+(def ^:private a-reasoning-less-tool-round
+  "A turn that calls a tool WITHOUT producing reasoning, but still MENTIONS the field
+  (its :reasoning is an empty string) -- the shape the real gateway answers with, and
+  the shape that used to make the next request 400."
+  [{:reasoning "" :content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
+   {:reasoning "" :content "done reading"}])
+
+(deftest a-thinking-mode-vendor-gets-the-field-back-on-the-next-request
+  ;; THE BUG THIS FEATURE EXISTS FOR, end to end and offline: the first round returns a
+  ;; tool call whose reasoning is EMPTY -- the shape the real gateway answers with, and
+  ;; the shape that used to make the next request 400. The strict fake (`harness.fake`
+  ;; :thinking) is that vendor, sentence and all, so this can no longer only be met in
+  ;; production.
+  (let [thread "t-think-echo"
+        pin    (assoc (fake/scripted a-reasoning-less-tool-round {:thinking true})
+                      :reasoning-effort "high")
+        assistant-messages (fn []
+                             (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
+                                  (mapv #(json/read-str % :key-fn keyword))
+                                  (filter #(= "message" (:kind %)))
+                                  (map :payload)
+                                  (filter #(= "assistant" (:role %)))))]
+    (providers/use-provider! thread pin)
+    (let [stop (http/start! {:port 0})]
+      (try
+        (binding [*port* (-> stop meta :local-port)]
+          (let [body (.body (post-run thread {:messages [{:id "u1" :role "user" :content "read deps.edn"}]}))]
+            (is (str/includes? body "RUN_FINISHED")
+                "the run finishes -- so the SECOND request was accepted")
+            (is (not (str/includes? body "must be passed back"))
+                "with no sign of the vendor's refusal")))
+
+        (testing "the second round really happened, and the log shows what was sent"
+          ;; Two assistant messages on disk = two LLM rounds: the tool call, and the
+          ;; answer that follows it. The second one exists only because the vendor
+          ;; accepted the request carrying the first.
+          ;;
+          ;; WAITED FOR, not read immediately: the returned side of the message record
+          ;; lands one beat after the terminal frame (see wait-for-recorded), so a
+          ;; reader that races the consumer sees half a conversation.
+          (wait-for-recorded (log-file thread)
+                             #(<= 2 (count (filter (fn [r] (and (= "message" (:kind r))
+                                                               (= "assistant" (get-in r [:payload :role]))))
+                                                   %)))
+                             5000)
+          (let [assistant (assistant-messages)]
+            (is (= 2 (count assistant)) "both rounds are on disk")
+            (is (contains? (first assistant) :reasoning_content)
+                "and the tool-call round carries the field the request carried: the
+                 log does not disagree with the wire")
+            (is (= "" (:reasoning_content (first assistant)))
+                "empty, because that is what the vendor said -- not invented text")))
+        (finally (stop) (providers/use-provider! thread nil))))))
+
+(deftest a-client-history-that-lost-the-field-is-repaired-on-the-way-out
+  ;; THE OTHER HALF, and the reason the padding lives at the edge rather than in
+  ;; `stream!`: a history that comes BACK from a client need not carry a field only a
+  ;; provider cares about. The client is the source of truth for WHICH messages exist;
+  ;; this repair only puts the vendor's requirement back on them.
+  (let [history [{:id "u1" :role "user" :content "hi"}
+                 {:id "a1" :role "assistant" :content "hello"}]      ; no reasoning_content
+        run     (fn [thread provider]
+                  (providers/use-provider! thread provider)
+                  (let [stop (http/start! {:port 0})]
+                    (try
+                      (binding [*port* (-> stop meta :local-port)]
+                        (.body (post-run thread {:messages history})))
+                      (finally (stop) (providers/use-provider! thread nil))))
+                  (wait-for-recorded
+                   (log-file thread)
+                   #(some (fn [r] (and (= "message" (:kind r))
+                                       (= "assistant" (get-in r [:payload :role]))))
+                          %)
+                   5000)
+                  (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
+                       (mapv #(json/read-str % :key-fn keyword))
+                       (filter #(= "message" (:kind %)))
+                       (map :payload)
+                       (filter #(= "assistant" (:role %)))))
+        reply (fn [] [{:content "ok"}])]
+
+    (testing "a thinking-mode provider gets the field added, and the log shows it"
+      ;; The strict vendor is in the room: without the pad this run is a 400.
+      (let [body (run "t-pad-on" (assoc (fake/scripted (reply) {:thinking true})
+                                        :reasoning-effort "high"))]
+        (is (not (str/includes? body "must be passed back"))
+            "the request the client sent would have been refused as-is")
+        (is (contains? (first body) :reasoning_content)
+            "and the field is on the message the vendor was shown -- before the audit line")))
+
+    (testing "a provider with no reasoning effort is untouched"
+      (let [logged (run "t-pad-off" (fake/scripted (reply)))]
+        (is (not (contains? (first logged) :reasoning_content))
+            "nothing is invented onto a request that never needed it")))
+
+    (testing "but a field the client DID send survives, thinking mode or not"
+      ;; No reasoning effort here, so nothing can be padded: what the vendor is shown
+      ;; is the client's own message, and the field on it must still be there. This is
+      ;; the whitelist rebuild, not the pad -- and the two are easy to confuse.
+      (let [with-field [{:id "u1" :role "user" :content "hi"}
+                        {:id "a1" :role "assistant" :content "hello"
+                         :reasoning_content "I looked it up"}]]
+        (providers/use-provider! "t-client-field" (fake/scripted (reply)))
+        (let [stop (http/start! {:port 0})]
+          (try
+            (binding [*port* (-> stop meta :local-port)]
+              (post-run "t-client-field" {:messages with-field}))
+            (finally (stop) (providers/use-provider! "t-client-field" nil))))
+        (wait-for-recorded (log-file "t-client-field")
+                           #(some (fn [r] (and (= "message" (:kind r))
+                                               (= "assistant" (get-in r [:payload :role]))))
+                                  %)
+                           5000)
+        (let [assistant (->> (str/split-lines (slurp (log-file "t-client-field") :encoding "UTF-8"))
+                             (mapv #(json/read-str % :key-fn keyword))
+                             (filter #(= "message" (:kind %)))
+                             (map :payload)
+                             (filter #(= "assistant" (:role %))))]
+          (is (= "I looked it up" (:reasoning_content (first assistant)))
+              "the client's own words reached the vendor"))))))

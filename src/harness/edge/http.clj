@@ -54,6 +54,7 @@
             [harness.infra.log :as log]
             [harness.infra.logging :as logging]
             [harness.cap.providers :as providers]
+            [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
@@ -427,9 +428,16 @@
               (try (let [provider (providers/current-provider thread-id (:provider input))]
                      (guard-input-modalities! input provider)
                      [provider
-                      (ag/inbound (:messages input) (system-prompt/assemble thread-id)
-                                  (opening-blocks! thread-id)
-                                  (:context input))
+                      ;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
+                      ;; list this run will log and send -- not inside `stream!`,
+                      ;; where it would be easier and would make the `message` audit
+                      ;; line disagree with what actually went out. See
+                      ;; harness.kernel.llm/thinking-mode-history.
+                      (llm/thinking-mode-history
+                       (ag/inbound (:messages input) (system-prompt/assemble thread-id)
+                                   (opening-blocks! thread-id)
+                                   (:context input))
+                       provider)
                       (resume-decisions (:resume input))
                       (providers/resolve-provider thread-id (:provider input))])
                    (catch Throwable t

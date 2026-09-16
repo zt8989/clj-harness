@@ -40,6 +40,12 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 **换 provider 而不指定 model 就落在新厂商的默认 model 上**。
 *别叫成* 配置项 / 参数（旋钮是**可被某一档选**的那三个，别的都不是）。
 
+**思考模式**（thinking mode）—— 厂商在**请求带 `reasoning_effort`** 时进入的模式：它会把推理过程单独
+流回来（`reasoning_content`），并**要求历史里每条 assistant 消息都把那个字段送回去**，缺了就是 HTTP 400。
+「这一轮没有推理」厂商也是**带一个空值**说的，所以空串要原样留着；历史里真的没有这个字段时，
+我们在请求侧补一个空串（只补空串，不编内容）。见 [providers](docs/architecture/providers.md)。
+*别叫成* 思考档（那是 `:reasoning-effort` 这个**旋钮**本身，是选 low/medium/high 的地方）。
+
 ## 编辑
 
 **编辑模式** —— 本会话被服务哪一套编辑实现，取值 `:hashline`（默认）或 `:str-replace`，写在

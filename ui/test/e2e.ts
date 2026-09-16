@@ -101,8 +101,8 @@ export function threadId(prefix: string): string {
 ///   { id: "c1", name: "read", arguments: { path: "deps.edn" } }
 /// `tool-calls` and `arguments` are spelled the way harness.fake reads them; the
 /// server's JSON reader keywordizes them on arrival.
-export function script(turns: readonly unknown[]): void {
-  fs.writeFileSync(requireFacts().scriptPath, JSON.stringify({ turns }));
+export function script(turns: readonly unknown[], opts?: { thinking?: boolean }): void {
+  fs.writeFileSync(requireFacts().scriptPath, JSON.stringify({ turns, ...opts }));
 }
 
 // -------------------------------------------------------------- the wire
