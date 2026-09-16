@@ -77,7 +77,8 @@
 |---|---|
 | `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
-| `edge.replay` | 记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
+| `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
+| `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场 |
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、
 `evals`（把某 thread 跑过的 `eval` 读出来，供人决定晋升）、`repl`（起服务后落进 REPL）、

@@ -124,11 +124,13 @@
 | ~~01~~ | ~~词与记录：一次模型调用的边界与用量~~ | — | ~~`CONTEXT.md` 立词；`model/start` / `model/end` 两条审计行；`consume-sse` 留住用量；假 provider 也能报；真机日志证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 | ~~02~~ | ~~会话统计的折法与端点~~ | 01 | ~~`harness.edge.stats` 的纯折（手搓记录可断言）+ `GET /api/threads/<stem>/stats`；curl 证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 | ~~03~~ | ~~composer 之下的状态条~~ | 02 | ~~五格、英文、调用结束刷新；格式化是纯函数并进 UI 套件；真机截图证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
-| 04 | 收口：文档与全量验证 | 03 | `CONTEXT.md` 补齐、`docs/architecture` 跟上（`edge.md` 的行表、`architecture.md` 的模块地图与「在办」、`client.md`）；两套全量 + 真机证据 |
+| ~~04~~ | ~~收口：文档与全量验证~~ | 03 | ~~`CONTEXT.md` 补齐、`docs/architecture` 跟上、两套全量 + 真机证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 
 ## 状态
 
-**已在办：票 01、02、03 落地（2026-09-16），票 04（收口）未开工。** 分支 `composer-status`。
+**四张票全部落地（2026-09-16）。** 分支 `composer-status`。
+
+**收尾时在主仓要做的一件事**：本特征的「在办」那条是**立票当天加在主仓未提交的 `docs/architecture.md`** 上的（与 `session-context` 那条同处一个未提交改动），而 worktree 是从 HEAD 切出来的、**没有这一条**——所以合回主仓时把那一条删掉（主仓那份是权威）。
 
 **基线（立票当日实测，2026-09-16）：`main` @ `492ed0d`。**
 
@@ -280,3 +282,40 @@
 **顺带撞上一条真的缺数现场**：那次会话的第一次发送因为临时家里没有 `config.edn` 根本没到模型，
 条子当时只画 `1 turn`——一个 `model/start` 都没有，所以其余四格一个都不画。那不是设计出来的演示，
 是撞上的，正好是决策 6 在真页面上的样子，留在那份 README 里。
+
+### 04 — 收口：文档与全量验证（2026-09-16，分支 `composer-status`，票面已删）
+
+**文档**（都在 worktree 里，跟着代码一起合回）：
+
+- `docs/architecture/edge.md`：路由表加 `GET /api/threads/<stem>/stats` 一行；
+  **改掉那句现在不成立的**「读日志的代码只认 `input` / `event` 两种行」——改成「**重建对话的**代码只认两种行，
+  审计轨迹有自己的读侧」；「GET 打在这个形状上一律 405」改成「不该被服务的动词答 405，
+  方法说有没有副作用」；另加一段讲 stats 折的是哪一半、缺席为什么是缺席、以及它容忍半行而 `replay` 不容忍。
+- `docs/architecture.md`：`harness.edge` 的表加 `edge.stats` 一行（并把 `edge.replay` 那行点明是
+  **对话那一半**）；快照点钉到收口这次的提交（下一个提交）。
+- `docs/architecture/client.md`：装配树加 `composer-stats.tsx` 与 `lib/stats.ts`（`format.ts` 那行也说清它零 import）；
+  「状态的归属」加两条——五格读的是**记录**（客户端不数、不估）、以及**什么时候问**（挂载 / 切会话 /
+  助手消息多一条 / run 结束，**不轮询**）；测试那节把「套件不 import `src/`」改成实际规则
+  （要浏览器的一律不 import，零 import 的纯模块按相对路径引），并把 `stats` 套件列进清单。
+- `docs/architecture/overview.md`：状态表加一行**会话统计 = 不存**（它是记录的读法）——
+  核过之后确认这是**唯一**要动的地方（没有新增状态、也没有进库）。
+- `README.md`：验证那节的报数改成今天实测的（734 / 10666，UI 19 个用例 6 组），
+  并把 `http_test` 那条**真竞赛**写进去（失败条数每次可能不同，比对看名字）。
+- `CONTEXT.md`：核过票 01 立的四个词与落地后的代码一致（`轮` / `模型调用` / `会话统计` / `缓存命中`），
+  没有改词条——代码里用的就是它们。
+
+**记录清单逐行核**：`.scratch/composer-status/evidence/record-ledger-review.md` ——
+每一格指到那一行、代码里的**唯一实现**、以及用 `grep` 核过「有没有第二处」的结果
+（用量三个键与轮数全仓只有一处读）。
+
+**报数**（收口这次实测）：
+
+- `clojure -M:test -m harness.test-runner` → `Ran 734 tests containing 10666 assertions. 2 failures, 0 errors.`
+  ——只有 `project_test/a-binding-survives-a-real-restart` 那对（JDK 25 的 stdout 噪音），
+  **从头到尾没有出现过新的失败名字**（01 落地时 726 / 10614、02 时 734 / 10666）。
+- `cd ui && npm test` → `Test Files 1 passed (1)` / `Tests 19 passed (19)`。
+- `cd ui && npm run build` → 过（tsc --noEmit + vite build；顺带修掉了 main 上本来就红的两处类型错）。
+
+**真机证据**：`.scratch/composer-status/evidence/` 六份——01 的日志两行（可重跑脚本 + 输出）、
+02 的 curl（脚本 + 输出）、03 的浏览器截图 + 那个 DOM 片段 + 它的 README，外加这页检查表。
+**两件始终没做的事写在 01 的 README 里**：没跑活厂商、缓存字段的拼法没在真机上核过。
