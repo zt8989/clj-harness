@@ -250,6 +250,31 @@
         (is (str/includes? (ex-message e) ":default")
             "and that sentence also names the section")))))
 
+(deftest a-home-with-no-config-edn-gets-one-at-boot-and-only-then
+  ;; NEW: a home nobody has configured is a home the FIRST SERVING PROCESS hands a file
+  ;; to, because a person who has just installed this should have something to open.
+  ;; The reader stays pure: asking a home what it says never writes.
+  (with-home nil nil
+    (fn []
+      (io/delete-file (home/config-file) true)
+      (testing "asking reads a missing file as an empty one -- and creates nothing"
+        (is (= "" (home/config)))
+        (is (not (.exists (home/config-file))) "the home is as it was found"))
+      (testing "the boot seeds it"
+        (let [{:keys [file created?]} (providers/ensure-config!)]
+          (is (true? created?))
+          (is (.exists ^java.io.File file))
+          (is (str/includes? (slurp file :encoding "UTF-8") ":default")
+              "with a few lines saying which sections exist")
+          (is (= {} (providers/config))
+              "and an empty map, which is how this shape says 'says nothing'")
+          (is (contains? (providers/catalog) :openrouter) "so the built-ins stand")))
+      (testing "and it never overwrites a home that already has one"
+        (spit (home/config-file) "{:default {:provider :openrouter}}" :encoding "UTF-8")
+        (is (false? (:created? (providers/ensure-config!))))
+        (is (str/includes? (slurp (home/config-file)) ":provider :openrouter")
+            "the person's file, not the skeleton")))))
+
 (deftest a-providers-edn-file-is-a-named-failure
   ;; The file held this section until the catalog moved into config.edn. A home
   ;; that still has one is told to move its entries and delete it -- rather than
@@ -1455,11 +1480,18 @@
       (let [e (try (providers/settings "st-bad") nil (catch Exception ex ex))]
         (is (some? e) "an unresolvable configuration fails rather than answering")
         (is (str/includes? (ex-message e) "no provider named")))
-      (testing "and so does a config.edn that is not there at all"
+      (testing "and a config.edn that is not there at all is the SAME ANSWER, not a
+                different error: absence and emptiness are one fact about a home"
         (io/delete-file (home/config-file) true)
         (let [e (try (providers/settings "st-bad") nil (catch Exception ex ex))]
           (is (some? e))
-          (is (str/includes? (ex-message e) "config.edn not found")))))))
+          (is (str/includes? (ex-message e) "no provider")
+              "the sentence a run with no default tier meets")
+          (is (str/includes? (ex-message e) "config.edn")
+              "and it names the file, absolutely -- which is the useful half of the
+               refusal that used to carry the path")
+          (is (not (.exists (home/config-file)))
+              "and asking did not create it: reads leave the home as they found it"))))))
 
 (defn- spawn-child
   "Run FORM in a NEW JVM and return its combined output. DIR is handed over as

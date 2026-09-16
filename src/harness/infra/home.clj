@@ -285,17 +285,23 @@
   (str (log-file dir thread-id)))
 
 (defn config
-  "config.edn, re-read every time so it can be edited while the process runs.
-  A missing file is a hard, NAMED failure: the message carries the absolute
-  path and the knob that moves it, so the reader knows exactly what to create
-  and where."
+  "config.edn's text, re-read every time so it can be edited while the process runs.
+
+  A MISSING FILE READS AS AN EMPTY ONE, and that is a reversal of what this function
+  used to do (it refused by name, carrying the path) made deliberately: 'there is no
+  file' and 'the file says nothing' are the same fact about a home, and the shape
+  already spells 'says nothing'. The refusal was there so a missing file would not
+  silently mean 'no configuration' -- but nothing is silent about it now: a run with
+  no default tier fails by name and teaches the shape to write, and the built-in
+  provider table stands on its own either way.
+
+  IT CREATES NOTHING, which is why this stays a read: harness.cap.providers seeds the
+  file at boot (that is what a process preparing its own home looks like), while a
+  read-only caller -- an offline tool, the settings panel, a test asking what a home
+  says -- leaves the home exactly as it found it."
   []
   (let [f (config-file)]
-    (when-not (.exists f)
-      (throw (ex-info (str "config.edn not found at " (.getAbsolutePath f)
-                           "; create it or set CLJ_HARNESS_HOME")
-                      {:path (.getAbsolutePath f)})))
-    (slurp f :encoding "UTF-8")))
+    (if (.exists f) (slurp f :encoding "UTF-8") "")))
 
 ;; ------------------------------------------------- configured lists of paths
 ;;

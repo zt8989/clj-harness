@@ -1552,6 +1552,14 @@
                    (cap-hooks/install!)
                    (system-prompt/install!)]]
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
+    ;; A HOME THAT HAS NEVER BEEN CONFIGURED GETS A config.edn HERE, at boot: a
+    ;; process about to SERVE from a home is the one that should hand a person a file
+    ;; to edit. The reader does not do this -- `home/config` reads a missing file as an
+    ;; empty one and creates nothing -- so an offline tool or a test asking what a home
+    ;; says still leaves the home exactly as it found it.
+    (when (:created? (providers/ensure-config!))
+      (println (str "no config.edn in " root " -- wrote an empty one; the settings panel"
+                    " (or an editor) can fill it in")))
     (try
       (let [server (hk/run-server handler opts)]
         (println (str "harness listening on http://localhost:" (:port opts))

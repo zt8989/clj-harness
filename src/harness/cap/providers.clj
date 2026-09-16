@@ -760,9 +760,12 @@
                  ;; it is the one a person meets on a fresh home, and an example written
                  ;; against the file's previous shape was advice to write something that
                  ;; no longer parses.
-                 (nil? src) (fail (str "no provider: name one in config.edn's :default"
-                                       " (e.g. {:default {:provider :openrouter}}) or describe"
-                                       " one inline there"
+                 ;; THE ABSOLUTE PATH IS IN THE SENTENCE, because the file that used to
+                 ;; be missing *was* named by a refusal that no longer fires: 'which
+                 ;; file, and where' is the half of it that was worth keeping.
+                 (nil? src) (fail (str "no provider: name one in " (config-path)
+                                       "'s :default (e.g. {:default {:provider :openrouter}})"
+                                       " or describe one inline there"
                                        " ({:default {:protocol … :base-url … :model …}})")
                                   {})
                  :else      (named registry src))
@@ -1665,6 +1668,41 @@
        ";; survive a write from the form. What it held before this write is beside it as\n"
        ";; config.edn.bak, when there was anything to keep. Editing by hand is still fine\n"
        ";; -- the form reads this file back -- and the next write will reorder it again.\n\n"))
+
+(def ^:private skeleton
+  "What a home that has never been configured gets, the first time a process starts
+  in it: a few lines saying which file this is and where the rest is written down,
+  and an empty map -- which is how this shape says 'says nothing'.
+
+  A COMMENTED LITTLE, NOT A TEMPLATE: the full explanation is documentation and
+  belongs in docs/ (see docs/architecture/providers.md); what a person needs at the
+  moment they open this file is which sections exist and that leaving them empty is a
+  working state. A write from the settings form replaces these comments with its own
+  header, which the file then says out loud."
+  (str ";; The two sections of this file, both of which the settings panel writes:\n"
+       ";;   :default    the three knobs a session starts from\n"
+       ";;   :providers  the vendors, {name entry}\n"
+       ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
+       ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
+       "\n{}\n"))
+
+(defn ensure-config!
+  "Give this home a config.edn if it has none, and leave one that exists ALONE.
+
+  CALLED BY THE COMPOSITION ROOT AT BOOT (`harness.edge.http/start!`), not by the
+  reader: `home/config` reads a missing file as an empty one and creates nothing, so a
+  read-only caller leaves the home as it found it. A process that is going to SERVE
+  from a home is the one that should hand a person a file to edit -- and doing it here
+  rather than in `infra` keeps the shape in the namespace the shape belongs to.
+
+  Returns the file, and whether it had to create it."
+  []
+  (let [f (home/config-file)]
+    (if (.exists f)
+      {:file f :created? false}
+      (do (when-let [dir (.getParentFile f)] (.mkdirs dir))
+          (spit f skeleton :encoding "UTF-8")
+          {:file f :created? true}))))
 
 (defn- write-config!
   "M -> config.edn, written atomically, with ONE GENERATION of backup.

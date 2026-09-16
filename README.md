@@ -58,18 +58,19 @@ $env:CLJ_HARNESS_HOME = "D:\harness-config"
 clojure -M:run
 ```
 
-首次使用先建目录并放两份配置（后两份可选）：
+首次使用只需要一份配置（其余可以不存在）：
 
 ```pwsh
 New-Item -ItemType Directory -Force ~/.clj-harness
-Copy-Item config.edn.example ~/.clj-harness/config.edn
-Copy-Item harness.edn.example ~/.clj-harness/harness.edn   # 可选：不复制就是全默认（含按锚点编辑）
 Copy-Item .env.example ~/.clj-harness/.env
 # 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY（或某家厂商自己的 <ID>_API_KEY）
 ```
 
-`config.edn.example` 把**两节**都写了出来——`:default` 的三个旋钮与 `:providers` 里的一家厂商——
-所以它既是能直接用的配置，也是这个形状的参考手册。
+**`config.edn` 不用自己造**：服务第一次在一个家目录里启动时会写下一份带注释的空配置，
+之后在「设置」的 General 页里挑一家厂商就成型了（手动编辑当然也可以）。
+`config.edn.example` 是那份文件的**注释版**——把 `:default` 的三个旋钮与 `:providers` 里的一家厂商
+都写了出来，想要一份带完整说明的起点就照抄它。
+`harness.edn.example` 同理，可复制可不复制（不复制就是全默认，含按锚点编辑）。
 
 `harness.edn.example` 把 `:editing` 与 `:approval` 的每个键都写在**它的默认值**上并逐条注释，所以它同时
 是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
@@ -78,11 +79,11 @@ Copy-Item .env.example ~/.clj-harness/.env
 git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
-**缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
-`harness.edn` / `hooks.edn` / `.env` 可以不存在——不存在 = 那个配置什么都没说，
-`.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
-顶层冒出第三节 / 键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，
-从外部看没有区别。**最常撞上的那一份写坏**是旧形状——三个旋钮直接写在顶层；那个失败的句子会说
+**缺失的文件与空的文件是同一件事：什么都没说。** `config.edn` 不存在也算——**服务启动时会替你写一份**
+（一段说明两节是什么的注释 + 一个空 map），所以刚装好的家开箱就能用，而且有一份能直接编辑的文件。
+`.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`；`harness.edn` / `hooks.edn` 同样可以不存在。
+而**存在却写坏**（EDN 语法坏 / 不是 map / 顶层冒出第三节 / 键拼错）一律**指名绝对路径硬失败**：
+一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。**最常撞上的那一份写坏**是旧形状——三个旋钮直接写在顶层；那个失败的句子会说
 「把它们挪到 `:default` 下面」。
 
 ### system 消息：冻结的开头 + hook 追加的文本

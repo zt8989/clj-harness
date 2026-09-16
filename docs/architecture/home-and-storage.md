@@ -36,7 +36,9 @@
 ```
 ~/.clj-harness/
 ├── config.edn        **唯一一份配置**，两节：:default（三个旋钮的默认档）与
-│                     :providers（厂商 endpoint + 它的 model 表）；每轮重读
+│                     :providers（厂商 endpoint + 它的 model 表）；每轮重读。
+│                     没有就在**开机时**由组合根写一份空骨架（`ensure-config!`），
+│                     读侧从不创建它
 ├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
 ├── .env              一家厂商一把钥匙：`<ID>_API_KEY`（如 `ACME_GATEWAY_API_KEY`），

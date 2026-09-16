@@ -2120,11 +2120,17 @@
                (is (= 400 (.statusCode resp)))
                (is (str/includes? (:error reply) "no provider named"))))
 
-           (testing "and a config.edn that is not there says so by path"
+           (testing "and a config.edn that is not there is the SAME ANSWER as an empty
+                     one: the file's absence and its emptiness are one fact, so the
+                     sentence a person meets names what to write and where"
              (io/delete-file config true)
-             (let [resp (settings)]
+             (let [resp (settings)
+                   body (:error (read-json resp))]
                (is (= 400 (.statusCode resp)))
-               (is (str/includes? (:error (read-json resp)) "config.edn not found"))))
+               (is (str/includes? body "no provider"))
+               (is (str/includes? body "config.edn")
+                   "with the path, which is the useful half of the refusal that used
+                    to carry it")))
 
            (testing "only GET is served -- this route has no effect to POST"
              (is (= 405 (.statusCode (api-call :post "/api/settings" "{}")))))))
@@ -2810,6 +2816,30 @@
            (if (nil? old-env)
              (io/delete-file dotenv true)
              (spit dotenv old-env :encoding "UTF-8"))))))))
+
+(deftest a-home-with-no-config-edn-is-given-one-by-the-server-that-starts-in-it
+  ;; The composition root seeds it: a process about to serve from a home hands the
+  ;; person a file to edit. The reader does not -- see providers/ensure-config!.
+  (let [dir (io/file (System/getProperty "java.io.tmpdir")
+                     (str "harness-noconfig-" (System/nanoTime)))
+        old (home/root)]
+    (.mkdirs dir)
+    (try
+      (with-redefs [home/root (constantly (str dir))]
+        (let [stop (http/start! {:port 0})]
+          (try
+            ;; *port* is what `api-call` reads, and the wrappers that normally bind
+            ;; it are the ones that START the server -- this test starts its own, so
+            ;; it binds the port itself. See *port* for why no port is written down.
+            (binding [*port* (:local-port (meta stop))]
+              (let [f (io/file dir "config.edn")]
+                (is (.exists f) "the boot wrote one")
+                (is (str/includes? (slurp f :encoding "UTF-8") ":default")
+                    "with the sections named in a comment, and an empty map")
+                (is (= 200 (.statusCode (api-call :get "/api/providers" nil)))
+                    "and the catalog answers from a home that says nothing")))
+            (finally (stop)))))
+      (finally (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
 
 (deftest asking-a-vendor-what-it-serves-stays-offline-in-this-suite
   ;; The ONE route in this feature that leaves the machine, tested with the seam at

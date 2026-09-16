@@ -14,6 +14,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.infra.db :as db]
+            [harness.cap.providers :as providers]
             [harness.infra.home :as home])
   (:import (java.io File StringWriter)
            (java.nio.file Files OpenOption)
@@ -143,16 +144,24 @@
 (deftest opening-the-store-reads-no-configuration-file
   ;; The boundary this guards is .scratch/project-sidebar decision 2: the store
   ;; holds state, while records AND configuration stay files. Opening it must
-  ;; therefore not consult config.edn -- the one file whose absence is a hard,
-  ;; named refusal (harness.infra.home/config throws). So an empty home is an exact
-  ;; test of "the store does not read config": if anything on this path reaches
-  ;; for it, this test fails with that named error rather than passing quietly.
+  ;; therefore not consult config.edn.
+  ;;
+  ;; THE TRIPWIRE IS A BROKEN config.edn, not a missing one: a missing file reads as
+  ;; an empty one now (harness.infra.home/config), so its absence would prove nothing.
+  ;; harness.cap.providers/config still refuses a file that says something which is not
+  ;; a map, so a store that reached for its configuration would fail here with that
+  ;; sentence rather than passing quietly.
   (let [dir (fresh-root)]
     (with-root
       dir
       (fn []
-        (testing "this home holds no configuration at all"
-          (is (empty? (seq (.listFiles dir)))))
+        (spit (io/file dir "config.edn") "[1 2 3]" :encoding "UTF-8")
+        (testing "this home's configuration is a file the reader would refuse"
+          ;; THE READER THAT PARSES is providers/config -- `home/config` only hands
+          ;; over bytes, so it refuses nothing and would be a tripwire that never
+          ;; fires. Reaching for the configuration on this path therefore fails HERE.
+          (is (thrown? clojure.lang.ExceptionInfo (providers/config))
+              "so reaching for it on this path could not pass unnoticed"))
         (testing "and the store still opens, is written to, and is read back"
           (db/with-transaction
             (fn [^Connection c]
@@ -160,8 +169,8 @@
                 (.execute st "CREATE TABLE probe (x INTEGER)")
                 (.execute st "INSERT INTO probe VALUES (7)"))))
           (is (= [[7]] (rows "SELECT x FROM probe"))))
-        (testing "config.edn was never asked for, so it was never created"
-          (is (not (.exists (io/file dir "config.edn")))))))))
+        (testing "and the file it did not read is the one it did not touch"
+          (is (= "[1 2 3]" (slurp (io/file dir "config.edn") :encoding "UTF-8"))))))))
 
 ;; ------------------------------------------------------------------ first open
 
