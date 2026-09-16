@@ -82,12 +82,13 @@
 (def points
   "Every hook point this harness knows, as data. 27 of them.
 
-  The P2 points (the first fourteen, plus the two assembly points below) have a
-  trigger source in this codebase today; the P3 points are declared and never fire
-  until the subsystem they belong to is built -- file watching, MCP elicitation,
-  context compaction, subagents, tasks, git worktrees. A point with no trigger
-  source simply never dispatches: that is the design, not an omission, and it is
-  why a P3 point costs one row rather than an interface.
+  The P2 points and `SystemPrompt` -- FIFTEEN rows, since it sits among the P2 rows
+  rather than after them -- have a trigger source in this codebase today; the P3
+  points are declared and never fire until the subsystem they belong to is built --
+  file watching, MCP elicitation, context compaction, subagents, tasks, git
+  worktrees. A point with no trigger source simply never dispatches: that is the
+  design, not an omission, and it is why a P3 point costs one row rather than an
+  interface.
 
   THE TWO ASSEMBLY POINTS SIT ASTRIDE EACH OTHER and each owns one half of what a
   run opens with: `SystemPrompt` owns the system message (its opening is frozen,

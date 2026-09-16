@@ -129,8 +129,8 @@ Phase A 先落地，是为了让 hook 的接线段（10/11/12 都要改执行缝
   组装、模型看到它之前」。它与其他门禁点只差那一格：**匹配到的声明全部跑、全部追加**
   （不是第一条 block 获胜——一条 hook 不该把另一条的文本吃掉），退出 0 的 stdout 就是内容，
   dispatch 收进有序的 `:blocks`；空输出 = 这一条什么都不说；退出 2 = **这次 run 不开始**
-  （stderr 逐字是理由，客户端收 RUN_ERROR）。**其它点的返回与审计行逐字节不变**。今天 P2 接线点因此是
-  **7 个**：原来的六个加上它。
+  （stderr 逐字是理由，客户端收 RUN_ERROR）。**其它点的返回与审计行逐字节不变**。点表因此从 **26 行变
+  27 行**，而新的一行**是接线的**（不是 P3 那种占位），所以有触发源的点从十四行变 **15 行**。
 - **来源从两层变三层**。多了 `:built-in`：内核自己注册的 `:run` 行，**排在最前**（内建 → 文件 → 会话）。
   并且一条声明现在**说它跑什么、且只说一样**：`:command`（非空字符串）或 `:run`（可调用）恰好之一；
   两个都没有、两个都给都指名报错。**`hooks.edn` 里写 `:run` 被指名拒绝**（文件里放不了函数），
@@ -140,9 +140,14 @@ Phase A 先落地，是为了让 hook 的接线段（10/11/12 都要改执行缝
   由**新 ns `harness.system-prompt`** 注册——它要 `tools` / `project` / `providers`，所以声明不进
   `harness.hooks`（`project` 已 require `preamble`，而 system 半要 `tools`，会成环）。
 - **`prompt.md` 因此换了定位**：从「整份冻结的 system prompt」变成「system 消息的冻结**开头**」。
-  与任何会话无关的话留下（身份、hook 自助、secrets 纪律、「其余自己读」），**本会话的事实**
+  与任何会话无关的话留下（身份、secrets 纪律、「其余自己读」），**本会话的事实**
   （工具集合、绑定目录、provider 档）由 hook 每次 run 现算追加——宁可付一次冷前缀，也不让 system
   消息说一件已经不成立的事。
+- **上面第 19 行与 13（收口）说的「hook 自助」那一节，实际是退场了**——与本节其余改动不同，这不是
+  搬家而是**删除**：那段文本不再进 system 消息。这是本特征动 `prompt.md` 内容的两处之一（另一处是
+  secrets 里指向 `active-provider` 的那一颗，它的内容由 `<provider>` 块接管）。后果如实说：模型不再
+  从冻结开头知道 hook 这回事，`eval` 只剩工具描述里那一句。理由与作者自己记的越界说明见
+  `.scratch/system-prompt-blocks/spec.md` 文末的落地记录。
 - **两处 prompt.md 之外的连带**，如实记：`harness.llm/prompt` 的措辞从「system prompt」改成
   「system 消息的开头」；`replay/history` 与 `harness.http` 改调 `system-prompt/assemble`
   （没有 sink 的调用方仍拿到逐字节相同的 `prompt.md`）。

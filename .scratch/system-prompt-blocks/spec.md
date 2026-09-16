@@ -5,6 +5,10 @@ hook 自助、secrets 纪律、以及「其余自己读」。其余每一样**�
 按 append 顺序依次拼在那段开头之后。仍是**同一条 system 消息**：AG-UI 帧形状不动、客户端一个字都看不到、
 jsonl 行种类不加。
 
+> 2026-09-16 落地后补：上面那句里**「hook 自助」这一项没有留下**——`prompt.md` 的 Self-extension/eval
+> 整节退场了，冻结开头实际只有身份、secrets 纪律、「其余自己读」和一句 Be concise。这是作者当场决定的
+> 越界，理由与后果见文末「两处与本 spec 不符的地方」，**上文与本行以下保持原样不改写**。
+
 ```
 [system  prompt.md 的冻结开头（逐字节）]
 [追加    <tools>…</tools>      ]  ← 内核自己注册的 hook（source :built-in）

@@ -25,23 +25,12 @@
             [harness.project :as project]
             [harness.providers :as providers]
             [harness.system-prompt :as system-prompt]
+            [harness.test-support :as support]
             [harness.tools :as tools]))
-
-(def ^:private builtin-ids
-  "The kernel's own rows, by the names harness.system-prompt registers them with --
-  the ids `effective-hooks` reports and `session-disable!` takes."
-  ["builtin:tools" "builtin:project" "builtin:provider"])
-
-(defn- write-hooks! [decls]
-  (.mkdirs (io/file (home/root)))
-  (spit (str (home/root) "/hooks.edn") (pr-str decls) :encoding "UTF-8"))
-
-(defn- wipe-hooks! []
-  (io/delete-file (io/file (home/root) "hooks.edn") true))
 
 ;; A hooks.edn written here declares for EVERY thread in this process, so it is
 ;; wiped around every test -- the same discipline harness.hooks-test applies.
-(use-fixtures :each (fn [f] (wipe-hooks!) (f) (wipe-hooks!)))
+(use-fixtures :each (fn [f] (support/wipe-hooks!) (f) (support/wipe-hooks!)))
 
 (defn- assemble-run
   "One assembly of THREAD-ID's system message with a sink bound -- what the edge
@@ -60,13 +49,6 @@
 (defn- opening [] (slurp "prompt.md" :encoding "UTF-8"))
 
 (defn- says [text] {:run (fn [_] {:exit 0 :out text :err ""})})
-
-(defn- without-builtins!
-  "Switch the kernel's own rows off for THREAD-ID, so a test about the DECLARED
-  rows sees only those. Per-thread, like every other switch, so it cannot leak into
-  another test's thread."
-  [thread-id]
-  (doseq [id builtin-ids] (hooks/session-disable! thread-id id)))
 
 (defn- block
   "The BLOCK out of a whole system message -- <tools>, <project> or <provider> --
@@ -87,7 +69,7 @@
   ;; nobody records would change a run silently. So no sink means the point does
   ;; not dispatch -- even with declarations in the file, and even with the kernel's
   ;; own rows registered.
-  (write-hooks! {:system-prompt [{:command "echo this must not be appended"}]})
+  (support/write-hooks! {:system-prompt [{:command "echo this must not be appended"}]})
   (is (= (opening) (system-prompt/assemble "sp-nosink"))
       "byte for byte: the frozen opening and nothing else")
   (is (= (opening) (system-prompt/assemble nil))))
@@ -96,7 +78,7 @@
   ;; 'Nothing declared, nothing happens' is the engine's property and it still
   ;; holds -- but since the kernel registers rows of its own, the state is reached
   ;; by switching those off rather than by having no declarations at all.
-  (without-builtins! "sp-none")
+  (support/without-builtins! "sp-none")
   (let [{:keys [text audits]} (assemble-run "sp-none")]
     (is (= (opening) text))
     (is (empty? audits))))
@@ -106,8 +88,8 @@
 (deftest every-matched-declaration-appends-in-source-and-written-order
   ;; The point's defining difference: not first-block-wins. One hook must not be
   ;; able to swallow another one's text.
-  (without-builtins! "sp-order")
-  (write-hooks! {:system-prompt [{:command "printf 'from the file\n'"}
+  (support/without-builtins! "sp-order")
+  (support/write-hooks! {:system-prompt [{:command "printf 'from the file\n'"}
                                  {:command "printf 'and a second file row\n'"}]})
   (hooks/session-add! "sp-order" :system-prompt (says "from the session"))
   (let [{:keys [text audits]} (assemble-run "sp-order")]
@@ -125,7 +107,7 @@
       (is (= 3 (:matched (first audits)))))))
 
 (deftest a-block-is-trimmed-and-an-empty-one-says-nothing
-  (without-builtins! "sp-blank")
+  (support/without-builtins! "sp-blank")
   (hooks/session-add! "sp-blank" :system-prompt (says "  \n  padded  \n "))
   (hooks/session-add! "sp-blank" :system-prompt (says "   \n  "))
   (hooks/session-add! "sp-blank" :system-prompt (says "second"))
@@ -137,18 +119,18 @@
 (deftest changing-hooks-edn-takes-effect-at-the-next-assembly
   ;; No restart, no reset: the same discipline config.edn and harness.edn are read
   ;; with, because the file is read on every trigger.
-  (without-builtins! "sp-live")
+  (support/without-builtins! "sp-live")
   (testing "with nothing declared only the opening is sent"
     (is (= (opening) (:text (assemble-run "sp-live")))))
   (testing "declaring one puts its text in the very next assembly"
-    (write-hooks! {:system-prompt [{:command "printf 'declared midway\n'"}]})
+    (support/write-hooks! {:system-prompt [{:command "printf 'declared midway\n'"}]})
     (is (str/ends-with? (:text (assemble-run "sp-live")) "\n\ndeclared midway")))
   (testing "and removing it takes the text back out"
-    (wipe-hooks!)
+    (support/wipe-hooks!)
     (is (= (opening) (:text (assemble-run "sp-live"))))))
 
 (deftest a-switched-off-declaration-does-not-append-and-stays-readable
-  (without-builtins! "sp-off")
+  (support/without-builtins! "sp-off")
   (let [id (hooks/session-add! "sp-off" :system-prompt (says "should not appear"))]
     (hooks/session-disable! "sp-off" id)
     (testing "it appends nothing"
@@ -164,8 +146,9 @@
 ;; ------------------------------------------------------- saying no stops the run
 
 (deftest a-declaration-that-says-no-stops-the-run-with-its-own-words
-  (without-builtins! "sp-block")
-  (write-hooks! {:system-prompt [{:command "echo 'the run may not start like this' >&2; exit 2"}]})
+  (support/without-builtins! "sp-block")
+  (support/write-hooks!
+   {:system-prompt [{:command "echo 'the run may not start like this' >&2; exit 2"}]})
   (let [{:keys [audits error]} (assemble-run "sp-block")]
     (testing "assembly throws, and the message IS the hook's stderr -- verbatim"
       (is (some? error))
@@ -182,16 +165,16 @@
   ;; :on-error :block, and the reason says WHICH failure it was: a hook that writes
   ;; what the system message is supposed to say cannot be silently dropped -- an
   ;; instruction that was meant to constrain the run must not vanish.
-  (without-builtins! "sp-fail")
+  (support/without-builtins! "sp-fail")
   (testing "a command that fails as soon as the shell reaches it"
-    (write-hooks! {:system-prompt [{:command "/nonexistent/never-a-hook.sh"}]})
+    (support/write-hooks! {:system-prompt [{:command "/nonexistent/never-a-hook.sh"}]})
     (let [{:keys [error]} (assemble-run "sp-fail")]
       (is (some? error))
       (is (str/includes? (ex-message error) "hook exited 127"))))
   (testing "an in-process hook that throws could not be run at all"
     ;; The broken command above declares for every thread, so it goes first --
     ;; otherwise the earliest block would be its reason and not this one's.
-    (wipe-hooks!)
+    (support/wipe-hooks!)
     (hooks/session-add! "sp-fail" :system-prompt
                         {:run (fn [_] (throw (ex-info "the block generator is broken" {})))})
     (let [{:keys [error]} (assemble-run "sp-fail")]
@@ -204,10 +187,10 @@
   ;; "Every matched declaration runs" is about RUNNING, and it holds even when the
   ;; first one refuses: the second one's side effect is a fact about the trigger,
   ;; while the run stopping is a separate fact about the assembly.
-  (without-builtins! "sp-both")
+  (support/without-builtins! "sp-both")
   (let [marker (str (System/getProperty "java.io.tmpdir") "/sp-late-ran.txt")]
     (io/delete-file (io/file marker) true)
-    (write-hooks! {:system-prompt [{:command "echo no >&2; exit 2"}
+    (support/write-hooks! {:system-prompt [{:command "echo no >&2; exit 2"}
                                    {:command (str "echo ran > " marker "; exit 0")}]})
     (is (some? (:error (assemble-run "sp-both"))))
     (is (.exists (io/file marker))
@@ -220,7 +203,8 @@
   (let [rows (hooks/declarations-at "sp-builtin" :system-prompt)]
     (testing "three rows, all at the SystemPrompt point, all from the kernel"
       (is (= 3 (count rows)))
-      (is (= (set builtin-ids) (set (map :id rows))))
+      (is (= #{"builtin:tools" "builtin:project" "builtin:provider"}
+             (set (map :id rows))))
       (is (every? #(= :built-in (:source %)) rows)))
     (testing "each runs the only way a built-in may: a function, never a command"
       (is (every? #(ifn? (:run %)) rows))
@@ -252,7 +236,7 @@
 (deftest the-kernel-rows-run-first-then-the-file-then-the-session
   ;; The precedence rule, observed where it is visible: the order the text comes
   ;; out in. Built-in, then the file's in the file's order, then the session's.
-  (write-hooks! {:system-prompt [{:command "printf 'from-the-file\n'"}]})
+  (support/write-hooks! {:system-prompt [{:command "printf 'from-the-file\n'"}]})
   (hooks/session-add! "sp-order-all" :system-prompt (says "from-the-session"))
   (let [text (:text (assemble-run "sp-order-all"))
         at   (fn [s] (str/index-of text s))]

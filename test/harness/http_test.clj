@@ -16,6 +16,7 @@
             [harness.project :as project]
             [harness.replay :as replay]
             [harness.shell :as shell]
+            [harness.test-support :as support]
             [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
@@ -299,14 +300,6 @@
 
 ;; ------------------------------------- the assembled system message, at the edge
 
-(defn- write-system-prompt-hooks! [command]
-  (.mkdirs (io/file (home/root)))
-  (spit (str (home/root) "/hooks.edn") (pr-str {:system-prompt [{:command command}]})
-        :encoding "UTF-8"))
-
-(defn- wipe-system-prompt-hooks! []
-  (io/delete-file (io/file (home/root) "hooks.edn") true))
-
 (defn- system-texts
   "Every system message a thread's log holds, in order."
   [thread-id]
@@ -328,7 +321,7 @@
   ;; A hooks.edn declaration is in the mix too, so the test covers all three
   ;; sources at once: the kernel's own rows, a file's, and (in the test below) the
   ;; session's.
-  (write-system-prompt-hooks! "printf 'A DECLARED BLOCK\\n'")
+  (support/write-hooks! {:system-prompt [{:command "printf 'A DECLARED BLOCK\\n'"}]})
   (try
     (with-server
      "it-system"
@@ -369,13 +362,13 @@
            (is (= "RUN_STARTED" (:type (first frames))))
            (is (= "RUN_FINISHED" (:type (last frames))))
            (is (empty? (wire/violations frames)))))))
-    (finally (wipe-system-prompt-hooks!))))
+    (finally (support/wipe-hooks!))))
 
 (deftest switching-a-row-off-takes-its-text-out-of-the-next-runs-message
   ;; Both halves of the switch, at the edge and on a SECOND run of the same thread:
   ;; the declared row and the kernel's own row behave identically, because they are
   ;; rows in one table. Nothing is restarted and nothing is reset.
-  (write-system-prompt-hooks! "printf 'A DECLARED BLOCK\\n'")
+  (support/write-hooks! {:system-prompt [{:command "printf 'A DECLARED BLOCK\\n'"}]})
   (try
     (with-server
      "it-system-off"
@@ -406,14 +399,15 @@
            (let [again (first (system-texts "it-system-off"))]
              (is (str/includes? again "A DECLARED BLOCK"))
              (is (str/includes? again "<tools>")))))))
-    (finally (wipe-system-prompt-hooks!))))
+    (finally (support/wipe-hooks!))))
 
 (deftest a-system-prompt-hook-that-says-no-stops-the-run-over-http
   ;; Exit 2 at this point is a HARD failure, not fail-open: what these hooks write
   ;; is what the system message is supposed to say, so a run that could not be told
   ;; it does not start. The client gets the hook's own words as the RUN_ERROR, and
   ;; no model was ever called.
-  (write-system-prompt-hooks! "echo 'no system message for you' >&2; exit 2")
+  (support/write-hooks!
+   {:system-prompt [{:command "echo 'no system message for you' >&2; exit 2"}]})
   (try
     (with-server
      "it-system-block"
@@ -425,7 +419,7 @@
          (testing "and the vendor was never called -- the run never started"
            (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames))
            (is (not-any? #(= "TEXT_MESSAGE_START" (:type %)) frames))))))
-    (finally (wipe-system-prompt-hooks!))))
+    (finally (support/wipe-hooks!))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read
   ;; Every other replay test builds its log with the emitter directly. This one goes

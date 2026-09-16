@@ -83,8 +83,8 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 
 ### system 消息：冻结的开头 + hook 追加的文本
 
-**一条 system 消息，开头冻结，其余现算。** `prompt.md` 只留**与任何会话无关的话**——身份、hook 自助、
-secrets 纪律、「其余自己读」——那是**承诺**。**本会话的事实**由 `SystemPrompt` 点上的 hook 在每次 run
+**一条 system 消息，开头冻结，其余现算。** `prompt.md` 只留**与任何会话无关的话**——身份、secrets
+纪律、「其余自己读」——那是**承诺**。**本会话的事实**由 `SystemPrompt` 点上的 hook 在每次 run
 组装时追加：
 
 ```

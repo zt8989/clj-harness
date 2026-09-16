@@ -47,7 +47,6 @@
   (:require [clojure.string :as str]
             [harness.hooks :as hooks]
             [harness.hooks.dispatch :as hook]
-            [harness.home :as home]
             [harness.llm :as llm]
             [harness.project :as project]
             [harness.providers :as providers]
@@ -175,20 +174,22 @@
   (project/bind!), so this is derived on every run -- which is the only way the
   block can never state a binding that has stopped being true.
 
-  THE FENCE IS DERIVED TOO, and that is not decoration: the free paths are read
-  from the same places harness.project/out-of-bounds? reads them from, including
-  the two that a hand-written sentence kept getting wrong. `:approval {:strict
-  true}` takes the PROJECT directory out of the free set, and a skill root is
-  free even though it sits outside both the project and the configuration home --
-  so a fixed sentence would be a rule that does not hold, which is the one thing
-  a block whose job is to state the rules must not do.
+  THE FENCE IS DERIVED, NOT DESCRIBED, and that is not decoration: the free paths
+  below ARE harness.project/fence -- the same list harness.project/out-of-bounds?
+  tests a tool call against, including the two cases a hand-written sentence kept
+  getting wrong. `:approval {:strict true}` takes the PROJECT directory out of the
+  free set, and a skill root is free even though it sits outside both the project
+  and the configuration home -- so a fixed sentence would be a rule that does not
+  hold, which is the one thing a block whose job is to state the rules must not do.
+  Reading the gate's own list rather than re-deriving it is what keeps the two from
+  drifting apart.
 
   UNBOUND SAYS SO PLAINLY and mentions no fence at all: a session with no binding
   has no fence, and describing one would be describing a rule that is not in
   force."
   [payload]
   (let [thread-id (get payload "thread_id")
-        dir       (project/binding-for thread-id)]
+        {:keys [dir strict? free]} (project/fence thread-id)]
     {:exit 0 :err ""
      :out (if (nil? dir)
             (str "<project>\n"
@@ -196,30 +197,17 @@
                  " resolve against the process's working directory, and bash runs there."
                  " Absolute paths are never redirected.\n"
                  "</project>")
-            (let [{:keys [approval]} (project/harness-config thread-id)
-                  {:keys [strict allow]} approval
-                  free (concat
-                        (when-not strict
-                          [[dir "this project"]])
-                        [[(home/root)
-                          (str "this harness's configuration home; reading your own"
-                               " configuration there is allowed")]]
-                        (for [r (project/skill-roots thread-id)]
-                          [r "where this session's skills live"])
-                        (for [p (or allow [])]
-                          [(project/resolve-path thread-id p)
-                           "declared free by the project's :approval {:allow ..}"]))]
-              (str "<project>\n"
-                   "bound to: " dir "\n"
-                   "Relative paths in the file tools resolve against it, and bash runs with it"
-                   " as its working directory. Absolute paths are never redirected.\n"
-                   "A read/write/edit path that resolves outside every free path below parks"
-                   " for human approval before it runs:\n"
-                   (str/join "\n" (map (fn [[p why]] (str "  - " p " -- " why)) free)) "\n"
-                   (when strict
-                     (str "This project sets :approval {:strict true}, so the project directory"
-                          " is NOT in that set: paths inside it park too.\n"))
-                   "</project>")))}))
+            (str "<project>\n"
+                 "bound to: " dir "\n"
+                 "Relative paths in the file tools resolve against it, and bash runs with it"
+                 " as its working directory. Absolute paths are never redirected.\n"
+                 "A read/write/edit path that resolves outside every free path below parks"
+                 " for human approval before it runs:\n"
+                 (str/join "\n" (map (fn [[p why]] (str "  - " p " -- " why)) free)) "\n"
+                 (when strict?
+                   (str "This project sets :approval {:strict true}, so the project directory"
+                        " is NOT in that set: paths inside it park too.\n"))
+                 "</project>"))}))
 
 (defn- provider-block
   "The <provider> block: which vendor, which model, which reasoning effort -- the

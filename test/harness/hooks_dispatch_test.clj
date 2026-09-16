@@ -9,10 +9,10 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [harness.home :as home]
             [harness.hooks :as hooks]
             [harness.hooks.dispatch :as dispatch]
-            [harness.project :as project]))
+            [harness.project :as project]
+            [harness.test-support :as support]))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-dispatch-test"))
 (def ^:private scripts (str root "/scripts"))
@@ -31,14 +31,13 @@
     (str f)))
 
 (defn- declared! [point decls]
-  (.mkdirs (io/file (home/root)))
-  (spit (str (home/root) "/hooks.edn") (pr-str {point decls}) :encoding "UTF-8"))
+  (support/write-hooks! {point decls}))
 
 (defn- wipe [f]
-  (io/delete-file (io/file (home/root) "hooks.edn") true)
+  (support/wipe-hooks!)
   (io/delete-file (io/file scripts "payload.txt") true)
   (f)
-  (io/delete-file (io/file (home/root) "hooks.edn") true))
+  (support/wipe-hooks!))
 
 (use-fixtures :each wipe)
 
@@ -240,7 +239,7 @@
                 (fire :pre-tool-use {:tool_name "write"} {:thread-id "hd-same-c"}))]
     ;; The file declares for every thread, so it is cleared before the second half
     ;; or the two halves would not be measuring the same thing.
-    (io/delete-file (io/file (home/root) "hooks.edn") true)
+    (support/wipe-hooks!)
     (hooks/session-add! "hd-same-r" :pre-tool-use
                         {:run (fn [_] {:exit 2 :out "" :err "same words"})})
     (let [inline (fire :pre-tool-use {:tool_name "write"} {:thread-id "hd-same-r"})]
@@ -249,26 +248,12 @@
 
 ;; ------------------------------------------- the one point whose stdout is content
 
-(def ^:private builtin-ids
-  "The kernel's own rows at the SystemPrompt point -- harness.system-prompt
-  registers them, process-wide, when it loads."
-  ["builtin:tools" "builtin:project" "builtin:provider"])
-
-(defn- without-builtins!
-  "Switch the kernel's own rows off for THREAD-ID, so a test about the
-  DECLARATIONS at this point sees only those. This is the ordinary per-thread
-  switch, not a test-only door -- and it is needed here only because the registry
-  is process-wide: a full suite loads harness.system-prompt, so the three rows are
-  in every thread's table by the time these tests run."
-  [thread-id]
-  (doseq [id builtin-ids] (hooks/session-disable! thread-id id)))
-
 (deftest a-content-point-collects-every-declarations-text-in-order
   ;; SystemPrompt is the one row of the point table whose stdout IS the result.
   ;; Its contract is the OPPOSITE of first-block-wins: every matched declaration
   ;; runs and every one appends, because one hook must not be able to eat
   ;; another's text.
-  (without-builtins! "hd-blocks")
+  (support/without-builtins! "hd-blocks")
   (let [out (fn [text] {:run (fn [_] {:exit 0 :out text :err ""})})]
     (hooks/session-add! "hd-blocks" :system-prompt (out "  first  "))
     (hooks/session-add! "hd-blocks" :system-prompt (out "second"))
@@ -288,7 +273,7 @@
         (is (= 3 (:matched (first @audits))))))))
 
 (deftest a-content-declaration-that-refuses-contributes-no-text
-  (without-builtins! "hd-blocks-refused")
+  (support/without-builtins! "hd-blocks-refused")
   (hooks/session-add! "hd-blocks-refused" :system-prompt
                       {:run (fn [_] {:exit 2
                                      :out "this must not be appended to anything"

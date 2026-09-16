@@ -567,13 +567,27 @@
   (preamble/instruction-files (:instructions (harness-config thread-id))
                               (binding-for thread-id)))
 
-(defn out-of-bounds?
-  "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every
-  directory a bound session may touch. The allowed set:
+(defn fence
+  "The fence in force for THREAD-ID, as data: {:dir .., :strict? bool,
+  :free [[path why] ..]} -- or nil when the session is unbound and there is no fence
+  at all. One read answers 'is there a fence', 'which directory is it around' and
+  'what is it made of', so a caller cannot see a bound session and its fence as two
+  different facts.
+
+  ONE LIST, TWO READERS, and that is the point of it being here rather than
+  written twice. `out-of-bounds?` tests against it, and the <project> block the
+  model reads states it -- and a block that stated a rule the gate does not
+  enforce would be a system message that lies, which is the one thing a block
+  whose job is to state the rules must not do. 'why' is the sentence the block
+  prints beside a free path, so a path joining this set cannot arrive without
+  someone saying why it is free.
+
+  :free, in the order the block states it:
 
     - the project directory itself -- UNLESS the project's harness.edn set
       :approval {:strict true}, which tightens the fence until every project
-      path needs an approval too;
+      path needs an approval too (hence :strict?, which says so out loud
+      rather than leaving the block to infer it from a missing row);
     - the configuration home (config.edn, providers.edn, .env -- reading
       one's own configuration is the fence's explicit allowance, and strict
       does not tighten it away: the config home is harness's own ground, not
@@ -581,32 +595,51 @@
     - :approval {:allow [..]} -- extra paths the project declares free of
       the fence, each resolved for the session like any tool path (relative
       to the project root, absolute passes through);
-    - the session's SKILL ROOTS (skill-roots, below), for the same reason the
+    - the session's SKILL ROOTS (skill-roots, above), for the same reason the
       configuration home is here and with the same status: they are not project
       files, they are what the host and the human installed for their agents. A
       skill's body routinely says 'read references/x.md', and a path like that
       resolves NEXT TO THE SKILL -- so without this every reference file would
       park a human, which would make loading a skill useless.
 
-      Note what is NOT here and must not be: the CONTENT of an instruction file.
-      An AGENTS.md that says 'read ~/notes/x.md' does not make ~/notes/x.md
-      allowed. The roots are places the harness was configured to look, not
-      capabilities a document can grant itself.
+  Note what is NOT here and must not be: the CONTENT of an instruction file. An
+  AGENTS.md that says 'read ~/notes/x.md' does not make ~/notes/x.md allowed. The
+  roots are places the harness was configured to look, not capabilities a document
+  can grant itself.
 
-  The config is read fresh per call, so harness.edn edits take effect on the
-  next tool call. The fence engages ONLY when a binding exists: an unbound
-  session answers false for every path, byte-for-byte the pre-binding
-  behavior. This fn is the WHERE question as a boolean -- whether to PARK an
-  out-of-bounds call is the tool seam's decision, made through the ordinary
-  approval flow."
+  The config is read fresh per call, so harness.edn edits move the fence on the
+  next call."
+  [thread-id]
+  (when-let [dir (binding-for thread-id)]
+    (let [{:keys [approval]}   (harness-config thread-id)
+          {:keys [allow strict]} approval]
+      {:dir     dir
+       :strict? (boolean strict)
+       :free    (concat
+                 (when-not strict
+                   [[dir "this project"]])
+                 [[(home/root)
+                   (str "this harness's configuration home; reading your own"
+                        " configuration there is allowed")]]
+                 (for [r (skill-roots thread-id)]
+                   [r "where this session's skills live"])
+                 (for [p (or allow [])]
+                   [(resolve-path thread-id p)
+                    "declared free by the project's :approval {:allow ..}"]))})))
+
+(defn out-of-bounds?
+  "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every
+  directory a bound session may touch. Which directories those are -- and why
+  each one is free -- is `fence`, and this fn is only the containment question
+  asked of that list. Keeping the two apart is what stops the rule and its
+  statement from being two rules.
+
+  A session with no binding has no fence, so this answers false for every path,
+  byte-for-byte the pre-binding behavior. This fn is the WHERE question as a
+  boolean -- whether to PARK an out-of-bounds call is the tool seam's decision,
+  made through the ordinary approval flow."
   [thread-id path]
   (boolean
-   (when-let [dir (binding-for thread-id)]
-     (let [{:keys [approval]}   (harness-config thread-id)
-           {:keys [allow strict]} approval
-           resolved (resolve-path thread-id path)
-           allowed  (concat (when-not strict [dir])
-                            [(home/root)]
-                            (skill-roots thread-id)
-                            (map #(resolve-path thread-id %) (or allow [])))]
-       (not (some #(under? resolved %) allowed))))))
+   (when-let [{:keys [free]} (fence thread-id)]
+     (let [resolved (resolve-path thread-id path)]
+       (not (some (fn [[free-path _]] (under? resolved free-path)) free))))))
