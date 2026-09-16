@@ -40,3 +40,41 @@ clojure -M:test -e '(load-file ".scratch/composer-status/evidence/record-lines.c
 - **缓存命中的键名拼法**（`prompt_tokens_details.cached_tokens` 是不是这台机器上那家厂商的拼法）
   留给票 02 的「以真机为准」那一节：那一票才把它折成条子上的一个数，也只有它需要为这个拼法负责。
 - **`model/start` 里还没有 `:tools`**——照计划，那是 `.scratch/trajectory/` 的 04 往同一条行上加的键。
+
+---
+
+# 票 02 的证据：端点的答案
+
+同一个目录里多两个文件：
+
+- `stats-endpoint.clj` —— **可重跑**：起真的 HTTP 边、把脚本厂商按上、跑一轮真会话（一次工具轮 = 两次模型调用），
+  然后**真的 curl 一次**（`clojure.java.shell` 里的 `curl -s`）并把 curl 自己吐的字节打出来。
+- `stats-endpoint.txt` —— 它的输出。
+
+```
+clojure -M:test -e '(load-file ".scratch/composer-status/evidence/stats-endpoint.clj")'
+```
+
+## 它证明了什么
+
+1. **端点答的就是那五个数**，而且是 `curl` 从外面问到的（不是 JVM 内部调函数）：
+   `{"turns":1,"steps":2,"stepsWithUsage":2,"usage":{"totalTokens":2248,"promptTokens":2200,
+   "completionTokens":48,"cachedTokens":2000},"cacheHitPercent":91,"outputTokensPerSecond":2667,...}`
+2. **每个数都与脚本报的数对得上**，输出里逐个写明了它是由什么加出来的：
+   1040+1208、1000+1200、40+8、900+1100、2000/2200=90.9%→91。
+   速率 2667 也对得上日志里那两对时间戳（48 tok ÷ 18ms）。
+3. **`steps` = 模型调用**：一轮工具调用就是两次调用（一次带工具、一次收尾），记两行、算两步。
+4. **不在这里的会话是 404，而且带句子**：`never-ran` 那次回来的是定位器自己那句
+   「no log for thread … under …/projects -- nothing there is named never-ran.jsonl」，
+   不是一句空白的 404。
+
+## 它没有证明什么（如实写在这里）
+
+- **还是没跑活厂商**（同票 01 那条：动真实 `~/.clj-harness` 与 key 本会话不做）。
+  厂商真回来的数字由 `llm_test` 对 `test/harness/fixtures/deepseek_sse.txt` 断言。
+- **`prompt_tokens_details.cached_tokens` 这个拼法没有在真机上核过**——它是仓库里那份录下来的响应用的拼法，
+  而票 02 的「以真机为准」那一节要的是拿一台真厂商再核一次。**这一条留给你**：
+  折它的是 `harness.edge.stats/number-at` 那一个函数，核出来是另一种拼法就在那一处加第二种（并写明是哪家厂商）。
+- **`cacheHitPercent` 比票面的形状多一个键**：票面的产出形状里没有它，而条子第五格要画它——
+  客户端不许自己除，所以它在这里算完再出去。`calls` / `callsWithUsage` 两个键**没有**落地：
+  `calls` 就是 `steps`（同一件事实的第二份），覆盖数改叫 `stepsWithUsage`，一个名字一件事。

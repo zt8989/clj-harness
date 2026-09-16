@@ -122,13 +122,13 @@
 | # | 票 | Blocked by | 交付什么 |
 |---|---|---|---|
 | ~~01~~ | ~~词与记录：一次模型调用的边界与用量~~ | — | ~~`CONTEXT.md` 立词；`model/start` / `model/end` 两条审计行；`consume-sse` 留住用量；假 provider 也能报；真机日志证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
-| 02 | 会话统计的折法与端点 | 01 | `harness.edge.stats` 的纯折（手搓记录可断言）+ `GET /api/threads/<stem>/stats`；curl 证据 |
+| ~~02~~ | ~~会话统计的折法与端点~~ | 01 | ~~`harness.edge.stats` 的纯折（手搓记录可断言）+ `GET /api/threads/<stem>/stats`；curl 证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 | 03 | composer 之下的状态条 | 02 | 五格、英文、调用结束刷新；格式化是纯函数并进 UI 套件；真机截图证据 |
 | 04 | 收口：文档与全量验证 | 03 | `CONTEXT.md` 补齐、`docs/architecture` 跟上（`edge.md` 的行表、`architecture.md` 的模块地图与「在办」、`client.md`）；两套全量 + 真机证据 |
 
 ## 状态
 
-**已在办：票 01 落地（2026-09-16），票 02 及以后未开工。** 分支 `composer-status`。
+**已在办：票 01、02 落地（2026-09-16），票 03、04 未开工。** 分支 `composer-status`。
 
 **基线（立票当日实测，2026-09-16）：`main` @ `492ed0d`。**
 
@@ -195,3 +195,49 @@
 **没有新的失败名字**（另一次跑还出现过 `http_test/the-projects-listing-joins-the-store-with-the-disk`
 那两条真竞赛——见「状态」那节的说明：条数每次都不同，看名字）。
 本票没动 `ui/`：`cd ui && npm test` 与 `npm run build` 照旧（`EXPECTED_CASES` 仍是 15）。
+
+### 02 — 会话统计的折法与端点（2026-09-16，分支 `composer-status`，票面已删）
+
+**落地了什么**
+
+- **新 ns `harness.edge.stats`**，与 `edge.replay` / `kernel.frames` 并排（记录的两个读侧）。
+  两个入口：`records->stats`（**对记录序列的纯函数**，手搓记录可断言）与 `log-stats`（接一个 File，
+  与 `replay/rebuild` 同一个立场：**目录是调用者的**，这个 ns 永远不知道 home 在哪）。
+- **端点 `GET /api/threads/<stem>/stats`**：`thread-verbs` 那个闭集加 `"stats"`，
+  dispatch 里长出这条形状上的**第一个 GET 分支**，那句「每一个动词都是 POST，因为每一个都有副作用」
+  跟着改成「方法说有没有副作用」；定位走 `replay/locate`（**不新造寻址方式**），
+  找不到是 404（定位器自己那句），读不回来是 400——与 rebuild 同一条缝。
+- **产出形状**（比票面示例多一个键、少两个键，理由见下）：
+
+      {"threadId": "…", "turns": 3, "steps": 42, "stepsWithUsage": 41,
+       "usage": {"totalTokens": …, "promptTokens": …, "completionTokens": …, "cachedTokens": …},
+       "cacheHitPercent": 91, "outputTokensPerSecond": 242, "incomplete": false}
+
+  - **多 `cacheHitPercent`**：票面的示例里没有它，而条子第五格要画「98% cached」——
+    客户端不许自己除，所以比例的分子分母在这一处取齐、在这一处算完。
+  - **少 `calls` / `callsWithUsage`**：`calls` 就是 `steps`（同一件事实的第二份），
+    覆盖数只留一个名字 `stepsWithUsage`。
+- **纪律逐条落在函数上**：轮按**新的用户消息 id** 数（一条用户消息一轮，与 `CONTEXT.md` 的 `轮` 一致；
+  悬置恢复的第二个 `input` 不开新轮）；步 = 模型调用（`model/start` 的行数，**按次序**与 `model/end` 配对，
+  没有任何 id）；每个用量键**各自求和**、没人报就**整个键不出现**（不是 0）；
+  `total_tokens` 缺了才按 prompt + completion 补，且**要求两半都在**（半个和不是总数）；
+  缓存命中与速率**只在同时报了两半的调用上**取分子分母；速率的分母是那几次调用的 `:ts` 差，
+  **不拿别的行的间隔冒充**；`incomplete` = 最后一帧不是终帧。
+- **容忍半截的最后一行**：`read-records` 用 `replay/lines->records` 严格解析**除最后一行之外**的行，
+  最后一行解析不出来就丢掉——条子最常被问的时刻正是会话在跑的时候，而这不是重建
+  （重建宁可整个拒绝，因为少一截的对话比没有更坏）。中间那一行坏了仍然照严格的那条报错。
+
+**测试**：`test/harness/edge/stats_test.clj`（8 个用例 / 49 条断言，已注册进 `harness.test-runner`）：
+手搓记录断言折法（一轮一调用、新用户消息开新轮、悬置恢复不开新轮、一个 input 带两条新用户消息算两轮、
+没报的调用不进任何分母、没有 `model/*` 的老日志只剩轮数、空日志、半截的 run），
+外加三条走真 HTTP 的端点用例（一轮真会话折出来的数、不在这里的会话 404、`GET .../rebuild` 仍是 405）。
+
+**证据**：`.scratch/composer-status/evidence/` 的 `stats-endpoint.clj` / `.txt` —— 起真边、真跑一轮、
+**真的 curl 一次**，把 curl 的字节与「每个数是由什么加出来的」并排打出来
+（2248 / 2200 / 48 / 2000 / 91% / 2667 tok·s⁻¹，与日志里那两对时间戳对得上）。同一目录的 README 写明了
+**没跑活厂商**、以及**缓存字段的拼法还没在真机上核过**（那一处是 `harness.edge.stats/number-at`，
+核出第二种拼法就在**同一个函数**里加，并写明是哪家厂商）——这两条是留给你的。
+
+**报数**：`clojure -M:test -m harness.test-runner`
+→ `Ran 734 tests containing 10666 assertions. 2 failures, 0 errors.`（票 01 落地时是 726 / 10614）。
+两条失败仍是 `project_test/a-binding-survives-a-real-restart` 的 JDK 25 那对，**没有新的失败名字**。
