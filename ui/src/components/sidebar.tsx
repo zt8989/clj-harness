@@ -89,6 +89,16 @@
 // it did nothing. A FAILURE still needs a line, and it goes under the button that
 // raised it, in the server's own words, exactly as the New task refusals do.
 //
+// A MACHINE WITH NO DIALOG IS THE ONE FAILURE THAT EARNS A FIELD. Everything
+// else -- an add the server refused, a picker that blew up -- gets the server's
+// sentence under the button and nothing more, which is where every other
+// refusal in this file lands. "There is no folder dialog on this machine" (a 501
+// from /api/project/pick) is a DEAD END rather than a refusal: the line alone
+// names no next move, so it arrives with somewhere to type the absolute path,
+// and that field is drawn for no other reason. Collapsing the two is exactly how
+// this shipped broken -- no dialog answered as a cancellation, a cancellation is
+// silent, and the button read as idle rather than impossible.
+//
 // ------------------------------------------------------------- archiving's shape
 //
 // ARCHIVING IS A FLAG, NOT A DELETION, and the whole of the UI's part is to draw
@@ -168,6 +178,7 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   ChevronRightIcon,
+  CheckIcon,
   FolderIcon,
   FolderMinusIcon,
   FolderPlusIcon,
@@ -175,6 +186,7 @@ import {
   RefreshCwIcon,
   SettingsIcon,
   SquarePenIcon,
+  XIcon,
 } from "lucide-react";
 
 import {
@@ -182,6 +194,7 @@ import {
   ThreadListItemAction,
 } from "@/components/assistant-ui/elements/thread-list.aui";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { SettingsPanel } from "@/components/settings-panel";
 import {
   Dialog,
@@ -202,6 +215,7 @@ import {
   bindThread,
   listProjects,
   pickFolder,
+  PickerUnavailableError,
   projectName,
   removeProject,
   setArchived,
@@ -248,6 +262,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   // add the server refused. Separate from `newTaskError` because they belong to
   // two different buttons, and one firing must not answer for the other.
   const [addError, setAddError] = useState<string | null>(null);
+  // The typed path, and whether it is being asked for. It appears for ONE
+  // reason -- this machine has no folder dialog -- and never otherwise: it is
+  // the way out of a dead end, not a second way to add a project.
+  const [typingPath, setTypingPath] = useState(false);
+  const [typedPath, setTypedPath] = useState("");
   const [busy, setBusy] = useState(false);
   // The project a new task will land in. Derived rather than owned: see the
   // effect below. Only an explicit click pins it.
@@ -423,14 +442,42 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     }
   };
 
+  /// The landing half that both ways in share: send the directory, pin what comes
+  /// back, refresh. Sharing it is what keeps the typed path from becoming a
+  /// SECOND way to add a project -- same endpoint, same canonical path, same row,
+  /// and no second set of decisions to drift out of step with the first.
+  ///
+  /// Throws what the server threw, which for a bad directory is that server's own
+  /// named refusal ("no such directory", "not a directory") -- it says it better
+  /// than an empty field's complaint would.
+  const addDirectoryAt = async (dir: string): Promise<void> => {
+    const added = await addProject(dir);
+    // The refusal under the New task button named a state that adding a
+    // project has just ended; leaving it up would have the sidebar
+    // contradicting itself one line above the new project's row.
+    setNewTaskError(null);
+    // The server answers the CANONICAL path, and that is what gets pinned --
+    // so adding `~/proj` and then re-adding `~/proj/.` end on the same row
+    // rather than two selections that look different and are not.
+    setPinned(added.path);
+    // Getting here means the project landed, whichever way it was asked for --
+    // so the dead end is over: the sentence that announced it and the field
+    // that answered it both go, together.
+    setAddError(null);
+    setTypingPath(false);
+    setTypedPath("");
+    await refresh();
+  };
+
   /// Add a project: open the folder picker, and add whatever it answers. The
   /// whole of the interaction is this one function -- see the header for why the
   /// form that used to sit here is gone.
   ///
   /// CANCELLED IS NOT AN ERROR AND NOT A NOTICE: `pickFolder` answers null, and
-  /// the right response to somebody dismissing a window is to do nothing. Only a
-  /// rejection -- the picker could not open, or the add was refused -- earns a
-  /// line, and it lands under the button that raised it.
+  /// the right response to somebody dismissing a window is to do nothing. A
+  /// rejection earns a line under the button that raised it -- and ONE KIND of
+  /// rejection earns more than a line, because a machine with no dialog has put
+  /// the click in a dead end and saying only "no" leaves it there.
   ///
   /// `busy` covers the whole thing, including the time the native dialog is up.
   /// That is the honest state: while a modal window is waiting on a human, every
@@ -442,16 +489,32 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     try {
       const picked = await pickFolder();
       if (picked === null) return;
-      const added = await addProject(picked);
-      // The refusal under the New task button named a state that adding a
-      // project has just ended; leaving it up would have the sidebar
-      // contradicting itself one line above the new project's row.
-      setNewTaskError(null);
-      // The server answers the CANONICAL path, and that is what gets pinned --
-      // so adding `~/proj` and then re-adding `~/proj/.` end on the same row
-      // rather than two selections that look different and are not.
-      setPinned(added.path);
-      await refresh();
+      await addDirectoryAt(picked);
+    } catch (failure: unknown) {
+      setAddError(failure instanceof Error ? failure.message : String(failure));
+      // No dialog to ask, so ASK HERE: the field appears because this machine
+      // cannot open one, and at no other time -- it is a way out, not a second
+      // front door (see the header on why there is no form by default).
+      if (failure instanceof PickerUnavailableError) setTypingPath(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /// The typed path's own submit. Refuses the empty field here rather than
+  /// sending it, because "nothing was entered" is not the server's business and
+  /// its refusal would be worded for worse things.
+  const addTypedPath = async (): Promise<void> => {
+    const dir = typedPath.trim();
+    if (busy) return;
+    if (dir === "") {
+      setAddError("Type the directory's absolute path — nothing was entered.");
+      return;
+    }
+    setBusy(true);
+    setAddError(null);
+    try {
+      await addDirectoryAt(dir);
     } catch (failure: unknown) {
       setAddError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -609,6 +672,61 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         >
           {addError}
         </p>
+      )}
+
+      {/* The way out of a machine with no folder dialog. Drawn ONLY then -- see
+          `addProjectNow` for the one condition that shows it -- so that the
+          field is recognisably an answer to something rather than a form this
+          product decided not to have. */}
+      {typingPath && (
+        <form
+          data-slot="sidebar-add-project-path"
+          className="flex shrink-0 items-center gap-1 px-2.5 pb-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void addTypedPath();
+          }}
+        >
+          <Input
+            autoFocus
+            disabled={busy}
+            value={typedPath}
+            onChange={(event) => setTypedPath(event.target.value)}
+            placeholder="Absolute path — D:\work\lisp-harness"
+            aria-label="Project directory path"
+            data-slot="sidebar-add-project-path-input"
+            className="h-7 text-xs"
+          />
+          <Button
+            type="submit"
+            variant="ghost"
+            size="icon"
+            disabled={busy}
+            title="Add this directory"
+            data-slot="sidebar-add-project-path-submit"
+            className="text-muted-foreground hover:text-foreground size-7 p-0"
+          >
+            <CheckIcon className="size-4" />
+            <span className="sr-only">Add this directory</span>
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            disabled={busy}
+            title="Cancel"
+            data-slot="sidebar-add-project-path-cancel"
+            className="text-muted-foreground hover:text-foreground size-7 p-0"
+            onClick={() => {
+              setTypingPath(false);
+              setTypedPath("");
+              setAddError(null);
+            }}
+          >
+            <XIcon className="size-4" />
+            <span className="sr-only">Cancel</span>
+          </Button>
+        </form>
       )}
 
       <div

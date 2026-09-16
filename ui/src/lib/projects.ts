@@ -88,16 +88,32 @@ export async function addProject(dir: string): Promise<AddedProject> {
   return res.json();
 }
 
+/// What pops up when this machine has NO folder dialog to open. It carries the
+/// server's sentence, which is what gets shown and what the typed path answers.
+export class PickerUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PickerUnavailableError";
+  }
+}
+
 /// The native folder dialog, opened by the server. Answers the chosen absolute
 /// path, or null when the human cancelled -- and CANCELLING IS NOT AN ERROR, so
 /// it is a null rather than a rejection: nothing failed, someone changed their
 /// mind.
+///
+/// A machine that cannot open the dialog at all throws `PickerUnavailableError`,
+/// which is the THIRD answer and not a flavour of either of the others. It has
+/// to be its own thing because the two ask for different next moves: silence
+/// after a cancellation, and somewhere to type a path after this. Collapsing
+/// them is what made a dead folder button look like a slow one.
 ///
 /// The chosen path is only ever FILLED IN. Nothing is bound or created here: the
 /// person still submits the form, which is what keeps "picking a folder" from
 /// being an accidental one-step commit.
 export async function pickFolder(): Promise<string | null> {
   const res = await fetch(`${AGENT_URL}api/project/pick`, { method: "POST" });
+  if (res.status === 501) throw new PickerUnavailableError(await reasonFrom(res));
   if (!res.ok) throw new Error(await reasonFrom(res));
   const body = (await res.json()) as { dir?: string | null };
   return body.dir ?? null;
