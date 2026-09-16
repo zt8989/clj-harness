@@ -103,7 +103,6 @@ import {
   BracesIcon,
   BrainIcon,
   CheckIcon,
-  ChevronDownIcon,
   FilePenLineIcon,
   FileTextIcon,
   LoaderIcon,
@@ -119,7 +118,9 @@ import {
 } from "lucide-react";
 import { useAgUiInterrupts } from "@assistant-ui/react-ag-ui";
 import {
+  useAuiState,
   useToolCallElapsed,
+  type PartState,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
@@ -669,8 +670,8 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 // ---------------------------------------------------------------- reasoning
 //
 // Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
-// is drawn as: an icon, a bold name, a chevron, `py-1.5 text-sm`, revealed by a
-// click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
+// is drawn as: an icon, a bold name, the subject this step is about, `py-1.5
+// text-sm`, revealed by a click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
 // `outline`, i.e. `rounded-lg border px-3 py-2` -- and this repo does not want a
 // second visual species in one transcript: the things a turn did (thought, read,
 // thought, ran) are a list of steps, and a step that is boxed while the step
@@ -692,33 +693,85 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 // `active` (the shimmer) is the live-run signal, exactly as it is on a tool
 // card: the row says "still going" while the work is going, and stops when it
 // stops.
-const ReasoningTrigger: FC<{ active: boolean }> = ({ active }) => (
+//
+// The row carries the FIRST LINE of the thought, for the same reason a tool row
+// carries its subject: a step whose content is invisible until clicked makes the
+// reader click to find out whether they needed to. The label is `思考` -- the
+// reference this repo was asked to match uses that word, and it is the one place
+// in the transcript where a Chinese label sits next to English ones. The tool
+// names stay literal (`read`, `bash`): they are the model's vocabulary, and
+// translating them would break the correspondence with the arguments panel.
+
+/// How much of a thought the row shows before the CSS ellipsis takes over.
+///
+/// The clip is not only cosmetic. The preview is a STRING (see `previewOf`), and
+/// `useAuiState` compares what a selector returns BY VALUE -- so once the first
+/// line has reached this many characters, the row stops re-rendering on every
+/// token of a thought that is still arriving. Handing the row the whole text and
+/// letting CSS do all the cutting would keep that subscription alive for the
+/// length of the stream.
+const PREVIEW_LIMIT = 120;
+
+function clip(text: string): string {
+  return text.length > PREVIEW_LIMIT
+    ? `${text.slice(0, PREVIEW_LIMIT).trimEnd()}…`
+    : text;
+}
+
+/// The first line of a reasoning group's thinking, or "".
+///
+/// The group knows which parts it covers (`indices`) and the row knows nothing
+/// else, so the parts are read from the message state here. A group can hold
+/// several parts; the first one WITH a non-blank line wins, because joining them
+/// would put a seam in the middle of a sentence.
+///
+/// This returns a string rather than the parts for the reason `PREVIEW_LIMIT`
+/// gives: the caller is `useAuiState`, and a string it can compare by value is
+/// what keeps the row from re-rendering per token.
+function previewOf(
+  parts: readonly PartState[],
+  indices: readonly number[],
+): string {
+  for (const index of indices) {
+    const part = parts[index];
+    if (part?.type !== "reasoning") continue;
+    const line = firstLine(part.text);
+    if (line !== "") return clip(line);
+  }
+  return "";
+}
+
+const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
+  active,
+  preview,
+}) => (
   <CollapsibleTrigger
     data-slot="reasoning-trigger"
-    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit max-w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
   >
     <BrainIcon
       data-slot="reasoning-trigger-icon"
       className="aui-reasoning-trigger-icon size-4 shrink-0"
+      aria-hidden="true"
     />
     <span
       data-slot="reasoning-trigger-label"
       className={cn(
-        "aui-reasoning-trigger-label inline-block min-w-0 text-start leading-none",
+        "aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none",
         active && "shimmer motion-reduce:animate-none",
       )}
     >
-      <b className="aui-reasoning-trigger-name">Reasoning</b>
-    </span>
-    <ChevronDownIcon
-      data-slot="reasoning-trigger-chevron"
-      className={cn(
-        "aui-reasoning-trigger-chevron size-4 shrink-0",
-        "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-        "-rotate-90",
-        "group-data-open/trigger:rotate-0",
+      <b className="aui-reasoning-trigger-name">思考</b>
+      {preview !== "" && (
+        <span
+          data-slot="reasoning-trigger-subject"
+          className="aui-reasoning-trigger-subject"
+        >
+          {" · "}
+          {preview}
+        </span>
       )}
-    />
+    </span>
   </CollapsibleTrigger>
 );
 
@@ -733,10 +786,11 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   children,
 }) => {
   const running = group.status.type === "running";
+  const preview = useAuiState((s) => previewOf(s.message.parts, group.indices));
 
   return (
     <ReasoningRoot variant="ghost" className="mb-0">
-      <ReasoningTrigger active={running} />
+      <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
         <ReasoningText className="max-h-none pt-1">{children}</ReasoningText>
       </ReasoningContent>
