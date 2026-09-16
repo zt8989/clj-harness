@@ -47,6 +47,7 @@
 | `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
 | `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
 | `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令（或跑一个进程内的函数）、读退出码、超时、落审计行 |
+| `mcp` / `parked` | **外部服务器作为工具来源**，以及悬置调用的登记表 |
 | `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
 | `log` / `logging` | **后端自己的错误日志**（与 session jsonl 是两回事）：`log` 是一次调用同时写 stderr 与文件的门面，`logging` 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 
@@ -64,7 +65,8 @@
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的三条行、eval 与晋升
 8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
-9. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
+9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接生命周期、桥接、elicitation、账本与界面
+10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 
@@ -86,8 +88,10 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 写下这一节是为了让「文档没写」与「还没做」不会被读成同一件事。
 
-- **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
-  `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
+- **MCP 在分支 `mcp` 上**，不在 `main`（6 张票，5 张已落地）：本目录的
+  [mcp](architecture/mcp.md) 一页写的是那个分支上的现状。落地后 `main` 会多出 `harness.mcp` /
+  `harness.parked` 两个命名空间、`mcp.edn` 这份配置、工具表的第三个来源、三条管理路由，
+  以及两个接线了的 hook 点。
 - **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，同日复议改版）。
   一次 `eval` 调用就是一次融合：在里面调用工具表里的任何工具、按返回值决定下一步、循环做批量操作，
   中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。

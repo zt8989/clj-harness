@@ -31,6 +31,7 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 ├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读，可以不存在）
 ├── harness.edn       用户级 harness 配置（可选；编辑模式、围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
+├── mcp.edn           MCP 服务器声明（可选；不存在 = 一个服务器都没声明）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
 ├── harness.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
@@ -46,7 +47,7 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的时候现问文件。判别
 标准是「能不能被改写」，不是「改得勤不勤」：
 
-- `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **仍是文件、仍是现读**，改完不用重启
+- `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` / `mcp.edn` **仍是文件、仍是现读**，改完不用重启
   （「设置」那一版生效配置每次打开都重读，就是这条纪律看得见的地方）。
 - **旧的 `~/.clj-harness/logs/` 不导入、也不迁移**：那个平铺目录下的会话在本产品里一律不可见（文件名
   不含项目身份，自动归属只能猜）。字节一个都不动，要接着用就手动挪进 `projects/<workspace>/`。
@@ -77,7 +78,7 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
 **缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
-`providers.edn` / `hooks.edn` / `harness.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
+`providers.edn` / `hooks.edn` / `harness.edn` / `mcp.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
 `.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
 键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。
 
@@ -184,6 +185,25 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 **形状与校验的细节**（哪些键必需、哪些值会指名报错、两个数字为什么是「报告用」不是「执行用」、
 旧扁平形状为什么不读不迁移）见 [`docs/architecture/providers.md`](docs/architecture/providers.md)。
 
+### MCP 服务器（可选）
+
+`mcp.edn` 声明外部的 MCP 服务器，它们的工具会以 `mcp__<server>__<tool>` 出现在这个会话的工具表里——
+与内建工具**走同一个执行缝**，所以审批、`PreToolUse` 阻断、会话级关闭、三行审计全都一样：
+
+```edn
+{:servers {"workshop" {:command "node" :args ["/abs/path/server.js"]}
+           "depot"    {:url "https://example.com/mcp"}}}
+```
+
+`{:command ..}`（本机子进程）与 `{:url ..}`（远端 HTTP）二选一。**项目级整表替换用户级的。**
+`:env` 的值**永不入日志、永不进端点响应**（与 api-key 同一条纪律）。连不上、崩掉、挂死的服务器
+**不拖死任何人**：它的工具缺席、原因被指名，其余服务器照常；下一次用它自己重连。
+
+设置页里有它的账本：状态、失败原因、工具清单、以及本会话的开关（**关闭不是隐藏**——工具仍在表里，
+调用被拒；过程被收掉，`mcp.edn` 一个字不改）。
+
+细节见 [`docs/architecture/mcp.md`](docs/architecture/mcp.md)。
+
 ### hook 与项目级配置（可选）
 
 一个 hook 是某个 hook 点上的一行声明，**说它跑什么、且只说一样**：`:command`（非空字符串，经 shell
@@ -263,12 +283,15 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 607 tests / 9774 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# main 上 607 tests / 9774 assertions，exit 0（基线随分支变，报数时带上分支与提交）
+# 本分支（mcp）上 658 / 10030。2 条红是既有的环境问题、与改动无关：
+#   project_test/a-binding-survives-a-real-restart ×2 —— JDK 25 的原生访问警告
+#   被打进 fork 出来的子 JVM 的 stdout，而断言比的就是那行 stdout。干净检出上一样红
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
-# 11 tests，含 4 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
+# main 上 11 tests / 4 组；本分支上 16（多的是 elicitation 那一组 5 条）
 ```
 
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；
