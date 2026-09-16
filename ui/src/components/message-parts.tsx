@@ -30,9 +30,29 @@
 // `streaming`, so the resting state is closed and the reader is never ambushed
 // by a panel that opened itself.
 //
-// The "still working" signal therefore moves onto the collapsed row: a spinning
-// icon plus a status word for a tool call, a shimmering label for reasoning.
+// The "still working" signal therefore moves onto the collapsed row itself: a
+// spinning mark at its end for a tool call, a shimmering label for reasoning.
 // Both are visible without opening anything, and both stop when the work stops.
+//
+// ------------------------------------------------------- what a row says it is
+//
+// A row is three things, left to right: an icon saying which KIND of call this
+// is, the tool's name, and a one-line SUBJECT -- what this particular call is
+// about. The subject is a PROJECTION of the call's arguments rather than a
+// truncation of them: a clipped `{"path": "/Users/..."}` still reads as JSON,
+// while `read · /Users/.../CONTEXT.md` reads as a sentence. The projection is a
+// closed table (`subjectOf` below), one line per tool, and a tool nobody has
+// taught this page about falls through to its first string argument -- which is
+// what keeps "a new tool shows up with no front-end change" true.
+//
+// The state keeps a place of its own at the END of the row, because the middle
+// now belongs to the subject: a mark (spinner, tick, cross, exclamation) plus the
+// elapsed time it always had. The state WORD is gone from the row -- a status
+// word in the `·` slot was what the subject needed -- but the state is not
+// quieter for it: the mark still spins while running, turns destructive on a
+// failure, the label is struck through when a call is cancelled, and a parked
+// call still gets its "Needs approval" phrasing as accessible text on the mark
+// (and its decision card, full width, below the row).
 //
 // -------------------------------------------------- one row, two kinds of step
 //
@@ -79,10 +99,22 @@
 import { type ElementType, type FC, type PropsWithChildren } from "react";
 import {
   AlertCircleIcon,
+  BetweenHorizontalStartIcon,
+  BracesIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
+  FilePenLineIcon,
+  FileTextIcon,
   LoaderIcon,
+  PencilIcon,
+  ReplaceIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+  SparklesIcon,
+  SquareTerminalIcon,
+  Undo2Icon,
+  WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useAgUiInterrupts } from "@assistant-ui/react-ag-ui";
@@ -181,44 +213,202 @@ function formatDuration(ms: number): string {
   return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 }
 
-/// The header row: what was called, what it is doing, and how long it has been
-/// doing it. `useToolCallElapsed` reads the part's timing and returns undefined
-/// when the runtime recorded none, in which case the duration simply is not
-/// drawn -- an absent number, not a zero.
-const ToolCallTrigger: FC<{ toolName: string; state: CallState }> = ({
-  toolName,
-  state,
-}) => {
+// ------------------------------------------------ which kind of call this is
+
+/// The icon at the head of a row, by tool name.
+///
+/// It answers "what KIND of call is this" -- a file read, a shell command, a
+/// search -- and nothing else. It used to answer "how is it doing" instead (the
+/// state icon), which left the row's kind unsaid and put the state in the one
+/// place a reader scans first. The five states have their own place at the end of
+/// the row now (see `ToolCallTrigger`), and the two questions no longer share a
+/// slot.
+///
+/// Keys are tool NAMES, exactly as `harness.tools` registers them: `CONTEXT.md`
+/// says the names are not to be aliased, and this table is one more reason not
+/// to -- a renamed tool loses its icon silently.
+const TOOL_ICONS: Record<string, ElementType> = {
+  read: FileTextIcon,
+  write: FilePenLineIcon,
+  edit: PencilIcon,
+  replace: ReplaceIcon,
+  insert: BetweenHorizontalStartIcon,
+  undo_last_replace: Undo2Icon,
+  anchor_grep: SearchIcon,
+  bash: SquareTerminalIcon,
+  eval: BracesIcon,
+  skill: SparklesIcon,
+  "session-configure": SlidersHorizontalIcon,
+};
+
+/// What a tool this page has never heard of gets: MCP tools registered at
+/// runtime, and every tool added after today.
+///
+/// It is deliberately not one of the icons above. A fallback that looked like
+/// `read` would claim to know what a call does, and the whole point of the
+/// fallback is that the page does not know. `WrenchIcon` says "a tool" and stops.
+const FALLBACK_TOOL_ICON = WrenchIcon;
+
+// ------------------------------------------------- what this call is about
+
+type Args = Record<string, unknown>;
+
+/// The arguments, or null while they are still arriving.
+///
+/// `argsText` is the raw JSON the model streams, so for most of a call's life it
+/// is a half-written object: `{"path": "/Users/zh` parses as nothing. Returning
+/// null is the honest answer, and the row then shows the name alone rather than
+/// half a payload it would have to take back a moment later.
+function parseArgs(argsText: string): Args | null {
+  if (argsText.trim() === "") return null;
+  try {
+    const value: unknown = JSON.parse(argsText);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    return value as Args;
+  } catch {
+    return null;
+  }
+}
+
+/// One argument as a non-empty string, or undefined -- empty strings are treated
+/// as absent, because `read · ` with nothing after the dot is worse than `read`.
+function stringArg(args: Args, key: string): string | undefined {
+  const value = args[key];
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/// How many lines an array-valued argument holds; 0 when it is absent or is not
+/// an array. Used by the two anchor tools, whose payload IS the line list.
+function lineCount(args: Args, key: string): number {
+  const value = args[key];
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/// The first line that is not blank, trimmed. Models open a thought -- and often
+/// a command -- with a newline, and "the first line" would then be nothing.
+function firstLine(text: string): string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed !== "") return trimmed;
+  }
+  return "";
+}
+
+/// What this call is about, in one line.
+///
+/// This is a CLOSED table -- the feature's spec holds the same list, and the two
+/// are meant to be read together. A tool that is not in it falls through to the
+/// last branch rather than to nothing, which is the property that lets a new
+/// tool (or an MCP one) appear in the transcript with a readable row and no
+/// front-end change.
+///
+/// Nothing here parses the arguments beyond reading them: no path is resolved, no
+/// anchor is looked up, no command is rewritten. The row reports what the model
+/// asked for, in the model's own words, which is what the arguments panel would
+/// show one click later.
+function subjectOf(toolName: string, args: Args): string | null {
+  switch (toolName) {
+    case "read":
+    case "write":
+    case "edit":
+    case "undo_last_replace":
+      return stringArg(args, "path") ?? null;
+    case "replace": {
+      // No path argument to show: `replace` addresses lines by anchor and the
+      // path is derived from them, so the anchors ARE the subject.
+      const from = stringArg(args, "remove_from");
+      if (from === undefined) return null;
+      const to = stringArg(args, "remove_to");
+      const range = to === undefined || to === from ? from : `${from}…${to}`;
+      const lines = lineCount(args, "replacement_lines");
+      return lines === 0 ? `${range} → 删除` : `${range} → ${lines} 行`;
+    }
+    case "insert": {
+      const anchor = stringArg(args, "anchor");
+      if (anchor === undefined) return null;
+      const direction = stringArg(args, "direction") ?? "after";
+      return `${direction} ${anchor} · ${lineCount(args, "lines")} 行`;
+    }
+    case "anchor_grep":
+      return stringArg(args, "pattern") ?? null;
+    case "bash":
+      return firstLine(stringArg(args, "command") ?? "") || null;
+    case "eval":
+      return firstLine(stringArg(args, "code") ?? "") || null;
+    case "skill":
+      return stringArg(args, "name") ?? null;
+    case "session-configure":
+      return (
+        ["provider", "model", "reasoning-effort"]
+          .flatMap((key) => {
+            const value = stringArg(args, key);
+            return value === undefined ? [] : [`${key}=${value}`];
+          })
+          .join(" ") || null
+      );
+    default:
+      // The first string argument, in the order the model wrote them. Nested
+      // objects are not searched: a row that dug through an MCP tool's payload
+      // would be inventing knowledge, and the first string is a defensible guess.
+      return (
+        Object.values(args).find(
+          (value): value is string => typeof value === "string" && value !== "",
+        ) ?? null
+      );
+  }
+}
+
+/// The row: what was called, what it is about, and how it is doing.
+///
+/// `useToolCallElapsed` reads the part's timing and returns undefined when the
+/// runtime recorded none, in which case the duration simply is not drawn -- an
+/// absent number, not a zero.
+///
+/// The row is `w-full` (not the `w-fit` it was) because the subject has to be
+/// ellipsised rather than wrapped: a one-line transcript is only a transcript if
+/// the lines stay one line high. That also makes the whole width clickable, which
+/// is why the chevron could go: a control this wide does not need an arrow to say
+/// it can be opened, and a column of arrows read as a list of to-dos.
+const ToolCallTrigger: FC<{
+  toolName: string;
+  state: CallState;
+  subject: string | null;
+}> = ({ toolName, state, subject }) => {
   const elapsedMs = useToolCallElapsed();
-  const { label, icon: Icon } = CALL_STATES[state];
+  const { label, icon: StatusIcon } = CALL_STATES[state];
   const isRunning = state === "running";
+  const KindIcon = TOOL_ICONS[toolName] ?? FALLBACK_TOOL_ICON;
 
   return (
     <CollapsibleTrigger
       data-slot="tool-call-trigger"
-      className="aui-tool-call-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit max-w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+      className="aui-tool-call-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
     >
-      <Icon
+      <KindIcon
         data-slot="tool-call-trigger-icon"
-        className={cn(
-          "aui-tool-call-trigger-icon size-4 shrink-0",
-          isRunning && "animate-spin [animation-duration:0.6s]",
-          state === "failed" && "text-destructive",
-        )}
+        className="aui-tool-call-trigger-icon size-4 shrink-0"
+        aria-hidden="true"
       />
       <span
         data-slot="tool-call-trigger-label"
         className={cn(
-          "aui-tool-call-trigger-label inline-block min-w-0 text-start leading-none",
+          "aui-tool-call-trigger-label min-w-0 flex-1 truncate text-start leading-none",
           state === "cancelled" && "line-through",
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
-        <b className="aui-tool-call-trigger-name break-all">{toolName}</b>
-        <span className="aui-tool-call-trigger-state">
-          {" · "}
-          {label}
-        </span>
+        <b className="aui-tool-call-trigger-name">{toolName}</b>
+        {subject !== null && (
+          <span
+            data-slot="tool-call-trigger-subject"
+            className="aui-tool-call-trigger-subject"
+          >
+            {" · "}
+            {subject}
+          </span>
+        )}
       </span>
       {elapsedMs !== undefined && (
         <span
@@ -228,15 +418,25 @@ const ToolCallTrigger: FC<{ toolName: string; state: CallState }> = ({
           {formatDuration(elapsedMs)}
         </span>
       )}
-      <ChevronDownIcon
-        data-slot="tool-call-trigger-chevron"
-        className={cn(
-          "aui-tool-call-trigger-chevron size-4 shrink-0",
-          "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-          "-rotate-90",
-          "group-data-open/trigger:rotate-0",
-        )}
-      />
+      {/* The state, at the end of the row: a mark and -- for a reader who cannot
+          see the mark -- its word, off screen. The word is what makes a spinner
+          and a tick mean the same thing to everybody; it is not drawn inline any
+          more because that slot is the subject's. */}
+      <span
+        data-slot="tool-call-trigger-status"
+        title={label}
+        className="aui-tool-call-trigger-status flex shrink-0 items-center"
+      >
+        <StatusIcon
+          className={cn(
+            "size-4",
+            isRunning && "animate-spin [animation-duration:0.6s]",
+            state === "failed" && "text-destructive",
+          )}
+          aria-hidden="true"
+        />
+        <span className="sr-only">{label}</span>
+      </span>
     </CollapsibleTrigger>
   );
 };
@@ -389,6 +589,12 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   // it says all of it; see `statusErrorText`.
   const failureExplained = statusErrorText(status) !== null;
 
+  // What the row says this call is about. Null while the arguments are still
+  // arriving, or when this tool's projection has nothing to say -- the row then
+  // shows the name alone.
+  const parsedArgs = parseArgs(argsText);
+  const subject = parsedArgs === null ? null : subjectOf(toolName, parsedArgs);
+
   return (
     <>
       {/* Uncontrolled, and `defaultOpen` stays at its default of false: this is
@@ -398,7 +604,7 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
           decision it is waiting for is a block of its own underneath (below),
           drawn at full width so it cannot be missed. */}
       <ToolFallbackRoot>
-        <ToolCallTrigger toolName={toolName} state={state} />
+        <ToolCallTrigger toolName={toolName} state={state} subject={subject} />
         <ToolFallbackContent>
           <ToolFallbackError status={status} />
           <ToolCallArgs argsText={argsText} />
