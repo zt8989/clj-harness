@@ -1,10 +1,11 @@
 # 技能与指令（一场会话开场拿到什么）
 
-会话开场时，模型除了冻结的 `prompt.md`，还会拿到**两块约定内容**：约定位置的**指令文件**，
+会话开场时，模型除了 system 消息（冻结的开头 + hook 追加的文本，见
+[hooks](hooks.md#systempromptstdout-是内容的那一格)），还会拿到**两块约定内容**：约定位置的**指令文件**，
 以及约定位置的**技能清单**；技能被**加载**后，正文再补进对话——而加载有两条路：模型的 `skill` 工具，
 与人在输入框里打的 `/name`。三件事由两个命名空间分管——
 `harness.skills` 管技能（根、目录名即身份、frontmatter、坏技能诊断、正文的派生注入），
-`harness.preamble` 管开场那几条 user 消息的**顺序**与读指令文件的失败语义。
+`harness.preamble` 管**user 侧开场块**那几条消息的**顺序**与读指令文件的失败语义。
 
 **这一页讲的是现状**：默认位置是哪几个、注入的形态与顺序、失败怎么分、以及各自为什么这样定。
 它不创作技能——不写、不装、不做授权。
@@ -14,7 +15,7 @@
 一条 run 交给 provider 的消息向量，头部是固定的：
 
 ```
-[system  prompt.md（冻结）]
+[system  组装的 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本]
 [user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
 [user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离对话更近）
 [user    <skills>…清单…</skills>]                                          能力菜单，最后一块开场内容
@@ -27,10 +28,12 @@
 把它散落在调用点就是把这个决定藏进两行 `into`，所以不许。这个前缀随会话稳定，因此照旧被 provider
 的前缀缓存命中；只有改了 AGENTS.md 或技能集才会 miss 一次。
 
-**`prompt.md` 是整场会话唯一的 system 消息，一字不动。** 其余一律 `role=user`。两条理由：
+**system 消息只有一条，这一页说的那些块一律 `role=user`。** 两条理由：
 `ag_ui/inbound` 关于 system 的规则只有「客户端带了就换成冻结的那条、没带就前置一条」——多加一条
 system 会把那条规则变成「关于一族 system 消息的规则」；而 role 本身就是给模型的框架（这是被放进来的
 东西，不是人刚打的字），`<instructions>` / `<skills>` / `<skill>` 三个标签再补一层明确的边界。
+（system 那一条里**追加**的部分属于另一半，由 `harness.system-prompt` 组装、`SystemPrompt` 点上的
+hook 决定——两半不可能交错，因为 role 不同。）
 
 **位置解析是纯函数**：`skills/roots` 与 `preamble/instruction-files` 都是 `(配置值, 项目目录)` 入参，
 **不查绑定、不读 harness.edn**。这不是洁癖，是断环——围栏必须知道技能根（见「与围栏的关系」），
@@ -156,8 +159,9 @@ the session (<N> chars). Follow it unless a later instruction supersedes it.
 
 ## `InstructionsLoaded` 接线
 
-26 个 hook 点里**已接线的第六个**。每折叠**一个**指令文件触发一次，观察者（`:gate? false`），
-verdict 丢弃；**被跳过的文件不触发**——什么都没被折叠，为一个没发生的事宣告一次 hook 比没有更坏。
+27 个 hook 点里**已接线的第六个**（第七个是 `SystemPrompt`，它管另一半）。每折叠**一个**指令文件触发一次，
+观察者（`:gate? false`），verdict 丢弃；**被跳过的文件不触发**——什么都没被折叠，为一个没发生的事
+宣告一次 hook 比没有更坏。
 
 这个点自 hook 引擎落地起就声明着（`payload #{:path}`，"an instruction file is folded into the run's
 context"），一直没有触发源；**本特征就是它的子系统**。

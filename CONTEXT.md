@@ -72,13 +72,26 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 日志 jsonl 装"发生过什么"：每一帧、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
 是状态还是记录（守着这条边界的是 `harness.db-test` 的元断言）。
 
-**冻结的 prompt** —— `prompt.md` 是 system prompt，首调读入即冻结（provider 前缀缓存的前提），
-热改要 `(harness.llm/reset-prompt!)` 或重启。它是**代码资产**：进 git、要人 review，是唯一一个不住在
-配置家里的配置文件。**因为冻结，它不按模式拼两套文本**——锚点语法归工具描述讲（工具描述是 per-thread
-的，可以随模式变），prompt 只中立地点出自省入口。
+**冻结的开头** —— `prompt.md` 是**一条 system 消息的开头**，不是整条消息。它装的是**承诺**：与任何
+会话都成立的话（身份、secrets 纪律、「其余自己读」），首调读入即冻结（provider 前缀缓存的前提），
+热改要 `(harness.llm/reset-prompt!)` 或重启。消息的其余部分是**本会话的事实**（工具集合、绑定的目录、
+provider 档），由 `harness.system-prompt/assemble` 在每次 run 现算——事实能在会话中途变，冻下来的那句
+就会说一件已经不成立的事。它是**代码资产**：进 git、要人 review，是唯一一个不住在配置家里的配置文件。
+**因为冻结，它不按模式拼两套文本**——锚点语法归工具描述讲（工具描述是 per-thread 的，可以随模式变），
+prompt 只中立地点出自省入口。
+*别叫成* system prompt（那是整条消息，头只是它）、冻结的 prompt。
+
+**围栏**（fence）—— 绑定了项目的会话里，文件工具可以直接碰、不必 park 的那些目录：项目目录自己
+（除非 `:approval {:strict true}` 把它拿掉）、配置家、技能根、`:approval {:allow [..]}` 声明的路径。
+它**只有一个来源** `harness.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
+`<project>` 块拿它对模型说规则——两处若是各写一份，模型就会以为某个路径自由而实际被拦。
 
 **park / 审批** —— 一次工具调用在跑之前被挂住等人决定，那个人的决定一次性取用。这是**能力**边界，
 不是编辑纪律：编辑模式从不用 park 表达自己。
 
-**hook** —— 一个命名的 hook 点加一条 shell 命令，按声明在点上跑，退出码决定放行还是阻断。本会话可以
-给自己加、撤、关、开 hook（走 `eval`），进程重启即失。
+**hook** —— 一个命名的 hook 点加一条**声明**，声明说它跑什么：`:command`（shell 命令，经 stdin 拿
+这个点的 payload）或 `:run`（本进程里的可调用），**恰好一样**。点表 27 行是数据。来源有三个，
+先后按这个档位定：`:built-in`（内核自己注册的行）、`:config`（配置家的 `hooks.edn`，叠在绑定项目的
+`.harness/hooks.edn` 上）、`:session`（本会话自己的 overlay）。退出码决定放行还是阻断；`SystemPrompt`
+那一点例外——它的 stdout 是**内容**（追加进 system 消息的文本）。本会话可以给自己加、撤、关、开 hook
+（走 `eval`），进程重启即失。

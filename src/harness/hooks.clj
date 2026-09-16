@@ -15,27 +15,56 @@
                                ;   always compared against the same string the
                                ;   command just read on stdin
      :gate?    true            ; does this point's verdict redirect the run?
-     :on-error :block}         ; what a TIMEOUT or a failed spawn means here:
+     :on-error :block          ; what a TIMEOUT or a failed spawn means here:
                                ;   :block for a gate, :proceed for an observer
+     :stdout   :content}       ; what a declaration's STDOUT means here, when it
+                               ;   means anything. The default (the key absent)
+                               ;   is the base protocol: exit codes decide, and
+                               ;   stdout is read only for a JSON answer. :content
+                               ;   makes stdout the THING ITSELF -- the text the
+                               ;   point collects -- which is the one cell that
+                               ;   makes a point's results more than a verdict
 
   ADDING A POINT IS ADDING A ROW. The engine's dispatch reads this table; it has
   no per-point code, which is the property the whole hook design rests on: a new
   hook point must not be a new special case in the execution path.
 
-  WHAT THIS NAMESPACE OWNS: the point table, the two-level assembly (the
-  configuration home's hooks.edn under the bound project's), validation of a
-  declaration, and the one read entry -- `effective-hooks` -- that answers which
-  declarations are in force for a thread. It does NOT run anything: spawning,
-  exit codes, timeouts and the audit line are `harness.hooks.dispatch`'s, and the
-  session-level overlay that lets a running session add or switch off its own
-  declarations is the session overlay below.
+  WHAT THIS NAMESPACE OWNS: the point table, the three sources declarations come
+  from (the kernel's own, the configuration home's hooks.edn under the bound
+  project's, and the session's overlay), validation of a declaration, and the one
+  read entry -- `effective-hooks` -- that answers which declarations are in force
+  for a thread. It does NOT run anything: spawning, exit codes, timeouts and the
+  audit line are `harness.hooks.dispatch`'s, and the session-level overlay that
+  lets a running session add or switch off its own declarations is the session
+  overlay below.
 
-  TWO LAYERS, ONE READ. `config` answers what the FILES say and re-reads them
-  every call (the config.edn discipline), so editing hooks.edn takes effect on the
-  next trigger, not the next restart. `effective-hooks` folds the session's own
-  layer over that, which is what a running session may add to, remove from, and
-  switch off -- per-thread, in-process, gone on restart. Dispatch reads the
-  folded one and nothing else."
+  THREE SOURCES, ONE READ, and ONE ORDER. `config` answers what the FILES say and
+  re-reads them every call (the config.edn discipline), so editing hooks.edn takes
+  effect on the next trigger, not the next restart. `effective-hooks` folds the
+  session's own layer -- and the kernel's own registrations -- over that, which is
+  what a running session may add to, remove from, and switch off: per-thread,
+  in-process, gone on restart. Dispatch reads the folded one and nothing else.
+
+  THE KERNEL'S OWN ROWS ARE ROWS LIKE ANY OTHER, which is the property worth
+  stating plainly rather than the three-source table being a special case: they
+  sit in the same table, run through the same seam, answer with the same exit
+  codes and leave the same audit line. Only two things differ, and both are on the
+  row: :source is :built-in (which puts it FIRST, ahead of the files), and what it
+  runs is a function (:run) rather than a command. A session can switch one off
+  and back on exactly like a declared hook -- so 'the kernel's own' is a fact
+  about where a row came FROM, not a run of exemptions from the engine.
+
+  THE ORDER IS THE SOURCE, THEN THE WRITING. Built-in rows first, then the file's
+  in the file's order, then what the session added in the order it added them.
+  That is the whole precedence rule, and it is the same rule for every point: a
+  row added later cannot silently outrank one that was already in force.
+
+  WHAT A ROW RUNS IS ONE THING, AND IT SAYS WHICH. A declaration carries exactly
+  one of :command (a non-empty string, spawned by the shell) or :run (a callable,
+  invoked in this process with the payload as a map). Neither, or both, fails by
+  name. `hooks.edn` may not name :run at all -- a file cannot hold a function --
+  and that refusal is the same per-field validation :timeout and :matcher get,
+  not an exception carved out for one key."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -51,14 +80,21 @@
 ;; place the two spellings are tied together.
 
 (def points
-  "Every hook point this harness knows, as data. 26 of them.
+  "Every hook point this harness knows, as data. 27 of them.
 
-  The P2 points (the first fourteen) have a trigger source in this codebase
-  today; the P3 points (the rest) are declared and never fire until the
-  subsystem they belong to is built -- file watching, MCP elicitation, context
-  compaction, subagents, tasks, git worktrees. A point with no trigger source
-  simply never dispatches: that is the design, not an omission, and it is why
-  a P3 point costs one row rather than an interface."
+  The P2 points and `SystemPrompt` -- FIFTEEN rows, since it sits among the P2 rows
+  rather than after them -- have a trigger source in this codebase today; the P3
+  points are declared and never fire until the subsystem they belong to is built --
+  file watching, MCP elicitation, context compaction, subagents, tasks, git
+  worktrees. A point with no trigger source simply never dispatches: that is the
+  design, not an omission, and it is why a P3 point costs one row rather than an
+  interface.
+
+  THE TWO ASSEMBLY POINTS SIT ASTRIDE EACH OTHER and each owns one half of what a
+  run opens with: `SystemPrompt` owns the system message (its opening is frozen,
+  the rows at this point append their text behind it) and `InstructionsLoaded`
+  owns the user-side opening blocks. They cannot interleave -- different message
+  roles -- so 'the order has exactly one decider' holds inside each half."
   [{:name "SessionStart" :when "a session's first run starts, or a log is rebuilt and resumed"
     :payload #{:source} :matches nil :gate? false :on-error :proceed}
    {:name "UserPromptSubmit" :when "a user turn arrives, before the model sees it"
@@ -79,6 +115,13 @@
     :payload #{:error} :matches nil :gate? false :on-error :proceed}
    {:name "Notification" :when "the harness has something to tell the user"
     :payload #{:message} :matches nil :gate? false :on-error :proceed}
+   ;; THE ONE POINT WHOSE STDOUT IS THE THING ITSELF. Everywhere else a
+   ;; declaration answers with an exit code (and, at PermissionRequest, an answer
+   ;; on stdout); here the matched declarations all run and every non-empty stdout
+   ;; is text appended to the system message. That single difference is the
+   ;; `:stdout :content` cell above and nothing else -- the seam is the same one.
+   {:name "SystemPrompt" :when "a run's system message is being assembled, before the model sees it"
+    :payload #{} :matches nil :gate? true :on-error :block :stdout :content}
    {:name "InstructionsLoaded" :when "an instruction file is folded into the run's context"
     :payload #{:path} :matches nil :gate? false :on-error :proceed}
    {:name "ConfigChange" :when "a session's configuration moved (provider, model, project)"
@@ -138,24 +181,40 @@
 
 ;; ------------------------------------------------------------- declarations
 ;;
-;; One row under a point: {:matcher .. :command .. :timeout ..}. :command is the
-;; only required field -- a declaration with nothing to run is not a declaration.
+;; One row under a point: {:matcher .. :command .. :timeout ..} -- or :run
+;; instead of :command, in the two sources that can hold a function.
+;;
+;; A DECLARATION SAYS WHAT IT RUNS, and it says exactly one thing: a :command
+;; string, or a :run function. Which of the two is allowed is the SOURCE's
+;; business, and the source is the one argument of `check-declaration` that is
+;; not the declaration itself -- because 'a file cannot hold a function' is a fact
+;; about files, not about the row.
 
 (def ^:private declaration-keys
   "Everything a declaration may carry. A key outside this set fails by name: a
   stray :commnd would otherwise be dropped and the row would look like it
   declared nothing to run, which is worse than an error."
-  #{:matcher :command :timeout})
+  #{:matcher :command :run :timeout})
 
 (defn- fail [msg data] (throw (ex-info msg data)))
 
 (defn- check-declaration
-  "One declaration at POINT, validated. Returns it unchanged. Everything wrong
-  with it fails HERE, by name, with the point and the offending value in the
+  "One declaration at POINT, from ORIGIN (:config for a hooks.edn row, :session
+  for one a running session added), validated. Returns it unchanged. Everything
+  wrong with it fails HERE, by name, with the point and the offending value in the
   message: a hook that silently does not run is indistinguishable from a hook
-  that ran and decided to allow."
-  [point-kw point idx decl]
-  (let [where (str "hooks.edn " point-kw "[" idx "]")]
+  that ran and decided to allow.
+
+  ORIGIN decides one of the checks and no more than one -- a hooks.edn row may not
+  carry :run, because a file cannot hold a function. That refusal is named rather
+  than left to the unknown-key check: the author did not misspell a field, they
+  reached for the wrong one, and 'a file cannot hold a function' is the sentence
+  that tells them where to put it instead."
+  [point-kw point idx decl origin]
+  (let [where (str (case origin
+                     :config "hooks.edn"
+                     :session "a session declaration")
+                   " " point-kw "[" idx "]")]
     (when-not (map? decl)
       (fail (str where " must be a map, not " (pr-str (type decl)))
             {:point point-kw :index idx :value decl}))
@@ -163,18 +222,63 @@
       (when (seq unknown)
         (fail (str where " has unknown key(s) " (pr-str (vec unknown))
                    "; a declaration takes " (pr-str (vec (sort declaration-keys)))
-                   " -- `command` is the one that is required")
+                   " -- one of `command` or `run` is the one that is required")
               {:point point-kw :index idx :unknown (vec unknown)})))
-    (let [cmd (:command decl)]
-      (when-not (and (string? cmd) (not (str/blank? cmd)))
-        (fail (str where " needs a non-empty string :command, got " (pr-str cmd))
-              {:point point-kw :index idx :command cmd})))
+    ;; WHAT IT RUNS: exactly one of :command / :run. Checked as a pair rather
+    ;; than field by field, because the failure is about the pair -- a row with
+    ;; both says two contradictory things, and a row with neither says nothing.
+    ;;
+    ;; THE SOURCE'S OWN RULE COMES FIRST, because it is the more fundamental fact
+    ;; about the row: a file that names :run at all has reached for the wrong
+    ;; field, whatever it put in it, and 'a file cannot hold a function' is the
+    ;; sentence that sends the author to the right place.
+    (let [has-command? (contains? decl :command)
+          has-run?     (contains? decl :run)]
+      (cond
+        (and (= :config origin) has-run?)
+        (fail (str where " sets :run, but a hooks.edn declaration runs a command:"
+                   " a file cannot hold a function. Declare it from the session"
+                   " (harness.hooks/session-add!), or write it as a :command"
+                   " -- and if what you want is a hook the kernel itself runs,"
+                   " that is a :built-in row, not a file.")
+              {:point point-kw :index idx :run (:run decl) :reason :run-in-a-file})
+
+        ;; BOTH KEYS AT ALL, whatever they hold: the row says two contradictory
+        ;; things, and picking one of them here would be the engine choosing
+        ;; which of the author's two sentences to believe.
+        (and has-command? has-run?)
+        (fail (str where " gives both :command and :run; a declaration runs exactly"
+                   " one thing -- pick the one this hook is")
+              {:point point-kw :index idx :command (:command decl) :run (:run decl)})
+
+        (and has-run? (not (ifn? (:run decl))))
+        (fail (str where " :run must be callable (a fn of the payload map), got "
+                   (pr-str (:run decl)))
+              {:point point-kw :index idx :run (:run decl)})
+
+        (and (not has-run?) (not (and (string? (:command decl))
+                                     (not (str/blank? (:command decl))))))
+        (fail (str where " needs a non-empty string :command, or a callable :run"
+                   " -- a declaration says what it runs. Got " (pr-str (:command decl)))
+              {:point point-kw :index idx :command (:command decl)})
+
+        :else nil))
     (let [t (:timeout decl)]
       (when (some? t)
         (when-not (and (integer? t) (pos? t))
           (fail (str where " :timeout must be a positive whole number of milliseconds, got "
                      (pr-str t))
-                {:point point-kw :index idx :timeout t}))))
+                {:point point-kw :index idx :timeout t}))
+        ;; A :timeout bounds the WAIT for a spawned command. A :run hook has no
+        ;; spawn -- it is a call in this process that returns when it returns --
+        ;; so the bound would do nothing at all. Quietly accepting a field that
+        ;; cannot take effect is the same failure the unknown-key check exists to
+        ;; stop, so it is refused for the same reason and in the same voice.
+        (when (contains? decl :run)
+          (fail (str where " sets :timeout with :run, but there is no spawn to"
+                     " bound: :timeout is the wait for a :command, and a :run hook"
+                     " is a call in this process that returns when it returns")
+                {:point point-kw :index idx :timeout t :reason :timeout-on-a-run}))))
     (when (contains? decl :matcher)
       (let [m (:matcher decl)]
         (when-not (and (string? m) (not (str/blank? m)))
@@ -229,15 +333,94 @@
                                     " must be a vector of declarations, not "
                                     (pr-str (type decls)))
                                {:path abs :point k :reason :not-a-vector}))
-                       [k (vec (map-indexed #(check-declaration k point %1 %2) decls))])))
+                       [k (vec (map-indexed
+                                #(check-declaration k point %1 %2 :config)
+                                decls))])))
               raw)))))
+
+;; -------------------------------------------------- built-in declarations
+;;
+;; The kernel's own hooks, and they are ROWS, not a parallel mechanism: same
+;; table, same seam, same exit codes, same audit line, same two axes (a session
+;; may switch one off and back on). The only thing that differs is the SOURCE --
+;; which also decides that they run FIRST -- and that what they run is a function.
+;;
+;; WHY THEY ARE REGISTERED RATHER THAN DECLARED HERE: building one needs the live
+;; tool table, the session's binding and the provider, so the namespace that owns
+;; them is harness.system-prompt -- and THIS namespace must not require that one,
+;; or the two would be a cycle (see that namespace's docstring). So the registry
+;; is a seam and the rows arrive through it, exactly the way the session's do.
+;;
+;; THE NAME IS THE ID. An on-disk row is identified by its position because that
+;; is all a file has; a built-in has a name, because the kernel wrote it and can
+;; say what it is -- `builtin:tools` reads as itself in a table, in a disable
+;; call, and in `effective-hooks`.
+
+(defonce ^:private builtins
+  (atom {}))
+;; point-kw -> [declaration ..] in registration order. Each carries :id, :name
+;; and :run.
+
+(def ^:private builtin-keys
+  "Everything a built-in row may carry. Same discipline as a declaration: a key
+  the engine does not read fails by name rather than sitting there looking
+  honoured."
+  #{:name :run})
+
+(defn register-builtin!
+  "Put NAME's row at POINT in the process-wide built-in table, and return the id
+  it answers to -- `builtin:<name>`.
+
+  Called by the namespace that can BUILD the kernel's own hooks
+  (harness.system-prompt registers the three at the SystemPrompt point), because
+  this namespace cannot require it. Everything else about the row is the ordinary
+  declaration contract, so a built-in is switchable, auditable and ordered like
+  any other hook.
+
+  REGISTERING THE SAME NAME AGAIN REPLACES IT IN PLACE. An id is a name and a name
+  means one row, so re-loading the registering namespace is a no-op rather than a
+  second copy -- and replacing in place keeps the order the rows were first
+  registered in, which is the order they append their text in."
+  [point-kw name decl]
+  (let [point (point-for point-kw)]
+    (when-not point
+      (fail (str (pr-str point-kw) " is not a hook point; the points are "
+                 (pr-str point-keys))
+            {:point point-kw :reason :unknown-point}))
+    (when-not (and (string? name) (not (str/blank? name)))
+      (fail (str "a built-in hook needs a non-empty string name, got " (pr-str name))
+            {:point point-kw :name name}))
+    (when-not (map? decl)
+      (fail (str "builtin:" name " must be a map, not " (pr-str (type decl)))
+            {:point point-kw :name name}))
+    (let [unknown (sort (remove builtin-keys (keys decl)))]
+      (when (seq unknown)
+        (fail (str "builtin:" name " has unknown key(s) " (pr-str (vec unknown))
+                   "; a built-in row takes " (pr-str (vec (sort builtin-keys))))
+              {:point point-kw :name name :unknown (vec unknown)})))
+    (when-not (ifn? (:run decl))
+      (fail (str "builtin:" name " needs a callable :run -- a built-in hook is a"
+                 " function in this process, and that is the only thing it is"
+                 " allowed to be. Got " (pr-str (:run decl)))
+            {:point point-kw :name name :run (:run decl)}))
+    (let [id (str "builtin:" name)
+          row (assoc decl :id id :name name)]
+      (swap! builtins
+             (fn [b]
+               (let [rows (vec (get b point-kw []))
+                     at   (first (keep-indexed (fn [i d] (when (= id (:id d)) i)) rows))]
+                 (assoc b point-kw
+                        (if (some? at)
+                          (assoc rows at row)
+                          (conj rows row))))))
+      id)))
 
 ;; ------------------------------------------------- session hooks (the eval face)
 ;;
 ;; A running session may grow hooks of its own, and switch any declaration off --
-;; the ones it added AND the ones declared on disk. That is what `eval` is FOR
-;; now: not a way to read the harness, but a way to give this session behaviour
-;; it did not start with.
+;; the ones it added, the ones declared on disk, AND the kernel's own. That is
+;; what `eval` is FOR now: not a way to read the harness, but a way to give this
+;; session behaviour it did not start with.
 ;;
 ;; TWO ORTHOGONAL AXES, the same pair the tool table uses (harness.tools):
 ;;
@@ -284,11 +467,13 @@
   "Add DECL to POINT in THREAD-ID's session only, and return the id it answers
   to. DECL is validated exactly as a hooks.edn declaration is -- a session hook
   that cannot run is refused where it was written, not skipped at trigger time --
-  and a point that does not exist is refused by name.
+  and a point that does not exist is refused by name. A session is the one source
+  that may name :run as well as :command.
 
-  Session declarations are APPENDED to whatever the files declared: a hook a
-  session grows cannot silently replace the user's, and the id prefix (@ versus
-  #) makes the two readable apart in one table.
+  Session declarations are APPENDED to whatever the kernel registered and the
+  files declared: a hook a session grows cannot silently replace either, and the
+  id prefix (@ versus # versus builtin:) makes the three readable apart in one
+  table.
 
   An id is per session and stays put, so a declaration added at the start of a
   session can be switched off later by the same id."
@@ -298,7 +483,7 @@
       (fail (str (pr-str point-kw) " is not a hook point; the points are "
                  (pr-str point-keys))
             {:point point-kw :reason :unknown-point}))
-    (check-declaration point-kw point 0 decl)
+    (check-declaration point-kw point 0 decl :session)
     (let [n  (get (swap! counters update thread-id (fnil inc 0)) thread-id)
           id (str (name point-kw) "@" n)]
       (swap! overlays assoc-in [thread-id :added id] (assoc decl :point point-kw))
@@ -324,8 +509,10 @@
   "Switch ID off for THREAD-ID's session only. The declaration stays in the
   table and simply never fires -- no spawn, no audit line, no hold on the run.
 
-  The id may name a session hook or an on-disk one; a hook this session cannot
-  see is a no-op, because switching something off must never invent it.
+  The id may name a session hook, an on-disk one, or one of the kernel's own; a
+  hook this session cannot see is a no-op, because switching something off must
+  never invent it. A built-in is switchable like any other row: what the kernel
+  registers is a HOOK, and switching a hook off is this session's business.
 
   This is a POLICY switch, like the tool table's: it stops a hook from running,
   which is not the same as forbidding the behaviour a hook was there to allow."
@@ -370,15 +557,19 @@
 
 (defn effective-hooks
   "ID -> the declaration in force for THREAD-ID, over the WHOLE table: every
-  point, with the on-disk declarations and the session's own folded together.
+  point, with the kernel's own rows, the on-disk declarations and the session's
+  own folded together.
 
-    {\"stop#0\"        {:point :stop :command \"notify.sh\" :source :config}
-     \"pre-tool-use@1\" {:point :pre-tool-use :command \"gate.sh\" :source :session}
+    {\"builtin:tools\"   {:point :system-prompt :run <fn> :source :built-in}
+     \"stop#0\"         {:point :stop :command \"notify.sh\" :source :config}
+     \"pre-tool-use@1\"  {:point :pre-tool-use :command \"gate.sh\" :source :session}
      ...}
 
   Every declaration carries :id (what a disable names), :point (which trigger
-  runs it) and :source (:config or :session) -- enough for a session to read its
-  own table and act on it, which is the whole point of exposing it.
+  runs it), :source (:built-in, :config or :session) and -- for the kernel's own
+  rows -- :name, which is the half of a built-in id worth reading. That is enough
+  for a session to read its own table and act on it, which is the whole point of
+  exposing it.
 
   A DISABLED declaration is still in here, with :disabled? true. Availability is
   a separate question from presence, exactly as in the tool table: the caller
@@ -389,6 +580,10 @@
   [thread-id]
   (into {}
         (concat
+         (for [[point-kw decls] @builtins
+               decl decls]
+           [(:id decl) (assoc decl :point point-kw :source :built-in
+                              :disabled? (disabled? thread-id (:id decl)))])
          (for [[point-kw decls] (config thread-id)
                [idx decl] (map-indexed vector decls)
                :let [id (declaration-id point-kw idx)]]
@@ -398,20 +593,41 @@
            [id (assoc decl :id id :source :session
                       :disabled? (disabled? thread-id id))]))))
 
+(def ^:private source-tier
+  "Where a SOURCE sits in the order a point's declarations run: the kernel's own
+  first, then the files, then what this session added.
+
+  Keyed on :source rather than on the id's punctuation, because the tier is a fact
+  about where a row came from and the id's spelling is a separate decision -- and
+  because a new source should be a new line here, not a new branch in a regex."
+  {:built-in 0 :config 1 :session 2})
+
+(defn- builtin-position
+  "Which built-in row ID is, counting across the whole registry. Derived from the
+  registry rather than carried on the row, so a built-in's public shape stays the
+  shape every other declaration has. Sorted by point so the answer does not
+  depend on hash-map iteration order."
+  [id]
+  (long (or (first (keep-indexed (fn [i d] (when (= id (:id d)) i))
+                                 (mapcat val (sort-by (comp name key) @builtins))))
+            0)))
+
 (defn- declaration-order
-  "The order two declarations of one point were written in: the file's first,
-  in the file's own order, then what the session added. Derived from the id,
-  because a map has no order worth relying on -- and the order is load-bearing:
-  the first block wins, so the reader of a model's refusal can trace it to a
-  specific line."
+  "The order two declarations of one point were written in: the kernel's own (in
+  registration order), then the file's (in the file's own order), then what the
+  session added (in the order it added them). Derived from the row, because a map
+  has no order worth relying on -- and the order is load-bearing: the first block
+  wins, so the reader of a model's refusal can trace it to a specific line."
   [d]
-  (let [[_ sep n] (re-matches #".*?([#@])(\d+)$" (:id d))]
-    [(if (= "#" sep) 0 1) (Long/parseLong n)]))
+  (if (= :built-in (:source d))
+    [0 (builtin-position (:id d))]
+    [(source-tier (:source d) 3)
+     (Long/parseLong (second (re-find #"(\d+)$" (:id d))))]))
 
 (defn declarations-at
   "The declarations of POINT in force for THREAD-ID that this trigger should
-  consider: session hooks and on-disk ones together, in the order they were
-  written (the file's, then the session's).
+  consider: the kernel's own rows, the session's, and the on-disk ones together,
+  in the order they were written (built-in, then the file's, then the session's).
 
   Disabled ones are LEFT OUT here rather than filtered by the caller: a switched
   off hook is one that does not fire, and that is a fact about the table, not a

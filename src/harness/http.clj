@@ -13,9 +13,10 @@
     \"input\"   -- the client's RunAgentInput as received.
     \"event\"   -- every AG-UI frame we emitted.
     \"message\" -- one line per provider-shaped message the LLM saw or produced,
-                   VERBATIM: the frozen system prompt, each inbound message
-                   (per-run context rides as a trailing user message), and every
-                   assistant reply / tool result the kernel appended.
+                   VERBATIM: the ASSEMBLED system message (prompt.md's frozen
+                   opening plus what the SystemPrompt hooks appended), each inbound
+                   message (per-run context rides as a trailing user message), and
+                   every assistant reply / tool result the kernel appended.
     \"tools/*\" -- the tool execution lifecycle (pre-execute / execute /
                    post-execute), keyed by toolCallId. No wire frame at all.
     \"approval/decided\" -- a human's answer to a parked call, with the interrupt
@@ -50,7 +51,6 @@
             [harness.git :as git]
             [harness.hooks.dispatch :as hook]
             [harness.home :as home]
-            [harness.llm :as llm]
             [harness.log :as log]
             [harness.logging :as logging]
             [harness.providers :as providers]
@@ -58,6 +58,7 @@
             [harness.preamble :as preamble]
             [harness.project :as project]
             [harness.replay :as replay]
+            [harness.system-prompt :as system-prompt]
             [harness.tools :as tools]
             [org.httpkit.server :as hk])
   (:import [java.nio.charset StandardCharsets]))
@@ -411,11 +412,18 @@
         ;; parked -- blows up before the run starts. Catch it here and push a
         ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
         ;; run rather than a broken stream.
+        ;;
+        ;; THE SYSTEM MESSAGE IS ASSEMBLED HERE, and it has to be HERE -- inside
+        ;; the binding above -- or it silently loses its hooks: harness.system-
+        ;; prompt fires SystemPrompt through this sink, and an unbound sink means
+        ;; the point does not dispatch at all. A declaration at that point that
+        ;; says no lands in the catch below as an ordinary refusal, with the
+        ;; hook's own words as the RUN_ERROR reason.
         (let [[provider messages decisions resolved]
               (try (let [provider (providers/current-provider thread-id (:provider input))]
                      (guard-input-modalities! input provider)
                      [provider
-                      (ag/inbound (:messages input) (llm/prompt)
+                      (ag/inbound (:messages input) (system-prompt/assemble thread-id)
                                   (opening-blocks! thread-id)
                                   (:context input))
                       (resume-decisions (:resume input))
@@ -478,10 +486,14 @@
                      :override (providers/wire (:override c) providers/knobs)
                      :resolved (providers/wire (:resolved c))}))
             ;; The message record, submitted side: what the first LLM call is about
-            ;; to see. The FROZEN system prompt plus every inbound message in the
-            ;; provider's shape, one line each, VERBATIM. Context rides as a
-            ;; trailing user message -- it must never touch the system prompt, or
-            ;; the provider's prefill (prompt cache) would miss every call.
+            ;; to see. The ASSEMBLED system message -- prompt.md's frozen opening
+            ;; with each SystemPrompt hook's text behind it -- plus every inbound
+            ;; message in the provider's shape, one line each, VERBATIM. Context
+            ;; rides as a trailing user message -- it must never touch the system
+            ;; prompt, or the provider's prefill (prompt cache) would miss every
+            ;; call. The appended text has no other trace: it is server-side, it
+            ;; never becomes a frame, and this line is where its weight is on the
+            ;; record. (The hook/SystemPrompt line records the same run of it.)
             (log-messages! thread-id run-id messages)
             ;; Drain run-chan and convert each kernel event to AG-UI frames. The
             ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via

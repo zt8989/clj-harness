@@ -39,18 +39,20 @@
              (distinct (map :type seen)))))))
 
 (deftest prompt-is-frozen
-  ;; The system prompt is read ONCE and frozen -- the provider's prefill (prompt
-  ;; cache) keys on a byte-identical first message, so a prompt.md edit must not
-  ;; leak into served prompts until reset-prompt! deliberately thaws it. The
-  ;; file edit below is restored in finally, so the rest of the suite still sees
-  ;; the real prompt.md.
+  ;; What is frozen is the OPENING of the system message -- prompt.md, read once.
+  ;; (The message itself is assembled per run from it in harness.system-prompt;
+  ;; the part that must not drift is this one, because the provider's prefill
+  ;; (prompt cache) keys on a byte-identical prefix, so a prompt.md edit must not
+  ;; leak into served prompts until reset-prompt! deliberately thaws it.) The file
+  ;; edit below is restored in finally, so the rest of the suite still sees the
+  ;; real prompt.md.
   (let [original (slurp "prompt.md" :encoding "UTF-8")]
     (try
       (llm/reset-prompt!)
       (is (= original (llm/prompt)) "the first call reads prompt.md")
       (spit "prompt.md" (str original "\n<!-- drifted after freeze -->\n")
             :encoding "UTF-8")
-      (is (= original (llm/prompt)) "a file edit does NOT leak into the frozen prompt")
+      (is (= original (llm/prompt)) "a file edit does NOT leak into the frozen opening")
       (finally
         (spit "prompt.md" original :encoding "UTF-8")
         (llm/reset-prompt!)))))

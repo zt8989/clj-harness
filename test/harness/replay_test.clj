@@ -151,9 +151,15 @@
 (deftest history-is-shaped-for-the-provider
   (write-log! "t-shape" (one-run-lines))
   (let [history (replay/history (log-file "t-shape"))]
-    (testing "the system prompt leads, freshly read rather than stored in the log"
+    (testing "the system message leads, ASSEMBLED rather than read out of the log"
+      ;; The opening is derived from prompt.md and the appended text from the
+      ;; hooks, per run -- a copy out of the log would be a stale sentence. Replay
+      ;; has no hook sink, so nothing is appended here and the result is the frozen
+      ;; opening byte for byte; the appended case is harness.system-prompt-test's
+      ;; and harness.http-test's. What matters here is that the source is the
+      ;; opening plus the derivations, not the recorded message.
       (is (= "system" (:role (first history))))
-      (is (str/starts-with? (:content (first history)) (llm/prompt))))
+      (is (= (llm/prompt) (:content (first history)))))
     (testing "reasoning is folded back onto the assistant message -- the whole point"
       (is (= reasoning-text (:reasoning_content (assistant-with-calls history)))))
     (testing "calls are in the provider's casing, not AG-UI's"

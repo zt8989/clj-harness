@@ -10,11 +10,13 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.home :as home]
+            [harness.hooks :as hooks]
             [harness.http :as http]
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.replay :as replay]
             [harness.shell :as shell]
+            [harness.test-support :as support]
             [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
@@ -251,13 +253,18 @@
          (is (some #(= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
                        (get-in % [:payload :messages 0 :content]))
                    lines)))
-       (testing "the submitted system prompt is on disk VERBATIM"
+       (testing "the submitted system message is on disk VERBATIM"
          (let [sys (first (filter #(= "system" (:role %)) msgs))]
            (is (some? sys))
            ;; Context never touches the system message -- it rides as a trailing
-           ;; user message -- so what was submitted is the frozen prompt.md
-           ;; and nothing else, in every run.
-           (is (= (slurp "prompt.md" :encoding "UTF-8") (:content sys)))))
+           ;; user message -- so what was submitted is prompt.md's frozen opening
+           ;; with the SystemPrompt hooks' text behind it, in every run. The
+           ;; opening is compared TRIMMED because the assembly normalises its
+           ;; trailing newlines before adding a block.
+           (is (str/starts-with? (:content sys)
+                                 (str/trimr (slurp "prompt.md" :encoding "UTF-8"))))
+           (is (str/includes? (:content sys) "<tools>")
+               "and the kernel's own roll call is behind it")))
        (testing "the user's message is recorded in the provider's shape"
          (is (some #(and (= "user" (:role %))
                          (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee" (:content %)))
@@ -290,6 +297,129 @@
                            (= (str/split-lines (slurp "deps.edn" :encoding "UTF-8"))
                               (read-lines (:content %))))
                      tools))))))))
+
+;; ------------------------------------- the assembled system message, at the edge
+
+(defn- system-texts
+  "Every system message a thread's log holds, in order."
+  [thread-id]
+  (->> (wait-for-recorded (log-file thread-id)
+                          (fn [ls] (some #(and (= "message" (:kind %))
+                                               (= "assistant" (get-in % [:payload :role])))
+                                         ls))
+                          2000)
+       (filter #(= "system" (get-in % [:payload :role])))
+       (mapv #(str (get-in % [:payload :content])))))
+
+(deftest the-assembled-system-message-reaches-the-model-and-never-the-client
+  ;; The whole shape, through the real edge: prompt.md's opening plus what the
+  ;; hooks appended is in the run's message record (the model reads it) and in NO
+  ;; AG-UI frame (the client never does). "The front end shows nothing" is not a
+  ;; filtering decision anywhere -- it is the absence of a frame, and this is the
+  ;; only layer that can prove it.
+  ;;
+  ;; A hooks.edn declaration is in the mix too, so the test covers all three
+  ;; sources at once: the kernel's own rows, a file's, and (in the test below) the
+  ;; session's.
+  (support/write-hooks! {:system-prompt [{:command "printf 'A DECLARED BLOCK\\n'"}]})
+  (try
+    (with-server
+     "it-system"
+     (fn []
+       (io/delete-file (log-file "it-system") true)
+       (let [resp   (.body (post-run "it-system"))
+             frames (wire/frames-from-sse resp)
+             text   (first (system-texts "it-system"))
+             on-wire (json/write-str frames)]
+         (testing "the model is handed the frozen opening first, byte for byte"
+           (is (str/starts-with? text (str/trimr (slurp "prompt.md" :encoding "UTF-8")))))
+         (testing "then the kernel's own rows, each stating a live fact"
+           (is (str/includes? text "<tools>"))
+           (is (str/includes? text "available: "))
+           (is (str/includes? text "<project>"))
+           (is (str/includes? text "not bound to any project directory"))
+           (is (str/includes? text "<provider>")))
+         (testing "and then what the FILE declared -- all three sources, in order"
+           (is (str/includes? text "A DECLARED BLOCK"))
+           (is (< (str/index-of text "<tools>") (str/index-of text "A DECLARED BLOCK"))))
+         (testing "the trigger is on the record, with what it collected"
+           (let [line (first (filter #(= "hook/SystemPrompt" (:kind %))
+                                     (wait-for-recorded (log-file "it-system")
+                                                        (fn [ls] (some #(= "hook/SystemPrompt" (:kind %)) ls))
+                                                        2000)))]
+             (is (some? line))
+             (is (= 4 (get-in line [:payload :matched]))
+                 "the kernel's three rows and the file's one")))
+         (testing "and not one frame carries any of it"
+           ;; The markers are the ones only THIS run's assembly could have
+           ;; written. The tool roll call is deliberately not among them: the
+           ;; scripted run reads this repository's own README, which talks about
+           ;; <tools> too, so that string can reach the wire legitimately.
+           (is (not (str/includes? on-wire "A DECLARED BLOCK")))
+           (is (not (str/includes? on-wire "not bound to any project directory")))
+           (is (not (str/includes? on-wire "available: "))))
+         (testing "while the run itself is complete and well-formed"
+           (is (= "RUN_STARTED" (:type (first frames))))
+           (is (= "RUN_FINISHED" (:type (last frames))))
+           (is (empty? (wire/violations frames)))))))
+    (finally (support/wipe-hooks!))))
+
+(deftest switching-a-row-off-takes-its-text-out-of-the-next-runs-message
+  ;; Both halves of the switch, at the edge and on a SECOND run of the same thread:
+  ;; the declared row and the kernel's own row behave identically, because they are
+  ;; rows in one table. Nothing is restarted and nothing is reset.
+  (support/write-hooks! {:system-prompt [{:command "printf 'A DECLARED BLOCK\\n'"}]})
+  (try
+    (with-server
+     "it-system-off"
+     (fn []
+       (io/delete-file (log-file "it-system-off") true)
+       (post-run "it-system-off")
+       (let [before (first (system-texts "it-system-off"))]
+         (is (str/includes? before "A DECLARED BLOCK"))
+         (is (str/includes? before "<tools>"))
+         (testing "switching the declared row and one of the kernel's off"
+           (hooks/session-disable! "it-system-off" "system-prompt#0")
+           (hooks/session-disable! "it-system-off" "builtin:tools")
+           (io/delete-file (log-file "it-system-off") true)
+           (post-run "it-system-off")
+           (let [after (first (system-texts "it-system-off"))]
+             (is (not (str/includes? after "A DECLARED BLOCK")))
+             (is (not (str/includes? after "<tools>")))
+             (testing "the rows that were NOT switched off are still there"
+               (is (str/includes? after "<project>"))
+               (is (str/includes? after "<provider>")))
+             (testing "and the opening is untouched -- it is not in a hook's hands"
+               (is (str/starts-with? after (str/trimr (slurp "prompt.md" :encoding "UTF-8")))))))
+         (testing "switching them back on brings both blocks back"
+           (hooks/session-enable! "it-system-off" "system-prompt#0")
+           (hooks/session-enable! "it-system-off" "builtin:tools")
+           (io/delete-file (log-file "it-system-off") true)
+           (post-run "it-system-off")
+           (let [again (first (system-texts "it-system-off"))]
+             (is (str/includes? again "A DECLARED BLOCK"))
+             (is (str/includes? again "<tools>")))))))
+    (finally (support/wipe-hooks!))))
+
+(deftest a-system-prompt-hook-that-says-no-stops-the-run-over-http
+  ;; Exit 2 at this point is a HARD failure, not fail-open: what these hooks write
+  ;; is what the system message is supposed to say, so a run that could not be told
+  ;; it does not start. The client gets the hook's own words as the RUN_ERROR, and
+  ;; no model was ever called.
+  (support/write-hooks!
+   {:system-prompt [{:command "echo 'no system message for you' >&2; exit 2"}]})
+  (try
+    (with-server
+     "it-system-block"
+     (fn []
+       (let [frames (wire/frames-from-sse (.body (post-run "it-system-block")))]
+         (testing "the run terminates as an error carrying the hook's stderr verbatim"
+           (is (= "RUN_ERROR" (:type (last frames))))
+           (is (str/includes? (str (:message (last frames))) "no system message for you")))
+         (testing "and the vendor was never called -- the run never started"
+           (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames))
+           (is (not-any? #(= "TEXT_MESSAGE_START" (:type %)) frames))))))
+    (finally (support/wipe-hooks!))))
 
 (deftest the-log-the-server-writes-is-one-replay-can-read
   ;; Every other replay test builds its log with the emitter directly. This one goes

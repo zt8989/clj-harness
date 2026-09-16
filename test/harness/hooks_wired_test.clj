@@ -1,9 +1,9 @@
 (ns harness.hooks-wired-test
-  "The four hook points that are wired, through the real HTTP edge: SessionStart
-  on a session's first run, PostToolUse after a successful tool, Stop when a run
-  ends normally, and InstructionsLoaded once per instruction file folded -- plus
-  the regression that matters most, that a session which declares nothing behaves
-  exactly as it did before hooks existed.
+  "The hook points that are wired, through the real HTTP edge: SessionStart on a
+  session's first run, PostToolUse after a successful tool, Stop when a run ends
+  normally, InstructionsLoaded once per instruction file folded, and SystemPrompt
+  while the system message is assembled -- plus the regression that matters most,
+  that a session which DECLARES nothing fires nothing but the kernel's own rows.
 
   The edge is the layer that has to be exercised here, because it is the edge that
   binds the run's hook sink: everything below it (offline tools, replay) fires
@@ -18,6 +18,7 @@
             [harness.http :as http]
             [harness.providers :as providers]
             [harness.project :as project]
+            [harness.test-support :as support]
             [harness.tools :as tools]
             [harness.wire :as wire])
   (:import [java.net URI]
@@ -102,12 +103,8 @@
 (defn- hook-lines [ls]
   (filter #(str/starts-with? (str (:kind %)) "hook/") ls))
 
-(defn- write-hooks! [decls]
-  (.mkdirs (io/file (home/root)))
-  (spit (str (home/root) "/hooks.edn") (pr-str decls) :encoding "UTF-8"))
-
 (defn- wipe! []
-  (io/delete-file (io/file (home/root) "hooks.edn") true)
+  (support/wipe-hooks!)
   (io/delete-file (io/file (home/root) "hooks-fired.txt") true))
 
 ;; A hooks.edn this namespace wrote is a hook EVERY LATER TEST IN THE PROCESS
@@ -126,28 +123,44 @@
 
 ;; --------------------------------------------------- nothing declared, nothing
 
-(deftest a-session-with-no-hooks-behaves-exactly-as-before
+(deftest a-session-that-declares-nothing-fires-only-the-kernels-own-rows
+  ;; The regression that matters most, restated for a table that now holds the
+  ;; kernel's own rows: a session which DECLARES nothing leaves the declaration
+  ;; points silent, and the one hook line a run leaves is the SystemPrompt row the
+  ;; kernel registered for itself -- because that row appends text to the system
+  ;; message on every run, and a trigger that did work leaves a line.
   (wipe!)
   (with-server
    "hw-none"
    (fn []
      (io/delete-file (log-file "hw-none") true)
      (post-run "hw-none")
-     (let [ls (wait-for (log-file "hw-none")
-                        (fn [ls] (some #(= "Stop" (:kind %)) (hook-lines ls)))
-                        1500)]
-       (testing "no hook/ line is written at all -- an untouched run leaves no trace"
-         (is (empty? (hook-lines ls))))
-       (testing "and the run itself is complete and well-formed"
-         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type]))
-                   (filter #(= "event" (:kind %)) ls))))))))
+     (let [_  (wait-for (log-file "hw-none")
+                        (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+                        1500)
+           ;; Stop fires as the run ends and the returned message tail lands one
+           ;; beat after the terminal frame, so the run is given a moment to finish
+           ;; writing before the claim "and nothing else fired" is made. Same shape
+           ;; as the second-run check in session-start-fires-once below.
+           _  (Thread/sleep 300)
+           ls (log-lines (log-file "hw-none"))]
+       (testing "the only hook line is the kernel's own SystemPrompt trigger"
+         (is (= ["hook/SystemPrompt"] (mapv :kind (hook-lines ls)))))
+       (testing "and every point a session would have to declare at is silent"
+         (is (empty? (filter #(contains? #{"hook/SessionStart" "hook/PostToolUse"
+                                           "hook/Stop" "hook/InstructionsLoaded"}
+                                         (:kind %))
+                             ls))))
+       (testing "the run itself is complete and well-formed"
+         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))
 
 ;; ------------------------------------------------------------------ SessionStart
 
 (deftest session-start-fires-once-on-a-sessions-first-run
   (wipe!)
-  (write-hooks! {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
-                                                          "session-start")}]})
+  (support/write-hooks!
+   {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                             "session-start")}]})
   (with-server
    "hw-start"
    (fn []
@@ -175,8 +188,8 @@
 (deftest post-tool-use-fires-after-a-tool-ran-and-is-told-which-one
   (wipe!)
   (let [marker (str (home/root) "/hooks-fired.txt")]
-    (write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
-                                    :matcher "read"}]})
+    (support/write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
+                                            :matcher "read"}]})
     (with-server
      "hw-post"
      (fn []
@@ -198,8 +211,8 @@
 (deftest a-matcher-that-does-not-fit-means-the-hook-never-sees-that-call
   (wipe!)
   (let [marker (str (home/root) "/hooks-fired.txt")]
-    (write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
-                                    :matcher "bash"}]})
+    (support/write-hooks! {:post-tool-use [{:command (marker-script marker "post-tool-use")
+                                            :matcher "bash"}]})
     (with-server
      "hw-nomatch"
      (fn []
@@ -218,7 +231,7 @@
 (deftest stop-fires-when-a-run-ends-normally
   (wipe!)
   (let [marker (str (home/root) "/hooks-fired.txt")]
-    (write-hooks! {:stop [{:command (marker-script marker "stop")}]})
+    (support/write-hooks! {:stop [{:command (marker-script marker "stop")}]})
     (with-server
      "hw-stop"
      (fn []
@@ -241,10 +254,11 @@
   ;; reading a log the other wrote. The claim is about OBSERVERS: their verdict is
   ;; discarded, so the run they watch is unchanged.
   (wipe!)
-  (write-hooks! {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
-                                                          "start")}]
-                 :stop          [{:command (marker-script (str (home/root) "/hooks-fired.txt")
-                                                          "stop")}]})
+  (support/write-hooks!
+   {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                             "start")}]
+    :stop          [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                             "stop")}]})
   (providers/use-provider! "hw-frames-off" (fake/scripted script))
   (with-server
    "hw-frames-on"
@@ -274,7 +288,7 @@
 
 (deftest a-pretooluse-gate-can-refuse-a-call-and-the-model-is-told-why
   (wipe!)
-  (write-hooks! {:pre-tool-use [{:command (gate-script 2 "no reads before breakfast")}]})
+  (support/write-hooks! {:pre-tool-use [{:command (gate-script 2 "no reads before breakfast")}]})
   (with-server
    "hw-gate"
    (fn []
@@ -301,7 +315,7 @@
 
 (deftest a-gate-that-allows-changes-nothing-about-the-run
   (wipe!)
-  (write-hooks! {:pre-tool-use [{:command (gate-script 0 "fine")}]})
+  (support/write-hooks! {:pre-tool-use [{:command (gate-script 0 "fine")}]})
   (with-server
    "hw-allow"
    (fn []
@@ -318,7 +332,7 @@
 
 (deftest the-verdict-is-audited-with-the-point-and-the-outcome
   (wipe!)
-  (write-hooks! {:pre-tool-use [{:command (gate-script 2 "denied")}]})
+  (support/write-hooks! {:pre-tool-use [{:command (gate-script 2 "denied")}]})
   (with-server
    "hw-audit"
    (fn []
@@ -343,7 +357,7 @@
   ;; must not be spawned for a call that can never run.
   (wipe!)
   (let [marker (str (home/root) "/hooks-fired.txt")]
-    (write-hooks! {:pre-tool-use [{:command (marker-script marker "gate")}]})
+    (support/write-hooks! {:pre-tool-use [{:command (marker-script marker "gate")}]})
     (tools/session-disable! "hw-disabled" "read")
     (try
       (with-server
@@ -376,7 +390,8 @@
 
 (deftest a-permission-request-hook-can-approve-a-parked-call
   (wipe!)
-  (write-hooks! {:permission-request [{:command (answer-script "approve" "the rule says yes")}]})
+  (support/write-hooks!
+   {:permission-request [{:command (answer-script "approve" "the rule says yes")}]})
   (tools/session-require-approval! "hw-delegate-ok" "read")
   (try
     (with-server
@@ -406,7 +421,8 @@
 
 (deftest a-permission-request-hook-can-deny-a-parked-call
   (wipe!)
-  (write-hooks! {:permission-request [{:command (answer-script "deny" "not on a tuesday")}]})
+  (support/write-hooks!
+   {:permission-request [{:command (answer-script "deny" "not on a tuesday")}]})
   (tools/session-require-approval! "hw-delegate-no" "read")
   (try
     (with-server
@@ -428,7 +444,7 @@
   ;; The regression that matters most: a declaration exists at the point but says
   ;; nothing on stdout, so the call parks exactly as it did before hooks existed.
   (wipe!)
-  (write-hooks! {:permission-request [{:command (gate-script 0 "just watching")}]})
+  (support/write-hooks! {:permission-request [{:command (gate-script 0 "just watching")}]})
   (tools/session-require-approval! "hw-delegate-quiet" "read")
   (try
     (with-server
@@ -485,7 +501,8 @@
     (spit (str (home/user-home) "/AGENTS.md") "user rules\n" :encoding "UTF-8")
     (spit (str proj "/AGENTS.md") "project rules\n" :encoding "UTF-8")
     (project/bind! "hw-instructions" proj)
-    (write-hooks! {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
+    (support/write-hooks!
+     {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
     (with-server
      "hw-instructions"
      (fn []
@@ -529,8 +546,9 @@
 (deftest a-session-with-no-instruction-files-fires-nothing
   (wipe!)
   (wipe-instructions!)
-  (write-hooks! {:instructions-loaded [{:command (marker-script (str (home/root) "/hooks-fired.txt")
-                                                               "should-not-run")}]})
+  (support/write-hooks!
+   {:instructions-loaded [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                                   "should-not-run")}]})
   (with-server
    "hw-noinstructions"
    (fn []

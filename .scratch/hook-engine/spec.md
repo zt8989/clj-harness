@@ -120,6 +120,40 @@ Phase A 先落地，是为了让 hook 的接线段（10/11/12 都要改执行缝
   - **帧形状一个字节都没动**：悬置仍走既有 park/resume 通道（不发 `:tool/result`、不写 tool 消息、run 以 interrupt 收尾）。新增 outcome **`:hook-blocked`** 写进了 `harness.event` 的 docstring——不允许悄悄多一个没人记录的值；工具结果按 veto 的形状回喂，但**说清是谁说不**（读到"人工否决"的模型会不敢再要东西，读到"hook 拦的"的模型知道去看规则）。
 - **13（收口）**：`prompt.md` 的 Self-extension 与 Session tools 两段退场，换成一节 hook 自助说明。**诚实条款**：eval 是进程内的 Clojure、**没有沙箱**，"仅限 hook"约束的是**定位与承诺**，不是语言能力；工具表那四个入口在代码里保留（测试、边、e2e server 仍在用），只是不再对模型宣传；**secrets 纪律一字不减**，并点明它不随其他任何东西一起变松。
 
+### 后续：点表多了一行，来源从两层变三层（2026-09-16，`system-prompt-blocks`）
+
+上面那些是 2026-09-14 落地时的记录，**不改写**。这一笔是后来的改动，写在这里免得两份说法打架。
+
+- **第 27 个点 `SystemPrompt` / `:system-prompt`**：`payload #{}`、`:matches nil`、`:gate? true`、
+  `:on-error :block`，外加点表里**第一格 `:stdout :content`**。时机是「一次 run 的 system 消息正在被
+  组装、模型看到它之前」。它与其他门禁点只差那一格：**匹配到的声明全部跑、全部追加**
+  （不是第一条 block 获胜——一条 hook 不该把另一条的文本吃掉），退出 0 的 stdout 就是内容，
+  dispatch 收进有序的 `:blocks`；空输出 = 这一条什么都不说；退出 2 = **这次 run 不开始**
+  （stderr 逐字是理由，客户端收 RUN_ERROR）。**其它点的返回与审计行逐字节不变**。点表因此从 **26 行变
+  27 行**，而新的一行**是接线的**（不是 P3 那种占位），所以有触发源的点从十四行变 **15 行**。
+- **来源从两层变三层**。多了 `:built-in`：内核自己注册的 `:run` 行，**排在最前**（内建 → 文件 → 会话）。
+  并且一条声明现在**说它跑什么、且只说一样**：`:command`（非空字符串）或 `:run`（可调用）恰好之一；
+  两个都没有、两个都给都指名报错。**`hooks.edn` 里写 `:run` 被指名拒绝**（文件里放不了函数），
+  `:timeout` 配 `:run` 也拒绝（`run` 没有 spawn 可限时）。
+  **`verdict-of` 之下的东西一个字没改**：退出码语义、`:on-error`、first-block-wins、审计行。
+- **内建三条行**（`builtin:tools` / `builtin:project` / `builtin:provider`）在 `SystemPrompt` 点上，
+  由**新 ns `harness.system-prompt`** 注册——它要 `tools` / `project` / `providers`，所以声明不进
+  `harness.hooks`（`project` 已 require `preamble`，而 system 半要 `tools`，会成环）。
+- **`prompt.md` 因此换了定位**：从「整份冻结的 system prompt」变成「system 消息的冻结**开头**」。
+  与任何会话无关的话留下（身份、secrets 纪律、「其余自己读」），**本会话的事实**
+  （工具集合、绑定目录、provider 档）由 hook 每次 run 现算追加——宁可付一次冷前缀，也不让 system
+  消息说一件已经不成立的事。
+- **上面第 19 行与 13（收口）说的「hook 自助」那一节，实际是退场了**——与本节其余改动不同，这不是
+  搬家而是**删除**：那段文本不再进 system 消息。这是本特征动 `prompt.md` 内容的两处之一（另一处是
+  secrets 里指向 `active-provider` 的那一颗，它的内容由 `<provider>` 块接管）。后果如实说：模型不再
+  从冻结开头知道 hook 这回事，`eval` 只剩工具描述里那一句。理由与作者自己记的越界说明见
+  `.scratch/system-prompt-blocks/spec.md` 文末的落地记录。
+- **两处 prompt.md 之外的连带**，如实记：`harness.llm/prompt` 的措辞从「system prompt」改成
+  「system 消息的开头」；`replay/history` 与 `harness.http` 改调 `system-prompt/assemble`
+  （没有 sink 的调用方仍拿到逐字节相同的 `prompt.md`）。
+- 数：**607 tests / 9774 assertions 全绿**（基线 `main` @ `63869d2`，569 / 9574）。
+
+
 ### 实现时撞出来的三件事（票面没写，记在这里）
 
 1. **日志的 append 需要一把锁。** 多数写入来自 run 的单个消费线程，但 hook 在它自己的点上触发（PostToolUse 跑在那次调用的线程上），两条线可能同时在飞——而**半行不是更短的记录，是一个坏掉的文件**。加锁是让写入者原有的保证继续成立，而不是让每个调用方都知道这件事。

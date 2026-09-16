@@ -9,10 +9,10 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [harness.home :as home]
             [harness.hooks :as hooks]
             [harness.hooks.dispatch :as dispatch]
-            [harness.project :as project]))
+            [harness.project :as project]
+            [harness.test-support :as support]))
 
 (def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-dispatch-test"))
 (def ^:private scripts (str root "/scripts"))
@@ -31,14 +31,13 @@
     (str f)))
 
 (defn- declared! [point decls]
-  (.mkdirs (io/file (home/root)))
-  (spit (str (home/root) "/hooks.edn") (pr-str {point decls}) :encoding "UTF-8"))
+  (support/write-hooks! {point decls}))
 
 (defn- wipe [f]
-  (io/delete-file (io/file (home/root) "hooks.edn") true)
+  (support/wipe-hooks!)
   (io/delete-file (io/file scripts "payload.txt") true)
   (f)
-  (io/delete-file (io/file (home/root) "hooks.edn") true))
+  (support/wipe-hooks!))
 
 (use-fixtures :each wipe)
 
@@ -200,3 +199,94 @@
       (is (= :allow (:verdict r)))
       (is (= 1 (:matched r)))
       (is (.exists (io/file marker))))))
+
+;; ---------------------------------------------- what a declaration runs
+
+(deftest an-in-process-declaration-is-handed-the-payload-as-a-map
+  ;; The same KEYS the wire carries -- the ones a command reads on stdin -- with
+  ;; the VALUES kept, because a function can hold one and JSON can only hold text.
+  ;; Deliberately not a JSON round trip: wrapping the payload to "unify" the two
+  ;; sides would hand a function a string where the author had a map.
+  (let [seen (atom nil)]
+    (hooks/session-add! "hd-run" :pre-tool-use
+                        {:run (fn [payload]
+                                (reset! seen payload)
+                                {:exit 0 :out "" :err ""})})
+    (let [r (fire :pre-tool-use {:tool_name "bash" :tool_input {:command "ls"}}
+                  {:thread-id "hd-run"})]
+      (is (= :allow (:verdict r)))
+      (is (= "PreToolUse" (get @seen "hook")))
+      (is (= "hd-run" (get @seen "thread_id")))
+      (is (= "bash" (get @seen "tool_name")))
+      (is (= {:command "ls"} (get @seen "tool_input"))
+          "the value arrives typed, not stringified"))))
+
+(deftest an-in-process-declaration-that-throws-is-a-verdict-not-an-exception
+  (hooks/session-add! "hd-run-boom" :pre-tool-use
+                      {:run (fn [_] (throw (ex-info "the gate itself is broken" {})))})
+  (let [r (fire :pre-tool-use {:tool_name "write"} {:thread-id "hd-run-boom"})]
+    (testing "it did not escape the seam: the run's fate is the point's call"
+      (is (= :block (:verdict r)) "a gate that could not decide does not decide yes"))
+    (testing "and the reason says it could not be RUN, not that it said no"
+      (is (str/includes? (:reason r) "could not be run"))
+      (is (str/includes? (:reason r) "the gate itself is broken")))))
+
+(deftest a-command-and-a-function-reach-the-same-verdict
+  ;; The seam's whole claim, said once as an equivalence rather than twice as two
+  ;; separate assertions: nothing below the seam can tell the two apart.
+  (let [cmd (do (declared! :pre-tool-use
+                           [{:command (script! "same.sh" "echo same words >&2; exit 2")}])
+                (fire :pre-tool-use {:tool_name "write"} {:thread-id "hd-same-c"}))]
+    ;; The file declares for every thread, so it is cleared before the second half
+    ;; or the two halves would not be measuring the same thing.
+    (support/wipe-hooks!)
+    (hooks/session-add! "hd-same-r" :pre-tool-use
+                        {:run (fn [_] {:exit 2 :out "" :err "same words"})})
+    (let [inline (fire :pre-tool-use {:tool_name "write"} {:thread-id "hd-same-r"})]
+      (is (= :block (:verdict cmd) (:verdict inline)))
+      (is (= "same words" (:reason cmd) (:reason inline))))))
+
+;; ------------------------------------------- the one point whose stdout is content
+
+(deftest a-content-point-collects-every-declarations-text-in-order
+  ;; SystemPrompt is the one row of the point table whose stdout IS the result.
+  ;; Its contract is the OPPOSITE of first-block-wins: every matched declaration
+  ;; runs and every one appends, because one hook must not be able to eat
+  ;; another's text.
+  (support/without-builtins! "hd-blocks")
+  (let [out (fn [text] {:run (fn [_] {:exit 0 :out text :err ""})})]
+    (hooks/session-add! "hd-blocks" :system-prompt (out "  first  "))
+    (hooks/session-add! "hd-blocks" :system-prompt (out "second"))
+    (hooks/session-add! "hd-blocks" :system-prompt (out "   \n  "))
+    (let [audits (atom [])
+          r (fire :system-prompt {} {:thread-id "hd-blocks"
+                                     :audit #(swap! audits conj %)})]
+      (testing "all three ran, and each contributed its trimmed text in declaration order"
+        (is (= 3 (:matched r)))
+        (is (= :allow (:verdict r)))
+        (is (= ["first" "second"] (:blocks r))))
+      (testing "a declaration whose output trims to nothing says nothing -- not an error"
+        (is (= 2 (count (:blocks r)))))
+      (testing "and the trigger still lands exactly one audit line"
+        (is (= 1 (count @audits)))
+        (is (= "SystemPrompt" (:point (first @audits))))
+        (is (= 3 (:matched (first @audits))))))))
+
+(deftest a-content-declaration-that-refuses-contributes-no-text
+  (support/without-builtins! "hd-blocks-refused")
+  (hooks/session-add! "hd-blocks-refused" :system-prompt
+                      {:run (fn [_] {:exit 2
+                                     :out "this must not be appended to anything"
+                                     :err "no system prompt for you"})})
+  (let [r (fire :system-prompt {} {:thread-id "hd-blocks-refused"})]
+    (is (= :block (:verdict r)))
+    (is (str/includes? (:reason r) "no system prompt for you"))
+    (is (= [] (:blocks r))
+        "a refused declaration's stdout is not text to assemble -- its stderr is the reason")))
+
+(deftest the-blocks-cell-is-on-one-row-of-the-table-and-not-on-the-others
+  (hooks/session-add! "hd-noblocks" :stop {:command (script! "quiet.sh" "exit 0")})
+  (let [r (fire :stop {} {:thread-id "hd-noblocks"})]
+    (is (= :allow (:verdict r)))
+    (is (not (contains? r :blocks))
+        "every other point answers with a verdict, and its return has to stay what it was")))

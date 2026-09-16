@@ -193,6 +193,16 @@ fail-open/closed）。stdout 可带 JSON 高级决策（如 PermissionDenied 的
 
 P3 的 hook 点在引擎里**先定义为数据**（无触发源时永不触发），随对应子系统交付接线——引擎不需要为它们改代码。
 
+> **2026-09-16 记一笔（不改上表）。** 点表从 26 行变 **27 行**：多的一行是 `SystemPrompt`
+> （`payload #{}`、`matches nil`、`:gate? true`、`:on-error :block`，并带一格 `:stdout :content`），
+> 时机是「一次 run 的 system 消息正在被组装、模型看到它之前」。它**不是 P3 的新子系统**，而是既有装配
+> 路径上补的一个真实触发点——原来「system prompt 是谁拼的」根本没有点，`prompt.md` 是一份冻结文件。
+> 与其它门禁点的唯一差别写在那一格里：stdout **是内容**（匹配的声明全部跑、全部追加），退出 2 表示
+> 这次 run 不开始。见 `.scratch/system-prompt-blocks/` 与 `docs/architecture/hooks.md`。
+> 上表是**当时**的清单，不改写；今天的点表以 `harness.hooks/points` 为准。读上表时把「26 个」读作
+> **27 行**、把 P2 那十四行读作 **15 行**：`SystemPrompt` 加在 `Notification` 与 `InstructionsLoaded`
+> 之间，它**有触发源**，所以连同上面的标题「（26 个全覆盖）」在内，凡按今天读的地方都要 +1。
+
 ### jsonl 恢复流程（决策）
 
 恢复 = 重建 + 交还，不是接管：`rebuild` 端点返回重建的完整消息列表 → UI 把它当作客户端持有的历史 →
