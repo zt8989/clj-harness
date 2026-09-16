@@ -7,7 +7,7 @@
 // follows, made visible here.
 //
 // THE KEY NEVER ARRIVES. Not its value, not its length, not a prefix: the
-// server subtracts it (see harness.providers/unsecret) and reports presence and
+// server subtracts it (see harness.cap.providers/unsecret) and reports presence and
 // origin instead, under `key`. A client therefore has nothing to redact, which
 // is the only arrangement in which "the UI does not leak the key" is a fact
 // rather than a promise about a rendering path.
@@ -35,7 +35,7 @@ export type HomeFile = {
 
 export type HomeSummary = {
   path: string;
-  /// Which of harness.home's three rules produced the path. A home the
+  /// Which of harness.infra.home's three rules produced the path. A home the
   /// environment moved and a home nobody moved are debugged in different
   /// places, so the panel may not leave this to be guessed from the string.
   origin: "environment" | "override" | "default";

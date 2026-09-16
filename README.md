@@ -32,7 +32,7 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 ├── harness.edn       用户级 harness 配置（可选；编辑模式、围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
 ├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
+├── harness.infra.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
 
@@ -40,7 +40,7 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 它们在 **OS 家目录**下，**不跟随 `CLJ_HARNESS_HOME`**：搬家搬的是 harness 的配置，不是这台机器的家目录。
 把配置家目录挪到别处不该让另一批技能凭空消失（见「技能与指令」）。
 
-**库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记，以及按
+**库装状态，文件装记录。** `harness.infra.db` 里只有会被**改写**的东西：项目、会话归属、归档标记，以及按
 锚点编辑的行锚点（`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` 三张表，外加
 `hashline_undo` 存最近一次撤销）。**锚点不在某个目录里**，它与项目、会话共用同一个库、同一条迁移链。
 日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的时候现问文件。判别
@@ -73,7 +73,7 @@ Copy-Item .env.example ~/.clj-harness/.env
 是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
 
 **`prompt.md` 是唯一的例外**：它留在仓库里，不进家目录——那是被 review 的代码资产，每次改动都需要
-git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.llm/reset-prompt!)` 或重启。
+git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
 **缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
@@ -125,6 +125,13 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 **「只加载，不创作」也说清了两种加载**：模型调 `skill`，或人在输入框里打 `/name `。打错了不是失败——
 注入位换成一句点名说明（收到什么名字、能加载哪些）。**`disable-model-invocation: true` 的技能只有人能加载**：
 文件说这条不该由模型决定，所以清单里没有、工具也拒绝，而人打 `/name` 就是人在决定。
+
+**名字不必背**：输入框里打 `/`，弹出一张技能表——名字、它属于**哪一层**（`System` = 机器上的
+`~/.agents/skills`，`Project` = 绑定项目里那份）、一句描述；接着打就按名字与描述过滤。选中一行，
+输入框里就是 `/名字 `，后面照旧由人接着写（选中**不发送**）。两条与模型那份清单**故意不同**：
+`disable-model-invocation` 的技能**在**（人是决定者），**坏掉的技能也在**——带原因、但选不动，
+因为「一个静默消失的技能」与「一个从没装过的技能」从外面看没有区别。同名的那份按**前面的根赢**，
+所以默认顺序下机器上的那份赢，项目里同名的不会出现。
 
 两个键都写在 `harness.edn`（用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
 
@@ -217,7 +224,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 两种模式都是一等公民，各有完整用例；`edit` 的行为一个字没变，只是不再默认在场。`:editing` 是
 `harness.edn` 里**唯一逐键合成**的块（其余顶层键是整键替换），所以项目级只写 `{:auto-read false}`
 不会把用户级的 `:mode` 一起抹掉；全部七个键与它们的默认值都在 `harness.edn.example` 里。自省：
-`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+`(harness.cap.editing/editing-mode harness.kernel.tools/*thread-id*)`。
 
 两套各自是什么、为什么默认换了、锚点存在哪，见
 [`docs/architecture/kernel.md`](docs/architecture/kernel.md) 与
@@ -233,14 +240,14 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 | `glob` | 按**名字**找文件：一列能直接交给 `read` 的绝对路径，按路径排序 | 答案是 `rg` 两次列举的**交集**，因为 `rg --glob` 的优先级**高于** `.gitignore`——直接交给它，`**/*` 会把 `node_modules` 整棵树列出来。交集说的是「在**这个树里**按模式找」 |
 | `todo_write` | 记本会话的任务清单：一次送**完整**清单，空数组即清空 | 清单**进库**（`todos`，一行一个会话）：它每次被整份改写，而「能被改写的」正是这个库收状态、不收记录的那条判据。一条消息里只许写一次——两次整份替换之间不存在合并，所以那样的消息两条都**不落盘** |
 | `web_fetch` | 取一个 http(s) URL 的**正文**（`<script>`/`<style>` 丢掉、块级标签换行、实体解开） | 它是**有损的文本抽取器，不是渲染器**：JS 渲染的页面会如实回一句「没有可读正文」，而不是假装那一页是空的 |
-| `web_search` | 搜索并拿回标题 / URL / 摘要 | 三个厂商：**Brave**（`BRAVE_API_KEY`）、**Exa**（`EXA_API_KEY`）、**Tavily**（`TAVILY_API_KEY`）。键在配置家的 `.env` 或环境里找（与 provider 的键走**同一个** `harness.home/env-value`），**哪个有就用哪个，顺序就是上面这个**。全都没有就**指名拒绝**，别的功能一概不受影响 |
+| `web_search` | 搜索并拿回标题 / URL / 摘要 | 三个厂商：**Brave**（`BRAVE_API_KEY`）、**Exa**（`EXA_API_KEY`）、**Tavily**（`TAVILY_API_KEY`）。键在配置家的 `.env` 或环境里找（与 provider 的键走**同一个** `harness.infra.home/env-value`），**哪个有就用哪个，顺序就是上面这个**。全都没有就**指名拒绝**，别的功能一概不受影响 |
 
 **出网的两个都不带审批——这是决定，不是疏忽。** `bash` 今天就能 `curl` 任何地址且不带审批，
 所以给它们挂个 park 是**装样子**：「关闭不是禁止」这句在这里同样成立，一个看起来像护栏、
 一步就能绕过去的东西比没有护栏更坏。要这道坎的会话自己装规则：
 
 ```clojure
-(harness.tools/session-require-approval! harness.tools/*thread-id* "web_fetch")
+(harness.kernel.tools/session-require-approval! harness.kernel.tools/*thread-id* "web_fetch")
 ```
 
 ## 启动
@@ -249,7 +256,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ```pwsh
 clojure -M:run          # 项目根
-# 或 clojure -A:test -M -m harness.http
+# 或 clojure -A:test -M -m harness.edge.http
 # 期望：harness listening on http://localhost:8080 -- POST an AG-UI RunAgentInput here; stop with (stop!)
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```

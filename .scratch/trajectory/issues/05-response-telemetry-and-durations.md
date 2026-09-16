@@ -1,0 +1,47 @@
+# 05 — 响应侧：用量、结束原因，与每段的耗时
+
+**What to build:** 每次模型调用回来时说的事实（token 用量、结束原因、vendor 回声的 model）不再丢掉；
+两条 `model/*` 标记与既有的 `tools/*` 行一起，把每一段的时长算出来，并在条上显示。
+
+从用户视角：能回答「这一轮为什么慢、慢在哪一段、那一次调用烧了多少 token」——
+今天这些数在 provider 的响应里，解析器读到了，然后**丢了**。
+
+**Blocked by:** 04（本票的用量挂在它的 `model/end` 上，耗时是它那两条标记的差）
+
+**Status:** ready-for-agent
+
+## 验收
+
+- [ ] `harness.llm/consume-sse` 留住今天被丢掉的三样：`usage`、`finish_reason`、响应里的 `model`。
+      它**仍然是对行纯函数**（遥测来自同一批行，不碰网络），返回形状由本票定：
+      助手消息 + 一段遥测（`{:usage … :finish-reason … :model …}`）。
+- [ ] 断言用仓库里那份**真的录下来的响应**：`test/harness/fixtures/deepseek_sse.txt` 的末块里本来就有
+      `prompt_tokens 769 / completion_tokens 324 / total_tokens 1093 / reasoning_tokens 296` 与
+      `finish_reason "tool_calls"`。断言它们**读得回来**——今天这份 fixture 里的数字一个都没被读过。
+- [ ] `:model/end` 带 `{:usage … :finish-reason … :model …}`（字段**原样**，不重命名 vendor 的键：
+      记录照收到的样子）。读侧再折成 UI 用的四个（输入 / 输出 / 合计 / 推理），
+      **缺哪个就少哪个**——没报就是没报，填 0 是撒谎。
+- [ ] **流中途失败也要发 `:model/end`**（`try` / `finally`）：没有终点的那一段正是最该看见的一次调用，
+      卡在半路的模型调用不该在时间轴上变成一根无限长的条。
+- [ ] 假 provider 的脚本能写用量（一轮一个可选的 `usage`），否则本票与 06 只能起真机验。
+      不写用量的轮：读侧如实少那几个键（与「没报就是没报」同一条）。
+- [ ] 读侧给每一段补上时间，**不加新的时间戳字段**（决策 7，一切由行的 `:ts` 差出来）：
+      - 助手条：`startedAt` / `endedAt`（它那次调用的 `model/start` → `model/end`），
+        `call` 指向 `calls[]` 里的哪一次；
+      - `calls[]`：`startedAt` / `endedAt` / `usage` / `finishReason`；
+      - 工具条：`queuedAt`（`tools/pre-execute`）/ `startedAt`（`tools/execute`）/ `endedAt`
+        （`tools/post-execute`）。
+- [ ] **等人的时间不算执行时间**：被 park 的工具，等待落在 `queuedAt` → `startedAt` 之间，
+      执行时长是 `startedAt` → `endedAt`。一次等了三分钟的审批不该长得像一次跑了三分钟的工具。
+- [ ] **被否决的调用没有 `startedAt`**（它从没执行过，`executed` 是 false）：执行时长是**空**，不是 0；
+      UI 上也别画成 0s。
+- [ ] **并发的工具会重叠**：读侧如实给出各自的段，不替它们排成首尾相接（画法在 06）。
+- [ ] UI：`工具` 行显示执行时长，助手行显示那次调用的耗时与用量（形如 `1.2s · 1093 tok`），
+      量级用既有的时长格式化（仓库里已有一个，**提到公共处复用，不复制第二份**）。
+      没有用量的调用不显示 token 部分——空着，别写 0。
+- [ ] 老日志（没有 `model/*` 行）里工具段照旧能算出时长（`tools/*` 那三条本来就在），
+      模型段如实缺失——**不拿两次工具之间的间隔冒充模型耗时**。
+- [ ] 测试：折法的手搓记录里加一段「模型调用 + 并发两个工具 + 一个被否决」，
+      断言 4 个段的起止与重叠关系；`consume-sse` 对 fixture 的用量断言；假 provider 一轮带用量能折出来。
+- [ ] `clojure -M:test -m harness.test-runner` 与 `cd ui && npm test` 全绿
+      （基线以落地当次为准，报数带上分支与提交）。

@@ -161,7 +161,7 @@ export function App() {
   // NO REBUILD, and that is the point rather than an omission: there is no
   // conversation under a brand-new id, so asking the server to rebuild one would
   // be asking it to find a file that is not there (a 404), and inventing an empty
-  // conversation on the SERVER is exactly what `harness.replay/locate` refuses to
+  // conversation on the SERVER is exactly what `harness.edge.replay/locate` refuses to
   // do. The client knows this thread is empty -- it just made the id up -- so the
   // empty conversation belongs here.
   const onSwitchToNewThread = useCallback(async () => {

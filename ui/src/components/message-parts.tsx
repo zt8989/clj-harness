@@ -189,7 +189,7 @@ const CALL_STATES: Record<CallState, { label: string; icon: ElementType }> = {
 /// different things -- a call the human stopped ("cancelled") and a call that
 /// broke. Note that in THIS repo a tool that fails does not fail the run: the
 /// harness hands the failure back to the model as ordinary result text (see
-/// `harness.tools`), so `failed` here means the call itself did not finish, not
+/// `harness.kernel.tools`), so `failed` here means the call itself did not finish, not
 /// that the tool did not like its input.
 function callState(
   status: ToolCallMessagePartStatus | undefined,
@@ -229,7 +229,7 @@ function formatDuration(ms: number): string {
 /// the row now (see `ToolCallTrigger`), and the two questions no longer share a
 /// slot.
 ///
-/// Keys are tool NAMES, exactly as `harness.tools` registers them: `CONTEXT.md`
+/// Keys are tool NAMES, exactly as `harness.kernel.tools` registers them: `CONTEXT.md`
 /// says the names are not to be aliased, and this table is one more reason not
 /// to -- a renamed tool loses its icon silently.
 const TOOL_ICONS: Record<string, ElementType> = {

@@ -363,3 +363,28 @@ Brave（默认首选，`BRAVE_API_KEY`）、Exa（`EXA_API_KEY`）、Tavily（`T
 
 `web_search` 那一步仍然用本机假厂商（8123，Brave 形状），端点靠 `alter-var-root` 指过去；
 这次键是真的放进配置家 `.env` 的 `BRAVE_API_KEY`（三厂商之后，**这就是选它的办法**）。
+
+### 合并进 main：本特征的文件按层重新落位（2026-09-16）
+
+落地的分支基于 `3ac23d8`，而 main 在那之后落了 `layer-layout`（`src/harness/` 分四层）
+与 `skill-picker`。合并时本特征**没有改行为，只改了住址**——因为层律
+（`harness.layers-test`：每个命名空间在四层之一、不许 require 自己上面的层、路径必须与名字一致）
+不接受一个平铺的 `src/harness/web.clj`：
+
+| 本特征原来写的 | 合并后的家 | 为什么 |
+|---|---|---|
+| `harness.rg` | `harness.infra.rg` | 与 `infra.shell` 同类：**怎么**跑别人的程序，没有任何能力语义 |
+| `harness.glob` | `harness.cap.glob` | 一个能力（一个工具的实现） |
+| `harness.todos` | `harness.cap.todos` | 同上，落在 `infra.db` 的 `todos` 表上 |
+| `harness.web` | `harness.cap.web` | 出网是能力 |
+| `harness.web.search` | `harness.cap.web.search` | 同上，一行厂商线一个条目 |
+| `harness.tools` 里的四个注册与它们的说明 | `harness.cap.tools` | 内核那次拆分：**定义**在 `cap.tools`，**缝**在 `kernel.tools` |
+| `harness.tools` 里的回合计数与 `sole-call-of-its-name?` | `harness.kernel.tools` | 它是「一个回合」这个机制，不是任何一个工具的知识——正是核心里能留的那半 |
+
+两处**契约变了、本特征跟着改**的地方：
+
+- `:fence-paths true` 变成**声明的停车规则** `:park-reason (fence nil)`。`glob` 那行跟着改了，
+  它的用例也从「标记是 true」改成**真的调那条规则**：项目外面答 `:out-of-bounds`，
+  项目里面与没有 `path` 都答 nil（后者由缺参数检查报，一行之后）。
+- 内建工具**不再是 require 的副作用**：测试要在一个 `:once` fixture 里
+  `support/with-builtins` 把它们装上。本特征那四个新测试命名空间各自加了一行。

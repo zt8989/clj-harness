@@ -3,7 +3,7 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`052494a`（2026-09-16）。** 工作树里的在办改动不算现状，见文末「在办」。
+**快照：`0bc88d5`（2026-09-16）。** 工作树里的在办改动不算现状，见文末「在办」。
 
 ## 与另外两处文档的分工
 
@@ -26,32 +26,58 @@
 
 ## 模块地图
 
-后端（`src/harness/`，纯 Clojure，无 Java 依赖除 sqlite-jdbc）：
+后端 `src/harness/`（纯 Clojure，无 Java 依赖除 sqlite-jdbc）**分四层**，四层的规则、归属与接线方式见
+**[layers](architecture/layers.md)**。下面按层列出来，一张表看在眼里就是那四层。
+
+### `harness.infra` —— 基建：东西落在哪、错了写哪、进程怎么起来
 
 | 命名空间 | 是什么 |
 |---|---|
-| `event` | 内核的全部词汇：11 种事件 |
-| `loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
-| `llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system 消息开头（`prompt.md`）的冻结载体** |
-| `tools` | **工具表与唯一执行缝**：内建表（**哪些在表里取决于本会话的编辑模式**，见 `editing`）、会话 overlay（两轴）、待决审批、三相执行 |
-| `editing` + `hashline/*` | **文件编辑的两套实现与它们的开关**：`editing` 解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套；`hashline/{anchors,store,serve,reading,edit,replace,insert,undo,write,grep,files}` 是按锚点编辑的全部实现（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
-| `ag_ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
-| `http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入 |
-| `providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
-| `home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`）。也是**秘密的取用口**：`env-value`（名字 → 值，配置家的 `.env` 优先于环境）是 provider 的 `HARNESS_API_KEY` 与三个搜索键共用的那一个查找 |
-| `project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对） |
-| `skills` | **技能**：默认根、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`） |
-| `git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
-| `preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
-| `system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本，并注册内核自己那三条内建 hook（工具集合 / 工程目录 / provider 档）。**不并进 `preamble` 是 require 环**：`project` 已 require `preamble`，而这三条要 `tools` / `project` / `hooks.dispatch` |
-| `db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表、锚点的四张表，以及任务清单的 `todos` |
-| `rg` / `glob` | **按名字找文件**：`rg` 是「怎么跑 ripgrep」的唯一出处（二进制名、超时、`rg` 不在 PATH 上那句点名失败），`glob` 与 `anchor_grep` 共用它。`glob` 的答案是 rg 两次列举的**交集**（`--glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。**不属于任何编辑家族**，所以两种模式都服务它 |
-| `todos` | **本会话的任务清单**，落 `todos` 表：一行一个会话、清单整存整取（`todo_write` 整份替换）。判据是「能被整份改写的是状态」，`db_test` 的两条元断言为此作证 |
-| `web` / `web.search` | **出网**：`web` 是唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）；`web.search` 是**三家厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪、响应形状），厂商由**哪个键在**决定，顺序写在那一张表里。抽取器是纯函数，所以它不靠 socket 也能测 |
-| `frames` / `replay` | 日志的**读侧**：帧折叠回消息、重建对话 |
-| `hooks` / `hooks.dispatch` | **hook 引擎**：点表是数据；按声明 spawn 命令（或跑一个进程内的函数）、读退出码、超时、落审计行 |
-| `shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
-| `log` / `logging` | **后端自己的错误日志**（与 session jsonl 是两回事）：`log` 是一次调用同时写 stderr 与文件的门面，`logging` 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
+| `infra.home` | 配置根：决定每个文件落在哪。**两层 floor**：`root`（配置家目录，`CLJ_HARNESS_HOME` 可搬）与 `user-home`（OS 家目录，宿主约定文件住那儿，**不跟随** `CLJ_HARNESS_HOME`） |
+| `infra.db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
+| `infra.logging` | 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
+| `infra.log` | 一次调用同时写 stderr 与文件的门面（**后端自己的错误日志**，与 session jsonl 是两回事） |
+| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
+| `infra.rg` | **怎么跑 ripgrep**：二进制名、超时、以及「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句字符串——后者也是 `rg` 对**不存在的搜索根**说的话）。`cap.hashline.grep` 与 `cap.glob` 共用它，而 `--json` 的解析留在 `grep` 自己手里 |
+
+### `harness.kernel` —— 机制：只说得清「怎么做」
+
+| 命名空间 | 是什么 |
+|---|---|
+| `kernel.event` | 内核的全部词汇：11 种事件 |
+| `kernel.frames` | 帧折叠回消息：日志的**读侧**引擎 |
+| `kernel.loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
+| `kernel.llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system 消息开头（`prompt.md`）的冻结载体** |
+| `kernel.tools` | **唯一执行缝**：注册表、会话 overlay（两轴）、待决审批、三相执行、工具声明的词汇、**安装门**；外加两条装进来的策略（批的计划器、编辑模式的收窄）。**它不认识任何一个具体工具** |
+| `kernel.hooks` | **hook 引擎的数据半**：27 个点是数据、一条声明允许带什么、三个来源的档位与顺序 |
+| `kernel.hooks.dispatch` | **hook 引擎的执行半**：按声明 spawn 命令（或跑一个进程内的函数）、读退出码、超时、落审计行 |
+
+### `harness.cap` —— 能力：说得清「它会做什么」
+
+| 命名空间 | 是什么 |
+|---|---|
+| `cap.tools` | **十五个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
+| `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
+| `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
+| `cap.todos` | **本会话的任务清单**：校验、整份替换、渲染，落在 `infra.db` 的 `todos` 表（一行一个会话，清单整存整取）。判据是「能被整份改写的是状态」 |
+| `cap.web` | **出网**：唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、301/302/303 变 GET 而 307/308 保留方法与 body、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）。抽取器是纯函数，所以它不靠 socket 也能测 |
+| `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
+| `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
+| `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那三条行（工具集合 / 工程目录 / provider 档）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这三条要 `kernel.tools` / `cap.project` / `kernel.hooks.dispatch` |
+| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的技能注入） |
+| `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
+| `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
+| `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
+| `cap.git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
+
+### `harness.edge` —— 适配：把内核翻译成别人的协议
+
+| 命名空间 | 是什么 |
+|---|---|
+| `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
+| `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
+| `edge.replay` | 记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、
 `evals`（把某 thread 跑过的 `eval` 读出来，供人决定晋升）、`repl`（起服务后落进 REPL）、
@@ -59,9 +85,10 @@
 
 ## 章节
 
+0. **[layers](architecture/layers.md)** — **四层是什么**：判据、归属、允许的边、能力怎么装进核心
 1. **[overview](architecture/overview.md)** — 一次请求的完整路径，端到端；三条铁律；状态存在哪
 2. **[kernel](architecture/kernel.md)** — event / loop / llm / tools：一轮 run、执行缝的三个出口、悬置与它的 wire 形状
-3. **[edge](architecture/edge.md)** — `harness.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫
+3. **[edge](architecture/edge.md)** — `harness.edge.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫
 4. **[home-and-storage](architecture/home-and-storage.md)** — 配置根、配置文件、sqlite、日志树、重建
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏

@@ -25,7 +25,7 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 **编辑模式** —— 本会话被服务哪一套编辑实现，取值 `:hashline`（默认）或 `:str-replace`，写在
 `harness.edn` 的 `:editing {:mode …}`。它不是开关 API 而是配置；每次调用现读，改它不需要重启，
 而且**按会话解析**（两个项目各选一种，是日常情形）。自省入口是
-`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+`(harness.cap.editing/editing-mode harness.kernel.tools/*thread-id*)`。
 *别叫成* 编辑后端、edit mode（中文一律写"编辑模式"）。
 
 **工具表** —— 一个会话此刻被服务的工具集合（名字 + 描述 + 参数）。编辑模式是它的又一个输入：
@@ -67,13 +67,27 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 一律小写、多词用下划线（`undo_last_replace` 就是那个先例）：不写 `camelCase`、不写 `PascalCase`
 ——别人家的清单里写 `WebFetch`、`TodoWrite`，那是别人家的写法。
 
+## 技能
+
+**技能层** —— 技能根按来源分的一档。今天两档：**系统级**（`<OS 家目录>/.agents/skills`）与
+**项目级**（`<项目>/.agents/skills`）。同名时**前面的根赢**，所以默认顺序下**系统级赢项目级**——
+项目里放一份与机器上同名的技能，在清单与列表里都不出现。`harness.edn` 的 `:skills {:roots […]}`
+写的根**没有层**：配置表里没有「系统 / 项目」这回事，从列表位置猜一个层名就是把猜测写成事实，
+所以那种根只报出路径。
+*别叫成* 用户级、全局、global、scope、来源。
+
+**技能列表** —— 输入框里打 `/` 弹出的那份菜单。它列的是这场会话的技能：**能加载的**都在，
+包括 `disable-model-invocation: true` 的（文件说的是模型不该自己决定去用，人打 `/name` 就是人在决定）；
+**坏掉的也在**——带原因、但选不动。每行标明它的**技能层**，平铺成一张表，不分节。
+*别叫成* picker、命令面板、补全、下拉。
+
 ## 状态住在哪
 
-**库装状态、文件装记录。** `~/.clj-harness/harness.db`（sqlite）装"现在是什么"：项目、会话、
+**库装状态、文件装记录。** `~/.clj-harness/harness.infra.db`（sqlite）装"现在是什么"：项目、会话、
 **任务清单**（`todos` 一行一个会话），以及锚点
 （`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` / `hashline_undo` 四张表）。
 日志 jsonl 装"发生过什么"：每一帧、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
-是状态还是记录（守着这条边界的是 `harness.db-test` 的元断言）。
+是状态还是记录（守着这条边界的是 `harness.infra.db-test` 的元断言）。
 
 **任务清单** —— 本会话的待办，由 `todo_write` 写。一次调用送的是**完整清单**，不是增量：整份替换
 （空数组即清空），顺序本身就是信息。**正因为它每次被整份改写**，它是状态而不是记录，所以它进库
@@ -83,16 +97,17 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 
 **冻结的开头** —— `prompt.md` 是**一条 system 消息的开头**，不是整条消息。它装的是**承诺**：与任何
 会话都成立的话（身份、secrets 纪律、「其余自己读」），首调读入即冻结（provider 前缀缓存的前提），
-热改要 `(harness.llm/reset-prompt!)` 或重启。消息的其余部分是**本会话的事实**（工具集合、绑定的目录、
-provider 档），由 `harness.system-prompt/assemble` 在每次 run 现算——事实能在会话中途变，冻下来的那句
+热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。消息的其余部分是**本会话的事实**（工具集合、绑定的目录、
+provider 档），由 `harness.cap.system-prompt/assemble` 在每次 run 现算——事实能在会话中途变，冻下来的那句
 就会说一件已经不成立的事。它是**代码资产**：进 git、要人 review，是唯一一个不住在配置家里的配置文件。
 **因为冻结，它不按模式拼两套文本**——锚点语法归工具描述讲（工具描述是 per-thread 的，可以随模式变），
 prompt 只中立地点出自省入口。
 *别叫成* system prompt（那是整条消息，头只是它）、冻结的 prompt。
 
 **围栏**（fence）—— 绑定了项目的会话里，文件工具可以直接碰、不必 park 的那些目录：项目目录自己
-（除非 `:approval {:strict true}` 把它拿掉）、配置家、技能根、`:approval {:allow [..]}` 声明的路径。
-它**只有一个来源** `harness.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
+（除非 `:approval {:strict true}` 把它拿掉）、配置家、技能根（即「技能层」那两档所在的目录）、
+`:approval {:allow [..]}` 声明的路径。
+它**只有一个来源** `harness.cap.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
 `<project>` 块拿它对模型说规则——两处若是各写一份，模型就会以为某个路径自由而实际被拦。
 
 **park / 审批** —— 一次工具调用在跑之前被挂住等人决定，那个人的决定一次性取用。这是**能力**边界，

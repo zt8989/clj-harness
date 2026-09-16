@@ -102,7 +102,7 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
 （含 MCP 的）不改前端就能看见它的调用。
 
-**两张按工具名开的表就是「认得它」的全部**（都在 `message-parts.tsx`；键是 `harness.tools` 注册的那个
+**两张按工具名开的表就是「认得它」的全部**（都在 `message-parts.tsx`；键是 `harness.kernel.tools` 注册的那个
 名字，`CONTEXT.md` 说不许起别名——改了名，图标会**静默**丢回扳手）：
 
 | 表 | 答什么 | 认得的名字 |
@@ -120,26 +120,55 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 界面上只有一次普通的 `skill` 调用与它的返回。见
 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
 
+**这句话有一个例外，只有一行**：`/name` 那条**人的**加载路径现在有输入面了——技能列表（下一节）。
+注入本身照旧零帧；多出来的是「有哪些名字可选」这一屏，而它读的是服务端一条只读端点。
+两者不是一回事：一个是模型看到什么，一个是人挑什么。
+
+## 技能列表（输入框里打 `/` 弹出的那份菜单）
+
+打 `/` 弹出的那张表是**上游的触发面板**驱动的：`assistant-ui` 自带
+`ComposerPrimitive.Unstable_TriggerPopoverRoot` / `.Unstable_TriggerPopover` / `.Items` / `.Item`
+一套，本仓接的是「挂在哪、名字从哪来、哪些能选、一行画什么」。
+
+- **挂点仍是一个自建插入点，抄来的文件一行未改**：`composer-chrome.tsx` 的 `ComposerFrame` 本来就套在
+  composer 外面，而触发面板必须包住**输入框**（它给输入框发 combobox 的四个属性、并让面板在发送前吃掉
+  方向键与 Enter），所以 `TriggerPopoverRoot` 就挂在那一层。`thread.aui.tsx` 与
+  `elements/` 里那 12 份**一个字节没动**。
+- **三个默认值都换掉了**，因为它们是为另一种语义写的：`matcher`（上游默认「前面是空白就算触发」，
+  本仓只认**消息开头**的 `/`，与服务端的 `slash-pattern` 同形状）、`formatter`（`serialize` 成
+  `/名字`，上游补尾随空格并把光标放到空格后）、`search`（没有 categories 时上游那条回落路径会走空表，
+  所以过滤是这里的：名字与描述、大小写无关、顺序照服务端给的）。
+- **没有 categories，这是决定不是省事**：一张平铺的表、每行带自己的层徽标，不是「先选层再选技能」的两级。
+- **状态只有三样**：正在取（一行说明）、取不回来（`role="alert"`，把服务端那句话显示在面板里）、
+  什么都没有（**面板根本不出现**——把一个空盒子摆出来，比不摆更糟）。
+- 数据与措辞在 `src/lib/skills.ts`（层关键词 → 屏幕上的词、坏技能的原因关键词 → 一句话），
+  面板与行在 `composer-chrome.tsx`。
+
 ## 测试
 
 `cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval}.ts` 是被它 import 的普通模块：
+`test/suites/{frames,client,turn,approval,skills}.ts` 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
   或「丢了用例」变成**失败**而不是静默变绿。
-- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.http`，在 `--port 0`（OS 分配）上，
+- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.edge.http`，在 `--port 0`（OS 分配）上，
   provider 是 `harness.fake` 的脚本替身，日志写进临时 `CLJ_HARNESS_HOME`。
   所以跑多少次结果都一样，也不会写进真实的 `~/.clj-harness`。
 - **控制通道是文件不是端点**：服务端在遇到**新的 threadId** 时重读脚本文件。
   测试写这个文件就相当于说「模型下一句回什么」——**生产 HTTP 边因此一个测试专用路由都不长**。
 - 套件驱动真的 `@ag-ui/client`，所以它测的是协议与运行时的真实行为，不是替身。
+- **两个家目录都交到用例手上**（`configure` 的 `home` 与 `userHome`）。`userHome` 由 spawner 造好、
+  用 `--user-home` 交给后端，所以一个用例能往 OS 家目录里**播一份系统级技能**——
+  「机器上的技能是两层之一」这件事在界面上能验，靠的就是这一条缝。
+- **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
+  它**不**断菜单怎么画、哪个键选什么——那部分在真 Chromium 里量（下一段），因为套件**不 import `src/`**。
 
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
-（三段位、归档、移除、设置的哨兵搜索），不是自动化套件。
+（三段位、归档、移除、设置的哨兵搜索、**技能列表的弹层与键盘**），不是自动化套件。
 
 ## 一条从后端来的注意
 
-`harness.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
+`harness.edge.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
 **服务跑在另一个线程上**，`binding` 只改当前线程的动态栈，stub 会被静默忽略。
 凡是给「服务端在别的线程上调用」的缝注入替身，都得用 `alter-var-root`。

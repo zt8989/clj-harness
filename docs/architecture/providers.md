@@ -1,6 +1,6 @@
 # providers：厂商、model、三档解析
 
-`harness.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
+`harness.cap.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
 
 ## 目录的形状
 
@@ -57,7 +57,7 @@
 
 ## api-key
 
-- 密钥在**一个地方**解析（`harness.home/env-value`；私有的 `api-key` 现在只是它的一行调用），
+- 密钥在**一个地方**解析（`harness.infra.home/env-value`；私有的 `api-key` 现在只是它的一行调用），
   在**一个地方**挂上（`resolve-provider` 的返回）。**那个取用口有两个用户**：provider 的
   `HARNESS_API_KEY` 与 `web_search` 的三个厂商键（`BRAVE_API_KEY` / `EXA_API_KEY` /
   `TAVILY_API_KEY`）——「一个人放在仓库外面的秘密」

@@ -36,6 +36,12 @@ export interface Suite {
 export interface HarnessFacts {
   url: string;
   scriptPath: string;
+  /// The config root, where the server's session logs land.
+  home: string;
+  /// The OS home -- the host's convention directory (`~/.agents/skills`,
+  /// `~/AGENTS.md`). A case that wants a SYSTEM-LEVEL skill in the catalogue
+  /// writes one here, before the call that should see it.
+  userHome: string;
 }
 
 /// A parsed SSE frame, as the wire delivers it. Only the fields the suites read
@@ -68,6 +74,19 @@ function requireFacts(): HarnessFacts {
 
 export function url(): string {
   return facts?.url ?? "http://localhost:8080/";
+}
+
+/// The two homes the running harness was given. Read fresh on every call, like
+/// the server reads them: the server re-reads its convention files and skill
+/// roots on every run, so a case plants a file and the NEXT call is what proves
+/// it was read. Nothing is cached here -- a cached path would still be right, but
+/// a cached ANSWER is the bug this discipline exists to avoid.
+export function homeDir(): string {
+  return requireFacts().home;
+}
+
+export function userHomeDir(): string {
+  return requireFacts().userHome;
 }
 
 /// A fresh id per conversation. The harness holds NO session state, so an id is

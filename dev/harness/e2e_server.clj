@@ -42,9 +42,9 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [harness.fake :as fake]
-            [harness.home :as home]
-            [harness.http :as http]
-            [harness.providers :as providers]))
+            [harness.infra.home :as home]
+            [harness.edge.http :as http]
+            [harness.cap.providers :as providers]))
 
 (defn- turns-in [file]
   (let [f (io/file file)]
@@ -64,7 +64,7 @@
 
   So this patches `pinned-provider`, the seam `current-provider` consults first.
   Patching that one public fn covers every caller at once: the run path, and the
-  init-line suppression in harness.http, which then reads correctly -- a session
+  init-line suppression in harness.edge.http, which then reads correctly -- a session
   served by a script has no provider tier to record.
 
   The provider instance is keyed by thread id, so a new thread id starts a fresh
@@ -86,15 +86,28 @@
   (some (fn [[k v]] (when (= name k) v)) (partition 2 1 args)))
 
 (defn- isolate-os-home!
-  "Point the host's convention directory at a fresh temp dir for this process,
-  so a run's opening blocks come from a home this test made rather than the
-  developer's. Sibling, never nested: the configuration root's own isolation is
-  the spawner's (CLJ_HARNESS_HOME), and putting the user home inside it would
-  place it within the fence's allowed set, quietly answering a question the
-  fence tests ask."
-  []
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "clj-harness-e2e-home-" (System/nanoTime)))]
+  "Point the host's convention directory at PATH -- or at a fresh temp directory
+  of this process's own when PATH is nil, which is what a suite that has nothing
+  to plant wants.
+
+  THE PATH IS AN ARGUMENT BECAUSE A CALLER HAS TO PLANT THINGS THERE, and it has
+  to know where 'there' is BEFORE the server starts: ~/AGENTS.md and
+  ~/.agents/skills are read into every run's opening blocks, so a check that
+  wants a system-level skill in the catalogue -- or a standing instruction --
+  must write it first, into a directory it chose. A server that made up its own
+  private temp home and never said where it was left exactly that check
+  impossible, and 'the machine's skills are one of the two layers' was
+  consequently unmeasurable from the UI side.
+
+  SIBLING, NEVER NESTED is the caller's half of the bargain: the configuration
+  root's own isolation is the spawner's (CLJ_HARNESS_HOME), and putting the user
+  home inside it would place it within the fence's allowed set, quietly
+  answering a question the fence tests ask."
+  [path]
+  (let [dir (if path
+              (io/file path)
+              (io/file (System/getProperty "java.io.tmpdir")
+                       (str "clj-harness-e2e-home-" (System/nanoTime))))]
     (.mkdirs dir)
     (alter-var-root #'home/*user-home-override* (constantly (str dir)))
     (str dir)))
@@ -102,7 +115,7 @@
 (defn -main [& args]
   (let [script-file (or (arg args "--script-file")
                         (throw (ex-info "missing --script-file" {})))]
-    (isolate-os-home!)
+    (isolate-os-home! (arg args "--user-home"))
     (install-pin! script-file)
     (let [stop (http/start! {:port (Integer/parseInt (str (or (arg args "--port") "0")))})]
       (println (str "PRINT-READY {:port " (:local-port (meta stop)) "}"))

@@ -6,7 +6,7 @@
 浏览器 (ui/src/app.tsx)
   │  POST /  { threadId, runId, messages, context, resume? }        AG-UI RunAgentInput
   ▼
-harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+headers）
+harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 status+headers）
   │
   ├─ log!  "input"        收到的 RunAgentInput 原样
   │
@@ -51,12 +51,12 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
 
 1. **jsonl 只 append，内核 run 中永不读自己的日志。** 日志是**记录**，不是真相源，也不是输入。
    唯一的读取者是 run 外的显式管理动作（重建）与作者工具（`evals`）。
-   推论：写日志的地方只有边（`harness.http/log!`），而且是流式响应里同步写的——
+   推论：写日志的地方只有边（`harness.edge.http/log!`），而且是流式响应里同步写的——
    写不进去就发不出去，不存在「帧到了日志没到」。
 2. **system 消息只有一条，它的开头冻结，hook 追加其后。** `prompt.md` 首调读入即冻
-   （`harness.llm/prompt`），因为 provider 的前缀缓存（prefill）靠的是逐字节稳定的前缀；
+   （`harness.kernel.llm/prompt`），因为 provider 的前缀缓存（prefill）靠的是逐字节稳定的前缀；
    改它要显式 `(llm/reset-prompt!)` 或重启。**冻结的是开头**：一条 system 消息的其余部分由
-   `harness.system-prompt/assemble` 在每次 run 组装时补上——`SystemPrompt` 点上每一条声明
+   `harness.cap.system-prompt/assemble` 在每次 run 组装时补上——`SystemPrompt` 点上每一条声明
    （内建三条 + 文件里的 + 会话加的）追加自己的文本，按来源档位排。
    推论：**本会话的事实一律不进那个冻结文件**——工具集合、绑定的目录、生效的 provider 都是现算的，
    所以 `prompt.md` 里那句工具枚举会过时，而 `<tools>` 块不会。
@@ -68,7 +68,7 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
 
 ## 一个 run 有三个出口，不是一个
 
-模型发起的工具调用在**执行缝**（`harness.tools/run!`）里被判定为三种结局之一，次序写死：
+模型发起的工具调用在**执行缝**（`harness.kernel.tools/run!`）里被判定为三种结局之一，次序写死：
 
 - **放行**：跑。没有任何东西拦它。
 - **阻断**：不跑，理由作为**这次调用的工具结果**回喂模型，run 继续（否决、`PreToolUse` 退出 2、
@@ -86,8 +86,8 @@ harness.http/handle-run ──► as-channel，SSE 回包（首帧带 status+hea
 | 状态 | 在哪 | 为什么 |
 |---|---|---|
 | 会话消息 | **客户端**（+ jsonl 记录） | 铁律 3 |
-| 项目 / 会话归属 / 归档 | **sqlite**（`harness.db`） | 会被**改写**的状态 |
-| 行锚点、已展示集合、撤销记录 | **sqlite**（`harness.db`，四张 `hashline_*` 表） | 会被**改写**的状态；且会话长命，重启后日志里的锚点还得能用 |
+| 项目 / 会话归属 / 归档 | **sqlite**（`harness.infra.db`） | 会被**改写**的状态 |
+| 行锚点、已展示集合、撤销记录 | **sqlite**（`harness.infra.db`，四张 `hashline_*` 表） | 会被**改写**的状态；且会话长命，重启后日志里的锚点还得能用 |
 | 文件编辑模式（`harness.edn` 的 `:editing`） | **文件**（每次调用现读） | 手编、改了不重启；按会话解析，两种模式各有完整用例 |
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录 |
 | 配置 | **文件**（每轮现读） | 手编、改了不重启 |

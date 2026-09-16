@@ -1,4 +1,4 @@
-# 边：`harness.http`
+# 边：`harness.edge.http`
 
 一个 http-kit 服务器，两条边共用一个 handler：流式的 **AG-UI 边**（`POST /`）与
 普通的 JSON **管理边**（`/api/*`）。CORS 只放行 `http://localhost:5173`（那是契约，不是偏好）。
@@ -24,7 +24,7 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 ```
 
 **这个 binding 包住 set-up，不只是包住 run。** set-up 里有**两**件事都靠它才活着：折叠会话的指令文件
-（`InstructionsLoaded`），以及组装 system 文本（`SystemPrompt`——`harness.system-prompt/assemble`
+（`InstructionsLoaded`），以及组装 system 文本（`SystemPrompt`——`harness.cap.system-prompt/assemble`
 就在这里被调，它随后被交给 `ag_ui/inbound`）。两者都发生在第一条消息组装**之前**——binding 摆在
 set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点声明了却永不触发」在接线层面唯一的一次近失，
 记在 [hooks](hooks.md#27-个点全部是数据)。
@@ -38,7 +38,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 |---|---|---|---|
 | `/` | POST | AG-UI run（流式） | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
+| `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
+| `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model、可选的思考档 | 无（只读） |
+| `/api/skills` | GET | **技能列表**：本会话的根分组（每组带层与根路径），每行带名字、描述、能不能用与原因 | 无（只读） |
 | `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有与来源） | 无（只读） |
+| `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数 | 无（只读） |
+| `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传） | `git/branch` |
 | `/api/project` | GET | 绑定目录（未绑定答 `null`） | 无 |
 | `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`） | `project/bound` |
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
@@ -106,11 +111,11 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 ## 入站翻译：parts 与图片
 
 入站消息的 `content` 可以是字符串，也可以是 parts，而两个协议对 parts 的拼法不同。
-**翻译发生在 `harness.ag_ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
+**翻译发生在 `harness.edge.ag-ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
 到协议层才翻会让那条日志撒谎。
 
 它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在 system 消息之后、客户端消息之前。
-它收到的 system 文本也是**已经组装好的**（`harness.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
+它收到的 system 文本也是**已经组装好的**（`harness.cap.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
 它自己不读任何文件、不跑任何 hook（两样都是递进来的），所以这个命名空间仍是个转换器；空块时它返回
 **原向量本身**，而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
 见 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
