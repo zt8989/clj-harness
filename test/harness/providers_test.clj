@@ -10,6 +10,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.home :as home]
+            [harness.parked :as parked]
             [harness.providers :as providers]
             [harness.tools :as tools]))
 
@@ -694,7 +695,7 @@
                                             :arguments (json/write-str args)}}
                                 thread-id))
         {:keys [parked]} (call)
-        _ (tools/decide-approval! (:interrupt-id parked) :approved {})]
+        _ (parked/decide-approval! (:interrupt-id parked) :approved {})]
     (call)))
 
 (defn- veto!
@@ -705,7 +706,7 @@
                                             :arguments (json/write-str args)}}
                                 thread-id))
         {:keys [parked]} (call)]
-    (tools/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
+    (parked/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
     (call)))
 
 (deftest session-configure-parks-rather-than-writing

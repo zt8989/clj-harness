@@ -33,7 +33,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.home :as home]
+            [harness.hooks.dispatch :as hook]
             [harness.project :as project]
+            [harness.parked :as parked]
             [harness.shell :as shell])
   (:import [java.net URI]
            [java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
@@ -242,14 +244,58 @@
 ;; their own threads (harness.loop), so two requests can be in flight on one
 ;; connection and the answers may come back in either order.
 
+(def ^:private elicitation-method
+  "The MCP request a server sends when it wants the user to type something. The
+  one server->client request this client answers."
+  "elicitation/create")
+
+(defn- answer-for
+  "The human's decision, as the MCP response it becomes.
+
+  BOTH DIRECTIONS ARE THE PERSON'S, and that is why neither is a hook's to give:
+  a rule may answer an approval (that is a delegation), but 'fill in this form for
+  me' is not something a rule can do. The verdict comes from the same parked
+  record an approval uses -- resume's `resolved` carries the form's values,
+  `cancelled` carries which kind of no it was."
+  [decision]
+  (case (:verdict decision)
+    :approved {:action "accept" :content (or (:payload decision) {})}
+    :vetoed   (let [p (:payload decision)]
+                (case (get p :action)
+                  "cancel" {:action "cancel"}
+                  {:action "decline"}))))
+
 (def ^:private not-implemented
   "The JSON-RPC code for a method this client does not have."
   -32601)
 
+(defn- deliver-suspension!
+  "Make the call that is holding this connection park, by handing the question to
+  whoever is waiting on its `tools/call`.
+
+  The reader thread cannot suspend anything itself -- suspending means unwinding
+  out of a tool body -- so this is the hand-off: the waiting thread is the one with
+  something to unwind. Oldest first when a server has several calls in flight: MCP
+  attaches no correlation to an elicitation, so the choice has to be made here
+  rather than read off the message, and the oldest has waited longest.
+
+  False when there is no call to suspend -- which is the server asking outside any
+  tool call, a case this client cannot put to a person."
+  [in-flight pending question]
+  (let [[id _] (->> @in-flight
+                    (filter (fn [[_ v]] (= "tools/call" (:method v))))
+                    (sort-by key)
+                    first)]
+    (if (nil? id)
+      false
+      (do (swap! in-flight dissoc id)
+          (when-let [p (get @pending id)] (deliver p {:mcp-suspend question}))
+          true))))
+
 (defn- stdio-client
-  "A connection to the server COMMAND runs in DIR. Throws when the process cannot
-  be started at all; everything after that is this connection's business and comes
-  back as a NAMED failure from the request that hit it.
+  "A connection to the server SERVER runs as COMMAND in DIR. Throws when the
+  process cannot be started at all; everything after that is this connection's
+  business and comes back as a NAMED failure from the request that hit it.
 
   A CONNECTION IS A CACHE, NOT A FACT. It knows when it has stopped being usable
   (`:why-dead`), and a caller that finds it dead DROPS it and starts another --
@@ -258,10 +304,19 @@
   conversation cannot be repaired: the messages after the broken one would be
   answers to questions nobody asked.
 
+  IT ALSO ANSWERS THE SERVER'S QUESTIONS. A server may ask the user for input
+  mid-call (`elicitation/create`), the one server->client request this client
+  implements. The answer is a PERSON's, so the call parks and the reply is sent on
+  a later run; see `on-elicit`.
+
   Returns {:request! :notify! :close! :stderr :alive? :why-dead :drop!}."
-  [{:keys [command dir env timeout-ms]}]
+  [{:keys [server command dir env timeout-ms]}]
   (let [handle (shell/start {:command command :dir dir :env env})
         pending (atom {})
+        ;; id -> {:method .. :ctx ..}, for the requests a server's QUESTION has to
+        ;; be attached to. MCP gives an elicitation no correlation id, so the only
+        ;; thing to go on is which call is in flight when it arrives.
+        in-flight (atom {})
         next-id (atom 0)
         dead (atom nil)
         die! (fn [why]
@@ -274,6 +329,59 @@
                 (die! why)
                 ((:close! handle)))
         write-line! (:write-line! handle)
+        ;; THE SERVER ASKS, AND SOMEBODY HAS TO ANSWER. Two cases, and the
+        ;; difference is whether a person has already spoken:
+        ;;
+        ;;   - the call this question belongs to has a decided parked record, so
+        ;;     this is the resume run re-issuing the call: answer the server and
+        ;;     let the call finish;
+        ;;   - there is no decision yet, so the call parks.
+        on-elicit
+        (fn [id msg]
+          (let [params (:params msg)
+                question {:server server
+                          :prompt (:message params)
+                          :schema (:requestedSchema params)
+                          ;; THE SERVER IS HOLDING A REQUEST OPEN, so this question
+                          ;; has a deadline. Past it the server has stopped asking,
+                          ;; and an answer then would be an answer to nobody.
+                          :expires-at (+ (System/currentTimeMillis) timeout-ms)}
+                ctx (->> @in-flight
+                         (filter (fn [[_ v]] (= "tools/call" (:method v))))
+                         (sort-by key)
+                         (map (comp :ctx val))
+                         first)
+                rec (when-let [{:keys [thread-id tool-call-id]} ctx]
+                      (when-let [r (parked/parked-for-call thread-id tool-call-id)]
+                        (when (= :elicitation (:reason r)) r)))
+                decision (when rec (parked/take-decision! (:interrupt-id rec)))]
+            (hook/emit :elicitation {:server server :request question})
+            (cond
+              ;; The person came back too late. NOTHING goes to the server -- a
+              ;; made-up answer is a lie written into a protocol -- and the
+              ;; connection goes, because a request nobody will ever answer is
+              ;; exactly what 02 says to abandon.
+              (and decision rec (> (System/currentTimeMillis) (:expires-at rec)))
+              (do (drop! (str "the question expired unanswered after " timeout-ms "ms"))
+                  (fail (str "the question from " server " expired unanswered after "
+                             timeout-ms "ms")
+                        {:reason :elicitation-expired :server server}))
+
+              decision
+              (let [answer (answer-for decision)]
+                (hook/emit :elicitation-result {:server server :response answer})
+                (write-line! (json/write-str {:jsonrpc "2.0" :id id :result answer})))
+
+              ;; Nobody has answered yet: park the call.
+              (deliver-suspension! in-flight pending question) nil
+
+              ;; A question with no call behind it: the server is asking outside
+              ;; any tool call, which this client has no way to put to a person.
+              :else
+              (write-line! (json/write-str
+                            {:jsonrpc "2.0" :id id
+                             :error {:code not-implemented
+                                     :message "no tool call is in flight to ask about"}})))))
         ;; One line from the server, routed. Lines are newline-delimited JSON-RPC
         ;; (the stdio framing), so a line that is NOT JSON is the server's own
         ;; protocol error, named as one rather than skipped: a server printing a
@@ -293,17 +401,20 @@
                   (and (some? id) (or (contains? msg :result) (some? (:error msg))))
                   (when-let [p (get @pending id)] (deliver p msg))
 
-                  ;; A server -> client REQUEST. Nothing in this ticket answers
-                  ;; one, so it is refused in the protocol's own vocabulary rather
-                  ;; than dropped: a server left waiting on an answer it will never
-                  ;; get is a hang, and a hang is worse than a refusal.
-                  ;; (Elicitation becomes a real answer in its own ticket.)
+                  ;; A server -> client REQUEST.
                   (and (some? id) (some? (:method msg)))
-                  (write-line! (json/write-str
-                                {:jsonrpc "2.0" :id id
-                                 :error {:code not-implemented
-                                         :message (str "this client does not implement "
-                                                       (:method msg))}}))
+                  (if (= elicitation-method (:method msg))
+                    (on-elicit id msg)
+                    ;; Anything else: refused in the protocol's own vocabulary
+                    ;; rather than dropped. A server left waiting on an answer it
+                    ;; will never get is a hang, and a hang is worse than a
+                    ;; refusal -- and guessing at a method this client does not
+                    ;; have would be worse than both.
+                    (write-line! (json/write-str
+                                  {:jsonrpc "2.0" :id id
+                                   :error {:code not-implemented
+                                           :message (str "this client does not implement "
+                                                         (:method msg))}})))
 
                   ;; A notification. Nothing here is waiting on it.
                   :else nil)))))
@@ -333,49 +444,61 @@
               (catch Throwable t
                 (die! (str "reading from the server failed: " (ex-message t))))))
         request!
-        (fn [method params]
+        ;; VARIADIC rather than two arities, because a `let` binding cannot refer
+        ;; to itself and the one-argument form would have to.
+        (fn [method params & [ctx]]
           (when-let [why @dead]
-            (fail (str "the server is not usable: " why) {:reason :dead :why why}))
-          (let [id (swap! next-id inc)
-                p  (promise)]
-            (swap! pending assoc id p)
-            ;; AND CHECK AGAIN, because the check above and this registration are
-            ;; not one step: a server that dies in between -- the common case for
-            ;; a command that does not exist, which exits before anyone speaks to
-            ;; it -- would leave this promise nobody will ever deliver, and the
-            ;; caller would sit here until its timeout. A dead connection has to
-            ;; cost a named failure, not a wait.
-            (when-let [why @dead]
-              (deliver p {:mcp-dead why}))
-            (when-not (write-line! (json/write-str
-                                    (cond-> {:jsonrpc "2.0" :id id :method method}
-                                      (some? params) (assoc :params params))))
-              (swap! pending dissoc id)
-              (fail (str "could not write to the server (" (str/trim ((:stderr handle))) ")")
-                    {:reason :write-failed}))
-            (let [answer (deref p timeout-ms ::timeout)]
-              (swap! pending dissoc id)
-              (cond
-                (= ::timeout answer)
-                ;; AND THE CONNECTION GOES WITH IT. A request still in flight is
-                ;; not waiting politely: it will answer eventually, and every
-                ;; message after it would then be off by one -- a response read as
-                ;; the next request's. Killing the conversation is the only way the
-                ;; next call can be sure what it is reading.
-                (do (drop! (str "no answer to " method " within " timeout-ms "ms"))
-                    (fail (str "the server did not answer " method " within " timeout-ms "ms")
-                          {:reason :timeout :method method :timeout-ms timeout-ms}))
+             (fail (str "the server is not usable: " why) {:reason :dead :why why}))
+           (let [id (swap! next-id inc)
+                 p  (promise)]
+             (swap! pending assoc id p)
+             (when ctx (swap! in-flight assoc id {:method method :ctx ctx}))
+             ;; AND CHECK AGAIN, because the check above and this registration are
+             ;; not one step: a server that dies in between -- the common case for
+             ;; a command that does not exist, which exits before anyone speaks to
+             ;; it -- would leave this promise nobody will ever deliver, and the
+             ;; caller would sit here until its timeout. A dead connection has to
+             ;; cost a named failure, not a wait.
+             (when-let [why @dead]
+               (deliver p {:mcp-dead why}))
+             (when-not (write-line! (json/write-str
+                                     (cond-> {:jsonrpc "2.0" :id id :method method}
+                                       (some? params) (assoc :params params))))
+               (swap! pending dissoc id)
+               (fail (str "could not write to the server (" (str/trim ((:stderr handle))) ")")
+                     {:reason :write-failed}))
+             (let [answer (deref p timeout-ms ::timeout)]
+               (swap! pending dissoc id)
+               (swap! in-flight dissoc id)
+               (cond
+                 ;; THE SERVER ASKED SOMETHING AND NOBODY HAS ANSWERED YET. The
+                 ;; reader thread put this here instead of blocking on it (it must
+                 ;; keep reading), so the suspension happens on THIS thread -- the
+                 ;; one inside the tool body, where unwinding out of the call
+                 ;; means something. It throws, and the seam catches it.
+                 (:mcp-suspend answer)
+                 (parked/suspend! (:thread-id ctx) (:tool-call-id ctx) (:mcp-suspend answer))
 
-                (:mcp-dead answer)
-                (fail (str "the server stopped answering: " (:mcp-dead answer))
-                      {:reason :dead :why (:mcp-dead answer)})
+                 (= ::timeout answer)
+                 ;; AND THE CONNECTION GOES WITH IT. A request still in flight is
+                 ;; not waiting politely: it will answer eventually, and every
+                 ;; message after it would then be off by one -- a response read
+                 ;; as the next request's. Killing the conversation is the only
+                 ;; way the next call can be sure what it is reading.
+                 (do (drop! (str "no answer to " method " within " timeout-ms "ms"))
+                     (fail (str "the server did not answer " method " within " timeout-ms "ms")
+                           {:reason :timeout :method method :timeout-ms timeout-ms}))
 
-                (map? (:error answer))
-                (fail (str "the server refused " method ": "
-                           (or (:message (:error answer)) (pr-str (:error answer))))
-                      {:reason :rpc :method method :error (:error answer)})
+                 (:mcp-dead answer)
+                 (fail (str "the server stopped answering: " (:mcp-dead answer))
+                       {:reason :dead :why (:mcp-dead answer)})
 
-                :else (:result answer)))))]
+                 (map? (:error answer))
+                 (fail (str "the server refused " method ": "
+                            (or (:message (:error answer)) (pr-str (:error answer))))
+                       {:reason :rpc :method method :error (:error answer)})
+
+                 :else (:result answer)))))]
     {:request! request!
      :notify!  (fn [method params]
                  (write-line! (json/write-str
@@ -383,9 +506,9 @@
                                  (some? params) (assoc :params params)))))
      ;; EACH OF THESE CALLS THROUGH TO THE HANDLE, with the double parens that
      ;; make it a call. `#(:close! handle)` would be a fn that RETURNS the
-     ;; handle's fn -- a bug that reads as 'the process is never killed' and
-     ;; hides in plain sight, because every one of these is only ever used by
-     ;; writing `(client :close!)` and expecting something to have happened.
+     ;; handle's fn -- a bug that reads as 'the process is never killed' and hides
+     ;; in plain sight, because every one of these is only ever used by writing
+     ;; `(client :close!)` and expecting something to have happened.
      :stderr   (fn [] ((:stderr handle)))
      :alive?   (fn [] ((:alive? handle)))
      :why-dead (fn [] @dead)
@@ -532,7 +655,15 @@
                  (.connectTimeout (java.time.Duration/ofMillis (long timeout-ms)))
                  (.build))
         exchange (fn [msg] (http-post http url timeout-ms session msg))
-        request! (fn [method params]
+        ;; THE SAME ARITY as the stdio client's, so the bridge above does not have
+        ;; to know which transport it is talking to. The context is unused here:
+        ;; MCP over HTTP cannot ASK a question this client can answer yet (a
+        ;; server request would arrive on the response stream, and this client
+        ;; reads one stream for one answer -- see the ticket's note), so an
+        ;; elicitation over HTTP ends as that request's named timeout rather than
+        ;; as a park. Kept in the signature so the two clients stay
+        ;; interchangeable, which is the property the whole ticket is about.
+        request! (fn [method params & [_ctx]]
                    (when-let [why @dead]
                      (fail (str "the server is not usable: " why) {:reason :dead :why why}))
                    (let [id (swap! next-id* inc)
@@ -594,7 +725,7 @@
   that says only 'it did not answer' leaves the reader with nothing to act on --
   raise the timeout, or stop using that server -- and those are different
   decisions."
-  [server client timeout-ms {:keys [name description inputSchema]}]
+  [server thread-id client timeout-ms {:keys [name description inputSchema]}]
   (let [full (str "mcp__" server "__" name)]
     (if-not (re-matches bridged-name-re full)
       {:skipped full
@@ -611,8 +742,16 @@
              :source :mcp
              :run (fn [args]
                     (let [result (try
+                                   ;; THE CONTEXT is what a server's question
+                                   ;; needs to find this call: MCP's
+                                   ;; elicitation carries no correlation, so the
+                                   ;; caller supplies the identity of the call it
+                                   ;; is inside, and the client hands it back when
+                                   ;; the question arrives.
                                    ((:request! client) "tools/call"
-                                                       {:name name :arguments (or args {})})
+                                                       {:name name :arguments (or args {})}
+                                                       {:thread-id thread-id
+                                                        :tool-call-id parked/*tool-call-id*})
                                    (catch Exception e
                                      ;; Every failure of a server call is answered
                                      ;; in the server's and the tool's name, with
@@ -646,10 +785,11 @@
   refused a declaration with both or neither, so this is a total dispatch rather
   than a guess -- and it is the only place that knows the difference, which is why
   nothing above it can accidentally spawn a URL or fetch a command."
-  [decl dir]
+  [server decl dir]
   (if-let [url (:url decl)]
     (http-client {:url url :timeout-ms (:timeout decl default-timeout-ms)})
-    (stdio-client {:command (stdio-command decl)
+    (stdio-client {:server server
+                   :command (stdio-command decl)
                    :dir dir
                    :env (:env decl)
                    :timeout-ms (:timeout decl default-timeout-ms)})))
@@ -659,8 +799,8 @@
   to be usable happens here, so a caller gets either a usable connection or an
   exception naming what went wrong -- and the two transports are indistinguishable
   from this point on."
-  [server decl dir]
-  (let [client (open-connection decl dir)
+  [server decl dir thread-id]
+  (let [client (open-connection server decl dir)
         where  (or (:url decl) (:command decl))]
     (try
       ((:request! client) "initialize"
@@ -669,7 +809,8 @@
         :clientInfo {:name "clj-harness" :version "1"}})
       ((:notify! client) "notifications/initialized" nil)
       (let [listed  ((:request! client) "tools/list" {})
-            bridged (mapv #(bridge server client (:timeout decl default-timeout-ms) %)
+            bridged (mapv #(bridge server thread-id client
+                                   (:timeout decl default-timeout-ms) %)
                           (:tools listed))]
         {:decl    decl
          :client  client
@@ -716,14 +857,14 @@
   connection's death is carried into the new one's report (`:restarted-after`), so
   the audit trail shows the two facts together instead of a server that silently
   came back."
-  [identity dir server decl]
+  [identity dir server decl thread-id]
   (let [key [identity server]
         old (get @connections key)]
     (if (usable? old decl)
       old
       (let [why (when old ((:why-dead (:client old))))]
         (forget! key)
-        (let [conn (connect! server decl dir)]
+        (let [conn (connect! server decl dir thread-id)]
           (swap! connections assoc key (cond-> conn
                                          why (assoc :restarted-after why)))
           conn)))))
@@ -789,7 +930,7 @@
     (into {}
           (mapcat (fn [[server decl]]
                     (try
-                      (let [conn (server-connection identity identity server decl)]
+                      (let [conn (server-connection identity identity server decl thread-id)]
                         (note-outcome! identity server decl
                                        {:status :connected
                                         :tools (:tools conn)

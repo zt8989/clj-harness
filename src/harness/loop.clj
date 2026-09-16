@@ -6,6 +6,7 @@
             [harness.event :as ev]
             [harness.hooks.dispatch :as hook]
             [harness.llm :as llm]
+            [harness.parked :as parked]
             [harness.project :as project]
             [harness.skills :as skills]
             [harness.tools :as tools]))
@@ -28,10 +29,10 @@
   [decisions thread-id emit history]
   (vec
    (keep (fn [{:keys [interrupt-id verdict payload]}]
-           (let [rec (tools/parked interrupt-id)]
+           (let [rec (parked/parked interrupt-id)]
              (when-not rec
                (throw (ex-info (str "unknown interrupt: " interrupt-id) {})))
-             (tools/decide-approval! interrupt-id verdict payload)
+             (parked/decide-approval! interrupt-id verdict payload)
              (let [call-id (:tool-call-id rec)
                    {:keys [content error parked]}
                    (tools/run! {:id call-id
@@ -159,8 +160,17 @@
           (hook/emit :stop {}))
         (emit (if (seq parked)
                 (ev/run-interrupt
-                 (mapv (fn [{:keys [interrupt-id id name args]}]
-                         {:id interrupt-id :tool-call-id id :name name :args args})
+                 (mapv (fn [{:keys [interrupt-id id name args reason question]}]
+                         ;; :reason and :question ride along because there is more
+                         ;; than one way to park now -- a human deciding, and a
+                         ;; server asking a question -- and the client has to tell
+                         ;; them apart to draw the right card, with the question on
+                         ;; it. Still facts only; what reaches the WIRE is
+                         ;; harness.ag-ui's business, and it stays a strict
+                         ;; interrupt object.
+                         (cond-> {:id interrupt-id :tool-call-id id :name name :args args}
+                           reason   (assoc :reason reason)
+                           question (assoc :question question)))
                        parked))
                 (ev/run-end))))
       (catch Throwable t

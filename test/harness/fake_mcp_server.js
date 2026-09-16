@@ -20,6 +20,10 @@
 //   fail   answers with isError: true           -- a refused call is a tool ERROR
 //   hang   never answers                        -- a request must time out
 //   exit   dies without answering               -- the server going away mid-call
+//   ask    asks the USER something first        -- elicitation, the whole point of
+//          (its arguments carry the message and the requested schema, and the
+//           answer it gets back is what this tool returns, so a test can read
+//           exactly what the client sent)
 //   <long> a name long enough to overflow a provider's function.name limit
 //
 // Environment knobs, so one file covers the failure modes too:
@@ -88,6 +92,17 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "ask",
+    description: "Ask the user something, then answer with what they said.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        schema: { type: "object" },
+      },
+    },
+  },
+  {
     name: LONG_NAME,
     description: "A name too long to bridge.",
     inputSchema: { type: "object", properties: {} },
@@ -127,6 +142,26 @@ function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
 
+// ONE QUESTION AT A TIME, and the tools/call it belongs to is remembered. MCP
+// gives an elicitation no correlation id, so a real server correlates the same
+// way this does: it is holding exactly one call open while it asks.
+let nextElicitationId = 9000;
+const waiting = [];
+
+function elicit(args) {
+  const id = nextElicitationId++;
+  send({
+    jsonrpc: "2.0",
+    id,
+    method: "elicitation/create",
+    params: {
+      message: String(args.message || "What?"),
+      requestedSchema: args.schema || { type: "object", properties: {} },
+    },
+  });
+  return id;
+}
+
 function text(s) {
   return { content: [{ type: "text", text: s }] };
 }
@@ -141,6 +176,9 @@ function call(name, args) {
       return { content: [{ type: "text", text: "the fake server refused" }], isError: true };
     case "hang":
       return null; // never answers
+    case "ask":
+      // Answers LATER, when the user's answer comes back -- see the handler.
+      return { elicit: elicit(args) };
     case "exit":
       // Goes away mid-call: no answer, no goodbye. This is what a server that
       // crashed looks like from the client's side.
@@ -152,9 +190,30 @@ function call(name, args) {
 }
 
 function handle(msg) {
-  const { id, method, params } = msg;
+  const { id, method, params, result } = msg;
   // A notification: no id, and nothing to answer.
   if (id === undefined || id === null) return;
+
+  // THE ANSWER TO A QUESTION WE ASKED: finish the call that was waiting on it,
+  // and answer THAT with what the user said -- so the client's tool result is a
+  // faithful copy of what it sent us, which is how a test reads it back.
+  if (method === undefined && result !== undefined) {
+    const at = waiting.findIndex((w) => w.elicitId === id);
+    if (at !== -1) {
+      const [w] = waiting.splice(at, 1);
+      send({
+        jsonrpc: "2.0",
+        id: w.callId,
+        result: {
+          content: [
+            { type: "text", text: JSON.stringify({ action: result.action, content: result.content || null }) },
+          ],
+          isError: result.action !== "accept",
+        },
+      });
+    }
+    return;
+  }
 
   switch (method) {
     case "initialize":
@@ -173,7 +232,13 @@ function handle(msg) {
       break;
     case "tools/call": {
       const answer = call(params.name, params.arguments || {});
-      if (answer !== null) send({ jsonrpc: "2.0", id, result: answer });
+      if (answer === null) break;
+      if (answer.elicit !== undefined) {
+        // Hold this call until the answer to that question arrives.
+        waiting.push({ callId: id, elicitId: answer.elicit });
+        break;
+      }
+      send({ jsonrpc: "2.0", id, result: answer });
       break;
     }
     default:

@@ -24,6 +24,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.home :as home]
+            [harness.parked :as parked]
             [harness.log :as log]
             [harness.mcp :as mcp]
             [harness.project :as project]
@@ -145,7 +146,7 @@
         table  (mcp/tools-for thread)]
     (testing "the roster became rows of the table"
       (is (= #{"mcp__fake__echo" "mcp__fake__where" "mcp__fake__fail" "mcp__fake__hang"
-                      "mcp__fake__exit"}
+                      "mcp__fake__exit" "mcp__fake__ask"}
              (set (keys table)))))
     (testing "and they say where they came from"
       (is (every? #(= :mcp (:source %)) (vals table))))
@@ -231,11 +232,11 @@
       (testing "and the reason says it was this session's rule"
         (is (= :session-asks (:reason parked))))
       (testing "an approved resume runs it"
-        (tools/decide-approval! (:interrupt-id parked) :approved nil)
+        (parked/decide-approval! (:interrupt-id parked) :approved nil)
         (is (= "echo: x" (:content (call! thread "mcp__fake__echo" {:text "x"})))))
       (testing "and a vetoed one never reaches the server"
         (let [{:keys [parked]} (call! thread "mcp__fake__echo" {:text "y"})]
-          (tools/decide-approval! (:interrupt-id parked) :vetoed nil)
+          (parked/decide-approval! (:interrupt-id parked) :vetoed nil)
           (let [{:keys [content error]} (call! thread "mcp__fake__echo" {:text "y"})]
             (is (true? error))
             (is (str/includes? content "vetoed by human"))))))))
@@ -690,5 +691,118 @@
             (is (some? parked))
             (is (= :session-asks (:reason parked)))
             (testing "and an approved resume runs it"
-              (tools/decide-approval! (:interrupt-id parked) :approved nil)
+              (parked/decide-approval! (:interrupt-id parked) :approved nil)
               (is (= "echo: x" (:content (call! thread "mcp__remote__echo" {:text "x"})))))))))))
+
+;; ------------------------------- 04: a server asks the human
+
+(defn- schema-of [prompt fields]
+  {:type "object" :properties (into {} (map (fn [[k v]] [k v]) fields)) :required []})
+
+(defn- ask!
+  "Call the fake server's `ask` tool -- which will ask the user something before
+  it can answer."
+  [thread message schema]
+  (call! thread "mcp__fake__ask" {:message message :schema schema}))
+
+(deftest a-server-question-parks-the-call-under-its-own-reason
+  (write-servers! {"fake" (fake-decl)})
+  (let [thread (str "mcp-ask-" (System/currentTimeMillis))
+        schema (schema-of "Your name?" {"name" {:type "string"}})]
+    (is (contains? (mcp/tools-for thread) "mcp__fake__ask"))
+    (let [{:keys [parked content error]} (ask! thread "Your name?" schema)]
+      (testing "the call does not run to completion -- it stops to ask"
+        (is (some? parked))
+        (is (not error))
+        (is (= "mcp__fake__ask" (:name parked))))
+      (testing "and it says WHICH KIND of stop this is: a question, not an approval"
+        (is (= :elicitation (:reason parked))))
+      (testing "the question rides the parked record, so a client can draw it
+                without inventing anything"
+        (let [rec (parked/parked (:interrupt-id parked))]
+          (is (= "fake" (:server rec)))
+          (is (= "Your name?" (:prompt rec)))
+          ;; THROUGH JSON, so property names come back as keywords -- which is
+          ;; what a client renders from, and what it must not lose.
+          (is (= (json/read-str (json/write-str schema) :key-fn keyword) (:schema rec)))
+          (is (pos? (:expires-at rec))))))))
+
+(deftest the-answer-goes-back-to-the-server-and-finishes-the-call
+  ;; The whole circuit: park, a person fills the form, the call is issued again,
+  ;; the server gets the values, and the tool result carries them.
+  (write-servers! {"fake" (fake-decl)})
+  (let [thread (str "mcp-answer-" (System/currentTimeMillis))
+        schema (schema-of "Your name?" {"name" {:type "string"}})
+        parked (:parked (ask! thread "Your name?" schema))]
+    (parked/decide-approval! (:interrupt-id parked) :approved {:name "Ada"})
+    (let [{:keys [content error]} (ask! thread "Your name?" schema)]
+      (testing "the server was told accept, with the values"
+        (is (false? error))
+        ;; KEYWORD KEYS, because both directions of this wire do that: the edge
+        ;; reads the resume payload with :key-fn keyword, and the tool result has
+        ;; been through the fake server's JSON. String keys here would be a test
+        ;; asserting a shape nothing produces.
+        (is (= {:action "accept" :content {:name "Ada"}}
+               (json/read-str content :key-fn keyword))))
+      (testing "and the call finished -- a person's answer is not a new message
+                bolted on afterwards, it is what the call was waiting for"
+        (is (str/includes? content "Ada"))))))
+
+(deftest a-declined-question-is-not-an-empty-form
+  (write-servers! {"fake" (fake-decl)})
+  (let [thread (str "mcp-decline-" (System/currentTimeMillis))
+        schema (schema-of "Your name?" {"name" {:type "string"}})]
+    (testing "declining says decline"
+      (let [parked (:parked (ask! thread "Your name?" schema))]
+        (parked/decide-approval! (:interrupt-id parked) :vetoed {:action "decline"})
+        (let [{:keys [content]} (ask! thread "Your name?" schema)]
+          (is (= "decline" (:action (json/read-str content :key-fn keyword)))))))
+    (testing "and cancelling says cancel -- the two are different answers"
+      (let [parked (:parked (ask! thread "Your name?" schema))]
+        (parked/decide-approval! (:interrupt-id parked) :vetoed {:action "cancel"})
+        (let [{:keys [content]} (ask! thread "Your name?" schema)]
+          (is (= "cancel" (:action (json/read-str content :key-fn keyword)))))))
+    (testing "a veto with no action named is a decline, which is the safer reading"
+      (let [parked (:parked (ask! thread "Your name?" schema))]
+        (parked/decide-approval! (:interrupt-id parked) :vetoed nil)
+        (let [{:keys [content]} (ask! thread "Your name?" schema)]
+          (is (= "decline" (:action (json/read-str content :key-fn keyword)))))))))
+
+(deftest a-question-nobody-answers-expires-and-nothing-is-invented
+  (let [thread (str "mcp-expire-" (System/currentTimeMillis))
+        live   (lifecycle-file "expire")]
+    (write-servers! {"fake" (fake-decl {:timeout 1200 :env {"MCP_FAKE_LIFECYCLE" live}})})
+    (let [schema (schema-of "Your name?" {"name" {:type "string"}})
+          parked (:parked (ask! thread "Your name?" schema))]
+      (Thread/sleep 1400)                       ; the person came back too late
+      (parked/decide-approval! (:interrupt-id parked) :approved {:name "Ada"})
+      (let [{:keys [content error]} (ask! thread "Your name?" schema)]
+        (testing "the call fails by name, saying what expired"
+          (is (true? error))
+          (is (str/includes? content "expired unanswered"))
+          (is (str/includes? content "1200ms")))
+        (testing "and NOBODY was told a form was filled in"
+          (is (not (str/includes? content "accept"))))
+        (testing "and the connection was abandoned rather than left holding a
+                  request nobody will ever answer -- which is why the next
+                  assembly starts a SECOND process"
+          (mcp/tools-for thread)
+          (is (<= 2 (count (filter #{"start"} (lifecycle live))))))))))
+
+(deftest a-question-the-client-cannot-render-still-arrives-whole
+  ;; The schema is passed through VERBATIM, field kinds included. Rendering is the
+  ;; client's business; DROPPING a field would be answering a question the server
+  ;; did not ask, which is why nothing here filters.
+  (write-servers! {"fake" (fake-decl)})
+  (let [thread (str "mcp-schema-" (System/currentTimeMillis))
+        schema {:type "object"
+                :properties {"name"   {:type "string"}
+                             "age"    {:type "number"}
+                             "opt_in" {:type "boolean"}
+                             "colour" {:type "string" :enum ["red" "green"]}
+                             "weird"  {:type "object"}}}]
+    (let [rec (parked/parked (:interrupt-id (:parked (ask! thread "Tell me" schema))))]
+      (testing "every field survives, including the kinds this client has no
+                control for"
+        (is (= (json/read-str (json/write-str schema) :key-fn keyword) (:schema rec)))
+        (is (= 5 (count (get-in rec [:schema :properties]))))))))

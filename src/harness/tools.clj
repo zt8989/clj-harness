@@ -48,6 +48,7 @@
             [harness.hashline.write :as hashline-write]
             [harness.hooks.dispatch :as hook]
             [harness.mcp :as mcp]
+            [harness.parked :as parked]
             [harness.providers :as providers]
             [harness.project :as project]
             [harness.skills :as skills]
@@ -831,73 +832,6 @@
   [thread-id name]
   (contains? (get @session-approvals thread-id #{}) name))
 
-(defonce ^:private parked-registry
-  (atom {}))
-;; interrupt-id -> {:thread-id .. :tool-call-id .. :name .. :args ..}
-
-(defn park-approval!
-  "Record a parked call under INTERRUPT-ID -- the correlation key a client hands
-  back on resume. Deliberately process-local: a restart loses the parking, and a
-  resume naming an interrupt this process never parked is answered as unknown
-  rather than guessed at. Never persisted, never read back from disk.
-
-  Re-parking the same id reopens it: any earlier decision is cleared, so a call
-  that had to be parked twice cannot inherit the first verdict."
-  [interrupt-id rec]
-  (swap! parked-registry update interrupt-id
-         (fn [old] (merge (dissoc old :verdict :payload :consumed)
-                          (assoc rec :interrupt-id interrupt-id)))))
-
-(defn parked
-  "The parked record for INTERRUPT-ID, or nil -- what the approval endpoint and
-  the resume path look up, and what a test asserts on. Process-local and
-  short-lived: it exists between the park and the verdict being consumed."
-  [interrupt-id]
-  (get @parked-registry interrupt-id))
-
-(defn parked-for-call
-  "The parked record for TOOL-CALL-ID in THREAD-ID, or nil. Call ids are unique
-  per assistant message, so at most one record matches a given call."
-  [thread-id tool-call-id]
-  (->> @parked-registry
-       vals
-       (filter #(and (= thread-id (:thread-id %))
-                     (= tool-call-id (:tool-call-id %))))
-       first))
-
-(defn parked-calls
-  "interrupt-id -> parked record, for THREAD-ID (every thread when nil)."
-  ([] @parked-registry)
-  ([thread-id]
-   (into {} (filter #(= thread-id (:thread-id (val %))) @parked-registry))))
-
-(defn decide-approval!
-  "Record the human's decision for INTERRUPT-ID: :approved or :vetoed, plus any
-  payload the client attached (a reason, typically). Recording decides nothing by
-  itself -- the seam consumes the verdict on the call's next transit through it."
-  [interrupt-id verdict payload]
-  (swap! parked-registry update interrupt-id
-         (fn [rec] (assoc (or rec {}) :interrupt-id interrupt-id
-                          :verdict verdict :payload payload))))
-
-(defn take-decision!
-  "Atomically take -- and mark consumed -- the decision for INTERRUPT-ID. Returns
-  {:verdict .. :payload ..} the first time and nil ever after, so replaying an
-  interrupt cannot execute its call twice."
-  [interrupt-id]
-  (let [[before _]
-        (swap-vals! parked-registry
-                    (fn [reg]
-                      (cond-> reg
-                        (and (get-in reg [interrupt-id :verdict])
-                             (not (get-in reg [interrupt-id :consumed])))
-                        (assoc-in [interrupt-id :consumed] true))))]
-    (let [rec (get before interrupt-id)]
-      (when (and (:verdict rec) (not (:consumed rec)))
-        (select-keys rec [:verdict :payload])))))
-
-;; ------------------------------------------------------------------ dispatch
-
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
@@ -1216,8 +1150,16 @@
                                             :path  (:path role)}))
                                         ((:run tool) parsed)))
                                [result err]
-                               (try [(binding [*thread-id* thread-id] (body)) nil]
+                               (try [(binding [*thread-id* thread-id
+                                               parked/*tool-call-id* id]
+                                       (body))
+                                     nil]
                                     (catch Throwable t [nil t]))
+                               ;; A SUSPENSION IS NOT A FAILURE, and it is caught
+                               ;; before the generic handler can read it as one:
+                               ;; the tool did not go wrong, it stopped to ask.
+                               suspended (when (parked/suspended? err)
+                                           (ex-data err))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
                                ;; PostToolUse is an OBSERVER: its verdict is
                                ;; discarded here on purpose. It already ran inside
@@ -1229,14 +1171,31 @@
                                    (hook/emit :post-tool-use {:tool_name name
                                                               :tool_input parsed}))
                                _ (report (ev/tool-post-execute id name))]
-                           (if err
+                           (cond
+                             suspended
+                             ;; THE RECORD NEEDS THE CALL IT BELONGS TO, and only
+                             ;; the seam knows it: the suspension was raised from
+                             ;; inside the body, which knows the QUESTION but not
+                             ;; the name and arguments it was called with. Without
+                             ;; this the resume would have nothing to re-issue.
+                             (do (parked/park-approval! (::parked/interrupt-id suspended)
+                                                        {:name name :args arguments})
+                                 {:content "" :error false
+                                  :parked (cond-> {:interrupt-id (::parked/interrupt-id suspended)
+                                                   :id id :name name :args arguments
+                                                   :question (::parked/question suspended)}
+                                            true (assoc :reason :elicitation))})
+
+                             err
                              {:content (ex-message err) :error true}
+
+                             :else
                              {:content (str result) :error false})))
                park (fn [reason interrupt-id]
                       (let [interrupt-id (or interrupt-id
-                                             (:interrupt-id (parked-for-call thread-id id))
+                                             (:interrupt-id (parked/parked-for-call thread-id id))
                                              (str (java.util.UUID/randomUUID)))]
-                        (park-approval! interrupt-id (cond-> {:thread-id thread-id
+                        (parked/park-approval! interrupt-id (cond-> {:thread-id thread-id
                                                               :tool-call-id id
                                                               :name name :args arguments}
                                                        reason (assoc :reason reason)))
@@ -1273,8 +1232,8 @@
                   :error true})
 
              reason
-             (let [existing (parked-for-call thread-id id)
-                   decision (when existing (take-decision! (:interrupt-id existing)))]
+             (let [existing (parked/parked-for-call thread-id id)
+                   decision (when existing (parked/take-decision! (:interrupt-id existing)))]
                (case (:verdict decision)
                  :approved (do (report (ev/tool-pre-execute id name :approved []))
                                (execute))

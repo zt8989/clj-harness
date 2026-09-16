@@ -56,6 +56,7 @@
             [harness.mcp :as mcp]
             [harness.providers :as providers]
             [harness.loop :as loop]
+            [harness.parked :as parked]
             [harness.preamble :as preamble]
             [harness.project :as project]
             [harness.replay :as replay]
@@ -298,7 +299,7 @@
                           "cancelled" :vetoed
                           (throw (ex-info (str "unknown resume status: " status) {})))
                 id      (str interruptId)
-                rec     (tools/parked id)]
+                rec     (parked/parked id)]
             (when-not rec
               (throw (ex-info (str "unknown interrupt: " id) {})))
             {:interrupt-id id :verdict verdict :payload payload
@@ -688,6 +689,40 @@
               (api-response 400 {:error move-error :threadId thread-id :dir abs})
               (do (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
                   (api-response 200 {:threadId thread-id :dir abs})))))))))
+
+(defn- elicitation-get
+  "GET /api/elicitation?interruptId=.. -- the QUESTION behind a parked interrupt:
+  which server asked, what it asked, and the JSON Schema it wants filled in.
+
+  WHY THIS IS AN ENDPOINT AND NOT A FIELD ON THE INTERRUPT. AG-UI's interrupt
+  object is a strict shape -- id, reason, message, toolCallId and a couple more,
+  and a client's own validator refuses anything else -- so a form schema stuffed
+  into it would be a protocol change this harness has no business making. The
+  interrupt says 'a server is asking a question' and carries the question's
+  sentence; the SHAPE of the answer is fetched here, by the client that is about
+  to draw it.
+
+  Read-only, and therefore no audit line: it answers where a parked call already
+  is, and asking about a decision must not become part of the record of it.
+
+  A missing or unknown id is a NAMED 404 rather than an empty form: a client
+  drawing a form for a question nobody asked would be collecting answers into
+  nowhere."
+  [req]
+  (let [id (get (query-params (:query-string req)) "interruptId")]
+    (cond
+      (str/blank? id)
+      (api-response 400 {:error "missing interruptId query parameter"})
+
+      :else
+      (let [rec (parked/parked id)]
+        (if (and rec (= :elicitation (:reason rec)))
+          (api-response 200 {:interruptId id
+                             :server      (:server rec)
+                             :prompt      (:prompt rec)
+                             :schema      (:schema rec)
+                             :expiresAt   (:expires-at rec)})
+          (api-response 404 {:error (str "no elicitation is parked under " id)}))))))
 
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
@@ -1224,6 +1259,11 @@
     (= "/api/settings" (:uri req))
     (case (:request-method req)
       :get  (settings-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/elicitation" (:uri req))
+    (case (:request-method req)
+      :get  (elicitation-get req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/project/pick" (:uri req))

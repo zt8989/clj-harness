@@ -61,12 +61,24 @@
 (defn- interrupt-frame
   "One parked call -> the wire's interrupt object. AG-UI validates this shape
   strictly: id and reason are required, message and toolCallId optional, and the
-  human-facing line is MESSAGE -- a client renders that, not reason."
-  [{:keys [id tool-call-id name args]}]
-  {:id id
-   :reason "tool-approval"
-   :message (str "Approve `" name "`? arguments: " args)
-   :toolCallId tool-call-id})
+  human-facing line is MESSAGE -- a client renders that, not reason.
+
+  TWO KINDS OF STOP, ONE SHAPE. A parked call is either waiting for a person to
+  approve it (`tool-approval`, the default and every case that existed before) or
+  waiting for a person to answer a server's question (`elicitation`). REASON is
+  what tells a client which card to draw, and MESSAGE is what it puts on the card
+  -- for a question that is the question itself, because 'Approve ask? arguments'
+  would be a sentence about a tool call rather than the thing being asked."
+  [{:keys [id tool-call-id name args reason question]}]
+  (if (= :elicitation reason)
+    {:id id
+     :reason "elicitation"
+     :message (or (:prompt question) "A server is asking you for input.")
+     :toolCallId tool-call-id}
+    {:id id
+     :reason "tool-approval"
+     :message (str "Approve `" name "`? arguments: " args)
+     :toolCallId tool-call-id}))
 
 (defn- step [s ev]
   (case (:type ev)

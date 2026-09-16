@@ -24,19 +24,26 @@ import { configure, type Suite } from "./e2e";
 import { startHarness } from "./support/harness";
 import { approvalSuite } from "./suites/approval";
 import { clientSuite } from "./suites/client";
+import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
 import { turnSuite } from "./suites/turn";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite];
+const SUITES: readonly Suite[] = [
+  framesSuite,
+  clientSuite,
+  turnSuite,
+  approvalSuite,
+  elicitationSuite,
+];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
 /// of the list above -- or losing its cases -- fail the run instead of quietly
 /// shrinking a green one. Bump it deliberately when a case is genuinely added or
 /// removed.
-const EXPECTED_CASES = 11;
+const EXPECTED_CASES = 16;
 
 let total = 0;
 for (const suite of SUITES) {
@@ -55,7 +62,7 @@ let harness: Awaited<ReturnType<typeof startHarness>> | null = null;
 
 beforeAll(async () => {
   harness = await startHarness();
-  configure({ url: harness.url, scriptPath: harness.scriptPath });
+  configure({ url: harness.url, scriptPath: harness.scriptPath, home: harness.home });
   console.log(`harness for this run: ${harness.url}`);
 });
 

@@ -32,10 +32,15 @@ export interface Suite {
   cases: readonly Case[];
 }
 
-/// The two facts the harness hands over. Set once, by the driver's beforeAll.
+/// What the harness hands over. Set once, by the driver's beforeAll.
 export interface HarnessFacts {
   url: string;
   scriptPath: string;
+  /// The server's configuration home -- a temp directory. A suite needs it to
+  /// write configuration the SERVER reads fresh (an `mcp.edn` declaring a
+  /// server, say), which is how a test reaches a feature that has no endpoint
+  /// of its own for setting it up.
+  home: string;
 }
 
 /// A parsed SSE frame, as the wire delivers it. Only the fields the suites read
@@ -64,6 +69,11 @@ function requireFacts(): HarnessFacts {
     throw new Error("the e2e harness is not configured -- start it in the driver's beforeAll and call configure()");
   }
   return facts;
+}
+
+/// The server's configuration home.
+export function home(): string {
+  return requireFacts().home;
 }
 
 export function url(): string {

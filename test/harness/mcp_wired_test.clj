@@ -21,7 +21,8 @@
             [harness.mcp :as mcp]
             [harness.providers :as providers]
             [harness.test-support :as support]
-            [harness.tools :as tools])
+            [harness.tools :as tools]
+            [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse HttpResponse$BodyHandlers]
@@ -66,18 +67,31 @@
     (try (binding [*port* port] (f))
          (finally (stop) (providers/use-provider! thread nil)))))
 
-(defn- post-run [thread-id]
-  (let [body (json/write-str {:threadId thread-id
-                              :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "go"}]
-                              :tools [] :context []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.send (HttpClient/newHttpClient) req
-           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+(defn- post-run
+  ([thread-id] (post-run thread-id {}))
+  ([thread-id extra]
+    (let [body (json/write-str (merge {:threadId thread-id
+                                      :runId (str (java.util.UUID/randomUUID))
+                                      :messages [{:id "u1" :role "user" :content "go"}]
+                                      :tools [] :context []}
+                                     extra))
+         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
+                  (.header "Content-Type" "application/json")
+                  (.header "Accept" "text/event-stream")
+                    (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
+            (.build))]
+       (.send (HttpClient/newHttpClient) req
+              (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+
+(defn- api-get
+  "A management-edge GET, as {:status :body}."
+  [path]
+  (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/" path)))
+                (.GET)
+                (.build))
+        resp (.send (HttpClient/newHttpClient) req
+                    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
+    {:status (.statusCode resp) :body (.body resp)}))
 
 (defn- log-file
   "A thread's log. Every thread here is UNBOUND -- it exercises servers and hooks,
@@ -289,3 +303,113 @@
                      (testing "and no server was ever mentioned -- no declarations
                                means this capability leaves no trace at all"
                        (is (= [] (of-kind ls "mcp/server")))))))))
+
+;; ------------------------------------- 04: a server asks, through the real edge
+
+(defn- record-script
+  "A hook command that appends its stdin payload to MARKER. Used for the two
+  elicitation points, whose payload is the thing worth asserting on."
+  [marker label]
+  (let [dir (str (home/root) "/hook-scripts")]
+    (.mkdirs (io/file dir))
+    (let [f (io/file dir (str label ".sh"))]
+      (spit f (str "#!/bin/sh\n{ echo \"--- " label "\"; cat; } >> " marker "\n")
+            :encoding "UTF-8")
+      (.setExecutable f true)
+      (str f))))
+
+(defn- interrupt-of
+  "The interrupts a run ended on, read off the real wire -- not out of the
+  server's own bookkeeping, which is the difference between checking the protocol
+  and checking our opinion of it."
+  [response]
+  (->> (wire/frames-from-sse (.body response))
+       (filter #(= "RUN_FINISHED" (:type %)))
+       (keep #(get-in % [:outcome :interrupts]))
+       (first)))
+
+(defn- ask-script [message]
+  [{:content ""
+    :tool-calls [{:id "q1" :name "mcp__fake__ask"
+                  :arguments {:message message
+                              :schema {:type "object"
+                                       :properties {"name" {:type "string"}}}}}]}
+   {:content "thanks"}])
+
+(deftest a-servers-question-parks-the-run-and-the-answer-finishes-it
+  (let [thread "wired-ask"
+        marker (str (home/root) "/elicitation-hooks.txt")]
+    (write-servers! {"fake" (decl)})
+    (io/delete-file marker true)
+    (support/write-hooks! {:elicitation        [{:command (record-script marker "elicitation")}]
+                           :elicitation-result [{:command (record-script marker "elicitation-result")}]})
+    (with-server thread (ask-script "What is your name?")
+                 (fn []
+                   (io/delete-file (log-file thread) true)
+                   (let [ints (interrupt-of (post-run thread))]
+                     (testing "the run ended on a QUESTION, and the frame says which kind"
+                       (is (some? ints))
+                       (is (= 1 (count ints)))
+                       (is (= "elicitation" (:reason (first ints)))))
+                     (testing "the human-facing line is the question itself"
+                       (is (= "What is your name?" (:message (first ints)))))
+                     (testing "and the SCHEMA is not on the wire -- it is fetched from
+                               the harness's own edge, because the interrupt's shape
+                               belongs to AG-UI and is strictly validated"
+                       (is (not (contains? (first ints) :schema)))
+                       (let [id (:id (first ints))]
+                         (is (some? id))
+                         (let [answer (api-get (str "api/elicitation?interruptId=" id))
+                               body   (json/read-str (:body answer) :key-fn keyword)]
+                           (is (= 200 (:status answer)))
+                           (is (= "fake" (:server body)))
+                           (is (= "What is your name?" (:prompt body)))
+                           (is (contains? (:schema body) :properties)))))
+                     (testing "an id nobody parked is a named 404, not an empty form"
+                       (is (= 404 (:status (api-get "api/elicitation?interruptId=nope")))))
+                     (testing "the answer goes back and the call finishes"
+                       (let [id (:id (first ints))
+                             resumed (post-run thread
+                                               {:resume [{:interruptId id :status "resolved"
+                                                          :payload {"name" "Ada"}}]})]
+                         (is (= "RUN_FINISHED"
+                                (:type (last (wire/frames-from-sse (.body resumed))))))
+                         (let [ls (wait-for (log-file thread)
+                                            #(some (fn [c] (str/includes? c "Ada"))
+                                                   (tool-results %))
+                                            5000)]
+                           (is (some #(str/includes? % "Ada") (tool-results ls))
+                               "the server was told the values, and said so back"))))
+                     (testing "and both elicitation points FIRED, with the server
+                               named in the payload the command was handed"
+                       (let [ls (wait-quiet (log-file thread) 3000)]
+                         ;; TWICE, and that is the price this design knowingly
+                         ;; pays: the answer arrives on a LATER run, the call is
+                         ;; issued again, and the server asks again -- the second
+                         ;; time being the one the recorded answer satisfies. A
+                         ;; count of one here would mean the tool was never
+                         ;; re-issued, i.e. that the resume did something else.
+                         (is (= 2 (count (of-kind ls "hook/Elicitation"))))
+                         (testing "and the ANSWER was reported once, before it went back"
+                           (is (= 1 (count (of-kind ls "hook/ElicitationResult")))))
+                         (let [seen (slurp marker :encoding "UTF-8")]
+                           (is (str/includes? seen "--- elicitation"))
+                           (is (str/includes? seen "--- elicitation-result"))
+                           (is (str/includes? seen "\"server\":\"fake\""))
+                           (is (str/includes? seen "What is your name?"))
+                           (is (str/includes? seen "Ada")))))
+                     (support/wipe-hooks!))))))
+
+(deftest a-run-with-no-question-is-untouched-by-any-of-this
+  (let [thread "wired-no-ask"]
+    (write-servers! {"fake" (decl)})
+    (with-server thread script
+                 (fn []
+                   (io/delete-file (log-file thread) true)
+                   (let [ints (interrupt-of (post-run thread))
+                         ls   (wait-for (log-file thread) ran-server-tool? 5000)]
+                     (testing "an ordinary server call ends the run normally"
+                       (is (nil? ints))
+                       (is (finished? ls)))
+                     (testing "and no elicitation point fired"
+                       (is (= [] (of-kind ls "hook/Elicitation")))))))))

@@ -10,6 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.home :as home]
+            [harness.parked :as parked]
             [harness.hooks :as hooks]
             [harness.http :as http]
             [harness.providers :as providers]
@@ -918,7 +919,7 @@
                                                    :arguments (json/write-str {:reasoning-effort "high"})}}
                                        id))
                {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
+           (parked/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session now serves the changed value"
            (is (= "high" (:reasoning-effort (providers/active-provider id)))))
@@ -955,7 +956,7 @@
                                                        :arguments (json/write-str {:reasoning-effort "low"})}}
                                            id))
                    {:keys [parked]} (call)]
-               (tools/decide-approval! (:interrupt-id parked) :approved {})
+               (parked/decide-approval! (:interrupt-id parked) :approved {})
                (call))
              (post-run id)
              (let [lines (wait-for-recorded
@@ -992,7 +993,7 @@
                                                    :arguments (json/write-str {:provider "beta"})}}
                                        id))
                {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
+           (parked/decide-approval! (:interrupt-id parked) :approved {})
            (call))
          (testing "the session's served endpoint moved with the vendor"
            (let [a (providers/active-provider id)]

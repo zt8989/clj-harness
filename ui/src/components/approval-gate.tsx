@@ -58,7 +58,7 @@ import {
   type FC,
   type PropsWithChildren,
 } from "react";
-import { ShieldAlertIcon } from "lucide-react";
+import { MessageCircleQuestionIcon, ShieldAlertIcon } from "lucide-react";
 import {
   useAgUiInterrupts,
   useAgUiSubmitInterruptResponses,
@@ -66,6 +66,8 @@ import {
 } from "@assistant-ui/react-ag-ui";
 
 import { Button } from "@/components/ui/button";
+import { AGENT_URL } from "@/lib/threads";
+import { answersFor, fieldSpecs, inputKindFor } from "@/lib/elicitation";
 
 /// The interrupt reason this card owns. Every other reason on this seam --
 /// including the protocol's own `tool_call`, `input_required` and `confirmation`
@@ -74,11 +76,29 @@ import { Button } from "@/components/ui/button";
 /// what gets submitted.
 const APPROVAL_REASON = "tool-approval";
 
+/// The OTHER kind of stop, and the only other one this harness makes: a server
+/// asked the user something and the call is waiting for the answer. Its card is
+/// a form rather than two buttons, but it rides the same seam, the same batch and
+/// the same resume array -- which is the whole point of the reason being a value
+/// rather than a second mechanism.
+const ELICITATION_REASON = "elicitation";
+
 /// Whether an interrupt is one of ours. The one place the reason string is
 /// compared; everything else that cares asks this, so the vocabulary cannot
 /// drift between the card, the batch and the tool card.
 export const isApprovalInterrupt = (candidate: AgUiInterrupt): boolean =>
   candidate.reason === APPROVAL_REASON;
+
+/// Whether an interrupt is a server asking a question.
+export const isElicitationInterrupt = (candidate: AgUiInterrupt): boolean =>
+  candidate.reason === ELICITATION_REASON;
+
+/// Whether an interrupt is one this file draws a card for at all. The seam
+/// carries other reasons -- the protocol's own among them -- and a card that
+/// guessed at one it does not understand would be worse than no card, because
+/// the guess is what gets submitted.
+export const isParkedInterrupt = (candidate: AgUiInterrupt): boolean =>
+  isApprovalInterrupt(candidate) || isElicitationInterrupt(candidate);
 
 /// The two statuses the resume entry is allowed to carry (`AgUiResumeEntry`),
 /// used as the decision's own vocabulary so there is no mapping layer to drift.
@@ -96,9 +116,15 @@ type Decision = "resolved" | "cancelled";
 const payloadFor = (decision: Decision): unknown =>
   decision === "resolved" ? { decision: "approved" } : undefined;
 
+/// One recorded decision: HOW the gate was answered, and what rides with the
+/// answer. The payload belongs to the CARD rather than to the status, because a
+/// form's answer is the form (`{name: "Ada"}`) while an approval's is the fixed
+/// sentence the wire has always carried.
+type Recorded = { decision: Decision; payload: unknown };
+
 type GateState = {
-  decisions: ReadonlyMap<string, Decision>;
-  decide: (interruptId: string, decision: Decision) => void;
+  decisions: ReadonlyMap<string, Recorded>;
+  decide: (interruptId: string, decision: Decision, payload?: unknown) => void;
   submitting: boolean;
   error: string | null;
 };
@@ -138,14 +164,14 @@ export const ApprovalBatchProvider: FC<
   const interrupts = useAgUiInterrupts();
   const submitResponses = useAgUiSubmitInterruptResponses();
 
-  const open = interrupts.filter(isApprovalInterrupt);
+  const open = interrupts.filter(isParkedInterrupt);
   // The batch's ids as one string. `interrupts` is a fresh array on every store
   // update, so an array in a dependency list would re-run the reset below on
   // every delta; this key changes only when the batch itself does. NUL is the
   // separator because it cannot occur inside an interrupt id.
   const openKey = open.map((i) => i.id).join("\u0000");
 
-  const [decisions, setDecisions] = useState<ReadonlyMap<string, Decision>>(
+  const [decisions, setDecisions] = useState<ReadonlyMap<string, Recorded>>(
     new Map(),
   );
   const [submitting, setSubmitting] = useState(false);
@@ -176,10 +202,15 @@ export const ApprovalBatchProvider: FC<
   }, [openKey]);
 
   const decide = useCallback(
-    (interruptId: string, decision: Decision) => {
+    (interruptId: string, decision: Decision, payload?: unknown) => {
       if (submitting) return;
 
-      const next = new Map(decisions).set(interruptId, decision);
+      const next = new Map(decisions).set(interruptId, {
+        decision,
+        // The default is what an approval has always sent; a card with something
+        // else to say passes it here.
+        payload: payload === undefined ? payloadFor(decision) : payload,
+      });
       setDecisions(next);
 
       const openIds = open.map((i) => i.id);
@@ -191,11 +222,11 @@ export const ApprovalBatchProvider: FC<
       setError(null);
       void submitResponses(
         openIds.map((id) => {
-          const decided = next.get(id) as Decision;
+          const decided = next.get(id) as Recorded;
           return {
             interruptId: id,
-            status: decided,
-            payload: payloadFor(decided),
+            status: decided.decision,
+            payload: decided.payload,
           };
         }),
       )
@@ -233,7 +264,7 @@ const ApprovalCard: FC<{
   argsText: string;
 }> = ({ interrupt, toolName, argsText }) => {
   const { decisions, decide, submitting, error } = useContext(GateContext);
-  const decision = decisions.get(interrupt.id);
+  const decision = decisions.get(interrupt.id)?.decision;
 
   return (
     <div
@@ -344,4 +375,189 @@ export const ApprovalGate: FC<{
       argsText={argsText}
     />
   );
+};
+
+/// ---------------------------------------------------------------- the question
+///
+/// A server asked the user something and the call is waiting. The card is a
+/// FORM. WHAT it renders comes from `lib/elicitation.ts`, which owns the
+/// schema-to-fields rules and their tests; WHERE the question comes from is the
+/// harness's own edge rather than the interrupt:
+///
+///   - the interrupt carries the question and a reason, and NOT the schema. Its
+///     shape belongs to AG-UI and a client's validator refuses extra fields, so
+///     stuffing a form into it would be a protocol change this repo has no
+///     business making.
+///   - `GET /api/elicitation?interruptId=` answers with what was asked, by whom,
+///     and the JSON Schema to fill in. The server's name is on the card because
+///     the person answering deserves to know which outside program is asking.
+///
+/// NOTHING IS ASSUMED ABOUT THE SCHEMA. `requestedSchema` is a JSON Schema object
+/// with primitive properties; this renders the kinds it knows as the inputs they
+/// are, and anything else as a text field WITH ITS TYPE NAMED. A field is never
+/// dropped for being unfamiliar -- dropping one would send the server a form that
+/// looked answered and was missing half the answers.
+
+/// The question, and the form that answers it.
+const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
+  const { decisions, decide, submitting, error } = useContext(GateContext);
+  const [asked, setAsked] = useState<{
+    server?: string;
+    prompt?: string;
+    schema?: unknown;
+  } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let live = true;
+    setAsked(null);
+    setLoadError(null);
+    fetch(`${AGENT_URL}api/elicitation?interruptId=${encodeURIComponent(interrupt.id)}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(
+            `asking what this question was failed: HTTP ${res.status}`,
+          );
+        }
+        return (await res.json()) as { server?: string; prompt?: string; schema?: unknown };
+      })
+      .then((body) => {
+        if (live) setAsked(body);
+      })
+      .catch((failure: unknown) => {
+        if (live) {
+          setLoadError(failure instanceof Error ? failure.message : String(failure));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [interrupt.id]);
+
+  const fields = asked === null ? [] : fieldSpecs(asked.schema);
+  const recorded = decisions.get(interrupt.id)?.decision;
+
+  const settle = (decision: Decision) => {
+    if (decision === "resolved") {
+      decide(interrupt.id, "resolved", answersFor(fields, values));
+    } else {
+      decide(interrupt.id, "cancelled", { action: "decline" });
+    }
+  };
+
+  return (
+    <div
+      data-slot="elicitation-card"
+      className="aui-elicitation-card border-border/60 bg-card text-card-foreground mb-1 flex flex-col gap-2 rounded-lg border p-3"
+    >
+      <p className="aui-elicitation-card-title flex items-center gap-2 text-sm font-semibold">
+        <MessageCircleQuestionIcon
+          data-slot="elicitation-card-icon"
+          className="aui-elicitation-card-icon size-4 shrink-0"
+        />
+        {asked?.server !== undefined
+          ? `${asked.server} is asking you something`
+          : "A server is asking you something"}
+      </p>
+
+      <p className="aui-elicitation-card-prompt text-xs">
+        {asked?.prompt ?? interrupt.message ?? ""}
+      </p>
+
+      {loadError !== null && (
+        <p className="aui-elicitation-card-error text-destructive text-xs">
+          {loadError}
+        </p>
+      )}
+
+      {asked !== null &&
+        fields.map((field) => (
+          <label
+            key={field.name}
+            data-slot="elicitation-field"
+            data-field-kind={field.kind}
+            className="aui-elicitation-field flex flex-col gap-1 text-xs"
+          >
+            <span className="font-medium">
+              {field.name}
+              {/* A kind with no input of its own is still SHOWN, with its name
+                  spelled out -- the alternative is a form that quietly drops a
+                  field the server asked for. */}
+              {field.kind !== "string" && (
+                <span className="text-muted-foreground ml-1 font-normal">
+                  ({field.kind})
+                </span>
+              )}
+            </span>
+            {field.description !== undefined && (
+              <span className="text-muted-foreground">{field.description}</span>
+            )}
+            {inputKindFor(field) === "select" ? (
+              <select
+                data-slot="elicitation-select"
+                className="aui-elicitation-select border-input bg-background rounded-md border px-2 py-1"
+                value={values[field.name] ?? ""}
+                onChange={(e) =>
+                  setValues((prev) => ({ ...prev, [field.name]: e.target.value }))
+                }
+              >
+                <option value="">—</option>
+                {(field.enumValues ?? ["true", "false"]).map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                data-slot="elicitation-input"
+                className="aui-elicitation-input border-input bg-background rounded-md border px-2 py-1"
+                type={inputKindFor(field) === "number" ? "number" : "text"}
+                value={values[field.name] ?? ""}
+                onChange={(e) =>
+                  setValues((prev) => ({ ...prev, [field.name]: e.target.value }))
+                }
+              />
+            )}
+          </label>
+        ))}
+
+      <div className="aui-elicitation-card-actions flex items-center gap-2">
+        <Button
+          size="sm"
+          className="aui-elicitation-card-submit active:scale-[0.98]"
+          disabled={submitting || asked === null || recorded === "resolved"}
+          onClick={() => settle("resolved")}
+        >
+          {recorded === "resolved" ? "Sent" : "Send"}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="aui-elicitation-card-decline active:scale-[0.98]"
+          disabled={submitting || recorded !== undefined}
+          onClick={() => settle("cancelled")}
+        >
+          {recorded === "cancelled" ? "Declined" : "Decline"}
+        </Button>
+      </div>
+
+      {error !== null && (
+        <p className="aui-elicitation-card-error text-destructive text-xs">{error}</p>
+      )}
+    </div>
+  );
+};
+
+/// Mounted from the tool card, by the parked call's own `toolCallId` -- the same
+/// binding the approval card uses, so a card can never be drawn against a
+/// neighbouring call's question.
+export const ElicitationGate: FC<{ toolCallId: string }> = ({ toolCallId }) => {
+  const interrupt = useAgUiInterrupts().find(
+    (candidate) =>
+      isElicitationInterrupt(candidate) && candidate.toolCallId === toolCallId,
+  );
+  if (interrupt === undefined) return null;
+  return <ElicitationCard interrupt={interrupt} />;
 };

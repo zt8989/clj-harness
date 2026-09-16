@@ -11,6 +11,7 @@
             [harness.ag-ui :as ag]
             [harness.fake :as fake]
             [harness.home :as home]
+            [harness.parked :as parked]
             [harness.loop :as loop]
             [harness.project :as project]
             [harness.tools :as tools]
@@ -87,9 +88,9 @@
         (is (= "c1" (:tool-call-id int)))
         (is (= "write" (:name int)))
         (is (string? (:id int)))
-        (is (= thr (:thread-id (tools/parked (:id int)))))
-        (is (= "c1" (:tool-call-id (tools/parked (:id int)))))
-        (is (= 1 (count (tools/parked-calls thr))))))
+        (is (= thr (:thread-id (parked/parked (:id int)))))
+        (is (= "c1" (:tool-call-id (parked/parked (:id int)))))
+        (is (= 1 (count (parked/parked-calls thr))))))
 
     (testing "the parked call is left unanswered in the history"
       (is (some #(seq (:tool_calls %)) history))
@@ -295,8 +296,8 @@
       (is (= ["c1" "c2"] (mapv :tool_call_id (tool-msgs history)))))))
 
 (deftest unknown-interrupts-are-not-invented
-  (is (nil? (tools/parked "no-such-interrupt")))
-  (is (empty? (tools/parked-calls "thr-that-never-parked"))))
+  (is (nil? (parked/parked "no-such-interrupt")))
+  (is (empty? (parked/parked-calls "thr-that-never-parked"))))
 
 ;; ----------------------------------------------------------------- the fence
 ;;
@@ -347,7 +348,7 @@
       (is (empty? (tool-msgs history))))
     (testing "the interrupt carries the same facts as any approval"
       (let [[int]  (:interrupts term)
-            parked (tools/parked (:id int))]
+            parked (parked/parked (:id int))]
         (is (= "c1" (:tool-call-id int)))
         (is (= "read" (:name int)))
         (is (string? (:id int)))
@@ -472,7 +473,7 @@
       (is (= :run/interrupt (:type term)))
       (is (empty? (results seen)))
       (is (empty? (tool-msgs history)))
-      (is (= :out-of-bounds (:reason (tools/parked (:id (first (:interrupts term))))))))))
+      (is (= :out-of-bounds (:reason (parked/parked (:id (first (:interrupts term))))))))))
 
 (deftest the-project-level-replaces-the-user-level-whole
   ;; The user level freed the whole project (:allow on pdir); the project's
