@@ -131,7 +131,9 @@ import {
 
 import {
   ApprovalGate,
+  ElicitationGate,
   isApprovalInterrupt,
+  isElicitationInterrupt,
 } from "@/components/approval-gate";
 import { ComposerFrame, ComposerTools } from "@/components/composer-chrome";
 import {
@@ -611,9 +613,10 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   // that never reopens. Found by running the two-call batch in a real
   // browser, not by reading this code; the pending-interrupt check is what
   // makes the card honest again.
-  const parkedByInterrupt = useAgUiInterrupts().some(
+  const parkedByInterrupt = useAgUiInterrupts().find(
     (candidate) =>
-      isApprovalInterrupt(candidate) && candidate.toolCallId === toolCallId,
+      (isApprovalInterrupt(candidate) || isElicitationInterrupt(candidate)) &&
+      candidate.toolCallId === toolCallId,
   );
   const state = parkedByInterrupt
     ? "needs-approval"
@@ -664,7 +667,15 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
           holding a run. `requires-action` is the protocol's own "a human has to
           decide" signal -- see `approval-gate.tsx`, which also argues why this
           is written here rather than reused from the copied kit. */}
-      {state === "needs-approval" ? (
+      {/* TWO KINDS OF PARK, TWO CARDS, ONE SLOT. Which one is decided by the
+          interrupt's reason -- the same value the server put there -- so a card
+          cannot be drawn for the wrong kind of stop. */}
+      {parkedByInterrupt !== undefined &&
+      isElicitationInterrupt(parkedByInterrupt) ? (
+        <ElicitationGate toolCallId={toolCallId} />
+      ) : null}
+      {parkedByInterrupt !== undefined &&
+      isApprovalInterrupt(parkedByInterrupt) ? (
         <ApprovalGate
           toolCallId={toolCallId}
           toolName={toolName}

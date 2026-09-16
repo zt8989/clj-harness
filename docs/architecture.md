@@ -48,7 +48,7 @@
 | `kernel.frames` | 帧折叠回消息：日志的**读侧**引擎 |
 | `kernel.loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
 | `kernel.llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system 消息开头（`prompt.md`）的冻结载体** |
-| `kernel.tools` | **唯一执行缝**：注册表、会话 overlay（两轴）、待决审批、三相执行、工具声明的词汇、**安装门**；外加两条装进来的策略（批的计划器、编辑模式的收窄）。**它不认识任何一个具体工具** |
+| `kernel.tools` | **唯一执行缝**：注册表、会话 overlay（两轴）、待决审批、三相执行、工具声明的词汇、**安装门**；外加两条装进来的策略（批的计划器、编辑模式的收窄）与两条**按会话回答**的贡献（`:tools-for` 外部来源的工具、`:disabled-for` 由层提供的停用语）。`suspend!`（工具体从中间停下并抛出）也在这里。**它不认识任何一个具体工具** |
 | `kernel.hooks` | **hook 引擎的数据半**：27 个点是数据、一条声明允许带什么、三个来源的档位与顺序 |
 | `kernel.hooks.dispatch` | **hook 引擎的执行半**：按声明 spawn 命令（或跑一个进程内的函数）、读退出码、超时、落审计行 |
 
@@ -69,6 +69,7 @@
 | `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
+| `cap.mcp` | **外部服务器作为工具来源**：读两级 `mcp.edn`、按（项目身份 × server × 声明形状）缓存连接、两种 transport（stdio 子进程 / HTTP）、把 `tools/list` 桥成工具表里的行、elicitation（服务器反过来问人）与会话级启停。工具是**动态来源**（`:tools-for`），所以它经 `install!` 装上而不是写死在表里 |
 | `cap.git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 
 ### `harness.edge` —— 适配：把内核翻译成别人的协议
@@ -95,7 +96,8 @@
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的三条行、eval 与晋升
 8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
-9. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
+9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
+10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 
@@ -117,8 +119,6 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 写下这一节是为了让「文档没写」与「还没做」不会被读成同一件事。
 
-- **MCP**：计划见 `.scratch/mcp/`（6 张票，01 号票已细化到接线形状）。代码里**一行都没有**；
-  `harness.mcp` 这个命名空间不存在，`mcp.edn` 不存在，工具表里没有外部来源。
 - **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，同日复议改版）。
   一次 `eval` 调用就是一次融合：在里面调用工具表里的任何工具、按返回值决定下一步、循环做批量操作，
   中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。

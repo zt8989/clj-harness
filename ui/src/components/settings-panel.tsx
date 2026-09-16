@@ -45,6 +45,7 @@ import { ArrowLeftIcon, Loader2Icon, PlusIcon, RefreshCwIcon, TrashIcon } from "
 import { useCallback, useEffect, useState, type FC } from "react";
 
 import { Button } from "@/components/ui/button";
+import { McpPanel } from "@/components/mcp-panel";
 import {
   Dialog,
   DialogContent,
@@ -891,11 +892,21 @@ const ModelsPage: FC<{
 
 // ------------------------------------------------------------------ the panel
 
-type Page = "general" | "models";
+/// A PAGE, not a section: the nav is the one place a person looks for something,
+/// and "where do I see the servers" should have the same answer as every other
+/// question about this session.
+///
+/// MCP IS NOT A SETTING, and it is here anyway. Nothing on this page writes
+/// `mcp.edn` -- what a server IS comes from the files, and this only shows the
+/// ledger and switches servers on or off FOR THIS SESSION. It sits beside the
+/// others because it is one of the things a person asks about "what is this
+/// session running on", which is what this dialog is for.
+type Page = "general" | "models" | "mcp";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "general", label: "General" },
   { id: "models", label: "Models" },
+  { id: "mcp", label: "MCP servers" },
 ];
 
 export const SettingsPanel: FC<{
@@ -1015,6 +1026,17 @@ export const SettingsPanel: FC<{
             )}
             {page === "models" && (
               <ModelsPage registry={registry} failure={registryFailure} onChanged={reload} />
+            )}
+            {page === "mcp" && (
+              <section data-slot="settings-mcp" className="flex flex-col gap-3">
+                <SectionTitle>MCP servers</SectionTitle>
+                <p className="text-muted-foreground text-xs">
+                  Outside programs this session was asked to hand tools to. Declared in
+                  <code className="bg-muted mx-1 rounded px-1">mcp.edn</code> — this
+                  page reads that and changes nothing about it.
+                </p>
+                <McpPanel threadId={threadId} />
+              </section>
             )}
           </div>
         </div>

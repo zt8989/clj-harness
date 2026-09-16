@@ -66,6 +66,7 @@
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.hooks :as cap-hooks]
+            [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
             [harness.kernel.tools :as tools]
             [org.httpkit.server :as hk])
@@ -543,6 +544,15 @@
               (loop []
                 (when-let [ev (async/<! events)]
                   (if (= :run/done (:type ev))
+                    (do
+                      ;; What happened to this run's MCP servers, drained from the
+                      ;; mcp outbox. IT LANDS AT THE END because that is when the
+                      ;; fact exists: a server is connected on the way to this run's
+                      ;; first LLM call (the seam asks for the roster), so at the
+                      ;; provider/changed drain above nothing has happened yet. A run
+                      ;; that never reached the provider leaves the line for the next.
+                      (doseq [e (cap-mcp/take-events!)]
+                        (log! thread-id run-id "mcp/server" e))
                     ;; Returned side of the message record: every message the kernel
                     ;; appended after the initial vector -- assistant replies
                     ;; VERBATIM (the history holds the provider message unrebuilt,
@@ -553,7 +563,7 @@
                     ;; terminal frame, so a reader racing the consumer may not see
                     ;; it yet.
                     (log-messages! thread-id run-id
-                                   (subvec (:history ev) (count messages)))
+                                   (subvec (:history ev) (count messages))))
                     (do ;; Tool-lifecycle events are audit lines, not wire frames:
                         ;; each lands as its own jsonl line, keyed by toolCallId.
                         (when-let [[kind payload] (lifecycle-record ev)]
@@ -1211,6 +1221,107 @@
       (api-response 200 {:path    (:path (:ok removed))
                          :unbound (:unbound (:ok removed))}))))
 
+(defn- mcp-get
+  "GET /api/mcp?threadId=.. -- this session's MCP ledger: which servers it
+  declares, what each one is doing, and which tools each is providing.
+
+  READ-ONLY, so no audit line -- the same rule the other GETs follow. Asking what
+  a server is doing is not part of the record of what it did.
+
+  An unbound (or unknown) thread is an ANSWER, not an error: the declarations come
+  from the configuration home plus, when there is one, the bound project's -- every
+  session has an MCP ledger, even the one that has declared nothing (it is empty).
+
+  The ledger carries no server's `:env` at any depth. That is the api-key's rule,
+  and it holds here for the same reason: a person needs to know a server IS
+  configured, never with what."
+  [req]
+  (let [thread-id (get (query-params (:query-string req)) "threadId")]
+    (api-response 200 {:threadId (or thread-id "")
+                       :servers  (cap-mcp/status thread-id)})))
+
+(defn- mcp-post
+  "POST /api/mcp {threadId, server, enabled} -- switch one declared server on or
+  off FOR THIS SESSION.
+
+  NOT A CONFIG EDIT: mcp.edn is untouched, and the switch is gone on restart --
+  the same standing as a session's tool overlay and its hook overlay. Closing a
+  server closes its process, but its tools stay in the table with their calls
+  refused (see harness.cap.mcp/session-disable-server!), because hiding them would
+  make 'there is no such server' and 'that server is off' the same observation.
+
+  A CHANGE WORTH A LINE, unlike the GET above: this one moves what the session can
+  do, so it lands an `mcp/server` audit line with `disabled`, runId null (it happens
+  outside any run). A server this session does not declare is a NAMED 404: the panel
+  draws a switch per DECLARED server, so an unknown name means the screen is out of
+  date, and guessing which server it meant would switch the wrong thing."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed
+        thread-id (str (:threadId ok))
+        server    (:server ok)
+        enabled   (:enabled ok)
+        declared  (set (keys (cap-mcp/config thread-id)))]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? thread-id)
+      (api-response 400 {:error "missing threadId"})
+
+      (not (string? server))
+      (api-response 400 {:error "missing server"})
+
+      (not (boolean? enabled))
+      (api-response 400 {:error "enabled must be true or false"})
+
+      (not (contains? declared server))
+      (api-response 404 {:error (str "this session does not declare an MCP server "
+                                     (pr-str server)
+                                     "; it declares " (pr-str (vec (sort declared))))})
+
+      :else
+      (do (if enabled
+            (cap-mcp/session-enable-server! thread-id server)
+            (cap-mcp/session-disable-server! thread-id server))
+          (log! thread-id nil "mcp/server" {:server server :disabled (not enabled)
+                                            :via "http"})
+          (api-response 200 {:threadId thread-id :server server :enabled enabled})))))
+
+(defn- elicitation-get
+  "GET /api/elicitation?interruptId=.. -- the QUESTION behind a parked interrupt:
+  which server asked, what it asked, and the JSON Schema it wants filled in.
+
+  WHY THIS IS AN ENDPOINT AND NOT A FIELD ON THE INTERRUPT. AG-UI's interrupt
+  object is a strict shape -- id, reason, message, toolCallId and a couple more, and
+  a client's own validator refuses anything else -- so a form schema stuffed into it
+  would be a protocol change this harness has no business making. The interrupt says
+  'a server is asking a question' and carries the question's sentence; the SHAPE of
+  the answer is fetched here, by the client that is about to draw it.
+
+  Read-only, and therefore no audit line: it answers where a parked call already is,
+  and asking about a decision must not become part of the record of it.
+
+  A missing or unknown id is a NAMED 404 rather than an empty form: a client drawing
+  a form for a question nobody asked would be collecting answers into nowhere."
+  [req]
+  (let [id (get (query-params (:query-string req)) "interruptId")]
+    (cond
+      (str/blank? id)
+      (api-response 400 {:error "missing interruptId query parameter"})
+
+      :else
+      (let [rec (tools/parked id)]
+        (if (and rec (= :elicitation (:reason rec)))
+          (api-response 200 {:interruptId id
+                             :server      (:server rec)
+                             :prompt      (:prompt rec)
+                             :schema      (:schema rec)
+                             :expiresAt   (:expires-at rec)})
+          (api-response 404 {:error (str "no elicitation is parked under " id)}))))))
+
 (defn- model-get
   "GET /api/model?threadId=.. -- what this session is served by and what that
   model accepts, for a client deciding whether to offer an image picker:
@@ -1650,6 +1761,17 @@
       :post (git-post req)
       (api-response 405 {:error "method not allowed"}))
 
+    (= "/api/mcp" (:uri req))
+    (case (:request-method req)
+      :get  (mcp-get req)
+      :post (mcp-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/elicitation" (:uri req))
+    (case (:request-method req)
+      :get  (elicitation-get req)
+      (api-response 405 {:error "method not allowed"}))
+
     (= "/api/settings" (:uri req))
     (case (:request-method req)
       :get  (settings-get req)
@@ -1770,7 +1892,12 @@
         ;; this process runs.
         teardowns [(cap-tools/install!)
                    (cap-hooks/install!)
-                   (system-prompt/install!)]]
+                   (system-prompt/install!)
+                   ;; MCP SERVERS, when a home declares any: the tools they provide
+                   ;; are a question about the SESSION (which project's mcp.edn is
+                   ;; in force, which server is up), so the seam asks this
+                   ;; capability per assembly instead of being handed a map.
+                   (cap-mcp/install!)]]
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; A HOME THAT HAS NEVER BEEN CONFIGURED GETS A config.edn HERE, at boot: a
     ;; process about to SERVE from a home is the one that should hand a person a file

@@ -48,7 +48,11 @@
 (defonce ^:private built-ins (atom {}))
 
 (defn- register!
-  [name tool] (swap! built-ins assoc name tool))
+  "Put NAME->TOOL into THIS LAYER's table. The `:source` is stamped here, once,
+  rather than at fifteen call sites: this map IS the built-in half of the table,
+  so a row in it knows where it came from by construction. Rows from other
+  origins carry their own (an external server's say :mcp)."
+  [name tool] (swap! built-ins assoc name (assoc tool :source :builtin)))
 
 ;; ------------------------------------------------------------------- helpers
 

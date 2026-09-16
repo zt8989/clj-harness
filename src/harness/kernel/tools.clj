@@ -101,17 +101,41 @@
                 (update :tools merge (:tools layer))
                 (update :disabled into (map (fn [n] [n (:name layer)])) (:disable layer))
                 (update :planner #(or (:planner layer) %))
-                (update :narrow #(or (:narrow layer) %))))
-          {:tools {} :disabled {} :planner nil :narrow nil}
+                (update :narrow #(or (:narrow layer) %))
+                ;; ...AND THE TWO CONTRIBUTIONS THAT ANSWER FOR ONE SESSION AT A
+                ;; TIME. A layer whose tools depend on the SESSION (an external
+                ;; server's roster) or whose switch-off is per-session cannot say
+                ;; so in a static map, so it says it with a function. Folded
+                ;; after the static ones: a later layer's dynamic answer wins over
+                ;; an earlier layer's static one, which is the same "later wins"
+                ;; the rest of this door follows.
+                (update :tools-for conj (:tools-for layer))
+                (update :disabled-for conj (:disabled-for layer))))
+          {:tools {} :disabled {} :planner nil :narrow nil
+           :tools-for [] :disabled-for []}
           layers))
+
+(defonce ^:private session-sources
+  ;; The installed :tools-for contributions, in install order. Called on the way
+  ;; to every LLM request (specs) and by every call (run!), so a contribution that
+  ;; is expensive is expensive everywhere -- the capability's problem, not this
+  ;; door's.
+  (atom []))
+
+(defonce ^:private session-switches
+  ;; The installed :disabled-for contributions. Each answers nil, or a sentence
+  ;; about WHY this name is off for this thread.
+  (atom []))
 
 (defn- recompute!
   []
-  (let [{:keys [tools disabled planner narrow]} (fold-layers @layers)]
+  (let [{:keys [tools disabled planner narrow tools-for disabled-for]} (fold-layers @layers)]
     (reset! registry tools)
     (reset! base-disabled disabled)
     (reset! installed-planner planner)
-    (reset! installed-narrowing narrow)))
+    (reset! installed-narrowing narrow)
+    (reset! session-sources (vec (remove nil? tools-for)))
+    (reset! session-switches (vec (remove nil? disabled-for)))))
 
 (defn base-disabled-by
   "The layer that switched NAME off process-wide, or nil. The refusal names it,
@@ -132,7 +156,11 @@
                                  ;   installed a turn is just calls, and every one
                                  ;   of them runs on its own.
      :narrow  {:served? (fn [thread-id name])   ; which names this session is served
-               :refuse  (fn [thread-id name])}} ; ...and what to say when it is not
+               :refuse  (fn [thread-id name])}   ; ...and what to say when it is not
+     :tools-for    (fn [thread-id] {name tool})  ; tools whose EXISTENCE is a
+                                                 ;   question about the session
+     :disabled-for (fn [thread-id name])}        ; nil, or {:by .. :message ..}
+                                                 ;   when something switched it off
 
   THE TEARDOWN WITHDRAWS THIS LAYER BY IDENTITY and folds the rest again. That is
   the point of keeping the stack rather than deleting names: 'A installed x, B
@@ -145,10 +173,11 @@
   :disable leaves the definition in place and refuses its calls. Disabling on the
   way in and deleting on the way out are different statements, and a caller that
   wants the second has to mean it."
-  [{:keys [name tools disable planner narrow] :as _contribution}]
+  [{:keys [name tools disable planner narrow tools-for disabled-for] :as _contribution}]
   (let [id    (str (java.util.UUID/randomUUID))
         layer {:id id :name (or name id) :tools (or tools {})
-               :disable (vec disable) :planner planner :narrow narrow}]
+               :disable (vec disable) :planner planner :narrow narrow
+               :tools-for tools-for :disabled-for disabled-for}]
     (swap! layers conj layer)
     (recompute!)
     (fn teardown []
@@ -176,7 +205,7 @@
 ;; a model that cannot see a tool reads its absence as "this capability does not
 ;; exist" and goes looking for a way around it. Disabled is honest; hidden is not.
 
-(declare effective-tools)
+(declare effective-tools session-disabled-elsewhere? session-tools parked-for-call park-approval!)
 ;; The narrowing policy's two relays are used by , which is above them; the
 ;; policy itself arrives through install! and the definitions sit below with the
 ;; rest of the refusal vocabulary.
@@ -237,9 +266,69 @@
   (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
 
 (defn session-disabled?
-  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call."
+  "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call.
+
+  TWO WAYS TO BE OFF, and the seam does not care which: this session switched this
+  TOOL off (the overlay), or something a LAYER knows about switched it off --
+  an external server that was turned off takes its tools with it. The second is
+  answered by whatever the layer installed, so the seam still knows nothing about
+  what a server is."
   [thread-id name]
-  (contains? (get-in @overlays [thread-id :disabled] #{}) name))
+  (boolean (or (contains? (get-in @overlays [thread-id :disabled] #{}) name)
+               (session-disabled-elsewhere? thread-id name))))
+
+(defn- session-disabled-elsewhere?
+  "The layer-supplied answer for NAME, or nil. First answer wins, in install
+  order, so a switch installed later can still be overruled by nothing at all --
+  the FIRST switch that claims a name is the one whose sentence is used."
+  [thread-id name]
+  (some (fn [f] (try (f thread-id name) (catch Throwable _ nil)))
+        @session-switches))
+
+(def ^:dynamic *tool-call-id*
+  "The CALL being executed, bound by the seam beside *thread-id* -- the other half
+  of the identity a suspension needs. *thread-id* says whose conversation this is;
+  this says which of that conversation's calls is asking, which is what lets a tool
+  that has to stop mid-flight park ITSELF and be answered by the same id later.
+
+  Unbound outside a run, like its sibling."
+  nil)
+
+(defn suspend!
+  "Stop the call that is executing, from INSIDE its own body, and ask a human.
+
+  THE THIRD WAY A CALL CAN END, and the only one a tool causes itself. The other
+  two are decided for it at the seam: allow, or be refused. This one is a tool
+  saying 'I cannot finish without an answer' -- which is what an MCP server asking
+  for input means, and why it must NOT be modelled as a tool that returned early
+  with a message appended afterwards.
+
+  QUESTION describes what is being asked ({:server .. :prompt .. :schema ..}). It
+  rides the parked record, so a client can render a form without inventing
+  anything, and NONE of it goes on the wire as protocol: the interrupt carries an
+  id, a reason and a line for a human, and the schema comes from this harness's own
+  edge.
+
+  THROWS, always: its job is to unwind out of the tool body and out of whatever
+  machinery the tool was waiting on, so the seam can turn it into a park. A caller
+  that catches it is breaking the contract."
+  [thread-id tool-call-id question]
+  (let [interrupt-id (or (:interrupt-id (parked-for-call thread-id tool-call-id))
+                         (str (java.util.UUID/randomUUID)))]
+    (park-approval! interrupt-id (assoc question
+                                        :thread-id thread-id
+                                        :tool-call-id tool-call-id
+                                        :reason :elicitation))
+    (throw (ex-info (str "the call suspended on a question: " (:prompt question))
+                    {:suspended true
+                     :suspended/interrupt-id interrupt-id
+                     :suspended/question question}))))
+
+(defn suspended?
+  "Did T come out of `suspend!`? The seam's question, asked without the seam
+  having to know who asked or why."
+  [t]
+  (boolean (:suspended (ex-data t))))
 
 (defn effective-tools
   "NAME->TOOL for THREAD-ID: the immutable base overlaid with the session's
@@ -250,9 +339,28 @@
   here. Availability is a separate question, answered per call by
   session-disabled? at the execution seam."
   [thread-id]
-  (if (nil? thread-id)
-    @registry
-    (into @registry (get-in @overlays [thread-id :added] {}))))
+  (let [base (into @registry (session-tools thread-id))]
+    (if (nil? thread-id)
+      base
+      (into base (get-in @overlays [thread-id :added] {})))))
+
+(defn- session-tools
+  "What the installed layers offer THIS SESSION, folded in arrival order.
+
+  A layer's static :tools are in `registry` already; this is the other half --
+  the tools whose EXISTENCE is a question about the session. An external server's
+  roster is exactly that shape: which tools it has depends on which project's
+  declaration is in force and on whether the server is up, so it cannot be a map
+  written down at setup.
+
+  A contribution that throws contributes nothing: a source that cannot answer for
+  a session must not take the whole toolset down with it. That is the same
+  judgement the capability itself makes about one broken server."
+  [thread-id]
+  (reduce (fn [acc f]
+            (try (merge acc (f thread-id)) (catch Throwable _ acc)))
+          {}
+          @session-sources))
 
 
 ;; --------------------------------------------------------------------- specs
@@ -509,7 +617,13 @@
   reader who acts on only half of a doubly-refused call will try it again and be
   told the same thing."
   [thread-id name]
-  (if-let [layer (base-disabled-by name)]
+  ;; A LAYER THAT KNOWS WHY SPEAKS FOR ITSELF: an external server that was switched
+  ;; off can say which server it was and how to bring it back, and only that layer
+  ;; knows. Its sentence is used verbatim -- the seam has nothing to add to an
+  ;; answer about something it has never heard of.
+  (if-let [elsewhere (session-disabled-elsewhere? thread-id name)]
+    (:message elsewhere)
+    (if-let [layer (base-disabled-by name)]
     (str "disabled in this harness: " name " is switched off by the " layer
          " layer, which no session can re-enable."
          (when-not (served? thread-id name)
@@ -520,7 +634,7 @@
            (str " Re-enable it with (harness.kernel.tools/session-enable!"
                 " harness.kernel.tools/*thread-id* \"" name "\").")
            (str " Re-enabling it will not make it run, either: "
-                (unserved-message thread-id name))))))
+                (unserved-message thread-id name)))))))
 
 ;; ------------------------------------------------------------------- the batch
 
@@ -698,8 +812,16 @@
                                           (:note role))
                                         ((:run tool) parsed)))
                                [result err]
-                               (try [(binding [*thread-id* thread-id] (body)) nil]
+                               (try [(binding [*thread-id* thread-id
+                                               *tool-call-id* id]
+                                       (body))
+                                     nil]
                                     (catch Throwable t [nil t]))
+                               ;; A SUSPENSION IS NOT A FAILURE, and it is picked
+                               ;; out before the generic handler can read it as
+                               ;; one: the tool did not go wrong, it stopped to ask
+                               ;; (see parked/suspend!).
+                               suspended (when (suspended? err) (ex-data err))
                                _ (report (ev/tool-executed id name (some-> err ex-message)))
                                ;; PostToolUse is an OBSERVER: its verdict is
                                ;; discarded here on purpose. It already ran inside
@@ -711,8 +833,25 @@
                                    (hook/emit :post-tool-use {:tool_name name
                                                               :tool_input parsed}))
                                _ (report (ev/tool-post-execute id name))]
-                           (if err
+                           (cond
+                             ;; THE CALL COMPLETED ITS OWN STORY: the record it
+                             ;; parked is finished off here with the two things
+                             ;; only the seam knows -- the name and arguments it
+                             ;; was called with -- because the resume has to be
+                             ;; able to issue this call again.
+                             suspended
+                             (do (park-approval! (:suspended/interrupt-id suspended)
+                                                        {:name name :args arguments})
+                                 {:content "" :error false
+                                  :parked (cond-> {:interrupt-id (:suspended/interrupt-id suspended)
+                                                   :id id :name name :args arguments
+                                                   :question (:suspended/question suspended)}
+                                            true (assoc :reason :elicitation))})
+
+                             err
                              {:content (ex-message err) :error true}
+
+                             :else
                              {:content (str result) :error false})))
                park (fn [reason interrupt-id]
                       (let [interrupt-id (or interrupt-id

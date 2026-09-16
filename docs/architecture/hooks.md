@@ -49,8 +49,8 @@
 
 | 状态 | 点 |
 |---|---|
-| **已接线（7）** | `SessionStart`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`、**`SystemPrompt`**、`InstructionsLoaded` |
-| 已登记、无触发源（20） | `UserPromptSubmit`、`PermissionDenied`、`PostToolUseFailure`、`StopFailure`、`Notification`、`ConfigChange`、`CwdChanged`、`SessionEnd`、`FileChanged`、`Elicitation`、`ElicitationResult`、`PreCompact`、`PostCompact`、`SubagentStart/Stop`、`TeammateIdle`、`TaskCreated/Completed`、`WorktreeCreate/Remove` |
+| **已接线（9）** | `SessionStart`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`、**`SystemPrompt`**、`InstructionsLoaded`、**`Elicitation`**、**`ElicitationResult`** |
+| 已登记、无触发源（18） | `UserPromptSubmit`、`PermissionDenied`、`PostToolUseFailure`、`StopFailure`、`Notification`、`ConfigChange`、`CwdChanged`、`SessionEnd`、`FileChanged`、`PreCompact`、`PostCompact`、`SubagentStart/Stop`、`TeammateIdle`、`TaskCreated/Completed`、`WorktreeCreate/Remove` |
 
 **没有触发源的点永不触发——这是设计，不是遗漏。** 这就是为什么一个 P3 点的代价是一行数据，
 而不是一个接口。它们等各自的子系统（文件监视、上下文压缩、子代理、任务、worktree）落地时再接。
@@ -190,6 +190,9 @@ fire {point thread-id fact audit}
 **不是另一套机制**——它们是本会话给自己装的悬置型规则，与 `hooks.edn` 里写的门禁是同一族。
 `PermissionRequest` 就是让**规则**去回答本来要打断人的那个问题的那一点，详见
 [kernel 的悬置一节](kernel.md#悬置先问规则再问人)。
+
+**两个 MCP 点（`Elicitation` / `ElicitationResult`）也是观察者**，而且这是刻意的：一条规则可以
+「替人回答一次审批」（那是合理的委派），但「替人填一张表」不是——所以那条答复通道不给它们。
 
 **没声明任何 hook 时整条路径是 no-op**：不 spawn、不等待、不落行，帧与审计线与这个能力存在之前
 逐字节相同。hook 只在**边**绑定了 run 的 sink 时触发，所以离线工具、replay、直接驱动内核的测试

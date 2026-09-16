@@ -24,6 +24,7 @@ import { configure, type Suite } from "./e2e";
 import { startHarness } from "./support/harness";
 import { approvalSuite } from "./suites/approval";
 import { clientSuite } from "./suites/client";
+import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
 import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
@@ -31,7 +32,7 @@ import { turnSuite } from "./suites/turn";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -43,7 +44,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// shadowed name listed once; asking changes nothing).
 /// 14 -> 18: the `stats` suite's four (the strip's cells, the numbers it leaves
 /// out, a real run folded by the endpoint, and a session that has not run).
-const EXPECTED_CASES = 19;
+/// 18 -> 24: the `elicitation` suite's five -- one through the whole loop (a
+/// server's question parks the run and the answer finishes it) and four on the
+/// form itself (the four kinds; answers keep the declared type; a field nobody
+/// expected is kept and named; an empty or odd schema is an empty form).
+const EXPECTED_CASES = 24;
 
 let total = 0;
 for (const suite of SUITES) {

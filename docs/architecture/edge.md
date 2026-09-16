@@ -59,6 +59,9 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/projects` | GET | 侧边栏的数据：每个项目 + 它的会话 | 无 |
 | `/api/projects` | POST | 让一个目录成为项目（find-or-create） | 无 |
 | `/api/projects/<canonical-path>/remove` | POST | 移除项目（= 解绑它的会话，不删日志） | 无 |
+| `/api/mcp` | GET | MCP 账本：服务器、状态、工具清单 | 无（只读） |
+| `/api/mcp` | POST | 本会话启停一个 MCP 服务器 | `mcp/server`（带 `disabled`，runId null） |
+| `/api/elicitation` | GET | 某个悬置的问题问的是什么、要填什么 | 无（只读） |
 
 规矩三条：
 
@@ -144,6 +147,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `project/bound` | 绑定变更，before → after（可读成目录时间线） |
 | `session/rebuilt` | 重建动作，落**被重建的那份日志**上 |
 | `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`、`hook/InstructionsLoaded`…） |
+| `mcp/server` | 一个 MCP 服务器的连接结果、失败、重连或启停（**只有变化才落行**，落在 `:run/done`） |
 
 几条支撑性的事实：
 

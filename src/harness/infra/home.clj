@@ -88,6 +88,7 @@
   (io/file (root) "providers.edn"))
 
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
+(defn mcp-file       [] (io/file (root) "mcp.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 
 (defn config-backup-file

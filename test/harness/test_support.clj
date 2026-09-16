@@ -22,6 +22,7 @@
   (:require [clojure.java.io :as io]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.system-prompt :as system-prompt]
+            [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
             [harness.infra.home :as home]
             [harness.kernel.hooks :as hooks]))
@@ -95,4 +96,20 @@
   cannot leak a tool table into the next one."
   [f]
   (let [teardowns [(cap-tools/install!) (cap-hooks/install!) (system-prompt/install!)]]
+    (try (f) (finally (doseq [td teardowns] (td))))))
+
+
+(defn with-mcp
+  "The same capabilities, PLUS harness.cap.mcp -- the external servers a home
+  declares, whose tools arrive through the seam's `:tools-for` rather than as a
+  map written down at setup.
+
+  A SEPARATE FIXTURE rather than part of the one above, because that one is what
+  every tool-driving namespace in this suite uses and MCP is exactly the
+  capability most of them do not have: a table with an external server in it is a
+  different table, and the tests that are about the SEAM should keep asserting
+  against the one they were written for."
+  [f]
+  (let [teardowns [(cap-tools/install!) (cap-hooks/install!)
+                   (system-prompt/install!) (cap-mcp/install!)]]
     (try (f) (finally (doseq [td teardowns] (td))))))

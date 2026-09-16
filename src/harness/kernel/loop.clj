@@ -193,8 +193,16 @@
           (hook/emit :stop {}))
         (emit (if (seq parked)
                 (ev/run-interrupt
-                 (mapv (fn [{:keys [interrupt-id id name args]}]
-                         {:id interrupt-id :tool-call-id id :name name :args args})
+                 (mapv (fn [{:keys [interrupt-id id name args reason question]}]
+                         ;; :reason and :question ride along because there is more
+                         ;; than one way to park: a human deciding, and a server
+                         ;; asking a question. The client has to tell them apart to
+                         ;; draw the right card, and the question belongs on it.
+                         ;; What reaches the WIRE is harness.edge.ag-ui's business,
+                         ;; and it stays a strict interrupt object there.
+                         (cond-> {:id interrupt-id :tool-call-id id :name name :args args}
+                           reason   (assoc :reason reason)
+                           question (assoc :question question)))
                        parked))
                 (ev/run-end))))
       (catch Throwable t
