@@ -42,9 +42,9 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [harness.fake :as fake]
-            [harness.home :as home]
-            [harness.http :as http]
-            [harness.providers :as providers]))
+            [harness.infra.home :as home]
+            [harness.edge.http :as http]
+            [harness.cap.providers :as providers]))
 
 (defn- turns-in [file]
   (let [f (io/file file)]
@@ -64,7 +64,7 @@
 
   So this patches `pinned-provider`, the seam `current-provider` consults first.
   Patching that one public fn covers every caller at once: the run path, and the
-  init-line suppression in harness.http, which then reads correctly -- a session
+  init-line suppression in harness.edge.http, which then reads correctly -- a session
   served by a script has no provider tier to record.
 
   The provider instance is keyed by thread id, so a new thread id starts a fresh

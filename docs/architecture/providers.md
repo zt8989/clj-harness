@@ -1,6 +1,6 @@
 # providers：厂商、model、三档解析
 
-`harness.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
+`harness.cap.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
 
 ## 目录的形状
 

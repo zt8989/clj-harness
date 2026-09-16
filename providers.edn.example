@@ -40,7 +40,7 @@
 ;; Declaring both? :max-output-tokens must not exceed :context-window.
 ;;
 ;; THIS FILE IS OPTIONAL. A config.edn naming a provider from the built-in table
-;; (harness.providers) needs no file here, and a config.edn that describes its
+;; (harness.cap.providers) needs no file here, and a config.edn that describes its
 ;; provider inline -- {:protocol .. :base-url .. :model ..} -- needs neither.
 ;; What you write here is merged OVER the built-in table: same provider field by
 ;; field, same provider's :models model by model -- and an individual MODEL merges
@@ -82,7 +82,7 @@
              "qwen3-vl" {:input #{:text :image} :output #{:text}
                          :context-window 262144}}}}
 
-;; A LOCAL ENDPOINT NEEDS NO KEY, but harness.providers still resolves
+;; A LOCAL ENDPOINT NEEDS NO KEY, but harness.cap.providers still resolves
 ;; HARNESS_API_KEY (from .env, then the environment) and attaches it -- the
 ;; protocol module decides whether to use it. Nothing to configure for localhost.
 ;;

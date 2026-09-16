@@ -4,7 +4,7 @@
 
 ## 事件：11 种，就这些
 
-`harness.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.ag_ui` 从这些事件派生**，
+`harness.kernel.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.edge.ag-ui` 从这些事件派生**，
 内核自己不知道 AG-UI 存在。
 
 | 事件 | 含义 |
@@ -23,7 +23,7 @@
 
 `:run/end` 与 `:run/interrupt` **互斥**，一次 run 恰好发其一——客户端因此永远看得到一个终结。
 
-## 循环：`harness.loop`
+## 循环：`harness.kernel.loop`
 
 ```
 drive! :
@@ -55,7 +55,7 @@ drive! :
 - **没有迭代上限**，这是设计。
 - `replay!` 遇到本进程没 park 过的 interrupt **直接抛**——猜一个批准是这里最坏的失败模式。
 
-## provider 层：`harness.llm`
+## provider 层：`harness.kernel.llm`
 
 一个 multimethod，按 `:protocol` 分派；生产上只有 `:openai-completions`，测试里有一个 `:fake` 脚本替身。
 
@@ -74,11 +74,11 @@ drive! :
 
 ### prompt 的载体：冻结的是**开头**
 
-`prompt.md` 的载体在这里（`harness.llm/prompt` / `reset-prompt!`），因为「冻结」这件事的理由就是
+`prompt.md` 的载体在这里（`harness.kernel.llm/prompt` / `reset-prompt!`），因为「冻结」这件事的理由就是
 provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 **但它是 system 消息的开头，不是整个 system 消息。** 一条 system 消息的全文由
-`harness.system-prompt/assemble` 在每次 run 组装：`prompt.md` 的字节（冻结）之后，接上
+`harness.cap.system-prompt/assemble` 在每次 run 组装：`prompt.md` 的字节（冻结）之后，接上
 `SystemPrompt` 点每条匹配声明追加的文本，顺序由来源档位定（内建三条 → 文件 → 会话），块间一个空行。
 追加的文本**原样**进 prompt，引擎不包装——块自己带 `<tools>` 这类标签。
 
@@ -87,14 +87,14 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 事实能在会话中途变（`project/bind!`、`session-configure`、`session-disable!`），冻下来的那句就会
 说一件已经不成立的事。代价是事实动了要付一次冷前缀，那是它该有的样子。
 
-两半各有主人：**system 半是 `harness.system-prompt`，user 半是 `harness.preamble`**
-（`harness.project` 已经 require 了 `preamble`，而 system 半要 `tools` / `project` / `hooks.dispatch`，
+两半各有主人：**system 半是 `harness.cap.system-prompt`，user 半是 `harness.cap.preamble`**
+（`harness.cap.project` 已经 require 了 `preamble`，而 system 半要 `tools` / `project` / `hooks.dispatch`，
 并进去就是 require 环）。两半不可能交错：不同的 message role。
 
-`harness.llm/prompt` 对**没有 hook sink 的调用方**（离线工具、replay、直接驱动内核的测试）返回的就是
+`harness.kernel.llm/prompt` 对**没有 hook sink 的调用方**（离线工具、replay、直接驱动内核的测试）返回的就是
 那份开头，逐字节——见 [edge](edge.md) 与 [hooks](hooks.md) 的 no-op 一节。
 
-## 工具表与执行缝：`harness.tools`
+## 工具表与执行缝：`harness.kernel.tools`
 
 工具定义：
 
@@ -216,7 +216,7 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 
 `*thread-id*` 在工具体外面被绑定，所以工具内部的代码（`eval` 尤其是）能问到自己属于哪个会话。
 
-### 文件编辑：锚点那一套（`harness.editing` + `harness.hashline.*`）
+### 文件编辑：锚点那一套（`harness.cap.editing` + `harness.cap.hashline.*`）
 
 **按锚点编辑是这个 harness 的默认编辑方式**（2026-09-15 起）：`read` 每行回成 `锚点│内容`，
 `replace` / `insert` 用那个锚点定位，而不是让模型重打一遍要改的文本。
@@ -242,7 +242,7 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 与空格行的锚点就能下下一笔，不必重读文件。
 
 **一次消息里对同一个文件的多次编辑是一次提交。** 一个回合的工具调用是**并发**跑的
-（`harness.loop`），两笔各自针对同一基态的编辑各自都成立、合起来丢数据——所以它们按目标路径分组、
+（`harness.kernel.loop`），两笔各自针对同一基态的编辑各自都成立、合起来丢数据——所以它们按目标路径分组、
 区间必须两两不相交、全部针对消息开始前的状态校验、最后一次调用给出合并后的 diff、**一次写一次撤销**，
 不成立就整批拒绝（其余调用得到的答复是「已并入」）。不这么做的失败模式是**静默数据丢失**。
 

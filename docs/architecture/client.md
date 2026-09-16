@@ -100,7 +100,7 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
   或「丢了用例」变成**失败**而不是静默变绿。
-- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.http`，在 `--port 0`（OS 分配）上，
+- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.edge.http`，在 `--port 0`（OS 分配）上，
   provider 是 `harness.fake` 的脚本替身，日志写进临时 `CLJ_HARNESS_HOME`。
   所以跑多少次结果都一样，也不会写进真实的 `~/.clj-harness`。
 - **控制通道是文件不是端点**：服务端在遇到**新的 threadId** 时重读脚本文件。
@@ -112,6 +112,6 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 
 ## 一条从后端来的注意
 
-`harness.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
+`harness.edge.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
 **服务跑在另一个线程上**，`binding` 只改当前线程的动态栈，stub 会被静默忽略。
 凡是给「服务端在别的线程上调用」的缝注入替身，都得用 `alter-var-root`。

@@ -73,7 +73,7 @@ Copy-Item .env.example ~/.clj-harness/.env
 是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
 
 **`prompt.md` 是唯一的例外**：它留在仓库里，不进家目录——那是被 review 的代码资产，每次改动都需要
-git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.llm/reset-prompt!)` 或重启。
+git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
 **缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
@@ -217,7 +217,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 两种模式都是一等公民，各有完整用例；`edit` 的行为一个字没变，只是不再默认在场。`:editing` 是
 `harness.edn` 里**唯一逐键合成**的块（其余顶层键是整键替换），所以项目级只写 `{:auto-read false}`
 不会把用户级的 `:mode` 一起抹掉；全部七个键与它们的默认值都在 `harness.edn.example` 里。自省：
-`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+`(harness.cap.editing/editing-mode harness.kernel.tools/*thread-id*)`。
 
 两套各自是什么、为什么默认换了、锚点存在哪，见
 [`docs/architecture/kernel.md`](docs/architecture/kernel.md) 与
@@ -229,7 +229,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ```pwsh
 clojure -M:run          # 项目根
-# 或 clojure -A:test -M -m harness.http
+# 或 clojure -A:test -M -m harness.edge.http
 # 期望：harness listening on http://localhost:8080 -- POST an AG-UI RunAgentInput here; stop with (stop!)
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```

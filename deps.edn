@@ -1,5 +1,5 @@
 ;; "resources" holds DATA the code reads off the classpath rather than source:
-;; today that is the vendored anchor table (harness.hashline.anchors), 85 KB
+;; today that is the vendored anchor table (harness.cap.hashline.anchors), 85 KB
 ;; gzipped. It is on :paths for every alias, because the thing that needs it is
 ;; src/ and not a test.
 {:paths ["src" "resources"]
@@ -17,10 +17,10 @@
         org.clojure/core.async {:mvn/version "1.6.681"}
         http-kit/http-kit     {:mvn/version "2.8.0"}
         org.clojure/data.json {:mvn/version "2.5.2"}
-        ;; The home's metadata store (harness.db). The ONE binary dependency in
+        ;; The home's metadata store (harness.infra.db). The ONE binary dependency in
         ;; this repo, and a deliberate one: the store's whole reason to exist is
         ;; a critical section that commits several facts at once, which is what
-        ;; a transaction is for. See harness.db's docstring and
+        ;; a transaction is for. See harness.infra.db's docstring and
         ;; .scratch/project-sidebar/spec.md decision 2.
         org.xerial/sqlite-jdbc {:mvn/version "3.53.4.0"}
         ;; Logging: the standard Clojure facade over SLF4J, on Logback. Logback
@@ -28,14 +28,14 @@
         ;; SizeAndTimeBasedRollingPolicy, rotation by date AND size in ONE policy.
         ;; Each half alone is the bug: a date-only policy lets one bad afternoon
         ;; fill the disk, a size-only one buries "what happened on Tuesday". See
-        ;; harness.logging.
+        ;; harness.infra.logging.
         org.clojure/tools.logging {:mvn/version "1.3.0"}
         ch.qos.logback/logback-classic {:mvn/version "1.5.6"}}
  :aliases
  ;; :test carries dev/ because the replay tool lives there and has tests of its own.
  {:test  {:extra-paths ["test" "dev"]}
   :dev   {:extra-paths ["dev" "test"]}
-  :run   {:main-opts ["-m" "harness.http"]}
+  :run   {:main-opts ["-m" "harness.edge.http"]}
   ;; Read back what an agent built at runtime, for the promotion decision:
   ;;   clojure -M:evals <thread-id> [log-dir]
   :evals {:extra-paths ["dev"] :main-opts ["-m" "harness.evals"]}

@@ -8,7 +8,7 @@
   poisoning control are git's job -- nothing here is ever replayed automatically,
   because replaying a log would turn the record into executable input.
 
-  It lives under dev/ for the same reason harness.replay does: the kernel never
+  It lives under dev/ for the same reason harness.edge.replay does: the kernel never
   reads its own log. This is a reader, and it is for the author, not the agent --
   the agent already sees its own eval calls in the rebuilt conversation.
 
@@ -21,12 +21,12 @@
   findings are locked by tests, so nobody later 'fixes' this reader by reaching
   for the audit lines.
 
-  The read discipline is harness.replay's: a corrupt or truncated log is a hard
+  The read discipline is harness.edge.replay's: a corrupt or truncated log is a hard
   failure that names the line, never a shorter result that reads as a small answer."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
-            [harness.home]
-            [harness.replay :as replay]))
+            [harness.infra.home]
+            [harness.edge.replay :as replay]))
 
 (def ^:private eval-tool-name "eval")
 
@@ -96,7 +96,7 @@
   here would be a third copy of a rule with two callers already. Use
   `replay/locate`, or a path you already have.
 
-  Uses harness.replay for reading, so a corrupt log fails the same way it does
+  Uses harness.edge.replay for reading, so a corrupt log fails the same way it does
   everywhere else -- naming the offending line -- and the filename rule is not
   reimplemented a third time."
   [^java.io.File f]
@@ -118,7 +118,7 @@
   Prints every eval THREAD-ID ran, in order: the code verbatim, then its result.
 
   LOG-DIR is the TREE's root and defaults to the process's projects directory
-  (harness.home/projects-dir); the thread's file is LOCATED under it, because the
+  (harness.infra.home/projects-dir); the thread's file is LOCATED under it, because the
   logs are a tree of workspaces now and this tool has no business knowing which
   project a session belonged to. Pass a directory to search somewhere else
   entirely.
@@ -128,7 +128,7 @@
   tool, and commit it -- version control is the rollback story. Nothing here ever
   re-runs the code."
   [thread-id & [dir]]
-  (let [dir   (or dir (str (harness.home/projects-dir)))
+  (let [dir   (or dir (str (harness.infra.home/projects-dir)))
         found (try {:ok (evals (replay/locate dir thread-id))}
                    (catch Exception e {:error (ex-message e)}))]
     (if-some [error (:error found)]
