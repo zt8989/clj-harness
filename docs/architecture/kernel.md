@@ -4,7 +4,7 @@
 
 ## 事件：11 种，就这些
 
-`harness.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.ag_ui` 从这些事件派生**，
+`harness.kernel.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.edge.ag-ui` 从这些事件派生**，
 内核自己不知道 AG-UI 存在。
 
 | 事件 | 含义 |
@@ -23,7 +23,7 @@
 
 `:run/end` 与 `:run/interrupt` **互斥**，一次 run 恰好发其一——客户端因此永远看得到一个终结。
 
-## 循环：`harness.loop`
+## 循环：`harness.kernel.loop`
 
 ```
 drive! :
@@ -55,7 +55,7 @@ drive! :
 - **没有迭代上限**，这是设计。
 - `replay!` 遇到本进程没 park 过的 interrupt **直接抛**——猜一个批准是这里最坏的失败模式。
 
-## provider 层：`harness.llm`
+## provider 层：`harness.kernel.llm`
 
 一个 multimethod，按 `:protocol` 分派；生产上只有 `:openai-completions`，测试里有一个 `:fake` 脚本替身。
 
@@ -74,11 +74,11 @@ drive! :
 
 ### prompt 的载体：冻结的是**开头**
 
-`prompt.md` 的载体在这里（`harness.llm/prompt` / `reset-prompt!`），因为「冻结」这件事的理由就是
+`prompt.md` 的载体在这里（`harness.kernel.llm/prompt` / `reset-prompt!`），因为「冻结」这件事的理由就是
 provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 **但它是 system 消息的开头，不是整个 system 消息。** 一条 system 消息的全文由
-`harness.system-prompt/assemble` 在每次 run 组装：`prompt.md` 的字节（冻结）之后，接上
+`harness.cap.system-prompt/assemble` 在每次 run 组装：`prompt.md` 的字节（冻结）之后，接上
 `SystemPrompt` 点每条匹配声明追加的文本，顺序由来源档位定（内建三条 → 文件 → 会话），块间一个空行。
 追加的文本**原样**进 prompt，引擎不包装——块自己带 `<tools>` 这类标签。
 
@@ -87,14 +87,14 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 事实能在会话中途变（`project/bind!`、`session-configure`、`session-disable!`），冻下来的那句就会
 说一件已经不成立的事。代价是事实动了要付一次冷前缀，那是它该有的样子。
 
-两半各有主人：**system 半是 `harness.system-prompt`，user 半是 `harness.preamble`**
-（`harness.project` 已经 require 了 `preamble`，而 system 半要 `tools` / `project` / `hooks.dispatch`，
+两半各有主人：**system 半是 `harness.cap.system-prompt`，user 半是 `harness.cap.preamble`**
+（`harness.cap.project` 已经 require 了 `preamble`，而 system 半要 `tools` / `project` / `hooks.dispatch`，
 并进去就是 require 环）。两半不可能交错：不同的 message role。
 
-`harness.llm/prompt` 对**没有 hook sink 的调用方**（离线工具、replay、直接驱动内核的测试）返回的就是
+`harness.kernel.llm/prompt` 对**没有 hook sink 的调用方**（离线工具、replay、直接驱动内核的测试）返回的就是
 那份开头，逐字节——见 [edge](edge.md) 与 [hooks](hooks.md) 的 no-op 一节。
 
-## 工具表与执行缝：`harness.tools`
+## 工具表与执行缝：`harness.kernel.tools`
 
 工具定义：
 
@@ -110,12 +110,21 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 基座**不是一个固定清单**：文件编辑有两套实现，一次只会有一套装在本会话的工具表里，由
 `harness.edn` 的 `:editing {:mode …}` 决定（见 [home-and-storage](home-and-storage.md#配置根一个根三层优先级)）。
 
-| 模式 | 文件工具 | 其余 |
-|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `bash` `eval` `session-configure` `skill` `write` |
-| `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 |
+| 模式 | 文件工具 | 两种模式都服务 | 其余 |
+|---|---|---|---|
+| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `eval` `session-configure` `skill` `write` |
+| `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
-`session-configure` 带 `:requires-approval`，其余不带。`read` 与 `write` 在两种模式下**同名**，
+**中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
+`harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
+（它落库，见 [home-and-storage](home-and-storage.md#任务清单的表)）；两个 `web_*` 碰的是**网**。
+它们都属于「没有编辑家族」那一类——`harness.cap.editing/families` **一个字都没改**，因为那张表登记的是
+「与编辑有关的名字」，没登记的名字两种模式都服务。
+
+`session-configure` 带 `:requires-approval`，其余不带。两个 `web_*` **刻意也不带**：
+`bash` 今天就能 `curl` 任何地址且不带审批，给它们挂个 park 是**装样子**（`tool-toggles` 自己写过那句
+「关闭不是禁止」），要这道坎的会话自己装规则（`session-require-approval!`，或一条 hook）。
+`read` 与 `write` 在两种模式下**同名**，
 靠 `:describe` 换脸：参数与说明随模式变，名字不变——同一个名字在两种模式下是两件不同的事，
 比两个名字各自只在一半时间里存在更好读。
 
@@ -126,6 +135,15 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 `skill` 只按名字查表（表由目录列举产生，所以名字永远变不成路径），**不标审批**：读一份指令不是副作用，
 而正文里让人做的事各自过各自那道缝。它唯一的效果是把那份正文带进对话，施加点在循环里那一步
 （见 [skills-and-instructions](skills-and-instructions.md#skill-工具)）。
+`todo_write` 送的是**完整清单**（不是增量，空数组即清空），一次调用整份替换本会话的清单；
+**一条消息里只许一次**——两次「整份替换」之间不存在合并，而一个回合的工具调用是并发跑的，
+所以那样的消息**两条都不落盘**（判据是 `harness.kernel.tools/sole-call-of-its-name?`，它读的是 run loop
+交给 `register-turn!` 的整个回合）。
+`web_fetch` 取回的是一页的**正文**（`<script>` / `<style>` 连同内容丢掉、块级标签换行、实体解码），
+它是**有损的文本抽取器而不是渲染器**，所以 JS 渲染的页面会如实回一句「没有可读正文」；
+`web_search` 有**三个厂商的线**（`harness.cap.web.search`：Brave / Exa / Tavily，各自一对请求与响应形状），
+**哪个键在就哪个答**（顺序 Brave → Exa → Tavily，就是这张表里的顺序），
+键与 provider 的键走同一个 `harness.infra.home/env-value`。
 
 ### 会话 overlay：两条正交轴
 
@@ -216,7 +234,7 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 
 `*thread-id*` 在工具体外面被绑定，所以工具内部的代码（`eval` 尤其是）能问到自己属于哪个会话。
 
-### 文件编辑：锚点那一套（`harness.editing` + `harness.hashline.*`）
+### 文件编辑：锚点那一套（`harness.cap.editing` + `harness.cap.hashline.*`）
 
 **按锚点编辑是这个 harness 的默认编辑方式**（2026-09-15 起）：`read` 每行回成 `锚点│内容`，
 `replace` / `insert` 用那个锚点定位，而不是让模型重打一遍要改的文本。
@@ -242,7 +260,7 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 与空格行的锚点就能下下一笔，不必重读文件。
 
 **一次消息里对同一个文件的多次编辑是一次提交。** 一个回合的工具调用是**并发**跑的
-（`harness.loop`），两笔各自针对同一基态的编辑各自都成立、合起来丢数据——所以它们按目标路径分组、
+（`harness.kernel.loop`），两笔各自针对同一基态的编辑各自都成立、合起来丢数据——所以它们按目标路径分组、
 区间必须两两不相交、全部针对消息开始前的状态校验、最后一次调用给出合并后的 diff、**一次写一次撤销**，
 不成立就整批拒绝（其余调用得到的答复是「已并入」）。不这么做的失败模式是**静默数据丢失**。
 
@@ -250,9 +268,18 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 并且**拒绝把自己印出来的锚点行回写进文件**。`undo_last_replace` 读的撤销记录只保留最近一次，
 把文件**和锚点**一起退回去（只还原文本会让库里那套锚点描述一个已经不存在的状态）。
 
-`anchor_grep` 走 `rg --json`，命中行直接带锚点（行号仍然印，但它**不是拿来编辑的**）；`rg` 不在 PATH 上
-是点名失败，不静默降级。危险正则在跑之前就被拒（反向引用、量词化的组、量词化的选择分支、大 `{n}`、
+`anchor_grep` 走 `rg --json`，命中行直接带锚点（行号仍然印，但它**不是拿来编辑的**）。
+危险正则在跑之前就被拒（反向引用、量词化的组、量词化的选择分支、大 `{n}`、
 嵌套量词），出路是 `literal: true`。
+
+**跑 `rg` 这件事本身在 `harness.infra.rg` 里，因为它现在有两个用户**：二进制名、超时、以及
+「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句
+字符串——后者也是 `rg` 对**不存在的搜索根**说的话，按它判断会把一个拼错的路径报成「没装 ripgrep」）。
+`--json` 的解析留在 `anchor_grep` 自己手里：一次命中是一条**行**，而行是要给它铸锚点的那个东西。
+`glob` 用同一份管道，读的是**文件名**而不是行：它的答案是 **rg 两次列举的交集**——
+`rg --glob` 的优先级**高于** `.gitignore`（它自己的帮助这么写），所以把模型的模式直接交给它，
+`**/*` 会把 `node_modules` 整个列出来；交集说的是「在**这个树里**按模式找」，
+而不是「按模式盖在这个树上面」。
 
 **存储**（表结构与那三次迁移见 [home-and-storage](home-and-storage.md#sqlitehome-的元数据层)）：
 落盘持久化是刻意的——会话长命（jsonl 日志 + 重建），重启后日志里的锚点还该能用。

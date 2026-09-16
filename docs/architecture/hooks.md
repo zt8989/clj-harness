@@ -36,14 +36,14 @@
   只有 `PermissionRequest` 用得上：`{"decision":"approve"|"deny","reason":".."}`。
   读不懂、或不是对象，就不算答案——**一个 hook 打印一行日志不该被读成做了决定**。
 - **`SystemPrompt` 那一格的 stdout 是内容本身**，见下。
-- 命令经钉住的 shell spawn（`harness.shell` 的 Windows 陷阱见 [client](client.md) 之外的 README）；
+- 命令经钉住的 shell spawn（`harness.infra.shell` 的 Windows 陷阱见 [client](client.md) 之外的 README）；
   `:run` 是进程内的一次调用，抛异常 = 起不来（`{:exit nil :err <消息>}`）。两者都折进同一个
   `{:exit :out :err :timeout}`，所以退出码语义、失败策略、审计行在下面完全一样。
 - **一次真触发的落一行 `hook/<Point>` 审计行**；没匹配到任何声明 = 不 spawn、不等待、不落行。
 
 ## 27 个点，全部是数据
 
-`harness.hooks/points` 是一张表，每个点是
+`harness.kernel.hooks/points` 是一张表，每个点是
 `{:name :when :payload :matches :gate? :on-error}`，另有一格可选：`:stdout`。**加点 = 加一行**，
 引擎里没有 per-point 代码——这是整个 hook 设计赖以成立的性质。
 
@@ -90,7 +90,7 @@ payload 里带的与审计行里写的都是后者（CodeBuddy 的拼法，迁�
 超时 / 起不来照点自己的 `:on-error`（`:block`）走同一条。**这是硬失败而不是 fail-open**，与 AGENTS.md 同族：
 这些 hook 写的是**本该进 system 消息的话**，吞掉它就是撒谎。
 
-组装住在 `harness.system-prompt`（它同时注册下面那三条内建 hook）；它为什么不并进 `harness.preamble`
+组装住在 `harness.cap.system-prompt`（它同时注册下面那三条内建 hook）；它为什么不并进 `harness.cap.preamble`
 见 [architecture](../architecture.md) 的模块地图与 [kernel](kernel.md#prompt-的载体冻结的是开头)。
 
 ## 三个来源，一条读取
@@ -99,7 +99,7 @@ payload 里带的与审计行里写的都是后者（CodeBuddy 的拼法，迁�
 
 | 来源 | `:source` | 谁能声明 | 跑什么 | 排在哪 |
 |---|---|---|---|---|
-| 内核自己注册的 | `:built-in` | `harness.system-prompt` | 进程内的函数（`:run`） | 最前 |
+| 内核自己注册的 | `:built-in` | `harness.cap.system-prompt` | 进程内的函数（`:run`） | 最前 |
 | 配置家 / 项目的 `hooks.edn` | `:config` | 作者 | 命令（`:command`） | 次之，按文件里的顺序 |
 | 本会话 `session-add!` 的 | `:session` | 运行中的会话 | 两者皆可 | 最后，按加入的顺序 |
 
@@ -134,11 +134,11 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 在会话里经 `eval` 这么用（工具表那套 `session-require-approval!` 是同一形状）：
 
 ```clojure
-(harness.hooks/session-add! harness.tools/*thread-id* :stop {:command "notify.sh"})  ; => "stop@1"
-(harness.hooks/session-disable! harness.tools/*thread-id* "stop@1")
-(harness.hooks/session-enable! harness.tools/*thread-id* "stop@1")
-(harness.hooks/session-remove! harness.tools/*thread-id* "stop@1")
-(harness.hooks/session-disable! harness.tools/*thread-id* "builtin:tools")  ; 内建的也一样
+(harness.kernel.hooks/session-add! harness.kernel.tools/*thread-id* :stop {:command "notify.sh"})  ; => "stop@1"
+(harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "stop@1")
+(harness.kernel.hooks/session-enable! harness.kernel.tools/*thread-id* "stop@1")
+(harness.kernel.hooks/session-remove! harness.kernel.tools/*thread-id* "stop@1")
+(harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "builtin:tools")  ; 内建的也一样
 ```
 
 `effective-hooks` 是**引擎唯一读的那一面**：它把内建、磁盘、会话三层折在一起，
@@ -149,7 +149,7 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 
 ## 内建的三条行
 
-`harness.system-prompt` 在加载时注册三条 `:run` 行，都在 `SystemPrompt` 点：
+`harness.cap.system-prompt` 在加载时注册三条 `:run` 行，都在 `SystemPrompt` 点：
 
 | id | 块 | 说什么 |
 |---|---|---|
@@ -182,7 +182,7 @@ fire {point thread-id fact audit}
 - `:answer` 取**第一个**给了答案的声明（同一套「最早者胜」的规矩）。
 - 观察者失败不改判定，但理由会被带回去——否则引擎就是唯一知道「有 hook 坏了」的地方，
   而调用方说不出来。
-- 审计行**每条真触发恰好一行**；`runId` 是 sink 的事（`harness.http` 绑），不是这里返回的东西。
+- 审计行**每条真触发恰好一行**；`runId` 是 sink 的事（`harness.edge.http` 绑），不是这里返回的东西。
 
 ## 与工具缝的关系
 

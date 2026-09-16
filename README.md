@@ -27,13 +27,13 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 
 ```
 ~/.clj-harness/
-├── config.edn        模型默认档：三个旋钮（每轮重读，可运行期编辑）
-├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读，可以不存在）
+├── config.edn        **唯一一份配置**：:default（三个旋钮的默认档）+ :providers（厂商目录）（每轮重读）
 ├── harness.edn       用户级 harness 配置（可选；编辑模式、围栏的 allow / strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（可选；不存在 = 这个点没人监听）
 ├── mcp.edn           MCP 服务器声明（可选；不存在 = 一个服务器都没声明）
-├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
+├── .env              密钥：一家厂商一把 `<ID>_API_KEY`（`acme-gateway` → `ACME_GATEWAY_API_KEY`），
+│                     全局 `HARNESS_API_KEY` 兜底；优先于真实环境变量
+├── harness.infra.db        sqlite：项目 / 会话归属 / 归档 / **文件锚点**（home 的元数据层）
 └── projects/<项目>/*.jsonl   会话日志，按项目分目录
 ```
 
@@ -41,13 +41,13 @@ jsonl 只是记录。工具、hook、审批、项目目录、provider 解析都�
 它们在 **OS 家目录**下，**不跟随 `CLJ_HARNESS_HOME`**：搬家搬的是 harness 的配置，不是这台机器的家目录。
 把配置家目录挪到别处不该让另一批技能凭空消失（见「技能与指令」）。
 
-**库装状态，文件装记录。** `harness.db` 里只有会被**改写**的东西：项目、会话归属、归档标记，以及按
+**库装状态，文件装记录。** `harness.infra.db` 里只有会被**改写**的东西：项目、会话归属、归档标记，以及按
 锚点编辑的行锚点（`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` 三张表，外加
 `hashline_undo` 存最近一次撤销）。**锚点不在某个目录里**，它与项目、会话共用同一个库、同一条迁移链。
 日志与配置都不进库——**库里没有消息表**，也没有日志的全文索引或大小镜像，那些读的时候现问文件。判别
 标准是「能不能被改写」，不是「改得勤不勤」：
 
-- `config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` / `mcp.edn` **仍是文件、仍是现读**，改完不用重启
+- `config.edn` / `harness.edn` / `hooks.edn` / `mcp.edn` **仍是文件、仍是现读**，改完不用重启
   （「设置」那一版生效配置每次打开都重读，就是这条纪律看得见的地方）。
 - **旧的 `~/.clj-harness/logs/` 不导入、也不迁移**：那个平铺目录下的会话在本产品里一律不可见（文件名
   不含项目身份，自动归属只能猜）。字节一个都不动，要接着用就手动挪进 `projects/<workspace>/`。
@@ -59,28 +59,34 @@ $env:CLJ_HARNESS_HOME = "D:\harness-config"
 clojure -M:run
 ```
 
-首次使用先建目录并放三份配置（第四份可选）：
+首次使用只需要一份配置（其余可以不存在）：
 
 ```pwsh
 New-Item -ItemType Directory -Force ~/.clj-harness
-Copy-Item config.edn.example ~/.clj-harness/config.edn
-Copy-Item providers.edn.example ~/.clj-harness/providers.edn
-Copy-Item harness.edn.example ~/.clj-harness/harness.edn   # 可选：不复制就是全默认（含按锚点编辑）
 Copy-Item .env.example ~/.clj-harness/.env
-# 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY
+# 编辑 ~/.clj-harness/.env 填入 HARNESS_API_KEY（或某家厂商自己的 <ID>_API_KEY）
 ```
+
+**`config.edn` 不用自己造**：服务第一次在一个家目录里启动时会写下一份带注释的空配置，
+之后在「设置」的 General 页里挑一家厂商就成型了（手动编辑当然也可以）。
+`config.edn.example` 是那份文件的**注释版**——把 `:default` 的三个旋钮与 `:providers` 里的一家厂商
+都写了出来，想要一份带完整说明的起点就照抄它。
+`harness.edn.example` 同理，可复制可不复制（不复制就是全默认，含按锚点编辑）。
 
 `harness.edn.example` 把 `:editing` 与 `:approval` 的每个键都写在**它的默认值**上并逐条注释，所以它同时
 是参考手册——只想改一个旋钮就照抄那一行（`:editing` 是**逐键**合成的，见下）。
 
 **`prompt.md` 是唯一的例外**：它留在仓库里，不进家目录——那是被 review 的代码资产，每次改动都需要
-git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.llm/reset-prompt!)` 或重启。
+git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.kernel.llm/reset-prompt!)` 或重启。
 **冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
-**缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
-`providers.edn` / `hooks.edn` / `harness.edn` / `mcp.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
-`.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
-键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。
+**缺失的文件与空的文件是同一件事：什么都没说。** `config.edn` 不存在也算——**服务启动时会替你写一份**
+（一段说明两节是什么的注释 + 一个空 map），所以刚装好的家开箱就能用，而且有一份能直接编辑的文件。
+`.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`；`harness.edn` / `hooks.edn` / `mcp.edn` 同样可以不存在。
+而**存在却写坏**（EDN 语法坏 / 不是 map / 顶层冒出第三节 / 键拼错）一律**指名绝对路径硬失败**：
+一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。**旧形状会被自动搬过去**：`config.edn` 从前**就是**默认档（三个旋钮、或整个 provider 写在顶层），
+服务启动时会把它整体挪进 `:default` 并打印一行（旧的那份留作 `config.edn.bak`），所以已经配好的家
+不用手改；手编成旧形状的文件如果没经过启动就读，读侧的句子会告诉你挪到哪儿。
 
 ### system 消息：冻结的开头 + hook 追加的文本
 
@@ -127,6 +133,13 @@ git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），
 注入位换成一句点名说明（收到什么名字、能加载哪些）。**`disable-model-invocation: true` 的技能只有人能加载**：
 文件说这条不该由模型决定，所以清单里没有、工具也拒绝，而人打 `/name` 就是人在决定。
 
+**名字不必背**：输入框里打 `/`，弹出一张技能表——名字、它属于**哪一层**（`System` = 机器上的
+`~/.agents/skills`，`Project` = 绑定项目里那份）、一句描述；接着打就按名字与描述过滤。选中一行，
+输入框里就是 `/名字 `，后面照旧由人接着写（选中**不发送**）。两条与模型那份清单**故意不同**：
+`disable-model-invocation` 的技能**在**（人是决定者），**坏掉的技能也在**——带原因、但选不动，
+因为「一个静默消失的技能」与「一个从没装过的技能」从外面看没有区别。同名的那份按**前面的根赢**，
+所以默认顺序下机器上的那份赢，项目里同名的不会出现。
+
 两个键都写在 `harness.edn`（用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
 
 ```edn
@@ -150,23 +163,24 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 **provider 是厂商，model 挂在厂商下面。** 会话由**三个旋钮**描述，写在 `config.edn`：
 
 ```edn
-{:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+{:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}}
 ```
 
 `:model` 可省（省则用该厂商的默认 model）；`:reasoning-effort` 是 provider 不认识的约定。解析低 → 高、
-**逐旋钮**合并：`config.edn` 默认档 → 本会话覆盖（`session-configure` 工具，经人工审批）→ 本次 run 的请求。
-**换厂商而不指定 model，就落在新厂商的默认 model 上。**
+**逐旋钮**合并：`config.edn` 的 `:default` → 本会话覆盖（`session-configure` 工具，经人工审批）→
+本次 run 的请求。**换厂商而不指定 model，就落在新厂商的默认 model 上。**
 
-`providers.edn` 里每个厂商是 endpoint + 一张 model 表：
+`config.edn` 的另一节 `:providers` 里，每个厂商是 endpoint + 一张 model 表：
 
 ```edn
-{:openrouter {:protocol :openai-completions
-              :base-url "https://openrouter.ai/api/v1"
-              :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
-              :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
-                                                        :context-window 1000000
-                                                        :max-output-tokens 64000}
-                         "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}
+{:providers
+ {:openrouter {:protocol :openai-completions
+               :base-url "https://openrouter.ai/api/v1"
+               :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
+               :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
+                                                         :context-window 1000000
+                                                         :max-output-tokens 64000}
+                          "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}}
 ```
 
 每个 model **必须**声明 `:input` / `:output`（词汇表就是本 harness 真搬得动的类型：`:input` ⊆
@@ -177,17 +191,20 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 {:protocol :openai-completions :base-url "https://some-endpoint/v1" :model "some-model"}
 ```
 
-**想知道此刻实际在用什么**：侧边栏底部「设置」打开一版**只读**的生效配置——三个旋钮各是**哪一档**
-选的、家目录的绝对路径是哪条规则给的、home 里哪几份文件在、有没有 api-key（**只有有没有与来源，
-值永不出现在响应里**）。它每次调用都重读配置文件，所以改完 `config.edn` 按「Re-read」就是新值，
-不用重启。
+**加一家厂商不必手编文件**：侧边栏底部「设置」打开两页——**General**（在用什么，以及**默认档**那三个
+控件：厂商、该厂商的一个 model、思考档）、**Models**（厂商列表与表单：新建 / 改写 / 删掉一条，
+填了密钥就写进 `.env` 的一行）。
+General 与 Models **会写** `config.edn`：先校验整份新配置再原子落盘，被拒时一个字节都不动，
+改写前那份留在 `config.edn.bak`。密钥的值**永不出现在任何响应里**——Models 每一行报的是有没有密钥与派生出来的**凭据名**
+（那就是你要编辑的那一行）。面板每次打开都重读文件，所以手改完按「Re-read」
+就是新值，不用重启。
 
 **形状与校验的细节**（哪些键必需、哪些值会指名报错、两个数字为什么是「报告用」不是「执行用」、
 旧扁平形状为什么不读不迁移）见 [`docs/architecture/providers.md`](docs/architecture/providers.md)。
 
 ### MCP 服务器（可选）
 
-`mcp.edn` 声明外部的 MCP 服务器，它们的工具会以 `mcp__<server>__<tool>` 出现在这个会话的工具表里——
+`mcp.edn` 声明外部的 MCP 服务器，它们的工具以 `mcp__<server>__<tool>` 出现在这个会话的工具表里——
 与内建工具**走同一个执行缝**，所以审批、`PreToolUse` 阻断、会话级关闭、三行审计全都一样：
 
 ```edn
@@ -199,8 +216,8 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 `:env` 的值**永不入日志、永不进端点响应**（与 api-key 同一条纪律）。连不上、崩掉、挂死的服务器
 **不拖死任何人**：它的工具缺席、原因被指名，其余服务器照常；下一次用它自己重连。
 
-设置页里有它的账本：状态、失败原因、工具清单、以及本会话的开关（**关闭不是隐藏**——工具仍在表里，
-调用被拒；过程被收掉，`mcp.edn` 一个字不改）。
+设置页的 **MCP servers** 一页是它的账本：状态、失败原因、工具清单、以及本会话的开关
+（**关闭不是隐藏**——工具仍在表里，调用被拒；进程被收掉，`mcp.edn` 一个字不改）。
 
 细节见 [`docs/architecture/mcp.md`](docs/architecture/mcp.md)。
 
@@ -237,11 +254,31 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 两种模式都是一等公民，各有完整用例；`edit` 的行为一个字没变，只是不再默认在场。`:editing` 是
 `harness.edn` 里**唯一逐键合成**的块（其余顶层键是整键替换），所以项目级只写 `{:auto-read false}`
 不会把用户级的 `:mode` 一起抹掉；全部七个键与它们的默认值都在 `harness.edn.example` 里。自省：
-`(harness.editing/editing-mode harness.tools/*thread-id*)`。
+`(harness.cap.editing/editing-mode harness.kernel.tools/*thread-id*)`。
 
 两套各自是什么、为什么默认换了、锚点存在哪，见
 [`docs/architecture/kernel.md`](docs/architecture/kernel.md) 与
 [`docs/architecture/home-and-storage.md`](docs/architecture/home-and-storage.md)。
+
+### 另外四只手：找文件、记清单、上网（`glob` / `todo_write` / `web_fetch` / `web_search`）
+
+这四个**不属于任何编辑模式**——两种模式都服务它们，因为它们是关于路径、关于这次运行、关于网的，
+与「按什么寻址一行」无关：
+
+| 工具 | 一句话 | 为什么是这个形状 |
+|---|---|---|
+| `glob` | 按**名字**找文件：一列能直接交给 `read` 的绝对路径，按路径排序 | 答案是 `rg` 两次列举的**交集**，因为 `rg --glob` 的优先级**高于** `.gitignore`——直接交给它，`**/*` 会把 `node_modules` 整棵树列出来。交集说的是「在**这个树里**按模式找」 |
+| `todo_write` | 记本会话的任务清单：一次送**完整**清单，空数组即清空 | 清单**进库**（`todos`，一行一个会话）：它每次被整份改写，而「能被改写的」正是这个库收状态、不收记录的那条判据。一条消息里只许写一次——两次整份替换之间不存在合并，所以那样的消息两条都**不落盘** |
+| `web_fetch` | 取一个 http(s) URL 的**正文**（`<script>`/`<style>` 丢掉、块级标签换行、实体解开） | 它是**有损的文本抽取器，不是渲染器**：JS 渲染的页面会如实回一句「没有可读正文」，而不是假装那一页是空的 |
+| `web_search` | 搜索并拿回标题 / URL / 摘要 | 三个厂商：**Brave**（`BRAVE_API_KEY`）、**Exa**（`EXA_API_KEY`）、**Tavily**（`TAVILY_API_KEY`）。键在配置家的 `.env` 或环境里找（与 provider 的键走**同一个** `harness.infra.home/env-value`），**哪个有就用哪个，顺序就是上面这个**。全都没有就**指名拒绝**，别的功能一概不受影响 |
+
+**出网的两个都不带审批——这是决定，不是疏忽。** `bash` 今天就能 `curl` 任何地址且不带审批，
+所以给它们挂个 park 是**装样子**：「关闭不是禁止」这句在这里同样成立，一个看起来像护栏、
+一步就能绕过去的东西比没有护栏更坏。要这道坎的会话自己装规则：
+
+```clojure
+(harness.kernel.tools/session-require-approval! harness.kernel.tools/*thread-id* "web_fetch")
+```
 
 ## 启动
 
@@ -249,7 +286,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ```pwsh
 clojure -M:run          # 项目根
-# 或 clojure -A:test -M -m harness.http
+# 或 clojure -A:test -M -m harness.edge.http
 # 期望：harness listening on http://localhost:8080 -- POST an AG-UI RunAgentInput here; stop with (stop!)
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```
@@ -283,15 +320,16 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# main 上 607 tests / 9774 assertions，exit 0（基线随分支变，报数时带上分支与提交）
-# 本分支（mcp）上 658 / 10030。2 条红是既有的环境问题、与改动无关：
-#   project_test/a-binding-survives-a-real-restart ×2 —— JDK 25 的原生访问警告
-#   被打进 fork 出来的子 JVM 的 stdout，而断言比的就是那行 stdout。干净检出上一样红
+# 664 tests / 9996 assertions（基线随分支变，报数时带上分支与提交）
+# 2 failures，两条都是**本机环境**、与代码无关：`project_test/a-binding-survives-a-real-restart`
+#   逐字比较 fork 出来的 JVM 的 stdout，而这台机器的 JDK 25 在 sqlite-jdbc 加载原生库时
+#   会往 stdout 打四行 "a restricted method in java.lang.System has been called"。
+#   新建一个 JVM 就能看见那四行，所以与本仓库的代码无关。
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
-# main 上 11 tests / 4 组；本分支上 16（多的是 elicitation 那一组 5 条）
+# 11 tests，含 4 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
 ```
 
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；

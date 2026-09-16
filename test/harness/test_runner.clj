@@ -29,44 +29,52 @@
   ask, so the arrangement would quietly answer one of them for itself."
   (:require [clojure.java.io :as io]
             [clojure.test :as t]
-            [harness.home :as home]))
+            [harness.infra.home :as home]))
 
 (def test-namespaces
-  '[harness.event-test
-    harness.db-test
-    harness.llm-test
-    harness.skills-test
-    harness.preamble-test
-    harness.mcp-test
-    harness.mcp-wired-test
-    harness.tools-test
+  '[harness.kernel.install-test
+    harness.kernel.event-test
+    harness.infra.db-test
+    harness.kernel.llm-test
+    harness.cap.skills-test
+    harness.cap.preamble-test
+    harness.edge.stats-test
+    harness.kernel.tools-test
+    harness.cap.mcp-test
+    harness.cap.mcp-wired-test
     harness.session-tools-test
     harness.approval-test
-    harness.loop-test
-    harness.ag-ui-test
-    harness.replay-test
+    harness.kernel.loop-test
+    harness.edge.ag-ui-test
+    harness.edge.replay-test
     harness.evals-test
-    harness.providers-test
-    harness.project-test
-    harness.log-test
-    harness.git-test
-    harness.editing-test
-    harness.editing-mode-tools-test
-    harness.hashline-anchors-test
-    harness.hashline-store-test
-    harness.hashline-read-test
-    harness.hashline-replace-test
-    harness.hashline-refusals-test
-    harness.hashline-write-test
-    harness.hashline-undo-test
-    harness.hashline-batch-test
-    harness.hashline-insert-test
-    harness.hashline-grep-test
-    harness.hooks-test
-    harness.hooks-dispatch-test
-    harness.hooks-wired-test
-    harness.system-prompt-test
-    harness.http-test])
+    harness.cap.providers-test
+    harness.cap.project-test
+    harness.infra.log-test
+    harness.cap.git-test
+    harness.cap.editing-test
+    harness.cap.editing-mode-tools-test
+    harness.cap.hashline.anchors-test
+    harness.cap.hashline.store-test
+    harness.cap.hashline.read-test
+    harness.cap.hashline.replace-test
+    harness.cap.hashline.refusals-test
+    harness.cap.hashline.write-test
+    harness.cap.hashline.undo-test
+    harness.cap.hashline.batch-test
+    harness.cap.hashline.insert-test
+    harness.cap.hashline.grep-test
+    harness.cap.glob-test
+    harness.cap.todos-test
+    harness.cap.web-test
+    harness.cap.web-search-test
+    harness.kernel.hooks.install-test
+    harness.kernel.hooks-test
+    harness.kernel.hooks.dispatch-test
+    harness.kernel.hooks-wired-test
+    harness.cap.system-prompt-test
+    harness.edge.http-test
+    harness.layers-test])
 
 (def ^:private tmp-home
   (atom nil))
@@ -76,15 +84,15 @@
 
 (def ^:private seed-config
   "A minimal config.edn, so a run that resolves a provider from config -- rather
-  than from the scripted override -- has something to resolve. The inline form,
-  so it needs no providers.edn: :protocol :fake is the offline provider, and the
-  endpoint is a URL that is never contacted.
+  than from the scripted override -- has something to resolve. The INLINE form in
+  the :default section, so it needs no :providers entry: :protocol :fake is the
+  offline provider, and the endpoint is a URL that is never contacted.
 
   It declares NO modalities, which is deliberate -- an inline provider that says
-  nothing about what it accepts is not guarded (see harness.ag-ui/undeclared-
+  nothing about what it accepts is not guarded (see harness.edge.ag-ui/undeclared-
   input?), and a seeded config must not make every text-only integration test
   fail for a reason the test never stated."
-  "{:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}\n")
+  "{:default {:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}}\n")
 
 (defn- seed!
   [dir]
@@ -149,7 +157,7 @@
   signal, because it is read as one.
 
   F is the File captured before `isolate!` ran, never one recomputed from
-  harness.home here -- by now the root points at the temp home, so asking again
+  harness.infra.home here -- by now the root points at the temp home, so asking again
   would compare the temp store against itself and pass while the real home was
   being written."
   [^java.io.File f before]
@@ -161,11 +169,11 @@
                           " changed during this run: " (pr-str before) " -> " (pr-str after)
                           " ([bytes mtime], nil meaning absent) -- some code path resolved"
                           " the store against the developer's real home instead of through"
-                          " harness.home.")))
+                          " harness.infra.home.")))
           false))))
 
 (defn -main [& _]
-  ;; The store's path is resolved through harness.home BEFORE the root moves, so
+  ;; The store's path is resolved through harness.infra.home BEFORE the root moves, so
   ;; it comes from the one place that decides paths rather than a second copy of
   ;; the precedence rule -- and so the File in hand still names the developer's
   ;; real home for the rest of this run.

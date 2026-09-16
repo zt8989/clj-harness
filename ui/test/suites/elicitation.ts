@@ -13,28 +13,28 @@
 import { expect } from "vitest";
 
 import { answersFor, fieldSpecs, inputKindFor, type FieldSpec } from "../../src/lib/elicitation";
-import { type Case, type Suite, framesFromSse, home, postRun, script, threadId, url } from "../e2e";
+import { type Case, type Suite, framesFromSse, homeDir, postRun, script, threadId, url } from "../e2e";
 import fs from "node:fs";
 import path from "node:path";
 
 /// The fake MCP server this suite declares. A real process on a real pipe, the
 /// same one the Clojure suite drives -- so what is being tested here is the wire
 /// and the client, not a mock of either.
-const FAKE_SERVER = path.resolve(import.meta.dirname, "..", "..", "..", "test", "harness", "fake_mcp_server.js");
+const FAKE_SERVER = path.resolve(import.meta.dirname, "..", "..", "..", "test", "harness", "cap", "fake_mcp_server.js");
 
 /// Declare it in the server's own configuration home. Written fresh because
 /// `mcp.edn` is read on the way to every request, which is what lets a test set
 /// a feature up mid-run.
 function declareFakeServer(): void {
   fs.writeFileSync(
-    path.join(home(), "mcp.edn"),
+    path.join(homeDir(), "mcp.edn"),
     `{:servers {"fake" {:command "node ${FAKE_SERVER}"}}}`,
     "utf8",
   );
 }
 
 function undeclare(): void {
-  const file = path.join(home(), "mcp.edn");
+  const file = path.join(homeDir(), "mcp.edn");
   if (fs.existsSync(file)) fs.rmSync(file);
 }
 

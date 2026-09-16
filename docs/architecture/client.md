@@ -16,7 +16,7 @@ app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntim
                     侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
-  settings-panel.tsx 「设置」打开的只读报告（生效配置 / 各来自哪一档 / 家目录 / 有没有 key）
+  settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
   assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
@@ -25,6 +25,7 @@ lib/
   threads.ts        AGENT_URL + rebuild 调用
   projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
   settings.ts       GET /api/settings 的类型化薄封装
+  providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
 ```
 
@@ -41,7 +42,7 @@ lib/
   也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
   界面上明说这一点。
 - **侧边栏管的不只是切换**：新建任务（**先有项目**，没有就先去添加一个）、归档 / 取消归档、
-  移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那份只读报告。
+  移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那个面板。
   这些动作都在**请求进行中一起禁用**，失败的服务端原话落在**被点的那一行**下面。
 - **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
 
@@ -102,31 +103,101 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
 （含 MCP 的）不改前端就能看见它的调用。
 
+**两张按工具名开的表就是「认得它」的全部**（都在 `message-parts.tsx`；键是 `harness.kernel.tools` 注册的那个
+名字，`CONTEXT.md` 说不许起别名——改了名，图标会**静默**丢回扳手）：
+
+| 表 | 答什么 | 认得的名字 |
+|---|---|---|
+| `TOOL_ICONS` | **这是哪一只手**（kind，不是状态） | `read` `write` `edit` `replace` `insert` `undo_last_replace` `anchor_grep` `glob` `bash` `eval` `skill` `session-configure` `todo_write` `web_fetch` `web_search`；认不出的给 `WrenchIcon`，刻意不长得像其中任何一个 |
+| `subjectOf` | **这一步在干什么**（只读参数，不做解析） | 同上一列。各自的形状：`glob` 是模式（给了根就带上根）、`todo_write` 是进度（`2/3 完成`，空清单是「清空」）、`web_fetch` 是 URL、`web_search` 是查询串；认不出的是「第一个字符串参数」 |
+
+新增一个工具**不动**这两张表也能用（默认分支与扳手图标就是留好的口子）；动它们是**可读性**，
+不是可用性：一行是「扳手 + 一段 JSON」还是「一眼看出这是按名字找文件、进度 2/3」。
+真机证据（四条新工具的步骤行与各自展开后的参数、结果）在
+`.scratch/tool-parity/evidence/`。
+
 **`skill` 也是一次普通工具调用，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
 上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
 界面上只有一次普通的 `skill` 调用与它的返回。见
 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
 
+**这句话有一个例外，只有一行**：`/name` 那条**人的**加载路径现在有输入面了——技能列表（下一节）。
+注入本身照旧零帧；多出来的是「有哪些名字可选」这一屏，而它读的是服务端一条只读端点。
+两者不是一回事：一个是模型看到什么，一个是人挑什么。
+
+## 技能列表（输入框里打 `/` 弹出的那份菜单）
+
+打 `/` 弹出的那张表是**上游的触发面板**驱动的：`assistant-ui` 自带
+`ComposerPrimitive.Unstable_TriggerPopoverRoot` / `.Unstable_TriggerPopover` / `.Items` / `.Item`
+一套，本仓接的是「挂在哪、名字从哪来、哪些能选、一行画什么」。
+
+- **挂点仍是一个自建插入点，抄来的文件一行未改**：`composer-chrome.tsx` 的 `ComposerFrame` 本来就套在
+  composer 外面，而触发面板必须包住**输入框**（它给输入框发 combobox 的四个属性、并让面板在发送前吃掉
+  方向键与 Enter），所以 `TriggerPopoverRoot` 就挂在那一层。`thread.aui.tsx` 与
+  `elements/` 里那 12 份**一个字节没动**。
+- **三个默认值都换掉了**，因为它们是为另一种语义写的：`matcher`（上游默认「前面是空白就算触发」，
+  本仓只认**消息开头**的 `/`，与服务端的 `slash-pattern` 同形状）、`formatter`（`serialize` 成
+  `/名字`，上游补尾随空格并把光标放到空格后）、`search`（没有 categories 时上游那条回落路径会走空表，
+  所以过滤是这里的：名字与描述、大小写无关、顺序照服务端给的）。
+- **没有 categories，这是决定不是省事**：一张平铺的表、每行带自己的层徽标，不是「先选层再选技能」的两级。
+- **状态只有三样**：正在取（一行说明）、取不回来（`role="alert"`，把服务端那句话显示在面板里）、
+  什么都没有（**面板根本不出现**——把一个空盒子摆出来，比不摆更糟）。
+- 数据与措辞在 `src/lib/skills.ts`（层关键词 → 屏幕上的词、坏技能的原因关键词 → 一句话），
+  面板与行在 `composer-chrome.tsx`。
+
 ## 测试
 
 `cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval}.ts` 是被它 import 的普通模块：
+`test/suites/{frames,client,turn,approval,skills}.ts` 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
   或「丢了用例」变成**失败**而不是静默变绿。
-- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.http`，在 `--port 0`（OS 分配）上，
+- **后端是真的**：`dev/harness/e2e_server.clj` 起真 `harness.edge.http`，在 `--port 0`（OS 分配）上，
   provider 是 `harness.fake` 的脚本替身，日志写进临时 `CLJ_HARNESS_HOME`。
   所以跑多少次结果都一样，也不会写进真实的 `~/.clj-harness`。
 - **控制通道是文件不是端点**：服务端在遇到**新的 threadId** 时重读脚本文件。
   测试写这个文件就相当于说「模型下一句回什么」——**生产 HTTP 边因此一个测试专用路由都不长**。
 - 套件驱动真的 `@ag-ui/client`，所以它测的是协议与运行时的真实行为，不是替身。
+- **两个家目录都交到用例手上**（`configure` 的 `home` 与 `userHome`）。`userHome` 由 spawner 造好、
+  用 `--user-home` 交给后端，所以一个用例能往 OS 家目录里**播一份系统级技能**——
+  「机器上的技能是两层之一」这件事在界面上能验，靠的就是这一条缝。
+- **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
+  它**不**断菜单怎么画、哪个键选什么——那部分在真 Chromium 里量（下一段），因为套件**不 import `src/`**。
 
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
-（三段位、归档、移除、设置的哨兵搜索），不是自动化套件。
+（三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**），
+不是自动化套件。
+
+### 设置面板：两页，两页都会写
+
+**General**（本会话在用什么 + **默认档**三个控件）与 **Models**（provider 目录与表单）。
+页面选择是组件里的一个 `useState`，**不是路由**——不引路由依赖，URL 指不到某一页。
+
+- **两页都会写**：General 的 Save 写 `config.edn` 的 `:default`，Models 的表单写 `:providers`
+  （以及，填了密钥时，`.env` 的一行）。
+- **曾经还有两页**（「API key」与「Config home」），主人看过后删掉了：它们报的东西——密钥有没有、
+  从哪来、是哪一行、家目录在哪、哪几份文件在——Models 的每一行（`ACME_GATEWAY_API_KEY` 与 `key ✓`）
+  与 composer 那边已经在眼前，**一页只装已经看得见的东西就是一步多余的路**。
+  （历史与理由在 `.scratch/custom-providers/spec.md` 的复议段，本目录只记现在没有它们。）
+- **表单不问「哪一行是默认 model」**：没有单选钮，**第一行就是这家厂商的默认 model**（目录要求每个
+  provider 声明一个默认 model，而「默认 model」在人心里指的是「一轮跑在哪个 model 上」——
+  那件事在 General 设）。控件旁边写明这一条，免得有人以为顺序只是顺序。
+- **默认档的模型必须从列表里选**：没有「— 厂商自己的默认 —」这一项。厂商一定有一个默认 model
+  （目录不接受没有 model 的 provider），所以那个空选项除了把这句话再说一遍没有别的内容；
+  换厂商时控件直接落在新厂商的默认 model 上——服务端本来也会解析到它，控件只是把它说出来。
+- **弹窗尺寸是定的，滚动发生在页里**：一份 provider 表单比面板高，会自己长大的 modal 会在人打字时
+  把导航与按钮挪走。所以高度定住（`min(30rem, 62vh)`），只有右侧那一页滚。
+- **两个请求、两份失败**：`GET /api/settings` 要**解析**配置，`GET /api/providers` 只读它。
+  「`:default` 指着一个刚被删掉的 provider」正是那个状态——报告拒答，目录照答——
+  所以两边各自失败、各自清空，页面才能既**说出**坏在哪，又留着手把修好它的**控件**。
+  读失败时**不留旧值**：一行陈旧的解析结果摆在拒绝句子旁边，是面板一次说两件事。
+- **首次跑通的顺序**是它们各自的形状决定的：设置面板 → Models → Add provider → 填 → Create
+  → 列表里立刻有它（`catalog` 每轮重读）→ composer 的选择器里也有它（分组标签用**显示名**，
+  发出去的仍是 id）→ General 把默认档指过去 → **新会话**从它开始。
 
 ## 一条从后端来的注意
 
-`harness.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
+`harness.edge.http/*directory-chooser*` 这个测试缝用 `alter-var-root` 而不是 `binding`：
 **服务跑在另一个线程上**，`binding` 只改当前线程的动态栈，stub 会被静默忽略。
 凡是给「服务端在别的线程上调用」的缝注入替身，都得用 `alter-var-root`。

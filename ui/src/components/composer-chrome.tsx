@@ -29,7 +29,7 @@
 //
 // The model and the reasoning effort are PER SESSION and nothing else is affected:
 // the server keeps the override in memory keyed by thread id (see POST /api/model),
-// and config.edn, providers.edn and every other thread are left alone. Choosing a
+// and config.edn and every other thread are left alone. Choosing a
 // provider clears the model, because an id that belonged to the old vendor is not
 // one the new one serves -- the server enforces that, and the picker just does not
 // pretend otherwise.
@@ -43,15 +43,30 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
+  useRef,
   useState,
   type FC,
   type PropsWithChildren,
 } from "react";
-import { useAuiState } from "@assistant-ui/react";
+import {
+  ComposerPrimitive,
+  unstable_useTriggerPopoverScopeContext,
+  useAuiState,
+  type Unstable_TriggerMatcher,
+} from "@assistant-ui/react";
+import type {
+  Unstable_DirectiveFormatter,
+  Unstable_TriggerAdapter,
+  Unstable_TriggerItem,
+} from "@assistant-ui/core";
 import { BrainIcon, FolderIcon, GitBranchIcon, TriangleAlertIcon } from "lucide-react";
 
-import { choicesFor, gitStateFor, setModel, switchBranch } from "@/lib/composer";
+import { choicesFor, gitStateFor, providerLabel, setModel, switchBranch } from "@/lib/composer";
 import { bindThread, listProjects, projectName } from "@/lib/projects";
+import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
+
+import { ComposerStats } from "./composer-stats";
 
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
@@ -279,12 +294,15 @@ const ComposerTools: FC = () => {
 
   // Grouped by provider, so a long catalog reads as a short list of vendors each
   // with its models -- and the value is the MODEL id alone, because the provider
-  // is implied by which group it was chosen from.
+  // is implied by which group it was chosen from. The group's LABEL is the
+  // vendor's display name when it has one and its id otherwise (see
+  // `providerLabel`): the option's value stays the id either way, which is what
+  // the server is sent and what a log line will say.
   const options = data.providers.flatMap((provider) =>
     provider.models.map((model) => ({
       value: model,
       label: model,
-      group: provider.name,
+      group: providerLabel(provider),
     })),
   );
   const currentModel = data.model ?? options[0]?.value ?? "";
@@ -327,9 +345,236 @@ const ComposerTools: FC = () => {
   );
 };
 
+// ------------------------------------------------------------------ the skill list
+//
+// `/` IN THE COMPOSER, AND THE MENU THE KIT ALREADY SHIPS. A skill is loaded by a
+// person by starting a message with `/name `, and the server has read that since
+// before this file existed -- what was missing was any way to know the names. So
+// this adds no protocol, no frame and no server-side rule: it puts the names on
+// screen and writes the same `/name ` a person would have typed.
+//
+// THE POPOVER, ITS KEYS AND ITS ARIA ARE UPSTREAM'S (`Unstable_TriggerPopover*`,
+// driven by a registered adapter). What is OURS is where the names come from, which
+// of them are offered, and what a row says -- see lib/skills.ts for the data half.
+// Rebuilding the popover here would have meant re-deriving the three seams the
+// kit's own Input already has: the caret it reports to the popover, the keys it
+// lets the popover consume before sending, and the four combobox attributes.
+
+const TRIGGER_CHAR = "/";
+
+/// `/` AT THE START OF THE MESSAGE, and nowhere else.
+///
+/// The kit's default matcher accepts any word boundary, which would open this menu
+/// after `see /alpha` -- a sentence ABOUT a skill, which the server does not load.
+/// A menu that offers a load which cannot happen is worse than no menu, so the
+/// matcher is narrowed to the shape `harness.cap.skills/slash-pattern` actually reads:
+/// the slash first, then a name with no whitespace after it yet.
+const slashAtStart: Unstable_TriggerMatcher = (text, char, cursorPosition) => {
+  const typed = text.slice(0, cursorPosition);
+  if (!typed.startsWith(char)) return null;
+  if (/\s/.test(typed.slice(char.length))) return null;
+  return { query: typed.slice(char.length), offset: 0, endOffset: cursorPosition };
+};
+
+/// The pick, serialized as what a person would have typed: `/name`. The kit adds
+/// the trailing space and puts the caret after it, so this one function decides
+/// everything that lands in the composer -- there is no insertion logic here to
+/// get wrong.
+const slashFormatter: Unstable_DirectiveFormatter = {
+  serialize: (item) => `${TRIGGER_CHAR}${item.id}`,
+  // Nothing parses directives back out of this composer: it is a textarea, and the
+  // text it holds IS the `/name` the server reads. A parse that claimed otherwise
+  // would be describing a rendering this interface does not do.
+  parse: (text) => [{ kind: "text", text }],
+};
+
+/// `scan`'s four ways for a skill to be broken, as the sentence a person needs.
+/// The server says WHY by keyword (the model reads the same vocabulary in a
+/// refusal); what a reader of a menu needs is the everyday cause. An unknown
+/// reason falls through as itself rather than as silence.
+const BROKEN_WORDS: Record<string, string> = {
+  unreadable: "the file cannot be read",
+  "no-frontmatter": "no frontmatter",
+  "name-mismatch": "its name does not match its folder",
+  "no-description": "no description",
+};
+
+/// A `metadata` field as a string. The kit types an item's metadata as arbitrary
+/// JSON, so the narrowing lives in one place rather than in a cast at every read.
+function metadataString(item: Unstable_TriggerItem, key: string): string | null {
+  const value = item.metadata?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+/// One pickable row: the name, the layer it came from, and what it does.
+const SkillListRow: FC<{ item: Unstable_TriggerItem; index: number }> = ({ item, index }) => {
+  const ref = useRef<HTMLButtonElement>(null);
+  const scope = unstable_useTriggerPopoverScopeContext();
+  // The kit owns the highlight. What it cannot know is that this list is taller
+  // than the box it is drawn in, so following the highlight is ours. The index is
+  // the one the primitive itself uses for `data-highlighted`, so the row that
+  // scrolls into view and the row that is drawn as current cannot disagree.
+  const highlighted = scope.highlightedIndex === index;
+  useEffect(() => {
+    if (highlighted) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [highlighted]);
+
+  const layer = layerWord(metadataString(item, "layer") ?? undefined);
+  return (
+    <ComposerPrimitive.Unstable_TriggerPopoverItem
+      item={item}
+      index={index}
+      ref={ref}
+      data-slot="skill-list-row"
+      // Where this skill lives. The layer chip says which of the two it is; the
+      // path is the truth underneath it -- and for a root nobody has named (a
+      // configured `:skills {:roots ..}`) it is the ONLY thing that can be said.
+      title={metadataString(item, "root") ?? undefined}
+      className="data-[highlighted]:bg-accent flex w-full items-baseline gap-2 rounded-lg px-2 py-1.5 text-start text-sm"
+    >
+      <b className="shrink-0 font-medium">{item.label}</b>
+      {layer !== null && (
+        <span data-slot="skill-list-layer" className="text-muted-foreground shrink-0 text-xs">
+          {layer}
+        </span>
+      )}
+      {item.description !== undefined && (
+        <span className="text-muted-foreground min-w-0 flex-1 truncate">{item.description}</span>
+      )}
+    </ComposerPrimitive.Unstable_TriggerPopoverItem>
+  );
+};
+
+/// The menu itself: the trigger, the rows, and the two states a fetch has.
+///
+/// IT ASKS THE SERVER WHEN THE TEXT ENTERS THE TRIGGER SHAPE, once per entry --
+/// not on every keystroke, and not when the page loads. That is what makes a skill
+/// installed a moment ago visible on the next `/`, and it is also when the previous
+/// answer is dropped: a stale menu is the one thing a menu must not be.
+const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
+  const text = useAuiState((s) => s.composer.text);
+  // The same shape `slashAtStart` insists on, asked of the whole text: is this
+  // message opening a slash name? Question and fetch share this one answer.
+  const asking = text.startsWith(TRIGGER_CHAR) && !/\s/.test(text);
+  const [groups, setGroups] = useState<SkillGroup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!asking) {
+      setGroups(null);
+      setError(null);
+      return;
+    }
+    let live = true;
+    skillsFor(threadId)
+      .then((answer) => live && (setGroups(answer), setError(null)))
+      .catch((failure: unknown) =>
+        live && setError(failure instanceof Error ? failure.message : String(failure)),
+      );
+    return () => {
+      live = false;
+    };
+  }, [asking, threadId]);
+
+  const skills = useMemo(() => skillsIn(groups ?? []), [groups]);
+  const pickable = useMemo(() => skills.filter((skill) => skill["available?"]), [skills]);
+  const broken = useMemo(() => skills.filter((skill) => !skill["available?"]), [skills]);
+
+  const adapter = useMemo<Unstable_TriggerAdapter>(
+    () => ({
+      // NO CATEGORIES, and that is a decision rather than a shortcut: this is one
+      // flat table with a per-row layer, not a "pick a layer, then pick a skill"
+      // drill-down. A consequence worth stating, because it is not obvious: the
+      // kit fills a popover from `search` when there is no category to walk, so
+      // leaving this out would leave the menu empty.
+      categories: () => [],
+      categoryItems: () => [],
+      search: (query) =>
+        pickable
+          .filter((skill) => matches(skill, query))
+          .map((skill) => ({
+            id: skill.name,
+            type: "skill",
+            label: skill.name,
+            description: skill.description ?? undefined,
+            metadata: { layer: skill.layer ?? null, root: skill.root },
+          })),
+    }),
+    [pickable],
+  );
+
+  const loading = asking && groups === null && error === null;
+  // Nothing to say, no popover: handing the kit an adapter is what opens it, so a
+  // session with no skills gets no empty box -- and no combobox relationship
+  // pointing at a list that is not there.
+  const openable = loading || error !== null || skills.length > 0;
+
+  return (
+    <ComposerPrimitive.Unstable_TriggerPopover
+      char={TRIGGER_CHAR}
+      matcher={slashAtStart}
+      adapter={openable ? adapter : undefined}
+      isLoading={loading}
+      data-slot="skill-list"
+      // Above the frame, not inside its flow: the composer must not resize when a
+      // menu opens. The frame is the positioning box (see ComposerFrame).
+      className="absolute bottom-full left-0 z-50 mb-1.5 max-h-72 w-full overflow-y-auto rounded-(--composer-radius) border bg-(--composer-bg) p-1 shadow-lg"
+    >
+      <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={slashFormatter} />
+      {loading && (
+        <p data-slot="skill-list-loading" className="text-muted-foreground px-2 py-1.5 text-sm">
+          Reading this session's skills…
+        </p>
+      )}
+      {error !== null && (
+        <p role="alert" data-slot="skill-list-error" className="text-destructive px-2 py-1.5 text-xs">
+          {error}
+        </p>
+      )}
+      <ComposerPrimitive.Unstable_TriggerPopoverItems>
+        {(items) => items.map((item, index) => <SkillListRow key={item.id} item={item} index={index} />)}
+      </ComposerPrimitive.Unstable_TriggerPopoverItems>
+      {broken.length > 0 && (
+        // LISTED BUT NOT PICKABLE, and both halves matter. Listed, because a skill
+        // that silently vanished and one that was never installed look identical
+        // from the outside -- the harder of the two to debug must not be what a bug
+        // produces. Not pickable, because loading it cannot work: these are drawn
+        // outside the kit's item list, so no arrow key and no Enter can reach them.
+        <div data-slot="skill-list-unusable" className="border-border/60 mt-1 border-t pt-1">
+          {broken.map((skill) => (
+            <div
+              key={skill.name}
+              data-slot="skill-list-unusable-row"
+              title={skill.root}
+              className="text-muted-foreground flex items-baseline gap-2 px-2 py-1 text-sm"
+            >
+              <b className="shrink-0 font-medium line-through">{skill.name}</b>
+              <span className="min-w-0 flex-1 truncate text-xs">
+                {BROKEN_WORDS[skill.reason ?? ""] ?? skill.reason}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </ComposerPrimitive.Unstable_TriggerPopover>
+  );
+};
+
 /// The wrapper Thread renders around the composer. It draws the strip above the
-/// composer and then gets out of the way; with no thread id there is nothing to
-/// show, so it renders its children alone.
+/// composer, the status strip below it, and then gets out of the way; with no thread
+/// id there is nothing to show, so it renders its children alone.
+///
+/// The two strips are at opposite ends on purpose: the context bar answers "where
+/// and on what" before a conversation starts and folds away once it does, while the
+/// status strip answers "what has this cost" and only appears once there is an
+/// answer. Either one is invisible in the state the other is showing -- see each
+/// component's own header.
+///
+/// It is ALSO the trigger root, and it has to be: a trigger popover must be an
+/// ancestor of the composer's input -- that is what hands the input the popover's
+/// combobox attributes and what lets the popover swallow Enter before the composer
+/// sends. This frame is the one place that wraps the composer without touching the
+/// copied element, so the declaration lives here and `thread.aui.tsx` is untouched.
 export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
   const threadId = useThreadId();
   const started = useAuiState((s) => s.thread.messages.length > 0);
@@ -340,10 +585,16 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
     <div
       data-slot="composer-frame"
       data-started={started ? "" : undefined}
-      className="bg-muted/40 rounded-(--composer-radius) p-1.5"
+      // `relative` is for the skill list: it floats ABOVE this frame, so the frame
+      // is the box it is measured against.
+      className="bg-muted/40 rounded-(--composer-radius) relative p-1.5"
     >
-      {!started && <ComposerContextBar threadId={threadId} />}
-      {children}
+      <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+        <SkillPicker threadId={threadId} />
+        {!started && <ComposerContextBar threadId={threadId} />}
+        {children}
+        <ComposerStats threadId={threadId} />
+      </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </div>
   );
 };

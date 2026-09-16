@@ -1,44 +1,47 @@
 "use client";
 
-// The settings panel: what this session is actually running on.
+// The settings panel: two pages, and BOTH of them write.
 //
-// ---------------------------------------------------------------- read only
+// ---------------------------------------------------------------- the pages
 //
-// NOTHING HERE EDITS ANYTHING. The panel answers "who am I talking to, and where
-// did that come from" -- config.edn, providers.edn, a session's own override --
-// and writing any of those back is a different feature. That is why there is no
-// input, no save button and no disabled-looking form: a form that cannot be
-// submitted is furniture, and this is a report.
+// General   what this session is running on, and the DEFAULT TIER -- the three
+//           knobs a NEW session starts from, which is the one thing on this page
+//           that changes a file.
+// Models    the provider catalog: every vendor, where it came from, and the form
+//           that adds, edits and removes one.
 //
-// THE ANSWER IS ALWAYS LIVE, which is the one property worth building the panel
-// around. The server re-reads the files per call, so the panel refetches every
-// time it is opened rather than caching anything -- opening it after editing
-// config.edn shows the new value, with no restart. A cached answer would make
-// the panel a snapshot of start-up, which is precisely the thing this product's
-// configuration discipline says it is not.
+// TWO PAGES, AND THE PAGE IS COMPONENT STATE -- not a route, and not a place a URL
+// can point at. Both write config.edn; the key's presence, the credential NAME it
+// is read from and the home's path are facts the Models rows and the composer
+// already carry, so they are not pages of their own.
+//
+// The pages that DO write are honest about it: General's Save writes config.edn's
+// :default, Models' form writes config.edn's :providers (and, when a key is typed,
+// one line of .env). The other two are reports, and they stay reports.
+//
+// THE ANSWER IS ALWAYS LIVE. The server re-reads the files per call, so the panel
+// refetches every time it is opened rather than caching anything -- opening it
+// after editing config.edn shows the new value, with no restart. A cached answer
+// would make the panel a snapshot of start-up, which is precisely the thing this
+// product's configuration discipline says it is not.
 //
 // ------------------------------------------------------------------ the key
 //
-// THE KEY IS NEVER IN THE RESPONSE, so there is nothing here to redact -- see
-// `lib/settings.ts`. What the panel draws is presence and origin: whether one is
-// configured at all, and whether it comes from the home's `.env` or the
-// environment. Those two facts answer the two questions people actually have
-// ("is it set up?" and "which of the two places do I edit?"), and neither can be
-// answered by looking at a masked value.
+// THE KEY IS NEVER IN THE RESPONSE, so there is nothing here to redact. What the
+// panel draws is presence, origin, and the credential NAME -- the name is the
+// useful half, because it is the line to edit or the line to add, and deriving it
+// from the provider id in your head is the step this feature exists to remove.
 //
 // ------------------------------------------------------------------ refusals
 //
 // A CONFIGURATION THAT CANNOT BE RESOLVED IS THE PANEL'S CONTENT, not an error
 // state: the server's sentence goes where the values would have been. A
-// half-edited config.edn is the ordinary way a person meets this endpoint, and
-// the message names the provider it could not find and the ones it could have --
-// which is more use than a blank panel and a generic apology.
-//
-// The refetch button is there for the same reason the sidebar has one: a report
-// that reads files can be out of date the moment a file changes, and the honest
-// answer to that is a visible way to re-ask rather than a subscription to
-// something the server does not watch.
-import { Loader2Icon, RefreshCwIcon } from "lucide-react";
+// half-edited config.edn is the ordinary way a person meets this endpoint, and the
+// message names the provider it could not find and the ones it could have -- which
+// is more use than a blank panel and a generic apology. THE SAME RULE GOVERNS THE
+// FORMS: a refused write shows the server's sentence where the form is, and the
+// form stays put, because the file did not move either.
+import { ArrowLeftIcon, Loader2Icon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type FC } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -46,10 +49,23 @@ import { McpPanel } from "@/components/mcp-panel";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  probeModels,
+  providerLabel,
+  putDefaults,
+  putProvider,
+  registryFor,
+  removeProvider,
+  type DefaultKnobs,
+  type ModelRow,
+  type Origin,
+  type ProviderRow,
+  type Registry,
+} from "@/lib/providers";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 
 /// How a tier reads on screen. `catalog` is spelled out rather than shown as the
@@ -62,15 +78,13 @@ const TIER_LABELS: Record<Tier, string> = {
   catalog: "the provider's default",
 };
 
-const ORIGIN_LABELS: Record<Settings["home"]["origin"], string> = {
-  environment: "from CLJ_HARNESS_HOME",
-  override: "from a test override",
-  default: "the default (~/.clj-harness)",
-};
-
-const KEY_SOURCE_LABELS: Record<NonNullable<Settings["key"]["source"]>, string> = {
-  "env-file": "from the home's .env",
-  environment: "from the environment",
+/// Where a provider came from, in the words a person would use. The three are
+/// different edits -- a built-in, your own vendor, your patch of a built-in -- and
+/// only the second and third are yours to change or remove.
+const ORIGIN_LABELS_PROVIDER: Record<Origin, string> = {
+  builtin: "built-in",
+  user: "yours",
+  "builtin-patched": "your patch",
 };
 
 /// NOTE: the path is shown WHOLE, never shortened to its last segments. A
@@ -87,26 +101,856 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+/// The server's sentence, shown where the thing it is about would have been. One
+/// component, because a refusal in the panel and a refusal in a form have to look
+/// like the same event: the file says no, and this is what it said.
+const Refusal: FC<{ slot: string; message: string; note?: string }> = ({
+  slot,
+  message,
+  note,
+}) => (
+  <div data-slot={slot} className="rounded-md border p-2">
+    <p className="text-destructive text-xs break-words">{message}</p>
+    {note !== undefined && <p className="text-muted-foreground mt-1 text-xs">{note}</p>}
+  </div>
+);
+
+const SectionTitle: FC<{ children: React.ReactNode }> = ({ children }) => (
+  <h3 className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
+    {children}
+  </h3>
+);
+
+const Field: FC<{
+  label: string;
+  slot: string;
+  hint?: string;
+  children: React.ReactNode;
+}> = ({ label, slot, hint, children }) => (
+  <label data-slot={slot} className="flex flex-col gap-1">
+    <span className="text-xs font-medium">{label}</span>
+    {children}
+    {hint !== undefined && <span className="text-muted-foreground text-xs">{hint}</span>}
+  </label>
+);
+
+const inputClass =
+  "h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:border-ring";
+
+// ------------------------------------------------------------------- General
+
+/// The three knobs, editable. What makes this different from the composer's
+/// pickers is the TIER it writes: this is config.edn's :default -- what a NEW
+/// session starts from -- where those change THIS session and forget it on
+/// restart. The panel says which tier each knob came from right above, so the two
+/// are never confused for one another.
+const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
+  registry,
+  onChanged,
+}) => {
+  const tier = registry.default;
+  /// An INLINE description cannot be expressed by three selects: there is no
+  /// provider NAME in it. So the controls start empty, the page says what is there
+  /// instead, and Save stays disabled until a vendor is picked -- because saving a
+  /// form that looks untouched would otherwise delete the description.
+  const inline = !("provider" in tier) && Object.keys(tier).length > 0;
+
+  const [provider, setProvider] = useState<string>(
+    typeof tier.provider === "string" ? tier.provider : "",
+  );
+  const [model, setModel] = useState<string>(
+    typeof tier.model === "string" ? tier.model : "",
+  );
+  const [effort, setEffort] = useState<string>(
+    typeof tier["reasoning-effort"] === "string" ? (tier["reasoning-effort"] as string) : "",
+  );
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const chosen = registry.providers.find((p) => p.name === provider);
+
+  /// A MODEL THAT IS ALWAYS ONE THE VENDOR DECLARES. Two ways the tier can hold
+  /// something else: it names a model this vendor does not serve (hand-written, or
+  /// the tier points at a different vendor than the control does), or it names none
+  /// at all. Both land on the vendor's OWN default, which is what the server would
+  /// have resolved anyway -- the control just says so out loud instead of sending a
+  /// value the select cannot even show.
+  const modelFor = (p: ProviderRow | undefined, want: string): string =>
+    p !== undefined && p.models.some((m) => m.id === want) ? want : (p?.model ?? "");
+
+  // The tier is re-read after every write, so the controls follow the file rather
+  // than their own last submission.
+  useEffect(() => {
+    const name = typeof tier.provider === "string" ? tier.provider : "";
+    setProvider(name);
+    setModel(
+      modelFor(
+        registry.providers.find((p) => p.name === name),
+        typeof tier.model === "string" ? tier.model : "",
+      ),
+    );
+    setEffort(
+      typeof tier["reasoning-effort"] === "string" ? (tier["reasoning-effort"] as string) : "",
+    );
+  }, [tier, registry]);
+  const save = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      // EVERY KNOB IS SENT, with "" meaning REMOVE THE KEY -- the controls show the
+      // tier's whole content, so a knob cleared here is a knob cleared in the file.
+      const knobs: DefaultKnobs = {
+        provider: provider === "" ? null : provider,
+        model: model === "" ? null : model,
+        "reasoning-effort": effort === "" ? null : effort,
+      };
+      await putDefaults(knobs);
+      onChanged();
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-slot="settings-defaults" className="flex flex-col gap-2">
+      <SectionTitle>Default tier</SectionTitle>
+      <p className="text-muted-foreground text-xs">
+        What a new session starts from — <code className="font-mono">config.edn</code>
+        &apos;s <code className="font-mono">:default</code>. This session may be listening
+        to its own choice instead; the rows above say which.
+      </p>
+
+      {inline && (
+        <div data-slot="settings-default-inline" className="rounded-md border p-2">
+          <p className="text-xs">
+            config.edn <em>describes</em> this provider inline —{" "}
+            <code className="font-mono break-all">
+              {String(tier["base-url"] ?? "")} / {String(tier.model ?? "")}
+            </code>
+          </p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            Three selects cannot express that. Choosing a vendor below replaces the
+            description with a named one.
+          </p>
+        </div>
+      )}
+
+      <Field label="Default provider" slot="settings-default-provider">
+        <select
+          aria-label="Default provider"
+          className={inputClass}
+          value={provider}
+          disabled={busy}
+          onChange={(e) => {
+            const name = e.target.value;
+            setProvider(name);
+            // A model id means "an id this vendor serves", so switching vendor lands
+            // on the NEW vendor's own default -- which is what the server would
+            // resolve anyway, said out loud rather than left blank.
+            setModel(modelFor(registry.providers.find((p) => p.name === name), ""));
+          }}
+        >
+          <option value="">— none —</option>
+          {registry.providers.map((p) => (
+            <option key={p.name} value={p.name}>
+              {providerLabel(p)}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Default model"
+        slot="settings-default-model"
+        hint={
+          chosen === undefined
+            ? "Pick a provider first."
+            : "One of this vendor's models. The vendor's own default is preselected."
+        }
+      >
+        {/* NO EMPTY CHOICE: the tier names a model, and a vendor always has a default
+            one, so "— the vendor's own default —" was an option whose only content was
+            the thing the field would have said anyway. A vendor with no models cannot
+            be reached here at all (the catalog refuses one), so the list is never
+            empty for a chosen provider. */}
+        <select
+          aria-label="Default model"
+          className={inputClass}
+          value={model}
+          disabled={busy || chosen === undefined}
+          onChange={(e) => setModel(e.target.value)}
+        >
+          {(chosen?.models ?? []).map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field label="Default reasoning effort" slot="settings-default-reasoning">
+        <select
+          aria-label="Default reasoning effort"
+          className={inputClass}
+          value={effort}
+          disabled={busy}
+          onChange={(e) => setEffort(e.target.value)}
+        >
+          <option value="">— none sent —</option>
+          {registry["reasoning-efforts"].map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          data-slot="settings-default-save"
+          disabled={busy || (inline && provider === "")}
+          onClick={() => void save()}
+        >
+          Save default tier
+        </Button>
+        {busy && <Loader2Icon className="text-muted-foreground size-3.5 animate-spin" />}
+      </div>
+      {failure !== null && (
+        <Refusal
+          slot="settings-default-error"
+          message={failure}
+          note="Nothing was written — the tier still holds what it held."
+        />
+      )}
+    </div>
+  );
+};
+
+const GeneralPage: FC<{
+  settings: Settings | null;
+  registry: Registry | null;
+  onChanged: () => void;
+}> = ({ settings, registry, onChanged }) => {
+  const tier = (knob: "provider" | "model" | "reasoning-effort") => settings?.tiers[knob];
+  return (
+    <div data-slot="settings-page-general" className="flex flex-col gap-4">
+      {/* The report is ABSENT when it could not be resolved -- and the controls
+          below are still here, which is what makes a broken home fixable from the
+          page that shows it is broken. */}
+      {settings !== null && (
+      <section data-slot="settings-model">
+        <SectionTitle>In force</SectionTitle>
+        <Row label="provider">
+          <code data-slot="settings-provider" className="font-mono">
+            {settings.provider ?? "—"}
+          </code>
+          {settings["display-name"] !== undefined && (
+            <span className="text-muted-foreground"> ({settings["display-name"]})</span>
+          )}
+          {tier("provider") !== undefined && (
+            <span className="text-muted-foreground"> · {TIER_LABELS[tier("provider")!]}</span>
+          )}
+        </Row>
+        <Row label="model">
+          <code data-slot="settings-model-id" className="font-mono">
+            {settings.model ?? "—"}
+          </code>
+          {tier("model") !== undefined && (
+            <span className="text-muted-foreground"> · {TIER_LABELS[tier("model")!]}</span>
+          )}
+        </Row>
+        <Row label="reasoning">
+          <span data-slot="settings-reasoning">{settings["reasoning-effort"] ?? "—"}</span>
+          {tier("reasoning-effort") !== undefined && (
+            <span className="text-muted-foreground">
+              {" "}
+              · {TIER_LABELS[tier("reasoning-effort")!]}
+            </span>
+          )}
+        </Row>
+        {settings["base-url"] !== undefined && (
+          <Row label="endpoint">
+            <code className="text-muted-foreground font-mono break-all">
+              {settings["base-url"]}
+            </code>
+          </Row>
+        )}
+      </section>
+      )}
+
+      {registry !== null && <Defaults registry={registry} onChanged={onChanged} />}
+    </div>
+  );
+};
+
+// -------------------------------------------------------------------- Models
+
+const emptyModel = (id: string, input: string[] = ["text"]): ModelRow => ({
+  id,
+  input,
+  output: ["text"],
+});
+
+/// One model row: what it is called, what it accepts, and whether it is the
+/// vendor's default. Output is TEXT and only text -- the catalog's vocabulary has
+/// one output type -- so it is stated rather than offered as a choice.
+const ModelRowEditor: FC<{
+  row: ModelRow;
+  canRemove: boolean;
+  onChange: (row: ModelRow) => void;
+  onRemove: () => void;
+}> = ({ row, canRemove, onChange, onRemove }) => (
+  <div
+    data-slot="settings-provider-model"
+    className="flex flex-col gap-1 rounded-md border p-2"
+  >
+    <div className="flex items-center gap-2">
+      <Input
+        aria-label="Model id"
+        className="h-7 flex-1 text-xs"
+        value={row.id}
+        onChange={(e) => onChange({ ...row, id: e.target.value })}
+      />
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Remove model"
+        title="Remove this model"
+        disabled={!canRemove}
+        onClick={onRemove}
+      >
+        <TrashIcon />
+      </Button>
+    </div>
+    <div className="flex items-center gap-3">
+      {(["text", "image"] as const).map((modality) => (
+        <label key={modality} className="flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            aria-label={`Accepts ${modality}`}
+            checked={row.input.includes(modality)}
+            onChange={(e) => {
+              const next = e.target.checked
+                ? [...row.input, modality]
+                : row.input.filter((m) => m !== modality);
+              onChange({ ...row, input: next });
+            }}
+          />
+          {modality}
+        </label>
+      ))}
+      <span className="text-muted-foreground text-xs">out: text</span>
+      <details data-slot="settings-provider-model-limits" className="ml-auto">
+        <summary className="text-muted-foreground cursor-pointer text-xs">Limits</summary>
+        <div className="mt-1 flex items-center gap-2">
+          {(["context-window", "max-output-tokens"] as const).map((count) => (
+            <label key={count} className="flex items-center gap-1 text-xs">
+              {count === "context-window" ? "context" : "max out"}
+              <Input
+                aria-label={count}
+                className="h-6 w-20 text-xs"
+                inputMode="numeric"
+                value={row[count] ?? ""}
+                onChange={(e) => {
+                  const raw = e.target.value.trim();
+                  const next = { ...row };
+                  if (raw === "") delete next[count];
+                  else next[count] = Number(raw);
+                  onChange(next);
+                }}
+              />
+            </label>
+          ))}
+        </div>
+        <p className="text-muted-foreground mt-1 text-[10px]">
+          Reported, not enforced. Omit what you have not verified.
+        </p>
+      </details>
+    </div>
+  </div>
+);
+
+type Draft = {
+  id: string;
+  displayName: string;
+  baseUrl: string;
+  protocol: string;
+  apiKey: string;
+  models: ModelRow[];
+  editing: boolean;
+};
+
+const draftOf = (provider: ProviderRow): Draft => ({
+  id: provider.name,
+  displayName: provider["display-name"] ?? "",
+  baseUrl: provider["base-url"],
+  protocol: provider.protocol,
+  apiKey: "",
+  models: provider.models.map((m) => ({ ...m })),
+  editing: true,
+});
+
+const blankDraft = (protocols: readonly string[]): Draft => ({
+  id: "",
+  displayName: "",
+  baseUrl: "",
+  // THE DEFAULT PROTOCOL IS THE ONE REAL VENDORS SPEAK, when this process has it:
+  // the server's list is "what this process can speak", which in a dev process also
+  // includes the test double -- selectable, truthfully, but a terrible thing to
+  // start a new vendor on by accident.
+  protocol: protocols.includes("openai-completions")
+    ? "openai-completions"
+    : (protocols[0] ?? ""),
+  apiKey: "",
+  models: [],
+  editing: false,
+});
+
+const ProviderForm: FC<{
+  draft: Draft;
+  protocols: readonly string[];
+  onCancel: () => void;
+  onSaved: () => void;
+  onRemoved: () => void;
+}> = ({ draft: initial, protocols, onCancel, onSaved, onRemoved }) => {
+  const [draft, setDraft] = useState<Draft>(initial);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [offered, setOffered] = useState<string[] | null>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+
+  const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
+
+  const save = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await putProvider({
+        id: draft.id,
+        ...(draft.displayName === "" ? {} : { "display-name": draft.displayName }),
+        protocol: draft.protocol,
+        "base-url": draft.baseUrl,
+        // THE FIRST ROW IS THE VENDOR'S DEFAULT MODEL, and the catalogue requires one
+        // (an entry whose :model is not among its models is refused). Asking here
+        // would ask a question General already answers for the thing people mean by
+        // "the default model" -- which one a run STARTS on.
+        model: draft.models[0]?.id ?? "",
+        models: draft.models,
+        // ABSENT when the field is empty: that means "leave .env alone", which is
+        // what an untouched key field means. (The server refuses an empty string.)
+        ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
+      });
+      onSaved();
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await removeProvider(draft.id);
+      onRemoved();
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fetchModels = async () => {
+    setBusy(true);
+    setFailure(null);
+    setOffered(null);
+    try {
+      const { models } = await probeModels({
+        ...(draft.editing ? { id: draft.id } : {}),
+        "base-url": draft.baseUrl,
+        protocol: draft.protocol,
+        ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
+      });
+      setOffered(models);
+      setPicked([]);
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-slot="settings-provider-form" className="flex flex-col gap-3">
+      <Field
+        label="Provider ID"
+        slot="settings-provider-id"
+        hint={
+          draft.editing
+            ? "Renaming means removing this entry and adding another: the id is what the request names and what the credential in .env is derived from."
+            : "Lowercase letters, digits and dashes, starting with a letter. It names this vendor in requests and derives its credential name in .env."
+        }
+      >
+        <Input
+          className="h-8 font-mono text-xs"
+          placeholder="acme-gateway"
+          value={draft.id}
+          disabled={draft.editing || busy}
+          onChange={(e) => set({ id: e.target.value })}
+        />
+      </Field>
+
+      <Field label="Display name" slot="settings-provider-display-name" hint="Optional — what the picker shows.">
+        <Input
+          className="h-8 text-xs"
+          value={draft.displayName}
+          disabled={busy}
+          onChange={(e) => set({ displayName: e.target.value })}
+        />
+      </Field>
+
+      <Field label="API address" slot="settings-provider-base-url">
+        <Input
+          className="h-8 font-mono text-xs"
+          placeholder="https://gateway.example/v1"
+          value={draft.baseUrl}
+          disabled={busy}
+          onChange={(e) => set({ baseUrl: e.target.value })}
+        />
+      </Field>
+
+      <Field label="API protocol" slot="settings-provider-protocol">
+        <select
+          aria-label="API protocol"
+          className={inputClass}
+          value={draft.protocol}
+          disabled={busy}
+          onChange={(e) => set({ protocol: e.target.value })}
+        >
+          {protocols.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="API key"
+        slot="settings-provider-key"
+        hint={
+          draft.editing
+            ? "Leave empty to keep the line in .env as it is. A value replaces it."
+            : "Written to the home's .env as its own line, named after the id. Never sent back to this page."
+        }
+      >
+        <Input
+          className="h-8 font-mono text-xs"
+          type="password"
+          autoComplete="off"
+          value={draft.apiKey}
+          disabled={busy}
+          onChange={(e) => set({ apiKey: e.target.value })}
+        />
+      </Field>
+
+      <div className="flex flex-col gap-2">
+        <SectionTitle>Model catalog</SectionTitle>
+        {draft.models.length > 0 && (
+          <p className="text-muted-foreground text-xs">
+            The <strong>first</strong> model is this vendor&apos;s own default — what a run
+            lands on when no tier names one. Which model a session actually starts on is
+            set in General, not here.
+          </p>
+        )}
+        {draft.models.length === 0 && (
+          <p className="text-muted-foreground text-xs">
+            A vendor must declare at least one model: an entry with no models cannot be
+            selected, so offering it would be offering a refusal.
+          </p>
+        )}
+        {draft.models.map((row, i) => (
+          <ModelRowEditor
+            key={`${i}-${row.id}`}
+            row={row}
+            // The LAST model cannot go: a vendor with no models cannot be selected
+            // at all, so the form would be building something the file refuses.
+            canRemove={draft.models.length > 1}
+            onChange={(next) =>
+              set({ models: draft.models.map((m, j) => (j === i ? next : m)) })
+            }
+            onRemove={() => set({ models: draft.models.filter((_, j) => j !== i) })}
+          />
+        ))}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            data-slot="settings-provider-model-add"
+            disabled={busy}
+            onClick={() =>
+              set({ models: [...draft.models, emptyModel(`model-${draft.models.length + 1}`)] })
+            }
+          >
+            <PlusIcon /> Add model
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-slot="settings-provider-model-fetch"
+            disabled={busy || draft.baseUrl === ""}
+            title={
+              draft.baseUrl === ""
+                ? "Fill in an API address first"
+                : "Ask the vendor what it serves"
+            }
+            onClick={() => void fetchModels()}
+          >
+            Fetch available models
+          </Button>
+        </div>
+
+        {offered !== null && (
+          <div data-slot="settings-provider-model-offered" className="rounded-md border p-2">
+            <p className="text-muted-foreground text-xs">
+              {offered.length === 0
+                ? "The vendor listed no models."
+                : "Tick what you want in the catalog. Each arrives declaring text only — raise it if the vendor takes images."}
+            </p>
+            <div className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">
+              {offered.map((id) => (
+                <label key={id} className="flex items-center gap-1.5 font-mono text-xs">
+                  <input
+                    type="checkbox"
+                    checked={picked.includes(id)}
+                    onChange={(e) =>
+                      setPicked(
+                        e.target.checked ? [...picked, id] : picked.filter((p) => p !== id),
+                      )
+                    }
+                  />
+                  {id}
+                </label>
+              ))}
+            </div>
+            {picked.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-1"
+                data-slot="settings-provider-model-take"
+                onClick={() => {
+                  const have = new Set(draft.models.map((m) => m.id));
+                  const add = picked.filter((id) => !have.has(id)).map((id) => emptyModel(id));
+                  set({ models: [...draft.models, ...add] });
+                  setOffered(null);
+                  setPicked([]);
+                }}
+              >
+                Add {picked.length} to the catalog
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {failure !== null && (
+        <Refusal
+          slot="settings-provider-error"
+          message={failure}
+          note="Nothing was written — config.edn is exactly as it was."
+        />
+      )}
+
+      <div className="flex items-center gap-2">
+        <Button size="sm" data-slot="settings-provider-submit" disabled={busy} onClick={() => void save()}>
+          {draft.editing ? "Save provider" : "Create provider"}
+        </Button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+        {draft.editing && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive ml-auto"
+            data-slot="settings-provider-remove"
+            disabled={busy}
+            title="Takes this entry out of config.edn. config.edn.bak holds the file as it was, and the .env line stays."
+            onClick={() => void remove()}
+          >
+            Remove
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ModelsPage: FC<{
+  registry: Registry | null;
+  failure: string | null;
+  onChanged: () => void;
+}> = ({ registry, failure, onChanged }) => {
+  const [draft, setDraft] = useState<Draft | null>(null);
+
+  if (failure !== null && registry === null) {
+    return <Refusal slot="settings-providers-error" message={failure} />;
+  }
+  if (registry === null) {
+    return (
+      <p data-slot="settings-page-models-loading" className="text-muted-foreground flex items-center gap-2 text-xs">
+        <Loader2Icon className="size-3.5 animate-spin" />
+        Reading the catalog…
+      </p>
+    );
+  }
+
+  if (draft !== null) {
+    return (
+      <>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-slot="settings-provider-back"
+          className="-ml-2 mb-1"
+          onClick={() => setDraft(null)}
+        >
+          <ArrowLeftIcon /> Providers
+        </Button>
+        <ProviderForm
+          key={`${draft.id}-${draft.editing}`}
+          draft={draft}
+          protocols={registry.protocols}
+          onCancel={() => setDraft(null)}
+          onSaved={() => {
+            setDraft(null);
+            onChanged();
+          }}
+          onRemoved={() => {
+            setDraft(null);
+            onChanged();
+          }}
+        />
+      </>
+    );
+  }
+
+  return (
+    <div data-slot="settings-page-models" className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <SectionTitle>Providers</SectionTitle>
+        <Button
+          variant="outline"
+          size="sm"
+          data-slot="settings-provider-add"
+          onClick={() => setDraft(blankDraft(registry.protocols))}
+        >
+          <PlusIcon /> Add provider
+        </Button>
+      </div>
+      <div data-slot="settings-providers" className="flex flex-col divide-y">
+        {registry.providers.map((p) => (
+          <button
+            key={p.name}
+            type="button"
+            data-slot="settings-provider-row"
+            data-origin={p.origin}
+            className="hover:bg-accent/40 flex flex-col gap-0.5 rounded-md p-2 text-left"
+            onClick={() => setDraft(draftOf(p))}
+          >
+            <span className="flex items-center gap-2 text-xs">
+              <span className="font-medium">{providerLabel(p)}</span>
+              <span className="text-muted-foreground rounded border px-1 text-[10px]">
+                {ORIGIN_LABELS_PROVIDER[p.origin]}
+              </span>
+              {p.key["present?"] ? (
+                <span className="text-muted-foreground text-[10px]">key ✓</span>
+              ) : (
+                <span className="text-muted-foreground text-[10px]">no key</span>
+              )}
+            </span>
+            <span className="text-muted-foreground font-mono text-[10px] break-all">
+              {p["base-url"]}
+            </span>
+            <span className="text-muted-foreground text-[10px]">
+              {p.models.length} {p.models.length === 1 ? "model" : "models"} · {p.credential}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ------------------------------------------------------------------- the rest
+
+// ------------------------------------------------------------------ the panel
+
+/// A PAGE, not a section: the nav is the one place a person looks for something,
+/// and "where do I see the servers" should have the same answer as every other
+/// question about this session.
+///
+/// MCP IS NOT A SETTING, and it is here anyway. Nothing on this page writes
+/// `mcp.edn` -- what a server IS comes from the files, and this only shows the
+/// ledger and switches servers on or off FOR THIS SESSION. It sits beside the
+/// others because it is one of the things a person asks about "what is this
+/// session running on", which is what this dialog is for.
+type Page = "general" | "models" | "mcp";
+
+const PAGES: { id: Page; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "models", label: "Models" },
+  { id: "mcp", label: "MCP servers" },
+];
+
 export const SettingsPanel: FC<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
   threadId: string;
 }> = ({ open, onOpenChange, threadId }) => {
+  const [page, setPage] = useState<Page>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [registry, setRegistry] = useState<Registry | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [registryFailure, setRegistryFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  /// TWO CALLS, TWO FAILURES, AND THAT SEPARATION IS THE POINT rather than a
+  /// detail of the code below: `GET /api/settings` RESOLVES the configuration and
+  /// fails when it cannot be served, while `GET /api/providers` only reads it and
+  /// keeps working. A home whose :default names a provider somebody just removed is
+  /// exactly that state -- the report refuses, the catalog answers -- and nulling
+  /// both on one failure would take away the controls that FIX it.
+  ///
+  /// A FAILED READ LEAVES NOTHING BEHIND: the previous answer is cleared, because a
+  /// stale value sitting next to a refusal is the panel saying two things at once.
+  /// The server's own sentence, kept whole, is what goes in its place -- it names the
+  /// provider it could not resolve and the ones the catalog does define, and a
+  /// paraphrase would be one more thing to distrust.
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setSettings(await getSettings(threadId));
-      setFailure(null);
-    } catch (failure: unknown) {
-      // The server's own sentence, kept whole: it names the provider it could
-      // not resolve and the ones the catalog does define, and a paraphrase would
-      // be one more thing to distrust.
-      setSettings(null);
-      setFailure(failure instanceof Error ? failure.message : String(failure));
+      const [s, r] = await Promise.allSettled([getSettings(threadId), registryFor()]);
+      if (s.status === "fulfilled") {
+        setSettings(s.value);
+        setFailure(null);
+      } else {
+        setSettings(null);
+        setFailure(s.reason instanceof Error ? s.reason.message : String(s.reason));
+      }
+      if (r.status === "fulfilled") {
+        setRegistry(r.value);
+        setRegistryFailure(null);
+      } else {
+        setRegistry(null);
+        setRegistryFailure(r.reason instanceof Error ? r.reason.message : String(r.reason));
+      }
     } finally {
       setLoading(false);
     }
@@ -118,169 +962,84 @@ export const SettingsPanel: FC<{
     if (open) void load();
   }, [open, load]);
 
-  const tier = (knob: "provider" | "model" | "reasoning-effort") =>
-    settings?.tiers[knob];
+  /// After a write: the same read, and stay where the person was. Not a second
+  /// implementation of it -- a write that needs a different refresh is a sign the
+  /// refresh was wrong.
+  const reload = load;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         data-slot="settings-panel"
-        className="sm:max-w-lg"
+        className="sm:max-w-3xl"
         aria-describedby={undefined}
       >
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>
-            What this session is running on right now. Read from the files on
-            every open — edit one and reopen to see the change. Nothing here
-            writes anything.
-          </DialogDescription>
         </DialogHeader>
 
-        {failure !== null && (
-          <div data-slot="settings-error" className="rounded-md border p-2">
-            <p className="text-destructive text-xs break-words">{failure}</p>
-            <p className="text-muted-foreground mt-1 text-xs">
-              A configuration that cannot be resolved is shown instead of the
-              values — the files are still yours to fix.
-            </p>
-          </div>
-        )}
+        {/* THE DIALOG DOES NOT GROW WITH ITS CONTENT. A provider form is taller than
+            the panel, and a modal that resized around it would move the nav and the
+            buttons while somebody is typing in it. So the size is fixed here and the
+            PAGE scrolls inside. */}
+        <div className="flex h-[min(30rem,62vh)] gap-4">
+          <nav data-slot="settings-nav" className="flex w-36 shrink-0 flex-col gap-0.5">
+            {PAGES.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                data-slot={`settings-nav-${p.id}`}
+                aria-current={page === p.id ? "page" : undefined}
+                className={
+                  page === p.id
+                    ? "bg-accent text-accent-foreground rounded-md px-2 py-1.5 text-left text-xs"
+                    : "text-muted-foreground hover:bg-accent/40 rounded-md px-2 py-1.5 text-left text-xs"
+                }
+                onClick={() => setPage(p.id)}
+              >
+                {p.label}
+              </button>
+            ))}
+          </nav>
 
-        {loading && settings === null && failure === null && (
-          <p
-            data-slot="settings-loading"
-            className="text-muted-foreground flex items-center gap-2 text-xs"
-          >
-            <Loader2Icon className="size-3.5 animate-spin" />
-            Reading the configuration…
-          </p>
-        )}
+          <div className="min-w-0 flex-1 overflow-y-auto pr-1">
+            {failure !== null && (
+              <Refusal
+                slot="settings-error"
+                message={failure}
+                note="A configuration that cannot be resolved is shown instead of the values — the files are still yours to fix."
+              />
+            )}
 
-        {settings !== null && (
-          <div className="flex flex-col gap-3">
-            <section data-slot="settings-model">
-              <h3 className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
-                Model
-              </h3>
-              <Row label="provider">
-                <code data-slot="settings-provider" className="font-mono">
-                  {settings.provider ?? "—"}
-                </code>
-                {tier("provider") !== undefined && (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {TIER_LABELS[tier("provider")!]}
-                  </span>
-                )}
-              </Row>
-              <Row label="model">
-                <code data-slot="settings-model-id" className="font-mono">
-                  {settings.model ?? "—"}
-                </code>
-                {tier("model") !== undefined && (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {TIER_LABELS[tier("model")!]}
-                  </span>
-                )}
-              </Row>
-              <Row label="reasoning">
-                <span data-slot="settings-reasoning">
-                  {settings["reasoning-effort"] ?? "—"}
-                </span>
-                {tier("reasoning-effort") !== undefined && (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {TIER_LABELS[tier("reasoning-effort")!]}
-                  </span>
-                )}
-              </Row>
-              {settings["base-url"] !== undefined && (
-                <Row label="endpoint">
-                  <code className="text-muted-foreground font-mono break-all">
-                    {settings["base-url"]}
-                  </code>
-                </Row>
-              )}
-            </section>
-
-            <section data-slot="settings-key">
-              <h3 className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
-                API key
-              </h3>
-              {/* Presence and origin, and there is deliberately no third thing:
-                  no value, no length, no masked hint. A row of dots answers
-                  neither of the questions this section exists for. */}
-              <Row label="configured">
-                <span data-slot="settings-key-present">
-                  {settings.key["present?"] ? "yes" : "no"}
-                </span>
-                {settings.key.source !== null && (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {KEY_SOURCE_LABELS[settings.key.source]}
-                  </span>
-                )}
-              </Row>
-              <p className="text-muted-foreground mt-0.5 text-xs">
-                The value itself is never sent to this page.
+            {loading && settings === null && failure === null && (
+              <p
+                data-slot="settings-loading"
+                className="text-muted-foreground flex items-center gap-2 text-xs"
+              >
+                <Loader2Icon className="size-3.5 animate-spin" />
+                Reading the configuration…
               </p>
-            </section>
+            )}
 
-            <section data-slot="settings-home">
-              <h3 className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
-                Config home
-              </h3>
-              <Row label="path">
-                <code
-                  data-slot="settings-home-path"
-                  className="font-mono break-all"
-                >
-                  {settings.home.path}
-                </code>
-              </Row>
-              <Row label="where from">
-                <span data-slot="settings-home-origin">
-                  {ORIGIN_LABELS[settings.home.origin]}
-                </span>
-              </Row>
-              <Row label="files">
-                <ul data-slot="settings-home-files" className="flex flex-col gap-0.5">
-                  {settings.home.files.map((f) => (
-                    <li key={f.name} className="flex items-baseline gap-1.5">
-                      <span
-                        data-present={f["present?"] ? "" : undefined}
-                        className={
-                          f["present?"]
-                            ? "font-mono"
-                            : "text-muted-foreground font-mono line-through"
-                        }
-                      >
-                        {f.name}
-                      </span>
-                      {!f["present?"] && (
-                        <span className="text-muted-foreground text-[10px]">
-                          not here
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </Row>
-            </section>
+            {page === "general" && (settings !== null || registry !== null) && (
+              <GeneralPage settings={settings} registry={registry} onChanged={reload} />
+            )}
+            {page === "models" && (
+              <ModelsPage registry={registry} failure={registryFailure} onChanged={reload} />
+            )}
+            {page === "mcp" && (
+              <section data-slot="settings-mcp" className="flex flex-col gap-3">
+                <SectionTitle>MCP servers</SectionTitle>
+                <p className="text-muted-foreground text-xs">
+                  Outside programs this session was asked to hand tools to. Declared in
+                  <code className="bg-muted mx-1 rounded px-1">mcp.edn</code> — this
+                  page reads that and changes nothing about it.
+                </p>
+                <McpPanel threadId={threadId} />
+              </section>
+            )}
           </div>
-        )}
-
-        {/* THE MCP LEDGER, embedded rather than given an entry of its own --
-            which is what the MCP ticket said would happen once this page
-            existed: one place to look at what this session is running on. It
-            brings its OWN switch, because unlike everything else on this panel a
-            server can be turned off, and that is a session decision rather than a
-            report. */}
-        <section data-slot="settings-mcp" className="flex flex-col gap-2">
-          <McpPanel threadId={threadId} />
-        </section>
+        </div>
 
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-foreground text-xs">
@@ -299,9 +1058,7 @@ export const SettingsPanel: FC<{
             title="Read the files again"
             className="h-7 px-2 text-xs"
           >
-            <RefreshCwIcon
-              className={loading ? "size-3.5 animate-spin" : "size-3.5"}
-            />
+            <RefreshCwIcon className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
             Re-read
           </Button>
         </div>

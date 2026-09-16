@@ -3,7 +3,7 @@
 //
 // The bug this pins: the second request of a conversation used to answer 400 --
 // the kernel appended the reasoning of turn one to the history in a shape the
-// provider rejected. It is covered offline by harness.loop-test, but the path
+// provider rejected. It is covered offline by harness.kernel.loop-test, but the path
 // that actually failed ran through the AG-UI edge AND the client, which only this
 // level exercises.
 //

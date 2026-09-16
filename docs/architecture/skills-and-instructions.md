@@ -4,8 +4,8 @@
 [hooks](hooks.md#systempromptstdout-是内容的那一格)），还会拿到**两块约定内容**：约定位置的**指令文件**，
 以及约定位置的**技能清单**；技能被**加载**后，正文再补进对话——而加载有两条路：模型的 `skill` 工具，
 与人在输入框里打的 `/name`。三件事由两个命名空间分管——
-`harness.skills` 管技能（根、目录名即身份、frontmatter、坏技能诊断、正文的派生注入），
-`harness.preamble` 管**user 侧开场块**那几条消息的**顺序**与读指令文件的失败语义。
+`harness.cap.skills` 管技能（根、目录名即身份、frontmatter、坏技能诊断、正文的派生注入），
+`harness.cap.preamble` 管**user 侧开场块**那几条消息的**顺序**与读指令文件的失败语义。
 
 **这一页讲的是现状**：默认位置是哪几个、注入的形态与顺序、失败怎么分、以及各自为什么这样定。
 它不创作技能——不写、不装、不做授权。
@@ -23,7 +23,7 @@
 [user    context（既有：每轮请求携带的 context，尾随）]
 ```
 
-**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.preamble/messages`。常驻规则在前、
+**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.cap.preamble/messages`。常驻规则在前、
 能力菜单在后、对话紧随其后——模型按顺序读到的是「必须先怎样」，然后才是「还能拿什么」。
 把它散落在调用点就是把这个决定藏进两行 `into`，所以不许。这个前缀随会话稳定，因此照旧被 provider
 的前缀缓存命中；只有改了 AGENTS.md 或技能集才会 miss 一次。
@@ -32,19 +32,22 @@
 `ag_ui/inbound` 关于 system 的规则只有「客户端带了就换成冻结的那条、没带就前置一条」——多加一条
 system 会把那条规则变成「关于一族 system 消息的规则」；而 role 本身就是给模型的框架（这是被放进来的
 东西，不是人刚打的字），`<instructions>` / `<skills>` / `<skill>` 三个标签再补一层明确的边界。
-（system 那一条里**追加**的部分属于另一半，由 `harness.system-prompt` 组装、`SystemPrompt` 点上的
+（system 那一条里**追加**的部分属于另一半，由 `harness.cap.system-prompt` 组装、`SystemPrompt` 点上的
 hook 决定——两半不可能交错，因为 role 不同。）
 
 **位置解析是纯函数**：`skills/roots` 与 `preamble/instruction-files` 都是 `(配置值, 项目目录)` 入参，
 **不查绑定、不读 harness.edn**。这不是洁癖，是断环——围栏必须知道技能根（见「与围栏的关系」），
-所以 `harness.project` require 它们，反过来 require 就是环（Clojure 在 `require` 时就报）。
-调用方手里本来就有这两样：围栏有绑定，`skill` 工具体有 thread-id，于是 `harness.project/skill-roots`
+所以 `harness.cap.project` require 它们，反过来 require 就是环（Clojure 在 `require` 时就报）。
+调用方手里本来就有这两样：围栏有绑定，`skill` 工具体有 thread-id，于是 `harness.cap.project/skill-roots`
 与 `preamble-files` 做那一次配对——只有它同时看得见配置读取、绑定、以及两个纯函数消费方。
 
 ## 技能：目录名即身份
 
-- **默认根**：`<OS 家目录>/.agents/skills`，绑定项目时再加 `<项目>/.agents/skills`。
-  **前面的根赢同名**，所以项目里的一份同名技能盖过用户级的。
+- **默认根**：`<OS 家目录>/.agents/skills`（**系统级**），绑定项目时再加 `<项目>/.agents/skills`（**项目级**）。
+  **前面的根赢同名**，所以按这个默认顺序**机器上的那份赢**：项目里放一份与机器上同名的技能，
+  它在模型的清单与人的技能列表里**都不出现**（它加载不动，所以不该在表里）。顺序本身就是机制，两处各钉一半：
+  `harness.cap.skills-test/the-two-defaults-are-the-host-conventions`（默认顺序 = 项目那份排在后面、输）
+  与 `harness.cap.skills-test/layer-precedence-the-project-wins-a-name-conflict`（把顺序倒过来，赢家就换人）。
 - **一个技能 = 一个目录里有一个 `SKILL.md`**。文件名**精确匹配**，不做大小写猜测：这个仓的纪律是
   「没人写过的名字是命名失败」，而替人猜哪个文件是「把一次手滑变成一次静默 no-op」。
   没有 `SKILL.md` 的目录（`_shared/`、`references/`）**静默跳过**——它根本不是技能。
@@ -84,7 +87,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
 
 ## 技能正文是派生的，不是累积的
 
-一条纯函数：provider 形状的消息向量 → 同样的向量（`harness.skills/derived-injections`）。它扫出
+一条纯函数：provider 形状的消息向量 → 同样的向量（`harness.cap.skills/derived-injections`）。它扫出
 assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对它的工具结果，**结果是那句加载确认**
 时，在该工具结果之后插入 `<skill name="X">…</skill>` 的 user 消息。
 
@@ -107,11 +110,11 @@ assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对�
 的判据是 `loaded-prefix` 那句前缀，工具写、它读，共用一份常量。被否决、被禁用、缺参数的调用根本到不了
 工具体，也就从不写下这句话——而在别处重建那个事实，等于用第二个地方、从日志里重新推导「到底发生了什么」。
 
-**施加点在 `harness.loop/drive!`：每次 `llm/stream!` 之前对 history 施加一次。** 不放在 `ag_ui/inbound`
+**施加点在 `harness.kernel.loop/drive!`：每次 `llm/stream!` 之前对 history 施加一次。** 不放在 `ag_ui/inbound`
 ——模型调用 `skill` 就是为了**现在**照着做，人打 `/name` 更是为了**这条消息**，等下一轮等于白调；
 幂等让「每轮施加」不需要任何簿记。
 
-**正文从根现读**（每轮现解析），与 config.edn / harness.edn / providers.edn 同一条纪律：改一份技能，
+**正文从根现读**（每轮现解析），与 config.edn / harness.edn 同一条纪律：改一份技能，
 下一轮就生效。代价写清楚：**正文因此不冻结在会话里**——技能在会话中途从根里消失时，注入位换成一句
 点名说明（「没有叫 X 的技能在任何根里……它读不到，也不该被假定」），**绝不静默少一段指令**。
 一个**打错的**名字拿到同一句话：什么都没加载，和加载到一个「无话可说」的技能，不能长得一样。
@@ -134,6 +137,38 @@ harness 就把那份正文加载进来——**同一个派生、同一个 `<skil
 - **图片不挡路**：消息可以既带图又带 `/name`（content 是 parts），触发词从**文本部分**里读，
   所以那条消息照旧算数。
 - **前端零改动**：人打的字本来就在客户端手里、本来就在 wire 上；harness 加的是服务端那一侧的正文。
+  （唯一的例外是**技能列表**——那份菜单是前端画的，见下面一节；它画的也只是这份清单的呈现，
+  协议侧仍然一个字节没动。）
+
+## 技能列表：`/` 在输入框里弹出的那份菜单
+
+`/name` 一直是人的加载路径，而**名字只能靠背**——页面上没有任何一份目录。技能列表补的就是这一截：
+输入框里打 `/`，弹出一张**平铺的表**：每行是名字、它所在的**层**（`System` / `Project`）与一句描述；
+选中一行，输入框里就是 `/名字 `，后面照旧由人接着写。
+
+- **数据只有服务端有，所以由服务端回答**：`GET /api/skills?threadId=…`（只读，**不留痕**——
+  与 `/api/model`、`/api/choices` 同一条纪律）。答的是 `{:groups [{:layer :system :root "…" :skills […]}]}`：
+  每组是**一个根**，按先后顺序（系统级在前），**空的组不出现**；每行是 `:name` / `:description` /
+  `:available?` / `:reason`。哪几个根、同名谁赢、坏技能为什么坏——这些答案只在 `harness.cap.skills` 有一份，
+  前端复刻一遍就是第二份会漂移的答案。
+- **层跟着根走**：`harness.cap.skills/root-layers` 在**造出默认根的那一处**给它们贴上 `:system` / `:project`，
+  `harness.cap.project/skill-layers` 做配置与绑定的配对（`skill-roots` 就是它丢掉层的结果，默认只写一次）。
+  **配置里 `:skills {:roots …}` 写的根没有层**——配置表里没有「系统 / 项目」这回事，从列表位置猜一个
+  就是把猜测写成事实，所以那些行不画徽标，只把根路径放在 `title` 里。**插件级将来是这里多加一项**，
+  不是前端多一个分支。
+- **列表是「人能加载的」，不是「模型能用的」**，两处与清单**故意不同**：
+  `disable-model-invocation: true` 的**在**（文件说的是模型不该自己决定去用，人打 `/name` 就是人在决定，
+  服务端放行），**坏技能也在**——带原因、但**不可选**（它不在可选条目里，所以方向键与 Enter 都够不到它）。
+  这一条是既有纪律在界面上的样子：一个静默消失的技能，与一个从没装过的技能，从外部看没有区别。
+- **同名被盖住的那份不在表里**：它加载不动，而 `scan` 已经回答了那个名字归谁——列出输家是对一个
+  已经有答案的问题再答一次。
+- **选中不发送**：写进输入框的逐字是 `/名字 `（尾随空格是服务端触发形状要求的那个分隔），
+  后面那句话由人写。触发形状与 `slash-pattern` **同一形状**：只在**消息开头**，且名字后面还没有空白——
+  所以 `see /alpha` 不弹（服务端不会加载它，菜单不该提供一个做不到的动作）。
+- **它站在上游的触发面板上**（`ComposerPrimitive.Unstable_TriggerPopover*`，见
+  [client](client.md#技能列表输入框里打--弹出的那份菜单)）：弹层、键盘、combobox 的 ARIA 全归上游，
+  本仓写的是「名字从哪来」「哪些能选」「一行画什么」。抄进来的 12 份元素**一行未改**。
+- **它只做技能**：命令与子智能体在本仓**不存在**（没有可列的东西）；插件级是上面那条多加一项的事。
 
 ## `skill` 工具
 
@@ -146,7 +181,7 @@ the session (<N> chars). Follow it unless a later instruction supersedes it.
 
 - 定位**只按清单里的名字查表，从不拼路径**。
 - 未知名字 → **指名拒绝**，说出收到的名字与本会话能用的名字（沿用
-  `harness.providers` 那句 "no provider named X; the registry defines …" 的形状）。
+  `harness.cap.providers` 那句 "no provider named X; the registry defines …" 的形状）。
 - 坏技能 → 指名拒绝，带 `:reason` 与它的 `:path`。
 - **`disable-model-invocation: true` 的技能被拒绝**——这条是两条加载路径**唯一**的不同：
   文件自己说这条不该由模型决定去用，所以模型侧拒绝、人侧放行（人打 `/name` 就是人在决定）。
@@ -190,7 +225,7 @@ context"），一直没有触发源；**本特征就是它的子系统**。
   这种半份写法在 `:skills` 里合法，在顶层则不是。
 - **用户级那两处取 OS 家目录，不跟随 `CLJ_HARNESS_HOME`**：它们与 ZCode / Claude 读的是同一份文件，
   是**宿主的**约定位置，不是 harness 的配置家目录；把配置家目录挪到别处不该让另一批技能凭空消失。
-  `harness.home/user-home` 因此是**第二层 floor**，与 `root` 互为兄弟而非嵌套，且各自一条测试缝
+  `harness.infra.home/user-home` 因此是**第二层 floor**，与 `root` 互为兄弟而非嵌套，且各自一条测试缝
   （`*user-home-override*`）。嵌套会让 OS 家目录落进围栏的允许集——那恰好是围栏测试要问的问题，
   安排本身就会替它回答。
 
@@ -223,7 +258,7 @@ context"），一直没有触发源；**本特征就是它的子系统**。
 
 ## 自省
 
-`harness.preamble/report` 回答「这次 run 开场拿到了什么」：每块的来源与**字符数**、以及被跳过的东西和
+`harness.cap.preamble/report` 回答「这次 run 开场拿到了什么」：每块的来源与**字符数**、以及被跳过的东西和
 原因。字符数记的是**真正注入的文本的长度**，不是文件的字节数——模型付的是交给它的文本，被 trim 掉的
 空白没交给它。什么都不截断，正是这个数字值得报出来的原因。
 

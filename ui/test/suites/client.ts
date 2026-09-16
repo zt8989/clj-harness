@@ -13,7 +13,10 @@
 import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
-import { type Case, type Suite, content, script, threadId, url } from "../e2e";
+import fs from "node:fs";
+import path from "node:path";
+
+import { type Case, type Suite, content, homeDir, script, threadId, url } from "../e2e";
 
 const reasoning = "用户想看这个项目。先读 deps.edn 确认依赖。";
 const answer = "这是一个 Clojure 项目，只有 4 个依赖。";
@@ -99,6 +102,97 @@ const cases: Case[] = [
       const messages = agent.messages;
       expect(messages.some((m) => content(m) === "第二轮。"), "the SECOND turn's text is in the conversation").toBe(true);
       expect(messages.filter((m) => m.role === "tool").length, "exactly one tool message, from the one call").toBe(1);
+    },
+  },
+
+  {
+    name: "a-second-turn-echoes-its-reasoning-back-to-a-thinking-mode-vendor",
+    // THE COVERAGE GAP THIS EXISTS FOR: the case above runs ONE turn and looks at
+    // what the client materialised. The defect that bit a real provider only shows
+    // up on the SECOND request -- the one that carries the first turn's assistant
+    // messages in its history -- and that request is built from what the CLIENT sends
+    // back. So: two turns on one thread, against a strict vendor (`script(..,
+    // {thinking: true})`), which answers 400 whenever an assistant message arrives
+    // without `reasoning_content`.
+    //
+    // A PAD WOULD HIDE A BROKEN FOLD, so this reads the SESSION LOG rather than
+    // trusting the run's success: the tool-call round must reach the vendor with the
+    // reasoning TEXT the model produced, not with the empty string the server pads
+    // when a round had none.
+    run: async () => {
+      const tid = threadId("thinkturn");
+      const first = "第一轮：先看一眼 deps.edn。";
+      const second = "第二轮的想法。";
+      const { agent } = newAgent(tid);
+      // ONE script for the whole conversation: the file is re-read per NEW thread id,
+      // and a tool round costs two LLM calls (the call, then the reply to its result).
+      script(
+        [
+          { reasoning: first, content: "", "tool-calls": [{ id: "c1", name: "read", arguments: { path: "deps.edn" } }] },
+          { content: "第一轮的回答。" },
+          { reasoning: second, content: "第二轮的回答。" },
+        ],
+        { thinking: true },
+      );
+
+      await agent.runAgent({ tools: [], context: [] });
+      // The SAME agent runs again: `@ag-ui/client` sends `this.messages`, so this is
+      // exactly the "client resends the whole history" path.
+      await agent.runAgent({ tools: [], context: [] });
+
+      const messages = agent.messages;
+      expect(
+        messages.some((m) => content(m) === "第二轮的回答。"),
+        "the second turn's answer arrived -- so the vendor accepted the second request",
+      ).toBe(true);
+
+      // The session log, polled, AND SLICED BY RUN. The log records two different
+      // things about a run -- the messages the request CARRIED (logged when the run
+      // starts) and the ones the vendor RETURNED (logged when it ends) -- and the
+      // second would satisfy a naive check on its own: the scripted vendor's replies
+      // carry the reasoning too. The question here is what the SECOND REQUEST carried,
+      // so the rows are taken from the last `input` marker onwards.
+      const logPath = path.join(homeDir(), "projects", ".unbound", `${tid}.jsonl`);
+      const secondRequestAssistants = async () => {
+        for (let i = 0; i < 100; i += 1) {
+          try {
+            const rows = fs
+              .readFileSync(logPath, "utf8")
+              .split("\n")
+              .filter((line) => line.trim() !== "")
+              .map((line) => JSON.parse(line) as { kind?: string; payload?: { role?: string; reasoning_content?: unknown } });
+            const lastInput = rows.map((r) => r.kind).lastIndexOf("input");
+            if (lastInput >= 0 && rows.length > lastInput + 2) {
+              const carried = rows
+                .slice(lastInput)
+                // The guard IS the narrowing: a row that got here has an assistant
+                // payload, and saying so once is what keeps the two probes below from
+                // asking again -- which is what `npm run build` was failing on.
+                .filter(
+                  (r): r is { payload: { role?: string; reasoning_content?: unknown } } =>
+                    r.kind === "message" && r.payload?.role === "assistant",
+                )
+                .map((r) => r.payload);
+              if (carried.length >= 2) return carried;   // both rounds of the second request
+            }
+          } catch {
+            // the file may not exist yet on the first polls
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return [];
+      };
+
+      const carried = await secondRequestAssistants();
+      expect(carried.length, "the second request's assistant messages reached the log").toBeGreaterThan(0);
+      expect(
+        carried.some((m) => m.reasoning_content === first),
+        "the FIRST turn's reasoning reached the vendor as TEXT on the second request -- the round trip through the client and back",
+      ).toBe(true);
+      expect(
+        carried.some((m) => m.reasoning_content === ""),
+        "and the round that produced none is padded with an empty string, not invented text",
+      ).toBe(true);
     },
   },
 ];

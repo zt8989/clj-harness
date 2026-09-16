@@ -32,15 +32,16 @@ export interface Suite {
   cases: readonly Case[];
 }
 
-/// What the harness hands over. Set once, by the driver's beforeAll.
+/// The two facts the harness hands over. Set once, by the driver's beforeAll.
 export interface HarnessFacts {
   url: string;
   scriptPath: string;
-  /// The server's configuration home -- a temp directory. A suite needs it to
-  /// write configuration the SERVER reads fresh (an `mcp.edn` declaring a
-  /// server, say), which is how a test reaches a feature that has no endpoint
-  /// of its own for setting it up.
+  /// The config root, where the server's session logs land.
   home: string;
+  /// The OS home -- the host's convention directory (`~/.agents/skills`,
+  /// `~/AGENTS.md`). A case that wants a SYSTEM-LEVEL skill in the catalogue
+  /// writes one here, before the call that should see it.
+  userHome: string;
 }
 
 /// A parsed SSE frame, as the wire delivers it. Only the fields the suites read
@@ -71,13 +72,21 @@ function requireFacts(): HarnessFacts {
   return facts;
 }
 
-/// The server's configuration home.
-export function home(): string {
+export function url(): string {
+  return facts?.url ?? "http://localhost:8080/";
+}
+
+/// The two homes the running harness was given. Read fresh on every call, like
+/// the server reads them: the server re-reads its convention files and skill
+/// roots on every run, so a case plants a file and the NEXT call is what proves
+/// it was read. Nothing is cached here -- a cached path would still be right, but
+/// a cached ANSWER is the bug this discipline exists to avoid.
+export function homeDir(): string {
   return requireFacts().home;
 }
 
-export function url(): string {
-  return facts?.url ?? "http://localhost:8080/";
+export function userHomeDir(): string {
+  return requireFacts().userHome;
 }
 
 /// A fresh id per conversation. The harness holds NO session state, so an id is
@@ -92,8 +101,8 @@ export function threadId(prefix: string): string {
 ///   { id: "c1", name: "read", arguments: { path: "deps.edn" } }
 /// `tool-calls` and `arguments` are spelled the way harness.fake reads them; the
 /// server's JSON reader keywordizes them on arrival.
-export function script(turns: readonly unknown[]): void {
-  fs.writeFileSync(requireFacts().scriptPath, JSON.stringify({ turns }));
+export function script(turns: readonly unknown[], opts?: { thinking?: boolean }): void {
+  fs.writeFileSync(requireFacts().scriptPath, JSON.stringify({ turns, ...opts }));
 }
 
 // -------------------------------------------------------------- the wire

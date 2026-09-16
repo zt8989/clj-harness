@@ -71,14 +71,14 @@ function hasToolMessage(agent: HttpAgent, callId: string): boolean {
 
 /// Turn one asks for the eval that marks the session; turn two is the reply to
 /// it. Written out because the eval code has to be EXACT -- it is the same call a
-/// model would make, and harness.tools' session API is what it names.
+/// model would make, and harness.kernel.tools' session API is what it names.
 const markedTurn = {
   content: "",
   "tool-calls": [
     {
       id: "mark",
       name: "eval",
-      arguments: { code: '(harness.tools/session-require-approval! harness.tools/*thread-id* "write")' },
+      arguments: { code: '(harness.kernel.tools/session-require-approval! harness.kernel.tools/*thread-id* "write")' },
     },
   ],
 };

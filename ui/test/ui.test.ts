@@ -26,24 +26,25 @@ import { approvalSuite } from "./suites/approval";
 import { clientSuite } from "./suites/client";
 import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
+import { skillsSuite } from "./suites/skills";
+import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [
-  framesSuite,
-  clientSuite,
-  turnSuite,
-  approvalSuite,
-  elicitationSuite,
-];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
 /// of the list above -- or losing its cases -- fail the run instead of quietly
 /// shrinking a green one. Bump it deliberately when a case is genuinely added or
 /// removed.
-const EXPECTED_CASES = 16;
+///
+/// 11 -> 14: the `skills` suite's three cases (both layers from the real roots; a
+/// shadowed name listed once; asking changes nothing).
+/// 14 -> 18: the `stats` suite's four (the strip's cells, the numbers it leaves
+/// out, a real run folded by the endpoint, and a session that has not run).
+const EXPECTED_CASES = 24;
 
 let total = 0;
 for (const suite of SUITES) {
@@ -62,7 +63,15 @@ let harness: Awaited<ReturnType<typeof startHarness>> | null = null;
 
 beforeAll(async () => {
   harness = await startHarness();
-  configure({ url: harness.url, scriptPath: harness.scriptPath, home: harness.home });
+  // Both homes go to the suites: a case that wants a system-level skill, or an
+  // instruction file, writes into the OS home first -- and a case that wants to
+  // read a session log looks under the config root.
+  configure({
+    url: harness.url,
+    scriptPath: harness.scriptPath,
+    home: harness.home,
+    userHome: harness.userHome,
+  });
   console.log(`harness for this run: ${harness.url}`);
 });
 

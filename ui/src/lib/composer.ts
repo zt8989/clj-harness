@@ -25,13 +25,24 @@ async function reasonFrom(res: Response): Promise<string> {
 /// session's CURRENT values and each is ABSENT when no tier named one -- the
 /// harness reports 'nothing chose this' by omission, and a client that turned
 /// that into null would be saying something the server did not.
+///
+/// `name` is the ID and `display-name` is the label a person gave that vendor --
+/// TWO keys rather than one already-decided string, because what to show is this
+/// side's business (see `providerLabel`) while what to SEND must be the id.
 export type Choices = {
   provider?: string;
   model?: string;
   "reasoning-effort"?: string;
   "reasoning-efforts": string[];
-  providers: { name: string; models: string[] }[];
+  providers: { name: string; "display-name"?: string; models: string[] }[];
 };
+
+/// What to call a vendor on screen: its display name when it has one, its id
+/// otherwise. The fallback lives here rather than on the server because it is a
+/// rendering decision -- the id is always the truth, and a vendor nobody named
+/// has no label to show.
+export const providerLabel = (provider: { name: string; "display-name"?: string }): string =>
+  provider["display-name"] ?? provider.name;
 
 export async function choicesFor(threadId: string): Promise<Choices> {
   const res = await fetch(`${AGENT_URL}api/choices?threadId=${encodeURIComponent(threadId)}`);

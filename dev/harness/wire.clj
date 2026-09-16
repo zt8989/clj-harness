@@ -5,7 +5,7 @@
   tooling that inspects an SSE stream.
 
   Since ticket 05 the frame applier and the terminal check live in src/ as
-  harness.frames -- rebuilding a conversation from recorded frames is a product
+  harness.kernel.frames -- rebuilding a conversation from recorded frames is a product
   capability now. What is left here is purely TEST TOOLING:
 
     - frames-from-sse, which parses a raw SSE body into frames so tests can assert
@@ -16,7 +16,7 @@
   It is deliberately NOT in src/. The kernel emits events; it does not consume them."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
-            [harness.frames :as frames]))
+            [harness.kernel.frames :as frames]))
 
 (defn frames-from-sse
   "The AG-UI events carried by a raw SSE body."

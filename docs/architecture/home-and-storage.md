@@ -2,7 +2,7 @@
 
 ## 配置根：一个根，三层优先级
 
-`harness.home/root` 每次现读（读环境变量很便宜），顺序：
+`harness.infra.home/root` 每次现读（读环境变量很便宜），顺序：
 
 1. `*root-override*` —— **测试专用**的动态 var，测试运行器绑它到临时目录；
 2. `CLJ_HARNESS_HOME` —— 环境变量，真实部署搬家的方式；
@@ -16,7 +16,7 @@
 
 ## 第二层 floor：OS 家目录
 
-`harness.home/user-home` 是 `(System/getProperty "user.home")`，**它不跟随 `CLJ_HARNESS_HOME`，
+`harness.infra.home/user-home` 是 `(System/getProperty "user.home")`，**它不跟随 `CLJ_HARNESS_HOME`，
 也不跟随任何配置**。住在那儿的是**宿主自己的约定文件**：`~/AGENTS.md` 与 `~/.agents/skills/`——
 与 ZCode / Claude 读的是同一份。
 
@@ -35,12 +35,16 @@
 
 ```
 ~/.clj-harness/
-├── config.edn        模型默认档（三个旋钮，每轮重读）
-├── providers.edn     provider 目录：厂商 endpoint + 它的 model 表（每轮重读）
+├── config.edn        **唯一一份配置**，两节：:default（三个旋钮的默认档）与
+│                     :providers（厂商 endpoint + 它的 model 表）；每轮重读。
+│                     没有就在**开机时**由组合根写一份空骨架（`ensure-config!`），
+│                     读侧从不创建它
 ├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
-├── .env              HARNESS_API_KEY（优先于真实环境变量）
-├── harness.db        sqlite：home 的元数据层
+├── .env              一家厂商一把钥匙：`<ID>_API_KEY`（如 `ACME_GATEWAY_API_KEY`），
+│                     外加全局 `HARNESS_API_KEY` 兜底与三个搜索键（Brave/Exa/Tavily）
+│                     ——优先于真实环境变量，顺序见 harness.infra.home/env-source
+├── harness.infra.db        sqlite：home 的元数据层
 └── projects/
     ├── <sanitized-project-canonical-path>/
     │   └── <sanitized-thread-id>.jsonl
@@ -54,13 +58,13 @@
 而绝对路径必然以 `/`（或盘符）开头，所以项目名永远不会以点开头——反过来写字面 `_unbound`
 会和 `/unbound` 撞名，两份互不相干的日志混进同一个目录。
 
-**谁回答「日志在哪个目录」**：`harness.home` 只知道根与命名规则，`harness.project` 知道会话属于哪个项目，
-两个事实在**写入侧**（`harness.http/log-dir-for`）合起来。读侧（`harness.replay`）只走文件系统、
+**谁回答「日志在哪个目录」**：`harness.infra.home` 只知道根与命名规则，`harness.cap.project` 知道会话属于哪个项目，
+两个事实在**写入侧**（`harness.edge.http/log-dir-for`）合起来。读侧（`harness.edge.replay`）只走文件系统、
 由调用方递目录进去——**这是「内核 run 中永不读自己的日志」在代码结构上的样子**。
 
 **`~/.clj-harness/logs/` 现在住着另一样东西，别和上面那棵树混起来。** 它是**后端自己的
-运行日志**（`harness.log`，按日期与大小 rotate，见 `harness.logging`），不是会话日志：会话日志是
-`projects/<workspace>/<thread>.jsonl`，是**记录**；`logs/harness.log` 是**诊断**，没有任何会话读它，
+运行日志**（`harness.infra.log`，按日期与大小 rotate，见 `harness.infra.logging`），不是会话日志：会话日志是
+`projects/<workspace>/<thread>.jsonl`，是**记录**；`logs/harness.infra.log` 是**诊断**，没有任何会话读它，
 删掉也不会丢一段对话。旧版那种**平铺的会话** jsonl 也曾经住在这个目录名下，
 **那批退了役，而且不导入**。
 不迁移、不从文件名反推归属、不为了「看起来没丢」把它们塞进某个项目。理由在库与文件的分工里——文件名
@@ -96,7 +100,7 @@
 
 ## sqlite：home 的元数据层
 
-`harness.db` 是本仓**唯一的二进制依赖**，而且是刻意引的：它存在的理由是**一次写入多个事实**——
+`harness.infra.db` 是本仓**唯一的二进制依赖**，而且是刻意引的：它存在的理由是**一次写入多个事实**——
 一个临界区里推进若干条状态，这正是事务要做的事。
 
 ### 库与文件的边界
@@ -104,7 +108,7 @@
 | 进库 | 留在文件 |
 |---|---|
 | 会被**改写**的状态：项目、会话归属、归档、hashline 的锚点 | 只追加的记录：会话 jsonl |
-| | 手编的配置：`config.edn` / `providers.edn` / `harness.edn` |
+| | 手编的配置：`config.edn` / `harness.edn` |
 
 判别标准**不是「改得勤不勤」，是「能不能被改写」**。推论：
 
@@ -120,7 +124,7 @@
 迁过之后，**另一条再也打不开**。`user_version` 还在写，但只是面包屑，没有任何代码从它做决定。
 
 **合并之后这两条链合成了一条**：`projects-and-sessions`、`sessions-remember-the-project-path`、
-`hashline-store`、`hashline-served`、`hashline-undo-served`。每一步还带一个 `:present?` 探针回答
+`hashline-store`、`hashline-served`、`hashline-undo-served`、`todos`。每一步还带一个 `:present?` 探针回答
 「这份 schema 里已经有了吗」，所以被**任一**条旧链迁过的库都打得开：认识的步骤**记为已做**而不是重跑，
 不认识的表是惰性的。本机真 home 那个库就是这么被治好的——它缺的列由探针发现并补上，不再需要手写 ALTER。
 
@@ -164,7 +168,7 @@ CREATE TABLE schema_steps (
 
 ### 锚点的四张表
 
-按锚点编辑在这里落盘（`harness.hashline.store`）。四张表答的是**同一个想法的四个问题**——一行的四字母
+按锚点编辑在这里落盘（`harness.cap.hashline.store`）。四张表答的是**同一个想法的四个问题**——一行的四字母
 名字归谁、命名的是哪一版：
 
 | 表 | 装什么 |
@@ -180,12 +184,29 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
 代价是每个会话多一份整文件校验和。
 
 **锚点与校验和为什么是列里的 JSON 而不是一行一行。** 一行一行的话，一个大文件就是一万行，每个会话一份，
-而本仓的规矩是「一张表要有人做一次决定」（`harness.db-test` 的元断言）。这些列各自是**一个值**——
+而本仓的规矩是「一张表要有人做一次决定」（`harness.infra.db-test` 的元断言）。这些列各自是**一个值**——
 数组，整写整读，从不按元素查——给它们建表什么也买不到，还要付「会话读过的每个文件 × 行数」的代价。
 
-**列名是对着正则挑的。** `harness.db-test` 禁止任何看起来像对话内容的列名，`prior_text` /
+**列名是对着正则挑的。** `harness.infra.db-test` 禁止任何看起来像对话内容的列名，`prior_text` /
 `resulting_text` 直说里面装的是什么（文件正文，改前 / 改后），而 `content` 既会踩那条守卫、又说不清
 是哪一份正文。它们在这里算**状态**的判据是：**每次编辑都重写**，而且没有它们撤销就不存在。
+
+### 任务清单的表
+
+`todos` 装**一个会话的待办**（`harness.cap.todos`，写它的工具是 `todo_write`）：
+
+| 表 | 装什么 |
+|---|---|
+| `todos` | **一个会话的清单，一行**：`thread_id`（主键）、`items`（清单本身，JSON 数组）、`updated_at` |
+
+**它是状态的判据在「写」里，不在「行」里。** `todo_write` 每次都送**完整**清单并**整份替换**，
+没有追加、没有部分更新——所以「能被整份改写」这条判据在这里成立，而「改过几次」没有任何人需要。
+这也是它进库、而不是留在对话里的理由：清单要活过一次 run（重启、另一个进程、将来某个面板读它），
+而对话是客户端手里的东西。
+
+**一行而不是一项一行**，与上面锚点那两张表同一条理由：`items` 是**一个值**，整写整读、从不按元素查，
+读它的人渲染整个列表。逐项建表买不到任何东西，还要多一个「位置」列来维护——而读写它的调用本来就
+是整份的。`items` 这个列名同样是对着那条正则挑的：叫 `content` 会既踩守卫、又说不清是哪一份内容。
 
 ### 迁移
 
@@ -200,7 +221,7 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
   因为记录步骤的那张表没法记录自己。
 - **为什么只有一条链**：schema 版本是关于文件的全序事实，所以产生它的步骤必须在一条链里、
   在一个顺序上；按租户拆开再在加载时拼起来，正是这个 store 要避免的注册机制。
-  **DDL 住这里（store 拥有 schema），各租户表上的查询住在实体自己那里**（`harness.project`、`harness.hashline.store`）。
+  **DDL 住这里（store 拥有 schema），各租户表上的查询住在实体自己那里**（`harness.cap.project`、`harness.cap.hashline.store`）。
 - 打开时若文件**不是**本 store 的，按三种情形**指名拒绝、一个字不写**：
   `:not-sqlite`（压根不是 sqlite 文件）、`:foreign`（是别人的 store）、`:unidentifiable`（认不出来是谁的）。
   本 store 但**坏掉**的，则**隔离**（挪成 `.corrupt-*`）并重建，同时记一条 recovery；重建再失败就是硬错误。
@@ -208,8 +229,8 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
 
 ## 日志的读侧：frames / replay
 
-- `harness.frames` 把记录的 AG-UI 帧**折叠回消息列表**（`terminal?` / `apply-frames`）。
-- `harness.replay` 重建对话：`threads`（扫目录列清单）、`locate`（stem → 唯一文件）、
+- `harness.kernel.frames` 把记录的 AG-UI 帧**折叠回消息列表**（`terminal?` / `apply-frames`）。
+- `harness.edge.replay` 重建对话：`threads`（扫目录列清单）、`locate`（stem → 唯一文件）、
   `rebuild`（种子 = 第一条 input、折叠全部 event 帧、把 context 带回来）。
 
 **重建 = 交还，不是接管**：服务端把重建结果交给客户端持有，之后照常走 AG-UI；
@@ -225,8 +246,12 @@ stem 什么都指不到、或指向两个 workspace 里同名的两份日志 →
 
 ## 配置不搬进库，而且看得见
 
-`config.edn` / `providers.edn` / `harness.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
+`config.edn` / `harness.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
 会被**改写**的状态。两边各自现读，所以改配置不需要重启，打开库也不会去读配置文件。
+
+**一份配置一个文件**：厂商目录与默认档是 `config.edn` 的两节（见 [providers](providers.md)）。
+它从前是两份文件（`config.edn` + `providers.edn`），合并的理由是那两节回答的是同一个问题的两半——
+「这台机器能到哪些厂商、从哪一个开始」——而一个人回答它时不该开两个文件。
 
 这条纪律唯一看得见的地方是「设置」那一版只读报告（`GET /api/settings`）：它每次调用重读全部配置，
 所以改一个文件再问一次就是新答案。**「库装状态、文件装记录」这条边界可以这样测**：

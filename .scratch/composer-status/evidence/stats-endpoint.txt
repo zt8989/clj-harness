@@ -1,0 +1,24 @@
+THREAD stats-evidence
+SCRIPTED-USAGE-1 {"prompt_tokens":1000,"completion_tokens":40,"total_tokens":1040,"prompt_tokens_details":{"cached_tokens":900}}
+SCRIPTED-USAGE-2 {"prompt_tokens":1200,"completion_tokens":8,"total_tokens":1208,"prompt_tokens_details":{"cached_tokens":1100}}
+THE TWO CALLS AS THE LOG RECORDED THEM (start -> end, in ms):
+  1789555612010 model/start {"model":"scripted","base-url":"http:\/\/offline.invalid\/v1"}
+  1789555612024 model/end {"usage":{"prompt_tokens":1000,"completion_tokens":40,"total_tokens":1040,"prompt_tokens_details":{"cached_tokens":900}}}
+  1789555612031 model/start {"model":"scripted","base-url":"http:\/\/offline.invalid\/v1"}
+  1789555612034 model/end {"usage":{"prompt_tokens":1200,"completion_tokens":8,"total_tokens":1208,"prompt_tokens_details":{"cached_tokens":1100}}}
+$ curl -s http://127.0.0.1:57579/api/threads/stats-evidence/stats
+{"turns":1,"incomplete":false,"steps":2,"stepsWithUsage":2,"usage":{"totalTokens":2248,"promptTokens":2200,"completionTokens":48,"cachedTokens":2000},"cacheHitPercent":91,"outputTokensPerSecond":2824,"threadId":"stats-evidence"}
+THE SAME ANSWER, KEY BY KEY (and what each one is made of):
+ turns                  1       <- one user message
+ steps                  2       <- two model/start lines (a tool round is two calls)
+ stepsWithUsage         2       <- both calls reported
+ usage.totalTokens      2248    <- 1040 + 1208
+ usage.promptTokens     2200    <- 1000 + 1200
+ usage.completionTokens 48      <- 40 + 8
+ usage.cachedTokens     2000    <- 900 + 1100
+ cacheHitPercent        91       <- 2000 / 2200 = 90.9% -> 91
+ outputTokensPerSecond  2824    <- 48 completion tokens over the two durations printed above
+ incomplete             false
+ (a 404 for a session with no log)
+  404 {"error":"no log for thread \"never-ran\" under \/var\/folders\/9_\/vz1tw99s6bn2cd7gpsxc97nc0000gn\/T\/clj-harness-test-1789555611511\/projects -- nothing there is named never-ran.jsonl","threadId":"never-ran"}
+{}
