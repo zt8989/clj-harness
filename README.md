@@ -291,6 +291,23 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 **5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`ui/vite.config.js` 里
 `server.port: 5173, strictPort: true` 把这句话钉死——换端口不是改一处配置，是同时改两处契约。
 
+### 添加项目：选目录这件事依赖平台
+
+浏览器给不出绝对路径（网页的 file input 给的是没有位置的 File 对象），所以**目录选择的窗只能由服务端
+这台机器来开**：窗在那里画，选中的路径从那里回来。它按平台分成三种：
+
+| 平台 | 选目录怎么来的 |
+| --- | --- |
+| macOS | `osascript` 原生 choose folder |
+| Windows | PowerShell（`-NoProfile -STA`）+ WinForms `FolderBrowserDialog`，先找 `powershell.exe` 再找 `pwsh.exe` |
+| Linux / 其他 | **不支持**：服务端答 501 并给出一句话，侧边栏随即给出绝对路径输入框 |
+
+关键不是支持哪些平台，而是**「窗没能打开」不能被当成「人取消了」**：从前二者都答 `{:dir nil}`，Windows 上
+点「添加项目」于是表现为**彻底没反应**——没有窗、没有错、没有提示。现在选择器的答案是三态
+（选好了 / 取消了 / 这台机器上没有），取消依旧静默，没有窗则明说并给出手输路径那条退路。
+
+**没有桌面会话**（以服务方式启的进程、远程会话）是同一个答案：那里没有窗可画，服务端按「没有」处理。
+
 ### 停止
 
 `Ctrl+C`，或 `Get-Process clojure,node | Stop-Process`。
