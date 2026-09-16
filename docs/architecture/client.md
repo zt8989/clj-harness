@@ -19,6 +19,8 @@ components/
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
+  composer-chrome.tsx   composer 上下两条与两个 LOCAL: 插入点（ComposerFrame / ComposerTools）
+  composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
   assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
@@ -26,6 +28,9 @@ lib/
   projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
+  stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
+  format.ts         给**人看**的数字：字节、时间，以及状态条那五格的字符串（`statsCells`）。
+                    **零 import**，所以 UI 套件能直接测它
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
 ```
 
@@ -45,6 +50,13 @@ lib/
   移除项目（只解绑，日志不动；确认框说的是「会话留在磁盘上」）、以及「设置」那个面板。
   这些动作都在**请求进行中一起禁用**，失败的服务端原话落在**被点的那一行**下面。
 - **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
+- **状态条那五格读的是记录，不是客户端手里的对话。** 客户端确实持有 conversation，所以它数得出轮与步、
+  也估算得出 tok/s（运行时的 `chars ÷ 4`），但**它不这么做**：缓存命中它根本不知道，而估算出来的用量
+  冒充厂商报的量就是编。那五个数由 `GET /api/threads/<stem>/stats` 从会话的 jsonl 折出来
+  （服务端见 [edge](edge.md#管理边路由表)），**缺的数就是缺的**，页面把它留空而不是写 0。
+- **它什么时候问**：挂载、会话切换、**助手消息多一条**（一轮 ReAct 在这个客户端就是一条助手消息，
+  所以这约等于「一次模型调用结束了」）、run 结束——**不轮询**。一次调用的数只有在它的 `model/end`
+  行写下来之后才存在，所以一次长调用进行中这条就停在上一格，那是不撒谎的代价。
 
 ## 审批门
 
@@ -148,7 +160,7 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 ## 测试
 
 `cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills}.ts` 是被它 import 的普通模块：
+`test/suites/{frames,client,turn,approval,skills,stats}.ts` 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
@@ -162,11 +174,17 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 - **两个家目录都交到用例手上**（`configure` 的 `home` 与 `userHome`）。`userHome` 由 spawner 造好、
   用 `--user-home` 交给后端，所以一个用例能往 OS 家目录里**播一份系统级技能**——
   「机器上的技能是两层之一」这件事在界面上能验，靠的就是这一条缝。
+- **套件不 import 任何要浏览器的 `src/`**（React、DOM、`@` 别名都不行——`vitest.config.ts` 只跑 node，
+  也不加载 `vite.config.js` 的别名）。**唯一例外是零 import 的纯模块，按相对路径引**：
+  `suites/stats.ts` 引 `src/lib/format.ts`，为的是把「`2.9M tok` 是这么写出来的」钉住
+  ——不然那句话只有一个没测的格式化函数守着。
 - **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
-  它**不**断菜单怎么画、哪个键选什么——那部分在真 Chromium 里量（下一段），因为套件**不 import `src/`**。
+  它**不**断菜单怎么画、哪个键选什么；`suites/stats.ts` 断的是端点折出来的数**与那五格的字符串**，
+  它**不**断那条灰线的位置与字号——那些在真 Chromium 里量（下一段）。
 
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
-（三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**），
+（三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**、
+**composer 下面那条状态条**），
 不是自动化套件。
 
 ### 设置面板：两页，两页都会写

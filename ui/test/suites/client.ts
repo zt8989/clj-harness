@@ -165,7 +165,13 @@ const cases: Case[] = [
             if (lastInput >= 0 && rows.length > lastInput + 2) {
               const carried = rows
                 .slice(lastInput)
-                .filter((r) => r.kind === "message" && r.payload?.role === "assistant")
+                // The guard IS the narrowing: a row that got here has an assistant
+                // payload, and saying so once is what keeps the two probes below from
+                // asking again -- which is what `npm run build` was failing on.
+                .filter(
+                  (r): r is { payload: { role?: string; reasoning_content?: unknown } } =>
+                    r.kind === "message" && r.payload?.role === "assistant",
+                )
                 .map((r) => r.payload);
               if (carried.length >= 2) return carried;   // both rounds of the second request
             }

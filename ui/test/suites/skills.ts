@@ -10,9 +10,9 @@
 // What this suite does NOT prove: how the menu is drawn, which keys select what, and
 // what the composer holds afterwards. Those are the picker's behaviour, and they are
 // measured in a real browser against a scripted backend (see the feature's spec,
-// `skill-picker`), because this driver imports nothing from src/ on purpose --
-// ui/vitest.config.ts says so, and it is why a component test would need a second
-// driver and a DOM environment this repository does not have.
+// `skill-picker`), because this driver imports nothing from src/ that needs a
+// browser -- ui/vitest.config.ts says so, and it is why a component test would need
+// a second driver and a DOM environment this repository does not have.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -1,0 +1,8 @@
+{"turns": [
+  {"content": "", "tool-calls": [{"id": "c1", "name": "no-such-tool", "arguments": {}}],
+   "usage": {"prompt_tokens": 1000, "completion_tokens": 40, "total_tokens": 1040,
+             "prompt_tokens_details": {"cached_tokens": 900}}},
+  {"content": "好的，我看过了。", "reasoning": "先看一眼项目。",
+   "usage": {"prompt_tokens": 1200, "completion_tokens": 8, "total_tokens": 1208,
+             "prompt_tokens_details": {"cached_tokens": 1100}}}
+]}

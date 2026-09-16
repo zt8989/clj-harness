@@ -70,6 +70,7 @@
     harness.kernel.hooks.dispatch-test
     harness.kernel.hooks-wired-test
     harness.cap.system-prompt-test
+    harness.edge.stats-test
     harness.edge.http-test
     harness.layers-test])
 

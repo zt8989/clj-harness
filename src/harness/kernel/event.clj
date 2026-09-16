@@ -1,8 +1,9 @@
 (ns harness.kernel.event
-  "The kernel's whole vocabulary: eleven event kinds. Everything AG-UI-shaped
-  is derived from these by harness.edge.ag-ui, never produced here; the three
-  tool-lifecycle kinds (:tool/pre-execute, :tool/execute, :tool/post-execute)
-  carry no wire frame at all -- the http edge turns them into jsonl audit
+  "The kernel's whole vocabulary: thirteen event kinds. Everything AG-UI-shaped
+  is derived from these by harness.edge.ag-ui, never produced here; five kinds
+  carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
+  :tool/execute, :tool/post-execute) and the two model-call boundaries
+  (:model/start, :model/end) -- and the http edge turns those into jsonl audit
   lines, never into AG-UI frames.
 
   :run/interrupt is the second terminal event: a run that parks calls for a
@@ -48,6 +49,39 @@
   "One tool call is done with the seam entirely -- it always closes the call's
   lifecycle, whatever the earlier phases decided."
   [id name] {:type :tool/post-execute :id id :name name})
+
+(defn model-start
+  "One model call BEGINS. PROVIDER is the resolved provider map, and what is kept
+  from it is the call's IDENTITY -- who this call went to -- never its body: the
+  messages are already `message` lines, and a second copy of them would be the
+  same fact written twice.
+
+  The three knobs are recorded AS THE VENDOR SPELLS THEM (:model, :base-url,
+  :reasoning-effort), and A KEY IS WRITTEN ONLY WHEN THE PROVIDER HAS IT -- for
+  :reasoning-effort that is 'this request is not in thinking mode', and for the
+  other two it is 'this provider named none', which is not the same statement as
+  a null. A base-url is not a secret -- `provider/init` records it already.
+
+  IT PAIRS WITH :model/end BY ORDER: the nth :model/start of a run is that run's
+  nth call. A counter in the record would be the same fact written a second
+  time, and two copies drift."
+  [provider]
+  (cond-> {:type :model/start}
+    (:model provider)            (assoc :model (:model provider))
+    (:base-url provider)         (assoc :base-url (:base-url provider))
+    (:reasoning-effort provider) (assoc :reasoning-effort (:reasoning-effort provider))))
+
+(defn model-end
+  "One model call is OVER, and TELEMETRY is what the vendor reported back --
+  {:usage …, :finish-reason …, :model …} -- kept VERBATIM: the vendor's own key
+  names inside :usage are not renamed on the way into the record. What those
+  numbers mean is the record reader's business, not the kernel's.
+
+  AN EMPTY TELEMETRY IS STILL AN EVENT. A call that died mid-stream reports
+  nothing, and this line is what says so -- without it a stalled call cannot be
+  told from one that never ended."
+  [telemetry]
+  (merge {:type :model/end} telemetry))
 
 (defn run-end [] {:type :run/end})
 

@@ -144,7 +144,9 @@
   [{:keys [seen reply]} _messages on-event thread-id]
   (swap! seen conj {:thread-id thread-id :tools (tools/specs thread-id)})
   (on-event (ev/text-delta reply))
-  {:role "assistant" :content reply})
+  {:message {:role "assistant" :content reply}
+   ;; a spy that reports nothing about the call, like a vendor that does not
+   :telemetry {}})
 
 (defn- spy-run [thread-id]
   (let [seen (atom [])

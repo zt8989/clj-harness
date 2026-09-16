@@ -59,6 +59,7 @@
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.stats :as stats]
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
@@ -239,10 +240,17 @@
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
 (defn- lifecycle-record
-  "A tool-lifecycle kernel event -> the [kind payload] jsonl line it becomes,
-  keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every other
-  event kind. The audit line is additive: the event itself carries no wire
-  frame, so the AG-UI conversion upstream of this is untouched."
+  "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
+  becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
+  other event kind. The audit line is additive: the event itself carries no wire
+  frame, so the AG-UI conversion upstream of this is untouched.
+
+  THE MODEL-CALL PAIR IS RECORDED AS IT ARRIVES -- the start's identity
+  (:model / :base-url / :reasoning-effort) and the end's telemetry (:usage /
+  :finish-reason / :model) with the vendor's own key names intact. Nothing is
+  renamed or recomputed here: what the read side (harness.edge.stats) needs is the
+  vendor's answer, not this edge's opinion of it. The two lines pair by ORDER --
+  the nth model/start of a run is that run's nth call."
   [ev]
   (case (:type ev)
     :tool/pre-execute
@@ -258,6 +266,15 @@
 
     :tool/post-execute
     ["tools/post-execute" {:toolCallId (:id ev) :toolName (:name ev)}]
+
+    :model/start
+    ["model/start" (dissoc ev :type)]
+
+    ;; AN EMPTY PAYLOAD IS AN ANSWER: {} here says 'this call reported nothing',
+    ;; which is what a call that died mid-stream looks like. It is not the same as
+    ;; zeroes, and the read side must not be handed a zero it can add up.
+    :model/end
+    ["model/end" (dissoc ev :type)]
 
     nil))
 
@@ -784,8 +801,13 @@
   is load-bearing rather than tidiness: the handler dispatches on this shape
   BEFORE the run endpoint, so a path that merely looks like it -- and names a verb
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
-  be answered 405 by a route that was never about it."
-  #{"rebuild" "archive"})
+  be answered 405 by a route that was never about it.
+
+  ONE OF THE THREE IS A GET: `stats` only reads the log, so it has no effect to
+  report and nothing to add to it. The set stays closed and the 405 stays here --
+  what changed is that the sentence 'every verb on this shape is a POST' is no
+  longer true, not where the refusal happens."
+  #{"rebuild" "archive" "stats"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -886,6 +908,41 @@
         (if-some [error (:error written)]
           (api-response 404 {:error error :threadId stem})
           (api-response 200 {:threadId stem :archived (:ok written)}))))))
+
+(defn- stats-get
+  "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
+  (harness.edge.stats): turns, model calls, what those calls reported, how much of
+  the prompt came from the vendor's cache, how fast the answers came out.
+
+  IT READS THE LOG AND WRITES NOTHING, which is why it is the first GET on this
+  shape: the other verbs here change something (a rebuild lands an audit line, an
+  archive rewrites a row), and this one only answers. Asking it again is free and
+  asking it mid-run is normal.
+
+  THE STEM IS LOCATED THE SAME WAY THE REBUILD LOCATES IT -- `replay/locate`, the
+  same naming rule and the same refusal -- so there is one addressing rule on this
+  edge, not a second one invented for reading. 'Nothing found' is a 404 with the
+  locator's own sentence; a log that cannot be read back is a 400, the same split
+  the rebuild draws between 'not here' and 'here, and broken'.
+
+  THE ANSWER IS THE WHOLE ANSWER: what the fold could not establish is ABSENT, not
+  zero (see harness.edge.stats/records->stats). The client renders the gaps by
+  leaving them out; it does not fill them in."
+  [stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))
+        folded  (when (nil? (:error located))
+                  (try {:ok (stats/log-stats (:ok located))}
+                       (catch Throwable t {:error (ex-message t)})))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+
+      (some? (:error folded))
+      (api-response 400 {:error (:error folded) :threadId stem})
+
+      :else
+      (api-response 200 (assoc (:ok folded) :threadId stem)))))
 
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
@@ -1486,14 +1543,17 @@
 
     :else
     (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
-      ;; The verb-carrying routes: one shape, two verbs, and every one of them is
-      ;; a POST because every one of them has an effect. A GET on this shape is
-      ;; answered 405 HERE rather than falling through to the run endpoint --
-      ;; which is where the pre-verb dispatch used to send it, and where it became
-      ;; a 500 from a body that was never there.
+      ;; The verb-carrying routes: one shape, three verbs. TWO OF THEM ARE POSTS
+      ;; because they have an effect, and `stats` is a GET because it only reads --
+      ;; so the rule is 'the method says whether there is an effect', not 'this
+      ;; shape is POST-only'. A method this shape does not serve is still answered
+      ;; 405 HERE rather than falling through to the run endpoint -- which is where
+      ;; the pre-verb dispatch used to send it, and where it became a 500 from a
+      ;; body that was never there.
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
         [:post "archive"] (archive-post req stem)
+        [:get "stats"]    (stats-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

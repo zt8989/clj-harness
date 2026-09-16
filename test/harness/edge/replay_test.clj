@@ -271,7 +271,9 @@
   [{:keys [seen reply]} messages on-event _thread-id]
   (reset! seen messages)
   (on-event (ev/text-delta reply))
-  {:role "assistant" :content reply})
+  {:message {:role "assistant" :content reply}
+   ;; a recorder that reports nothing about the call, like a vendor that does not
+   :telemetry {}})
 
 (defn- recording-provider [reply]
   {:protocol :recording :reply reply :seen (atom nil)})

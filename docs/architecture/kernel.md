@@ -2,7 +2,7 @@
 
 这四个命名空间是内核的全部。`event` 定义词汇，`llm` 说话，`tools` 干活，`loop` 把它们串起来。
 
-## 事件：11 种，就这些
+## 事件：13 种，就这些
 
 `harness.kernel.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.edge.ag-ui` 从这些事件派生**，
 内核自己不知道 AG-UI 存在。
@@ -17,11 +17,16 @@
 | `:tool/pre-execute` | 一次调用进入执行缝（**不上 wire**，只落审计行） |
 | `:tool/execute` | 一次调用离开执行（同上） |
 | `:tool/post-execute` | 一次调用的生命周期闭合（同上） |
+| `:model/start` | 一次**模型调用**开始，带这次调用的身份（model / base-url / 思考档；**不上 wire**） |
+| `:model/end` | 一次模型调用结束，带**厂商回的话**（usage / finish_reason / 回声的 model；**不上 wire**） |
 | `:run/end` | 正常收尾 |
 | `:run/interrupt` | **第二种终态**：有调用 park 等人，本次 run 到此为止 |
 | `:run/error` | 出错收尾 |
 
 `:run/end` 与 `:run/interrupt` **互斥**，一次 run 恰好发其一——客户端因此永远看得到一个终结。
+
+五个事件**没有帧**（三条工具生命周期 + 两条模型调用边界）：它们落 jsonl 审计行，
+读它们的是记录的读侧（[edge](edge.md) 那一侧），不是对话。加一帧去装一个统计量就是改协议。
 
 ## 循环：`harness.kernel.loop`
 
@@ -31,12 +36,18 @@ drive! :
   [有 resume 就先 replay! —— 把人的决定重放进缝]
   loop:
     施加 skills/derived-injections（技能正文，按会话自身重算；幂等）
-    llm/stream!      流式一轮（事件边流边发）
+    emit :model/start → llm/stream!  流式一轮（事件边流边发）→ emit :model/end
+      ├ 厂商报的用量、结束原因、回声的 model 挂在 end 上，逐字进记录，不重命名
+      └ 中途抛也发 end（载荷空）：没有终点的那一段分不出「还在跑」与「跑死了」
     tool_calls 非空 → 并发跑，收齐结果，追加 tool 消息，再来一轮
     tool_calls 为空 → 结束
   有 parked → emit :run/interrupt，否则 emit :run/end
   然后 emit :run/done（携带最终 history），通道关闭
 ```
+
+**一次模型调用恰好一对 `:model/start` / `:model/end`**，按**次序**配对（一个 run 里第 n 条 start 就是
+第 n 次调用）：序号不记进记录，那是同一件事实的第二份（见 [edge](edge.md) 的行表）。
+把两条包起来的是 `harness.kernel.loop/model-call!`，它是「失败也要闭合」这唯一一件事的落点。
 
 **技能正文在每次 `llm/stream!` 之前重算一次**，就在这一行：模型调用 `skill` 是为了**现在**照着做，
 等下一轮等于白调；而它是**派生**的（从会话自己扫出加载过的技能，见

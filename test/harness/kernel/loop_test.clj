@@ -24,10 +24,12 @@
 (defn- joined [seen type]
   (apply str (map :text (filter #(= type (:type %)) seen))))
 
-(defn- without-lifecycle [seen]
+(defn- without-audit [seen]
   "The audit events ride the same stream as the wire-relevant ones; the run's
-  shape is asserted over the latter only."
-  (remove #(contains? #{:tool/pre-execute :tool/execute :tool/post-execute}
+  shape is asserted over the latter only. Five kinds are audit-only: the three
+  tool-lifecycle ones and the two model-call boundaries (harness.kernel.event)."
+  (remove #(contains? #{:tool/pre-execute :tool/execute :tool/post-execute
+                        :model/start :model/end}
                       (:type %))
           seen))
 
@@ -36,7 +38,7 @@
         (drive (fake/scripted [{:reasoning "thinking..." :content "hello world"}]) [])]
     (testing "streams reasoning then text, then ends"
       (is (= [:run/start :run/end]
-             (mapv :type (without-lifecycle
+             (mapv :type (without-audit
                           (remove #(#{:reasoning/delta :text/delta} (:type %)) seen)))))
       (is (= "thinking..." (joined seen :reasoning/delta)))
       (is (= "hello world" (joined seen :text/delta))))
@@ -53,7 +55,7 @@
                [])]
     (testing "one serial tool round, then a final answer"
       (is (= [:run/start :tool/call :tool/result :text/delta :run/end]
-             (mapv :type (without-lifecycle seen))))
+             (mapv :type (without-audit seen))))
       (testing "the failed call's lifecycle: pre-execute refused, no execute, post closes"
         (let [pre  (first (filter #(= :tool/pre-execute (:type %)) seen))
               post (first (filter #(= :tool/post-execute (:type %)) seen))]
@@ -111,10 +113,49 @@
       (is (= "done" (:content (last history))))))
   (tools/session-unregister! "t-slow" "slow"))
 
+(deftest every-model-call-is-bracketed-and-carries-the-vendors-report
+  ;; The pair of audit lines the composer's status strip counts: one :model/start per
+  ;; call, one :model/end per call, in that order, with the vendor's own usage on the
+  ;; end. Two calls here (a tool round, then the answer), so the pairing is not
+  ;; trivially one-and-done.
+  (let [{:keys [seen]}
+        (drive (fake/scripted [{:content ""
+                                :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}]
+                                :usage {:prompt_tokens 100 :completion_tokens 10
+                                        :total_tokens 110
+                                        :prompt_tokens_details {:cached_tokens 80}}}
+                               {:content "done"
+                                :usage {:prompt_tokens 120 :completion_tokens 4
+                                        :total_tokens 124}}])
+               [])
+        calls (filter #(#{:model/start :model/end} (:type %)) seen)
+        ends  (filter #(= :model/end (:type %)) seen)]
+    (testing "one start and one end per call, alternating"
+      (is (= [:model/start :model/end :model/start :model/end] (mapv :type calls))))
+    (testing "each start names the call's identity, never its body"
+      (doseq [start (filter #(= :model/start (:type %)) seen)]
+        (is (not (contains? start :messages)))
+        (is (not (contains? start :api-key)))))
+    (testing "each end carries that call's OWN report -- the first call's, then the second's"
+      (is (= [110 124] (mapv #(get-in % [:usage :total_tokens]) ends)))
+      (is (= 80 (get-in (first ends) [:usage :prompt_tokens_details :cached_tokens]))))))
+
+(deftest a-round-that-reports-nothing-gets-an-empty-model-end
+  ;; A vendor that stays silent is not a vendor that reported zeroes, and the read
+  ;; side has to be able to tell them apart.
+  (let [{:keys [seen]} (drive (fake/scripted [{:content "hello"}]) [])
+        end           (first (filter #(= :model/end (:type %)) seen))]
+    (is (= {:type :model/end} end))))
+
 (deftest transport-failure-ends-the-run
   (let [{:keys [seen]}
         (drive {:protocol :explodes} [])]
-    (is (= [:run/start :run/error] (mapv :type seen)))
+    (is (= [:run/start :model/start :model/end :run/error] (mapv :type seen)))
+    (testing "the call that never answered still CLOSED its segment"
+      ;; The distinction the record reader depends on: a segment with no end cannot be
+      ;; told from one that is still running, so a call that dies must still leave a
+      ;; :model/end -- with an empty payload, because nothing came back.
+      (is (= {:type :model/end} (first (filter #(= :model/end (:type %)) seen)))))
     (is (string? (:message (last seen))))))
 
 ;; ------------------------------------------------------------- skill injection
