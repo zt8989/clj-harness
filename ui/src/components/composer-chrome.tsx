@@ -66,6 +66,8 @@ import { choicesFor, gitStateFor, providerLabel, setModel, switchBranch } from "
 import { bindThread, listProjects, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
+import { ComposerStats } from "./composer-stats";
+
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
 /// agent.
@@ -559,8 +561,14 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
 };
 
 /// The wrapper Thread renders around the composer. It draws the strip above the
-/// composer and then gets out of the way; with no thread id there is nothing to
-/// show, so it renders its children alone.
+/// composer, the status strip below it, and then gets out of the way; with no thread
+/// id there is nothing to show, so it renders its children alone.
+///
+/// The two strips are at opposite ends on purpose: the context bar answers "where
+/// and on what" before a conversation starts and folds away once it does, while the
+/// status strip answers "what has this cost" and only appears once there is an
+/// answer. Either one is invisible in the state the other is showing -- see each
+/// component's own header.
 ///
 /// It is ALSO the trigger root, and it has to be: a trigger popover must be an
 /// ancestor of the composer's input -- that is what hands the input the popover's
@@ -585,6 +593,7 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
         {children}
+        <ComposerStats threadId={threadId} />
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </div>
   );

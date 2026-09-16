@@ -3,8 +3,15 @@
 //
 // The dev server's config loads the React plugin (the browser bundle);
 // a test run needs none of it -- the suites drive a real harness over HTTP from
-// node, importing nothing from src/. Vitest prefers `vitest.config.*` over
-// `vite.config.*`, so this file existing is what keeps the two apart.
+// node. Vitest prefers `vitest.config.*` over `vite.config.*`, so this file
+// existing is what keeps the two apart.
+//
+// NOTHING FROM src/ THAT NEEDS A BROWSER: no React, no DOM, and no `@` alias
+// either (it is declared in vite.config.js, which this run does not load). A pure
+// module -- one that imports nothing, like src/lib/format.ts, whose job is turning
+// numbers into the strings a person reads -- is imported by RELATIVE path by the
+// suite that tests it (see suites/stats.ts). That is the whole exception, and it
+// exists because the alternative is an untested formatter.
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({

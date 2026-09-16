@@ -123,12 +123,12 @@
 |---|---|---|---|
 | ~~01~~ | ~~词与记录：一次模型调用的边界与用量~~ | — | ~~`CONTEXT.md` 立词；`model/start` / `model/end` 两条审计行；`consume-sse` 留住用量；假 provider 也能报；真机日志证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 | ~~02~~ | ~~会话统计的折法与端点~~ | 01 | ~~`harness.edge.stats` 的纯折（手搓记录可断言）+ `GET /api/threads/<stem>/stats`；curl 证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
-| 03 | composer 之下的状态条 | 02 | 五格、英文、调用结束刷新；格式化是纯函数并进 UI 套件；真机截图证据 |
+| ~~03~~ | ~~composer 之下的状态条~~ | 02 | ~~五格、英文、调用结束刷新；格式化是纯函数并进 UI 套件；真机截图证据~~ **已落地，见文末「落地记录」；票面已按仓库约定删掉** |
 | 04 | 收口：文档与全量验证 | 03 | `CONTEXT.md` 补齐、`docs/architecture` 跟上（`edge.md` 的行表、`architecture.md` 的模块地图与「在办」、`client.md`）；两套全量 + 真机证据 |
 
 ## 状态
 
-**已在办：票 01、02 落地（2026-09-16），票 03、04 未开工。** 分支 `composer-status`。
+**已在办：票 01、02、03 落地（2026-09-16），票 04（收口）未开工。** 分支 `composer-status`。
 
 **基线（立票当日实测，2026-09-16）：`main` @ `492ed0d`。**
 
@@ -241,3 +241,42 @@
 **报数**：`clojure -M:test -m harness.test-runner`
 → `Ran 734 tests containing 10666 assertions. 2 failures, 0 errors.`（票 01 落地时是 726 / 10614）。
 两条失败仍是 `project_test/a-binding-survives-a-real-restart` 的 JDK 25 那对，**没有新的失败名字**。
+
+### 03 — composer 之下的状态条（2026-09-16，分支 `composer-status`，票面已删）
+
+**落地了什么**
+
+- **`ui/src/components/composer-stats.tsx`**：五格。挂在 `ComposerFrame` 里、`{children}` **之后**
+  ——同一个圆角框内、输入框下面。上下文条在**上面**且对话一开始就收，状态条在**下面**且**有数才画**，
+  两条各在各的位置。`thread.aui.tsx`（抄来的 registry 源码）**一个字节没动**。
+- **`ui/src/lib/stats.ts`**：`statsFor(threadId)` 一个薄取数；**404 是普通答案**（新会话没有日志），
+  一律返回 null 交给「没数就不画」，不抛、不画错误行。
+- **刷新时机**（决策 10）：挂载、会话切换、**助手消息多一条**（一轮 ReAct 在这个客户端就是一条助手消息，
+  所以这约等于「一次模型调用结束了」）、run 结束。**不轮询**：一次长调用进行中条子停在上一格。
+- **`ui/src/lib/format.ts` 加三个纯函数**：`plural`、`formatTokens`（409 / 812k / 2.9M，与 `formatBytes`
+  同一档精度）与 **`statsCells`（payload → 格子）**——**缺的格子是 `null`，不填 0**，
+  整条在「轮数为 0 且没有调用」时不画。这个模块**一个 import 都没有**，就是为了让 UI 套件能测它。
+- **文案英文**（决策 9）：`1 turn` / `2 turns`、`42 steps`、`242 tok/s`、`2.9M tok`、`98% cached`；
+  数字用 `tabular-nums`（9 → 10 时整行不跳）。
+- **UI 套件**：新 `ui/test/suites/stats.ts`（4 条：格子与量级、缺数不画、**真 HTTP 折一轮真会话**、
+  没跑过的会话是 404），注册进 `SUITES`，`EXPECTED_CASES` **15 → 19**。
+
+**顺手改的两处（都不是本特征引起的）**
+
+- `ui/test/suites/client.ts` 有两处 `m.reasoning_content` 在 `m: Payload | undefined` 上取值，
+  **`npm run build` 在 main 上今天就是红的**（`npx tsc --noEmit` 在主仓同一处报同样的两条）。
+  按仓库惯例顺手修掉：把那个 `filter` 写成**类型谓词**（守卫即窄化），并在这里记一笔。
+- `ui/vitest.config.ts` 与 `suites/skills.ts` 里「套件不从 `src/` 里 import 任何东西」这句
+  **不再完全成立**：`stats.ts` 要用那个纯格式化模块。那句话改成实际规则——
+  **凡是要浏览器（React / DOM / `@` 别名）的都不 import，零导入的纯模块走相对路径**。
+
+**验收对照**：`cd ui && npm test` → `Test Files 1 passed` / `Tests 19 passed`；
+`cd ui && npm run build` **过**（tsc --noEmit + vite build，见上面那条修好的）。
+
+**证据**：`.scratch/composer-status/evidence/`
+—— `strip-in-the-browser.{png,md}` 与 `strip.dom.html`：真 vite（:5173）+ 真 e2e 后端（:8080，脚本厂商，
+临时家目录），条子读作 `2 turns · 2 steps · 1371 tok/s` ／ `2k tok · 91% cached`，
+与脚本报的数（2000/2200、1040+1208）对得上。
+**顺带撞上一条真的缺数现场**：那次会话的第一次发送因为临时家里没有 `config.edn` 根本没到模型，
+条子当时只画 `1 turn`——一个 `model/start` 都没有，所以其余四格一个都不画。那不是设计出来的演示，
+是撞上的，正好是决策 6 在真页面上的样子，留在那份 README 里。
