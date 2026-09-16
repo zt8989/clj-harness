@@ -23,10 +23,11 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 (binding [hook/*sink* {:thread-id .. :audit (fn [payload] (log! ..)) :run-id ..}] ...)
 ```
 
-**这个 binding 包住 set-up，不只是包住 run。** 折叠会话的指令文件本身就是 hook 点
-（`InstructionsLoaded`），而那次折叠发生在第一条消息组装**之前**——binding 摆在 set-up 之后，
-那个点会拿到 nil sink、永远静默。这是「点声明了却永不触发」在接线层面唯一的一次近失，
-记在 [hooks](hooks.md#26-个点全部是数据)。
+**这个 binding 包住 set-up，不只是包住 run。** set-up 里有**两**件事都靠它才活着：折叠会话的指令文件
+（`InstructionsLoaded`），以及组装 system 文本（`SystemPrompt`——`harness.system-prompt/assemble`
+就在这里被调，它随后被交给 `ag_ui/inbound`）。两者都发生在第一条消息组装**之前**——binding 摆在
+set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点声明了却永不触发」在接线层面唯一的一次近失，
+记在 [hooks](hooks.md#27-个点全部是数据)。
 
 **没绑 = hook 不触发**，这是刻意的默认值：离线工具、replay、直接驱动内核的测试都没有审计写入者，
 而一个没人记录的 hook 判定比没有 hook 更糟——它会**静默地**改变一次 run。
@@ -109,8 +110,9 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 到协议层才翻会让那条日志撒谎。
 
 它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在 system 消息之后、客户端消息之前。
-它自己不读任何文件（块是递进来的），所以这个命名空间仍是个转换器；空块时它返回**原向量本身**，
-而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
+它收到的 system 文本也是**已经组装好的**（`harness.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
+它自己不读任何文件、不跑任何 hook（两样都是递进来的），所以这个命名空间仍是个转换器；空块时它返回
+**原向量本身**，而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
 见 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
 
 ```

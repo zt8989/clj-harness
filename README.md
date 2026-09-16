@@ -74,15 +74,43 @@ Copy-Item .env.example ~/.clj-harness/.env
 
 **`prompt.md` 是唯一的例外**：它留在仓库里，不进家目录——那是被 review 的代码资产，每次改动都需要
 git 历史。它首调读入即**冻结**（provider 前缀缓存的前提），热改要 `(harness.llm/reset-prompt!)` 或重启。
+**冻结的是它这份文本，不是整条 system 消息**——见下面「system 消息：冻结的开头 + hook 追加的文本」。
 
 **缺失与损坏是两回事**：`config.edn` 缺失会**指名绝对路径**报错（不静默用默认值）；
 `providers.edn` / `hooks.edn` / `harness.edn` / `.env` 可以不存在——前者 = 那个配置什么都没说，
 `.env` 不在则 key 落回真实环境变量 `HARNESS_API_KEY`。而**存在却写坏**（EDN 语法坏 / 不是 map /
 键拼错）一律指名绝对路径硬失败：一份被静默忽略的配置，与一份什么都没说的配置，从外部看没有区别。
 
+### system 消息：冻结的开头 + hook 追加的文本
+
+**一条 system 消息，开头冻结，其余现算。** `prompt.md` 只留**与任何会话无关的话**——身份、hook 自助、
+secrets 纪律、「其余自己读」——那是**承诺**。**本会话的事实**由 `SystemPrompt` 点上的 hook 在每次 run
+组装时追加：
+
+```
+[system  prompt.md 的冻结开头                    ]
+[追加    <tools>…</tools>       ] ← 内建（内核注册的行）
+[追加    <project>…</project>   ] ← 内建
+[追加    <provider>…</provider> ] ← 内建
+[追加    作者写什么就是什么      ] ← hooks.edn 里 / 本会话声明的 hook，按声明顺序
+[user    开场块：AGENTS.md / 技能清单 / 技能正文 —— 一字不动]
+```
+
+内建三块报的都是**活的事实**：本会话**实际被服务**的工具集合（含会话注册的、以及以后 MCP 桥进来的，
+并另起一行说明哪些被本会话关掉了——**关闭不是隐藏**）、绑在哪个目录（绝对路径 + 围栏的自由路径集合，
+含 `:approval {:strict true}` 与 `:approval {:allow ..}` 两种变化；未绑定就明说没绑定）、
+生效的 vendor / model / 思考档（**永不含 api-key**；答不出就一个块都不出）。
+
+**事实不动则文本逐字节不动**，所以 provider 的前缀缓存照旧命中；事实动了（换目录、关掉一条 hook、
+改 provider 档）就付**一次冷前缀**——宁可冷一次，也不让 system 消息说一件已经不成立的事。
+这也是为什么 `prompt.md` 里那句工具枚举退场了：它从写下的那一刻就在过时，而 `<tools>` 不会。
+
+**客户端一个字节都收不到这些追加的文本**：它不进任何 AG-UI 帧，只进 jsonl 的 `message` 行（还有一行
+`hook/SystemPrompt` 审计行记录这次组装匹配了几条）。
+
 ### 技能与指令（一场会话开场拿到什么）
 
-会话开场时，模型除了冻结的 `prompt.md`，还会拿到两样东西，**都从约定目录现读**：
+会话开场时，模型除了冻结的 system 消息开头，还会拿到两样东西，**都从约定目录现读**：
 
 | | 默认位置 | 变成什么 |
 | --- | --- | --- |
@@ -158,9 +186,18 @@ AGENTS.md 在但读不出来（权限 / 非 UTF-8）是点名失败，run 不开
 
 ### hook 与项目级配置（可选）
 
-`hooks.edn` 声明某个 hook 点上要跑的命令（`hook 点 → [{:matcher :command :timeout}]`），
-契约是：payload 走 stdin JSON，**退出码 0 放行 / 2 阻断（stderr 回喂模型）**，超时与崩溃都不炸 run。
-**不声明任何 hook 时整条路径是 no-op。**
+一个 hook 是某个 hook 点上的一行声明，**说它跑什么、且只说一样**：`:command`（非空字符串，经 shell
+spawn）或 `:run`（可调用的函数，在进程内跑）。契约是：payload 走 stdin JSON（`:run` 拿到同一批键的
+map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）**，超时与崩溃都不炸 run。
+
+**声明有三个来源**，先后由来源档位定：内核自己注册的（`:built-in`，最前）→ 配置家 / 项目的 `hooks.edn`
+（`:config`，按文件顺序）→ 本会话 `eval` 加的（`:session`，按加入顺序）。**`:run` 只有后两个来源能写，
+`hooks.edn` 里写它被指名拒绝**——文件里放不了函数。
+
+**`SystemPrompt` 点上 stdout 是内容本身**：匹配到的声明**全部跑、全部追加**（不是「第一条获胜」），
+文本原样进 system 消息的追加部分。这一点的退出 2 表示**这次 run 不开始**，而不是少一段规矩。
+
+**不声明任何 hook 时整条路径是 no-op**——内建的那三条行是唯一常驻的，把它们也关掉，那一点就一行都不写。
 
 绑定到一个项目目录后，项目可以带自己的 `.harness/`（`harness.edn` / `hooks.edn`），
 项目级**整键/逐点替换**用户级。两者的完整语义见
@@ -226,7 +263,7 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 569 tests / 9574 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
+# 607 tests / 9774 assertions，全绿，exit 0（基线随分支变，报数时带上分支与提交）
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
