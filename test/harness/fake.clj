@@ -21,7 +21,7 @@
 
 (defn- script-provider [script on-event]
   (let [turn (first @script)
-        {:keys [reasoning content tool-calls]} turn]
+        {:keys [reasoning content tool-calls usage]} turn]
     (swap! script #(vec (rest %)))
     (emit! ev/reasoning-delta reasoning on-event)
     (emit! ev/text-delta content on-event)
@@ -31,22 +31,36 @@
                           {:id id :type "function"
                            :function {:name name :arguments args}}))
                       tool-calls)]
-      (cond-> {:role "assistant" :content (or content "")}
-        ;; MENTIONED IS NOT THE SAME AS NON-EMPTY, and a thinking-mode vendor needs
-        ;; the difference kept: it sends the field on every round -- empty when the
-        ;; round had no reasoning -- and requires it back on the next request. A turn
-        ;; that says `:reasoning ""` is that vendor; one that omits it is a vendor
-        ;; with nothing to say about reasoning at all. See
-        ;; harness.kernel.llm/consume-sse, which keeps the same distinction on the
-        ;; real wire.
-        (contains? turn :reasoning) (assoc :reasoning_content (or reasoning ""))
-        (seq calls)                 (assoc :tool_calls calls)))))
+      {:message
+       (cond-> {:role "assistant" :content (or content "")}
+         ;; MENTIONED IS NOT THE SAME AS NON-EMPTY, and a thinking-mode vendor needs
+         ;; the difference kept: it sends the field on every round -- empty when the
+         ;; round had no reasoning -- and requires it back on the next request. A turn
+         ;; that says `:reasoning ""` is that vendor; one that omits it is a vendor
+         ;; with nothing to say about reasoning at all. See
+         ;; harness.kernel.llm/consume-sse, which keeps the same distinction on the
+         ;; real wire.
+         (contains? turn :reasoning) (assoc :reasoning_content (or reasoning ""))
+         (seq calls)                 (assoc :tool_calls calls))
+       ;; REPORTED vs SILENT, kept apart the same way `:reasoning` is: a turn that
+       ;; writes a :usage is a vendor that reports one, and a turn that omits the key
+       ;; is a vendor that says nothing about the call -- which is not the same as
+       ;; reporting zeroes (see the contract in harness.kernel.llm).
+       :telemetry (if (contains? turn :usage) {:usage usage} {})})))
 
 (defn scripted
   "Provider over a vector of turns. A turn is
-     {:reasoning s, :content s, :tool-calls [{:id s :name s :arguments map}]}
+     {:reasoning s, :content s, :tool-calls [{:id s :name s :arguments map}], :usage map}
   The assistant message it returns is deliberately OpenAI-shaped, because that is
   what the history holds.
+
+  :usage IS THE VENDOR'S OWN SHAPE -- `prompt_tokens`, `completion_tokens`,
+  `total_tokens`, `prompt_tokens_details.cached_tokens` -- and it travels as this
+  call's telemetry, which the kernel puts on the `model/end` audit line verbatim.
+  The fake reports it exactly as a real vendor does, because a test that folds
+  tokens has to fold something shaped like what production sends. A turn that
+  omits the key reports NOTHING about the call, which is not the same as
+  reporting zeroes.
 
   OPTS:
     :thinking  be a THINKING-MODE VENDOR on the way in as well as on the way out --
@@ -55,7 +69,12 @@
                `refuse-unless-echoed!`."
   ([turns] (scripted turns {}))
   ([turns {:keys [thinking]}]
-   {:protocol :fake :script (atom (vec turns)) :thinking (boolean thinking)}))
+   {:protocol :fake :script (atom (vec turns)) :thinking (boolean thinking)
+    ;; THE PIN NAMES ITSELF, like every other scripted provider in the repo does
+    ;; (the seeded config, http_test's pins, providers_test's fixtures all carry
+    ;; both). Without them a `model/start` audit line would name nobody, and the
+    ;; offline suite would be folding a record shape production never writes.
+    :base-url "http://offline.invalid/v1" :model "scripted"}))
 
 (def ^:private thinking-mode-refusal
   "The real vendor's 400, byte for byte -- what a DeepSeek-compatible gateway answers

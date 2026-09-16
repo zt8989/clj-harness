@@ -106,6 +106,8 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
 | `event` | 发出的每个 AG-UI 帧 |
 | `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**（含开场块：指令文件与技能清单都在里面） |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
+| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort`（有才记），**不上 wire** |
+| `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
 | `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |
@@ -124,6 +126,9 @@ GET 打在这个形状上由这里答 405，而不是掉进 run 端点——那�
   整个会话档的样子——回放者拿到 `:override` 就能还原「按完 session 长什么样」。
   被人工**否决**的变更**不落此行**，所以「有没有这一行」就是批准与否的判据。
 - **api-key 只以 `:api-key :stripped` 出现**——是「被剥掉了」这个事实，永不出现值。
+- **`model/start` 与 `model/end` 按次序配对**：一个 run 里第 n 条 `model/start` 就是第 n 次调用，
+  序号**不记**——记一份就是同一件事实的第二份，两份必然会漂。时长由两条行自己的 `:ts` 差出来，
+  也不新记时间戳字段。**承载这次调用的参数与用量的是这两行**，不是帧：客户端在对话里一个字都看不到它们。
 - 读日志的代码只认 `input` / `event` 两种行；其余是审计轨迹，不是对话的一部分。
 
 ## 入站翻译：parts 与图片

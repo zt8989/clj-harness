@@ -9,10 +9,58 @@
 
 (defn- parse [lines]
   (let [seen (atom [])
-        msg  (llm/consume-sse lines #(swap! seen conj %))]
-    {:msg msg :seen @seen}))
+        out  (llm/consume-sse lines #(swap! seen conj %))]
+    ;; Unpacked on purpose: the assertions below are about the MESSAGE, and the
+    ;; telemetry that travels beside it has its own tests further down. `out` is
+    ;; the contract's real shape, and one test asserts exactly that.
+    {:msg (:message out) :telemetry (:telemetry out) :seen @seen}))
 
 (defn- joined [seen type] (apply str (map :text (filter #(= type (:type %)) seen))))
+
+(deftest consume-sse-answers-with-the-message-and-the-telemetry
+  ;; THE CONTRACT EVERY stream! METHOD SHARES: a provider-shaped message to append
+  ;; to the history, and what the vendor said ABOUT the call. They are two things,
+  ;; and only the first one is conversation.
+  (let [out (llm/consume-sse ["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}"]
+                             (fn [_]))]
+    (is (= #{:message :telemetry} (set (keys out))))
+    (is (= "hi" (:content (:message out))))))
+
+(deftest the-vendors-report-survives-the-parse
+  ;; THESE NUMBERS WERE UNREAD FOR AS LONG AS THE FIXTURE EXISTED. The parser took
+  ;; `choices[0].delta` and never looked at `usage`, `finish_reason`, or the model
+  ;; the vendor echoed back -- which is why the composer's status strip could not
+  ;; count a single token of it (harness.edge.stats). They come back EXACTLY as the
+  ;; vendor sent them: no renaming, no arithmetic on the way into the record.
+  (let [{:keys [telemetry msg]} (parse (str/split-lines fixture))]
+    (testing "the usage block, verbatim -- the vendor's own key names and nesting"
+      (is (= 769 (get-in telemetry [:usage :prompt_tokens])))
+      (is (= 324 (get-in telemetry [:usage :completion_tokens])))
+      (is (= 1093 (get-in telemetry [:usage :total_tokens])))
+      (is (= 296 (get-in telemetry [:usage :completion_tokens_details :reasoning_tokens])))
+      (testing "and the cached-token cell, which is the numerator of 缓存命中"
+        (is (= 0 (get-in telemetry [:usage :prompt_tokens_details :cached_tokens])))))
+    (testing "finish_reason is read where the wire puts it -- inside choices[0]"
+      (is (= "tool_calls" (:finish-reason telemetry))))
+    (testing "and the model the vendor echoed back, not the one the request named"
+      (is (= "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" (:model telemetry))))
+    (testing "none of it leaked into the message"
+      (is (= #{:role :content :reasoning_content :tool_calls} (set (keys msg)))))))
+
+(deftest a-stream-that-reports-nothing-says-no-keys
+  ;; 'the vendor said nothing' is not 'the vendor said zero', and the difference is
+  ;; what keeps a half-reported session from adding up to a smaller number that
+  ;; looks authoritative. An empty map is the whole answer.
+  (let [{:keys [telemetry]} (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}"])]
+    (is (= {} telemetry))))
+
+(deftest a-null-finish-reason-does-not-wipe-a-real-one
+  ;; Most chunks carry `"finish_reason": null`; the one that names a reason is the
+  ;; last. A fold that wrote every occurrence would erase it.
+  (let [{:keys [telemetry]}
+        (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}"])]
+    (is (= "stop" (:finish-reason telemetry)))))
 
 (deftest parses-a-streaming-body
   ;; This fixture is a REAL capture from OpenRouter (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)

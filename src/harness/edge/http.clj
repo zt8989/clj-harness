@@ -239,10 +239,17 @@
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
 (defn- lifecycle-record
-  "A tool-lifecycle kernel event -> the [kind payload] jsonl line it becomes,
-  keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every other
-  event kind. The audit line is additive: the event itself carries no wire
-  frame, so the AG-UI conversion upstream of this is untouched."
+  "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
+  becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
+  other event kind. The audit line is additive: the event itself carries no wire
+  frame, so the AG-UI conversion upstream of this is untouched.
+
+  THE MODEL-CALL PAIR IS RECORDED AS IT ARRIVES -- the start's identity
+  (:model / :base-url / :reasoning-effort) and the end's telemetry (:usage /
+  :finish-reason / :model) with the vendor's own key names intact. Nothing is
+  renamed or recomputed here: what the read side (harness.edge.stats) needs is the
+  vendor's answer, not this edge's opinion of it. The two lines pair by ORDER --
+  the nth model/start of a run is that run's nth call."
   [ev]
   (case (:type ev)
     :tool/pre-execute
@@ -258,6 +265,15 @@
 
     :tool/post-execute
     ["tools/post-execute" {:toolCallId (:id ev) :toolName (:name ev)}]
+
+    :model/start
+    ["model/start" (dissoc ev :type)]
+
+    ;; AN EMPTY PAYLOAD IS AN ANSWER: {} here says 'this call reported nothing',
+    ;; which is what a call that died mid-stream looks like. It is not the same as
+    ;; zeroes, and the read side must not be handed a zero it can add up.
+    :model/end
+    ["model/end" (dissoc ev :type)]
 
     nil))
 

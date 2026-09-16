@@ -2,17 +2,27 @@
   "Provider layer. One multimethod, dispatched on :protocol.
 
   Contract for every method:
-    (stream! provider messages on-event thread-id) -> assistant message
+    (stream! provider messages on-event thread-id)
+      -> {:message   <provider-shaped assistant message>
+          :telemetry <what the vendor said ABOUT the call>}
+
+  ON-EVENT is called with each harness.kernel.event value as it is produced. The returned
+  MESSAGE is provider-shaped and is appended to the history VERBATIM by
+  harness.kernel.loop -- never rebuilt. That is what keeps reasoning_content alive across
+  tool rounds, which DeepSeek requires whenever the request carries tools
+  (omitting it there is a hard HTTP 400).
+
+  THE TELEMETRY IS A SECOND THING, and it is not part of the message: the vendor's
+  usage (prompt/completion/cached tokens), its finish_reason, and the model name it
+  echoes back. It belongs to the CALL, not to the conversation -- replaying it into a
+  later request would be inventing a field the vendor never asked for. So it travels
+  beside the message, the kernel puts it on the `model/end` audit line, and it never
+  goes on the wire. A method that has nothing to report returns an empty map, which is
+  honest: 'this round reported nothing' is not 'this round reported zero'.
 
   THREAD-ID is the session the run serves; it selects the thread's effective
   toolset (harness.kernel.tools base + session overlay) for the request's tools array
   and is otherwise opaque to the methods.
-
-  ON-EVENT is called with each harness.kernel.event value as it is produced. The returned
-  assistant message is provider-shaped and is appended to the history VERBATIM by
-  harness.kernel.loop -- never rebuilt. That is what keeps reasoning_content alive across
-  tool rounds, which DeepSeek requires whenever the request carries tools
-  (omitting it there is a hard HTTP 400).
 
   VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
   mentions `reasoning_content` on every round, empty when the round had no reasoning,
@@ -142,18 +152,48 @@
                      :function {:name (:name t) :arguments (:arguments t)}})
         (sort-by key calls)))
 
+(defn- telemetry-fields
+  "The three things a chunk says ABOUT the call rather than IN it: the vendor's
+  usage, its finish_reason, and the model name it echoes back. Returned as the
+  partial map this chunk contributes, merged last-wins into the stream's telemetry.
+
+  THE KEYS ARE TAKEN AS THEY ARRIVE and never renamed -- `:usage` keeps whatever
+  the vendor put inside it (OpenAI-compatible vendors spell cached tokens
+  `prompt_tokens_details.cached_tokens`; a fold that wanted a translated key
+  would be guessing at a second spelling this repo has no evidence for).
+
+  A KEY IS WRITTEN ONLY WHEN THE CHUNK HAS IT, and finish_reason only when it is
+  non-nil: most chunks carry `\"finish_reason\": null`, and 'null on every chunk'
+  would otherwise overwrite the one chunk that said `tool_calls`. Usage arrives on
+  the LAST chunk of a stream, which is also why this is folded rather than read
+  once at the top."
+  [chunk]
+  (cond-> {}
+    (contains? chunk :usage) (assoc :usage (:usage chunk))
+    (contains? chunk :model) (assoc :model (:model chunk))
+    (some? (get-in chunk [:choices 0 :finish_reason]))
+    (assoc :finish-reason (get-in chunk [:choices 0 :finish_reason]))))
+
 (defn consume-sse
-  "Fold a seq of SSE lines into an assistant message, calling EMIT for each event.
+  "Fold a seq of SSE lines into the assistant message AND the call's telemetry,
+  calling EMIT for each event.
   Pure over LINES -- the network layer only supplies them, which is what makes the
-  parser testable against a recorded body with no network at all."
+  parser testable against a recorded body with no network at all.
+
+  Returns {:message <assistant message> :telemetry <map>}, and the telemetry map is
+  EMPTY when the stream reported nothing about the call -- which is what a stream
+  that died mid-way looks like, and is not the same as one that reported zeroes."
   [lines emit]
-  (let [text  (StringBuilder.)
-        think (StringBuilder.)
-        calls (atom {})
-        seen? (atom false)]
+  (let [text      (StringBuilder.)
+        think     (StringBuilder.)
+        calls     (atom {})
+        seen?     (atom false)
+        telemetry (atom {})]
     (doseq [payload (data-payloads lines)]
-      (let [delta (get-in (json/read-str payload :key-fn keyword) [:choices 0 :delta])
+      (let [chunk (json/read-str payload :key-fn keyword)
+            delta (get-in chunk [:choices 0 :delta])
             [_ present?] (reasoning-field delta)]
+        (swap! telemetry merge (telemetry-fields chunk))
         (when present? (reset! seen? true))
         (absorb! text think calls delta)
         (speak! delta emit)))
@@ -162,17 +202,19 @@
       ;; state machine that can be cut off in the middle of a JSON string.
       (doseq [{:keys [id function]} assembled]
         (emit (ev/tool-call id (:name function) (:arguments function))))
-      (cond-> {:role "assistant" :content (str text)}
-        ;; THE FIELD IS KEPT WHEN THE VENDOR MENTIONED IT, EMPTY INCLUDED -- which is
-        ;; not the same rule as 'when there is text'. A thinking-mode vendor that has
-        ;; nothing to reason about still sends the field, and it REQUIRES it back on
-        ;; the next request (a DeepSeek-compatible gateway answers HTTP 400 otherwise:
-        ;; 'The reasoning_content in the thinking mode must be passed back to the API').
-        ;; Answering 'the vendor said nothing' with silence is what this used to do,
-        ;; and it is what made the next request impossible: see
-        ;; `thinking-mode-history` and .scratch/reasoning-round-trip/spec.md.
-        @seen?          (assoc :reasoning_content (str think))
-        (seq assembled) (assoc :tool_calls assembled)))))
+      {:message
+       (cond-> {:role "assistant" :content (str text)}
+         ;; THE FIELD IS KEPT WHEN THE VENDOR MENTIONED IT, EMPTY INCLUDED -- which is
+         ;; not the same rule as 'when there is text'. A thinking-mode vendor that has
+         ;; nothing to reason about still sends the field, and it REQUIRES it back on
+         ;; the next request (a DeepSeek-compatible gateway answers HTTP 400 otherwise:
+         ;; 'The reasoning_content in the thinking mode must be passed back to the API').
+         ;; Answering 'the vendor said nothing' with silence is what this used to do,
+         ;; and it is what made the next request impossible: see
+         ;; `thinking-mode-history` and .scratch/reasoning-round-trip/spec.md.
+         @seen?          (assoc :reasoning_content (str think))
+         (seq assembled) (assoc :tool_calls assembled))
+       :telemetry @telemetry})))
 
 (defn thinking-mode-history
   "MESSAGES -> the history a THINKING-MODE vendor must be shown, which is the same

@@ -43,6 +43,32 @@
                      nil)))))
          decisions)))
 
+(defn- model-call!
+  "One model call with its boundaries emitted: :model/start before the request,
+  :model/end after it -- AND WHEN IT THROWS, which is why this is a function
+  rather than two lines at the call site.
+
+  A CALL THAT DIES MID-STREAM REPORTS NOTHING, so its :model/end carries an empty
+  telemetry -- and the segment is closed either way. A segment with no end cannot
+  be told from one that is still running, which is exactly the distinction a reader
+  of the record needs: a stalled call must not look like a call that never
+  finished. The error itself is rethrown untouched, so the run still ends on
+  :run/error after this line.
+
+  THE TELEMETRY RIDES OUT ON THE EVENT and stops there -- it is not appended to
+  the history. It belongs to the call, not to the conversation: showing it to the
+  provider on a later request would be inventing a field the vendor never asked
+  for."
+  [provider history emit thread-id]
+  (emit (ev/model-start provider))
+  (try
+    (let [{:keys [message telemetry]} (llm/stream! provider history emit thread-id)]
+      (emit (ev/model-end telemetry))
+      message)
+    (catch Throwable t
+      (emit (ev/model-end nil))
+      (throw t))))
+
 (defn- drive!
   "Run one run, calling EMIT with each harness.kernel.event value as it is produced.
   Returns the final history. The producer side of run-chan; all run behaviour
@@ -80,7 +106,11 @@
 
   With NOTHING handed in nothing is injected, which is the honest default: this
   namespace cannot know what a session's history should be decorated with, and an
-  offline replay that wants the bodies passes the same function the edge does."
+  offline replay that wants the bodies passes the same function the edge does.
+
+  EVERY MODEL CALL IS BRACKETED by :model/start / :model/end (`model-call!`, just
+  above): the pair is what lets the record say how long a call took and what the
+  vendor reported for it, without the kernel timing anything itself."
   [provider messages emit {:keys [thread-id resume before-llm] :as _opts}]
   (let [history (atom (vec messages))
         ;; (history, thread-id) -> history, called immediately before every LLM
@@ -100,7 +130,7 @@
               replayed
               (loop []
                 (let [_         (with-skills)
-                      assistant (llm/stream! provider @history emit thread-id)
+                      assistant (model-call! provider @history emit thread-id)
                       calls     (:tool_calls assistant)]
                   (swap! history conj assistant)
                   (if (seq calls)

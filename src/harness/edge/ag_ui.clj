@@ -104,12 +104,20 @@
       (update s :frames conj {:type "TOOL_CALL_RESULT" :messageId id :toolCallId (:id ev)
                               :content (:content ev) :role "tool"}))
 
-    (:tool/pre-execute :tool/execute :tool/post-execute)
-    ;; The tool-lifecycle audit events carry no AG-UI frame at all: the edge
-    ;; records them as jsonl lines. Passing the event through unchanged keeps
-    ;; the fold total without inventing wire frames for audit data. (The
-    ;; constants share one result and so must be grouped in a list -- bare
-    ;; consecutive constants would pair each with its own result.)
+    (:tool/pre-execute :tool/execute :tool/post-execute
+     :model/start :model/end)
+    ;; The audit-only events carry no AG-UI frame at all: the edge records them as
+    ;; jsonl lines. Passing the event through unchanged keeps the fold total
+    ;; without inventing wire frames for audit data. (The constants share one
+    ;; result and so must be grouped in a list -- bare consecutive constants would
+    ;; pair each with its own result.)
+    ;;
+    ;; THE MODEL-CALL BOUNDARIES ARE HERE FOR THE SAME REASON, and the reason is
+    ;; worth repeating because they are the ones somebody will be tempted to wire
+    ;; up: tok/s and cache hits are numbers the CONVERSATION has no use for, and
+    ;; adding a frame for them would be changing a protocol to carry a statistic.
+    ;; The client learns them from the management edge (harness.edge.stats), and
+    ;; the run it is watching looks exactly as it did before.
     s
 
     :run/end

@@ -137,19 +137,41 @@
 
 | # | 票 | Blocked by | 交付什么 |
 |---|---|---|---|
-| 01 | 词：轮 / 模型调用 / 轨迹 | — | `CONTEXT.md` 立词；顺手把 `批` 那条里的「回合」改成「模型调用」 |
+| 01 | 词：轮 / 模型调用 / 轨迹 | — | ~~`CONTEXT.md` 立词；顺手把 `批` 那条里的「回合」改成「模型调用」~~ **见文末复议：`轮` / `模型调用` 与 `批` 那条已由 `composer-status` 01 落地，本票只剩 `轨迹` 那个词** |
 | 02 | 轨迹的读侧与端点 | 01 | 折法 + `GET /api/threads/<stem>/trajectory`；只到边，没有界面 |
 | 03 | `对话` / `轨迹` 切换与逐轮条列 | 02 | 页签、视图、左侧逐轮条列、右侧 `系统提示词` 页签、真机证据 |
-| 04 | 请求侧：调用的边界与照发出的表 | 03 | `model/start` / `model/end` 两条审计行；表正文；右侧长出 `工具` 页签 |
-| 05 | 响应侧：用量与耗时 | 04 | 留住 usage / finish_reason / 回声的 model；每一段的起止；条上看得见 |
+| 04 | 请求侧：调用的边界与照发出的表 | 03 | ~~`model/start` / `model/end` 两条审计行~~ **两条行已由 `composer-status` 01 落地**；本票只剩「`model/start` 上挂 `:tools`」与右侧 `工具` 页签 |
+| 05 | 响应侧：用量与耗时 | 04 | ~~留住 usage / finish_reason / 回声的 model~~ **已由 `composer-status` 01 落地**；本票只剩读侧折段与条上的显示 |
 | 06 | 时间轴：三条 lane | 05 | `输入`/`模型`/`工具`；`时长` 与 `轮次` 两种看法；搜索 |
 | 07 | 收口：现状与全量验证 | 04, 05, 06 | `docs/architecture` 与 README 跟上；两套全量 + 真机证据 |
 
 ## 状态
 
-未开工（票已按仓库约定立在 `issues/`，全部 `ready-for-agent`）。
+~~未开工（票已按仓库约定立在 `issues/`，全部 `ready-for-agent`）。~~
+**部分开工，见文末复议（2026-09-16）：记录侧那半已由 `.scratch/composer-status/` 01 落地，本特征本体的视图仍未开工。**
 
 基线（立票当日实测）：`main` @ `63869d2`，`clojure -M:test -m harness.test-runner`
 → `Ran 569 tests containing 9574 assertions. 0 failures, 0 errors.`，退出码 0。
 前端 `cd ui && npm test`（`EXPECTED_CASES` 仍是 11，本特征不改它）与 `cd ui && npm run build`。
 报数一律带上**分支与提交**（基线随分支变）。
+
+## 复议（2026-09-16）：记录侧由 `composer-status` 先落地
+
+**这是加注，不是改写。** 上面那些话是立票当天的事实，留着；这一节说的是后来发生了什么。
+
+**发生了什么**：`.scratch/composer-status/`（牛总 2026-09-16 立，4 张票）要在 composer 下面画一条状态条，
+而它要的五个数——几轮、几步（**模型调用**）、输出速度、总用量、缓存命中——与本特征的**记录清单**是同一批格子。
+它比本特征小、要得早，所以记录侧由它先补（牛总当场裁定）。
+
+**本 spec 的 01 / 04 / 05 各缩水成什么**：
+
+| 本 spec 里的 | 今天的归属 |
+|---|---|
+| 决策 5 的两条审计行 `model/start` / `model/end` | `composer-status` 01 落地：行名与载荷字段**一字不改**（`model/end` 带 `{:usage … :finish-reason … :model …}`，厂商的键名逐字）。**04 只剩往 `model/start` 上挂 `:tools`** |
+| 05 的 `consume-sse` 留住 `usage` / `finish_reason` / 回声的 `model` | `composer-status` 01 落地：`stream!` 的返回形状随之变成 `{:message … :telemetry …}`（四个 defmethod 一起改） |
+| 01 的 `CONTEXT.md` 立词 | `轮` / `模型调用` 与 `批` 那条的「回合 → 模型调用」已由 `composer-status` 01 落地。**01 只剩 `轨迹` 那个词**（仍是它的） |
+| 02 的读侧 ns 名 `harness.trajectory` | **这个名字与 `layer-layout`（已落地）之后的分层对不上**：记录读侧今天是 `harness.edge.replay`，帧读侧是 `harness.kernel.frames`。`composer-status` 02 的聚合读侧落在 **`harness.edge.stats`**；本特征那半个读侧应落在 `harness.edge.trajectory`，且**轮的判据复用 `edge.stats` 里那一个实现**（不许写第二份） |
+| 07 的「`edge.md` 那句『读日志的代码只认 `input` / `event` 两种行』要改」 | 仍由 07 改：今天的读侧还没读 `model/*`，那句话此刻**还是真的** |
+
+**一字未动的**：`轨迹` 那个视图、轮的折法（消息 id 差集）、`模型调用` 的定义、记录清单是闭的、
+「记录不是状态、不进库」、AG-UI 协议一个字不加——`composer-status` 是照着这些做的，不是另立一套。
