@@ -80,6 +80,7 @@
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
 | `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场 |
+| `edge.trajectory` | **`message` 那一半**的记录读侧：按轮折回「模型每一轮到底看到了什么」——system 消息的字节、拼在它旁边的上下文、每条用户消息、每次工具调用的参数与结果、每次调用发出去的工具表。`GET /api/threads/<stem>/trajectory` 是它唯一的出口；轮的判据与 `edge.stats` **共用一份实现** |
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、
 `evals`（把某 thread 跑过的 `eval` 读出来，供人决定晋升）、`repl`（起服务后落进 REPL）、

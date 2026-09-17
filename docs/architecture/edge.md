@@ -128,6 +128,16 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **它容忍半行**：日志的最后一行可能正在被写，那行丢掉、其余照折——条子最常被问的时刻正是会话跑着的时候。
 （`replay` 相反：重建宁可整个拒绝，因为少一截的对话比没有更坏。）
 **它不写任何东西**，所以它是这条形状上唯一一个 GET；同一个 stem 问多少次都只是再读一遍日志。
+「这份日志完了没有」是**两个读者共用的一条规则**（`stats/incomplete?`），不是各算一遍。
+
+**`trajectory` 折的是另外两半**（`harness.edge.trajectory`，`GET /api/threads/<stem>/trajectory`）：
+它读 `input` + `message` + `tools/*`，回答「**模型每一轮到底看到了什么**」——system 消息的字节、
+拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果，以及每一轮发出去的工具表。
+它与 `stats` 是同一份文件的两个读者：`stats` 数数（不读一条消息），它看内容（不数一个数）。
+两半的边界是**轮的判据**：两处都调**同一个**「这个 input 带来哪些用户消息 id」的实现
+（`stats/user-ids`），所以数出来的轮与分出来的组不会各说各话。
+**它按次序判轮、不认 `input` 行**：悬置恢复会写第二个 `input`（同一个 runId、没有新用户消息），
+那是同一轮的续，不是新的一轮。
 
 ## jsonl 审计行
 
@@ -139,7 +149,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `event` | 发出的每个 AG-UI 帧 |
 | `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**（含开场块：指令文件与技能清单都在里面） |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
-| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort`（有才记），**不上 wire** |
+| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort`（有才记）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |

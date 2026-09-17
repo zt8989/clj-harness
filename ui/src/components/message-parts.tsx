@@ -151,6 +151,7 @@ import {
   ToolFallbackRoot,
 } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
+import { formatMillis } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 // ------------------------------------------------------------- tool call card
@@ -208,16 +209,6 @@ function callState(
     default:
       return "done";
   }
-}
-
-/// Elapsed milliseconds, in the same buckets upstream's duration uses: sub-second
-/// is "<1s", then one decimal, then whole seconds, then minutes and seconds.
-function formatDuration(ms: number): string {
-  if (ms < 1000) return "<1s";
-  const seconds = ms / 1000;
-  if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 }
 
 // ------------------------------------------------ which kind of call this is
@@ -456,7 +447,7 @@ const ToolCallTrigger: FC<{
           data-slot="tool-call-trigger-duration"
           className="aui-tool-call-trigger-duration shrink-0 text-xs tabular-nums"
         >
-          {formatDuration(elapsedMs)}
+          {formatMillis(elapsedMs)}
         </span>
       )}
       {/* The state, at the end of the row: a mark and -- for a reader who cannot

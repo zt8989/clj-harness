@@ -311,6 +311,27 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 **5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`ui/vite.config.js` 里
 `server.port: 5173, strictPort: true` 把这句话钉死——换端口不是改一处配置，是同时改两处契约。
 
+### 会话旁边还有一个「轨迹」
+
+线程栏上方可以在 `Conversation` 与 `Trajectory` 之间切。对话页签回答「我们聊了什么」；
+轨迹回答**另一个问题**：**模型每一轮到底看到了什么**——它自己那份 system 消息的字节、
+拼在它旁边的指令文件与技能清单、模型中途要来的技能正文、每次工具调用的参数与结果，
+以及**照发出**的那张工具表；上方一条 `input` / `model` / `tools` 的时间轴把这些按时间摊开。
+
+默认只有那份列表：**点某一行，右侧才展开那一条**（再点一次收回），因为记录里没有「这一轮的提示词」
+这种东西，只有二十条里的某一条。**上面条带里的每一段也能点**，效果与点那一行一样——
+它俩本来就是同一件东西的两次画法。点开 `system` 那一行，面板里有 `system prompt` 与 `tools` **两个页签**：
+一个是那份提示词，另一个是它照发出的工具表——一行一个工具，折着看名字与描述的第一行，
+展开看完整描述与定义 JSON。
+
+它**读的是记录**（`~/.clj-harness/logs/...` 那份 jsonl），不是客户端手里那份对话——因为上面这些东西
+客户端一个都没有，AG-UI 帧里也没有。所以它**不数、不算、不补**：记录里没有的格子它说没有，
+绝不拿「这个会话今天有什么」去冒充「当时是什么」。一条早于 `model/*` 那两行的老日志，
+模型那段就是空的，并如实标出来；一个被人否掉的工具调用不是「跑了 0 秒」，是一条没跑过的记号。
+
+看它的时机只有两个：打开的时候，和一次模型调用结束的时候（一次 run 结束也补一次）。
+没有轮询——一次长调用要流好几分钟，这段时间里它**站着不动**，因为它要显示的那部分记录**还不存在**。
+
 ### 添加项目：选目录这件事依赖平台
 
 浏览器给不出绝对路径（网页的 file input 给的是没有位置的 File 对象），所以**目录选择的窗只能由服务端
@@ -337,20 +358,23 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 734 tests / 10666 assertions（基线随分支变，报数时带上分支与提交）
+# 801 tests / 11018 assertions（分支 `trajectory`，从 main @ f7f4d31 切出；
+#   基线随分支变，报数时带上分支与提交。同一台机器上 main @ f7f4d31 是 787 / 10953）
 # 本机固定失败两条，都与代码无关：`project_test/a-binding-survives-a-real-restart`
 #   逐字比较 fork 出来的 JVM 的 stdout，而这台机器的 JDK 25 在 sqlite-jdbc 加载原生库时
 #   会往 stdout 打四行 "a restricted method in java.lang.System has been called"。
 #   新建一个 JVM 就能看见那四行，所以与本仓库的代码无关。
 #   另有 `http_test/the-projects-listing-joins-the-store-with-the-disk` 是**真竞赛**
-#   （终帧之后服务端还要写返回侧那几行 message），跑多少次不一定撞上——
-#   失败条数每次都可能不同，比对看**名字**。
+#   （它比「列表接口报的字节数与 mtime」和「随后从磁盘读的」，中间只要有人往同一份日志落一行就不等），
+#   跑多少次不一定撞上——失败条数每次都可能不同，比对看**名字**。
+#   加了一整个测试命名空间会**因为时序变化**把这条推到红：把新命名空间从 runner 里注销掉
+#   再跑一次就回到基线那两条（2026-09-17 在 `trajectory` 分支上验过）。
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
-# 19 tests，含 6 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
-#   / 技能列表（两层的根） / 会话统计（那条状态条读的端点与它的五格）
+# 24 tests，含 8 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
+#   / 技能列表（两层的根） / 会话统计（那条状态条读的端点与它的五格） / elicitation / 界面取数
 ```
 
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；

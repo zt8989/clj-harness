@@ -62,14 +62,22 @@
   other two it is 'this provider named none', which is not the same statement as
   a null. A base-url is not a secret -- `provider/init` records it already.
 
+  SPECS IS THE REQUEST'S TOOL TABLE -- the very value that goes into the request
+  body, handed in by the caller that resolved it (harness.kernel.loop). It is
+  recorded because 'the model had these tools, described exactly like this' is a
+  question about the CALL, and the only other witness is the provider's request
+  body, which nothing keeps. PASSING IT IN rather than resolving it again here is
+  the whole point: two resolutions would be two tables that happen to agree today.
+
   IT PAIRS WITH :model/end BY ORDER: the nth :model/start of a run is that run's
   nth call. A counter in the record would be the same fact written a second
   time, and two copies drift."
-  [provider]
+  [provider specs]
   (cond-> {:type :model/start}
     (:model provider)            (assoc :model (:model provider))
     (:base-url provider)         (assoc :base-url (:base-url provider))
-    (:reasoning-effort provider) (assoc :reasoning-effort (:reasoning-effort provider))))
+    (:reasoning-effort provider) (assoc :reasoning-effort (:reasoning-effort provider))
+    (seq specs)                  (assoc :tools specs)))
 
 (defn model-end
   "One model call is OVER, and TELEMETRY is what the vendor reported back --

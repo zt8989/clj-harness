@@ -62,6 +62,7 @@
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
             [harness.edge.stats :as stats]
+            [harness.edge.trajectory :as trajectory]
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
@@ -965,11 +966,12 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  ONE OF THE THREE IS A GET: `stats` only reads the log, so it has no effect to
-  report and nothing to add to it. The set stays closed and the 405 stays here --
-  what changed is that the sentence 'every verb on this shape is a POST' is no
-  longer true, not where the refusal happens."
-  #{"rebuild" "archive" "stats"})
+  ONE OF THE FOUR IS A GET: `stats` only reads the log, so it has no effect to
+  report and nothing to add to it; `trajectory` is the second reader on the same
+  terms. The set stays closed and the 405 stays here -- what changed is that the
+  sentence 'every verb on this shape is a POST' is no longer true, not where the
+  refusal happens."
+  #{"rebuild" "archive" "stats" "trajectory"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -1095,6 +1097,40 @@
                      (catch Throwable t {:error (ex-message t)}))
         folded  (when (nil? (:error located))
                   (try {:ok (stats/log-stats (:ok located))}
+                       (catch Throwable t {:error (ex-message t)})))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+
+      (some? (:error folded))
+      (api-response 400 {:error (:error folded) :threadId stem})
+
+      :else
+      (api-response 200 (assoc (:ok folded) :threadId stem)))))
+
+(defn- trajectory-get
+  "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
+  folded from its RECORD (harness.edge.trajectory): the system message that was in
+  force, the context spliced in beside it, every user message, and each tool call with
+  its arguments and result.
+
+  THE SECOND READ-ONLY VERB ON THIS SHAPE, for the same reason as `stats`: it answers
+  and writes nothing, so asking it again is free and asking it mid-run is normal.
+
+  IT READS A DIFFERENT HALF OF THE LOG THAN `stats` DOES, and that is why it exists
+  rather than being a field on it: `stats` folds the audit lines into numbers and never
+  looks at a message, while this folds the `message` lines and never adds anything up.
+  Two questions, two readers, one file.
+
+  LOCATION AND REFUSALS ARE THE SAME AS `stats`' -- `replay/locate`, 404 for 'not here'
+  with the locator's own sentence, 400 for 'here, and unreadable'. A log whose last run
+  has not finished is NEITHER: it is read, and the answer says so, because looking at a
+  session while it runs is the ordinary case rather than an error."
+  [stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))
+        folded  (when (nil? (:error located))
+                  (try {:ok (trajectory/log-trajectory (:ok located))}
                        (catch Throwable t {:error (ex-message t)})))]
     (cond
       (some? (:error located))
@@ -1828,6 +1864,7 @@
         [:post "rebuild"] (rebuild-post req stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
+        [:get "trajectory"] (trajectory-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

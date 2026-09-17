@@ -68,10 +68,10 @@
 | 工具的结果与错误 | `message` 的 `role: "tool"`；错误另有 `tools/execute` 的 `:error` | 有 |
 | 工具的三态与「有没有真的跑」 | `tools/pre-execute` 的 `:outcome` / `:missing`；`tools/execute` 的**有无** | 有 |
 | 工具段与等待段的时长 | 三行 `tools/*` 与 `approval/decided` 的 `:ts` | 有 |
-| 模型段的起止与时长 | `model/start` → `model/end` 的 `:ts` | **补（04）** |
-| 用量、结束原因、vendor 回声的 model | `model/end` 的载荷 | **补（05）** |
-| 工具表照发出的样子 | `model/start` 的 `:tools`（与进请求体的是**同一次 resolve** 出来的那个值） | **补（04）** |
-| 这次调用发给谁、用什么参数 | `model/start` 的 `:model` / `:base-url` / `:reasoning-effort` | **补（04）** |
+| 模型段的起止与时长 | `model/start` → `model/end` 的 `:ts` | 标记已在（`composer-status`）；**读侧的段仍开着**（05） |
+| 用量、结束原因、vendor 回声的 model | `model/end` 的载荷 | ~~补（05）~~ 有（`composer-status` 已落地） |
+| 工具表照发出的样子 | `model/start` 的 `:tools`（与进请求体的是**同一次 resolve** 出来的那个值） | ~~补（04）~~ 有（2026-09-17 落地） |
+| 这次调用发给谁、用什么参数 | `model/start` 的 `:model` / `:base-url` / `:reasoning-effort` | ~~补（04）~~ 有（`composer-status` 已落地） |
 | 这次调用属于哪一轮、是第几次调用 | 数序（见下），不另记 | 派生 |
 | 这一轮是谁的、会话绑到哪 | `project/bound`；`provider/init` / `provider/changed` | 有（保留，不重复记） |
 | 每一格发生的时间 | 每一条 jsonl 行自己的 `:ts`（不新记时间戳字段） | 有 |
@@ -138,12 +138,12 @@
 | # | 票 | Blocked by | 交付什么 |
 |---|---|---|---|
 | 01 | 词：轮 / 模型调用 / 轨迹 | — | ~~`CONTEXT.md` 立词；顺手把 `批` 那条里的「回合」改成「模型调用」~~ **见文末复议：`轮` / `模型调用` 与 `批` 那条已由 `composer-status` 01 落地，本票只剩 `轨迹` 那个词** |
-| 02 | 轨迹的读侧与端点 | 01 | 折法 + `GET /api/threads/<stem>/trajectory`；只到边，没有界面 |
-| 03 | `对话` / `轨迹` 切换与逐轮条列 | 02 | 页签、视图、左侧逐轮条列、右侧 `系统提示词` 页签、真机证据 |
-| 04 | 请求侧：调用的边界与照发出的表 | 03 | ~~`model/start` / `model/end` 两条审计行~~ **两条行已由 `composer-status` 01 落地**；本票只剩「`model/start` 上挂 `:tools`」与右侧 `工具` 页签 |
-| 05 | 响应侧：用量与耗时 | 04 | ~~留住 usage / finish_reason / 回声的 model~~ **已由 `composer-status` 01 落地**；本票只剩读侧折段与条上的显示 |
-| 06 | 时间轴：三条 lane | 05 | `输入`/`模型`/`工具`；`时长` 与 `轮次` 两种看法；搜索 |
-| 07 | 收口：现状与全量验证 | 04, 05, 06 | `docs/architecture` 与 README 跟上；两套全量 + 真机证据 |
+| 02 | 轨迹的读侧与端点 | 01 | ~~折法 + `GET /api/threads/<stem>/trajectory`；只到边，没有界面~~ **2026-09-17 落地（ns 是 `harness.edge.trajectory`），见文末落地记录** |
+| 03 | `对话` / `轨迹` 切换与逐轮条列 | 02 | ~~页签、视图、左侧逐轮条列、右侧 `系统提示词` 页签、真机证据~~ **2026-09-17 落地**（切换用普通按钮，没取注册表的 `tabs`；见 03 复议） |
+| 04 | 请求侧：调用的边界与照发出的表 | 03 | ~~`model/start` / `model/end` 两条审计行~~ 已由 `composer-status` 01 落地；~~`:tools` 与 `工具` 页签~~ **2026-09-17 落地，本票结束** |
+| 05 | 响应侧：用量与耗时 | 04 | ~~留住 usage / finish_reason / 回声的 model~~ 已由 `composer-status` 01 落地；~~读侧的段、用量与行上显示~~ **2026-09-17 落地，本票结束**（时间只留在 `calls[]` 一份，条目带 `:call` 指针） |
+| 06 | 时间轴：三条 lane | 05 | ~~`输入`/`模型`/`工具`；`时长` 与 `轮次` 两种看法；搜索~~ **2026-09-17 落地**（等宽几何量过：0% / 33.33% / 66.67%） |
+| 07 | 收口：现状与全量验证 | 04, 05, 06 | ~~`docs/architecture` 与 README 跟上；两套全量 + 真机证据~~ **2026-09-17 落地**（804 / 11028 / 基线两条；前端 24 全过；真机 4 张） |
 
 ## 状态
 
@@ -175,3 +175,65 @@
 
 **一字未动的**：`轨迹` 那个视图、轮的折法（消息 id 差集）、`模型调用` 的定义、记录清单是闭的、
 「记录不是状态、不进库」、AG-UI 协议一个字不加——`composer-status` 是照着这些做的，不是另立一套。
+
+## 落地记录（2026-09-17）：02 落地，04 的记录一半补齐
+
+**这仍是加注。** 上面两节都留着；这一节只记今天真做了的事。
+
+**分支 `trajectory`**（worktree `.worktrees/trajectory`，从 `main` @ `f7f4d31` 切出）。
+
+**落地的**：
+
+- **01 收尾**：`轨迹` 补进 `CONTEXT.md`（挨着 `会话统计`，写明它俩是同一份记录的两个读者）。
+- **02 全部**：`harness.edge.trajectory` —— 记录按轮折回来，`GET /api/threads/<stem>/trajectory`
+  从管理边吐出去，`thread-verbs` 闭集加第四个词（`stats` 已经是那条形状上的第一个 GET，
+  「每一个动词都是 POST」那句话上一轮就改过了）。
+- **04 的记录那一半**：`model/start` 多一个 `:tools`。`harness.kernel.loop/model-call!` **resolve 一次**，
+  同一份值既进请求体（provider map 上的 `:tools`）又进标记；`harness.kernel.llm` 不再自己 reach 工具表。
+  「照发出的样子」因此是**构造正确**。读侧轮里长出 `:calls [{:index :model :tools}]`。
+- **一处既有事实两写被收掉**：`harness.edge.stats/incomplete?` 提成公开——两个读侧共用同一条
+  「这份日志完了没有」（这条正是上一节预判的那句「轮的判据复用同一个实现」的近亲）。
+
+**仍然开着的**：03 的视图与右侧面板（含 04 的 `工具` 页签）、05 的读侧段与耗时、06 的时间轴、07 的收口。
+
+**验证**：`test/harness/edge/trajectory_test.clj` 13 条（手搓记录断言折法 + 真 HTTP 打端点）。
+全量套件与基线的逐条对照见 07 —— 本机已知的红是 `harness.cap.project-test/a-binding-survives-a-real-restart`
+（fork 子进程，基线上同样红），以及 `harness.edge.http-test` 依赖磁盘 mtime 的那两条**时红时绿**。
+
+## 落地记录（2026-09-17，收口：全部七张票）
+
+**分支 `trajectory`，从 `main` @ `f7f4d31` 切出，工作树 `.worktrees/trajectory`；改动尚未提交。**
+
+**做完的**：01 词（`轨迹` 补进 `CONTEXT.md`）、02 读侧与端点（`harness.edge.trajectory` +
+`GET /api/threads/<stem>/trajectory` + 14 条测试）、03 视图（切换 / 逐轮条列 / 右侧 `系统提示词`）、
+04 的记录与 UI 一半（`model/start` 上的 `:tools` + `工具` 页签）、05 读侧的段与用量、
+06 时间轴（三条 lane / 两种看法 / 搜索）、07 收口（文档 + 全量 + 真机）。
+
+**落地后与票面不同、且值得记下的**（细节在各自的复议段里）：
+
+- ns 是 `harness.edge.trajectory`（分层之后读侧在 `edge`）；「第一个 GET」早已被 `stats` 占掉。
+- `:calls`、工具表、`stats/incomplete?` / `user-ids` / `tokens-of` 的公开，都是落地时按「一件事一个地方」
+  定的：轮里只有**指针**（`:call`），时间只有 `calls[]` 那一份，规则只有一份实现。
+- 视图切换**没有**用注册表的 `tabs` 原件，两个信号读在视图体内（`App` 里读会抛）。
+- 「每次调用等宽」的第三种看法没做（非目标照旧）。
+
+**验证**：`clojure -M:test -m harness.test-runner` = **804 / 11028 / 基线那两条**；
+`cd ui && npm test` = **24 全过**；`cd ui && npm run build` 过；真机 4 张在 `evidence/`。
+**唯一没有验到的**：真 vendor（全程用脚本替身，与这个仓库的既有纪律一致）。
+
+## 复议（2026-09-17 晚）：右侧从「固定两页签」改成「点哪条展哪条」
+
+**牛总当场改的口径**：右侧不该常驻显示 `系统提示词` / `工具`，而应**跟着点击的条目展开、默认不显示**。
+按这条改，**记录清单一个字没动**（它记的是数据，这条改的是画法）：那些格子照旧在，
+只是入口从「一轮的两个页签」变成「那一条自己」——system 消息是 `system` 条，
+工具表是那次调用 `assistant` 条上的 `:call` 指过去的。验收主线第 2、3 条因此读作
+「点开 `system` 条 / 点开某次调用的 `assistant` 条」，字节对照不变。
+
+## 复议（2026-09-18 凌晨）：`tools/*` 那三行的「时长」不是我以为的那三段
+
+记录清单里「工具段与等待段的时长 ← 三行 `tools/*` 的 `:ts`」这一格，**格子没错，读法错了**：
+`tools/execute` 是**离开**执行（工具跑完的那一刻），不是开始。于是「工具那段」应当是
+`tools/pre-execute`(到达) → `tools/execute`(跑完)，而悬置的等待要用**第二次 pre-execute**
+（恢复）来切。照原读法画出来的工具条只有 2 毫秒，真正跑的时间被误当成「等人」——这是这条时间轴
+第一版最实在的一个错，靠牛总一句「input 和 model 之间那段空白没标出来」才发现。
+结论一句话：**这四行记录的是四个时刻，不是「开始/结束/闭合」三段**。

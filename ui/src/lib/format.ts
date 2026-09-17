@@ -60,6 +60,22 @@ export function formatTokens(n: number): string {
 /// that predates the model-call lines, `usage` when no call reported any,
 /// `cacheHitPercent` when no call reported the pair), so `undefined` here means
 /// "not reported" and must never be turned into 0.
+/// Elapsed milliseconds, in the same buckets upstream's duration uses: sub-second
+/// is "<1s", then one decimal, then whole seconds, then minutes and seconds.
+///
+/// IT LIVES HERE RATHER THAN IN THE TOOL CARD because the trajectory draws the
+/// same spans in a second place: one formatter, so a tool that took 1.4s on the
+/// timeline and 1.4s on its own card cannot say two things. The buckets are the
+/// tool card's, deliberately -- this is a glance, not a stopwatch, and the raw
+/// millisecond marks are on the wire for anyone who needs them.
+export function formatMillis(ms: number): string {
+  if (ms < 1000) return "<1s";
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+}
+
 export interface StatsPayload {
   turns: number;
   steps?: number;

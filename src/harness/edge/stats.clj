@@ -59,10 +59,15 @@
 
 ;; ---------------------------------------------------------------------- turns
 
-(defn- user-ids
-  "The ids of the user messages an INPUT record brings. Ids, not content: two
-  identical user messages are two turns, and the system message changes between
-  runs, so content comparison would be wrong at both ends."
+(defn user-ids
+  "The ids of the user messages an INPUT record brings, in order. Ids, not content: two
+  identical user messages are two turns, and the system message changes between runs,
+  so content comparison would be wrong at both ends.
+
+  PUBLIC, like `incomplete?`, because BOTH READERS need exactly this answer: this
+  namespace counts the turns, harness.edge.trajectory groups the items by them. 'What
+  counts as a user message in an input' is one rule, and a second copy of it is a second
+  chance to disagree about where one turn ends."
   [record]
   (->> (get-in record [:payload :messages])
        (filter #(= "user" (:role %)))
@@ -139,10 +144,14 @@
   (let [v (get-in usage ks)]
     (when (number? v) v)))
 
-(defn- total-of
+(defn tokens-of
   "One call's total: the vendor's own `total_tokens`, else prompt + completion --
   and only for a call that reported BOTH halves. Half a sum is not a total, and
-  presenting one as a total is the same mistake as calling an absent count zero."
+  presenting one as a total is the same mistake as calling an absent count zero.
+
+  PUBLIC, like `incomplete?` and `user-ids`, because harness.edge.trajectory shows a
+  per-call total on the trajectory's rows and must not spell 'what counts as this
+  call's tokens' a second way."
   [usage]
   (or (number-at usage [:total_tokens])
       (let [prompt (number-at usage [:prompt_tokens])
@@ -170,7 +179,7 @@
   [calls]
   (let [usages (keep :usage calls)]
     (cond-> {}
-      (sum-over usages total-of)                                   (assoc :totalTokens (sum-over usages total-of))
+      (sum-over usages tokens-of)                                   (assoc :totalTokens (sum-over usages tokens-of))
       (sum-over usages #(number-at % [:prompt_tokens]))            (assoc :promptTokens (sum-over usages #(number-at % [:prompt_tokens])))
       (sum-over usages #(number-at % [:completion_tokens]))        (assoc :completionTokens (sum-over usages #(number-at % [:completion_tokens])))
       (sum-over usages #(number-at % [:prompt_tokens_details :cached_tokens]))
@@ -210,11 +219,15 @@
     (when (and (seq usable) (pos? ms))
       (Math/round (* 1000.0 (/ (double tokens) (double ms)))))))
 
-(defn- incomplete?
+(defn incomplete?
   "TRUE when the log's last frame is not a terminal one: that run is still going,
   or died without closing. Reading it anyway is the point -- a session is most
   likely to be asked about while it is running -- and this is the flag that says
-  the last turn is not over yet."
+  the last turn is not over yet.
+
+  PUBLIC BECAUSE BOTH READERS ASK IT: this namespace reports it as a number's
+  caveat, harness.edge.trajectory as a turn's. One rule, one spelling -- the
+  alternative is two readers that can disagree about whether a log is finished."
   [records]
   (let [last-frame (last (filter #(= "event" (:kind %)) records))]
     (boolean (and last-frame (not (frames/terminal? (:payload last-frame)))))))
