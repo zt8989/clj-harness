@@ -79,6 +79,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
+import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApprovalBatchProvider } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
@@ -122,6 +123,14 @@ export function App() {
   }, []);
   // Set by the approval gate below, read by the runtime on the next render.
   const [gateOpen, setGateOpen] = useState(false);
+  // WHICH VIEW THIS COLUMN SHOWS. Session-scoped UI state and deliberately NOT
+  // persisted: it is a way of looking at the session in front of you, not a preference
+  // about sessions, and a stored one would surprise a reader on the next launch.
+  //
+  // `conversation` is the default, and the switch replaces the WHOLE column --
+  // composer included -- because the trajectory is a reading of a finished record
+  // rather than a place to type. See components/trajectory-view.tsx.
+  const [view, setView] = useState<"conversation" | "trajectory">("conversation");
   // The switching guards read `isRunning` off the runtime, but the runtime
   // does not exist yet while the adapter object is being built -- the ref
   // closes that loop. Assigned right after the hook, before anything can click.
@@ -198,12 +207,58 @@ export function App() {
               content, and the whole page scrolls instead of the message list. */}
           <div className="flex h-dvh">
             <Sidebar runtime={runtime} currentThreadId={threadId} />
-            <div className="min-h-0 flex-1">
+            {/* `min-w-0` IS LOAD-BEARING, not tidiness: a flex item's automatic minimum
+                width is its content's min-content width, and the trajectory's rows are
+                single-line mono JSON with no spaces -- so without this the column
+                refuses to be narrower than the longest argument list, and the page
+                scrolls sideways with every preview running off the edge. The chat never
+                needed it because its text wraps. */}
+            <div className="min-h-0 min-w-0 flex-1">
               {/* The composer's chrome needs to know which session it is
                   configuring -- the model override and the branch are both
                   per-session -- and the id's owner is this component's state. */}
               <ThreadIdContext.Provider value={threadId}>
-                <Thread components={THREAD_COMPONENTS} />
+                <div className="flex h-full min-h-0 min-w-0 flex-col">
+                  {/* The switch sits ABOVE the column. The trajectory reads the run's
+                      own state for its refetch trigger, and it does that INSIDE the
+                      runtime provider -- from its own body, not from here: `App` is the
+                      component that RENDERS the provider, so a hook reading the
+                      assistant state in this body throws. The browser said so. */}
+                  <div
+                    data-slot="view-switch"
+                    className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5"
+                  >
+                    {(
+                      [
+                        ["conversation", "Conversation"],
+                        ["trajectory", "Trajectory"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        data-slot="view-switch-tab"
+                        data-view={key}
+                        aria-pressed={view === key}
+                        onClick={() => setView(key)}
+                        className={
+                          view === key
+                            ? "rounded-md bg-muted px-2 py-0.5 text-xs text-foreground"
+                            : "rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    {view === "conversation" ? (
+                      <Thread components={THREAD_COMPONENTS} />
+                    ) : (
+                      <TrajectoryView threadId={threadId} />
+                    )}
+                  </div>
+                </div>
               </ThreadIdContext.Provider>
             </div>
           </div>

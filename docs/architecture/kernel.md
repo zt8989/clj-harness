@@ -17,7 +17,7 @@
 | `:tool/pre-execute` | 一次调用进入执行缝（**不上 wire**，只落审计行） |
 | `:tool/execute` | 一次调用离开执行（同上） |
 | `:tool/post-execute` | 一次调用的生命周期闭合（同上） |
-| `:model/start` | 一次**模型调用**开始，带这次调用的身份（model / base-url / 思考档；**不上 wire**） |
+| `:model/start` | 一次**模型调用**开始：这次调用的身份（model / base-url / 思考档）与**照发出的那张工具表**——`loop` resolve 一次，同一份既进请求体又进这条（**不上 wire**） |
 | `:model/end` | 一次模型调用结束，带**厂商回的话**（usage / finish_reason / 回声的 model；**不上 wire**） |
 | `:run/end` | 正常收尾 |
 | `:run/interrupt` | **第二种终态**：有调用 park 等人，本次 run 到此为止 |

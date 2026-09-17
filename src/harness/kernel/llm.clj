@@ -20,9 +20,12 @@
   goes on the wire. A method that has nothing to report returns an empty map, which is
   honest: 'this round reported nothing' is not 'this round reported zero'.
 
-  THREAD-ID is the session the run serves; it selects the thread's effective
-  toolset (harness.kernel.tools base + session overlay) for the request's tools array
-  and is otherwise opaque to the methods.
+  THE REQUEST'S TOOL TABLE RIDES ON THE PROVIDER MAP, as :tools -- RESOLVED BY THE
+  CALLER (harness.kernel.loop), not here. The caller is also what writes the
+  `model/start` audit line, and the table on that line has to be the table that went
+  out: two resolutions would be two tables that happen to agree, and 'described
+  exactly like this' would stop being a fact about the request. So this layer does
+  NOT reach for the thread's toolset at all, and THREAD-ID is opaque to the methods.
 
   VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
   mentions `reasoning_content` on every round, empty when the round had no reasoning,
@@ -50,8 +53,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [harness.kernel.event :as ev]
-            [harness.kernel.tools :as tools])
+            [harness.kernel.event :as ev])
   (:import [java.net URI]
            [java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
             HttpResponse HttpResponse$BodyHandlers]
@@ -255,10 +257,10 @@
           messages)))
 
 (defmethod stream! :openai-completions
-  [{:keys [model reasoning-effort] :as provider} messages on-event thread-id]
+  [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
                                       :messages messages
-                                      :tools (tools/specs thread-id)
+                                      :tools tools
                                       :stream true}
                                reasoning-effort (assoc :reasoning_effort reasoning-effort)))
         resp (.send http-client (request provider body) (HttpResponse$BodyHandlers/ofInputStream))]

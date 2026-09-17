@@ -72,3 +72,39 @@
       （端口由 OS 分配，不写死——见 `AGENTS.md`）。测试文件要注册进 `harness.test-runner`。
 - [ ] **协议那侧一个字都没动**：本票不加任何事件、不加任何帧；`harness.frames` 折出来的对话逐字节不变。
 - [ ] `clojure -M:test -m harness.test-runner` 全绿（基线以落地当次为准，报数带上分支与提交）。
+
+## 复议（2026-09-17，落地）
+
+**票面的假设被这段时间的落地推翻了四处，落地按现实走**：
+
+1. **ns 是 `harness.edge.trajectory`，不是 `harness.trajectory`**。`layer-layout` 之后 `src/harness/`
+   分成 `infra/kernel/cap/edge` 四层，日志的读侧（`replay`、`stats`）都在 `edge`，新的读侧与它们并排。
+2. **「这条形状上的第一个 GET」已经不成立**：`/api/threads/<stem>/stats` 先到了，`thread-verbs` 里
+   `stats` 就是 GET，那句「每一个动词都是 POST」的注释已经改过一轮。本票只加了第四个词 `trajectory`。
+3. **`incomplete?` 不再自己算**：`harness.edge.stats/incomplete?` 已经是同一条规则（「最后一帧不是终帧」），
+   本票把它从 `defn-` 提成 `defn` 由两个读侧共用——一条规则一个拼法，读侧之间不许对「这份日志完了没有」有分歧。
+4. **`/api/threads/<stem>/stats` 是端点的样板**：`replay/locate` + 404「不在这里」/ 400「在这里，但坏了」的分工、
+   `try {:ok …} catch {:error …}` 的形状，都照它抄，没有再发明一遍。
+
+**多做了两件票面之外的事，理由都写进代码里了**：
+
+- **轮里多了一个 `:calls`**（票面把它排在 04）。04 的**记录**那一半（`model/start` / `model/end`
+  + `:model` / `:base-url` / `:reasoning-effort`）已经由 `composer-status` 落地，只剩**工具表**没进记录；
+  表在本票落地时一并补上并读出来了（见 04 的复议）。写进去不读出来就是只有一半的账。
+- **`harness.edge.stats` 与 `harness.kernel.{event,llm,loop}` 各改了一处**：`incomplete?` 公开、
+  `ev/model-start` 多收一个工具表、`llm/stream!` 不再自己 resolve 表（改由 `loop` resolve 一次、
+  同一份既进 body 又进标记）。这不是本票的范围，是本票落地时发现的、上一条那张表必须走的路。
+
+**验收核对**（对着票面逐条，实测）：
+
+- 折法是纯函数、手搓记录可断言 ✓（`test/harness/edge/trajectory_test.clj`，13 条）
+- 轮边界＝新的 user **id** ✓；悬置恢复不新开轮 ✓（真机日志 + 手搓记录各一条）
+- 提交侧/返回侧按「第一个 event」分 ✓；对位、`opening`/`run` 两种来源 ✓
+- 历史回显不重列 ✓；同一 toolCallId 只出一条、`executed` 由 execute 行的**有无**决定 ✓
+- system 条只在变了的时候再出现 ✓
+- 半截的 run 不抛、`incomplete` 如实 ✓（`replay/records->messages` 对同一份记录仍然拒绝，两个读侧两个答案）
+- `GET /api/threads/<stem>/trajectory`、闭集加一词、405 照旧 ✓；404/400 与 stats 同款 ✓
+- 空日志/没跑过的会话 → 空 `turns`，不报错 ✓
+- 帧侧一个字没动 ✓（本票不加事件、不加帧；全量套件里帧用例全过）
+
+**没做完的**：视图（03）、时间轴（06）、文档（07）按票走；右侧面板与工具表的**显示**是 04 的 UI 一半。

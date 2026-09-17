@@ -58,16 +58,24 @@
   THE TELEMETRY RIDES OUT ON THE EVENT and stops there -- it is not appended to
   the history. It belongs to the call, not to the conversation: showing it to the
   provider on a later request would be inventing a field the vendor never asked
-  for."
+  for.
+
+  THE TOOL TABLE IS RESOLVED ONCE, HERE, and handed to both sides: the provider
+  puts it in the request body and the start event records it. That is what makes
+  `model/start`'s :tools the table that WENT OUT rather than a second resolution
+  that happens to agree -- and it is why the resolve lives in this function rather
+  than in the provider layer."
   [provider history emit thread-id]
-  (emit (ev/model-start provider))
-  (try
-    (let [{:keys [message telemetry]} (llm/stream! provider history emit thread-id)]
-      (emit (ev/model-end telemetry))
-      message)
-    (catch Throwable t
-      (emit (ev/model-end nil))
-      (throw t))))
+  (let [specs (tools/specs thread-id)]
+    (emit (ev/model-start provider specs))
+    (try
+      (let [{:keys [message telemetry]}
+            (llm/stream! (assoc provider :tools specs) history emit thread-id)]
+        (emit (ev/model-end telemetry))
+        message)
+      (catch Throwable t
+        (emit (ev/model-end nil))
+        (throw t)))))
 
 (defn- drive!
   "Run one run, calling EMIT with each harness.kernel.event value as it is produced.
