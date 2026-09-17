@@ -2,12 +2,12 @@
 //
 // Start the harness on a port nobody is using, and the UI in front of it.
 //
-//   node dev.mjs                     harness (real, your own ~/.clj-harness) + UI
-//   node dev.mjs --port 8080         the address the client used to hardcode
-//   node dev.mjs --scripted          the scripted double instead: no api-key, no
-//                                    model, a temp home, a provider that replays
-//   node dev.mjs --scripted my.json  ...with your own turns
-//   node dev.mjs --ui-port 5199      somewhere other than 5173
+//   node scripts/dev.mjs                     harness (real, your own ~/.clj-harness) + UI
+//   node scripts/dev.mjs --port 8080         the address the client used to hardcode
+//   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
+//                                            model, a temp home, a provider that replays
+//   node scripts/dev.mjs --scripted my.json  ...with your own turns
+//   node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
 //
 // WHY THIS EXISTS. `npm run dev` on its own expects a harness on 8080, and 8080 is
 // the one port a second checkout, a test run, or yesterday's forgotten session is
@@ -38,36 +38,56 @@
 //                                             "arguments": {"path": "deps.edn"}}]}]}
 //
 // consumed one per model call -- one tool round costs two.
-import { spawn } from "node:child_process";
+//
+// LOOKING AT THE UI IS A VERIFICATION STEP IN THIS REPO -- the one layer a suite cannot
+// reach -- so --scripted is that step's entry point, and the three rules the suites keep
+// are properties of THIS invocation rather than a checklist somebody assembles by hand:
+//
+//   * THE HOMES ARE TEMP, SIBLINGS, AND GONE ON THE WAY OUT. The config root and the OS
+//     home are made under one temp directory -- never nested, see AGENTS.md -- because a
+//     session's jsonl is written under the root and ~/AGENTS.md plus ~/.agents/skills are
+//     read from the home, and neither may be the developer's. Both are removed when this
+//     stops, Ctrl-C included.
+//   * NO PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
+//     announces becomes vite's proxy target, so no source file learns a number and there
+//     is no 8080 to clear first.
+//   * THE TEMP PATHS ARE PRINTED. A run's record lands under the root AS IT STREAMS and
+//     the directory is gone once this exits, so the banner is the only window in which a
+//     walkthrough can read the two sessions it just drove.
+//
+// The announced port is read from stdout, which is where AGENTS.md's "do not read a
+// child's answer from stdout" does not bite: this is a handshake the e2e server prints
+// on purpose, not an answer it computes, and the match runs over the accumulated stream
+// -- so a JDK warning arriving first delays it by a chunk instead of losing it.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const UI_DIR = path.join(ROOT, "ui");
+import { exitOf, run, stopTree } from "./proc.mjs";
 
-/// CROSS-PLATFORM: on Windows `clojure` and `npm` are `.bat`/`.cmd`, and Node
-/// refuses to spawn those without a shell (the fix for CVE-2024-27980). A shell
-/// changes the argument rule in the other direction -- Node quotes NOTHING when
-/// one is in play -- so `run` quotes for it, below.
-const ON_WINDOWS = process.platform === "win32";
+// THE REPOSITORY IS THIS FILE'S PARENT, and that is what makes the script movable: it is
+// invoked from wherever a reader is standing (`node scripts/dev.mjs`, at the root or
+// anywhere else) and every path below is derived from here rather than from the cwd.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, "..");
+const UI_DIR = path.join(ROOT, "ui");
 
 // ---------------------------------------------------------------- arguments
 
 const USAGE = `Start the harness on a port nobody is using, and the UI in front of it.
 
-  node dev.mjs                     harness (real, your own ~/.clj-harness) + UI
-  node dev.mjs --port 8080         the address the client used to hardcode
-  node dev.mjs --scripted          the scripted double instead: no api-key, no
-                                   model, a temp home, a provider that replays
-  node dev.mjs --scripted my.json  ...with your own turns
-  node dev.mjs --ui-port 5199      somewhere other than 5173
+  node scripts/dev.mjs                     harness (real, your own ~/.clj-harness) + UI
+  node scripts/dev.mjs --port 8080         the address the client used to hardcode
+  node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
+                                           model, a temp home, a provider that replays
+  node scripts/dev.mjs --scripted my.json  ...with your own turns
+  node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
 
 The backend is started on port 0 (the OS picks) and the port it announces is handed
 to the dev server as HARNESS_BACKEND_URL, which ui/vite.config.js uses as its proxy
-target. Ctrl-C stops both, and the temp home the scripted mode made is deleted with
-it.`;
+target. Ctrl-C stops both, and the two temp homes the scripted mode made are deleted
+with it -- their paths are printed when it starts, which is the only time they exist.`;
 
 const argv = process.argv.slice(2);
 let port = 0;
@@ -104,47 +124,17 @@ for (const [name, value] of [["--port", port], ["--ui-port", uiPort]]) {
 
 // ------------------------------------------------------------- the children
 
-/// CROSS-PLATFORM: a shell on Windows is what makes `.bat`/`.cmd` runnable at all,
-/// and it is also what takes the quoting away -- so an argument that could be read
-/// as two words, or as a metacharacter, is quoted here instead.
-function quoteForWindows(arg) {
-  return /[\s"&|<>^()]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
-}
+// `run` / `stopTree` / `exitOf` are in ./proc.mjs: the two platform branches they
+// carry are knowledge, and a second copy of either would be a second thing to keep
+// true (see that file).
 
 let backend = null;
 let ui = null;
 let tmp = null;
-
-function run(command, args, options = {}) {
-  return spawn(command, ON_WINDOWS ? args.map(quoteForWindows) : args, {
-    ...options,
-    shell: ON_WINDOWS,
-    // CROSS-PLATFORM, and this is the half with no shared answer: off Windows a
-    // process GROUP is what can be stopped as a unit, and `clojure` (a launcher
-    // that execs java) and `npm` (a shell that spawns vite) both leave orphans
-    // behind when only the direct child is killed. Windows has no process groups
-    // to signal, so it gets `taskkill /T` in `stopTree` instead.
-    detached: !ON_WINDOWS,
-  });
-}
-
-/// Stop a child and everything it started. Idempotent, and quiet when there is
-/// nothing to stop -- the callers below run on several paths at once.
-function stopTree(child) {
-  if (child === null || child.exitCode !== null || child.signalCode !== null) return;
-  if (ON_WINDOWS) {
-    // `/T` is the whole tree -- the same job the process group does off Windows.
-    spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    // No group (already reparented, or never got one): the direct child is the
-    // best that is left.
-    child.kill("SIGTERM");
-  }
-}
+/// The pair --scripted made, kept so the banner can name them: a session's record is
+/// written under the config root while the run is in flight, and this directory does
+/// not outlive the script, so the paths are worth saying out loud once.
+let homes = null;
 
 let cleaned = false;
 function cleanup() {
@@ -162,7 +152,10 @@ function cleanup() {
 // handlers on the event loop whatever the children are doing, so there is nothing
 // to arrange; the handlers below are all of it.
 process.on("exit", cleanup);
-for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+// SIGHUP IS IN THE LIST BECAUSE A CLOSED TERMINAL IS NOT Ctrl-C: with no handler Node
+// takes the signal's default action and dies without running the exit handler above,
+// which is how a temp pair gets left behind by the tidiest way to stop.
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
   process.on(signal, () => {
     cleanup();
     process.exit(code);
@@ -190,6 +183,7 @@ if (scripted) {
   const userHome = path.join(tmp, "user-home");
   fs.mkdirSync(home);
   fs.mkdirSync(userHome);
+  homes = { root: home, userHome };
   fs.writeFileSync(
     path.join(home, "config.edn"),
     '{:default {:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}}\n',
@@ -267,15 +261,23 @@ console.log(
   `dev.mjs: harness on http://127.0.0.1:${boundPort}` +
     (port === 0 ? " (a port the OS picked)" : ""),
 );
-console.log(`dev.mjs: the log is ${logPath}`);
 console.log(`dev.mjs: UI on http://localhost:${uiPort} (Ctrl-C stops both)`);
+if (homes !== null) {
+  console.log(
+    `dev.mjs: temp config root ${homes.root}` +
+      " (a session's record is projects/<workspace>/<thread>.jsonl under it)",
+  );
+  console.log(`dev.mjs: temp OS home   ${homes.userHome}`);
+  console.log("dev.mjs: siblings, deleted when this stops -- read the jsonl while it runs");
+}
+console.log(`dev.mjs: the log is ${logPath}`);
 
 // ------------------------------------------------------------------- the UI
 
 if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
   console.log("dev.mjs: no ui/node_modules -- running npm install first");
   const install = run("npm", ["install"], { cwd: UI_DIR, stdio: "inherit" });
-  const installed = await new Promise((resolve) => install.on("exit", (code) => resolve(code)));
+  const installed = await exitOf(install);
   if (installed !== 0) {
     console.error("dev.mjs: npm install failed");
     process.exit(1);
@@ -288,6 +290,6 @@ ui = run("npm", ["run", "dev", "--", "--port", String(uiPort)], {
   env: { ...process.env, HARNESS_BACKEND_URL: `http://127.0.0.1:${boundPort}` },
 });
 
-const uiExit = await new Promise((resolve) => ui.on("exit", (code) => resolve(code)));
+const uiExit = await exitOf(ui);
 cleanup();
-process.exit(uiExit ?? 0);
+process.exit(uiExit);

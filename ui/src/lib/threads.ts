@@ -17,8 +17,8 @@
 //
 // THE HARNESS'S ADDRESS IS THIS ORIGIN by default, not `http://localhost:8080/`.
 // The page and the harness are served from ONE address, and the dev server is what
-// forwards the harness's share of it (`ui/vite.config.js`, and `dev.mjs` for
-// starting the two together on a port it picks). Two things follow, and both are
+// forwards the harness's share of it (`ui/vite.config.js`, and `scripts/dev.mjs`
+// for starting the two together on a port it picks). Two things follow, and both are
 // the reason: the browser makes no cross-origin request at all -- so nothing here
 // depends on the harness's CORS allowance, which is a list of origins that has to
 // keep up with a port that no longer has to be 5173 -- and a build carries no

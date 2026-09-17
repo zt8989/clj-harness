@@ -83,6 +83,10 @@ Ran 36 tests containing 147 assertions.
 0 failures, 0 errors.
 ```
 
+（那条命令是当时**真的跑过**的那一条，所以留在这里；它等价于现在的一句
+`node test.mjs --ns harness.kernel.tools-test,harness.cap.hashline.batch-test`——而且后者是**完整协议**：
+还会跑收尾的隔离判定、并把临时目录删掉，手拼的那条两样都没有。）
+
 以及所有碰 `turn-plan` 的套件一起跑：
 
 ```
@@ -150,6 +154,12 @@ node dev.mjs --scripted /path/to/script.json --ui-port 5211
 # 前端：vite 在 5211，一条 /api 前缀规则（含 POST /api/agent 这条 run 端点）反代到后端那个随机端口
 # 浏览器打开 http://localhost:5211
 ```
+
+> **复议（2026-09-17）：脚本挪到 `scripts/` 下了。** 本文里所有 `node dev.mjs` / `node test.mjs`
+> 现在读作 `node scripts/dev.mjs` / `node scripts/test.mjs`；本节那两条命令照此执行，其余文字与
+> 它们写下的日期都不动。顺带一条本节的补充：`--scripted` 会把两个临时家的路径报在启动横幅里，
+> 而它们**退出即删**——第 4 步要看 `threads/<stem>.jsonl`（现在是
+> `projects/<workspace>/<thread>.jsonl`），就在它开着的时候看。
 
 那个脚本文件就是下面这种形状（第一轮调一次 `bash` 跑 `sleep 10`：一轮工具调用 = 两次模型调用，
 那 10 秒里 run 是真的在飞，够切走、够在另一场里发一条、够切回来看它还在长）：

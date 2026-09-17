@@ -37,8 +37,8 @@ import { defineConfig } from "vite";
 // been a prefix match dragging every module request through this middleware.
 //
 // THE TARGET IS AN ENVIRONMENT VARIABLE, and that is the point of the whole
-// arrangement: the harness can be started on any port (`dev.mjs` picks a free one
-// and asks the OS for it), and nothing in the source has to know which.
+// arrangement: the harness can be started on any port (`scripts/dev.mjs` picks a
+// free one and asks the OS for it), and nothing in the source has to know which.
 //
 // 5173 IS STILL A CONTRACT, but a smaller one than it used to be. It is the
 // address a person opens and the one the harness's own CORS allowance names;

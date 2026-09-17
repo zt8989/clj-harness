@@ -165,7 +165,20 @@
                           " harness.infra.home.")))
           false))))
 
-(defn -main [& _]
+(defn run-suite!
+  "Run NAMESPACES under the isolation protocol, and answer the process's exit code.
+
+  PUBLIC FOR THE SAME REASON `isolate!` IS: a subset of the suite has to go through
+  the SAME protocol rather than the convenient part of it. A targeted run that
+  isolate!'d but never checked the verdict would report green on exactly the
+  failure the verdict exists for, and one that never cleaned up would leave a temp
+  root behind for every invocation -- and both halves are easy to forget when the
+  caller assembles the run by hand. `-main` below is this function plus an exit,
+  and `scripts/test.mjs` is the caller that made the door necessary.
+
+  NOT `run!`: that name is `clojure.core`'s since 1.12, and shadowing it here would
+  be a warning at load and a trap for whoever next requires this namespace."
+  [namespaces]
   ;; The store's path is resolved through harness.infra.home BEFORE the root moves, so
   ;; it comes from the one place that decides paths rather than a second copy of
   ;; the precedence rule -- and so the File in hand still names the developer's
@@ -173,13 +186,22 @@
   (let [store  (home/db-file)
         before (store-state store)
         dir    (isolate!)]
-    (println "test config root:" dir)
-    (println "test OS home:" @tmp-user-home)
-    (println "developer home store before this run:"
-             (if before (str "present (" (first before) " bytes, left alone)") "absent"))
-    (apply require test-namespaces)
-    (let [{:keys [fail error]} (apply t/run-tests test-namespaces)
-          isolated?            (isolation-verdict store before)
-          broken               (+ (or fail 0) (or error 0) (if isolated? 0 1))]
-      (cleanup!)
-      (System/exit (if (zero? broken) 0 1)))))
+    (try
+      (println "test config root:" dir)
+      (println "test OS home:" @tmp-user-home)
+      (println "developer home store before this run:"
+               (if before (str "present (" (first before) " bytes, left alone)") "absent"))
+      (apply require namespaces)
+      (let [{:keys [fail error]} (apply t/run-tests namespaces)
+            isolated?            (isolation-verdict store before)
+            broken               (+ (or fail 0) (or error 0) (if isolated? 0 1))]
+        (if (zero? broken) 0 1))
+      ;; A NAMESPACE THAT WILL NOT LOAD THROWS OUT OF `require`, and the temp pair
+      ;; must not survive that: the point of the arrangement is that a run leaves the
+      ;; machine as it found it, green or red. Same for anything else that throws
+      ;; between `isolate!` and the end -- the `finally` is what makes the cleanup a
+      ;; property of the protocol rather than of the happy path.
+      (finally (cleanup!)))))
+
+(defn -main [& _]
+  (System/exit (run-suite! test-namespaces)))

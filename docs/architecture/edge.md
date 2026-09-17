@@ -7,7 +7,7 @@
 认不出的路径答 404（`no such route: ...`）。
 
 CORS 只放行 `http://localhost:5173`。
-**那条放行现在只是一条备用路径**：dev 时页面走自己 origin 的反代（`dev.mjs` + `ui/vite.config.js`，
+**那条放行现在只是一条备用路径**：dev 时页面走自己 origin 的反代（`scripts/dev.mjs` + `ui/vite.config.js`，
 一条 `/api` 前缀规则就够），浏览器一个跨域请求都不发；只有把前端指到绝对地址
 （`VITE_AGENT_URL`）直连这个进程时才用得上它。
 所以端口不再是「同时改两处契约」的那件事——本进程绑哪个端口由 `--port` 决定（`0` = 随 OS 挑，
