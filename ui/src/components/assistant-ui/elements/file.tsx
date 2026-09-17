@@ -245,7 +245,11 @@ function FileDownload({
     <a
       data-slot="file-download"
       href={href}
-      download={filename || t("file.downloadAttribute")}
+      // LOCAL: `download` is the SUGGESTED FILENAME, not copy -- it is what lands on
+      // disk, so it does not follow the interface language (a Chinese page that saves
+      // a file called 「下载」 would be worse than an English default, and neither has
+      // an extension). Upstream's literal is kept.
+      download={filename || "download"}
       {...(kind === "url" && { target: "_blank", rel: "noopener noreferrer" })}
       className={cn(
         "text-muted-foreground hover:bg-accent hover:text-accent-foreground shrink-0 rounded-md p-1 transition-colors",

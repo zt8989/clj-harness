@@ -15,8 +15,7 @@
   "file": {
     "unnamed": "Unnamed file",
     "downloadLabel": "Download {{filename}}",
-    "downloadFallback": "file",
-    "downloadAttribute": "download"
+    "downloadFallback": "file"
   },
   "image": {
     "alt": "Image content",

@@ -563,7 +563,7 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
       return;
     }
     let live = true;
-    skillsFor(threadId)
+    skillsFor(threadId, t)
       .then((answer) => live && (setGroups(answer), setError(null)))
       .catch((failure: unknown) =>
         live && setError(failure instanceof Error ? failure.message : String(failure)),

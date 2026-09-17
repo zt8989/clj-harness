@@ -412,6 +412,7 @@ export const ApprovalGate: FC<{
 /// catalog here.
 const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
   const { t } = useTranslation("approval");
+  const { t: tErrors } = useTranslation("errors");
   const { decisions, decide, submitting, error } = useContext(GateContext);
   const [asked, setAsked] = useState<{
     server?: string;
@@ -429,7 +430,10 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(
-            `asking what this question was failed: HTTP ${res.status}`,
+            // A sentence THIS SIDE raises (the server said nothing usable), so it
+            // follows the interface's language -- and its key lives with the other
+            // fetch failures, in `errors`.
+            tErrors("http.askingQuestion", { status: res.status }),
           );
         }
         return (await res.json()) as { server?: string; prompt?: string; schema?: unknown };

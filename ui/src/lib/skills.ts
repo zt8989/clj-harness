@@ -23,7 +23,11 @@ type Translate = TFunction<"composer">;
 /// The server's `{:error ..}` reason, when the body carries one -- the same habit
 /// `lib/composer.ts` and `lib/projects.ts` keep, and for the same reason: the
 /// server's sentence is the one worth showing.
-async function reasonFrom(res: Response): Promise<string> {
+///
+/// WHEN THE BODY CARRIES NONE, THIS SIDE SPEAKS, and it speaks the interface's
+/// language (spec decision 3). The key is `errors`' rather than this face's, which is
+/// why the namespace is named at the call: one sentence, one home, whoever raises it.
+async function reasonFrom(res: Response, t: Translate): Promise<string> {
   const body: unknown = await res.json().catch(() => undefined);
   return body !== undefined &&
     typeof body === "object" &&
@@ -31,7 +35,7 @@ async function reasonFrom(res: Response): Promise<string> {
     "error" in body &&
     typeof body.error === "string"
     ? body.error
-    : `HTTP ${res.status}`;
+    : t("http.status", { ns: "errors", status: res.status });
 }
 
 /// One skill as the server describes it. `available?` and `reason` are a PAIR: an
@@ -60,9 +64,9 @@ export type SkillGroup = {
 /// feature's spec for why.
 export type Skill = SkillRow & { layer?: string; root: string };
 
-export async function skillsFor(threadId: string): Promise<SkillGroup[]> {
+export async function skillsFor(threadId: string, t: Translate): Promise<SkillGroup[]> {
   const res = await fetch(`${AGENT_URL}api/skills?threadId=${encodeURIComponent(threadId)}`);
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { groups?: SkillGroup[] };
   return body.groups ?? [];
 }

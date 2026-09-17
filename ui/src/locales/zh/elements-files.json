@@ -15,8 +15,7 @@
   "file": {
     "unnamed": "未命名文件",
     "downloadLabel": "下载 {{filename}}",
-    "downloadFallback": "文件",
-    "downloadAttribute": "下载"
+    "downloadFallback": "文件"
   },
   "image": {
     "alt": "图片内容",
