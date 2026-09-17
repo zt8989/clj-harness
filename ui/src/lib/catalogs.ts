@@ -30,6 +30,7 @@ import enFormat from "../locales/en/format.json";
 import enSettings from "../locales/en/settings.json";
 import enShell from "../locales/en/shell.json";
 import enThread from "../locales/en/thread.json";
+import enTrajectory from "../locales/en/trajectory.json";
 import zhApproval from "../locales/zh/approval.json";
 import zhComposer from "../locales/zh/composer.json";
 import zhErrors from "../locales/zh/errors.json";
@@ -37,6 +38,7 @@ import zhFormat from "../locales/zh/format.json";
 import zhSettings from "../locales/zh/settings.json";
 import zhShell from "../locales/zh/shell.json";
 import zhThread from "../locales/zh/thread.json";
+import zhTrajectory from "../locales/zh/trajectory.json";
 
 import type { Language } from "./language";
 
@@ -46,8 +48,8 @@ import type { Language } from "./language";
 /// read from (`src/i18next.d.ts`) and the fallback, so a key that exists only in
 /// Chinese is a key no call site can name.
 export const RESOURCES = {
-  en: { approval: enApproval, composer: enComposer, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread },
-  zh: { approval: zhApproval, composer: zhComposer, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread },
+  en: { approval: enApproval, composer: enComposer, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread, trajectory: enTrajectory },
+  zh: { approval: zhApproval, composer: zhComposer, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread, trajectory: zhTrajectory },
 } as const satisfies Record<Language, Record<string, unknown>>;
 
 /// Derived from the tables rather than listed again: a second list is a second

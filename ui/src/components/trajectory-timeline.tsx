@@ -27,12 +27,29 @@
 // tools in a row. The stacking is what makes the lane's height a quiet statement about
 // how parallel that turn was.
 import { type FC, useMemo } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { formatMillis } from "@/lib/format";
 import { KIND_HUE, LANE_KIND, type Lane } from "@/components/trajectory-colors";
 import type { TrajectoryPayload, TrajectoryTurn } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
+
+/// The translator this face's words go through. PINNED TO THE NAMESPACE, like
+/// `lib/format.ts` pins its own: a bare `TFunction` would mean "whatever the default
+/// namespace is" and would accept a shell translator by mistake, while a `string` key
+/// would lose the key check in `marksOf` entirely.
+type Translate = TFunction<"trajectory">;
+
+/// The word a lane wears. A TABLE OF LITERAL KEYS rather than `t(`lane.${lane}`)`: a built
+/// key is one the type gate cannot check. THE ID IS THE RECORD'S, THE WORD IS OURS -- the
+/// lane identity (`data-lane`, and the key into `LANE_KIND`/`KIND_HUE`) stays
+/// `input`/`model`/`tool`; only what a reader reads moves.
+const LANE_LABEL: Record<Lane, (t: Translate) => string> = {
+  input: (t) => t("lane.input"),
+  model: (t) => t("lane.model"),
+  tool: (t) => t("lane.tools"),
+};
 
 /// One mark on a lane: where it starts and ends, what to say about it, and WHICH ITEM it
 /// stands for.
@@ -58,11 +75,11 @@ type Mark = {
   never?: boolean;
 };
 
-const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool"): Mark[] => {
+const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool", t: Translate): Mark[] => {
   if (lane === "input") {
     return turn.items.flatMap((item, index) =>
       item.kind === "user" && item.at !== undefined
-        ? [{ turn: turn.index, index, label: `turn ${turn.index}`, start: item.at, end: item.at }]
+        ? [{ turn: turn.index, index, label: t("turn.label", { n: turn.index }), start: item.at, end: item.at }]
         : [],
     );
   }
@@ -77,7 +94,7 @@ const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool"): Mark[]
         {
           turn: turn.index,
           index: row === -1 ? null : row,
-          label: call.model ?? `call ${call.index}`,
+          label: call.model ?? t("call.label", { n: call.index }),
           start: call.startedAt,
           end: call.endedAt ?? call.startedAt,
         },
@@ -110,6 +127,11 @@ const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool"): Mark[]
 
 /// A lane as a row of positioned marks. Positions are fractions of the axis, so the
 /// lane's own width never enters the arithmetic.
+///
+/// THE DRAWN WORD IS NOT `name`, AND `name` IS NOT `lane`. `name` is the lane's spelling
+/// on the DOM (`data-lane`: `input` / `model` / `tools`) -- the walkthrough measures it,
+/// so it does not move with the language -- while the word beside it comes from
+/// `LANE_LABEL`. The colour still comes from `lane`, through `LANE_KIND`.
 const Lane: FC<{
   name: string;
   lane: Lane;
@@ -119,7 +141,8 @@ const Lane: FC<{
   open: { turn: number; index: number } | null;
   onOpen: (target: { turn: number; index: number }) => void;
 }> = ({ name, lane, marks, span, mode, open, onOpen }) => {
-  const { t } = useTranslation("format");
+  const { t } = useTranslation("trajectory");
+  const { t: tFormat } = useTranslation("format");
   /// The stacking: marks that overlap in time get their own vertical offset, so the
   /// lane's height grows with the turn's parallelism and no mark hides another.
   const rows = useMemo(() => {
@@ -148,7 +171,7 @@ const Lane: FC<{
 
   return (
     <div className="flex items-center gap-2" data-slot="trajectory-lane" data-lane={name}>
-      <span className="w-14 shrink-0 text-[0.7rem] text-muted-foreground">{name}</span>
+      <span className="w-14 shrink-0 text-[0.7rem] text-muted-foreground">{LANE_LABEL[lane](t)}</span>
       <div className="relative flex-1" style={{ height }} data-slot="trajectory-lane-track">
         {rows.map(({ mark, row }, i) => {
           const [from, to] = position(mark, span, mode);
@@ -157,7 +180,7 @@ const Lane: FC<{
               ? 0
               : (mark.wait / Math.max(1, mark.end - mark.start + mark.wait)) * 100;
           const isOpen = mark.index !== null && open?.turn === mark.turn && open.index === mark.index;
-          const duration = formatMillis(Math.max(0, mark.end - mark.start), t);
+          const duration = formatMillis(Math.max(0, mark.end - mark.start), tFormat);
           const geometry = {
             left: `${from * 100}%`,
             width: `${Math.max(to - from, 0.004) * 100}%`,
@@ -195,8 +218,8 @@ const Lane: FC<{
               key={`${mark.label}-${i}`}
               type="button"
               onClick={() => onOpen({ turn: mark.turn, index: mark.index as number })}
-              title={`${mark.label} · ${duration} — click to open it`}
-              aria-label={`open ${mark.label} in turn ${mark.turn}`}
+              title={t("timeline.openTitle", { label: mark.label, duration })}
+              aria-label={t("timeline.openAria", { label: mark.label, turn: mark.turn })}
               aria-pressed={isOpen}
               data-slot="trajectory-segment"
               data-mode={mode}
@@ -251,11 +274,11 @@ const position = (mark: Mark, span: Span, mode: Mode): [number, number] => {
   ];
 };
 
-const spanOf = (turns: readonly TrajectoryTurn[]): Span => {
+const spanOf = (turns: readonly TrajectoryTurn[], t: Translate): Span => {
   const all = turns.flatMap((turn) => [
-    ...marksOf(turn, "input"),
-    ...marksOf(turn, "model"),
-    ...marksOf(turn, "tool"),
+    ...marksOf(turn, "input", t),
+    ...marksOf(turn, "model", t),
+    ...marksOf(turn, "tool", t),
   ]);
   /// A turn with no marks is left OUT of the map rather than given an empty span:
   /// `position` falls back to the mark's own span for a turn it cannot find, and an
@@ -264,9 +287,9 @@ const spanOf = (turns: readonly TrajectoryTurn[]): Span => {
     turns
       .map((turn) => {
         const own = [
-          ...marksOf(turn, "input"),
-          ...marksOf(turn, "model"),
-          ...marksOf(turn, "tool"),
+          ...marksOf(turn, "input", t),
+          ...marksOf(turn, "model", t),
+          ...marksOf(turn, "tool", t),
         ];
         return [turn.index, own] as const;
       })
@@ -284,6 +307,14 @@ const spanOf = (turns: readonly TrajectoryTurn[]): Span => {
   };
 };
 
+/// The two ways to lay the same marks out, named. A TABLE OF LITERAL KEYS for the same
+/// reason `LANE_LABEL` is one: only the drawn word moves -- `data-mode` stays `duration` /
+/// `turns`, because that is what the walkthrough measures and what `mode` means.
+const MODE_LABEL: Record<Mode, (t: Translate) => string> = {
+  duration: (t) => t("mode.duration"),
+  turns: (t) => t("mode.turns"),
+};
+
 export const TrajectoryTimeline: FC<{
   payload: TrajectoryPayload;
   mode: Mode;
@@ -291,8 +322,12 @@ export const TrajectoryTimeline: FC<{
   open: { turn: number; index: number } | null;
   onOpen: (target: { turn: number; index: number }) => void;
 }> = ({ payload, mode, onMode, open, onOpen }) => {
-  const { t } = useTranslation("format");
-  const span = useMemo(() => spanOf(payload.turns), [payload.turns]);
+  const { t } = useTranslation("trajectory");
+  const { t: tFormat } = useTranslation("format");
+  const span = useMemo(() => spanOf(payload.turns, t), [payload.turns, t]);
+  /// The lane identities, in drawing order, each with the `data-lane` spelling it has
+  /// always had (the tool lane's is `tools`, not `tool`). The words drawn beside them come
+  /// from `LANE_LABEL` inside `Lane`.
   const lanes: { name: string; lane: Lane }[] = [
     { name: "input", lane: "input" },
     { name: "model", lane: "model" },
@@ -317,19 +352,19 @@ export const TrajectoryTimeline: FC<{
               mode === m ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >
-            {m}
+            {MODE_LABEL[m](t)}
           </button>
         ))}
         {!nothingToDraw && (
           <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-            {formatMillis(Math.max(0, total), t)} total
+            {t("timeline.total", { duration: formatMillis(Math.max(0, total), tFormat) })}
           </span>
         )}
       </div>
       {/* A record with no marks at all gets a sentence, not an empty axis. */}
       {nothingToDraw ? (
         <p className="text-xs text-muted-foreground">
-          this record has no timings yet — nothing to lay out.
+          {t("timeline.empty")}
         </p>
       ) : (
         lanes.map(({ name, lane }) => (
@@ -337,7 +372,7 @@ export const TrajectoryTimeline: FC<{
             key={lane}
             name={name}
             lane={lane}
-            marks={payload.turns.flatMap((turn) => marksOf(turn, lane))}
+            marks={payload.turns.flatMap((turn) => marksOf(turn, lane, t))}
             span={span}
             mode={mode}
             open={open}
