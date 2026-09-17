@@ -1,5 +1,5 @@
 (ns harness.cap.tools
-  "The sixteen tools this harness ships: their bodies, their faces, and nothing
+  "The seventeen tools this harness ships: their bodies, their faces, and nothing
   else. It is a CAPABILITY, so it lives here and not in harness.kernel.tools --
   which holds the seam that runs a tool, not any particular tool.
 
@@ -756,6 +756,20 @@
   [{:keys [job]}]
   (jobs/read-output kernel-tools/*thread-id* job))
 
+(def ^:private bash-kill-description
+  (str "Stop a background job -- the command and everything it started -- and forget it."
+       " Use it when a job has done what you needed, has gone wrong, or is holding something"
+       " you want back (a port, a file). "
+       "The answer carries whatever the job printed that you had not read yet, plus what"
+       " happened: `[stopped]` if it was still running, or `[exit N]` if it had already"
+       " ended by itself. Either way the job is gone afterwards -- reading a stopped job is"
+       " the same as reading one that never existed."))
+
+(defn- t-bash-kill
+  "`bash_kill`'s body: stop it, answer with what it had said, forget it."
+  [{:keys [job]}]
+  (jobs/stop! kernel-tools/*thread-id* job))
+
 (register! "bash_background"
   (tool bash-background-description
         {"command" {:type "string" :description "Command line."}}
@@ -765,6 +779,11 @@
   (tool bash-output-description
         {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
         [:job] t-bash-output))
+
+(register! "bash_kill"
+  (tool bash-kill-description
+        {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
+        [:job] t-bash-kill))
 
 (register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."

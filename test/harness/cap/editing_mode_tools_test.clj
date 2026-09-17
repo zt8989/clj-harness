@@ -102,8 +102,8 @@
   ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
   ;; anchor editing, and this is the assertion that would move first if somebody
   ;; changed it back by accident -- or changed it to something that is neither.
-  (is (= ["anchor_grep" "bash" "bash_background" "bash_output" "eval" "glob"
-          "insert" "read" "replace" "session-configure" "skill" "todo_write"
+  (is (= ["anchor_grep" "bash" "bash_background" "bash_kill" "bash_output" "eval"
+          "glob" "insert" "read" "replace" "session-configure" "skill" "todo_write"
           "undo_last_replace" "web_fetch" "web_search" "write"]
          (spec-names nil))
       "an unconfigured process is served the anchor toolset")
@@ -179,7 +179,7 @@
   (let [names (spec-names "emt-anchor")]
     (is (not (contains? (set names) "edit")))
     (testing "and everything that is not an editing tool is untouched"
-      (is (= ["bash" "bash_background" "bash_output" "eval" "glob" "read"
+      (is (= ["bash" "bash_background" "bash_kill" "bash_output" "eval" "glob" "read"
              "session-configure" "skill" "todo_write" "web_fetch" "web_search"
              "write"]
              (non-editing-names "emt-anchor"))))))
@@ -195,7 +195,7 @@
     (testing "and `edit` does"
       (is (contains? (set names) "edit")))
     (testing "with everything else untouched"
-      (is (= ["bash" "bash_background" "bash_output" "eval" "glob" "read"
+      (is (= ["bash" "bash_background" "bash_kill" "bash_output" "eval" "glob" "read"
              "session-configure" "skill" "todo_write" "web_fetch" "web_search"
              "write"]
              (non-editing-names "emt-strrep"))))))

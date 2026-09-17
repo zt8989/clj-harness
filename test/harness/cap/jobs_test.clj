@@ -148,3 +148,43 @@
         (dotimes [_ 3] (jobs/ensure-exit-hook!))
         (is (= 1 @installs) "three calls, one hook -- two would run the reap twice"))
       (finally (jobs/ensure-exit-hook!)))))
+
+(deftest stopping-a-job-takes-the-whole-tree-and-forgets-it
+  (let [dir (support/temp-dir "jobs-stop")
+        pid-file (io/file dir "child.pid")
+        id (jobs/start! "jt-i" {:command (str "sleep 30 & echo $! > "
+                                              (shell/quote-arg (.getAbsolutePath pid-file))
+                                              "; wait")})
+        pid (do (Thread/sleep 1000)
+                (Long/parseLong (clojure.string/trim (slurp pid-file :encoding "UTF-8"))))]
+    (is (alive? pid) "the job really is running")
+    (let [answer (jobs/stop! "jt-i" id)]
+      (testing "the answer says it was stopped, not that it exited"
+        (is (= "[stopped]" (last (clojure.string/split-lines answer)))))
+      (testing "the command and the child it started are both gone"
+        (is (gone-within? pid 5000))))
+    (testing "and the job is forgotten, so a second stop finds nothing"
+      (let [e (try (jobs/stop! "jt-i" id) nil (catch Exception e e))]
+        (is (= :unknown-job (:reason (ex-data e)))))
+      (let [e (try (jobs/read-output "jt-i" id) nil (catch Exception e e))]
+        (is (= :unknown-job (:reason (ex-data e))))))))
+
+(deftest stopping-a-job-returns-what-this-session-never-read
+  ;; Stopping and reading are not interchangeable: a stop that dropped the unread
+  ;; lines would make the order of two calls change what the model can know.
+  (let [id (jobs/start! "jt-j" {:command "echo nobody-read-this; sleep 30"})]
+    (Thread/sleep 1000)
+    (let [answer (jobs/stop! "jt-j" id)
+          lines  (clojure.string/split-lines answer)]
+      (is (some #{"nobody-read-this"} lines))
+      (is (= "[stopped]" (last lines))))))
+
+(deftest a-job-that-ended-gives-its-exit-code-and-is-forgotten
+  (let [id (jobs/start! "jt-k" {:command "exit 3"})]
+    (read-until "jt-k" id #(re-find #"\[exit" (:answer %)) 10000)
+    (let [answer (jobs/stop! "jt-k" id)]
+      (testing "a job that died on its own reports its own exit code"
+        (is (= "[exit 3]" (last (clojure.string/split-lines answer)))))
+      (testing "and is still forgotten, because remembering it forever is a leak"
+        (let [e (try (jobs/read-output "jt-k" id) nil (catch Exception e e))]
+          (is (= :unknown-job (:reason (ex-data e)))))))))

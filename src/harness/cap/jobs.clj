@@ -225,6 +225,40 @@
     (pumping! thread-id job-id handle)
     job-id))
 
+(defn stop!
+  "Stop JOB-ID -- it and everything it started -- and forget it.
+
+  THE ANSWER STILL CARRIES WHAT THE SESSION NEVER READ. A stop that silently dropped
+  the last lines would make 'read it, then stop it' and 'stop it' two different
+  amounts of information, and the short one is what a caller reaches for when the
+  job has already gone wrong.
+
+  A JOB THAT HAS ALREADY ENDED IS FORGOTTEN TOO, and answers with its exit code:
+  this is the only verb that leaves the registry, so `bash_kill` means 'stop caring
+  about this job' in both cases. Asking twice therefore gets the unknown-job refusal
+  the second time -- idempotent in the only way that matters, since the second caller
+  finds it gone rather than finding it twice.
+
+  THROWS for a job id this session does not have."
+  [thread-id job-id]
+  (let [p (path thread-id job-id)
+        ;; Taking the unread lines and leaving the registry are ONE step: a reader
+        ;; racing this sees either a job with its lines or no job at all, never a job
+        ;; whose output was taken and then forgotten.
+        [before _] (swap-vals! registry
+                               (fn [reg]
+                                 (if (get-in reg p)
+                                   (update-in reg [thread-id :jobs] dissoc job-id)
+                                   reg)))]
+    (if-let [j (get-in before p)]
+      (let [running? ((:alive? (:handle j)))
+            line-loss (unread j)]
+        (when running? (close! j))
+        ;; `[stopped]` only ever comes from here (a read says `[running]` or
+        ;; `[exit N]`), so a reader can tell 'I stopped this' from 'it died'.
+        (answer (if running? "[stopped]" (status-line (:handle j))) line-loss))
+      (throw (unknown-job thread-id job-id)))))
+
 (defn read-output
   "What JOB-ID has printed since this session last read it, and whether it is still
   running: its new lines, a line per batch that scrolled off the tail before the

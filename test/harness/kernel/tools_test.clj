@@ -201,17 +201,17 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "bash_background" "bash_output" "eval" "glob"
-              "insert" "read" "replace" "session-configure" "skill" "todo_write"
-              "undo_last_replace" "web_fetch" "web_search" "write"]
+      (is (= ["anchor_grep" "bash" "bash_background" "bash_kill" "bash_output" "eval"
+              "glob" "insert" "read" "replace" "session-configure" "skill"
+              "todo_write" "undo_last_replace" "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "bash_background" "bash_output" "edit" "eval" "glob" "read"
-              "session-configure" "skill" "todo_write" "web_fetch" "web_search"
-              "write"]
+      (is (= ["bash" "bash_background" "bash_kill" "bash_output" "edit" "eval" "glob"
+              "read" "session-configure" "skill" "todo_write" "web_fetch"
+              "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
@@ -376,3 +376,26 @@
   ;; these are three names rather than one with an `action`.
   (is (str/includes? (:content (call "bash_background" {})) "missing required argument"))
   (is (str/includes? (:content (call "bash_output" {})) "missing required argument")))
+
+(deftest a-background-job-can-be-stopped-and-is-then-gone
+  (let [started (:content (call "bash_background" {:command "sleep 30"}))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        answer  (:content (call "bash_kill" {:job job-id}))]
+    (is (some? job-id))
+    (is (str/includes? answer "[stopped]"))
+    (testing "and reading it afterwards is the same as reading one that never existed"
+      (let [{:keys [content error]} (call "bash_output" {:job job-id})]
+        (is (true? error))
+        (is (str/includes? content (str "unknown job: " job-id))))))
+  (testing "a job that ended on its own reports its exit code instead"
+    (let [started (:content (call "bash_background" {:command "exit 3"}))
+          job-id  (second (re-find #"job (j\d+) started" started))]
+      ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
+      ;; different facts, and only the second one is true once the command is gone.
+      (read-job-until nil job-id #(re-find #"\[exit" %) 10000)
+      (is (str/includes? (:content (call "bash_kill" {:job job-id})) "[exit 3]")))))
+
+(deftest bash-kill-refuses-a-job-it-does-not-have
+  (let [{:keys [content error]} (call "bash_kill" {:job "j-not-a-job"})]
+    (is (true? error))
+    (is (str/includes? content "unknown job: j-not-a-job"))))
