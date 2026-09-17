@@ -20,6 +20,9 @@ components/
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
+  turn-steps.tsx    一整轮的**折叠**：结束的那一轮把步骤收起来、只留答案，
+                    行那条摘要（`N 次工具调用 · M 条消息`）与它背后的 store 都在这儿
+  picker.tsx        四个选择器共用的那一份：可搜索的浮层（项目 / 分支 / model / 思考档）
   composer-chrome.tsx   composer 上下两条、三个 LOCAL: 插入点
                         （ComposerFrame / ComposerTools / ComposerAddAttachment），
                         以及附件那条判据在界面上的两处（禁用的 `+`、那句拒话）
@@ -37,6 +40,11 @@ lib/
                     **零 import**，所以 UI 套件能直接测它
   attachment-rules.ts  附件那两条判据（模型收不收图、源字节有没有过 2 MB）与它们各自的拒话。
                     同样**零 import**，同样被 UI 套件直接测
+  turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、它做了几次调用几条消息、
+                    摘要那行写什么。**零 import**（`turnBounds` / `turnIsSettled` /
+                    `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
+  picker.ts         选择器那份清单的**过滤与分组**：查什么（标签 / hint / 组名）、
+                    同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
   attachments.ts    附件适配器（这一份就是「composer 有没有附件能力」这个开关本身）+
                     它往里写、界面往外读的那个小 store
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
@@ -97,24 +105,58 @@ lib/
 - **字体是平台自己的那一串**：`--font-sans` 是 `-apple-system, BlinkMacSystemFont, "Segoe UI",
   "PingFang SC", …`，中文直接用系统字体（macOS 上是 PingFang SC）。它换掉了一个要先下载的 webfont
   ——构建产物里因此少了三份 `.woff2` 与那几条 `@font-face`。`--font-mono` 没动，代码块照旧是等宽。
-- **对话区两档字号，第三个数字是载荷**：正文（助手答案）**14px**，步骤行（工具行、思考行）
-  **13px**，参数与结果块 **12px**。正文那条规则写在 `ui/src/styles.css` 里、按
-  `[data-slot="aui_assistant-message-content"]` 命中——那个元素是抄来的文件里的，它没有 `aui-*`
-  class 可挂，而改那份文件就破坏了「不重装直接 diff」；步骤行的 13px 写在
-  `message-parts.tsx` 的行上（行是我们自己的）。
+- **对话区两档字号，第三个数字是载荷**：正文**14px**（对话**两侧**都是：答案、问题，以及问题在
+  编辑态的那只输入框），步骤行（工具行、思考行）**13px**，参数与结果块 **12px**。正文那条规则写在
+  `ui/src/styles.css` 里，**故意不放进 `@layer base`**——编辑框自带 `text-base`（上游的），
+  而 Tailwind v4 把 utilities 声明在 base 之后，在层里写多高的特异性也压不过它。命中的钩子两侧
+  **不同名**：答案的内容 div 带 `data-slot="aui_assistant-message-content"` 而没有 `aui-*` class，
+  问题的气泡反过来带 `aui-user-message-content` class 而没有 `data-slot`——两边都是上游自己的命名，
+  而改那份抄来的文件就破坏了「不重装直接 diff」。步骤行的 13px 写在 `message-parts.tsx` 的行上
+  （行是我们自己的）。**没动的是 composer 的输入框**：它照旧 16px，输入框的惯例。
+- **对话区只跟着末尾走，那颗 `arrow-down` 只在读者自己走开时出现**：viewport **不锚最后一段的顶部**
+  （上游 registry 给的是 `turnAnchor="top"`，而那个属性同时把自动跟随**关掉**：新内容在折线下方生长、
+  没人跟，按钮从这一段的第一行起就一直挂着）。`thread.aui.tsx` 里这**一处 `LOCAL:` 改动**把它去掉，
+  `turnAnchor` 于是回到默认的 `bottom`：run 期间视口跟着末尾走，手动往上滚才脱开，回到末尾
+  （自己滚回，或点那颗按钮）就立刻重新跟随，按钮同时消失。
+- **一轮结束就折起来，只留最后一个 message**：助手那几条消息是这一轮的**步骤**，最后一条是**答案**，
+  而长的对话里九成内容都是步骤。所以一轮只要**停下来**，页面上就只剩**答案**，上面挂一行
+  `N 次工具调用 · M 条消息`，点开把步骤放回来、再点收起。**折着是默认、开着是例外**：记住的是
+  「读者手动开过哪几轮」，于是「自动折叠」不需要任何 effect（停下来就不再是例外），刷新之后回到折着。
+  停下来的判据是**这一轮最后一条消息的状态**：`running` 还在写、`requires-action` 停在人身上
+  （审批卡就在步骤里，折起来会把它藏掉），`complete` 与 `incomplete` 都算停了——中断的一轮同样算结束。
+  轮的**边界是数出来的**（相邻的助手消息，两端的邻居说话），算术全在 `lib/turns.ts`（零 import，
+  UI 套件直接当数测），UI 在 `components/turn-steps.tsx`。**那一行不是当年删掉的「N tool call」组头回来**：
+  那个头在**每个工具调用**前面、计数恒为 1，这一行是**一整轮**一行。
+- **composer 的四个选择器是一个可搜索的浮层，不是原生 `<select>`**（`components/picker.tsx`）：
+  项目、分支、model、思考档都是「点一下 → 弹出一个带搜索框的列表」。列表**可以按组，但只有一层**——
+  model 按**供应商**一行一组、底下是它自己的 model，一条平铺的清单，不是「先选厂商、再选 model」；
+  键盘是上/下/Home/End/Enter/Esc，焦点落在当前值上、关掉时回触发器。**搜索匹配三样东西**：
+  标签、`hint`、组名——项目行的 `hint` 是完整路径（所以「workspace」也能找到一条只有末段做标签的项目），
+  model 的 id 不含厂商名（所以「deepseek」要能找到它全部 model）。算术在**零 import** 的
+  `lib/picker.ts`，UI 套件直接测。**思考档没有搜索框**（三个选项一眼读完，搜索框在那里是陈设），
+  其余三个有。两个「画得出来」的口子也在这里：model 选择器允许一行**不在目录里**的当前 model
+  （会话由 inline provider 服务时），正如项目选择器允许一个本 home 没登记过的目录。
+- **会话开始之后，composer 底下不留空隙**：抄来那份 footer 带着上游的 `pb-4 md:pb-6`，于是停靠的
+  composer 与窗口底边之间留着 16–24px 的页面底色——一段读起来像「剩下来的地方」的空白。
+  规则写在 `ui/src/styles.css`：`.aui-thread-viewport-footer:has([data-started]) { padding-bottom: 0 }`，
+  `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框在会话有消息时挂上），
+  首次会话居中的时候仍是上游的间距。
 
 抄进来的清单（对账就是不重装直接 diff）：
 
 | 位置 | 是什么 |
 |---|---|
-| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button、**其中 `thread.aui.tsx` 与 `thread-list.aui.tsx` 两份带 `LOCAL:` 改动**（前者的三处插入点见下，后者见再下面），其余十份一字未改；`attachment.aui.tsx` 与 `image.tsx` 都在**原样未改**那一组里，而它们今天真的被用上了——composer 的缩略图、对话里那张图与点开放大，画的就是这两份（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button、**其中 `thread.aui.tsx` 与 `thread-list.aui.tsx` 两份带 `LOCAL:` 改动**（前者的五处见下，后者见再下面），其余十份一字未改；`attachment.aui.tsx` 与 `image.tsx` 都在**原样未改**那一组里，而它们今天真的被用上了——composer 的缩略图、对话里那张图与点开放大，画的就是这两份（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
 | `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
 | `src/hooks/` | 2 份 hook，同样未改 |
 
 **两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
 （`ComposerFrame` 套在 composer 外面、`ComposerTools` 画在动作行右侧、`ComposerAddAttachment` 顶替动作行
-左侧那颗附图按钮），三处都只为让 `composer-chrome.tsx` 有地方可接——这份文件的行、样式与结构其余部分
-与上游一致。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
+左侧那颗附图按钮），三处都只为让 `composer-chrome.tsx` 有地方可接；**第四处不是插入点，是删了一个
+属性**——viewport 的 `turnAnchor="top"`（见上一节「只跟着末尾走」）；**第五处是消息级的**——`AssistantMessage`
+读一次折叠钩子（`useStepFold` / `useTurnFolded`），据此把整条消息 `hidden`、或在轮首画那一行摘要，
+**逻辑一行都不在这份文件里**（`components/turn-steps.tsx` 与 `lib/turns.ts`），它只问「我该被收起来吗」。
+五处之外，这份文件的行、样式与结构其余部分与上游一致。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
 按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
 它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
 `ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有
@@ -128,6 +170,11 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 `thread.aui.tsx` 会画它自己那个头），`ReasoningGroup` 是思考。工具行与思考行是**同一形状的一行**：
 `类型图标 · 名字 · 摘要`，状态（转圈 / 对勾 / 叉 / 感叹号）在**行尾**、词进 `sr-only`，
 参数与结果仍在行里点开才见（**默认折叠是有意的差异**，实现与理由见该文件头注释）。
+**唯一的例外是正在流式的那段思考**：token 到达期间它自己展开，用上游那扇「跟随最新 token」的
+窗口（`max-h-64` + 底部渐隐）滚动显示；最后一个 token 落下就折回去，行上留**首行**。
+历史会话（不流式的）永远是折的，手动开合过的面板也不再被自动改动（`userOpen ?? streaming`）。
+**轮那一层另有一行摘要**（`N 次工具调用 · M 条消息`，见上「一轮结束就折起来」）：它不是组头的回归——
+组头在**每个调用**前面、计数恒为 1，那一行在**一整轮**前面、数的是这一轮做了多少。
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
 （含 MCP 的）不改前端就能看见它的调用。
 **composer 那一组**是上面那三个插入点（`ComposerFrame` / `ComposerTools` / `ComposerAddAttachment`），
@@ -284,7 +331,8 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 ## 测试
 
 `cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats}.ts` 是被它 import 的普通模块：
+`test/suites/{frames,client,turn,approval,skills,stats,elicitation,attachments,turns,picker}.ts`
+是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
@@ -303,7 +351,10 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
   `suites/stats.ts` 引 `src/lib/format.ts`，为的是把「`2.9M tok` 是这么写出来的」钉住
   ——不然那句话只有一个没测的格式化函数守着；`suites/attachments.ts` 引
   `src/lib/attachment-rules.ts`，为的是把**与 `undeclared-input` 同一条**的那个判据钉住，
-  外加 2 MB 那个边界的两侧。
+  外加 2 MB 那个边界的两侧；`suites/turns.ts` 引 `src/lib/turns.ts`，为的是把折起来那条规则的
+  **算术**钉住——轮的边界、什么时候算停、那一行数出来是几（这三件事在浏览器里只看得到结果）；
+  `suites/picker.ts` 引 `src/lib/picker.ts`，为的是把「查什么」与「同组怎么并」钉住（同样是
+  只在浏览器里看结果、看不出规则的那一类）。
 - **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
   它**不**断菜单怎么画、哪个键选什么；`suites/stats.ts` 断的是端点折出来的数**与那五格的字符串**，
   它**不**断那条灰线的位置与字号；`suites/attachments.ts` 两条**都是纯的**，它**不**断那颗按钮的
@@ -321,6 +372,8 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 
 - **两页都会写**：General 的 Save 写 `config.edn` 的 `:default`，Models 的表单写 `:providers`
   （以及，填了密钥时，`.env` 的一行）。
+- **这一页的下拉仍是原生 `<select>`**，与 composer 那四个不一样：这里是一张表单，选项是四五条，
+  一眼读完，而 composer 那边面对的是三十个项目 / 一年的分支 / 一整个厂商目录（见上）。
 - **曾经还有两页**（「API key」与「Config home」），主人看过后删掉了：它们报的东西——密钥有没有、
   从哪来、是哪一行、家目录在哪、哪几份文件在——Models 的每一行（`ACME_GATEWAY_API_KEY` 与 `key ✓`）
   与 composer 那边已经在眼前，**一页只装已经看得见的东西就是一步多余的路**。

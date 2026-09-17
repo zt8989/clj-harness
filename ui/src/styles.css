@@ -150,19 +150,47 @@
     @apply font-sans;
     }
 
-  /* The assistant's answer is 14px, and it is set HERE rather than on the element
-     because that element is a copied registry file (`thread.aui.tsx`), kept
-     byte-comparable against upstream so a re-pull can be diffed. Its only stable
-     hook is the `data-slot` attribute, so that is what this rule reaches for.
-
-     The steps of a turn sit one size below the answer (13px) and payloads
-     (arguments, results, durations) one below that (12px, unchanged) -- the two
-     smaller sizes live on the rows themselves, in `message-parts.tsx`, because
-     those rows are ours. Reading rule: prose is 14, a step is 13, a payload is 12. */
-  [data-slot="aui_assistant-message-content"] {
-    font-size: 14px;
-    }
 }
+
+/* The reading rule: prose is 14px, a step is 13px, a payload is 12px. The two
+   smaller sizes live on the rows themselves, in `message-parts.tsx`, because
+   those rows are ours; prose is 14px on BOTH sides of the conversation -- the
+   answer and the question are the same kind of text, and the edit box is that
+   question under construction, so it is the same size as the bubble it came
+   from.
+
+   The prose elements are not ours either: they are in a copied registry file
+   (`thread.aui.tsx`), kept byte-comparable against upstream so a re-pull can be
+   diffed. Their hooks are whatever upstream put on them, and the two sides of
+   the conversation do not agree on which -- the answer's content div carries a
+   `data-slot` and no `aui-*` class, the question's bubble carries the
+   `aui-user-message-content` class and no `data-slot`. Both are upstream's own
+   naming, and both are what these selectors reach for.
+
+   DELIBERATELY UNLAYERED. The edit box carries a size of its own (`text-base`,
+   upstream's), and Tailwind v4 declares its utilities layer AFTER `base` -- so
+   inside `@layer base` this rule would lose to that utility whatever its
+   specificity. Outside every layer, it wins. */
+[data-slot="aui_assistant-message-content"],
+.aui-user-message-content,
+.aui-edit-composer-input {
+  font-size: 14px;
+  }
+
+/* No gap under the composer once the conversation has started. The copied footer
+   carries upstream's `pb-4 md:pb-6`, which leaves 16-24px of page background
+   between the docked composer and the bottom of the window -- a strip that reads
+   as leftover space rather than as layout, and that the composer's own box (the
+   rounded frame around it, one padding wide on every side) already accounts for.
+
+   `:has()` is what keeps this to the DOCKED state: `data-started` is put on the
+   composer's frame when the thread has messages, which is exactly when the footer
+   stops being part of a centred empty page. On an empty session the composer is
+   centred and the footer's padding is upstream's business. Unlayered, like the
+   rule above and for the same reason: `pb-4 md:pb-6` are utilities. */
+.aui-thread-viewport-footer:has([data-started]) {
+  padding-bottom: 0;
+  }
 
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 

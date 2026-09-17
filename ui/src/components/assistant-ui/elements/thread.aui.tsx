@@ -23,6 +23,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
+import { TurnStepsTrigger, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -192,8 +193,21 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
         ["--composer-padding" as string]: "8px",
       }}
     >
+      {/* LOCAL: upstream anchors the viewport to the TOP of the last turn
+          (`turnAnchor="top"`), and that attribute does two things at once: it
+          keeps the last turn's opening line pinned near the top, and it turns
+          auto-scroll OFF (see `useThreadViewportAutoScroll`, where `autoScroll`
+          defaults to `turnAnchor !== "top"`). With it, a run's new content grows
+          below the fold, nothing follows it, and the scroll-to-bottom button is
+          showing from the first line of the run onwards.
+
+          This repo wants upstream's other mode instead, and dropping the
+          attribute is how you ask for it: `turnAnchor` is `"bottom"` by default,
+          so the viewport follows the run until the reader scrolls up, and that
+          button means exactly one thing -- "you have scrolled away from the end,
+          click to come back". It hides again the moment the reader is back at
+          the bottom, whether by that click or by hand. */}
       <ThreadPrimitive.Viewport
-        turnAnchor="top"
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
@@ -431,6 +445,18 @@ const AssistantMessage: FC = () => {
   const turnEnd = useAuiState(isTurnEnd);
   const continuation = useAuiState(isTurnContinuation);
 
+  // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
+  // of it except the answer, which stays where it is -- and its first message
+  // draws the one-line summary of what went away. `fold === "step"` is this whole
+  // message being put away; `fold === "head"` is this one drawing the summary and
+  // having its own content put away, and `folded` says whether the reader has it
+  // open. Everything behind those three values is `components/turn-steps.tsx`,
+  // which is ours: the boundary of a turn and the arithmetic behind the summary
+  // line are in `lib/turns.ts`. `fold === "none"` means "draw this message exactly
+  // as this file always did".
+  const fold = useStepFold();
+  const folded = useTurnFolded();
+
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
@@ -439,14 +465,23 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
+      data-fold={fold}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
         continuation && "-mt-4",
+        fold === "step" && "hidden",
       )}
     >
+      {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
+          way back in. It is drawn by the turn's FIRST message, because that is
+          where a reader meets the turn; the steps it hides are its siblings. */}
+      {fold === "head" ? <TurnStepsTrigger /> : null}
       <div
         data-slot="aui_assistant-message-content"
-        className="text-foreground px-2 leading-relaxed wrap-break-word"
+        className={cn(
+          "text-foreground px-2 leading-relaxed wrap-break-word",
+          fold === "head" && folded && "hidden",
+        )}
       >
         <MessagePrimitive.GroupedParts
           groupBy={groupPartByType({

@@ -44,10 +44,12 @@
 // one the new one serves -- the server enforces that, and the picker just does not
 // pretend otherwise.
 //
-// THE PICKERS ARE NATIVE SELECTS. A dropdown built from the kit would be prettier
-// and would also be four hundred lines of state for a list that is at most a few
-// dozen entries; a `<select>` is keyboard-navigable and readable by a screen
-// reader for free, which is the part that is not worth re-deriving.
+// THE FOUR PICKERS ARE `components/picker.tsx` -- the projects, the branch, the
+// model and the effort. They used to be native `<select>`s, and the reason that
+// changed is in that file: these lists are long (thirty projects, a year of
+// branches, a catalog of vendors) and a native select cannot be searched. The
+// model list is the one that is GROUPED (a heading per vendor, one flat list under
+// each) and it is still one pick, not vendor-then-model.
 import {
   createContext,
   useCallback,
@@ -91,6 +93,7 @@ import { bindThread, listProjects, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ComposerStats } from "./composer-stats";
+import { Picker } from "./picker";
 
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
@@ -125,55 +128,6 @@ function useRemote<T>(load: () => Promise<T>): {
   return { data, error, reload: useCallback(() => setNonce((n) => n + 1), []) };
 }
 
-const Select: FC<{
-  slot: string;
-  label: string;
-  value: string;
-  options: { value: string; label: string; group?: string }[];
-  disabled?: boolean;
-  title?: string;
-  leading?: React.ReactNode;
-  onChange: (value: string) => void;
-}> = ({ slot, label, value, options, disabled, title, leading, onChange }) => {
-  // Options that name a group are gathered under it, so a long catalog reads as
-  // a short list of vendors each with its models. Options with no group stand on
-  // their own -- and the two are never mixed within one picker.
-  const grouped = options.some((o) => o.group !== undefined);
-  const groups: { group: string | undefined; options: typeof options }[] = [];
-  for (const option of options) {
-    const last = groups[groups.length - 1];
-    if (last !== undefined && last.group === option.group) last.options.push(option);
-    else groups.push({ group: option.group, options: [option] });
-  }
-  const item = (option: (typeof options)[number]) => (
-    <option key={option.value} value={option.value}>
-      {option.label}
-    </option>
-  );
-  return (
-    <label data-slot={slot} className="flex min-w-0 items-center gap-1.5" title={title}>
-      {leading}
-      <span className="sr-only">{label}</span>
-      <select
-        data-slot={`${slot}-select`}
-        aria-label={label}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        className="text-muted-foreground hover:text-foreground max-w-[16rem] min-w-0 cursor-pointer truncate bg-transparent text-sm outline-none disabled:opacity-50"
-      >
-        {grouped
-          ? groups.map((g) => (
-              <optgroup key={g.group} label={g.group}>
-                {g.options.map(item)}
-              </optgroup>
-            ))
-          : options.map(item)}
-      </select>
-    </label>
-  );
-};
-
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const projects = useRemote(
@@ -183,7 +137,14 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const dirs = (projects.data ?? []).map((p) => ({ value: p.path, label: projectName(p.path) }));
+  // The label is the last path segment -- a row has to be scannable -- and the
+  // whole path rides along as the hint: it is what the row is searched by (a
+  // person remembers `workspace`) and what it shows when the list is open.
+  const dirs = (projects.data ?? []).map((p) => ({
+    value: p.path,
+    label: projectName(p.path),
+    hint: p.path,
+  }));
   const current = git.data?.dir ?? "";
 
   const rebind = async (path: string) => {
@@ -223,7 +184,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
     <div data-slot="composer-context" className="flex flex-col gap-1 px-1.5 pt-1 pb-0.5">
       <div className="flex items-center gap-4">
         {dirs.length > 0 && (
-          <Select
+          <Picker
             slot="composer-directory"
             label="Project directory"
             title={current}
@@ -236,13 +197,13 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
               // be drawable, or the picker would silently show someone else's answer.
               dirs.some((d) => d.value === current) || current === ""
                 ? dirs
-                : [{ value: current, label: projectName(current) }, ...dirs]
+                : [{ value: current, label: projectName(current), hint: current }, ...dirs]
             }
-            onChange={(path) => void rebind(path)}
+            onPick={(option) => void rebind(option.value)}
           />
         )}
         {git.data?.["repo?"] === true && (
-          <Select
+          <Picker
             slot="composer-branch"
             label="Git branch"
             value={branch ?? ""}
@@ -258,7 +219,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
                 ? [{ value: "", label: "detached" }, ...git.data.branches.map(branchesOf)]
                 : git.data.branches.map(branchesOf)
             }
-            onChange={(next) => void switchTo(next)}
+            onPick={(option) => void switchTo(option.value)}
           />
         )}
         {git.data?.["repo?"] === true && git.data.dirty > 0 && (
@@ -339,49 +300,68 @@ const ComposerTools: FC = () => {
     );
   }
 
-  // Grouped by provider, so a long catalog reads as a short list of vendors each
-  // with its models -- and the value is the MODEL id alone, because the provider
-  // is implied by which group it was chosen from. The group's LABEL is the
+  // GROUPED BY VENDOR, ONE FLAT LIST, and that is the whole shape of this menu: a
+  // heading per provider with its models under it, so a long catalog reads as a
+  // short list of vendors -- but one pick rather than vendor-then-model, because
+  // two menus for one decision is one menu too many. The row's VALUE is the model
+  // id alone, because the vendor is implied by which heading it was under (`hint`
+  // carries nothing: the heading above the row already says it, and searching
+  // matches the heading too -- see `lib/picker.ts`). The heading's TEXT is the
   // vendor's display name when it has one and its id otherwise (see
-  // `providerLabel`): the option's value stays the id either way, which is what
-  // the server is sent and what a log line will say.
-  const options = data.providers.flatMap((provider) =>
+  // `providerLabel`): the id stays the truth either way, which is what the server
+  // is sent and what a log line will say.
+  // A session served by a model the catalog does not list -- an inline provider in
+  // config.edn, a vendor that has since been removed -- still has to be drawable,
+  // exactly as the directory picker treats a directory this home does not list: a
+  // picker showing nothing at all reads as a session with no model.
+  const listed = data.providers.flatMap((provider) =>
     provider.models.map((model) => ({
       value: model,
       label: model,
       group: providerLabel(provider),
     })),
   );
+  const options =
+    data.model === undefined || listed.some((option) => option.value === data.model)
+      ? listed
+      : [{ value: data.model, label: data.model, hint: "not in the catalog" }, ...listed];
   const currentModel = data.model ?? options[0]?.value ?? "";
 
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
-      <Select
+      <Picker
         slot="composer-model"
         label="Model"
         value={currentModel}
         disabled={busy}
         title={data.provider === undefined ? data.model : `${data.provider} / ${data.model}`}
         options={options}
-        onChange={(model) => {
-          // The provider comes from the group the model was listed under, because
-          // an id is only meaningful against the vendor that declares it.
-          const owner = data.providers.find((p) => p.models.includes(model));
-          void change(owner === undefined ? { model } : { provider: owner.name, model });
+        onPick={(option) => {
+          // The provider comes from the vendor that declares this model, because an
+          // id is only meaningful against the one that does.
+          const owner = data.providers.find((p) => p.models.includes(option.value));
+          void change(
+            owner === undefined
+              ? { model: option.value }
+              : { provider: owner.name, model: option.value },
+          );
         }}
       />
-      <Select
+      <Picker
         slot="composer-effort"
         label="Reasoning effort"
         value={data["reasoning-effort"] ?? ""}
         disabled={busy}
         leading={<BrainIcon className="text-muted-foreground size-4 shrink-0" />}
         title="Reasoning effort — this session only"
+        // Three options and a default: read at a glance, so no search box (see
+        // `components/picker.tsx` on `searchable`).
+        searchable={false}
         options={[
           { value: "", label: "default" },
           ...data["reasoning-efforts"].map((effort) => ({ value: effort, label: effort })),
         ]}
-        onChange={(effort) => void change({ "reasoning-effort": effort })}
+        onPick={(option) => void change({ "reasoning-effort": option.value })}
       />
       {error !== null && (
         <p role="alert" data-slot="composer-tools-error" className="text-destructive text-xs">
