@@ -169,6 +169,67 @@
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
       (is (= "run" (:source (item-of turn "context")))))))
 
+(deftest an-injection-is-shown-once-for-the-whole-session
+  ;; The runs RESTATE their injections: the server holds no session, so every run re-reads
+  ;; the instruction files, re-renders the catalog, and re-derives every skill body the
+  ;; history still triggers. Drawing each run's own bytes would put the opening under every
+  ;; turn, and a five-turn session would read as if it had opened five times.
+  (testing "the opening blocks are re-spliced into every run and are shown once"
+    (let [turns (turns-of
+                 [(input 0 (user "u1" "first"))
+                  (message 10 (system-msg "S"))
+                  (message 11 (user "" "<instructions>rules</instructions>"))
+                  (message 12 (user "" "<skills>a catalog</skills>"))
+                  (message 13 (user "u1" "first"))
+                  finished
+                  (input 100 (user "u1" "first") (user "u2" "second"))
+                  (message 110 (system-msg "S"))
+                  (message 111 (user "" "<instructions>rules</instructions>"))
+                  (message 112 (user "" "<skills>a catalog</skills>"))
+                  (message 113 (user "u1" "first"))
+                  (message 114 (user "u2" "second"))
+                  finished])]
+      (is (= 2 (count turns)))
+      (is (= ["system" "context" "context" "user"] (kinds (first turns))))
+      (is (= ["user"] (kinds (second turns)))
+          "the second turn opens no blocks: those bytes were already shown")))
+
+  (testing "bytes that CHANGED are bytes nobody has seen, so they are shown again"
+    (let [turns (turns-of
+                 [(input 0 (user "u1" "first"))
+                  (message 10 (system-msg "S"))
+                  (message 11 (user "" "<instructions>rules</instructions>"))
+                  (message 12 (user "u1" "first"))
+                  finished
+                  (input 100 (user "u1" "first") (user "u2" "second"))
+                  (message 110 (system-msg "S"))
+                  (message 111 (user "" "<instructions>rules and more</instructions>"))
+                  (message 112 (user "u1" "first"))
+                  (message 113 (user "u2" "second"))
+                  finished])]
+      (is (= ["context" "user"] (kinds (second turns))))
+      (is (= "<instructions>rules and more</instructions>"
+             (:text (item-of (second turns) "context")))
+          "the edited file is what this turn really carried; hiding the change would be the
+           one thing worse than repeating it")))
+
+  (testing "the run's own trailing context obeys the same rule"
+    (let [turns (turns-of
+                 [(input 0 (user "u1" "first"))
+                  (message 10 (system-msg "S"))
+                  (message 11 (user "u1" "first"))
+                  (message 12 (user "" "- project: clj-harness"))
+                  finished
+                  (input 100 (user "u1" "first") (user "u2" "second"))
+                  (message 110 (system-msg "S"))
+                  (message 111 (user "u1" "first"))
+                  (message 112 (user "u2" "second"))
+                  (message 113 (user "" "- project: clj-harness"))
+                  finished])]
+      (is (= ["system" "user" "context"] (kinds (first turns))))
+      (is (= ["user"] (kinds (second turns)))
+          "the same trailing context, and it is not drawn a second time"))))
+
 (deftest history-is-not-listed-a-second-time
   ;; The client restates its whole history on every run; only what is NEW is the
   ;; turn's own material. Listing the restatement would show every message once per

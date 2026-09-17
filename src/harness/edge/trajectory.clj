@@ -229,25 +229,39 @@
     (update-in turns [(dec (count turns)) :items] into items)))
 
 (defn- add-context
-  "Append injected context to the last turn, SKIPPING what that turn already carries byte
-  for byte.
+  "Append injected context to the last turn, SKIPPING what the readback already carries
+  byte for byte.
 
-  A run RESTATES its injections: the opening blocks are spliced in on every run, so a
-  resumed run would otherwise list the session's instruction files a second time inside
-  the same turn. Within a turn, the same bytes are shown once."
+  AN INJECTION IS SHOWN ONCE FOR THE WHOLE SESSION, not once per turn. A run RESTATES
+  its injections -- the opening blocks are spliced in on every run (the server holds no
+  session, so it re-reads the instruction files and re-renders the catalog every time),
+  and a skill body is re-derived on every turn its trigger is still in the history -- so
+  'show what the run carried' draws the same bytes under every turn, and a five-turn
+  session reads as if the opening happened five times. That is a picture of a flow that
+  did not happen, and it is the one thing this view may not do. So the question 'has
+  this been shown?' is asked against the WHOLE trajectory.
+
+  The CHANGE case falls out of that rather than being written beside it: bytes that
+  changed are bytes nobody has seen, so they are shown again, in the turn where they
+  changed -- the same rule the system item already follows (see
+  `the-system-message-appears-again-only-when-it-changes`).
+
+  The caller hands in one run's blocks in the record's order, so what this drops is
+  exactly the repeats."
   [turns source messages]
   (if (empty? turns)
     turns
     (let [i     (dec (count turns))
           turn  (get turns i)
+          shown (into #{}
+                      (comp (filter #(= "context" (:kind %))) (map :text))
+                      (mapcat :items turns))
           items (mapv #(context-item source %) messages)
-          fresh (remove #(contains? (:contextSeen turn) (:text %)) items)]
-      (-> turns
-          (assoc i (update turn :contextSeen into (map :text fresh)))
-          (assoc-in [i :items] (into (:items turn) fresh))))))
+          fresh (remove #(contains? shown (:text %)) items)]
+      (assoc-in turns [i :items] (into (:items turn) fresh)))))
 
 (defn- open-turn [turns]
-  (conj turns {:index (inc (count turns)) :items [] :calls [] :contextSeen #{}}))
+  (conj turns {:index (inc (count turns)) :items [] :calls []}))
 
 (defn- user-item
   "One user message, taking its text from the message the PROVIDER actually got (the
@@ -501,13 +515,19 @@
   THE SYSTEM MESSAGE IS SHOWN ONCE, and again whenever its bytes change: the frozen
   prompt is the same text on every run, so listing it per turn would be the same fact
   written N times -- but a prompt that CHANGED between turns is the single most important
-  thing this view could show, and hiding it would be worse than repeating it."
+  thing this view could show, and hiding it would be worse than repeating it.
+
+  THE INJECTED CONTEXT OBEYS THE SAME RULE, spelled out in `add-context`: a block is shown
+  once for the whole session, and again only in the turn where its bytes changed. The runs
+  restate their injections -- the server holds no session, so it re-reads the instruction
+  files and re-derives every skill body on every run -- and drawing each run's own bytes
+  would repeat one fact under every turn, making a five-turn session look like five
+  openings."
   [records]
   (let [life-of (tool-lifecycles records)
         call-of (call-index records)]
     {:turns      (mapv (fn [turn]
-                         (let [turn  (dissoc turn :contextSeen)
-                               calls (:calls turn)]
+                         (let [calls (:calls turn)]
                            (cond-> turn
                              (seq calls)   (assoc :calls (vec (map-indexed
                                                                (fn [i call] (assoc call :index i))
