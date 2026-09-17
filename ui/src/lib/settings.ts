@@ -17,7 +17,14 @@
 // resolution may legitimately have less to say: an inline provider declares no
 // modalities unless the entry does, and a knob no tier named is absent rather
 // than null.
+import type { TFunction } from "i18next";
+
 import { AGENT_URL } from "@/lib/threads";
+
+/// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
+/// brands a translator with the namespace it was bound to, so a shell translator
+/// does not typecheck here and only the errors catalog's keys compile.
+type Translate = TFunction<"errors">;
 
 /// Which tier supplied a knob, or `catalog` when no tier did and the provider's
 /// entry answered -- a provider's DEFAULT model is nobody's choice but the
@@ -84,7 +91,10 @@ export type Settings = {
 /// That sentence is the panel's content in that case: a half-edited config.edn
 /// is the ordinary way a person meets this, and "no provider named :nope; the
 /// registry defines [...]" beats a blank pane.
-export async function getSettings(threadId: string): Promise<Settings> {
+///
+/// THE SERVER'S SENTENCE WINS AND IS NEVER TRANSLATED. Only an answer with no
+/// `error` at all falls back to this side's sentence, in the interface's language.
+export async function getSettings(threadId: string, t: Translate): Promise<Settings> {
   const res = await fetch(
     `${AGENT_URL}api/settings?threadId=${encodeURIComponent(threadId)}`,
   );
@@ -97,7 +107,7 @@ export async function getSettings(threadId: string): Promise<Settings> {
       "error" in body &&
       typeof body.error === "string"
         ? body.error
-        : `HTTP ${res.status}`;
+        : t("http.status", { status: res.status });
     throw new Error(reason);
   }
   return body as Settings;

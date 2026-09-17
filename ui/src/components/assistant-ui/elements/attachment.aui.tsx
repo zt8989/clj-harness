@@ -1,5 +1,18 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's own words -- the attach
+// button's "Add Attachment" and the remove button's "Remove file", the "Upload
+// failed" fallback, the tile's read-out, the preview's alt and dialog title, and the
+// three type labels "Image" / "Document" / "File" -- are gone from this file and read
+// from the `elements-files` catalog instead (spec decision 5, which reverses
+// flat-step-rows decision 9's "leave the copies untouched"). WHAT DOES NOT MOVE is
+// the boundary: the attachment's own name is data and passes through, and the type
+// the runtime reports is only MAPPED to a word. The cost, written down: this file is
+// no longer byte-comparable with upstream, so each deliberate edit below is marked
+// `LOCAL:` -- a marker says "this was changed on purpose", not "this is what upstream
+// changed". Every non-word byte -- `data-slot`, class names, upstream identifiers --
+// is untouched.
+
 import {
   type PropsWithChildren,
   useState,
@@ -20,6 +33,7 @@ import {
   useAuiState,
   useAui,
 } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 import {
   Tooltip,
   TooltipContent,
@@ -46,11 +60,14 @@ type AttachmentPreviewProps = {
 };
 
 const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
+  // LOCAL: upstream's "Attachment preview" alt is gone from this file and read from
+  // the `elements-files` catalog instead (the tile below shows the same words).
+  const { t } = useTranslation("elements-files");
   const [isLoaded, setIsLoaded] = useState(false);
   return (
     <img
       src={src}
-      alt="Attachment preview"
+      alt={t("attachment.previewAlt")}
       className={cn(
         "block h-auto max-h-[80vh] w-auto max-w-full rounded-sm object-contain transition-opacity duration-300 motion-reduce:transition-none",
         isLoaded
@@ -64,6 +81,10 @@ const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
 
 const AttachmentPreviewDialog: FC<PropsWithChildren> = ({ children }) => {
   const src = useAttachmentSrc();
+  // LOCAL: upstream's dialog title, "Image Attachment Preview", is gone from this
+  // file and read from the `elements-files` catalog instead. It is drawn only for a
+  // screen reader (`sr-only`), and screen-reader text is copy like any other.
+  const { t } = useTranslation("elements-files");
 
   if (!src) return children;
 
@@ -81,7 +102,7 @@ const AttachmentPreviewDialog: FC<PropsWithChildren> = ({ children }) => {
       </DialogTrigger>
       <DialogContent className="aui-attachment-preview-dialog-content [&>button]:bg-foreground/60 [&>button]:hover:bg-foreground/80 [&_svg]:text-background p-2 sm:max-w-3xl [&>button]:rounded-full [&>button]:p-1 [&>button]:opacity-100 [&>button]:ring-0!">
         <DialogTitle className="aui-sr-only sr-only">
-          Image Attachment Preview
+          {t("attachment.previewTitle")}
         </DialogTitle>
         <div className="aui-attachment-preview bg-background relative mx-auto flex max-h-[80dvh] w-full items-center justify-center overflow-hidden rounded-sm">
           <AttachmentPreview src={src} />
@@ -92,13 +113,15 @@ const AttachmentPreviewDialog: FC<PropsWithChildren> = ({ children }) => {
 };
 
 const AttachmentThumb: FC = () => {
+  // LOCAL: the same "Attachment preview" alt as above, read from the catalog.
+  const { t } = useTranslation("elements-files");
   const src = useAttachmentSrc();
 
   return (
     <Avatar className="aui-attachment-tile-avatar h-full w-full rounded-none">
       <AvatarImage
         src={src}
-        alt="Attachment preview"
+        alt={t("attachment.previewAlt")}
         className="aui-attachment-tile-image rounded-none object-cover"
       />
       <AvatarFallback>
@@ -109,6 +132,12 @@ const AttachmentThumb: FC = () => {
 };
 
 const AttachmentUI: FC = () => {
+  // LOCAL: upstream's three type labels -- "Image" / "Document" / "File" -- and its
+  // "Upload failed" fallback are gone from this file and read from the
+  // `elements-files` catalog instead. The type the runtime reports is only MAPPED to a
+  // word, each branch below naming its own literal key; a type this file does not
+  // know still passes through exactly as it came.
+  const { t } = useTranslation("elements-files");
   const aui = useAui();
   const isComposer = aui.attachment.source !== "message";
 
@@ -117,11 +146,11 @@ const AttachmentUI: FC = () => {
     const type = s.attachment.type;
     switch (type) {
       case "image":
-        return "Image";
+        return t("attachment.typeImage");
       case "document":
-        return "Document";
+        return t("attachment.typeDocument");
       case "file":
-        return "File";
+        return t("attachment.typeFile");
       default:
         return type;
     }
@@ -141,10 +170,15 @@ const AttachmentUI: FC = () => {
   const errorMessage = useAuiState((s) =>
     s.attachment.status.type === "incomplete" &&
     s.attachment.status.reason === "error"
-      ? (s.attachment.status.message ?? "Upload failed")
+      ? (s.attachment.status.message ?? t("attachment.uploadFailed"))
       : undefined,
   );
 
+  // LOCAL: the tile's read-out used to be assembled from the type label and two
+  // English suffixes (`", upload failed"` / `", uploading"`). The whole sentence is
+  // the catalog's now, with the type and the state interpolated -- the state's suffix
+  // carries its own punctuation, because Chinese does not join clauses the way
+  // English does.
   return (
     <TooltipProvider>
       <Tooltip>
@@ -179,9 +213,14 @@ const AttachmentUI: FC = () => {
                 onKeyUp={(e) => {
                   if (e.key === " ") e.currentTarget.click();
                 }}
-                aria-label={`${typeLabel} attachment${
-                  isError ? ", upload failed" : isUploading ? ", uploading" : ""
-                }`}
+                aria-label={t("attachment.ariaLabel", {
+                  type: typeLabel,
+                  state: isError
+                    ? t("attachment.ariaError")
+                    : isUploading
+                      ? t("attachment.ariaUploading")
+                      : "",
+                })}
               >
                 <AttachmentThumb />
                 {isUploading && (
@@ -217,10 +256,13 @@ const AttachmentUI: FC = () => {
 };
 
 const AttachmentRemove: FC = () => {
+  // LOCAL: upstream's "Remove file" tooltip is gone from this file and read from the
+  // `elements-files` catalog instead.
+  const { t } = useTranslation("elements-files");
   return (
     <AttachmentPrimitive.Remove asChild>
       <TooltipIconButton
-        tooltip="Remove file"
+        tooltip={t("attachment.remove")}
         className="aui-attachment-tile-remove absolute end-1 top-1 size-5 rounded-full bg-black/50! text-white after:absolute after:-inset-1.5 hover:bg-black/70! hover:text-white! active:scale-[0.96] motion-reduce:transition-none"
         side="top"
       >
@@ -251,15 +293,19 @@ export const ComposerAttachments: FC = () => {
 };
 
 export const ComposerAddAttachment: FC = () => {
+  // LOCAL: upstream's "Add Attachment" -- the tooltip and the `aria-label`, the same
+  // words twice -- is gone from this file and read from the `elements-files` catalog
+  // instead. Only one of the two is drawn; both are copy.
+  const { t } = useTranslation("elements-files");
   return (
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton
-        tooltip="Add Attachment"
+        tooltip={t("attachment.add")}
         side="bottom"
         variant="ghost"
         size="icon"
         className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 rounded-full active:scale-[0.96] motion-reduce:transition-none"
-        aria-label="Add Attachment"
+        aria-label={t("attachment.add")}
       >
         <PlusIcon className="aui-attachment-add-icon size-4" />
       </TooltipIconButton>

@@ -1,0 +1,34 @@
+{
+  "attachment": {
+    "add": "添加附件",
+    "remove": "移除文件",
+    "uploadFailed": "上传失败",
+    "previewAlt": "附件预览",
+    "previewTitle": "图片附件预览",
+    "typeImage": "图片",
+    "typeDocument": "文档",
+    "typeFile": "文件",
+    "ariaLabel": "{{type}}附件{{state}}",
+    "ariaError": "，上传失败",
+    "ariaUploading": "，正在上传"
+  },
+  "file": {
+    "unnamed": "未命名文件",
+    "downloadLabel": "下载 {{filename}}",
+    "downloadFallback": "文件"
+  },
+  "image": {
+    "alt": "图片内容",
+    "previewAlt": "图片预览",
+    "zoom": "点一下放大",
+    "zoomOverlay": "放大的图片",
+    "zoomClose": "关闭放大的图片",
+    "generating": "正在生成图片…",
+    "generateFailed": "图片生成失败",
+    "blocked": "提供方拦下了这张图。",
+    "regenerate": "重新生成图片",
+    "download": "下载图片",
+    "copy": "复制图片",
+    "clipboardUnavailable": "这个环境里没有剪贴板 API。"
+  }
+}

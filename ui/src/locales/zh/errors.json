@@ -1,0 +1,17 @@
+{
+  "runInProgress": {
+    "switch": "这次运行还没结束；结束前不能切换会话。",
+    "newThread": "这次运行还没结束；新会话要等它结束。"
+  },
+  "http": {
+    "status": "HTTP {{status}}",
+    "listingProjects": "读取项目列表失败：HTTP {{status}}",
+    "listingSessions": "读取会话列表失败：HTTP {{status}}",
+    "askingQuestion": "读不出这个问题是什么：HTTP {{status}}"
+  },
+  "attachment": {
+    "model": "这个模型 {{model}} 不收图片；它声明的是 {{declared}} —— 换模型，或只带它声明的东西",
+    "size": "这张图 {{actual}}，上限是 {{limit}}",
+    "unnamedModel": "（未命名）"
+  }
+}

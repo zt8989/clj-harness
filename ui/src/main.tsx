@@ -11,10 +11,18 @@
 // the entry the Vite plugin compiles, and everything the copied components rely
 // on (Tailwind, the shadcn theme tokens, the shimmer/collapsible keyframes) is
 // reached through it. See src/styles.css.
+//
+// SO IS THE LANGUAGE, and its position in this list is the whole reason it is
+// imported here rather than inside App: `./lib/i18n` initializes i18next and sets
+// `<html lang>` as a side effect of being loaded, so importing it above the render
+// is what makes the first paint already be in the right language. Imported from
+// inside a component it would still work -- and would also let one frame of raw
+// keys (`view.conversation`) reach the screen.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app";
+import "./lib/i18n";
 import "./styles.css";
 
 

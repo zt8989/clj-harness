@@ -76,6 +76,7 @@ import { fromThreadMessageLike, type AssistantRuntime } from "@assistant-ui/core
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { fromAgUiMessages, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
@@ -87,9 +88,9 @@ import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
 import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
-  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
-  RUN_IN_PROGRESS_REFUSAL,
   runInProgress,
+  runInProgressNewThreadRefusal,
+  runInProgressRefusal,
 } from "@/lib/run-state";
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
@@ -136,6 +137,15 @@ export function App() {
   // does not exist yet while the adapter object is being built -- the ref
   // closes that loop. Assigned right after the hook, before anything can click.
   const runtimeRef = useRef<AssistantRuntime | null>(null);
+  // A TRANSLATION HOOK IS NOT AN ASSISTANT HOOK, and the difference matters here:
+  // the runtime-state hooks (`useAuiState` and friends) throw in this body, because
+  // App is the component that RENDERS the runtime provider -- but this one reads
+  // i18next's state, which sits above the whole page and has nothing to do with the
+  // runtime. See the note above the view switch.
+  const { t } = useTranslation();
+  // `rebuildThread`'s fallback when the server sends no reason is this side's
+  // sentence, so it comes from the `errors` catalog (see lib/threads.ts).
+  const { t: tErrors } = useTranslation("errors");
 
   // Id first, then await -- the thread-list adapter's hard rule: the selected
   // id is set before history is waited for, because the runtime discards the
@@ -152,13 +162,13 @@ export function App() {
   const onSwitchToThread = useCallback(
     async (id: string) => {
       if (runtimeRef.current && runInProgress(runtimeRef.current)) {
-        throw new Error(RUN_IN_PROGRESS_REFUSAL);
+        throw new Error(runInProgressRefusal(t));
       }
       adoptThread(id);
-      const rebuilt = await rebuildThread(id);
+      const rebuilt = await rebuildThread(id, tErrors);
       return { messages: toThreadMessages(rebuilt.messages) };
     },
-    [adoptThread],
+    [adoptThread, t, tErrors],
   );
 
   // `onSwitchToNewThread` IS HERE, and only one thing calls it: removing the last
@@ -176,10 +186,10 @@ export function App() {
   // empty conversation belongs here.
   const onSwitchToNewThread = useCallback(async () => {
     if (runtimeRef.current && runInProgress(runtimeRef.current)) {
-      throw new Error(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
+      throw new Error(runInProgressNewThreadRefusal(t));
     }
     adoptThread(crypto.randomUUID());
-  }, [adoptThread]);
+  }, [adoptThread, t]);
 
   const runtime = useAgUiRuntime({
     agent,
@@ -235,8 +245,8 @@ export function App() {
                   >
                     {(
                       [
-                        ["conversation", "Conversation"],
-                        ["trajectory", "Trajectory"],
+                        ["conversation", "view.conversation"],
+                        ["trajectory", "view.trajectory"],
                       ] as const
                     ).map(([key, label]) => (
                       <button
@@ -252,7 +262,7 @@ export function App() {
                             : "rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
                         }
                       >
-                        {label}
+                        {t(label)}
                       </button>
                     ))}
                   </div>

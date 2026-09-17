@@ -59,6 +59,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { MessageCircleQuestionIcon, ShieldAlertIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import {
   useAgUiInterrupts,
   useAgUiSubmitInterruptResponses,
@@ -258,11 +259,17 @@ export const ApprovalBatchProvider: FC<
 /// `message`. That line is a sentence written for a person to read ("Approve
 /// `write`? arguments: {...}"), and it is drawn below as exactly that, a
 /// sentence, never as the source of a field.
+///
+/// WHAT THIS CARD TRANSLATES IS ONLY ITS OWN WORDS. `interrupt.message` is the
+/// server's sentence and the tool name and arguments are the model's
+/// vocabulary; both are drawn verbatim in every language, because a record that
+/// changes with the reader is not one record (spec decision 3).
 const ApprovalCard: FC<{
   interrupt: AgUiInterrupt;
   toolName: string;
   argsText: string;
 }> = ({ interrupt, toolName, argsText }) => {
+  const { t } = useTranslation("approval");
   const { decisions, decide, submitting, error } = useContext(GateContext);
   const decision = decisions.get(interrupt.id)?.decision;
 
@@ -276,7 +283,7 @@ const ApprovalCard: FC<{
           data-slot="approval-card-icon"
           className="aui-approval-card-icon size-4 shrink-0"
         />
-        This tool call needs your approval
+        {t("card.title")}
       </p>
 
       <div className="aui-approval-card-call flex flex-col">
@@ -305,7 +312,7 @@ const ApprovalCard: FC<{
             decide(interrupt.id, "resolved");
           }}
         >
-          {decision === "resolved" ? "Approved" : "Approve"}
+          {decision === "resolved" ? t("card.approved") : t("card.approve")}
         </Button>
         <Button
           size="sm"
@@ -316,7 +323,7 @@ const ApprovalCard: FC<{
             decide(interrupt.id, "cancelled");
           }}
         >
-          {decision === "cancelled" ? "Denied" : "Deny"}
+          {decision === "cancelled" ? t("card.denied") : t("card.deny")}
         </Button>
       </div>
 
@@ -330,13 +337,11 @@ const ApprovalCard: FC<{
       )}
 
       <p className="aui-approval-card-note text-muted-foreground text-xs">
-        Approving runs the call as usual. Denying skips it: the model is handed a
-        tool result saying a human vetoed it, and the run carries on.
+        {t("card.note")}
       </p>
 
       <p className="aui-approval-card-hold text-muted-foreground text-xs">
-        The message box stays closed until this is decided -- a message sent now
-        would be refused rather than queued.
+        {t("card.hold")}
       </p>
     </div>
   );
@@ -399,7 +404,15 @@ export const ApprovalGate: FC<{
 /// looked answered and was missing half the answers.
 
 /// The question, and the form that answers it.
+///
+/// THE QUESTION IS THE SERVER'S, AND SO IS THE FORM. `asked.prompt` is the
+/// server's own sentence, and the field names, kinds, descriptions and enum
+/// values come out of the MCP server's schema; all of them are drawn verbatim
+/// (spec decision 3), which is why only the card's frame and buttons read from a
+/// catalog here.
 const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
+  const { t } = useTranslation("approval");
+  const { t: tErrors } = useTranslation("errors");
   const { decisions, decide, submitting, error } = useContext(GateContext);
   const [asked, setAsked] = useState<{
     server?: string;
@@ -417,7 +430,10 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(
-            `asking what this question was failed: HTTP ${res.status}`,
+            // A sentence THIS SIDE raises (the server said nothing usable), so it
+            // follows the interface's language -- and its key lives with the other
+            // fetch failures, in `errors`.
+            tErrors("http.askingQuestion", { status: res.status }),
           );
         }
         return (await res.json()) as { server?: string; prompt?: string; schema?: unknown };
@@ -457,8 +473,8 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
           className="aui-elicitation-card-icon size-4 shrink-0"
         />
         {asked?.server !== undefined
-          ? `${asked.server} is asking you something`
-          : "A server is asking you something"}
+          ? t("elicitation.named", { server: asked.server })
+          : t("elicitation.title")}
       </p>
 
       <p className="aui-elicitation-card-prompt text-xs">
@@ -530,7 +546,7 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
           disabled={submitting || asked === null || recorded === "resolved"}
           onClick={() => settle("resolved")}
         >
-          {recorded === "resolved" ? "Sent" : "Send"}
+          {recorded === "resolved" ? t("elicitation.sent") : t("elicitation.send")}
         </Button>
         <Button
           size="sm"
@@ -539,7 +555,7 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
           disabled={submitting || recorded !== undefined}
           onClick={() => settle("cancelled")}
         >
-          {recorded === "cancelled" ? "Declined" : "Decline"}
+          {recorded === "cancelled" ? t("elicitation.declined") : t("elicitation.decline")}
         </Button>
       </div>
 

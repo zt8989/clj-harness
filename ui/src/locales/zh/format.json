@@ -1,0 +1,14 @@
+{
+  "duration": {
+    "subSecond": "<1 秒",
+    "seconds": "{{value}} 秒",
+    "minutes": "{{minutes}} 分 {{seconds}} 秒"
+  },
+  "stats": {
+    "turns_other": "{{count}} 轮",
+    "steps_other": "{{count}} 次模型调用",
+    "rate": "{{value}} tok/s",
+    "total": "{{value}} tok",
+    "cached": "{{value}}% 命中缓存"
+  }
+}

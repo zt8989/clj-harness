@@ -16,7 +16,17 @@
 // its first run -- is a row with no disk facts. See the row component for how
 // that is drawn; the one thing it must never become is a zero-byte file, which
 // would be a lie about a broken log.
+import type { TFunction } from "i18next";
+
 import { AGENT_URL } from "@/lib/threads";
+
+/// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE.
+///
+/// i18next brands a translator with the namespace it was bound to, so this is what
+/// makes only the errors catalog's keys compile here -- the call site hands over a
+/// translator it got from `useTranslation("errors")`, and a shell translator will
+/// not typecheck.
+type Translate = TFunction<"errors">;
 
 /// One session, as the sidebar needs it.
 export type SessionSummary = {
@@ -38,9 +48,9 @@ export type ProjectSummary = {
   sessions: readonly SessionSummary[];
 };
 
-export async function listProjects(): Promise<ProjectSummary[]> {
+export async function listProjects(t: Translate): Promise<ProjectSummary[]> {
   const res = await fetch(`${AGENT_URL}api/projects`);
-  if (!res.ok) throw new Error(`listing projects failed: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(t("http.listingProjects", { status: res.status }));
   return res.json();
 }
 
@@ -57,7 +67,13 @@ export function projectName(path: string): string {
 /// management route answers a refusal that way, and the reason is the sentence
 /// the UI is supposed to show -- a wrapper's paraphrase would be one more thing
 /// to distrust, so this only digs it out.
-async function reasonFrom(res: Response): Promise<string> {
+///
+/// THE SERVER'S SENTENCE WINS, AND IS NEVER TRANSLATED. Only when the body carries
+/// no `error` at all -- a proxy's 502, a route that answered empty -- does this side
+/// speak, and then the fallback is this interface's sentence in its own language
+/// (see docs/architecture/client.md's boundary section): `HTTP 500` is a fact about
+/// the wire, not a message from the server.
+async function reasonFrom(res: Response, t: Translate): Promise<string> {
   const body: unknown = await res.json().catch(() => undefined);
   return body !== undefined &&
     typeof body === "object" &&
@@ -65,7 +81,7 @@ async function reasonFrom(res: Response): Promise<string> {
     "error" in body &&
     typeof body.error === "string"
     ? body.error
-    : `HTTP ${res.status}`;
+    : t("http.status", { status: res.status });
 }
 
 /// Make DIR a project of this home. Answers the project's CANONICAL path and its
@@ -78,13 +94,13 @@ async function reasonFrom(res: Response): Promise<string> {
 /// POST /api/project (singular) -- see `bindThread` below.
 export type AddedProject = { projectId: number; path: string };
 
-export async function addProject(dir: string): Promise<AddedProject> {
+export async function addProject(dir: string, t: Translate): Promise<AddedProject> {
   const res = await fetch(`${AGENT_URL}api/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dir }),
   });
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
 
@@ -111,10 +127,10 @@ export class PickerUnavailableError extends Error {
 /// The chosen path is only ever FILLED IN. Nothing is bound or created here: the
 /// person still submits the form, which is what keeps "picking a folder" from
 /// being an accidental one-step commit.
-export async function pickFolder(): Promise<string | null> {
+export async function pickFolder(t: Translate): Promise<string | null> {
   const res = await fetch(`${AGENT_URL}api/project/pick`, { method: "POST" });
-  if (res.status === 501) throw new PickerUnavailableError(await reasonFrom(res));
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (res.status === 501) throw new PickerUnavailableError(await reasonFrom(res, t));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir?: string | null };
   return body.dir ?? null;
 }
@@ -123,13 +139,13 @@ export async function pickFolder(): Promise<string | null> {
 /// makes a session belong to a project, and for a brand-new session it is also
 /// what makes the session exist at all: the store learns about a conversation
 /// when something asks for it to belong somewhere.
-export async function bindThread(threadId: string, dir: string): Promise<string> {
+export async function bindThread(threadId: string, dir: string, t: Translate): Promise<string> {
   const res = await fetch(`${AGENT_URL}api/project`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, dir }),
   });
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir: string };
   return body.dir;
 }
@@ -152,12 +168,12 @@ export async function bindThread(threadId: string, dir: string): Promise<string>
 /// out loud.
 export type RemovedProject = { path: string; unbound: number };
 
-export async function removeProject(path: string): Promise<RemovedProject> {
+export async function removeProject(path: string, t: Translate): Promise<RemovedProject> {
   const res = await fetch(
     `${AGENT_URL}api/projects/${encodeURIComponent(path)}/remove`,
     { method: "POST" },
   );
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
 
@@ -173,13 +189,13 @@ export async function removeProject(path: string): Promise<RemovedProject> {
 /// The answer is the flag as the STORE now holds it, echoed back rather than
 /// assumed -- see `project/archive!` for why the value coming out, not the one
 /// going in, is what a caller should believe.
-export async function setArchived(threadId: string, archived: boolean): Promise<boolean> {
+export async function setArchived(threadId: string, archived: boolean, t: Translate): Promise<boolean> {
   const res = await fetch(`${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/archive`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ archived }),
   });
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { archived: boolean };
   return body.archived;
 }

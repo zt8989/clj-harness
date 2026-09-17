@@ -16,7 +16,14 @@
 import { expect } from "vitest";
 
 import { type Case, type Suite, postRun, script, threadId, url } from "../e2e";
-import { type StatsPayload, statsCells } from "../../src/lib/format";
+import { translator } from "../support/locale";
+import { type StatsPayload, formatBytes, formatMillis, formatTime, statsCells } from "../../src/lib/format";
+
+/// English is the language these cells were first written in, and it stays the one
+/// the shapes are read against; the Chinese half of each case is below it, pinning
+/// the words AND the quantifier rules that differ.
+const en = translator("en");
+const zh = translator("zh");
 
 /// The endpoint the strip reads, as this suite needs to name it.
 async function statsOf(tid: string): Promise<{ status: number; body: StatsPayload }> {
@@ -39,7 +46,7 @@ const cases: Case[] = [
   {
     name: "the-cells-are-what-the-record-answered",
     run: async () => {
-      const cells = statsCells({
+      const payload: StatsPayload = {
         turns: 1,
         steps: 2,
         stepsWithUsage: 2,
@@ -47,8 +54,8 @@ const cases: Case[] = [
         cacheHitPercent: 91,
         outputTokensPerSecond: 242,
         incomplete: false,
-      });
-      expect(cells).toEqual({
+      };
+      expect(statsCells(payload, en)).toEqual({
         turns: "1 turn",
         steps: "2 steps",
         rate: "242 tok/s",
@@ -56,15 +63,39 @@ const cases: Case[] = [
         cached: "91% cached",
       });
 
-      // The plural is a real rule, not decoration: a session that has run one turn
-      // reads "1 turn".
-      expect(statsCells({ turns: 3, incomplete: false })?.turns).toBe("3 turns");
+      // THE SAME FIVE FACTS, SAID IN CHINESE -- and this is the assertion that makes
+      // the catalog the thing under test rather than a decoration: the same payload
+      // through the same function has to come out in the other language, with the
+      // units (which do not translate) unchanged and the words (which do) not.
+      // `steps` is a count of MODEL CALLS, and `CONTEXT.md` says the Chinese word for
+      // one is 模型调用 -- not 步, which is the synonym the glossary exists to forbid.
+      expect(statsCells(payload, zh)).toEqual({
+        turns: "1 轮",
+        steps: "2 次模型调用",
+        rate: "242 tok/s",
+        total: "2k tok",
+        cached: "91% 命中缓存",
+      });
+
+      // The quantifier is a real rule and it is DIFFERENT in each language: English
+      // has a singular form and Chinese does not, so the same count reads two ways.
+      const three: StatsPayload = { turns: 3, incomplete: false };
+      expect(statsCells(three, en)?.turns).toBe("3 turns");
+      expect(statsCells(three, zh)?.turns).toBe("3 轮");
 
       // And the magnitudes: bare under a thousand, whole thousands under a million,
       // one decimal above -- the same glance-worth precision `formatBytes` keeps.
-      expect(statsCells({ turns: 1, usage: { totalTokens: 409 }, incomplete: false })?.total).toBe("409 tok");
-      expect(statsCells({ turns: 1, usage: { totalTokens: 812_400 }, incomplete: false })?.total).toBe("812k tok");
-      expect(statsCells({ turns: 1, usage: { totalTokens: 2_940_000 }, incomplete: false })?.total).toBe("2.9M tok");
+      // These are the NUMBER's, not the language's, which is why both translators
+      // answer identically.
+      const tokens = (totalTokens: number): StatsPayload => ({
+        turns: 1,
+        usage: { totalTokens },
+        incomplete: false,
+      });
+      expect(statsCells(tokens(409), en)?.total).toBe("409 tok");
+      expect(statsCells(tokens(812_400), en)?.total).toBe("812k tok");
+      expect(statsCells(tokens(2_940_000), en)?.total).toBe("2.9M tok");
+      expect(statsCells(tokens(812_400), zh)?.total).toBe(statsCells(tokens(812_400), en)?.total);
     },
   },
   {
@@ -72,19 +103,61 @@ const cases: Case[] = [
     run: async () => {
       // The whole point of the server's absences arriving as absences: a session
       // whose log predates the model-call lines has turns and NOTHING else, and the
-      // strip must show that rather than a row of zeroes.
-      const cells = statsCells({ turns: 4, incomplete: false });
+      // strip must show that rather than a row of zeroes. AN ABSENT CELL IS ABSENT IN
+      // BOTH LANGUAGES -- it is the string that has a language, never the null.
+      const cells = statsCells({ turns: 4, incomplete: false }, en);
       expect(cells).toEqual({ turns: "4 turns", steps: null, rate: null, total: null, cached: null });
+      expect(statsCells({ turns: 4, incomplete: false }, zh)).toEqual({
+        turns: "4 轮",
+        steps: null,
+        rate: null,
+        total: null,
+        cached: null,
+      });
 
       // A call that reported nothing: steps are there, the tokens are not.
-      const partial = statsCells({ turns: 1, steps: 3, stepsWithUsage: 2, incomplete: false });
+      const partial = statsCells({ turns: 1, steps: 3, stepsWithUsage: 2, incomplete: false }, en);
       expect(partial?.steps).toBe("3 steps");
       expect(partial?.total).toBeNull();
       expect(partial?.cached).toBeNull();
 
       // Nothing at all: no session of numbers to report, and nothing to draw.
-      expect(statsCells(null)).toBeNull();
-      expect(statsCells({ turns: 0, incomplete: false })).toBeNull();
+      expect(statsCells(null, en)).toBeNull();
+      expect(statsCells({ turns: 0, incomplete: false }, en)).toBeNull();
+    },
+  },
+  {
+    name: "the-durations-and-the-timestamps-speak-both-languages",
+    run: async () => {
+      // THE BUCKETS ARE ONE FORMATTER'S (they used to be the tool card's, copied
+      // there), so their words have to come from one place too. All four buckets, in
+      // both languages: the sub-second one is a phrase, the other three are a number
+      // with a unit around it, and `2m 15s` is the one that is not a suffix at all.
+      expect(formatMillis(400, en)).toBe("<1s");
+      expect(formatMillis(400, zh)).toBe("<1 秒");
+      expect(formatMillis(1400, en)).toBe("1.4s");
+      expect(formatMillis(1400, zh)).toBe("1.4 秒");
+      expect(formatMillis(45_000, en)).toBe("45s");
+      expect(formatMillis(45_000, zh)).toBe("45 秒");
+      expect(formatMillis(135_000, en)).toBe("2m 15s");
+      expect(formatMillis(135_000, zh)).toBe("2 分 15 秒");
+
+      // THE UNITS DO NOT TRANSLATE, and these two assertions are here to say so out
+      // loud: a byte size and a token count are the same string in both languages, so
+      // there is no catalog entry for `B`/`KB`/`MB` or for the `k`/`M` of a token
+      // count -- only one place to change each of them.
+      expect(formatBytes(4096)).toBe("4 KB");
+      expect(formatBytes(3 * 1024 * 1024)).toBe("3 MB");
+
+      // AND THE TIMESTAMP IS THE ONE PLACE THE TWO ARE SPLIT: the timezone is the
+      // machine's (so this assertion is written against a FIXED instant and reads it
+      // back through the same locale the page would), while the punctuation is the
+      // interface language's. Same millis, two languages, two punctuations -- which
+      // is the whole point, and why the locale is a parameter and not a machine fact.
+      const at = Date.UTC(2026, 8, 17, 6, 30);
+      expect(formatTime(at, "en")).toBe(new Date(at).toLocaleString("en"));
+      expect(formatTime(at, "zh")).toBe(new Date(at).toLocaleString("zh"));
+      expect(formatTime(at, "zh")).not.toBe(formatTime(at, "en"));
     },
   },
   {
@@ -125,7 +198,7 @@ const cases: Case[] = [
       // The wire's answer, as the strip draws it. The rate is the one number this
       // case cannot pin by hand (it is completion tokens over the two calls' real
       // durations), so it is asserted as a shape.
-      const cells = statsCells(body);
+      const cells = statsCells(body, en);
       expect(cells?.turns).toBe("1 turn");
       expect(cells?.steps).toBe("2 steps");
       expect(cells?.total).toBe("2k tok");

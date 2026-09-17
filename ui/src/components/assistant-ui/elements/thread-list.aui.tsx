@@ -45,10 +45,12 @@
 // not a no-op here, it is a reload of the conversation being read.
 import { Loader2Icon } from "lucide-react";
 import { forwardRef, type ComponentPropsWithoutRef, type FC, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatTime } from "@/lib/format";
+import { asLanguage } from "@/lib/language";
 import type { SessionSummary } from "@/lib/projects";
 
 /// The row's data, as the sidebar has it. Deliberately the wire shape rather
@@ -88,6 +90,12 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
   actions,
 }) => {
   const { threadId, lastActivity, bytes } = session;
+  // LOCAL: the two disk facts' words. The formatters themselves are `lib/format.ts`;
+  // what moved here is the ABSENCE -- "never run" and "no log yet" used to be
+  // answered by the formatter, and the row is the thing that knows which absence it
+  // is looking at.
+  const { t, i18n } = useTranslation();
+  const locale = asLanguage(i18n.language);
   return (
     <li data-slot="thread-list-item" data-current={current ? "" : undefined}>
       <div
@@ -121,9 +129,15 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
             >
               {threadId}
             </code>
+            {/* LOCAL: upstream's literal `current` is gone from this file and
+                read from the shell catalog instead. It is a word a person sees
+                (the small uppercase label beside the row id), so it had to
+                follow the rest of the sidebar into the shell catalog -- see
+                `session.current` in `locales/en/shell.json` and its Chinese
+                twin. The classes are upstream's and stay. */}
             {current && (
               <span className="text-muted-foreground shrink-0 text-[10px] tracking-wide uppercase">
-                current
+                {t("session.current")}
               </span>
             )}
           </span>
@@ -131,9 +145,14 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
             data-slot="thread-list-item-meta"
             className="text-muted-foreground w-full truncate text-xs tabular-nums"
           >
-            {formatTime(lastActivity)} · {formatBytes(bytes)}
+            {lastActivity === null ? t("session.neverRun") : formatTime(lastActivity, locale)} ·{" "}
+            {bytes === null ? t("session.noLog") : formatBytes(bytes)}
           </span>
-          {running && <span className="sr-only">Running</span>}
+          {/* LOCAL: upstream's literal `Running` is gone from this file and read
+              from the shell catalog instead. It is the screen-reader word for the
+              spinner, and screen-reader text is copy like any other -- see
+              `session.running` in `locales/en/shell.json` and its Chinese twin. */}
+          {running && <span className="sr-only">{t("session.running")}</span>}
         </button>
         {actions !== undefined && (
           <div className="shrink-0 pt-1 pe-1">{actions}</div>

@@ -1,5 +1,17 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's own words -- the
+// unnamed-file fallback, and the download's fallback name and its `Download <name>`
+// label -- are gone from this file and read from the `elements-files` catalog instead
+// (spec decision 5, which reverses flat-step-rows decision 9's "leave the copies
+// untouched"). WHAT DOES NOT MOVE is the boundary: a file's name and its MIME type
+// are DATA and pass through untouched; the size is `lib/format.ts`'s since ticket 02
+// (see the marker below). The cost, written down: this file is no longer
+// byte-comparable with upstream, so each deliberate edit below is marked `LOCAL:` --
+// a marker says "this was changed on purpose", not "this is what upstream changed".
+// Every non-word byte -- `data-slot`, class names, upstream identifiers -- is
+// untouched.
+
 import { memo, type FC } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import {
@@ -12,6 +24,13 @@ import {
   DownloadIcon,
 } from "lucide-react";
 import type { FileMessagePartComponent } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
+// LOCAL: `formatFileSize` used to live here with its OWN rounding (one decimal).
+// There were three copies of `B`/`KB`/`MB` in this UI, so the size is written by
+// `lib/format.ts` now. What that costs: this row used to say "1.5 MB" and says
+// "2 MB" -- the glanceable precision, the same one the sidebar's disk facts use.
+// See .scratch/ui-i18n/spec.md (ticket 02).
+import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const fileVariants = cva(
@@ -112,16 +131,6 @@ function getDataUrlSize(data: string): number {
     .byteLength;
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export type FileRootProps = React.ComponentProps<"div"> &
   VariantProps<typeof fileVariants>;
 
@@ -174,13 +183,17 @@ function FileName({
   children,
   ...props
 }: React.ComponentProps<"span">) {
+  // LOCAL: upstream's "Unnamed file" fallback is gone from this file and read from
+  // the `elements-files` catalog instead. A name the part DOES carry is its own data
+  // and still passes through.
+  const { t } = useTranslation("elements-files");
   return (
     <span
       data-slot="file-name"
       className={cn("min-w-0 flex-1 truncate font-medium", className)}
       {...props}
     >
-      {children || "Unnamed file"}
+      {children || t("file.unnamed")}
     </span>
   );
 }
@@ -196,7 +209,7 @@ function FileSize({ bytes, className, ...props }: FileSizeProps) {
       className={cn("text-muted-foreground shrink-0", className)}
       {...props}
     >
-      {formatFileSize(bytes)}
+      {formatBytes(bytes)}
     </span>
   );
 }
@@ -217,6 +230,11 @@ function FileDownload({
   children,
   ...props
 }: FileDownloadProps) {
+  // LOCAL: upstream's two fallbacks -- the `download` attribute's name when the part
+  // carries no filename, and the `Download <name>` label -- are gone from this file
+  // and read from the `elements-files` catalog instead. The filename the part DOES
+  // carry is data and still passes through.
+  const { t } = useTranslation("elements-files");
   if (typeof data !== "string") return null;
   const kind = getFileDataKind(data, sourceType);
   if (kind === "id") return null;
@@ -227,13 +245,23 @@ function FileDownload({
     <a
       data-slot="file-download"
       href={href}
+      // LOCAL: `download` is the SUGGESTED FILENAME, not copy -- it is what lands on
+      // disk, so it does not follow the interface language (a Chinese page that saves
+      // a file called 「下载」 would be worse than an English default, and neither has
+      // an extension). Upstream's literal is kept.
       download={filename || "download"}
       {...(kind === "url" && { target: "_blank", rel: "noopener noreferrer" })}
       className={cn(
         "text-muted-foreground hover:bg-accent hover:text-accent-foreground shrink-0 rounded-md p-1 transition-colors",
         className,
       )}
-      aria-label={!children ? `Download ${filename || "file"}` : undefined}
+      aria-label={
+        !children
+          ? t("file.downloadLabel", {
+              filename: filename || t("file.downloadFallback"),
+            })
+          : undefined
+      }
       {...props}
     >
       {children || <DownloadIcon className="size-4" />}
@@ -301,5 +329,4 @@ export {
   getMimeTypeIcon,
   getFileDataKind,
   getBase64Size,
-  formatFileSize,
 };

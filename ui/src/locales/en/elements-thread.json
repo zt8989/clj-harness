@@ -1,0 +1,39 @@
+{
+  "history": {
+    "loading": "Loading conversation"
+  },
+  "welcome": {
+    "heading": "How can I help you today?"
+  },
+  "scroll": {
+    "toBottom": "Scroll to bottom"
+  },
+  "composer": {
+    "placeholder": "Send a message...",
+    "inputLabel": "Message input",
+    "voiceInput": "Voice input",
+    "voiceInputStart": "Start voice input",
+    "dictationStop": "Stop dictation",
+    "dictationStopLabel": "Stop voice input",
+    "send": "Send message",
+    "stopGenerating": "Stop generating"
+  },
+  "message": {
+    "working": "Assistant is working",
+    "copy": "Copy",
+    "refresh": "Refresh",
+    "more": "More",
+    "exportMarkdown": "Export as Markdown",
+    "edit": "Edit",
+    "previous": "Previous",
+    "next": "Next",
+    "cancel": "Cancel",
+    "update": "Update"
+  },
+  "code": {
+    "copy": "Copy"
+  },
+  "dialog": {
+    "close": "Close"
+  }
+}

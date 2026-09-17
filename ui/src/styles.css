@@ -160,8 +160,9 @@
    from.
 
    The prose elements are not ours either: they are in a copied registry file
-   (`thread.aui.tsx`), kept byte-comparable against upstream so a re-pull can be
-   diffed. Their hooks are whatever upstream put on them, and the two sides of
+   (`thread.aui.tsx`), whose deliberate edits are marked `LOCAL:` -- a re-pull is
+   reconciled by reading those markers, not by a byte diff. Their hooks are
+   whatever upstream put on them, and the two sides of
    the conversation do not agree on which -- the answer's content div carries a
    `data-slot` and no `aui-*` class, the question's bubble carries the
    `aui-user-message-content` class and no `data-slot`. Both are upstream's own

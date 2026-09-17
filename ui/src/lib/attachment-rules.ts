@@ -31,10 +31,34 @@
 //
 // ------------------------------------------------------------ WHY IT IS BARE
 //
-// This module IMPORTS NOTHING: no React, no `@` alias, no DOM. That is what lets
-// vitest reach it by relative path (see vitest.config.ts, which deliberately
-// loads no alias), and a rule this load-bearing is worth a test that needs no
-// browser. `format.ts` is the precedent.
+// This module IMPORTS NOTHING that needs a browser: no React, no `@` alias, no DOM.
+// That is what lets vitest reach it by relative path (see vitest.config.ts, which
+// deliberately loads no alias), and a rule this load-bearing is worth a test that
+// needs no browser. `format.ts` is the precedent -- and since that one is now the
+// single place a byte size is written, the size sentence below goes through it
+// rather than carrying a second copy of the units (there used to be three copies of
+// `B`/`KB`/`MB` in this UI; see .scratch/ui-i18n/spec.md, ticket 02).
+//
+// THE SENTENCES BELOW ARE THIS SIDE'S OWN, and that is why they take a translator.
+// A refusal is decided HERE, before any request is sent, so there is no server
+// sentence to prefer -- the rule the fetch helpers keep (use `body.error` verbatim
+// when the server spoke, and only otherwise say our own words) has nothing to read
+// here. The model id and the declared modalities are interpolated as they arrived,
+// never translated; only the words around them are.
+import type { TFunction } from "i18next";
+
+import { formatMegabytes } from "./format";
+
+/// The translator these sentences are worded through, PINNED TO THE FACE THEY
+/// BELONG TO.
+///
+/// i18next's `TFunction` is branded with the namespace it was bound to, so a bare
+/// `TFunction` here would mean "whatever the default namespace is" and would accept a
+/// shell translator by mistake -- while a `string` key would lose the key check
+/// inside this file entirely. Naming `errors` keeps both: only the errors catalog's
+/// keys compile here, and only an errors translator can be passed in (the same
+/// choice `format.ts` makes for its own face).
+type Translate = TFunction<"errors">;
 
 /// The most SOURCE-FILE BYTES a single attachment may carry.
 ///
@@ -64,16 +88,20 @@ export function acceptsImages(
 /// does. It names the model, what it declared, and the way out -- the same three
 /// things the server's own refusal names, so a reader who meets either sentence
 /// has been told the same thing.
+///
+/// A MODEL WITH NO ID GETS THIS SIDE'S WORD FOR IT (`(unnamed)`), which is why that
+/// one word comes out of the catalog; the id itself -- and the declared modalities --
+/// are interpolated exactly as they arrived, JSON-quoted as they always were.
 export function imageRefusal(
   declared: readonly string[] | null | undefined,
   model: string | undefined,
+  t: Translate,
 ): string | null {
   if (acceptsImages(declared)) return null;
-  return (
-    `model ${JSON.stringify(model ?? "(unnamed)")} does not take images;` +
-    ` it declares ${JSON.stringify(declared)} — change the model,` +
-    ` or attach only what it declares`
-  );
+  return t("attachment.model", {
+    model: JSON.stringify(model ?? t("attachment.unnamedModel")),
+    declared: JSON.stringify(declared),
+  });
 }
 
 /// Is this file over the cap? Measured on SOURCE BYTES, and measured in exactly
@@ -85,23 +113,21 @@ export function overByteLimit(bytes: number): boolean {
 
 /// The sentence for a file over the cap, or null when it is not. It carries the
 /// two numbers a person needs to fix it: what this one is, and what the limit is.
-export function sizeRefusal(bytes: number): string | null {
-  if (!overByteLimit(bytes)) return null;
-  return `this image is ${megabytes(bytes)}; the limit is ${megabytes(ATTACHMENT_MAX_BYTES)}`;
-}
-
-/// The attachment's size as a person reads it: a tenth of a megabyte, with a
-/// trailing `.0` dropped so the cap reads as the "2 MB" a person would write.
 ///
-/// THE COMPARISON IS EXACT AND THE SENTENCE ROUNDS, and that leaves one small gap
-/// worth stating rather than hiding: a file one byte over the cap prints the same
-/// "2 MB" the cap does. The two numbers are here to tell somebody what to do about
-/// it, and at that size the thing to do is look at the file, not to compute a
-/// difference -- while six significant digits would be a worse sentence for every
-/// other file that lands here.
-function megabytes(bytes: number): string {
-  const mb = (bytes / (1024 * 1024)).toFixed(1);
-  return `${mb.endsWith(".0") ? mb.slice(0, -2) : mb} MB`;
+/// BOTH ARE FORMATTED BY THE ONE DECIMAL FORM (`formatMegabytes`), not the
+/// glanceable one: a file that is over the cap by a fraction of a megabyte must not
+/// print the same two numbers as the cap, or the refusal reads as a bug. That
+/// caveat -- the comparison is exact while the sentence rounds -- is the formatter's
+/// now, which is where the other copy of it used to live.
+///
+/// THE UNITS DO NOT TRANSLATE, so the two formatted magnitudes go into the sentence
+/// as VALUES while the words around them come from the catalog.
+export function sizeRefusal(bytes: number, t: Translate): string | null {
+  if (!overByteLimit(bytes)) return null;
+  return t("attachment.size", {
+    actual: formatMegabytes(bytes),
+    limit: formatMegabytes(ATTACHMENT_MAX_BYTES),
+  });
 }
 
 /// Everything to be said about one file, before it is added -- or null, which is
@@ -118,6 +144,7 @@ export function refusalFor(
   file: { size: number },
   declared: readonly string[] | null | undefined,
   model: string | undefined,
+  t: Translate,
 ): string | null {
-  return imageRefusal(declared, model) ?? sizeRefusal(file.size);
+  return imageRefusal(declared, model, t) ?? sizeRefusal(file.size, t);
 }

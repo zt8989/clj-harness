@@ -1,0 +1,97 @@
+{
+  "kind": {
+    "system": "system",
+    "context": "context",
+    "user": "user",
+    "assistant": "assistant",
+    "tool": "tool"
+  },
+  "row": {
+    "noText": "(no text)"
+  },
+  "pane": {
+    "close": "close"
+  },
+  "turn": {
+    "label": "turn {{n}}",
+    "count_one": "{{count}} turn",
+    "count_other": "{{count}} turns",
+    "items": "{{n}} items",
+    "calls": "{{n}} calls"
+  },
+  "call": {
+    "label": "call {{n}}",
+    "sent_one": "call {{names}} sent",
+    "sent_other": "calls {{names}} sent",
+    "tools": "{{n}} tools"
+  },
+  "tabs": {
+    "systemPrompt": "system prompt",
+    "tools": "tools"
+  },
+  "facts": {
+    "prompt": "prompt",
+    "bytes": "bytes",
+    "injected": "injected",
+    "by": "by",
+    "arrived": "arrived",
+    "id": "id",
+    "model": "model",
+    "took": "took",
+    "tokens": "tokens",
+    "finished": "finished",
+    "tools": "tools",
+    "executed": "executed",
+    "outcome": "outcome",
+    "waited": "waited",
+    "ran": "ran"
+  },
+  "values": {
+    "initial": "initial",
+    "changed": "changed since the last turn",
+    "whenOpened": "when the run opened",
+    "duringRun": "during the run",
+    "yes": "yes",
+    "no": "no"
+  },
+  "blocks": {
+    "reasoning": "reasoning",
+    "answer": "answer",
+    "arguments": "arguments",
+    "error": "error",
+    "result": "result"
+  },
+  "tools": {
+    "unnamed": "unnamed tool",
+    "predates": "this record predates the model-call lines, so it cannot say which tools were on the table.",
+    "noTable": "no call in this turn carried a tool table."
+  },
+  "empty": {
+    "noRecord": "no record for this session yet.",
+    "nothingRun": "nothing has run in this session yet, so there is nothing the model saw."
+  },
+  "search": {
+    "placeholder": "Search this session’s record…"
+  },
+  "header": {
+    "incomplete": "the last run has not finished"
+  },
+  "list": {
+    "hidden": "rows that do not match are hidden."
+  },
+  "lane": {
+    "input": "input",
+    "model": "model",
+    "tools": "tools"
+  },
+  "mode": {
+    "duration": "duration",
+    "turns": "turns"
+  },
+  "timeline": {
+    "total": "{{duration}} total",
+    "empty": "this record has no timings yet — nothing to lay out.",
+    "openTitle": "{{label}} · {{duration}} — click to open it",
+    "openAria": "open {{label}} in turn {{turn}}"
+  }
+}

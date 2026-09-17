@@ -10,9 +10,10 @@
 // conversation HAS cost and appears once there is anything to report.
 //
 // It does not touch `components/assistant-ui/elements/thread.aui.tsx` -- that is a
-// copy of the assistant-ui element kept byte-comparable with upstream, and the two
-// LOCAL: insertion points in composer-chrome.tsx are the whole reason this file can
-// exist without editing it.
+// copy of the assistant-ui element, and the two LOCAL: insertion points in
+// composer-chrome.tsx are the whole reason this file can exist without editing it.
+// (That copy does carry in-place edits of its own now, each marked `LOCAL:`; this
+// file's copy simply is not one of them.)
 //
 // --------------------------------------------- the numbers are the SERVER's, not ours
 //
@@ -41,6 +42,7 @@
 import { type FC, useEffect, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { DatabaseIcon, TimerIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { type StatsPayload, statsCells } from "@/lib/format";
 import { statsFor } from "@/lib/stats";
@@ -51,6 +53,11 @@ import { statsFor } from "@/lib/stats";
 const Sep: FC = () => <span aria-hidden="true">·</span>;
 
 export const ComposerStats: FC<{ threadId: string }> = ({ threadId }) => {
+  /// The strip's five cells are phrases, so their words come from the `format` face
+  /// even though the numbers are the server's: `statsCells` is handed a translator
+  /// rather than reaching for one, which is what keeps it a pure function a suite can
+  /// call (see `lib/format.ts`).
+  const { t } = useTranslation("format");
   /// A COUNT of assistant messages, not the messages: `useAuiState` compares what
   /// the selector returns, and a selector handing back a fresh array would re-render
   /// on every token.
@@ -71,7 +78,7 @@ export const ComposerStats: FC<{ threadId: string }> = ({ threadId }) => {
     };
   }, [threadId, assistantCount, isRunning]);
 
-  const cells = statsCells(stats);
+  const cells = statsCells(stats, t);
   if (cells === null) return null;
 
   return (

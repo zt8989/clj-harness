@@ -142,13 +142,13 @@ lib/
   `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框在会话有消息时挂上），
   首次会话居中的时候仍是上游的间距。
 
-抄进来的清单（对账就是不重装直接 diff）：
+抄进来的清单（**对账是读 `LOCAL:` 标注**——i18n 那批落地之后这些文件就地改，逐字节 diff 不再是手段）：
 
 | 位置 | 是什么 |
 |---|---|
-| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button、**其中 `thread.aui.tsx` 与 `thread-list.aui.tsx` 两份带 `LOCAL:` 改动**（前者的五处见下，后者见再下面），其余十份一字未改；`attachment.aui.tsx` 与 `image.tsx` 都在**原样未改**那一组里，而它们今天真的被用上了——composer 的缩略图、对话里那张图与点开放大，画的就是这两份（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
-| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
-| `src/hooks/` | 2 份 hook，同样未改 |
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、thread-list、tool-fallback、tool-group、reasoning、reasoning.aui、markdown-text、attachment、file、image、follow-up-suggestions、tooltip-icon-button。**九份带 `LOCAL:` 标注**——文案进了目录（spec 决策 5），另有结构性的几处（`thread.aui.tsx` 的五处见下，`thread-list.aui.tsx` 的重写见再下面）。**三份没有可译的文案，因此仍是原样**：`reasoning.aui.tsx`、`follow-up-suggestions.aui.tsx`、`tooltip-icon-button.tsx`。`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用（注入点已不再导入它，见下） |
+| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton。**其中 `dialog.tsx` 带 `LOCAL:` 标注**：它的 `Close` 进了目录（`sr-only` 与页脚那颗按钮两处） |
+| `src/hooks/` | 2 份 hook，不含文案，未改 |
 
 **两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
 （`ComposerFrame` 套在 composer 外面、`ComposerTools` 画在动作行右侧、`ComposerAddAttachment` 顶替动作行
@@ -156,7 +156,7 @@ lib/
 属性**——viewport 的 `turnAnchor="top"`（见上一节「只跟着末尾走」）；**第五处是消息级的**——`AssistantMessage`
 读一次折叠钩子（`useStepFold` / `useTurnFolded`），据此把整条消息 `hidden`、或在轮首画那一行摘要，
 **逻辑一行都不在这份文件里**（`components/turn-steps.tsx` 与 `lib/turns.ts`），它只问「我该被收起来吗」。
-五处之外，这份文件的行、样式与结构其余部分与上游一致。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
+上面五处是**结构**上的改动；这份文件的**文案**也就地搬进了目录（spec 决策 5），所以它和 `thread-list.aui.tsx` 一样，不再与上游逐字节相同——**抄来的文件如今就地改，每一处有意改动都标 `LOCAL:`**。标记是逐字节对账的替代品：它说明「这里是有意改的」，不说明「上游改了什么」。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
 按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
 它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
 `ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有
@@ -201,6 +201,67 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 **这句话有一个例外，只有一行**：`/name` 那条**人的**加载路径现在有输入面了——技能列表（下一节）。
 注入本身照旧零帧；多出来的是「有哪些名字可选」这一屏，而它读的是服务端一条只读端点。
 两者不是一回事：一个是模型看到什么，一个是人挑什么。
+
+## 文案与语言（i18n）
+
+界面说**两种语言**：英文与中文。机制是 i18next + react-i18next（为什么引库而不手写一份表、
+代价是什么，见 `.scratch/ui-i18n/spec.md`），两份目录在 `ui/src/locales/<语言>/<面>.json`，
+一个「面」是页面上的一处地方：**外壳 / 输入框 / 正文 / 审批 / 设置 / 轨迹 / 数字与时长 /
+抄来的元素（三组）/ 本侧的句子**——十一份，**全部已落地**（2026-09-17，13 张票）。
+今天界面上不再有硬写的界面文案；留在原文里的只有后端自己的句子与模型的词汇（见下面「边界」）。
+
+- **两条守卫把「搬漏了」变成红的**：每个键在两种语言里都在、值都非空，且**语言各自的复数形式要与
+  它自己的 CLDR 类别一致**（英文有 `_one`，中文没有）；反过来，**目录里不留没人命名的键**
+  （一个拼错的键被补进目录、或一行删掉后留下的条目，都不会出现在屏幕上，只会越积越多）。
+  两条都在 `test/suites/i18n.ts` 里，第一条是「故意弄坏会红」验过的。
+
+- **判定链是一条纯函数**（`src/lib/language.ts`，零 import）：**这个浏览器记住的** →
+  `navigator.language`（`zh*` 归 `zh`，其余归 `en`）→ `en`。记住的值**解析不出来就往下落**，不是粘住
+  ——语言表哪天砍掉一种，选过它的浏览器要落到自己浏览器的答案上，而不是停在一个画不出来的语言上。
+  四类标签有实测：`zh` / `zh-CN` / `zh-TW` / 旧的 `zh_CN` 都是中文（**基础子标签**决定），
+  `fr` 这类落到英文。
+- **开关在设置面板的 General 页**，写 `localStorage`；键在 `src/lib/language.ts` 一处写着，
+  **改名等于把所有人已经做过的选择抹掉**。它是那个面板里**唯一不写文件**的一项：语言是这个浏览器的
+  偏好，不是这台 harness 的配置，所以它也不进 `config.edn`、不上线——同一个会话在两个不同语言的
+  浏览器里，读到的后端句子完全相同。
+- **开关那一行在两个条件之外**，不是排版：config.edn 解析不出来的家画出来的是一页拒绝，而**被放进
+  那页、又读不懂那门语言的人，必须还能把它换掉**。
+- **`<html lang>` 是状态的一部分**，不是装饰：读屏软件靠它挑嗓音。所以它由 `src/lib/i18n.ts` 在初始化
+  时和每次切换后写上；`index.html` 里那个静态值只是兜底（静态文件写不出正确值，原来那个 `zh` 与
+  通篇英文的文案本来就不自洽）。
+- **初始化是同步的**（`initAsync: false`）：目录是打包进来的静态资源，没有 Suspense，也就没有
+  「先闪一帧 `view.conversation`」的窗口。
+- **键在调用处字面写**，不拼字符串（`` t(`status.${x}`) `` 这种不许）。两条守卫靠它成立：
+  `npm run typecheck` 挡得住不存在的键（`src/i18next.d.ts` 把类型收到英文那份上，实测过一个错键会
+  编译失败并列出可用的键），套件挡得住两种语言不一致（键集相同、值非空，缺一个就是红）。
+- **纯模块仍是运行时零 import**（`src/lib/language.ts`、`src/lib/catalogs.ts`）——「套件按相对路径
+  import 纯模块」这条既有性质没有被破坏，那两份文件只 import JSON 与类型。
+- **数字与时长的词只有一处**（`src/lib/format.ts`，`TFunction` 是类型 import，运行时仍是零 import）。
+  里面有三条分界，都是判据而不是口味：**单位不翻**（`B`/`KB`/`MB`、token 的 `k`/`M`、`tok`、`tok/s`
+  两种语言同一个串，进目录只会多出第二个要改的地方）；**短语与量词翻**（`<1s`、`2m 15s`、
+  `3 次模型调用`）；**时区取本机、标点取界面语言**——`formatTime` 因此收一个 locale 参数，而
+  `formatBytes` 不收：一个是「读者坐在哪」，一个是「页面在说什么」。量词交给 i18next 的 `count`
+  （英文有单数、中文没有，这条差别是**语言的**，所以和词一起放在目录里）。
+  另外**拒绝句用另一位小数**（`formatMegabytes`）：`formatBytes` 的整 MB 四舍五入会让
+  「这张图 2 MB，上限是 2 MB」读起来像 bug。
+- **缺失的数字是调用方的话，不是格式化器的话**：「还没有日志」「还没跑过」原来是 `formatBytes` /
+  `formatTime` 答的，现在由那两行自己说——只有它知道这是哪一种缺失（其中一种根本不是字节或时间）。
+
+### 边界：只有界面自己的文案有语言
+
+**后端的句子原样穿过，一个字节不翻。** 工具结果、HTTP 错误体、审批与 elicitation 的话术、工具描述、
+`prompt.md`（轨迹视图里读得到）、MCP 服务器给的 prompt 与 description——都是这样。
+
+理由不只是省事：**工具结果同时是模型的上下文**（它是模型读完才决定下一步的那份记录）。把它翻成随
+界面变化的两种语言，等于让同一份记录不再唯一——同一段 run，在两个不同语言的浏览器里，模型看到的
+东西会不一样。这与「服务端不持有会话」是同一个方向：**记录是记录，界面是界面。**
+
+界面上另一处不翻的是**模型的词汇**：工具名逐字（`read` / `bash` / `todo_write`，见
+[CONTEXT.md](../../CONTEXT.md) 的「工具名的写法」），参数与结果的正文是模型写的，也不翻。
+`src/lib/attachment-rules.ts` 那种**本侧自己抬起**的句子反过来必须翻——服务端给了 `error` 就原样用它，
+只在服务端没说话时才说自己那句。
+
+判据一句话：**界面里不该出现中文夹英文（或反过来）**，除了上面这两类刻意留在原文里的东西。
 
 ## 技能列表（输入框里打 `/` 弹出的那份菜单）
 
@@ -329,7 +390,8 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
   而不是留给下一个加 lane 的人去猜。
 - 一格里没有的都不编：老记录（早于 `model/*` 那两行）**没有** `calls`、模型 lane 空着并如实说；
   被否决的调用**没有** `startedAt`（它不是「0 秒」），画成空心记号。
-- 文案与 UI 其余部分同语言（英文），`data-slot` 是它的挂点（`trajectory-view` / `trajectory-turn` /
+- 文案与 UI 其余部分同语言（见[文案与语言](#文案与语言i18n)：这一面的文案进
+  `ui/src/locales/*/trajectory.json`），`data-slot` 是它的挂点（`trajectory-view` / `trajectory-turn` /
   `trajectory-item` / `trajectory-pane` / `trajectory-segment` …），真机证据在
   `.scratch/trajectory/evidence/`。
 

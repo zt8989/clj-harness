@@ -1,0 +1,32 @@
+{
+  "tool": {
+    "used": "用过的工具",
+    "cancelled": "已取消的工具",
+    "resultHeader": "结果：",
+    "errorHeader": "错误：",
+    "cancelledReason": "取消的原因：",
+    "unserializable": "[无法序列化的值]",
+    "approved": "用户批准",
+    "denied": "用户拒绝",
+    "optionAllowOnce": "允许",
+    "optionAllowAlways": "始终允许",
+    "optionDenyOnce": "拒绝",
+    "optionDenyAlways": "始终拒绝",
+    "allow": "允许",
+    "deny": "拒绝",
+    "confirm": "确认",
+    "back": "返回",
+    "answerLabel": "回答",
+    "noteLabel": "备注",
+    "answerPlaceholder": "输入你的回答",
+    "notePlaceholder": "给你的决定加一句备注",
+    "send": "发送"
+  },
+  "group": {
+    "calls_other": "{{count}} 次工具调用"
+  },
+  "reasoning": {
+    "label": "思考",
+    "duration": " ({{duration}}s)"
+  }
+}

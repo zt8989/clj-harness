@@ -42,13 +42,22 @@
 // show does not exist yet.
 import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
+import type { TFunction } from "i18next";
 import { WrenchIcon, XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { formatMillis, formatTime, formatTokens } from "@/lib/format";
+import { asLanguage } from "@/lib/language";
 import { type TrajectoryItem, type TrajectoryPayload, type TrajectoryTurn, trajectoryFor } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 import { KIND_HUE } from "@/components/trajectory-colors";
 import { type Mode, TrajectoryTimeline } from "@/components/trajectory-timeline";
+
+/// The translator this face's words go through. PINNED TO THE NAMESPACE, like
+/// `lib/format.ts` pins its own: a bare `TFunction` would mean "whatever the default
+/// namespace is" and would accept a shell translator by mistake, while a `string` key
+/// would lose the key check in the helpers below (`headline`).
+type Translate = TFunction<"trajectory">;
 
 /// The one-line preview: the first line that has anything on it, cut to a glance.
 const preview = (text: string): string => {
@@ -63,7 +72,7 @@ const preview = (text: string): string => {
 /// built from the text alone is a blank chip under the word "assistant". The reasoning is
 /// what the model was saying at that moment, so it is what the row shows -- PREFIXED,
 /// because a reader has to know which of the two they are looking at.
-const headline = (item: TrajectoryItem): string => {
+const headline = (item: TrajectoryItem, t: Translate): string => {
   switch (item.kind) {
     case "tool":
       // A SPACE between the two: it is a name and its arguments, and `bash{"command":…}`
@@ -72,28 +81,47 @@ const headline = (item: TrajectoryItem): string => {
     case "assistant":
       if (item.text.trim() !== "") return preview(item.text);
       if (item.reasoning !== undefined && item.reasoning.trim() !== "")
-        return `reasoning: ${preview(item.reasoning)}`;
-      return "(no text)";
+        return `${t("blocks.reasoning")}: ${preview(item.reasoning)}`;
+      return t("row.noText");
     default:
       return preview(item.text);
   }
 };
 
+/// The word a kind wears, in the reader's language. A TABLE OF LITERAL KEYS rather than
+/// `t(`kind.${kind}`)`: a built key is one the type gate cannot check and the last ticket
+/// cannot find a use for (see `lib/catalogs.ts`).
+///
+/// THE KEY IS THE RECORD'S, THE WORD IS OURS: `item.kind` is the record's own discriminator
+/// -- it is also the key into the shared colour table below -- and it stays exactly that.
+/// What a reader reads is this table's entry, so a page in Chinese says 工具 where a page in
+/// English says `tool`; the record says `tool` either way.
+const KIND_LABEL: Record<TrajectoryItem["kind"], (t: Translate) => string> = {
+  system: (t) => t("kind.system"),
+  context: (t) => t("kind.context"),
+  user: (t) => t("kind.user"),
+  assistant: (t) => t("kind.assistant"),
+  tool: (t) => t("kind.tool"),
+};
+
 /// The chip, wherever it appears: the row and the pane say the same word the same way,
-/// so a reader who clicked `tool` is looking at `tool`. THE COLOUR COMES FROM THE SHARED
-/// TABLE (trajectory-colors), which is also what colours the strip's lanes -- a lane and
-/// its chips are the same kind of thing, so they are the same colour.
-const Chip: FC<{ kind: TrajectoryItem["kind"] }> = ({ kind }) => (
-  <span
-    data-slot="trajectory-item-chip"
-    className={cn(
-      "shrink-0 self-center rounded px-1.5 py-0.5 text-[0.68rem] leading-4",
-      KIND_HUE[kind].chip,
-    )}
-  >
-    {kind}
-  </span>
-);
+/// so a reader who clicked a tool row is looking at the same word in the pane. THE COLOUR
+/// COMES FROM THE SHARED TABLE (trajectory-colors), which is also what colours the strip's
+/// lanes -- a lane and its chips are the same kind of thing, so they are the same colour.
+const Chip: FC<{ kind: TrajectoryItem["kind"] }> = ({ kind }) => {
+  const { t } = useTranslation("trajectory");
+  return (
+    <span
+      data-slot="trajectory-item-chip"
+      className={cn(
+        "shrink-0 self-center rounded px-1.5 py-0.5 text-[0.68rem] leading-4",
+        KIND_HUE[kind].chip,
+      )}
+    >
+      {KIND_LABEL[kind](t)}
+    </span>
+  );
+};
 
 /// One row of the list. It CARRIES NO EXPANSION OF ITS OWN: opening a row means the
 /// detail pane, because two ways to see the same text (a folded body here, a pane there)
@@ -105,6 +133,7 @@ const ItemRow: FC<{
   query: string;
   onSelect: () => void;
 }> = ({ item, index, selected, query, onSelect }) => {
+  const { t } = useTranslation("trajectory");
   const hit = query === "" || JSON.stringify(item).toLowerCase().includes(query);
 
   return (
@@ -132,7 +161,7 @@ const ItemRow: FC<{
               data-slot="trajectory-item-head"
               className="min-w-0 flex-1 truncate font-mono text-xs text-foreground"
             >
-              {headline(item)}
+              {headline(item, t)}
             </span>
             <span className="shrink-0 font-mono text-xs text-muted-foreground" aria-hidden="true">
               →
@@ -149,7 +178,7 @@ const ItemRow: FC<{
             data-slot="trajectory-item-head"
             className="min-w-0 flex-1 truncate font-mono text-xs text-foreground"
           >
-            {headline(item)}
+            {headline(item, t)}
           </span>
         )}
       </button>
@@ -216,6 +245,7 @@ const tablesOf = (turn: TrajectoryTurn): { calls: readonly number[]; tools: read
 /// on the wire. No state, no key handling, and it is keyboard- and screen-reader-loud
 /// for free, which is the same reason the composer's pickers are native selects.
 const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
+  const { t } = useTranslation("trajectory");
   /// The wire shape is `{type: "function", function: {name, description, parameters}}`;
   /// a bare definition (or a shape from elsewhere) is read as itself rather than
   /// rejected, because the point of this pane is to show what is there.
@@ -226,7 +256,7 @@ const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
   const name =
     typeof fn === "object" && fn !== null && "name" in fn && typeof fn.name === "string"
       ? fn.name
-      : "unnamed tool";
+      : t("tools.unnamed");
   const description =
     typeof fn === "object" && fn !== null && "description" in fn && typeof fn.description === "string"
       ? fn.description
@@ -254,17 +284,18 @@ const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
 
 /// The tool list of one turn: every distinct table, each with the call(s) that sent it.
 const ToolList: FC<{ turn: TrajectoryTurn }> = ({ turn }) => {
+  const { t } = useTranslation("trajectory");
   const tables = tablesOf(turn);
 
   if (turn.calls === undefined) {
     return (
       <p className="text-xs text-muted-foreground">
-        this record predates the model-call lines, so it cannot say which tools were on the table.
+        {t("tools.predates")}
       </p>
     );
   }
   if (tables.length === 0) {
-    return <p className="text-xs text-muted-foreground">no call in this turn carried a tool table.</p>;
+    return <p className="text-xs text-muted-foreground">{t("tools.noTable")}</p>;
   }
   return (
     <div data-slot="trajectory-tool-tables">
@@ -273,8 +304,8 @@ const ToolList: FC<{ turn: TrajectoryTurn }> = ({ turn }) => {
           {/* Which call sent it, and how many tools -- the count is on the line so a
               reader knows how much is folded away before opening anything. */}
           <p className="mb-1 text-[0.7rem] uppercase tracking-wide text-muted-foreground">
-            {calls.length === 1 ? `call ${calls[0]} sent` : `calls ${calls.join(", ")} sent`} ·{" "}
-            {tools.length} tools
+            {t("call.sent", { count: calls.length, names: calls.join(", ") })} ·{" "}
+            {t("call.tools", { n: tools.length })}
           </p>
           <ul className="rounded border border-border/60">
             {tools.map((tool, i) => (
@@ -301,6 +332,9 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
   turn,
   onClose,
 }) => {
+  const { t: tFormat, i18n } = useTranslation("format");
+  const { t } = useTranslation("trajectory");
+  const locale = asLanguage(i18n.language);
   /// Reset per item by the `key` the caller gives this component, so clicking a system
   /// row always opens on the prompt and the tools are one deliberate click away.
   const [tab, setTab] = useState<SystemTab>("prompt");
@@ -322,14 +356,14 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
         <Chip kind={item.kind} />
         <span className="truncate text-xs text-muted-foreground">
-          turn {turn.index}
+          {t("turn.label", { n: turn.index })}
           {item.kind === "tool" && item.name !== undefined ? ` · ${item.name}` : ""}
-          {callIndex === undefined ? "" : ` · call ${callIndex}`}
+          {callIndex === undefined ? "" : ` · ${t("call.label", { n: callIndex })}`}
         </span>
         <button
           type="button"
           onClick={onClose}
-          aria-label="close"
+          aria-label={t("pane.close")}
           data-slot="trajectory-detail-close"
           className="ml-auto rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
         >
@@ -345,8 +379,8 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
         >
           {(
             [
-              ["prompt", "system prompt"],
-              ["tools", "tools"],
+              ["prompt", t("tabs.systemPrompt")],
+              ["tools", t("tabs.tools")],
             ] as const
           ).map(([key, label]) => (
             <button
@@ -371,8 +405,8 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["prompt", item.initial === true ? "initial" : "changed since the last turn"],
-                ["bytes", `${item.text.length}`],
+                [t("facts.prompt"), item.initial === true ? t("values.initial") : t("values.changed")],
+                [t("facts.bytes"), `${item.text.length}`],
               ]}
             />
             <Block text={item.text} mono />
@@ -384,8 +418,11 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["injected", item.source === "opening" ? "when the run opened" : "during the run"],
-                ["by", item.call === undefined ? null : `call ${item.call}`],
+                [
+                  t("facts.injected"),
+                  item.source === "opening" ? t("values.whenOpened") : t("values.duringRun"),
+                ],
+                [t("facts.by"), item.call === undefined ? null : t("call.label", { n: item.call })],
               ]}
             />
             <Block text={item.text} mono />
@@ -396,8 +433,8 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["arrived", item.at === undefined ? null : formatTime(item.at)],
-                ["id", item.id ?? null],
+                [t("facts.arrived"), item.at === undefined ? null : formatTime(item.at, locale)],
+                [t("facts.id"), item.id ?? null],
               ]}
             />
             <Block text={item.text} />
@@ -408,22 +445,22 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["model", call?.model ?? null],
+                [t("facts.model"), call?.model ?? null],
                 [
-                  "took",
+                  t("facts.took"),
                   call?.startedAt === undefined || call.endedAt === undefined
                     ? null
-                    : formatMillis(call.endedAt - call.startedAt),
+                    : formatMillis(call.endedAt - call.startedAt, tFormat),
                 ],
-                ["tokens", call?.tokens === undefined ? null : formatTokens(call.tokens)],
-                ["finished", call?.finishReason ?? null],
+                [t("facts.tokens"), call?.tokens === undefined ? null : formatTokens(call.tokens)],
+                [t("facts.finished"), call?.finishReason ?? null],
                 /// The COUNT only: the table itself is on the turn's system row, and the
                 /// same JSON in two panes is one place to keep in step too many.
-                ["tools", call?.tools === undefined ? null : `${call.tools.length}`],
+                [t("facts.tools"), call?.tools === undefined ? null : `${call.tools.length}`],
               ]}
             />
-            {item.reasoning !== undefined && <Block label="reasoning" text={item.reasoning} />}
-            {item.text.trim() !== "" && <Block label="answer" text={item.text} />}
+            {item.reasoning !== undefined && <Block label={t("blocks.reasoning")} text={item.reasoning} />}
+            {item.text.trim() !== "" && <Block label={t("blocks.answer")} text={item.text} />}
           </>
         )}
 
@@ -431,30 +468,30 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["executed", item.executed ? "yes" : "no"],
-                ["outcome", item.outcome ?? null],
+                [t("facts.executed"), item.executed ? t("values.yes") : t("values.no")],
+                [t("facts.outcome"), item.outcome ?? null],
                 /// THE TWO DURATIONS ARE DIFFERENT KINDS OF TIME. `waited` is the park --
                 /// a person deciding; `ran` is the tool working, from the moment execution
                 /// could start (`resumedAt`, or the arrival when nothing was parked) to the
                 /// moment it LEFT execution. A call that never ran has neither.
                 [
-                  "waited",
+                  t("facts.waited"),
                   item.resumedAt === undefined || item.arrivedAt === undefined
                     ? null
-                    : formatMillis(item.resumedAt - item.arrivedAt),
+                    : formatMillis(item.resumedAt - item.arrivedAt, tFormat),
                 ],
                 [
-                  "ran",
+                  t("facts.ran"),
                   item.executedAt === undefined
                     ? null
-                    : formatMillis(item.executedAt - (item.resumedAt ?? item.arrivedAt ?? item.executedAt)),
+                    : formatMillis(item.executedAt - (item.resumedAt ?? item.arrivedAt ?? item.executedAt), tFormat),
                 ],
-                ["id", item.toolCallId],
+                [t("facts.id"), item.toolCallId],
               ]}
             />
-            {item.argsText !== undefined && <Block label="arguments" text={item.argsText} mono />}
-            {item.error !== undefined && <Block label="error" text={item.error} mono />}
-            <Block label="result" text={item.result} mono />
+            {item.argsText !== undefined && <Block label={t("blocks.arguments")} text={item.argsText} mono />}
+            {item.error !== undefined && <Block label={t("blocks.error")} text={item.error} mono />}
+            <Block label={t("blocks.result")} text={item.result} mono />
           </>
         )}
       </div>
@@ -463,6 +500,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
 };
 
 export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
+  const { t } = useTranslation("trajectory");
   /// THE REFETCH TRIGGER, read off the runtime here rather than handed in: one ReAct
   /// round is one assistant message on this side, so a rise in that count is a call that
   /// just finished, and `isRunning` catches the run that ends without one (an error).
@@ -508,7 +546,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   /// kind of lie this view must not tell. Failing to resolve closes the pane instead.
   const open = useMemo(() => {
     if (selected === null) return null;
-    const turn = turns.find((t) => t.index === selected.turn);
+    const turn = turns.find((candidate) => candidate.index === selected.turn);
     const item = turn?.items[selected.index];
     return turn === undefined || item === undefined ? null : { turn, item };
   }, [selected, turns]);
@@ -516,7 +554,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   if (payload === null) {
     return (
       <div data-slot="trajectory-view" className="flex h-full items-center justify-center">
-        <p className="text-sm text-muted-foreground">no record for this session yet.</p>
+        <p className="text-sm text-muted-foreground">{t("empty.noRecord")}</p>
       </div>
     );
   }
@@ -525,7 +563,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
     return (
       <div data-slot="trajectory-view" className="flex h-full items-center justify-center">
         <p className="text-sm text-muted-foreground">
-          nothing has run in this session yet, so there is nothing the model saw.
+          {t("empty.nothingRun")}
         </p>
       </div>
     );
@@ -546,15 +584,15 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
           value={query}
           data-slot="trajectory-search"
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search this session&rsquo;s record…"
+          placeholder={t("search.placeholder")}
           className="h-7 w-64 rounded-md border border-border bg-background px-2 text-xs"
         />
         <span className="text-xs text-muted-foreground">
-          {turns.length === 1 ? "1 turn" : `${turns.length} turns`}
+          {t("turn.count", { count: turns.length })}
         </span>
         {payload.incomplete && (
           <span data-slot="trajectory-incomplete" className="text-xs text-amber-600 dark:text-amber-400">
-            the last run has not finished
+            {t("header.incomplete")}
           </span>
         )}
       </div>
@@ -574,26 +612,26 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
           className="h-full min-h-0 min-w-0 overflow-y-auto overflow-x-hidden"
           data-slot="trajectory-turns"
         >
-          {turns.map((t) => (
-            <li key={t.index} data-slot="trajectory-turn" data-turn={t.index}>
+          {turns.map((turn) => (
+            <li key={turn.index} data-slot="trajectory-turn" data-turn={turn.index}>
               <div className="border-y border-border bg-muted/40 px-3 py-1">
-                <span className="text-[0.7rem] font-medium">turn {t.index}</span>
+                <span className="text-[0.7rem] font-medium">{t("turn.label", { n: turn.index })}</span>
                 <span className="ml-2 text-[0.7rem] text-muted-foreground">
-                  {t.items.length} items
-                  {t.calls === undefined ? "" : ` · ${t.calls.length} calls`}
+                  {t("turn.items", { n: turn.items.length })}
+                  {turn.calls === undefined ? "" : ` · ${t("turn.calls", { n: turn.calls.length })}`}
                 </span>
               </div>
               <ul>
-                {t.items.map((item, i) => (
+                {turn.items.map((item, i) => (
                   <ItemRow
                     key={`${item.kind}-${i}`}
                     item={item}
                     index={i}
                     query={query.toLowerCase()}
-                    selected={selected?.turn === t.index && selected.index === i}
+                    selected={selected?.turn === turn.index && selected.index === i}
                     onSelect={() =>
                       setSelected((was) =>
-                        was?.turn === t.index && was.index === i ? null : { turn: t.index, index: i },
+                        was?.turn === turn.index && was.index === i ? null : { turn: turn.index, index: i },
                       )
                     }
                   />
@@ -603,7 +641,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
           ))}
           {query !== "" && (
             <li className="px-3 py-2 text-xs text-muted-foreground">
-              rows that do not match are hidden.
+              {t("list.hidden")}
             </li>
           )}
         </ol>

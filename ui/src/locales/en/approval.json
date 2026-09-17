@@ -1,0 +1,19 @@
+{
+  "card": {
+    "title": "This tool call needs your approval",
+    "approve": "Approve",
+    "approved": "Approved",
+    "deny": "Deny",
+    "denied": "Denied",
+    "note": "Approving runs the call as usual. Denying skips it: the model is handed a tool result saying a human vetoed it, and the run carries on.",
+    "hold": "The message box stays closed until this is decided -- a message sent now would be refused rather than queued."
+  },
+  "elicitation": {
+    "title": "A server is asking you something",
+    "named": "{{server}} is asking you something",
+    "send": "Send",
+    "sent": "Sent",
+    "decline": "Decline",
+    "declined": "Declined"
+  }
+}

@@ -1,5 +1,16 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's one sentence -- the
+// folding head's "N tool calls" -- is gone from this file and read from the
+// `elements-card` catalog instead (spec decision 5, which reverses flat-step-rows
+// decision 9's "leave the copies untouched"). The COUNT is still computed here and
+// handed to i18next's `count`, because English has a singular form and Chinese does
+// not: which form a number takes is the language's business, and it belongs beside
+// the words. Note the division of labour with `message-parts.tsx`: that file's line
+// is the per-TURN summary, this one is the per-GROUP folding head. The cost,
+// written down: this file is no longer byte-comparable with upstream, so the
+// deliberate edit below is marked `LOCAL:`. Every non-word byte -- `data-slot`,
+// class names, upstream identifiers -- is untouched.
 import {
   memo,
   useCallback,
@@ -11,6 +22,7 @@ import {
 import { ChevronDownIcon, LoaderIcon } from "lucide-react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { useScrollLock } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 import {
   Collapsible,
   CollapsibleContent,
@@ -101,7 +113,13 @@ function ToolGroupTrigger({
   count: number;
   active?: boolean;
 }) {
-  const label = `${count} tool ${count === 1 ? "call" : "calls"}`;
+  // LOCAL: upstream's own sentence -- `${count} tool call` / `calls` built with a
+  // `count === 1` ternary -- is gone from this file and read from the
+  // `elements-card` catalog instead, through i18next's `count`. English has the
+  // singular form and Chinese only `other`; both live beside the words, where the
+  // parity check can see them.
+  const { t } = useTranslation("elements-card");
+  const label = t("group.calls", { count });
 
   return (
     <CollapsibleTrigger

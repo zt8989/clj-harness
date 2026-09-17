@@ -1,0 +1,129 @@
+{
+  "language": {
+    "title": "语言",
+    "field": "界面语言",
+    "hint": "只管这个浏览器——记在这里，不写任何文件。后端自己的话（工具结果、报错）不翻译。"
+  },
+  "page": {
+    "general": "General",
+    "models": "Models",
+    "mcp": "MCP servers"
+  },
+  "panel": {
+    "title": "设置",
+    "errorNote": "配置无法解析时，这里显示那句话而不是那些值——文件仍由你自己修。",
+    "loading": "正在读配置…",
+    "sourceInline": "config.edn 以行内方式描述这个提供方",
+    "sourceRequest": "这次请求选中了它",
+    "reread": "重新读",
+    "rereadTitle": "再读一遍这些文件"
+  },
+  "report": {
+    "title": "当前生效",
+    "provider": "提供方",
+    "model": "模型",
+    "reasoning": "思考档",
+    "endpoint": "端点"
+  },
+  "tier": {
+    "config": "config.edn",
+    "session": "本会话",
+    "request": "本次请求",
+    "catalog": "提供方的默认"
+  },
+  "defaults": {
+    "title": "默认档",
+    "introLead": "新会话从这里开始——",
+    "introPossessive": " 的 ",
+    "introTail": "。本会话也可能在听它自己的选择；上面几行会说明是哪一个。",
+    "inlineDescribes": "行内描述",
+    "inlineAfter": "这个提供方—— ",
+    "inlineNote": "三个下拉框表达不了它。在下面选一个提供方，就会把这段描述换成带名字的一条。",
+    "provider": "默认提供方",
+    "none": "— 无 —",
+    "model": "默认模型",
+    "modelNoProvider": "请先选一个提供方。",
+    "modelHint": "这个提供方自己的模型之一。它自己的默认已预先选好。",
+    "reasoning": "默认思考档",
+    "noneSent": "— 不发送 —",
+    "save": "保存默认档",
+    "errorNote": "什么都没写进去——这一档还是原来的样子。"
+  },
+  "models": {
+    "loading": "正在读模型目录…",
+    "back": "提供方",
+    "title": "提供方",
+    "add": "添加提供方",
+    "keyPresent": "有密钥 ✓",
+    "keyMissing": "没有密钥",
+    "count_other": "{{count}} 个模型 · {{credential}}"
+  },
+  "origin": {
+    "builtin": "内置",
+    "user": "你自己的",
+    "builtinPatched": "你的补丁"
+  },
+  "form": {
+    "providerId": "提供方 ID",
+    "providerIdPlaceholder": "acme-gateway",
+    "providerIdEditingHint": "改名等于删掉这条再加一条：请求里点的是这个 id，.env 里的凭据名也由它派生。",
+    "providerIdHint": "小写字母、数字和短横线，以字母开头。它在请求里给这个提供方命名，并在 .env 里派生出它的凭据名。",
+    "displayName": "显示名",
+    "displayNameHint": "可选——选择器里显示的名字。",
+    "baseUrl": "API 地址",
+    "baseUrlPlaceholder": "https://gateway.example/v1",
+    "protocol": "API 协议",
+    "apiKey": "API 密钥",
+    "apiKeyEditingHint": "留空就保持 .env 里那一行不变。填了就会替换它。",
+    "apiKeyHint": "写进配置家的 .env，单独一行，名字由 id 派生。永不回送到这个页面。",
+    "catalogTitle": "模型目录",
+    "firstLead": "这个列表里的",
+    "firstWord": "第一个",
+    "firstTail": "模型是这个提供方自己的默认——没有哪一档点名时，一次运行就落在这里。会话实际从哪个模型开始，在 General 页设置，不在这里。",
+    "noModels": "一个提供方至少要声明一个模型：没有模型的条目选不了，摆出来就是摆一个拒绝。",
+    "addModel": "添加模型",
+    "fetch": "获取可用模型",
+    "fetchNoAddress": "请先填 API 地址",
+    "fetchTitle": "问一下这个提供方都提供什么",
+    "offeredEmpty": "这个提供方没有列出任何模型。",
+    "offeredHint": "勾选你想放进模型目录的。每个加进来时只声明文本——如果这个提供方也收图片，就把它加上。",
+    "takeWithCount_other": "把 {{count}} 个加入模型目录",
+    "errorNote": "什么都没写进去——config.edn 与原来一模一样。",
+    "save": "保存提供方",
+    "create": "新建提供方",
+    "cancel": "取消",
+    "remove": "移除",
+    "removeTitle": "把这条从 config.edn 里拿掉。config.edn.bak 保留改动前的文件，.env 里那一行留着。",
+    "modelId": "模型 id",
+    "removeModel": "移除模型",
+    "removeModelTitle": "移除这个模型",
+    "acceptsText": "接受文本",
+    "acceptsImage": "接受图片",
+    "outText": "输出：文本",
+    "limits": "上限",
+    "context": "上下文",
+    "maxOut": "最大输出",
+    "contextWindow": "context-window",
+    "maxOutputTokens": "max-output-tokens",
+    "limitsNote": "只是报出来，不强制执行。拿不准的就别填。"
+  },
+  "mcp": {
+    "heading": "MCP 服务器",
+    "introLead": "这个会话把工具交给哪些外部程序。声明写在",
+    "introTail": "——本页只读它，不改动它任何东西。",
+    "loading": "正在加载…",
+    "emptyLead": "这个会话没有声明任何服务器。在",
+    "emptyTail": "里声明一个。",
+    "notUsable": "——不能用作工具名",
+    "turnOn": "打开",
+    "turnOff": "关闭",
+    "listingFailed": "列出 MCP 服务器失败：HTTP {{status}}",
+    "switchingFailed": "切换 {{server}} 失败：HTTP {{status}}",
+    "status": {
+      "connected": "已连接",
+      "failed": "失败",
+      "disabled": "已关闭",
+      "idle": "还没用上"
+    }
+  }
+}

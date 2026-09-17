@@ -27,6 +27,7 @@ import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
 import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
+import { i18nSuite } from "./suites/i18n";
 import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
@@ -35,7 +36,7 @@ import { turnsSuite } from "./suites/turns";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -59,7 +60,20 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 26 -> 29: the `turns` suite's three -- the boundary of a turn (a run of adjacent
 /// assistant messages), when it counts as settled, and the summary line's two
 /// numbers. All three are pure arithmetic over a literal message list.
-const EXPECTED_CASES = 31;
+/// 31 -> 33: the `i18n` suite's two -- the language chain (remembered, then the
+/// browser's tag, then English, falling through anything unusable) and the parity
+/// between the two catalogs (the same keys, every value a non-empty string). Both
+/// pure; this is the pair that makes a half-translated page a red run.
+/// 33 -> 34: the `stats` suite's third -- the durations and the timestamps in BOTH
+/// languages, plus the two units that deliberately do not translate. Ticket 02 merged
+/// the four copies of the size/duration words into `lib/format.ts`, and this is the
+/// case that pins what they now say.
+/// 34 -> 35: the `i18n` suite's third -- every catalog entry is NAMED by some source
+/// file, the other direction of the parity check (a mistyped key that was then added
+/// to the catalog to satisfy the types, an entry left behind by a deleted row). It
+/// reads the sources through `import.meta.glob`; the case itself says what a grep
+/// costs and which way it errs.
+const EXPECTED_CASES = 35;
 
 let total = 0;
 for (const suite of SUITES) {

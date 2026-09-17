@@ -1,0 +1,34 @@
+{
+  "attachment": {
+    "add": "Add Attachment",
+    "remove": "Remove file",
+    "uploadFailed": "Upload failed",
+    "previewAlt": "Attachment preview",
+    "previewTitle": "Image Attachment Preview",
+    "typeImage": "Image",
+    "typeDocument": "Document",
+    "typeFile": "File",
+    "ariaLabel": "{{type}} attachment{{state}}",
+    "ariaError": ", upload failed",
+    "ariaUploading": ", uploading"
+  },
+  "file": {
+    "unnamed": "Unnamed file",
+    "downloadLabel": "Download {{filename}}",
+    "downloadFallback": "file"
+  },
+  "image": {
+    "alt": "Image content",
+    "previewAlt": "Image preview",
+    "zoom": "Click to zoom image",
+    "zoomOverlay": "Zoomed image",
+    "zoomClose": "Close zoomed image",
+    "generating": "Generating image…",
+    "generateFailed": "Image could not be generated",
+    "blocked": "The provider blocked this image.",
+    "regenerate": "Regenerate image",
+    "download": "Download image",
+    "copy": "Copy image",
+    "clipboardUnavailable": "Clipboard API is not available in this environment."
+  }
+}

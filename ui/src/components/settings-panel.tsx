@@ -1,6 +1,6 @@
 "use client";
 
-// The settings panel: two pages, and BOTH of them write.
+// The settings panel: three pages, and TWO of them write.
 //
 // ---------------------------------------------------------------- the pages
 //
@@ -9,15 +9,17 @@
 //           that changes a file.
 // Models    the provider catalog: every vendor, where it came from, and the form
 //           that adds, edits and removes one.
+// MCP       the outside programs this session hands tools to, and the per-session
+//           switch for each -- not a file of its own, and not one of the two above.
 //
-// TWO PAGES, AND THE PAGE IS COMPONENT STATE -- not a route, and not a place a URL
-// can point at. Both write config.edn; the key's presence, the credential NAME it
-// is read from and the home's path are facts the Models rows and the composer
-// already carry, so they are not pages of their own.
+// THREE PAGES, AND THE PAGE IS COMPONENT STATE -- not a route, and not a place a URL
+// can point at. General and Models both write config.edn; the key's presence, the
+// credential NAME it is read from and the home's path are facts the Models rows and
+// the composer already carry, so they are not pages of their own.
 //
 // The pages that DO write are honest about it: General's Save writes config.edn's
 // :default, Models' form writes config.edn's :providers (and, when a key is typed,
-// one line of .env). The other two are reports, and they stay reports.
+// one line of .env). The third is a report, and it stays a report.
 //
 // THE ANSWER IS ALWAYS LIVE. The server re-reads the files per call, so the panel
 // refetches every time it is opened rather than caching anything -- opening it
@@ -41,8 +43,10 @@
 // is more use than a blank panel and a generic apology. THE SAME RULE GOVERNS THE
 // FORMS: a refused write shows the server's sentence where the form is, and the
 // form stays put, because the file did not move either.
+import type { TFunction } from "i18next";
 import { ArrowLeftIcon, Loader2Icon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type FC } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
@@ -53,6 +57,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { setLanguage } from "@/lib/i18n";
+import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
   probeModels,
   providerLabel,
@@ -68,23 +74,37 @@ import {
 } from "@/lib/providers";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 
+/// The translator this face is worded through: the settings catalog, because every
+/// string below is drawn in the panel (see `locales/<lng>/settings.json`). The
+/// `TFunction` import is a TYPE import, so nothing is added to the runtime graph.
+type Translate = TFunction<"settings">;
+
 /// How a tier reads on screen. `catalog` is spelled out rather than shown as the
-/// word: "the model's default" says what happened, where "catalog" is a name for
+/// word: "the provider's default" says what happened, where "catalog" is a name for
 /// a table nobody outside this repo has seen.
-const TIER_LABELS: Record<Tier, string> = {
-  config: "config.edn",
-  session: "this session",
-  request: "this run's request",
-  catalog: "the provider's default",
+///
+/// THE WORD IS OURS, THE KEY IS THE SERVER'S. `Tier` is the server's vocabulary --
+/// `config` / `session` / `request` / `catalog` -- while "this session" and "本次请求"
+/// are what a reader gets. Each entry therefore closes over its own key, written
+/// literally (`t("tier.session")`), so a tier the server adds cannot render its raw
+/// keyword on screen: a `t(`tier.${tier}`)` would have no sentence to fall back on.
+const TIER_LABELS: Record<Tier, (t: Translate) => string> = {
+  config: (t) => t("tier.config"),
+  session: (t) => t("tier.session"),
+  request: (t) => t("tier.request"),
+  catalog: (t) => t("tier.catalog"),
 };
 
 /// Where a provider came from, in the words a person would use. The three are
-/// different edits -- a built-in, your own vendor, your patch of a built-in -- and
-/// only the second and third are yours to change or remove.
-const ORIGIN_LABELS_PROVIDER: Record<Origin, string> = {
-  builtin: "built-in",
-  user: "yours",
-  "builtin-patched": "your patch",
+/// different edits -- a built-in, your own vendor, your own patch of a built-in --
+/// and only the second and third are yours to change or remove.
+///
+/// Same rule as `TIER_LABELS`: `Origin` is the server's keyword, the word is ours,
+/// and each branch writes its own literal key.
+const ORIGIN_LABELS_PROVIDER: Record<Origin, (t: Translate) => string> = {
+  builtin: (t) => t("origin.builtin"),
+  user: (t) => t("origin.user"),
+  "builtin-patched": (t) => t("origin.builtinPatched"),
 };
 
 /// NOTE: the path is shown WHOLE, never shortened to its last segments. A
@@ -148,6 +168,8 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
   registry,
   onChanged,
 }) => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const tier = registry.default;
   /// An INLINE description cannot be expressed by three selects: there is no
   /// provider NAME in it. So the controls start empty, the page says what is there
@@ -204,7 +226,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
         model: model === "" ? null : model,
         "reasoning-effort": effort === "" ? null : effort,
       };
-      await putDefaults(knobs);
+      await putDefaults(knobs, tErrors);
       onChanged();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -215,31 +237,40 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
 
   return (
     <div data-slot="settings-defaults" className="flex flex-col gap-2">
-      <SectionTitle>Default tier</SectionTitle>
+      <SectionTitle>{t("defaults.title")}</SectionTitle>
+      {/* THE TWO IDENTIFIERS ARE NOT COPY: `config.edn` and `:default` name a file
+          and a key, so they stay literal and stay in `<code>`, and the sentence is
+          split into the runs around them. The reason is the one the sidebar's remove
+          dialog spells out: `t` returns a string, so a single key holding both would
+          flatten the `<code>` elements into plain text. The possessive between them
+          is its own fragment because the two languages attach it differently
+          ("config.edn's" vs "config.edn 的"). */}
       <p className="text-muted-foreground text-xs">
-        What a new session starts from — <code className="font-mono">config.edn</code>
-        &apos;s <code className="font-mono">:default</code>. This session may be listening
-        to its own choice instead; the rows above say which.
+        {t("defaults.introLead")}
+        <code className="font-mono">config.edn</code>
+        {t("defaults.introPossessive")}
+        <code className="font-mono">:default</code>
+        {t("defaults.introTail")}
       </p>
 
       {inline && (
         <div data-slot="settings-default-inline" className="rounded-md border p-2">
+          {/* Same split around the endpoint values: the base url and the model id
+              come from the server and pass through verbatim, while "describes this
+              provider inline" is the panel's own sentence. */}
           <p className="text-xs">
-            config.edn <em>describes</em> this provider inline —{" "}
+            config.edn <em>{t("defaults.inlineDescribes")}</em>{t("defaults.inlineAfter")}
             <code className="font-mono break-all">
               {String(tier["base-url"] ?? "")} / {String(tier.model ?? "")}
             </code>
           </p>
-          <p className="text-muted-foreground mt-1 text-xs">
-            Three selects cannot express that. Choosing a vendor below replaces the
-            description with a named one.
-          </p>
+          <p className="text-muted-foreground mt-1 text-xs">{t("defaults.inlineNote")}</p>
         </div>
       )}
 
-      <Field label="Default provider" slot="settings-default-provider">
+      <Field label={t("defaults.provider")} slot="settings-default-provider">
         <select
-          aria-label="Default provider"
+          aria-label={t("defaults.provider")}
           className={inputClass}
           value={provider}
           disabled={busy}
@@ -252,7 +283,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
             setModel(modelFor(registry.providers.find((p) => p.name === name), ""));
           }}
         >
-          <option value="">— none —</option>
+          <option value="">{t("defaults.none")}</option>
           {registry.providers.map((p) => (
             <option key={p.name} value={p.name}>
               {providerLabel(p)}
@@ -262,12 +293,12 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
       </Field>
 
       <Field
-        label="Default model"
+        label={t("defaults.model")}
         slot="settings-default-model"
         hint={
           chosen === undefined
-            ? "Pick a provider first."
-            : "One of this vendor's models. The vendor's own default is preselected."
+            ? t("defaults.modelNoProvider")
+            : t("defaults.modelHint")
         }
       >
         {/* NO EMPTY CHOICE: the tier names a model, and a vendor always has a default
@@ -276,7 +307,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
             be reached here at all (the catalog refuses one), so the list is never
             empty for a chosen provider. */}
         <select
-          aria-label="Default model"
+          aria-label={t("defaults.model")}
           className={inputClass}
           value={model}
           disabled={busy || chosen === undefined}
@@ -290,15 +321,15 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
         </select>
       </Field>
 
-      <Field label="Default reasoning effort" slot="settings-default-reasoning">
+      <Field label={t("defaults.reasoning")} slot="settings-default-reasoning">
         <select
-          aria-label="Default reasoning effort"
+          aria-label={t("defaults.reasoning")}
           className={inputClass}
           value={effort}
           disabled={busy}
           onChange={(e) => setEffort(e.target.value)}
         >
-          <option value="">— none sent —</option>
+          <option value="">{t("defaults.noneSent")}</option>
           {registry["reasoning-efforts"].map((r) => (
             <option key={r} value={r}>
               {r}
@@ -314,7 +345,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
           disabled={busy || (inline && provider === "")}
           onClick={() => void save()}
         >
-          Save default tier
+          {t("defaults.save")}
         </Button>
         {busy && <Loader2Icon className="text-muted-foreground size-3.5 animate-spin" />}
       </div>
@@ -322,10 +353,57 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
         <Refusal
           slot="settings-default-error"
           message={failure}
-          note="Nothing was written — the tier still holds what it held."
+          note={t("defaults.errorNote")}
         />
       )}
     </div>
+  );
+};
+
+/// Each language written IN ITS OWN LANGUAGE, and deliberately NOT in the catalogs.
+///
+/// This is the one place on the page where translating would defeat the purpose: a
+/// reader who has landed on a language they cannot read has to be able to find their
+/// own in this list, and `中文` is findable to someone who does not know the word
+/// "Chinese". Every other string in the panel goes through the catalogs; these two
+/// do not move.
+const LANGUAGE_NAMES: Record<Language, string> = {
+  en: "English",
+  zh: "中文",
+};
+
+/// The panel's own language, and the only control on any page of it that writes no
+/// file.
+const LanguageRow: FC = () => {
+  const { t, i18n } = useTranslation("settings");
+  return (
+    <section data-slot="settings-language">
+      <SectionTitle>{t("language.title")}</SectionTitle>
+      <Field
+        label={t("language.field")}
+        slot="settings-language-field"
+        hint={t("language.hint")}
+      >
+        <select
+          aria-label={t("language.field")}
+          className={inputClass}
+          value={i18n.language}
+          onChange={(event) => {
+            // The options are generated from the same list, so this is always one of
+            // them -- and the guard is here rather than a cast because the value is
+            // DOM-supplied, which is exactly where a closed list stops being closed.
+            const chosen = event.target.value;
+            if (isLanguage(chosen)) setLanguage(chosen);
+          }}
+        >
+          {SUPPORTED_LANGUAGES.map((language) => (
+            <option key={language} value={language}>
+              {LANGUAGE_NAMES[language]}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </section>
   );
 };
 
@@ -334,6 +412,7 @@ const GeneralPage: FC<{
   registry: Registry | null;
   onChanged: () => void;
 }> = ({ settings, registry, onChanged }) => {
+  const { t } = useTranslation("settings");
   const tier = (knob: "provider" | "model" | "reasoning-effort") => settings?.tiers[knob];
   return (
     <div data-slot="settings-page-general" className="flex flex-col gap-4">
@@ -342,8 +421,8 @@ const GeneralPage: FC<{
           page that shows it is broken. */}
       {settings !== null && (
       <section data-slot="settings-model">
-        <SectionTitle>In force</SectionTitle>
-        <Row label="provider">
+        <SectionTitle>{t("report.title")}</SectionTitle>
+        <Row label={t("report.provider")}>
           <code data-slot="settings-provider" className="font-mono">
             {settings.provider ?? "—"}
           </code>
@@ -351,28 +430,28 @@ const GeneralPage: FC<{
             <span className="text-muted-foreground"> ({settings["display-name"]})</span>
           )}
           {tier("provider") !== undefined && (
-            <span className="text-muted-foreground"> · {TIER_LABELS[tier("provider")!]}</span>
+            <span className="text-muted-foreground"> · {TIER_LABELS[tier("provider")!](t)}</span>
           )}
         </Row>
-        <Row label="model">
+        <Row label={t("report.model")}>
           <code data-slot="settings-model-id" className="font-mono">
             {settings.model ?? "—"}
           </code>
           {tier("model") !== undefined && (
-            <span className="text-muted-foreground"> · {TIER_LABELS[tier("model")!]}</span>
+            <span className="text-muted-foreground"> · {TIER_LABELS[tier("model")!](t)}</span>
           )}
         </Row>
-        <Row label="reasoning">
+        <Row label={t("report.reasoning")}>
           <span data-slot="settings-reasoning">{settings["reasoning-effort"] ?? "—"}</span>
           {tier("reasoning-effort") !== undefined && (
             <span className="text-muted-foreground">
               {" "}
-              · {TIER_LABELS[tier("reasoning-effort")!]}
+              · {TIER_LABELS[tier("reasoning-effort")!](t)}
             </span>
           )}
         </Row>
         {settings["base-url"] !== undefined && (
-          <Row label="endpoint">
+          <Row label={t("report.endpoint")}>
             <code className="text-muted-foreground font-mono break-all">
               {settings["base-url"]}
             </code>
@@ -382,6 +461,14 @@ const GeneralPage: FC<{
       )}
 
       {registry !== null && <Defaults registry={registry} onChanged={onChanged} />}
+
+      {/* THE LANGUAGE ROW IS OUTSIDE BOTH CONDITIONALS, and that is the requirement
+          rather than the layout: a home whose config.edn cannot be resolved draws a
+          page of refusals, and a reader who has been put in front of that page in a
+          language they cannot read must still be able to change it. It is also the
+          honest place for the only control in this modal that writes nothing --
+          it changes this browser, not this harness. */}
+      <LanguageRow />
     </div>
   );
 };
@@ -402,76 +489,91 @@ const ModelRowEditor: FC<{
   canRemove: boolean;
   onChange: (row: ModelRow) => void;
   onRemove: () => void;
-}> = ({ row, canRemove, onChange, onRemove }) => (
-  <div
-    data-slot="settings-provider-model"
-    className="flex flex-col gap-1 rounded-md border p-2"
-  >
-    <div className="flex items-center gap-2">
-      <Input
-        aria-label="Model id"
-        className="h-7 flex-1 text-xs"
-        value={row.id}
-        onChange={(e) => onChange({ ...row, id: e.target.value })}
-      />
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        aria-label="Remove model"
-        title="Remove this model"
-        disabled={!canRemove}
-        onClick={onRemove}
-      >
-        <TrashIcon />
-      </Button>
+}> = ({ row, canRemove, onChange, onRemove }) => {
+  const { t } = useTranslation("settings");
+  return (
+    <div
+      data-slot="settings-provider-model"
+      className="flex flex-col gap-1 rounded-md border p-2"
+    >
+      <div className="flex items-center gap-2">
+        <Input
+          aria-label={t("form.modelId")}
+          className="h-7 flex-1 text-xs"
+          value={row.id}
+          onChange={(e) => onChange({ ...row, id: e.target.value })}
+        />
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={t("form.removeModel")}
+          title={t("form.removeModelTitle")}
+          disabled={!canRemove}
+          onClick={onRemove}
+        >
+          <TrashIcon />
+        </Button>
+      </div>
+      <div className="flex items-center gap-3">
+        {(["text", "image"] as const).map((modality) => (
+          <label key={modality} className="flex items-center gap-1 text-xs">
+            <input
+              type="checkbox"
+              // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
+              // vocabulary ("text" / "image") and is printed as-is below, while the
+              // accessible name is a sentence, so each branch names its own key.
+              aria-label={
+                modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
+              }
+              checked={row.input.includes(modality)}
+              onChange={(e) => {
+                const next = e.target.checked
+                  ? [...row.input, modality]
+                  : row.input.filter((m) => m !== modality);
+                onChange({ ...row, input: next });
+              }}
+            />
+            {modality}
+          </label>
+        ))}
+        <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
+        <details data-slot="settings-provider-model-limits" className="ml-auto">
+          <summary className="text-muted-foreground cursor-pointer text-xs">
+            {t("form.limits")}
+          </summary>
+          <div className="mt-1 flex items-center gap-2">
+            {(["context-window", "max-output-tokens"] as const).map((count) => (
+              <label key={count} className="flex items-center gap-1 text-xs">
+                {count === "context-window" ? t("form.context") : t("form.maxOut")}
+                <Input
+                  // The accessible name keeps the field's raw key, which is what the
+                  // English aria-label was; it is the one string here that does not
+                  // translate, because it names the config.edn key itself.
+                  aria-label={
+                    count === "context-window"
+                      ? t("form.contextWindow")
+                      : t("form.maxOutputTokens")
+                  }
+                  className="h-6 w-20 text-xs"
+                  inputMode="numeric"
+                  value={row[count] ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    const next = { ...row };
+                    if (raw === "") delete next[count];
+                    else next[count] = Number(raw);
+                    onChange(next);
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+          <p className="text-muted-foreground mt-1 text-[10px]">{t("form.limitsNote")}</p>
+        </details>
+      </div>
     </div>
-    <div className="flex items-center gap-3">
-      {(["text", "image"] as const).map((modality) => (
-        <label key={modality} className="flex items-center gap-1 text-xs">
-          <input
-            type="checkbox"
-            aria-label={`Accepts ${modality}`}
-            checked={row.input.includes(modality)}
-            onChange={(e) => {
-              const next = e.target.checked
-                ? [...row.input, modality]
-                : row.input.filter((m) => m !== modality);
-              onChange({ ...row, input: next });
-            }}
-          />
-          {modality}
-        </label>
-      ))}
-      <span className="text-muted-foreground text-xs">out: text</span>
-      <details data-slot="settings-provider-model-limits" className="ml-auto">
-        <summary className="text-muted-foreground cursor-pointer text-xs">Limits</summary>
-        <div className="mt-1 flex items-center gap-2">
-          {(["context-window", "max-output-tokens"] as const).map((count) => (
-            <label key={count} className="flex items-center gap-1 text-xs">
-              {count === "context-window" ? "context" : "max out"}
-              <Input
-                aria-label={count}
-                className="h-6 w-20 text-xs"
-                inputMode="numeric"
-                value={row[count] ?? ""}
-                onChange={(e) => {
-                  const raw = e.target.value.trim();
-                  const next = { ...row };
-                  if (raw === "") delete next[count];
-                  else next[count] = Number(raw);
-                  onChange(next);
-                }}
-              />
-            </label>
-          ))}
-        </div>
-        <p className="text-muted-foreground mt-1 text-[10px]">
-          Reported, not enforced. Omit what you have not verified.
-        </p>
-      </details>
-    </div>
-  </div>
-);
+  );
+};
 
 type Draft = {
   id: string;
@@ -516,6 +618,8 @@ const ProviderForm: FC<{
   onSaved: () => void;
   onRemoved: () => void;
 }> = ({ draft: initial, protocols, onCancel, onSaved, onRemoved }) => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const [draft, setDraft] = useState<Draft>(initial);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -542,7 +646,7 @@ const ProviderForm: FC<{
         // ABSENT when the field is empty: that means "leave .env alone", which is
         // what an untouched key field means. (The server refuses an empty string.)
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
-      });
+      }, tErrors);
       onSaved();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -555,7 +659,7 @@ const ProviderForm: FC<{
     setBusy(true);
     setFailure(null);
     try {
-      await removeProvider(draft.id);
+      await removeProvider(draft.id, tErrors);
       onRemoved();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -574,7 +678,7 @@ const ProviderForm: FC<{
         "base-url": draft.baseUrl,
         protocol: draft.protocol,
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
-      });
+      }, tErrors);
       setOffered(models);
       setPicked([]);
     } catch (f: unknown) {
@@ -587,24 +691,28 @@ const ProviderForm: FC<{
   return (
     <div data-slot="settings-provider-form" className="flex flex-col gap-3">
       <Field
-        label="Provider ID"
+        label={t("form.providerId")}
         slot="settings-provider-id"
         hint={
           draft.editing
-            ? "Renaming means removing this entry and adding another: the id is what the request names and what the credential in .env is derived from."
-            : "Lowercase letters, digits and dashes, starting with a letter. It names this vendor in requests and derives its credential name in .env."
+            ? t("form.providerIdEditingHint")
+            : t("form.providerIdHint")
         }
       >
         <Input
           className="h-8 font-mono text-xs"
-          placeholder="acme-gateway"
+          placeholder={t("form.providerIdPlaceholder")}
           value={draft.id}
           disabled={draft.editing || busy}
           onChange={(e) => set({ id: e.target.value })}
         />
       </Field>
 
-      <Field label="Display name" slot="settings-provider-display-name" hint="Optional — what the picker shows.">
+      <Field
+        label={t("form.displayName")}
+        slot="settings-provider-display-name"
+        hint={t("form.displayNameHint")}
+      >
         <Input
           className="h-8 text-xs"
           value={draft.displayName}
@@ -613,19 +721,19 @@ const ProviderForm: FC<{
         />
       </Field>
 
-      <Field label="API address" slot="settings-provider-base-url">
+      <Field label={t("form.baseUrl")} slot="settings-provider-base-url">
         <Input
           className="h-8 font-mono text-xs"
-          placeholder="https://gateway.example/v1"
+          placeholder={t("form.baseUrlPlaceholder")}
           value={draft.baseUrl}
           disabled={busy}
           onChange={(e) => set({ baseUrl: e.target.value })}
         />
       </Field>
 
-      <Field label="API protocol" slot="settings-provider-protocol">
+      <Field label={t("form.protocol")} slot="settings-provider-protocol">
         <select
-          aria-label="API protocol"
+          aria-label={t("form.protocol")}
           className={inputClass}
           value={draft.protocol}
           disabled={busy}
@@ -640,12 +748,12 @@ const ProviderForm: FC<{
       </Field>
 
       <Field
-        label="API key"
+        label={t("form.apiKey")}
         slot="settings-provider-key"
         hint={
           draft.editing
-            ? "Leave empty to keep the line in .env as it is. A value replaces it."
-            : "Written to the home's .env as its own line, named after the id. Never sent back to this page."
+            ? t("form.apiKeyEditingHint")
+            : t("form.apiKeyHint")
         }
       >
         <Input
@@ -659,19 +767,16 @@ const ProviderForm: FC<{
       </Field>
 
       <div className="flex flex-col gap-2">
-        <SectionTitle>Model catalog</SectionTitle>
+        <SectionTitle>{t("form.catalogTitle")}</SectionTitle>
         {draft.models.length > 0 && (
           <p className="text-muted-foreground text-xs">
-            The <strong>first</strong> model is this vendor&apos;s own default — what a run
-            lands on when no tier names one. Which model a session actually starts on is
-            set in General, not here.
+            {t("form.firstLead")}
+            <strong>{t("form.firstWord")}</strong>
+            {t("form.firstTail")}
           </p>
         )}
         {draft.models.length === 0 && (
-          <p className="text-muted-foreground text-xs">
-            A vendor must declare at least one model: an entry with no models cannot be
-            selected, so offering it would be offering a refusal.
-          </p>
+          <p className="text-muted-foreground text-xs">{t("form.noModels")}</p>
         )}
         {draft.models.map((row, i) => (
           <ModelRowEditor
@@ -697,7 +802,7 @@ const ProviderForm: FC<{
               set({ models: [...draft.models, emptyModel(`model-${draft.models.length + 1}`)] })
             }
           >
-            <PlusIcon /> Add model
+            <PlusIcon /> {t("form.addModel")}
           </Button>
           <Button
             variant="ghost"
@@ -706,12 +811,12 @@ const ProviderForm: FC<{
             disabled={busy || draft.baseUrl === ""}
             title={
               draft.baseUrl === ""
-                ? "Fill in an API address first"
-                : "Ask the vendor what it serves"
+                ? t("form.fetchNoAddress")
+                : t("form.fetchTitle")
             }
             onClick={() => void fetchModels()}
           >
-            Fetch available models
+            {t("form.fetch")}
           </Button>
         </div>
 
@@ -719,8 +824,8 @@ const ProviderForm: FC<{
           <div data-slot="settings-provider-model-offered" className="rounded-md border p-2">
             <p className="text-muted-foreground text-xs">
               {offered.length === 0
-                ? "The vendor listed no models."
-                : "Tick what you want in the catalog. Each arrives declaring text only — raise it if the vendor takes images."}
+                ? t("form.offeredEmpty")
+                : t("form.offeredHint")}
             </p>
             <div className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">
               {offered.map((id) => (
@@ -752,7 +857,7 @@ const ProviderForm: FC<{
                   setPicked([]);
                 }}
               >
-                Add {picked.length} to the catalog
+                {t("form.takeWithCount", { count: picked.length })}
               </Button>
             )}
           </div>
@@ -763,16 +868,16 @@ const ProviderForm: FC<{
         <Refusal
           slot="settings-provider-error"
           message={failure}
-          note="Nothing was written — config.edn is exactly as it was."
+          note={t("form.errorNote")}
         />
       )}
 
       <div className="flex items-center gap-2">
         <Button size="sm" data-slot="settings-provider-submit" disabled={busy} onClick={() => void save()}>
-          {draft.editing ? "Save provider" : "Create provider"}
+          {draft.editing ? t("form.save") : t("form.create")}
         </Button>
         <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
-          Cancel
+          {t("form.cancel")}
         </Button>
         {draft.editing && (
           <Button
@@ -781,10 +886,10 @@ const ProviderForm: FC<{
             className="text-destructive ml-auto"
             data-slot="settings-provider-remove"
             disabled={busy}
-            title="Takes this entry out of config.edn. config.edn.bak holds the file as it was, and the .env line stays."
+            title={t("form.removeTitle")}
             onClick={() => void remove()}
           >
-            Remove
+            {t("form.remove")}
           </Button>
         )}
       </div>
@@ -797,6 +902,7 @@ const ModelsPage: FC<{
   failure: string | null;
   onChanged: () => void;
 }> = ({ registry, failure, onChanged }) => {
+  const { t } = useTranslation("settings");
   const [draft, setDraft] = useState<Draft | null>(null);
 
   if (failure !== null && registry === null) {
@@ -806,7 +912,7 @@ const ModelsPage: FC<{
     return (
       <p data-slot="settings-page-models-loading" className="text-muted-foreground flex items-center gap-2 text-xs">
         <Loader2Icon className="size-3.5 animate-spin" />
-        Reading the catalog…
+        {t("models.loading")}
       </p>
     );
   }
@@ -821,7 +927,7 @@ const ModelsPage: FC<{
           className="-ml-2 mb-1"
           onClick={() => setDraft(null)}
         >
-          <ArrowLeftIcon /> Providers
+          <ArrowLeftIcon /> {t("models.back")}
         </Button>
         <ProviderForm
           key={`${draft.id}-${draft.editing}`}
@@ -844,14 +950,14 @@ const ModelsPage: FC<{
   return (
     <div data-slot="settings-page-models" className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <SectionTitle>Providers</SectionTitle>
+        <SectionTitle>{t("models.title")}</SectionTitle>
         <Button
           variant="outline"
           size="sm"
           data-slot="settings-provider-add"
           onClick={() => setDraft(blankDraft(registry.protocols))}
         >
-          <PlusIcon /> Add provider
+          <PlusIcon /> {t("models.add")}
         </Button>
       </div>
       <div data-slot="settings-providers" className="flex flex-col divide-y">
@@ -867,19 +973,19 @@ const ModelsPage: FC<{
             <span className="flex items-center gap-2 text-xs">
               <span className="font-medium">{providerLabel(p)}</span>
               <span className="text-muted-foreground rounded border px-1 text-[10px]">
-                {ORIGIN_LABELS_PROVIDER[p.origin]}
+                {ORIGIN_LABELS_PROVIDER[p.origin](t)}
               </span>
               {p.key["present?"] ? (
-                <span className="text-muted-foreground text-[10px]">key ✓</span>
+                <span className="text-muted-foreground text-[10px]">{t("models.keyPresent")}</span>
               ) : (
-                <span className="text-muted-foreground text-[10px]">no key</span>
+                <span className="text-muted-foreground text-[10px]">{t("models.keyMissing")}</span>
               )}
             </span>
             <span className="text-muted-foreground font-mono text-[10px] break-all">
               {p["base-url"]}
             </span>
             <span className="text-muted-foreground text-[10px]">
-              {p.models.length} {p.models.length === 1 ? "model" : "models"} · {p.credential}
+              {t("models.count", { count: p.models.length, credential: p.credential })}
             </span>
           </button>
         ))}
@@ -903,10 +1009,10 @@ const ModelsPage: FC<{
 /// session running on", which is what this dialog is for.
 type Page = "general" | "models" | "mcp";
 
-const PAGES: { id: Page; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "models", label: "Models" },
-  { id: "mcp", label: "MCP servers" },
+const PAGES: { id: Page; label: (t: Translate) => string }[] = [
+  { id: "general", label: (t) => t("page.general") },
+  { id: "models", label: (t) => t("page.models") },
+  { id: "mcp", label: (t) => t("page.mcp") },
 ];
 
 export const SettingsPanel: FC<{
@@ -914,6 +1020,8 @@ export const SettingsPanel: FC<{
   onOpenChange: (open: boolean) => void;
   threadId: string;
 }> = ({ open, onOpenChange, threadId }) => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const [page, setPage] = useState<Page>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
@@ -936,7 +1044,7 @@ export const SettingsPanel: FC<{
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, r] = await Promise.allSettled([getSettings(threadId), registryFor()]);
+      const [s, r] = await Promise.allSettled([getSettings(threadId, tErrors), registryFor(tErrors)]);
       if (s.status === "fulfilled") {
         setSettings(s.value);
         setFailure(null);
@@ -954,7 +1062,7 @@ export const SettingsPanel: FC<{
     } finally {
       setLoading(false);
     }
-  }, [threadId]);
+  }, [threadId, tErrors]);
 
   // Refetched on EVERY open, which is the whole "read it fresh" contract showing
   // through: there is no cache to go stale because there is no cache.
@@ -975,7 +1083,7 @@ export const SettingsPanel: FC<{
         aria-describedby={undefined}
       >
         <DialogHeader>
-          <DialogTitle>Settings</DialogTitle>
+          <DialogTitle>{t("panel.title")}</DialogTitle>
         </DialogHeader>
 
         {/* THE DIALOG DOES NOT GROW WITH ITS CONTENT. A provider form is taller than
@@ -997,7 +1105,7 @@ export const SettingsPanel: FC<{
                 }
                 onClick={() => setPage(p.id)}
               >
-                {p.label}
+                {p.label(t)}
               </button>
             ))}
           </nav>
@@ -1007,7 +1115,7 @@ export const SettingsPanel: FC<{
               <Refusal
                 slot="settings-error"
                 message={failure}
-                note="A configuration that cannot be resolved is shown instead of the values — the files are still yours to fix."
+                note={t("panel.errorNote")}
               />
             )}
 
@@ -1017,7 +1125,7 @@ export const SettingsPanel: FC<{
                 className="text-muted-foreground flex items-center gap-2 text-xs"
               >
                 <Loader2Icon className="size-3.5 animate-spin" />
-                Reading the configuration…
+                {t("panel.loading")}
               </p>
             )}
 
@@ -1029,11 +1137,14 @@ export const SettingsPanel: FC<{
             )}
             {page === "mcp" && (
               <section data-slot="settings-mcp" className="flex flex-col gap-3">
-                <SectionTitle>MCP servers</SectionTitle>
+                <SectionTitle>{t("mcp.heading")}</SectionTitle>
+                {/* `mcp.edn` is a filename, not copy: it stays literal and stays in
+                    `<code>`, and the sentence is split into the runs around it (the
+                    same reason the Default-tier intro gives). */}
                 <p className="text-muted-foreground text-xs">
-                  Outside programs this session was asked to hand tools to. Declared in
-                  <code className="bg-muted mx-1 rounded px-1">mcp.edn</code> — this
-                  page reads that and changes nothing about it.
+                  {t("mcp.introLead")}
+                  <code className="bg-muted mx-1 rounded px-1">mcp.edn</code>
+                  {t("mcp.introTail")}
                 </p>
                 <McpPanel threadId={threadId} />
               </section>
@@ -1044,9 +1155,9 @@ export const SettingsPanel: FC<{
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-foreground text-xs">
             {settings?.source === "inline"
-              ? "config.edn describes this provider inline"
+              ? t("panel.sourceInline")
               : settings?.source === "request"
-                ? "this run's request picked it"
+                ? t("panel.sourceRequest")
                 : ""}
           </span>
           <Button
@@ -1055,11 +1166,11 @@ export const SettingsPanel: FC<{
             data-slot="settings-refresh"
             disabled={loading}
             onClick={() => void load()}
-            title="Read the files again"
+            title={t("panel.rereadTitle")}
             className="h-7 px-2 text-xs"
           >
             <RefreshCwIcon className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
-            Re-read
+            {t("panel.reread")}
           </Button>
         </div>
       </DialogContent>

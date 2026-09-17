@@ -1,5 +1,20 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's own words -- the alt
+// fallbacks ("Image content" / "Image preview"), the loading sentence, the zoom
+// overlay's three labels, the content-filter failure ("Image could not be generated"
+// / "The provider blocked this image."), the clipboard refusal, and the action
+// buttons' Download / Copy / Regenerate labels -- are gone from this file and read
+// from the `elements-files` catalog instead (spec decision 5, which reverses
+// flat-step-rows decision 9's "leave the copies untouched"). WHAT DOES NOT MOVE is
+// the boundary: the image's bytes, its data URL, its MIME type and its filename are
+// DATA and pass through untouched. The cost, written down: this file is no longer
+// byte-comparable with upstream, so each deliberate edit below is marked `LOCAL:` --
+// a marker says "this was changed on purpose", not "this is what upstream changed".
+// Every non-word byte -- `data-slot`, class names, upstream identifiers -- is
+// untouched.
+
+import type { TFunction } from "i18next";
 import {
   memo,
   useState,
@@ -24,7 +39,15 @@ import type {
   ImageMessagePart,
   ImageMessagePartComponent,
 } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
+
+// LOCAL: the translator this file's words are read from, PINNED TO THIS FILE'S FACE.
+// A bare `TFunction` would mean the default namespace; naming `elements-files` keeps
+// only this catalog's keys compiling here, the same guard `format.ts` puts on its own
+// module. Only `copyImagePart` takes one as an argument -- the components use
+// `useTranslation` directly.
+type Translate = TFunction<"elements-files">;
 
 const extensionForMimeType = (mimeType?: string): string => {
   switch (mimeType) {
@@ -99,15 +122,19 @@ const downloadImagePart = (
   if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl), 40_000);
 };
 
+// LOCAL: the clipboard refusal is the interface's own sentence, so it takes the
+// translator rather than being written here (spec decision 3 -- only the interface's
+// words have a language).
 const copyImagePart = async (
   part: Pick<ImageMessagePart, "image">,
+  t: Translate,
 ): Promise<void> => {
   if (
     typeof navigator === "undefined" ||
     !navigator.clipboard ||
     typeof ClipboardItem === "undefined"
   ) {
-    throw new Error("Clipboard API is not available in this environment.");
+    throw new Error(t("image.clipboardUnavailable"));
   }
   const blob = /^data:/i.test(part.image)
     ? dataUriToBlob(part.image)
@@ -172,10 +199,14 @@ function ImagePreview({
   containerClassName,
   onLoad,
   onError,
-  alt = "Image content",
+  alt,
   src,
   ...props
 }: ImagePreviewProps) {
+  // LOCAL: upstream's "Image content" alt fallback is gone from this file and read
+  // from the `elements-files` catalog instead. A caller that passes its own alt -- the
+  // filename, which is data -- still wins.
+  const { t } = useTranslation("elements-files");
   const imgRef = useRef<HTMLImageElement>(null);
   const [loadedSrc, setLoadedSrc] = useState<string | undefined>(undefined);
   const [errorSrc, setErrorSrc] = useState<string | undefined>(undefined);
@@ -214,7 +245,7 @@ function ImagePreview({
         <img
           ref={imgRef}
           src={src}
-          alt={alt}
+          alt={alt ?? t("image.alt")}
           className={cn(
             "block h-auto w-full object-contain",
             !loaded && "invisible",
@@ -261,7 +292,12 @@ type ImageZoomProps = PropsWithChildren<{
   alt?: string;
 }>;
 
-function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
+function ImageZoom({ src, alt, children }: ImageZoomProps) {
+  // LOCAL: upstream's zoom labels -- "Click to zoom image", "Zoomed image" and
+  // "Close zoomed image" -- and its "Image preview" alt fallback are gone from this
+  // file and read from the `elements-files` catalog instead. A caller that passes its
+  // own alt -- the filename, which is data -- still wins.
+  const { t } = useTranslation("elements-files");
   const [isOpen, setIsOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -331,7 +367,7 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
         role="button"
         tabIndex={0}
         className="aui-image-zoom-trigger cursor-zoom-in"
-        aria-label="Click to zoom image"
+        aria-label={t("image.zoom")}
       >
         {children}
       </div>
@@ -344,12 +380,12 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
             aria-modal="true"
             className="aui-image-zoom-overlay fade-in animate-in fixed inset-0 z-50 flex items-center justify-center bg-black/80 duration-200"
             onClick={handleClose}
-            aria-label="Zoomed image"
+            aria-label={t("image.zoomOverlay")}
           >
             <img
               data-slot="image-zoom-content"
               src={src}
-              alt={alt}
+              alt={alt ?? t("image.previewAlt")}
               className="aui-image-zoom-content fade-in zoom-in-95 animate-in max-h-[90vh] max-w-[90vw] cursor-zoom-out object-contain duration-200"
               onClick={(e) => {
                 e.stopPropagation();
@@ -359,7 +395,7 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
             <button
               ref={closeRef}
               type="button"
-              aria-label="Close zoomed image"
+              aria-label={t("image.zoomClose")}
               onClick={(e) => {
                 e.stopPropagation();
                 handleClose();
@@ -376,6 +412,10 @@ function ImageZoom({ src, alt = "Image preview", children }: ImageZoomProps) {
 }
 
 function ImageGenerating({ className }: { className?: string }) {
+  // LOCAL: upstream's `sr-only` "Generating image…" is gone from this file and read
+  // from the `elements-files` catalog instead. It is never drawn, but it is what a
+  // screen reader announces while a generation is in flight, so it is copy.
+  const { t } = useTranslation("elements-files");
   return (
     <div
       data-slot="image-generating"
@@ -385,7 +425,7 @@ function ImageGenerating({ className }: { className?: string }) {
       )}
     >
       <Loader2Icon className="text-muted-foreground size-8 animate-spin" />
-      <span className="sr-only">Generating image…</span>
+      <span className="sr-only">{t("image.generating")}</span>
     </div>
   );
 }
@@ -397,6 +437,10 @@ function ImageContentFilterError({
   className?: string;
   reason?: string;
 }) {
+  // LOCAL: upstream's "Image could not be generated" is gone from this file and read
+  // from the `elements-files` catalog instead. The `reason` stays whatever the caller
+  // passed -- the one sentence this file hands it is the catalog's (see `ImageImpl`).
+  const { t } = useTranslation("elements-files");
   return (
     <div
       data-slot="image-content-filter-error"
@@ -406,7 +450,7 @@ function ImageContentFilterError({
       )}
     >
       <ShieldAlertIcon className="text-muted-foreground size-8" />
-      <p className="text-sm font-medium">Image could not be generated</p>
+      <p className="text-sm font-medium">{t("image.generateFailed")}</p>
       {reason && <p className="text-muted-foreground text-xs">{reason}</p>}
     </div>
   );
@@ -427,6 +471,9 @@ function RegenerateButton({
 }: {
   onRegenerate: () => void | Promise<void>;
 }) {
+  // LOCAL: upstream's "Regenerate image" aria-label is gone from this file and read
+  // from the `elements-files` catalog instead.
+  const { t } = useTranslation("elements-files");
   const [isRegenerating, setIsRegenerating] = useState(false);
   return (
     <button
@@ -442,7 +489,7 @@ function RegenerateButton({
       }}
       disabled={isRegenerating}
       data-slot="image-regenerate"
-      aria-label="Regenerate image"
+      aria-label={t("image.regenerate")}
       className="hover:bg-muted inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
     >
       <RefreshCwIcon
@@ -453,6 +500,10 @@ function RegenerateButton({
 }
 
 function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
+  // LOCAL: upstream's "Download image" and "Copy image" aria-labels are gone from
+  // this file and read from the `elements-files` catalog instead. The copy path hands
+  // the translator to `copyImagePart`, whose refusal is also a catalog sentence.
+  const { t } = useTranslation("elements-files");
   return (
     <div
       data-slot="image-actions"
@@ -462,7 +513,7 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
         type="button"
         onClick={() => downloadImagePart(part)}
         data-slot="image-download"
-        aria-label="Download image"
+        aria-label={t("image.download")}
         className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
       >
         <DownloadIcon className="size-4" />
@@ -470,10 +521,10 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
       <button
         type="button"
         onClick={() => {
-          copyImagePart(part).catch(() => {});
+          copyImagePart(part, t).catch(() => {});
         }}
         data-slot="image-copy"
-        aria-label="Copy image"
+        aria-label={t("image.copy")}
         className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
       >
         <CopyIcon className="size-4" />
@@ -484,6 +535,11 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
 }
 
 const ImageImpl: ImageMessagePartComponent = (props) => {
+  // LOCAL: upstream's content-filter reason, "The provider blocked this image.", and
+  // its "Image content" alt fallback are gone from this file and read from the
+  // `elements-files` catalog instead. A `filename` the part carries is data and still
+  // wins over the fallback.
+  const { t } = useTranslation("elements-files");
   const { image, filename, status } = props;
 
   if (status?.type === "running") {
@@ -498,15 +554,15 @@ const ImageImpl: ImageMessagePartComponent = (props) => {
   if (status?.type === "incomplete" && status.reason === "content-filter") {
     return (
       <ImageRoot>
-        <ImageContentFilterError reason="The provider blocked this image." />
+        <ImageContentFilterError reason={t("image.blocked")} />
       </ImageRoot>
     );
   }
 
   return (
     <ImageRoot>
-      <ImageZoom src={image} alt={filename || "Image content"}>
-        <ImagePreview src={image} alt={filename || "Image content"} />
+      <ImageZoom src={image} alt={filename || t("image.alt")}>
+        <ImagePreview src={image} alt={filename || t("image.alt")} />
       </ImageZoom>
       <ImageFilename>{filename}</ImageFilename>
     </ImageRoot>

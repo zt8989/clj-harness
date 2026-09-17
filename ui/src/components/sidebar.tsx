@@ -170,8 +170,10 @@
 // click landed: opening another session (the run belongs to the thread it started
 // on), and starting a new one (which would abandon that thread's view). The
 // guard reads the runtime's own `isRunning`, so it lifts by itself when the run
-// settles. `lib/run-state.ts` holds the sentences, because the adapter refuses
-// for the same reasons and the two must not word them differently.
+// settles. `lib/run-state.ts` words the sentences from the `errors` catalog --
+// they are this client's own words, not the server's, which are never translated
+// -- because the adapter refuses for the same reasons and the two must not word
+// them differently.
 import { useCallback, useEffect, useState, type FC } from "react";
 import type { AssistantRuntime } from "@assistant-ui/react";
 import {
@@ -188,6 +190,7 @@ import {
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import {
   ThreadListItem,
@@ -223,9 +226,9 @@ import {
   type SessionSummary,
 } from "@/lib/projects";
 import {
-  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
-  RUN_IN_PROGRESS_REFUSAL,
   runInProgress,
+  runInProgressNewThreadRefusal,
+  runInProgressRefusal,
 } from "@/lib/run-state";
 
 type SidebarProps = {
@@ -245,13 +248,16 @@ type RowError = { id: string; message: string } | null;
 type ProjectError = { path: string; message: string } | null;
 
 /// The refusals about STARTING a session, which have no row to land on. They go
-/// under the New task button, which is the thing that was clicked.
-export const NO_PROJECT_REFUSAL =
-  "Add a project first — a session belongs to a project.";
-export const NO_PROJECT_SELECTED_REFUSAL =
-  "Pick a project first — a session belongs to a project.";
+/// under the New task button, which is the thing that was clicked -- and they
+/// were module-level constants until this feature, because a sentence a person
+/// reads cannot be one (see `lib/run-state.ts` for the same argument).
 
 export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
+  const { t } = useTranslation();
+  // The failures this list can raise are THIS side's sentences (a listing that
+  // would not load, a bind the server answered without a reason), so they come from
+  // the `errors` catalog while the panel's own words stay in `shell`.
+  const { t: tErrors } = useTranslation("errors");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -279,14 +285,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 
   const refresh = useCallback(async () => {
     try {
-      setProjects(await listProjects());
+      setProjects(await listProjects(tErrors));
       setListError(null);
     } catch (failure: unknown) {
       setListError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [tErrors]);
 
   // On mount, and again whenever the current thread changes -- opening a session
   // rebuilds it from its log, which appends an audit line to that very file, so
@@ -314,7 +320,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const openThread = async (threadId: string, projectPath: string) => {
     if (busy || threadId === currentThreadId) return;
     if (runInProgress(runtime)) {
-      refuse(threadId, RUN_IN_PROGRESS_REFUSAL);
+      refuse(threadId, runInProgressRefusal(t));
       return;
     }
     setPinned(projectPath);
@@ -349,13 +355,13 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     if (busy) return;
     const movesThePage = archived && threadId === currentThreadId;
     if (movesThePage && runInProgress(runtime)) {
-      refuse(threadId, RUN_IN_PROGRESS_REFUSAL);
+      refuse(threadId, runInProgressRefusal(t));
       return;
     }
     setBusy(true);
     setRowError(null);
     try {
-      await setArchived(threadId, archived);
+      await setArchived(threadId, archived, tErrors);
       if (movesThePage) {
         // "Never be reading an archived session": the project's most recent
         // unarchived session, which is the first one the server listed (the
@@ -367,7 +373,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           await runtime.threads.switchToThread(next.threadId);
         } else {
           const id = crypto.randomUUID();
-          await bindThread(id, project.path);
+          await bindThread(id, project.path, tErrors);
           setPinned(project.path);
           await runtime.threads.switchToThread(id);
         }
@@ -396,14 +402,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       // the PROJECT row, where the click landed. A paraphrase would be a second
       // wording of one rule, and this file's header is explicit about where that
       // ends up.
-      setProjectError({ path: project.path, message: RUN_IN_PROGRESS_REFUSAL });
+      setProjectError({ path: project.path, message: runInProgressRefusal(t) });
       return;
     }
     setBusy(true);
     setProjectError(null);
     setRowError(null);
     try {
-      await removeProject(project.path);
+      await removeProject(project.path, tErrors);
       if (movesThePage) {
         // SOMEWHERE ELSE, in this order: the most recent unarchived session of
         // any remaining project (the lists are already newest-first), and --
@@ -451,7 +457,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   /// named refusal ("no such directory", "not a directory") -- it says it better
   /// than an empty field's complaint would.
   const addDirectoryAt = async (dir: string): Promise<void> => {
-    const added = await addProject(dir);
+    const added = await addProject(dir, tErrors);
     // The refusal under the New task button named a state that adding a
     // project has just ended; leaving it up would have the sidebar
     // contradicting itself one line above the new project's row.
@@ -487,7 +493,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     setBusy(true);
     setAddError(null);
     try {
-      const picked = await pickFolder();
+      const picked = await pickFolder(tErrors);
       if (picked === null) return;
       await addDirectoryAt(picked);
     } catch (failure: unknown) {
@@ -508,7 +514,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     const dir = typedPath.trim();
     if (busy) return;
     if (dir === "") {
-      setAddError("Type the directory's absolute path — nothing was entered.");
+      setAddError(t("addProject.emptyPath"));
       return;
     }
     setBusy(true);
@@ -530,7 +536,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   /// which button was clicked.
   const startSessionIn = async (project: ProjectSummary): Promise<void> => {
     const id = crypto.randomUUID();
-    await bindThread(id, project.path);
+    await bindThread(id, project.path, tErrors);
     await runtime.threads.switchToThread(id);
   };
 
@@ -539,7 +545,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const newTask = async () => {
     if (busy) return;
     if (runInProgress(runtime)) {
-      setNewTaskError(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
+      setNewTaskError(runInProgressNewThreadRefusal(t));
       return;
     }
     if (projects.length === 0) {
@@ -547,11 +553,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       // modal OS window out of the button that says "New task" would be an
       // answer nobody asked for, and the folder button that does want it is
       // sitting next to this one.
-      setNewTaskError(NO_PROJECT_REFUSAL);
+      setNewTaskError(t("refusal.noProject"));
       return;
     }
     if (selected === null) {
-      setNewTaskError(NO_PROJECT_SELECTED_REFUSAL);
+      setNewTaskError(t("refusal.noProjectSelected"));
       return;
     }
     const project = selected;
@@ -581,7 +587,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
       // The same sentence the header button uses, because it is the same reason
       // -- a run belongs to the thread it started on -- said on the row whose
       // click raised it. A paraphrase would be a second wording of one rule.
-      setProjectError({ path: project.path, message: RUN_IN_PROGRESS_NEW_THREAD_REFUSAL });
+      setProjectError({ path: project.path, message: runInProgressNewThreadRefusal(t) });
       return;
     }
     setBusy(true);
@@ -620,7 +626,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           className="hover:bg-muted h-8 flex-1 justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
         >
           <SquarePenIcon data-slot="sidebar-new-task-icon" className="size-4 shrink-0" />
-          New task
+          {t("sidebar.newTask")}
         </Button>
         <Button
           variant="ghost"
@@ -628,11 +634,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           data-slot="sidebar-add-project"
           disabled={busy}
           onClick={() => void addProjectNow()}
-          title="Add a project — opens a folder picker, and the directory you choose becomes a project"
+          title={t("sidebar.addProjectTitle")}
           className="text-muted-foreground hover:text-foreground size-8 p-0"
         >
           <FolderPlusIcon data-slot="sidebar-add-project-icon" className="size-4" />
-          <span className="sr-only">Add project</span>
+          <span className="sr-only">{t("sidebar.addProject")}</span>
         </Button>
         <Button
           variant="ghost"
@@ -640,14 +646,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           data-slot="sidebar-refresh"
           disabled={busy}
           onClick={() => void refresh()}
-          title="Re-read the list from disk and the store"
+          title={t("sidebar.refreshTitle")}
           className="text-muted-foreground hover:text-foreground size-8 p-0"
         >
           <RefreshCwIcon
             data-slot="sidebar-refresh-icon"
             className={busy ? "size-4 animate-spin" : "size-4"}
           />
-          <span className="sr-only">Refresh</span>
+          <span className="sr-only">{t("sidebar.refresh")}</span>
         </Button>
       </header>
 
@@ -692,8 +698,8 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             disabled={busy}
             value={typedPath}
             onChange={(event) => setTypedPath(event.target.value)}
-            placeholder="Absolute path — D:\work\lisp-harness"
-            aria-label="Project directory path"
+            placeholder={t("addProject.path")}
+            aria-label={t("addProject.pathLabel")}
             data-slot="sidebar-add-project-path-input"
             className="h-7 text-xs"
           />
@@ -702,19 +708,19 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             variant="ghost"
             size="icon"
             disabled={busy}
-            title="Add this directory"
+            title={t("addProject.submit")}
             data-slot="sidebar-add-project-path-submit"
             className="text-muted-foreground hover:text-foreground size-7 p-0"
           >
             <CheckIcon className="size-4" />
-            <span className="sr-only">Add this directory</span>
+            <span className="sr-only">{t("addProject.submit")}</span>
           </Button>
           <Button
             type="button"
             variant="ghost"
             size="icon"
             disabled={busy}
-            title="Cancel"
+            title={t("addProject.cancel")}
             data-slot="sidebar-add-project-path-cancel"
             className="text-muted-foreground hover:text-foreground size-7 p-0"
             onClick={() => {
@@ -724,7 +730,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             }}
           >
             <XIcon className="size-4" />
-            <span className="sr-only">Cancel</span>
+            <span className="sr-only">{t("addProject.cancel")}</span>
           </Button>
         </form>
       )}
@@ -766,8 +772,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 
         {loaded && projects.length === 0 && listError === null && (
           <p data-slot="sidebar-empty" className="text-muted-foreground px-1.5 py-4 text-xs">
-            No projects yet. A session belongs to a project, so one has to be
-            added before a task can start.
+            {t("sidebar.empty")}
           </p>
         )}
       </div>
@@ -785,11 +790,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           variant="ghost"
           data-slot="sidebar-settings"
           onClick={() => setSettingsOpen(true)}
-          title="Settings: what this session is running on, and what this home can be on"
+          title={t("sidebar.settingsTitle")}
           className="text-muted-foreground hover:text-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
         >
           <SettingsIcon data-slot="sidebar-settings-icon" className="size-4 shrink-0" />
-          Settings
+          {t("sidebar.settings")}
         </Button>
       </footer>
 
@@ -845,6 +850,7 @@ const ProjectSection: FC<{
   onNewSession,
   onRemove,
 }) => {
+  const { t } = useTranslation();
   // If the session on screen is in this project -- among the ones the project
   // draws in its main list -- the project opens with it. A collapsed project
   // hiding the conversation being read would make the highlight invisible exactly
@@ -901,9 +907,7 @@ const ProjectSection: FC<{
           data-archived={session.archived ? "" : undefined}
           disabled={busy}
           title={
-            session.archived
-              ? "Unarchive — put this session back with the project's other sessions"
-              : "Archive — keep this session and its log, but move it out of the way"
+            session.archived ? t("session.unarchiveTitle") : t("session.archiveTitle")
           }
           onClick={() => onArchive(session.threadId, !session.archived)}
         >
@@ -912,7 +916,9 @@ const ProjectSection: FC<{
           ) : (
             <ArchiveIcon className="size-3.5" />
           )}
-          <span className="sr-only">{session.archived ? "Unarchive" : "Archive"}</span>
+          <span className="sr-only">
+            {session.archived ? t("session.unarchive") : t("session.archive")}
+          </span>
         </ThreadListItemAction>
       }
     />
@@ -981,14 +987,14 @@ const ProjectSection: FC<{
           // the click is how you get to read it (see `newSession`).
           disabled={busy}
           onClick={onNewSession}
-          title="New session — starts an empty conversation in this project"
+          title={t("project.newSessionTitle")}
           className="text-muted-foreground hover:text-foreground shrink-0"
         >
           <SquarePenIcon
             data-slot="sidebar-project-new-session-icon"
             className="size-3.5"
           />
-          <span className="sr-only">New session</span>
+          <span className="sr-only">{t("project.newSession")}</span>
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -997,14 +1003,14 @@ const ProjectSection: FC<{
               size="icon-xs"
               data-slot="sidebar-project-more"
               disabled={busy}
-              title="More — actions for this project"
+              title={t("project.moreTitle")}
               className="text-muted-foreground hover:text-foreground me-1 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100"
             >
               <MoreHorizontalIcon
                 data-slot="sidebar-project-more-icon"
                 className="size-3.5"
               />
-              <span className="sr-only">More</span>
+              <span className="sr-only">{t("project.more")}</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent data-slot="sidebar-project-menu" align="end">
@@ -1024,7 +1030,7 @@ const ProjectSection: FC<{
                   one-line row. What this menu offers, in a menu that is about a
                   project, needs no qualifier; the dialog it opens says the rest,
                   at a width that has room for it. */}
-              Remove
+              {t("project.remove")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -1052,7 +1058,7 @@ const ProjectSection: FC<{
       <Dialog open={confirming} onOpenChange={setConfirming}>
         <DialogContent data-slot="sidebar-remove-confirm" showCloseButton={false}>
           <DialogHeader>
-            <DialogTitle>Remove this project?</DialogTitle>
+            <DialogTitle>{t("dialog.removeTitle")}</DialogTitle>
             {/* min-w-0 AND A BREAKABLE PATH ARE LOAD-BEARING, not tidiness.
                 `DialogContent` is a CSS GRID, and a grid's implicit column is
                 `auto` -- which cannot shrink below its items' MIN-CONTENT width.
@@ -1065,15 +1071,21 @@ const ProjectSection: FC<{
                 corner of its own.
                 `[overflow-wrap:anywhere]` collapses the path's min-content width
                 to a single character, so the column can no longer be widened by
-                it, and `min-w-0` lets this block shrink as well. */}
+                it, and `min-w-0` lets this block shrink as well.
+
+                THE SENTENCE IS TWO CATALOG KEYS AROUND THE PATH, and that is
+                what keeps the name and the path as the styled elements they
+                were: i18next's `t` returns a string, so a single key holding
+                both would flatten the `<span>` and the `<code>` into plain text.
+                Each half is a whole clause, so a language that orders them
+                differently can still say the same thing. */}
             <DialogDescription className="min-w-0">
               <span data-slot="sidebar-remove-name" className="font-medium">
                 {name}
               </span>{" "}
-              leaves the sidebar. Its sessions are kept on disk — nothing under{" "}
-              <code className="font-mono text-xs [overflow-wrap:anywhere]">{project.path}</code> is deleted
-              or moved — and adding this directory again brings them back, as they
-              were.
+              {t("dialog.removeLeaves")}{" "}
+              <code className="font-mono text-xs [overflow-wrap:anywhere]">{project.path}</code>{" "}
+              {t("dialog.removeTail")}
             </DialogDescription>
           </DialogHeader>
           <p
@@ -1081,8 +1093,8 @@ const ProjectSection: FC<{
             className="text-muted-foreground text-xs"
           >
             {sessions.length === 0
-              ? "It has no sessions."
-              : `${sessions.length} session${sessions.length === 1 ? "" : "s"} will stop being listed here.`}
+              ? t("dialog.removeNone")
+              : t("dialog.removeSessions", { count: sessions.length })}
           </p>
           <DialogFooter>
             <Button
@@ -1090,7 +1102,7 @@ const ProjectSection: FC<{
               data-slot="sidebar-remove-cancel"
               onClick={() => setConfirming(false)}
             >
-              Keep it
+              {t("dialog.keep")}
             </Button>
             <Button
               variant="destructive"
@@ -1101,7 +1113,7 @@ const ProjectSection: FC<{
                 onRemove();
               }}
             >
-              Remove project
+              {t("dialog.removeSubmit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1114,8 +1126,8 @@ const ProjectSection: FC<{
             {active.length === 0 && (
               <li className="text-muted-foreground px-2.5 py-1 text-xs">
                 {archived.length === 0
-                  ? "No sessions in this project yet."
-                  : "Every session here is archived."}
+                  ? t("session.empty")
+                  : t("session.allArchived")}
               </li>
             )}
           </ul>
@@ -1137,7 +1149,7 @@ const ProjectSection: FC<{
                     archivedOpen ? "size-3.5 shrink-0 rotate-90" : "size-3.5 shrink-0"
                   }
                 />
-                <span className="flex-1">Archived</span>
+                <span className="flex-1">{t("session.archived")}</span>
                 <span className="shrink-0 tabular-nums">{archived.length}</span>
               </button>
               {archivedOpen && (

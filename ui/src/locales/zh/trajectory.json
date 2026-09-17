@@ -1,0 +1,95 @@
+{
+  "kind": {
+    "system": "系统",
+    "context": "上下文",
+    "user": "用户",
+    "assistant": "助手",
+    "tool": "工具"
+  },
+  "row": {
+    "noText": "（没有文本）"
+  },
+  "pane": {
+    "close": "关闭"
+  },
+  "turn": {
+    "label": "第 {{n}} 轮",
+    "count_other": "{{count}} 轮",
+    "items": "{{n}} 个条目",
+    "calls": "{{n}} 次模型调用"
+  },
+  "call": {
+    "label": "第 {{n}} 次模型调用",
+    "sent_other": "由第 {{names}} 次模型调用发出",
+    "tools": "{{n}} 个工具"
+  },
+  "tabs": {
+    "systemPrompt": "系统提示词",
+    "tools": "工具表"
+  },
+  "facts": {
+    "prompt": "提示词",
+    "bytes": "字节",
+    "injected": "注入",
+    "by": "来自",
+    "arrived": "到达",
+    "id": "id",
+    "model": "模型",
+    "took": "耗时",
+    "tokens": "token 数",
+    "finished": "结束原因",
+    "tools": "工具",
+    "executed": "已执行",
+    "outcome": "执行结果",
+    "waited": "等待",
+    "ran": "执行"
+  },
+  "values": {
+    "initial": "初始",
+    "changed": "自上一轮起有变化",
+    "whenOpened": "这次运行开始时",
+    "duringRun": "运行途中",
+    "yes": "是",
+    "no": "否"
+  },
+  "blocks": {
+    "reasoning": "思考",
+    "answer": "回答",
+    "arguments": "参数",
+    "error": "错误",
+    "result": "结果"
+  },
+  "tools": {
+    "unnamed": "未命名工具",
+    "predates": "这份记录早于模型调用的那几行，所以说不出当时工具表里有哪些工具。",
+    "noTable": "这一轮里没有任何一次模型调用带工具表。"
+  },
+  "empty": {
+    "noRecord": "这个会话还没有记录。",
+    "nothingRun": "这个会话什么都还没跑过，所以没有模型看到过的东西。"
+  },
+  "search": {
+    "placeholder": "搜索这个会话的记录…"
+  },
+  "header": {
+    "incomplete": "最后一次运行还没结束"
+  },
+  "list": {
+    "hidden": "不匹配的行都藏起来了。"
+  },
+  "lane": {
+    "input": "输入",
+    "model": "模型",
+    "tools": "工具"
+  },
+  "mode": {
+    "duration": "时长",
+    "turns": "按轮"
+  },
+  "timeline": {
+    "total": "共 {{duration}}",
+    "empty": "这份记录还没有时间戳——没有东西可铺开。",
+    "openTitle": "{{label}} · {{duration}}——点一下打开它",
+    "openAria": "打开第 {{turn}} 轮里的 {{label}}"
+  }
+}

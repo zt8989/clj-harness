@@ -44,6 +44,7 @@
 import { SimpleImageAttachmentAdapter } from "@assistant-ui/react";
 
 import { refusalFor } from "@/lib/attachment-rules";
+import i18n from "@/lib/i18n";
 
 /// What the guard knows about the session's model, and what it last refused.
 ///
@@ -108,9 +109,16 @@ export const attachmentGuard = {
 /// The kit's image adapter with one gate in front of `add`. `send` is inherited
 /// untouched: by the time an attachment is sent the gate has already spoken, and a
 /// second opinion there could only disagree with the first.
+///
+/// WHERE THE TRANSLATOR COMES FROM, and why it is not a parameter: `add` is called
+/// by upstream's paste, drop and `+` handlers, which are ordinary functions with no
+/// React tree in reach -- the same reason the store above exists. The language has
+/// exactly one owner (`lib/i18n.ts`, the instance the whole page renders through), so
+/// the adapter reads that owner rather than carrying a second copy of the language
+/// that a component would have to keep in step.
 class GuardedImageAttachments extends SimpleImageAttachmentAdapter {
   public override async add({ file }: { file: File }) {
-    const refusal = refusalFor(file, guard.input, guard.model);
+    const refusal = refusalFor(file, guard.input, guard.model, i18n.getFixedT(null, "errors"));
     if (refusal !== null) {
       set({ refusal });
       throw new Error(refusal);

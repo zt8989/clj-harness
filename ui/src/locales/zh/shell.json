@@ -1,0 +1,56 @@
+{
+  "view": {
+    "conversation": "对话",
+    "trajectory": "轨迹"
+  },
+  "session": {
+    "neverRun": "还没跑过",
+    "noLog": "还没有日志",
+    "current": "当前",
+    "running": "运行中",
+    "archive": "归档",
+    "archiveTitle": "归档——保留这个会话和它的日志，但把它挪到一旁",
+    "unarchive": "取消归档",
+    "unarchiveTitle": "取消归档——把这个会话放回项目里其他会话中间",
+    "empty": "这个项目里还没有会话。",
+    "allArchived": "这里的会话都归档了。",
+    "archived": "已归档"
+  },
+  "project": {
+    "newSession": "新建会话",
+    "newSessionTitle": "新建会话——在这个项目里开一段空对话",
+    "more": "更多",
+    "moreTitle": "更多——这个项目的操作",
+    "remove": "移除"
+  },
+  "sidebar": {
+    "newTask": "新建任务",
+    "addProject": "添加项目",
+    "addProjectTitle": "添加项目——打开文件夹选择器，你选的目录会成为项目",
+    "refresh": "刷新",
+    "refreshTitle": "从磁盘和库重新读取列表",
+    "empty": "还没有项目。会话属于项目，所以要新建任务，得先添加一个项目。",
+    "settings": "设置",
+    "settingsTitle": "设置：这个会话正在用什么跑，这个配置家可以选什么"
+  },
+  "addProject": {
+    "path": "绝对路径——D:\\work\\lisp-harness",
+    "pathLabel": "项目目录路径",
+    "submit": "添加这个目录",
+    "cancel": "取消",
+    "emptyPath": "请填写目录的绝对路径——什么都没填。"
+  },
+  "refusal": {
+    "noProject": "先添加一个项目——会话属于项目。",
+    "noProjectSelected": "先选一个项目——会话属于项目。"
+  },
+  "dialog": {
+    "removeTitle": "移除这个项目？",
+    "removeLeaves": "离开了侧边栏。它的会话保留在磁盘上——",
+    "removeTail": "下没有任何内容被删除或移动——再次添加这个目录，它们就会原样回来。",
+    "removeNone": "它还没有会话。",
+    "removeSessions_other": "{{count}} 个会话将不再在这里列出。",
+    "keep": "保留",
+    "removeSubmit": "移除项目"
+  }
+}
