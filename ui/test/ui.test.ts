@@ -32,10 +32,11 @@ import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
 import { turnsSuite } from "./suites/turns";
+import { concurrentSuite } from "./suites/concurrent";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, concurrentSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -59,7 +60,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 26 -> 29: the `turns` suite's three -- the boundary of a turn (a run of adjacent
 /// assistant messages), when it counts as settled, and the summary line's two
 /// numbers. All three are pure arithmetic over a literal message list.
-const EXPECTED_CASES = 31;
+/// 31 -> 32: the `concurrent` suite's one -- two thread ids running at once, with
+/// each session's own log read back off disk (its `input` row, its terminal frame)
+/// and rebuilt through the server. It is the backend half of parallel sessions: the
+/// server always allowed this and nothing had ever asked it to.
+const EXPECTED_CASES = 32;
 
 let total = 0;
 for (const suite of SUITES) {

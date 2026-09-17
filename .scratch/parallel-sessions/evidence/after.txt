@@ -1,0 +1,7 @@
+# timeout 1200 clojure -M:test -m harness.test-runner   (改完之后)
+# 工作树 .worktrees/parallel-sessions，分支 parallel-sessions
+
+871:Ran 859 tests containing 11264 assertions.
+872:0 failures, 0 errors.
+873:ISOLATION FAILURE: /Users/zhouteng/.clj-harness/harness.db changed during this run: [13545472 1789641184073] -> [13545472 1789641349687] ([bytes mtime], nil meaning absent) -- some code path resolved the store against the developer's real home instead of through harness.infra.home.
+875:EXIT=1

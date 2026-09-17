@@ -1,11 +1,14 @@
 (ns harness.kernel.tools-test
-  (:require [clojure.data.json :as json]
+  (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
+            [harness.fake :as fake]
             [harness.infra.shell :as shell]
+            [harness.kernel.loop :as loop]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]))
 
@@ -407,3 +410,111 @@
   (let [{:keys [content error]} (call "bash_kill" {:job "j-not-a-job"})]
     (is (true? error))
     (is (str/includes? content "unknown job: j-not-a-job"))))
+
+;; ------------------------------------------------- the turn plan, per session
+;;
+;; `turn-plan` used to be ONE slot every session shared. Two sessions running at
+;; once -- harness.edge.http gives every run its own go block -- would overwrite
+;; each other's plan, and the anchor batch (one write for several edits to one
+;; file) would silently degrade into concurrent edits that lose updates. It is
+;; now keyed by thread-id and named by a token, so one turn's teardown cannot
+;; delete another turn's plan. The cases below pin that, and the ORDER the seam
+;; relies on.
+
+(defn- a-call
+  "One call in the provider's shape, with the id the plan is keyed by."
+  [id name]
+  {:id id :type "function"
+   :function {:name name :arguments "{}"}})
+
+(deftest a-turn-plan-is-keyed-by-thread-id
+  (let [a "t-plan-a" b "t-plan-b"]
+    (try
+      (let [ta (tools/register-turn! a [(a-call "a1" "todo_write") (a-call "a2" "todo_write")])
+            tb (tools/register-turn! b [(a-call "b1" "todo_write")])]
+        (testing "each registration carries its own token"
+          (is (not= ta tb)))
+        (testing "the later registration changes no other thread-id's counts"
+          (is (false? (binding [tools/*thread-id* a]
+                        (tools/sole-call-of-its-name? "todo_write")))
+              "a called todo_write twice, and b's one call does not un-say that")
+          (is (true? (binding [tools/*thread-id* b]
+                       (tools/sole-call-of-its-name? "todo_write")))))
+        (testing "a thread-id that never registered reads no counts"
+          (is (true? (binding [tools/*thread-id* "t-plan-never-registered"]
+                       (tools/sole-call-of-its-name? "todo_write"))))))
+      (finally (tools/forget-turn!)))))
+
+(deftest forget-turn-only-drops-the-turn-that-owns-the-token
+  (let [a "t-token-a" b "t-token-b"]
+    (try
+      (let [ta (tools/register-turn! a [(a-call "x1" "todo_write") (a-call "x2" "todo_write")])
+            _  (tools/register-turn! b [(a-call "y1" "todo_write")])
+            tb (tools/register-turn! b [(a-call "y2" "todo_write") (a-call "y3" "todo_write")])]
+        (testing "a teardown whose token has been superseded changes nothing"
+          (tools/forget-turn! b ta)
+          (is (false? (binding [tools/*thread-id* b]
+                        (tools/sole-call-of-its-name? "todo_write")))
+              "b's LATER turn is still registered -- the stale token did not drop it"))
+        (testing "the owning token drops only its own thread-id's entry"
+          (tools/forget-turn! b tb)
+          (is (true? (binding [tools/*thread-id* b]
+                       (tools/sole-call-of-its-name? "todo_write"))))
+          (is (false? (binding [tools/*thread-id* a]
+                        (tools/sole-call-of-its-name? "todo_write")))
+              "a's turn is untouched by b's teardown")))
+      (finally (tools/forget-turn!)))))
+
+(deftest batch-role-reads-only-its-own-thread-ids-plan
+  ;; `batch-role` is private -- it is the seam's own question -- so the test asks it
+  ;; the way the seam does: through the var, under the thread-id the seam binds.
+  (let [a "t-role-a" b "t-role-b"]
+    (try
+      (let [teardown (tools/install!
+                     {:name "id-planner"
+                      :planner (fn [_tid calls]
+                                 (into {} (map (fn [{:keys [id]}]
+                                                 [id {:role :applier :run (constantly "ok")}]))
+                                       calls))})]
+        (try
+          (tools/register-turn! a [(a-call "a1" "read")])
+          (tools/register-turn! b [(a-call "b1" "read")])
+          (is (some? (binding [tools/*thread-id* a] (#'tools/batch-role "a1")))
+              "a's own call is in a's plan")
+          (is (nil? (binding [tools/*thread-id* a] (#'tools/batch-role "b1")))
+              "and b's call id is not")
+          (is (nil? (binding [tools/*thread-id* b] (#'tools/batch-role "a1"))))
+          (finally (teardown))))
+      (finally (tools/forget-turn!)))))
+
+(deftest the-seam-is-told-about-a-turn-before-any-of-it-runs
+  ;; Two `todo_write` calls in one message: the body reads `sole-call-of-its-name?`
+  ;; itself (harness.cap.tools), so the count of two has to be visible before either
+  ;; body runs. A PLANNER THAT SLEEPS is what makes that deterministic rather than a
+  ;; race: while it sleeps the seam is still inside `register-turn!`, so a seam that
+  ;; spawned the tools first would leave them reading the empty plan -- the answer
+  ;; the old code gave. Both calls are refused here because the turn genuinely holds
+  ;; two of them.
+  (let [tid "t-slow-plan"]
+    (try
+      (let [teardown (tools/install! {:name "slow-planner"
+                                      :planner (fn [_tid _calls]
+                                                 (Thread/sleep 200)
+                                                 {})})]
+        (try
+          (let [ch  (loop/run-chan (fake/scripted
+                                    [{:content ""
+                                      :tool-calls [{:id "c1" :name "todo_write" :arguments {:todos []}}
+                                                   {:id "c2" :name "todo_write" :arguments {:todos []}}]}
+                                     {:content "done"}])
+                                   [] {:thread-id tid})
+                seen (loop [acc []]
+                       (if-let [ev (async/<!! ch)]
+                         (if (= :run/done (:type ev)) acc (recur (conj acc ev)))
+                         acc))
+                results (filter #(= :tool/result (:type %)) seen)]
+            (is (= 2 (count results)))
+            (is (every? :error results)
+                "both calls see a turn that holds two todo_writes, so neither is sole"))
+          (finally (teardown))))
+      (finally (tools/forget-turn!)))))
