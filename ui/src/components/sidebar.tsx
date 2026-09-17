@@ -731,7 +731,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 
       <div
         data-slot="sidebar-scroll"
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
+        // `contain: paint` states the invariant rather than patching one offender: the
+        // list's content may never change the PAGE's size. It makes this element the
+        // containing block for every absolutely positioned descendant inside it, so a
+        // future row that forgets its `relative` (or an `sr-only` added straight into a
+        // static wrapper) cannot push the document down again. The Radix menus and
+        // tooltips are portaled to `body`, so they are not descendants and are
+        // unaffected -- verified by opening the project menu with this in place.
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [contain:paint]"
       >
         {listError !== null && (
           <p role="alert" data-slot="sidebar-list-error" className="text-destructive px-1.5 py-1 text-xs">
@@ -923,10 +930,19 @@ const ProjectSection: FC<{
         // `group` so the "more" button is revealed by hovering anywhere on the
         // row, and `focus-within` so it is there for the keyboard too -- a hover
         // affordance with no keyboard path is a verb half the people cannot use.
+        // `relative` IS LOAD-BEARING, and it is not about the hover: every button in
+        // this row carries an `sr-only` span, and `sr-only` is `position: absolute`.
+        // With no positioned ancestor those spans' containing block is the PAGE, so
+        // the last project's "New session"/"More" sit at their real page offset --
+        // thousands of pixels down a long sidebar -- and the scrolling list CANNOT clip
+        // them (a clip does not reach a descendant whose containing block is outside
+        // it). The document grows to include them and the whole page scrolls into blank
+        // space. Measured: 20 projects made the document 2432px tall in a 900px window,
+        // and this one class took it back to 900.
         className={
           selected
-            ? "group bg-muted/70 flex w-full items-center rounded-md"
-            : "group hover:bg-muted/60 flex w-full items-center rounded-md"
+            ? "group relative bg-muted/70 flex w-full items-center rounded-md"
+            : "group relative hover:bg-muted/60 flex w-full items-center rounded-md"
         }
       >
         <button
