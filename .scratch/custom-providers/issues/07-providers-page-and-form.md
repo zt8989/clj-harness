@@ -31,6 +31,11 @@
       （今天还没人用过它）、协议下拉照 `composer-chrome.tsx` 里那个本地原生 `<select>` 的写法
       （仓库没有 Select 原语，不为这个引一个）。**抄来的 assistant-ui 文件一个都不动**
       （`git diff --stat ui/src/components/assistant-ui/` 空）。
+      ~~**2026-09-17 部分推翻**：`composer-chrome.tsx` 里那个本地 `<select>` 已经不在了——composer 的
+      四个选择器换成了 `components/picker.tsx`（可搜索的浮层，理由见 `docs/architecture/client.md`），
+      所以「照 composer 那个写法」这句今天指不到东西。**本票的落地方式不变**：设置面板那几处下拉
+      仍是原生 `<select>`（一页表单、四五条选项，够用），仓库也确实仍然没有 shadcn 的 Select 原语——
+      只是别再去 composer-chrome 里找那个本地实现了~~
 - [ ] `data-slot` 齐，且这批名字写进本票：`settings-providers`、`settings-provider-row`、
       `settings-provider-add`、`settings-provider-form`、`settings-provider-id`、
       `settings-provider-display-name`、`settings-provider-base-url`、`settings-provider-protocol`、

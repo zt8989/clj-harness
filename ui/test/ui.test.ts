@@ -30,10 +30,12 @@ import { framesSuite } from "./suites/frames";
 import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
+import { pickerSuite } from "./suites/picker";
+import { turnsSuite } from "./suites/turns";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -52,7 +54,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 24 -> 26: the `attachments` suite's two -- the model rule (the same judgement
 /// as the server's `undeclared-input`, and the one place the two could disagree)
 /// and the 2 MB cap on source bytes, boundary included. Both are pure.
-const EXPECTED_CASES = 26;
+/// 29 -> 31: the `picker` suite's two -- what a query keeps (the label, the hint,
+/// the group, case and whitespace) and how runs of one group are grouped. Both pure.
+/// 26 -> 29: the `turns` suite's three -- the boundary of a turn (a run of adjacent
+/// assistant messages), when it counts as settled, and the summary line's two
+/// numbers. All three are pure arithmetic over a literal message list.
+const EXPECTED_CASES = 31;
 
 let total = 0;
 for (const suite of SUITES) {

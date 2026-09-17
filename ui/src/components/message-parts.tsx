@@ -23,16 +23,22 @@
 //
 // ------------------------------------------------------- up front: collapsed
 //
-// Tool cards and reasoning rows start CLOSED and open only when clicked -- the
-// content is never on screen until somebody asks for it. For reasoning that is
-// the opposite of upstream, which holds the disclosure open while tokens stream
-// (`streaming`) and snaps it shut when the run ends. We simply never pass
-// `streaming`, so the resting state is closed and the reader is never ambushed
-// by a panel that opened itself.
+// Tool cards start CLOSED and open only when clicked -- the content is never on
+// screen until somebody asks for it.
 //
-// The "still working" signal therefore moves onto the collapsed row itself: a
-// spinning mark at its end for a tool call, a shimmering label for reasoning.
-// Both are visible without opening anything, and both stop when the work stops.
+// A THOUGHT IS THE ONE EXCEPTION, and it is the reader's own request: while its
+// tokens stream, the disclosure opens itself and shows the thinking as it
+// arrives. A row whose label is the thought's first line stops moving a second
+// in, and the thing worth watching is the thought itself. It is upstream's
+// behaviour (`streaming`), kept for upstream's reason -- the live window follows
+// the newest token, and the panel folds itself when the thought ends -- with this
+// repo's row around it. See `ReasoningBlock` for what it costs and what it does
+// not change.
+//
+// The "still working" signal is on the collapsed ROW as well, not only in the
+// panel: a spinning mark at its end for a tool call, a shimmering label for
+// reasoning. Both are visible without opening anything, and both stop when the
+// work stops.
 //
 // ------------------------------------------------------- what a row says it is
 //
@@ -711,12 +717,13 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 //
 // Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
 // is drawn as: an icon, a bold name, the subject this step is about, `py-1.5
-// text-[13px]`, revealed by a click. Upstream's reasoning is a CARD -- `ReasoningRoot`'s default variant is
-// `outline`, i.e. `rounded-lg border px-3 py-2` -- and this repo does not want a
-// second visual species in one transcript: the things a turn did (thought, read,
-// thought, ran) are a list of steps, and a step that is boxed while the step
-// next to it is not reads as a different KIND of thing rather than a different
-// step.
+// text-[13px]`, revealed by a click -- or, while the thought is still arriving,
+// by the thought itself. Upstream's reasoning is a CARD -- `ReasoningRoot`'s
+// default variant is `outline`, i.e. `rounded-lg border px-3 py-2` -- and this
+// repo does not want a second visual species in one transcript: the things a turn
+// did (thought, read, thought, ran) are a list of steps, and a step that is boxed
+// while the step next to it is not reads as a different KIND of thing rather than
+// a different step.
 //
 // So the trigger below is written here rather than taken from the copied kit,
 // for the same reason `ToolCallTrigger` is: the row is this repo's presentation,
@@ -725,10 +732,10 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 // (`ReasoningRoot` / `ReasoningContent` / `ReasoningText`), because the scroll
 // lock, the fades and the animation are not ours to re-derive.
 //
-// `variant="ghost"` is what removes the card, and `className` on the text is
-// what removes the kit's inner `max-h-64` scroll box -- a tool's output is shown
-// whole, so a thought that scrolls inside its own 256px window would be the one
-// step with a different reading rule.
+// `variant="ghost"` is what removes the card. The kit's inner `max-h-64` scroll
+// box is kept for a thought that is still arriving and removed for one that has
+// stopped: a live window has to be bounded, and a finished thought is read whole
+// like a tool's output -- the reasoning for both halves is on `ReasoningBlock`.
 //
 // `active` (the shimmer) is the live-run signal, exactly as it is on a tool
 // card: the row says "still going" while the work is going, and stops when it
@@ -815,12 +822,27 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   </CollapsibleTrigger>
 );
 
-/// A run of adjacent reasoning parts, behind one collapsed row.
+/// A run of adjacent reasoning parts, behind one row that is folded unless the
+/// thought is still arriving.
 ///
-/// `streaming` is deliberately not passed, and that is the entire difference
-/// from upstream's reasoning group: without it the disclosure's open state is
-/// the reader's alone (`userOpen ?? false`), so thinking arrives folded and
-/// stays folded. A shimmering label marks the live run instead.
+/// `streaming` is what does that, and it is read off the GROUP rather than off the
+/// message: `group.status` runs while any part the group covers is running, so the
+/// panel follows the THOUGHT and not the run -- a turn that thinks, reads and then
+/// thinks again opens for the first thought, folds, and opens again for the next
+/// one. When the last token lands the panel folds itself and the row is left
+/// saying the first line, which is what a thought that never streamed says too. A
+/// restored conversation is never streaming, so history arrives folded.
+///
+/// The kit's live window is kept for the streaming case and only for it. Without a
+/// height cap (`max-h-64`, the kit's own) the panel would grow for as long as the
+/// model thinks, and the newest tokens -- the ones the window exists to follow --
+/// would be the furthest down the page. A thought that has stopped gets
+/// `max-h-none` back, so a reader who opens one reads it whole, the same rule a
+/// tool's result gets.
+///
+/// Nothing is remembered across that transition: the open state is the kit's
+/// (`userOpen ?? streaming`), so a panel opened by hand stays open and one closed
+/// by hand stays closed.
 const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   group,
   children,
@@ -829,10 +851,12 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   const preview = useAuiState((s) => previewOf(s.message.parts, group.indices));
 
   return (
-    <ReasoningRoot variant="ghost" className="mb-0">
+    <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
       <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
-        <ReasoningText className="max-h-none pt-1">{children}</ReasoningText>
+        <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>
+          {children}
+        </ReasoningText>
       </ReasoningContent>
     </ReasoningRoot>
   );
