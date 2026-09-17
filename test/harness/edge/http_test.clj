@@ -21,6 +21,7 @@
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.trajectory :as trajectory]
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
             [harness.kernel.tools :as tools]
@@ -2677,6 +2678,73 @@
      (finally
        (project/bind! "it-slash" nil)
        (support/wipe-tree! proj))))))
+
+(deftest a-slash-load-is-in-the-side-the-run-really-submitted
+  ;; Ticket 02's record half, end to end. The body a `/name` asks for is folded in BEFORE
+  ;; the `message` record's submitted side is written, so the two halves of that record
+  ;; line up with the boundary the kernel starts from -- an injection the kernel made on
+  ;; its own would shift the boundary and file a client message as part of its answer.
+  ;; The same bytes are then folded by the trajectory, because 'what the record says' and
+  ;; 'what the view draws' are two halves of one promise.
+  (support/with-temp-env
+   [_root home]
+   (let [proj      (support/temp-dir "http-slash-side")
+         skill-dir (str (io/file home ".agents" "skills" "alpha"))
+         ask       {:id "u1" :role "user" :content "/alpha fix the bug"}]
+     (.mkdirs (io/file skill-dir))
+     (spit (str skill-dir "/SKILL.md")
+           "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
+           :encoding "UTF-8")
+     (project/bind! "it-slash-side" proj)
+     (try
+      (with-server
+       "it-slash-side" [{:content "first"} {:content "second"}]
+       (fn []
+         (post-run "it-slash-side" {:messages [ask]})
+         ;; Wait for the FIRST run to be written through its returned side before sending
+         ;; the second: the second run's input has to land after that tail in the file.
+         (wait-for-recorded (log-file-for "it-slash-side")
+                            (fn [ls] (some #(and (= "message" (:kind %))
+                                                 (= "first" (get-in % [:payload :content])))
+                                           ls))
+                            2000)
+         (post-run "it-slash-side"
+                   {:messages [ask {:id "a1" :role "assistant" :content "first"}
+                               {:id "u2" :role "user" :content "and another thing"}]})
+         (let [records (wait-for-recorded
+                        (log-file-for "it-slash-side")
+                        (fn [ls] (some #(and (= "message" (:kind %))
+                                             (= "second" (get-in % [:payload :content])))
+                                       ls))
+                        2000)
+               text-of (fn [r] (str (get-in r [:payload :content])))
+               body?   (fn [r] (and (= "message" (:kind r))
+                                    (= "user" (get-in r [:payload :role]))
+                                    (str/starts-with? (text-of r) "<skill name=\"alpha\">")))
+               input?  (fn [r] (= "input" (:kind r)))
+               event?  (fn [r] (= "event" (:kind r)))
+               i2      (second (keep-indexed (fn [i r] (when (input? r) i)) records))
+               e2      (first (keep-indexed (fn [i r] (when (and (event? r) (> i i2)) i))
+                                           records))]
+           (testing "the body is folded into the submitted side -- the run's real first prompt"
+             (is (= 1 (count (filter body? (subvec records i2 e2)))))
+             (is (empty? (filter body? (subvec records e2)))
+                 "and it is NOT filed past the split, as if the kernel had added it"))
+
+           (testing "the trajectory then draws the ask's turn carrying it, and nothing else"
+             (let [turns (:turns (trajectory/records->trajectory (vec records)))
+                   ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
+               (is (= 2 (count turns)))
+               (is (= ["system" "context" "user" "context" "assistant"]
+                      (mapv :kind (:items (first turns)))))
+               (is (= ["opening" "run"] (mapv :source (ctx (first turns))))
+                   "the catalog, then the body where the ask put it")
+               (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
+                   "no context this run did not carry -- and the client's own message is not
+                    drawn as one instead"))))))
+      (finally
+        (project/bind! "it-slash-side" nil)
+        (support/wipe-tree! proj))))))
 
 ;; ------------------------------------------------- the composer's own edge
 ;;

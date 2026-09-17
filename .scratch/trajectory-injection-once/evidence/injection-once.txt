@@ -1,0 +1,34 @@
+=== the record: the submitted side vs the kernel's own tail ===
+  run 1 submitted (5 lines)
+    system
+    INJECTED block  <instructions path="/var/folders/9_/vz1tw99s6bn2cd7g
+    INJECTED block  <skills> ## Skills  A skill is a set of instructions
+    user            /alpha fix the bug
+    INJECTED body   <skill name="alpha"> --- name: alpha description: al
+  run 1 returned  (1 lines)
+    assistant        first
+  run 2 submitted (7 lines)
+    system
+    INJECTED block  <instructions path="/var/folders/9_/vz1tw99s6bn2cd7g
+    INJECTED block  <skills> ## Skills  A skill is a set of instructions
+    user            /alpha fix the bug
+    INJECTED body   <skill name="alpha"> --- name: alpha description: al
+    assistant        first
+    user            and another thing
+  run 2 returned  (1 lines)
+    assistant        second
+
+=== GET /api/threads/evidence-injection-once/trajectory (asked from outside, over curl) ===
+  turn 1 (6 items)
+    system             You are a coding agent working in the current direct
+    context   opening  <instructions path="/var/folders/9_/vz1tw99s6bn2cd7g
+    context   opening  <skills> ## Skills  A skill is a set of instructions
+    user               /alpha fix the bug
+    context   run      <skill name="alpha"> --- name: alpha description: al
+    assistant          first
+  turn 2 (2 items)
+    user               and another thing
+    assistant          second
+
+temp config root: /var/folders/9_/vz1tw99s6bn2cd7gpsxc97nc0000gn/T/clj-harness-test-1789629300296
+temp project: /var/folders/9_/vz1tw99s6bn2cd7gpsxc97nc0000gn/T/clj-harness-evidence-injection-1247544903440041

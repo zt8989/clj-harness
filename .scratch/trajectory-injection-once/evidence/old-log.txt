@@ -1,0 +1,14 @@
+folding /Users/zhouteng/.clj-harness/projects/_Users_zhouteng_Documents_workspace_clj-harness/80de94f6-1e7a-49da-8670-cf54044a53ec.jsonl
+written by an OLDER build: 1789624666137
+the injection items it draws per turn (kind + source + text):
+  turn 1
+    opening  <instructions path="/Users/zhouteng/Documents/
+    opening  <skills> ## Skills  A skill is a set of instru
+    run      <skill name="to-tickets"> --- name: to-tickets
+  turn 2
+    run      103 需要 02 需要 04 拆出来 
+  turn 3
+    run      /using-git-worktrees 开工
+    run      <skill name="using-git-worktrees"> --- name: u
+  turn 4
+  turn 5

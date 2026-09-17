@@ -147,7 +147,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 |---|---|
 | `input` | 收到的 RunAgentInput，原样 |
 | `event` | 发出的每个 AG-UI 帧 |
-| `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**（含开场块：指令文件与技能清单都在里面） |
+| `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**。**submitted 侧 = 第一次模型调用真正收到的那一份**（开场块、技能清单、`/<名字>` 的技能正文都在里面），returned 侧 = 内核在那之后追加的；两半按**条数**切开，所以那一步注入必须发生在记 submitted 之前 |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort`（有才记）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
@@ -189,6 +189,10 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 它自己不读任何文件、不跑任何 hook（两样都是递进来的），所以这个命名空间仍是个转换器；空块时它返回
 **原向量本身**，而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
 见 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
+
+**会话自己的注入不在 `inbound` 里，在它之后**：`/<名字>` 要的技能正文由 `harness.cap.project/before-llm`
+折进来，而 `harness.edge.http/run-agent!` 在**记 `message` 行之前**先施加一次——submitted 侧因此就是模型
+真收到的那一份（内核每次模型调用前还会再施加，幂等；内核自己插一条就会把按条数切的两半顶偏）。
 
 ```
 AG-UI 入站                                        出网（OpenAI 兼容 chat-completions）

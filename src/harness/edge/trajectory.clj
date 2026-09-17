@@ -103,13 +103,23 @@
 
 (defn- align
   "Where the client's own messages sit inside a run's submitted block:
-  {:before <opening blocks> :own <the client's messages> :after <trailing context>}.
+  {:before <opening blocks> :own <the client's messages>
+   :between <injections that landed inside them> :after <what follows them>}.
 
   A run's submitted block is [system] + [opening blocks…] + [the client's messages]
-  + [trailing context] -- that is `harness.edge.ag-ui/inbound`'s order. The client's
-  stretch is CONTIGUOUS and matched by role and content, so the two ends fall out: what
-  precedes the match is the opening blocks (the session's instruction files and skills
-  catalog), what follows it is what the run appended after them (the per-run context).
+  + [trailing context] -- that is `harness.edge.ag-ui/inbound`'s order, with the session's
+  own injections folded in where they belong. The client's messages are matched IN ORDER
+  and by role-and-content, and the three ends fall out: what precedes the first match is
+  the opening blocks (the session's instruction files and the skills catalog), what lies
+  BETWEEN two matches was injected too, and what follows the last match is what the run
+  put after the client's own words (the per-run context).
+
+  THE MATCH IS NOT CONTIGUOUS, and that is the difference a `/name` makes: the message
+  that asked for a skill body is still in the history on every later run (the client
+  restates its whole conversation), so the body is re-derived and spliced in AFTER it --
+  between two messages the client holds. A contiguous match finds nothing there and
+  files the whole block as opening context, which is the one answer this view may not
+  give: the client's own words would be drawn as something the server injected.
 
   AN EMPTY CLIENT LIST MAKES THE WHOLE REST 'BEFORE': with nothing to match, the extra
   user messages are the blocks, not trailing context -- the alternative would file a
@@ -121,15 +131,27 @@
   [submitted ins]
   (let [n (count ins)]
     (if (zero? n)
-      {:before submitted :own [] :after []}
-      (loop [k 0]
-        (if (> (+ k n) (count submitted))
-          {:before submitted :own [] :after []}
-          (if (= (mapv shape (subvec submitted k (+ k n))) (mapv shape ins))
-            {:before (vec (subvec submitted 0 k))
-             :own    (vec (subvec submitted k (+ k n)))
-             :after  (vec (subvec submitted (+ k n)))}
-            (recur (inc k))))))))
+      {:before submitted :own [] :between [] :after []}
+      (let [idx (loop [i 0 k 0 found []]
+                  (cond
+                    (= k n)                 found
+                    (= i (count submitted)) nil
+                    (= (shape (nth submitted i)) (shape (nth ins k)))
+                    (recur (inc i) (inc k) (conj found i))
+                    :else                   (recur (inc i) k found)))]
+        (if (nil? idx)
+          {:before submitted :own [] :between [] :after []}
+          (let [hit     (set idx)
+                first-i (first idx)
+                last-i  (last idx)]
+            {:before  (vec (subvec submitted 0 first-i))
+             :own     (mapv #(nth submitted %) idx)
+             :between (vec (keep-indexed (fn [i m]
+                                           (when (and (< first-i i) (< i last-i)
+                                                      (not (contains? hit i)))
+                                             m))
+                                         submitted))
+             :after   (vec (subvec submitted (inc last-i)))}))))))
 
 ;; ------------------------------------------------------------------ what ran
 
@@ -229,25 +251,39 @@
     (update-in turns [(dec (count turns)) :items] into items)))
 
 (defn- add-context
-  "Append injected context to the last turn, SKIPPING what that turn already carries byte
-  for byte.
+  "Append injected context to the last turn, SKIPPING what the readback already carries
+  byte for byte.
 
-  A run RESTATES its injections: the opening blocks are spliced in on every run, so a
-  resumed run would otherwise list the session's instruction files a second time inside
-  the same turn. Within a turn, the same bytes are shown once."
+  AN INJECTION IS SHOWN ONCE FOR THE WHOLE SESSION, not once per turn. A run RESTATES
+  its injections -- the opening blocks are spliced in on every run (the server holds no
+  session, so it re-reads the instruction files and re-renders the catalog every time),
+  and a skill body is re-derived on every turn its trigger is still in the history -- so
+  'show what the run carried' draws the same bytes under every turn, and a five-turn
+  session reads as if the opening happened five times. That is a picture of a flow that
+  did not happen, and it is the one thing this view may not do. So the question 'has
+  this been shown?' is asked against the WHOLE trajectory.
+
+  The CHANGE case falls out of that rather than being written beside it: bytes that
+  changed are bytes nobody has seen, so they are shown again, in the turn where they
+  changed -- the same rule the system item already follows (see
+  `the-system-message-appears-again-only-when-it-changes`).
+
+  The caller hands in one run's blocks in the record's order, so what this drops is
+  exactly the repeats."
   [turns source messages]
   (if (empty? turns)
     turns
     (let [i     (dec (count turns))
           turn  (get turns i)
+          shown (into #{}
+                      (comp (filter #(= "context" (:kind %))) (map :text))
+                      (mapcat :items turns))
           items (mapv #(context-item source %) messages)
-          fresh (remove #(contains? (:contextSeen turn) (:text %)) items)]
-      (-> turns
-          (assoc i (update turn :contextSeen into (map :text fresh)))
-          (assoc-in [i :items] (into (:items turn) fresh))))))
+          fresh (remove #(contains? shown (:text %)) items)]
+      (assoc-in turns [i :items] (into (:items turn) fresh)))))
 
 (defn- open-turn [turns]
-  (conj turns {:index (inc (count turns)) :items [] :calls [] :contextSeen #{}}))
+  (conj turns {:index (inc (count turns)) :items [] :calls []}))
 
 (defn- user-item
   "One user message, taking its text from the message the PROVIDER actually got (the
@@ -408,7 +444,14 @@
   "STATE + one run -> STATE. Turns are opened by new user messages, and everything the
   run showed goes under them in the record's order:
 
-    [system?] [opening blocks] [user …] [trailing context] [assistant / tool …]
+    [system?] [opening blocks] [injected context] [user …] [trailing context] [assistant / tool …]
+
+  THE INJECTED CONTEXT THAT LANDED INSIDE THE CLIENT'S OWN MESSAGES is drawn right after
+  the opening blocks and before this turn's own user message: the retransmitted history it
+  really sat between is not listed (a client restates its whole conversation on every run),
+  and 'this run carried it' is the fact that stays true when the message next to it is not
+  drawn. It is deduped like every other injection, so the ordinary case -- the same bytes
+  already shown in the turn that asked for them -- draws nothing here.
 
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the
@@ -422,7 +465,7 @@
         submitted (:submitted run)
         sys       (first (filter #(= "system" (:role %)) submitted))
         body      (vec (remove #(= "system" (:role %)) submitted))
-        {:keys [before own after]} (align body ins)
+        {:keys [before own between after]} (align body ins)
         own-of    (into {} (map-indexed (fn [i m] [i m]) own))
         texts     (str (:content sys))
         at        (:ts (:input run))
@@ -446,6 +489,7 @@
                       (cond-> changed?
                         (append-last [(system-item texts (nil? shownSystem))]))
                       (add-context "opening" before)
+                      (add-context "run" between)
                       (append-last [(user-item ins own-of (first fresh) at)]))
             turns (reduce (fn [turns message]
                             (-> turns open-turn (append-last [(user-item ins own-of message at)])))
@@ -458,10 +502,11 @@
                       (append-calls calls))]
         {:seen seen' :shownSystem texts :turns turns})
 
-      ;; No new user message: the run continues the turn it parked in. Its injections
-      ;; are deduped against that turn, and its output lands after them.
+      ;; No new user message: the run continues the turn it parked in. Its injections are
+      ;; deduped like every other one, and its output lands after them.
       (let [turns (-> turns
                       (add-context "opening" before)
+                      (add-context "run" between)
                       (add-context "run" after)
                       (cond-> changed? (append-last [(system-item texts false)]))
                       (append-last (returned-items (:returned run) call-of life-of offset))
@@ -501,13 +546,19 @@
   THE SYSTEM MESSAGE IS SHOWN ONCE, and again whenever its bytes change: the frozen
   prompt is the same text on every run, so listing it per turn would be the same fact
   written N times -- but a prompt that CHANGED between turns is the single most important
-  thing this view could show, and hiding it would be worse than repeating it."
+  thing this view could show, and hiding it would be worse than repeating it.
+
+  THE INJECTED CONTEXT OBEYS THE SAME RULE, spelled out in `add-context`: a block is shown
+  once for the whole session, and again only in the turn where its bytes changed. The runs
+  restate their injections -- the server holds no session, so it re-reads the instruction
+  files and re-derives every skill body on every run -- and drawing each run's own bytes
+  would repeat one fact under every turn, making a five-turn session look like five
+  openings."
   [records]
   (let [life-of (tool-lifecycles records)
         call-of (call-index records)]
     {:turns      (mapv (fn [turn]
-                         (let [turn  (dissoc turn :contextSeen)
-                               calls (:calls turn)]
+                         (let [calls (:calls turn)]
                            (cond-> turn
                              (seq calls)   (assoc :calls (vec (map-indexed
                                                                (fn [i call] (assoc call :index i))
