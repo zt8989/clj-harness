@@ -25,3 +25,19 @@
 - [ ] 每次都以**源文件字节**判，量法在代码里只写一次（不许一处量 `file.size`、另一处量 base64 长度）。
 - [ ] vitest 新增一例（`EXPECTED_CASES` 再 +1）。
 - [ ] `npm run typecheck` / `npm run build` / `npm test` 全绿。
+
+## Comments
+
+### 回执（2026-09-17）：2 MB 量的是源文件字节，判据只有一处
+
+判据与 02 的同一处、同一套写法：`ui/src/lib/attachment-rules.ts` 的 `overByteLimit` /
+`sizeRefusal`（`ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024`），零 import，vitest 按相对路径引。
+`refusalFor(file, input, model)` 是唯一的入口，**它只收 `{size}`**——所以量法只有一处，
+不存在「一处量 `file.size`、另一处量 base64 长度」。拒绝发生在适配器的 `add` 里，此刻什么都还没挂上去，
+所以输入框里的字与已挂的附件都不动。
+
+真机：2.96 MB 的 PNG 粘进去 → 不出缩略图、红字 `this image is 3 MB; the limit is 2 MB`
+（`evidence/t03-01-too-big.png`，同一张图上已挂的两张缩略图与输入框里的字都还在）；
+**同一张图**画出 300×300 的版本（0.29 MB）再粘 → 照常出缩略图，证明拒的是体积不是这张图。
+vitest 新增一例（`EXPECTED_CASES` 24 → 26），边界两侧各一条断言（正好 2 MB 过、2 MB + 1 字节拒）。
+不做压缩、不做缩放、不重编码——票面那条非目标照旧。

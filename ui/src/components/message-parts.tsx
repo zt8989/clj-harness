@@ -135,7 +135,7 @@ import {
   isApprovalInterrupt,
   isElicitationInterrupt,
 } from "@/components/approval-gate";
-import { ComposerFrame, ComposerTools } from "@/components/composer-chrome";
+import { ComposerAttachButton, ComposerFrame, ComposerTools } from "@/components/composer-chrome";
 import {
   ReasoningContent,
   ReasoningRoot,
@@ -856,10 +856,11 @@ export const THREAD_COMPONENTS: ThreadComponents = {
   ToolFallback: ToolCallCard,
   ToolGroup: FlatToolGroup,
   ReasoningGroup: ReasoningBlock,
-  // The composer's chrome: the directory and branch strip above it, and the
-  // model and thinking pickers inside it. See composer-chrome.tsx -- they are
-  // two slots rather than an edited composer so the copied element keeps its
-  // shape.
+  // The composer's chrome: the directory and branch strip above it, the model and
+  // thinking pickers inside it, and the attach button beside them. See
+  // composer-chrome.tsx -- they are slots rather than an edited composer so the
+  // copied element keeps its shape.
   ComposerFrame,
   ComposerTools,
+  ComposerAddAttachment: ComposerAttachButton,
 };

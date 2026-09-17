@@ -359,23 +359,22 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 801 tests / 11018 assertions（分支 `trajectory`，从 main @ f7f4d31 切出；
-#   基线随分支变，报数时带上分支与提交。同一台机器上 main @ f7f4d31 是 787 / 10953）
-# 本机固定失败两条，都与代码无关：`project_test/a-binding-survives-a-real-restart`
-#   逐字比较 fork 出来的 JVM 的 stdout，而这台机器的 JDK 25 在 sqlite-jdbc 加载原生库时
-#   会往 stdout 打四行 "a restricted method in java.lang.System has been called"。
-#   新建一个 JVM 就能看见那四行，所以与本仓库的代码无关。
-#   另有 `http_test/the-projects-listing-joins-the-store-with-the-disk` 是**真竞赛**
-#   （它比「列表接口报的字节数与 mtime」和「随后从磁盘读的」，中间只要有人往同一份日志落一行就不等），
-#   跑多少次不一定撞上——失败条数每次都可能不同，比对看**名字**。
-#   加了一整个测试命名空间会**因为时序变化**把这条推到红：把新命名空间从 runner 里注销掉
-#   再跑一次就回到基线那两条（2026-09-17 在 `trajectory` 分支上验过）。
+# 824 tests / 11135 assertions，0 failures / 0 errors（分支 `composer-image`，从 main @ 7fc34c8 切出；
+#   基线随分支变，报数时带上分支与提交。同一台机器上 `trajectory` @ f7f4d31 那一次是 801 / 11018，
+#   main @ f7f4d31 是 787 / 10953）
+# 这台机器上曾经固定失败的那几条已经修好（JDK 25 把 sqlite-jdbc 的原生库加载告警
+#   "a restricted method in java.lang.System has been called" 打到 stdout，而那条用例逐字比较 fork 出来的
+#   JVM 的 stdout——现在比的是它自己写下的文件，不是 stdout）。仍然**真竞赛**的是
+#   `http_test/the-projects-listing-joins-the-store-with-the-disk`（它比「列表接口报的字节数与 mtime」和
+#   「随后从磁盘读的」，中间只要有人往同一份日志落一行就不等）——跑多少次不一定撞上，
+#   失败条数每次都可能不同，比对看**名字**。
 # 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
 
 # UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
 cd ui && npm test
-# 24 tests，含 8 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
+# 26 tests，含 9 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
 #   / 技能列表（两层的根） / 会话统计（那条状态条读的端点与它的五格） / elicitation / 界面取数
+#   / 附件（模型收不收图、2 MB 上限——两例都是纯函数，不起后端）
 ```
 
 UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；

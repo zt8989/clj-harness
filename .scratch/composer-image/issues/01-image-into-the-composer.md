@@ -40,3 +40,27 @@ AG-UI 的 image part 翻成 provider 的 `image_url`（url 与 data 两种来源
 - [ ] `cd ui && npm run typecheck` 0 error、`npm run build` 全绿、`npm test` 全绿且 `EXPECTED_CASES`
       不改——本票不加用例，线那一侧已被 `http-test` 的
       `an-image-part-reaches-the-model-translated-and-the-log-says-so` 盖住。
+
+## Comments
+
+### 回执（2026-09-17）：三条路都活了，服务端零 diff
+
+代码只有两处，都在 `ui/`：`lib/attachments.ts`（适配器，一行挂到 `app.tsx` 的
+`adapters.attachments`）与它为说明而写的那段头注释。**`src/` 零 diff**，`http-test` 那条
+`an-image-part-reaches-the-model-translated-and-the-log-says-so` 本来就盖着线那一侧。
+
+真机（真 Chromium + 真 vite + 真 e2e 后端，家目录与 OS 家都是临时目录）走完三条路，证据在
+`evidence/`：粘贴 / 拖放的悬停边框 / `+`（accept 读到 `image/*`）各一张截图，
+三个缩略图发出去之后这条消息在对话里带着三张图（`t01-02`），点开放大、Esc 关闭；
+只有图没有字时发送键可点；逐个删完那一行 `empty:hidden` 回到零高、发送键回到 disabled；
+选一个 `.txt` 不出缩略图也不报错。
+
+记录里那两行在 `evidence/t01-03-log-lines.txt`：`input` 里三个
+`{:type "image" :source {:type "data" …}}`，同一个 runId 的 `message` 里是三个
+`{:type "image_url" :image_url {:url "data:image/png;base64,…"}}`（base64 只留头尾）。
+
+`typecheck` / `build` / `npm test` 全绿，`EXPECTED_CASES` 本票没动（24）。
+
+**一条没做到位、如实记下**：真机那两种剪贴板来源（截图工具复制、从 Finder 复制图片文件）需要一台有桌面
+会话的机器；本次用的是浏览器自己的剪贴板 + 一次真的 ⌘V，走同一条 `paste` / `clipboardData.files` 的路。
+理由与替代写法写在 `evidence/README.md`。

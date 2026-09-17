@@ -1,0 +1,19 @@
+# 票 01 的证据：一次带图 run 的两条记录行
+#
+# 会话：5a262822-10e4-4729-8ac4-fbe78582c731.jsonl（e2e 后端，家目录与 OS 家都是临时目录，厂商是 harness.fake 的脚本替身）
+# 动作：剪贴板里粘了三张 PNG（每张 5 KB 上下），输入框里一个字都没有，点发送。
+# 这一份 run 的行：['input', 'hook/SystemPrompt', 'message', 'message', 'event', 'model/start', 'event', 'event', 'event', 'model/end', 'event', 'event', 'message']
+#
+# 两行取自同一个 runId。base64 只留头尾——整张图的字节不进证据文件。
+
+--- 行 kind="input"（客户端发来的原样，runId=kPzRe4Y） ---
+  role: 'user'
+    {"type": "image", "source": {"type": "data", "value": "iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6148 chars elided>… AElFTkSuQmCC", "mimeType": "image/png"}}
+    {"type": "image", "source": {"type": "data", "value": "iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6752 chars elided>… RU5ErkJggg==", "mimeType": "image/png"}}
+    {"type": "image", "source": {"type": "data", "value": "iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6720 chars elided>… SUVORK5CYII=", "mimeType": "image/png"}}
+
+--- 同一个 run 的行 kind="message"（翻给厂商的形状） ---
+  role: 'user'
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6148 chars elided>… AElFTkSuQmCC"}}
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6752 chars elided>… RU5ErkJggg=="}}
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAADICAYAAACZ …<6720 chars elided>… SUVORK5CYII="}}

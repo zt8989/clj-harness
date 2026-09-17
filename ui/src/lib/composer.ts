@@ -50,6 +50,27 @@ export async function choicesFor(threadId: string): Promise<Choices> {
   return res.json();
 }
 
+/// What `GET /api/model?threadId=…` answers about THIS session's model. Only the
+/// two fields the composer's attachment rule needs are named, and both are
+/// optional because both may be absent: a provider described inline that declared
+/// no modalities has no `input`, and that is a different answer from `[]` (see
+/// `lib/attachment-rules.ts`).
+///
+/// It is a SECOND endpoint next to `/api/choices`, not a field added to it. The
+/// split is deliberate and older than this feature: `/api/choices` answers "what
+/// may this session be switched to" and is read by the picker, while `/api/model`
+/// answers "what is it served by and what does that take", which is the question a
+/// client deciding whether to offer an image picker has -- its docstring says so in
+/// those words. Folding the second into the first would have been a shape change
+/// to an endpoint two other readers depend on.
+export type ModelAnswer = { model?: string; input?: string[] };
+
+export async function modelFor(threadId: string): Promise<ModelAnswer> {
+  const res = await fetch(`${AGENT_URL}api/model?threadId=${encodeURIComponent(threadId)}`);
+  if (!res.ok) throw new Error(await reasonFrom(res));
+  return res.json();
+}
+
 /// Change this session's selection. Only the named knobs move; `clear` drops the
 /// session's own tier and puts it back on config.edn.
 export async function setModel(
