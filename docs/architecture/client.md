@@ -156,7 +156,7 @@ lib/
 属性**——viewport 的 `turnAnchor="top"`（见上一节「只跟着末尾走」）；**第五处是消息级的**——`AssistantMessage`
 读一次折叠钩子（`useStepFold` / `useTurnFolded`），据此把整条消息 `hidden`、或在轮首画那一行摘要，
 **逻辑一行都不在这份文件里**（`components/turn-steps.tsx` 与 `lib/turns.ts`），它只问「我该被收起来吗」。
-五处之外，这份文件的行、样式与结构其余部分与上游一致。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
+上面五处是**结构**上的改动；这份文件的**文案**也就地搬进了目录（spec 决策 5），所以它和 `thread-list.aui.tsx` 一样，不再与上游逐字节相同——**抄来的文件如今就地改，每一处有意改动都标 `LOCAL:`**。标记是逐字节对账的替代品：它说明「这里是有意改的」，不说明「上游改了什么」。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
 按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
 它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
 `ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有

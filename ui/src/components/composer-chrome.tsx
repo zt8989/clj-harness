@@ -9,8 +9,10 @@
 // which wraps the composer, `ComposerTools`, which renders in the composer's own
 // action row, and `ComposerAddAttachment`, which stands in for the attach button in
 // that same row. Everything visible below is in THIS file; the copied element
-// gained three components and no markup, which is the arrangement that keeps it
-// byte-comparable with upstream on the next registry pull.
+// gained three components and no markup. That arrangement is what keeps this file's
+// own copy out of the copied element -- the copies are edited in place now, each
+// deliberate edit marked `LOCAL:`, so a registry pull is reconciled by reading those
+// markers rather than by a byte diff.
 //
 // ------------------------------------------------------ and one shared store
 //

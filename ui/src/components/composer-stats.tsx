@@ -10,9 +10,10 @@
 // conversation HAS cost and appears once there is anything to report.
 //
 // It does not touch `components/assistant-ui/elements/thread.aui.tsx` -- that is a
-// copy of the assistant-ui element kept byte-comparable with upstream, and the two
-// LOCAL: insertion points in composer-chrome.tsx are the whole reason this file can
-// exist without editing it.
+// copy of the assistant-ui element, and the two LOCAL: insertion points in
+// composer-chrome.tsx are the whole reason this file can exist without editing it.
+// (That copy does carry in-place edits of its own now, each marked `LOCAL:`; this
+// file's copy simply is not one of them.)
 //
 // --------------------------------------------- the numbers are the SERVER's, not ours
 //

@@ -1,5 +1,18 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's own words -- the
+// welcome heading, the composer's placeholder, the button tooltips and their
+// `sr-only` twins, "Loading conversation", the action bar's Copy / Refresh / More /
+// Export as Markdown, the branch picker's Previous / Next, the edit composer's
+// Cancel / Update -- are gone from this file and read from the `elements-thread`
+// catalog instead (spec decision 5, which reverses flat-step-rows decision 9's
+// "leave the copies untouched"). A half-English, half-Chinese page is the thing
+// this feature exists to remove, and this file's sentences sit at the very front
+// of it. The cost, written down: this file is no longer byte-comparable with
+// upstream, so each deliberate edit below is marked `LOCAL:` -- a marker says
+// "this was changed on purpose", not "this is what upstream changed". Every
+// non-word byte -- `data-slot`, class names, upstream identifiers -- is untouched.
+
 import {
   ComposerAddAttachment,
   ComposerAttachments,
@@ -65,6 +78,7 @@ import {
   type FC,
   type PropsWithChildren,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -142,26 +156,32 @@ const isTurnEnd = (s: AssistantState) =>
 const isTurnContinuation = (s: AssistantState) =>
   s.thread.messages[s.message.index - 1]?.role === "assistant";
 
-const ThreadHistorySkeleton: FC = () => (
-  <div
-    data-slot="aui_thread-history-skeleton"
-    role="status"
-    className="animate-in fade-in fill-mode-both flex flex-col gap-y-6 [animation-delay:150ms] [animation-duration:200ms]"
-  >
-    <span className="sr-only">Loading conversation</span>
-    <Skeleton className="ml-auto h-9 w-2/5 rounded-xl motion-reduce:animate-none" />
-    <div className="flex flex-col gap-y-2">
-      <Skeleton className="h-4 w-11/12 motion-reduce:animate-none" />
-      <Skeleton className="h-4 w-4/5 motion-reduce:animate-none" />
-      <Skeleton className="h-4 w-3/5 motion-reduce:animate-none" />
+// LOCAL: upstream's literal "Loading conversation" is gone from this file and read
+// from the `elements-thread` catalog instead. It is the status line a screen reader
+// announces while history is fetched, and screen-reader text is copy like any other.
+const ThreadHistorySkeleton: FC = () => {
+  const { t } = useTranslation("elements-thread");
+  return (
+    <div
+      data-slot="aui_thread-history-skeleton"
+      role="status"
+      className="animate-in fade-in fill-mode-both flex flex-col gap-y-6 [animation-delay:150ms] [animation-duration:200ms]"
+    >
+      <span className="sr-only">{t("history.loading")}</span>
+      <Skeleton className="ml-auto h-9 w-2/5 rounded-xl motion-reduce:animate-none" />
+      <div className="flex flex-col gap-y-2">
+        <Skeleton className="h-4 w-11/12 motion-reduce:animate-none" />
+        <Skeleton className="h-4 w-4/5 motion-reduce:animate-none" />
+        <Skeleton className="h-4 w-3/5 motion-reduce:animate-none" />
+      </div>
+      <Skeleton className="ml-auto h-9 w-1/3 rounded-xl motion-reduce:animate-none" />
+      <div className="flex flex-col gap-y-2">
+        <Skeleton className="h-4 w-10/12 motion-reduce:animate-none" />
+        <Skeleton className="h-4 w-2/3 motion-reduce:animate-none" />
+      </div>
     </div>
-    <Skeleton className="ml-auto h-9 w-1/3 rounded-xl motion-reduce:animate-none" />
-    <div className="flex flex-col gap-y-2">
-      <Skeleton className="h-4 w-10/12 motion-reduce:animate-none" />
-      <Skeleton className="h-4 w-2/3 motion-reduce:animate-none" />
-    </div>
-  </div>
-);
+  );
+};
 
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
@@ -268,11 +288,15 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
+// LOCAL: upstream's literal "Scroll to bottom" is gone from this file and read from
+// the `elements-thread` catalog instead -- the tooltip and the `sr-only` text the
+// button draws through `TooltipIconButton`.
 const ThreadScrollToBottom: FC = () => {
+  const { t } = useTranslation("elements-thread");
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
       <TooltipIconButton
-        tooltip="Scroll to bottom"
+        tooltip={t("scroll.toBottom")}
         variant="outline"
         className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
       >
@@ -282,11 +306,16 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
+// LOCAL: upstream's welcome heading, "How can I help you today?", is gone from this
+// file and read from the `elements-thread` catalog instead. It is the first sentence
+// an empty conversation shows, and the one the spec names as the reason this copy
+// can no longer stay untouched.
 const ThreadWelcome: FC = () => {
+  const { t } = useTranslation("elements-thread");
   return (
     <div className="aui-thread-welcome-root mb-6 flex flex-col items-center px-4 text-center">
       <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-medium tracking-tight duration-200">
-        How can I help you today?
+        {t("welcome.heading")}
       </h1>
     </div>
   );
@@ -318,7 +347,12 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
+// LOCAL: upstream's composer placeholder ("Send a message...") and its input's
+// `aria-label` ("Message input") are gone from this file and read from the
+// `elements-thread` catalog instead. The placeholder is the interface's own
+// instruction, not a model word, so it is copy and follows the language.
 const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
+  const { t } = useTranslation("elements-thread");
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone asChild>
@@ -328,12 +362,12 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
         >
           <ComposerAttachments />
           <ComposerPrimitive.Input
-            placeholder="Send a message..."
+            placeholder={t("composer.placeholder")}
             className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
             rows={1}
             autoFocus={autoFocus}
             enterKeyHint="send"
-            aria-label="Message input"
+            aria-label={t("composer.inputLabel")}
           />
           <ComposerAction />
         </div>
@@ -348,6 +382,13 @@ const ComposerAction: FC = () => {
   // itself when the caller has a reason to draw it differently.
   const { ComposerTools, ComposerAddAttachment: Attach = ComposerAddAttachment } =
     useContext(ThreadComponentsContext);
+  // LOCAL: upstream's literal tooltips and `aria-label`s for the dictation and send
+  // buttons -- "Voice input", "Start voice input", "Stop dictation", "Stop voice
+  // input", "Send message" (twice: `tooltip` and the send button's `aria-label`) and
+  // "Stop generating" -- are gone from this file and read from the `elements-thread`
+  // catalog instead. Tooltips and `aria-label` values are copy, so they follow the
+  // language even though they are not drawn as text.
+  const { t } = useTranslation("elements-thread");
 
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
@@ -359,13 +400,13 @@ const ComposerAction: FC = () => {
           <AuiIf condition={(s) => s.composer.dictation == null}>
             <ComposerPrimitive.Dictate asChild>
               <TooltipIconButton
-                tooltip="Voice input"
+                tooltip={t("composer.voiceInput")}
                 side="bottom"
                 type="button"
                 variant="ghost"
                 size="icon"
                 className="aui-composer-dictate text-muted-foreground hover:text-foreground size-7 rounded-full"
-                aria-label="Start voice input"
+                aria-label={t("composer.voiceInputStart")}
               >
                 <MicIcon className="aui-composer-dictate-icon size-4" />
               </TooltipIconButton>
@@ -374,13 +415,13 @@ const ComposerAction: FC = () => {
           <AuiIf condition={(s) => s.composer.dictation != null}>
             <ComposerPrimitive.StopDictation asChild>
               <TooltipIconButton
-                tooltip="Stop dictation"
+                tooltip={t("composer.dictationStop")}
                 side="bottom"
                 type="button"
                 variant="ghost"
                 size="icon"
                 className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="Stop voice input"
+                aria-label={t("composer.dictationStopLabel")}
               >
                 <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
               </TooltipIconButton>
@@ -390,13 +431,13 @@ const ComposerAction: FC = () => {
         <AuiIf condition={(s) => !s.thread.isRunning}>
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
-              tooltip="Send message"
+              tooltip={t("composer.send")}
               side="bottom"
               type="button"
               variant="default"
               size="icon"
               className="aui-composer-send size-7 rounded-full"
-              aria-label="Send message"
+              aria-label={t("composer.send")}
             >
               <ArrowUpIcon className="aui-composer-send-icon size-4" />
             </TooltipIconButton>
@@ -409,7 +450,7 @@ const ComposerAction: FC = () => {
               variant="default"
               size="icon"
               className="aui-composer-cancel size-7 rounded-full"
-              aria-label="Stop generating"
+              aria-label={t("composer.stopGenerating")}
             >
               <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
             </Button>
@@ -436,6 +477,12 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
+
+  // LOCAL: upstream's `aria-label` "Assistant is working" on the streaming indicator
+  // is gone from this file and read from the `elements-thread` catalog instead. It is
+  // never drawn -- the dot is -- but it is what a screen reader announces, so it is
+  // copy.
+  const { t } = useTranslation("elements-thread");
 
   // LOCAL: the two neighbours, read off the thread's message list (see
   // `isTurnEnd`). `continuation` tightens the gap ABOVE this message so a turn's
@@ -548,7 +595,7 @@ const AssistantMessage: FC = () => {
                   <span
                     data-slot="aui_assistant-message-indicator"
                     className="animate-pulse font-sans"
-                    aria-label="Assistant is working"
+                    aria-label={t("message.working")}
                   >
                     {"●"}
                   </span>
@@ -587,6 +634,10 @@ const AssistantMessage: FC = () => {
 };
 
 const AssistantActionBar: FC = () => {
+  // LOCAL: upstream's action-bar literals -- the Copy, Refresh and More tooltips and
+  // the "Export as Markdown" menu item -- are gone from this file and read from the
+  // `elements-thread` catalog instead. Tooltips are copy, and the menu item is drawn.
+  const { t } = useTranslation("elements-thread");
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -594,7 +645,7 @@ const AssistantActionBar: FC = () => {
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
       <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy">
+        <TooltipIconButton tooltip={t("message.copy")}>
           <AuiIf condition={(s) => s.message.isCopied}>
             <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
           </AuiIf>
@@ -604,14 +655,14 @@ const AssistantActionBar: FC = () => {
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
       <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
+        <TooltipIconButton tooltip={t("message.refresh")}>
           <RefreshCwIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
-            tooltip="More"
+            tooltip={t("message.more")}
             className="data-[state=open]:bg-accent"
           >
             <MoreHorizontalIcon />
@@ -626,7 +677,7 @@ const AssistantActionBar: FC = () => {
           <ActionBarPrimitive.ExportMarkdown asChild>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
               <DownloadIcon className="size-4" />
-              Export as Markdown
+              {t("message.exportMarkdown")}
             </ActionBarMorePrimitive.Item>
           </ActionBarPrimitive.ExportMarkdown>
         </ActionBarMorePrimitive.Content>
@@ -676,6 +727,9 @@ const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  // LOCAL: upstream's "Edit" tooltip is gone from this file and read from the
+  // `elements-thread` catalog instead.
+  const { t } = useTranslation("elements-thread");
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -683,7 +737,10 @@ const UserActionBar: FC = () => {
       className="aui-user-action-bar-root flex flex-col items-end"
     >
       <ActionBarPrimitive.Edit asChild>
-        <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
+        <TooltipIconButton
+          tooltip={t("message.edit")}
+          className="aui-user-action-edit"
+        >
           <PencilIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>
@@ -692,6 +749,9 @@ const UserActionBar: FC = () => {
 };
 
 const EditComposer: FC = () => {
+  // LOCAL: upstream's edit-composer buttons, "Cancel" and "Update", are gone from
+  // this file and read from the `elements-thread` catalog instead. They are drawn.
+  const { t } = useTranslation("elements-thread");
   return (
     <MessagePrimitive.Root
       data-slot="aui_edit-composer-wrapper"
@@ -709,12 +769,12 @@ const EditComposer: FC = () => {
               size="sm"
               className="h-8 rounded-full px-3.5"
             >
-              Cancel
+              {t("message.cancel")}
             </Button>
           </ComposerPrimitive.Cancel>
           <ComposerPrimitive.Send asChild>
             <Button size="sm" className="h-8 rounded-full px-3.5">
-              Update
+              {t("message.update")}
             </Button>
           </ComposerPrimitive.Send>
         </div>
@@ -727,6 +787,9 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
   className,
   ...rest
 }) => {
+  // LOCAL: upstream's branch-picker tooltips, "Previous" and "Next", are gone from
+  // this file and read from the `elements-thread` catalog instead.
+  const { t } = useTranslation("elements-thread");
   return (
     <BranchPickerPrimitive.Root
       hideWhenSingleBranch
@@ -737,7 +800,7 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
       {...rest}
     >
       <BranchPickerPrimitive.Previous asChild>
-        <TooltipIconButton tooltip="Previous">
+        <TooltipIconButton tooltip={t("message.previous")}>
           <ChevronLeftIcon />
         </TooltipIconButton>
       </BranchPickerPrimitive.Previous>
@@ -745,7 +808,7 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
         <BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count />
       </span>
       <BranchPickerPrimitive.Next asChild>
-        <TooltipIconButton tooltip="Next">
+        <TooltipIconButton tooltip={t("message.next")}>
           <ChevronRightIcon />
         </TooltipIconButton>
       </BranchPickerPrimitive.Next>

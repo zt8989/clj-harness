@@ -3,6 +3,7 @@
 import * as React from "react"
 import { cn } from "cn"
 import { Dialog as DialogPrimitive } from "radix-ui"
+import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
@@ -55,6 +56,13 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  // LOCAL: upstream's screen-reader-only "Close" on the top-right button is gone from
+  // this file and read from the `elements-thread` catalog instead. `sr-only` text is
+  // copy -- it is exactly what a screen reader announces -- so it follows the
+  // language with the rest of the shell. The first deliberate edit here, hence the
+  // new marker: the file is no longer byte-comparable with upstream, and a `LOCAL:`
+  // marker says "this was changed on purpose", not "what upstream changed".
+  const { t } = useTranslation("elements-thread")
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -76,7 +84,7 @@ function DialogContent({
             >
               <XIcon
               />
-              <span className="sr-only">Close</span>
+              <span className="sr-only">{t("dialog.close")}</span>
             </Button>
           </DialogPrimitive.Close>
         )}
@@ -103,6 +111,10 @@ function DialogFooter({
 }: React.ComponentProps<"div"> & {
   showCloseButton?: boolean
 }) {
+  // LOCAL: upstream's drawn "Close" in the footer is gone from this file and read
+  // from the `elements-thread` catalog instead. It is the same word as the icon
+  // button's `sr-only` text above, from the same `dialog.close` key.
+  const { t } = useTranslation("elements-thread")
   return (
     <div
       data-slot="dialog-footer"
@@ -115,7 +127,7 @@ function DialogFooter({
       {children}
       {showCloseButton && (
         <DialogPrimitive.Close asChild>
-          <Button variant="outline">Close</Button>
+          <Button variant="outline">{t("dialog.close")}</Button>
         </DialogPrimitive.Close>
       )}
     </div>

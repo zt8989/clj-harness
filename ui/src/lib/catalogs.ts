@@ -25,6 +25,7 @@
 // ticket find an entry nobody uses. A dynamic key defeats both.
 import enApproval from "../locales/en/approval.json";
 import enComposer from "../locales/en/composer.json";
+import enElementsThread from "../locales/en/elements-thread.json";
 import enErrors from "../locales/en/errors.json";
 import enFormat from "../locales/en/format.json";
 import enSettings from "../locales/en/settings.json";
@@ -33,6 +34,7 @@ import enThread from "../locales/en/thread.json";
 import enTrajectory from "../locales/en/trajectory.json";
 import zhApproval from "../locales/zh/approval.json";
 import zhComposer from "../locales/zh/composer.json";
+import zhElementsThread from "../locales/zh/elements-thread.json";
 import zhErrors from "../locales/zh/errors.json";
 import zhFormat from "../locales/zh/format.json";
 import zhSettings from "../locales/zh/settings.json";
@@ -48,8 +50,8 @@ import type { Language } from "./language";
 /// read from (`src/i18next.d.ts`) and the fallback, so a key that exists only in
 /// Chinese is a key no call site can name.
 export const RESOURCES = {
-  en: { approval: enApproval, composer: enComposer, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread, trajectory: enTrajectory },
-  zh: { approval: zhApproval, composer: zhComposer, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread, trajectory: zhTrajectory },
+  en: { approval: enApproval, composer: enComposer, "elements-thread": enElementsThread, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread, trajectory: enTrajectory },
+  zh: { approval: zhApproval, composer: zhComposer, "elements-thread": zhElementsThread, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread, trajectory: zhTrajectory },
 } as const satisfies Record<Language, Record<string, unknown>>;
 
 /// Derived from the tables rather than listed again: a second list is a second

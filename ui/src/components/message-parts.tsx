@@ -95,8 +95,9 @@
 // signal (`requires-action`) that tells the tool card what state it is in.
 //
 // Nothing in `components/assistant-ui/elements/` was edited to get this. A slot
-// override keeps this file ours and the copied files byte-comparable on the
-// next registry pull; the upstream pieces used are the copied atoms and
+// override keeps this file ours, and the change lands here rather than in a copied
+// file -- those copies are edited in place now, each edit marked `LOCAL:`, but this
+// one did not need to be. The upstream pieces used are the copied atoms and
 // disclosure shells -- `ToolFallbackRoot` / `ToolFallbackContent` /
 // `ToolFallbackError` (animation, scroll lock, error block), and -- for
 // reasoning -- the shell only: `ReasoningRoot` / `ReasoningContent` /

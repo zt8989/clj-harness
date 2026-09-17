@@ -10,6 +10,7 @@ import {
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
@@ -61,6 +62,13 @@ export const MarkdownText = memo(MarkdownTextImpl);
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
+  // LOCAL: upstream's "Copy" tooltip on the code block's copy button is gone from
+  // this file and read from the `elements-thread` catalog instead. It is the first
+  // deliberate edit to this copied file, so the marker is new here: the tooltip is a
+  // word a person reads, and the file is therefore no longer byte-comparable with
+  // upstream -- the marker says "this was changed on purpose", not "what upstream
+  // changed".
+  const { t } = useTranslation("elements-thread");
   const onCopy = () => {
     if (!code || isCopied) return;
     copyToClipboard(code);
@@ -71,7 +79,7 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {language}
       </span>
-      <TooltipIconButton tooltip="Copy" onClick={onCopy}>
+      <TooltipIconButton tooltip={t("code.copy")} onClick={onCopy}>
         {!isCopied && (
           <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
         )}
