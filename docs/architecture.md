@@ -61,7 +61,7 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `cap.tools` | **十五个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.tools` | **十六个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `bash_background` / `bash_output` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`；批的计划器与编辑模式的收窄策略也从这里装上 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
@@ -132,3 +132,12 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
   **它的说明也不在 `prompt.md` 里，而且这是设计**：名册由 wire 上的 `:tools` 自描述，技法（怎么把工具
   串起来用）才需要一块地方说——那块地方是 `SystemPrompt` 点上的一条内建行，开关在 `harness.edn`
   （票 04），所以 `prompt.md` 到那时仍是一个字都不提本特征。
+
+- **bash 的时限与后台作业**：计划见 `.scratch/bash-lifetime/`（4 张票，2026-09-17 立）。
+  前台 `bash` 调用多一个 `timeout`（毫秒，默认 120000），到点**连子孙一起**停掉并把已经打出来的输出
+  还回去；另加三个名字——`bash_background` / `bash_output` / `bash_kill`——给「没人等它」那种跑法，
+  作业活在这个进程里、按会话分家、JVM 退出时收掉。
+  **代码里一行都没有**：`bash` 今天走的是 `infra.shell/shell`（无超时），
+  `run` 那条带时限的路到点只杀壳、不收子孙，工具表里也没有那三个名字。
+  本目录因此**今天仍然成立**的那两条——`bash` 的 cwd 是绑定的目录、命令内容永不判定——一个字不改；
+  变的只是「等多久」与「谁在等」，那是本特征落地时票 04 要写进这里的事。

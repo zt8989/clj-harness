@@ -43,6 +43,7 @@
     harness.cap.preamble-test
     harness.kernel.tools-test
     harness.cap.mcp-test
+    harness.cap.jobs-test
     harness.cap.mcp-wired-test
     harness.session-tools-test
     harness.approval-test

@@ -1,7 +1,7 @@
 (ns harness.kernel.tools
   "The tool table's SEAM: the per-session overlay, the parked calls a human still
   has to answer, and the three-phase execution. It knows what a tool IS and what
-  a call MEANS; it knows no particular tool. `harness.cap.tools` holds the fifteen
+  a call MEANS; it knows no particular tool. `harness.cap.tools` holds the built-in
   this harness ships, and they arrive through `install!`.
 
   A tool is
