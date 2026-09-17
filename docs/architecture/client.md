@@ -61,7 +61,7 @@ lib/
 `POST /api/agent`，其余都是 `/api/<什么>`——所以 `ui/vite.config.js` 只要**一条** `/api` 前缀规则。
 `lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方，`${HARNESS}api/`）与
 `AGENT_URL`（`HttpAgent({url})` 用的那一个端点，`${API_BASE}agent`）。目标来自
-`HARNESS_BACKEND_URL`，由 `./dev.sh` 填：它让后端**在 0 号端口绑**（OS 分配）、读后端**自己报
+`HARNESS_BACKEND_URL`，由 `node dev.mjs` 填：它让后端**在 0 号端口绑**（OS 分配）、读后端**自己报
 出来的**那个端口，所以源码里没有端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
 浏览器因此**一个跨域请求都不发**（没有 preflight，CORS 白名单也不再是前端要跟着改的东西），
 构建产物里也不带我们的地址——换到任何部署自己的反代后面都一样。

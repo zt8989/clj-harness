@@ -313,12 +313,15 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 ### 1) 一条命令起两个（推荐）
 
 ```bash
-./dev.sh                 # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
-./dev.sh --port 8080     # 钉死端口（老地址，需要时）
-./dev.sh --scripted      # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
-./dev.sh --ui-port 5199  # 前端换端口
+node dev.mjs             # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
+node dev.mjs --port 8080 # 钉死端口（老地址，需要时）
+node dev.mjs --scripted  # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
+node dev.mjs --ui-port 5199  # 前端换端口
 ```
 
+**是 Node 脚本不是 shell 脚本**，三个平台同一个文件：进程组 / `taskkill`、信号处理、临时目录
+三处各自分叉，`process.platform` 一看就知道走了哪条。跑 `node dev.mjs`（POSIX 上 `./dev.mjs`
+也行，它带 shebang）。
 仓库里**只有这一处**告诉前端后端在哪，而它不在源码里：脚本让后端**在 0 号端口上绑**（OS 分配），
 把后端**自己报出来的**那个端口交给 `HARNESS_BACKEND_URL`，`ui/vite.config.js` 拿它当代理目标。
 所以没有任何源文件知道端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
@@ -326,7 +329,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 **真实模式用的是你自己的 `~/.clj-harness`**（你的配置、你的厂商、你的密钥）；
 `--scripted` **绝不用**——它拿一对临时家目录（config root 与 OS home，两者平级不嵌套，
-见 `AGENTS.md`），退出时连目录一起删。`CLJ_HARNESS_HOME=... ./dev.sh` 也能用：脚本不覆盖这个
+见 `AGENTS.md`），退出时连目录一起删。`CLJ_HARNESS_HOME=... node dev.mjs` 也能用：脚本不覆盖这个
 变量，所以想让真实模式落在别处，就在前面给它。
 
 ### 2) 分开起
