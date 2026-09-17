@@ -18,11 +18,18 @@
 // does not ask for it: a server is configured WITH a token, and the panel's job
 // is to say it is configured, never with what. Same rule as the api key, and the
 // same reason -- a screen is a place secrets get copied out of.
+import type { TFunction } from "i18next";
 import { useCallback, useEffect, useState, type FC } from "react";
 import { RefreshCwIcon, ServerIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { AGENT_URL } from "@/lib/threads";
+
+/// The translator this face is worded through: the settings catalog, because the
+/// panel is drawn on the settings dialog's MCP page (see `locales/<lng>/settings.json`).
+/// The `TFunction` import is a TYPE import, so nothing is added to the runtime graph.
+type Translate = TFunction<"settings">;
 
 /// One server, as the endpoint describes it.
 export type McpServer = {
@@ -36,31 +43,49 @@ export type McpServer = {
   skipped?: readonly { skipped: string; why: string }[];
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  connected: "connected",
-  failed: "failed",
-  disabled: "switched off",
-  idle: "not used yet",
-};
-
-/// The status, as a person reads it -- and the tone it is drawn in.
+/// The status, as a person reads it. `server.status` is the SERVER's keyword
+/// (`connected` / `failed` / `disabled` / `idle`); the word is ours. Each branch
+/// therefore writes its own literal key, and a keyword this panel has no sentence
+/// for falls through as itself rather than as silence -- an unknown status is still
+/// a fact, and hiding it would be worse than showing the raw word.
 ///
 /// FAILED AND SWITCHED OFF ARE NOT THE SAME FACT and are never merged: a failed
 /// server is retried the next time it is used, a switched-off one is not until
 /// somebody turns it back on. A panel that showed one word for both would hide
 /// the only difference that matters when a tool goes missing.
-function statusLabel(server: McpServer): string {
-  return STATUS_LABELS[server.status] ?? server.status;
+function statusLabel(t: Translate, server: McpServer): string {
+  switch (server.status) {
+    case "connected":
+      return t("mcp.status.connected");
+    case "failed":
+      return t("mcp.status.failed");
+    case "disabled":
+      return t("mcp.status.disabled");
+    case "idle":
+      return t("mcp.status.idle");
+    default:
+      return server.status;
+  }
 }
 
-async function fetchServers(threadId: string): Promise<readonly McpServer[]> {
+/// THE TWO SENTENCES BELOW ARE THE PANEL'S OWN, and that is why they are the only
+/// error strings here that go through the catalog: a server that refused sends
+/// `body.error` and that sentence passes through VERBATIM (see the boundary in
+/// `settings-panel`), while "listing MCP servers failed: HTTP 500" is raised here,
+/// on this side of the wire. The server name and the status code interpolate; the
+/// words are ours.
+async function fetchServers(
+  t: Translate,
+  threadId: string,
+): Promise<readonly McpServer[]> {
   const res = await fetch(`${AGENT_URL}api/mcp?threadId=${encodeURIComponent(threadId)}`);
-  if (!res.ok) throw new Error(`listing MCP servers failed: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(t("mcp.listingFailed", { status: res.status }));
   const body = (await res.json()) as { servers?: readonly McpServer[] };
   return body.servers ?? [];
 }
 
 async function setEnabled(
+  t: Translate,
   threadId: string,
   server: string,
   enabled: boolean,
@@ -72,7 +97,9 @@ async function setEnabled(
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `switching ${server} failed: HTTP ${res.status}`);
+    throw new Error(
+      body.error ?? t("mcp.switchingFailed", { server, status: res.status }),
+    );
   }
 }
 
@@ -82,6 +109,7 @@ const ServerRow: FC<{
   busy: boolean;
   onToggle: (enabled: boolean) => void;
 }> = ({ server, busy, onToggle }) => {
+  const { t } = useTranslation("settings");
   const off = server.status === "disabled";
   return (
     <div
@@ -106,7 +134,7 @@ const ServerRow: FC<{
               : "text-muted-foreground text-xs"
           }
         >
-          {statusLabel(server)}
+          {statusLabel(t, server)}
         </span>
       </div>
 
@@ -132,7 +160,8 @@ const ServerRow: FC<{
           a silently shorter list is a capability somebody thinks they have. */}
       {server.skipped !== undefined && server.skipped.length > 0 && (
         <p data-slot="mcp-server-skipped" className="text-muted-foreground text-xs">
-          {server.skipped.map((s) => s.skipped).join(", ")} — not usable as a tool name
+          {server.skipped.map((s) => s.skipped).join(", ")}
+          {t("mcp.notUsable")}
         </p>
       )}
 
@@ -146,7 +175,7 @@ const ServerRow: FC<{
             onToggle(off);
           }}
         >
-          {off ? "Turn on" : "Turn off"}
+          {off ? t("mcp.turnOn") : t("mcp.turnOff")}
         </Button>
       </div>
     </div>
@@ -160,18 +189,19 @@ const ServerRow: FC<{
 /// silently disagrees with the server -- is worse than one that is visibly
 /// something you asked for.
 export const McpPanel: FC<{ threadId: string }> = ({ threadId }) => {
+  const { t } = useTranslation("settings");
   const [servers, setServers] = useState<readonly McpServer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setServers(await fetchServers(threadId));
+      setServers(await fetchServers(t, threadId));
       setError(null);
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
     }
-  }, [threadId]);
+  }, [threadId, t]);
 
   useEffect(() => {
     void load();
@@ -181,7 +211,7 @@ export const McpPanel: FC<{ threadId: string }> = ({ threadId }) => {
     async (server: string, enabled: boolean) => {
       setBusy(server);
       try {
-        await setEnabled(threadId, server, enabled);
+        await setEnabled(t, threadId, server, enabled);
         await load();
         setError(null);
       } catch (failure: unknown) {
@@ -194,13 +224,13 @@ export const McpPanel: FC<{ threadId: string }> = ({ threadId }) => {
         setBusy(null);
       }
     },
-    [threadId, load],
+    [threadId, load, t],
   );
 
   if (servers === null) {
     return (
       <p data-slot="mcp-panel-loading" className="text-muted-foreground text-xs">
-        {error ?? "Loading…"}
+        {error ?? t("mcp.loading")}
       </p>
     );
   }
@@ -208,7 +238,7 @@ export const McpPanel: FC<{ threadId: string }> = ({ threadId }) => {
   return (
     <div data-slot="mcp-panel" className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">MCP servers</p>
+        <p className="text-sm font-medium">{t("mcp.heading")}</p>
         <Button
           size="sm"
           variant="ghost"
@@ -223,8 +253,9 @@ export const McpPanel: FC<{ threadId: string }> = ({ threadId }) => {
 
       {servers.length === 0 ? (
         <p data-slot="mcp-panel-empty" className="text-muted-foreground text-xs">
-          No servers are declared for this session. Declare one in
-          <code className="bg-muted mx-1 rounded px-1">mcp.edn</code>.
+          {t("mcp.emptyLead")}
+          <code className="bg-muted mx-1 rounded px-1">mcp.edn</code>
+          {t("mcp.emptyTail")}
         </p>
       ) : (
         servers.map((server) => (
