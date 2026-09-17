@@ -12,7 +12,7 @@
 // the words around it from here).
 import type { TFunction } from "i18next";
 
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator a layer chip is worded through. It is the composer's own catalog
 /// because that is the only face that draws a layer today: `System` / `Project` are
@@ -65,7 +65,7 @@ export type SkillGroup = {
 export type Skill = SkillRow & { layer?: string; root: string };
 
 export async function skillsFor(threadId: string, t: Translate): Promise<SkillGroup[]> {
-  const res = await fetch(`${AGENT_URL}api/skills?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}skills?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { groups?: SkillGroup[] };
   return body.groups ?? [];

@@ -65,10 +65,17 @@ export type ThreadListItemProps = {
   /// Whether another action is in flight; every row stops accepting clicks while
   /// one is, so a slow request cannot be turned into two.
   busy: boolean;
-  /// Whether this thread has a run in flight. Since only the open thread is
-  /// mounted, this is the main thread's running state -- the same thing the
-  /// refusal below the row is about.
+  /// LOCAL: THIS ROW'S OWN SESSION, not the one on screen. Upstream read the
+  /// runtime's main-thread state and the sidebar narrowed it with
+  /// `=== currentThreadId`; there is one runtime per session now, so the sidebar
+  /// passes the answer from its registry and the row draws what it is given.
+  /// Whether this thread has a run in flight.
   running: boolean;
+  /// LOCAL: added with ticket 03/05. A session can be WAITING rather than running
+  /// -- a run ended on an interrupt, so `isRunning` is false, and a human still
+  /// owes it an answer. Upstream's row has no such state; it is drawn in words
+  /// because "stopped" and "waiting for you" want different reactions.
+  parked?: boolean;
   onOpen: () => void;
   /// The refusal or failure that belongs to THIS row, or null. Rendered under the
   /// row it happened on and nowhere else: a message at the top of the list makes
@@ -85,6 +92,7 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
   current,
   busy,
   running,
+  parked = false,
   onOpen,
   error,
   actions,
@@ -127,7 +135,20 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
               data-slot="thread-list-item-id"
               className="min-w-0 flex-1 truncate font-mono text-xs"
             >
-              {threadId}
+              {/* LOCAL: the two things a session can be doing that ask something of
+                  the reader, and they are NOT the same thing -- the spinner is
+                  "come back later", this is "come here". Only one can be up at a
+                  time (a parked run is not running), and neither is drawn for a
+                  session that has simply settled. A word a person reads, so it
+                  comes from the shell catalog like `current` below it. */}
+              {parked && (
+                <span
+                  data-slot="thread-list-item-parked"
+                  className="text-foreground shrink-0 text-[10px] tracking-wide"
+                >
+                  {t("session.parked")}
+                </span>
+              )}
             </code>
             {/* LOCAL: upstream's literal `current` is gone from this file and
                 read from the shell catalog instead. It is a word a person sees

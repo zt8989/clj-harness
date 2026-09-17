@@ -6,7 +6,7 @@
 // the session's jsonl log (GET /api/threads/<stem>/stats), which is the only place
 // those facts exist -- the vendor's usage never reaches the client, and the client
 // must not estimate it. See .scratch/composer-status/spec.md.
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 import type { StatsPayload } from "@/lib/format";
 
 /// This session's numbers.
@@ -18,7 +18,7 @@ import type { StatsPayload } from "@/lib/format";
 /// null, because the strip has no way to say anything useful about it and a red
 /// line under the composer is not the place to try.
 export async function statsFor(threadId: string): Promise<StatsPayload | null> {
-  const res = await fetch(`${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/stats`);
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/stats`);
   if (!res.ok) return null;
   return (await res.json()) as StatsPayload;
 }

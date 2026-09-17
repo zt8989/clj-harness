@@ -76,6 +76,14 @@ export function url(): string {
   return facts?.url ?? "http://localhost:8080/";
 }
 
+/// THE AG-UI ENDPOINT: where a `RunAgentInput` is POSTed. NOT `url()`, which is
+/// the server root -- the run edge lives under the API prefix with every other
+/// route (`POST /api/agent`), and an agent built against `url()` would post a run
+/// at the root and be answered `no such route`.
+export function runUrl(): string {
+  return `${url()}api/agent`;
+}
+
 /// The two homes the running harness was given. Read fresh on every call, like
 /// the server reads them: the server re-reads its convention files and skill
 /// roots on every run, so a case plants a file and the NEXT call is what proves
@@ -122,7 +130,7 @@ export async function postRun(
   messages: readonly Message[],
   extra?: Record<string, unknown>,
 ): Promise<Response> {
-  return fetch(url(), {
+  return fetch(runUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify({ threadId: tid, runId: rid, messages, tools: [], context: [], ...extra }),

@@ -8,6 +8,7 @@
     "noLog": "还没有日志",
     "current": "当前",
     "running": "运行中",
+    "parked": "等你回应",
     "archive": "归档",
     "archiveTitle": "归档——保留这个会话和它的日志，但把它挪到一旁",
     "unarchive": "取消归档",
@@ -42,7 +43,11 @@
   },
   "refusal": {
     "noProject": "先添加一个项目——会话属于项目。",
-    "noProjectSelected": "先选一个项目——会话属于项目。"
+    "noProjectSelected": "先选一个项目——会话属于项目。",
+    "archiveRunning": "那个会话还在跑；结束之后再归档。",
+    "archiveParked": "那个会话在等你回应；结束之后再归档。",
+    "removeProjectRunning": "{{session}} 还在跑；结束之后再移除项目。",
+    "removeProjectParked": "{{session}} 在等你回应；结束之后再移除项目。"
   },
   "dialog": {
     "removeTitle": "移除这个项目？",

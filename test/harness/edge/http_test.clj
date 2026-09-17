@@ -111,7 +111,7 @@
                                                   :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
                                       :tools [] :context []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
+         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")
                   (.header "Accept" "text/event-stream")
                   (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
@@ -1079,6 +1079,28 @@
 
 (defn- read-json [resp]
   (json/read-str (.body resp) :key-fn keyword))
+
+(deftest the-run-edge-is-one-route-under-the-api-prefix
+  ;; THE RUN USED TO BE THE CATCH-ALL. It sat at the server ROOT and every path the
+  ;; table did not know fell to it, so a mistyped management route was read as a run
+  ;; -- a request with no RunAgentInput in it -- and answered with whatever that
+  ;; produced. It is now one route among the rest, and what is left over says so.
+  ;;
+  ;; `api-call` (just above) is the plain JSON caller, which is the point here: none
+  ;; of these is a run, and none of them should reach the kernel.
+  (with-server
+   "routes"
+   (fn []
+     (testing "the run edge is POST /api/agent, and only POST"
+       (is (= 405 (.statusCode (api-call :get "/api/agent" nil)))))
+     (testing "the server root is not a run any more"
+       (is (= 404 (.statusCode (api-call :post "/" "{}")))))
+     (testing "a mistyped management path is a 404 that names itself, not a run"
+       (let [resp (api-call :get "/api/thread" nil)]
+         (is (= 404 (.statusCode resp)))
+         (is (str/includes? (str (:error (read-json resp))) "no such route"))))
+     (testing "and so is anything else the table does not know"
+       (is (= 404 (.statusCode (api-call :get "/nope" nil))))))))
 
 ;; The scripted run that proves a bound thread's relative write lands in the
 ;; project: turn one writes a RELATIVE path, turn two replies.
@@ -3378,7 +3400,7 @@
         bytes (.getBytes body StandardCharsets/UTF_8)
         sock  (java.net.Socket. "127.0.0.1" (int *port*))
         out   (.getOutputStream sock)]
-    (.write out (.getBytes (str "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+    (.write out (.getBytes (str "POST /api/agent HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                                 "Content-Type: application/json\r\n"
                                 "Accept: text/event-stream\r\n"
                                 "Content-Length: " (count bytes) "\r\n\r\n")

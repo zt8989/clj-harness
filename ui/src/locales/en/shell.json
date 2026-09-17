@@ -8,6 +8,7 @@
     "noLog": "no log yet",
     "current": "current",
     "running": "Running",
+    "parked": "Waiting on you",
     "archive": "Archive",
     "archiveTitle": "Archive — keep this session and its log, but move it out of the way",
     "unarchive": "Unarchive",
@@ -42,7 +43,11 @@
   },
   "refusal": {
     "noProject": "Add a project first — a session belongs to a project.",
-    "noProjectSelected": "Pick a project first — a session belongs to a project."
+    "noProjectSelected": "Pick a project first — a session belongs to a project.",
+    "archiveRunning": "That session is still running; archive it once it settles.",
+    "archiveParked": "That session is waiting on you; archive it once it settles.",
+    "removeProjectRunning": "{{session}} is still running; remove the project once it settles.",
+    "removeProjectParked": "{{session}} is waiting on you; remove the project once it settles."
   },
   "dialog": {
     "removeTitle": "Remove this project?",

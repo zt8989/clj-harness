@@ -148,7 +148,23 @@
                     ;; alts!! treats a closed empty port as ready-with-nil, which
                     ;; would let a drain swallow a phantom nil and strand a real
                     ;; result.
-                    (let [chs  (mapv (fn [{:keys [id] :as call}]
+                    (let [;; THE SEAM IS TOLD ABOUT THE WHOLE TURN BEFORE ANY OF IT
+                          ;; RUNS, and this is the only place that can do it: a tool
+                          ;; sees one call, and the anchor tools need to know which of
+                          ;; their siblings address the same file (see the batch
+                          ;; section of harness.kernel.tools). Unregistered -- a direct run!,
+                          ;; a replayed approval -- every call is on its own, which is
+                          ;; what it was before batching existed.
+                          ;;
+                          ;; REGISTERED BEFORE THE TOOL THREADS ARE SPAWNED, which is what
+                          ;; makes the sentence above true rather than aspirational: a body
+                          ;; may ask about its own turn (`sole-call-of-its-name?`), and a
+                          ;; planner that is slow would otherwise let it read the empty --
+                          ;; or the previous -- plan. The token names THIS registration, so
+                          ;; one turn finishing cannot drop a later turn's plan for the
+                          ;; same thread-id (see register-turn!).
+                          token (tools/register-turn! thread-id calls)
+                          chs  (mapv (fn [{:keys [id] :as call}]
                                        (let [ch (async/chan 1)]
                                          (async/thread
                                            ;; EMIT doubles as the lifecycle
@@ -162,14 +178,6 @@
                                          ch))
                                      calls)
                           done (atom {})]
-                      ;; THE SEAM IS TOLD ABOUT THE WHOLE TURN BEFORE ANY OF IT
-                      ;; RUNS, and this is the only place that can do it: a tool
-                      ;; sees one call, and the anchor tools need to know which of
-                      ;; their siblings address the same file (see the batch
-                      ;; section of harness.kernel.tools). Unregistered -- a direct run!,
-                      ;; a replayed approval -- every call is on its own, which is
-                      ;; what it was before batching existed.
-                      (tools/register-turn! thread-id calls)
                       (dotimes [_ (count chs)]
                         ;; alts!! returns [value port]; the value carries its own
                         ;; id, so completion order needs no bookkeeping. A parked
@@ -180,7 +188,7 @@
                           (swap! done assoc (:id result) result)))
                       ;; ...and forgotten once every call has answered, so the plan
                       ;; does not accumulate for the life of the process.
-                      (tools/forget-turn!)
+                      (tools/forget-turn! thread-id token)
                       (let [results (mapv #(get @done (:id %)) calls)
                             parked  (vec (keep :parked results))]
                         ;; Answer every call that actually ran; a parked call

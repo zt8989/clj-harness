@@ -19,7 +19,7 @@
 // than null.
 import type { TFunction } from "i18next";
 
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
 /// brands a translator with the namespace it was bound to, so a shell translator
@@ -96,7 +96,7 @@ export type Settings = {
 /// `error` at all falls back to this side's sentence, in the interface's language.
 export async function getSettings(threadId: string, t: Translate): Promise<Settings> {
   const res = await fetch(
-    `${AGENT_URL}api/settings?threadId=${encodeURIComponent(threadId)}`,
+    `${API_BASE}settings?threadId=${encodeURIComponent(threadId)}`,
   );
   const body: unknown = await res.json().catch(() => undefined);
   if (!res.ok) {

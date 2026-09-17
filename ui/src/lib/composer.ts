@@ -7,7 +7,7 @@
 // a threadId and nothing here is cached across threads.
 import type { TFunction } from "i18next";
 
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
 /// brands a translator with the namespace it was bound to, so a shell translator
@@ -55,7 +55,7 @@ export const providerLabel = (provider: { name: string; "display-name"?: string 
   provider["display-name"] ?? provider.name;
 
 export async function choicesFor(threadId: string, t: Translate): Promise<Choices> {
-  const res = await fetch(`${AGENT_URL}api/choices?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}choices?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
@@ -76,7 +76,7 @@ export async function choicesFor(threadId: string, t: Translate): Promise<Choice
 export type ModelAnswer = { model?: string; input?: string[] };
 
 export async function modelFor(threadId: string, t: Translate): Promise<ModelAnswer> {
-  const res = await fetch(`${AGENT_URL}api/model?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}model?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
@@ -88,7 +88,7 @@ export async function setModel(
   change: { provider?: string; model?: string; "reasoning-effort"?: string; clear?: boolean },
   t: Translate,
 ): Promise<void> {
-  const res = await fetch(`${AGENT_URL}api/model`, {
+  const res = await fetch(`${API_BASE}model`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, ...change }),
@@ -108,7 +108,7 @@ export type GitState = {
 };
 
 export async function gitStateFor(threadId: string, t: Translate): Promise<GitState> {
-  const res = await fetch(`${AGENT_URL}api/git?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}git?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
@@ -117,7 +117,7 @@ export async function gitStateFor(threadId: string, t: Translate): Promise<GitSt
 /// a dirty tree, a branch held by another worktree -- and the refusal is git's
 /// own sentence, which names the file in the way.
 export async function switchBranch(threadId: string, branch: string, t: Translate): Promise<GitState> {
-  const res = await fetch(`${AGENT_URL}api/git`, {
+  const res = await fetch(`${API_BASE}git`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, branch }),

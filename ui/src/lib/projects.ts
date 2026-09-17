@@ -18,7 +18,7 @@
 // would be a lie about a broken log.
 import type { TFunction } from "i18next";
 
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE.
 ///
@@ -49,7 +49,7 @@ export type ProjectSummary = {
 };
 
 export async function listProjects(t: Translate): Promise<ProjectSummary[]> {
-  const res = await fetch(`${AGENT_URL}api/projects`);
+  const res = await fetch(`${API_BASE}projects`);
   if (!res.ok) throw new Error(t("http.listingProjects", { status: res.status }));
   return res.json();
 }
@@ -95,7 +95,7 @@ async function reasonFrom(res: Response, t: Translate): Promise<string> {
 export type AddedProject = { projectId: number; path: string };
 
 export async function addProject(dir: string, t: Translate): Promise<AddedProject> {
-  const res = await fetch(`${AGENT_URL}api/projects`, {
+  const res = await fetch(`${API_BASE}projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dir }),
@@ -128,7 +128,7 @@ export class PickerUnavailableError extends Error {
 /// person still submits the form, which is what keeps "picking a folder" from
 /// being an accidental one-step commit.
 export async function pickFolder(t: Translate): Promise<string | null> {
-  const res = await fetch(`${AGENT_URL}api/project/pick`, { method: "POST" });
+  const res = await fetch(`${API_BASE}project/pick`, { method: "POST" });
   if (res.status === 501) throw new PickerUnavailableError(await reasonFrom(res, t));
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir?: string | null };
@@ -140,7 +140,7 @@ export async function pickFolder(t: Translate): Promise<string | null> {
 /// what makes the session exist at all: the store learns about a conversation
 /// when something asks for it to belong somewhere.
 export async function bindThread(threadId: string, dir: string, t: Translate): Promise<string> {
-  const res = await fetch(`${AGENT_URL}api/project`, {
+  const res = await fetch(`${API_BASE}project`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, dir }),
@@ -170,7 +170,7 @@ export type RemovedProject = { path: string; unbound: number };
 
 export async function removeProject(path: string, t: Translate): Promise<RemovedProject> {
   const res = await fetch(
-    `${AGENT_URL}api/projects/${encodeURIComponent(path)}/remove`,
+    `${API_BASE}projects/${encodeURIComponent(path)}/remove`,
     { method: "POST" },
   );
   if (!res.ok) throw new Error(await reasonFrom(res, t));
@@ -190,7 +190,7 @@ export async function removeProject(path: string, t: Translate): Promise<Removed
 /// assumed -- see `project/archive!` for why the value coming out, not the one
 /// going in, is what a caller should believe.
 export async function setArchived(threadId: string, archived: boolean, t: Translate): Promise<boolean> {
-  const res = await fetch(`${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/archive`, {
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/archive`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ archived }),

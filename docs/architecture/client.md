@@ -12,8 +12,11 @@ AG-UI 帧的形状、interrupt/resume 的语义、以及「服务端不持有会
 
 ```
 main.tsx            React root
-app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntime → <Thread/>
-                    侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
+app.tsx             **一场会话一份 runtime（一份 `SessionHost`）**，各带自己的 HttpAgent、
+                    `useAgUiRuntime`、`ApprovalBatchProvider` 与 <Thread/>。App 持有的是
+                    「现在看哪一场」（`shown`）、「哪些会话有活着的 host」（roster）、
+                    以及每场自己的 `{:running? :parked?}` 注册表（侧边栏按 id 查）
+                    侧边栏在 provider **之外**（它管全部会话），THREAD_COMPONENTS 仍在此注入
                     （附件适配器也在这里交出：`adapters.attachments` 一行）
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
@@ -31,7 +34,9 @@ components/
                         `LOCAL:` 改动**，其余原样未改（见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
-  threads.ts        AGENT_URL + rebuild 调用
+  threads.ts        两个地址：`API_BASE`（`${HARNESS}api/`，管理调用挂的地方）与 `AGENT_URL`
+                    （`${API_BASE}agent`，`HttpAgent` 用的那一个端点）。`HARNESS` 默认 `/`（本 origin），
+                    `VITE_AGENT_URL` 可指绝对地址。外加 rebuild 调用
   projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
@@ -47,18 +52,40 @@ lib/
                     同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
   attachments.ts    附件适配器（这一份就是「composer 有没有附件能力」这个开关本身）+
                     它往里写、界面往外读的那个小 store
-  run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
+  session-status.ts 一场会话的 `{:running? :parked?}`（host 报上去、侧边栏按 id 查）
+                    与仍然要拒的两句话（归档 / 删项目）。**改名自 `run-state.ts`**：
+                    旧名字说的是「整页在跑」，而那个前提没了
 ```
 
-**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`vite.config.js` 里
-`server.port: 5173, strictPort: true` 把这句话钉死——换端口要同时改两处契约。
+**页面只跟自己的 origin 说话，dev server 把它转出去。** 整个后端在**一个前缀**下——run 端点是
+`POST /api/agent`，其余都是 `/api/<什么>`——所以 `ui/vite.config.js` 只要**一条** `/api` 前缀规则。
+`lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方，`${HARNESS}api/`）与
+`AGENT_URL`（`HttpAgent({url})` 用的那一个端点，`${API_BASE}agent`）。目标来自
+`HARNESS_BACKEND_URL`，由 `node scripts/dev.mjs` 填：它让后端**在 0 号端口绑**（OS 分配）、读后端**自己报
+出来的**那个端口，所以源码里没有端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
+浏览器因此**一个跨域请求都不发**（没有 preflight，CORS 白名单也不再是前端要跟着改的东西），
+构建产物里也不带我们的地址——换到任何部署自己的反代后面都一样。
+要直连后端就走 `VITE_AGENT_URL=http://127.0.0.1:<port>/`，那条路才是后端 CORS 放行存在的理由。
+`strictPort: true` 留着：第二个 dev server 悄悄落到 5174，比启动失败更让人意外。
 
 ## 状态的归属
 
-- **`threadId` 的主人是 React state**（`app.tsx` 的 `useState`）。agent 只在 `adoptThread` 一处被回写，
-  而 `prepareRunAgentInput` 照旧从 agent 读——所以下一条输入续写**同一个日志**，服务端零会话状态。
-- **恢复** = `rebuildThread`（POST rebuild）→ `fromAgUiMessages` + `fromThreadMessageLike`
-  → `onSwitchToThread` 把重建消息灌回运行时。转换与 runtime 自己的快照导入路径**逐字相同**（引上游，不另写）。
+- **一场会话一份 runtime，切换不再经过 runtime。** 每个开过的会话挂一份 `SessionHost`：它自己造
+  HttpAgent、自己调一次 `useAgUiRuntime`，于是自己有一份 core。`threadList` 适配器里**只传 threadId**，
+  `onSwitchToThread` / `onSwitchToNewThread` 两个回调退场——它们的效果是「先清空当前 core、再灌新消息」，
+  而那份 core 现在正在流。host 一旦存在就**不再卸载、也不再重建**（core 归 hook 的 ref 所有，不归 DOM 子树），
+  所以「这个会话没在显示」不等于「它的 run 死了」；`agent.threadId` 也不再有回写者（`adoptThread` 已删），
+  服务端照旧零会话状态。
+- **「现在看哪一场」是 App 的 state**（`shown`），带两个动作：`onShow`（这场有 conversation，第一次
+  host 时重建）与 `onShowFresh`（这场是客户端刚 mint 的，没有日志可重建，host 空着起）。
+- **第一次打开才 rebuild，判据是「那份 host 在不在」**：重建走运行时自己的 `history` 适配器，它每个
+  core 只 `load()` 一次（`__internal_load`）。已经活着的 host 再显示多少次都不重建——它 core 里那份
+  conversation 可能还在长，拿 rebuild 的结果盖上去就是又一次孤儿。
+- **恢复的转换仍与 runtime 自己的快照导入路径逐字相同**（引上游，不另写）：`fromAgUiMessages` +
+  `fromThreadMessageLike`，只是交给适配器的形状是 `{messages: [{parentId, message}]}`。
+- **history 适配器的 `append`/`update` 是空实现**：日志归服务端所有，客户端一个字节都不往回写。
+  host 的 `load()` 失败（截断 / 损坏的日志）走 `onError` 上报，句子仍旧落在**所点的行**上，
+  而失败的那份 host 会被丢掉、页面退回上一场——所以点它一次就是重试一次。
 - **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目，
   也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
   界面上明说这一点。
@@ -70,7 +97,9 @@ lib/
   **取消永远静默**：`pickFolder` 答 `null` 就是什么都不做——人关了窗不需要被告知；
   「没有窗」是可说的另一件事，它必须说得出来，否则一颗点不动的按钮看起来只是慢。
   输入框**只**为这个原因出现，从不为别的失败出现：它是死路的路，不是第二扇门。
-- **run 进行中拒绝切换与新建**，拒绝的话显示在**所点的行上**；`isRunning` 自己会随 run 结束而解除。
+- **切换与新建不再被 run 拦住**（一场会话一份 runtime，切走不打扰任何一场的 run）。仍然拒绝的是**归档 /
+  删掉一场没完（在跑或悬置）的会话**，判据是**那条会话自己**在不在跑（App 的注册表），不是当前页在不在跑；
+  句子落在**那一行**上（归档）或**项目那一行**上（删项目，且点名是哪一场），说辞在 `lib/session-status.ts`。
 - **状态条那五格读的是记录，不是客户端手里的对话。** 客户端确实持有 conversation，所以它数得出轮与步、
   也估算得出 tok/s（运行时的 `chars ÷ 4`），但**它不这么做**：缓存命中它根本不知道，而估算出来的用量
   冒充厂商报的量就是编。那五个数由 `GET /api/threads/<stem>/stats` 从会话的 jsonl 折出来
@@ -91,6 +120,10 @@ lib/
   只回答一部分会被运行时按名拒绝；所以决定存在一张比单张卡活得久的 store 里，最后一张卡交完才提交。
 - **审批门开着时 composer 由 `isSendDisabled` 关掉**：那时发的消息会被运行时静默吃掉
   （文本清空、哪儿都不落地），堵死发送是唯一不吞用户输入的处理。
+- **门是每场会话一份**：`boolean` 住在那份 host 里，`ApprovalBatchProvider` 也每份 host 一个（它读的正是
+  它上面那个 provider 的待决中断）。所以 A 停在等人决定时，只有 A 的输入框关着，B 照常能发。
+- **悬置不是「在跑」**：`isRunning` 在悬置时是 `false`（那一轮 run 已经以 interrupt 结束），
+  所以注册表里的 `:parked?` 单独一格，侧边栏那一行在悬置时说 `Waiting on you`——在跑说转圈。
 
 ## 样式体系：Tailwind v4 + shadcn，抄源码路线
 
@@ -158,9 +191,10 @@ lib/
 **逻辑一行都不在这份文件里**（`components/turn-steps.tsx` 与 `lib/turns.ts`），它只问「我该被收起来吗」。
 上面五处是**结构**上的改动；这份文件的**文案**也就地搬进了目录（spec 决策 5），所以它和 `thread-list.aui.tsx` 一样，不再与上游逐字节相同——**抄来的文件如今就地改，每一处有意改动都标 `LOCAL:`**。标记是逐字节对账的替代品：它说明「这里是有意改的」，不说明「上游改了什么」。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
 按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
-它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
-`ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有
-switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
+它那条 running 指示（**这一行的 `running` 是这一行自己的会话在不在跑**，不再是「当前页在不在跑」；
+另加一格 `parked`，悬置时那行说 `Waiting on you`——`isRunning` 在悬置时是 `false`，两种说法是两件事），
+删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的 `ThreadListItemPrimitive.Trigger`
+（拒绝的句子必须显示在**所点的行**上）。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
 
 其余的本地差异走**自建注入点**，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`
 与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
@@ -371,7 +405,8 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
   （与 `system` 条同一条规矩）。技能的正文也一样：**用一次画一次**，画在用它的那一轮。
   折法在 `harness.edge.trajectory/add-context`（去重记在会话这一层），客户端照旧只画折好的东西。
 - **切换住在 `app.tsx`，整列换掉，输入框也一起没有**——轨迹是读一份已发生的东西，不是一个能打字的地方。
-  它**不写任何存储**：这是看会话的一种方式，不是关于会话的偏好。
+  它**不写任何存储**：这是看会话的一种方式，不是关于会话的偏好。轨迹那半边只画**当前显示的那一场**
+  （每份 host 只在 visible 时渲染整列），所以不显示的会话只挂着 runtime，不渲染消息。
 - **取数时机与 composer 下面那条状态条同一个**（`composer-stats.tsx`）：挂载时、会话变化时、
   以及一次模型调用结束时（本侧一轮 ReAct 就是一条 assistant 消息，所以那个计数涨了就是有调用刚回来；
   `isRunning` 收尾）。读取它的 hook 必须**在 runtime provider 之内**——`App` 自己渲染那个 provider，
@@ -397,8 +432,9 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 
 ## 测试
 
-`cd ui && npm test`（vitest）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,elicitation,attachments,turns,picker}.ts`
+**怎么跑**用 `node scripts/test.mjs --ui`（它起的就是 `cd ui && npm test`，即 vitest；全套三条腿
+见 `AGENTS.md`）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
+`test/suites/{frames,client,turn,approval,skills,stats,elicitation,attachments,turns,picker,concurrent}.ts`
 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。

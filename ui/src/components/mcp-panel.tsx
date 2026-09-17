@@ -24,7 +24,7 @@ import { RefreshCwIcon, ServerIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator this face is worded through: the settings catalog, because the
 /// panel is drawn on the settings dialog's MCP page (see `locales/<lng>/settings.json`).
@@ -78,7 +78,7 @@ async function fetchServers(
   t: Translate,
   threadId: string,
 ): Promise<readonly McpServer[]> {
-  const res = await fetch(`${AGENT_URL}api/mcp?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}mcp?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(t("mcp.listingFailed", { status: res.status }));
   const body = (await res.json()) as { servers?: readonly McpServer[] };
   return body.servers ?? [];
@@ -90,7 +90,7 @@ async function setEnabled(
   server: string,
   enabled: boolean,
 ): Promise<void> {
-  const res = await fetch(`${AGENT_URL}api/mcp`, {
+  const res = await fetch(`${API_BASE}mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, server, enabled }),

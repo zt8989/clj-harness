@@ -658,12 +658,24 @@
 ;; namespace stop requiring harness.cap.hashline at all.
 
 (defonce ^:private turn-plan (atom {}))
-;; {:plan {call-id -> the part that call plays} :counts {tool-name -> how many calls}}
+;; thread-id -> {:token <this registration> :plan {call-id -> the part that call
+;; plays} :counts {tool-name -> how many calls}}
 ;;
 ;; TWO FACTS ABOUT ONE TURN, in one atom, because both answer 'what else is in this
 ;; message' and a second atom would be a second thing to reset. The plan is the
 ;; installed planner's (the anchor-edit batching above); the counts are the seam's
 ;; own, and `sole-call-of-its-name?` is what reads them.
+;;
+;; KEYED BY THREAD-ID because two sessions run at once -- `harness.edge.http` gives
+;; every run its own go block -- and a single slot would let one session's turn
+;; overwrite another's, silently degrading an anchor batch into concurrent edits
+;; that lose updates. The key is the one a tool BODY can read: a body gets parsed
+;; arguments and no call id, but the seam binds `*thread-id*` around it.
+;;
+;; TWO TURNS ON ONE THREAD-ID AT ONCE is not prevented -- a client may fire two runs
+;; at the same id -- and is a KNOWN, ACCEPTED boundary rather than something this
+;; registry queues for: the later registration wins that id's slot, and the
+;; earlier turn's answers then read the later counts.
 
 (defn- plan-counts
   "How many times each tool NAME is called in this turn.
@@ -684,19 +696,42 @@
   siblings are. Called by the run loop -- the only place that sees a whole turn at
   once -- and best effort throughout: a planner that throws, or none at all, leaves
   a turn that behaves exactly as it did before batching existed, which is one call,
-  one edit. The counts do not depend on any planner, so they are taken either way."
+  one edit. The counts do not depend on any planner, so they are taken either way.
+
+  ANSWERS A TOKEN naming THIS registration and writes it into the entry -- see
+  forget-turn! for what it is for. It is handed back rather than derived because
+  only the caller knows which turn it is finishing, and two turns on one thread-id
+  are otherwise indistinguishable. Other thread-ids' entries are left alone.
+"
   [thread-id calls]
-  (reset! turn-plan
-          {:plan   (if-let [plan @installed-planner]
-                     (try (plan thread-id calls) (catch Throwable _ {}))
-                     {})
-           :counts (plan-counts calls)}))
+  (let [token (str (java.util.UUID/randomUUID))]
+    (swap! turn-plan assoc thread-id
+           {:token  token
+            :plan   (if-let [plan @installed-planner]
+                      (try (plan thread-id calls) (catch Throwable _ {}))
+                      {})
+            :counts (plan-counts calls)})
+    token))
 
 (defn forget-turn!
-  "Drop the plan once the turn's calls have all answered. Without this the map grows
-  with the process, one entry per anchor edit ever made."
-  []
-  (reset! turn-plan {}))
+  "Drop a turn's plan once its calls have all answered. Without this the map grows
+  with the process, one entry per anchor edit ever made.
+
+  ONLY THE ENTRY THE TOKEN STILL OWNS. A later registration on the same thread-id
+  replaces the entry and records a new token; this turn's teardown must then leave
+  that one alone, because the later turn's plan is the live one.
+
+  The NO-ARGUMENT arity drops every thread-id's entry. It is what a test fixture
+  wants when it resets the seam between cases; the run loop always names its own
+  turn."
+  ([]
+   (reset! turn-plan {}))
+  ([thread-id token]
+   (swap! turn-plan
+          (fn [plans]
+            (if (= token (get-in plans [thread-id :token]))
+              (dissoc plans thread-id)
+              plans)))))
 
 (defn sole-call-of-its-name?
   "Is the call being run the ONLY call of NAME in its turn?
@@ -713,14 +748,18 @@
   tools those are, and it should not.
 
   TRUE WHEN THE TURN WAS NEVER REGISTERED (a direct `run!`, a replayed approval):
+  THE ANSWER IS FOR THE SESSION ASKING IT -- the counts of the turn registered under
+  the `*thread-id*` the seam has bound around this body, not one shared slot. Two
+  sessions running at once each ask about their own message.
+
   those callers run one call at a time, which is the case the rule is about."
   [name]
-  (<= (long (get (:counts @turn-plan) name 0)) 1))
+  (<= (long (get (:counts (get @turn-plan *thread-id*)) name 0)) 1))
 
 (defn- batch-role
   "What this call's part in its message is, or nil when it is an ordinary call."
   [id]
-  (get-in @turn-plan [:plan id]))
+  (get-in @turn-plan [*thread-id* :plan id]))
 
 (defn run!
   "The ONE tool execution seam. The call's lifecycle is reported to ON-PHASE

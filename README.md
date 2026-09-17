@@ -310,16 +310,55 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ## 启动
 
-### 1) 后端 :8080
+### 1) 一条命令起两个（推荐）
 
-```pwsh
-clojure -M:run          # 项目根
-# 或 clojure -A:test -M -m harness.edge.http
-# 期望：harness listening on http://localhost:8080 -- POST an AG-UI RunAgentInput here; stop with (stop!)
+```bash
+node scripts/dev.mjs             # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
+node scripts/dev.mjs --port 8080 # 钉死端口（老地址，需要时）
+node scripts/dev.mjs --scripted  # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
+node scripts/dev.mjs --ui-port 5199  # 前端换端口
+```
+
+**脚本在 `scripts/` 下**：`dev.mjs` 起服务、`test.mjs` 跑测试、`proc.mjs` 是两者共用的跨平台子进程
+动作。**是 Node 脚本不是 shell 脚本**，三个平台同一个文件：进程组 / `taskkill`、信号处理、临时目录
+三处各自分叉，`process.platform` 一看就知道走了哪条。跑 `node scripts/dev.mjs`（POSIX 上
+`./scripts/dev.mjs` 也行，它带 shebang）。脚本从自身位置往上找仓库根，所以在哪一级敲都不影响。
+仓库里**只有这一处**告诉前端后端在哪，而它不在源码里：脚本让后端**在 0 号端口上绑**（OS 分配），
+把后端**自己报出来的**那个端口交给 `HARNESS_BACKEND_URL`，`ui/vite.config.js` 拿它当代理目标。
+所以没有任何源文件知道端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
+端口是**读回来的不是猜的**：先探一个空闲端口再交给后端，是跟整台机器赛跑。
+
+**真实模式用的是你自己的 `~/.clj-harness`**（你的配置、你的厂商、你的密钥）；
+`--scripted` **绝不用**——它拿一对临时家目录（config root 与 OS home，两者平级不嵌套，
+见 `AGENTS.md`），退出时连目录一起删。`CLJ_HARNESS_HOME=... node scripts/dev.mjs` 也能用：脚本不覆盖
+这个变量，所以想让真实模式落在别处，就在前面给它。
+
+### 2) 分开起
+
+```bash
+clojure -M:run --port 0   # 后端；不带 --port 就是 8080，0 是「随 OS 挑」
+# 期望：harness listening on http://localhost:<真正绑到的那个端口> -- POST an AG-UI RunAgentInput to /api/agent
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```
 
-### 2) 前端 :5173
+```bash
+cd ui
+npm install      # 首次
+HARNESS_BACKEND_URL=http://127.0.0.1:<上面那个端口> npm run dev
+npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
+```
+
+### 3) 前端侧的形状（为什么是代理）
+
+**页面只跟自己的 origin 说话。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，
+其余都是 `/api/<什么>`——所以 `vite.config.js` 只需要**一条** `/api` 前缀规则转给后端。
+`src/lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方）与 `AGENT_URL`
+（`HttpAgent` 构造时用的那一个端点，=`${API_BASE}agent`）。两件事因此成立：浏览器
+**一个跨域请求都不发**（没有 preflight，也没有一份要跟着端口改的 CORS 白名单），而构建产物里
+**不带我们的地址**，换到任何部署自己的反代后面都一样。要直连后端（不走代理）就
+`VITE_AGENT_URL=http://…:8080`，那正是后端那条 CORS 放行存在的理由。
+
+### 4) 会话里的东西
 
 侧边栏是三个段位：「新建任务」与「设置」钉在上下，**中间的项目区是唯一滚动的东西**（窗口拉高拉矮
 都不出现整页滚动）。一个项目 = 一个目录，显示成它最后一个文件夹名；悬停出「更多」，里面有
@@ -329,15 +368,9 @@ clojure -M:run          # 项目根
 **新建任务必须先有项目**：一个项目都没有时，它说的是「先添加一个项目」并给出入口。会话的记录落在
 `~/.clj-harness/projects/<workspace>/<threadId>.jsonl`。
 
-```pwsh
-cd ui
-npm install      # 首次
-npm run dev      # Vite 起在 5173，浏览器打开 http://localhost:5173
-npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
-```
-
-**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`ui/vite.config.js` 里
-`server.port: 5173, strictPort: true` 把这句话钉死——换端口不是改一处配置，是同时改两处契约。
+**5173 还在，但它不再是 CORS 契约。** 走后端那条放行的那半边（`VITE_AGENT_URL` 指绝对地址）
+才需要它；走代理时浏览器跟 5173 同源，白名单与它无关。`strictPort` 留着是因为第二个 dev server
+悄悄落到 5174 比启动失败更让人意外。
 
 ### 会话旁边还有一个「轨迹」
 
@@ -383,26 +416,33 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 
 ### 验证
 
-```pwsh
-# 内核（Clojure）：离线全量
-clojure -M:test -m harness.test-runner
-# 852 tests / 11233 assertions，0 failures / 0 errors（分支 `bash-lifetime`，从 main @ 7ed63b0 切出；
-#   基线随分支变，报数时带上分支与提交。切出那天 main 上是 824 / 11135）
-# 这台机器上曾经固定失败的那几条已经修好（JDK 25 把 sqlite-jdbc 的原生库加载告警
-#   "a restricted method in java.lang.System has been called" 打到 stdout，而那条用例逐字比较 fork 出来的
-#   JVM 的 stdout——现在比的是它自己写下的文件，不是 stdout）。仍然**真竞赛**的是
-#   `http_test/the-projects-listing-joins-the-store-with-the-disk`（它比「列表接口报的字节数与 mtime」和
-#   「随后从磁盘读的」，中间只要有人往同一份日志落一行就不等）——跑多少次不一定撞上，
-#   失败条数每次都可能不同，比对看**名字**。
-# 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了
-
-# UI（TypeScript）：端到端全量。自带后端，不需要 8080、不需要 api-key、不需要模型
-cd ui && npm test
-# 26 tests，含 9 组：帧 schema / 真 @ag-ui/client 驱动 / 二轮续写 / 审批 park→approve→veto
-#   / 技能列表（两层的根） / 会话统计（那条状态条读的端点与它的五格） / elicitation / 界面取数
-#   / 附件（模型收不收图、2 MB 上限——两例都是纯函数，不起后端）
+```bash
+node scripts/test.mjs            # 三条腿一起跑，也可以 --backend / --ui / --build 单跑
+node scripts/test.mjs --ns harness.edge.http-test   # 只跑几个命名空间，家目录隔离照旧生效
 ```
 
-UI 套件驱动**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；
-测什么由**脚本文件**决定，生产 HTTP 边因此一个测试专用路由都不长。细节见
-[`docs/architecture/client.md`](docs/architecture/client.md)。
+**别自己拼命令**：家目录隔离、端口由 OS 分配、跑完删临时目录，都是**调用方式**的事，
+手拼一次就漏一次。理由与每一条守什么写在 `AGENTS.md` 与 `scripts/test.mjs` 的头注释里。
+
+后端那条腿跑出来大概长这样（分支 `parallel-sessions`，基线随分支变，报数时带上分支与提交）：
+
+```
+Ran 860 tests containing 11269 assertions.
+0 failures, 0 errors.
+ISOLATION FAILURE: ...   # 只有真实家目录在这段时间被**别的进程**动过才会出现
+```
+
+- 断言数被锚点表的 rank/select 往返与去重用例拉高（各自数千条），不是用例变多了。
+- 仍然**真竞赛**的是 `http_test/the-projects-listing-joins-the-store-with-the-disk`（它比「列表接口报的
+  字节数与 mtime」和「随后从磁盘读的」，中间只要有人往同一份日志落一行就不等）——跑多少次不一定撞上，
+  失败条数每次都可能不同，比对看**名字**。
+- `ISOLATION FAILURE` 那条不是用例失败，是**进程级**的断言：真实 `~/.clj-harness/harness.db`
+  在这段时间里变了。运行时自己写的不会变（它指向临时目录），会变的是**这台机器上另开的**
+  harness 实例——退出码因此是 1，但失败集合仍然是空的。
+- 前端那条腿 32 个用例，含 11 组：帧 schema / 真 `@ag-ui/client` 驱动 / 二轮续写 / 审批
+  park→approve→veto / 技能列表（两层的根）/ 会话统计 / elicitation / 界面取数 / 附件 /
+  一轮的折叠算术 / 两个会话同时跑。它自带后端（真 HTTP、真 `@ag-ui/client`，provider 是脚本替身），
+  所以不需要 8080、不需要 api-key、不需要模型。
+```
+
+细节见 [`docs/architecture/client.md`](docs/architecture/client.md)。

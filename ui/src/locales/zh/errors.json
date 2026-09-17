@@ -1,8 +1,4 @@
 {
-  "runInProgress": {
-    "switch": "这次运行还没结束；结束前不能切换会话。",
-    "newThread": "这次运行还没结束；新会话要等它结束。"
-  },
   "http": {
     "status": "HTTP {{status}}",
     "listingProjects": "读取项目列表失败：HTTP {{status}}",

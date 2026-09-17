@@ -77,7 +77,7 @@
                                       :messages [{:id "u1" :role "user" :content "go"}]
                                       :tools [] :context []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/")))
+         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")
                   (.header "Accept" "text/event-stream")
                     (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))

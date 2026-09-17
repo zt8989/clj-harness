@@ -67,7 +67,7 @@ import {
 } from "@assistant-ui/react-ag-ui";
 
 import { Button } from "@/components/ui/button";
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 import { answersFor, fieldSpecs, inputKindFor } from "@/lib/elicitation";
 
 /// The interrupt reason this card owns. Every other reason on this seam --
@@ -426,7 +426,7 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
     let live = true;
     setAsked(null);
     setLoadError(null);
-    fetch(`${AGENT_URL}api/elicitation?interruptId=${encodeURIComponent(interrupt.id)}`)
+    fetch(`${API_BASE}elicitation?interruptId=${encodeURIComponent(interrupt.id)}`)
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(

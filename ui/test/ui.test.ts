@@ -33,10 +33,11 @@ import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
 import { turnsSuite } from "./suites/turns";
+import { concurrentSuite } from "./suites/concurrent";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -73,7 +74,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// to the catalog to satisfy the types, an entry left behind by a deleted row). It
 /// reads the sources through `import.meta.glob`; the case itself says what a grep
 /// costs and which way it errs.
-const EXPECTED_CASES = 35;
+/// 35 -> 36: the `concurrent` suite's one -- two thread ids running at once, with
+/// each session's own log read back off disk (its `input` row, its terminal frame)
+/// and rebuilt through the server. It is the backend half of parallel sessions: the
+/// server always allowed this and nothing had ever asked it to.
+const EXPECTED_CASES = 36;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -11,7 +11,7 @@
 // is one thing to parse and one place a field can be forgotten.
 import type { TFunction } from "i18next";
 
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
 /// brands a translator with the namespace it was bound to, so a shell translator
@@ -119,7 +119,7 @@ async function read(res: Response, t: Translate): Promise<Registry> {
 }
 
 async function post(path: string, body: unknown, t: Translate): Promise<Registry> {
-  const res = await fetch(`${AGENT_URL}${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -128,19 +128,19 @@ async function post(path: string, body: unknown, t: Translate): Promise<Registry
 }
 
 export async function registryFor(t: Translate): Promise<Registry> {
-  return read(await fetch(`${AGENT_URL}api/providers`), t);
+  return read(await fetch(`${API_BASE}providers`), t);
 }
 
 export async function putProvider(payload: ProviderPayload, t: Translate): Promise<Registry> {
-  return post("api/providers", payload, t);
+  return post("providers", payload, t);
 }
 
 export async function removeProvider(id: string, t: Translate): Promise<Registry> {
-  return post(`api/providers/${encodeURIComponent(id)}/remove`, {}, t);
+  return post(`providers/${encodeURIComponent(id)}/remove`, {}, t);
 }
 
 export async function putDefaults(knobs: DefaultKnobs, t: Translate): Promise<Registry> {
-  return post("api/defaults", knobs, t);
+  return post("defaults", knobs, t);
 }
 
 /// Ask a VENDOR what it serves -- the one call in this feature that leaves the
@@ -151,7 +151,7 @@ export async function probeModels(
   ask: { id?: string; "base-url"?: string; protocol?: string; "api-key"?: string },
   t: Translate,
 ): Promise<{ models: string[]; asked: string }> {
-  const res = await fetch(`${AGENT_URL}api/providers/models`, {
+  const res = await fetch(`${API_BASE}providers/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ask),

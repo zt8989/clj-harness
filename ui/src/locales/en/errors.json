@@ -1,8 +1,4 @@
 {
-  "runInProgress": {
-    "switch": "A run is in progress; switching is refused until it settles.",
-    "newThread": "A run is in progress; a new session waits until it settles."
-  },
   "http": {
     "status": "HTTP {{status}}",
     "listingProjects": "listing projects failed: HTTP {{status}}",

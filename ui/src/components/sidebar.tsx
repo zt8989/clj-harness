@@ -38,16 +38,17 @@
 //      makes the session exist at all: the store learns about a conversation
 //      when something asks for it to belong somewhere. Its log does not exist
 //      yet, and that is a state the listing already handles.
-//   3. switch the runtime to that id.
+//   3. SHOW that id -- `onShowFresh`, which is the page putting a host on screen
+//      and NOT rebuilding: the id is this client's, it just made it up, and there
+//      is no conversation under it yet.
 //
-// Step 3 goes through `switchToThread`, NOT `switchToNewThread`, and that is
-// deliberate rather than a shortcut: by the time it runs, the session is a ROW
-// with a home, so "switch to it" is exactly what is happening. Letting the
-// runtime mint its own id instead would put the id out of this component's reach
-// -- and the id is what the bind needs -- so the adapter's `onSwitchToNewThread`
-// had nothing left to do and was removed. A session that has never run rebuilds
-// to an empty conversation (see the server's `ensure-complete!`), so the switch
-// hydrates nothing and looks exactly like a new thread should.
+// Step 3 is a page action now rather than a runtime one, and that is the whole of
+// ticket 02 in this file: `runtime.threads.switchToThread` and its
+// `switchToNewThread` sibling are gone, because their effect was to clear the core
+// before refilling it -- and the core that is now streaming belongs to a host that
+// never gets refilled. `onShowFresh` also keeps the id in this component's hands,
+// which the bind above needs; letting the runtime mint one would put it out of
+// reach.
 //
 // WITHOUT A PROJECT THERE IS NO NEW TASK, and the button says so instead of
 // opening a session with nowhere to live. That is the product rule the whole
@@ -124,11 +125,14 @@
 // rule is "never be reading an archived session", and that rule needs no
 // exception.
 //
-// A RUN IN FLIGHT REFUSES IT. Archiving the current session requires switching
-// away from it, and a switch mid-run is refused everywhere else in this file --
-// so the archive is refused BEFORE it is written, rather than written and then
-// left unable to move. A flag written while the page cannot leave is precisely
-// the state the paragraph above forbids.
+// A SESSION THAT HAS NOT FINISHED REFUSES IT, and now that means the session
+// being archived rather than the session on screen. A run is still appending to
+// the log this row is filing away, and a resume still has somewhere to write,
+// so the archive is refused BEFORE it is written -- rather than written and then
+// left pointing at a log that moved. It is refused WHETHER IT IS ON SCREEN OR
+// NOT (ticket 04): the old guard asked `=== currentThreadId` because one runtime
+// made "running" and "on screen" the same fact, and with a host per session
+// that question would let a background run be archived out from under itself.
 //
 // ------------------------------------------------------------------- removal
 //
@@ -152,9 +156,12 @@
 // for the menu. Opening the menu must not change what the row says about the
 // project.
 //
-// A PROJECT ON SCREEN CANNOT BE REMOVED WHILE A RUN IS IN FLIGHT, because the
-// page has to move off it (below) and every other switch in this file refuses
-// mid-run. The guard reads the runtime's `isRunning`, so it lifts by itself.
+// A PROJECT HOLDING A SESSION THAT HAS NOT FINISHED CANNOT BE REMOVED, because
+// the log goes on being written (or a resume goes on having somewhere to write)
+// while the row that names it leaves the sidebar. ANY such session stops it, not
+// just one on screen: the same ticket-04 correction the archive guard needed, and
+// the sentence names which session, because the button cannot. The registry lifts
+// the guard by itself when the session settles.
 //
 // THE PAGE NEVER STAYS ON A REMOVED PROJECT. If the session being read belonged
 // to the project that just went away, the sidebar moves: to the most recent
@@ -166,16 +173,26 @@
 //
 // ------------------------------------------------------------------- refusals
 //
-// Two things are refused while a run is in flight, and both are shown where the
-// click landed: opening another session (the run belongs to the thread it started
-// on), and starting a new one (which would abandon that thread's view). The
-// guard reads the runtime's own `isRunning`, so it lifts by itself when the run
-// settles. `lib/run-state.ts` words the sentences from the `errors` catalog --
-// they are this client's own words, not the server's, which are never translated
-// -- because the adapter refuses for the same reasons and the two must not word
-// them differently.
+// WHAT IS NO LONGER REFUSED: switching sessions and starting new ones. Both used
+// to be refused while a run was in flight, because there was one runtime and a
+// switch cleared the core the run was streaming into. There is one runtime PER
+// SESSION now (see app.tsx), so a switch is a change of which host is on screen
+// and the run it left behind keeps running into its own core. Nothing here reads
+// a runtime any more -- the sidebar does not have one.
+//
+// WHAT IS STILL REFUSED: filing away a session that has not finished, and
+// removing a project that has one inside it. The judgement is about THAT session
+// -- it has a run still writing, or a resume that still has somewhere to write --
+// and it comes from the page's registry rather than from whatever is on screen.
+// That distinction is the whole of ticket 04: the old guard asked whether the
+// CURRENT page was running, which was the same question only while one runtime
+// existed, and let a background session be archived out from under itself.
+//
+// `lib/session-status.ts` words the sentences from the `shell` catalog -- they are
+// this client's own words, not the server's, which are never translated -- because
+// the row and the project menu both show them and two wordings of one rule drift.
 import { useCallback, useEffect, useState, type FC } from "react";
-import type { AssistantRuntime } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -190,7 +207,6 @@ import {
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
-import { useTranslation } from "react-i18next";
 
 import {
   ThreadListItem,
@@ -226,14 +242,36 @@ import {
   type SessionSummary,
 } from "@/lib/projects";
 import {
-  runInProgress,
-  runInProgressNewThreadRefusal,
-  runInProgressRefusal,
-} from "@/lib/run-state";
+  archiveRefusal,
+  blocked,
+  IDLE,
+  removeProjectRefusal,
+  type SessionStatus,
+} from "@/lib/session-status";
 
 type SidebarProps = {
-  runtime: AssistantRuntime;
+  /// WHICH SESSION IS ON SCREEN. The sidebar does not own it and cannot change
+  /// it by itself: it asks the page (see `onShow`), which is the same thing every
+  /// `runtime.threads.switchToThread` call here used to do through a runtime.
   currentThreadId: string;
+  /// ONE ANSWER PER SESSION, owned by the page and reported by each host: whether
+  /// that session has a run in flight and whether it has stopped to ask a human.
+  /// A session nothing has reported on reads `IDLE`.
+  statuses: Record<string, SessionStatus>;
+  /// The refusals that came from SESSIONS rather than from this component -- a
+  /// history that would not load, keyed by the session it would not load for.
+  /// The page owns them because the load happens in a host, not here; they are
+  /// drawn in exactly the same place as this component's own row errors.
+  openErrors: Record<string, string>;
+  /// SHOW A SESSION THAT HAS A CONVERSATION: host it if it has no host yet and
+  /// rebuild its history once, then put it on screen.
+  onShow: (threadId: string) => void;
+  /// SHOW A SESSION THIS CLIENT HAS JUST MINTED (and, on every path that has a
+  /// project, just bound): nothing to rebuild, so the host starts empty. Kept
+  /// distinct from `onShow` for that reason -- under a brand-new id there is no
+  /// log, and asking the server to rebuild one is asking it to find a file that
+  /// is not there.
+  onShowFresh: (threadId: string) => void;
 };
 
 /// The refusal or failure that belongs to ONE row -- a refused switch, a list
@@ -250,9 +288,15 @@ type ProjectError = { path: string; message: string } | null;
 /// The refusals about STARTING a session, which have no row to land on. They go
 /// under the New task button, which is the thing that was clicked -- and they
 /// were module-level constants until this feature, because a sentence a person
-/// reads cannot be one (see `lib/run-state.ts` for the same argument).
+/// reads cannot be one (see `lib/session-status.ts` for the same argument).
 
-export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
+export const Sidebar: FC<SidebarProps> = ({
+  currentThreadId,
+  statuses,
+  openErrors,
+  onShow,
+  onShowFresh,
+}) => {
   const { t } = useTranslation();
   // The failures this list can raise are THIS side's sentences (a listing that
   // would not load, a bind the server answered without a reason), so they come from
@@ -292,7 +336,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     } finally {
       setLoaded(true);
     }
-  }, [tErrors]);
+  }, []);
 
   // On mount, and again whenever the current thread changes -- opening a session
   // rebuilds it from its log, which appends an audit line to that very file, so
@@ -317,47 +361,45 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 
   const refuse = (id: string, message: string) => setRowError({ id, message });
 
+  /// SHOW A SESSION FROM THE LIST. Not refused, whatever its own status: a run in
+  /// another session keeps running where it is (see this file's header), and a run
+  /// in THIS one is not disturbed either -- the host that owns it stays mounted and
+  /// keeps streaming while the page looks elsewhere.
+  ///
+  /// The rebuild that used to happen here (and whose server-side refusal used to be
+  /// caught here) now belongs to the host: it loads its own history once, when it
+  /// is first mounted. A history that will not load comes back through
+  /// `openErrors`, so the sentence still lands on the row that was clicked.
   const openThread = async (threadId: string, projectPath: string) => {
     if (busy || threadId === currentThreadId) return;
-    if (runInProgress(runtime)) {
-      refuse(threadId, runInProgressRefusal(t));
-      return;
-    }
     setPinned(projectPath);
     setBusy(true);
     setRowError(null);
     try {
-      await runtime.threads.switchToThread(threadId);
+      onShow(threadId);
       await refresh();
-    } catch (failure: unknown) {
-      // The server's own refusal -- a truncated or corrupt log, a stem that
-      // names two files -- arrives as the rejection's message and is shown
-      // as-is under the row that asked for it. The other rows were never
-      // touched, and a wrapper's paraphrase would be one more thing to distrust.
-      setRowError({
-        id: threadId,
-        message: failure instanceof Error ? failure.message : String(failure),
-      });
     } finally {
       setBusy(false);
     }
   };
 
-  /// Archive a session, or bring it back. Refused while a run is in flight ONLY
-  /// when it would have to move the page -- see the header: archiving a session
-  /// you are NOT reading is a pure row write from the UI's point of view, and a
-  /// running conversation elsewhere has no say in it.
+  /// Archive a session, or bring it back. REFUSED WHILE THAT SESSION HAS NOT
+  /// FINISHED -- running or parked -- whatever is on screen (see this file's
+  /// header, and ticket 04): a run is still writing to the log being filed away,
+  /// and a resume still has somewhere to write. Filing away a settled session you
+  /// are not reading is a pure row write and stays allowed.
   const archive = async (
     project: ProjectSummary,
     threadId: string,
     archived: boolean,
   ): Promise<void> => {
     if (busy) return;
-    const movesThePage = archived && threadId === currentThreadId;
-    if (movesThePage && runInProgress(runtime)) {
-      refuse(threadId, runInProgressRefusal(t));
+    const status = statuses[threadId] ?? IDLE;
+    if (blocked(status)) {
+      refuse(threadId, archiveRefusal(t, status));
       return;
     }
+    const movesThePage = archived && threadId === currentThreadId;
     setBusy(true);
     setRowError(null);
     try {
@@ -370,12 +412,12 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         const next = project.sessions.find((s) => !s.archived && s.threadId !== threadId);
         if (next !== undefined) {
           setPinned(project.path);
-          await runtime.threads.switchToThread(next.threadId);
+          onShow(next.threadId);
         } else {
           const id = crypto.randomUUID();
           await bindThread(id, project.path, tErrors);
           setPinned(project.path);
-          await runtime.threads.switchToThread(id);
+          onShowFresh(id);
         }
       }
       await refresh();
@@ -396,13 +438,23 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const remove = async (project: ProjectSummary): Promise<void> => {
     if (busy) return;
     const movesThePage = project.sessions.some((s) => s.threadId === currentThreadId);
-    if (movesThePage && runInProgress(runtime)) {
-      // The same sentence the session rows use, because it is the same reason --
-      // the page would have to move off a running conversation -- but rendered on
-      // the PROJECT row, where the click landed. A paraphrase would be a second
-      // wording of one rule, and this file's header is explicit about where that
-      // ends up.
-      setProjectError({ path: project.path, message: runInProgressRefusal(t) });
+    // ANY session in this project that has not finished stops the removal --
+    // not just one on screen (ticket 04, and ticket 05 for the parked case).
+    // The two are the same reason: the log being taken out of the sidebar is
+    // one a run is still appending to, or one a resume still has to reach.
+    const unfinished = project.sessions.find((s) => blocked(statuses[s.threadId] ?? IDLE));
+    if (unfinished !== undefined) {
+      // Rendered on the PROJECT row, where the click landed, and it NAMES the
+      // session, because the button cannot: a sentence that only said "a session"
+      // would send the reader hunting for which one.
+      setProjectError({
+        path: project.path,
+        message: removeProjectRefusal(
+          t,
+          unfinished.threadId,
+          statuses[unfinished.threadId] ?? IDLE,
+        ),
+      });
       return;
     }
     setBusy(true);
@@ -414,11 +466,11 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
         // SOMEWHERE ELSE, in this order: the most recent unarchived session of
         // any remaining project (the lists are already newest-first), and --
         // when this was the last project -- a BRAND-NEW thread with no project
-        // at all. That last branch goes through `switchToNewThread`, which is
-        // the one thing in this app that does: there is nothing left to bind to,
-        // and the server tolerates a session with no project by design. What
-        // neither branch does is leave the chat on the project just removed, or
-        // invent a project to hold the new session.
+        // at all. That last branch is `onShowFresh` with an id nobody bound --
+        // minted here rather than by the runtime, which no longer mints: there is
+        // nothing left to bind to, and the server tolerates a session with no
+        // project by design. What neither branch does is leave the chat on the
+        // project just removed, or invent a project to hold the new session.
         const rest = projects.filter((p) => p.path !== project.path);
         const next = rest
           .flatMap((p) => p.sessions.filter((s) => !s.archived).map((s) => ({ p, s })))
@@ -429,10 +481,10 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           )[0];
         if (next !== undefined) {
           setPinned(next.p.path);
-          await runtime.threads.switchToThread(next.s.threadId);
+          onShow(next.s.threadId);
         } else {
           setPinned(null);
-          await runtime.threads.switchToNewThread();
+          onShowFresh(crypto.randomUUID());
         }
       }
       await refresh();
@@ -537,17 +589,16 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const startSessionIn = async (project: ProjectSummary): Promise<void> => {
     const id = crypto.randomUUID();
     await bindThread(id, project.path, tErrors);
-    await runtime.threads.switchToThread(id);
+    onShowFresh(id);
   };
 
   /// A new session from the header button: in the derived selection, with the
   /// refusals landing under the header because that button has no row of its own.
   const newTask = async () => {
     if (busy) return;
-    if (runInProgress(runtime)) {
-      setNewTaskError(runInProgressNewThreadRefusal(t));
-      return;
-    }
+    // NOT gated on a run in flight any more. Starting a session used to be
+    // refused because it would abandon the one on screen; a new session gets its
+    // own host now, and whatever is running keeps running in its own.
     if (projects.length === 0) {
       // The refusal names the state; it does NOT open the picker. Popping a
       // modal OS window out of the button that says "New task" would be an
@@ -583,13 +634,6 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   /// opinion about a fact already settled.
   const newSession = async (project: ProjectSummary): Promise<void> => {
     if (busy) return;
-    if (runInProgress(runtime)) {
-      // The same sentence the header button uses, because it is the same reason
-      // -- a run belongs to the thread it started on -- said on the row whose
-      // click raised it. A paraphrase would be a second wording of one rule.
-      setProjectError({ path: project.path, message: runInProgressNewThreadRefusal(t) });
-      return;
-    }
     setBusy(true);
     setProjectError(null);
     setRowError(null);
@@ -607,7 +651,6 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     }
   };
 
-  const running = runInProgress(runtime);
 
   return (
     <aside
@@ -760,8 +803,9 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
             selected={selected?.path === project.path}
             onSelect={() => setPinned(project.path)}
             busy={busy}
-            running={running}
+            statuses={statuses}
             rowError={rowError}
+            openErrors={openErrors}
             removeError={projectError?.path === project.path ? projectError.message : null}
             onOpen={(threadId) => void openThread(threadId, project.path)}
             onArchive={(threadId, archived) => void archive(project, threadId, archived)}
@@ -829,8 +873,11 @@ const ProjectSection: FC<{
   selected: boolean;
   onSelect: () => void;
   busy: boolean;
-  running: boolean;
+  /// ONE ANSWER PER SESSION, from the page's registry. Read per row: this
+  /// project draws many sessions and each reports its own status (ticket 03).
+  statuses: Record<string, SessionStatus>;
   rowError: RowError;
+  openErrors: Record<string, string>;
   removeError: string | null;
   onOpen: (threadId: string) => void;
   onArchive: (threadId: string, archived: boolean) => void;
@@ -842,8 +889,9 @@ const ProjectSection: FC<{
   selected,
   onSelect,
   busy,
-  running,
+  statuses,
   rowError,
+  openErrors,
   removeError,
   onOpen,
   onArchive,
@@ -898,9 +946,25 @@ const ProjectSection: FC<{
       session={session}
       current={session.threadId === currentThreadId}
       busy={busy}
-      running={running && session.threadId === currentThreadId}
+      // THIS ROW'S OWN SESSION, not the one on screen. It used to be
+      // `running && session.threadId === currentThreadId`, because there was one
+      // core and the only honest answer was "is the page running"; with one core
+      // per session the registry answers for the row itself, and that comparison
+      // became the WRONG answer (ticket 03: A running while you look at B used to
+      // put A's row out).
+      running={(statuses[session.threadId] ?? IDLE).running}
+      parked={(statuses[session.threadId] ?? IDLE).parked}
       onOpen={() => onOpen(session.threadId)}
-      error={rowError?.id === session.threadId ? rowError.message : null}
+      // The row's own refusal, from EITHER source: this component's (`rowError`, a
+      // row write that failed) or the page's (`openErrors`, a history that would
+      // not load). Same place, because it is the same promise to the reader --
+      // the sentence lands under the row that was clicked, never at the top of
+      // the list for them to match up.
+      error={
+        rowError?.id === session.threadId
+          ? rowError.message
+          : (openErrors[session.threadId] ?? null)
+      }
       actions={
         <ThreadListItemAction
           data-slot="thread-list-item-archive"
