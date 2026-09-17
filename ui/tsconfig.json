@@ -4,6 +4,11 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // The translation catalogs are JSON (`src/locales/<language>/<namespace>.json`),
+    // imported as modules so their keys come through as literal types -- which is
+    // what makes `t("view.conversatoin")` a compile error instead of a key that
+    // renders itself on screen. Vite reads the same files natively.
+    "resolveJsonModule": true,
     "jsx": "react-jsx",
     "types": ["vite/client", "node"],
 

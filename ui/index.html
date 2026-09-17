@@ -1,5 +1,12 @@
 <!doctype html>
-<html lang="zh">
+<!--
+  `lang` starts at the fallback and is corrected before the first paint by
+  `/src/lib/i18n.ts`, which owns the language AND this attribute: a page whose copy
+  says one language and whose `lang` says another is what a screen reader reads
+  aloud wrongly. It cannot be written correctly here -- this file is static and the
+  answer depends on the browser.
+-->
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />

@@ -1,0 +1,7 @@
+{
+  "language": {
+    "title": "Language",
+    "field": "Interface language",
+    "hint": "This browser only — remembered here, written to no file. The harness's own sentences (tool results, errors) are not translated."
+  }
+}

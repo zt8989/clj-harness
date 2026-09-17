@@ -76,6 +76,7 @@ import { fromThreadMessageLike, type AssistantRuntime } from "@assistant-ui/core
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { fromAgUiMessages, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
@@ -136,6 +137,12 @@ export function App() {
   // does not exist yet while the adapter object is being built -- the ref
   // closes that loop. Assigned right after the hook, before anything can click.
   const runtimeRef = useRef<AssistantRuntime | null>(null);
+  // A TRANSLATION HOOK IS NOT AN ASSISTANT HOOK, and the difference matters here:
+  // the runtime-state hooks (`useAuiState` and friends) throw in this body, because
+  // App is the component that RENDERS the runtime provider -- but this one reads
+  // i18next's state, which sits above the whole page and has nothing to do with the
+  // runtime. See the note above the view switch.
+  const { t } = useTranslation();
 
   // Id first, then await -- the thread-list adapter's hard rule: the selected
   // id is set before history is waited for, because the runtime discards the
@@ -235,8 +242,8 @@ export function App() {
                   >
                     {(
                       [
-                        ["conversation", "Conversation"],
-                        ["trajectory", "Trajectory"],
+                        ["conversation", "view.conversation"],
+                        ["trajectory", "view.trajectory"],
                       ] as const
                     ).map(([key, label]) => (
                       <button
@@ -252,7 +259,7 @@ export function App() {
                             : "rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
                         }
                       >
-                        {label}
+                        {t(label)}
                       </button>
                     ))}
                   </div>

@@ -43,6 +43,7 @@
 // form stays put, because the file did not move either.
 import { ArrowLeftIcon, Loader2Icon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type FC } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
@@ -53,6 +54,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { setLanguage } from "@/lib/i18n";
+import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
   probeModels,
   providerLabel,
@@ -329,6 +332,53 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
   );
 };
 
+/// Each language written IN ITS OWN LANGUAGE, and deliberately NOT in the catalogs.
+///
+/// This is the one place on the page where translating would defeat the purpose: a
+/// reader who has landed on a language they cannot read has to be able to find their
+/// own in this list, and `中文` is findable to someone who does not know the word
+/// "Chinese". Every other string in the panel goes through the catalogs; these two
+/// do not move.
+const LANGUAGE_NAMES: Record<Language, string> = {
+  en: "English",
+  zh: "中文",
+};
+
+/// The panel's own language, and the only control on any page of it that writes no
+/// file.
+const LanguageRow: FC = () => {
+  const { t, i18n } = useTranslation("settings");
+  return (
+    <section data-slot="settings-language">
+      <SectionTitle>{t("language.title")}</SectionTitle>
+      <Field
+        label={t("language.field")}
+        slot="settings-language-field"
+        hint={t("language.hint")}
+      >
+        <select
+          aria-label={t("language.field")}
+          className={inputClass}
+          value={i18n.language}
+          onChange={(event) => {
+            // The options are generated from the same list, so this is always one of
+            // them -- and the guard is here rather than a cast because the value is
+            // DOM-supplied, which is exactly where a closed list stops being closed.
+            const chosen = event.target.value;
+            if (isLanguage(chosen)) setLanguage(chosen);
+          }}
+        >
+          {SUPPORTED_LANGUAGES.map((language) => (
+            <option key={language} value={language}>
+              {LANGUAGE_NAMES[language]}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </section>
+  );
+};
+
 const GeneralPage: FC<{
   settings: Settings | null;
   registry: Registry | null;
@@ -382,6 +432,14 @@ const GeneralPage: FC<{
       )}
 
       {registry !== null && <Defaults registry={registry} onChanged={onChanged} />}
+
+      {/* THE LANGUAGE ROW IS OUTSIDE BOTH CONDITIONALS, and that is the requirement
+          rather than the layout: a home whose config.edn cannot be resolved draws a
+          page of refusals, and a reader who has been put in front of that page in a
+          language they cannot read must still be able to change it. It is also the
+          honest place for the only control in this modal that writes nothing --
+          it changes this browser, not this harness. */}
+      <LanguageRow />
     </div>
   );
 };
