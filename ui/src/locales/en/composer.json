@@ -1,0 +1,36 @@
+{
+  "context": {
+    "directory": "Project directory",
+    "branch": "Git branch",
+    "branchClean": "The working tree of this session's directory",
+    "dirty_one": "{{count}} uncommitted change — switching may be refused",
+    "dirty_other": "{{count}} uncommitted changes — switching may be refused",
+    "dirtyLabel": "uncommitted changes",
+    "detached": "detached"
+  },
+  "model": {
+    "label": "Model",
+    "notInCatalog": "not in the catalog"
+  },
+  "effort": {
+    "label": "Reasoning effort",
+    "title": "Reasoning effort — this session only",
+    "default": "default"
+  },
+  "skill": {
+    "layer": {
+      "system": "System",
+      "project": "Project"
+    },
+    "reading": "Reading this session's skills…",
+    "broken": {
+      "unreadable": "the file cannot be read",
+      "noFrontmatter": "no frontmatter",
+      "nameMismatch": "its name does not match its folder",
+      "noDescription": "no description"
+    }
+  },
+  "attach": {
+    "label": "Add Attachment"
+  }
+}

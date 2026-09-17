@@ -1,0 +1,35 @@
+{
+  "context": {
+    "directory": "项目目录",
+    "branch": "Git 分支",
+    "branchClean": "这个会话所在目录的工作树",
+    "dirty_other": "{{count}} 个未提交的改动——切换可能被拒",
+    "dirtyLabel": "未提交的改动",
+    "detached": "游离"
+  },
+  "model": {
+    "label": "模型",
+    "notInCatalog": "不在模型目录里"
+  },
+  "effort": {
+    "label": "思考档",
+    "title": "思考档——只改本会话",
+    "default": "默认档"
+  },
+  "skill": {
+    "layer": {
+      "system": "系统级",
+      "project": "项目级"
+    },
+    "reading": "正在读本会话的技能…",
+    "broken": {
+      "unreadable": "文件读不出来",
+      "noFrontmatter": "没有 frontmatter",
+      "nameMismatch": "名字和所在文件夹对不上",
+      "noDescription": "没有描述"
+    }
+  },
+  "attach": {
+    "label": "添加附件"
+  }
+}

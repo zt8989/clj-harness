@@ -74,6 +74,8 @@ import type {
   Unstable_TriggerItem,
 } from "@assistant-ui/core";
 import { BrainIcon, FolderIcon, GitBranchIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 
 import { ComposerAddAttachment as CopiedAddAttachment } from "@/components/assistant-ui/elements/attachment.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
@@ -130,6 +132,7 @@ function useRemote<T>(load: () => Promise<T>): {
 
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
+  const { t } = useTranslation("composer");
   const projects = useRemote(
     useCallback(() => listProjects(), []),
   );
@@ -186,7 +189,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
         {dirs.length > 0 && (
           <Picker
             slot="composer-directory"
-            label="Project directory"
+            label={t("context.directory")}
             title={current}
             value={current}
             disabled={busy}
@@ -205,18 +208,18 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
         {git.data?.["repo?"] === true && (
           <Picker
             slot="composer-branch"
-            label="Git branch"
+            label={t("context.branch")}
             value={branch ?? ""}
             disabled={busy}
             leading={<GitBranchIcon className="text-muted-foreground size-4 shrink-0" />}
             title={
               git.data.dirty > 0
-                ? `${git.data.dirty} uncommitted change${git.data.dirty === 1 ? "" : "s"} — switching may be refused`
-                : "The working tree of this session's directory"
+                ? t("context.dirty", { count: git.data.dirty })
+                : t("context.branchClean")
             }
             options={
               branch === null
-                ? [{ value: "", label: "detached" }, ...git.data.branches.map(branchesOf)]
+                ? [{ value: "", label: t("context.detached") }, ...git.data.branches.map(branchesOf)]
                 : git.data.branches.map(branchesOf)
             }
             onPick={(option) => void switchTo(option.value)}
@@ -225,7 +228,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
         {git.data?.["repo?"] === true && git.data.dirty > 0 && (
           <TriangleAlertIcon
             data-slot="composer-dirty"
-            aria-label="uncommitted changes"
+            aria-label={t("context.dirtyLabel")}
             className="text-muted-foreground size-3.5 shrink-0"
           />
         )}
@@ -253,6 +256,7 @@ const branchesOf = (name: string) => ({ value: name, label: name });
 /// not go dark because a second question could not be answered, and a server that
 /// cannot resolve this session's provider cannot run it either.
 const ComposerTools: FC = () => {
+  const { t } = useTranslation("composer");
   const threadId = useThreadId();
   const session = useRemote(
     useCallback(async (): Promise<{ choices: Choices; model: ModelAnswer } | null> => {
@@ -324,14 +328,14 @@ const ComposerTools: FC = () => {
   const options =
     data.model === undefined || listed.some((option) => option.value === data.model)
       ? listed
-      : [{ value: data.model, label: data.model, hint: "not in the catalog" }, ...listed];
+      : [{ value: data.model, label: data.model, hint: t("model.notInCatalog") }, ...listed];
   const currentModel = data.model ?? options[0]?.value ?? "";
 
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
       <Picker
         slot="composer-model"
-        label="Model"
+        label={t("model.label")}
         value={currentModel}
         disabled={busy}
         title={data.provider === undefined ? data.model : `${data.provider} / ${data.model}`}
@@ -349,16 +353,16 @@ const ComposerTools: FC = () => {
       />
       <Picker
         slot="composer-effort"
-        label="Reasoning effort"
+        label={t("effort.label")}
         value={data["reasoning-effort"] ?? ""}
         disabled={busy}
         leading={<BrainIcon className="text-muted-foreground size-4 shrink-0" />}
-        title="Reasoning effort — this session only"
+        title={t("effort.title")}
         // Three options and a default: read at a glance, so no search box (see
         // `components/picker.tsx` on `searchable`).
         searchable={false}
         options={[
-          { value: "", label: "default" },
+          { value: "", label: t("effort.default") },
           ...data["reasoning-efforts"].map((effort) => ({ value: effort, label: effort })),
         ]}
         onPick={(option) => void change({ "reasoning-effort": option.value })}
@@ -391,6 +395,7 @@ const ComposerTools: FC = () => {
 // receives no pointer events in the browsers worth caring about -- a `title` on it
 // would be a tooltip nobody can ever see.
 export const ComposerAttachButton: FC = () => {
+  const { t } = useTranslation("composer");
   const guard = useSyncExternalStore(attachmentGuard.subscribe, attachmentGuard.current);
   const refusal = imageRefusal(guard.input, guard.model);
   if (refusal === null) return <CopiedAddAttachment />;
@@ -403,7 +408,7 @@ export const ComposerAttachButton: FC = () => {
         size="icon"
         disabled
         className="aui-composer-add-attachment text-muted-foreground size-7 rounded-full opacity-50"
-        aria-label="Add Attachment"
+        aria-label={t("attach.label")}
       >
         <PlusIcon className="aui-attachment-add-icon size-4" />
       </TooltipIconButton>
@@ -454,16 +459,33 @@ const slashFormatter: Unstable_DirectiveFormatter = {
   parse: (text) => [{ kind: "text", text }],
 };
 
+/// The translator this face is worded through: the composer's own catalog, because
+/// every string below is drawn inside the composer (see `locales/<lng>/composer.json`).
+type Translate = TFunction<"composer">;
+
 /// `scan`'s four ways for a skill to be broken, as the sentence a person needs.
 /// The server says WHY by keyword (the model reads the same vocabulary in a
 /// refusal); what a reader of a menu needs is the everyday cause. An unknown
-/// reason falls through as itself rather than as silence.
-const BROKEN_WORDS: Record<string, string> = {
-  unreadable: "the file cannot be read",
-  "no-frontmatter": "no frontmatter",
-  "name-mismatch": "its name does not match its folder",
-  "no-description": "no description",
-};
+/// reason falls through as itself rather than as silence, and a reason the server
+/// did not give at all says nothing.
+///
+/// THE KEYS ARE WRITTEN OUT, one case per keyword, rather than built from the
+/// reason: the reason is a keyword from the server, so a template key would put a
+/// raw name on screen for a cause this page has no sentence for.
+function brokenWord(t: Translate, reason: string | null): string | null {
+  switch (reason) {
+    case "unreadable":
+      return t("skill.broken.unreadable");
+    case "no-frontmatter":
+      return t("skill.broken.noFrontmatter");
+    case "name-mismatch":
+      return t("skill.broken.nameMismatch");
+    case "no-description":
+      return t("skill.broken.noDescription");
+    default:
+      return reason;
+  }
+}
 
 /// A `metadata` field as a string. The kit types an item's metadata as arbitrary
 /// JSON, so the narrowing lives in one place rather than in a cast at every read.
@@ -474,6 +496,7 @@ function metadataString(item: Unstable_TriggerItem, key: string): string | null 
 
 /// One pickable row: the name, the layer it came from, and what it does.
 const SkillListRow: FC<{ item: Unstable_TriggerItem; index: number }> = ({ item, index }) => {
+  const { t } = useTranslation("composer");
   const ref = useRef<HTMLButtonElement>(null);
   const scope = unstable_useTriggerPopoverScopeContext();
   // The kit owns the highlight. What it cannot know is that this list is taller
@@ -485,7 +508,7 @@ const SkillListRow: FC<{ item: Unstable_TriggerItem; index: number }> = ({ item,
     if (highlighted) ref.current?.scrollIntoView({ block: "nearest" });
   }, [highlighted]);
 
-  const layer = layerWord(metadataString(item, "layer") ?? undefined);
+  const layer = layerWord(t, metadataString(item, "layer") ?? undefined);
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverItem
       item={item}
@@ -518,6 +541,7 @@ const SkillListRow: FC<{ item: Unstable_TriggerItem; index: number }> = ({ item,
 /// installed a moment ago visible on the next `/`, and it is also when the previous
 /// answer is dropped: a stale menu is the one thing a menu must not be.
 const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
+  const { t } = useTranslation("composer");
   const text = useAuiState((s) => s.composer.text);
   // The same shape `slashAtStart` insists on, asked of the whole text: is this
   // message opening a slash name? Question and fetch share this one answer.
@@ -589,7 +613,7 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
       <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={slashFormatter} />
       {loading && (
         <p data-slot="skill-list-loading" className="text-muted-foreground px-2 py-1.5 text-sm">
-          Reading this session's skills…
+          {t("skill.reading")}
         </p>
       )}
       {error !== null && (
@@ -616,7 +640,7 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
             >
               <b className="shrink-0 font-medium line-through">{skill.name}</b>
               <span className="min-w-0 flex-1 truncate text-xs">
-                {BROKEN_WORDS[skill.reason ?? ""] ?? skill.reason}
+                {brokenWord(t, skill.reason)}
               </span>
             </div>
           ))}
