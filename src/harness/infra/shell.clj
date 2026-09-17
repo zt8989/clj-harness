@@ -13,7 +13,7 @@
   line by line. A hook is the first kind; an MCP server is the second.
 
   AND ON WINDOWS THE TWO KINDS DO NOT RUN IN THE SAME SHELL: `start` hands the
-  command to Windows' own `cmd /c`, while `run` and `shell` still go through bash.
+  command to Windows' own `cmd /c`, while `run` still goes through bash.
   That is not an inconsistency, it is what each kind of command IS -- see
   `start`'s own note, and `windows-argv` for the reason in full.
 
@@ -47,7 +47,6 @@
   existence question (`select`) -- so the Windows-only steps are asserted on a
   machine that has neither Git Bash nor pwsh."
   (:require [clojure.java.io :as io]
-            [clojure.java.shell :as shell]
             [clojure.string :as str])
   (:import [java.io BufferedReader]
            [java.nio.charset StandardCharsets]
@@ -257,32 +256,50 @@
   [s]
   (str "'" (str/replace (str s) "'" "'\\''") "'"))
 
-(defn shell
-  "Run COMMAND in this process's shell, with OPTIONS forwarded to
-  clojure.java.shell/sh (:dir, :out-enc). Returns {:exit :out :err} unchanged.
+(defn- kill-tree!
+  "Stop P and everything it started.
 
-  For callers that want the answers, not the process: no stdin, no timeout.
+  THE CHILD IS NOT THE COMMAND, and that is the whole reason this exists: what a
+  spawn site holds is a SHELL, and the process a person means is that shell's
+  child. `npx` is the ordinary case (a node program that starts the real server
+  itself), and so is `npm test` (bash starts npx, npx starts node). Killing the
+  shell alone leaves the real one running with a closed stdin -- a leak that also
+  outlives the harness that made it.
 
-  Options whose value is nil are DROPPED rather than passed through: since
-  Clojure 1.12 clojure.java.shell resolves :dir eagerly, so `{:dir nil}` is not
-  'no directory' but a null file to resolve -- the unbound-session case, which is
-  the common one."
-  [command & {:as opts}]
-  (let [r (require-shell!)]
-    (apply shell/sh (concat [(:command r)] (:argv-prefix r) [command]
-                            (mapcat identity
-                                    (assoc (into {} (remove (comp nil? val)) opts)
-                                           :out-enc "UTF-8"))))))
+  So the descendants are collected FIRST (once their parent dies they are
+  reparented, and the tree that was there a moment ago can no longer be walked),
+  then the direct child is asked to stop, and anything still standing is killed
+  outright. Gentle where it can be, conclusive where it must be.
+
+  BOTH KINDS OF SPAWN END HERE: `run` when its time limit is reached, and `start`
+  when a caller closes the handle."
+  [^Process p]
+  (let [kids (try (vec (.toList (.descendants (.toHandle p)))) (catch Exception _ []))]
+    (.destroy p)
+    (when-not (try (.waitFor p 2 TimeUnit/SECONDS) (catch Exception _ true))
+      (.destroyForcibly p))
+    (doseq [^java.lang.ProcessHandle k kids] (.destroy k))
+    (doseq [^java.lang.ProcessHandle k kids :when (.isAlive k)] (.destroyForcibly k))
+    nil))
 
 (defn run
-  "Run COMMAND the way A: once, with STDIN written to it, and no more than
-  TIMEOUT-MS of waiting. Returns
+  "Run COMMAND the way A: once, with STDIN written to it and then CLOSED, and no
+  more than TIMEOUT-MS of waiting. Returns
 
     {:exit n :out \"..\" :err \"..\"}                 it finished
     {:exit nil :out \"..\" :err \"..\" :timeout true} it was killed at the limit
 
   The output it produced BEFORE the timeout is returned rather than discarded:
   a hook that hangs after printing its reason should still be readable.
+
+  AT THE LIMIT THE WHOLE TREE GOES, not just the shell we hold -- `kill-tree!`'s
+  own note says why the child is not the command. Until this was wired in here,
+  a timed-out `bash` tool call left `npm`/`node`/`sleep` running with nobody
+  attached to it.
+
+  STDIN IS CLOSED RATHER THAN LEFT OPEN: the write end is closed with the writer,
+  so a command that reads stdin sees EOF instead of waiting forever for a parent
+  that is not going to type anything.
 
   A command that cannot be spawned at all throws -- :exit only means anything for
   a process that started, and callers must not read 'we never ran it' as
@@ -304,7 +321,7 @@
         o  (future (slurp (.getInputStream p) :encoding "UTF-8"))
         e  (future (slurp (.getErrorStream p) :encoding "UTF-8"))
         done (.waitFor p (long (or timeout-ms 30000)) TimeUnit/MILLISECONDS)]
-    (when-not done (.destroyForcibly p) (.waitFor p))
+    (when-not done (kill-tree! p))
     (let [out (try (deref o 5000 "") (catch Exception _ ""))
           err (try (deref e 5000 "") (catch Exception _ ""))]
       @w
@@ -357,43 +374,34 @@
           cmd  (io/file root "System32" "cmd.exe")]
       [(if (.exists cmd) (.getAbsolutePath cmd) "cmd.exe") "/c"])))
 
-(defn- spawn-argv
-  "COMMAND as the argv to spawn for a LONG-LIVED process. Windows gets its own
-  shell (see `windows-argv`); everywhere else the command goes to the resolved
-  shell, which is what a command line written for a server assumes.
+(defn spawn-argv
+  "COMMAND as the argv to spawn for a LONG-LIVED process, in one of two SHAPES:
 
-  ONLY `start` asks this. `run` and `shell` stay on bash even on Windows, because
-  what they run is written FOR a shell -- a hook is a script, often `.sh`, and the
-  `bash` tool's whole promise is a bash command -- whereas a long-lived server is
-  a PROGRAM TO LAUNCH, and its command is a path plus flags that must survive
-  verbatim."
-  [command]
-  (if (windows?)
-    (conj (vec @windows-argv) command)
-    (let [r (require-shell!)]
-      (into (vec (cons (:command r) (:argv-prefix r))) [command]))))
+    :program  a PROGRAM TO LAUNCH. Its command line is a path plus flags, and it
+              must survive verbatim -- which on Windows means Windows' own `cmd /c`
+              (see `windows-argv` for why bash must not be used for this).
+    :shell    a command written FOR A SHELL, exactly as `run` takes one: it goes to
+              the shell this process resolved, with that shell's own argv prefix.
 
-(defn- kill-tree!
-  "Stop P and everything it started.
+  THE TWO SHAPES DIFFER ON WINDOWS ONLY, and that is the whole reason this asks:
+  there `:program` needs cmd and `:shell` needs Git Bash. Everywhere else both are
+  the resolved shell, which is why the difference is easy to miss -- a server
+  declared as `node server.js` and a *shell command* like `npm test &` look like
+  the same thing until the machine is Windows.
 
-  THE CHILD IS NOT THE SERVER, and that is the whole reason this exists: the
-  process we hold is a SHELL, and the command it runs is often a wrapper -- `npx`
-  is the ordinary case, and npx is a node program that starts the real server
-  itself. Killing the shell leaves the server running with a closed stdin, which
-  is a leak that also outlives the harness that made it.
+  PURE IN THE TWO FACTS IT BRANCHES ON -- whether this is Windows, and the shell
+  resolution -- so that BOTH branches can be asserted on one machine. A test asking
+  for the Windows answer does not need Windows, and the branch it asserts is the
+  one no mac will ever take on its own.
 
-  So the descendants are collected FIRST (once their parent dies they are
-  reparented, and the tree that was there a moment ago can no longer be walked),
-  then the direct child is asked to stop, and anything still standing is killed
-  outright. Gentle where it can be, conclusive where it must be."
-  [^Process p]
-  (let [kids (try (vec (.toList (.descendants (.toHandle p)))) (catch Exception _ []))]
-    (.destroy p)
-    (when-not (try (.waitFor p 2 TimeUnit/SECONDS) (catch Exception _ true))
-      (.destroyForcibly p))
-    (doseq [^java.lang.ProcessHandle k kids] (.destroy k))
-    (doseq [^java.lang.ProcessHandle k kids :when (.isAlive k)] (.destroyForcibly k))
-    nil))
+  ONLY `start` asks this. `run` always hands its command to the resolved shell,
+  because everything `run` executes is written for a shell."
+  ([shape command] (spawn-argv shape command (windows?) (resolution)))
+  ([shape command on-windows? shell-res]
+   (if (and on-windows? (= shape :program))
+     (into (vec @windows-argv) [command])
+     (let [r (or shell-res (require-shell!))]
+       (into (vec (concat [(:command r)] (:argv-prefix r))) [command])))))
 
 (defn start
   "Spawn COMMAND as a LONG-LIVED process -- the kind `run` cannot do: a process
@@ -410,6 +418,9 @@
      :alive? (fn [] -> boolean)
      :close! (fn [])}                     ; kill it and stop the pumps
 
+  `:shape` says which of `spawn-argv`'s two kinds this is, and defaults to
+  `:program` -- the server case, which is what `start` was written for.
+
   STDERR IS DRAINED AND ONLY DRAINED. A process that fills its stderr pipe blocks
   forever, so it is read on its own thread into a buffer -- and that buffer is
   DIAGNOSTICS, never protocol. A caller that parsed stderr as if it were an answer
@@ -418,8 +429,8 @@
 
   `:env` is ADDED to the inherited environment rather than replacing it: a server
   declared with one token still needs PATH to find its own runtime."
-  [{:keys [command dir env]}]
-  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv command)))
+  [{:keys [command dir env shape] :or {shape :program}}]
+  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv shape command)))
              (.redirectErrorStream false))
         _  (when dir (.directory pb (io/file dir)))
         _  (when (seq env) (.putAll (.environment pb) (into {} env)))

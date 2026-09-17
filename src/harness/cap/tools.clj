@@ -1,5 +1,5 @@
 (ns harness.cap.tools
-  "The fifteen tools this harness ships: their bodies, their faces, and nothing
+  "The eighteen tools this harness ships: their bodies, their faces, and nothing
   else. It is a CAPABILITY, so it lives here and not in harness.kernel.tools --
   which holds the seam that runs a tool, not any particular tool.
 
@@ -27,6 +27,7 @@
             [harness.cap.hashline.serve :as serve]
             [harness.cap.hashline.undo :as undo]
             [harness.cap.hashline.write :as hashline-write]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
             [harness.cap.providers :as providers]
             [harness.cap.skills :as skills]
@@ -41,7 +42,7 @@
 ;;
 ;; `register!` here is NOT the seam's (the seam has no such function any more):
 ;; it accumulates this namespace's own definitions into a map that `install!`
-;; hands over. Keeping the fifteen forms in their original shape is deliberate --
+;; hands over. Keeping those forms in their original shape is deliberate --
 ;; they moved out of the seam verbatim, so a reader diffing the two files sees
 ;; bodies, not a rewrite.
 
@@ -49,7 +50,7 @@
 
 (defn- register!
   "Put NAME->TOOL into THIS LAYER's table. The `:source` is stamped here, once,
-  rather than at fifteen call sites: this map IS the built-in half of the table,
+  rather than at every call site: this map IS the built-in half of the table,
   so a row in it knows where it came from by construction. Rows from other
   origins carry their own (an external server's say :mcp)."
   [name tool] (swap! built-ins assoc name (assoc tool :source :builtin)))
@@ -178,12 +179,40 @@
     (write-file! p (str/replace-first s old_string new_string))
     (str "edited " p)))
 
-(defn- t-bash [{:keys [command]}]
-  (let [dir (project/binding-for kernel-tools/*thread-id*)
-        {:keys [exit out err]} (shell/shell command :dir (when dir dir))
-        body (str out err)]
+(def ^:private bash-default-timeout-ms
+  "How long a `bash` call waits for its command before stopping it, in
+  MILLISECONDS. One source, and the tool's own description interpolates it: a
+  description with the number written into it is a description that goes on saying
+  two minutes after somebody changes the default."
+  120000)
+
+(defn- t-bash
+  "`bash`'s body: one command, a bounded wait, and the answer.
+
+  THE WAIT IS THE POINT. This used to go through `infra.shell/shell`
+  (`clojure.java.shell/sh`), which has no timeout at all -- so a hung command hung
+  the whole run, forever. `infra.shell/run` is the timeout-shaped one, and it
+  stops the command TOGETHER WITH EVERYTHING IT STARTED, which is the half that
+  matters: what a hung `npm test` leaves behind is a child of the shell, not the
+  shell.
+
+  A timeout is not an error: the command's own output is returned, with the limit
+  appended in the same shape a non-zero exit gets. The model learns what happened
+  and can try something narrower -- the same judgement `cap.git` makes about a git
+  that hung ('a fact the caller may want to report')."
+  [{:keys [command timeout]}]
+  (let [dir   (project/binding-for kernel-tools/*thread-id*)
+        limit (or (positive-int :timeout timeout) bash-default-timeout-ms)
+        {:keys [exit out err] stopped :timeout} (shell/run {:command command
+                                                            :dir (when dir dir)
+                                                            :timeout-ms limit})
+        body  (str out err)]
     (str (if (str/blank? body) "(no output)" body)
-         (when-not (zero? exit) (str "\n[exit " exit "]")))))
+         (cond
+           ;; A process that never finished has no exit code -- the limit is the
+           ;; fact, and `exit` is nil here, so a `(zero? exit)` would throw.
+           stopped           (str "\n[timed out after " limit "ms — the command was stopped]")
+           (not (zero? exit)) (str "\n[exit " exit "]")))))
 
 (defn- t-eval [{:keys [code]}]
   (let [sw (java.io.StringWriter.)
@@ -665,9 +694,96 @@
          :park-reason (fence nil)))
 
 (register! "bash"
-  (tool "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working directory is this session's project directory when one is bound, otherwise the process working directory."
-        {"command" {:type "string" :description "Command line."}}
+  (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working"
+             " directory is this session's project directory when one is bound, otherwise the"
+             " process working directory. "
+             "The command gets " bash-default-timeout-ms "ms to finish; `timeout` overrides that,"
+             " in milliseconds. When the limit is reached the command is stopped -- together with"
+             " everything it started -- and whatever it printed by then comes back, with a line"
+             " saying it was stopped. A very large `timeout` means this run really does wait that"
+             " long; for something that has to outlive the call, use `bash_background` instead.")
+        {"command" {:type "string" :description "Command line."}
+         "timeout" {:type "integer" :minimum 1
+                    :description (str "How long to wait, in milliseconds. Default "
+                                      bash-default-timeout-ms ".")}}
         [:command] t-bash))
+
+;; ---------------------------------------------------------------- 后台执行
+;;
+;; THREE NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing
+;; toolset's precedent (`replace` / `insert` / `undo_last_replace` are three names,
+;; not one `edit {action}`): each schema then carries exactly its own arguments, so
+;; the seam's missing-argument check answers for every verb, and a refusal belongs
+;; to one verb instead of to a branch. The cost is three descriptions in every
+;; request, which is the price of that clarity.
+;;
+;; THE WORK IS IN harness.cap.jobs. What is here is the faces.
+
+(def ^:private bash-background-description
+  (str "Run a shell command in the BACKGROUND: this call returns as soon as the command has"
+       " started, and the command keeps running. Use it for something that has to outlive the"
+       " call -- a dev server, a watcher, a slow test or build -- so you can carry on working"
+       " while it runs. "
+       "The answer is a job id (like `j1`); the command's output is NOT in it. "
+       "NOTHING TELLS YOU WHEN IT FINISHES OR WHEN IT PRINTS SOMETHING: read it with"
+       " `bash_output`, stop it with `bash_kill`. "
+       "A job has NO timeout -- it runs until it ends or until it is stopped -- and it lives"
+       " only as long as this harness process. "
+       "The working directory is this session's project directory when one is bound,"
+       " otherwise the process working directory, exactly as `bash`."))
+
+(def ^:private bash-output-description
+  (str "Read what a background job has printed SINCE YOU LAST READ IT, and whether it is still"
+       " running. The answer is the new lines, plus one status line: `[running]`, or `[exit N]`"
+       " once the command has ended. "
+       "READING DOES NOT WAIT: `(no new output)` means there is nothing new right now, not that"
+       " the job is finished -- the status line says which, and nothing will interrupt you when"
+       " it changes. "
+       "Only the last " jobs/tail-lines " lines are kept, so a job that printed more than you"
+       " read says how many lines you missed."))
+
+(defn- t-bash-background
+  "`bash_background`'s body: hand the command to harness.cap.jobs and answer its id.
+  The directory is resolved exactly as `bash`'s is, so a relative command means the
+  same place in both."
+  [{:keys [command]}]
+  (let [dir (project/binding-for kernel-tools/*thread-id*)
+        id  (jobs/start! kernel-tools/*thread-id* {:command command :dir dir})]
+    (str "job " id " started; read its output with bash_output.")))
+
+(defn- t-bash-output
+  "`bash_output`'s body. All the arithmetic is harness.cap.jobs'."
+  [{:keys [job]}]
+  (jobs/read-output kernel-tools/*thread-id* job))
+
+(def ^:private bash-kill-description
+  (str "Stop a background job -- the command and everything it started -- and forget it."
+       " Use it when a job has done what you needed, has gone wrong, or is holding something"
+       " you want back (a port, a file). "
+       "The answer carries whatever the job printed that you had not read yet, plus what"
+       " happened: `[stopped]` if it was still running, or `[exit N]` if it had already"
+       " ended by itself. Either way the job is gone afterwards -- reading a stopped job is"
+       " the same as reading one that never existed."))
+
+(defn- t-bash-kill
+  "`bash_kill`'s body: stop it, answer with what it had said, forget it."
+  [{:keys [job]}]
+  (jobs/stop! kernel-tools/*thread-id* job))
+
+(register! "bash_background"
+  (tool bash-background-description
+        {"command" {:type "string" :description "Command line."}}
+        [:command] t-bash-background))
+
+(register! "bash_output"
+  (tool bash-output-description
+        {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
+        [:job] t-bash-output))
+
+(register! "bash_kill"
+  (tool bash-kill-description
+        {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
+        [:job] t-bash-kill))
 
 (register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."

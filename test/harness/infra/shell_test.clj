@@ -81,6 +81,63 @@
       (is (= 0 exit) (str "the command ran (stderr: " (str/trim (str err)) ")"))
       (is (str/includes? (str out) "harness-shell-test")))))
 
+(deftest a-command-that-does-not-finish-is-stopped-together-with-what-it-started
+  ;; THE CHILD IS NOT THE COMMAND. `<shell> -lc "..."` means the process this
+  ;; namespace holds is a shell, and the one a person means by "the command" is its
+  ;; child -- `npm test` is the ordinary case (bash starts npx, npx starts node).
+  ;; Killing the shell alone leaves that child running with nobody attached to it,
+  ;; which is how two test JVMs survived sixteen hours.
+  (let [dir (support/temp-dir "shell-tree")
+        pid-file (io/file dir "child.pid")
+        ;; `$!` is the backgrounded child's pid, and `wait` keeps the shell around
+        ;; so the shape under test is really two processes; without it the shell
+        ;; would exit and the child would be reparented before the limit is reached.
+        command (str "sleep 30 & echo $! > " (shell/quote-arg (.getAbsolutePath pid-file))
+                     "; wait")
+        started (System/currentTimeMillis)
+        res (shell/run {:command command :timeout-ms 2000})
+        elapsed (- (System/currentTimeMillis) started)
+        pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
+    (testing "the call gives up at the limit rather than waiting for the command"
+      (is (true? (:timeout res)))
+      (is (nil? (:exit res)) "a process that never finished has no exit code")
+      (is (< elapsed 20000) (str "it came back at the limit, not when the command did ("
+                                 elapsed "ms)")))
+    (testing "and the child it started is gone too"
+      (is (some? pid) "the shell really did start a child")
+      (is (support/gone-within? pid 5000)
+          (str "pid " pid " outlived the call that started it")))))
+
+(deftest what-a-command-printed-before-the-limit-comes-back
+  ;; The output is not discarded: a command that hangs after saying why it cannot
+  ;; finish is exactly the case worth reading.
+  (let [{:keys [out timeout]} (shell/run {:command "echo said-before-hanging; sleep 30"
+                                          :timeout-ms 2000})]
+    (is (true? timeout))
+    (is (str/includes? (str out) "said-before-hanging"))))
+
+(deftest the-two-long-lived-shapes-differ-exactly-on-windows
+  ;; The one branch no machine in this repo will ever take on its own, asserted
+  ;; anyway: a SERVER is a program to launch (and on Windows that means `cmd /c`, so
+  ;; its backslash paths survive), while a background SHELL COMMAND is a shell
+  ;; command -- bash's promise, Git Bash on Windows. Passing the two facts in is what
+  ;; makes both branches reachable from this machine.
+  (let [git-bash {:command "C:\\Program Files\\Git\\bin\\bash.exe" :kind :git-bash
+                  :posix? true :argv-prefix ["-lc"]}]
+    (testing "on Windows a program goes to cmd, and its command is left alone"
+      (let [argv (shell/spawn-argv :program "node server.js --port 1" true nil)]
+        (is (str/ends-with? (first argv) "cmd.exe"))
+        (is (= ["/c" "node server.js --port 1"] (rest argv)))))
+    (testing "while a shell command goes to the shell this process resolved"
+      (is (= ["C:\\Program Files\\Git\\bin\\bash.exe" "-lc" "npm test"]
+             (shell/spawn-argv :shell "npm test" true git-bash))))
+    (testing "and off Windows both are the resolved shell, which is why the "
+      (let [r (shell/resolution)]
+        (is (some? r) "this machine resolves a shell")
+        (let [expected (into [(:command r)] (:argv-prefix r))]
+          (is (= (conj expected "npm test") (shell/spawn-argv :shell "npm test" false r)))
+          (is (= (conj expected "node server.js") (shell/spawn-argv :program "node server.js" false r))))))))
+
 (deftest a-bash-that-is-windows-wsl-launcher-does-not-count-as-a-bash
   ;; The trap. C:\\WINDOWS\\System32\\bash.exe is another filesystem, and from a JVM it
   ;; answers nothing at all; a chain that took it would report a shell that runs

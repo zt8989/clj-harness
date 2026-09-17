@@ -3,7 +3,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
+            [harness.infra.shell :as shell]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]))
 
@@ -199,16 +201,17 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "read" "replace"
-              "session-configure" "skill" "todo_write" "undo_last_replace"
-              "web_fetch" "web_search" "write"]
+      (is (= ["anchor_grep" "bash" "bash_background" "bash_kill" "bash_output" "eval"
+              "glob" "insert" "read" "replace" "session-configure" "skill"
+              "todo_write" "undo_last_replace" "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "edit" "eval" "glob" "read" "session-configure" "skill"
-              "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["bash" "bash_background" "bash_kill" "bash_output" "edit" "eval" "glob"
+              "read" "session-configure" "skill" "todo_write" "web_fetch"
+              "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
@@ -260,3 +263,147 @@
                         "tt-unbound")]
         (is (false? error))
         (is (some #(str/includes? % "{:paths") (read-lines content)))))))
+
+;; -------------------------------------------------------------------- the limit
+;;
+;; A `bash` call has a ceiling now. The DEFAULT is asserted at the seam rather
+;; than by waiting two minutes for it: a `shell/run` stand-in records what the
+;; tool asked for, and the body runs on this thread, so `with-redefs` reaches it
+;; (harness.infra.env-test watches its own seam the same way). The MECHANISM is
+;; asserted by really stopping a command, with a limit small enough to watch.
+
+(deftest bash-waits-no-longer-than-it-was-told
+  (let [asked (atom [])]
+    (with-redefs [shell/run (fn [opts] (swap! asked conj opts) {:exit 0 :out "" :err ""})]
+      (testing "no `timeout` argument means the default, and only one place knows it"
+        (call "bash" {:command "true"})
+        (is (= 120000 (:timeout-ms (first @asked)))))
+      (testing "a `timeout` argument is what the call waits"
+        (call "bash" {:command "true" :timeout 5000})
+        (is (= 5000 (:timeout-ms (second @asked))))))))
+
+(deftest a-timeout-that-is-not-a-number-of-milliseconds-is-refused
+  ;; The same refusal `offset`/`limit` get, because the same helper answers it:
+  ;; 0, -3 and 1.5 are all things a model can actually send.
+  (doseq [bad [0 -3 1.5 "soon"]]
+    (let [{:keys [content error]} (call "bash" {:command "true" :timeout bad})]
+      (is (true? error) (str (pr-str bad) " is refused"))
+      (is (str/includes? content "`timeout` must be a positive integer")))))
+
+(deftest a-command-that-would-hang-is-stopped-at-the-limit
+  ;; Through the TOOL, not just through `shell/run`: this is the path a model's call
+  ;; takes, and the pid file is the command's own child -- the thing that used to
+  ;; survive the call. `<cmd> &` plus `wait` keeps the shell around so the shape under
+  ;; test really is two processes.
+  (let [dir (support/temp-dir "tools-hang")
+        pid-file (io/file dir "child.pid")
+        started (System/currentTimeMillis)
+        {:keys [content error]} (call "bash"
+                                      {:command (str "echo said-before-hanging; sleep 60 & echo $! > "
+                                                     (shell/quote-arg (.getAbsolutePath pid-file))
+                                                     "; wait")
+                                       :timeout 1500})
+        elapsed (- (System/currentTimeMillis) started)]
+    (try
+      (testing "it is information, not a failed run"
+        (is (false? error)))
+      (testing "what it printed is kept, and the answer says where it stopped"
+        (is (str/includes? content "said-before-hanging"))
+        (is (str/includes? content "[timed out after 1500ms")))
+      (testing "and the call came back at the limit, not at the end"
+        (is (< elapsed 20000) (str "elapsed " elapsed "ms")))
+      (testing "and the child the command started is gone with it"
+        (let [pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
+          (is (support/gone-within? pid 5000)
+              (str "pid " pid " outlived the call that started it"))))
+      (finally (support/wipe-tree! dir)))))
+
+(deftest a-command-that-finishes-is-answered-exactly-as-it-was
+  ;; The ceiling is not allowed to change any other answer: a quiet command, a
+  ;; command with output, and a command that failed.
+  (let [{:keys [content error]} (call "bash" {:command "echo hi"})]
+    (is (false? error))
+    (is (= "hi" (str/trim content))))
+  (let [{:keys [content error]} (call "bash" {:command "echo boom >&2; exit 3"})]
+    (is (false? error))
+    (is (str/includes? content "boom"))
+    (is (str/includes? content "[exit 3]"))
+    (is (not (str/includes? content "timed out"))))
+  (is (= "(no output)" (str/trim (:content (call "bash" {:command "true"}))))))
+
+;; ------------------------------------------------------------------ background
+;;
+;; The faces are here; the arithmetic is harness.cap.jobs' own tests. What this
+;; namespace owns is the two things only a tool call can show: where the command
+;; runs, and how a refusal reaches the model.
+
+(deftest a-background-command-runs-where-a-foreground-one-would
+  (let [pdir (io/file dir "job-project")]
+    (.mkdirs pdir)
+    ;; The same trick the `bash` cwd case uses: a relative cat finding a file that
+    ;; exists ONLY in the project directory proves where the command was sitting,
+    ;; without parsing pwd (whose spelling differs between Git Bash and the JVM).
+    (spit (io/file pdir "marker.txt") "job-here" :encoding "UTF-8")
+    (project/bind! "tt-job" (.getAbsolutePath pdir))
+    (try
+      (let [answer (:content (tools/run! {:function {:name "bash_background"
+                                                     :arguments (json/write-str
+                                                                 {:command "cat marker.txt"})}}
+                                         "tt-job"))
+            job-id (second (re-find #"job (j\d+) started" answer))]
+        (is (some? job-id) (str "the tool answered with a job id: " answer))
+        (is (= ["job-here"]
+               (:lines (support/read-until #(:content (tools/run!
+                                                       {:function {:name "bash_output"
+                                                                   :arguments (json/write-str
+                                                                               {:job job-id})}}
+                                                       "tt-job"))
+                                           #(re-find #"\[exit" (:answer %)) 10000)))))
+      (finally
+        (jobs/shutdown!)
+        (project/bind! "tt-job" nil)))))
+
+(deftest a-background-call-comes-back-before-the-command-does
+  ;; The whole point: the call is not the command's lifetime.
+  (let [started (System/currentTimeMillis)
+        answer  (:content (call "bash_background" {:command "sleep 30"}))
+        elapsed (- (System/currentTimeMillis) started)]
+    (is (re-find #"job j\d+ started" answer))
+    (is (< elapsed 5000) (str "it returned while the command was still running (" elapsed "ms)"))
+    (jobs/shutdown!)))
+
+(deftest an-unknown-job-reaches-the-model-as-an-error
+  (let [{:keys [content error]} (call "bash_output" {:job "j-not-a-job"})]
+    (is (true? error))
+    (is (str/includes? content "unknown job: j-not-a-job"))))
+
+(deftest the-background-tools-take-the-arguments-they-need
+  ;; The seam's missing-argument check is per tool, which is one of the reasons
+  ;; these are three names rather than one with an `action`.
+  (is (str/includes? (:content (call "bash_background" {})) "missing required argument"))
+  (is (str/includes? (:content (call "bash_output" {})) "missing required argument")))
+
+(deftest a-background-job-can-be-stopped-and-is-then-gone
+  (let [started (:content (call "bash_background" {:command "sleep 30"}))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        answer  (:content (call "bash_kill" {:job job-id}))]
+    (is (some? job-id))
+    (is (str/includes? answer "[stopped]"))
+    (testing "and reading it afterwards is the same as reading one that never existed"
+      (let [{:keys [content error]} (call "bash_output" {:job job-id})]
+        (is (true? error))
+        (is (str/includes? content (str "unknown job: " job-id))))))
+  (testing "a job that ended on its own reports its exit code instead"
+    (let [started (:content (call "bash_background" {:command "exit 3"}))
+          job-id  (second (re-find #"job (j\d+) started" started))]
+      ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
+      ;; different facts, and only the second one is true once the command is gone.
+      (support/read-until #(:content (tools/run! {:function {:name "bash_output"
+                                                             :arguments (json/write-str {:job job-id})}}))
+                          #(re-find #"\[exit" (:answer %)) 10000)
+      (is (str/includes? (:content (call "bash_kill" {:job job-id})) "[exit 3]")))))
+
+(deftest bash-kill-refuses-a-job-it-does-not-have
+  (let [{:keys [content error]} (call "bash_kill" {:job "j-not-a-job"})]
+    (is (true? error))
+    (is (str/includes? content "unknown job: j-not-a-job"))))

@@ -2806,7 +2806,7 @@
   Renamed rather than `init -b`: see harness.cap.git-test for why."
   []
   (let [dir git-repo
-        run (fn [c] (shell/shell c :dir dir))]
+        run (fn [c] (shell/run {:command c :dir dir}))]
     (.mkdirs (io/file dir))
     (run "git init -q")
     (run "git config user.email test@example.invalid")
@@ -2846,8 +2846,8 @@
                body (read-json resp)]
            (is (= 200 (.statusCode resp)))
            (is (= "side" (:branch body)))
-           (is (= "side" (str/trim (:out (shell/shell "git rev-parse --abbrev-ref HEAD"
-                                                   :dir git-repo)))))))
+           (is (= "side" (str/trim (:out (shell/run {:command "git rev-parse --abbrev-ref HEAD"
+                                                    :dir git-repo})))))))
        (testing "and the audit line records the move, before -> after"
          (let [lines (filterv #(= "git/branch" (:kind %)) (log-lines-for id))]
            (is (= 1 (count lines)))

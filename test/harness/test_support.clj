@@ -20,6 +20,7 @@
   harness.test-runner lists the namespaces it runs, and this one has nothing to
   run."
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.mcp :as cap-mcp]
@@ -162,7 +163,7 @@
 
 (defn with-builtins
   "Install THE APP'S CAPABILITIES for the duration of ONE test namespace, and
-  withdraw them afterwards: harness.cap.tools' fifteen tools, the hook-file reader
+  withdraw them afterwards: harness.cap.tools' built-in tools, the hook-file reader
   (harness.cap.hooks) and the kernel's own three SystemPrompt rows
   (harness.cap.system-prompt) -- the same three the composition root installs.
 
@@ -217,3 +218,50 @@
   (let [teardowns [(cap-tools/install!) (cap-hooks/install!)
                    (system-prompt/install!) (cap-mcp/install!)]]
     (try (f) (finally (doseq [td teardowns] (td))))))
+
+;; ------------------------------------------------- processes a test started
+;;
+;; The three questions a test about SPAWNING asks, here rather than written once per
+;; namespace: the feature that added background jobs put the same two helpers in
+;; three files, and a helper that drifts in one of them is a test that stops saying
+;; what it meant.
+
+(defn alive?
+  "Is PID a live process? Asked of the OS rather than of a JVM object, because the pid
+  in hand is usually a GRANDCHILD -- the one a command started -- and nothing in this
+  process holds a handle to it."
+  [pid]
+  (boolean (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
+             (.isAlive ^java.lang.ProcessHandle h))))
+
+(defn gone-within?
+  "Did PID disappear within MS? Polled rather than asked once: a process that was just
+  killed can still be seen for a moment -- it is a zombie until its own parent reaps
+  it, and that parent is usually not this process -- so a single read is a coin toss."
+  [pid ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (cond
+        (not (alive? pid)) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 50) (recur))))))
+
+(defn read-until
+  "Call READ -- a fn of no arguments answering a string -- until PRED is true of
+  `{:answer <the last answer> :lines <every line seen so far, minus the status and
+  placeholder lines>}`, or MS runs out. Answers that state.
+
+  READS ARE THE ONLY WAY TO SEE A JOB, so 'wait for the job' is 'keep reading it':
+  the loop is what the model itself has to do, and it is the same loop whether the
+  caller drives harness.cap.jobs directly or goes through the tool seam."
+  [read pred ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop [seen []]
+      (let [answer (read)
+            seen   (into seen (remove #(or (re-find #"^\[" %) (= "(no new output)" %))
+                                      (str/split-lines answer)))
+            state  {:answer answer :lines seen}]
+        (cond
+          (pred state) state
+          (> (System/currentTimeMillis) deadline) state
+          :else (do (Thread/sleep 50) (recur seen)))))))
