@@ -83,14 +83,14 @@ payload 里带的与审计行里写的都是后者（CodeBuddy 的拼法，迁�
   （`fire` 的返回在其它点上**逐字节不变**——`:blocks` 这个键只在这一点出现。）
 - **空输出 = 这一条什么都不说**，不是错误。所以「本会话答不出 provider」那种情况的正确写法是
   打印空字符串，而不是报错。
-- 文本**原样**进 prompt，引擎不包装：块自己带 `<tools>` 这样的标签，作者写什么就是什么；
+- 文本**原样**进 prompt，引擎不包装：块自己带 `<project>` 这样的标签，作者写什么就是什么；
   块之间恰好一个空行。
 
 **退出 2 表示这次 run 不开始**：stderr 逐字是理由，客户端收到 RUN_ERROR，日志里有 `hook/SystemPrompt` 行。
 超时 / 起不来照点自己的 `:on-error`（`:block`）走同一条。**这是硬失败而不是 fail-open**，与 AGENTS.md 同族：
 这些 hook 写的是**本该进 system 消息的话**，吞掉它就是撒谎。
 
-组装住在 `harness.cap.system-prompt`（它同时注册下面那三条内建 hook）；它为什么不并进 `harness.cap.preamble`
+组装住在 `harness.cap.system-prompt`（它同时装上下面那两条内建 hook）；它为什么不并进 `harness.cap.preamble`
 见 [architecture](../architecture.md) 的模块地图与 [kernel](kernel.md#prompt-的载体冻结的是开头)。
 
 ## 三个来源，一条读取
@@ -129,7 +129,7 @@ thread-id → {:added {id decl}    ; presence：本会话贡献的
   藏起来会让「没有这条 hook」和「这条 hook 关着」变成同一个观察，而前者是谎话——声明就摆在文件里。
 
 id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文件里的位置）、会话 `pre-tool-use@1`
-（本会话第几次加）、内建 `builtin:tools`（名字就是 id，因为内核写得出名字）。
+（本会话第几次加）、内建 `builtin:env`（名字就是 id，因为内核写得出名字）。
 
 在会话里经 `eval` 这么用（工具表那套 `session-require-approval!` 是同一形状）：
 
@@ -138,7 +138,7 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 (harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "stop@1")
 (harness.kernel.hooks/session-enable! harness.kernel.tools/*thread-id* "stop@1")
 (harness.kernel.hooks/session-remove! harness.kernel.tools/*thread-id* "stop@1")
-(harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "builtin:tools")  ; 内建的也一样
+(harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "builtin:env")  ; 内建的也一样
 ```
 
 `effective-hooks` 是**引擎唯一读的那一面**：它把内建、磁盘、会话三层折在一起，
@@ -147,22 +147,32 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 `declarations-at` 已经**滤掉**被关的——一个被关掉的 hook 就是「不触发」，那是表的事实，
 不该让 dispatch 记得去判断。
 
-## 内建的三条行
+## 内建的两条行
 
-`harness.cap.system-prompt` 在加载时注册三条 `:run` 行，都在 `SystemPrompt` 点：
+`harness.cap.system-prompt` 在自己的 `install!` 里装上两条 `:run` 行，都在 `SystemPrompt` 点：
 
 | id | 块 | 说什么 |
 |---|---|---|
-| `builtin:tools` | `<tools>` | 本会话**实际被服务**的工具集合、本会话关掉了哪些、哪些来自外部程序（`mcp__<server>__<tool>`） |
 | `builtin:project` | `<project>` | 绑在哪个目录（绝对路径）、相对路径/bash/绝对路径各自怎么解析、围栏的自由路径集合（含 `:approval {:strict true}` 与 `:approval {:allow ..}` 的两种变化）；未绑定就明说没绑定、不提围栏 |
-| `builtin:provider` | `<provider>` | 生效的 vendor / model / 思考档；答不出就一个块都不出；**永不含 api-key** |
+| `builtin:env` | `<env>` | 这台机器：平台、命令实际交给哪个 shell（kind + 路径 + 起法）、声明名单里这个 shell 看得见哪些命令行增强工具（`rg` / `fd` / `jq` / `git`）——**有说，没有也说** |
 
-三块都是**现算**的：工具集合随会话注册、关闭、编辑模式变；binding 随 `project/bind!` 变；
-provider 随 `session-configure` 变。因此**事实不动则文本逐字节不动**（prefix 照旧命中），
-事实动了就付一次冷前缀——**宁可冷一次，也不让 system 消息说一件已经不成立的事**。
+**曾经还有两条，2026-09-16 的复议里退场**：`<tools>`（本会话的工具名册）与 `<provider>`（生效的
+vendor / model / 思考档）。名册在 wire 的 `:tools` 数组里**自描述**（每次请求都带着每个工具的名字与
+描述），说第二遍是把同一件事说两遍；`<provider>` 是**净损失**，如实记在
+`.scratch/session-context/spec.md`（`active-provider` 仍可问、`/api/model` 仍答，只是不再主动说）。
+工作与逐条断言在同一个目录，`.scratch/system-prompt-blocks/spec.md` 末尾记着这次复议**没有推翻它
+的任何一条决策**——被改的是行的集合，不是机制。
 
-`<tools>` 报的是 wire 上 `:tools` 数组里的那套（编辑模式减过的那套），不是整张表：列一个模型调不动的
-工具，正是这一块存在要消灭的那种过时。它也**不复制每个工具的描述**——描述已经在 `:tools` 里了。
+两块都是**现算**的：binding 随 `project/bind!` 变，机器事实随进程变。因此**事实不动则文本逐字节不动**
+（prefix 照旧命中），事实动了（换目录、关掉一条 hook）就付一次冷前缀——**宁可冷一次，也不让 system
+消息说一件已经不成立的事**。
+
+`<env>` 自己带两条纪律，值得单独写下来。**机器的事实每进程算一次，块每 run 现算**：平台、shell、
+增强工具与 `harness.infra.shell` 的解析同住一个 `defonce`，而块本身照旧每 run 组装——那条纪律管的是
+**会话**事实。**探测走同一个 shell**：一次 spawn 跑一个逐个 `command -v` 的小循环，不是
+`System.getenv`——登录 shell 会重新 source profile，它的 PATH 与 JVM 的可以不同，而模型真去跑的时候
+用的是前者，用 JVM 的 PATH 答出来的是那句到执行时才不成立的话。探测答不上来（起不来、超时）就
+**如实说「不知道」**：这一半报问不出来，不让整块消失，也不假装没有。
 
 ## dispatch：谁在跑
 
@@ -198,7 +208,7 @@ fire {point thread-id fact audit}
 逐字节相同。hook 只在**边**绑定了 run 的 sink 时触发，所以离线工具、replay、直接驱动内核的测试
 一个 hook 都不跑。**内建的行是这条的性质的唯一例外，而且只在一个地方**：它们在每个 thread 的表里，
 所以一次真触发的 `hook/SystemPrompt` 行会落——那是这些行在**干活**，不是引擎在无声明时留下痕迹；
-把三条都关掉，那一点又回到一行都不写。
+把两条都关掉，那一点又回到一行都不写。
 
 ## eval 的定位，与晋升路径
 

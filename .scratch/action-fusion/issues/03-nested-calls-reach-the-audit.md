@@ -17,7 +17,7 @@
   `loop` / `replay` / 既有测试**一字不改**。
 - **id 由外层调用派生**：`<外层 toolCallId>/<n>`，`n` 在该次调用内递增。这样读日志的人一眼分得出
   内层与顶层，也能机械地把内层归到外层——而不是拿到一串看起来像顶层调用的 id 去猜。
-- **内层事件照旧不上 wire**：相位事件本来就是审计行、不是帧（`harness.event` 的 docstring 写着这件事），
+- **内层事件照旧不上 wire**：相位事件本来就是审计行、不是帧（`harness.kernel.event` 的 docstring 写着这件事），
   所以 UI 不会因此多出卡片。**一个脚本的中间步骤不是七张卡片。**
 
 ## 已知代价（写在这里，免得下一个人重新发现）
@@ -29,7 +29,7 @@
 
 - [ ] 一次 eval 里调 N 个工具 → 日志里出现 3N 行内层 `tools/*`（pre / execute / post 各一行），
       id 全部派生自那次 eval 调用，且互不相同
-- [ ] 内层行的 thread 与 runId 语义不变（仍由边写，仍是 `harness.http` 的 `log!`）
+- [ ] 内层行的 thread 与 runId 语义不变（仍由边写，仍是 `harness.edge.http` 的 `log!`）
 - [ ] **「审计三行不带 args」继续成立**：内层那些行不带参数，命令正文仍只在
       assistant message 的 `tool_calls[].function.arguments` 里（与 `eval` 的 code 同一条读法）
 - [ ] 内层行**不上 wire**：一次带内层调用的 run 与不带内层调用的同形 run，AG-UI 帧序相同，UI 不多卡片

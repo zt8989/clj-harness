@@ -2,14 +2,18 @@
   "Where a session's instruction files come from, and how the blocks a run opens
   with are assembled and ordered.
 
-  Every fixture writes into the temp OS home the runner pins
-  (harness.test-runner/isolate!), never the developer's real one: this machine
-  has a 4.1 KB ~/AGENTS.md, and a suite that read it would depend on one person's
-  dotfiles."
+  EVERY TEST HERE GETS A HOME OF ITS OWN: the fixture wraps each case in
+  harness.test-support/with-temp-env, so the instruction files it plants land in a
+  directory nobody else reads and nobody has to clean. Not the developer's real home
+  (this machine has a 4.1 KB ~/AGENTS.md, and a suite that read it would depend on one
+  person's dotfiles), and not the run-wide temp pair either -- that one is shared by
+  every test in the JVM, so a file left there is a file the next test's session opens
+  with."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.test-support :as support]
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]))
 
@@ -32,25 +36,18 @@
     (spit f content :encoding "UTF-8")
     path))
 
-(defn- wipe-conventions!
-  "Clear what the tests above wrote into the pinned OS home. The pinned home is
-  ONE directory for the whole process, so a file one test left behind would be
-  read by every later one -- the discipline project_test applies to harness.edn."
-  []
-  (doseq [f (reverse (file-seq (io/file (home/user-home))))]
-    (when-not (= (str (io/file (home/user-home))) (str f))
-      (io/delete-file f true))))
-
 (use-fixtures :each
+  ;; A HOME PER TEST, made and deleted by the fixture. Nothing to wipe: the
+  ;; directory the conventions were planted in goes away with the test.
   (fn [f]
     (reset! tmp-dirs [])
-    (wipe-conventions!)
-    (try (f)
-         (finally
-           (doseq [d @tmp-dirs] (io/delete-file d true))
-           (wipe-conventions!)
-           (doseq [t ["pr-1" "pr-2" "pr-3" "pr-4" "pr-5" "pr-6"]]
-             (project/bind! t nil))))))
+    (support/with-temp-env
+     [_root _home]
+     (try (f)
+          (finally
+            (doseq [d @tmp-dirs] (support/wipe-tree! d))
+            (doseq [t ["pr-1" "pr-2" "pr-3" "pr-4" "pr-5" "pr-6"]]
+              (project/bind! t nil)))))))
 
 (deftest the-two-defaults-are-the-host-conventions
   (testing "unbound: the OS home's AGENTS.md, and nothing else"

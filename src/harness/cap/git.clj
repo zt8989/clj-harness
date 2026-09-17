@@ -47,8 +47,14 @@
   trailing newline is never part of the answer.
 
   :timeout is carried through rather than thrown: a git that hung is a fact the
-  caller may want to report, and it is not the same fact as git refusing."
+  caller may want to report, and it is not the same fact as git refusing.
+
+  IT REFUSES BY NAME FIRST when this machine has no POSIX shell: every argument
+  below is spliced into a single-quoted command line (see `quoted`), so running a
+  git it could not quote for would be the harness quietly asking a different
+  question than the one it wrote down."
   [dir & args]
+  (shell/require-posix! "`git`, which this session reads its branch and directory with,")
   (let [{:keys [exit out err timeout]}
         (shell/run {:command (str/join " " (cons "git" (map quoted args)))
                     :dir dir

@@ -29,12 +29,15 @@
   ask, so the arrangement would quietly answer one of them for itself."
   (:require [clojure.java.io :as io]
             [clojure.test :as t]
-            [harness.infra.home :as home]))
+            [harness.infra.home :as home]
+            [harness.test-support :as support]))
 
 (def test-namespaces
   '[harness.kernel.install-test
     harness.kernel.event-test
     harness.infra.db-test
+    harness.infra.shell-test
+    harness.infra.env-test
     harness.kernel.llm-test
     harness.cap.skills-test
     harness.cap.preamble-test
@@ -83,21 +86,9 @@
 (def ^:private tmp-user-home
   (atom nil))
 
-(def ^:private seed-config
-  "A minimal config.edn, so a run that resolves a provider from config -- rather
-  than from the scripted override -- has something to resolve. The INLINE form in
-  the :default section, so it needs no :providers entry: :protocol :fake is the
-  offline provider, and the endpoint is a URL that is never contacted.
-
-  It declares NO modalities, which is deliberate -- an inline provider that says
-  nothing about what it accepts is not guarded (see harness.edge.ag-ui/undeclared-
-  input?), and a seeded config must not make every text-only integration test
-  fail for a reason the test never stated."
-  "{:default {:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}}\n")
-
-(defn- seed!
-  [dir]
-  (spit (io/file dir "config.edn") seed-config :encoding "UTF-8"))
+;; The seed config lives in harness.test-support, with the reason it exists: a test
+;; that makes its OWN root (with-temp-env) needs the same file, and two copies of a
+;; text two things must agree on is one copy too many.
 
 (defn isolate!
   "Point the config root AND the OS home at fresh temp directories for this
@@ -115,7 +106,7 @@
                            (str "clj-harness-test-home-" stamp))]
         (.mkdirs dir)
         (.mkdirs home')
-        (seed! dir)
+        (support/seed-config! dir)
         (alter-var-root #'home/*root-override* (constantly (str dir)))
         (alter-var-root #'home/*user-home-override* (constantly (str home')))
         (reset! tmp-home (str dir))

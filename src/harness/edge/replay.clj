@@ -105,6 +105,80 @@
                              "would produce half a conversation, so it is refused.")
                         {:last-frame (peek frames)}))))))
 
+(defn open-run
+  "The run a log ends on WITHOUT closing it, or nil -- {:run-id .. :last-frame ..
+  :unanswered [toolCallId ..]}.
+
+  THE SAME WALK `ensure-complete!` REFUSES ON, read the other way: an `input`
+  opens a run, a terminal frame closes it, and this is what the open one left
+  unsaid. The refusal and the repair must not drift, so they ask the same two
+  questions of the same records -- and `closing-frames` is what the answer is for.
+
+  ONLY THE OPEN RUN'S CALLS ARE REPORTED. A call with no result INSIDE a run that
+  did close is the ordinary approval park -- its :run/interrupt ends the run and the
+  answer arrives on the resume run -- so 'every call needs a result' would report
+  the normal flow as damage and append a result to a call a human is still deciding."
+  [records]
+  (let [input-at  (last (keep-indexed (fn [i r] (when (= "input" (:kind r)) i)) records))
+        closed-at (last (keep-indexed (fn [i r]
+                                        (when (and (= "event" (:kind r))
+                                                   (frames/terminal? (:payload r)))
+                                          i))
+                                      records))]
+    (when (and (some? input-at) (or (nil? closed-at) (< closed-at input-at)))
+      (let [frames   (->> records
+                          (drop (inc (or closed-at input-at)))
+                          (filter #(= "event" (:kind %)))
+                          (mapv :payload))
+            answered (into #{} (keep #(when (= "TOOL_CALL_RESULT" (:type %))
+                                        (:toolCallId %)))
+                           frames)
+            calls    (distinct (keep #(when (= "TOOL_CALL_START" (:type %))
+                                        (:toolCallId %))
+                                      frames))]
+        {:run-id     (:runId (nth records input-at))
+         :last-frame (:type (peek frames))
+         :unanswered (vec (remove answered calls))}))))
+
+(defn closing-frames
+  "What a log that ends mid-run is MISSING, as {:run-id .. :last-frame .. :frames
+  [frame ..]} -- or nil when the log ends where a log should.
+
+  PURE: it says what is missing, and the writer is the edge, which owns the file.
+
+  A TOOL CALL THAT NEVER ANSWERED GETS A RESULT FIRST, and that is not tidiness:
+  the rebuilt conversation is handed to the client as the NEXT run's history, and an
+  assistant message whose tool_calls has no answering tool message is a shape the
+  vendors refuse -- so closing the run without answering it would trade a refusal on
+  the read side for a 400 on the next call. The sentence is the true one (the call
+  was cut off and nothing was recorded) rather than an invented result.
+
+  AND THE TERMINAL IS RUN_ERROR, NEVER RUN_FINISHED. A run that never reached a
+  terminal frame did not finish; this log is an append-only record whose whole value
+  is that its lines are true, and RUN_FINISHED would be the one line in it that lies.
+  The message says what happened and who wrote the line, because the reader of a
+  record is entitled to know a frame appeared without a run having emitted it."
+  [records]
+  (when-let [{:keys [run-id last-frame unanswered]} (open-run records)]
+    (let [results (vec (map-indexed
+                        (fn [i id]
+                          {:type      "TOOL_CALL_RESULT"
+                           :messageId (str run-id "-cut-" (inc i))
+                           :toolCallId id
+                           :content   (str "the run was cut off before this call"
+                                           " returned; no result was recorded")})
+                        unanswered))]
+      {:run-id     run-id
+       :last-frame last-frame
+       :frames     (conj results
+                         {:type    "RUN_ERROR"
+                          :message (str "the run was cut off: this record ends "
+                                        (if last-frame
+                                          (str "at " last-frame)
+                                          "before the run's first frame")
+                                        " with no terminal frame, and it was closed"
+                                        " when the session was continued")})})))
+
 (defn records->messages
   "Parsed log records -> the AG-UI message list they describe."
   [records]

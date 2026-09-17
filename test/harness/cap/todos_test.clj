@@ -90,21 +90,30 @@
 ;; ------------------------------------------------------ it outlives the process
 
 (defn- in-a-fresh-jvm
-  "Run FORM in a NEW JVM whose config root is THIS run's, and answer {:exit :out}.
+  "Run FORM in a NEW JVM whose config root is THIS run's and whose OS home is
+  USER-HOME, and answer {:exit :out}.
 
   A second process is the only way to prove the list is in the DATABASE: everything
   else in this file would pass for a list kept in a map.
 
+  THE OS HOME TRAVELS TOO, and it is a temp directory the test makes: a child JVM
+  inherits nothing of this process's `*user-home-override*`, so a child left to the
+  JVM's own `user.home` would read the DEVELOPER'S ~/AGENTS.md and ~/.agents/skills.
+  That is the rule for any test that forks a JVM (AGENTS.md), and it is the same pair
+  the fixture pins in-process -- here the root must be this run's, because the point
+  is that the child reads what this process wrote.
+
   The child's answer comes back through a FILE named by an environment variable,
-  never through stdout. Two reasons, and the second is the one that bit: this
-  machine's JDK 25 prints four 'restricted method' WARNING lines to stdout when
-  sqlite-jdbc loads its native library, so a child's stdout carries noise that has
-  nothing to do with the form -- which is currently failing an assertion in
-  harness.cap.project-test. And a path crossing a process boundary belongs in an
-  environment variable rather than in an interpolated argv string (deps.edn's
-  standing byte/encoding rule)."
-  [^String form ^java.io.File out]
-  (let [pb (doto (ProcessBuilder. ^java.util.List (vec ["clojure" "-M" "-e" form]))
+  never through stdout: this machine's JDK prints four 'restricted method' WARNING
+  lines to stdout when sqlite-jdbc loads its native library, so a child's stdout
+  carries noise that has nothing to do with the form. And a path crossing a process
+  boundary belongs in an environment variable rather than in an interpolated argv
+  string (deps.edn's standing byte/encoding rule)."
+  [^String form ^java.io.File out ^java.io.File user-home]
+  (let [pb (doto (ProcessBuilder. ^java.util.List
+                                  (vec ["clojure"
+                                        (str "-J-Duser.home=" (.getAbsolutePath user-home))
+                                        "-M" "-e" form]))
              (.directory (io/file (System/getProperty "user.dir")))
              (.redirectErrorStream true))]
     (.put (.environment pb) "CLJ_HARNESS_HOME" (home/root))
@@ -117,10 +126,13 @@
       {:exit (.exitValue p) :out out-text})))
 
 (deftest the-list-outlives-the-process-that-wrote-it
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "harness-todos-" (System/nanoTime)))
-        out (io/file dir "answer.txt")]
+  (let [dir   (io/file (System/getProperty "java.io.tmpdir")
+                       (str "harness-todos-" (System/nanoTime)))
+        uhome (io/file (System/getProperty "java.io.tmpdir")
+                       (str "harness-todos-home-" (System/nanoTime)))
+        out   (io/file dir "answer.txt")]
     (.mkdirs dir)
+    (.mkdirs uhome)
     (try
       (todos/write! tid [{:content "survives a restart" :status "in_progress"}])
       (let [r (in-a-fresh-jvm
@@ -128,13 +140,13 @@
                     " (spit (System/getenv \"CLJ_HARNESS_TEST_OUT\")"
                     " (pr-str (harness.cap.todos/items-for \"todos-test\"))"
                     " :encoding \"UTF-8\")")
-               out)]
+               out uhome)]
         (is (zero? (:exit r)) (str "the second JVM failed:\n" (:out r)))
         (is (= [{:content "survives a restart" :status "in_progress"}]
                (edn/read-string (slurp out :encoding "UTF-8")))
             "a process that never saw the write reads the list out of the store"))
       (finally
-        (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
+        (doseq [d [dir uhome]] (support/wipe-tree! d))))))
 
 ;; ------------------------------------------------------------- the refusals
 

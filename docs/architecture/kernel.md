@@ -90,13 +90,13 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 **但它是 system 消息的开头，不是整个 system 消息。** 一条 system 消息的全文由
 `harness.cap.system-prompt/assemble` 在每次 run 组装：`prompt.md` 的字节（冻结）之后，接上
-`SystemPrompt` 点每条匹配声明追加的文本，顺序由来源档位定（内建三条 → 文件 → 会话），块间一个空行。
-追加的文本**原样**进 prompt，引擎不包装——块自己带 `<tools>` 这类标签。
+`SystemPrompt` 点每条匹配声明追加的文本，顺序由来源档位定（内建两条 → 文件 → 会话），块间一个空行。
+追加的文本**原样**进 prompt，引擎不包装——块自己带 `<project>` 这类标签。
 
 **冻结的边界就是「与任何会话无关的话」这条线**：身份、secrets 纪律、以及「其余自己读」是
-**承诺**，写死在文件里；工具集合、绑定的目录、生效的 provider 是**事实**，现算。理由不是洁癖——
-事实能在会话中途变（`project/bind!`、`session-configure`、`session-disable!`），冻下来的那句就会
-说一件已经不成立的事。代价是事实动了要付一次冷前缀，那是它该有的样子。
+**承诺**，写死在文件里；绑定的目录、**这台机器长什么样**（平台、命令交给哪个 shell、有哪些
+命令行增强工具）是**事实**，现算。理由不是洁癖——事实能在会话中途变（`project/bind!`、
+`session-disable!`），冻下来的那句就会说一件已经不成立的事。代价是事实动了要付一次冷前缀，那是它该有的样子。
 
 两半各有主人：**system 半是 `harness.cap.system-prompt`，user 半是 `harness.cap.preamble`**
 （`harness.cap.project` 已经 require 了 `preamble`，而 system 半要 `tools` / `project` / `hooks.dispatch`，

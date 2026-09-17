@@ -64,6 +64,23 @@
    (log/info (render kind context))
    nil))
 
+(defn warn!
+  "The same shape at WARN, for a fact that is not a failure and is not ordinary
+  either -- something the process chose to let pass, which somebody reading the
+  file later needs to see. `error!` is for what threw and was caught; this is for
+  what did NOT throw and still is not what should have happened.
+
+  The distinction is worth a level rather than a louder INFO: a run whose client
+  hung up, a frame dropped on the floor and a stream that ended without a terminal
+  frame are all 'the process carried on, and here is what it carried on through'.
+  Folding them into INFO buries them among the starts and terminals that came
+  before; folding them into ERROR would claim a failure that nobody reported."
+  ([kind] (warn! kind {}))
+  ([kind context]
+   (logging/ensure!)
+   (log/warn (render kind context))
+   nil))
+
 (defn started
   "One line recording that the process came up and WHERE its logs are going. Not
   an error, and deliberately still a log line rather than a `println`: it is the

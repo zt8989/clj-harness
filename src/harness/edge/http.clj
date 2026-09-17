@@ -40,7 +40,15 @@
                    the last line, like any append-only record.
     \"session/rebuilt\" -- a rebuild action, recorded on the log it rebuilt:
                    the message count and the fact. The rebuild itself only
-                   READS the log; this line is its one trace.
+                   READS a log that is complete; the one write it can be forced
+                   into is the line below.
+    \"session/closed-off\" -- a rebuild found the log ending MID-RUN (a process
+                   killed between a run's last frame and its terminal one) and
+                   closed it instead of refusing: which run, at which frame, and
+                   the frames appended -- a result for every call that never
+                   answered, then RUN_ERROR. Written BEFORE the frames it names,
+                   so the record explains a terminal frame that no run emitted.
+                   A log that ends where it should is untouched by this.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -293,20 +301,47 @@
       zero frames that way.
 
   Bodies are UTF-8 BYTES: this machine's JVM default charset is GBK, so handing
-  http-kit a String would be a coin flip on any non-ASCII."
-  [thread-id run-id ch]
+  http-kit a String would be a coin flip on any non-ASCII.
+
+  IT REPORTS THE TERMINAL INTO STATE -- the run's one side channel to the close
+  handler (`handle-run`), since `:on-open` and `:on-close` are two callbacks with
+  nothing else in common: whether this stream was ever told to end. (What the run
+  was DOING lives in the same atom and is set by the loop that drains the kernel,
+  not here -- this function only ever sees frames.) `send!`'s own answer is NOT a
+  liveness signal and is deliberately ignored: measured 2026-09-17 on a client that
+  had RESET the connection, every `send!` still answered true, four thousand frames
+  went into a socket nobody was reading, and http-kit called the close handler only
+  when the server closed the channel itself. A TCP socket cannot be asked whether
+  the peer is still listening, so 'the browser hung up' is not a fact this process
+  can discover by writing."
+  [thread-id run-id ch state]
   (let [first? (atom true)]
     (fn [frame]
       (log! thread-id run-id "event" frame)
-      (let [body (.getBytes (str "data: " (json/write-str frame) "\n\n")
-                            StandardCharsets/UTF_8)
-            head (when @first?
-                   {:status  200
-                    :headers (merge cors {"Content-Type" "text/event-stream"
-                                          "Cache-Control" "no-cache"})
-                    :body    body})]
+      (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
+                             StandardCharsets/UTF_8)
+            head  (when @first?
+                    {:status  200
+                     :headers (merge cors {"Content-Type" "text/event-stream"
+                                           "Cache-Control" "no-cache"})
+                     :body    body})
+            last? (contains? terminal (:type frame))]
         (reset! first? false)
-        (hk/send! ch (or head body) (contains? terminal (:type frame)))))))
+        (when last?
+          (swap! state assoc :terminal (:type frame)))
+        (hk/send! ch (or head body) last?)
+        (when last?
+          ;; LOGGED WHERE IT IS DISPATCHED, not where it was built: this is the frame
+          ;; that carries close-after-send?, so 'the run reached a terminal frame' and
+          ;; 'the stream was told to end' are one moment. The outcome is the wire's
+          ;; own vocabulary (RUN_FINISHED / RUN_ERROR), and the reason rides along for
+          ;; the one terminal that has one.
+          ;;
+          ;; AFTER the send, not before it: a log write is a synchronous file write,
+          ;; and putting it in front would delay the frame that ends the run.
+          (log/info! :run/terminal {:thread-id thread-id :run-id run-id
+                                    :event     (:type frame)
+                                    :reason    (:message frame)}))))))
 
 (defn- resume-decisions
   "A client's resume entries -> the decisions the kernel replays, in order:
@@ -407,178 +442,259 @@
       (hook/emit :instructions-loaded {:path path}))
     (preamble/messages gathered)))
 
-(defn- run-agent! [ch input]
+(defn- run-agent! [ch state input]
   (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
-        emit    (runner thread-id run-id ch)
+        emit    (runner thread-id run-id ch state)
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
     (async/go
-      ;; THE RUN-SCOPED HOOK SINK, bound around the whole run. This is the edge,
-      ;; so it is the only place that knows both the thread and where an audit
-      ;; line goes; binding it here is what lets hooks fire at all -- and every
-      ;; caller BELOW the edge (an offline tool, replay, a scripted test driving
-      ;; the kernel directly) leaves it nil, so nothing fires there.
-      ;;
-      ;; It wraps the set-up as well as the run, because folding the session's
-      ;; instruction files is itself a hook point (InstructionsLoaded) and that
-      ;; folding happens before the first message is built. Binding it after the
-      ;; set-up would have left that point declared and permanently silent.
-      (binding [hook/*sink* {:thread-id thread-id
-                             :audit     (fn [payload]
-                                          (log! thread-id run-id
-                                                (str "hook/" (:point payload))
-                                                (dissoc payload :point)))
-                             :run-id    run-id}]
-        ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
-        ;; a text-only model -- or a resume naming an interrupt this process never
-        ;; parked -- blows up before the run starts. Catch it here and push a
-        ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
-        ;; run rather than a broken stream.
-        ;;
-        ;; THE SYSTEM MESSAGE IS ASSEMBLED HERE, and it has to be HERE -- inside
-        ;; the binding above -- or it silently loses its hooks: harness.system-
-        ;; prompt fires SystemPrompt through this sink, and an unbound sink means
-        ;; the point does not dispatch at all. A declaration at that point that
-        ;; says no lands in the catch below as an ordinary refusal, with the
-        ;; hook's own words as the RUN_ERROR reason.
-        (let [[provider messages decisions resolved]
-              (try (let [provider (providers/current-provider thread-id (:provider input))]
-                     (guard-input-modalities! input provider)
-                     [provider
-                      ;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
-                      ;; list this run will log and send -- not inside `stream!`,
-                      ;; where it would be easier and would make the `message` audit
-                      ;; line disagree with what actually went out. See
-                      ;; harness.kernel.llm/thinking-mode-history.
-                      (llm/thinking-mode-history
-                       (ag/inbound (:messages input) (system-prompt/assemble thread-id)
-                                   (opening-blocks! thread-id)
-                                   (:context input))
-                       provider)
-                      (resume-decisions (:resume input))
-                      (providers/resolve-provider thread-id (:provider input))])
-                   (catch Throwable t
-                     ;; A run that could not even be set up -- no provider, a
-                     ;; refused model -- is reported to the client as a
-                     ;; RUN_ERROR frame AND written down, because the frame
-                     ;; scrolls past in a browser and the reason somebody is
-                     ;; staring at is often a configuration mistake they will
-                     ;; want to read twice.
-                     (log/error! :run-refused t {:thread-id thread-id})
-                     (doseq [frame (into (vec (convert (ev/run-start)))
-                                         (convert (ev/run-error (ex-message t))))]
-                       (emit frame))
-                     nil))]
-          (when provider
-            ;; SessionStart fires on a session's FIRST run -- beside the provider
-            ;; init line, because both answer "what is this conversation, as it
-            ;; begins". It is an observer: its verdict is discarded. Every start is
-            ;; a "new" one today; the rebuild path (:source "resume") is a later
-            ;; ticket's.
-            (when-not (session-started? thread-id)
-              (hook/emit :session-start {:source "new"})
-              (mark-session-started! thread-id))
-            ;; The provider timeline, part 1: ONE init line per session, on its
-            ;; first run. It lands after the input line and before the first
-            ;; message line, so a reader meets "here is what this conversation is
-            ;; served by" before it meets the conversation. Later runs of the same
-            ;; thread do not repeat it -- the timeline is init plus changes, not a
-            ;; snapshot per run.
-            (when (and (nil? (providers/pinned-provider thread-id))
-                       (not (init-logged? thread-id)))
-              (log! thread-id run-id "provider/init"
-                    (provider-line provider (:source resolved)))
-              (mark-init-logged! thread-id))
-            ;; The decision record: what the human answered, next to the input that
-            ;; carried it. The same verdict also lands on the resumed call's
-            ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
-            ;; that carries the interrupt id and the client's payload.
-            (doseq [d decisions]
-              (log! thread-id run-id "approval/decided" d))
-            ;; The provider timeline, part 2: any change a tool made during this
-            ;; run, drained from the outbox. It lands after approval/decided
-            ;; because the change is only written once the human's approval has
-            ;; been consumed -- so the two lines read together as "approved, and
-            ;; here is what it changed".
-            ;;
-            ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
-            ;; are what the change moved (a session can only move a knob), and
-            ;; :override is the session's whole tier afterwards. The endpoint that
-            ;; resulted is on :resolved, so a reader stepping the timeline sees
-            ;; both "what was chosen" and "what that meant" at each step.
-            (doseq [c (providers/take-provider-changes! thread-id)]
-              (log! thread-id run-id "provider/changed"
-                    {:verdict  (:verdict c :approved)
-                     :before   (providers/wire (:before c)   providers/knobs)
-                     :after    (providers/wire (:after c)    providers/knobs)
-                     :trigger  (:trigger c)
-                     :override (providers/wire (:override c) providers/knobs)
-                     :resolved (providers/wire (:resolved c))}))
-            ;; The message record, submitted side: what the first LLM call is about
-            ;; to see. The ASSEMBLED system message -- prompt.md's frozen opening
-            ;; with each SystemPrompt hook's text behind it -- plus every inbound
-            ;; message in the provider's shape, one line each, VERBATIM. Context
-            ;; rides as a trailing user message -- it must never touch the system
-            ;; prompt, or the provider's prefill (prompt cache) would miss every
-            ;; call. The appended text has no other trace: it is server-side, it
-            ;; never becomes a frame, and this line is where its weight is on the
-            ;; record. (The hook/SystemPrompt line records the same run of it.)
-            (log-messages! thread-id run-id messages)
-            ;; Drain run-chan and convert each kernel event to AG-UI frames. The
-            ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
-            ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
-            ;; :run/done history itself is never converted -- it is the returned
-            ;; side of the message record instead.
-            (let [events (loop/run-chan provider messages {:thread-id thread-id
-                                                           :resume decisions
-                                                           ;; The session's skill bodies
-                                                           ;; go back in before every
-                                                           ;; LLM call. Both edges pass
-                                                           ;; the SAME function, so a
-                                                           ;; rebuilt conversation carries
-                                                           ;; what a live one did.
-                                                           :before-llm project/before-llm})]
-              (loop []
-                (when-let [ev (async/<! events)]
-                  (if (= :run/done (:type ev))
-                    (do
-                      ;; What happened to this run's MCP servers, drained from the
-                      ;; mcp outbox. IT LANDS AT THE END because that is when the
-                      ;; fact exists: a server is connected on the way to this run's
-                      ;; first LLM call (the seam asks for the roster), so at the
-                      ;; provider/changed drain above nothing has happened yet. A run
-                      ;; that never reached the provider leaves the line for the next.
-                      (doseq [e (cap-mcp/take-events!)]
-                        (log! thread-id run-id "mcp/server" e))
-                    ;; Returned side of the message record: every message the kernel
-                    ;; appended after the initial vector -- assistant replies
-                    ;; VERBATIM (the history holds the provider message unrebuilt,
-                    ;; reasoning and tool calls intact) and each tool result as the
-                    ;; tool message submitted on the next call. :run/done follows
-                    ;; RUN_ERROR too, so any run the kernel started leaves its full
-                    ;; message tail on disk -- but it lands one beat AFTER the
-                    ;; terminal frame, so a reader racing the consumer may not see
-                    ;; it yet.
-                    (log-messages! thread-id run-id
-                                   (subvec (:history ev) (count messages))))
-                    (do ;; Tool-lifecycle events are audit lines, not wire frames:
-                        ;; each lands as its own jsonl line, keyed by toolCallId.
-                        (when-let [[kind payload] (lifecycle-record ev)]
-                          (log! thread-id run-id kind payload))
-                        (doseq [frame (convert ev)] (emit frame))
-                        (recur))))))))))))
+      ;; A GO BLOCK'S EXCEPTION GOES NOWHERE: core.async throws it into the block's
+      ;; own channel, which nobody reads -- so a consumer that dies takes the run
+      ;; down in silence. The kernel's producer blocks on its next put, the client
+      ;; waits for frames that will never come, and the record stops mid-sentence
+      ;; with nothing anywhere saying why. That is the one failure in this file
+      ;; that cannot be allowed to be quiet, so the whole run body is wrapped.
+      (try
+        (binding [hook/*sink* {:thread-id thread-id
+                               :audit     (fn [payload]
+                                            (log! thread-id run-id
+                                                  (str "hook/" (:point payload))
+                                                  (dissoc payload :point)))
+                               :run-id    run-id}]
+          ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
+          ;; a text-only model -- or a resume naming an interrupt this process never
+          ;; parked -- blows up before the run starts. Catch it here and push a
+          ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
+          ;; run rather than a broken stream.
+          ;;
+          ;; THE SYSTEM MESSAGE IS ASSEMBLED HERE, and it has to be HERE -- inside
+          ;; the binding above -- or it silently loses its hooks: harness.system-
+          ;; prompt fires SystemPrompt through this sink, and an unbound sink means
+          ;; the point does not dispatch at all. A declaration at that point that
+          ;; says no lands in the catch below as an ordinary refusal, with the
+          ;; hook's own words as the RUN_ERROR reason.
+          (let [[provider messages decisions resolved]
+                (try (let [provider (providers/current-provider thread-id (:provider input))]
+                       (guard-input-modalities! input provider)
+                       [provider
+                        ;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
+                        ;; list this run will log and send -- not inside `stream!`,
+                        ;; where it would be easier and would make the `message` audit
+                        ;; line disagree with what actually went out. See
+                        ;; harness.kernel.llm/thinking-mode-history.
+                        (llm/thinking-mode-history
+                         (ag/inbound (:messages input) (system-prompt/assemble thread-id)
+                                     (opening-blocks! thread-id)
+                                     (:context input))
+                         provider)
+                        (resume-decisions (:resume input))
+                        (providers/resolve-provider thread-id (:provider input))])
+                     (catch Throwable t
+                       ;; A run that could not even be set up -- no provider, a
+                       ;; refused model -- is reported to the client as a
+                       ;; RUN_ERROR frame AND written down, because the frame
+                       ;; scrolls past in a browser and the reason somebody is
+                       ;; staring at is often a configuration mistake they will
+                       ;; want to read twice.
+                       (log/error! :run-refused t {:thread-id thread-id})
+                       (doseq [frame (into (vec (convert (ev/run-start)))
+                                           (convert (ev/run-error (ex-message t))))]
+                         (emit frame))
+                       nil))]
+            (when provider
+              ;; THE RUN'S FIRST LINE IN THE PROCESS LOG, and the anchor every later
+              ;; line about this run is read against: a run whose start has no
+              ;; terminal, no close and no death beside it is one whose process
+              ;; stopped between the two. The model rides along because 'which
+              ;; provider did this go to' is the other half of 'and then what'.
+              (log/info! :run/start {:thread-id thread-id :run-id run-id
+                                     :model     (:model provider)
+                                     :provider  (:provider provider)})
+              ;; SessionStart fires on a session's FIRST run -- beside the provider
+              ;; init line, because both answer "what is this conversation, as it
+              ;; begins". It is an observer: its verdict is discarded. Every start is
+              ;; a "new" one today; the rebuild path (:source "resume") is a later
+              ;; ticket's.
+              (when-not (session-started? thread-id)
+                (hook/emit :session-start {:source "new"})
+                (mark-session-started! thread-id))
+              ;; The provider timeline, part 1: ONE init line per session, on its
+              ;; first run. It lands after the input line and before the first
+              ;; message line, so a reader meets "here is what this conversation is
+              ;; served by" before it meets the conversation. Later runs of the same
+              ;; thread do not repeat it -- the timeline is init plus changes, not a
+              ;; snapshot per run.
+              (when (and (nil? (providers/pinned-provider thread-id))
+                         (not (init-logged? thread-id)))
+                (log! thread-id run-id "provider/init"
+                      (provider-line provider (:source resolved)))
+                (mark-init-logged! thread-id))
+              ;; The decision record: what the human answered, next to the input that
+              ;; carried it. The same verdict also lands on the resumed call's
+              ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
+              ;; that carries the interrupt id and the client's payload.
+              (doseq [d decisions]
+                (log! thread-id run-id "approval/decided" d))
+              ;; The provider timeline, part 2: any change a tool made during this
+              ;; run, drained from the outbox. It lands after approval/decided
+              ;; because the change is only written once the human's approval has
+              ;; been consumed -- so the two lines read together as "approved, and
+              ;; here is what it changed".
+              ;;
+              ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
+              ;; are what the change moved (a session can only move a knob), and
+              ;; :override is the session's whole tier afterwards. The endpoint that
+              ;; resulted is on :resolved, so a reader stepping the timeline sees
+              ;; both "what was chosen" and "what that meant" at each step.
+              (doseq [c (providers/take-provider-changes! thread-id)]
+                (log! thread-id run-id "provider/changed"
+                      {:verdict  (:verdict c :approved)
+                       :before   (providers/wire (:before c)   providers/knobs)
+                       :after    (providers/wire (:after c)    providers/knobs)
+                       :trigger  (:trigger c)
+                       :override (providers/wire (:override c) providers/knobs)
+                       :resolved (providers/wire (:resolved c))}))
+              ;; The message record, submitted side: what the first LLM call is about
+              ;; to see. The ASSEMBLED system message -- prompt.md's frozen opening
+              ;; with each SystemPrompt hook's text behind it -- plus every inbound
+              ;; message in the provider's shape, one line each, VERBATIM. Context
+              ;; rides as a trailing user message -- it must never touch the system
+              ;; prompt, or the provider's prefill (prompt cache) would miss every
+              ;; call. The appended text has no other trace: it is server-side, it
+              ;; never becomes a frame, and this line is where its weight is on the
+              ;; record. (The hook/SystemPrompt line records the same run of it.)
+              (log-messages! thread-id run-id messages)
+              ;; Drain run-chan and convert each kernel event to AG-UI frames. The
+              ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
+              ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
+              ;; :run/done history itself is never converted -- it is the returned
+              ;; side of the message record instead.
+              (let [events (loop/run-chan provider messages {:thread-id thread-id
+                                                             :resume decisions
+                                                             ;; The session's skill bodies
+                                                             ;; go back in before every
+                                                             ;; LLM call. Both edges pass
+                                                             ;; the SAME function, so a
+                                                             ;; rebuilt conversation carries
+                                                             ;; what a live one did.
+                                                             :before-llm project/before-llm})]
+                (loop []
+                  (when-let [ev (async/<! events)]
+                    (if (= :run/done (:type ev))
+                      (do
+                        ;; What happened to this run's MCP servers, drained from the
+                        ;; mcp outbox. IT LANDS AT THE END because that is when the
+                        ;; fact exists: a server is connected on the way to this run's
+                        ;; first LLM call (the seam asks for the roster), so at the
+                        ;; provider/changed drain above nothing has happened yet. A run
+                        ;; that never reached the provider leaves the line for the next.
+                        (doseq [e (cap-mcp/take-events!)]
+                          (log! thread-id run-id "mcp/server" e))
+                      ;; Returned side of the message record: every message the kernel
+                      ;; appended after the initial vector -- assistant replies
+                      ;; VERBATIM (the history holds the provider message unrebuilt,
+                      ;; reasoning and tool calls intact) and each tool result as the
+                      ;; tool message submitted on the next call. :run/done follows
+                      ;; RUN_ERROR too, so any run the kernel started leaves its full
+                      ;; message tail on disk -- but it lands one beat AFTER the
+                      ;; terminal frame, so a reader racing the consumer may not see
+                      ;; it yet.
+                      (log-messages! thread-id run-id
+                                     (subvec (:history ev) (count messages))))
+                      (do ;; Tool-lifecycle events are audit lines, not wire frames:
+                          ;; each lands as its own jsonl line, keyed by toolCallId.
+                          (when-let [[kind payload] (lifecycle-record ev)]
+                            (log! thread-id run-id kind payload)
+                            ;; WHAT THE RUN IS DOING, KEPT FOR THE WAY OUT. Only the
+                            ;; close handler and the drop warning read it, and both
+                            ;; are read when the run is over -- a run that stops
+                            ;; mid-flight and leaves no statement of where it stopped
+                            ;; is the exact hole this fills.
+                            (swap! state assoc :last (str kind " " (:toolName payload)))
+                            ;; A CALL THAT DID NOT RUN GETS A LINE, and only such a
+                            ;; call does: :pass is every ordinary call, and a line per
+                            ;; ordinary call is noise to scroll past. The rest are
+                            ;; decisions somebody made or a gate that fired -- the
+                            ;; answer to 'why didn't my tool run', which otherwise
+                            ;; lives only in the thread's own jsonl.
+                            (when-let [outcome (:outcome payload)]
+                              (log/info! :run/tool-not-run
+                                         {:thread-id thread-id :run-id run-id
+                                          :tool      (:toolName payload)
+                                          :outcome   outcome})))
+                          (doseq [frame (convert ev)] (emit frame))
+                          (recur)))))
+                ;; THE CHANNEL CLOSED, AND THIS IS WHERE A RUN SAYS WHETHER IT GOT
+                ;; TO SAY GOODBYE. The kernel closes it after :run/done, so every
+                ;; normal ending emits a terminal frame first and lands here quiet.
+                ;; A silent arrival means the run stopped without one -- a crashed
+                ;; consumer, a tool thread that died holding a result, a channel
+                ;; closed from underneath -- and the record would otherwise end
+                ;; mid-sentence with nothing anywhere saying so.
+                (when-not (:terminal @state)
+                  (log/warn! :run/events-closed-without-terminal
+                             {:thread-id thread-id :run-id run-id
+                              :last      (:last @state)}))))))
+      (catch Throwable t
+        (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
+                                    :last      (:last @state)})
+        ;; THE STREAM IS ENDED RATHER THAN LEFT OPEN: a client parked on a run
+        ;; that will never send another frame has nothing to look at and nothing
+        ;; to report, which is the state this whole wrapper exists to shorten.
+        (try (hk/close ch) (catch Throwable _ nil)))))))
 
 
 (defn- handle-run [req]
-  (let [input (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)]
+  (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+        thread-id (str (:threadId input))
+        run-id    (str (:runId input))
+        ;; THE RUN'S LIVE STATE, and the only thing the emitter and the close
+        ;; handler share. `:on-open` and `:on-close` are two callbacks on
+        ;; different threads with nothing else in common, so a fact one of them
+        ;; knows and the other must report lives here.
+        state     (atom {:terminal nil :last nil})]
     ;; as-channel wants no status or headers of its own. run-agent! returns immediately
     ;; -- the run is driven by a go loop draining the core.async channel -- so it does
     ;; not block the worker that :on-open runs on.
-    (hk/as-channel req {:on-open (fn [ch] (run-agent! ch input))})))
+    ;;
+    ;; ONE LINE PER STREAM END, SAYING WHETHER THE RUN SAID GOODBYE. Paired with
+    ;; `run/start`, that is what a reader needs to tell a finished run from one
+    ;; that stopped mid-flight, and the 'last' names where it stopped.
+    ;;
+    ;; WHAT IT CANNOT SAY IS WHO LEFT. A browser that aborts its fetch does not
+    ;; become visible here: an aborted fetch, a stopped tab and a live tab that
+    ;; simply stopped being sent anything all look the same from this side, and
+    ;; the client-side wording the browser puts on a run it cut off is its own
+    ;; ('BodyStreamBuffer was aborted'). What happens in the process is
+    ;; unambiguous either way -- NOTHING cancels a run when a client goes, so the
+    ;; run keeps running and its record keeps growing -- and that asymmetry is
+    ;; what makes the two failures tellable apart afterwards: a record that ends
+    ;; mid-tool with no terminal frame, beside a `run/start` and no `:shutdown`,
+    ;; is a run still going; beside a `:shutdown`, it is a process that was stopped.
+    (hk/as-channel req
+                   {:on-open  (fn [ch] (run-agent! ch state input))
+                    :on-close (fn [_ch status]
+                                (let [{:keys [terminal last]} @state]
+                                  (if terminal
+                                    (log/info! :run/stream-closed
+                                               {:thread-id thread-id :run-id run-id
+                                                :status    status
+                                                :terminal  terminal})
+                                    ;; NOT OBSERVED YET, AND KEPT ANYWAY: http-kit
+                                    ;; reports `:server-close` even for a peer that
+                                    ;; has reset the connection (measured), so this
+                                    ;; branch is the one place a client-side close
+                                    ;; WOULD show up if the server ever starts
+                                    ;; hearing about one. Silent when it fires is
+                                    ;; how a lost stream stays unexplained.
+                                    (log/warn! :run/stream-closed-before-terminal
+                                               {:thread-id thread-id :run-id run-id
+                                                :status    status
+                                                :last      last}))))})))
 
 ;; ----------------------------------------------------- the management edge
 ;;
@@ -1142,14 +1258,54 @@
       :else
       (api-response 200 (assoc (:ok folded) :threadId stem)))))
 
+(defn- close-off-open-run!
+  "Close the run a log ends on, so the conversation can be CONTINUED instead of
+  being refused -- {:run-id .. :frames [type ..]} when it closed something, nil
+  when the log already ends where a log should.
+
+  THIS IS WHERE A TRUNCATED LOG STOPS BEING A DEAD END. A process killed between
+  a run's last frame and its terminal one leaves a record that reads as half a
+  conversation, and every reader of it -- the UI opening the thread, a future
+  export, the eval reader -- was told to refuse it. The refusal is right about the
+  FACTS and wrong about the OUTCOME: the conversation the user wants back is
+  sitting right there, one terminal frame short of readable. So the run is closed
+  at the moment somebody asks to continue it, and the record says who closed it
+  and what was appended (`session/closed-off`). Until then nothing is touched --
+  reading a truncated log still refuses, because a reader that silently folds
+  half a run is the failure this whole contract exists to prevent.
+
+  THE AUDIT LINE LANDS BEFORE THE FRAMES IT NAMES, which is also why the appended
+  terminal is the last FRAME in the file: a reader that meets a RUN_ERROR no run
+  emitted must have met the line that explains it first.
+
+  BEST EFFORT ON PURPOSE. A corrupt log throws here and is left to `rebuild` to
+  refuse by name -- repairing is what this does, and the reader that follows says
+  precisely what is wrong with a log nobody can repair."
+  [stem ^java.io.File path]
+  (try
+    (when-let [{:keys [run-id last-frame frames]}
+               (replay/closing-frames (replay/lines->records (replay/read-lines path)))]
+      (log! stem nil "session/closed-off" {:run-id     run-id
+                                           :last-frame last-frame
+                                           :frames     (mapv :type frames)})
+      (doseq [frame frames]
+        ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
+        ;; reader pairs a terminal frame with the run it ended.
+        (log! stem run-id "event" frame))
+      {:run-id run-id :frames (mapv :type frames)})
+    (catch Throwable t
+      (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
+      nil)))
+
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
   the AG-UI message list (seed + every recorded frame, reasoning and tool
   calls included) plus the context it started with. The client takes both into
-  its next ordinary run; the server holds no rebuilt state. A truncated or
-  corrupt log is refused with the reason on the 400. The rebuild action lands
-  a session/rebuilt audit line on the log it rebuilt -- runId nil, because a
-  rebuild happens OUTSIDE any run.
+  its next ordinary run; the server holds no rebuilt state. A CORRUPT log is
+  refused with the reason on the 400; a log that merely ends MID-RUN is closed
+  off first (`close-off-open-run!`) and rebuilt, because that is what continuing
+  a session means. The rebuild action lands a session/rebuilt audit line on the
+  log it rebuilt -- runId nil, because a rebuild happens OUTSIDE any run.
 
   The stem is located BEFORE anything else happens, and that ordering is why a
   rebuild never writes half a trace: a stem that resolves to nothing, or to more
@@ -1157,6 +1313,8 @@
   [req stem]
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
+        _       (when (nil? (:error located))
+                  (close-off-open-run! stem (:ok located)))
         result  (when (nil? (:error located))
                   (try {:ok (replay/rebuild (:ok located))}
                        (catch Throwable t {:error (ex-message t)})))]
@@ -1899,6 +2057,38 @@
 
 ;; ---------------------------------------------------------------------- start
 
+(def ^:private death-logged?
+  "Whether this process has already arranged to record its own exit. One hook per
+  process, not one per `start!`: the test suite starts a server per case, and a
+  hook apiece would register a hundred of them."
+  (atom false))
+
+(defn- log-own-death!
+  "On the way out, one line saying the process is going down.
+
+  WHY THIS IS WORTH A HOOK. Everything else in the file is written by a process
+  that is still running; a run that stops mid-flight because the JVM went away
+  leaves its jsonl ending mid-sentence and NOTHING anywhere saying so -- which is
+  a death indistinguishable from a hang, from a client that hung up, and from a
+  record that was never flushed. This is the only code the JVM runs on the way
+  out, so it is the only place that line can come from. `harness.cap.mcp` installs
+  one for the same reason: cleanup has nowhere else to live.
+
+  THE LINE IS EVIDENCE WHEN IT APPEARS AND NONE WHEN IT DOES NOT, because the JVM
+  runs shutdown hooks only for an orderly death. A `SIGTERM` writes it -- three
+  runs out of three on 2026-09-17, on the thread this names -- and a `SIGKILL` or a
+  crash writes nothing at all (measured the same day: the file held its startup
+  line and nothing else). So an absent `:shutdown` narrows nothing by itself; what
+  it is for is the OTHER half, where the run's own record stops mid-flight: a
+  `run/start` with no terminal and a `:shutdown` after it is a process somebody
+  stopped, and the same without one is a run that is still going. Logback's own
+  hook races this one in principle; it has not been observed to win."
+  [root]
+  (when (compare-and-set! death-logged? false true)
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread. ^Runnable (fn [] (log/info! :shutdown {:root root}))
+                               "harness-shutdown"))))
+
 (defn start!
   "Start the server and return its stop fn. Default port is 8080.
 
@@ -1953,6 +2143,10 @@
         (println (str "harness listening on http://localhost:" (:port opts))
                  "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
         (log/started root (:port opts))
+        ;; ...AND ONE LINE FOR THE OTHER END OF THAT STORY. `:listening` marks
+        ;; where the file's story begins; this marks where the process stopped
+        ;; telling it, which is the fact a run that dies mid-flight leaves behind.
+        (log-own-death! root)
         ;; http-kit's server IS the stop fn, and its meta carries :local-port --
         ;; which is how every test learns the port the OS handed out. The wrapper
         ;; keeps that meta, so `(meta stop)` still answers the same thing.

@@ -22,12 +22,17 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 
 **测试不得读写真实的 `~/.clj-harness`、`~/AGENTS.md`、`~/.agents/skills`。**
 
-- config root 指向临时目录：`CLJ_HARNESS_HOME`，Clojure 侧由 `harness.test-runner/isolate!`
-  统一做掉（临时目录、`harness.home/*root-override*` 都归它），测试体内不要再自己设。
-- OS home 指向另一个临时目录：`harness.home/*user-home-override*`。Clojure 侧归 `isolate!`，
-  e2e 侧起服务时自动做（`harness.e2e-server`）。它和 root 是**平级的两个临时目录，不要嵌套**。
+- 进程级两个 override 由 `harness.test-runner/isolate!` 在开跑前指到临时目录：
+  `harness.home/*root-override*`（config root）与 `*user-home-override*`（OS home），
+  两者**平级、不嵌套**。这**是底线，不是一个测试的场地**。
+- **要 home / 项目目录 / 配置目录的测试自己造**：`harness.test-support/with-temp-env`
+  给这一个测试一对临时 root + OS home（跑完连目录一起删掉），项目目录用
+  `harness.test-support/temp-dir`。**不要往 isolate! 那对里写**：它是整个 JVM 共用的，
+  留下的文件会变成下一条用例的输入（凭空多出的 `<instructions>` / `<skills>` 块）。
+  临时 root 里 `with-temp-env` 会种一份最小 `config.edn`，否则 run 会被「没有 `:default` provider」拒掉。
 - 自己拉 JVM 的测试（fork 子进程、`ui/test/support/harness.ts`）要自己把两个都指过去：
-  `CLJ_HARNESS_HOME` 给 root，`-Duser.home` 给 OS home。
+  `CLJ_HARNESS_HOME` 给 root，`-Duser.home` 给 OS home。**答案不要从子进程的 stdout 读**——
+  JDK 的原生访问告警混在里面；让子进程写到一个文件里再读。
 - 改这两处用 `alter-var-root`，不要 `binding`——服务在别的线程上跑。
 - 跑完删掉临时目录。
 

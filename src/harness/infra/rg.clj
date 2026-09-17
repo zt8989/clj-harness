@@ -73,8 +73,12 @@
   than failures are not turned into errors here: 0 is 'there were matches', 1 is
   'there were none', and both come back to the caller to interpret. Anything else
   -- and a search that ran out of time -- is a NAMED failure, because 'nothing
-  was found' and 'the search never happened' must not look the same to a model."
+  was found' and 'the search never happened' must not look the same to a model.
+
+  A SEARCH IS BUILT AS A POSIX COMMAND LINE (see `quoted`), so on a machine with no
+  POSIX shell this refuses by name before spawning anything."
   [args dir]
+  (shell/require-posix! "`anchor_grep` / `glob` search with `rg`, which")
   (let [res (shell/run {:command (command-line args) :dir dir :timeout-ms timeout-ms})
         {:keys [exit out err]} res]
     (cond

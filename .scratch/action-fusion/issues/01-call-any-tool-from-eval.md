@@ -4,7 +4,7 @@
 不用手写 provider 形状、不用自己 JSON 编码参数。于是「读完二十个文件」「改完一个文件再跑测试」
 在一个 eval 里是两三行 Clojure，按返回值分支与循环都是语言本来就有的东西。
 
-这一票不新增工具、不改任何工具的定义：它加的是 `harness.tools` 里的**一个函数**。
+这一票不新增工具、不改任何工具的定义：它加的是 `harness.kernel.tools` 里的**一个函数**。
 
 **Blocked by:** None — can start immediately
 
@@ -13,14 +13,14 @@
 ## 形状
 
 ```clojure
-(harness.tools/call! "read" {:path "deps.edn"})
+(harness.kernel.tools/call! "read" {:path "deps.edn"})
 ;; => {:content "…" :error false}          ;; 与顶层调用同样的结果 map
 
-(mapv #(harness.tools/call! "read" {:path %}) ["deps.edn" "README.md"])
+(mapv #(harness.kernel.tools/call! "read" {:path %}) ["deps.edn" "README.md"])
 ```
 
 - **参数是关键字键的 Clojure map**：JSON 编码是缝自己的事，不该是调用者的仪式。
-- **`thread-id` 默认 `harness.tools/*thread-id*`**，也就是当前会话。这一条是承重的：相对路径的重根、
+- **`thread-id` 默认 `harness.kernel.tools/*thread-id*`**，也就是当前会话。这一条是承重的：相对路径的重根、
   `bash` 的 cwd、围栏的判定都挂在会话绑定上，默认到当前会话意味着**内层调用与顶层调用遵守同一套规矩**，
   而不是「从 eval 里发出去的调用碰巧忘了绑会话，于是对着进程 cwd 裸奔」。
 - 三参形态（显式 thread-id）留给测试与工具内部要对另一个会话说话的情形。
@@ -29,7 +29,7 @@
 
 它当然可以，而且这恰好证明能力是真的。但那样每个会话会各写一份**略有出入**的版本——忘了传 thread-id、
 忘了对结果判 `:error`、把参数 map 当成 JSON 已经编好——而这些差异的代价是路径落错地方。
-一个入口、一处 docstring、一套断言，是这个仓一贯的做法（`harness.shell` 存在的理由与它一模一样：
+一个入口、一处 docstring、一套断言，是这个仓一贯的做法（`harness.infra.shell` 存在的理由与它一模一样：
 决定 spawn 哪个 shell 的坑是机器的属性，不是调用方的）。
 
 ## 验收

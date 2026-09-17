@@ -97,6 +97,75 @@
       (is (some? e) "expected a failure, got a half-built conversation")
       (is (re-find #"(?i)terminat|incomplete|truncat" (str (ex-message e)))))))
 
+(deftest a-log-that-ends-mid-run-says-what-would-close-it
+  ;; The other half of the refusal above, and it asks the SAME walk: what the open
+  ;; run left unsaid. This is what a continuation appends before handing the
+  ;; conversation back, so the two must agree about which run is open.
+  (testing "a call that never answered gets a result, then the terminal"
+    (let [lines (concat [(input-line "r1" [seed])]
+                        (event-lines "r1" [(ev/run-start)
+                                           (ev/tool-call "c1" "read" "{}")]))
+          {:keys [run-id last-frame frames]}
+          (replay/closing-frames (replay/lines->records lines))]
+      (is (= "r1" run-id))
+      (is (= "TOOL_CALL_END" last-frame))
+      (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"] (mapv :type frames)))
+      (testing "the result answers the call that hung, in the true words"
+        (is (= "c1" (:toolCallId (first frames))))
+        (is (re-find #"cut off" (:content (first frames)))))
+      (testing "and the terminal is RUN_ERROR, saying why it exists"
+        (is (re-find #"TOOL_CALL_END" (:message (second frames))))
+        (is (re-find #"continued" (:message (second frames)))))))
+
+  (testing "a run that died before its first frame is closed too"
+    (let [{:keys [last-frame frames]}
+          (replay/closing-frames (replay/lines->records [(input-line "r1" [seed])]))]
+      (is (nil? last-frame) "there is no frame to name")
+      (is (= ["RUN_ERROR"] (mapv :type frames)))))
+
+  (testing "once those frames are appended the conversation READS -- the point of it"
+    (let [base     (concat [(input-line "r1" [seed])]
+                           (event-lines "r1" [(ev/run-start)
+                                              (ev/tool-call "c1" "read" "{}")
+                                              (ev/text-delta "\u534a\u53e5\u8bdd")]))
+          {:keys [run-id frames]} (replay/closing-frames (replay/lines->records base))
+          closed   (concat base (map #(log-line {:ts 3 :runId run-id :kind "event"
+                                                 :payload %})
+                                     frames))
+          messages (replay/lines->messages closed)]
+      (is (seq messages))
+      (is (= "c1" (:toolCallId (last messages)))
+          "the appended result is the tool message the provider requires")
+      (testing "and the invariant the vendors enforce now holds end to end"
+        (let [calls   (mapcat #(map :id (:toolCalls %)) messages)
+              answers (set (keep :toolCallId messages))]
+          (is (seq calls))
+          (is (every? answers calls)
+              "every tool call in the history has an answering tool message")))))
+
+  (testing "a log that ends where it should has nothing missing"
+    (is (nil? (replay/closing-frames (replay/lines->records (one-run-lines))))))
+
+  (testing "and neither has a log that never ran"
+    (is (nil? (replay/closing-frames
+               (replay/lines->records
+                [(log-line {:ts 1 :runId nil :kind "project/bound"
+                            :payload {:before nil :after "/tmp/p" :via "http"}})]))))))
+
+(deftest a-park-is-not-a-run-that-never-terminated
+  ;; A call awaiting a human sits INSIDE a run that closed properly: :run/interrupt
+  ;; ends the run and the answer arrives on the resume run. Reading 'this call has
+  ;; no result' as damage would append a result to a call nobody has answered yet --
+  ;; and the approval would arrive to find its call already spoken for.
+  (let [lines (concat [(input-line "r1" [seed])]
+                      (event-lines "r1" [(ev/run-start)
+                                         (ev/tool-call "c1" "bash" "{}")
+                                         (ev/run-interrupt [{:id "i1" :tool-call-id "c1"
+                                                             :name "bash" :args "{}"}])]))
+        records (replay/lines->records lines)]
+    (is (nil? (replay/closing-frames records)) "a parked call is not a missing result")
+    (is (seq (replay/lines->messages lines)) "and the log reads as it always did")))
+
 (deftest a-half-written-line-fails-loudly
   (testing "a line killed mid-write names the line it choked on"
     (let [lines (conj (vec (one-run-lines)) "{\"ts\":3,\"runId\":\"r1\",\"kin")

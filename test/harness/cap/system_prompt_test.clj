@@ -21,12 +21,12 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.kernel.hooks :as hooks]
             [harness.kernel.hooks.dispatch :as dispatch]
+            [harness.infra.env :as env]
             [harness.infra.home :as home]
+            [harness.infra.shell :as shell]
             [harness.cap.project :as project]
-            [harness.cap.providers :as providers]
             [harness.cap.system-prompt :as system-prompt]
-            [harness.test-support :as support]
-            [harness.kernel.tools :as tools]))
+            [harness.test-support :as support]))
 
 (use-fixtures :once support/with-builtins)
 
@@ -53,8 +53,8 @@
 (defn- says [text] {:run (fn [_] {:exit 0 :out text :err ""})})
 
 (defn- block
-  "The BLOCK out of a whole system message -- <tools>, <project> or <provider> --
-  for assertions about that block rather than about its place in the message. Nil
+  "The BLOCK out of a whole system message -- <project> or <env> -- for
+  assertions about that block rather than about its place in the message. Nil
   when the block is not there at all, which is itself a case worth asserting."
   [text tag]
   (let [open  (str "<" tag ">")
@@ -203,9 +203,9 @@
 
 (deftest the-kernel-registers-its-own-rows-like-any-other-hook
   (let [rows (hooks/declarations-at "sp-builtin" :system-prompt)]
-    (testing "three rows, all at the SystemPrompt point, all from the kernel"
-      (is (= 3 (count rows)))
-      (is (= #{"builtin:tools" "builtin:project" "builtin:provider"}
+    (testing "two rows, all at the SystemPrompt point, all from the kernel"
+      (is (= 2 (count rows)))
+      (is (= #{"builtin:project" "builtin:env"}
              (set (map :id rows))))
       (is (every? #(= :built-in (:source %)) rows)))
     (testing "each runs the only way a built-in may: a function, never a command"
@@ -213,27 +213,27 @@
       (is (every? #(nil? (:command %)) rows)))
     (testing "the table is where a session sees them, with the name it can switch off"
       (let [e (hooks/effective-hooks "sp-builtin")]
-        (is (= "tools" (:name (get e "builtin:tools"))))
-        (is (= :system-prompt (:point (get e "builtin:provider"))))
-        (is (false? (:disabled? (get e "builtin:tools"))))))))
+        (is (= "project" (:name (get e "builtin:project"))))
+        (is (= :system-prompt (:point (get e "builtin:env"))))
+        (is (false? (:disabled? (get e "builtin:project"))))))))
 
 (deftest a-builtin-row-is-switchable-exactly-like-a-declared-one
-  (hooks/session-disable! "sp-builtin-off" "builtin:tools")
+  (hooks/session-disable! "sp-builtin-off" "builtin:project")
   (try
     (let [e (hooks/effective-hooks "sp-builtin-off")]
-      (is (some? (get e "builtin:tools")) "still in the table: off is not hidden")
-      (is (true? (:disabled? (get e "builtin:tools"))))
-      (is (= 2 (count (hooks/declarations-at "sp-builtin-off" :system-prompt)))))
-    (finally (hooks/session-enable! "sp-builtin-off" "builtin:tools")))
+      (is (some? (get e "builtin:project")) "still in the table: off is not hidden")
+      (is (true? (:disabled? (get e "builtin:project"))))
+      (is (= 1 (count (hooks/declarations-at "sp-builtin-off" :system-prompt)))))
+    (finally (hooks/session-enable! "sp-builtin-off" "builtin:project")))
   (testing "and switching it off stops that block while the opening stays put"
-    (hooks/session-disable! "sp-builtin-text" "builtin:tools")
+    (hooks/session-disable! "sp-builtin-text" "builtin:project")
     (try
       (let [{:keys [text audits]} (assemble-run "sp-builtin-text")]
         (is (str/starts-with? text (str/trimr (opening))) "the opening is untouched")
-        (is (nil? (block text "tools")))
-        (is (some? (block text "project")) "the other rows are unaffected")
-        (is (= 2 (:matched (first audits)))))
-      (finally (hooks/session-enable! "sp-builtin-text" "builtin:tools")))))
+        (is (nil? (block text "project")))
+        (is (some? (block text "env")) "the other rows are unaffected")
+        (is (= 1 (:matched (first audits)))))
+      (finally (hooks/session-enable! "sp-builtin-text" "builtin:project")))))
 
 (deftest the-kernel-rows-run-first-then-the-file-then-the-session
   ;; The precedence rule, observed where it is visible: the order the text comes
@@ -242,9 +242,9 @@
   (hooks/session-add! "sp-order-all" :system-prompt (says "from-the-session"))
   (let [text (:text (assemble-run "sp-order-all"))
         at   (fn [s] (str/index-of text s))]
-    (is (every? some? [(at "<tools>") (at "<project>") (at "<provider>")
+    (is (every? some? [(at "<project>") (at "<env>")
                        (at "\n\nfrom-the-file\n") (at "\n\nfrom-the-session")]))
-    (is (< (at "<tools>") (at "<project>") (at "<provider>")
+    (is (< (at "<project>") (at "<env>")
            (at "\n\nfrom-the-file\n") (at "\n\nfrom-the-session"))
         "the kernel's rows lead, then the file's, then what the session added")))
 
@@ -252,53 +252,10 @@
   ;; An id is a name and a name means one row, so re-registering -- which is what
   ;; requiring the namespace again does -- must not grow the table.
   (let [before (mapv :id (hooks/declarations-at "sp-reload" :system-prompt))]
-    (is (= 3 (count before)))
+    (is (= 2 (count before)))
     (require 'harness.cap.system-prompt :reload)
     (is (= before (mapv :id (hooks/declarations-at "sp-reload" :system-prompt)))
-        "three rows before and three rows after, in the same order")))
-
-;; ------------------------------------------------------------- the tools block
-
-(deftest the-tools-block-reports-the-set-that-is-actually-served
-  (let [text   (:text (assemble-run "sp-tools"))
-        tools' (block text "tools")
-        served (sort (map #(get-in % [:function :name]) (tools/specs "sp-tools")))]
-    (testing "available is the array the model is handed, not the whole table"
-      ;; Read from specs and sorted, so a tool the editing mode subtracts cannot
-      ;; appear -- naming a tool the model cannot call would be exactly the
-      ;; staleness this block exists to kill.
-      (is (str/includes? tools' (str "available: " (str/join ", " served))))
-      (is (not (str/includes? tools' "edit"))
-          "the default mode is by-anchor, so the other mode's tool is not on offer"))
-    (testing "and no descriptions: the :tools array already carries every one"
-      (is (not (str/includes? tools' "description")))
-      (is (not (str/includes? tools' "old_string"))))))
-
-(deftest a-tool-this-session-registers-appears-and-an-outside-one-is-named
-  (tools/session-register! "sp-tools-live" "mcp__fs__read_file"
-                           {:description "read a file over MCP"
-                            :parameters {:type "object" :properties {} :required []}
-                            :required []
-                            :run (fn [_] "")})
-  (try
-    (let [tools' (block (:text (assemble-run "sp-tools-live")) "tools")]
-      (testing "a tool registered a moment ago is on the list, because it is"
-        (is (str/includes? tools' "mcp__fs__read_file")))
-      (testing "and it is named as somebody else's hand, not this kernel's"
-        (is (str/includes? tools' (str "external (an MCP server provides these, not this kernel): "
-                                       "mcp__fs__read_file")))))
-    (finally (tools/session-unregister! "sp-tools-live" "mcp__fs__read_file"))))
-
-(deftest a-tool-this-session-switches-off-stays-visible-and-is-named-separately
-  ;; Off is not hidden: the tool is still in the table and the model can switch it
-  ;; back on, so a roll call that omitted it would describe a session that does not
-  ;; exist.
-  (tools/session-disable! "sp-tools-off" "write")
-  (try
-    (let [tools' (block (:text (assemble-run "sp-tools-off")) "tools")]
-      (is (str/includes? tools' "write") "still on the roll call")
-      (is (str/includes? tools' "switched off in this session: write")))
-    (finally (tools/session-enable! "sp-tools-off" "write"))))
+        "two rows before and two rows after, in the same order")))
 
 (deftest the-text-is-a-function-of-the-facts-and-nothing-else
   ;; The prefix cache is the reason: two runs over the same facts must produce the
@@ -308,14 +265,15 @@
     (is (= (:text (assemble-run "sp-stable")) (:text (assemble-run "sp-stable")))))
   (testing "and when a fact does move, the text does"
     (let [before (:text (assemble-run "sp-stable"))]
-      (tools/session-register! "sp-stable" "mcp__x__y"
-                               {:description "x" :parameters {:type "object" :properties {}}
-                                :required [] :run (fn [_] "")})
-      (let [after (:text (assemble-run "sp-stable"))]
-        (is (not= before after))
-        (is (str/includes? after "mcp__x__y"))
-        (testing "while two runs ON the new facts agree with each other"
-          (is (= after (:text (assemble-run "sp-stable")))))))))
+      (support/with-machine {:command "/bin/bash" :kind :bash :posix? true
+                             :argv-prefix ["-lc"]}
+                  #{"rg"}
+        (fn []
+          (let [after (:text (assemble-run "sp-stable"))]
+            (is (not= before after))
+            (is (str/includes? after "available: rg"))
+            (testing "while two runs ON the new facts agree with each other"
+              (is (= after (:text (assemble-run "sp-stable")))))))))))
 
 ;; ----------------------------------------------------------- the project block
 
@@ -378,74 +336,126 @@
   (testing "and once it settles, the text is byte-identical run to run"
     (is (= (:text (assemble-run "sp-proj-moves")) (:text (assemble-run "sp-proj-moves"))))))
 
-;; ---------------------------------------------------------- the provider block
+;; --------------------------------------------------------------- the env block
 
-(deftest the-provider-block-reports-the-effective-selection
-  ;; Read from the existing resolution rather than re-derived here; a second
-  ;; implementation would eventually disagree with what the session is served from.
-  (providers/set-override! "sp-provider" {:provider "openrouter"
-                                          :model "openai/gpt-4o-mini"
-                                          :reasoning-effort "high"})
+(def ^:private posix-shell
+  {:command "/bin/bash" :kind :bash :posix? true :argv-prefix ["-lc"]})
+
+(deftest the-env-block-states-this-machine-and-reads-the-shell-it-was-given
+  ;; The whole block is three facts about the machine, so it is asserted with the
+  ;; machine's two answers handed in: the chain's and the probe's. What is being
+  ;; checked here is that the block READS them -- the shell line especially, because
+  ;; re-deciding 'which shell is this' in a second place is how the two places come
+  ;; to disagree.
+  (support/with-machine {:command "/usr/local/bin/pwsh" :kind :pwsh :posix? false
+               :argv-prefix ["-NoProfile" "-Command"]}
+              #{"rg" "git"}
+    (fn []
+      (let [text (:text (assemble-run "sp-env"))
+            e    (block text "env")]
+        (testing "the block is there, and behind <project>"
+          (is (some? e))
+          (is (< (str/index-of text "<project>") (str/index-of text "<env>"))))
+        (testing "the shell is harness.infra.shell's answer, reported and not re-decided"
+          (is (str/includes? e "pwsh"))
+          (is (str/includes? e "/usr/local/bin/pwsh"))
+          (is (str/includes? e "-NoProfile -Command")))
+        (testing "and the platform says which machine this is"
+          (is (str/includes? e "platform: "))
+          (is (str/includes? e (env/platform))))
+        (testing "BOTH halves of the tool list are stated: what is here and what is not"
+          (is (str/includes? e "available: rg, git"))
+          (is (str/includes? e "not found: fd, jq"))
+          (is (not (str/includes? e "(nothing from the list)"))))))))
+
+(deftest a-list-with-nothing-and-everything-in-it-says-so-plainly
+  (support/with-machine posix-shell #{}
+    (fn []
+      (let [e (block (:text (assemble-run "sp-env-none")) "env")]
+        (is (str/includes? e "available: (none from the list)"))
+        (is (str/includes? e (str "not found: " (str/join ", " env/enhancers)))))))
+  (support/with-machine posix-shell (set env/enhancers)
+    (fn []
+      (let [e (block (:text (assemble-run "sp-env-every")) "env")]
+        (is (str/includes? e (str "available: " (str/join ", " env/enhancers))))
+        (is (str/includes? e "not found: (nothing from the list)"))))))
+
+(deftest a-machine-whose-shell-would-not-answer-still-gets-a-block
+  ;; A machine that cannot be asked is a fact like any other, and the one thing the
+  ;; block must not do is take the run down with it: a session that started anyway
+  ;; with an honest 'I do not know' is better than a session that did not start.
+  (support/with-machine posix-shell :unknown
+    (fn []
+      (let [{:keys [text error]} (assemble-run "sp-env-unknown")
+            e (block text "env")]
+        (is (nil? error) "the assembly still happens")
+        (is (some? e) "and the block is still there")
+        (is (str/includes? e "available: unknown"))
+        (is (not (str/includes? e "not found:"))
+            "nothing is claimed to be missing -- it was never asked")))))
+
+(deftest the-probe-asks-the-shell-rather-than-reading-the-jvm-s-environment
+  ;; The property the enhancer half rests on: the JVM's PATH is not the shell's --
+  ;; the shell is started as a login shell and re-sources the profile -- so the
+  ;; question has to go to the shell. Asserted by watching the seam the probe uses
+  ;; (harness.infra.shell/run, the same one every tool call goes through) rather than
+  ;; by reading an answer back and agreeing with it.
   (try
-    (let [prov (block (:text (assemble-run "sp-provider")) "provider")]
-      (is (some? prov))
-      (is (str/includes? prov "vendor: openrouter"))
-      (is (str/includes? prov "model: openai/gpt-4o-mini"))
-      (is (str/includes? prov "reasoning effort: high")))
-    (finally (providers/set-override! "sp-provider" nil))))
+    (let [seen (atom nil)]
+      (with-redefs [shell/run (fn [req] (reset! seen req) {:exit 0 :out "rg\n" :err ""})]
+        (is (= #{"rg"} (env/probe*))))
+      (is (some? @seen) "it asked through the shell, and asked once")
+      (is (str/includes? (:command @seen) "rg")
+          "and the question names the tools it is about"))
+    (finally (env/reset-probe!))))
 
-(deftest the-provider-block-follows-a-mid-session-change
-  ;; session-configure moves the session's own tier, and the next run's system
-  ;; message moves with it. One cold prefix is the price, and that is the point:
-  ;; the alternative is a message naming a model that stopped serving the session.
-  (let [before (:text (assemble-run "sp-provider-moves"))]
-    (providers/set-override! "sp-provider-moves" {:provider "deepseek"
-                                                  :model "deepseek-flash"})
-    (try
-      (let [after (:text (assemble-run "sp-provider-moves"))]
-        (is (not= before after))
-        (is (str/includes? after "vendor: deepseek"))
-        (is (str/includes? after "model: deepseek-flash")))
-      (finally (providers/set-override! "sp-provider-moves" nil)))))
+(deftest the-same-machine-produces-the-same-text
+  ;; The prefix cache, asserted where the block could break it: two assemblies of the
+  ;; same thread on the same machine are byte-identical, because every machine fact in
+  ;; here was resolved once. No stubs -- this one is about the real answer being CACHED
+  ;; rather than re-asked (and re-worded) on every run.
+  (is (= (:text (assemble-run "sp-env-stable"))
+         (:text (assemble-run "sp-env-stable")))))
 
-(deftest a-thread-that-cannot-answer-produces-no-provider-block
-  ;; Not an error and not an empty <provider></provider>: a session with nothing to
-  ;; say about its model says nothing about its model.
-  (with-redefs [providers/active-provider (constantly {})]
-    (let [text (:text (assemble-run "sp-provider-none"))]
-      (is (nil? (block text "provider")))
-      (is (some? (block text "tools")) "and the other rows are unaffected")
-      (is (not (str/includes? text "<provider>")))))
-  (testing "a fact the resolution does not carry is left out rather than printed as nil"
-    ;; The seeded provider is an inline description: it names an endpoint and a
-    ;; model without naming a vendor. The block says what it knows and stays quiet
-    ;; about the rest.
-    (let [prov (block (:text (assemble-run "sp-provider-inline")) "provider")]
-      (is (some? prov))
-      (is (str/includes? prov "model: seeded"))
-      (is (not (str/includes? prov "vendor: "))))))
+(deftest the-env-row-is-an-ordinary-row
+  ;; Visible in the table, switchable by name, off means gone, on means back -- the
+  ;; same shape the project row is asserted to have, because a row is a row.
+  (is (false? (:disabled? (get (hooks/effective-hooks "sp-env-row") "builtin:env"))))
+  (hooks/session-disable! "sp-env-row" "builtin:env")
+  (try
+    (is (true? (:disabled? (get (hooks/effective-hooks "sp-env-row") "builtin:env"))))
+    (is (nil? (block (:text (assemble-run "sp-env-row")) "env")))
+    (finally (hooks/session-enable! "sp-env-row" "builtin:env")))
+  (is (some? (block (:text (assemble-run "sp-env-row")) "env"))))
 
-(deftest the-provider-block-never-carries-the-api-key
-  ;; A SEARCH, not a proof by construction. The block selects three named fields
-  ;; out of a map that already refuses to carry a key -- so no path for a leak
-  ;; should exist -- but a test that only reasoned about the paths would not notice
-  ;; the day one appears, and this is the one thing here that must never be wrong.
-  ;; The key is written where the resolver really reads it, so the run under test
-  ;; is one whose provider HAS a key.
+;; ------------------------------------------- the whole message, searched for a key
+
+(deftest the-assembled-text-never-carries-the-api-key
+  ;; A SEARCH, not a proof by construction: the rows are built from facts that
+  ;; refuse to carry a key, so no path for a leak should exist -- but a test that only
+  ;; reasoned about the paths would not notice the day one appears, and this is the one
+  ;; thing here that must never be wrong. The key is written where the resolver really
+  ;; reads it, so the session under test is one whose provider HAS a key.
+  ;;
+  ;; THE FROZEN OPENING NAMES `:api-key` ITSELF -- that is the prohibition, and it
+  ;; stays. So the search for the FIELD is made against what the hooks appended, which
+  ;; is the part a leak could come from; the search for the SECRET is made against the
+  ;; whole message, opening included.
   (let [secret "sk-live-DO-NOT-LEAK-4f2a9c"
         f      (home/dotenv-file)]
     (.mkdirs (.getParentFile f))
     (spit f (str "HARNESS_API_KEY=" secret "\n") :encoding "UTF-8")
     (try
-      (let [text (:text (assemble-run "sp-key"))
-            prov (block text "provider")]
-        (is (some? prov)
-            "the block is there, so the search is a search of something")
+      (is (str/includes? (slurp f :encoding "UTF-8") secret)
+          "the key really is where the resolver reads it, so this is a search of something")
+      (let [text     (:text (assemble-run "sp-key"))
+            appended (subs text (count (str/trimr (opening))))]
+        (is (str/includes? text "<env>") "and the message really was assembled")
         (is (not (str/includes? text secret)))
         (is (not (str/includes? text "HARNESS_API_KEY")))
-        (testing "and the block itself never even names the field"
-          ;; The frozen opening names :api-key in its prohibition -- that is the
-          ;; rule, and it stays. What must not appear is the provider block
-          ;; carrying it, which is what this half asks.
-          (is (not (str/includes? prov "api-key")))))
+        (testing "and what the hooks appended never even names the field"
+          (is (not (str/includes? appended "api-key"))))
+        (testing "while the search itself is one that could have found a key"
+          ;; Without this half the assertion above would pass on an empty string too.
+          (is (str/includes? (str text " " secret) secret))))
       (finally (io/delete-file f true)))))

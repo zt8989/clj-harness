@@ -558,7 +558,7 @@
   point, with the kernel's own rows, the on-disk declarations and the session's
   own folded together.
 
-    {\"builtin:tools\"   {:point :system-prompt :run <fn> :source :built-in}
+    {\"builtin:env\"     {:point :system-prompt :run <fn> :source :built-in}
      \"stop#0\"         {:point :stop :command \"notify.sh\" :source :config}
      \"pre-tool-use@1\"  {:point :pre-tool-use :command \"gate.sh\" :source :session}
      ...}

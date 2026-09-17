@@ -20,9 +20,32 @@
   THE TRAP. On Windows, `bash` on PATH is C:\\WINDOWS\\System32\\bash.exe -- the
   WSL launcher, which is a different filesystem entirely and, from a JVM, fails
   by producing nothing at all. So where a Git Bash install is found it is pinned
-  by absolute path. Nowhere else does a second bash exist to be captured by, so
-  the fallback IS the answer on macOS and Linux: the lookup is the same on every
-  platform, which is why this is a search rather than an os.name test."
+  by absolute path, and a `bash` found on PATH is REFUSED when it is that file:
+  the lookup is the same on every platform, which is why this is a search rather
+  than an os.name test.
+
+  AND THE SEARCH IS WRITTEN DOWN, because on Windows Git Bash may simply not be
+  installed at all. The chain is Git Bash (two known install paths) -> a `bash` on
+  PATH -> `pwsh` -> `powershell` -> `cmd`, and each step knows HOW IT IS STARTED:
+  `-lc` is bash's spelling, `-NoProfile -Command` is PowerShell's, `/c` is cmd's.
+  What stood here before was `(or (find-git-bash) \"bash\")`, and on a Windows box
+  without Git Bash that answer is a name which resolves to the WSL launcher -- a
+  shell that runs nothing and says nothing. A resolution that names a program
+  which cannot run is worse than one that admits there is none, so the chain has
+  no guessed tail.
+
+  WHAT A SHELL IS, AS THIS NAMESPACE ANSWERS IT:
+
+    {:command \"C:\\Program Files\\Git\\bin\\bash.exe\"   ; what is spawned
+     :kind    :git-bash                                   ; which one it is
+     :posix?  true                                        ; -lc and single quotes mean
+                                                          ;   anything here?
+     :argv-prefix [\"-lc\"]}                                ; how the command is handed over
+
+  IT IS RESOLVED ONCE PER PROCESS, because it is a fact about the machine rather
+  than about a call, and the resolution is a pure function of the chain plus an
+  existence question (`select`) -- so the Windows-only steps are asserted on a
+  machine that has neither Git Bash nor pwsh."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str])
@@ -30,11 +53,197 @@
            [java.nio.charset StandardCharsets]
            [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
-(defonce binary
-  (or (first (filter #(.exists (io/file %))
-                     ["C:\\Program Files\\Git\\bin\\bash.exe"
-                      "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]))
-      "bash"))
+;; ------------------------------------------------------ which shell, and how
+
+(defn- windows?
+  "Is this machine Windows? Asked rather than assumed, because the trap below is
+  one platform's, and a test that wants to reason about the other one can say so."
+  []
+  (str/includes? (str/lower-case (System/getProperty "os.name" "")) "win"))
+
+(def candidates
+  "The chain, in order. Each row is a KIND and a NAME TO LOOK FOR -- the first two
+  are absolute because a Git Bash install is not on PATH the way a person means it,
+  and the rest are names, looked up on PATH when the resolution is asked for.
+  Adding a step is adding a row; nothing else here knows how many there are."
+  [{:kind :git-bash   :command "C:\\Program Files\\Git\\bin\\bash.exe"}
+   {:kind :git-bash   :command "C:\\Program Files\\Git\\usr\\bin\\bash.exe"}
+   {:kind :bash       :command "bash"}
+   {:kind :pwsh       :command "pwsh"}
+   {:kind :powershell :command "powershell"}
+   {:kind :cmd        :command "cmd"}])
+
+(def ^:private how-to-start
+  "kind -> the argv a command goes behind. One table rather than a `case` at each
+  spawn site: there are three spawn sites, and a second copy of this would
+  eventually be fixed in one of them."
+  {:git-bash   ["-lc"]
+   :bash       ["-lc"]
+   :pwsh       ["-NoProfile" "-Command"]
+   :powershell ["-NoProfile" "-Command"]
+   :cmd        ["/c"]})
+
+(defn argv-prefix
+  "How a command is handed to KIND. `-lc` is bash's spelling, `-NoProfile
+  -Command` is PowerShell's, `/c` is cmd's -- and which one is right is not a
+  style question: the wrong flags are a command arriving as arguments to a
+  program that has no idea what to do with them."
+  [kind]
+  (get how-to-start kind ["-lc"]))
+
+(defn posix?
+  "Does KIND read `-lc` and single-quoted words the way this harness builds them?
+  bash and Git Bash do; PowerShell and cmd do not."
+  [kind]
+  (contains? #{:git-bash :bash} kind))
+
+(defn- path-like?
+  "Does COMMAND name a place rather than a program to go looking for on PATH?"
+  [command]
+  (boolean (re-find #"[\\/]" (str command))))
+
+(defn- wsl-launcher?
+  "Is PATH Windows' own bash.exe -- the WSL launcher, whose filesystem is not this
+  one and which, from a JVM, answers nothing at all? See this namespace's
+  docstring for the trap."
+  [path]
+  (let [p (str/lower-case (str/replace (str path) "\\" "/"))]
+    (str/ends-with? p "/system32/bash.exe")))
+
+(defn on-path
+  "The first existing FILE named COMMAND in PATH-STRING, as an absolute path, or
+  nil.
+
+  PATH-STRING IS AN ARGUMENT rather than something read here: what a machine's
+  PATH holds is exactly the kind of thing the chain is asked about, and a function
+  that read the environment itself could only ever be tested against the one this
+  process happens to have. Because of that, `locator` is the only caller that
+  has to know where PATH comes from.
+
+  The suffixes are Windows': a program there is `pwsh.exe` while the name a person
+  types is `pwsh`. ALL of them are tried on every platform rather than added on
+  Windows alone, because the WSL trap this namespace exists for -- a `bash.exe` that
+  is not a bash -- can only be reproduced by a lookup that considers the name, and a
+  rule that can only be asserted on the platform it protects is a rule nobody ever
+  re-checks."
+  [command path-string]
+  (let [sep   (java.util.regex.Pattern/quote (System/getProperty "path.separator" ":"))
+        dirs  (remove str/blank? (str/split (str path-string) (re-pattern sep)))
+        names [(str command) (str command ".exe") (str command ".cmd") (str command ".bat")]]
+    (some (fn [dir]
+            (some (fn [name]
+                    (let [f (io/file dir name)]
+                      (when (and (.exists f) (.isFile f)) (.getAbsolutePath f))))
+                  names))
+          dirs)))
+
+(defn locator
+  "The existence question `select` asks, as a function of PATH-STRING: where is
+  this row, if it is anywhere?
+
+  THE WSL LAUNCHER IS REFUSED HERE, not after the fact: a `bash` that is that
+  file is not a bash for this harness's purposes, so the row counts as ABSENT and
+  the chain walks on to pwsh. That refusal is the whole difference between this
+  and the `(filter #(.exists ..))` it replaces."
+  [path-string]
+  (fn [{:keys [command]}]
+    (if (path-like? command)
+      (let [f (io/file command)]
+        (when (and (.exists f) (.isFile f)) (.getAbsolutePath f)))
+      (when-let [found (on-path command path-string)]
+        (when-not (wsl-launcher? found) found)))))
+
+(defn select
+  "The row the chain lands on: the first candidate LOCATE can find, with :command
+  replaced by where it actually is. Nil when it finds none of them.
+
+  PURE, AND THAT IS THE POINT. The chain is data and 'is it there' is the
+  argument, so every branch of it -- Git Bash, the WSL refusal, pwsh, cmd, none at
+  all -- is asserted without changing this machine's PATH and without owning a
+  Windows box to change it on."
+  [candidates locate]
+  (some (fn [c] (when-let [found (locate c)] (assoc c :command found))) candidates))
+
+(defn resolve*
+  "This process's shell, asked of the REAL machine -- the uncached read behind
+  `resolution`:
+
+    {:command \"..\" :kind :bash :posix? true :argv-prefix [\"-lc\"]}
+
+  or NIL when the machine has none of the candidates. Nil is an answer, not a
+  failure: a resolution naming a shell that cannot run is the worse one, and a
+  caller that needs one says so through `require-shell!`."
+  []
+  (when-let [c (select candidates (locator (System/getenv "PATH")))]
+    {:command     (:command c)
+     :kind        (:kind c)
+     :posix?      (posix? (:kind c))
+     :argv-prefix (argv-prefix (:kind c))}))
+
+(defonce ^:private resolved
+  ;; A fact about the MACHINE, and machines do not change under a running process,
+  ;; so it is asked once -- the same defonce and the same reason as the `binary`
+  ;; it replaces. Held in a vector so that "asked, and there is none" is a cached
+  ;; answer too, rather than a question asked again at every spawn.
+  (atom nil))
+
+(defn resolution
+  "The process's shell -- {:command :kind :posix? :argv-prefix} -- resolved once
+  per process, or nil when the machine has none of the chain's candidates."
+  []
+  (if-let [cached @resolved]
+    (first cached)
+    (let [r (resolve*)]
+      (reset! resolved [r])
+      r)))
+
+(defn reset-resolution!
+  "Forget the cached answer so the next `resolution` asks again. For tests that
+  drive the chain; a running process's machine does not change under it."
+  []
+  (reset! resolved nil))
+
+(defn require-shell!
+  "The resolution, or a refusal that NAMES what is missing. A spawn site asks this
+  rather than dereferencing `resolution` itself, so 'this machine has no shell' is
+  a sentence instead of a null dereference three frames down."
+  []
+  (or (resolution)
+      (throw (ex-info (str "this machine has no shell this harness can spawn: Git Bash,"
+                           " bash, pwsh, PowerShell and cmd were all looked for and none"
+                           " was found, so nothing can be run. Install one of them -- Git"
+                           " for Windows is what this harness knows how to talk to.")
+                      {:reason :no-shell}))))
+
+(defn require-posix!
+  "The resolution, or a refusal BY NAME when the shell this process spawns is not
+  POSIX. CALLER names what cannot run, so the sentence can say so.
+
+  A CALLER THAT BUILDS A COMMAND LINE is the one that has to ask. rg and git
+  splice values into a line with POSIX single quotes (see `quote-arg`), which mean
+  nothing to PowerShell and less to cmd -- a path with a space in it would arrive
+  as two arguments and the caller would never know. Running anyway, under a second
+  quoting convention nobody wrote, is the failure this exists to prevent."
+  [caller]
+  (let [r (resolution)]
+    (cond
+      (nil? r)
+      (throw (ex-info (str caller " needs a POSIX shell, and this machine has no shell"
+                           " at all: Git Bash, bash, pwsh, PowerShell and cmd were all"
+                           " looked for. Install Git Bash (or put a bash on PATH) and it"
+                           " comes back.")
+                      {:reason :no-posix-shell :shell nil}))
+
+      (:posix? r)
+      r
+
+      :else
+      (throw (ex-info (str caller " needs a POSIX shell, and the shell this machine"
+                           " would spawn is " (name (:kind r)) " (" (:command r) "), which"
+                           " does not read the single-quoted command lines this harness"
+                           " builds. Install Git Bash (or put a bash on PATH) and it"
+                           " comes back.")
+                      {:reason :no-posix-shell :shell (:kind r)})))))
 
 (defn quote-arg
   "S as a single-quoted POSIX word, for a caller that is BUILDING a command line
@@ -59,9 +268,11 @@
   'no directory' but a null file to resolve -- the unbound-session case, which is
   the common one."
   [command & {:as opts}]
-  (apply shell/sh binary "-lc" command
-         (mapcat identity (assoc (into {} (remove (comp nil? val)) opts)
-                                 :out-enc "UTF-8"))))
+  (let [r (require-shell!)]
+    (apply shell/sh (concat [(:command r)] (:argv-prefix r) [command]
+                            (mapcat identity
+                                    (assoc (into {} (remove (comp nil? val)) opts)
+                                           :out-enc "UTF-8"))))))
 
 (defn run
   "Run COMMAND the way A: once, with STDIN written to it, and no more than
@@ -77,7 +288,8 @@
   a process that started, and callers must not read 'we never ran it' as
   'it exited 0'."
   [{:keys [command stdin dir timeout-ms]}]
-  (let [pb (doto (ProcessBuilder. [binary "-lc" command])
+  (let [r  (require-shell!)
+        pb (doto (ProcessBuilder. (vec (concat [(:command r)] (:argv-prefix r) [command])))
              (.redirectErrorStream false))
         _  (when dir (.directory pb (io/file dir)))
         p  (.start pb)
@@ -118,11 +330,6 @@
   [v]
   (= ::timeout v))
 
-(defn- windows?
-  "Is this machine Windows? Asked rather than assumed, because the trap below is
-  one platform's, and a test that wants to reason about the other one can say so."
-  []
-  (str/includes? (str/lower-case (System/getProperty "os.name" "")) "win"))
 
 (def ^:private windows-argv
   "How a long-lived command is run on Windows, as the `[program flag]` a caller
@@ -152,8 +359,8 @@
 
 (defn- spawn-argv
   "COMMAND as the argv to spawn for a LONG-LIVED process. Windows gets its own
-  shell (see `windows-argv`); everywhere else the command goes to bash, which is
-  what a command line written for a server assumes.
+  shell (see `windows-argv`); everywhere else the command goes to the resolved
+  shell, which is what a command line written for a server assumes.
 
   ONLY `start` asks this. `run` and `shell` stay on bash even on Windows, because
   what they run is written FOR a shell -- a hook is a script, often `.sh`, and the
@@ -163,7 +370,8 @@
   [command]
   (if (windows?)
     (conj (vec @windows-argv) command)
-    [binary "-lc" command]))
+    (let [r (require-shell!)]
+      (into (vec (cons (:command r) (:argv-prefix r))) [command]))))
 
 (defn- kill-tree!
   "Stop P and everything it started.

@@ -37,7 +37,8 @@
 | `infra.db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
 | `infra.logging` | 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 | `infra.log` | 一次调用同时写 stderr 与文件的门面（**后端自己的错误日志**，与 session jsonl 是两回事） |
-| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用） |
+| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用）：一条**写明的候选链**（Git Bash → bash → pwsh → PowerShell → cmd）+ 每种 shell 自己的起法（`-lc` / `-NoProfile -Command` / `/c`）；Windows 上那个 `bash` 是 WSL 启动器时它**拒绝**并把链走下一级 |
+| `infra.env` | **这台机器长什么样**（`<env>` 块的事实来源）：平台、shell（读 `infra.shell` 的解析）、以及一份声明名单里这个 shell 看得见哪些命令行增强工具。每进程探一次并缓存，**探测走同一个 shell**，`System/getenv` 不算数 |
 | `infra.rg` | **怎么跑 ripgrep**：二进制名、超时、以及「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句字符串——后者也是 `rg` 对**不存在的搜索根**说的话）。`cap.hashline.grep` 与 `cap.glob` 共用它，而 `--json` 的解析留在 `grep` 自己手里 |
 
 ### `harness.kernel` —— 机制：只说得清「怎么做」
@@ -64,7 +65,7 @@
 | `cap.web` | **出网**：唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、301/302/303 变 GET 而 307/308 保留方法与 body、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）。抽取器是纯函数，所以它不靠 socket 也能测 |
 | `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
-| `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那三条行（工具集合 / 工程目录 / provider 档）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这三条要 `kernel.tools` / `cap.project` / `kernel.hooks.dispatch` |
+| `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那两条行（工程目录 / 这台机器）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这些行要它，也要 `kernel.hooks.dispatch` |
 | `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的技能注入） |
 | `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
@@ -95,7 +96,7 @@
 4. **[home-and-storage](architecture/home-and-storage.md)** — 配置根、配置文件、sqlite、日志树、重建
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
-7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的三条行、eval 与晋升
+7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的两条行、eval 与晋升
 8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
 9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
 10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
@@ -120,9 +121,10 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 
 写下这一节是为了让「文档没写」与「还没做」不会被读成同一件事。
 
-- **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，同日复议改版）。
+- **Action Fusion**：计划见 `.scratch/action-fusion/`（4 张票，2026-09-15 立，两次复议）。
   一次 `eval` 调用就是一次融合：在里面调用工具表里的任何工具、按返回值决定下一步、循环做批量操作，
   中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。
   代码里**一行都没有**：没有 `call!` 这个入口，内层调用的相位事件没有去处。
-  （`prompt.md` 对本特征**一个字都没写**——它现在只留下与任何会话无关的话，见
-  [overview 的铁律 2](architecture/overview.md#三条铁律)；`eval` 的定位由工具自己的描述承担。）
+  **它的说明也不在 `prompt.md` 里，而且这是设计**：名册由 wire 上的 `:tools` 自描述，技法（怎么把工具
+  串起来用）才需要一块地方说——那块地方是 `SystemPrompt` 点上的一条内建行，开关在 `harness.edn`
+  （票 04），所以 `prompt.md` 到那时仍是一个字都不提本特征。

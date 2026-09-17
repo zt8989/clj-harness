@@ -24,8 +24,33 @@
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
+            [harness.infra.env :as env]
             [harness.infra.home :as home]
+            [harness.infra.shell :as shell]
             [harness.kernel.hooks :as hooks]))
+
+(def seed-config
+  "A minimal config.edn, so a run that resolves a provider from config -- rather
+  than from a scripted override -- has something to resolve. The INLINE form in
+  the :default section, so it needs no :providers entry: :protocol :fake is the
+  offline provider, and the endpoint is a URL that is never contacted.
+
+  It declares NO modalities, which is deliberate -- an inline provider that says
+  nothing about what it accepts is not guarded (see harness.edge.ag-ui/undeclared-
+  input?), and a seeded config must not make every text-only integration test
+  fail for a reason the test never stated.
+
+  HERE RATHER THAN IN THE RUNNER because a test that makes its OWN root needs the
+  same file: harness.test-runner seeds the run-wide one, `with-temp-env` seeds the
+  per-test one, and a run without it is refused with 'no provider: name one in
+  <root>/config.edn's :default' -- which is a confusing way to learn that a temp
+  root was left bare."
+  "{:default {:protocol :fake :base-url \"http://offline.invalid/v1\" :model \"seeded\"}}\n")
+
+(defn seed-config!
+  "Write the seed config into DIR, making it a root a run can work in."
+  [dir]
+  (spit (io/file dir "config.edn") seed-config :encoding "UTF-8"))
 
 (defn config-text
   "DEFAULT-EDN and PROVIDERS-EDN as the text of the one config.edn a home is
@@ -63,6 +88,64 @@
   []
   (io/delete-file (hooks-file) true))
 
+(defn wipe-tree!
+  "Delete DIR and everything under it, bottom-up.
+
+  BOTTOM-UP BECAUSE `io/delete-file` DOES NOT RECURSE: on a non-empty directory its
+  `silently` flag turns the failure into a scheduled deleteOnExit, so the obvious
+  one-line version of this leaves the tree exactly where it was -- a skill planted by
+  one test was then read by every test after it."
+  [dir]
+  (doseq [f (reverse (file-seq (io/file dir)))]
+    (io/delete-file f true)))
+
+(defn temp-dir
+  "A fresh, empty directory under the system temp directory, named for LABEL."
+  [label]
+  (let [d (io/file (System/getProperty "java.io.tmpdir")
+                   (str "clj-harness-" label "-" (System/nanoTime)))]
+    (.mkdirs d)
+    (str d)))
+
+(defmacro with-temp-env
+  "Run BODY with the configuration ROOT and the OS HOME pointed at a fresh pair of
+  temp directories of this test's own, deleted on the way out. ROOT and HOME are
+  bound to their path strings.
+
+  A TEST THAT NEEDS A HOME MAKES ONE. `harness.test-runner/isolate!` makes ONE pair
+  for the whole run, and every test in the JVM shares it -- so a file planted there
+  is a file the next test reads (an <instructions> block nobody declared, a skill
+  called `alpha` in a catalog), and the cleanup written to undo it is a delete
+  against the OS home, which is the developer's REAL home the moment the override is
+  not in force. Neither problem exists if the directory belongs to the test.
+
+  THE PROJECT DIRECTORY AND ANY CONFIG FILE ARE THE BODY'S TO MAKE, under ROOT or
+  HOME: this only decides what `harness.infra.home/root` and `user-home` answer.
+
+  ALTER-VAR-ROOT, NOT BINDING: the kernel runs its loop and its tools on their own
+  threads, and a thread-local binding does not reach them -- a bound home would be
+  silently ignored by everything below the test body. Restored in a `finally`, so
+  the shared pair is back even when the body throws."
+  [[root home] & body]
+  `(let [root#     (temp-dir "root")
+         home#     (temp-dir "home")
+         prev-root# @#'home/*root-override*
+         prev-user# @#'home/*user-home-override*]
+     ;; A BARE ROOT REFUSES EVERY RUN: with no config.edn there is no :default
+     ;; provider, and the run's first hook fails with 'no provider: name one in
+     ;; <root>/config.edn's :default'. The seed is the smallest file that answers it.
+     (seed-config! root#)
+     (alter-var-root #'home/*root-override*      (constantly root#))
+     (alter-var-root #'home/*user-home-override* (constantly home#))
+     (try (let [~root root#
+                ~home home#]
+            ~@body)
+          (finally
+            (alter-var-root #'home/*root-override*      (constantly prev-root#))
+            (alter-var-root #'home/*user-home-override* (constantly prev-user#))
+            (wipe-tree! root#)
+            (wipe-tree! home#)))))
+
 (defn without-builtins!
   "Switch the kernel's own rows off for THREAD-ID, so a test asking about the
   DECLARED rows sees only those. Per-thread, like every other switch, so it cannot
@@ -97,6 +180,27 @@
   [f]
   (let [teardowns [(cap-tools/install!) (cap-hooks/install!) (system-prompt/install!)]]
     (try (f) (finally (doseq [td teardowns] (td))))))
+
+(defn with-machine
+  "Run F with the MACHINE STUBBED: the shell harness.infra.shell resolves to, and
+  the enhancer set harness.infra.env's probe answers with.
+
+  BOTH HALVES ARE INJECTABLE ON PURPOSE. Everything the <env> block states is a fact
+  about the machine this suite happens to run on, so a test that asserted them against
+  that machine could only ever assert the one shape it has -- and the shapes that
+  matter most (a Windows shell, a name that is missing) are exactly the ones it does
+  not have. Both answers are process-wide caches, so they are reset around the body:
+  a stub must not become the answer the next test reads."
+  [resolution probe f]
+  (try
+    (with-redefs [shell/resolve* (constantly resolution)
+                  env/probe*    (constantly probe)]
+      (shell/reset-resolution!)
+      (env/reset-probe!)
+      (f))
+    (finally
+      (env/reset-probe!)
+      (shell/reset-resolution!))))
 
 
 (defn with-mcp

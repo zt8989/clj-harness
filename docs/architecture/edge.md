@@ -53,7 +53,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`） | `project/bound` |
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
-| `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端 | `session/rebuilt` |
+| `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上那一轮（补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建 | `session/rebuilt`，合上过则先有 `session/closed-off` |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它 | 无（只读） |
 | `/api/projects` | GET | 侧边栏的数据：每个项目 + 它的会话 | 无 |

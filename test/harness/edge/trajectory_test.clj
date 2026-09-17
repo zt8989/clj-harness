@@ -17,7 +17,8 @@
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             [harness.fake :as fake]
-            [harness.infra.home :as home])
+            [harness.infra.home :as home]
+            [harness.kernel.frames :as frames])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]
@@ -518,6 +519,36 @@
   (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
        (filter #(= "message" (:kind %)))))
 
+(defn- await-run-recorded!
+  "Wait until THREAD-ID's log has stopped being written, and answer its records.
+
+  THE RETURNED SIDE LANDS AFTER THE TERMINAL FRAME: the edge writes :run/done's
+  messages once the SSE has closed, so at the moment the client's body ends the record
+  is still missing the assistant messages -- and a tool call's name and arguments live
+  on exactly those (the audit lines name the tool and never its body, which is why
+  `call-index` reads the pair out of the messages). Folding the log without waiting is
+  a race with the writer, and it is how this test failed under a full suite: the tool
+  item came back with a null name because the message naming the call was not written
+  yet.
+
+  THE CONDITION IS ABOUT THE WRITER, NOT ABOUT WHAT THIS TEST WANTS TO SEE. 'A terminal
+  frame is in the record and the last line is a message' is the end of the sequence the
+  edge writes; asking instead for 'a tool item exists' would pass by construction and
+  hide the very race the wait exists to survive."
+  [thread-id ms]
+  (let [f      (replay/locate (home/projects-dir) thread-id)
+        ended? (fn [records]
+                 (and (some #(and (= "event" (:kind %))
+                                  (frames/terminal? (:payload %)))
+                            records)
+                      (= "message" (:kind (last records)))))
+        finish (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (let [records (stats/read-records f)]
+        (if (or (ended? records) (> (System/currentTimeMillis) finish))
+          records
+          (do (Thread/sleep 25) (recur)))))))
+
 (deftest the-endpoint-folds-what-the-run-wrote
   ;; The whole path, once, over real HTTP: a real run writes the log, and the route
   ;; folds it. The system message is checked BYTE FOR BYTE against the line the edge
@@ -528,6 +559,9 @@
        {:content "done"}]
       (fn [port]
         (send-run! port thread-id)
+        ;; BEFORE the fold, not after it: the route reads the log, so the log has to
+        ;; have been finished being written (see await-run-recorded!).
+        (await-run-recorded! thread-id 5000)
         (let [[status body] (get-json port (str "/api/threads/" thread-id "/trajectory"))
               items   (:items (first (:turns body)))
               by      (fn [k] (first (filter #(= k (:kind %)) items)))

@@ -14,7 +14,7 @@
 `:parked`，所以它继续往下走，人永远不被问，那条记录就此孤儿（谁也 resume 不了它，客户端从没见过它）。
 今天这看起来像「工具什么都没干」，实际是「一个本该问到人的决定掉进了地板缝」。
 
-**二、`skill`。** 正文靠 `harness.skills/derived-injections` 发现：它把 assistant message 里 `skill` 的
+**二、`skill`。** 正文靠 `harness.cap.skills/derived-injections` 发现：它把 assistant message 里 `skill` 的
 `tool_call_id` 与一条以 `[skill-loaded]` 开头的 tool message 对起来。内层调用产生不了这一对
 （历史里只有 eval 那一次调用），于是正文被取回、印在 eval 的输出里、然后丢掉——**看起来成功，实际没有**。
 
@@ -41,7 +41,7 @@
 - [ ] 内层加载 `skill` → 指名拒绝（说清顶层调用才行），且**不返回** `[skill-loaded]` 那行
       ——免得派生注入去追一条根本不存在的 tool message
 - [ ] 被拒之后序列能继续：后续调用照常执行，run 正常收尾
-- [ ] 若拒绝要报相位事件，新增的 outcome 值必须写进 `harness.event` 的 docstring
+- [ ] 若拒绝要报相位事件，新增的 outcome 值必须写进 `harness.kernel.event` 的 docstring
       （本仓的规矩：不允许悄悄多一个没人记录的值）
 - [ ] 离线全量 `harness.test-runner` 全绿
 

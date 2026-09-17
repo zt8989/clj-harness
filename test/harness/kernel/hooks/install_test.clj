@@ -30,7 +30,7 @@
 (deftest an-empty-table-when-nothing-is-installed
   (testing "no built-in rows, no files -- the state a fresh kernel is in"
     (is (= [] (ids-at :system-prompt "t-empty"))
-        "the kernel's own three rows are installed, not registered at load")
+        "the kernel's own rows are installed, not registered at load")
     (is (= {} (hooks/config "t-empty"))
         "and no layer has installed a reader, so there are no files to read")))
 
@@ -38,15 +38,15 @@
   (let [before (hooks/effective-hooks "t-rows")
         td     (system-prompt/install!)]
     (try
-      (testing "installing makes exactly the three rows appear, named as they were"
-        (is (= ["builtin:tools" "builtin:project" "builtin:provider"]
+      (testing "installing makes exactly the two rows appear, named as they were"
+        (is (= ["builtin:project" "builtin:env"]
                (ids-at :system-prompt "t-rows")))
         (is (every? #(= :built-in (:source (get (hooks/effective-hooks "t-rows") %)))
-                    ["builtin:tools" "builtin:project" "builtin:provider"])))
+                    ["builtin:project" "builtin:env"])))
       (testing "and they are switchable like any other row, which is the point of them being rows"
-        (hooks/session-disable! "t-rows" "builtin:tools")
-        (is (true? (:disabled? (get (hooks/effective-hooks "t-rows") "builtin:tools"))))
-        (hooks/session-enable! "t-rows" "builtin:tools"))
+        (hooks/session-disable! "t-rows" "builtin:project")
+        (is (true? (:disabled? (get (hooks/effective-hooks "t-rows") "builtin:project"))))
+        (hooks/session-enable! "t-rows" "builtin:project"))
       (finally (td)))
     (testing "the teardown leaves the table as it found it"
       (is (= before (hooks/effective-hooks "t-rows"))))))
@@ -71,10 +71,10 @@
   (let [rows (system-prompt/install!)
         files (cap-hooks/install!)]
     (try
-      (is (= 3 (count (ids-at :system-prompt "t-both"))))
+      (is (= 2 (count (ids-at :system-prompt "t-both"))))
       (files)
       (testing "withdrawing the file reader leaves the kernel's own rows"
-        (is (= 3 (count (ids-at :system-prompt "t-both"))))
+        (is (= 2 (count (ids-at :system-prompt "t-both"))))
         (is (= {} (hooks/config "t-both"))))
       (finally (rows)))
     (is (= [] (ids-at :system-prompt "t-both")))))

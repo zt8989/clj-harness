@@ -4,14 +4,19 @@
   This is the layer that catches what unit tests structurally cannot see -- a run that
   is generated and logged perfectly but never reaches the client, and converter state
   that is rebuilt per event. Both of those actually happened during development."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
             [harness.infra.home :as home]
+            [harness.kernel.event :as ev]
+            [harness.kernel.frames :as frames]
             [harness.kernel.hooks :as hooks]
             [harness.kernel.llm :as llm]
+            [harness.kernel.loop :as loop]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
@@ -264,8 +269,8 @@
            ;; trailing newlines before adding a block.
            (is (str/starts-with? (:content sys)
                                  (str/trimr (slurp "prompt.md" :encoding "UTF-8"))))
-           (is (str/includes? (:content sys) "<tools>")
-               "and the kernel's own roll call is behind it")))
+           (is (str/includes? (:content sys) "<env>")
+               "and the kernel's own text is behind it")))
        (testing "the user's message is recorded in the provider's shape"
          (is (some #(and (= "user" (:role %))
                          (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee" (:content %)))
@@ -335,27 +340,28 @@
          (testing "the model is handed the frozen opening first, byte for byte"
            (is (str/starts-with? text (str/trimr (slurp "prompt.md" :encoding "UTF-8")))))
          (testing "then the kernel's own rows, each stating a live fact"
-           (is (str/includes? text "<tools>"))
-           (is (str/includes? text "available: "))
            (is (str/includes? text "<project>"))
            (is (str/includes? text "not bound to any project directory"))
-           (is (str/includes? text "<provider>")))
+           (is (str/includes? text "<env>"))
+           (is (str/includes? text "platform: "))
+           (is (str/includes? text "available: ")))
          (testing "and then what the FILE declared -- all three sources, in order"
            (is (str/includes? text "A DECLARED BLOCK"))
-           (is (< (str/index-of text "<tools>") (str/index-of text "A DECLARED BLOCK"))))
+           (is (< (str/index-of text "<env>") (str/index-of text "A DECLARED BLOCK"))))
          (testing "the trigger is on the record, with what it collected"
            (let [line (first (filter #(= "hook/SystemPrompt" (:kind %))
                                      (wait-for-recorded (log-file "it-system")
                                                         (fn [ls] (some #(= "hook/SystemPrompt" (:kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 4 (get-in line [:payload :matched]))
-                 "the kernel's three rows and the file's one")))
+             (is (= 3 (get-in line [:payload :matched]))
+                 "the kernel's two rows and the file's one")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
-           ;; written. The tool roll call is deliberately not among them: the
+           ;; written. The blocks' own tags are deliberately not among them: the
            ;; scripted run reads this repository's own README, which talks about
-           ;; <tools> too, so that string can reach the wire legitimately.
+           ;; <tools> and <project> too, so those strings can reach the wire
+           ;; legitimately. What is checked is a line no README has.
            (is (not (str/includes? on-wire "A DECLARED BLOCK")))
            (is (not (str/includes? on-wire "not bound to any project directory")))
            (is (not (str/includes? on-wire "available: "))))
@@ -378,28 +384,27 @@
        (post-run "it-system-off")
        (let [before (first (system-texts "it-system-off"))]
          (is (str/includes? before "A DECLARED BLOCK"))
-         (is (str/includes? before "<tools>"))
+         (is (str/includes? before "<env>"))
          (testing "switching the declared row and one of the kernel's off"
            (hooks/session-disable! "it-system-off" "system-prompt#0")
-           (hooks/session-disable! "it-system-off" "builtin:tools")
+           (hooks/session-disable! "it-system-off" "builtin:project")
            (io/delete-file (log-file "it-system-off") true)
            (post-run "it-system-off")
            (let [after (first (system-texts "it-system-off"))]
              (is (not (str/includes? after "A DECLARED BLOCK")))
-             (is (not (str/includes? after "<tools>")))
+             (is (not (str/includes? after "<project>")))
              (testing "the rows that were NOT switched off are still there"
-               (is (str/includes? after "<project>"))
-               (is (str/includes? after "<provider>")))
+               (is (str/includes? after "<env>")))
              (testing "and the opening is untouched -- it is not in a hook's hands"
                (is (str/starts-with? after (str/trimr (slurp "prompt.md" :encoding "UTF-8")))))))
          (testing "switching them back on brings both blocks back"
            (hooks/session-enable! "it-system-off" "system-prompt#0")
-           (hooks/session-enable! "it-system-off" "builtin:tools")
+           (hooks/session-enable! "it-system-off" "builtin:project")
            (io/delete-file (log-file "it-system-off") true)
            (post-run "it-system-off")
            (let [again (first (system-texts "it-system-off"))]
              (is (str/includes? again "A DECLARED BLOCK"))
-             (is (str/includes? again "<tools>")))))))
+             (is (str/includes? again "<env>")))))))
     (finally (support/wipe-hooks!))))
 
 (deftest a-system-prompt-hook-that-says-no-stops-the-run-over-http
@@ -1204,11 +1209,25 @@
          (let [before (:bytes (row-for listing-dir "listing-a"))]
            (is (= "RUN_FINISHED"
                   (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
-           (let [session (row-for listing-dir "listing-a")
-                 f       (log-file-for "listing-a")]
-             (is (< before (:bytes session)) "the run appended to the same file")
-             (is (= (.length f) (:bytes session)))
-             (is (= (.lastModified f) (:lastActivity session))))))
+           (let [f (log-file-for "listing-a")]
+             ;; THE RUN IS STILL WRITING WHEN THE CLIENT SEES ITS LAST FRAME: the
+             ;; returned side of the message record lands AFTER the terminal frame, so
+             ;; sizes taken now would be compared against a file that grows again a beat
+             ;; later -- which is how these two assertions failed in a full suite (the
+             ;; listing's snapshot said 165736 where the file already said 165916). Wait
+             ;; for the writer's own end of sequence, then measure.
+             (wait-for-recorded
+              f
+              (fn [ls] (and (some #(= "message" (:kind %)) ls)
+                            (some #(and (= "event" (:kind %))
+                                        (frames/terminal? (:payload %)))
+                                  ls)
+                            (= "message" (:kind (last ls)))))
+              5000)
+             (let [session (row-for listing-dir "listing-a")]
+               (is (< before (:bytes session)) "the run appended to the same file")
+               (is (= (.length f) (:bytes session)))
+               (is (= (.lastModified f) (:lastActivity session)))))))
        (testing "a session whose file is NOT there is still a row, with null facts"
          ;; The state the sidebar must survive: the store says this session exists,
          ;; the disk says nothing about it. Null is the honest answer and it is NOT
@@ -2302,32 +2321,78 @@
          (is (= body (slurp file :encoding "UTF-8")))
          (is (not (.exists (io/file (log-dir) (str tid ".jsonl"))))))))))
 
-(deftest rebuild-refuses-truncated-and-corrupt-logs-by-name
+(deftest rebuild-closes-a-mid-run-log-and-refuses-a-corrupt-one
   (with-server
    "it-refuse"
    (fn []
-     (testing "a log that ends mid-run is refused, naming the last frame"
-       (let [tid (str "trunc-" (java.util.UUID/randomUUID))
-             f   (log-file tid)]
-         (spit f (str (json/write-str
-                       {:ts 1 :runId "r1" :kind "input"
-                        :payload {:threadId tid :runId "r1"
-                                  :messages [{:id "u1" :role "user" :content "hi"}]
-                                  :tools [] :context []}})
-                      "\n"
-                      (json/write-str
-                       {:ts 2 :runId "r1" :kind "event"
-                        :payload {:type "RUN_STARTED" :threadId tid :runId "r1"}})
-                      "\n")
+     (testing "a log that ends mid-run is CLOSED OFF, and the conversation comes back"
+       ;; The state a killed process leaves: a run whose last frame is a tool call
+       ;; that never returned. Refusing it left the thread unopenable for good, so
+       ;; the rebuild closes the run instead -- and WRITES, which is why the frames
+       ;; are not the only thing to assert here.
+       (let [tid     (str "trunc-" (java.util.UUID/randomUUID))
+             f       (log-file tid)
+             frames  (vec (mapcat (ag/outbound tid "r1")
+                                  [(ev/run-start)
+                                   (ev/tool-call "c1" "read" "{}")]))
+             records #(mapv (fn [l] (json/read-str l :key-fn keyword))
+                            (str/split-lines (slurp f :encoding "UTF-8")))]
+         (.mkdirs (.getParentFile f))          ; the writer creates it; a fixture must not assume
+         (spit f (str (str/join "\n"
+                                (concat [(json/write-str
+                                          {:ts 1 :runId "r1" :kind "input"
+                                           :payload {:threadId tid :runId "r1"
+                                                     :messages [{:id "u1" :role "user" :content "hi"}]
+                                                     :tools [] :context []}})]
+                                        (map (fn [frame]
+                                               (json/write-str
+                                                {:ts 2 :runId "r1" :kind "event"
+                                                 :payload frame}))
+                                             frames)))
+                       "\n")
                :encoding "UTF-8")
          (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)]
-           (is (= 400 (.statusCode resp)))
-           (is (re-find #"(?i)mid-run|RUN_FINISHED|RUN_ERROR" (:error reply)))
-           (testing "the refusal left no audit line behind"
-             (is (not-any? #(= "session/rebuilt" (:kind %))
-                           (mapv #(json/read-str % :key-fn keyword)
-                                 (str/split-lines (slurp f :encoding "UTF-8")))))))))
+           (is (= 200 (.statusCode resp)) "a log one frame short of readable is not a refusal")
+           (is (seq (:messages reply)))
+           (testing "the record says who closed it, and what was appended"
+             (let [kinds   (mapv :kind (records))
+                   closing (first (filter #(= "session/closed-off" (:kind %)) (records)))]
+               (is (= 1 (count (filter #(= "session/closed-off" %) kinds))))
+               (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
+                       :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
+                      (:payload closing)))
+               (testing "and the frames follow it, the terminal frame last"
+                 (is (= ["session/closed-off" "event" "event" "session/rebuilt"]
+                        (mapv :kind (take-last 4 (records)))))
+                 (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
+                        (->> (records)
+                             (filter #(= "event" (:kind %)))
+                             (take-last 2)
+                             (mapv #(get-in % [:payload :type]))))))))
+           (testing "so the next reader gets a whole conversation"
+             (is (seq (replay/lines->messages (str/split-lines (slurp f :encoding "UTF-8"))))))))
+       (testing "and a second rebuild appends nothing: the log closed once"
+         (let [tid (str "trunc2-" (java.util.UUID/randomUUID))
+               f   (log-file tid)]
+           (.mkdirs (.getParentFile f))
+           (spit f (str (json/write-str
+                         {:ts 1 :runId "r1" :kind "input"
+                          :payload {:threadId tid :runId "r1"
+                                    :messages [{:id "u1" :role "user" :content "hi"}]
+                                    :tools [] :context []}})
+                        "\n")
+                 :encoding "UTF-8")
+           (let [first-lines (count (str/split-lines (slurp f :encoding "UTF-8")))]
+             (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+             (let [after-first (str/split-lines (slurp f :encoding "UTF-8"))]
+               (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+               (let [after-second (str/split-lines (slurp f :encoding "UTF-8"))]
+                 (is (> (count after-first) first-lines) "the first rebuild closed the run")
+                 (is (= 1 (count (filter #(str/includes? % "closed-off") after-second)))
+                     "the second found nothing to close")
+                 (is (= (inc (count after-first)) (count after-second))
+                     "and appended only its own rebuild line")))))))
      (testing "a half-written line is refused, naming the line"
        (let [tid (str "corrupt-" (java.util.UUID/randomUUID))]
          (spit (log-file tid)
@@ -2380,35 +2445,30 @@
   and the load above."
   [{:content "done"}])
 
-(defn- wipe-conventions! []
-  ;; BOTTOM-UP, because io/delete-file does NOT recurse: on a non-empty directory
-  ;; its `silently` flag turns the failure into a scheduled deleteOnExit, so the
-  ;; one-line version of this leaves the tree exactly where it was. That went
-  ;; unnoticed while the only thing written here was ~/AGENTS.md (one file, which
-  ;; deletes fine) -- but a SKILL is a directory holding a SKILL.md, so as soon as
-  ;; one test plants a skill, every LATER test in this namespace inherits it and
-  ;; asserts against a home it never made.
-  (doseq [f (reverse (file-seq (io/file (home/user-home) ".agents")))]
-    (io/delete-file f true))
-  (io/delete-file (io/file (home/user-home) "AGENTS.md") true))
 
 (deftest an-opening-block-reaches-the-model-and-never-the-client
   ;; The whole shape, through the real edge: the instruction files and the skills
   ;; catalog are in the RUN's message record (the model reads them) and absent
   ;; from every AG-UI frame (the client never does). "The front end shows
   ;; nothing" is not a filtering decision anywhere -- it is this.
-  (let [proj      (str (System/getProperty "java.io.tmpdir")
-                       "/harness-http-skills-" (System/nanoTime))
-        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))]
-    (.mkdirs (io/file proj))
-    (.mkdirs (io/file skill-dir))
-    (spit (str (io/file (home/user-home) "AGENTS.md")) "STANDING RULE\n" :encoding "UTF-8")
-    (spit (str (io/file proj "AGENTS.md")) "PROJECT RULE\n" :encoding "UTF-8")
-    (spit (str skill-dir "/SKILL.md")
-          "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
-          :encoding "UTF-8")
-    (project/bind! "it-skills" proj)
-    (try
+  ;;
+  ;; BOTH HOMES ARE THIS TEST'S OWN (support/with-temp-env): the conventions go in a
+  ;; temp OS home and the project in a temp root, so nothing is planted in the pair
+  ;; every test in this JVM shares -- a skill left there is an `alpha` every later
+  ;; catalog lists, and the wipe that used to clean it up was a delete against the OS
+  ;; home itself.
+  (support/with-temp-env
+   [_root home]
+   (let [proj      (support/temp-dir "http-skills")
+         skill-dir (str (io/file home ".agents" "skills" "alpha"))]
+     (.mkdirs (io/file skill-dir))
+     (spit (str (io/file home "AGENTS.md")) "STANDING RULE\n" :encoding "UTF-8")
+     (spit (str (io/file proj "AGENTS.md")) "PROJECT RULE\n" :encoding "UTF-8")
+     (spit (str skill-dir "/SKILL.md")
+           "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
+           :encoding "UTF-8")
+     (project/bind! "it-skills" proj)
+     (try
       (with-server
        "it-skills" skill-script
        (fn []
@@ -2450,30 +2510,28 @@
                        (filter #(= "TOOL_CALL_START" (:type %)) frames)))))))
       (finally
         (project/bind! "it-skills" nil)
-        (io/delete-file (io/file proj) true)
-        (wipe-conventions!)))))
+        (support/wipe-tree! proj))))))
 
 (deftest an-unreadable-instruction-file-stops-the-run-by-name
   ;; The contrast with a broken skill, asserted where it matters: at the edge, as
   ;; a RUN_ERROR the client sees, rather than a silently rule-less run.
-  (let [f (io/file (home/user-home) "AGENTS.md")]
-    (.mkdirs (io/file (home/user-home)))
-    (spit (str f) "rules\n" :encoding "UTF-8")
-    (.setReadable f false false)
-    (try
-      (if (.canRead f)
-        (is true "permission bits do not apply to this user; nothing to assert")
-        (with-server
-         "it-badrules" script
-         (fn []
-           (let [frames (wire/frames-from-sse (.body (post-run "it-badrules")))]
-             (testing "the client gets a terminated run carrying the reason"
-               (is (= "RUN_ERROR" (:type (last frames))))
-               (is (str/includes? (str (:message (last frames)))
-                                  "cannot read the instruction file")))
-             (testing "and no LLM call was made at all"
-               (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames)))))))
-      (finally (wipe-conventions!)))))
+  (support/with-temp-env
+   [_root home]
+   (let [f (io/file home "AGENTS.md")]
+     (spit (str f) "rules\n" :encoding "UTF-8")
+     (.setReadable f false false)
+     (if (.canRead f)
+       (is true "permission bits do not apply to this user; nothing to assert")
+       (with-server
+        "it-badrules" script
+        (fn []
+          (let [frames (wire/frames-from-sse (.body (post-run "it-badrules")))]
+            (testing "the client gets a terminated run carrying the reason"
+              (is (= "RUN_ERROR" (:type (last frames))))
+              (is (str/includes? (str (:message (last frames)))
+                                 "cannot read the instruction file")))
+            (testing "and no LLM call was made at all"
+              (is (not-any? #(= "TOOL_CALL_START" (:type %)) frames))))))))))
 
 (deftest the-skill-list-endpoint-answers-what-a-person-may-pick
   ;; The person's way in is a menu, and this is the one question it asks: which
@@ -2481,29 +2539,30 @@
   ;; conflict. Every one of those is a fact only the server has -- a client that
   ;; re-derived any of them from the wire would be a second answer, free to drift
   ;; from the one the model's catalog is built from.
-  (let [proj      (str (System/getProperty "java.io.tmpdir")
-                       "/harness-http-picker-" (System/nanoTime))
-        user-root (str (io/file (home/user-home) ".agents" "skills"))
-        proj-root (str (io/file proj ".agents" "skills"))
-        ;; spit does not make parents, and a skill IS a directory holding a
-        ;; SKILL.md -- so the fixture makes both, the way lay-skill! does in
-        ;; harness.cap.skills-test.
-        skill!    (fn [root name frontmatter]
-                    (let [f (io/file root name "SKILL.md")]
-                      (.mkdirs (.getParentFile f))
-                      (spit (str f) frontmatter :encoding "UTF-8")))]
-    (skill! user-root "shared"
-            "---\nname: shared\ndescription: the MACHINE's shared\n---\n\nbody\n")
-    (skill! user-root "manual-only"
-            "---\nname: manual-only\ndescription: only a human runs this\ndisable-model-invocation: true\n---\n\nbody\n")
-    (skill! user-root "misnamed"
-            "---\nname: something-else\ndescription: says a different name\n---\n\nbody\n")
-    (skill! proj-root "shared"
-            "---\nname: shared\ndescription: the PROJECT's shared\n---\n\nbody\n")
-    (skill! proj-root "only-project"
-            "---\nname: only-project\ndescription: project only\n---\n\nbody\n")
-    (project/bind! "it-picker" proj)
-    (try
+  (support/with-temp-env
+   [_root home]
+   (let [proj      (support/temp-dir "http-picker")
+         user-root (str (io/file home ".agents" "skills"))
+         proj-root (str (io/file proj ".agents" "skills"))
+         ;; spit does not make parents, and a skill IS a directory holding a
+         ;; SKILL.md -- so the fixture makes both, the way lay-skill! does in
+         ;; harness.cap.skills-test.
+         skill!    (fn [root name frontmatter]
+                     (let [f (io/file root name "SKILL.md")]
+                       (.mkdirs (.getParentFile f))
+                       (spit (str f) frontmatter :encoding "UTF-8")))]
+     (skill! user-root "shared"
+             "---\nname: shared\ndescription: the MACHINE's shared\n---\n\nbody\n")
+     (skill! user-root "manual-only"
+             "---\nname: manual-only\ndescription: only a human runs this\ndisable-model-invocation: true\n---\n\nbody\n")
+     (skill! user-root "misnamed"
+             "---\nname: something-else\ndescription: says a different name\n---\n\nbody\n")
+     (skill! proj-root "shared"
+             "---\nname: shared\ndescription: the PROJECT's shared\n---\n\nbody\n")
+     (skill! proj-root "only-project"
+             "---\nname: only-project\ndescription: project only\n---\n\nbody\n")
+     (project/bind! "it-picker" proj)
+     (try
       (with-server
        "it-picker" script
        (fn []
@@ -2551,16 +2610,15 @@
 
            (testing "a session with no skills at all answers an empty list, not a 404"
              ;; An UNBOUND thread, because that is the session with no project root:
-             ;; the machine's is now empty (wiped above), so there is nothing to
-             ;; pick and the route still says so in the ordinary way.
-             (wipe-conventions!)
+             ;; the machine's is now empty (wiped below, in this test's OWN home), so
+             ;; there is nothing to pick and the route still says so in the ordinary way.
+             (support/wipe-tree! (io/file home ".agents"))
              (let [resp (api-call :get "/api/skills?threadId=it-picker-empty" nil)]
                (is (= 200 (.statusCode resp)))
                (is (= [] (:groups (read-json resp)))))))))
       (finally
         (project/bind! "it-picker" nil)
-        (io/delete-file (io/file proj) true)
-        (wipe-conventions!)))))
+        (support/wipe-tree! proj))))))
 
 (deftest a-slash-load-reaches-the-model-and-never-the-client
   ;; The SECOND source of an injected body, asserted at the edge for the reason the
@@ -2568,16 +2626,16 @@
   ;; absence of a frame -- and a new way for a body to enter is exactly what could
   ;; reintroduce one. The provider here is scripted with NO tool call, so anything
   ;; in the conversation got there because a person typed it.
-  (let [proj      (str (System/getProperty "java.io.tmpdir")
-                       "/harness-http-slash-" (System/nanoTime))
-        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))]
-    (.mkdirs (io/file proj))
-    (.mkdirs (io/file skill-dir))
-    (spit (str skill-dir "/SKILL.md")
-          "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
-          :encoding "UTF-8")
-    (project/bind! "it-slash" proj)
-    (try
+  (support/with-temp-env
+   [_root home]
+   (let [proj      (support/temp-dir "http-slash")
+         skill-dir (str (io/file home ".agents" "skills" "alpha"))]
+     (.mkdirs (io/file skill-dir))
+     (spit (str skill-dir "/SKILL.md")
+           "---\nname: alpha\ndescription: alpha does a thing\n---\n\nALPHA BODY\n"
+           :encoding "UTF-8")
+     (project/bind! "it-slash" proj)
+     (try
       (with-server
        "it-slash" slash-script
        (fn []
@@ -2616,10 +2674,9 @@
            (testing "no skill tool call happened -- nothing asked the model for anything"
              (is (not-any? #(= "skill" (:toolCallName %))
                            (filter #(= "TOOL_CALL_START" (:type %)) frames)))))))
-      (finally
-        (project/bind! "it-slash" nil)
-        (io/delete-file (io/file proj) true)
-        (wipe-conventions!)))))
+     (finally
+       (project/bind! "it-slash" nil)
+       (support/wipe-tree! proj))))))
 
 ;; ------------------------------------------------- the composer's own edge
 ;;
@@ -3204,3 +3261,120 @@
                              (filter #(= "assistant" (:role %))))]
           (is (= "I looked it up" (:reasoning_content (first assistant)))
               "the client's own words reached the vendor"))))))
+
+;; ----------------------------------------------------- the process log
+;;
+;; The per-thread jsonl is the RUN's record; this is the PROCESS's, and it is the
+;; file a person is pointed at when a session broke and the browser only says
+;; something about a stream. Where the record stops mid-sentence, these lines are
+;; what make the stopping readable: `run/start` with no `run/terminal` beside it is
+;; a run that did not get to say goodbye, and whether a `:shutdown` line follows it
+;; is the difference between a run still going and a process that was stopped.
+;;
+;; The ABNORMAL endings are the ones worth the lines, and each has a test below
+;; because each is otherwise silent: a call that never ran, a stream that ended
+;; without a terminal frame, and a run whose own body threw.
+
+(defn- process-log
+  "The process log under the test's own root -- not the per-thread jsonl. Derived
+  from harness.infra.home rather than from a literal, so it follows the fixture's
+  temp root like everything else the server writes."
+  []
+  (let [f (io/file (home/root) "logs" "harness.infra.log")]
+    (if (.exists f) (slurp f :encoding "UTF-8") "")))
+
+(defn- await-log
+  "Wait for PAT to appear in the process log. The writers are other threads -- a go
+  block, http-kit's own -- so polling is the honest way to ask, and 5s is far more
+  than a line takes to land."
+  [pat]
+  (let [deadline (+ (System/currentTimeMillis) 5000)]
+    (loop []
+      (cond
+        (re-find pat (process-log)) true
+        (< deadline (System/currentTimeMillis)) false
+        :else (do (Thread/sleep 50) (recur))))))
+
+(defn- fire-run!
+  "Send a run over a socket of our OWN and do not read the answer.
+
+  For the cases where the server has nothing to say: a run that never reaches a
+  terminal frame sends no frames at all, so `post-run` -- which waits for the body
+  to end, and a body only ends with a terminal frame -- would block forever. The
+  caller closes the socket; the server does not care (nothing cancels a run when a
+  client goes), which is what makes walking away a legitimate client."
+  [thread-id run-id]
+  (let [body  (json/write-str {:threadId thread-id :runId run-id
+                               :messages [{:id "u1" :role "user" :content "hi"}]
+                               :tools [] :context []})
+        bytes (.getBytes body StandardCharsets/UTF_8)
+        sock  (java.net.Socket. "127.0.0.1" (int *port*))
+        out   (.getOutputStream sock)]
+    (.write out (.getBytes (str "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                "Content-Type: application/json\r\n"
+                                "Accept: text/event-stream\r\n"
+                                "Content-Length: " (count bytes) "\r\n\r\n")
+                           StandardCharsets/UTF_8))
+    (.write out bytes)
+    (.flush out)
+    sock))
+
+(deftest a-run-says-where-it-started-and-where-it-ended
+  ;; The ordinary story, and the shape everything else is read against. Asserted as
+  ;; three lines rather than as "something was logged": a file with a start and no
+  ;; terminal is exactly the broken case, so a test that cannot tell them apart
+  ;; would pass on the bug.
+  (with-server
+   "diag-story"
+   (fn []
+     (post-run "diag-story")
+     (is (await-log #"start .*thread-id=diag-story") "the run's start is in the file")
+     (is (await-log #"terminal event=RUN_FINISHED .*thread-id=diag-story")
+         "and the frame that ended it")
+     (is (await-log #"stream-closed .*terminal=RUN_FINISHED .*thread-id=diag-story")
+         "and the close, carrying http-kit's own reason"))))
+
+(deftest a-call-that-does-not-run-is-named-in-the-process-log
+  ;; `:outcome` lands on this line ONLY when the call did not simply pass, which is
+  ;; what keeps 'why didn't my tool run' out of the jsonl-only drawer. An unknown
+  ;; tool is the cheapest way to reach a non-:pass outcome; the gate outcomes
+  ;; (hook-blocked, needs-approval) come through the same line.
+  (with-server
+   "diag-refused"
+   [{:content "" :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}]}
+    {:content "gave up"}]
+   (fn []
+     (post-run "diag-refused")
+     (is (await-log #"tool-not-run .*outcome=unknown-tool .*thread-id=diag-refused")))))
+
+(deftest a-stream-that-ends-without-a-terminal-frame-is-a-warning
+  ;; The hole: a run whose event channel closes without a terminal frame leaves a
+  ;; record that stops mid-sentence and a client waiting on frames that will never
+  ;; come. A channel that arrives already closed is what every version of that looks
+  ;; like from the edge -- a consumer that died, a producer that went with it -- and
+  ;; saying so is the edge's job. Explaining it is not: this line is a pointer, not
+  ;; a diagnosis.
+  (with-server
+   "diag-lost-stream"
+   (fn []
+     (with-redefs [loop/run-chan (fn [& _] (doto (async/chan) async/close!))]
+       (let [sock (fire-run! "diag-lost-stream" "run-lost-stream")]
+         (try
+           (is (await-log #"events-closed-without-terminal .*run-id=run-lost-stream"))
+           (finally (.close sock))))))))
+
+(deftest a-run-whose-own-body-throws-says-so-and-ends-the-stream
+  ;; A go block's exception goes into the block's own channel, which nobody reads:
+  ;; the run vanishes, the kernel's producer blocks on a put that will never be
+  ;; taken, and the client is parked on a stream that will never send another frame.
+  ;; THIS is the failure the wrapper exists for, and here the FRAME CONVERSION is
+  ;; what breaks -- the first event kills the consumer.
+  (with-server
+   "diag-crashed"
+   (fn []
+     (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
+       (let [sock (fire-run! "diag-crashed" "run-crashed")]
+         (try
+           (is (await-log #"crashed .*run-id=run-crashed") "the crash is in the log")
+           (is (await-log #"no frames today") "with the throwable, not just a kind")
+           (finally (.close sock))))))))

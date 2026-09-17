@@ -12,6 +12,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.test-support :as support]
             [harness.cap.project :as project])
   (:import (java.io File)
            (java.sql DriverManager)))
@@ -297,8 +298,8 @@
         "the answer tracks the file, not a copy of the file")))
 
 (defn- in-a-fresh-jvm
-  "Run FORM -- a string of Clojure -- in a NEW JVM whose home is DIR, and return
-  {:exit :out}.
+  "Run FORM -- a string of Clojure -- in a NEW JVM whose config root is DIR and
+  whose OS home is USER-HOME, and return {:exit :out}.
 
   A real second process, not a second `with-redefs`: what a restart has to prove
   is that a store written by one JVM opens, migrates and answers in another, and
@@ -307,23 +308,52 @@
   needs no api-key and no model -- the form is ordinary Clojure -- so the child
   is a plain JVM.
 
-  DIR travels as the ENVIRONMENT VARIABLE, never inside FORM: the repo's standing
+  BOTH HOMES TRAVEL, and the second one is not decoration: a child JVM inherits
+  nothing of this process's `*user-home-override*`, so a child left to the JVM's own
+  `user.home` would read the DEVELOPER'S ~/AGENTS.md and ~/.agents/skills. That is
+  the rule for any test that forks a JVM (AGENTS.md), and it is the same pair the
+  fixture pins in-process.
+
+  THE PATHS TRAVEL AS ENVIRONMENT VARIABLES, never inside FORM: the repo's standing
   rule is that no byte crosses a process boundary without an explicit charset
   (deps.edn's comment block -- this machine's default is GBK), and a path
-  interpolated into an argv string would be exactly that fault. `clojure` is
-  looked up on PATH rather than pinned, the way the UI suite spawns it; a missing
-  CLI is a broken environment, not a case to skip."
-  [^File dir ^String form]
-  (let [pb (doto (ProcessBuilder. ^java.util.List (vec ["clojure" "-M" "-e" form]))
+  interpolated into an argv string would be exactly that fault. `clojure` is looked
+  up on PATH rather than pinned, the way the UI suite spawns it; a missing CLI is a
+  broken environment, not a case to skip.
+
+  THE ANSWER COMES BACK THROUGH ANSWER, a file the child is handed by name, not
+  through stdout -- see `child-answer` for what stdout carries now."
+  [^File dir ^File user-home ^File answer ^String form]
+  (let [pb (doto (ProcessBuilder. ^java.util.List
+                                  (vec ["clojure"
+                                        (str "-J-Duser.home=" (.getAbsolutePath ^File user-home))
+                                        "-M" "-e" form]))
              (.directory (io/file (System/getProperty "user.dir")))
              (.redirectErrorStream true))]
     (.put (.environment pb) "CLJ_HARNESS_HOME" (.getAbsolutePath dir))
+    (.put (.environment pb) "CLJ_HARNESS_TEST_OUT" (.getAbsolutePath ^File answer))
     (let [p (.start pb)
           out (slurp (.getInputStream p) :encoding "UTF-8")]
       (when-not (.waitFor p 120 java.util.concurrent.TimeUnit/SECONDS)
         (.destroyForcibly p)
         (throw (ex-info "a fresh JVM did not finish in 120s" {:form form})))
       {:exit (.exitValue p) :out out})))
+
+(defn- child-answer
+  "The answer the child wrote to the file it was told to write, or nil.
+
+  NEVER OUT OF STDOUT, and that is the whole reason this exists: since JDK 24 the
+  first native call -- sqlite-jdbc loading its library, which is every fresh home --
+  prints four lines about `--enable-native-access` to stdout, and `in-a-fresh-jvm`
+  merges the child's stderr into that stream as well. harness.cap.todos-test hands
+  an answer back through a file for the same reason; this is that shape.
+
+  NOT FIXED BY PASSING THE FLAG: `--enable-native-access` is unknown to older JVMs
+  and would turn a warning into a process that will not start, and deps.edn already
+  records that this machine's launcher ignores :jvm-opts anyway."
+  [^File file]
+  (when (and file (.exists file))
+    (str/trim (slurp file :encoding "UTF-8"))))
 
 (deftest a-binding-survives-a-real-restart
   ;; THE ticket's reason for existing, and the one claim no in-process test can
@@ -332,22 +362,46 @@
   ;; The child derives the directory from its OWN environment variable, which is
   ;; also what makes the second half a genuine test: it is told a home, not a
   ;; project, and has to find the binding the first process left there.
-  (let [dir  (io/file (System/getProperty "java.io.tmpdir")
-                      (str "harness-project-restart-" (System/nanoTime)))
-        proj (io/file dir "workspace")]
+  ;;
+  ;; BOTH HOMES ARE THIS TEST'S OWN: the config root it binds through, and an OS
+  ;; home of its own so the child never reads the developer's ~/AGENTS.md. Nothing
+  ;; here goes near the run-wide pair isolate! made, so there is nothing to wipe
+  ;; afterwards beyond the trees this test made.
+  (let [dir      (io/file (System/getProperty "java.io.tmpdir")
+                          (str "harness-project-restart-" (System/nanoTime)))
+        user-hm  (io/file (System/getProperty "java.io.tmpdir")
+                          (str "harness-project-restart-home-" (System/nanoTime)))
+        proj     (io/file dir "workspace")
+        tmp      (io/file (System/getProperty "java.io.tmpdir")
+                          (str "harness-project-answers-" (System/nanoTime)))
+        write-to (io/file tmp "write.txt")
+        read-to  (io/file tmp "read.txt")]
     (.mkdirs proj)
+    (.mkdirs user-hm)
+    (.mkdirs tmp)
     (try
-      (let [write (in-a-fresh-jvm dir "(require '[harness.cap.project :as p]) (println (p/bind! \"restart-thread\" (str (System/getenv \"CLJ_HARNESS_HOME\") \"/workspace\")))")
-            read  (in-a-fresh-jvm dir "(require '[harness.cap.project :as p]) (println (pr-str (p/binding-for \"restart-thread\")))")]
+      (let [write (in-a-fresh-jvm
+                   dir user-hm write-to
+                   (str "(require '[harness.cap.project :as p])"
+                        " (spit (System/getenv \"CLJ_HARNESS_TEST_OUT\")"
+                        "       (p/bind! \"restart-thread\" (str (System/getenv \"CLJ_HARNESS_HOME\") \"/workspace\"))"
+                        "       :encoding \"UTF-8\")"))
+            read  (in-a-fresh-jvm
+                   dir user-hm read-to
+                   (str "(require '[harness.cap.project :as p])"
+                        " (spit (System/getenv \"CLJ_HARNESS_TEST_OUT\")"
+                        "       (pr-str (p/binding-for \"restart-thread\"))"
+                        "       :encoding \"UTF-8\")"))]
         (testing "the first process bound the directory and said so"
           (is (zero? (:exit write)) (str "first JVM failed:\n" (:out write)))
-          (is (= (.getAbsolutePath proj) (str/trim (:out write)))))
+          (is (= (.getAbsolutePath proj) (child-answer write-to))))
         (testing "a SECOND process, which never saw the binding, answers it"
           (is (zero? (:exit read)) (str "second JVM failed:\n" (:out read)))
-          (is (= (str "\"" (.getAbsolutePath proj) "\"") (str/trim (:out read)))
+          (is (= (str "\"" (.getAbsolutePath proj) "\"") (child-answer read-to))
               "the binding was read back out of the store by a fresh JVM")))
       (finally
-        (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
+        (doseq [d [dir user-hm tmp]] (support/wipe-tree! d))))))
+
 
 (deftest a-relative-spelling-is-the-same-project-as-an-absolute-one
   ;; The last of the three spellings the ticket names. `..` and symlinks are
@@ -623,53 +677,54 @@
   ;; NEXT TO THE SKILL -- outside the project. Without this allowance every
   ;; reference file would park a human, which is the same as making the skill
   ;; unusable. The roots get the configuration home's standing, and no other.
-  (let [proj (str (System/getProperty "java.io.tmpdir")
-                  "/harness-project-skills-" (System/nanoTime))
-        skill-dir (str (io/file (home/user-home) ".agents" "skills" "alpha"))
-        elsewhere (str (System/getProperty "java.io.tmpdir")
-                       "/harness-project-elsewhere-" (System/nanoTime))]
-    (.mkdirs (io/file proj))
-    (.mkdirs (io/file skill-dir))
-    (.mkdirs (io/file elsewhere))
-    (project/bind! "pt-skills" proj)
-    ;; This test's project is its own directory, so its harness.edn goes THERE --
-    ;; write-project-harness! targets the namespace's shared root, which this
-    ;; thread is not bound to.
-    (let [proj-edn! (fn [text]
-                      (.mkdirs (io/file proj ".harness"))
-                      (spit (str (io/file proj ".harness" "harness.edn")) text :encoding "UTF-8"))]
-    (try
-      (testing "a file inside a skill root is free of the fence"
-        (is (false? (project/out-of-bounds? "pt-skills"
-                                            (str (io/file skill-dir "references" "x.md"))))))
+  ;;
+  ;; A HOME OF THIS TEST'S OWN: the skill goes under a temp OS home and the project
+  ;; under a temp root, both made here and thrown away at the end. The pair isolate!
+  ;; makes is shared by every test in the JVM, so planting a skill there (and then
+  ;; deleting it from the OS home again) is how one test's fixture becomes the next
+  ;; test's surprise -- see harness.test-support/with-temp-env.
+  (support/with-temp-env
+   [_root home]
+   (let [proj      (support/temp-dir "project-skills")
+         skill-dir (str (io/file home ".agents" "skills" "alpha"))
+         elsewhere (support/temp-dir "project-elsewhere")]
+     (.mkdirs (io/file skill-dir))
+     (project/bind! "pt-skills" proj)
+     ;; This test's project is its own directory, so its harness.edn goes THERE --
+     ;; write-project-harness! targets the namespace's shared root, which this
+     ;; thread is not bound to.
+     (let [proj-edn! (fn [text]
+                       (.mkdirs (io/file proj ".harness"))
+                       (spit (str (io/file proj ".harness" "harness.edn")) text :encoding "UTF-8"))]
+       (try
+         (testing "a file inside a skill root is free of the fence"
+           (is (false? (project/out-of-bounds? "pt-skills"
+                                               (str (io/file skill-dir "references" "x.md"))))))
 
-      (testing "and it stays free under :strict, exactly like the config home"
-        (proj-edn! "{:approval {:strict true}}")
-        (is (false? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md")))))
-        (proj-edn! "{}"))
+         (testing "and it stays free under :strict, exactly like the config home"
+           (proj-edn! "{:approval {:strict true}}")
+           (is (false? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md")))))
+           (proj-edn! "{}"))
 
-      (testing "but the world outside the roots still parks -- the allowance is the roots, not everything"
-        (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "x.md"))))))
+         (testing "but the world outside the roots still parks -- the allowance is the roots, not everything"
+           (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "x.md"))))))
 
-      (testing "and a CONFIGURED root is what is allowed, not a hardcoded pair"
-        (let [custom (str (io/file (System/getProperty "java.io.tmpdir")
-                                   (str "harness-custom-skills-" (System/nanoTime))))]
-          (.mkdirs (io/file custom))
-          (proj-edn! (str "{:skills {:roots [\"" custom "\"]}}"))
-          (is (false? (project/out-of-bounds? "pt-skills" (str (io/file custom "x.md")))))
-          (is (true? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md"))))
-              "the default root is no longer in force, so it is no longer free")
-          (proj-edn! "{}")))
+         (testing "and a CONFIGURED root is what is allowed, not a hardcoded pair"
+           (let [custom (support/temp-dir "custom-skills")]
+             (proj-edn! (str "{:skills {:roots [\"" custom "\"]}}"))
+             (is (false? (project/out-of-bounds? "pt-skills" (str (io/file custom "x.md")))))
+             (is (true? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md"))))
+                 "the default root is no longer in force, so it is no longer free")
+             (proj-edn! "{}")))
 
-      (testing "an INSTRUCTION file's content grants nothing: a path it merely mentions still parks"
-        ;; The point of the boundary. AGENTS.md is READ BY harness, not by the
-        ;; `read` tool -- and a document that could widen the fence would be a
-        ;; capability granting itself, which is a different security story.
-        (spit (str (io/file (home/user-home) "AGENTS.md"))
-              (str "Go read " elsewhere "/notes.md\n") :encoding "UTF-8")
-        (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "notes.md"))))))
+         (testing "an INSTRUCTION file's content grants nothing: a path it merely mentions still parks"
+           ;; The point of the boundary. AGENTS.md is READ BY harness, not by the
+           ;; `read` tool -- and a document that could widen the fence would be a
+           ;; capability granting itself, which is a different security story.
+           (spit (str (io/file home "AGENTS.md"))
+                 (str "Go read " elsewhere "/notes.md\n") :encoding "UTF-8")
+           (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "notes.md"))))))
 
-      (finally
-        (project/bind! "pt-skills" nil)
-        (doseq [d [proj skill-dir elsewhere]]
-          (io/delete-file (io/file d) true)))))))
+         (finally
+           (project/bind! "pt-skills" nil)
+           (doseq [d [proj skill-dir elsewhere]] (support/wipe-tree! d))))))))

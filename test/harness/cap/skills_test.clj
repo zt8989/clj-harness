@@ -41,30 +41,20 @@
     (swap! tmp-dirs conj d)
     (str d)))
 
-(defn- wipe-skills!
-  "Remove every skill the pinned OS home holds. The pinned home is ONE directory
-  for the whole process, so without this a skill one test wrote would be visible
-  to every later test -- the same discipline project_test applies to harness.edn.
-
-  Bottom-up, because io/delete-file does NOT recurse: it fails on a non-empty
-  directory, and its `silently` flag turns that failure into a scheduled
-  deleteOnExit -- so a one-line version of this leaves the directory exactly
-  where it was and every later test silently inherits the fixtures."
-  []
-  (let [dir (io/file (home/user-home) ".agents")]
-    (doseq [f (reverse (file-seq dir))]
-      (io/delete-file f true))))
-
 (use-fixtures :each
+  ;; A HOME PER TEST: the skills a case plants live in a directory the fixture
+  ;; makes and deletes, so there is nothing to wipe and nothing another test can
+  ;; read. The pinned pair is shared by every test in the JVM -- see
+  ;; harness.test-support/with-temp-env.
   (fn [f]
     (reset! tmp-dirs [])
-    (wipe-skills!)
-    (try (f)
-         (finally
-           (doseq [d @tmp-dirs] (io/delete-file d true))
-           (wipe-skills!)
-           (doseq [t ["sk-1" "sk-2" "sk-3" "sk-4" "sk-rel"]]
-             (project/bind! t nil))))))
+    (support/with-temp-env
+     [_root _home]
+     (try (f)
+          (finally
+            (doseq [d @tmp-dirs] (support/wipe-tree! d))
+            (doseq [t ["sk-1" "sk-2" "sk-3" "sk-4" "sk-rel"]]
+              (project/bind! t nil)))))))
 
 (defn- user-home [] (home/user-home))
 (defn- user-skills [] (str (io/file (user-home) ".agents" "skills")))
@@ -104,7 +94,9 @@
     ;; blamed on the wrong change.
     (is (not= (System/getProperty "user.home") (home/user-home))))
   (testing "and it holds nothing this test did not put there"
-    (wipe-skills!)
+    ;; The home this runs in is the FIXTURE'S, made for this one test (see the
+    ;; :each fixture) -- so it holds no skills by construction, and there is
+    ;; nothing to wipe before asking.
     (is (empty? (skills/scan (skills/roots))))))
 
 (deftest a-configured-list-replaces-both-defaults
