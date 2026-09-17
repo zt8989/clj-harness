@@ -3,11 +3,15 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`a08ca72`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`a08ca72` 是把 `composer-image` 合进来的那一提交，本特征给本目录添了
-[client](architecture/client.md) 里「附件」那一节并改掉两处已不成立的说法。
-这一版里还夹着另一个会话刚落下的 `trajectory-injection-once` 三张票面——只有 markdown，
-不改变本目录的任何一条陈述。）
+**快照：`1ff0393`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`1ff0393` 是把 `bash-lifetime` 的前三张提交合进来的那一提交，本特征给本目录添了
+`cap.jobs` 一行与状态表里「后台作业」一行，并改掉 `infra.shell` 那行（到点收整棵树、
+两种 argv 形状）、[kernel](architecture/kernel.md) 的模式表与「不做超时」那句的适用范围；
+工具数 15 → 18。**[projects](architecture/projects.md) 里 `bash` 的 cwd 与「命令内容永不判定」
+两条一个字没改**，变的只是「等多久」与「谁在等」。）
+这一版里还夹着两份刚落下的 markdown，都不改变本目录的任何一条陈述：
+`.scratch/bash-lifetime/`（本特征的 spec 与证据）与 `.scratch/edit-merge/`（下一个特征的 spec
+与六张票面——**尚未开工**，文末「在办」那一节记的就是它这一类）。
 
 ## 与另外两处文档的分工
 
@@ -133,3 +137,12 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
   **它的说明也不在 `prompt.md` 里，而且这是设计**：名册由 wire 上的 `:tools` 自描述，技法（怎么把工具
   串起来用）才需要一块地方说——那块地方是 `SystemPrompt` 点上的一条内建行，开关在 `harness.edn`
   （票 04），所以 `prompt.md` 到那时仍是一个字都不提本特征。
+
+- **编辑合并**：计划见 `.scratch/edit-merge/`（spec + 6 张票，2026-09-17 立）。
+  照 omp（`can1357/oh-my-pi`，它的 `docs/tools/edit.md`）的策略：**改写并成一个 `edit`**——
+  一个字符串载荷是一段补丁语言（段头 `[path]`、动作 `PUT` / `CUT` / paste / `REM` / `MV`），
+  两个编辑模式共用这个名字、脸由 `:describe` 换；**检索与撤销独立**（`anchor_grep` 保名，
+  `undo_last_replace` 改名 `undo_last_edit`）。寻址仍用本仓的按行锚点，
+ 所以 omp 的 `[PATH#TAG]` + 行号与 `N*`（整块，要语法树）两条**不搬**。
+  代码里**一行都没有**：今天锚点模式是 `replace` / `insert` 两个名字，`edit` 只在 str-replace 模式存在，
+  而载荷、多段、寄存器都还不存在。
