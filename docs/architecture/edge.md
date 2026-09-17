@@ -1,15 +1,21 @@
 # 边：`harness.edge.http`
 
-一个 http-kit 服务器，两条边共用一个 handler：流式的 **AG-UI 边**（`POST /`）与
-普通的 JSON **管理边**（`/api/*`）。CORS 只放行 `http://localhost:5173`。
-**那条放行现在只是一条备用路径**：dev 时页面走自己 origin 的反代（`dev.sh` + `ui/vite.config.js`），
-浏览器一个跨域请求都不发；只有把前端指到绝对地址（`VITE_AGENT_URL`）直连这个进程时才用得上它。
+一个 http-kit 服务器，**一个前缀**（`/api`）下两条边共用一个 handler：流式的 **AG-UI 边**
+（`POST /api/agent`）与普通的 JSON **管理边**（`/api/*` 的其余部分）。两者是**答案的形状**不同
+（SSE / JSON），不是路径不同——run 端点从前在服务器**根上**，路由表认不出的任何路径都落到它，
+于是一个打错的管理路径会被当成一次没有 `RunAgentInput` 的 run；现在它是一条**明写的路由**，
+认不出的路径答 404（`no such route: ...`）。
+
+CORS 只放行 `http://localhost:5173`。
+**那条放行现在只是一条备用路径**：dev 时页面走自己 origin 的反代（`dev.sh` + `ui/vite.config.js`，
+一条 `/api` 前缀规则就够），浏览器一个跨域请求都不发；只有把前端指到绝对地址
+（`VITE_AGENT_URL`）直连这个进程时才用得上它。
 所以端口不再是「同时改两处契约」的那件事——本进程绑哪个端口由 `--port` 决定（`0` = 随 OS 挑，
 绑到的那个会被打印并记进日志）。
 
 ## AG-UI 边
 
-`POST /` 收一个 `RunAgentInput`，以 SSE 回帧。两条 http-kit 的规矩必须同时成立：
+`POST /api/agent` 收一个 `RunAgentInput`，以 SSE 回帧。两条 http-kit 的规矩必须同时成立：
 
 - **status 与 headers 骑在第一次 `send!` 上**，不能先单独发一次 header；
 - **最后一帧带 `close-after-send?`**——单独走一条 close 路径会丢掉缓冲里没冲出去的body。
@@ -36,11 +42,13 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **没绑 = hook 不触发**，这是刻意的默认值：离线工具、replay、直接驱动内核的测试都没有审计写入者，
 而一个没人记录的 hook 判定比没有 hook 更糟——它会**静默地**改变一次 run。
 
-## 管理边：路由表
+## 路由表
+
+**表里认不出的路径一律 404**（`no such route: <路径>`），不再落到 run 上——见文件头那段。
 
 | 路由 | 动词 | 干什么 | 落审计行 |
 |---|---|---|---|
-| `/` | POST | AG-UI run（流式） | 下面那些 |
+| `/api/agent` | POST | **AG-UI run（流式）** | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
 | `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
 | `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model、可选的思考档 | 无（只读） |

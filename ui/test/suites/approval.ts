@@ -14,14 +14,14 @@
 import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
-import { type Case, type Suite, content, fileExists, rm, script, threadId, tmpPath, url } from "../e2e";
+import { type Case, type Suite, content, fileExists, rm, runUrl, script, threadId, tmpPath } from "../e2e";
 
 /// "resolved" approves, "cancelled" vetoes -- the two statuses the AG-UI resume
 /// entry is allowed to carry.
 type Decision = "resolved" | "cancelled";
 
 function newAgent(tid: string): { agent: HttpAgent; events: string[]; reset: () => void } {
-  const agent = new HttpAgent({ url: url(), threadId: tid });
+  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
   const events: string[] = [];
   agent.subscribe({
     onRunFinishedEvent: (b) => {

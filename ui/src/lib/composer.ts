@@ -5,7 +5,7 @@
 // the model override lives in the harness's memory keyed by thread id, and the
 // branch belongs to the directory the session is bound to. So every call carries
 // a threadId and nothing here is cached across threads.
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The server's `{:error ..}` reason, when the body carries one -- the same
 /// habit `lib/projects.ts` keeps, and for the same reason: the server's sentence
@@ -45,7 +45,7 @@ export const providerLabel = (provider: { name: string; "display-name"?: string 
   provider["display-name"] ?? provider.name;
 
 export async function choicesFor(threadId: string): Promise<Choices> {
-  const res = await fetch(`${AGENT_URL}api/choices?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}choices?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res));
   return res.json();
 }
@@ -66,7 +66,7 @@ export async function choicesFor(threadId: string): Promise<Choices> {
 export type ModelAnswer = { model?: string; input?: string[] };
 
 export async function modelFor(threadId: string): Promise<ModelAnswer> {
-  const res = await fetch(`${AGENT_URL}api/model?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}model?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res));
   return res.json();
 }
@@ -77,7 +77,7 @@ export async function setModel(
   threadId: string,
   change: { provider?: string; model?: string; "reasoning-effort"?: string; clear?: boolean },
 ): Promise<void> {
-  const res = await fetch(`${AGENT_URL}api/model`, {
+  const res = await fetch(`${API_BASE}model`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, ...change }),
@@ -97,7 +97,7 @@ export type GitState = {
 };
 
 export async function gitStateFor(threadId: string): Promise<GitState> {
-  const res = await fetch(`${AGENT_URL}api/git?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}git?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res));
   return res.json();
 }
@@ -106,7 +106,7 @@ export async function gitStateFor(threadId: string): Promise<GitState> {
 /// a dirty tree, a branch held by another worktree -- and the refusal is git's
 /// own sentence, which names the file in the way.
 export async function switchBranch(threadId: string, branch: string): Promise<GitState> {
-  const res = await fetch(`${AGENT_URL}api/git`, {
+  const res = await fetch(`${API_BASE}git`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, branch }),

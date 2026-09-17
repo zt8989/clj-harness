@@ -10,7 +10,7 @@
 // The layer is a KEY on the wire, not a sentence: what to CALL it is this
 // interface's business, the same split `:reason` keeps (a keyword from the server,
 // the words around it from here).
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The server's `{:error ..}` reason, when the body carries one -- the same habit
 /// `lib/composer.ts` and `lib/projects.ts` keep, and for the same reason: the
@@ -53,7 +53,7 @@ export type SkillGroup = {
 export type Skill = SkillRow & { layer?: string; root: string };
 
 export async function skillsFor(threadId: string): Promise<SkillGroup[]> {
-  const res = await fetch(`${AGENT_URL}api/skills?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}skills?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(await reasonFrom(res));
   const body = (await res.json()) as { groups?: SkillGroup[] };
   return body.groups ?? [];

@@ -13,7 +13,7 @@
 // `tools` key; a call the vendor reported nothing for has no `usage`; a tool call that
 // never ran has no `startedAt`. NONE of those may be rendered as a zero or filled in
 // from what the session has today -- the absent field is the answer.
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// One thing in a turn, in the order the model had it.
 export type TrajectoryItem =
@@ -80,7 +80,7 @@ export type TrajectoryPayload = {
 /// drawing nothing. Any other failure is null too -- the view has nothing useful to say
 /// about a broken log, and a red panel is not the place to try.
 export async function trajectoryFor(threadId: string): Promise<TrajectoryPayload | null> {
-  const res = await fetch(`${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/trajectory`);
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/trajectory`);
   if (!res.ok) return null;
   return (await res.json()) as TrajectoryPayload;
 }

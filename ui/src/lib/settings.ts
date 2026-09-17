@@ -17,7 +17,7 @@
 // resolution may legitimately have less to say: an inline provider declares no
 // modalities unless the entry does, and a knob no tier named is absent rather
 // than null.
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// Which tier supplied a knob, or `catalog` when no tier did and the provider's
 /// entry answered -- a provider's DEFAULT model is nobody's choice but the
@@ -86,7 +86,7 @@ export type Settings = {
 /// registry defines [...]" beats a blank pane.
 export async function getSettings(threadId: string): Promise<Settings> {
   const res = await fetch(
-    `${AGENT_URL}api/settings?threadId=${encodeURIComponent(threadId)}`,
+    `${API_BASE}settings?threadId=${encodeURIComponent(threadId)}`,
   );
   const body: unknown = await res.json().catch(() => undefined);
   if (!res.ok) {

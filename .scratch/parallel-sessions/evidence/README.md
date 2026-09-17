@@ -147,7 +147,7 @@ AGENTS.md 那条「端口由 OS 分配」管的是测试；走查里 8080 是应
 ```bash
 ./dev.sh --scripted /path/to/script.json --ui-port 5211
 # 后端：harness.e2e-server，临时 CLJ_HARNESS_HOME + 临时 --user-home（用完即删）
-# 前端：vite 在 5211，把 /api/* 与 POST / 反代到后端那个随机端口
+# 前端：vite 在 5211，一条 /api 前缀规则（含 POST /api/agent 这条 run 端点）反代到后端那个随机端口
 # 浏览器打开 http://localhost:5211
 ```
 

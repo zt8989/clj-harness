@@ -1954,6 +1954,16 @@
     (= :options (:request-method req))
     {:status 204 :headers cors}
 
+    ;; THE AG-UI EDGE, and the only route here that answers SSE rather than JSON.
+    ;; It IS a route, not the catch-all it used to be: the run endpoint sat at the
+    ;; server root and everything unmatched fell to it, which meant a mistyped
+    ;; management path became a run -- a request with no RunAgentInput in it, read
+    ;; as one. It is under `/api` with the rest so that a front end has ONE prefix
+    ;; to think about (and one thing for a dev proxy to forward).
+    (= "/api/agent" (:uri req))
+    (case (:request-method req)
+      :post (handle-run req)
+      (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)
       :get  (model-get req)
@@ -2053,7 +2063,12 @@
           (case [(:request-method req) verb]
             [:post "remove"] (remove-project-post stem)
             (api-response 405 {:error "method not allowed"}))
-          (handle-run req))))))
+          ;; NOTHING ELSE. This used to be `(handle-run req)` -- the run endpoint
+          ;; was the fallback for every unmatched path -- so a typo in a management
+          ;; route arrived at the kernel as a run with no RunAgentInput in it, and
+          ;; was answered with whatever that produced. A path this table does not
+          ;; know is now exactly that, and says so.
+          (api-response 404 {:error (str "no such route: " (:uri req))}))))))
 
 (defn handler
   "Every request, with a net under it.
@@ -2168,7 +2183,7 @@
             ;; (or a script) reads to learn where the server is said nothing.
             bound  (:local-port (meta server))]
         (println (str "harness listening on http://localhost:" bound)
-                 "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
+                 "-- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)")
         (log/started root bound)
         ;; ...AND ONE LINE FOR THE OTHER END OF THAT STORY. `:listening` marks
         ;; where the file's story begins; this marks where the process stopped

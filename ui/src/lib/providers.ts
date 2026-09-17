@@ -9,7 +9,7 @@
 // EVERY CALL ANSWERS WITH THE WHOLE CATALOG, writes included. The form refetches
 // after every change anyway, and one shape for GET and for the writes means there
 // is one thing to parse and one place a field can be forgotten.
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// The server's `{:error ..}` reason, when the body carries one -- the habit
 /// `lib/skills.ts`, `lib/composer.ts` and `lib/settings.ts` all keep, and for the
@@ -109,7 +109,7 @@ async function read(res: Response): Promise<Registry> {
 }
 
 async function post(path: string, body: unknown): Promise<Registry> {
-  const res = await fetch(`${AGENT_URL}${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -118,19 +118,19 @@ async function post(path: string, body: unknown): Promise<Registry> {
 }
 
 export async function registryFor(): Promise<Registry> {
-  return read(await fetch(`${AGENT_URL}api/providers`));
+  return read(await fetch(`${API_BASE}providers`));
 }
 
 export async function putProvider(payload: ProviderPayload): Promise<Registry> {
-  return post("api/providers", payload);
+  return post("providers", payload);
 }
 
 export async function removeProvider(id: string): Promise<Registry> {
-  return post(`api/providers/${encodeURIComponent(id)}/remove`, {});
+  return post(`providers/${encodeURIComponent(id)}/remove`, {});
 }
 
 export async function putDefaults(knobs: DefaultKnobs): Promise<Registry> {
-  return post("api/defaults", knobs);
+  return post("defaults", knobs);
 }
 
 /// Ask a VENDOR what it serves -- the one call in this feature that leaves the
@@ -140,7 +140,7 @@ export async function putDefaults(knobs: DefaultKnobs): Promise<Registry> {
 export async function probeModels(
   ask: { id?: string; "base-url"?: string; protocol?: string; "api-key"?: string },
 ): Promise<{ models: string[]; asked: string }> {
-  const res = await fetch(`${AGENT_URL}api/providers/models`, {
+  const res = await fetch(`${API_BASE}providers/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ask),

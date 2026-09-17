@@ -333,7 +333,7 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ```bash
 clojure -M:run --port 0   # 后端；不带 --port 就是 8080，0 是「随 OS 挑」
-# 期望：harness listening on http://localhost:<真正绑到的那个端口> -- POST an AG-UI RunAgentInput here
+# 期望：harness listening on http://localhost:<真正绑到的那个端口> -- POST an AG-UI RunAgentInput to /api/agent
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```
 
@@ -346,12 +346,13 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 
 ### 3) 前端侧的形状（为什么是代理）
 
-**页面只跟自己的 origin 说话。** `src/lib/threads.ts` 的 `AGENT_URL` 默认是 `/`，
-`vite.config.js` 把 `/api/*` 与 **`POST /`**（AG-UI 的 run 端点在根上，页面也在根上，
-所以区分它们的是**方法**）转给后端。两件事因此成立：浏览器**一个跨域请求都不发**
-（没有 preflight，也没有一份要跟着端口改的 CORS 白名单），而构建产物里**不带我们的地址**，
-换到任何部署自己的反代后面都一样。要直连后端（不走代理）就 `VITE_AGENT_URL=http://…:8080/`，
-那正是后端那条 CORS 放行存在的理由。
+**页面只跟自己的 origin 说话。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，
+其余都是 `/api/<什么>`——所以 `vite.config.js` 只需要**一条** `/api` 前缀规则转给后端。
+`src/lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方）与 `AGENT_URL`
+（`HttpAgent` 构造时用的那一个端点，=`${API_BASE}agent`）。两件事因此成立：浏览器
+**一个跨域请求都不发**（没有 preflight，也没有一份要跟着端口改的 CORS 白名单），而构建产物里
+**不带我们的地址**，换到任何部署自己的反代后面都一样。要直连后端（不走代理）就
+`VITE_AGENT_URL=http://…:8080`，那正是后端那条 CORS 放行存在的理由。
 
 ### 4) 会话里的东西
 

@@ -13,10 +13,10 @@
 import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
-import { type Case, type Suite, content, script, threadId, url } from "../e2e";
+import { type Case, type Suite, content, runUrl, script, threadId } from "../e2e";
 
 function newAgent(tid: string): { agent: HttpAgent; failed: () => string | null } {
-  const agent = new HttpAgent({ url: url(), threadId: tid });
+  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
   let failed: string | null = null;
   // A failed run arrives as a RUN_ERROR FRAME -- so it is `onRunErrorEvent`
   // that reports it. The hook that sounds like it should, `onRunFailedEvent`,

@@ -25,7 +25,7 @@ import { expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
-import { type Case, type Suite, content, homeDir, script, threadId, url } from "../e2e";
+import { type Case, type Suite, content, homeDir, runUrl, script, threadId, url } from "../e2e";
 
 /// One row of a session log, as far as this suite reads it.
 type LogRow = {
@@ -97,7 +97,7 @@ function agentFor(
   tid: string,
   saidTheUser: string,
 ): { agent: HttpAgent; failed: () => string | null } {
-  const agent = new HttpAgent({ url: url(), threadId: tid });
+  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
   let failed: string | null = null;
   agent.subscribe({
     onRunErrorEvent: (b) => {

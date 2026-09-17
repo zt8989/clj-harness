@@ -26,19 +26,15 @@ import { defineConfig } from "vite";
 // never makes a cross-origin request at all: no preflight, no CORS allowance to
 // keep in step with the port, and the same address in development that a
 // deployment has behind its own front. `src/lib/threads.ts` spells the same
-// decision out from the client's side (AGENT_URL defaults to `/`).
+// decision out from the client's side: the harness's address defaults to this
+// origin, and the two paths that hang off it (`API_BASE`, `AGENT_URL`) are
+// derived from that one value.
 //
-// TWO CONTEXTS, because the harness serves two different things:
-//
-//   * `/api/*`  -- the management edge (projects, threads, settings, ...).
-//   * `POST /`  -- the AG-UI run endpoint, which is the ROOT. The page is served
-//                  from that same root, so the method is what tells them apart:
-//                  `^/$` matches the exact path, and `bypass` lets everything but
-//                  the POST fall through to Vite (which then serves index.html,
-//                  the modules, and the HMR client). The path is anchored rather
-//                  than left as a bare `/`, because a bare `/` is a prefix match
-//                  and would put every module request through this middleware
-//                  just to hand it back.
+// ONE CONTEXT, because the harness is under one prefix: `/api/agent` is the
+// AG-UI run endpoint and everything else under `/api` is the management edge.
+// Nothing has to be told apart by METHOD here any more -- the run used to be at
+// the server ROOT, which the page is also served from, and a bare `/` would have
+// been a prefix match dragging every module request through this middleware.
 //
 // THE TARGET IS AN ENVIRONMENT VARIABLE, and that is the point of the whole
 // arrangement: the harness can be started on any port (`dev.sh` picks a free one
@@ -60,14 +56,10 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
+      // Prefix match, so it covers `/api/agent` too. Everything else on this dev
+      // server -- the page, the modules, the HMR client -- is Vite's and never
+      // reaches this middleware.
       "/api": { target: backend, changeOrigin: true },
-      "^/$": {
-        target: backend,
-        changeOrigin: true,
-        // `undefined` continues to the proxy; a string skips it and lets Vite
-        // serve that URL. Only the run POST is the harness's.
-        bypass: (req) => (req.method === "POST" ? undefined : req.url),
-      },
     },
   },
 });

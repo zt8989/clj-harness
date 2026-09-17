@@ -16,7 +16,7 @@ import { expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
-import { type Case, type Suite, content, homeDir, script, threadId, url } from "../e2e";
+import { type Case, type Suite, content, homeDir, runUrl, script, threadId } from "../e2e";
 
 const reasoning = "用户想看这个项目。先读 deps.edn 确认依赖。";
 const answer = "这是一个 Clojure 项目，只有 4 个依赖。";
@@ -25,7 +25,7 @@ const answer = "这是一个 Clojure 项目，只有 4 个依赖。";
 /// prepareRunAgentInput reads `this.threadId`, not a per-run argument), plus the
 /// ordered list of hook names the run fires.
 function newAgent(tid: string): { agent: HttpAgent; events: string[] } {
-  const agent = new HttpAgent({ url: url(), threadId: tid });
+  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
   const events: string[] = [];
   agent.subscribe({
     onReasoningMessageStartEvent: () => {

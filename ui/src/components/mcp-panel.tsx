@@ -22,7 +22,7 @@ import { useCallback, useEffect, useState, type FC } from "react";
 import { RefreshCwIcon, ServerIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { AGENT_URL } from "@/lib/threads";
+import { API_BASE } from "@/lib/threads";
 
 /// One server, as the endpoint describes it.
 export type McpServer = {
@@ -54,7 +54,7 @@ function statusLabel(server: McpServer): string {
 }
 
 async function fetchServers(threadId: string): Promise<readonly McpServer[]> {
-  const res = await fetch(`${AGENT_URL}api/mcp?threadId=${encodeURIComponent(threadId)}`);
+  const res = await fetch(`${API_BASE}mcp?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) throw new Error(`listing MCP servers failed: HTTP ${res.status}`);
   const body = (await res.json()) as { servers?: readonly McpServer[] };
   return body.servers ?? [];
@@ -65,7 +65,7 @@ async function setEnabled(
   server: string,
   enabled: boolean,
 ): Promise<void> {
-  const res = await fetch(`${AGENT_URL}api/mcp`, {
+  const res = await fetch(`${API_BASE}mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId, server, enabled }),
