@@ -230,6 +230,60 @@
       (is (= ["user"] (kinds (second turns)))
           "the same trailing context, and it is not drawn a second time"))))
 
+(deftest an-injection-between-the-client-s-own-messages-does-not-break-the-alignment
+  ;; The `/name` that asked for a body is still in the history on every later run -- the
+  ;; client restates its whole conversation -- so the body is re-derived and spliced in
+  ;; after it, BETWEEN two messages the client holds. Matching the client's stretch
+  ;; contiguously finds nothing there and files the whole block as opening context, which
+  ;; would draw the client's own words as something the server injected.
+  (let [turns (turns-of
+               [(input 0 (user "u1" "/alpha fix the bug"))
+                (message 10 (system-msg "S"))
+                (message 11 (user "" "<skills>a catalog</skills>"))
+                (message 12 (user "u1" "/alpha fix the bug"))
+                (message 13 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
+                finished
+                (message 20 (assistant "done"))
+                (input 100 (user "u1" "/alpha fix the bug")
+                       (assistant "done")
+                       (user "u2" "and another thing"))
+                (message 110 (system-msg "S"))
+                (message 111 (user "" "<skills>a catalog</skills>"))
+                (message 112 (user "u1" "/alpha fix the bug"))
+                (message 113 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
+                (message 114 (assistant "done"))
+                (message 115 (user "u2" "and another thing"))
+                finished
+                (message 120 (assistant "right"))])
+        [one two] turns
+        ctx (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
+    (is (= 2 (count turns)))
+    (is (= ["system" "context" "user" "context" "assistant"] (kinds one)))
+    (is (= ["opening" "run"] (mapv :source (ctx one)))
+        "the blocks, then the body the ask put there")
+    (is (= ["user" "assistant"] (kinds two))
+        "the second turn opens nothing: it is the same bytes, and the client's own message
+         is not drawn as injected context"))
+
+  (testing "a body nobody has shown yet lands with the turn that carried it"
+    ;; The asking message is behind us, so the retransmitted neighbours this really sat
+    ;; between are not drawn either; 'this run carried it' is the fact that survives.
+    (let [turns (turns-of
+                 [(input 0 (user "u1" "/alpha fix the bug"))
+                  (message 10 (system-msg "S"))
+                  (message 11 (user "u1" "/alpha fix the bug"))
+                  finished
+                  (input 100 (user "u1" "/alpha fix the bug") (user "u2" "go on"))
+                  (message 110 (system-msg "S"))
+                  (message 111 (user "u1" "/alpha fix the bug"))
+                  (message 112 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
+                  (message 113 (user "u2" "go on"))
+                  finished])]
+      (is (= ["context" "user"] (kinds (second turns))))
+      (is (= "<skill name=\"alpha\">ALPHA BODY</skill>"
+             (:text (item-of (second turns) "context")))
+          "before this turn's own message -- the nearest true anchor left"))))
+
 (deftest history-is-not-listed-a-second-time
   ;; The client restates its whole history on every run; only what is NEW is the
   ;; turn's own material. Listing the restatement would show every message once per

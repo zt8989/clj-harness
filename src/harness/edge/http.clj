@@ -486,10 +486,24 @@
                         ;; where it would be easier and would make the `message` audit
                         ;; line disagree with what actually went out. See
                         ;; harness.kernel.llm/thinking-mode-history.
+                        ;;
+                        ;; AND THE SESSION'S OWN INJECTIONS ARE PART OF WHAT THIS RUN SUBMITS,
+                        ;; so they are folded in HERE -- the `message` record's submitted
+                        ;; side, written a few lines below, is this same list. The kernel
+                        ;; still applies the same function before every LLM call (a skill
+                        ;; loaded mid-run has to be visible to the very next one), and
+                        ;; that is harmless because it is idempotent. It is also
+                        ;; LOAD-BEARING here: which half of the record a message belongs
+                        ;; to is decided by COUNT, so an injection the kernel made on its
+                        ;; own would shift that boundary and file a client message as
+                        ;; part of the kernel's answer.
+                        ;; See harness.edge.trajectory/run-segments.
                         (llm/thinking-mode-history
-                         (ag/inbound (:messages input) (system-prompt/assemble thread-id)
-                                     (opening-blocks! thread-id)
-                                     (:context input))
+                         (project/before-llm
+                          (ag/inbound (:messages input) (system-prompt/assemble thread-id)
+                                      (opening-blocks! thread-id)
+                                      (:context input))
+                          thread-id)
                          provider)
                         (resume-decisions (:resume input))
                         (providers/resolve-provider thread-id (:provider input))])
@@ -561,12 +575,15 @@
               ;; The message record, submitted side: what the first LLM call is about
               ;; to see. The ASSEMBLED system message -- prompt.md's frozen opening
               ;; with each SystemPrompt hook's text behind it -- plus every inbound
-              ;; message in the provider's shape, one line each, VERBATIM. Context
-              ;; rides as a trailing user message -- it must never touch the system
-              ;; prompt, or the provider's prefill (prompt cache) would miss every
-              ;; call. The appended text has no other trace: it is server-side, it
-              ;; never becomes a frame, and this line is where its weight is on the
-              ;; record. (The hook/SystemPrompt line records the same run of it.)
+              ;; message in the provider's shape, one line each, VERBATIM. THE SESSION'S
+              ;; OWN INJECTIONS ARE PART OF IT -- the skill bodies a `/name` in this
+              ;; history asks for were folded in above, because that is what the first
+              ;; LLM call is about to see. Context rides as a trailing user message --
+              ;; it must never touch the system prompt, or the provider's prefill
+              ;; (prompt cache) would miss every call. The appended text has no other
+              ;; trace: it is server-side, it never becomes a frame, and this line is
+              ;; where its weight is on the record. (The hook/SystemPrompt line records
+              ;; the same run of it.)
               (log-messages! thread-id run-id messages)
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
@@ -595,10 +612,14 @@
                         (doseq [e (cap-mcp/take-events!)]
                           (log! thread-id run-id "mcp/server" e))
                       ;; Returned side of the message record: every message the kernel
-                      ;; appended after the initial vector -- assistant replies
+                      ;; appended after the vector it was handed -- assistant replies
                       ;; VERBATIM (the history holds the provider message unrebuilt,
                       ;; reasoning and tool calls intact) and each tool result as the
-                      ;; tool message submitted on the next call. :run/done follows
+                      ;; tool message submitted on the next call. THE COUNT IS TAKEN
+                      ;; AGAINST THAT SAME VECTOR -- the one logged a few lines up -- and
+                      ;; that is what keeps the halves from overlapping: the history
+                      ;; STARTS as exactly the messages on the record, so everything
+                      ;; past their count is the kernel's own. :run/done follows
                       ;; RUN_ERROR too, so any run the kernel started leaves its full
                       ;; message tail on disk -- but it lands one beat AFTER the
                       ;; terminal frame, so a reader racing the consumer may not see
