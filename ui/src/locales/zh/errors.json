@@ -1,0 +1,6 @@
+{
+  "runInProgress": {
+    "switch": "run 进行中；在它结束前不能切换会话。",
+    "newThread": "run 进行中；新会话要等它结束。"
+  }
+}

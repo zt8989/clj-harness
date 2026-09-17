@@ -88,9 +88,9 @@ import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
 import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
-  RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
-  RUN_IN_PROGRESS_REFUSAL,
   runInProgress,
+  runInProgressNewThreadRefusal,
+  runInProgressRefusal,
 } from "@/lib/run-state";
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
@@ -159,13 +159,13 @@ export function App() {
   const onSwitchToThread = useCallback(
     async (id: string) => {
       if (runtimeRef.current && runInProgress(runtimeRef.current)) {
-        throw new Error(RUN_IN_PROGRESS_REFUSAL);
+        throw new Error(runInProgressRefusal(t));
       }
       adoptThread(id);
       const rebuilt = await rebuildThread(id);
       return { messages: toThreadMessages(rebuilt.messages) };
     },
-    [adoptThread],
+    [adoptThread, t],
   );
 
   // `onSwitchToNewThread` IS HERE, and only one thing calls it: removing the last
@@ -183,10 +183,10 @@ export function App() {
   // empty conversation belongs here.
   const onSwitchToNewThread = useCallback(async () => {
     if (runtimeRef.current && runInProgress(runtimeRef.current)) {
-      throw new Error(RUN_IN_PROGRESS_NEW_THREAD_REFUSAL);
+      throw new Error(runInProgressNewThreadRefusal(t));
     }
     adoptThread(crypto.randomUUID());
-  }, [adoptThread]);
+  }, [adoptThread, t]);
 
   const runtime = useAgUiRuntime({
     agent,

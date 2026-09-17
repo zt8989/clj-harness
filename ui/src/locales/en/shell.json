@@ -5,6 +5,53 @@
   },
   "session": {
     "neverRun": "never run",
-    "noLog": "no log yet"
+    "noLog": "no log yet",
+    "current": "current",
+    "running": "Running",
+    "archive": "Archive",
+    "archiveTitle": "Archive — keep this session and its log, but move it out of the way",
+    "unarchive": "Unarchive",
+    "unarchiveTitle": "Unarchive — put this session back with the project's other sessions",
+    "empty": "No sessions in this project yet.",
+    "allArchived": "Every session here is archived.",
+    "archived": "Archived"
+  },
+  "project": {
+    "newSession": "New session",
+    "newSessionTitle": "New session — starts an empty conversation in this project",
+    "more": "More",
+    "moreTitle": "More — actions for this project",
+    "remove": "Remove"
+  },
+  "sidebar": {
+    "newTask": "New task",
+    "addProject": "Add project",
+    "addProjectTitle": "Add a project — opens a folder picker, and the directory you choose becomes a project",
+    "refresh": "Refresh",
+    "refreshTitle": "Re-read the list from disk and the store",
+    "empty": "No projects yet. A session belongs to a project, so one has to be added before a task can start.",
+    "settings": "Settings",
+    "settingsTitle": "Settings: what this session is running on, and what this home can be on"
+  },
+  "addProject": {
+    "path": "Absolute path — D:\\work\\lisp-harness",
+    "pathLabel": "Project directory path",
+    "submit": "Add this directory",
+    "cancel": "Cancel",
+    "emptyPath": "Type the directory's absolute path — nothing was entered."
+  },
+  "refusal": {
+    "noProject": "Add a project first — a session belongs to a project.",
+    "noProjectSelected": "Pick a project first — a session belongs to a project."
+  },
+  "dialog": {
+    "removeTitle": "Remove this project?",
+    "removeLeaves": "leaves the sidebar. Its sessions are kept on disk — nothing under",
+    "removeTail": "is deleted or moved — and adding this directory again brings them back, as they were.",
+    "removeNone": "It has no sessions.",
+    "removeSessions_one": "{{count}} session will stop being listed here.",
+    "removeSessions_other": "{{count}} sessions will stop being listed here.",
+    "keep": "Keep it",
+    "removeSubmit": "Remove project"
   }
 }

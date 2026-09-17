@@ -23,9 +23,11 @@
 // (`t("status." + x)` is not allowed anywhere in this repo). That is what lets the
 // types below fail a key that does not exist, and it is what will let the last
 // ticket find an entry nobody uses. A dynamic key defeats both.
+import enErrors from "../locales/en/errors.json";
 import enFormat from "../locales/en/format.json";
 import enSettings from "../locales/en/settings.json";
 import enShell from "../locales/en/shell.json";
+import zhErrors from "../locales/zh/errors.json";
 import zhFormat from "../locales/zh/format.json";
 import zhSettings from "../locales/zh/settings.json";
 import zhShell from "../locales/zh/shell.json";
@@ -38,8 +40,8 @@ import type { Language } from "./language";
 /// read from (`src/i18next.d.ts`) and the fallback, so a key that exists only in
 /// Chinese is a key no call site can name.
 export const RESOURCES = {
-  en: { format: enFormat, settings: enSettings, shell: enShell },
-  zh: { format: zhFormat, settings: zhSettings, shell: zhShell },
+  en: { errors: enErrors, format: enFormat, settings: enSettings, shell: enShell },
+  zh: { errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell },
 } as const satisfies Record<Language, Record<string, unknown>>;
 
 /// Derived from the tables rather than listed again: a second list is a second
