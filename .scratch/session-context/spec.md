@@ -96,4 +96,67 @@ pwsh 要 `-NoProfile -Command`）。这条链是本特征的前置：没有它�
 
 ## 状态
 
-- 01–04：**ready-for-agent**（2026-09-16 立票，同日拆票）
+- 01–04：**已落地**（2026-09-16 立票，同日拆票；2026-09-17 一次全量绿之后收口）。记录见文末。
+
+## 落地记录（2026-09-17）
+
+**四张票落在 `c50f85d`。** 全量在**合并后的工作树状态**上实测：
+
+- `clojure -M:test -m harness.test-runner` → `Ran 824 tests containing 11135 assertions.
+  0 failures, 0 errors.`，**退出码 0**。（落地前的基线：810 / 11065、2 个 error——那是 `web_test`
+  的 `a-body-that-is-already-text-is-not-touched` 在环境里撞上的 404，收口这次运行没有再现。）
+- 分支 `main`；快照（`docs/architecture.md` 第 6 行）钉到 `c50f85d`。
+- `cd ui && npm test` → `Test Files 1 passed (1)` / `Tests 24 passed (24)`，退出码 0；
+  `cd ui && npm run build` → 过。`ui` 一个字没动（本特征的非目标），所以这两条是**回归**，不是本特征的证据。
+- 那份提交里还带着**工作树里别人的在办改动**（`session/closed-off` 重建收口、stream 的终态、
+  `log/warn!`、`with-temp-env` 那一批），与本特征无关但改到了同一批文件（`http_test` /
+  `test_support` / `test_runner` / `docs/architecture.md`），拆不开；**合并后的这个状态是绿的**，
+  照实一起提交，而不是把一个半截的树留在分支上。提交信息里写着这件事。
+
+### 票 → 交付
+
+| 票 | 交付 | 落在 |
+|---|---|---|
+| 01 | `builtin:tools` / `builtin:provider` 退场；组装机制零变化；既有断言按票面逐条改写（退场 6 条、改写 5 处、api-key 那条搬到整份文本） | `src/harness/cap/system_prompt.clj`、`test/harness/cap/system_prompt_test.clj`、`test/harness/kernel/hooks/install_test.clj`、`test/harness/edge/http_test.clj`、`src/harness/kernel/hooks.clj`（docstring 里的例句） |
+| 02 | 写明的候选链 + 每种 shell 自己的起法；WSL 启动器被拒；没有可用的 shell 就如实说「没有」；rg / git 指名失败 | `src/harness/infra/shell.clj`、`src/harness/infra/rg.clj`、`src/harness/cap/git.clj`、`test/harness/infra/shell_test.clj`（6 条） |
+| 03 | `harness.infra.env` + `builtin:env`：平台 / 解析到的 shell / 增强工具名单，机器事实每进程一次、探测走同一个 shell、答不上来如实说 | `src/harness/infra/env.clj`、`src/harness/cap/system_prompt.clj`、`test/harness/infra/env_test.clj`（6 条）、`test/harness/test_support.clj`（`with-machine`）、`system_prompt_test` 里 5 条组装层用例 |
+| 04 | hooks / overview / kernel / README / layers / client / `architecture.md`（模块地图 + 「在办」拿掉这一条）跟上 | `docs/`、`README.md` |
+
+### 实现时撞出来、票面没写的事
+
+1. **「整份 system 文本里搜不到 `api-key`」做不到**：冻结开头自己就写着 `:api-key`（secrets 一节的
+   禁令，一字不能动）。落地拆成两条——**真 key 搜整份文本**（连冻结开头一起），**`:api-key` 搜追加的
+   那一半**（`prompt.md` 之后的全部）。泄漏只可能从那一半来，而那两条都是**搜索**，不是「路径上没有」
+   的推理；「这条断言真能红」用哨兵 key + 一次「把它拼进去就该搜得到」的自检看着。
+   （票面：01 的第 40 行、03 的倒数第三条验收。）
+2. **`binary` 不再是一个 `defonce` 字符串**，而是 `resolution` 的 `:command`——它仍是字符串、仍是
+   会被 spawn 的那个；调用点多读了 `:argv-prefix`，于是 `shell` / `run` 的**形状**没变、**起法**从写死的
+   `-lc` 变成按 kind 取。
+3. **`start`（长驻进程）也跟着链走了**：非 Windows 上从 `[binary "-lc" cmd]` 改为按解析结果拼 argv，
+   Windows 上仍走 `cmd /c`（原样）。第一版把 `:argv-prefix` 当成了 argv 的全部、漏掉 `(:command r)`，
+   MCP 那 97 条用例当场红——**是跑全量抓到的**，不是想出来的。
+4. **探测命令是三条，不是一条**：`command -v` 的循环只对 POSIX 成立，pwsh 要 `Get-Command`，cmd 要
+   `where`。票面写「一次 `bash -lc`（或链上那一级自己的形态）」——「自己的形态」得真写出来，而没有
+   一条命令行三种 shell 都认。
+5. **`on-path` 改成在所有平台都试 `.exe` / `.cmd` / `.bat` 后缀**（原先只在 Windows 试），否则那个
+   WSL 陷阱在写它的这台机器（macOS）上根本复现不了，而一条只在它保护的平台上才被断言的规则，
+   没人会回头再核。副作用（刻意的）：macOS 上一个恰好叫 `bash.exe` 的文件现在也会被认。
+6. **被拒的 WSL 启动器让链走向下一级，而不是继续翻 PATH 的下一个目录**：PATH 上先撞见
+   `System32\bash.exe` 时那一行算「不存在」，于是 `<env>` 报 pwsh（或「一个都没有」），不会再去后面
+   找一个真 bash。选择写在 `locator` 的 docstring 里，也有一条用例钉着。
+7. **探测答不上来时只出一行**（`available: unknown (...)`），**不写 `not found:`**——没问过就不能宣称
+   某样东西不在。票面只说「这一半报不知道」。
+8. **`client.md` 有两句以 `<tools>` 为前提的话**（轨迹页：「提示词那段 `<tools>` 就是这些名字」），
+   票面没列这一处。改的是**现状文档**（改成「同一次请求的两面」），UI 一个字没动。
+9. **`prompt.md` 里那颗「想知道由谁服务，问 `active-provider`」的配方确实没有家**：`<provider>` 退场后
+   它不再出现在任何地方；`active-provider` 仍可问、`/api/model` 仍答。这是本条唯一的净损失，票面已接受。
+
+### 真机那一句：**没有跑**，如实写在这里
+
+票 04 的最后一条要的是「新会话里问模型『你现在跑在什么系统上、你的命令交给谁、有没有 rg』，它答得出来」。
+**没有人跑过，所以不写「过了」。** 在这个会话里跑真请求要动真实的 `~/.clj-harness` 与那把 api-key
+（`AGENTS.md` 的家目录纪律），本会话不做——与 `.scratch/composer-status/evidence/README.md` 里那条
+「没有跑活厂商，如实写在这里」同一个立场。**替代证据弱一档、但如实**：`<env>` 那几句在组装层被逐条
+断言（`system_prompt_test` / `env_test`：平台、shell 的 kind 与路径与起法、有/没有两半、问不出来那一态），
+所以「话说得对不对」有证据，**「模型读了会不会照着做」没有**。下一个能跑真机的人补这一句。
+
