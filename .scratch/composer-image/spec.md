@@ -106,8 +106,10 @@
 
 ## 落地记录
 
-四条票面都已落地，逐票的验收回执与证据在 `.scratch/composer-image/issues/`（票面按惯例在合回时删除）
-与 `evidence/`：
+四条票面都已落地并**按惯例删除**（它们带着各自的验收回执，落在 `91ce9d9` 里，历史留着；
+今天要读哪一条，`git show 91ce9d9:.scratch/composer-image/issues/<票>.md`）。
+本特征落地的那一提交是 `91ce9d9`（分支 `composer-image`，从 `main` @ `7fc34c8` 切出）。
+证据在 `evidence/`：
 
 - **01（图进得来、发得出去、对话里看得见）**：`ui/src/app.tsx` 一行适配器 + `ui/src/lib/attachments.ts`。
   真机三条路各走一次；记录里 `input` 行是三个
@@ -123,3 +125,16 @@
 
 **UI 套件**：`attachments` 套件两例（都是纯的），`EXPECTED_CASES` 24 → 26。
 **服务端套件**：零 diff，所以没有新增用例——线那一侧本来就由 `http-test` 那条盖着。
+
+**收口这次实测**：
+
+- `clojure -M:test -m harness.test-runner` → `Ran 824 tests containing 11135 assertions.
+  0 failures, 0 errors.`（这条分支上这次连那条真竞赛用例都没撞上）
+- `cd ui && npm test` → `26 passed (26)`（9 组）；`npm run typecheck` 0 error、`npm run build` 过。
+- `README.md` 的报数跟着改：后端换成这条分支今天的实测（`trajectory` @ `f7f4d31` 那一次的
+  801 / 11018 留作对照），UI 那行 24 → 26、8 组 → 9 组，并写明那两条「本机固定失败」的现状
+  （JDK 25 那条已修——子进程把自己的答案写进文件而不是 stdout；真竞赛那条留着）。
+
+**一处没做到位，如实记下**：真机那两种剪贴板来源（截图工具复制、从 Finder 复制图片文件）需要一台有
+桌面会话的机器，本次用的是浏览器自己的剪贴板 + 一次真的 ⌘V（同一条 `paste` / `clipboardData.files`
+的路）。理由与替代写法在 `evidence/README.md`。
