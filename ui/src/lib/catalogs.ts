@@ -26,6 +26,7 @@
 import enApproval from "../locales/en/approval.json";
 import enComposer from "../locales/en/composer.json";
 import enElementsCard from "../locales/en/elements-card.json";
+import enElementsFiles from "../locales/en/elements-files.json";
 import enElementsThread from "../locales/en/elements-thread.json";
 import enErrors from "../locales/en/errors.json";
 import enFormat from "../locales/en/format.json";
@@ -36,6 +37,7 @@ import enTrajectory from "../locales/en/trajectory.json";
 import zhApproval from "../locales/zh/approval.json";
 import zhComposer from "../locales/zh/composer.json";
 import zhElementsCard from "../locales/zh/elements-card.json";
+import zhElementsFiles from "../locales/zh/elements-files.json";
 import zhElementsThread from "../locales/zh/elements-thread.json";
 import zhErrors from "../locales/zh/errors.json";
 import zhFormat from "../locales/zh/format.json";
@@ -52,8 +54,8 @@ import type { Language } from "./language";
 /// read from (`src/i18next.d.ts`) and the fallback, so a key that exists only in
 /// Chinese is a key no call site can name.
 export const RESOURCES = {
-  en: { approval: enApproval, composer: enComposer, "elements-card": enElementsCard, "elements-thread": enElementsThread, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread, trajectory: enTrajectory },
-  zh: { approval: zhApproval, composer: zhComposer, "elements-card": zhElementsCard, "elements-thread": zhElementsThread, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread, trajectory: zhTrajectory },
+  en: { approval: enApproval, composer: enComposer, "elements-card": enElementsCard, "elements-files": enElementsFiles, "elements-thread": enElementsThread, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread, trajectory: enTrajectory },
+  zh: { approval: zhApproval, composer: zhComposer, "elements-card": zhElementsCard, "elements-files": zhElementsFiles, "elements-thread": zhElementsThread, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread, trajectory: zhTrajectory },
 } as const satisfies Record<Language, Record<string, unknown>>;
 
 /// Derived from the tables rather than listed again: a second list is a second
