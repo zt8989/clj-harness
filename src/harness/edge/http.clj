@@ -2160,10 +2160,16 @@
       (println (str "no config.edn in " root " -- wrote an empty one; the settings panel"
                     " (or an editor) can fill it in")))
     (try
-      (let [server (hk/run-server handler opts)]
-        (println (str "harness listening on http://localhost:" (:port opts))
+      (let [server (hk/run-server handler opts)
+            ;; THE PORT THE SOCKET GOT, which is not always the one that was asked
+            ;; for: `0` means 'whichever is free', and that is the form a launcher
+            ;; wants when it cannot know in advance. Reporting `(:port opts)` here
+            ;; printed `localhost:0` and logged `port=0`, so the one line a person
+            ;; (or a script) reads to learn where the server is said nothing.
+            bound  (:local-port (meta server))]
+        (println (str "harness listening on http://localhost:" bound)
                  "-- POST an AG-UI RunAgentInput here; stop with (stop!)")
-        (log/started root (:port opts))
+        (log/started root bound)
         ;; ...AND ONE LINE FOR THE OTHER END OF THAT STORY. `:listening` marks
         ;; where the file's story begins; this marks where the process stopped
         ;; telling it, which is the fact a run that dies mid-flight leaves behind.
@@ -2177,6 +2183,16 @@
         (log/error! :start-failed t {:port (:port opts) :root root})
         (throw t)))))
 
-(defn -main [& _]
-  (start!)
-  @(promise))
+(defn -main
+  "Run the server in the foreground until it is killed.
+
+  `--port N` picks the port; `0` asks the OS for a free one, which is the form a
+  launcher wants -- it cannot know in advance which ports are taken, and the one
+  that matters here is only knowable after the bind. Whichever it is, the bound
+  port is what gets printed and logged (see start!), so a script can start this
+  on `0`, read the line, and point a proxy at it. Without the option the default
+  is unchanged (`port`, 8080)."
+  [& args]
+  (let [asked (some (fn [[k v]] (when (= k "--port") v)) (partition 2 1 args))]
+    (start! (cond-> {} asked (assoc :port (Integer/parseInt (str asked)))))
+    @(promise)))

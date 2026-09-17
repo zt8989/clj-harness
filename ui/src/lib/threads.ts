@@ -6,8 +6,22 @@
 // so the one address serves both -- which is why AGENT_URL is defined here and
 // the run wiring imports it, rather than each file keeping its own copy of the
 // address.
-
-export const AGENT_URL = "http://localhost:8080/";
+//
+// THIS ORIGIN IS THE DEFAULT, not `http://localhost:8080/`. The page and the
+// harness are served from ONE address, and the dev server is what forwards the
+// harness's share of it (`ui/vite.config.js`, and `dev.sh` for starting the two
+// together on a port it picks). Two things follow, and both are the reason:
+// the browser makes no cross-origin request at all -- so nothing here depends on
+// the harness's CORS allowance, which is a list of origins that has to keep up
+// with a port that no longer has to be 5173 -- and a build carries no address
+// of ours into it, so the same bundle works behind whatever a deployment puts
+// in front.
+//
+// VITE_AGENT_URL IS THE WAY BACK OUT. Pointed at an absolute address it talks
+// to a harness directly, exactly as this file used to; that is the mode the
+// CORS allowance exists for, and a page served by something with no proxy needs
+// it.
+export const AGENT_URL: string = import.meta.env.VITE_AGENT_URL ?? "/";
 
 /// One row of `GET /api/threads`. `threadId` is the log file's stem -- the id a
 /// rebuild names -- and `lastActivity` is the file's mtime, epoch milliseconds.

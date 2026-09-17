@@ -1,7 +1,11 @@
 # 边：`harness.edge.http`
 
 一个 http-kit 服务器，两条边共用一个 handler：流式的 **AG-UI 边**（`POST /`）与
-普通的 JSON **管理边**（`/api/*`）。CORS 只放行 `http://localhost:5173`（那是契约，不是偏好）。
+普通的 JSON **管理边**（`/api/*`）。CORS 只放行 `http://localhost:5173`。
+**那条放行现在只是一条备用路径**：dev 时页面走自己 origin 的反代（`dev.sh` + `ui/vite.config.js`），
+浏览器一个跨域请求都不发；只有把前端指到绝对地址（`VITE_AGENT_URL`）直连这个进程时才用得上它。
+所以端口不再是「同时改两处契约」的那件事——本进程绑哪个端口由 `--port` 决定（`0` = 随 OS 挑，
+绑到的那个会被打印并记进日志）。
 
 ## AG-UI 边
 

@@ -310,16 +310,50 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ## 启动
 
-### 1) 后端 :8080
+### 1) 一条命令起两个（推荐）
 
-```pwsh
-clojure -M:run          # 项目根
-# 或 clojure -A:test -M -m harness.edge.http
-# 期望：harness listening on http://localhost:8080 -- POST an AG-UI RunAgentInput here; stop with (stop!)
+```bash
+./dev.sh                 # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
+./dev.sh --port 8080     # 钉死端口（老地址，需要时）
+./dev.sh --scripted      # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
+./dev.sh --ui-port 5199  # 前端换端口
+```
+
+仓库里**只有这一处**告诉前端后端在哪，而它不在源码里：脚本让后端**在 0 号端口上绑**（OS 分配），
+把后端**自己报出来的**那个端口交给 `HARNESS_BACKEND_URL`，`ui/vite.config.js` 拿它当代理目标。
+所以没有任何源文件知道端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
+端口是**读回来的不是猜的**：先探一个空闲端口再交给后端，是跟整台机器赛跑。
+
+**真实模式用的是你自己的 `~/.clj-harness`**（你的配置、你的厂商、你的密钥）；
+`--scripted` **绝不用**——它拿一对临时家目录（config root 与 OS home，两者平级不嵌套，
+见 `AGENTS.md`），退出时连目录一起删。`CLJ_HARNESS_HOME=... ./dev.sh` 也能用：脚本不覆盖这个
+变量，所以想让真实模式落在别处，就在前面给它。
+
+### 2) 分开起
+
+```bash
+clojure -M:run --port 0   # 后端；不带 --port 就是 8080，0 是「随 OS 挑」
+# 期望：harness listening on http://localhost:<真正绑到的那个端口> -- POST an AG-UI RunAgentInput here
 # REPL 形态：clojure '-J-Dfile.encoding=UTF-8' -M:repl
 ```
 
-### 2) 前端 :5173
+```bash
+cd ui
+npm install      # 首次
+HARNESS_BACKEND_URL=http://127.0.0.1:<上面那个端口> npm run dev
+npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
+```
+
+### 3) 前端侧的形状（为什么是代理）
+
+**页面只跟自己的 origin 说话。** `src/lib/threads.ts` 的 `AGENT_URL` 默认是 `/`，
+`vite.config.js` 把 `/api/*` 与 **`POST /`**（AG-UI 的 run 端点在根上，页面也在根上，
+所以区分它们的是**方法**）转给后端。两件事因此成立：浏览器**一个跨域请求都不发**
+（没有 preflight，也没有一份要跟着端口改的 CORS 白名单），而构建产物里**不带我们的地址**，
+换到任何部署自己的反代后面都一样。要直连后端（不走代理）就 `VITE_AGENT_URL=http://…:8080/`，
+那正是后端那条 CORS 放行存在的理由。
+
+### 4) 会话里的东西
 
 侧边栏是三个段位：「新建任务」与「设置」钉在上下，**中间的项目区是唯一滚动的东西**（窗口拉高拉矮
 都不出现整页滚动）。一个项目 = 一个目录，显示成它最后一个文件夹名；悬停出「更多」，里面有
@@ -329,15 +363,9 @@ clojure -M:run          # 项目根
 **新建任务必须先有项目**：一个项目都没有时，它说的是「先添加一个项目」并给出入口。会话的记录落在
 `~/.clj-harness/projects/<workspace>/<threadId>.jsonl`。
 
-```pwsh
-cd ui
-npm install      # 首次
-npm run dev      # Vite 起在 5173，浏览器打开 http://localhost:5173
-npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
-```
-
-**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`ui/vite.config.js` 里
-`server.port: 5173, strictPort: true` 把这句话钉死——换端口不是改一处配置，是同时改两处契约。
+**5173 还在，但它不再是 CORS 契约。** 走后端那条放行的那半边（`VITE_AGENT_URL` 指绝对地址）
+才需要它；走代理时浏览器跟 5173 同源，白名单与它无关。`strictPort` 留着是因为第二个 dev server
+悄悄落到 5174 比启动失败更让人意外。
 
 ### 会话旁边还有一个「轨迹」
 

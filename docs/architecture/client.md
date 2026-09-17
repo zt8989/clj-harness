@@ -34,7 +34,7 @@ components/
                         `LOCAL:` 改动**，其余原样未改（见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
-  threads.ts        AGENT_URL + rebuild 调用
+  threads.ts        AGENT_URL（默认 `/`，即**本 origin**；`VITE_AGENT_URL` 可指绝对地址）+ rebuild 调用
   projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
@@ -55,8 +55,15 @@ lib/
                     旧名字说的是「整页在跑」，而那个前提没了
 ```
 
-**5173 是 CORS 契约不是偏好**：后端只放行 `http://localhost:5173`，`vite.config.js` 里
-`server.port: 5173, strictPort: true` 把这句话钉死——换端口要同时改两处契约。
+**页面只跟自己的 origin 说话，dev server 把它转出去。** `ui/vite.config.js` 有两个代理上下文：
+`/api/*` 与 **`POST /`**（AG-UI 的 run 端点在根上，页面也在根上，所以区分它们的是**方法**——
+`^/$` 是锚定的精确路径，`bypass` 让非 POST 的那些落回 Vite 自己）。目标来自
+`HARNESS_BACKEND_URL`，由 `./dev.sh` 填：它让后端**在 0 号端口绑**（OS 分配）、读后端**自己报
+出来的**那个端口，所以源码里没有端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
+浏览器因此**一个跨域请求都不发**（没有 preflight，CORS 白名单也不再是前端要跟着改的东西），
+构建产物里也不带我们的地址——换到任何部署自己的反代后面都一样。
+要直连后端就走 `VITE_AGENT_URL=http://127.0.0.1:<port>/`，那条路才是后端 CORS 放行存在的理由。
+`strictPort: true` 留着：第二个 dev server 悄悄落到 5174，比启动失败更让人意外。
 
 ## 状态的归属
 
