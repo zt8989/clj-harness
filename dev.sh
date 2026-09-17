@@ -41,6 +41,7 @@ SCRIPTED=false
 SCRIPT_FILE=""
 TMP=""
 BACKEND_PID=""
+UI_PID=""
 
 usage() {
   cat <<'TXT'
@@ -73,15 +74,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# THE BACKEND GOES IN ITS OWN PROCESS GROUP, so stopping this script stops the
-# JVM under it too. `clojure` is a launcher that execs java, and what is left
-# behind when only the launcher's pid is killed is a harness still holding the
-# port -- which is the exact nuisance this script exists to avoid causing.
+# BOTH CHILDREN GO IN THEIR OWN PROCESS GROUPS, so stopping this script stops the
+# trees under them. `clojure` is a launcher that execs java, and `npm` is a shell
+# that spawns one: what is left behind when only the direct child's pid is killed
+# is a harness still holding its port and a vite still holding its own -- the exact
+# nuisance this script exists to avoid causing. `set -m` below is what puts each
+# of them in a group of its own.
+stop_tree() {
+  [ -n "$1" ] || return 0
+  kill -- "-$1" 2>/dev/null || kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
 cleanup() {
-  if [ -n "$BACKEND_PID" ]; then
-    kill -- "-$BACKEND_PID" 2>/dev/null || kill "$BACKEND_PID" 2>/dev/null || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
+  stop_tree "$UI_PID"
+  stop_tree "$BACKEND_PID"
   [ -n "$TMP" ] && rm -rf "$TMP"
   return 0
 }
@@ -142,4 +149,13 @@ if [ ! -d node_modules ]; then
   npm install
 fi
 
-HARNESS_BACKEND_URL="http://127.0.0.1:$BOUND" npm run dev -- --port "$UI_PORT"
+# BACKGROUNDED AND THEN WAITED ON, rather than run in the foreground, and that is
+# not a style choice: bash defers a TRAPPED signal until the foreground command
+# finishes, so `npm run dev` as the last line would mean Ctrl-C (or a TERM) reaching
+# only this script did nothing at all until the UI stopped by itself. `wait` is
+# interruptible, so the trap below runs the moment the signal arrives.
+set -m
+HARNESS_BACKEND_URL="http://127.0.0.1:$BOUND" npm run dev -- --port "$UI_PORT" &
+UI_PID=$!
+set +m
+wait "$UI_PID"
