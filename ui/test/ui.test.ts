@@ -68,7 +68,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// languages, plus the two units that deliberately do not translate. Ticket 02 merged
 /// the four copies of the size/duration words into `lib/format.ts`, and this is the
 /// case that pins what they now say.
-const EXPECTED_CASES = 34;
+/// 34 -> 35: the `i18n` suite's third -- every catalog entry is NAMED by some source
+/// file, the other direction of the parity check (a mistyped key that was then added
+/// to the catalog to satisfy the types, an entry left behind by a deleted row). It
+/// reads the sources through `import.meta.glob`; the case itself says what a grep
+/// costs and which way it errs.
+const EXPECTED_CASES = 35;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -142,13 +142,13 @@ lib/
   `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框在会话有消息时挂上），
   首次会话居中的时候仍是上游的间距。
 
-抄进来的清单（对账就是不重装直接 diff）：
+抄进来的清单（**对账是读 `LOCAL:` 标注**——i18n 那批落地之后这些文件就地改，逐字节 diff 不再是手段）：
 
 | 位置 | 是什么 |
 |---|---|
-| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button、**其中 `thread.aui.tsx` 与 `thread-list.aui.tsx` 两份带 `LOCAL:` 改动**（前者的五处见下，后者见再下面），其余十份一字未改；`attachment.aui.tsx` 与 `image.tsx` 都在**原样未改**那一组里，而它们今天真的被用上了——composer 的缩略图、对话里那张图与点开放大，画的就是这两份（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
-| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
-| `src/hooks/` | 2 份 hook，同样未改 |
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、thread-list、tool-fallback、tool-group、reasoning、reasoning.aui、markdown-text、attachment、file、image、follow-up-suggestions、tooltip-icon-button。**九份带 `LOCAL:` 标注**——文案进了目录（spec 决策 5），另有结构性的几处（`thread.aui.tsx` 的五处见下，`thread-list.aui.tsx` 的重写见再下面）。**三份没有可译的文案，因此仍是原样**：`reasoning.aui.tsx`、`follow-up-suggestions.aui.tsx`、`tooltip-icon-button.tsx`。`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用（注入点已不再导入它，见下） |
+| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton。**其中 `dialog.tsx` 带 `LOCAL:` 标注**：它的 `Close` 进了目录（`sr-only` 与页脚那颗按钮两处） |
+| `src/hooks/` | 2 份 hook，不含文案，未改 |
 
 **两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
 （`ComposerFrame` 套在 composer 外面、`ComposerTools` 画在动作行右侧、`ComposerAddAttachment` 顶替动作行
@@ -206,7 +206,14 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 
 界面说**两种语言**：英文与中文。机制是 i18next + react-i18next（为什么引库而不手写一份表、
 代价是什么，见 `.scratch/ui-i18n/spec.md`），两份目录在 `ui/src/locales/<语言>/<面>.json`，
-一个「面」是页面上的一处地方（外壳 / 输入框 / 正文 / 审批 / 设置 / 轨迹 / 抄来的元素 / 本侧的句子）。
+一个「面」是页面上的一处地方：**外壳 / 输入框 / 正文 / 审批 / 设置 / 轨迹 / 数字与时长 /
+抄来的元素（三组）/ 本侧的句子**——十一份，**全部已落地**（2026-09-17，13 张票）。
+今天界面上不再有硬写的界面文案；留在原文里的只有后端自己的句子与模型的词汇（见下面「边界」）。
+
+- **两条守卫把「搬漏了」变成红的**：每个键在两种语言里都在、值都非空，且**语言各自的复数形式要与
+  它自己的 CLDR 类别一致**（英文有 `_one`，中文没有）；反过来，**目录里不留没人命名的键**
+  （一个拼错的键被补进目录、或一行删掉后留下的条目，都不会出现在屏幕上，只会越积越多）。
+  两条都在 `test/suites/i18n.ts` 里，第一条是「故意弄坏会红」验过的。
 
 - **判定链是一条纯函数**（`src/lib/language.ts`，零 import）：**这个浏览器记住的** →
   `navigator.language`（`zh*` 归 `zh`，其余归 `en`）→ `en`。记住的值**解析不出来就往下落**，不是粘住

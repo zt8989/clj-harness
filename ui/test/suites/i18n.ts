@@ -80,6 +80,35 @@ function leaves(catalog: Catalog, prefix = ""): [string, unknown][] {
   });
 }
 
+/// Every source file the page is built from, as raw text, minus the catalogs
+/// themselves (a catalog must not count as a use of its own keys).
+///
+/// `import.meta.glob` rather than reading the tree with `node:fs`, because this is the
+/// vite pipeline and the glob is its own file list: no second notion of "the source",
+/// and it needs no permission to walk a directory.
+const SOURCES: readonly string[] = Object.entries(
+  import.meta.glob("../../src/**/*.{ts,tsx}", {
+    eager: true,
+    query: "?raw",
+    import: "default",
+  }) as Record<string, string>,
+)
+  .filter(([path]) => !path.includes("/locales/"))
+  .map(([, text]) => text);
+
+/// Whether some source file names a key, in the one spelling the discipline allows.
+///
+/// THE KEY IS WRITTEN LITERALLY AT THE CALL SITE (spec decision 7), which is the whole
+/// reason this check can exist: a key built from a template would never be found here,
+/// and that is a property worth failing on rather than tolerating. A plural key is
+/// looked up by its BASE, because that is what a call site writes -- `t("stats.turns",
+/// { count })`, never `stats.turns_one`.
+function isNamedSomewhere(key: string): boolean {
+  return SOURCES.some(
+    (text) => text.includes(`"${key}"`) || text.includes(`'${key}'`) || text.includes(`\`${key}\``),
+  );
+}
+
 const cases: Case[] = [
   {
     name: "the-language-chain-falls-through-what-it-cannot-use",
@@ -217,6 +246,38 @@ const cases: Case[] = [
       // driver puts on a suite contributing no cases: if the tables were ever emptied
       // or the walk stopped descending, the loop above would pass silently.
       expect(checked).toBeGreaterThan(0);
+    },
+  },
+  {
+    name: "every-catalog-entry-is-named-by-something",
+    run: async () => {
+      // THE OTHER DIRECTION OF THE PARITY CHECK. That one asks "is every key in both
+      // languages"; this asks "does anything actually name it" -- and the failure it
+      // catches is the quiet one: a call site whose key was mistyped and then added to
+      // the catalog to make the types pass, or an entry left behind after the row that
+      // used it was deleted. Neither shows up on a screen; both accumulate.
+      //
+      // It is a GREP, and it is honest about what that costs: the sources are searched
+      // as text, so a key named only inside a comment counts as used. That is the
+      // direction to be wrong in -- a false "used" is a missed warning, while a false
+      // "unused" would fail a green tree for a reason nobody could act on.
+      const orphans: string[] = [];
+      let seen = 0;
+      for (const language of ["en", "zh"] as const) {
+        for (const namespace of NAMESPACES) {
+          for (const [path] of leaves(RESOURCES[language][namespace] as Catalog)) {
+            seen += 1;
+            const plural = pluralOf(path);
+            const base = plural === null ? path : plural.base;
+            if (!isNamedSomewhere(base)) orphans.push(`${language}/${namespace}: ${base}`);
+          }
+        }
+      }
+
+      expect(orphans, "catalog entries nothing names").toEqual([]);
+
+      // And the scan saw the whole set, so a broken glob cannot make this pass.
+      expect(seen).toBeGreaterThan(300);
     },
   },
 ];
