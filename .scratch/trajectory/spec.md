@@ -61,7 +61,7 @@
 | 视图/读侧要的 | 读哪一行、哪个字段 | 今天 |
 |---|---|---|
 | 系统条的字节 | `message` 的 `role: "system"`（每 run 一份，逐字节） | 有 |
-| 上下文条：指令文件、技能清单、技能正文、本 run 的 context | `message` 的 `role: "user"` 里**不属于**该 run `input.messages` 的那些（`input` 的 `:context` 是它末尾那条的来源） | 有 |
+| 上下文条：指令文件、技能清单、技能正文、本 run 的 context | `message` 的 `role: "user"` 里**不属于**该 run `input.messages` 的那些（`input` 的 `:context` 是它末尾那条的来源）。**同一段文本整场只画一次**（见 `.scratch/trajectory-injection-once/spec.md`）：开场块只在第一轮，技能正文只在用它的那一轮，变了的那一轮再画一次 | 有 |
 | 用户条 | `input` 的 `:messages`（带 id —— 判「本轮新增」就靠它） | 有 |
 | 助手文本与推理 | `message` 的 `role: "assistant"`（`content` / `reasoning_content`） | 有 |
 | 工具的名字与参数 | 上一条的 `tool_calls[].function`（`arguments` 是原样的 JSON 串） | 有 |
