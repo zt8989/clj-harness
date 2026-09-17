@@ -84,6 +84,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApprovalBatchProvider } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
+import { imageAttachments } from "@/lib/attachments";
 import { AGENT_URL, rebuildThread } from "@/lib/threads";
 import {
   RUN_IN_PROGRESS_NEW_THREAD_REFUSAL,
@@ -184,6 +185,10 @@ export function App() {
     agent,
     isSendDisabled: gateOpen,
     adapters: {
+      // IMAGES IN THE COMPOSER, and this one line is what enables them -- see
+      // lib/attachments.ts: `capabilities.attachments` is `!!adapters.attachments`,
+      // and paste, drop and `+` all consult that flag before doing anything.
+      attachments: imageAttachments,
       threadList: {
         threadId,
         onSwitchToThread,

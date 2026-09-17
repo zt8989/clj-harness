@@ -14,14 +14,18 @@ AG-UI 帧的形状、interrupt/resume 的语义、以及「服务端不持有会
 main.tsx            React root
 app.tsx             HttpAgent({url: "http://localhost:8080/"}) → useAgUiRuntime → <Thread/>
                     侧边栏 + 审批批次 provider + THREAD_COMPONENTS 注入
+                    （附件适配器也在这里交出：`adapters.attachments` 一行）
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
-  composer-chrome.tsx   composer 上下两条与两个 LOCAL: 插入点（ComposerFrame / ComposerTools）
+  composer-chrome.tsx   composer 上下两条、三个 LOCAL: 插入点
+                        （ComposerFrame / ComposerTools / ComposerAddAttachment），
+                        以及附件那条判据在界面上的两处（禁用的 `+`、那句拒话）
   composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
-  assistant-ui/elements/  11 份抄自 assistant-ui registry，一字未改（thread-list 例外，见下）
+  assistant-ui/elements/  12 份抄自 assistant-ui registry；**只有 thread 与 thread-list 两份带
+                        `LOCAL:` 改动**，其余原样未改（见下）
   ui/               9 份 shadcn 基件，同样未改
 lib/
   threads.ts        AGENT_URL + rebuild 调用
@@ -31,6 +35,10 @@ lib/
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
   format.ts         给**人看**的数字：字节、时间，以及状态条那五格的字符串（`statsCells`）。
                     **零 import**，所以 UI 套件能直接测它
+  attachment-rules.ts  附件那两条判据（模型收不收图、源字节有没有过 2 MB）与它们各自的拒话。
+                    同样**零 import**，同样被 UI 套件直接测
+  attachments.ts    附件适配器（这一份就是「composer 有没有附件能力」这个开关本身）+
+                    它往里写、界面往外读的那个小 store
   run-state.ts      「run 进行中」的拒绝句子（适配器与侧边栏共用一份）
 ```
 
@@ -99,26 +107,31 @@ lib/
 
 | 位置 | 是什么 |
 |---|---|
-| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button，**一字未改**（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
+| `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、tool-fallback、tool-group、reasoning、markdown-text、attachment、file、follow-up-suggestions、image、tooltip-icon-button、**其中 `thread.aui.tsx` 与 `thread-list.aui.tsx` 两份带 `LOCAL:` 改动**（前者的三处插入点见下，后者见再下面），其余十份一字未改；`attachment.aui.tsx` 与 `image.tsx` 都在**原样未改**那一组里，而它们今天真的被用上了——composer 的缩略图、对话里那张图与点开放大，画的就是这两份（`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用；注入点已不再导入它，见下） |
 | `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton |
 | `src/hooks/` | 2 份 hook，同样未改 |
 
-**一处例外，改动逐处标注**：`thread-list.aui.tsx` 就地重写过——上游那份是给另一种产品形态的扁平、
+**两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
+（`ComposerFrame` 套在 composer 外面、`ComposerTools` 画在动作行右侧、`ComposerAddAttachment` 顶替动作行
+左侧那颗附图按钮），三处都只为让 `composer-chrome.tsx` 有地方可接——这份文件的行、样式与结构其余部分
+与上游一致。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
 按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
 它那条 running 指示，删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的
 `ThreadListItemPrimitive.Trigger`（拒绝切换时必须把原因显示在**所点的行**上，那需要我们自己持有
 switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，对账就是读那些标注块。
 
-其余的本地差异走两个**自建注入点**，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`
+其余的本地差异走**自建注入点**，不动抄来的文件：`message-parts.tsx` 的 `THREAD_COMPONENTS`
 与自建面板（`approval-gate.tsx`、`sidebar.tsx`）。
 
-`THREAD_COMPONENTS` 填的是**步骤行**，三个槽位各有分工：`ToolFallback` 是一种调用长什么样，
+`THREAD_COMPONENTS` 里分两组槽位。**步骤行那一组**三个各有分工：`ToolFallback` 是一种调用长什么样，
 `ToolGroup` **什么都不画**（组的头「N tool call」已去掉，而槽位不能空着——空着抄来的
 `thread.aui.tsx` 会画它自己那个头），`ReasoningGroup` 是思考。工具行与思考行是**同一形状的一行**：
 `类型图标 · 名字 · 摘要`，状态（转圈 / 对勾 / 叉 / 感叹号）在**行尾**、词进 `sr-only`，
 参数与结果仍在行里点开才见（**默认折叠是有意的差异**，实现与理由见该文件头注释）。
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
 （含 MCP 的）不改前端就能看见它的调用。
+**composer 那一组**是上面那三个插入点（`ComposerFrame` / `ComposerTools` / `ComposerAddAttachment`），
+属于 `composer-chrome.tsx`，与步骤行没有关系。
 
 **两张按工具名开的表就是「认得它」的全部**（都在 `message-parts.tsx`；键是 `harness.kernel.tools` 注册的那个
 名字，`CONTEXT.md` 说不许起别名——改了名，图标会**静默**丢回扳手）：
@@ -148,10 +161,11 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 `ComposerPrimitive.Unstable_TriggerPopoverRoot` / `.Unstable_TriggerPopover` / `.Items` / `.Item`
 一套，本仓接的是「挂在哪、名字从哪来、哪些能选、一行画什么」。
 
-- **挂点仍是一个自建插入点，抄来的文件一行未改**：`composer-chrome.tsx` 的 `ComposerFrame` 本来就套在
-  composer 外面，而触发面板必须包住**输入框**（它给输入框发 combobox 的四个属性、并让面板在发送前吃掉
-  方向键与 Enter），所以 `TriggerPopoverRoot` 就挂在那一层。`thread.aui.tsx` 与
-  `elements/` 里那 12 份**一个字节没动**。
+- **挂点仍是一个自建插入点，抄来的文件里没有为此加过一行**：`composer-chrome.tsx` 的 `ComposerFrame`
+  本来就套在 composer 外面，而触发面板必须包住**输入框**（它给输入框发 combobox 的四个属性、并让面板
+  在发送前吃掉方向键与 Enter），所以 `TriggerPopoverRoot` 就挂在那一层。这一节用到的
+  `elements/` 文件（`thread.aui.tsx` 与其余各份）**没有为技能列表改过**——`thread.aui.tsx` 那三个
+  `LOCAL:` 插入点是 composer 附件与选择器共用，与这份菜单无关。
 - **三个默认值都换掉了**，因为它们是为另一种语义写的：`matcher`（上游默认「前面是空白就算触发」，
   本仓只认**消息开头**的 `/`，与服务端的 `slash-pattern` 同形状）、`formatter`（`serialize` 成
   `/名字`，上游补尾随空格并把光标放到空格后）、`search`（没有 categories 时上游那条回落路径会走空表，
@@ -161,6 +175,62 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
   什么都没有（**面板根本不出现**——把一个空盒子摆出来，比不摆更糟）。
 - 数据与措辞在 `src/lib/skills.ts`（层关键词 → 屏幕上的词、坏技能的原因关键词 → 一句话），
   面板与行在 `composer-chrome.tsx`。
+
+## 附件：composer 里的图
+
+输入框里可以粘一张图（或拖进来、或用 `+` 从文件框里选），它显示成一个可删的缩略图，随这条用户消息一起
+发出去，并在这条消息旁边**带着图显示出来**（点一下放大、Esc 关）。三条路今天都是活的，而**把它们一起
+打开的是同一个东西**。
+
+- **适配器就是那个能力位。** `capabilities.attachments` 在上游就是 `!!adapters.attachments`，而粘贴
+  （`ComposerInput` 的 paste handler）、拖放（`Dropzone` 的 drop handler）与 `+` 三条路**都先问这个布尔**。
+  不给运行时适配器，三条路会以同一个方式安静下来：粘贴不被消费、拖放被拒、`+` 弹出文件框然后什么都不落地。
+  所以适配器不在 composer 里，它是 composer **能不能有附件**这件事本身——住在 `lib/attachments.ts`，
+  在 `app.tsx` 的 `adapters.attachments` 上交出去，一行。
+- **没有上传，字节躺在消息里。** 上游那份 `SimpleImageAttachmentAdapter` 的两个方法正好是这个界面要的：
+  `add` 留下那个 `File`（草稿期间画的缩略图就是它），`send` 把字节读成 **data URL**。那个 data URL
+  **就是 wire**，不是通往 wire 的一站：AG-UI 客户端把它转回
+  `{type: "image", source: {type: "data", value: <base64>, mimeType}}`，服务端再翻成厂商的
+  `image_url`（见 [edge](edge.md#管理边路由表) 那张表）。没有收字节的端点、没有中间存储、没有 URL、
+  没有生命周期——所以它不进库、不落盘，也不从库里读回来（`CONTEXT.md` 的**附件**词条）。
+- **判据与 `undeclared-input` 是同一条，这是这一节最要紧的一句。** 一个模型声明收不收图，
+  服务端在**调用厂商之前**用它拦一次（`harness.edge.ag_ui/undeclared-input`）；界面在**文件变成附件
+  之前**用它拦一次（`lib/attachment-rules.ts` 的 `acceptsImages`）。**两个读者、一条规则**，
+  因为两个方向都错：比服务端**严**（把「没声明」当成「不收」）会把一个今天跑得通的配置挡在门外，
+  而「没有声明就是没有承诺」是那条规则的原话；比服务端**松**则整条消息被 `RUN_ERROR` 吃掉——
+  composer 已经清空，打的字和那张图一起没了，正是本仓「不许吃掉别人打的字」要防的那件事。
+  **「缺字段」与「空集」是两个答案**：服务端对 nil 不拦、对 `#{}` 拦（`undeclared-input` 实测
+  `nil → []`、`#{} → [:image]`），线上也分得开（没声明就不写这个键，声明了空集写 `[]`），
+  所以界面照同一个分法读。
+- **2 MB 的上限量的是源文件字节。** 客户端每一轮都把整段历史重发，所以一张图会跟着每一轮的 `input`
+  行被重记一遍（2 MB 的截图约 2.7 MB base64，二十轮就是五十多兆的记录）。量源文件而不是 base64 长度或
+  解码后的像素，是因为**人手里那张图的体积是人唯一看得见、也唯一能自己动手改的数**。
+  **不许偷偷改字节**：不做客户端压缩、不做缩放、不做重编码——改掉别人给的字节再发出去，等于在记录与
+  「模型到底看到了什么」之间多一层没人能复盘的东西。超限就是拒，并说清拒的是什么。
+  判据只有一处（`overByteLimit`），所以不会出现一处量 `file.size`、另一处量 base64 长度。
+- **拒绝在适配器里发生，所以三条路都绕不过去。** `add` 是三种入口唯一汇合的地方；被拒时**抛**
+  （这是上游 `add` 自己的契约，三个调用方各自接住自己的 rejection），此刻什么都还没挂上去，
+  所以**输入框里的字与已经挂着的附件一个都不动**。
+- **拒话只画一处。** `ComposerFrame` 是画它的地方（`role="alert"`、`data-slot="composer-attachment-refusal"`），
+  两条判据的句子都往那儿去——这是「拒绝长什么样」只有一份的意思。`+` 那颗按钮在不受图的会话里
+  **留在原地、变成 disabled，理由挂在包着它的 `span` 的 `title` 上**（disabled 的按钮在值得在意的浏览器
+  里收不到指针事件，挂它自己身上的 `title` 是一句没人看得见的提示）。**留着而不是拿掉**是决定：
+  一个悄悄消失的按钮与一颗从来没做出来的按钮从外面看一模一样，而这两件事里更难查的那件不该是 bug 的产物
+  ——与技能列表把坏技能仍列出来同源；而且 `+` 是人决定要不要试的那一刻，理由必须在那之前就在，
+  粘贴与拖放只能在被拒之后才说得上话。
+- **那个事实住在一个小 store 里，不在 React state 里。** 判据要的是「本会话的模型收不收图」，
+  读它的有三处：适配器（拒）、`+`（自禁）、`ComposerFrame`（画句子）。而适配器是从**上游自己的事件
+  处理函数**里被调的——那里够不着任何 React 树——所以这个事实落在 `lib/attachments.ts` 的
+  subscribe/getSnapshot 上，适配器写、界面读。**谁刷新它**：`ComposerTools` 每次取（挂载、会话切换、
+  模型改完）都顺带问一次 `GET /api/model?threadId=…`（那个端点存在就是为了这件事，它的 docstring 写着
+  「for a client deciding whether to offer an image picker」），所以**换了模型不用重载页面，判据当次就变**；
+  这个请求失败被折成「什么都没声明」（服务端自己的语义），不让它把选择器一起拖掉。
+  `GET /api/choices` 的形状一个字节没改，附件这一问没有新增端点。
+- **对话那一侧用的是抄来的两份元素**：缩略图与消息旁那张图是 `elements/attachment.aui.tsx`，
+  点开放大、Esc 关闭是 `elements/image.tsx`（`ImageZoom`）。两份都在**原样未改**那一组里，
+  今天真的被用上了——这一票没有为了它们改过任何抄来的文件。
+- 真机证据（粘贴 / 拖放 / `+` 三条路、被拒的两句话、记录里那两条行）在
+  `.scratch/composer-image/evidence/`。
 
 ## 轨迹（`Conversation` / `Trajectory` 两个视图）
 
@@ -231,14 +301,17 @@ switch 的 Promise）。**每一处改动在文件里都有 `LOCAL:` 标注**，
 - **套件不 import 任何要浏览器的 `src/`**（React、DOM、`@` 别名都不行——`vitest.config.ts` 只跑 node，
   也不加载 `vite.config.js` 的别名）。**唯一例外是零 import 的纯模块，按相对路径引**：
   `suites/stats.ts` 引 `src/lib/format.ts`，为的是把「`2.9M tok` 是这么写出来的」钉住
-  ——不然那句话只有一个没测的格式化函数守着。
+  ——不然那句话只有一个没测的格式化函数守着；`suites/attachments.ts` 引
+  `src/lib/attachment-rules.ts`，为的是把**与 `undeclared-input` 同一条**的那个判据钉住，
+  外加 2 MB 那个边界的两侧。
 - **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
   它**不**断菜单怎么画、哪个键选什么；`suites/stats.ts` 断的是端点折出来的数**与那五格的字符串**，
-  它**不**断那条灰线的位置与字号——那些在真 Chromium 里量（下一段）。
+  它**不**断那条灰线的位置与字号；`suites/attachments.ts` 两条**都是纯的**，它**不**断那颗按钮的
+  disabled 状态与那句拒话画在哪——那些在真 Chromium 里量（下一段）。
 
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
 （三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**、
-**composer 下面那条状态条**），
+**composer 下面那条状态条**、**附件的粘贴 / 拖放 / `+` 三条路与两句拒话**），
 不是自动化套件。
 
 ### 设置面板：两页，两页都会写

@@ -77,14 +77,17 @@ export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
-  // LOCAL: the two insertion points the composer chrome needs. `ComposerFrame`
+  // LOCAL: the three insertion points the composer chrome needs. `ComposerFrame`
   // wraps the composer, so a caller can put something ABOVE it inside the same
   // rounded container; `ComposerTools` renders inside the composer's own action
-  // row, on the right. Upstream has neither, and a composer that can only be
-  // replaced wholesale would have meant rewriting this file rather than adding a
-  // seam to it -- see composer-chrome.tsx.
+  // row, on the right; `ComposerAddAttachment` replaces the attach button in that
+  // same row, for the one state upstream has no opinion about -- a session whose
+  // model does not take images. Upstream has none of the three, and a composer
+  // that can only be replaced wholesale would have meant rewriting this file
+  // rather than adding seams to it -- see composer-chrome.tsx.
   ComposerFrame?: ComponentType<PropsWithChildren> | undefined;
   ComposerTools?: ComponentType | undefined;
+  ComposerAddAttachment?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -327,12 +330,14 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
 
 const ComposerAction: FC = () => {
   // LOCAL: whatever the caller wants on the right of the composer's action row,
-  // before the dictate and send buttons.
-  const { ComposerTools } = useContext(ThreadComponentsContext);
+  // before the dictate and send buttons -- and, on the left, the attach button
+  // itself when the caller has a reason to draw it differently.
+  const { ComposerTools, ComposerAddAttachment: Attach = ComposerAddAttachment } =
+    useContext(ThreadComponentsContext);
 
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
+      <Attach />
       <div className="flex items-center gap-1.5">
         {/* LOCAL: the caller's tools, left of dictate and send. */}
         {ComposerTools !== undefined && <ComposerTools />}

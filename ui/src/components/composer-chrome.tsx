@@ -1,15 +1,25 @@
 // What sits around and inside the composer: the directory and branch above it,
-// the model and thinking inside it.
+// the model and thinking inside it, and the refusal a file can earn.
 //
-// ------------------------------------------------ two slots, and why they are here
+// ------------------------------------------------ three slots, and why they are here
 //
 // `Thread` is a COPY of the assistant-ui element (see thread.aui.tsx), and the
 // composer lives inside it with no way to be replaced. Rather than edit that file
-// into something we own, it gained two LOCAL: insertion points -- `ComposerFrame`,
-// which wraps the composer, and `ComposerTools`, which renders in the composer's
-// own action row. Everything visible below is in THIS file; the copied element
-// gained two components and no markup, which is the arrangement that keeps it
+// into something we own, it gained three LOCAL: insertion points -- `ComposerFrame`,
+// which wraps the composer, `ComposerTools`, which renders in the composer's own
+// action row, and `ComposerAddAttachment`, which stands in for the attach button in
+// that same row. Everything visible below is in THIS file; the copied element
+// gained three components and no markup, which is the arrangement that keeps it
 // byte-comparable with upstream on the next registry pull.
+//
+// ------------------------------------------------------ and one shared store
+//
+// The attachment rule needs one fact -- what this session's model takes -- and
+// three things read it: the adapter (which refuses), the button (which disables
+// itself), and this frame (which draws the sentence). The adapter is called from
+// upstream's own event handlers, so there is no React tree in reach of it; that is
+// why the fact lives in `lib/attachments.ts`'s little store rather than in state
+// passed down. See that file.
 //
 // ------------------------------------------------------- above: where, and on what
 //
@@ -46,6 +56,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type FC,
   type PropsWithChildren,
 } from "react";
@@ -60,9 +71,22 @@ import type {
   Unstable_TriggerAdapter,
   Unstable_TriggerItem,
 } from "@assistant-ui/core";
-import { BrainIcon, FolderIcon, GitBranchIcon, TriangleAlertIcon } from "lucide-react";
+import { BrainIcon, FolderIcon, GitBranchIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
 
-import { choicesFor, gitStateFor, providerLabel, setModel, switchBranch } from "@/lib/composer";
+import { ComposerAddAttachment as CopiedAddAttachment } from "@/components/assistant-ui/elements/attachment.aui";
+import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
+import { imageRefusal } from "@/lib/attachment-rules";
+import { attachmentGuard } from "@/lib/attachments";
+import {
+  choicesFor,
+  gitStateFor,
+  modelFor,
+  providerLabel,
+  setModel,
+  switchBranch,
+  type Choices,
+  type ModelAnswer,
+} from "@/lib/composer";
 import { bindThread, listProjects, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
@@ -257,18 +281,41 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
 const branchesOf = (name: string) => ({ value: name, label: name });
 
 /// The model and thinking pickers, in the composer's action row.
+///
+/// IT ALSO ASKS THE SECOND QUESTION. `/api/choices` answers what this session may
+/// be switched to; `/api/model` answers what it is served by and what that takes,
+/// which is what the attachment rule reads. Both are per-session and both change
+/// at the same moment -- the picker below is the one thing that changes either --
+/// so they are asked together, and the refetch after a switch is what keeps the
+/// rule in step with the model without a reload. A `/api/model` that FAILS is
+/// folded into "declared nothing" rather than failing this load: the picker must
+/// not go dark because a second question could not be answered, and a server that
+/// cannot resolve this session's provider cannot run it either.
 const ComposerTools: FC = () => {
   const threadId = useThreadId();
-  const choices = useRemote(
-    useCallback(
-      () => (threadId === null ? Promise.resolve(null) : choicesFor(threadId)),
-      [threadId],
-    ),
+  const session = useRemote(
+    useCallback(async (): Promise<{ choices: Choices; model: ModelAnswer } | null> => {
+      if (threadId === null) return null;
+      const [choices, model] = await Promise.all([
+        choicesFor(threadId),
+        modelFor(threadId).catch((): ModelAnswer => ({})),
+      ]);
+      return { choices, model };
+    }, [threadId]),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const data = choices.data;
+  const data = session.data?.choices ?? null;
+
+  // THE GUARD IS TOLD WHAT ARRIVED, in an effect rather than inside the loader,
+  // because only the answer that is actually RENDERED may reach it: `useRemote`
+  // drops an answer a later one superseded, and a model noted from a load nobody
+  // is looking at would be the previous session's.
+  const model = session.data?.model;
+  useEffect(() => {
+    if (model !== undefined) attachmentGuard.noteModel(model);
+  }, [model]);
 
   const change = async (next: { provider?: string; model?: string; "reasoning-effort"?: string }) => {
     if (threadId === null || busy) return;
@@ -276,7 +323,7 @@ const ComposerTools: FC = () => {
     setError(null);
     try {
       await setModel(threadId, next);
-      choices.reload();
+      session.reload();
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -285,9 +332,9 @@ const ComposerTools: FC = () => {
   };
 
   if (data === null) {
-    return error === null ? null : (
+    return session.error === null ? null : (
       <p role="alert" data-slot="composer-tools-error" className="text-destructive text-xs">
-        {error}
+        {session.error}
       </p>
     );
   }
@@ -342,6 +389,45 @@ const ComposerTools: FC = () => {
         </p>
       )}
     </div>
+  );
+};
+
+// ------------------------------------------------------- the attach button, refused
+//
+// `+` IS UPSTREAM'S BUTTON AND UPSTREAM'S FILE DIALOG (`ComposerPrimitive.
+// AddAttachment`), copied in with the rest of the composer -- what this adds is
+// the one state upstream has no opinion about: a session whose model does not
+// take images.
+//
+// PRESENT AND DISABLED, NOT ABSENT, and that is a decision rather than a
+// preference. A button that has quietly gone and a button that was never built
+// look identical from the outside, and the harder of those two to debug must not
+// be what a bug produces -- the same reasoning that keeps a broken skill listed in
+// the menu above. It also speaks EARLIER than the refusal can: the paste and drop
+// paths can only answer after they have been refused, while `+` is where somebody
+// decides whether to try at all.
+//
+// THE SENTENCE SITS ON A WRAPPER, not on the button, because a disabled button
+// receives no pointer events in the browsers worth caring about -- a `title` on it
+// would be a tooltip nobody can ever see.
+export const ComposerAttachButton: FC = () => {
+  const guard = useSyncExternalStore(attachmentGuard.subscribe, attachmentGuard.current);
+  const refusal = imageRefusal(guard.input, guard.model);
+  if (refusal === null) return <CopiedAddAttachment />;
+  return (
+    <span data-slot="composer-attach-disabled" title={refusal}>
+      <TooltipIconButton
+        tooltip={refusal}
+        side="bottom"
+        variant="ghost"
+        size="icon"
+        disabled
+        className="aui-composer-add-attachment text-muted-foreground size-7 rounded-full opacity-50"
+        aria-label="Add Attachment"
+      >
+        <PlusIcon className="aui-attachment-add-icon size-4" />
+      </TooltipIconButton>
+    </span>
   );
 };
 
@@ -578,6 +664,14 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
 export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
   const threadId = useThreadId();
   const started = useAuiState((s) => s.thread.messages.length > 0);
+  // The attachment rule's refusal, if the last file offered was turned away. THIS
+  // IS THE ONLY PLACE A REFUSAL IS DRAWN -- both reasons a file can be refused
+  // arrive here (see lib/attachment-rules.ts), which is what keeps "what a refusal
+  // looks like" one thing rather than one per rule.
+  const refusal = useSyncExternalStore(
+    attachmentGuard.subscribe,
+    attachmentGuard.current,
+  ).refusal;
 
   if (threadId === null) return <>{children}</>;
 
@@ -593,6 +687,15 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
         {children}
+        {refusal !== null && (
+          <p
+            role="alert"
+            data-slot="composer-attachment-refusal"
+            className="text-destructive px-1.5 pt-1 text-xs"
+          >
+            {refusal}
+          </p>
+        )}
         <ComposerStats threadId={threadId} />
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </div>

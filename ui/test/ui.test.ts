@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { configure, type Suite } from "./e2e";
 import { startHarness } from "./support/harness";
 import { approvalSuite } from "./suites/approval";
+import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
 import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
@@ -32,7 +33,7 @@ import { turnSuite } from "./suites/turn";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -48,7 +49,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// server's question parks the run and the answer finishes it) and four on the
 /// form itself (the four kinds; answers keep the declared type; a field nobody
 /// expected is kept and named; an empty or odd schema is an empty form).
-const EXPECTED_CASES = 24;
+/// 24 -> 26: the `attachments` suite's two -- the model rule (the same judgement
+/// as the server's `undeclared-input`, and the one place the two could disagree)
+/// and the 2 MB cap on source bytes, boundary included. Both are pure.
+const EXPECTED_CASES = 26;
 
 let total = 0;
 for (const suite of SUITES) {
