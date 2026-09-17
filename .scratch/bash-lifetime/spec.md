@@ -157,14 +157,8 @@
 
 ## 状态
 
-**立票，未开工**（2026-09-17）。
-
-**立票当天做的两件事，收尾时要记得：**
-
-- `docs/architecture.md` 的「在办」里加了本特征一条（**未提交**）。它是加在**主仓**的工作树上的，
-  而 worktree 从 HEAD 切出来**不会带上它**——所以本特征**落地之后**要在主仓把那一条**删掉**
-  （「在办」只留还没落地的）。composer-status 那次踩的是同一个坑的另一面。
-- 基线是立票当天实测的（下面），不是抄来的。
+**四张票全部落地（2026-09-17）。** 分支 `bash-lifetime`，从 `main` @ `7ed63b0` 切出，
+**直接在这个工作树上做**（没有另开 worktree）。票面已按仓库约定删除，四段的落地记录在下面。
 
 **基线（立票当日实测）：`main` @ `7ed63b0`。**
 
@@ -173,4 +167,112 @@
 - 前端：`cd ui && npm test` → `Test Files 1 passed (1)` / `Tests 26 passed (26)`（退出码 0），
   `EXPECTED_CASES` 钉在 26；`cd ui && npm run build` 过。
 
-本特征的票面在 `issues/`，编号从 01 起，依赖在前。
+## 落地记录
+
+### 01 + 02 — 时限与后台（2026-09-17，分支 `bash-lifetime`，提交 `d7b6815`）
+
+**两支票落在同一个提交里**，理由写在这里：它们动的是同一处（`infra.shell` 的收尾与 `cap.tools`
+的工具表）与同一套词，拆成两个提交只有仪式价值，而中间那个提交会带着一个「说了却没接上」的状态。
+
+- **时限**：`cap.tools` 里一个 `bash-default-timeout-ms`（120000，唯一一处字面量），描述串插值；
+  `bash` 的描述同时把三件事说清（单位毫秒、默认值、到点会怎样），并指向 `bash_background`。
+  `t-bash` 从 `shell/shell` 改走 `shell/run`，参数经 `positive-int` 校验（0 / -3 / 1.5 / "soon"
+  都是模型真会发的东西，各自得到同一条指名拒绝）。
+- **收整棵树**：`kill-tree!` 移到 `run` 上方（它现在服务两种 spawn），`run` 到点调它而不是
+  `destroyForcibly` 单个壳；docstring 里补了两条：到点收整棵树、stdin 写空后**关掉**。
+- **`shell/shell` 退休**：删掉，`edge.http_test` 两个小助手改用 `run`。
+- **新 ns `harness.cap.jobs`**：`{thread-id {:jobs {j1 ..}}}`；作业记句柄、有界尾巴（500 行，
+  一个 `def`，描述插值）、`total` 与 `cursor`；一条**每作业一个**的排空线程把 `start` 的
+  行队列倒进尾巴（队列没人排空就是随进程长大）；`read-output` 一次 `swap-vals!` 取行并推游标；
+  `shutdown!` + `ensure-exit-hook!`（`compare-and-set!` 只装一次，`install-hook!` 与
+  `reset-exit-hook!` 是给测试的两扇门，与 `shell/reset-resolution!` 同一个立场）。
+- **两个工具**：`bash_background`（答 `job j1 started; …`）与 `bash_output`（新行 + 一行状态，
+  没有新东西就是 `(no new output)`）；不认识的句柄抛，话里列出本会话活着的句柄。
+- **argv 两种形状**：`spawn-argv` 公开成 `[shape command]` + `[shape command on-windows? shell]`；
+  `start` 收 `:shape`（默认 `:program`，MCP 那条路一个字节没变），`cap.jobs` 传 `:shell`。
+- **跟着改的**：三处硬编码清单（`kernel/tools_test`、`editing_mode_tools_test`）、`CONTEXT.md` 的
+  闭清单、两页文档的工具数（15 → 17）。顺手把 `cap.tools` / `kernel.tools` / `test_support` 里那三处
+  「十五个」改成语义说法（不再背一个每加一个工具都要改的数）。
+
+**测试**：`harness.cap.jobs-test`（新，注册进 `harness.test-runner`；9 条）：
+起/读/状态、`(no new output)` 不等于结束、游标（读过的行不再回来）、有界尾巴与丢行计数、
+按会话分家、不认识的句柄指名拒绝、`shutdown!` 连子孙一起收（子进程 pid 由命令自己写，用
+`ProcessHandle` 轮询 5 秒）、退出钩子只装一次。
+`harness.infra.shell-test` +3：到点收整棵树（本特征的核心判据）、到点前打出来的东西还回来、
+两种 argv 形状（Windows 那一支在 mac 上断言）。`harness.kernel.tools-test` +7：默认值经替身
+证明、非正整数拒绝、到点真的停（墙钟 < 20 秒）、没到点时行为逐字不变、后台工具的 cwd 与 `bash`
+同一处（相对路径找 marker 文件）、调用不等命令、断言参数检查按名字各查各的。
+
+**证据**：`.scratch/bash-lifetime/evidence/`（可重跑脚本 + 输出 + README 写明哪三条被测、
+哪四件事**没**做）。
+
+**报数**：`timeout 900 clojure -M:test -m harness.test-runner` →
+`Ran 843 tests containing 11206 assertions. 0 failures, 0 errors.`（立票基线 824 / 11135）。
+
+### 03 — 停掉一条后台作业（2026-09-17，分支 `bash-lifetime`，提交 `d103150`）
+
+- `cap.jobs/stop!`：一次 `swap-vals!` **取走没读的输出并让作业离开注册表**（同一个动作，
+  所以读者看到的是「有作业且有输出」或者「没有作业」，不会是中间态）；`[stopped]` 只可能出自这里，
+  读那边只有 `[running]` / `[exit N]`。
+- 工具 `bash_kill`：整棵树收掉（与票 01 同一个 `kill!`），已经退出的作业报 `[exit N]` 并照样忘掉——
+  **这是唯一一个能让作业离开注册表的动词**，所以问第二次得到的是同一条指名拒绝。
+- 测试：`jobs-test` +3（停一条在跑的：答案 `[stopped]`、子进程消失、再读得到指名拒绝；
+  停之前没读的输出一并带回；自己结束的报退出码并被忘掉）、`kernel/tools-test` +2
+  （经缝停一条并确认它「不存在了」；不认识的句柄是错误）。
+- 工具表 17 → 18，两页文档与 `CONTEXT.md` 的清单跟上。
+
+**报数**：`Ran 848 tests containing 11222 assertions. 0 failures, 0 errors.`
+
+### 04 — 收口：词、文档与全量验证（2026-09-17，分支 `bash-lifetime`，本文件随它一起落地）
+
+- **`CONTEXT.md` 立三个词**（新一节「跑命令」）：**时限**（并明说它不是审批那条「不做超时」）、
+  **后台作业**（只在进程里、按会话、不跨重启、不随 run 死）、**句柄**（只在会话里有意义、不回退）。
+  另把「工具名的写法」那张闭清单补上三个名字。
+- **`docs/architecture/overview.md`** 的状态表加一行「后台作业 = 进程内存」，理由写在行里
+  （它是一条**正在跑的命令**，不是一条事实；run 结束**不**收它）。
+- **`docs/architecture.md`**：模块地图加 `cap.jobs` 一行（注册表 + 有界尾巴 + 唯一出口），
+  `cap.tools` 那行点明「后台命令在 `cap.jobs`」，`infra.shell` 那行补上「到点收整棵树」与
+  两种 argv 形状；工具数 16 → 17。**「在办」里本特征那一条删掉**（它落地了）。
+- **`docs/architecture/kernel.md`**：模式表补上三个后台工具（它们不属于任何编辑家族），
+  并给「**不做超时**」那句加上范围——它讲的只是审批，命令的时限是另一件事（后台作业反过来没有时限）。
+- **`docs/architecture/projects.md`**：围栏那节加一条——后台执行同样不挂审批（与 `bash` 是同一个
+  逃逸面，单独挂 park 是装样子），cwd 与 `bash` 同一处解析。
+- **`README.md`**：新增一节「命令等多久，以及不等人那种跑法」，与「另外四只手」并列；验证那节的
+  报数换成实测（848 / 11222，分支与切出提交写清）。
+- **没动的**：`docs/architecture/client.md`——UI 一个字没改，那一页已有的话（「新增一个工具不动这两张表」）
+  仍然成立，核过一遍没有要改的。
+
+**收口时跑了一次 code-review（两轴各一个子代理），它抓出四处真问题，改在收口这次提交里：**
+
+1. **`[exit N]` 可以在最后几行还在队列里时就报出来**（Spec 轴）。原来状态行问的是**进程**，
+   而尾巴由一条每 1s 轮询的排空线程填，于是「`(no new output)` + `[exit 0]`」会被读成「它没有更多输出了」。
+   改法：作业多一个 `:stream-ended?`，由排空线程**在看见 eof 时**记下（eof 只在它读完全部输出之后才到），
+   状态行据此判断——流没结束就答 `[running]`，所以**说 exit 的那个答案一定带着最后那几行**。
+   两个回归用例：`the-exit-line-arrives-with-the-output-that-went-with-it`，以及
+   `a-command-that-let-go-of-its-stdout-is-still-running`（`exec 1>&-` 之后进程还在，不许编一个退出码）。
+2. **工具数是十八，我写成了十七**（Standards 轴，硬错）。十五 + 三个新工具 = 十八；两页文档、
+   `cap.tools` 的 docstring、落地记录里那两处都改了。
+3. **一个被停掉的作业会以 nil 的形式回来**（证据跑第二遍时撞上的真 bug，也是上面第 1 条改完之后暴露的）：
+   `update-in` 会把函数返回的 nil **assoc 进去**，所以「任务不在就返回 nil」的守卫会**重建**这个条目；
+   而停一条作业与它进程的 stdout 结束之间恰好有那一刻（排空线程还攥着一个 `:next-line`）。
+   症状是所有后来的指名拒绝里都列着一条不存在的作业。改法：`update-job!` 先判断路径在不在，
+   不在就**原样返回 registry**。回归用例 `a-job-that-was-taken-out-does-not-come-back`（先红后绿）。
+4. **三份重复的测试助手**（`alive?` / `gone-within?` / 「读到满足条件为止」的循环散在三个文件里）。
+   收进 `harness.test-support`，三个文件都改成调用它。
+
+另外两条**看过后不改**：工具参数叫 `job`（模型眼里「哪条作业」）而 ns 里叫 `job-id`（那个字符串是 id），
+两个名字指向两个角色；`:minimum 1` 不是 spec 里没写的东西，它就是 `offset` / `limit` 同一个校验
+（`positive-input`），没它 `timeout: 0` 会变成「立刻停」。
+
+**报数**（收口这次实测）：
+
+- `timeout 900 clojure -M:test -m harness.test-runner` → `Ran 852 tests containing 11233 assertions.
+  0 failures, 0 errors.`（退出码 0；立票基线 824 / 11135）。
+- `cd ui && npm test` → `Test Files 1 passed (1)` / `Tests 26 passed (26)`；
+  `cd ui && npm run build` 过（本特征没动 `ui/`，`EXPECTED_CASES` 仍是 26）。
+  **这个工作树是几个会话共用的**：收口那天另一个会话的 UI 改动（`turn-steps.tsx` / `lib/turns.ts` /
+  一个新套件，未提交）正在树里，那一刻再跑 `npm test` 会看到 29 条。上面这个 26 是**本特征自己的**
+  UI 状态（本特征一个字节没改 `ui/`），收口提交**只 stage 本特征自己的路径**，他们的改动一个都没带走。
+- 不留进程：整套跑完 `pgrep -fl "sleep 30"` 空。机器上那两条 `harness.test-runner` 的 JVM 是
+  **2026-09-16 17:06 与 18:05 起、PPID 1 的孤儿**（就是本特征存在的理由之一），不是这次跑留下的。
+

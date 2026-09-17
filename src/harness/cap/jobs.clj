@@ -84,22 +84,40 @@
 
 ;; ------------------------------------------------------------------- the output
 
+(defn- update-job!
+  "Change the job at PATH in the registry -- and nothing at all when it is not there.
+
+  NOT `(update-in reg path (fn [j] (when j (f j))))`: `update-in` assocs whatever the
+  function returns, so a nil answer RE-CREATES the entry as nil. That is not
+  hypothetical, it is how a stopped job came back: the pump is still holding a
+  `:next-line` when a stop removes the job and kills its process, so the end of the
+  stream arrives a moment later and the entry reappears -- and every later refusal then
+  lists a job that is not there. The check decides whether to touch the map at all."
+  [path f]
+  (swap! registry (fn [reg] (if (get-in reg path) (update-in reg path f) reg))))
+
 (defn- add-line!
   "Append LINE to the job's tail, dropping the oldest line once the tail is full.
-  Written as `swap!` on the registry rather than a mutable deque inside the job, so
-  a reader always sees a whole job: the immutable-data rule for this codebase, and
-  the reason a reader can compute its answer from one snapshot."
+  Written as `swap!` on the registry rather than as a mutable deque inside the job, so
+  that a reader computes its whole answer from ONE snapshot: with a deque the lines and
+  the cursor it pairs them with could come from two different moments."
   [thread-id job-id line]
-  (swap! registry update-in (path thread-id job-id)
-         (fn [j]
-           (when j
-             (-> j
-                 (update :total inc)
-                 (update :lines (fn [ls]
-                                  (let [ls (conj ls line)]
-                                    (if (> (count ls) tail-lines)
-                                      (subvec ls 1)
-                                      ls)))))))))
+  (update-job! (path thread-id job-id)
+               (fn [j]
+                 (-> j
+                     (update :total inc)
+                     (update :lines (fn [ls]
+                                      (let [ls (conj ls line)]
+                                        (if (> (count ls) tail-lines)
+                                          (subvec ls 1)
+                                          ls))))))))
+
+(defn- mark-ended!
+  "Record that the command's output stream has ended. The pump calls this when the
+  queue answers eof -- which happens only after the reader loop has consumed every
+  line the command wrote, so 'ended' is the moment the tail is COMPLETE."
+  [thread-id job-id]
+  (update-job! (path thread-id job-id) #(assoc % :stream-ended? true)))
 
 (defn- pumping!
   "Drain this job's line queue into its tail, on a thread of its own, until either
@@ -115,22 +133,35 @@
         (when (get-in @registry (path thread-id job-id))
           (let [line ((:next-line handle) 1000)]
             (cond
-              (shell/eof? line)     nil
+              (shell/eof? line)     (mark-ended! thread-id job-id)
               (shell/timeout? line) (recur)
               :else                 (do (add-line! thread-id job-id line)
                                         (recur))))))
       (catch Exception _ nil))))
 
-(defn- status-line
-  "Whether the job is running, or what it exited with. ASKED OF THE PROCESS rather
-  than remembered: nothing had to happen for a job to end, so the answer is a
-  question and not a field somebody has to keep up to date."
+(defn- ended-line
+  "`[exit N]` for a process that is gone. Asked of the process rather than remembered,
+  and the `?` is a last resort: it is what is left for the moment between 'it was gone'
+  and the exit code being read, which is the only way `exitValue` can fail here."
   [handle]
-  (if ((:alive? handle))
-    "[running]"
-    (str "[exit " (try (.exitValue ^Process (:process handle))
-                       (catch Exception _ "?"))
-         "]")))
+  (str "[exit " (try (.exitValue ^Process (:process handle))
+                     (catch Exception _ "?"))
+       "]"))
+
+(defn- status-line
+  "How JOB is doing, AS THE READER CAN KNOW IT: `[running]` until the command's output
+  stream has ENDED (see `mark-ended!`) and the process is gone.
+
+  WHY BOTH, when the process is the thing that died: the tail and the status line are
+  read together, and a process that has exited while lines are still queued would
+  answer `(no new output)` + `[exit 0]` -- which reads as 'it printed nothing more'.
+  Until the pump has seen the end of the stream, `[running]` is the honest answer (the
+  next read gets the rest), and once it has, every line the command ever printed is
+  either in the tail or counted as dropped."
+  [j]
+  (if (and (:stream-ended? j) (not ((:alive? (:handle j)))))
+    (ended-line (:handle j))
+    "[running]"))
 
 (defn- unread
   "What J has that its session has not read: the lines, and how many lines scrolled
@@ -145,11 +176,11 @@
   "One shape for every job answer there is: what it said, what was lost, and one
   status line. The dropped-line line is ABSENT when nothing was dropped, so a normal
   read is the command's own output and nothing else."
-  [status line-loss]
+  [status unread]
   (str/join "\n" (concat
-                  (when (pos? (:gap line-loss))
-                    [(str "[" (:gap line-loss) " earlier lines were dropped]")])
-                  (if (seq (:lines line-loss)) (:lines line-loss) ["(no new output)"])
+                  (when (pos? (:gap unread))
+                    [(str "[" (:gap unread) " earlier lines were dropped]")])
+                  (if (seq (:lines unread)) (:lines unread) ["(no new output)"])
                   [status])))
 
 (defn- close!
@@ -205,6 +236,21 @@
 
 ;; ------------------------------------------------------------------- the verbs
 
+(defn- with-job
+  "Look this session's JOB-ID up and CHANGE it in the same step, answering the job as
+  it was BEFORE that change -- or throw when the session does not have it.
+
+  THE ONE STEP IS THE POINT, and it is why both verbs go through here instead of each
+  doing its own `swap-vals!`: reading takes the lines and moves the cursor, stopping
+  takes the lines and leaves the table, and a reader racing either one must see a job
+  with its lines or no job at all -- never a job whose output was taken away from it.
+  CHANGE is a fn of the registry and the job's path."
+  [thread-id job-id change]
+  (let [p (path thread-id job-id)
+        [before _] (swap-vals! registry (fn [reg] (if (get-in reg p) (change reg p) reg)))]
+    (or (get-in before p)
+        (throw (unknown-job thread-id job-id)))))
+
 (defn start!
   "Start COMMAND as a background job for THREAD-ID, in DIR. Answers the new job's
   id.
@@ -221,7 +267,7 @@
         job-id (next-id! thread-id)]
     (ensure-exit-hook!)
     (swap! registry assoc-in (path thread-id job-id)
-           {:id job-id :handle handle :lines [] :total 0 :cursor 0})
+           {:id job-id :handle handle :lines [] :total 0 :cursor 0 :stream-ended? false})
     (pumping! thread-id job-id handle)
     job-id))
 
@@ -241,23 +287,15 @@
 
   THROWS for a job id this session does not have."
   [thread-id job-id]
-  (let [p (path thread-id job-id)
-        ;; Taking the unread lines and leaving the registry are ONE step: a reader
-        ;; racing this sees either a job with its lines or no job at all, never a job
-        ;; whose output was taken and then forgotten.
-        [before _] (swap-vals! registry
-                               (fn [reg]
-                                 (if (get-in reg p)
-                                   (update-in reg [thread-id :jobs] dissoc job-id)
-                                   reg)))]
-    (if-let [j (get-in before p)]
-      (let [running? ((:alive? (:handle j)))
-            line-loss (unread j)]
-        (when running? (close! j))
-        ;; `[stopped]` only ever comes from here (a read says `[running]` or
-        ;; `[exit N]`), so a reader can tell 'I stopped this' from 'it died'.
-        (answer (if running? "[stopped]" (status-line (:handle j))) line-loss))
-      (throw (unknown-job thread-id job-id)))))
+  (let [j (with-job thread-id job-id
+                    (fn [reg _] (update-in reg [thread-id :jobs] dissoc job-id)))
+        running? ((:alive? (:handle j)))]
+    (when running? (close! j))
+    ;; `[stopped]` only ever comes from here (a read says `[running]` or `[exit N]`),
+    ;; so a reader can tell 'I stopped this' from 'it died'. A job that was ALREADY
+    ;; gone reports its own exit code, stream drained or not: this answer hands back
+    ;; every unread line, so there is nothing left for a later read to catch.
+    (answer (if running? "[stopped]" (ended-line (:handle j))) (unread j))))
 
 (defn read-output
   "What JOB-ID has printed since this session last read it, and whether it is still
@@ -271,16 +309,7 @@
   THROWS for a job id this session does not have. Taking the lines and moving the
   cursor is ONE step, so two readers of one job cannot be handed the same lines."
   [thread-id job-id]
-  (let [p (path thread-id job-id)
-        ;; swap-vals! rather than read-then-write: the lines returned and the cursor
-        ;; left behind have to be the same step, or two concurrent readers both get
-        ;; them and the next read reports a gap that never happened.
-        [before _] (swap-vals! registry
-                               (fn [reg]
-                                 (if (get-in reg p)
-                                   (assoc-in reg (conj p :cursor)
-                                             (get-in reg (conj p :total)))
-                                   reg)))]
-    (if-let [j (get-in before p)]
-      (answer (status-line (:handle j)) (unread j))
-      (throw (unknown-job thread-id job-id)))))
+  (let [j (with-job thread-id job-id
+                    (fn [reg p] (assoc-in reg (conj p :cursor)
+                                          (get-in reg (conj p :total)))))]
+    (answer (status-line j) (unread j))))

@@ -291,17 +291,32 @@
       (is (str/includes? content "`timeout` must be a positive integer")))))
 
 (deftest a-command-that-would-hang-is-stopped-at-the-limit
-  (let [started (System/currentTimeMillis)
-        {:keys [content error]} (call "bash" {:command "echo said-before-hanging; sleep 30"
-                                              :timeout 1500})
+  ;; Through the TOOL, not just through `shell/run`: this is the path a model's call
+  ;; takes, and the pid file is the command's own child -- the thing that used to
+  ;; survive the call. `<cmd> &` plus `wait` keeps the shell around so the shape under
+  ;; test really is two processes.
+  (let [dir (support/temp-dir "tools-hang")
+        pid-file (io/file dir "child.pid")
+        started (System/currentTimeMillis)
+        {:keys [content error]} (call "bash"
+                                      {:command (str "echo said-before-hanging; sleep 60 & echo $! > "
+                                                     (shell/quote-arg (.getAbsolutePath pid-file))
+                                                     "; wait")
+                                       :timeout 1500})
         elapsed (- (System/currentTimeMillis) started)]
-    (testing "it is information, not a failed run"
-      (is (false? error)))
-    (testing "what it printed is kept, and the answer says where it stopped"
-      (is (str/includes? content "said-before-hanging"))
-      (is (str/includes? content "[timed out after 1500ms")))
-    (testing "and the call came back at the limit, not at the end"
-      (is (< elapsed 20000) (str "elapsed " elapsed "ms")))))
+    (try
+      (testing "it is information, not a failed run"
+        (is (false? error)))
+      (testing "what it printed is kept, and the answer says where it stopped"
+        (is (str/includes? content "said-before-hanging"))
+        (is (str/includes? content "[timed out after 1500ms")))
+      (testing "and the call came back at the limit, not at the end"
+        (is (< elapsed 20000) (str "elapsed " elapsed "ms")))
+      (testing "and the child the command started is gone with it"
+        (let [pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
+          (is (support/gone-within? pid 5000)
+              (str "pid " pid " outlived the call that started it"))))
+      (finally (support/wipe-tree! dir)))))
 
 (deftest a-command-that-finishes-is-answered-exactly-as-it-was
   ;; The ceiling is not allowed to change any other answer: a quiet command, a
@@ -322,21 +337,6 @@
 ;; namespace owns is the two things only a tool call can show: where the command
 ;; runs, and how a refusal reaches the model.
 
-(defn- read-job-until
-  "Call `bash_output` for JOB-ID until PRED is true of the accumulated lines, or MS
-  runs out. Returns the lines, which is what a case wants."
-  [thread-id job-id pred ms]
-  (let [deadline (+ (System/currentTimeMillis) (long ms))]
-    (loop [seen []]
-      (let [answer (:content (tools/run! {:function {:name "bash_output"
-                                                     :arguments (json/write-str {:job job-id})}}
-                                         thread-id))
-            seen   (into seen (remove #(or (re-find #"^\[" %) (= "(no new output)" %))
-                                      (str/split-lines answer)))]
-        (if (or (pred answer) (> (System/currentTimeMillis) deadline))
-          seen
-          (do (Thread/sleep 50) (recur seen)))))))
-
 (deftest a-background-command-runs-where-a-foreground-one-would
   (let [pdir (io/file dir "job-project")]
     (.mkdirs pdir)
@@ -352,7 +352,13 @@
                                          "tt-job"))
             job-id (second (re-find #"job (j\d+) started" answer))]
         (is (some? job-id) (str "the tool answered with a job id: " answer))
-        (is (= ["job-here"] (read-job-until "tt-job" job-id #(re-find #"\[exit" %) 10000))))
+        (is (= ["job-here"]
+               (:lines (support/read-until #(:content (tools/run!
+                                                       {:function {:name "bash_output"
+                                                                   :arguments (json/write-str
+                                                                               {:job job-id})}}
+                                                       "tt-job"))
+                                           #(re-find #"\[exit" (:answer %)) 10000)))))
       (finally
         (jobs/shutdown!)
         (project/bind! "tt-job" nil)))))
@@ -392,7 +398,9 @@
           job-id  (second (re-find #"job (j\d+) started" started))]
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
       ;; different facts, and only the second one is true once the command is gone.
-      (read-job-until nil job-id #(re-find #"\[exit" %) 10000)
+      (support/read-until #(:content (tools/run! {:function {:name "bash_output"
+                                                             :arguments (json/write-str {:job job-id})}}))
+                          #(re-find #"\[exit" (:answer %)) 10000)
       (is (str/includes? (:content (call "bash_kill" {:job job-id})) "[exit 3]")))))
 
 (deftest bash-kill-refuses-a-job-it-does-not-have

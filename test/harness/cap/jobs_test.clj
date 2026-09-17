@@ -14,37 +14,18 @@
 ;; to make impossible.
 (use-fixtures :each (fn [f] (try (f) (finally (jobs/shutdown!)))))
 
-(defn- alive? [pid]
-  (boolean (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
-             (.isAlive ^java.lang.ProcessHandle h))))
+(defn- cleanup-dir!
+  "A test that made a temp directory takes it away again (AGENTS.md), and the pid
+  file in it is not the only thing that would otherwise accumulate."
+  [dir]
+  (support/wipe-tree! dir))
 
-(defn- gone-within?
-  "Polled: a process that was just killed can still be seen for a moment (a zombie
-  until its parent reaps it), so a single read would be a coin toss."
-  [pid ms]
-  (let [deadline (+ (System/currentTimeMillis) (long ms))]
-    (loop []
-      (cond
-        (not (alive? pid)) true
-        (> (System/currentTimeMillis) deadline) false
-        :else (do (Thread/sleep 50) (recur))))))
-
-(defn- read-until
-  "Read JOB-ID, accumulating what comes back, until PRED -- a fn of
-  `{:answer .. :lines ..}` -- says it is enough, or MS runs out. Reads are the only
-  way to see a job, so waiting for a job means reading it, which is exactly what the
-  model has to do."
-  [thread-id job-id pred ms]
-  (let [deadline (+ (System/currentTimeMillis) (long ms))]
-    (loop [seen []]
-      (let [answer (jobs/read-output thread-id job-id)
-            seen   (into seen (remove #(or (re-find #"^\[" %) (= "(no new output)" %))
-                                      (clojure.string/split-lines answer)))
-            state  {:answer answer :lines seen}]
-        (cond
-          (pred state) state
-          (> (System/currentTimeMillis) deadline) state
-          :else (do (Thread/sleep 50) (recur seen)))))))
+(defn- read-until-exit
+  "Read until the answer carries a status line, then answer the accumulated read."
+  [thread-id job-id]
+  (support/read-until #(jobs/read-output thread-id job-id)
+                      #(re-find #"\[exit" (:answer %))
+                      10000))
 
 (deftest a-job-prints-while-the-session-does-something-else
   ;; Ids are not asserted as `j1`: the counter belongs to the SESSION and never goes
@@ -53,7 +34,7 @@
   (let [id (jobs/start! "jt-a" {:command "echo one; echo two; echo three; exit 0"})]
     (testing "the answer is a job id, and nothing else"
       (is (re-matches #"j\d+" id)))
-    (let [{:keys [answer lines]} (read-until "jt-a" id #(re-find #"\[exit" (:answer %)) 10000)]
+    (let [{:keys [answer lines]} (read-until-exit "jt-a" id)]
       (testing "the lines it printed come back, in order"
         (is (= ["one" "two" "three"] lines)))
       (testing "and the status line says how it ended"
@@ -73,7 +54,9 @@
   ;; The cursor, which is the whole reason a read is stateful: a reader that got the
   ;; same lines twice would have to work out which of them were new.
   (let [id (jobs/start! "jt-c" {:command "echo only-once; sleep 30"})]
-    (is (= ["only-once"] (:lines (read-until "jt-c" id #(some? (seq (:lines %))) 10000))))
+    (is (= ["only-once"]
+           (:lines (support/read-until #(jobs/read-output "jt-c" id)
+                                       #(some? (seq (:lines %))) 10000))))
     (let [again (jobs/read-output "jt-c" id)]
       (is (= "(no new output)\n[running]" again)))))
 
@@ -132,13 +115,14 @@
                                               "; wait")})
         pid (do (Thread/sleep 1000)
                 (Long/parseLong (clojure.string/trim (slurp pid-file :encoding "UTF-8"))))]
-    (is (alive? pid) "the job really is running")
+    (is (support/alive? pid) "the job really is running")
     (jobs/shutdown!)
     (testing "the command and the child it started are both gone"
-      (is (gone-within? pid 5000)))
+      (is (support/gone-within? pid 5000)))
     (testing "and no session can read it any more"
       (let [e (try (jobs/read-output "jt-h" id) nil (catch Exception e e))]
-        (is (= :unknown-job (:reason (ex-data e))))))))
+        (is (= :unknown-job (:reason (ex-data e))))))
+    (cleanup-dir! dir)))
 
 (deftest the-exit-hook-is-installed-once-and-only-once
   (let [installs (atom 0)]
@@ -157,17 +141,18 @@
                                               "; wait")})
         pid (do (Thread/sleep 1000)
                 (Long/parseLong (clojure.string/trim (slurp pid-file :encoding "UTF-8"))))]
-    (is (alive? pid) "the job really is running")
+    (is (support/alive? pid) "the job really is running")
     (let [answer (jobs/stop! "jt-i" id)]
       (testing "the answer says it was stopped, not that it exited"
         (is (= "[stopped]" (last (clojure.string/split-lines answer)))))
       (testing "the command and the child it started are both gone"
-        (is (gone-within? pid 5000))))
+        (is (support/gone-within? pid 5000))))
     (testing "and the job is forgotten, so a second stop finds nothing"
       (let [e (try (jobs/stop! "jt-i" id) nil (catch Exception e e))]
         (is (= :unknown-job (:reason (ex-data e)))))
       (let [e (try (jobs/read-output "jt-i" id) nil (catch Exception e e))]
-        (is (= :unknown-job (:reason (ex-data e))))))))
+        (is (= :unknown-job (:reason (ex-data e))))))
+    (cleanup-dir! dir)))
 
 (deftest stopping-a-job-returns-what-this-session-never-read
   ;; Stopping and reading are not interchangeable: a stop that dropped the unread
@@ -181,10 +166,79 @@
 
 (deftest a-job-that-ended-gives-its-exit-code-and-is-forgotten
   (let [id (jobs/start! "jt-k" {:command "exit 3"})]
-    (read-until "jt-k" id #(re-find #"\[exit" (:answer %)) 10000)
+    (read-until-exit "jt-k" id)
     (let [answer (jobs/stop! "jt-k" id)]
       (testing "a job that died on its own reports its own exit code"
         (is (= "[exit 3]" (last (clojure.string/split-lines answer)))))
       (testing "and is still forgotten, because remembering it forever is a leak"
         (let [e (try (jobs/read-output "jt-k" id) nil (catch Exception e e))]
           (is (= :unknown-job (:reason (ex-data e)))))))))
+
+(deftest the-exit-line-arrives-with-the-output-that-went-with-it
+  ;; The regression this exists for: asking the PROCESS whether it is gone can answer
+  ;; `[exit 0]` while the last lines are still queued, and `(no new output)` + `[exit 0]`
+  ;; reads as 'it printed nothing more'. So the status stays `[running]` until the pump
+  ;; has seen the end of the stream -- which happens only after everything the command
+  ;; wrote is in the tail. The invariant, stated once: the answer that says exit is an
+  ;; answer that also carries the last line.
+  (let [id (jobs/start! "jt-l" {:command "echo last-words; exit 0"})
+        {:keys [answer]} (read-until-exit "jt-l" id)]
+    (is (clojure.string/includes? answer "last-words"))
+    (is (clojure.string/includes? answer "[exit 0]"))
+    (testing "and it is over: reading again adds nothing"
+      (is (= "(no new output)\n[exit 0]" (jobs/read-output "jt-l" id))))))
+
+(deftest a-command-that-let-go-of-its-stdout-is-still-running
+  ;; The other side of that rule. `exec 1>&-` closes the command's stdout while it
+  ;; lives on, so the stream ends and the tail is complete -- but the command is NOT
+  ;; gone, and reporting the exit of a process that is still there (or `[exit ?]`)
+  ;; would be inventing one.
+  (let [id (jobs/start! "jt-m" {:command "echo before-letting-go; exec 1>&-; sleep 30"})]
+    (let [{:keys [answer]} (support/read-until #(jobs/read-output "jt-m" id)
+                                               #(clojure.string/includes? (:answer %)
+                                                                          "before-letting-go")
+                                               10000)]
+      (is (clojure.string/includes? answer "before-letting-go")))
+    (Thread/sleep 1500)
+    (is (= "[running]" (last (clojure.string/split-lines (jobs/read-output "jt-m" id)))))
+    (jobs/stop! "jt-m" id)))
+
+(deftest a-job-outlives-the-call-that-started-it
+  ;; 决策 8 的另一面：**run 结束不杀它**。没有什么东西会在一轮 run 结束时收作业——
+  ;; 这由「没有任何 run 结束的收尾路径」保证，而这里断言的是它最容易被弄坏的那一半：
+  ;; 作业活得比发起它的那次调用久，也活得比本会话后来发起的调用久。
+  (let [dir (support/temp-dir "jobs-outlive")
+        pid-file (io/file dir "child.pid")
+        id (jobs/start! "jt-n" {:command (str "sleep 30 & echo $! > "
+                                              (shell/quote-arg (.getAbsolutePath pid-file))
+                                              "; wait")})
+        pid (do (Thread/sleep 1000)
+                (Long/parseLong (clojure.string/trim (slurp pid-file :encoding "UTF-8"))))]
+    (try
+      (is (support/alive? pid))
+      ;; ...the session does other work (another job, read, stopped) and comes back:
+      (let [other (jobs/start! "jt-n" {:command "echo other; exit 0"})]
+        (read-until-exit "jt-n" other)
+        (jobs/stop! "jt-n" other))
+      (is (clojure.string/includes? (jobs/read-output "jt-n" id) "[running]")
+          "the first job is untouched by everything the session did after starting it")
+      (is (support/alive? pid))
+      (finally
+        (jobs/shutdown!)
+        (cleanup-dir! dir)))))
+
+(deftest a-job-that-was-taken-out-does-not-come-back
+  ;; The pump is still holding a `:next-line` when a job is stopped, and the stop
+  ;; kills the process -- so its stdout ends right after the job left the registry.
+  ;; Whatever the pump does in that moment must not put the job back: `update-in` on a
+  ;; missing path ASSOCS what the function returns, so a nil-guarded update
+  ;; (`(fn [j] (when j ...))`) re-creates the entry as nil, and every later refusal
+  ;; lists a job that is not there.
+  (let [id (jobs/start! "jt-o" {:command "sleep 5; echo too-late"})]
+    (Thread/sleep 300)
+    (jobs/stop! "jt-o" id)
+    (Thread/sleep 1000)
+    (let [e (try (jobs/read-output "jt-o" id) nil (catch Exception e e))]
+      (is (= :unknown-job (:reason (ex-data e))))
+      (is (not (contains? (set (:known (ex-data e))) id))
+          "a job that was taken out must not come back as a nil entry"))))

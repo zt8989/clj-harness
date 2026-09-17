@@ -97,7 +97,7 @@ test/dev → 任意
 
 - **`llm` 里的 `prompt.md` 载体留核心层**：冻结是机制（provider 前缀缓存的前提：一条逐字节稳定的
   首消息），读哪个文件不是能力。
-- **`cap.tools` 与 `kernel.tools` 的分界线是「定义」与「缝」**：十七个工具的描述、参数与 `:run`
+- **`cap.tools` 与 `kernel.tools` 的分界线是「定义」与「缝」**：十八个工具的描述、参数与 `:run`
   在能力层，注册表、overlay、审批、三相执行、声明的词汇在核心层。缝曾经两者都装
   （一份 1320 行的文件），分开之后它的 docstring 才能说一句真话：它不认识任何一个具体工具。
 - **`cap.editing` 是能力，核心层没有 `editing`**：`:hashline` / `:str-replace` 是两套具体编辑实现的

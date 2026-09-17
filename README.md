@@ -281,6 +281,33 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 (harness.kernel.tools/session-require-approval! harness.kernel.tools/*thread-id* "web_fetch")
 ```
 
+### 命令等多久，以及不等人那种跑法（`timeout` / `bash_background` / `bash_output` / `bash_kill`）
+
+`bash` 的调用是**有上限**的：`timeout`（毫秒，**默认 120000**）到点就把命令**连它起的子孙一起**停掉，
+把它在此之前打出来的东西原样还回来，末尾补一行 `[timed out after 120000ms — the command was stopped]`。
+这不是错误（`[exit N]` 也不是），模型据此换个更窄的做法。
+
+为什么「连子孙」是重点：`bash` 跑的是 `<shell> -lc "…"`，**我们手里那个进程是壳**，而人真正指的是它的
+孩子——`npm test` 就是 bash 起 npx、npx 起 node。只杀壳等于留下一个没人认领的进程（本仓真出现过两个
+跑了 16 小时的测试 JVM）。同一个收尾函数两个 spawn 都走，所以 `run` 的超时、`start` 的关闭、
+后台作业的停止，收的都是整棵树。
+
+**要跑得比一次调用久的东西，用后台**：
+
+| 工具 | 一句话 |
+|---|---|
+| `bash_background` | 起一条命令，立刻返回一个**句柄**（`j1`）。命令继续跑，输出**不在**这个答案里 |
+| `bash_output` | 读**上次读之后**的新行 + 一行状态（`[running]` / `[exit N]`）。**不阻塞**——`(no new output)` 是「此刻没有新东西」，不是「它结束了」 |
+| `bash_kill` | 停掉整棵树并**忘掉**这条作业，顺带把它还没被读走的输出带回来 |
+
+三件事都是**决定**，不是省略：
+
+- **没有超时的是作业**。后台执行的全部意思就是没人等它；`timeout` 是「等多久」，两者不是一个旋钮。
+- **没有人通知你它结束了**。没有推送通道，所以工具描述里写明了「你得自己来问」。
+- **它只活在进程里**。按会话分家、JVM 退出时收掉、不落盘、不进库、也不随一轮 run 结束而死——
+  随 run 死就等于后台执行没用。输出只留最近 500 行（丢了会报数），因为这是给模型读的尾巴，
+  不是一份日志（要日志就让命令自己重定向到文件，再用 `read` 去看）。
+
 ## 启动
 
 ### 1) 后端 :8080
@@ -359,9 +386,8 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```pwsh
 # 内核（Clojure）：离线全量
 clojure -M:test -m harness.test-runner
-# 824 tests / 11135 assertions，0 failures / 0 errors（分支 `composer-image`，从 main @ 7fc34c8 切出；
-#   基线随分支变，报数时带上分支与提交。同一台机器上 `trajectory` @ f7f4d31 那一次是 801 / 11018，
-#   main @ f7f4d31 是 787 / 10953）
+# 852 tests / 11233 assertions，0 failures / 0 errors（分支 `bash-lifetime`，从 main @ 7ed63b0 切出；
+#   基线随分支变，报数时带上分支与提交。切出那天 main 上是 824 / 11135）
 # 这台机器上曾经固定失败的那几条已经修好（JDK 25 把 sqlite-jdbc 的原生库加载告警
 #   "a restricted method in java.lang.System has been called" 打到 stdout，而那条用例逐字比较 fork 出来的
 #   JVM 的 stdout——现在比的是它自己写下的文件，不是 stdout）。仍然**真竞赛**的是

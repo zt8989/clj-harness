@@ -1,5 +1,5 @@
 (ns harness.cap.tools
-  "The seventeen tools this harness ships: their bodies, their faces, and nothing
+  "The eighteen tools this harness ships: their bodies, their faces, and nothing
   else. It is a CAPABILITY, so it lives here and not in harness.kernel.tools --
   which holds the seam that runs a tool, not any particular tool.
 

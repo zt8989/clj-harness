@@ -81,26 +81,6 @@
       (is (= 0 exit) (str "the command ran (stderr: " (str/trim (str err)) ")"))
       (is (str/includes? (str out) "harness-shell-test")))))
 
-(defn- alive?
-  "Is PID a live process? Asked of the OS rather than of a JVM object, because the
-  process that matters below is a GRANDCHILD: nothing in this process holds a
-  handle to it."
-  [pid]
-  (boolean (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
-             (.isAlive ^java.lang.ProcessHandle h))))
-
-(defn- gone-within?
-  "Did PID disappear within MS? Polled rather than asked once: a process that was
-  just killed can still be seen for a moment -- it is a zombie until its own parent
-  reaps it, and that parent is not this process -- so a single read is a coin toss."
-  [pid ms]
-  (let [deadline (+ (System/currentTimeMillis) (long ms))]
-    (loop []
-      (cond
-        (not (alive? pid)) true
-        (> (System/currentTimeMillis) deadline) false
-        :else (do (Thread/sleep 50) (recur))))))
-
 (deftest a-command-that-does-not-finish-is-stopped-together-with-what-it-started
   ;; THE CHILD IS NOT THE COMMAND. `<shell> -lc "..."` means the process this
   ;; namespace holds is a shell, and the one a person means by "the command" is its
@@ -125,7 +105,7 @@
                                  elapsed "ms)")))
     (testing "and the child it started is gone too"
       (is (some? pid) "the shell really did start a child")
-      (is (gone-within? pid 5000)
+      (is (support/gone-within? pid 5000)
           (str "pid " pid " outlived the call that started it")))))
 
 (deftest what-a-command-printed-before-the-limit-comes-back

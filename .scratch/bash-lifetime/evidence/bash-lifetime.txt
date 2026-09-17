@@ -1,0 +1,25 @@
+repo:      /Users/zhouteng/Documents/workspace/clj-harness
+temp home: /tmp/bash-lifetime-evidence-3kUmzQ/home
+
+== 1) 前台：2000ms 的时限，命令自己起一个 sleep 60 的孩子 ==
+answer:       "(no output)\n[timed out after 2000ms — the command was stopped]"
+elapsed-ms:   2028  (the limit was 2000, the command wanted 60s)
+child pid:    22225
+child alive:  false
+
+== 2) 后台：起一条打三行的命令，读两次；再起一条并停掉它 ==
+start:    job j1 started; read its output with bash_output.
+read #1:  "tick-1\ntick-2\n[running]"
+read #2:  "tick-3\n[exit 0]"
+kill:         "(no new output)\n[stopped]"  on j2
+child pid:    23627
+child alive:  false
+read after:   "unknown job: j2. This session's jobs are j1. A job lives only as long as this harness process."
+
+== 3) 一个真的退出（不是停作业）的 JVM，它的作业进程还在不在 ==
+child JVM started job: j1
+child JVM is exiting now
+job child pid: 24980
+child alive:   no   (checked from OUTSIDE the JVM that started it, with ps)
+
+temp home removed: /tmp/bash-lifetime-evidence-3kUmzQ
