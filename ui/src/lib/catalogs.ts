@@ -28,11 +28,13 @@ import enErrors from "../locales/en/errors.json";
 import enFormat from "../locales/en/format.json";
 import enSettings from "../locales/en/settings.json";
 import enShell from "../locales/en/shell.json";
+import enThread from "../locales/en/thread.json";
 import zhComposer from "../locales/zh/composer.json";
 import zhErrors from "../locales/zh/errors.json";
 import zhFormat from "../locales/zh/format.json";
 import zhSettings from "../locales/zh/settings.json";
 import zhShell from "../locales/zh/shell.json";
+import zhThread from "../locales/zh/thread.json";
 
 import type { Language } from "./language";
 
@@ -42,8 +44,8 @@ import type { Language } from "./language";
 /// read from (`src/i18next.d.ts`) and the fallback, so a key that exists only in
 /// Chinese is a key no call site can name.
 export const RESOURCES = {
-  en: { composer: enComposer, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell },
-  zh: { composer: zhComposer, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell },
+  en: { composer: enComposer, errors: enErrors, format: enFormat, settings: enSettings, shell: enShell, thread: enThread },
+  zh: { composer: zhComposer, errors: zhErrors, format: zhFormat, settings: zhSettings, shell: zhShell, thread: zhThread },
 } as const satisfies Record<Language, Record<string, unknown>>;
 
 /// Derived from the tables rather than listed again: a second list is a second

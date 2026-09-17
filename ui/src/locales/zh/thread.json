@@ -1,0 +1,31 @@
+{
+  "status": {
+    "running": "运行中",
+    "done": "完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "needsApproval": "待审批"
+  },
+  "reasoning": {
+    "label": "思考"
+  },
+  "args": {
+    "header": "参数"
+  },
+  "result": {
+    "error": "错误：",
+    "header": "结果：",
+    "noResult": "没有结果",
+    "unserializable": "[无法序列化的值]"
+  },
+  "subject": {
+    "delete": "删除",
+    "clear": "清空",
+    "lines_other": "{{count}} 行",
+    "todoDone": "完成"
+  },
+  "summary": {
+    "calls_other": "{{count}} 次工具调用",
+    "messages_other": "{{count}} 条消息"
+  }
+}

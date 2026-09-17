@@ -14,6 +14,7 @@
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
+import { translator } from "../support/locale";
 import {
   turnBounds,
   turnCounts,
@@ -21,6 +22,14 @@ import {
   turnSummaryLabel,
   type TurnMessage,
 } from "../../src/lib/turns";
+
+/// The two languages the summary line is written in, bound to the REAL catalogs
+/// (`test/support/locale.ts` builds them from `lib/catalogs.ts`, which the suite
+/// can import and `lib/i18n.ts` cannot). English is the language this line was
+/// first written in; Chinese is the wording it had before it had a language at
+/// all, and both are pinned so a catalog edit cannot quietly drop one.
+const en = translator("en", "thread");
+const zh = translator("zh", "thread");
 
 /// One assistant message with `n` tool calls, and a status.
 function assistant(status: string, calls = 0): TurnMessage {
@@ -139,11 +148,22 @@ const cases: Case[] = [
       expect(turnCounts([user, bare], 1, 1)).toEqual({ calls: 0, messages: 1 });
 
       // The line itself, in both shapes: the tool-call half goes away when there
-      // were none -- `0 次工具调用 · 2 条消息` is a fact nobody asked for -- and
-      // the message count is never dropped.
-      expect(turnSummaryLabel(72, 25)).toBe("72 次工具调用 · 25 条消息");
-      expect(turnSummaryLabel(1, 2)).toBe("1 次工具调用 · 2 条消息");
-      expect(turnSummaryLabel(0, 4)).toBe("4 条消息");
+      // were none -- `0 tool calls · 2 messages` is a fact nobody asked for -- and
+      // the message count is never dropped. The two counts go through i18next's
+      // `count`, so English's singular form is pinned here too (a hand-rolled rule
+      // would have said `1 tool calls`).
+      expect(turnSummaryLabel(72, 25, en)).toBe("72 tool calls · 25 messages");
+      expect(turnSummaryLabel(1, 2, en)).toBe("1 tool call · 2 messages");
+      expect(turnSummaryLabel(0, 4, en)).toBe("4 messages");
+
+      // THE SAME LINE IN THE OTHER LANGUAGE -- and this is what makes the catalog
+      // the thing under test rather than a decoration: the same two numbers through
+      // the same function have to come out in Chinese, where there is no singular
+      // form, and the wording is TODAY'S (the one that used to be hard-coded in
+      // `lib/turns.ts`, before the line had a language).
+      expect(turnSummaryLabel(72, 25, zh)).toBe("72 次工具调用 · 25 条消息");
+      expect(turnSummaryLabel(1, 2, zh)).toBe("1 次工具调用 · 2 条消息");
+      expect(turnSummaryLabel(0, 4, zh)).toBe("4 条消息");
     },
   },
 ];

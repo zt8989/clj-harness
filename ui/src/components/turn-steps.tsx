@@ -28,6 +28,7 @@
 import { type FC, useSyncExternalStore } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { useAuiState, type AssistantState } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 
 import {
   turnBounds,
@@ -158,6 +159,10 @@ export const TurnStepsTrigger: FC = () => {
   const folded = useTurnFolded();
   const calls = useAuiState(turnCallsOf);
   const messages = useAuiState(turnMessagesOf);
+  // The line's own words live in the `thread` face; `lib/turns.ts` takes the
+  // translator rather than holding one, so this row is the one place that binds it
+  // to the language the page is speaking.
+  const { t } = useTranslation("thread");
 
   return (
     <button
@@ -173,7 +178,7 @@ export const TurnStepsTrigger: FC = () => {
         data-slot="turn-steps-label"
         className="aui-turn-steps-label leading-none"
       >
-        {turnSummaryLabel(calls, messages)}
+        {turnSummaryLabel(calls, messages, t)}
       </span>
       <ChevronDownIcon
         data-slot="turn-steps-chevron"

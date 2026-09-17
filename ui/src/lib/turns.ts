@@ -8,9 +8,11 @@
 // same question for the action bar (`isTurnEnd` / `isTurnContinuation`); this
 // module answers it for the fold, which needs the same boundary plus the counts.
 //
-// ZERO IMPORTS, like `stats.ts` and `attachment-rules.ts`, so the UI suite can
-// test this as arithmetic over a literal message list instead of through a
-// rendered thread (see test/suites/turns.ts).
+// RUNTIME-ZERO IMPORTS, like `stats.ts` and `attachment-rules.ts`: the one import
+// below is a TYPE (`import type { TFunction }`), which the compiler erases, so the
+// UI suite can still test this as arithmetic over a literal message list instead of
+// through a rendered thread (see test/suites/turns.ts).
+import type { TFunction } from "i18next";
 
 /// The shape this module reads a message through: enough to walk a turn, count a
 /// tool call, and ask whether the message is still being written. Structural on
@@ -82,13 +84,29 @@ export function turnCounts(
   return { calls, messages: last - first + 1 };
 }
 
-/// The summary line's text: `72 次工具调用 · 25 条消息`.
+/// The translator `turnSummaryLabel` takes, PINNED TO THE FACE THAT DRAWS IT.
+///
+/// i18next's `TFunction` is branded with the namespace it was bound to, so a bare
+/// `TFunction` here would mean "whatever the default namespace is" and would accept
+/// a shell translator by mistake, while a `string` key would lose the key check in
+/// this file entirely. Naming `thread` keeps both -- the same choice `format.ts`
+/// makes for its own face.
+type Translate = TFunction<"thread">;
+
+/// The summary line's text: `72 tool calls · 25 messages`, or -- in Chinese --
+/// `72 次工具调用 · 25 条消息`.
 ///
 /// The tool-call half is dropped when there were none: a turn of pure thought is
-/// the common case for a short answer, and `0 次工具调用 · 2 条消息` states a
+/// the common case for a short answer, and `0 tool calls · 2 messages` states a
 /// fact nobody asked for. A turn with no tool calls and one message never reaches
 /// this function -- there is nothing folded to label (see `useStepFold`).
-export function turnSummaryLabel(calls: number, messages: number): string {
-  const callsText = calls === 0 ? "" : `${calls} 次工具调用 · `;
-  return `${callsText}${messages} 条消息`;
+///
+/// THE SEPARATOR IS NOT IN THE CATALOG. ` · ` sits between two phrases that each
+/// carry their own plural rule, and i18next's `count` resolves one plural per key
+/// -- so the two halves are translated separately and the punctuation joins them.
+/// That is the same line `subjectOf` draws around its ` → ` and `…`.
+export function turnSummaryLabel(calls: number, messages: number, t: Translate): string {
+  const messagesText = t("summary.messages", { count: messages });
+  if (calls === 0) return messagesText;
+  return `${t("summary.calls", { count: calls })} · ${messagesText}`;
 }

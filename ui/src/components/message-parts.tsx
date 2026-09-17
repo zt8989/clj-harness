@@ -134,6 +134,7 @@ import {
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -161,6 +162,12 @@ import { CollapsibleTrigger } from "@/components/ui/collapsible";
 import { formatMillis } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+/// The translator this face's words go through. PINNED TO THE NAMESPACE, like
+/// `lib/format.ts` pins its own: a bare `TFunction` would mean "whatever the
+/// default namespace is" and would accept a shell translator by mistake, while a
+/// `string` key would lose the key check in the helpers below entirely.
+type Translate = TFunction<"thread">;
+
 // ------------------------------------------------------------- tool call card
 
 /// The vocabulary the card draws from: every state a tool call can be in.
@@ -175,6 +182,12 @@ type CallState =
 /// `Record<CallState, ...>`s would say the same thing in two places; here a
 /// state cannot gain a word without a mark.
 ///
+/// THE WORD IS THE CATALOG'S, AND IT ARRIVES AS A FUNCTION rather than a string
+/// because the table is module-level and the language is not: each entry closes
+/// over its own key, written literally (`t("status.running")`), which is what the
+/// key discipline requires -- a `t(\`status.${state}\`)` at the call site would
+/// make the type gate blind to a renamed key.
+///
 /// Upstream draws these states as icons only. This repo spells them out as well,
 /// because a checkmark and a cross are easy to miss and a card whose state is
 /// implied is a card whose state gets misread.
@@ -183,12 +196,15 @@ type CallState =
 /// holds five different icons, and naming one of them as the type of all of them
 /// says the wrong thing. It is also what upstream's own `statusIconMap` is typed
 /// as, and `lucide-react@1.46` exports no `LucideIcon` to reach for instead.
-const CALL_STATES: Record<CallState, { label: string; icon: ElementType }> = {
-  running: { label: "Running", icon: LoaderIcon },
-  done: { label: "Done", icon: CheckIcon },
-  failed: { label: "Failed", icon: XCircleIcon },
-  cancelled: { label: "Cancelled", icon: XCircleIcon },
-  "needs-approval": { label: "Needs approval", icon: AlertCircleIcon },
+const CALL_STATES: Record<
+  CallState,
+  { label: (t: Translate) => string; icon: ElementType }
+> = {
+  running: { label: (t) => t("status.running"), icon: LoaderIcon },
+  done: { label: (t) => t("status.done"), icon: CheckIcon },
+  failed: { label: (t) => t("status.failed"), icon: XCircleIcon },
+  cancelled: { label: (t) => t("status.cancelled"), icon: XCircleIcon },
+  "needs-approval": { label: (t) => t("status.needsApproval"), icon: AlertCircleIcon },
 };
 
 /// The state, read from the two places that report one.
@@ -318,7 +334,14 @@ function firstLine(text: string): string {
 /// anchor is looked up, no command is rewritten. The row reports what the model
 /// asked for, in the model's own words, which is what the arguments panel would
 /// show one click later.
-function subjectOf(toolName: string, args: Args): string | null {
+///
+/// THE ONE THING THIS FUNCTION SAYS ITSELF IS A HANDFUL OF WORDS, and they are the
+/// catalog's (`delete` / `N lines` / `clear` / `done`, and 删除 / N 行 / 清空 / 完成 in
+/// Chinese). Everything around them is a VALUE -- a path, an anchor, a command --
+/// and stays verbatim, tool names included. The symbols between them (`…`, ` → `,
+/// ` · `, the slash of `3/5`) are punctuation rather than words, so they stay
+/// literal too: only the numbers are interpolated.
+function subjectOf(toolName: string, args: Args, t: Translate): string | null {
   switch (toolName) {
     case "read":
     case "write":
@@ -333,13 +356,15 @@ function subjectOf(toolName: string, args: Args): string | null {
       const to = stringArg(args, "remove_to");
       const range = to === undefined || to === from ? from : `${from}…${to}`;
       const lines = lineCount(args, "replacement_lines");
-      return lines === 0 ? `${range} → 删除` : `${range} → ${lines} 行`;
+      return lines === 0
+        ? `${range} → ${t("subject.delete")}`
+        : `${range} → ${t("subject.lines", { count: lines })}`;
     }
     case "insert": {
       const anchor = stringArg(args, "anchor");
       if (anchor === undefined) return null;
       const direction = stringArg(args, "direction") ?? "after";
-      return `${direction} ${anchor} · ${lineCount(args, "lines")} 行`;
+      return `${direction} ${anchor} · ${t("subject.lines", { count: lineCount(args, "lines") })}`;
     }
     case "anchor_grep":
       return stringArg(args, "pattern") ?? null;
@@ -367,14 +392,14 @@ function subjectOf(toolName: string, args: Args): string | null {
     case "todo_write": {
       const todos = args["todos"];
       if (!Array.isArray(todos)) return null;
-      if (todos.length === 0) return "清空";
+      if (todos.length === 0) return t("subject.clear");
       const done = todos.filter(
         (item) =>
           item !== null &&
           typeof item === "object" &&
           (item as Args)["status"] === "completed",
       ).length;
-      return `${done}/${todos.length} 完成`;
+      return `${done}/${todos.length} ${t("subject.todoDone")}`;
     }
     case "web_fetch":
       // The whole URL, however long: the row ellipsises, and shortening it here
@@ -416,10 +441,12 @@ const ToolCallTrigger: FC<{
   subject: string | null;
 }> = ({ toolName, state, subject }) => {
   const elapsedMs = useToolCallElapsed();
+  const { t } = useTranslation("thread");
   // The elapsed time's words come from the `format` face, because `formatMillis` is
   // the one formatter the tool card and the trajectory share (ticket 02 merged them).
-  const { t } = useTranslation("format");
-  const { label, icon: StatusIcon } = CALL_STATES[state];
+  const { t: tFormat } = useTranslation("format");
+  const { label: labelFor, icon: StatusIcon } = CALL_STATES[state];
+  const label = labelFor(t);
   const isRunning = state === "running";
   const KindIcon = TOOL_ICONS[toolName] ?? FALLBACK_TOOL_ICON;
 
@@ -457,7 +484,7 @@ const ToolCallTrigger: FC<{
           data-slot="tool-call-trigger-duration"
           className="aui-tool-call-trigger-duration shrink-0 text-xs tabular-nums"
         >
-          {formatMillis(elapsedMs, t)}
+          {formatMillis(elapsedMs, tFormat)}
         </span>
       )}
       {/* The state, at the end of the row: a mark and -- for a reader who cannot
@@ -492,12 +519,13 @@ const ToolCallTrigger: FC<{
 /// rather than scrolls horizontally so a long path or a long string stays
 /// readable in a narrow thread.)
 const ToolCallArgs: FC<{ argsText: string }> = ({ argsText }) => {
+  const { t } = useTranslation("thread");
   if (argsText === "") return null;
 
   return (
     <div data-slot="tool-call-args" className="aui-tool-call-args flex flex-col">
       <p className="aui-tool-call-args-header text-muted-foreground text-xs font-medium">
-        Arguments
+        {t("args.header")}
       </p>
       <pre className="aui-tool-call-args-value bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
         {argsText}
@@ -509,7 +537,7 @@ const ToolCallArgs: FC<{ argsText: string }> = ({ argsText }) => {
 /// A result, rendered the way a value can be rendered: a string is shown as
 /// itself (tool results are text on the wire), anything else is pretty-printed,
 /// and a value that cannot be serialised says so instead of throwing.
-function resultText(result: unknown): string | null {
+function resultText(result: unknown, t: Translate): string | null {
   if (result === undefined || result === null) return null;
   if (typeof result === "string") return result;
   if (result instanceof Error) return String(result);
@@ -524,7 +552,7 @@ function resultText(result: unknown): string | null {
   try {
     return String(result);
   } catch {
-    return "[Unserializable value]";
+    return t("result.unserializable");
   }
 }
 
@@ -536,10 +564,13 @@ function resultText(result: unknown): string | null {
 /// `status.error` and once as the result. The formatting below differs from
 /// upstream's by indentation only, which cannot change whether there is
 /// anything to print.
-function statusErrorText(status: ToolCallMessagePartStatus | undefined): string | null {
+function statusErrorText(
+  status: ToolCallMessagePartStatus | undefined,
+  t: Translate,
+): string | null {
   if (status?.type !== "incomplete") return null;
 
-  const text = resultText(status.error);
+  const text = resultText(status.error, t);
   return text !== null && text.trim() !== "" ? text : null;
 }
 
@@ -559,7 +590,8 @@ const ToolCallResult: FC<{
   failed: boolean;
   failureExplained: boolean;
 }> = ({ result, failed, failureExplained }) => {
-  const text = resultText(result);
+  const { t } = useTranslation("thread");
+  const text = resultText(result, t);
 
   if (text === null || text.trim() === "") {
     if (failureExplained) return null;
@@ -569,7 +601,7 @@ const ToolCallResult: FC<{
         data-slot="tool-call-no-result"
         className="aui-tool-call-no-result text-muted-foreground text-xs"
       >
-        No result
+        {t("result.noResult")}
       </p>
     );
   }
@@ -580,7 +612,7 @@ const ToolCallResult: FC<{
       className="aui-tool-call-result flex flex-col"
     >
       <p className="aui-tool-call-result-header text-muted-foreground text-xs font-medium">
-        {failed && !failureExplained ? "Error:" : "Result:"}
+        {failed && !failureExplained ? t("result.error") : t("result.header")}
       </p>
       <pre className="aui-tool-call-result-value bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
         {text}
@@ -600,6 +632,7 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   status,
   isError,
 }) => {
+  const { t } = useTranslation("thread");
   // Parked is read from TWO places, and the second one is not a belt-and-
   // braces duplication. The runtime opens a new client-side assistant message
   // for every server TEXT_MESSAGE, finalizing the previous one as `complete`
@@ -630,13 +663,13 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
 
   // When upstream's error block has something to say about a call that broke,
   // it says all of it; see `statusErrorText`.
-  const failureExplained = statusErrorText(status) !== null;
+  const failureExplained = statusErrorText(status, t) !== null;
 
   // What the row says this call is about. Null while the arguments are still
   // arriving, or when this tool's projection has nothing to say -- the row then
   // shows the name alone.
   const parsedArgs = parseArgs(argsText);
-  const subject = parsedArgs === null ? null : subjectOf(toolName, parsedArgs);
+  const subject = parsedArgs === null ? null : subjectOf(toolName, parsedArgs, t);
 
   return (
     <>
@@ -747,10 +780,11 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 //
 // The row carries the FIRST LINE of the thought, for the same reason a tool row
 // carries its subject: a step whose content is invisible until clicked makes the
-// reader click to find out whether they needed to. The label is `思考` -- the
-// reference this repo was asked to match uses that word, and it is the one place
-// in the transcript where a Chinese label sits next to English ones. The tool
-// names stay literal (`read`, `bash`): they are the model's vocabulary, and
+// reader click to find out whether they needed to. The label is this row's own
+// word and it lives in the `thread` catalog (`思考` / `Thinking`), so each language
+// has its own -- it was once the one Chinese label in an English transcript, and
+// moving this face's words into the catalog is what stopped that being true. The
+// tool names stay literal (`read`, `bash`): they are the model's vocabulary, and
 // translating them would break the correspondence with the arguments panel.
 
 /// How much of a thought the row shows before the CSS ellipsis takes over.
@@ -795,36 +829,40 @@ function previewOf(
 const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   active,
   preview,
-}) => (
-  <CollapsibleTrigger
-    data-slot="reasoning-trigger"
-    className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-[13px] transition-[color,scale] active:scale-[0.98]"
-  >
-    <BrainIcon
-      data-slot="reasoning-trigger-icon"
-      className="aui-reasoning-trigger-icon size-4 shrink-0"
-      aria-hidden="true"
-    />
-    <span
-      data-slot="reasoning-trigger-label"
-      className={cn(
-        "aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none",
-        active && "shimmer motion-reduce:animate-none",
-      )}
+}) => {
+  const { t } = useTranslation("thread");
+
+  return (
+    <CollapsibleTrigger
+      data-slot="reasoning-trigger"
+      className="aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-2 py-1.5 text-[13px] transition-[color,scale] active:scale-[0.98]"
     >
-      <b className="aui-reasoning-trigger-name">思考</b>
-      {preview !== "" && (
-        <span
-          data-slot="reasoning-trigger-subject"
-          className="aui-reasoning-trigger-subject"
-        >
-          {" · "}
-          {preview}
-        </span>
-      )}
-    </span>
-  </CollapsibleTrigger>
-);
+      <BrainIcon
+        data-slot="reasoning-trigger-icon"
+        className="aui-reasoning-trigger-icon size-4 shrink-0"
+        aria-hidden="true"
+      />
+      <span
+        data-slot="reasoning-trigger-label"
+        className={cn(
+          "aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none",
+          active && "shimmer motion-reduce:animate-none",
+        )}
+      >
+        <b className="aui-reasoning-trigger-name">{t("reasoning.label")}</b>
+        {preview !== "" && (
+          <span
+            data-slot="reasoning-trigger-subject"
+            className="aui-reasoning-trigger-subject"
+          >
+            {" · "}
+            {preview}
+          </span>
+        )}
+      </span>
+    </CollapsibleTrigger>
+  );
+};
 
 /// A run of adjacent reasoning parts, behind one row that is folded unless the
 /// thought is still arriving.

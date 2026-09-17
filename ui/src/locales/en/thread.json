@@ -1,0 +1,34 @@
+{
+  "status": {
+    "running": "Running",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "needsApproval": "Needs approval"
+  },
+  "reasoning": {
+    "label": "Thinking"
+  },
+  "args": {
+    "header": "Arguments"
+  },
+  "result": {
+    "error": "Error:",
+    "header": "Result:",
+    "noResult": "No result",
+    "unserializable": "[Unserializable value]"
+  },
+  "subject": {
+    "delete": "delete",
+    "clear": "clear",
+    "lines_one": "{{count}} line",
+    "lines_other": "{{count}} lines",
+    "todoDone": "done"
+  },
+  "summary": {
+    "calls_one": "{{count}} tool call",
+    "calls_other": "{{count}} tool calls",
+    "messages_one": "{{count}} message",
+    "messages_other": "{{count}} messages"
+  }
+}
