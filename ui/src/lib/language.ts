@@ -36,6 +36,17 @@ export function isLanguage(value: unknown): value is Language {
   return SUPPORTED_LANGUAGES.some((language) => language === value);
 }
 
+/// One of the page's languages, from a value that may be anything.
+///
+/// FOR THE CALL SITES THAT ALREADY HAVE AN ANSWER and only need it typed: i18next's
+/// `i18n.language` is the live language, but it is typed `string` because the library
+/// cannot know this repo's list. This narrows it -- and normalizes a regional tag on
+/// the way, which is what a `<html lang>` or a stored value would carry. Anything
+/// unreadable becomes the fallback, the same answer a first visit gets.
+export function asLanguage(value: unknown): Language {
+  return (typeof value === "string" ? baseLanguage(value) : null) ?? FALLBACK_LANGUAGE;
+}
+
 /// A language tag reduced to one the page speaks, or null.
 ///
 /// The BASE SUBTAG is what decides. `zh-CN`, `zh-TW` and the legacy `zh_TW` are all

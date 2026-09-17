@@ -2,5 +2,9 @@
   "view": {
     "conversation": "Conversation",
     "trajectory": "Trajectory"
+  },
+  "session": {
+    "neverRun": "never run",
+    "noLog": "no log yet"
   }
 }

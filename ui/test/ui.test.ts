@@ -64,7 +64,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// browser's tag, then English, falling through anything unusable) and the parity
 /// between the two catalogs (the same keys, every value a non-empty string). Both
 /// pure; this is the pair that makes a half-translated page a red run.
-const EXPECTED_CASES = 33;
+/// 33 -> 34: the `stats` suite's third -- the durations and the timestamps in BOTH
+/// languages, plus the two units that deliberately do not translate. Ticket 02 merged
+/// the four copies of the size/duration words into `lib/format.ts`, and this is the
+/// case that pins what they now say.
+const EXPECTED_CASES = 34;
 
 let total = 0;
 for (const suite of SUITES) {

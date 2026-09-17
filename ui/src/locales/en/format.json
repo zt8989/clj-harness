@@ -1,0 +1,16 @@
+{
+  "duration": {
+    "subSecond": "<1s",
+    "seconds": "{{value}}s",
+    "minutes": "{{minutes}}m {{seconds}}s"
+  },
+  "stats": {
+    "turns_one": "{{count}} turn",
+    "turns_other": "{{count}} turns",
+    "steps_one": "{{count}} step",
+    "steps_other": "{{count}} steps",
+    "rate": "{{value}} tok/s",
+    "total": "{{value}} tok",
+    "cached": "{{value}}% cached"
+  }
+}

@@ -12,6 +12,12 @@ import {
   DownloadIcon,
 } from "lucide-react";
 import type { FileMessagePartComponent } from "@assistant-ui/react";
+// LOCAL: `formatFileSize` used to live here with its OWN rounding (one decimal).
+// There were three copies of `B`/`KB`/`MB` in this UI, so the size is written by
+// `lib/format.ts` now. What that costs: this row used to say "1.5 MB" and says
+// "2 MB" -- the glanceable precision, the same one the sidebar's disk facts use.
+// See .scratch/ui-i18n/spec.md (ticket 02).
+import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const fileVariants = cva(
@@ -112,16 +118,6 @@ function getDataUrlSize(data: string): number {
     .byteLength;
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export type FileRootProps = React.ComponentProps<"div"> &
   VariantProps<typeof fileVariants>;
 
@@ -196,7 +192,7 @@ function FileSize({ bytes, className, ...props }: FileSizeProps) {
       className={cn("text-muted-foreground shrink-0", className)}
       {...props}
     >
-      {formatFileSize(bytes)}
+      {formatBytes(bytes)}
     </span>
   );
 }
@@ -301,5 +297,4 @@ export {
   getMimeTypeIcon,
   getFileDataKind,
   getBase64Size,
-  formatFileSize,
 };

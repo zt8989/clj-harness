@@ -36,6 +36,38 @@ import {
 
 type Catalog = Record<string, unknown>;
 
+/// The suffixes i18next uses for plural forms, which are CLDR's category names.
+const PLURAL_FORMS = ["zero", "one", "two", "few", "many", "other"] as const;
+
+/// Split a leaf's dotted path into its base and plural form, when it has one.
+///
+/// `stats.turns_one` -> base `stats.turns`, form `one`; a leaf with no suffix on the
+/// last segment is null. Only the LAST segment is examined: a namespace or a group
+/// called `one` would not be a plural form, and reading it as one would invent a key.
+function pluralOf(path: string): { base: string; form: string } | null {
+  const underscore = path.lastIndexOf("_");
+  if (underscore === -1) return null;
+  const form = path.slice(underscore + 1);
+  if (!(PLURAL_FORMS as readonly string[]).includes(form)) return null;
+  return { base: path.slice(0, underscore), form };
+}
+
+/// The shape of one language's catalog for one namespace: the keys that stand alone,
+/// and the plural bases, each with the forms that language actually wrote.
+function shapeOf(catalog: Catalog) {
+  const plain: string[] = [];
+  const forms = new Map<string, string[]>();
+  for (const [path] of leaves(catalog)) {
+    const plural = pluralOf(path);
+    if (plural === null) {
+      plain.push(path);
+      continue;
+    }
+    forms.set(plural.base, [...(forms.get(plural.base) ?? []), plural.form]);
+  }
+  return { plain: plain.sort(), forms };
+}
+
 /// Every leaf in a catalog, as a dotted path and its value: `language.title` is one
 /// entry, not two. A nested object is structure, and the thing that has to be
 /// translated is always the leaf.
@@ -123,13 +155,42 @@ const cases: Case[] = [
         const en = leaves(RESOURCES.en[namespace] as Catalog);
         const zh = leaves(RESOURCES.zh[namespace] as Catalog);
 
-        // THE SAME KEYS, in the same language-independent sense: the key is an
+        // THE SAME KEYS, IN THE SAME LANGUAGE-INDEPENDENT SENSE: the key is an
         // address, and an address that exists in one language only is a call site
         // that renders English (or Chinese) wherever the reader happens to be.
+        //
+        // PLURAL FORMS ARE THE ONE EXCEPTION, and it is the language's, not ours:
+        // English has a singular form and Chinese does not, so `x_one` in one file
+        // and not the other is correct. The comparison is therefore between the keys
+        // that stand alone, plus the plural BASES -- and each base's forms are then
+        // checked against the language's own CLDR categories, which is what makes a
+        // misspelled suffix (`x_ones`) a failure rather than a key that quietly never
+        // gets used.
+        const enShape = shapeOf(RESOURCES.en[namespace] as Catalog);
+        const zhShape = shapeOf(RESOURCES.zh[namespace] as Catalog);
+
         expect(
-          zh.map(([key]) => key).sort(),
+          zhShape.plain,
           `namespace "${namespace}" has keys in one language only`,
-        ).toEqual(en.map(([key]) => key).sort());
+        ).toEqual(enShape.plain);
+
+        expect(
+          [...zhShape.forms.keys()].sort(),
+          `namespace "${namespace}" has plural keys in one language only`,
+        ).toEqual([...enShape.forms.keys()].sort());
+
+        for (const [language, shape] of [
+          ["en", enShape],
+          ["zh", zhShape],
+        ] as const) {
+          const categories = new Intl.PluralRules(language).resolvedOptions().pluralCategories;
+          for (const [base, forms] of shape.forms) {
+            expect(
+              [...forms].sort(),
+              `"${language}/${namespace}: ${base}" has the wrong plural forms`,
+            ).toEqual([...categories].sort());
+          }
+        }
 
         // AND EVERY VALUE IS A NON-EMPTY STRING. An empty one is worse than a missing
         // one: it renders as nothing at all, so the page loses a label and gives no

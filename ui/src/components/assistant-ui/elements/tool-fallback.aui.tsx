@@ -18,11 +18,13 @@ import {
   type ToolCallMessagePartStatus,
   type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { formatMillis } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -97,19 +99,16 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
-const formatToolDuration = (ms: number) => {
-  if (ms < 1000) return "<1s";
-  const seconds = ms / 1000;
-  if (seconds < 10) return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-};
-
 function ToolFallbackDuration({
   className,
   ...props
 }: React.ComponentProps<"span">) {
   const elapsedMs = useToolCallElapsed();
+  // LOCAL: this copy had its OWN buckets for the elapsed time -- the same four
+  // `formatMillis` uses, written out a second time. They are one formatter's now
+  // (the trajectory draws the same spans, and the two could disagree by
+  // construction), so this file asks for the translator instead of the arithmetic.
+  const { t } = useTranslation("format");
   if (elapsedMs === undefined) return null;
 
   return (
@@ -121,7 +120,7 @@ function ToolFallbackDuration({
       )}
       {...props}
     >
-      {formatToolDuration(elapsedMs)}
+      {formatMillis(elapsedMs, t)}
     </span>
   );
 }

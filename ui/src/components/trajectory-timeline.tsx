@@ -27,6 +27,7 @@
 // tools in a row. The stacking is what makes the lane's height a quiet statement about
 // how parallel that turn was.
 import { type FC, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { formatMillis } from "@/lib/format";
 import { KIND_HUE, LANE_KIND, type Lane } from "@/components/trajectory-colors";
@@ -118,6 +119,7 @@ const Lane: FC<{
   open: { turn: number; index: number } | null;
   onOpen: (target: { turn: number; index: number }) => void;
 }> = ({ name, lane, marks, span, mode, open, onOpen }) => {
+  const { t } = useTranslation("format");
   /// The stacking: marks that overlap in time get their own vertical offset, so the
   /// lane's height grows with the turn's parallelism and no mark hides another.
   const rows = useMemo(() => {
@@ -155,7 +157,7 @@ const Lane: FC<{
               ? 0
               : (mark.wait / Math.max(1, mark.end - mark.start + mark.wait)) * 100;
           const isOpen = mark.index !== null && open?.turn === mark.turn && open.index === mark.index;
-          const duration = formatMillis(Math.max(0, mark.end - mark.start));
+          const duration = formatMillis(Math.max(0, mark.end - mark.start), t);
           const geometry = {
             left: `${from * 100}%`,
             width: `${Math.max(to - from, 0.004) * 100}%`,
@@ -289,6 +291,7 @@ export const TrajectoryTimeline: FC<{
   open: { turn: number; index: number } | null;
   onOpen: (target: { turn: number; index: number }) => void;
 }> = ({ payload, mode, onMode, open, onOpen }) => {
+  const { t } = useTranslation("format");
   const span = useMemo(() => spanOf(payload.turns), [payload.turns]);
   const lanes: { name: string; lane: Lane }[] = [
     { name: "input", lane: "input" },
@@ -319,7 +322,7 @@ export const TrajectoryTimeline: FC<{
         ))}
         {!nothingToDraw && (
           <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-            {formatMillis(Math.max(0, total))} total
+            {formatMillis(Math.max(0, total), t)} total
           </span>
         )}
       </div>

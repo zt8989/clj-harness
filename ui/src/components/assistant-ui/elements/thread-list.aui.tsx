@@ -45,10 +45,12 @@
 // not a no-op here, it is a reload of the conversation being read.
 import { Loader2Icon } from "lucide-react";
 import { forwardRef, type ComponentPropsWithoutRef, type FC, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatTime } from "@/lib/format";
+import { asLanguage } from "@/lib/language";
 import type { SessionSummary } from "@/lib/projects";
 
 /// The row's data, as the sidebar has it. Deliberately the wire shape rather
@@ -88,6 +90,12 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
   actions,
 }) => {
   const { threadId, lastActivity, bytes } = session;
+  // LOCAL: the two disk facts' words. The formatters themselves are `lib/format.ts`;
+  // what moved here is the ABSENCE -- "never run" and "no log yet" used to be
+  // answered by the formatter, and the row is the thing that knows which absence it
+  // is looking at.
+  const { t, i18n } = useTranslation();
+  const locale = asLanguage(i18n.language);
   return (
     <li data-slot="thread-list-item" data-current={current ? "" : undefined}>
       <div
@@ -131,7 +139,8 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
             data-slot="thread-list-item-meta"
             className="text-muted-foreground w-full truncate text-xs tabular-nums"
           >
-            {formatTime(lastActivity)} · {formatBytes(bytes)}
+            {lastActivity === null ? t("session.neverRun") : formatTime(lastActivity, locale)} ·{" "}
+            {bytes === null ? t("session.noLog") : formatBytes(bytes)}
           </span>
           {running && <span className="sr-only">Running</span>}
         </button>

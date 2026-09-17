@@ -43,8 +43,10 @@
 import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { WrenchIcon, XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { formatMillis, formatTime, formatTokens } from "@/lib/format";
+import { asLanguage } from "@/lib/language";
 import { type TrajectoryItem, type TrajectoryPayload, type TrajectoryTurn, trajectoryFor } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 import { KIND_HUE } from "@/components/trajectory-colors";
@@ -301,6 +303,8 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
   turn,
   onClose,
 }) => {
+  const { t, i18n } = useTranslation("format");
+  const locale = asLanguage(i18n.language);
   /// Reset per item by the `key` the caller gives this component, so clicking a system
   /// row always opens on the prompt and the tools are one deliberate click away.
   const [tab, setTab] = useState<SystemTab>("prompt");
@@ -396,7 +400,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                ["arrived", item.at === undefined ? null : formatTime(item.at)],
+                ["arrived", item.at === undefined ? null : formatTime(item.at, locale)],
                 ["id", item.id ?? null],
               ]}
             />
@@ -413,7 +417,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
                   "took",
                   call?.startedAt === undefined || call.endedAt === undefined
                     ? null
-                    : formatMillis(call.endedAt - call.startedAt),
+                    : formatMillis(call.endedAt - call.startedAt, t),
                 ],
                 ["tokens", call?.tokens === undefined ? null : formatTokens(call.tokens)],
                 ["finished", call?.finishReason ?? null],
@@ -441,13 +445,13 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
                   "waited",
                   item.resumedAt === undefined || item.arrivedAt === undefined
                     ? null
-                    : formatMillis(item.resumedAt - item.arrivedAt),
+                    : formatMillis(item.resumedAt - item.arrivedAt, t),
                 ],
                 [
                   "ran",
                   item.executedAt === undefined
                     ? null
-                    : formatMillis(item.executedAt - (item.resumedAt ?? item.arrivedAt ?? item.executedAt)),
+                    : formatMillis(item.executedAt - (item.resumedAt ?? item.arrivedAt ?? item.executedAt), t),
                 ],
                 ["id", item.toolCallId],
               ]}

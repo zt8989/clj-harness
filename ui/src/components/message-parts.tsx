@@ -134,6 +134,7 @@ import {
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
+import { useTranslation } from "react-i18next";
 
 import {
   ApprovalGate,
@@ -415,6 +416,9 @@ const ToolCallTrigger: FC<{
   subject: string | null;
 }> = ({ toolName, state, subject }) => {
   const elapsedMs = useToolCallElapsed();
+  // The elapsed time's words come from the `format` face, because `formatMillis` is
+  // the one formatter the tool card and the trajectory share (ticket 02 merged them).
+  const { t } = useTranslation("format");
   const { label, icon: StatusIcon } = CALL_STATES[state];
   const isRunning = state === "running";
   const KindIcon = TOOL_ICONS[toolName] ?? FALLBACK_TOOL_ICON;
@@ -453,7 +457,7 @@ const ToolCallTrigger: FC<{
           data-slot="tool-call-trigger-duration"
           className="aui-tool-call-trigger-duration shrink-0 text-xs tabular-nums"
         >
-          {formatMillis(elapsedMs)}
+          {formatMillis(elapsedMs, t)}
         </span>
       )}
       {/* The state, at the end of the row: a mark and -- for a reader who cannot

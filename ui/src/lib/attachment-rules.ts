@@ -31,10 +31,14 @@
 //
 // ------------------------------------------------------------ WHY IT IS BARE
 //
-// This module IMPORTS NOTHING: no React, no `@` alias, no DOM. That is what lets
-// vitest reach it by relative path (see vitest.config.ts, which deliberately
-// loads no alias), and a rule this load-bearing is worth a test that needs no
-// browser. `format.ts` is the precedent.
+// This module IMPORTS NOTHING that needs a browser: no React, no `@` alias, no DOM.
+// That is what lets vitest reach it by relative path (see vitest.config.ts, which
+// deliberately loads no alias), and a rule this load-bearing is worth a test that
+// needs no browser. `format.ts` is the precedent -- and since that one is now the
+// single place a byte size is written, the size sentence below goes through it
+// rather than carrying a second copy of the units (there used to be three copies of
+// `B`/`KB`/`MB` in this UI; see .scratch/ui-i18n/spec.md, ticket 02).
+import { formatMegabytes } from "./format";
 
 /// The most SOURCE-FILE BYTES a single attachment may carry.
 ///
@@ -85,23 +89,15 @@ export function overByteLimit(bytes: number): boolean {
 
 /// The sentence for a file over the cap, or null when it is not. It carries the
 /// two numbers a person needs to fix it: what this one is, and what the limit is.
+///
+/// BOTH ARE FORMATTED BY THE ONE DECIMAL FORM (`formatMegabytes`), not the
+/// glanceable one: a file that is over the cap by a fraction of a megabyte must not
+/// print the same two numbers as the cap, or the refusal reads as a bug. That
+/// caveat -- the comparison is exact while the sentence rounds -- is the formatter's
+/// now, which is where the other copy of it used to live.
 export function sizeRefusal(bytes: number): string | null {
   if (!overByteLimit(bytes)) return null;
-  return `this image is ${megabytes(bytes)}; the limit is ${megabytes(ATTACHMENT_MAX_BYTES)}`;
-}
-
-/// The attachment's size as a person reads it: a tenth of a megabyte, with a
-/// trailing `.0` dropped so the cap reads as the "2 MB" a person would write.
-///
-/// THE COMPARISON IS EXACT AND THE SENTENCE ROUNDS, and that leaves one small gap
-/// worth stating rather than hiding: a file one byte over the cap prints the same
-/// "2 MB" the cap does. The two numbers are here to tell somebody what to do about
-/// it, and at that size the thing to do is look at the file, not to compute a
-/// difference -- while six significant digits would be a worse sentence for every
-/// other file that lands here.
-function megabytes(bytes: number): string {
-  const mb = (bytes / (1024 * 1024)).toFixed(1);
-  return `${mb.endsWith(".0") ? mb.slice(0, -2) : mb} MB`;
+  return `this image is ${formatMegabytes(bytes)}; the limit is ${formatMegabytes(ATTACHMENT_MAX_BYTES)}`;
 }
 
 /// Everything to be said about one file, before it is added -- or null, which is

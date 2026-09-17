@@ -2,5 +2,9 @@
   "view": {
     "conversation": "对话",
     "trajectory": "轨迹"
+  },
+  "session": {
+    "neverRun": "还没跑过",
+    "noLog": "还没有日志"
   }
 }
