@@ -1,5 +1,19 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's own words -- the tool
+// row's "Used tool" / "Cancelled tool", the result and error headers, the approval
+// card's option fallbacks and buttons, the answer field's labels and placeholder --
+// are gone from this file and read from the `elements-card` catalog instead (spec
+// decision 5, which reverses flat-step-rows decision 9's "leave the copies
+// untouched"). WHAT DOES NOT MOVE is the whole point of the boundary: the approval
+// prompt is the server's sentence, any option `label` or `id` it supplies is used
+// as it came, and the tool name, its arguments and its result are the model's words
+// (spec decisions 3 and 4). The cost, written down: this file is no longer
+// byte-comparable with upstream, so each deliberate edit below is marked `LOCAL:` --
+// a marker says "this was changed on purpose", not "this is what upstream changed".
+// Every non-word byte -- `data-slot`, class names, upstream identifiers -- is
+// untouched.
+import type { TFunction } from "i18next";
 import { memo, useCallback, useRef, useState } from "react";
 import {
   AlertCircleIcon,
@@ -30,6 +44,12 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
 const ANIMATION_DURATION = 200;
+
+// LOCAL: the translator this file's words are read from, PINNED TO THIS FILE'S
+// FACE. A bare `TFunction` would mean the default namespace; naming `elements-card`
+// keeps only this catalog's keys compiling here, the same guard `format.ts` puts on
+// its own module.
+type Translate = TFunction<"elements-card">;
 
 const pressable = "active:scale-[0.98]";
 
@@ -134,13 +154,17 @@ function ToolFallbackTrigger({
   toolName: string;
   status?: ToolCallMessagePartStatus;
 }) {
+  // LOCAL: the row's two labels, "Used tool" and "Cancelled tool", are gone from
+  // this file and read from the `elements-card` catalog instead. The tool name
+  // printed after them stays literal -- it is the model's vocabulary.
+  const { t } = useTranslation("elements-card");
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  const label = isCancelled ? t("tool.cancelled") : t("tool.used");
 
   return (
     <CollapsibleTrigger
@@ -240,7 +264,14 @@ function ToolFallbackArgs({
   );
 }
 
-const formatUnknownValue = (value: unknown, space?: number): string => {
+// LOCAL: the "unserializable value" fallback -- this file's own sentence for a
+// result it cannot render -- is gone from this file and read from the
+// `elements-card` catalog instead, so it arrives as an argument the caller supplies.
+const formatUnknownValue = (
+  value: unknown,
+  t: Translate,
+  space?: number,
+): string => {
   if (typeof value === "string") return value;
 
   try {
@@ -253,7 +284,7 @@ const formatUnknownValue = (value: unknown, space?: number): string => {
   try {
     return String(value);
   } catch {
-    return "[Unserializable value]";
+    return t("tool.unserializable");
   }
 };
 
@@ -264,6 +295,10 @@ function ToolFallbackResult({
 }: React.ComponentProps<"div"> & {
   result?: unknown;
 }) {
+  // LOCAL: the result block's "Result:" header is gone from this file and read
+  // from the `elements-card` catalog instead. The result's own text is the model's
+  // and passes through untouched.
+  const { t } = useTranslation("elements-card");
   if (result === undefined) return null;
 
   return (
@@ -273,10 +308,10 @@ function ToolFallbackResult({
       {...props}
     >
       <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-        Result:
+        {t("tool.resultHeader")}
       </p>
       <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {formatUnknownValue(result, 2)}
+        {formatUnknownValue(result, t, 2)}
       </pre>
     </div>
   );
@@ -289,16 +324,22 @@ function ToolFallbackError({
 }: React.ComponentProps<"div"> & {
   status?: ToolCallMessagePartStatus;
 }) {
+  // LOCAL: the error block's two headers, "Error:" and "Cancelled reason:", are
+  // gone from this file and read from the `elements-card` catalog instead. The
+  // error's own text is the server's and passes through untouched.
+  const { t } = useTranslation("elements-card");
   if (status?.type !== "incomplete") return null;
 
   const error = status.error;
   const errorText =
-    error === undefined || error === null ? null : formatUnknownValue(error);
+    error === undefined || error === null ? null : formatUnknownValue(error, t);
 
   if (!errorText) return null;
 
   const isCancelled = status.reason === "cancelled";
-  const headerText = isCancelled ? "Cancelled reason:" : "Error:";
+  const headerText = isCancelled
+    ? t("tool.cancelledReason")
+    : t("tool.errorHeader");
 
   return (
     <div
@@ -316,14 +357,20 @@ function ToolFallbackError({
   );
 }
 
-const APPROVED_RESULT = "Approved by user";
-const DENIED_RESULT = "User denied tool execution";
-
-const APPROVAL_OPTION_DEFAULT_LABELS: Record<string, string> = {
-  "allow-once": "Allow",
-  "allow-always": "Always allow",
-  "reject-once": "Deny",
-  "reject-always": "Always deny",
+// LOCAL: the fallback option labels -- used ONLY when the server supplied none --
+// are gone from this file and read from the `elements-card` catalog instead. The
+// kind keys ("allow-once", ...) are the server's vocabulary and stay untranslated;
+// each value is a literal `t(...)` call so the type gate and the unused-key sweep
+// both still see the key. A server-supplied `label` wins over this table (see
+// `approvalOptionLabel`), and a server-supplied `id` is the last fallback.
+const APPROVAL_OPTION_DEFAULT_LABELS: Record<
+  string,
+  (t: Translate) => string
+> = {
+  "allow-once": (t) => t("tool.optionAllowOnce"),
+  "allow-always": (t) => t("tool.optionAllowAlways"),
+  "reject-once": (t) => t("tool.optionDenyOnce"),
+  "reject-always": (t) => t("tool.optionDenyAlways"),
 };
 
 const isKnownKind = (kind: string) =>
@@ -332,10 +379,14 @@ const isKnownKind = (kind: string) =>
 const isAllowKind = (kind: string) =>
   kind === "allow-once" || kind === "allow-always";
 
-const approvalOptionLabel = (option: ToolApprovalOption) =>
+// LOCAL: this resolver now takes the translator, because the fallback labels it
+// reaches for are catalog words. The order it enforces is the boundary: the
+// server's `label` first, this table's kind only as a fallback, the server's `id`
+// last.
+const approvalOptionLabel = (option: ToolApprovalOption, t: Translate) =>
   option.label ??
   (isKnownKind(option.kind)
-    ? APPROVAL_OPTION_DEFAULT_LABELS[option.kind]
+    ? APPROVAL_OPTION_DEFAULT_LABELS[option.kind](t)
     : undefined) ??
   option.id;
 
@@ -375,6 +426,11 @@ function ToolFallbackApproval({
     interrupt?: ToolCallMessagePart["interrupt"];
     approval?: ToolCallMessagePart["approval"];
   }) {
+  // LOCAL: the approval card's fallback words -- its buttons, its option fallbacks
+  // and the answer field -- are gone from this file and read from the
+  // `elements-card` catalog instead. The server's prompt and any option label/id it
+  // supplies still pass through verbatim.
+  const { t } = useTranslation("elements-card");
   const [submitted, setSubmitted] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
@@ -430,7 +486,12 @@ function ToolFallbackApproval({
     ) {
       return;
     } else {
-      submit(() => addResult?.(approved ? APPROVED_RESULT : DENIED_RESULT));
+      // LOCAL: the two result lines this fallback records itself -- "Approved by
+      // user" / "User denied tool execution" -- are gone from this file and read
+      // from the `elements-card` catalog instead.
+      submit(() =>
+        addResult?.(approved ? t("tool.approved") : t("tool.denied")),
+      );
     }
   };
 
@@ -488,13 +549,20 @@ function ToolFallbackApproval({
 
   const answerField = acceptsText ? (
     <div className="aui-tool-fallback-approval-answer flex flex-col items-start gap-2">
+      {/* LOCAL: the answer field's `aria-label` and placeholder are copy, so they
+          follow the language; the server's prompt is preferred for the label when
+          the request is a question. */}
       <Textarea
         value={answer}
         onChange={(event) => setAnswer(event.target.value)}
         disabled={submitted}
-        aria-label={question ? (approval?.prompt ?? "Answer") : "Note"}
+        aria-label={
+          question
+            ? (approval?.prompt ?? t("tool.answerLabel"))
+            : t("tool.noteLabel")
+        }
         placeholder={
-          question ? "Type your answer" : "Add a note to your decision"
+          question ? t("tool.answerPlaceholder") : t("tool.notePlaceholder")
         }
       />
       {question && (
@@ -504,7 +572,7 @@ function ToolFallbackApproval({
           onClick={submitAnswer}
           disabled={submitted || !answer.trim()}
         >
-          Send
+          {t("tool.send")}
         </Button>
       )}
     </div>
@@ -525,7 +593,7 @@ function ToolFallbackApproval({
         {...props}
       >
         <p className="aui-tool-fallback-approval-confirm-title font-semibold">
-          {confirmMeta?.title ?? `${approvalOptionLabel(confirming)}?`}
+          {confirmMeta?.title ?? `${approvalOptionLabel(confirming, t)}?`}
         </p>
         {confirmDescription && (
           <p className="aui-tool-fallback-approval-confirm-description text-muted-foreground">
@@ -550,7 +618,7 @@ function ToolFallbackApproval({
             onClick={() => respondWithOption(confirming)}
             disabled={submitted}
           >
-            Confirm
+            {t("tool.confirm")}
           </Button>
           <Button
             size="sm"
@@ -559,7 +627,7 @@ function ToolFallbackApproval({
             onClick={() => setConfirmingId(null)}
             disabled={submitted}
           >
-            Back
+            {t("tool.back")}
           </Button>
         </div>
       </div>
@@ -593,7 +661,7 @@ function ToolFallbackApproval({
                 onClick={() => handleOption(option)}
                 disabled={submitted}
               >
-                {approvalOptionLabel(option)}
+                {approvalOptionLabel(option, t)}
               </Button>
             ),
           )}
@@ -605,7 +673,7 @@ function ToolFallbackApproval({
               onClick={() => respond(false)}
               disabled={submitted}
             >
-              Deny
+              {t("tool.deny")}
             </Button>
           )}
         </div>
@@ -651,7 +719,7 @@ function ToolFallbackApproval({
           onClick={() => respond(true)}
           disabled={submitted}
         >
-          Allow
+          {t("tool.allow")}
         </Button>
         <Button
           size="sm"
@@ -660,7 +728,7 @@ function ToolFallbackApproval({
           onClick={() => respond(false)}
           disabled={submitted}
         >
-          Deny
+          {t("tool.deny")}
         </Button>
       </div>
       {answerField}

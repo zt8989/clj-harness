@@ -1,5 +1,13 @@
 "use client";
 
+// LOCAL: this copied file is TRANSLATED IN PLACE. Upstream's trigger label --
+// "Reasoning" -- and its " (Ns)" duration suffix are gone from this file and read
+// from the `elements-card` catalog instead (spec decision 5, which reverses
+// flat-step-rows decision 9's "leave the copies untouched"). The reasoning TEXT
+// itself is the model's words and never passes through here. The cost, written
+// down: this file is no longer byte-comparable with upstream, so the deliberate
+// edit below is marked `LOCAL:`. Every non-word byte -- `data-slot`, class names,
+// upstream identifiers -- is untouched.
 import {
   createContext,
   useCallback,
@@ -11,6 +19,7 @@ import {
 } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import {
   Collapsible,
   CollapsibleContent,
@@ -170,7 +179,12 @@ function ReasoningTrigger({
   active?: boolean;
   duration?: number;
 }) {
-  const durationText = duration ? ` (${duration}s)` : "";
+  // LOCAL: upstream's "Reasoning" label and its " (Ns)" duration suffix are gone
+  // from this file and read from the `elements-card` catalog instead. The suffix
+  // keeps the `s` unit in both languages -- it is a numeric readout's unit, like the
+  // `tok/s` and `B`/`KB`/`MB` that `format.ts` deliberately leaves untranslated.
+  const { t } = useTranslation("elements-card");
+  const durationText = duration ? t("reasoning.duration", { duration }) : "";
 
   return (
     <CollapsibleTrigger
@@ -192,7 +206,8 @@ function ReasoningTrigger({
           active && "shimmer motion-reduce:animate-none",
         )}
       >
-        Reasoning{durationText}
+        {t("reasoning.label")}
+        {durationText}
       </span>
       <ChevronDownIcon
         data-slot="reasoning-trigger-chevron"

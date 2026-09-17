@@ -1,0 +1,33 @@
+{
+  "tool": {
+    "used": "Used tool",
+    "cancelled": "Cancelled tool",
+    "resultHeader": "Result:",
+    "errorHeader": "Error:",
+    "cancelledReason": "Cancelled reason:",
+    "unserializable": "[Unserializable value]",
+    "approved": "Approved by user",
+    "denied": "User denied tool execution",
+    "optionAllowOnce": "Allow",
+    "optionAllowAlways": "Always allow",
+    "optionDenyOnce": "Deny",
+    "optionDenyAlways": "Always deny",
+    "allow": "Allow",
+    "deny": "Deny",
+    "confirm": "Confirm",
+    "back": "Back",
+    "answerLabel": "Answer",
+    "noteLabel": "Note",
+    "answerPlaceholder": "Type your answer",
+    "notePlaceholder": "Add a note to your decision",
+    "send": "Send"
+  },
+  "group": {
+    "calls_one": "{{count}} tool call",
+    "calls_other": "{{count}} tool calls"
+  },
+  "reasoning": {
+    "label": "Reasoning",
+    "duration": " ({{duration}}s)"
+  }
+}
