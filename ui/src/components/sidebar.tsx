@@ -254,6 +254,10 @@ type ProjectError = { path: string; message: string } | null;
 
 export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   const { t } = useTranslation();
+  // The failures this list can raise are THIS side's sentences (a listing that
+  // would not load, a bind the server answered without a reason), so they come from
+  // the `errors` catalog while the panel's own words stay in `shell`.
+  const { t: tErrors } = useTranslation("errors");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -281,14 +285,14 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
 
   const refresh = useCallback(async () => {
     try {
-      setProjects(await listProjects());
+      setProjects(await listProjects(tErrors));
       setListError(null);
     } catch (failure: unknown) {
       setListError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [tErrors]);
 
   // On mount, and again whenever the current thread changes -- opening a session
   // rebuilds it from its log, which appends an audit line to that very file, so
@@ -357,7 +361,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     setBusy(true);
     setRowError(null);
     try {
-      await setArchived(threadId, archived);
+      await setArchived(threadId, archived, tErrors);
       if (movesThePage) {
         // "Never be reading an archived session": the project's most recent
         // unarchived session, which is the first one the server listed (the
@@ -369,7 +373,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
           await runtime.threads.switchToThread(next.threadId);
         } else {
           const id = crypto.randomUUID();
-          await bindThread(id, project.path);
+          await bindThread(id, project.path, tErrors);
           setPinned(project.path);
           await runtime.threads.switchToThread(id);
         }
@@ -405,7 +409,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     setProjectError(null);
     setRowError(null);
     try {
-      await removeProject(project.path);
+      await removeProject(project.path, tErrors);
       if (movesThePage) {
         // SOMEWHERE ELSE, in this order: the most recent unarchived session of
         // any remaining project (the lists are already newest-first), and --
@@ -453,7 +457,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   /// named refusal ("no such directory", "not a directory") -- it says it better
   /// than an empty field's complaint would.
   const addDirectoryAt = async (dir: string): Promise<void> => {
-    const added = await addProject(dir);
+    const added = await addProject(dir, tErrors);
     // The refusal under the New task button named a state that adding a
     // project has just ended; leaving it up would have the sidebar
     // contradicting itself one line above the new project's row.
@@ -489,7 +493,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
     setBusy(true);
     setAddError(null);
     try {
-      const picked = await pickFolder();
+      const picked = await pickFolder(tErrors);
       if (picked === null) return;
       await addDirectoryAt(picked);
     } catch (failure: unknown) {
@@ -532,7 +536,7 @@ export const Sidebar: FC<SidebarProps> = ({ runtime, currentThreadId }) => {
   /// which button was clicked.
   const startSessionIn = async (project: ProjectSummary): Promise<void> => {
     const id = crypto.randomUUID();
-    await bindThread(id, project.path);
+    await bindThread(id, project.path, tErrors);
     await runtime.threads.switchToThread(id);
   };
 

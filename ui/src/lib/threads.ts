@@ -6,6 +6,12 @@
 // so the one address serves both -- which is why AGENT_URL is defined here and
 // the run wiring imports it, rather than each file keeping its own copy of the
 // address.
+import type { TFunction } from "i18next";
+
+/// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
+/// brands a translator with the namespace it was bound to, so a shell translator
+/// does not typecheck here and only the errors catalog's keys compile.
+type Translate = TFunction<"errors">;
 
 export const AGENT_URL = "http://localhost:8080/";
 
@@ -17,9 +23,9 @@ export type ThreadSummary = {
   bytes: number;
 };
 
-export async function listThreads(): Promise<ThreadSummary[]> {
+export async function listThreads(t: Translate): Promise<ThreadSummary[]> {
   const res = await fetch(`${AGENT_URL}api/threads`);
-  if (!res.ok) throw new Error(`listing sessions failed: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(t("http.listingSessions", { status: res.status }));
   return res.json();
 }
 
@@ -34,7 +40,7 @@ export type RebuiltThread = {
   context: readonly unknown[];
 };
 
-export async function rebuildThread(threadId: string): Promise<RebuiltThread> {
+export async function rebuildThread(threadId: string, t: Translate): Promise<RebuiltThread> {
   const res = await fetch(
     `${AGENT_URL}api/threads/${encodeURIComponent(threadId)}/rebuild`,
     { method: "POST" },
@@ -45,7 +51,8 @@ export async function rebuildThread(threadId: string): Promise<RebuiltThread> {
     // 400. That reason is the sentence the row shows, so it is passed through
     // whole, not wrapped in something friendlier -- the ticket asks for the
     // server's words, and a wrapper's paraphrase would be one more thing to
-    // distrust.
+    // distrust. ONLY WHEN THE BODY HAS NO REASON does this side speak, and then
+    // it speaks the interface's language: `HTTP 500` is a fact about the wire.
     const reason =
       body !== undefined &&
       typeof body === "object" &&
@@ -53,7 +60,7 @@ export async function rebuildThread(threadId: string): Promise<RebuiltThread> {
       "error" in body &&
       typeof body.error === "string"
         ? body.error
-        : `HTTP ${res.status}`;
+        : t("http.status", { status: res.status });
     throw new Error(reason);
   }
   return body as RebuiltThread;

@@ -2,5 +2,15 @@
   "runInProgress": {
     "switch": "A run is in progress; switching is refused until it settles.",
     "newThread": "A run is in progress; a new session waits until it settles."
+  },
+  "http": {
+    "status": "HTTP {{status}}",
+    "listingProjects": "listing projects failed: HTTP {{status}}",
+    "listingSessions": "listing sessions failed: HTTP {{status}}"
+  },
+  "attachment": {
+    "model": "model {{model}} does not take images; it declares {{declared}} — change the model, or attach only what it declares",
+    "size": "this image is {{actual}}; the limit is {{limit}}",
+    "unnamedModel": "(unnamed)"
   }
 }

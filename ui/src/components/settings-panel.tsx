@@ -169,6 +169,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
   onChanged,
 }) => {
   const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const tier = registry.default;
   /// An INLINE description cannot be expressed by three selects: there is no
   /// provider NAME in it. So the controls start empty, the page says what is there
@@ -225,7 +226,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
         model: model === "" ? null : model,
         "reasoning-effort": effort === "" ? null : effort,
       };
-      await putDefaults(knobs);
+      await putDefaults(knobs, tErrors);
       onChanged();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -618,6 +619,7 @@ const ProviderForm: FC<{
   onRemoved: () => void;
 }> = ({ draft: initial, protocols, onCancel, onSaved, onRemoved }) => {
   const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const [draft, setDraft] = useState<Draft>(initial);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -644,7 +646,7 @@ const ProviderForm: FC<{
         // ABSENT when the field is empty: that means "leave .env alone", which is
         // what an untouched key field means. (The server refuses an empty string.)
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
-      });
+      }, tErrors);
       onSaved();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -657,7 +659,7 @@ const ProviderForm: FC<{
     setBusy(true);
     setFailure(null);
     try {
-      await removeProvider(draft.id);
+      await removeProvider(draft.id, tErrors);
       onRemoved();
     } catch (f: unknown) {
       setFailure(f instanceof Error ? f.message : String(f));
@@ -676,7 +678,7 @@ const ProviderForm: FC<{
         "base-url": draft.baseUrl,
         protocol: draft.protocol,
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),
-      });
+      }, tErrors);
       setOffered(models);
       setPicked([]);
     } catch (f: unknown) {
@@ -1019,6 +1021,7 @@ export const SettingsPanel: FC<{
   threadId: string;
 }> = ({ open, onOpenChange, threadId }) => {
   const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
   const [page, setPage] = useState<Page>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
@@ -1041,7 +1044,7 @@ export const SettingsPanel: FC<{
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, r] = await Promise.allSettled([getSettings(threadId), registryFor()]);
+      const [s, r] = await Promise.allSettled([getSettings(threadId, tErrors), registryFor(tErrors)]);
       if (s.status === "fulfilled") {
         setSettings(s.value);
         setFailure(null);
@@ -1059,7 +1062,7 @@ export const SettingsPanel: FC<{
     } finally {
       setLoading(false);
     }
-  }, [threadId]);
+  }, [threadId, tErrors]);
 
   // Refetched on EVERY open, which is the whole "read it fresh" contract showing
   // through: there is no cache to go stale because there is no cache.

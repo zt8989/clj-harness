@@ -9,14 +9,24 @@
 // EVERY CALL ANSWERS WITH THE WHOLE CATALOG, writes included. The form refetches
 // after every change anyway, and one shape for GET and for the writes means there
 // is one thing to parse and one place a field can be forgotten.
+import type { TFunction } from "i18next";
+
 import { AGENT_URL } from "@/lib/threads";
+
+/// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
+/// brands a translator with the namespace it was bound to, so a shell translator
+/// does not typecheck here and only the errors catalog's keys compile.
+type Translate = TFunction<"errors">;
 
 /// The server's `{:error ..}` reason, when the body carries one -- the habit
 /// `lib/skills.ts`, `lib/composer.ts` and `lib/settings.ts` all keep, and for the
 /// same reason: the server's sentence is the one worth showing. A refusal here
 /// names the field, the value, and what to write instead, and it is the only thing
 /// the form has to show.
-async function reasonFrom(res: Response): Promise<string> {
+///
+/// ONLY WHEN THE BODY HAS NO REASON does this side speak, and then in the
+/// interface's language -- the server's sentence is never translated.
+async function reasonFrom(res: Response, t: Translate): Promise<string> {
   const body: unknown = await res.json().catch(() => undefined);
   return body !== undefined &&
     typeof body === "object" &&
@@ -24,7 +34,7 @@ async function reasonFrom(res: Response): Promise<string> {
     "error" in body &&
     typeof body.error === "string"
     ? body.error
-    : `HTTP ${res.status}`;
+    : t("http.status", { status: res.status });
 }
 
 /// How to reach one model, and what it is allowed to be asked for. `input` and
@@ -103,34 +113,34 @@ export type DefaultKnobs = {
   "reasoning-effort"?: string | null;
 };
 
-async function read(res: Response): Promise<Registry> {
-  if (!res.ok) throw new Error(await reasonFrom(res));
+async function read(res: Response, t: Translate): Promise<Registry> {
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   return (await res.json()) as Registry;
 }
 
-async function post(path: string, body: unknown): Promise<Registry> {
+async function post(path: string, body: unknown, t: Translate): Promise<Registry> {
   const res = await fetch(`${AGENT_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return read(res);
+  return read(res, t);
 }
 
-export async function registryFor(): Promise<Registry> {
-  return read(await fetch(`${AGENT_URL}api/providers`));
+export async function registryFor(t: Translate): Promise<Registry> {
+  return read(await fetch(`${AGENT_URL}api/providers`), t);
 }
 
-export async function putProvider(payload: ProviderPayload): Promise<Registry> {
-  return post("api/providers", payload);
+export async function putProvider(payload: ProviderPayload, t: Translate): Promise<Registry> {
+  return post("api/providers", payload, t);
 }
 
-export async function removeProvider(id: string): Promise<Registry> {
-  return post(`api/providers/${encodeURIComponent(id)}/remove`, {});
+export async function removeProvider(id: string, t: Translate): Promise<Registry> {
+  return post(`api/providers/${encodeURIComponent(id)}/remove`, {}, t);
 }
 
-export async function putDefaults(knobs: DefaultKnobs): Promise<Registry> {
-  return post("api/defaults", knobs);
+export async function putDefaults(knobs: DefaultKnobs, t: Translate): Promise<Registry> {
+  return post("api/defaults", knobs, t);
 }
 
 /// Ask a VENDOR what it serves -- the one call in this feature that leaves the
@@ -139,13 +149,14 @@ export async function putDefaults(knobs: DefaultKnobs): Promise<Registry> {
 /// exactly as a run would.
 export async function probeModels(
   ask: { id?: string; "base-url"?: string; protocol?: string; "api-key"?: string },
+  t: Translate,
 ): Promise<{ models: string[]; asked: string }> {
   const res = await fetch(`${AGENT_URL}api/providers/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ask),
   });
-  if (!res.ok) throw new Error(await reasonFrom(res));
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
   return (await res.json()) as { models: string[]; asked: string };
 }
 

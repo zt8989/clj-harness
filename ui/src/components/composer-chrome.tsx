@@ -135,10 +135,13 @@ function useRemote<T>(load: () => Promise<T>): {
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("composer");
+  // The fetch failures below are this side's fallback sentences (see
+  // lib/projects.ts and lib/composer.ts), so they are drawn from `errors`.
+  const { t: tErrors } = useTranslation("errors");
   const projects = useRemote(
-    useCallback(() => listProjects(), []),
+    useCallback(() => listProjects(tErrors), [tErrors]),
   );
-  const git = useRemote(useCallback(() => gitStateFor(threadId), [threadId]));
+  const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -157,7 +160,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
     setBusy(true);
     setError(null);
     try {
-      await bindThread(threadId, path);
+      await bindThread(threadId, path, tErrors);
       // The branch belongs to the directory, so the new one has to be read back:
       // keeping the old answer would name a branch the session is no longer on.
       git.reload();
@@ -174,7 +177,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
     setBusy(true);
     setError(null);
     try {
-      await switchBranch(threadId, branch);
+      await switchBranch(threadId, branch, tErrors);
       git.reload();
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -259,16 +262,17 @@ const branchesOf = (name: string) => ({ value: name, label: name });
 /// cannot resolve this session's provider cannot run it either.
 const ComposerTools: FC = () => {
   const { t } = useTranslation("composer");
+  const { t: tErrors } = useTranslation("errors");
   const threadId = useThreadId();
   const session = useRemote(
     useCallback(async (): Promise<{ choices: Choices; model: ModelAnswer } | null> => {
       if (threadId === null) return null;
       const [choices, model] = await Promise.all([
-        choicesFor(threadId),
-        modelFor(threadId).catch((): ModelAnswer => ({})),
+        choicesFor(threadId, tErrors),
+        modelFor(threadId, tErrors).catch((): ModelAnswer => ({})),
       ]);
       return { choices, model };
-    }, [threadId]),
+    }, [threadId, tErrors]),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -289,7 +293,7 @@ const ComposerTools: FC = () => {
     setBusy(true);
     setError(null);
     try {
-      await setModel(threadId, next);
+      await setModel(threadId, next, tErrors);
       session.reload();
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -398,8 +402,9 @@ const ComposerTools: FC = () => {
 // would be a tooltip nobody can ever see.
 export const ComposerAttachButton: FC = () => {
   const { t } = useTranslation("composer");
+  const { t: tErrors } = useTranslation("errors");
   const guard = useSyncExternalStore(attachmentGuard.subscribe, attachmentGuard.current);
-  const refusal = imageRefusal(guard.input, guard.model);
+  const refusal = imageRefusal(guard.input, guard.model, tErrors);
   if (refusal === null) return <CopiedAddAttachment />;
   return (
     <span data-slot="composer-attach-disabled" title={refusal}>

@@ -143,6 +143,9 @@ export function App() {
   // i18next's state, which sits above the whole page and has nothing to do with the
   // runtime. See the note above the view switch.
   const { t } = useTranslation();
+  // `rebuildThread`'s fallback when the server sends no reason is this side's
+  // sentence, so it comes from the `errors` catalog (see lib/threads.ts).
+  const { t: tErrors } = useTranslation("errors");
 
   // Id first, then await -- the thread-list adapter's hard rule: the selected
   // id is set before history is waited for, because the runtime discards the
@@ -162,10 +165,10 @@ export function App() {
         throw new Error(runInProgressRefusal(t));
       }
       adoptThread(id);
-      const rebuilt = await rebuildThread(id);
+      const rebuilt = await rebuildThread(id, tErrors);
       return { messages: toThreadMessages(rebuilt.messages) };
     },
-    [adoptThread, t],
+    [adoptThread, t, tErrors],
   );
 
   // `onSwitchToNewThread` IS HERE, and only one thing calls it: removing the last
