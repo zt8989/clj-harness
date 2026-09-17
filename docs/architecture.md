@@ -3,15 +3,14 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`1ff0393`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`1ff0393` 是把 `bash-lifetime` 的前三张提交合进来的那一提交，本特征给本目录添了
-`cap.jobs` 一行与状态表里「后台作业」一行，并改掉 `infra.shell` 那行（到点收整棵树、
-两种 argv 形状）、[kernel](architecture/kernel.md) 的模式表与「不做超时」那句的适用范围；
-工具数 15 → 18。**[projects](architecture/projects.md) 里 `bash` 的 cwd 与「命令内容永不判定」
-两条一个字没改**，变的只是「等多久」与「谁在等」。）
-这一版里还夹着两份刚落下的 markdown，都不改变本目录的任何一条陈述：
-`.scratch/bash-lifetime/`（本特征的 spec 与证据）与 `.scratch/edit-merge/`（下一个特征的 spec
-与六张票面——**尚未开工**，文末「在办」那一节记的就是它这一类）。
+**快照：`ada4bc5`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`ada4bc5` 是把 `trajectory-injection-once` 合进来的那一提交。本特征给本目录添的是
+[edge](architecture/edge.md) 里 `message` 行与入站那一节的两句——**submitted 侧 = 第一次模型调用真正
+收到的那一份**（会话的注入在内），注入折在 `inbound` 之后、记 `message` 之前——以及
+[client](architecture/client.md) 轨迹一节的一条「注入物整场只画一次」。同一版里还有 `57601a4`
+（UI 六处调整）改的 [client](architecture/client.md)：正文两侧留白、流式思考、整轮折叠、贴底、
+可搜索选择器。`.scratch/trajectory-injection-once/`（本特征的 spec 与证据）随之落下，
+不改变本目录的其他陈述。）
 
 ## 与另外两处文档的分工
 
