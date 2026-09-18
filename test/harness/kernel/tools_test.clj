@@ -204,17 +204,16 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "bash_background" "bash_kill" "bash_output" "eval"
-              "glob" "insert" "read" "replace" "session-configure" "skill"
-              "todo_write" "undo_last_replace" "web_fetch" "web_search" "write"]
+      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job" "job_kill" "read"
+              "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
+              "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "bash_background" "bash_kill" "bash_output" "edit" "eval" "glob"
-              "read" "session-configure" "skill" "todo_write" "web_fetch"
-              "web_search" "write"]
+      (is (= ["bash" "edit" "eval" "glob" "job" "job_kill" "read" "session-configure"
+              "skill" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
@@ -349,19 +348,39 @@
     (spit (io/file pdir "marker.txt") "job-here" :encoding "UTF-8")
     (project/bind! "tt-job" (.getAbsolutePath pdir))
     (try
-      (let [answer (:content (tools/run! {:function {:name "bash_background"
+      (let [answer (:content (tools/run! {:function {:name "job"
                                                      :arguments (json/write-str
                                                                  {:command "cat marker.txt"})}}
                                          "tt-job"))
-            job-id (second (re-find #"job (j\d+) started" answer))]
+            job-id (second (re-find #"job (j\d+) started" answer))
+            path   (second (re-find #"its record is (\S+)" answer))]
         (is (some? job-id) (str "the tool answered with a job id: " answer))
-        (is (= ["job-here"]
-               (:lines (support/read-until #(:content (tools/run!
-                                                       {:function {:name "bash_output"
-                                                                   :arguments (json/write-str
-                                                                               {:job job-id})}}
-                                                       "tt-job"))
-                                           #(re-find #"\[exit" (:answer %)) 10000)))))
+        (is (some? path) (str "and with where its record is: " answer))
+        (testing "the record holds what the command printed, from where it ran"
+          ;; The command's exit line is the record's end marker, so waiting for it is
+          ;; waiting for the job -- and `cat` of a file only the project directory has
+          ;; is the evidence that the command ran there.
+          (is (support/holds-within?
+               #(str/includes? (slurp path :encoding "UTF-8") "job-here") 10000))
+          ;; ...and the record's LAST line says how the command ended, which is how a
+          ;; reader knows it is done rather than quiet.
+          (is (support/holds-within?
+               #(= "[exit 0]" (last (str/split-lines (slurp path :encoding "UTF-8"))))
+                  10000)))
+        (testing "and both reader tools reach it -- the fence does not park them"
+          ;; The evidence for the sentence this feature rests on: the record is in
+          ;; the configuration home, which cap.project/fence lists as free, so
+          ;; reading it needs no human.
+          (let [read-back (:content (tools/run! {:function {:name "read"
+                                                            :arguments (json/write-str {:path path})}}
+                                                "tt-job"))
+                searched  (:content (tools/run! {:function {:name "anchor_grep"
+                                                            :arguments (json/write-str
+                                                                        {:pattern "job-here"
+                                                                         :path path})}}
+                                                "tt-job"))]
+            (is (str/includes? read-back "job-here"))
+            (is (str/includes? searched "job-here")))))
       (finally
         (jobs/shutdown!)
         (project/bind! "tt-job" nil)))))
@@ -369,47 +388,82 @@
 (deftest a-background-call-comes-back-before-the-command-does
   ;; The whole point: the call is not the command's lifetime.
   (let [started (System/currentTimeMillis)
-        answer  (:content (call "bash_background" {:command "sleep 30"}))
+        answer  (:content (call "job" {:command "sleep 30"}))
         elapsed (- (System/currentTimeMillis) started)]
     (is (re-find #"job j\d+ started" answer))
     (is (< elapsed 5000) (str "it returned while the command was still running (" elapsed "ms)"))
     (jobs/shutdown!)))
 
 (deftest an-unknown-job-reaches-the-model-as-an-error
-  (let [{:keys [content error]} (call "bash_output" {:job "j-not-a-job"})]
+  (let [{:keys [content error]} (call "job_kill" {:job "j-not-a-job"})]
     (is (true? error))
     (is (str/includes? content "unknown job: j-not-a-job"))))
 
 (deftest the-background-tools-take-the-arguments-they-need
   ;; The seam's missing-argument check is per tool, which is one of the reasons
-  ;; these are three names rather than one with an `action`.
-  (is (str/includes? (:content (call "bash_background" {})) "missing required argument"))
-  (is (str/includes? (:content (call "bash_output" {})) "missing required argument")))
+  ;; these are two names rather than one with an `action`.
+  (is (str/includes? (:content (call "job" {})) "missing required argument"))
+  (is (str/includes? (:content (call "job_kill" {})) "missing required argument")))
+
+(deftest the-record-a-job-names-is-readable-with-bash
+  ;; The answer hands the model a path and says how to read it; this is that path
+  ;; being readable, with the tool the answer names -- which is the whole reason the
+  ;; job module does not keep a read verb of its own any more.
+  (let [answer (:content (call "job" {:command "echo one; echo two; sleep 30"}))
+        path   (second (re-find #"its record is (\S+)" answer))]
+    (is (some? path) (str "the answer names the record: " answer))
+    (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"two" (:answer %)) 10000)
+    (let [found  (:content (call "bash" {:command (str "grep two " path)}))
+          tailed (:content (call "bash" {:command (str "tail -1 " path)}))]
+      (is (str/includes? found "two") "`bash` can search the record")
+      (is (= "two" (str/trim tailed)) "and read its last line"))
+    (jobs/shutdown!)))
+
+(deftest a-job-says-when-the-command-sends-its-own-output-away
+  (let [tmp (io/file dir "redirected.txt")
+        target (.getAbsolutePath tmp)
+        answer (:content (call "job" {:command (str "echo hi > " target)}))]
+    (testing "the command still runs -- a note is not a refusal"
+      (is (some? (re-find #"job j\d+ started" answer))))
+    (testing "and the answer says where the output went, and why the record stays empty"
+      (is (str/includes? answer target))
+      (is (str/includes? answer "record will stay empty")))
+    (testing "the redirection really did happen: the command's output is in that file"
+      ;; The predicate has to tolerate the file not being there YET: the shell has just
+      ;; been spawned, and the whole point of waiting is that the redirection is the
+      ;; command's own doing rather than ours.
+      (is (support/holds-within?
+           #(and (.exists tmp) (= "hi" (str/trim (slurp tmp :encoding "UTF-8")))) 5000)))
+    (testing "while a command that sends nothing away is not given the note"
+      (let [plain (:content (call "job" {:command "sleep 30"}))]
+        (is (not (str/includes? plain "record will stay empty")))))
+    (jobs/shutdown!)))
 
 (deftest a-background-job-can-be-stopped-and-is-then-gone
-  (let [started (:content (call "bash_background" {:command "sleep 30"}))
+  (let [started (:content (call "job" {:command "sleep 30"}))
         job-id  (second (re-find #"job (j\d+) started" started))
-        answer  (:content (call "bash_kill" {:job job-id}))]
+        path    (second (re-find #"its record is (\S+)" started))
+        answer  (:content (call "job_kill" {:job job-id}))]
     (is (some? job-id))
-    (is (str/includes? answer "[stopped]"))
-    (testing "and reading it afterwards is the same as reading one that never existed"
-      (let [{:keys [content error]} (call "bash_output" {:job job-id})]
+    (testing "the answer says it was stopped, and where the record is"
+      (is (str/includes? answer "stopped"))
+      (is (str/includes? answer path)))
+    (testing "the record survives the stop, with `[stopped]` as its last line"
+      (is (= "[stopped]" (last (str/split-lines (slurp path :encoding "UTF-8"))))))
+    (testing "and stopping it again is the same as one that never existed"
+      (let [{:keys [content error]} (call "job_kill" {:job job-id})]
         (is (true? error))
         (is (str/includes? content (str "unknown job: " job-id))))))
-  (testing "a job that ended on its own reports its exit code instead"
-    (let [started (:content (call "bash_background" {:command "exit 3"}))
-          job-id  (second (re-find #"job (j\d+) started" started))]
+  (testing "a job that ended on its own is reported as ended, not as stopped"
+    (let [started (:content (call "job" {:command "exit 3"}))
+          job-id  (second (re-find #"job (j\d+) started" started))
+          path    (second (re-find #"its record is (\S+)" started))]
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
       ;; different facts, and only the second one is true once the command is gone.
-      (support/read-until #(:content (tools/run! {:function {:name "bash_output"
-                                                             :arguments (json/write-str {:job job-id})}}))
-                          #(re-find #"\[exit" (:answer %)) 10000)
-      (is (str/includes? (:content (call "bash_kill" {:job job-id})) "[exit 3]")))))
-
-(deftest bash-kill-refuses-a-job-it-does-not-have
-  (let [{:keys [content error]} (call "bash_kill" {:job "j-not-a-job"})]
-    (is (true? error))
-    (is (str/includes? content "unknown job: j-not-a-job"))))
+      (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"\[exit" (:answer %)) 10000)
+      (let [answer (:content (call "job_kill" {:job job-id}))]
+        (is (str/includes? answer "had already ended"))
+        (is (= "[exit 3]" (last (str/split-lines (slurp path :encoding "UTF-8")))))))))
 
 ;; ------------------------------------------------- the turn plan, per session
 ;;
