@@ -96,6 +96,8 @@ import {
 import { bindThread, listProjects, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
+import { ContextRing } from "./context-ring";
+import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
 import { Picker } from "./picker";
 
@@ -339,7 +341,12 @@ const ComposerTools: FC = () => {
 
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
-      <Picker
+      {/* THE RING AND THE MODEL ARE ONE PAIR, so their own gap is tighter than the row's:
+          the window belongs to the model that is selected, and a gap the width of the
+          row's would read as a third control between them. */}
+      <div className="flex items-center gap-1.5">
+        <ContextRing />
+        <Picker
         slot="composer-model"
         label={t("model.label")}
         value={currentModel}
@@ -356,7 +363,8 @@ const ComposerTools: FC = () => {
               : { provider: owner.name, model: option.value },
           );
         }}
-      />
+        />
+      </div>
       <Picker
         slot="composer-effort"
         label={t("effort.label")}
@@ -694,6 +702,10 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
       // is the box it is measured against.
       className="bg-muted/40 rounded-(--composer-radius) relative p-1.5"
     >
+      {/* THE NUMBERS ARE FETCHED HERE AND READ THROUGH A SCOPE (see
+          components/composer-numbers.tsx): the strip below and the ring in the action
+          row are the same answer at the same moment, and the triggers are written once. */}
+      <SessionNumbers threadId={threadId}>
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
@@ -707,8 +719,9 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
             {refusal}
           </p>
         )}
-        <ComposerStats threadId={threadId} />
+        <ComposerStats />
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      </SessionNumbers>
     </div>
   );
 };

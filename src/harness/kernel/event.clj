@@ -52,7 +52,7 @@
 
 (defn model-start
   "One model call BEGINS. PROVIDER is the resolved provider map, and what is kept
-  from it is the call's IDENTITY -- who this call went to -- never its body: the
+  from it is the call's IDENTITY -- who this call went to AND HOW MUCH ROOM IT HAD --
   messages are already `message` lines, and a second copy of them would be the
   same fact written twice.
 
@@ -61,6 +61,17 @@
   :reasoning-effort that is 'this request is not in thinking mode', and for the
   other two it is 'this provider named none', which is not the same statement as
   a null. A base-url is not a secret -- `provider/init` records it already.
+
+  :context-window IS RECORDED ON THIS LINE FOR THE SAME REASON :model IS: it is
+  part of what this call went out under, and it is the DENOMINATOR the composer's
+  context ring divides by (the numerator being `usage.prompt_tokens` on the paired
+  :model/end). IT HAS TO BE THIS CALL'S OWN NUMBER rather than an answer re-derivable
+  from the catalog: a session can be switched to another model between calls and a
+  built-in table can be edited, so re-resolving would divide one call's prompt by
+  another model's window. Recording it here also makes the line self-describing for
+  a session served by a SCRIPTED PIN -- which records no `provider/init` line at all,
+  having no resolution to record, and is the very kind of session a walkthrough
+  (`node scripts/dev.mjs --scripted`) drives.
 
   SPECS IS THE REQUEST'S TOOL TABLE -- the very value that goes into the request
   body, handed in by the caller that resolved it (harness.kernel.loop). It is
@@ -77,6 +88,7 @@
     (:model provider)            (assoc :model (:model provider))
     (:base-url provider)         (assoc :base-url (:base-url provider))
     (:reasoning-effort provider) (assoc :reasoning-effort (:reasoning-effort provider))
+    (:context-window provider)   (assoc :context-window (:context-window provider))
     (seq specs)                  (assoc :tools specs)))
 
 (defn model-end

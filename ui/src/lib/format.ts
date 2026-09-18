@@ -138,6 +138,15 @@ export interface StatsPayload {
   cacheHitPercent?: number;
   outputTokensPerSecond?: number;
   incomplete: boolean;
+  /// HOW FULL THE MODEL'S WINDOW IS, beside the session's totals above.
+  ///
+  /// IT IS NOT A SIXTH CELL OF THE STRIP: it answers a different question -- what the
+  /// next call is about to be sent, rather than what every call so far has cost -- and
+  /// it is drawn in a different place (the ring beside the model). It rides on this
+  /// payload because it is folded from the same record, in the same read, at the same
+  /// moment: two endpoints would be two clocks for one session's log. See
+  /// harness.edge.context and .scratch/context-usage/spec.md.
+  context?: ContextPayload;
 }
 
 /// What the strip draws: one string per cell that EXISTS. `null` means draw
@@ -179,5 +188,122 @@ export function statsCells(payload: StatsPayload | null, t: Translate): StatsCel
       payload.cacheHitPercent === undefined
         ? null
         : t("stats.cached", { value: payload.cacheHitPercent }),
+  };
+}
+
+/// The context section of the payload, named -- the ring's answer.
+///
+/// EVERY KEY IS OPTIONAL FOR THE SAME REASON `StatsPayload`'s are: `usedTokens` is
+/// absent when no call ever reported a prompt, `windowTokens` and `percent` are absent
+/// when nothing declared a window for that call, and `parts` is absent while the run
+/// that produced the numbers is still being written (see harness.edge.context). A
+/// `undefined` here means the record did not say, and it must never become a zero.
+export interface ContextPayload {
+  usedTokens?: number;
+  windowTokens?: number;
+  /// The whole-number share of the window in use. COMPUTED SERVER-SIDE and never
+  /// divided here: the numerator and the denominator are one call's, and the client
+  /// is not the place that knows which call (see harness.edge.context).
+  percent?: number;
+  parts?: { key: string; tokens: number }[];
+}
+
+/// One bucket of the prompt, as the panel and the ring draw it: what it is called
+/// and how big it was.
+export interface ContextPart {
+  key: string;
+  label: string;
+  /// With the `~`: see `contextCells`.
+  value: string;
+  /// The count the bar and the ring divide by -- the four numbers are all there is,
+  /// and they add up to `usedTokens` (the server's own guarantee).
+  tokens: number;
+}
+
+/// What the ring and its panel draw. `percent` is the number (the arc needs one),
+/// `label` is the sentence both surfaces say, and `parts` may be empty.
+export interface ContextCells {
+  percent: number;
+  label: string;
+  used: string;
+  window: string;
+  parts: ContextPart[];
+}
+
+/// Tokens as this feature writes them: one decimal above a thousand, the trailing
+/// `.0` trimmed, and `M` above a million.
+///
+/// IT IS NOT `formatTokens` AND THAT IS DELIBERATE. The strip's number is a session
+/// total in the millions, where a decimal is noise and `2.9M` / `812k` is the whole
+/// story; these numbers are one call's prompt against a window in the thousands, and
+/// `1.8K` beside `12.9K` beside `262K` is what makes three buckets comparable at a
+/// glance. Both are the same KIND of number, so both are written here, one above the
+/// other, rather than in the two components that need them.
+///
+/// `K` and `M` are units and do not go through the catalog (see the header).
+export function formatContextTokens(n: number): string {
+  const trim = (s: string): string => (s.endsWith(".0") ? s.slice(0, -2) : s);
+  if (n < 1000) return `${n}`;
+  if (n < 1000 * 1000) return `${trim((n / 1000).toFixed(1))}K`;
+  return `${trim((n / 1000 / 1000).toFixed(1))}M`;
+}
+
+/// The catalog's names for the three buckets, by the key the record reports.
+///
+/// A KEY NOBODY KNOWS IS DROPPED, not drawn as an empty row and not folded into an
+/// `other` bucket: the server is the one that decides what filled a prompt, and this
+/// side adding a bucket of its own would be this side guessing at what it was sent.
+const PART_LABELS: Record<string, "context.system" | "context.tools" | "context.conversation"> = {
+  system: "context.system",
+  tools: "context.tools",
+  conversation: "context.conversation",
+};
+
+/// The payload -> what the ring and its panel draw, with the absences kept absent.
+///
+/// NULL IS THE WHOLE ANSWER when the ring cannot be drawn, and it means exactly one
+/// thing: there is no fraction to draw. A session that never ran has no log, a call
+/// that reported no prompt has no numerator, and a model nobody declared a window for
+/// has no denominator -- in all three the honest drawing is none at all, because a
+/// ring is a fraction, and drawing one without a fraction is drawing a number that
+/// does not exist. (The panel hangs off the ring, so its absence follows from this one
+/// rule rather than from a second one.)
+///
+/// `parts` MAY STILL BE EMPTY with a fraction drawn: that is a run whose numbers are in
+/// the record and whose message side is not written yet, and the ring shows the share
+/// with no buckets in it until the next ask.
+///
+/// THE TILDE IS ON EVERY NUMBER THAT DESCRIBES THE PROMPT -- the total and each
+/// bucket -- and not on the window. The buckets are an estimate (the server divides a
+/// measured total by measured sizes), and the total is written the same way because
+/// the four numbers are one thought: mixing a measured figure with three estimated
+/// ones inside one sentence is a distinction nobody reading a ring should have to
+/// make. The window is the model's own declaration and stands alone.
+export function contextCells(payload: StatsPayload | null, t: Translate): ContextCells | null {
+  const context = payload?.context;
+  if (context === undefined) return null;
+  const { usedTokens, windowTokens, percent } = context;
+  if (usedTokens === undefined || windowTokens === undefined || percent === undefined) {
+    return null;
+  }
+
+  return {
+    percent,
+    label: t("context.used", { value: percent }),
+    used: `~${formatContextTokens(usedTokens)}`,
+    window: formatContextTokens(windowTokens),
+    parts: (context.parts ?? []).flatMap((part) => {
+      const key = PART_LABELS[part.key];
+      return key === undefined
+        ? []
+        : [
+            {
+              key: part.key,
+              label: t(key),
+              value: `~${formatContextTokens(part.tokens)}`,
+              tokens: part.tokens,
+            },
+          ];
+    }),
   };
 }

@@ -25,6 +25,15 @@
               how 'this request is not in thinking mode' is said"
       (is (= {:type :model/start :model "m" :base-url "u" :reasoning-effort "high"}
              (ev/model-start {:model "m" :base-url "u" :reasoning-effort "high"} nil))))
+    (testing ":context-window when the catalog declared one -- the denominator the
+              composer's context ring divides this call's prompt by"
+      ;; Recorded on the CALL rather than left to be re-resolved at read time: the
+      ;; window in force for THIS call is the only one that divides THIS call's
+      ;; prompt, and a session can be switched to another model between calls.
+      (is (= {:type :model/start :model "m" :context-window 262144}
+             (ev/model-start {:model "m" :context-window 262144} nil)))
+      (testing "and a model nobody gave a window writes no such key -- absent, not nil"
+        (is (= {:type :model/start :model "m"} (ev/model-start {:model "m"} nil)))))
     (testing "a provider that names nothing leaves the line naming nothing"
       ;; The scripted pin is exactly that provider: it has no :model and no
       ;; :base-url. Writing nulls would say 'the model is null', which is a

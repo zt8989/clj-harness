@@ -142,6 +142,19 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **它不写任何东西**，所以它是这条形状上唯一一个 GET；同一个 stem 问多少次都只是再读一遍日志。
 「这份日志完了没有」是**两个读者共用的一条规则**（`stats/incomplete?`），不是各算一遍。
 
+**同一个载荷里还带着 `context` 那一节**（`harness.edge.context`，见 [client](client.md) 里那颗圈）：
+最近的**一次报过用量的调用**把模型的上下文窗口填到了多少（`:usedTokens` / `:windowTokens` / `:percent`），
+以及填进去的**三样各占多少**（`:parts`：`system` / `tools` / `conversation`）。**没有第五个动词**：
+一次读盘、两个折（`stats/records->stats` 与 `context/records->context`），一个载荷——圆圈与状态条
+因此是同一个瞬间的两个说法。
+**分子与分母来自同一次调用**：分母是那一次调用自己 `model/start` 行上的 `:context-window`（日志早于
+这个键时才回退读 `provider/init` / `provider/changed` 的 `:resolved`），**不回目录现解**——换过 model
+之后现解出来的会是新 model 的窗口，而分子是旧那一次的。
+**三个篮子是摊出来的估算，分子分母不是**：厂商只报总数，所以三块按记录里各部分的字符数去摊那个总数
+（同一口径计数），它们因此**恰好加起来**等于 `:usedTokens`——条子画不满就是在说假话。`prompt_tokens`
+没报 `prompt_tokens` 的调用被跳过（不把上一次的数抹掉）、谁都没报过就没有 `:usedTokens`；**最后那次调用所在的 run**
+还没写完**（没有终帧、或返回侧还没落盘）时只缺 `:parts`：厂商的数已经在记录里了，不拿半份消息凑一个三分。
+
 **`trajectory` 折的是另外两半**（`harness.edge.trajectory`，`GET /api/threads/<stem>/trajectory`）：
 它读 `input` + `message` + `tools/*`，回答「**模型每一轮到底看到了什么**」——system 消息的字节、
 拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果，以及每一轮发出去的工具表。
@@ -161,7 +174,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `event` | 发出的每个 AG-UI 帧 |
 | `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**。**submitted 侧 = 第一次模型调用真正收到的那一份**（开场块、技能清单、`/<名字>` 的技能正文都在里面），returned 侧 = 内核在那之后追加的；两半按**条数**切开，所以那一步注入必须发生在记 submitted 之前 |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
-| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort`（有才记）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
+| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |

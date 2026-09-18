@@ -30,9 +30,13 @@ components/
                         （ComposerFrame / ComposerTools / ComposerAddAttachment），
                         以及附件那条判据在界面上的两处（禁用的 `+`、那句拒话）
   composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
+  composer-numbers.tsx  这场会话的数字**取一次**的地方：取数、「什么时候取」的四个触发条件，
+                        以及把它们交给 composer 里两个读者（状态条与那颗圈）的那个 scope
+  context-ring.tsx      model **左边**那颗圈（占了多少，按三样分色）与点开后的面板：
+                        三段的堆叠条 + 三行图例（系统提示词 / 工具定义 / 对话消息）
   assistant-ui/elements/  12 份抄自 assistant-ui registry；**只有 thread 与 thread-list 两份带
                         `LOCAL:` 改动**，其余原样未改（见下）
-  ui/               9 份 shadcn 基件，同样未改
+  ui/               10 份 shadcn 基件，同样未改
 lib/
   threads.ts        两个地址：`API_BASE`（`${HARNESS}api/`，管理调用挂的地方）与 `AGENT_URL`
                     （`${API_BASE}agent`，`HttpAgent` 用的那一个端点）。`HARNESS` 默认 `/`（本 origin），
@@ -41,8 +45,9 @@ lib/
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
-  format.ts         给**人看**的数字：字节、时间，以及状态条那五格的字符串（`statsCells`）。
-                    **零 import**，所以 UI 套件能直接测它
+  format.ts         给**人看**的数字：字节、时间、状态条那五格的字符串（`statsCells`），
+                    以及那颗圈与它的面板要的一切（`contextCells`：份额、大小、三个篮子的名字，
+                    缺一个就是 `null`）。**零 import**，所以 UI 套件能直接测它
   attachment-rules.ts  附件那两条判据（模型收不收图、源字节有没有过 2 MB）与它们各自的拒话。
                     同样**零 import**，同样被 UI 套件直接测
   turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、它做了几次调用几条消息、
@@ -107,6 +112,38 @@ lib/
 - **它什么时候问**：挂载、会话切换、**助手消息多一条**（一轮 ReAct 在这个客户端就是一条助手消息，
   所以这约等于「一次模型调用结束了」）、run 结束——**不轮询**。一次调用的数只有在它的 `model/end`
   行写下来之后才存在，所以一次长调用进行中这条就停在上一格，那是不撒谎的代价。
+  **这套触发条件现在只有一份实现**（`components/composer-numbers.tsx`），状态条与那颗圈共用它：
+  两个读者各问一次就是两个瞬间的同一条日志。**外加两次按需的追一问**，都写在那一处（run 结束后
+  隔一拍再问一次，因为记录的写者比它自己的终帧晚一拍——run 的 message 尾巴落在 `:run/done`；
+  打开面板时再问一次，因为那一下正是有人在问）。两次都不是轮询：一次 run 只多一次，不开面板不问。
+
+## 上下文占用：model 左边那颗圈
+
+**它画的是一个分数，所以没有分数就不画**（`components/context-ring.tsx`）。分子是厂商在那一次调用报的
+`prompt_tokens`，分母是**那一次调用自己那行** `model/start` 上的 `:context-window`——服务端折好的
+`context` 一节里的 `percent`，客户端**不自己除**。没有分子（这条会话一次调用都没报过）、没有分母
+（目录没为那个 model 声明窗口），或者压根没有会话（新会话没有日志，`GET .../stats` 是 404），
+`contextCells` 一律答 `null`，那颗圈整个不渲染。**这与状态条「有数才画」是同一条纪律**：环本身就是
+「占了多少」，画一个没有分母的环是在画一个不存在的数。面板挂在圈上，所以它的缺席跟着这一条走。
+
+**圈就是面板，绕成了一环。** 填满的那一段按同一份三个篮子分色——系统提示词（`primary`，与轨迹的
+`system` 同色）、工具定义（amber，与轨迹的 `tool` 同色）、对话消息（sky，人的消息的那个色）——
+所以看一眼圆环已经知道点开要说什么，两处也不可能各说各话：它们读的是同一个 `parts`。
+**篮子缺席时（那次 run 的 message 尾巴还没落盘）圈只用一色画出份额**：份额是量出来的事实，
+三分不是。颜色表只有一处（`PART_HUES`），类名写字面（Tailwind 扫的是源码里的字符串）。
+
+**面板里的 `~` 加在描述这次 prompt 的每个数上**——头部的用量与三行图例各一个，窗口那个数不带。
+三个篮子是摊出来的估算；头部那个用量虽是厂商自己数的，它与那三个数说的是同一件事，标法就得一致
+（一个面板里混两种语气，等于要人在一行字里读出哪个是量的、哪个是估的）。**头部的两个大小本身是确数**
+（厂商的 `prompt_tokens` 与目录声明的窗口），所以那半行不带 `~`。
+
+**头部的两个大小与图例的三行用同一个格式化**（`formatContextTokens`：千以上一位小数、末位 `.0` 去掉），
+它与状态条的 `formatTokens` **是两个函数，这是刻意的**：那条是会话累计、百万级，取整到 `k` 就够；
+这条是单次调用的上下文、千级，`1.8K` 与 `12.9K` 的可比性正是要点。两个都写在 `lib/format.ts`，
+与各自的读者放在一起说不清。
+
+**堆叠条总画满**：三块加起来恰好等于头部那个分子（服务端摊的时候就保证了），所以不需要第四段
+「其它」——那会是一段没人量过的颜色。
 
 ## 审批门
 
@@ -180,7 +217,7 @@ lib/
 | 位置 | 是什么 |
 |---|---|
 | `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、thread-list、tool-fallback、tool-group、reasoning、reasoning.aui、markdown-text、attachment、file、image、follow-up-suggestions、tooltip-icon-button。**九份带 `LOCAL:` 标注**——文案进了目录（spec 决策 5），另有结构性的几处（`thread.aui.tsx` 的五处见下，`thread-list.aui.tsx` 的重写见再下面）。**三份没有可译的文案，因此仍是原样**：`reasoning.aui.tsx`、`follow-up-suggestions.aui.tsx`、`tooltip-icon-button.tsx`。`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用（注入点已不再导入它，见下） |
-| `src/components/ui/` | 9 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton。**其中 `dialog.tsx` 带 `LOCAL:` 标注**：它的 `Close` 进了目录（`sr-only` 与页脚那颗按钮两处） |
+| `src/components/ui/` | 10 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton、popover。**其中 `dialog.tsx` 带 `LOCAL:` 标注**：它的 `Close` 进了目录（`sr-only` 与页脚那颗按钮两处）；`popover.tsx` 是本特征加的那一份（读的那种浮层，与「选一个」的 dropdown-menu 各管一摊） |
 | `src/hooks/` | 2 份 hook，不含文案，未改 |
 
 **两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
@@ -407,7 +444,7 @@ lib/
 - **切换住在 `app.tsx`，整列换掉，输入框也一起没有**——轨迹是读一份已发生的东西，不是一个能打字的地方。
   它**不写任何存储**：这是看会话的一种方式，不是关于会话的偏好。轨迹那半边只画**当前显示的那一场**
   （每份 host 只在 visible 时渲染整列），所以不显示的会话只挂着 runtime，不渲染消息。
-- **取数时机与 composer 下面那条状态条同一个**（`composer-stats.tsx`）：挂载时、会话变化时、
+- **取数时机与 composer 下面那条状态条同一个**（`composer-numbers.tsx` 里那一处）：挂载时、会话变化时、
   以及一次模型调用结束时（本侧一轮 ReAct 就是一条 assistant 消息，所以那个计数涨了就是有调用刚回来；
   `isRunning` 收尾）。读取它的 hook 必须**在 runtime provider 之内**——`App` 自己渲染那个 provider，
   在它的函数体里读会直接抛（浏览器里验过）。
@@ -434,7 +471,7 @@ lib/
 
 **怎么跑**用 `node scripts/test.mjs --ui`（它起的就是 `cd ui && npm test`，即 vitest；全套三条腿
 见 `AGENTS.md`）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,elicitation,attachments,turns,picker,concurrent}.ts`
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,picker,concurrent}.ts`
 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。

@@ -424,10 +424,10 @@ node scripts/test.mjs --ns harness.edge.http-test   # 只跑几个命名空间�
 **别自己拼命令**：家目录隔离、端口由 OS 分配、跑完删临时目录，都是**调用方式**的事，
 手拼一次就漏一次。理由与每一条守什么写在 `AGENTS.md` 与 `scripts/test.mjs` 的头注释里。
 
-后端那条腿跑出来大概长这样（分支 `parallel-sessions`，基线随分支变，报数时带上分支与提交）：
+后端那条腿跑出来大概长这样（分支 `context-usage`，基线随分支变，报数时带上分支与提交）：
 
 ```
-Ran 860 tests containing 11269 assertions.
+Ran 871 tests containing 11319 assertions.
 0 failures, 0 errors.
 ISOLATION FAILURE: ...   # 只有真实家目录在这段时间被**别的进程**动过才会出现
 ```
@@ -439,10 +439,10 @@ ISOLATION FAILURE: ...   # 只有真实家目录在这段时间被**别的进程
 - `ISOLATION FAILURE` 那条不是用例失败，是**进程级**的断言：真实 `~/.clj-harness/harness.db`
   在这段时间里变了。运行时自己写的不会变（它指向临时目录），会变的是**这台机器上另开的**
   harness 实例——退出码因此是 1，但失败集合仍然是空的。
-- 前端那条腿 32 个用例，含 11 组：帧 schema / 真 `@ag-ui/client` 驱动 / 二轮续写 / 审批
-  park→approve→veto / 技能列表（两层的根）/ 会话统计 / elicitation / 界面取数 / 附件 /
-  一轮的折叠算术 / 两个会话同时跑。它自带后端（真 HTTP、真 `@ag-ui/client`，provider 是脚本替身），
-  所以不需要 8080、不需要 api-key、不需要模型。
+- 前端那条腿 44 个用例，含 12 组：帧 schema / 真 `@ag-ui/client` 驱动 / 二轮续写 / 审批
+  park→approve→veto / 技能列表（两层的根）/ 会话统计 / 上下文占用（那颗圈与它的面板）/ elicitation /
+  界面取数 / 附件 / 一轮的折叠算术 / 两个会话同时跑。它自带后端（真 HTTP、真 `@ag-ui/client`，
+  provider 是脚本替身），所以不需要 8080、不需要 api-key、不需要模型。
 ```
 
 细节见 [`docs/architecture/client.md`](docs/architecture/client.md)。

@@ -10,5 +10,11 @@
     "rate": "{{value}} tok/s",
     "total": "{{value}} tok",
     "cached": "{{value}}% 命中缓存"
+  },
+  "context": {
+    "used": "上下文已用 {{value}}%",
+    "system": "系统提示词",
+    "tools": "工具定义",
+    "conversation": "对话消息"
   }
 }

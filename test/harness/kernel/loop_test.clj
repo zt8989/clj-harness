@@ -135,7 +135,13 @@
     (testing "each start names the call's identity, never its body"
       (doseq [start (filter #(= :model/start (:type %)) seen)]
         (is (not (contains? start :messages)))
-        (is (not (contains? start :api-key)))))
+        (is (not (contains? start :api-key)))
+        ;; AND THE WINDOW IT RAN UNDER IS PART OF THAT IDENTITY. 128000 is what
+        ;; `fake/scripted` declares (test/harness/fake.clj); what this pins is that
+        ;; the resolve's own map -- not a second lookup at read time -- is what
+        ;; reaches the line, which is what lets the context ring divide this call's
+        ;; `usage.prompt_tokens` by the window that was in force for THIS call.
+        (is (= 128000 (:context-window start)))))
     (testing "each end carries that call's OWN report -- the first call's, then the second's"
       (is (= [110 124] (mapv #(get-in % [:usage :total_tokens]) ends)))
       (is (= 80 (get-in (first ends) [:usage :prompt_tokens_details :cached_tokens]))))))
