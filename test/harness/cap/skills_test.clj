@@ -536,41 +536,10 @@
 
 ;; --------------------------------------- the request the vendor actually sees
 
-(def ^:private unanswered-call-refusal
-  "The vendor's own 400, byte for byte, as a real gateway answered it: an assistant message
-  whose tool_calls are not answered ADJACENTLY is refused before the model runs at all. Copied
-  rather than paraphrased, for the same reason harness.fake's thinking-mode refusal is: a test
-  must meet what production meets."
-  (json/write-str {:error {:message (str "An assistant message with 'tool_calls' must be followed"
-                                         " by tool messages responding to each 'tool_call_id'."
-                                         " (insufficient tool messages following tool_calls message)")
-                           :type "invalid_request_error"
-                           :param ""
-                           :code "invalid_request_error"}}))
-
-(defn- refuse-unanswered-calls!
-  "Answer the 400 a vendor answers when an assistant message's tool_calls are not followed,
-  immediately, by a tool message for every one of them."
-  [messages]
-  (let [unanswered? (some (fn [i]
-                           (let [ids (seq (map :id (:tool_calls (nth messages i))))]
-                             (when ids
-                               (let [answered (into #{}
-                                                    (keep :tool_call_id)
-                                                    (take-while #(= "tool" (:role %))
-                                                                (drop (inc i) messages)))]
-                                 (not (every? answered ids))))))
-                         (range (count messages)))]
-    (when unanswered?
-      (throw (ex-info (str "HTTP 400: " unanswered-call-refusal) {:status 400})))))
-
-;; A provider that IS the vendor's validator, then the scripted fake underneath it.
-;; A spy could only report the messages it was handed; this one REFUSES them the way
-;; the vendor does, so the run under test dies exactly where production died.
-(defmethod llm/stream! :vendor-shaped
-  [provider messages on-event thread-id]
-  (refuse-unanswered-calls! messages)
-  (llm/stream! (assoc provider :protocol :fake) messages on-event thread-id))
+;; THE VENDOR-SHAPED PROVIDER IS harness.test-support's -- the rule it refuses with is the
+;; one the run itself reads (harness.kernel.llm/unanswered-tool-calls), and the sentence is
+;; a real gateway's, byte for byte. See the section at the end of that namespace: the copy
+;; lives there because the http suite needs to meet the same refusal.
 
 (defn- drain-chan [ch]
   (loop [acc []]
@@ -606,7 +575,7 @@
         (is (some #(str/starts-with? (str (:content %)) "<skill name=\"alpha\">") out))))
 
     (testing "every assistant message's results stay adjacent in what came back"
-      (is (nil? (refuse-unanswered-calls! history))))))
+      (is (nil? (support/refuse-unanswered-calls! history))))))
 
 (deftest derivation-is-idempotent-and-loads-once-per-name
   (let [root (lay-user-skills! "alpha")

@@ -171,3 +171,41 @@
     (testing "a provider with no reasoning effort is untouched, byte for byte"
       (is (= history (llm/thinking-mode-history history {})))
       (is (= history (llm/thinking-mode-history history {:reasoning-effort nil}))))))
+
+
+;; ------------------------------------------- the adjacency the vendor demands
+
+(deftest unanswered-tool-calls-reads-the-vendors-rule
+  ;; The rule an OpenAI-shaped vendor enforces before the model runs, and the one the
+  ;; run's own guard reads (thread b553ed1d, 2026-09-18: a parked call the client never
+  ;; resumed made every later message of that session a 400).
+  (let [call (fn [id] {:id id :type "function" :function {:name "bash" :arguments "{}"}})]
+    (testing "a well-shaped history leaves nothing unanswered"
+      (is (empty? (llm/unanswered-tool-calls [{:role "user" :content "hi"}])))
+      (is (empty? (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                                              {:role "tool" :tool_call_id "c1" :content "ok"}])))
+      (is (empty? (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                                              {:role "tool" :tool_call_id "c1" :content "a"}
+                                              {:role "tool" :tool_call_id "c2" :content "b"}]))
+          "every id of the call answered, in any order"))
+
+    (testing "a call with no result at all is reported"
+      (is (= ["c1"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1")]}])))
+      (is (= ["c1"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                                                 {:role "user" :content "and this"}]))
+          "the next turn does not answer it either"))
+
+    (testing "what is checked is ADJACENCY, not 'answered somewhere in the list'"
+      (is (empty? (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                                               {:role "tool" :tool_call_id "c2" :content "b"}
+                                               {:role "tool" :tool_call_id "c1" :content "a"}]))
+          "the order inside the block is not the vendor's business -- both ids are there")
+      (is (= ["c2"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                                                 {:role "tool" :tool_call_id "c1" :content "a"}
+                                                 {:role "user" :content "and this"}
+                                                 {:role "tool" :tool_call_id "c2" :content "b"}]))
+          "but a result BEHIND another message does not answer it: that is the 400"))
+
+    (testing "only the calls that are missing are reported"
+      (is (= ["c2"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                                                 {:role "tool" :tool_call_id "c1" :content "a"}]))))))

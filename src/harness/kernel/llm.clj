@@ -256,6 +256,43 @@
               m))
           messages)))
 
+(defn unanswered-tool-calls
+  "MESSAGES -> the tool-call ids this request would leave UNANSWERED, in the order a
+  vendor walks the list. Empty when the history is well shaped, which is nearly every
+  run: this is a reader of a shape some run produced, not a rule the run has to keep.
+  
+  THE VENDOR'S RULE, WRITTEN DOWN ONCE. An assistant message carrying `tool_calls`
+  must be followed, IMMEDIATELY, by a tool message for each of its ids, and an
+  OpenAI-shaped vendor refuses a request that breaks it with HTTP 400 -- verbatim: 'An
+  assistant message with tool_calls must be followed by tool messages responding to
+  each tool_call_id. (insufficient tool messages following tool_calls message)'. It
+  refuses before the model runs, and the sentence names neither the call nor the
+  reason, which is the whole problem with learning this from the vendor.
+  
+  A CALL IS ANSWERED BY THE TOOL MESSAGES DIRECTLY BEHIND ITS ASSISTANT MESSAGE, not
+  by a tool message somewhere further down: an id answered late is still a refusal on
+  the wire, because what the vendor checks is ADJACENCY. Same rule as the repair in
+  harness.edge.replay/open-runs, one layer up -- there it is about a log, here about
+  the list a run is about to send.
+  
+  WHO ASKS, and why the answer is only ever a set of ids: harness.kernel.loop runs it
+  at the top of every run to tell a call that is STILL BEING DECIDED (this process
+  holds the park; the run asks the client again) from one NOBODY CAN ANSWER (no park
+  anywhere; the run is refused by name before the vendor is), and
+  harness.test-support's vendor-shaped provider runs the same function so a test can
+  meet the refusal production meets."
+  [messages]
+  (into []
+        (comp (mapcat (fn [i]
+                        (let [ids (seq (map :id (:tool_calls (nth messages i))))]
+                          (when ids
+                            (let [answered (into #{} (keep :tool_call_id)
+                                                 (take-while #(= "tool" (:role %))
+                                                             (drop (inc i) messages)))]
+                              (remove answered ids))))))
+              (distinct))
+        (range (count messages))))
+
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model

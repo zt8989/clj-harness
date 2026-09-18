@@ -3,6 +3,7 @@
   Terminates when a turn has no tool calls. No iteration cap, by design.
   Events leave the kernel over a core.async channel (run-chan)."
   (:require [clojure.core.async :as async]
+            [clojure.string :as str]
             [harness.kernel.event :as ev]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.kernel.llm :as llm]
@@ -77,6 +78,31 @@
         (emit (ev/model-end nil))
         (throw t)))))
 
+(defn- unanswerable-call-message
+  "What the run is refused WITH when its history leaves a tool call unanswered that no
+  parked record in this process answers.
+  
+  NAMED RATHER THAN RELAYED. The vendor's answer to this shape is a 400 whose sentence
+  names neither the call nor the reason -- 'insufficient tool messages following
+  tool_calls message' -- and a client that gets it cannot tell a client-side history
+  bug from a harness one, nor which call to fix. So the ids are in the sentence, and so
+  is the one thing a human can act on: a park lives in the process that made it, so
+  after a restart nothing can answer these, and the conversation cannot be continued as
+  it stands.
+  
+  A REFUSAL RATHER THAN A REPAIR. Answering the call here would be inventing a result
+  the model never saw and that no tool produced; the honest repair for a call whose run
+  was cut off belongs where a human asked to read the log back
+  (harness.edge.replay/closing-frames), not on the way to the provider."
+  [ids]
+  (str "this run's history leaves " (count ids) " tool call"
+       (when (< 1 (count ids)) "s") " unanswered and no parked approval in this process"
+       " can answer " (if (< 1 (count ids)) "them" "it") " (" (str/join ", " ids) "):"
+       " an OpenAI-shaped vendor refuses a request whose assistant message with tool_calls"
+       " is not followed by a tool message for each 'tool_call_id', so the run was"
+       " refused before the provider was called. Send a result for "
+       (if (< 1 (count ids)) "those calls" "that call") ", or start a new session."))
+
 (defn- drive!
   "Run one run, calling EMIT with each harness.kernel.event value as it is produced.
   Returns the final history. The producer side of run-chan; all run behaviour
@@ -95,6 +121,12 @@
   no :tool/result, no tool message -- and the run ends on :run/interrupt instead
   of :run/end: the conversation is now the human's to decide. Its tool message
   lands on the resume run, after the decision.
+
+  AND THAT IS WHY A RUN CAN END ON AN INTERRUPT WITHOUT ANY MODEL CALL: a history
+  that still carries such an unanswered call -- the client continued the conversation
+  without resuming it, which a refresh that lost the parked card does -- cannot be sent
+  to any OpenAI-shaped vendor. The run asks the question again when this process still
+  holds the park, and refuses by name when nobody does. See `stalled` in drive!.
 
   OPTS may carry :resume, the decisions a human handed back for this thread's
   parked calls; they are replayed at the top of the run, before the first LLM
@@ -131,12 +163,42 @@
     (try
       (let [replayed (when (seq resume)
                        (replay! resume thread-id emit history))
+            ;; WHAT THIS HISTORY LEAVES UNANSWERED, read before the first model call
+            ;; because it decides whether there is one to make. A run that parks a call
+            ;; ENDS on :run/interrupt with the call unanswered (see drive!'s own note
+            ;; below), so a client that continues such a conversation WITHOUT resuming
+            ;; anything -- a refresh that lost the parked card, a second run started
+            ;; beside the first -- hands the next run a block nothing answers, and the
+            ;; vendor refuses the request before the model runs at all. The vendor's own
+            ;; sentence names neither the call nor the reason, which is how this arrived
+            ;; as an opaque 400 on a conversation that then stayed bricked: the client's
+            ;; history is the client's, so every later message re-sent the same block.
+            ;;
+            ;; TWO ANSWERS, and the difference is whether anyone can still answer:
+            ;;
+            ;;   * STILL PARKED HERE. The human has not decided yet and a decision can
+            ;;     still arrive, so the run ASKS AGAIN -- it ends on the same interrupt
+            ;;     it ended on before, and the client gets its card back instead of a
+            ;;     request nobody can serve. Nothing is invented and nothing is
+            ;;     pre-empted: the same question, asked a second time.
+            ;;   * NOBODY HOLDS IT. A park lives in the process that made it, so after a
+            ;;     restart this call can never be answered. Sending it is what produced
+            ;;     the 400; guessing a result for it would be inventing one. The run is
+            ;;     refused BY NAME instead -- see `unanswerable-call-message`.
+            stalled  (vec (llm/unanswered-tool-calls @history))
+            still    (when (seq stalled) (tools/parked-interrupts thread-id stalled))
+            dead     (vec (remove (set (map :id still)) stalled))
+            refusal  (when (seq dead) (unanswerable-call-message dead))
+            _        (when refusal (throw (ex-info refusal {:unanswered dead})))
             parked
-            (if (seq replayed)
+            (cond
               ;; A replayed call that had to park again: the turn is still
               ;; unanswered, so there is no provider call to make.
-              replayed
-              (loop []
+              (seq replayed) replayed
+              ;; A call parked LAST turn, still undecided: ask the same question
+              ;; again rather than send a history the vendor refuses.
+              (seq still)    still
+              :else          (loop []
                 (let [_         (with-skills)
                       assistant (model-call! provider @history emit thread-id)
                       calls     (:tool_calls assistant)]

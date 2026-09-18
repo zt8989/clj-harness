@@ -482,6 +482,28 @@
                      (= tool-call-id (:tool-call-id %))))
        first))
 
+(defn parked-interrupts
+  "The parked calls for TOOL-CALL-IDS in THREAD-ID, as the interrupt maps a run ends on:
+  {:interrupt-id .. :id <the tool call> .. :name .. :args ..}, plus :reason and
+  :question when the park carried them. An id no record answers is simply ABSENT,
+  which is the fact the asker needs: harness.kernel.loop reads this to tell a call a
+  human is still deciding from one nobody can answer at all.
+  
+  THE SHAPE IS THE ONE :run/interrupt ALREADY EMITS for a call parked THIS turn (see
+  the :parked maps in `run!`), because a client must not have to tell 'parked just now'
+  from 'parked last turn, and the run is asking again' -- they are the same question and
+  the same answer."
+  [thread-id ids]
+  (vec (keep (fn [id]
+               (when-let [rec (parked-for-call thread-id id)]
+                 (cond-> {:interrupt-id (:interrupt-id rec)
+                          :id            (:tool-call-id rec)
+                          :name          (:name rec)
+                          :args          (:args rec)}
+                   (:reason rec)   (assoc :reason (:reason rec))
+                   (:question rec) (assoc :question (:question rec)))))
+             ids)))
+
 (defn parked-calls
   "interrupt-id -> parked record, for THREAD-ID (every thread when nil)."
   ([] @parked-registry)
@@ -880,7 +902,11 @@
                              ;; able to issue this call again.
                              suspended
                              (do (park-approval! (:suspended/interrupt-id suspended)
-                                                        {:name name :args arguments})
+                                                        {:thread-id    thread-id
+                                                         :tool-call-id id
+                                                         :name         name
+                                                         :args         arguments
+                                                         :question     (:suspended/question suspended)})
                                  {:content "" :error false
                                   :parked (cond-> {:interrupt-id (:suspended/interrupt-id suspended)
                                                    :id id :name name :args arguments

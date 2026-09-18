@@ -16,10 +16,16 @@
   switching the built-in rows off is the ordinary per-thread switch, and the whole
   point of those rows is that a session can switch one off.
 
+  AND ONE THING THAT IS NEITHER, though it lives here for the same reason: the
+  VENDOR-SHAPED PROVIDER, which refuses a request the way an OpenAI-shaped vendor does
+  (see the section at the end of this file). Two namespaces need a test that meets that
+  refusal, and one copy of the sentence is what keeps them meeting the same one.
+
   It lives under test/, beside harness.fake, and is NOT a test namespace --
   harness.test-runner lists the namespaces it runs, and this one has nothing to
   run."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.system-prompt :as system-prompt]
@@ -28,7 +34,8 @@
             [harness.infra.env :as env]
             [harness.infra.home :as home]
             [harness.infra.shell :as shell]
-            [harness.kernel.hooks :as hooks]))
+            [harness.kernel.hooks :as hooks]
+            [harness.kernel.llm :as llm]))
 
 (def seed-config
   "A minimal config.edn, so a run that resolves a provider from config -- rather
@@ -361,3 +368,40 @@
      {:entered (fn [] @entered)
       :release (fn [] (deliver go true))
       :restore (fn [] (alter-var-root sym (fn [_] original)))})))
+
+
+;; ---------------------------------------------------------- the vendor's refusal
+;;
+;; A PROVIDER THAT IS THE VENDOR'S VALIDATOR, then the scripted fake underneath it. A
+;; spy could only report the messages it was handed; this one REFUSES them the way an
+;; OpenAI-shaped vendor does, so a run under test dies exactly where production died.
+;;
+;; THE RULE IS harness.kernel.llm/unanswered-tool-calls' -- the same function the run's
+;; own guard reads -- so a test's vendor and production cannot disagree about which
+;; histories are refused. Only the SENTENCE is copied, byte for byte, from a real
+;; gateway (thread d841d970, 2026-09-18): a test must meet what production meets, and
+;; the wording is the evidence. What production must no longer do is relay it.
+
+(def unanswered-call-refusal
+  "The vendor's own 400 body, verbatim: an assistant message whose tool_calls are not
+  answered ADJACENTLY is refused before the model runs at all."
+  (json/write-str {:error {:message (str "An assistant message with 'tool_calls' must be followed"
+                                         " by tool messages responding to each 'tool_call_id'."
+                                         " (insufficient tool messages following tool_calls message)")
+                           :type "invalid_request_error"
+                           :param ""
+                           :code "invalid_request_error"}}))
+
+(defn refuse-unanswered-calls!
+  "Throw the 400 a vendor answers when an assistant message's tool_calls are not
+  followed, immediately, by a tool message for every one of them. Nil -- quiet -- when
+  the request is one the vendor would accept."
+  [messages]
+  (when-let [missing (seq (llm/unanswered-tool-calls messages))]
+    (throw (ex-info (str "HTTP 400: " unanswered-call-refusal)
+                    {:status 400 :unanswered (vec missing)}))))
+
+(defmethod llm/stream! :vendor-shaped
+  [provider messages on-event thread-id]
+  (refuse-unanswered-calls! messages)
+  (llm/stream! (assoc provider :protocol :fake) messages on-event thread-id))

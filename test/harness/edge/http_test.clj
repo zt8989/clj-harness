@@ -3661,3 +3661,85 @@
            (is (await-log #"crashed .*run-id=run-crashed") "the crash is in the log")
            (is (await-log #"no frames today") "with the throwable, not just a kind")
            (finally (.close sock))))))))
+
+
+;; ------------------------------------ a history that leaves a call unanswered
+;;
+;; THE 400 THIS EXISTS FOR (thread b553ed1d, 2026-09-18). A model call asked for a
+;; `write`; the seam parked it for approval; the run ended on that interrupt, so the
+;; call - deliberately - has no tool message. The client then sent its next ordinary
+;; run over the same conversation without resuming anything (the parked card was gone
+;; after a refresh), and the request went out carrying an assistant message whose
+;; tool_calls nothing answers. The vendor refused it before the model ran:
+;;
+;;   HTTP 400: An assistant message with 'tool_calls' must be followed by tool
+;;   messages responding to each 'tool_call_id'. (insufficient tool messages
+;;   following tool_calls message)
+;;
+;; - and it kept refusing it: the client's history is the client's, so every later
+;; message of that session re-sent the same block and died the same way. The
+;; conversation was bricked, and nothing in the answer named the call or the park.
+
+(defn- with-vendor-shaped
+  "Like `with-server`, but the pinned provider IS the vendor's validator: it refuses a
+  request whose assistant message with tool_calls is not answered adjacently, with a
+  real gateway's own 400 (see the section at the end of harness.test-support). A test
+  about that shape needs a provider that would die on it, not a fake that would happily
+  answer."
+  [thread f]
+  (providers/use-provider! thread (assoc (fake/scripted [{:content "done"}])
+                                         :protocol :vendor-shaped))
+  (let [stop (http/start! {:port 0})]
+    (try (binding [*port* (:local-port (meta stop))] (f))
+         (finally (stop) (providers/use-provider! thread nil)))))
+
+(defn- parked-history
+  "The client's message list for a run that carries a call NOTHING answered - the shape
+  the record above holds. The model asked for a tool, the seam parked it, the run ended
+  on the interrupt, and the tool message therefore never landed; what the client re-sends
+  is exactly this list plus whatever the human typed next."
+  [call-id]
+  [{:id "u1" :role "user" :content "run it"}
+   {:id "a1" :role "assistant" :content ""
+    :toolCalls [{:id call-id :type "function"
+                 :function {:name "read" :arguments "{\"path\": \"deps.edn\"}"}}]}
+   {:id "u2" :role "user" :content "and this"}])
+
+(defn- terminal-frame [frames]
+  (last (filter #(= "RUN_FINISHED" (:type %)) frames)))
+
+(deftest a-parked-call-the-run-is-not-resuming-is-asked-again-not-sent
+  (with-vendor-shaped
+   "park-ask"
+   (fn []
+     (tools/park-approval! "int-park-ask"
+                           {:thread-id "park-ask" :tool-call-id "c1" :name "read"
+                            :args "{}" :reason "tool-approval"})
+     (let [resp   (post-run "park-ask" {:messages (parked-history "c1")})
+           frames (wire/frames-from-sse (.body resp))
+           fin    (terminal-frame frames)]
+       (testing "the vendor is never asked a question it refuses before the model runs"
+         (is (= 200 (.statusCode resp)))
+         (is (not-any? #(= "RUN_ERROR" (:type %)) frames)
+             (str "saw " (pr-str (mapv :type frames))))
+         (is (seq frames)))
+       (testing "the run ends on the SAME interrupt, so the client can answer it"
+         (is (= "interrupt" (get-in fin [:outcome :type])))
+         (is (= ["int-park-ask"] (mapv :id (get-in fin [:outcome :interrupts]))))
+         (is (= ["c1"] (mapv :toolCallId (get-in fin [:outcome :interrupts])))))))))
+
+(deftest a-call-nobody-can-answer-is-refused-by-name
+  (testing "no park in this process holds it, so no decision can ever arrive for it"
+    (with-vendor-shaped
+     "park-dead"
+     (fn []
+       (let [resp   (post-run "park-dead" {:messages (parked-history "call_dead1")})
+             frames (wire/frames-from-sse (.body resp))
+             err    (last (filter #(= "RUN_ERROR" (:type %)) frames))]
+         (is (= 200 (.statusCode resp)))
+         (is (some? err) (str "saw " (pr-str (mapv :type frames))))
+         (testing "the sentence names the call and the shape -- it does not relay the vendor"
+           (is (str/includes? (str (:message err)) "call_dead1"))
+           (is (not (str/includes? (str (:message err)) "insufficient tool messages"))))
+         (testing "and nothing was sent to the scripted model -- it never got a turn"
+           (is (not-any? #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))))
