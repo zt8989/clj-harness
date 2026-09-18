@@ -34,10 +34,11 @@ import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
+import { sidebarSuite } from "./suites/sidebar";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -78,7 +79,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// each session's own log read back off disk (its `input` row, its terminal frame)
 /// and rebuilt through the server. It is the backend half of parallel sessions: the
 /// server always allowed this and nothing had ever asked it to.
-const EXPECTED_CASES = 36;
+/// 36 -> 39: the `sidebar` suite's three -- the session row RENDERED (react-dom/server)
+/// and read as text: its id line, the second line that says which absence it is looking
+/// at, and the parked word beside the id rather than inside a line that truncates. This
+/// is the suite that exists because the id line went blank in the i18n merge and a green
+/// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
+const EXPECTED_CASES = 39;
 
 let total = 0;
 for (const suite of SUITES) {

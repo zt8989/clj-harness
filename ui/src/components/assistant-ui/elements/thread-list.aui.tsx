@@ -135,21 +135,37 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
               data-slot="thread-list-item-id"
               className="min-w-0 flex-1 truncate font-mono text-xs"
             >
-              {/* LOCAL: the two things a session can be doing that ask something of
-                  the reader, and they are NOT the same thing -- the spinner is
-                  "come back later", this is "come here". Only one can be up at a
-                  time (a parked run is not running), and neither is drawn for a
-                  session that has simply settled. A word a person reads, so it
-                  comes from the shell catalog like `current` below it. */}
-              {parked && (
-                <span
-                  data-slot="thread-list-item-parked"
-                  className="text-foreground shrink-0 text-[10px] tracking-wide"
-                >
-                  {t("session.parked")}
-                </span>
-              )}
+              {/* THE ROW'S TITLE, and it has to be said out loud because its absence
+                  is invisible: a `<code>` with no text has no line box at all, so a row
+                  that lost this line looks like a row that never had one. It was lost
+                  exactly that way -- the i18n merge took main's parked-word block and
+                  dropped the branch's `{threadId}` along with its own. */}
+              {threadId}
             </code>
+            {/* LOCAL: the two things a session can be doing that ask something of
+                the reader, and they are NOT the same thing -- the spinner is
+                "come back later", this is "come here". Only one can be up at a
+                time (a parked run is not running), and neither is drawn for a
+                session that has simply settled. A word a person reads, so it
+                comes from the shell catalog like `current` below it.
+
+                BESIDE THE ID, NOT INSIDE IT, and the difference is measured rather
+                than tidy: the id's element is `truncate` and holds 36 characters of
+                monospace, so on a 288px sidebar it is ellipsized on every real row.
+                A label inside it is clipped away with the tail -- which would take
+                the ONE word this row exists to say with it. Out here it is a flex
+                sibling, so `shrink-0` means something and the id is the part that
+                gives. The branch this came from had it inside; the suite that
+                renders the row (`test/suites/sidebar.tsx`) is what pinned the two
+                apart. */}
+            {parked && (
+              <span
+                data-slot="thread-list-item-parked"
+                className="text-foreground shrink-0 text-[10px] tracking-wide"
+              >
+                {t("session.parked")}
+              </span>
+            )}
             {/* LOCAL: upstream's literal `current` is gone from this file and
                 read from the shell catalog instead. It is a word a person sees
                 (the small uppercase label beside the row id), so it had to
