@@ -2558,6 +2558,57 @@
                      "the second found nothing to close")
                  (is (= (inc (count after-first)) (count after-second))
                      "and appended only its own rebuild line")))))))
+
+     (testing "an earlier run left open beside a later one that FINISHED is repaired too"
+       ;; The shape one thread with two runs in flight leaves when the process is
+       ;; stopped between them: r1 never ended, r2 did. So the file's last frame IS a
+       ;; terminal and the LAST input's run is closed -- asking about those two found
+       ;; nothing to repair, while the refusal counted two runs against one terminal.
+       ;; This thread was refused for good; now the rebuild closes the run nobody
+       ;; closed and the conversation comes back.
+       (let [tid   (str "trunc-earlier-" (java.util.UUID/randomUUID))
+             f     (log-file tid)
+             input (fn [ts run-id]
+                     (json/write-str
+                      {:ts ts :runId run-id :kind "input"
+                       :payload {:threadId tid :runId run-id
+                                 :messages [{:id "u1" :role "user" :content "hi"}]
+                                 :tools [] :context []}}))
+             frames (fn [ts run-id evs]
+                      (map (fn [frame]
+                             (json/write-str {:ts ts :runId run-id :kind "event" :payload frame}))
+                           (mapcat (ag/outbound tid run-id) evs)))
+             log-lines (concat [(input 1 "r1")]
+                               (frames 2 "r1" [(ev/run-start)
+                                               (ev/tool-call "c1" "read" "{}")])
+                               [(input 3 "r2")]
+                               (frames 4 "r2" [(ev/run-start)
+                                               (ev/text-delta "继续")
+                                               (ev/run-end)]))]
+         (.mkdirs (.getParentFile f))
+         (spit f (str (str/join "\n" log-lines) "\n") :encoding "UTF-8")
+         (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (json/read-str (.body resp) :key-fn keyword)
+               rs    (mapv #(json/read-str % :key-fn keyword)
+                           (str/split-lines (slurp f :encoding "UTF-8")))]
+           (is (= 200 (.statusCode resp)) "a log the repair can close is not a refusal")
+           (is (seq (:messages reply)))
+           (testing "the closed line names r1 -- the run that never ended"
+             (let [closing (first (filter #(= "session/closed-off" (:kind %)) rs))]
+               (is (some? closing))
+               (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
+                       :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
+                      (:payload closing)))))
+           (testing "and the frames appended for it carry ITS run id"
+             (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
+                    (->> rs
+                         (filter #(and (= "r1" (:runId %)) (= "event" (:kind %))))
+                         (take-last 2)
+                         (mapv #(get-in % [:payload :type]))))
+                 "how a reader pairs the appended terminal with the run it ended"))
+           (testing "so the next reader gets a whole conversation"
+             (is (seq (replay/lines->messages
+                       (str/split-lines (slurp f :encoding "UTF-8")))))))))
      (testing "a half-written line is refused, naming the line"
        (let [tid (str "corrupt-" (java.util.UUID/randomUUID))]
          (spit (log-file tid)

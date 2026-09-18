@@ -106,7 +106,7 @@
                         (event-lines "r1" [(ev/run-start)
                                            (ev/tool-call "c1" "read" "{}")]))
           {:keys [run-id last-frame frames]}
-          (replay/closing-frames (replay/lines->records lines))]
+          (first (replay/closing-frames (replay/lines->records lines)))]
       (is (= "r1" run-id))
       (is (= "TOOL_CALL_END" last-frame))
       (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"] (mapv :type frames)))
@@ -119,7 +119,7 @@
 
   (testing "a run that died before its first frame is closed too"
     (let [{:keys [last-frame frames]}
-          (replay/closing-frames (replay/lines->records [(input-line "r1" [seed])]))]
+          (first (replay/closing-frames (replay/lines->records [(input-line "r1" [seed])])))]
       (is (nil? last-frame) "there is no frame to name")
       (is (= ["RUN_ERROR"] (mapv :type frames)))))
 
@@ -128,7 +128,7 @@
                            (event-lines "r1" [(ev/run-start)
                                               (ev/tool-call "c1" "read" "{}")
                                               (ev/text-delta "\u534a\u53e5\u8bdd")]))
-          {:keys [run-id frames]} (replay/closing-frames (replay/lines->records base))
+          {:keys [run-id frames]} (first (replay/closing-frames (replay/lines->records base)))
           closed   (concat base (map #(log-line {:ts 3 :runId run-id :kind "event"
                                                  :payload %})
                                      frames))
@@ -152,6 +152,82 @@
                 [(log-line {:ts 1 :runId nil :kind "project/bound"
                             :payload {:before nil :after "/tmp/p" :via "http"}})]))))))
 
+(deftest an-earlier-open-run-beside-a-later-finished-one-is-not-a-dead-end
+  ;; ONE THREAD, TWO RUNS IN FLIGHT, and the process dies between them: an earlier run
+  ;; that never ended, and a later one that did. The last frame in the file is the
+  ;; finished run's terminal, so 'was the last frame terminal?' answers yes -- while
+  ;; counting inputs against terminals answers no. This log used to be refused FOREVER:
+  ;; the refusal counted, the repair asked about the last input and the last terminal,
+  ;; found that run closed, and closed nothing at all.
+  (let [lines (concat [(input-line "r1" [seed])
+                       (input-line "r2" [seed])]
+                      (event-lines "r1" [(ev/run-start)
+                                         (ev/reasoning-delta reasoning-text)])
+                      (event-lines "r2" [(ev/run-start)
+                                         (ev/text-delta answer-text)
+                                         (ev/run-end)]))]
+    (testing "the refusal names the run nobody closed, not the file's last frame"
+      (let [msg (str (ex-message (try (replay/lines->messages lines)
+                                     nil
+                                     (catch Exception e e))))]
+        (is (str/includes? msg "r1"))
+        (is (str/includes? msg "REASONING_MESSAGE_CONTENT")
+            "the frame it names is the open run's own last frame")))
+
+    (testing "and the repair closes that run, under its own id"
+      (let [closures (replay/closing-frames (replay/lines->records lines))]
+        (is (= ["r1"] (mapv :run-id closures)))
+        (is (= ["REASONING_MESSAGE_CONTENT"] (mapv :last-frame closures)))
+        (is (= [["RUN_ERROR"]] (mapv #(mapv :type (:frames %)) closures)))))
+
+    (testing "once it is appended the log reads -- the whole conversation, both runs"
+      (let [closures (replay/closing-frames (replay/lines->records lines))
+            closed   (reduce (fn [ls {:keys [run-id frames]}]
+                               (concat ls (map #(log-line {:ts 9 :runId run-id
+                                                         :kind "event" :payload %})
+                                             frames)))
+                             lines closures)
+            messages (replay/lines->messages closed)]
+        (is (= ["user" "reasoning" "assistant"] (mapv :role messages)))
+        (is (= answer-text (:content (last messages)))
+            "the later run's own output survives the repair")))))
+
+(deftest every-open-run-is-closed-not-just-the-one-that-ran-last
+  ;; A process killed with TWO runs in flight leaves two open ones, and the log is only
+  ;; readable once both have ended -- so the repair answers for all of them rather than
+  ;; swapping one refusal for the next.
+  (let [lines (concat [(input-line "r1" [seed])]
+                      (event-lines "r1" [(ev/run-start)
+                                         (ev/tool-call "c1" "read" "{}")])
+                      [(input-line "r2" [seed])]
+                      (event-lines "r2" [(ev/run-start)
+                                         (ev/text-delta answer-text)]))
+        records (replay/lines->records lines)]
+    (testing "the refusal says how many runs are open"
+      (let [msg (str (ex-message (try (replay/lines->messages lines)
+                                     nil
+                                     (catch Exception e e))))]
+        (is (str/includes? msg "r1"))
+        (is (str/includes? msg "2 runs are open"))))
+
+    (testing "every open run gets its own closure, oldest first, with its own calls"
+      (let [closures (replay/closing-frames records)]
+        (is (= ["r1" "r2"] (mapv :run-id closures)))
+        (is (= ["c1"] (:unanswered (replay/open-run records))))
+        (is (= [["TOOL_CALL_RESULT" "RUN_ERROR"] ["RUN_ERROR"]]
+               (mapv #(mapv :type (:frames %)) closures)))
+        (is (= "c1" (:toolCallId (first (:frames (first closures))))))))
+
+    (testing "and appending both is what makes the log whole"
+      (let [closures (replay/closing-frames records)
+            closed   (reduce (fn [ls {:keys [run-id frames]}]
+                               (concat ls (map #(log-line {:ts 9 :runId run-id
+                                                         :kind "event" :payload %})
+                                             frames)))
+                             lines closures)]
+        (is (seq (replay/lines->messages closed)))
+        (is (nil? (replay/closing-frames (replay/lines->records closed)))
+            "nothing is left open")))))
 (deftest a-park-is-not-a-run-that-never-terminated
   ;; A call awaiting a human sits INSIDE a run that closed properly: :run/interrupt
   ;; ends the run and the answer arrives on the resume run. Reading 'this call has

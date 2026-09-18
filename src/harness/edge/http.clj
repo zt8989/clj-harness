@@ -1449,9 +1449,9 @@
       (api-response 200 (assoc (:ok folded) :threadId stem)))))
 
 (defn- close-off-open-run!
-  "Close the run a log ends on, so the conversation can be CONTINUED instead of
-  being refused -- {:run-id .. :frames [type ..]} when it closed something, nil
-  when the log already ends where a log should.
+  "Close every run a log left open, so the conversation can be CONTINUED instead of
+  being refused -- a vector of {:run-id .. :frames [type ..]}, one per closed run, or
+  nil when the log already ends where a log should.
 
   THIS IS WHERE A TRUNCATED LOG STOPS BEING A DEAD END. A process killed between
   a run's last frame and its terminal one leaves a record that reads as half a
@@ -1464,8 +1464,14 @@
   reading a truncated log still refuses, because a reader that silently folds
   half a run is the failure this whole contract exists to prevent.
 
-  THE AUDIT LINE LANDS BEFORE THE FRAMES IT NAMES, which is also why the appended
-  terminal is the last FRAME in the file: a reader that meets a RUN_ERROR no run
+  EVERY OPEN RUN, not just one. A thread can have several runs in flight at once
+  (each POST is its own run, and the browser may have more than one), so a process
+  killed mid-flight can leave more than one unclosed -- and a log is only readable
+  once all of them have ended. Each closure is one run's frames, written under that
+  run's id, with its own `session/closed-off` line.
+
+  THE AUDIT LINE LANDS BEFORE THE FRAMES IT NAMES, which is also why an appended
+  terminal is the last FRAME of its run: a reader that meets a RUN_ERROR no run
   emitted must have met the line that explains it first.
 
   BEST EFFORT ON PURPOSE. A corrupt log throws here and is left to `rebuild` to
@@ -1473,16 +1479,18 @@
   precisely what is wrong with a log nobody can repair."
   [stem ^java.io.File path]
   (try
-    (when-let [{:keys [run-id last-frame frames]}
-               (replay/closing-frames (replay/lines->records (replay/read-lines path)))]
-      (log! stem nil "session/closed-off" {:run-id     run-id
-                                           :last-frame last-frame
-                                           :frames     (mapv :type frames)})
-      (doseq [frame frames]
-        ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
-        ;; reader pairs a terminal frame with the run it ended.
-        (log! stem run-id "event" frame))
-      {:run-id run-id :frames (mapv :type frames)})
+    (when-let [closures (seq (replay/closing-frames
+                              (replay/lines->records (replay/read-lines path))))]
+      (doseq [{:keys [run-id last-frame frames]} closures]
+        (log! stem nil "session/closed-off" {:run-id     run-id
+                                             :last-frame last-frame
+                                             :frames     (mapv :type frames)})
+        (doseq [frame frames]
+          ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
+          ;; reader pairs a terminal frame with the run it ended.
+          (log! stem run-id "event" frame)))
+      (mapv (fn [{:keys [run-id frames]}] {:run-id run-id :frames (mapv :type frames)})
+            closures))
     (catch Throwable t
       (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
       nil)))
