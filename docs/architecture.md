@@ -3,14 +3,18 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`ada4bc5`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`ada4bc5` 是把 `trajectory-injection-once` 合进来的那一提交。本特征给本目录添的是
+**快照：`c7faa43`（2026-09-18）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`c7faa43` 是 `context-usage` 收口的那一提交：`edge.context` 一行进模块地图、`GET .../stats` 的载荷
+多一节、composer 里 model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文占用」那一节。
+上一版快照是 `ada4bc5`。）
+
+**`ada4bc5`（2026-09-17）** 是把 `trajectory-injection-once` 合进来的那一提交。它给本目录添的是
 [edge](architecture/edge.md) 里 `message` 行与入站那一节的两句——**submitted 侧 = 第一次模型调用真正
 收到的那一份**（会话的注入在内），注入折在 `inbound` 之后、记 `message` 之前——以及
 [client](architecture/client.md) 轨迹一节的一条「注入物整场只画一次」。同一版里还有 `57601a4`
 （UI 六处调整）改的 [client](architecture/client.md)：正文两侧留白、流式思考、整轮折叠、贴底、
 可搜索选择器。`.scratch/trajectory-injection-once/`（本特征的 spec 与证据）随之落下，
-不改变本目录的其他陈述。）
+不改变本目录的其他陈述。
 
 ## 与另外两处文档的分工
 
