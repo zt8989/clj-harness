@@ -696,7 +696,7 @@
              " in milliseconds. When the limit is reached the command is stopped -- together with"
              " everything it started -- and whatever it printed by then comes back, with a line"
              " saying it was stopped. A very large `timeout` means this run really does wait that"
-             " long; for something that has to outlive the call, use `bash_background` instead.")
+             " long; for something that has to outlive the call, use `job` instead.")
         {"command" {:type "string" :description "Command line."}
          "timeout" {:type "integer" :minimum 1
                     :description (str "How long to wait, in milliseconds. Default "
@@ -705,80 +705,85 @@
 
 ;; ---------------------------------------------------------------- 后台执行
 ;;
-;; THREE NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing
+;; TWO NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing
 ;; toolset's precedent (`replace` / `insert` / `undo_last_replace` are three names,
 ;; not one `edit {action}`): each schema then carries exactly its own arguments, so
 ;; the seam's missing-argument check answers for every verb, and a refusal belongs
-;; to one verb instead of to a branch. The cost is three descriptions in every
+;; to one verb instead of to a branch. The cost is two descriptions in every
 ;; request, which is the price of that clarity.
 ;;
 ;; THE WORK IS IN harness.cap.jobs. What is here is the faces.
 
-(def ^:private bash-background-description
+(def ^:private job-description
   (str "Run a shell command in the BACKGROUND: this call returns as soon as the command has"
        " started, and the command keeps running. Use it for something that has to outlive the"
        " call -- a dev server, a watcher, a slow test or build -- so you can carry on working"
        " while it runs. "
-       "The answer is a job id (like `j1`); the command's output is NOT in it. "
-       "NOTHING TELLS YOU WHEN IT FINISHES OR WHEN IT PRINTS SOMETHING: read it with"
-       " `bash_output`, stop it with `bash_kill`. "
+       "The answer is a job id (like `j1`) and where that job's record is; the command's output"
+       " is NOT in it. That output is kept in a file -- every line, nothing dropped, written as"
+       " it arrives -- so read it with `bash` (`tail` / `grep` / `cat`), or with `read` /"
+       " `grep`. Its last line says how the job ended: `[exit N]` once the command is gone,"
+       " `[stopped]` if it was stopped -- and no such line means it is still running. "
        "A job has NO timeout -- it runs until it ends or until it is stopped -- and it lives"
        " only as long as this harness process. "
        "The working directory is this session's project directory when one is bound,"
        " otherwise the process working directory, exactly as `bash`."))
 
-(def ^:private bash-output-description
-  (str "Read what a background job has printed SINCE YOU LAST READ IT, and whether it is still"
-       " running. The answer is the new lines, plus one status line: `[running]`, or `[exit N]`"
-       " once the command has ended. "
-       "READING DOES NOT WAIT: `(no new output)` means there is nothing new right now, not that"
-       " the job is finished -- the status line says which, and nothing will interrupt you when"
-       " it changes. "
-       "Only the last " jobs/tail-lines " lines are kept, so a job that printed more than you"
-       " read says how many lines you missed."))
+(defn- redirect-note
+  "The line `t-job` adds when COMMAND sends its own output to a file, or nil.
 
-(defn- t-bash-background
-  "`bash_background`'s body: hand the command to harness.cap.jobs and answer its id.
+  A NOTE, NOT A REFUSAL, and the judgement behind it is best effort on purpose (see
+  `cap.jobs/output-redirect`): quotes, variables and a nested shell all have ways of
+  hiding a redirection, and holding up a legitimate command -- `> report.csv` is real
+  work -- on a best-effort judgement pays a real thing for a posture. The command runs
+  either way; without this line the model is just pointed at a record that will stay
+  empty, with nothing saying why."
+  [command]
+  (when-let [target (jobs/output-redirect command)]
+    (str " note: this command sends its own output to " target ", so the job's record will"
+         " stay empty -- read that file instead, or drop the redirection and the record"
+         " keeps the output for you.")))
+
+(defn- t-job
+  "`job`'s body: hand the command to harness.cap.jobs and answer its id and its record.
   The directory is resolved exactly as `bash`'s is, so a relative command means the
-  same place in both."
+  same place in both. The path is ANSWERED BY harness.cap.jobs and not rebuilt here --
+  one place assembles it, so there is one place that can get it wrong."
   [{:keys [command]}]
   (let [dir (project/binding-for kernel-tools/*thread-id*)
-        id  (jobs/start! kernel-tools/*thread-id* {:command command :dir dir})]
-    (str "job " id " started; read its output with bash_output.")))
+        {:keys [id path]} (jobs/start! kernel-tools/*thread-id*
+                                       {:command command :dir dir})]
+    (str "job " id " started; its record is " path
+         " -- read it with `bash` (`tail` / `grep`), or with `read` / `grep`."
+         (redirect-note command))))
 
-(defn- t-bash-output
-  "`bash_output`'s body. All the arithmetic is harness.cap.jobs'."
-  [{:keys [job]}]
-  (jobs/read-output kernel-tools/*thread-id* job))
-
-(def ^:private bash-kill-description
+(def ^:private job-kill-description
   (str "Stop a background job -- the command and everything it started -- and forget it."
        " Use it when a job has done what you needed, has gone wrong, or is holding something"
        " you want back (a port, a file). "
-       "The answer carries whatever the job printed that you had not read yet, plus what"
-       " happened: `[stopped]` if it was still running, or `[exit N]` if it had already"
-       " ended by itself. Either way the job is gone afterwards -- reading a stopped job is"
-       " the same as reading one that never existed."))
+       "The answer says where the job's record is, and whether this call stopped it or the"
+       " command had already ended by itself. The record stays where it is, its last line"
+       " `[stopped]` or `[exit N]`, so read it with `bash` (`tail` / `grep`), or with `read` /"
+       " `grep`, before or after stopping. Either way the job is gone afterwards -- stopping it"
+       " twice, or naming a job that is gone, finds nothing."))
 
-(defn- t-bash-kill
-  "`bash_kill`'s body: stop it, answer with what it had said, forget it."
+(defn- t-job-kill
+  "`job_kill`'s body: stop it, forget it, and answer with where its record is."
   [{:keys [job]}]
-  (jobs/stop! kernel-tools/*thread-id* job))
+  (let [{:keys [id path stopped?]} (jobs/stop! kernel-tools/*thread-id* job)]
+    (str "job " id (if stopped? " stopped" " had already ended")
+         "; its record is " path
+         " -- read it with `bash` (`tail` / `grep`), or with `read` / `grep`.")))
 
-(register! "bash_background"
-  (tool bash-background-description
+(register! "job"
+  (tool job-description
         {"command" {:type "string" :description "Command line."}}
-        [:command] t-bash-background))
+        [:command] t-job))
 
-(register! "bash_output"
-  (tool bash-output-description
-        {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
-        [:job] t-bash-output))
-
-(register! "bash_kill"
-  (tool bash-kill-description
-        {"job" {:type "string" :description "Job id, as `bash_background` answered."}}
-        [:job] t-bash-kill))
+(register! "job_kill"
+  (tool job-kill-description
+        {"job" {:type "string" :description "Job id, as `job` answered."}}
+        [:job] t-job-kill))
 
 (register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."
