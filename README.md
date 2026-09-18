@@ -314,10 +314,16 @@ map，值保类型），**退出码 0 放行 / 2 阻断（stderr 回喂模型）
 
 ```bash
 node scripts/dev.mjs             # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
+node scripts/dev.mjs --tmux      # 后端留在本窗格，前端开在右侧新窗格（要在 tmux 里跑）
 node scripts/dev.mjs --port 8080 # 钉死端口（老地址，需要时）
 node scripts/dev.mjs --scripted  # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
 node scripts/dev.mjs --ui-port 5199  # 前端换端口
 ```
+
+`--tmux` 把这对进程**分到两个窗格**：后端留在你敲命令的这个窗格（它的日志就打在眼前），前端开在**右侧**
+新窗格，vite 那串启动横幅与 HMR 输出不再和后端日志抢同一块屏幕。端口那套握手一字未改——它只是换了个
+地方放前端，焦点也**留在左边**（Ctrl-C 在左边按，右侧窗格跟着一起收掉）。它得在 tmux 里跑：拿不到 pane
+就当场拒绝并说清怎么进 tmux，不会退回单窗格。
 
 **脚本在 `scripts/` 下**：`dev.mjs` 起服务、`test.mjs` 跑测试、`proc.mjs` 是两者共用的跨平台子进程
 动作。**是 Node 脚本不是 shell 脚本**，三个平台同一个文件：进程组 / `taskkill`、信号处理、临时目录

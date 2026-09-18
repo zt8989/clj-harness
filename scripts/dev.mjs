@@ -3,6 +3,8 @@
 // Start the harness on a port nobody is using, and the UI in front of it.
 //
 //   node scripts/dev.mjs                     harness (real, your own ~/.clj-harness) + UI
+//   node scripts/dev.mjs --tmux              the harness's log in this pane, the dev server
+//                                            in a new one to the right (run inside tmux)
 //   node scripts/dev.mjs --port 8080         the address the client used to hardcode
 //   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
 //                                            model, a temp home, a provider that replays
@@ -15,6 +17,16 @@
 // port becomes the dev server's proxy target (`HARNESS_BACKEND_URL`, read by
 // ui/vite.config.js), and the browser keeps talking to its own origin -- no CORS
 // allowance to keep in step, and nothing in the source learns a port.
+//
+// --TMUX IS THE SAME TWO PROCESSES, ARRANGED SO THAT NEITHER ONE BURIES THE OTHER.
+// vite's output (its startup banner, every HMR round) and the harness's log lines are
+// two continuous streams, and one terminal interleaves them: reading either means
+// scrolling past the other. In tmux each gets a pane -- the harness in THIS one, in
+// front of you, the dev server in a new one to the right. Nothing about the handshake
+// changes (the port is still read back off the backend's banner and still reaches vite
+// through HARNESS_BACKEND_URL), and this script still owns both: the pane is tmux's,
+// so what ends the pair is the backend child in this pane, and Ctrl-C here takes the
+// pane down on the way out.
 //
 // NODE RATHER THAN A SHELL SCRIPT, so that one file works on all three platforms.
 // The two Bash spellings this replaces were both POSIX-only: process groups for
@@ -78,6 +90,8 @@ const UI_DIR = path.join(ROOT, "ui");
 const USAGE = `Start the harness on a port nobody is using, and the UI in front of it.
 
   node scripts/dev.mjs                     harness (real, your own ~/.clj-harness) + UI
+  node scripts/dev.mjs --tmux              + the UI in a pane to the right, the harness's
+                                           own log left in this one (run inside tmux)
   node scripts/dev.mjs --port 8080         the address the client used to hardcode
   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
                                            model, a temp home, a provider that replays
@@ -87,13 +101,15 @@ const USAGE = `Start the harness on a port nobody is using, and the UI in front 
 The backend is started on port 0 (the OS picks) and the port it announces is handed
 to the dev server as HARNESS_BACKEND_URL, which ui/vite.config.js uses as its proxy
 target. Ctrl-C stops both, and the two temp homes the scripted mode made are deleted
-with it -- their paths are printed when it starts, which is the only time they exist.`;
+with it -- their paths are printed when it starts, which is the only time they exist.
+--tmux splits the pane it was run in, so it wants a shell that is inside tmux.`;
 
 const argv = process.argv.slice(2);
 let port = 0;
 let uiPort = 5173;
 let scripted = false;
 let scriptFile = "";
+let tmux = false;
 
 for (let i = 0; i < argv.length; i += 1) {
   const arg = argv[i];
@@ -101,6 +117,8 @@ for (let i = 0; i < argv.length; i += 1) {
     port = Number(argv[++i]);
   } else if (arg === "--ui-port") {
     uiPort = Number(argv[++i]);
+  } else if (arg === "--tmux") {
+    tmux = true;
   } else if (arg === "--scripted") {
     scripted = true;
     // An OPTIONAL file: what follows is the script only when it is not another
@@ -122,6 +140,19 @@ for (const [name, value] of [["--port", port], ["--ui-port", uiPort]]) {
   }
 }
 
+// --TMUX ASKS THE WINDOW IT IS IN FOR A PANE, so there has to be a window: $TMUX is
+// what a shell inside tmux is handed, and its absence is not a missing binary to go
+// looking for but a different shape of terminal. (No Windows branch: tmux is not a
+// program Windows has.)
+if (tmux && !process.env.TMUX) {
+  console.error(
+    "dev.mjs: --tmux splits the window it was run in, so it wants a shell that is " +
+      "inside tmux (try `tmux new -s harness`) -- there is no pane to put the UI in " +
+      "otherwise. Without it, `node scripts/dev.mjs` puts both in this terminal.",
+  );
+  process.exit(2);
+}
+
 // ------------------------------------------------------------- the children
 
 // `run` / `stopTree` / `exitOf` are in ./proc.mjs: the two platform branches they
@@ -131,15 +162,31 @@ for (const [name, value] of [["--port", port], ["--ui-port", uiPort]]) {
 let backend = null;
 let ui = null;
 let tmp = null;
+/// The tmux pane the UI runs in under --tmux, and null in every other mode: there,
+/// the dev server is a child this process spawned, and here it is a pane somebody
+/// else's server owns -- which is why it is taken down by name (below) rather than
+/// by signal.
+let uiPane = null;
 /// The pair --scripted made, kept so the banner can name them: a session's record is
 /// written under the config root while the run is in flight, and this directory does
 /// not outlive the script, so the paths are worth saying out loud once.
 let homes = null;
 
+/// Take the UI's pane down with us. Not awaited, and reachable from the `exit`
+/// handler (where there is nothing left to wait on): the command outlives this
+/// process either way, and it has no answer worth reading.
+function closeUiPane() {
+  if (uiPane === null) return;
+  const pane = uiPane;
+  uiPane = null;
+  run("tmux", ["kill-pane", "-t", pane], { stdio: "ignore" });
+}
+
 let cleaned = false;
 function cleanup() {
   if (cleaned) return;
   cleaned = true;
+  closeUiPane();
   stopTree(ui);
   stopTree(backend);
   if (tmp !== null) fs.rmSync(tmp, { recursive: true, force: true });
@@ -163,6 +210,63 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// --------------------------------------------------------------- the tmux pane
+
+/// A command's stdout as one line, for `tmux` -- whose answer to the one question
+/// asked here is one line by construction (`split-window -P -F '#{pane_id}'`). What
+/// tmux prints on the way to a non-zero exit becomes the reason the rejection
+/// carries, because that is where it says WHY ("no space for new pane", "can't find
+/// session").
+function capture(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = run(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => {
+      out += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      err += chunk.toString("utf8");
+    });
+    child.on("error", (failure) =>
+      reject(new Error(`could not run ${command}: ${failure.message}`)),
+    );
+    child.on("exit", (code) => {
+      if (code === 0) return resolve(out.trim());
+      const said = err.trim();
+      reject(new Error(`${command} exited ${code}${said === "" ? "" : `: ${said}`}`));
+    });
+  });
+}
+
+/// The UI in a pane to the RIGHT of this one, and the pane's id back so `cleanup` can
+/// take it down again.
+///
+/// -d IS WHAT KEEPS FOCUS HERE. A split makes the new pane current by default, and
+/// this pane is where the harness's log is arriving and where Ctrl-C ends the pair --
+/// so the pane you asked to be in front of you has to stay in front of you.
+///
+/// -e PATH RATHER THAN THE SERVER'S OWN: tmux hands a pane the environment of the
+/// SERVER, which was started by some earlier shell, while `npm` was found by way of
+/// the PATH this process was handed. (Passed only when there is one: `-e PATH=` would
+/// be an empty path, which is worse than whatever the server has.)
+///
+/// -k KEEPS THE PANE UP WHEN VITE EXITS, and that is for the failure rather than the
+/// success: 5173 is a contract (`strictPort`), so a dev server that would not start
+/// prints the one message there is no second copy of -- and a pane that closes on the
+/// way out takes it with it.
+async function openUiPane(backendPort, uiPort) {
+  const environment = [`HARNESS_BACKEND_URL=http://127.0.0.1:${backendPort}`];
+  if (process.env.PATH) environment.push(`PATH=${process.env.PATH}`);
+  const pane = await capture("tmux", [
+    "split-window", "-h", "-d", "-k", "-c", UI_DIR,
+    ...environment.flatMap((pair) => ["-e", pair]),
+    "-P", "-F", "#{pane_id}",
+    `npm run dev -- --port ${uiPort}`,
+  ]);
+  return pane;
+}
 
 // --------------------------------------------------------------- the backend
 
@@ -209,8 +313,17 @@ backend = run(backendArgv[0], backendArgv.slice(1), {
   env: backendEnv,
   stdio: ["ignore", "pipe", "pipe"],
 });
-backend.stdout.on("data", (chunk) => log.write(chunk));
-backend.stderr.on("data", (chunk) => log.write(chunk));
+// THE BACKEND'S OUTPUT IS THIS TERMINAL'S OUTPUT UNDER --tmux: this pane is where the
+// harness was asked to run, so its log lines arrive here as they do in the file. Off
+// --tmux the file is enough -- the terminal belongs to vite there, and it says so by
+// taking it over (`stdio: "inherit"` below). Each stream keeps its own: the pane
+// interleaves them exactly as it would if the harness were its foreground process.
+const tee = (chunk, sink) => {
+  log.write(chunk);
+  if (tmux) sink.write(chunk);
+};
+backend.stdout.on("data", (chunk) => tee(chunk, process.stdout));
+backend.stderr.on("data", (chunk) => tee(chunk, process.stderr));
 
 let boundPort = "";
 let seen = "";
@@ -261,7 +374,11 @@ console.log(
   `dev.mjs: harness on http://127.0.0.1:${boundPort}` +
     (port === 0 ? " (a port the OS picked)" : ""),
 );
-console.log(`dev.mjs: UI on http://localhost:${uiPort} (Ctrl-C stops both)`);
+console.log(
+  tmux
+    ? `dev.mjs: UI on http://localhost:${uiPort}, in the pane to the right`
+    : `dev.mjs: UI on http://localhost:${uiPort} (Ctrl-C stops both)`,
+);
 if (homes !== null) {
   console.log(
     `dev.mjs: temp config root ${homes.root}` +
@@ -284,12 +401,30 @@ if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
   }
 }
 
-ui = run("npm", ["run", "dev", "--", "--port", String(uiPort)], {
-  cwd: UI_DIR,
-  stdio: "inherit",
-  env: { ...process.env, HARNESS_BACKEND_URL: `http://127.0.0.1:${boundPort}` },
-});
+let exitCode;
+if (tmux) {
+  // THE PANE IS OPENED ONCE THE PORT IS KNOWN, which is the same ordering the other
+  // mode has: the dev server is handed the backend's address at the moment it starts,
+  // and there is no second chance to tell it.
+  try {
+    uiPane = await openUiPane(boundPort, uiPort);
+  } catch (failure) {
+    console.error(`dev.mjs: could not open the UI's pane -- ${failure.message}`);
+    process.exit(1);
+  }
+  // AND THE THING THAT ENDS IS THE BACKEND: it is the child this process owns, so its
+  // exit is the one event to wait on. The pane is tmux's child -- said goodbye to by
+  // `cleanup` by name, because nothing here can wait on it.
+  exitCode = await exitOf(backend);
+} else {
+  ui = run("npm", ["run", "dev", "--", "--port", String(uiPort)], {
+    cwd: UI_DIR,
+    stdio: "inherit",
+    env: { ...process.env, HARNESS_BACKEND_URL: `http://127.0.0.1:${boundPort}` },
+  });
 
-const uiExit = await exitOf(ui);
+  exitCode = await exitOf(ui);
+}
+
 cleanup();
-process.exit(uiExit);
+process.exit(exitCode);
