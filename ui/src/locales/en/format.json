@@ -12,5 +12,11 @@
     "rate": "{{value}} tok/s",
     "total": "{{value}} tok",
     "cached": "{{value}}% cached"
+  },
+  "context": {
+    "used": "Context used {{value}}%",
+    "system": "System prompt",
+    "tools": "Tool definitions",
+    "conversation": "Conversation"
   }
 }

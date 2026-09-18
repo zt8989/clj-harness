@@ -48,7 +48,7 @@
 
 ;; ------------------------------------------------------------------- the runs
 
-(defn- run-segments
+(defn run-segments
   "RECORDS split into runs, in order:
   [{:input <record> :submitted [msg…] :returned [msg…]}].
 
@@ -59,7 +59,13 @@
 
   A `message` line before any `input` belongs to no run and is dropped: there is no turn
   it could be shown under, and inventing one would put a message on screen that no model
-  call ever had in front of it."
+  call ever had in front of it.
+
+  PUBLIC, like `stats/incomplete?` and `stats/user-ids`, because a SECOND reader needs
+  exactly this split: harness.edge.context counts the messages of the run the last
+  reporting call belongs to (the system message against everything else), and 'which
+  records are one run, and which side of it is a message on' is one rule -- a second
+  implementation of it would be a second chance to disagree about where a run starts."
   [records]
   (loop [[record & more] records
          current         nil

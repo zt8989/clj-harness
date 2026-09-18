@@ -3,14 +3,18 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`ada4bc5`（2026-09-17）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`ada4bc5` 是把 `trajectory-injection-once` 合进来的那一提交。本特征给本目录添的是
+**快照：`c7faa43`（2026-09-18）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`c7faa43` 是 `context-usage` 收口的那一提交：`edge.context` 一行进模块地图、`GET .../stats` 的载荷
+多一节、composer 里 model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文占用」那一节。
+上一版快照是 `ada4bc5`。）
+
+**`ada4bc5`（2026-09-17）** 是把 `trajectory-injection-once` 合进来的那一提交。它给本目录添的是
 [edge](architecture/edge.md) 里 `message` 行与入站那一节的两句——**submitted 侧 = 第一次模型调用真正
 收到的那一份**（会话的注入在内），注入折在 `inbound` 之后、记 `message` 之前——以及
 [client](architecture/client.md) 轨迹一节的一条「注入物整场只画一次」。同一版里还有 `57601a4`
 （UI 六处调整）改的 [client](architecture/client.md)：正文两侧留白、流式思考、整轮折叠、贴底、
 可搜索选择器。`.scratch/trajectory-injection-once/`（本特征的 spec 与证据）随之落下，
-不改变本目录的其他陈述。）
+不改变本目录的其他陈述。
 
 ## 与另外两处文档的分工
 
@@ -88,7 +92,8 @@
 | `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
-| `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场 |
+| `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场。**端点那条载荷里还带着 `edge.context` 那一节**（一次读盘、两个折） |
+| `edge.context` | 记录的第**四**个读侧（`message` 那一半的第二个读者）：最近一次模型调用把上下文窗口填到了多少——分子是那次调用报的 `prompt_tokens`，分母是**那一次调用自己行上**的 `:context-window`——以及填进去的三样各占多少（按记录的字符数**摊**出来的估算，因此三块恰好加起来等于分子）。`records->context` 是对记录的纯函数，**没有自己的端点**：那一节并进 `GET /api/threads/<stem>/stats` 的载荷，composer 里 model 左边那颗圈与它的面板读它。见 [edge](architecture/edge.md) |
 | `edge.trajectory` | **`message` 那一半**的记录读侧：按轮折回「模型每一轮到底看到了什么」——system 消息的字节、拼在它旁边的上下文、每条用户消息、每次工具调用的参数与结果、每次调用发出去的工具表。`GET /api/threads/<stem>/trajectory` 是它唯一的出口；轮的判据与 `edge.stats` **共用一份实现** |
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、

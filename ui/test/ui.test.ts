@@ -25,6 +25,7 @@ import { startHarness } from "./support/harness";
 import { approvalSuite } from "./suites/approval";
 import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
+import { contextSuite } from "./suites/context";
 import { elicitationSuite } from "./suites/elicitation";
 import { framesSuite } from "./suites/frames";
 import { i18nSuite } from "./suites/i18n";
@@ -38,7 +39,7 @@ import { sidebarSuite } from "./suites/sidebar";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -84,7 +85,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// at, and the parked word beside the id rather than inside a line that truncates. This
 /// is the suite that exists because the id line went blank in the i18n merge and a green
 /// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
-const EXPECTED_CASES = 39;
+const EXPECTED_CASES = 44;
 
 let total = 0;
 for (const suite of SUITES) {

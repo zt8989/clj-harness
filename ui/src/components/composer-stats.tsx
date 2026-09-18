@@ -28,57 +28,32 @@
 //
 // ------------------------------------------------------- when it asks, and when not
 //
-// ON MOUNT, WHEN THE SESSION CHANGES, AND WHEN A MODEL CALL ENDS. A call's numbers
-// only exist once its `model/end` line is written, so that is the natural boundary
-// to ask at -- and the client can see it without any new protocol: one ReAct round
-// is one assistant message on this side, so a rise in that count is a call that just
-// finished. The run's own end is the same trigger one last time (a run that ends on
-// an error has no assistant message to count).
-//
-// THERE IS NO POLLING, deliberately. A long call streams for minutes; the strip
-// stands still for the length of it and then moves. That is honest rather than
-// laggy: the number it would show mid-call does not exist yet, and inventing one
-// would be the same mistake as estimating the tokens.
-import { type FC, useEffect, useState } from "react";
-import { useAuiState } from "@assistant-ui/react";
+// IT DOES NOT ASK FOR THEM ITSELF any more: the fetch and its triggers live in ONE
+// place for the whole composer (components/composer-numbers.tsx), so the strip and the
+// ring beside the model cannot end up showing two moments of the same log. Read that
+// file for when it asks and for why there is no polling.
+import { type FC } from "react";
 import { DatabaseIcon, TimerIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { type StatsPayload, statsCells } from "@/lib/format";
-import { statsFor } from "@/lib/stats";
+import { useComposerNumbers } from "@/components/composer-numbers";
+import { statsCells } from "@/lib/format";
 
 /// One `·` between two cells of a group. Its own component so the gap on either
 /// side is stated once: the separator belongs to the row, not to the cell that
 /// happens to follow it.
 const Sep: FC = () => <span aria-hidden="true">·</span>;
 
-export const ComposerStats: FC<{ threadId: string }> = ({ threadId }) => {
+export const ComposerStats: FC = () => {
   /// The strip's five cells are phrases, so their words come from the `format` face
   /// even though the numbers are the server's: `statsCells` is handed a translator
   /// rather than reaching for one, which is what keeps it a pure function a suite can
   /// call (see `lib/format.ts`).
   const { t } = useTranslation("format");
-  /// A COUNT of assistant messages, not the messages: `useAuiState` compares what
-  /// the selector returns, and a selector handing back a fresh array would re-render
-  /// on every token.
-  const assistantCount = useAuiState(
-    (s) => s.thread.messages.filter((m) => m.role === "assistant").length,
-  );
-  const isRunning = useAuiState((s) => s.thread.isRunning);
-  const [stats, setStats] = useState<StatsPayload | null>(null);
+  /// The numbers `ComposerFrame` fetched, not this component's own.
+  const { payload } = useComposerNumbers();
 
-  useEffect(() => {
-    let live = true;
-    void statsFor(threadId).then((next) => {
-      // A late answer from a previous session must not land on this one.
-      if (live) setStats(next);
-    });
-    return () => {
-      live = false;
-    };
-  }, [threadId, assistantCount, isRunning]);
-
-  const cells = statsCells(stats, t);
+  const cells = statsCells(payload, t);
   if (cells === null) return null;
 
   return (

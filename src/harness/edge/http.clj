@@ -80,6 +80,7 @@
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.context :as context]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
@@ -1387,12 +1388,21 @@
 
   THE ANSWER IS THE WHOLE ANSWER: what the fold could not establish is ABSENT, not
   zero (see harness.edge.stats/records->stats). The client renders the gaps by
-  leaving them out; it does not fill them in."
+  leaving them out; it does not fill them in.
+
+  AND IT CARRIES THE CONTEXT SECTION (harness.edge.context): how full the model's
+  window is right now and what filled it. One question per fold, one read of the
+  file -- the records are parsed once and both readers fold them -- so the strip
+  under the composer and the ring beside the model cannot report two different
+  moments of the same log. The composer's own contract (mount / session change /
+  assistant message added / run over) is what asks, and asking once asks both."
   [stem]
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
         folded  (when (nil? (:error located))
-                  (try {:ok (stats/log-stats (:ok located))}
+                  (try (let [records (stats/read-records (:ok located))]
+                         {:ok (assoc (stats/records->stats records)
+                                     :context (context/records->context records))})
                        (catch Throwable t {:error (ex-message t)})))]
     (cond
       (some? (:error located))

@@ -74,7 +74,14 @@
     ;; (the seeded config, http_test's pins, providers_test's fixtures all carry
     ;; both). Without them a `model/start` audit line would name nobody, and the
     ;; offline suite would be folding a record shape production never writes.
-    :base-url "http://offline.invalid/v1" :model "scripted"}))
+    :base-url "http://offline.invalid/v1" :model "scripted"
+    ;; AND IT DECLARES A WINDOW, for the same reason and one more: the composer's
+    ;; context ring divides a call's `usage.prompt_tokens` by the window on that
+    ;; call's own `model/start` line, and a pin is the one provider that records no
+    ;; `provider/init` -- so without a number here, every suite and every
+    ;; `--scripted` walkthrough would have a numerator and nothing to divide it by.
+    ;; THE NUMBER IS THE DOUBLE'S, not a vendor's: this provider is a script.
+    :context-window 128000}))
 
 (def ^:private thinking-mode-refusal
   "The real vendor's 400, byte for byte -- what a DeepSeek-compatible gateway answers

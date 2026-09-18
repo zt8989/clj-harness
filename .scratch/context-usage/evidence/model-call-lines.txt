@@ -1,0 +1,14 @@
+{"kind":"message","role":"system","chars":2534}
+{"kind":"message","role":"user","chars":4474}
+{"kind":"message","role":"user","chars":32}
+{"kind":"model/start","model":"scripted","context-window":128000,"tools_chars":17813}
+{"kind":"model/end","usage":{"prompt_tokens":60000,"completion_tokens":90,"total_tokens":60090}}
+{"kind":"message","role":"assistant","chars":40}
+{"kind":"message","role":"system","chars":2534}
+{"kind":"message","role":"user","chars":4474}
+{"kind":"message","role":"user","chars":32}
+{"kind":"message","role":"assistant","chars":40}
+{"kind":"message","role":"user","chars":41}
+{"kind":"model/start","model":"scripted","context-window":128000,"tools_chars":17813}
+{"kind":"model/end","usage":{"prompt_tokens":70000,"completion_tokens":80,"total_tokens":70080}}
+{"kind":"message","role":"assistant","chars":40}
