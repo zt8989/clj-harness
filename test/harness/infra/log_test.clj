@@ -13,10 +13,14 @@
             [harness.edge.http :as http]
             [harness.infra.log :as log]
             [harness.infra.logging :as logging]
-            [harness.cap.project :as project])
+            [harness.cap.project :as project]
+            [harness.test-support :as ts])
   (:import [ch.qos.logback.classic Logger LoggerContext]
+           [ch.qos.logback.core Appender]
            [ch.qos.logback.core.rolling RollingFileAppender SizeAndTimeBasedRollingPolicy]
            [java.io StringWriter]
+           [java.util.concurrent CountDownLatch]
+           [java.util.regex Pattern]
            [org.slf4j LoggerFactory]))
 
 (defn- fresh-home [name]
@@ -53,6 +57,19 @@
 
 (defn- root-logger ^Logger []
   (.getLogger ^LoggerContext (LoggerFactory/getILoggerFactory) Logger/ROOT_LOGGER_NAME))
+
+(defn- appenders
+  "Every appender currently attached to the root logger, in Logback's order."
+  []
+  (vec (iterator-seq (.iteratorForAppenders (root-logger)))))
+
+(defn- appender-names
+  "The attached appenders' NAMES. Counted by name rather than only by count,
+  because the failure being guarded against is two appenders carrying the SAME
+  name -- a root logger like that writes every line twice while still having an
+  innocent-looking iterator."
+  []
+  (mapv #(.getName ^Appender %) (appenders)))
 
 (deftest the-rotation-policy-is-by-date-and-by-size
   ;; The requirement, asserted directly. It is the reason Logback is a dependency
@@ -163,3 +180,131 @@
   (with-capture "safe" _ _
     (is (instance? Throwable (log/error! :x (ex-info "m" {}))))
     (is (nil? (log/error! :x nil {})) "a nil Throwable answers nil rather than throwing")))
+
+(deftest add-appender-stacks-and-a-second-file-appender-aborts
+  ;; THE TWO MEASUREMENTS `configure!`'s SHAPE RESTS ON. The no-hole ordering --
+  ;; attach the replacements, THEN detach the old pair -- would only be available
+  ;; if Logback held two of each at once, and it does not:
+  ;;
+  ;;   1. `Logger.addAppender` does NOT replace a same-named appender; it stacks
+  ;;      (`AppenderAttachableImpl` -> `COWArrayList.addIfAbsent`, which compares
+  ;;      by `equals`, and `AppenderBase` leaves `equals` as identity).
+  ;;   2. A second `RollingFileAppender` on the same file-name pattern ABORTS its
+  ;;      own start (logback's per-context collision map) and never writes a byte.
+  ;;      The old rolling appender therefore has to be STOPPED before the new one
+  ;;      starts, which forces detach-first and leaves the brief window in which
+  ;;      the root logger carries no appenders -- the hole `configure!`'s
+  ;;      docstring documents.
+  ;;
+  ;; Asserted so a Logback upgrade that changed either turns red here, beside the
+  ;; comment in `configure!` that assumed it.
+  (with-capture "appender-semantics" root _
+    (testing "a same-named appender stacks rather than replacing"
+      (let [extra ((ns-resolve 'harness.infra.logging 'console-appender) (StringWriter.))]
+        (try
+          (.addAppender (root-logger) extra)
+          (is (= 3 (count (appenders)))
+              "a second \"console\" stacked -- Logback does not replace by name")
+          (is (= 2 (count (filter #(= "console" %) (appender-names)))))
+          (finally
+            (.detachAppender (root-logger) extra)
+            (.stop extra)))
+        (is (= 2 (count (appenders))) "removed again by identity")))
+    (testing "a second file appender on the same pattern aborts its start"
+      (let [other (fresh-home "collision")
+            mk    (ns-resolve 'harness.infra.logging 'rolling-appender)
+            a     (mk other)
+            b     (mk other)]
+        (try
+          (is (.isStarted ^Appender a) "the first file appender for a path starts")
+          (is (not (.isStarted ^Appender b))
+              "the second on the SAME pattern aborts -- it never writes")
+          (finally
+            (.stop a)
+            (.stop b)))))))
+
+(deftest concurrent-ensure!-single-flights--two-appenders-and-no-doubled-line
+  ;; THE RACE THE MONITOR CLOSES. Every thread reads the root, decides it moved,
+  ;; and rebuilds. `ensure!` used to read the root and decide OUTSIDE any lock, so
+  ;; two threads that both read the OLD root both rebuilt, and the interleaving
+  ;; `detach/detach/add/add` left each appender installed twice -- after which
+  ;; every line is written to the console eight times, for the rest of the process.
+  ;;
+  ;; THE WINDOW GATE FORCES THAT INTERLEAVING DETERMINISTICALLY. It wraps the
+  ;; appender BUILDER, which `configure!` calls AFTER detaching every appender and
+  ;; BEFORE adding the new pair: each thread detaches, piles up at the gate, and is
+  ;; released together to add -- detach/detach/.../add/add/..., the exact order,
+  ;; witnessed rather than hoped for. Under the fix the same gate sees ONE thread;
+  ;; the rest queue on the monitor and never reach it.
+  ;;
+  ;; THE CONSOLE IS WHERE THE DUPLICATION SHOWS. The FILE cannot double even with
+  ;; the bug, because Logback refuses the second rolling appender on the same
+  ;; pattern (see the measurement test above), so the file assertion below passes
+  ;; both before and after -- it is the ticket's own wording, kept for that
+  ;; reason. The count-by-NAME assertion and the console assertion are what go red
+  ;; on the old code.
+  (let [old-root    (fresh-home "race-old")
+        new-root    (fresh-home "race-new")
+        out         (StringWriter.)
+        console-out (StringWriter.)
+        n           8
+        markers     (mapv #(str "race-marker-" % "-end") (range n))]
+    ;; The fixture's own configure! must run BEFORE the window is armed, or it
+    ;; would be the call the gate catches.
+    (binding [home/*root-override* old-root]
+      (logging/configure! {:root old-root :console out}))
+    ;; A PRIVATE BUILDER, resolved at runtime: the window has to sit between the
+    ;; detach and the add, and that is where `configure!` builds the pair.
+    (let [gate (ts/window-gate (ns-resolve 'harness.infra.logging 'console-appender)
+                               10000)]
+      (try
+        (let [start  (ts/start-gate n 8000)
+              logged (ts/start-gate n 8000)
+              done   (CountDownLatch. n)]
+          (dotimes [i n]
+            (doto (Thread. ^Runnable
+                           (fn []
+                             (try
+                               ((:arrive start))
+                               ;; `*err*` is what a reconfigure with no explicit
+                               ;; console target picks up, so binding it here is
+                               ;; what lets the console be read back -- on the same
+                               ;; writer whichever thread rebuilds.
+                               (binding [home/*root-override* new-root
+                                         *err*                 console-out]
+                                 ;; Reconfigure, then -- only once every thread
+                                 ;; has done so -- write one line of its own.
+                                 (logging/ensure!)
+                                 ((:arrive logged))
+                                 (log/info! :race {:marker (markers i)}))
+                               (catch Throwable _ nil)
+                               (finally (.countDown done)))))
+              (.setDaemon true)
+              (.start)))
+          ;; EVERY WAIT IS BOUNDED, so a premise that never comes true fails on its
+          ;; assertion instead of hanging the suite. Under the fix only one thread
+          ;; reaches the window and this times out -- and the release below still
+          ;; runs, so the case goes on to assert.
+          (ts/holds-within? #(= n ((:witness start))) 8000)
+          (ts/holds-within? #(>= ((:entered gate)) n) 2000)
+          ((:release gate))
+          (is (.await done 20 java.util.concurrent.TimeUnit/SECONDS)
+              "all eight threads finished")
+          (testing "the root logger carries the console and rolling appenders, once each"
+            (let [names (appender-names)]
+              (is (= 2 (count names))
+                  (str "exactly two appenders, got " (pr-str (frequencies names))))
+              (is (= {"console" 1 "rolling" 1} (frequencies names)))))
+          (testing "each thread's line reaches the console exactly once"
+            (let [text (str console-out)]
+              (doseq [[i m] (map-indexed vector markers)]
+                (is (= 1 (count (re-seq (re-pattern (Pattern/quote m)) text)))
+                    (str "console line " i " appears exactly once")))))
+          (testing "and each thread's line is in the file exactly once"
+            (let [text (file-text new-root)]
+              (doseq [[i m] (map-indexed vector markers)]
+                (is (= 1 (count (re-seq (re-pattern (Pattern/quote m)) text)))
+                    (str "file line " i " appears exactly once")))
+              (is (= n (count (re-seq #"race-marker-\d+-end" text)))
+                  "no line was written twice"))))
+        (finally (gate :restore))))))

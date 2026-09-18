@@ -1947,3 +1947,77 @@
                 "the name arrives as a string and lands as the keyword the file speaks")
             (is (not (str/includes? (slurp (home/config-file)) "https://inline/v1"))
                 "the description is replaced, not merged with")))))))
+
+;; ------------------------------------------------- the tier, written from two places
+;;
+;; `session-configure` (a tool thread) and the model endpoint (an http-kit thread) write
+;; the SAME session tier, so read-then-write loses one of the two changes -- and both
+;; audit lines then claim a transition that never happened.
+
+(deftest a-change-that-lands-while-another-is-in-flight-is-not-lost
+  ;; THE WINDOW IS BETWEEN READING THE TIER AND WRITING IT BACK. Two callers land in it
+  ;; in ordinary use -- the `session-configure` tool on a tool thread, the model endpoint
+  ;; on an http-kit thread -- and the one that writes second erases the other's change,
+  ;; while both audit lines go on to claim a transition that never happened.
+  ;;
+  ;; THE GATE HOLDS THE FIRST CALLER INSIDE THAT WINDOW: `:selection` is called on the way
+  ;; from the read to the write, and gating it (for the first call only, or the second
+  ;; caller would be held too) makes the second change land in the window EVERY time.
+  ;; What is under test is the order two operations run in, not how fast the machine is.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (let [tid "p-window"]
+        (try
+          (providers/swap-override! tid {:model "alpha-small"})   ; something to keep
+          (let [gate (support/window-gate #'providers/selection 30000 1)
+                held (future (providers/swap-override! tid {:reasoning-effort "low"}))]
+            (try
+              (is (support/holds-within? #(= 1 ((:entered gate))) 5000)
+                  "the first change is inside the window: read, not yet written")
+              (let [landed (providers/swap-override! tid {:model "alpha-large"})]
+                (is (= "alpha-large" (:model (:after landed)))
+                    "the second change lands while the first one is in flight"))
+              ((:release gate))
+              (is (not= ::timeout (deref held 10000 ::timeout)) "the held change finishes")
+              (let [final (providers/override-for tid)]
+                (is (= "alpha-large" (:model final)) "what landed is what is stored")
+                (is (= "low" (:reasoning-effort final))
+                    (str "and the change that was in flight was NOT lost: "
+                         (pr-str final))))
+            (finally
+              ((:release gate))
+              ((:restore gate))
+              (providers/set-override! tid nil)))))))))
+
+(deftest the-transition-it-answers-with-is-the-one-it-made
+  (with-home (cfg :alpha) reg
+    (fn []
+      (try
+        (let [first- (providers/swap-override! "p-pair" {:model "alpha-small"})
+              second- (providers/swap-override! "p-pair" {:reasoning-effort "low"})]
+          (is (= nil (:before first-)) "nothing was there before")
+          (is (= {:model "alpha-small"} (:after first-)))
+          (is (= (:after first-) (:before second-))
+              "the second call starts where the first left -- no stale read")
+          (is (= {:model "alpha-small" :reasoning-effort "low"} (:after second-))
+              "and folding a second knob keeps the first")
+          (is (= (:after second-) (providers/override-for "p-pair"))
+              "what it answers with is what is stored")
+          (is (map? (:resolved second-))
+              "and it carries what the catalog assembled, so no caller re-resolves")
+          (testing "clearing answers the transition too"
+            (is (= {:before (:after second-) :after nil :resolved nil}
+                   (providers/swap-override! "p-pair" nil)))))
+        (finally (providers/set-override! "p-pair" nil))))))
+
+(deftest a-change-that-cannot-be-served-writes-nothing
+  (with-home (cfg :alpha) reg
+    (fn []
+      (try
+        (providers/swap-override! "p-bad" {:model "alpha-small"})
+        (is (thrown? Exception
+                     (providers/swap-override! "p-bad" {:model "no-such-model"}))
+            "a model the provider does not declare is refused at the moment it is proposed")
+        (is (= {:model "alpha-small"} (providers/override-for "p-bad"))
+            "and the session keeps exactly what it had")
+        (finally (providers/set-override! "p-bad" nil))))))

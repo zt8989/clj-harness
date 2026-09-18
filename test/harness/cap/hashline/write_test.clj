@@ -9,6 +9,8 @@
             [harness.infra.db :as db]
             [harness.cap.hashline.anchors :as anchors]
             [harness.cap.hashline.store :as store]
+            [harness.cap.hashline.write :as hashline-write]
+            [harness.cap.hashline.undo :as hashline-undo]
             [harness.infra.home :as home]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
@@ -296,3 +298,96 @@
     (use-mode! :str-replace {})
     (is (not (str/includes? (desc-for tid) "RELEASES"))
         "a session with no anchors is not told about them")))
+;; --------------------------------------------------------- the lock order
+;;
+;; LOCK ORDER IS PART OF THE DATA. `read` takes the session lock first and the file's
+;; underneath it; `write` and `undo_last_replace` USED to take the file's first and
+;; reach the session lock underneath (through the read that mints anchors). Two tool
+;; calls in one message run on two threads, so one of them plus a `read` of the same
+;; file is all it takes -- and then neither finishes: no result, no run end, a spinner
+;; forever.
+;;
+;; THE CYCLE NEEDS A CALLER THAT HOLDS THE SESSION LOCK AND HAS NOT TAKEN THE FILE'S
+;; YET, and nothing can be gated inside that instant. So these cases hold the session
+;; lock themselves and freeze the call ONE STEP EARLIER -- at `store/canonical`, which
+;; either order runs before it takes anything -- then ask what the call did with the
+;; file after that. The freeze is what takes the machine's speed out of the question:
+;; what happens next is decided by the ORDER the two locks are taken in.
+
+(defn- behind-the-locks
+  "Run F -- write's or undo's `perform!` -- while the session lock is held by another
+  thread, and answer what the FILE showed once F was let go past its freeze:
+
+    :held?         the session lock really was held before F started
+    :entered?      F reached the point immediately before its first lock
+    :file-changed? the file's text was replaced while F waited
+
+  :file-changed? IS THE WHOLE QUESTION, and it is the only one of the three that is
+  decided by the lock order rather than by the clock: while another thread holds the
+  session lock, a call that takes the session lock first cannot reach the file at all,
+  and a call that takes the file's lock first has, by then, already written it.
+
+  The session lock is released and both threads are waited for on the way out, so a
+  failing case does not leave anyone parked on a lock for the rest of the suite."
+  [f]
+  (let [holding (promise)
+        release (promise)
+        holder  (future (store/with-session-lock
+                         tid
+                         (fn []
+                           (deliver holding true)
+                           (deref release 30000 false))))
+        held?   (true? (deref holding 5000 false))
+        gate    (support/window-gate #'store/canonical)
+        before  (slurp file :encoding "UTF-8")
+        call    (future (f))]
+    (try
+      (let [entered? (support/holds-within? #(= 1 ((:entered gate))) 5000)]
+        ((:release gate))                       ; let it take its first lock
+        {:held?         held?
+         :entered?      entered?
+         :file-changed? (support/holds-within?
+                         #(not= before (slurp file :encoding "UTF-8")) 2000)})
+      (finally
+        ((:release gate))
+        ((:restore gate))
+        (deliver release true)
+        (deref holder 10000 ::stuck)
+        (deref call 10000 ::stuck)))))
+
+(deftest a-write-never-holds-the-file-while-it-waits-for-the-session
+  (use-mode!)
+  (spit file "alpha\nbeta\n" :encoding "UTF-8")
+  (let [out (behind-the-locks
+             #(hashline-write/perform! tid identity
+                                       {:path (path) :content "fresh\n"}
+                                       {:mode :hashline :auto-read true}))]
+    (is (:held? out) "the session lock really was held")
+    (is (:entered? out) "and the write was frozen one step before its first lock")
+    (is (false? (:file-changed? out))
+        (str "the file was left alone while the session lock was held. A read of that"
+             " file takes the session lock first, so a write that takes the file's"
+             " lock and THEN waits for the session has already overwritten the file"
+             " by the time it waits -- and with the two orders meeting, the run never"
+             " ends."))
+    (is (= "fresh\n" (slurp file :encoding "UTF-8"))
+        "the write lands once the session lock is released")))
+
+(deftest an-undo-never-holds-the-file-while-it-waits-for-the-session
+  (use-mode!)
+  (spit file "one\ntwo\nthree\n" :encoding "UTF-8")
+  (let [[_ b _] (read!)]
+    (call "replace" {:remove_from b :replacement_lines ["TWO"]})
+    (let [edited (slurp file :encoding "UTF-8")
+          out    (behind-the-locks
+                  #(hashline-undo/perform! tid identity
+                                           {:path (path)}
+                                           {:mode :hashline :auto-read true}))]
+      (is (:held? out) "the session lock really was held")
+      (is (:entered? out) "and the undo was frozen one step before its first lock")
+      (is (false? (:file-changed? out))
+          (str "the file was left alone while the session lock was held -- the same"
+               " cycle as the write, and the undo is worse: it would have put the old"
+               " text back before it waited"))
+      (is (not= edited (slurp file :encoding "UTF-8"))
+          "the undo lands once the session lock is released"))))

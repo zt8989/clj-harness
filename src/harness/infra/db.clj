@@ -57,7 +57,7 @@
             [clojure.string :as str]
             [harness.infra.home :as home])
   (:import (java.io File IOException)
-           (java.nio.file CopyOption Files StandardCopyOption)
+           (java.nio.file CopyOption Files NoSuchFileException StandardCopyOption)
            (java.sql Connection SQLException)
            (org.sqlite SQLiteConfig SQLiteConfig$TransactionMode SQLiteErrorCode
                        SQLiteException)))
@@ -119,6 +119,51 @@
     (* (let [p (be16 b 16)] (if (= p 1) 65536 p))
        (be32 b 28))))
 
+(defn- journal-beside
+  "The name of the journal SQLite keeps beside F while it is being written, or nil
+  when there is none. Both names, because this store wears both: `-wal` once WAL is
+  on (which is every store that has finished being created), `-journal` while it is
+  still in the default rollback mode (which is how a store is born -- see the
+  namespace docstring on the ordering that matters)."
+  [^File f]
+  (some (fn [suffix]
+          (let [side (io/file (str (.getPath f) suffix))]
+            (when (.exists side) suffix)))
+        ["-wal" "-journal"]))
+
+(defn- short-of-its-header?
+  "The length of F when it is genuinely short of the size its own header declares,
+  or nil when no such claim can be made from outside.
+
+  A FILE SHORTER THAN ITS OWN HEADER IS NOT BY ITSELF A WRECK. SQLite grows a
+  database by writing page 1 first -- the header, carrying the new, larger page
+  count -- and the pages it counts after it, so while a checkpoint is in flight the
+  file is LEGITIMATELY shorter than its own header says. Measured on this store:
+  writing while checkpointing a 6 MB WAL, 127843 readings in twelve seconds said
+  'the file is shorter than its header declares'. Judging one of those moments is
+  what moved a healthy 18 MB store aside three times on 2026-09-18.
+
+  So the claim is only made when the shortness cannot be growth: the same length
+  read twice, with no journal beside the file in between. The journal is what makes
+  the difference -- SQLite removes it once a checkpoint has finished, and a finished
+  checkpoint is a file whose length has caught up with its header. The length is
+  read FIRST and the journal looked for SECOND, deliberately: a journal that appears
+  in between means the file is being written right now, and a file being written is
+  never judged.
+
+  What this does not cover: a journal removed between the two readings by something
+  other than a finished checkpoint (an outside `rm`, a journal-mode change). That
+  residue is not decided here either -- opening the store still gets the last word,
+  and only SQLite's own verdict moves a file (see `damage?`).
+
+  The caller prints the number this returns, which is why it returns one: the reason
+  a store is called a wreck must quote the size it was judged by, not a fresh look."
+  [^File f ^long first-reading ^long declared]
+  (let [journal (journal-beside f)
+        again   (.length f)]
+    (when (and (nil? journal) (= first-reading again) (< again declared))
+      again)))
+
 (defn- inspect
   "What is at F, judged from its bytes alone:
 
@@ -129,8 +174,11 @@
     {:state :foreign}                   a readable SQLite database belonging
                                         to something else
     {:state :unidentifiable}            a SQLite file too short to name an owner
-    {:state :damaged}                   the wreck of a store, unusable as it
-                                        stands
+    {:state :damaged}                   a store whose own bytes say it is shorter
+                                        than it declares -- an OPINION, because a
+                                        file being written to looks exactly like
+                                        this; the healing path opens it and lets
+                                        SQLite decide
     {:state :not-sqlite}                no SQLite header at all
 
   The order of the questions is the order of their answers' authority. The magic
@@ -144,10 +192,15 @@
   application id to read, so a file that short is :unidentifiable rather than
   guessed at, however plausibly it sits at the store's own path. That is what
   makes 'this store never moves aside a file whose owner it cannot establish' a
-  rule the code actually keeps, rather than one it keeps most of the time."
+  rule the code actually keeps, rather than one it keeps most of the time.
+
+  The truncation check is the one judgement here that can be wrong about a HEALTHY
+  file, because a file mid-checkpoint really is shorter than its own header; it is
+  made only where that explanation is ruled out. See `short-of-its-header?`."
   [^File f]
-  (let [b (head f)
-        n (if (nil? b) 0 (alength b))]
+  (let [b   (head f)
+        n   (if (nil? b) 0 (alength b))
+        len (.length f)]
     (cond
       (zero? n) {:state :fresh}
 
@@ -160,13 +213,13 @@
       (not= (be32 b 68) magic) {:state :foreign
                                 :app-id (be32 b 68)
                                 :user-version (be32 b 60)
-                                :bytes (.length f)}
+                                :bytes len}
 
       :else (if-some [declared (declared-bytes b)]
-              (if (< (.length f) declared)
+              (if-some [short (short-of-its-header? f len declared)]
                 {:state :damaged
                  :why (str "its header declares " declared " bytes but only "
-                           (.length f) " are there")}
+                           short " are there")}
                 {:state :ours :user-version (be32 b 60)})
               {:state :ours :user-version (be32 b 60)}))))
 
@@ -174,6 +227,19 @@
 
 (defonce ^:private recovery-log
   (atom []))
+
+(defonce ^:private store-open-lock
+  ;; ONE THREAD OPENS OR BUILDS THE STORE AT A TIME. Every connection runs this, so
+  ;; 'the store is not usable yet' and 'the store is not there yet' are answers several
+  ;; threads get at the same instant -- and a thread that looks at or opens a file while
+  ;; another is building or moving it does not fail with DAMAGE, which has a repair. It
+  ;; fails with READONLY_DBMOVED, or an I/O error from a stat on a path that is gone, or
+  ;; -- worst of the three -- it reads a HALF-BUILT store as :ours (the identity is
+  ;; written first, on purpose, see the namespace docstring), gets CORRUPT from the
+  ;; engine, and moves aside the store somebody else was in the middle of creating.
+  ;; Nothing can repair any of those, so the whole open runs under this monitor. See
+  ;; ensure-connection! for why that is cheaper than it sounds.
+  (Object.))
 
 (defn recoveries
   "Every damaged store this process has moved aside, oldest first, each as
@@ -193,29 +259,53 @@
   empty store is a file whose pages may still match, and SQLite would replay them
   into the replacement. If any of the three cannot be moved, this throws rather
   than proceeding -- overwriting a file we failed to preserve is the one outcome
-  worse than refusing to start."
+  worse than refusing to start.
+
+  AND SOMEBODY ELSE MAY HAVE GOT THERE FIRST. Every connection runs the judgement, so
+  several threads reach this call at once and only one of them finds the files still
+  there. A source that is already gone is that thread's ANSWER, not a failure -- it
+  means the store has been moved aside, which is the whole of what this call wanted.
+  What it must not do is record one recovery twice, so only the call that moved the
+  database ITSELF writes the fact down; a call that found nothing to move says so on
+  stderr and adds nothing."
   [^File f why]
-  (let [stamp (str (System/currentTimeMillis))
-        moves (atom [])]
+  (let [stamp    (str (System/currentTimeMillis))
+        moves    (atom [])
+        mine?    (atom false)]
     (doseq [suffix ["" "-wal" "-shm"]]
       (let [src (io/file (str (.getPath f) suffix))]
         (when (.exists src)
           (let [dst  (io/file (str (.getPath f) suffix ".corrupt-" stamp))
-                opts (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])]
-            (try
-              (Files/move (.toPath src) (.toPath dst) opts)
-              (catch IOException e
-                (throw (ex-info (str "the store at " (.getAbsolutePath f) " is damaged ("
-                                     why ") but could not be moved aside ("
-                                     (ex-message e) "); nothing was written over it")
-                                {:path (.getAbsolutePath f)
-                                 :reason :quarantine-failed}))))
-            (swap! moves conj (.getAbsolutePath dst))))))
+                opts (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])
+                gone (try
+                       (Files/move (.toPath src) (.toPath dst) opts)
+                       false
+                       (catch NoSuchFileException _
+                         ;; Between the check above and this move another thread took
+                         ;; it. Nothing to preserve, nothing to report, no failure.
+                         true)
+                       (catch IOException e
+                         (throw (ex-info (str "the store at " (.getAbsolutePath f)
+                                              " is damaged (" why
+                                              ") but could not be moved aside ("
+                                              (ex-message e) "); nothing was written over it")
+                                         {:path (.getAbsolutePath f)
+                                          :reason :quarantine-failed}))))]
+            (when-not gone
+              (swap! moves conj (.getAbsolutePath dst))
+              (when (= "" suffix) (reset! mine? true)))))))
     (let [fact {:path (.getAbsolutePath f) :why why :moved (vec @moves)}]
-      (swap! recovery-log conj fact)
-      (binding [*out* *err*]
-        (println (str "harness.db: the store was damaged (" why ") and moved aside"
-                      (when (seq @moves) (str ": " (str/join ", " @moves))))))
+      (if @mine?
+        (do
+          (swap! recovery-log conj fact)
+          (binding [*out* *err*]
+            (println (str "harness.db: the store was damaged (" why ") and moved aside"
+                          (when (seq @moves) (str ": " (str/join ", " @moves)))))))
+        (binding [*out* *err*]
+          (println (str "harness.db: the damaged store at " (.getAbsolutePath f)
+                        " had already been moved aside by another thread"
+                        (when (seq @moves)
+                          (str " (this call carried " (str/join ", " @moves) ")"))))))
       fact)))
 
 ;; ------------------------------------------------------------------ connections
@@ -826,40 +916,89 @@
            {:path (.getAbsolutePath f) :reason :unidentifiable :bytes bytes}))
 
 (defn- wrecked
-  "The refusal for the wreck of a store, for the read-only path that must not
-  repair it. The healing path (`ensure-connection!`) does not come through here:
-  it quarantines and rebuilds. This is what a diagnostic is told."
+  "The refusal for a store whose BYTES read as unusable, for the read-only path that
+  cannot open it to ask.
+
+  WORDED AS A READING, NOT A VERDICT, and that distinction is the whole of it: the
+  healing path does not act on this (only SQLite's own answer moves a file), so a
+  diagnostic that announced 'the store is damaged' could be describing a store that
+  opens perfectly well -- a file being written to is legitimately shorter than its own
+  header. What a diagnostic can honestly report is what the bytes said."
   [^File f {:keys [why]}]
-  (ex-info (str (.getAbsolutePath f) " is damaged: " why
-                ". Nothing was written; opening the store rebuilds it, moving the "
-                "damaged file aside under a .corrupt- name")
+  (ex-info (str (.getAbsolutePath f) " does not read as a usable store: " why
+                ". That answer comes from the file's bytes alone, because a read-only"
+                " question does not open the file -- and opening it is what decides: a"
+                " store in this state may open perfectly well, since a file being"
+                " written to is shorter than its own header while a checkpoint runs."
+                " Nothing was written or moved.")
            {:path (.getAbsolutePath f) :reason :damaged :why why}))
 
 (defn- ensure-connection!
   "The store, open, at STEPS' latest version. Creates it when nothing is there,
-  rebuilds it when what is there is ours and ruined, and refuses -- by name, with
-  no write -- when what is there belongs to someone else or cannot be identified."
+  rebuilds it when SQLITE says what is there is unusable, and refuses -- by name, with
+  no write -- when what is there belongs to someone else or cannot be identified.
+
+  ONLY THE ENGINE'S VERDICT MOVES A FILE. `inspect` reads bytes, and a byte reading is
+  a snapshot of a file that another thread may be in the middle of writing -- so it is
+  a hint about what to expect, never a reason to move somebody's store aside. The move
+  happens one step below: `connect-and-migrate!` opens the file, and only SQLite saying
+  CORRUPT or NOTADB (`damage?`) turns into a quarantine and a rebuild.
+
+  A FILE THAT ONLY LOOKS CUT SHORT IS THEREFORE OPENED rather than thrown away, and
+  that is the point: opening it is how the question 'is this a wreck or a snapshot?' is
+  actually answered. What was judged damaged is not treated as NEW either -- nothing of
+  ours is written into a file we have not managed to read yet (see `created?` below).
+
+  THE JUDGEMENT AND THE OPEN RUN UNDER ONE MONITOR (`store-open-lock`). The alternative
+  is not a slower answer but a WRONG one, and there are three ways it goes wrong: a
+  second thread that judged the same wreck and then opened the file after the first had
+  moved it fails with READONLY_DBMOVED; the same window gives an I/O error from a stat
+  on a path that is gone; and worst, a store that is being BUILT reads as ours from
+  outside (the identity is written first), so a reader that skipped the lock opens a
+  half-built file, hears CORRUPT from the engine, and moves aside the store somebody
+  else was creating -- while that somebody's own connection dies of READONLY_DBMOVED.
+  None of the three is damage, so none of them has a repair.
+
+  That is affordable because only the OPEN is serialized: `with-connection` opens a
+  fresh JDBC connection per call anyway, and the queries that follow run unlocked."
   [steps]
-  (let [f (home/db-file)]
+  (let [f     (home/db-file)
+        judge (fn []
+                (let [seen (inspect f)]
+                  (case (:state seen)
+                    :not-sqlite     (throw (not-a-store f seen))
+                    :foreign        (throw (someone-elses f seen))
+                    :unidentifiable (throw (nameless f seen))
+                    seen)))
+        open! (fn [^long attempt seen]
+                ;; CREATED MEANS 'there was nothing here and this process is about to
+                ;; build it'. A :damaged file is NOT created: it has an owner and a
+                ;; schema already, and the identity a creation writes must not go into
+                ;; a file whose usability is the open question.
+                (let [outcome (connect-and-migrate! f steps (= :fresh (:state seen)))]
+                  (if-let [why (:damage outcome)]
+                    (do
+                      (quarantine! f why)
+                      (when (pos? attempt)
+                        (throw (ex-info (str "the store at " (.getAbsolutePath f)
+                                             " is damaged and could not be rebuilt: " why)
+                                        {:path (.getAbsolutePath f)
+                                         :reason :rebuild-failed})))
+                      ::retry)
+                    outcome)))]
     (loop [attempt 0]
-      (let [seen (inspect f)]
-        (case (:state seen)
-          :not-sqlite     (throw (not-a-store f seen))
-          :foreign        (throw (someone-elses f seen))
-          :unidentifiable (throw (nameless f seen))
-          (let [created? (not= :ours (:state seen))]
-            (when (= :damaged (:state seen))
-              (quarantine! f (:why seen)))
-            (let [outcome (connect-and-migrate! f steps created?)]
-              (if-let [why (:damage outcome)]
-                (do
-                  (quarantine! f why)
-                  (when (pos? attempt)
-                    (throw (ex-info (str "the store at " (.getAbsolutePath f)
-                                         " is damaged and could not be rebuilt: " why)
-                                    {:path (.getAbsolutePath f) :reason :rebuild-failed})))
-                  (recur (inc attempt)))
-                outcome))))))))
+      ;; THE JUDGEMENT RUNS INSIDE THE LOCK TOO, and that is not belt-and-braces: a
+      ;; store being built READS AS :ours from outside, because the identity is written
+      ;; before anything else. A reader that judged outside the lock would open that
+      ;; half-built file and hand the engine a wreck to report.
+      ;;
+      ;; THE COST IS ONE UNCONTENDED MONITOR per connection, against a JDBC connection
+      ;; that `with-connection` opens per call regardless -- and only the OPEN is
+      ;; serialized, never the queries that follow it.
+      (let [answer (locking store-open-lock (open! attempt (judge)))]
+        (if (= ::retry answer)
+          (recur (inc attempt))
+          answer)))))
 
 ;; ------------------------------------------------------------------- the surface
 

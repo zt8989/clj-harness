@@ -109,17 +109,20 @@
   [thread-id resolve-path args config]
   (let [path (store/canonical (resolve-path (:path args)))
         content (:content args)]
-    (store/with-path-lock
-     path
+    (store/with-session-lock
+     thread-id
      (fn []
-       (check-no-echo! thread-id path content)
-       (let [f (java.io.File. ^String path)]
-         (when-let [p (.getParentFile f)] (.mkdirs p))
-         (spit f content :encoding "UTF-8"))
-       (store/forget-file! thread-id path)
-       (store/clear-undo! path)
-       (str "wrote " (count content) " chars to " path
-            (if (:auto-read config)
-              (auto-read-note thread-id path)
-              (str "\n\nThe file's anchors have been released: read it to get the"
-                   " anchors for what is there now.")))))))
+       (store/with-path-lock
+        path
+        (fn []
+          (check-no-echo! thread-id path content)
+          (let [f (java.io.File. ^String path)]
+            (when-let [p (.getParentFile f)] (.mkdirs p))
+            (spit f content :encoding "UTF-8"))
+          (store/forget-file! thread-id path)
+          (store/clear-undo! path)
+          (str "wrote " (count content) " chars to " path
+               (if (:auto-read config)
+                 (auto-read-note thread-id path)
+                 (str "\n\nThe file's anchors have been released: read it to get the"
+                      " anchors for what is there now.")))))))))
