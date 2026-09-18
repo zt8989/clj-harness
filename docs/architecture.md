@@ -3,10 +3,10 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`c7faa43`（2026-09-18）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`c7faa43` 是 `context-usage` 收口的那一提交：`edge.context` 一行进模块地图、`GET .../stats` 的载荷
-多一节、composer 里 model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文占用」那一节。
-上一版快照是 `ada4bc5`。）
+**快照：`b7fe690`（2026-09-18）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`b7fe690` 是 `context-usage` 合进 main 的那一提交（`c7faa43` + 修回退的 `9767c8e`）：`edge.context`
+一行进模块地图、`GET .../stats` 的载荷多一节 `context`、composer 里 model 左边那颗圈，以及
+[client](architecture/client.md) 里「上下文占用」那一节。上一版快照是 `ada4bc5`。）
 
 **`ada4bc5`（2026-09-17）** 是把 `trajectory-injection-once` 合进来的那一提交。它给本目录添的是
 [edge](architecture/edge.md) 里 `message` 行与入站那一节的两句——**submitted 侧 = 第一次模型调用真正

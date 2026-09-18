@@ -18,6 +18,12 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 
 ## 测试
 
+**铁律：测试期间 `~/.clj-harness` 只读——一个字都不许写进去。** 跑用例、起 dev、走查，家一律自己造
+（`--scripted` 的那对临时家、`with-temp-env`），不指着真应用连、不拿真家目录起第二个 harness。2026-09-18 的
+一次走查里两个进程抢同一个 `harness.db`：应用侧拿到 `SQLITE_BUSY`，迁移把库判成「受损」并隔离重建，
+**开发者自己那份 18M 的库当场被清空**（`harness.db.emptied-by-quarantine-*` 与 `.corrupt-*` 就是那次留下的）。
+库只有一把锁：读没事，写就是把正在跑的应用一起带走。
+
 **用脚本跑，不要自己拼命令。**
 
 ```bash

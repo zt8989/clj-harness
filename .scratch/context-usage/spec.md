@@ -129,12 +129,44 @@
 
 ### 报数
 
-- 后端：`node scripts/test.mjs --backend` → `Ran 871 tests containing 11319 assertions. 0 failures, 0 errors.`，
+- 后端（分支上的最后一次，合并前）：`node scripts/test.mjs --backend` → `Ran 871 tests containing 11321 assertions. 0 failures, 0 errors.`，
   退出码 0；`developer home store before this run: present (19050496 bytes, left alone)`，
   **没有 ISOLATION FAILURE**。（上一个可用基线是本次落地中途的 860 / 11269；`main` 上的对照见提交说明。）
 - 前端：`node scripts/test.mjs --ui` → `Test Files 1 passed (1)` / `Tests 44 passed (44)`
   （`EXPECTED_CASES` 39 → 44，新增 5 条在 `test/suites/context.ts`）。
 - `node scripts/test.mjs`（三条腿一起）→ `test.mjs: ok`，退出码 0。
+
+### 合并进 main 之后的一条修复（`9767c8e`，同一天）
+
+牛总在真机上问「5173 上为什么没有那颗圈」，顺着查出了读侧的一个真 bug——**票 02 那条「老日志回退」
+从来没给出过任何值**：
+
+1. `timeline-window` 的过滤器写成 `#({"provider/init" "provider/changed"} (:kind %))`。`#(` 是匿名函数
+   的读宏，里面的花括号因此是 **map 字面量**而不是集合：拿它当函数调用，只有 `provider/init` 是它的键，
+   `provider/changed` 永远匹配不上（它返回的那个真值还是 map 的**值**，所以 init 那一半看着像是好的）。
+2. 两条 provider 行的形状本来就不同：`provider/changed` 把解析结果嵌在 `:resolved` 下，
+   `provider/init` 的**载荷就是**那份结果（`harness.edge.http/provider-line` 把 wire map 平铺在顶层，
+   `http_test` 里钉着这个形状）。原来只读嵌套那一处，对 init 行一律答 nil。
+
+两条叠起来，任何 `model/start` 还没有 `:context-window` 的会话都会得到「这个 model 没声明窗口」——
+而那正是这条回退存在的理由。改法：读法提成一个 `window-of`（docstring 写明两种形状，以及为什么读侧
+不该关心碰到的是哪一种），过滤器写成 `#(contains? #{...} (:kind %))`；`context_test` 里两个手搓夹具
+换成真形状并各加一条断言（init 平铺 / changed 嵌套），定向跑 11 用例 / 45 断言全过。
+
+**真机上的那条「没有圈」与它无关**：牛总那份 `~/.clj-harness/config.edn` 里 `:kongming` 的
+`deepseek-v4.1-flash-expires-on-0910` 只声明了 `:input`/`:output`，没有 `:context-window`——
+分母缺席，圈按「没数就不画」不渲染；分子是有的（那条会话最后一行 `model/end` 报 `prompt_tokens 364010`）。
+这是配置的事：给那个 model 条目补上它真正服务的窗口，下一次调用成行圈就有。
+
+### 合并（`b7fe690`）
+
+`context-usage` 合进 `main`（`--no-ff`）。合并时 main 已经往前走了四个提交（`immutable-data` 十一张票、
+`job-output` 三张票、`dev.mjs --tmux`），五个文件两边都动过（`CONTEXT.md`、`README.md`、
+`docs/architecture.md`、`src/harness/edge/http.clj`、`test/harness/test_runner.clj`）——都自动合上了，
+没有冲突。**合并后的树上重跑了一遍全量**（这才是这条分支的最终报数）：
+
+- 后端 `node scripts/test.mjs --backend` → `Ran 895 tests containing 11493 assertions. 0 failures, 0 errors.`
+- 前端 44 个用例，`npm run build` 过，`test.mjs: ok`（退出码 0）。
 
 ### 落地时**没有**做的事，如实写在这里
 
