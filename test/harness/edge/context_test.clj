@@ -160,7 +160,7 @@
                               (message 1 "system" "s")
                               ;; a session that was switched to another model: the
                               ;; timeline says 8000, the call that actually ran says 1000
-                              (record 5 "provider/init" {:resolved {:context-window 8000}})
+                              (record 5 "provider/init" {:provider "openrouter" :model "m" :context-window 8000})
                               (start 10 1000 nil)
                               (end 20 (usage 500 5))
                               finished
@@ -169,7 +169,14 @@
       (is (= 50 (:percent answer)))))
 
   (testing "a log older than that key falls back to the provider timeline"
-    (let [answer (context-of [(record 5 "provider/init" {:resolved {:context-window 2000}})
+    ;; A `provider/init` PAYLOAD *IS* THE RESOLUTION, spliced at the top level beside
+    ;; :source (harness.edge.http/provider-line, and http_test pins the same shape) --
+    ;; not nested under :resolved. A reader that only knew the nested form would answer
+    ;; 'this model declared no window' for every session that never changed provider.
+    (let [answer (context-of [(record 5 "provider/init" {:provider "kongming"
+                                                         :model "m"
+                                                         :context-window 2000
+                                                         :source "default"})
                               (input 0 (user "u1" "hi"))
                               (message 1 "system" "s")
                               (message 2 "user" "hi")
@@ -179,6 +186,24 @@
                               (message 30 "assistant" "x")])]
       (is (= 2000 (:windowTokens answer)))
       (is (= 25 (:percent answer)))))
+
+  (testing "and a provider/changed line nests the same fact under :resolved"
+    ;; The other shape, from the other writer (harness.edge.http's :resolved). Both are
+    ;; the same fact about the same moment, so both are read.
+    (let [answer (context-of [(record 5 "provider/changed" {:verdict "approved"
+                                                             :resolved {:provider "openrouter"
+                                                                        :model "m"
+                                                                        :context-window 5000}})
+                              (input 0 (user "u1" "hi"))
+                              (message 1 "system" "s")
+                              (message 2 "user" "hi")
+                              (start 10 nil nil)
+                              (end 20 (usage 500 5))
+                              finished
+                              (message 30 "assistant" "x")])]
+      (println "DEBUG changed-case answer:" (pr-str answer))
+      (is (= 5000 (:windowTokens answer)))
+      (is (= 10 (:percent answer)))))
 
   (testing "a window that moved later in the session is not the one an earlier call ran under"
     (let [answer (context-of [(input 0 (user "u1" "hi"))

@@ -91,10 +91,24 @@
           nil
           (map-indexed vector runs)))
 
+(defn- window-of
+  "The window a PROVIDER LINE declared, whichever of the two shapes it is written in.
+
+  THE TWO SHAPES ARE NOT AN ACCIDENT AND THE READER MUST NOT HAVE TO CARE WHICH IT MET.
+  A `provider/changed` line nests the resolution -- `:before` / `:after` / `:override` are
+  the change, and `:resolved` is what the catalog made of it afterwards. A `provider/init`
+  line IS the resolution: harness.edge.http/provider-line splices the wire map at the top
+  level beside `:source`. Reading only the nested one silently answers nil on every log
+  whose session never changed provider -- which is most of them, and the failure looks
+  like 'this model declares no window' rather than like a bug."
+  [record]
+  (let [payload (:payload record)]
+    (or (get-in payload [:resolved :context-window])
+        (:context-window payload))))
+
 (defn- timeline-window
   "The window the provider timeline said was in force at or before RECORD: the last
-  `provider/init` / `provider/changed` before it, whose `:resolved` the edge wrote
-  down at the time.
+  `provider/init` / `provider/changed` before it, as the edge wrote it down at the time.
 
   THE FALLBACK FOR LOGS WRITTEN BEFORE `model/start` CARRIED THE WINDOW. It is
   deliberately not a fallback to the catalog: that would answer with today's number
@@ -103,12 +117,12 @@
   from the call's own line, which is why that is the primary source."
   [records end-record]
   (->> records
-       (filter #({"provider/init" "provider/changed"} (:kind %)))
+       (filter #(contains? #{"provider/init" "provider/changed"} (:kind %)))
        ;; By the clock, not by position: the lines a session's provider timeline is
        ;; made of land outside runs too, and a log's :ts only ever goes forwards.
        (filter #(<= (:ts %) (:ts end-record)))
        last
-       (#(get-in % [:payload :resolved :context-window]))))
+       window-of))
 
 ;; -------------------------------------------------------------------- the split
 
