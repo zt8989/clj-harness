@@ -1,6 +1,7 @@
 (ns harness.edge.http
-  "The AG-UI edge. One POST endpoint, SSE out, CORS so a browser app on :5173 can call
-  it directly (there is no proxy in front of us). Alongside it, a small management
+  "The AG-UI edge. One POST endpoint, SSE out, CORS so a page served from THIS
+  MACHINE can call it directly whatever port it is on (there is no proxy in front
+  of us). Alongside it, a small management
   edge of plain JSON endpoints -- /api/project, the session's project-directory
   binding, plus /api/project/pick, the OS folder dialog that feeds it -- which
   answers THREE things: a directory, a cancellation, or THIS MACHINE HAS NO
@@ -91,15 +92,104 @@
             [harness.cap.tools :as cap-tools]
             [harness.kernel.tools :as tools]
             [org.httpkit.server :as hk])
-  (:import [java.nio.charset StandardCharsets]))
+  (:import [java.net URI]
+           [java.nio.charset StandardCharsets]))
 
 (def port 8080)
-(def ui-origin "http://localhost:5173")
 
-(def ^:private cors
-  {"Access-Control-Allow-Origin"  ui-origin
-   "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-   "Access-Control-Allow-Headers" "Content-Type"})
+(def ui-origin
+  "The origin this edge names when a request names no page of its own, and the
+  value `start!` uses when the caller names none.
+
+  AN ORIGIN, NOT A LIST, and not an echo of whatever `Origin` happens to arrive.
+  A page served from THIS MACHINE is answered by rule instead, whatever port it is
+  on (`localhost-page?` below) -- that is the case the dev UI is in, and the reason
+  neither side has to be told the other's port. This one covers the other case: a
+  UI served from somewhere else, whose origin nobody could guess, so it has to be
+  said (`--ui-origin`). A deployment puts the page and this server behind one
+  address, where no cross-origin request is made at all."
+  "http://localhost:5173")
+
+(defonce ^:private named-origin
+  ;; THE ONE ORIGIN ALLOWED BY NAME, as opposed to the ones allowed by rule
+  ;; (`localhost-page?`). Why a HOLDER rather than the def above it: which process
+  ;; this is is not known until it starts -- a launcher may name a UI served from
+  ;; somewhere else -- so the value has to be settable AFTER this file is loaded. A
+  ;; value read straight into a header map is baked in at load time, which is the
+  ;; trap `.scratch/tool-parity/spec.md` recorded -- an `alter-var-root` on the
+  ;; string came too late for the map already built out of it.
+  ;;
+  ;; AND IT IS AN ATOM, NOT A DYNAMIC VAR, because every request is served on an
+  ;; http-kit thread: a `binding` here would be silently ignored (AGENTS.md).
+  (atom ui-origin))
+
+(def ^:private loopback-hostnames
+  "The host names a page served from THIS MACHINE arrives under. Matched WHOLE,
+  never by suffix, so `localhost.example.com` is not one of them -- that is the
+  difference between a rule and a hole."
+  #{"localhost" "127.0.0.1" "::1"})
+
+(defn- request-origin
+  "What page is asking, as the browser declares it, or nil when nothing is -- a
+  same-origin fetch, `curl`, or the suite.
+
+  http-kit LOWER-CASES request header names, which is the one fact a reader needs
+  here and the one way this could quietly always answer nil."
+  [req]
+  (get (:headers req) "origin"))
+
+(defn- origin-host
+  "The host inside an `Origin` value, or nil when the value is not a URL this edge
+  can reason about. `null` -- what a sandboxed frame and a `file://` page send --
+  is not a URL, so it answers nil here rather than being read as a host named
+  'null'."
+  [origin]
+  (when (string? origin)
+    (try
+      (let [uri (URI. origin)]
+        (when (contains? #{"http" "https"} (some-> (.getScheme uri) str/lower-case))
+          (some-> (.getHost uri)
+                  str/lower-case
+                  (str/replace #"^\[|\]$" ""))))
+      (catch Exception _ nil))))
+
+(defn- localhost-page?
+  "Is this a page served from this machine? ANY PORT, because the dev UI moves
+  between them on its own: vite picks one, `--ui-port` moves it, and the backend
+  moves with `--port`. A rule that named a port would put the two back in step by
+  hand, which is the thing this branch exists to stop doing."
+  [origin]
+  (boolean (contains? loopback-hostnames (origin-host origin))))
+
+(defn- cors-origin
+  "WHICH ORIGIN THIS ANSWER NAMES, or nil when it names none.
+
+  THIS ASKS THE REQUEST, rather than being told once at startup: a page on this
+  machine is answered whatever port it is on, and a page elsewhere is answered
+  only if it is the origin this process was started with. An origin that is
+  neither gets NO CORS HEADER AT ALL -- the browser then refuses the answer, which
+  is what a boundary is for, and naming some third origin would just be a lie
+  about who this process talks to.
+
+  A REQUEST THAT NAMES NO PAGE is answered `named-origin`, so every answer from
+  this edge carries one shape of headers instead of two. Inert either way -- there
+  is no browser to consult them -- and it is what the suite reads."
+  [origin]
+  (cond
+    (nil? origin)            @named-origin
+    (localhost-page? origin) origin
+    (= origin @named-origin) origin
+    :else                    nil))
+
+(defn- cors-headers
+  "The three headers an answer from this edge carries, or nil when it names no
+  origin. A FUNCTION of the request's `Origin` rather than a constant map, because
+  what it says depends on who is asking -- see `cors-origin`."
+  [origin]
+  (when-some [allowed (cors-origin origin)]
+    {"Access-Control-Allow-Origin"  allowed
+     "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
+     "Access-Control-Allow-Headers" "Content-Type"}))
 
 ;; ------------------------------------------------------------------- logging
 
@@ -462,6 +552,11 @@
       whatever was never flushed. Watched a complete, correctly logged run deliver
       zero frames that way.
 
+  WHICH IS WHY THE CALLER'S ORIGIN COMES IN AS AN ARGUMENT. `handler` merges the
+  CORS headers onto the ring response, and for this one route that is not where
+  the wire's headers come from -- so the value has to reach the first frame by
+  another road, and this is it.
+
   Bodies are UTF-8 BYTES: this machine's JVM default charset is GBK, so handing
   http-kit a String would be a coin flip on any non-ASCII.
 
@@ -476,7 +571,7 @@
   when the server closed the channel itself. A TCP socket cannot be asked whether
   the peer is still listening, so 'the browser hung up' is not a fact this process
   can discover by writing."
-  [thread-id run-id ch state]
+  [thread-id run-id ch state origin]
   (let [first? (atom true)]
     (fn [frame]
       (log! thread-id run-id "event" frame)
@@ -484,7 +579,7 @@
                              StandardCharsets/UTF_8)
             head  (when @first?
                     {:status  200
-                     :headers (merge cors {"Content-Type" "text/event-stream"
+                     :headers (merge (cors-headers origin) {"Content-Type" "text/event-stream"
                                            "Cache-Control" "no-cache"})
                      :body    body})
             last? (contains? terminal (:type frame))]
@@ -604,13 +699,13 @@
       (hook/emit :instructions-loaded {:path path}))
     (preamble/messages gathered)))
 
-(defn- run-agent! [ch state input]
+(defn- run-agent! [ch state input origin]
   (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
-        emit    (runner thread-id run-id ch state)
+        emit    (runner thread-id run-id ch state origin)
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
     (async/go
@@ -833,6 +928,10 @@
   (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
         thread-id (str (:threadId input))
         run-id    (str (:runId input))
+        ;; WHAT PAGE IS ASKING, read HERE because this is the one route whose
+        ;; headers do not come from the ring response: they ride on the first
+        ;; frame. `handler` reads the same header for every other route.
+        origin    (request-origin req)
         ;; THE RUN'S LIVE STATE, and the only thing the emitter and the close
         ;; handler share. `:on-open` and `:on-close` are two callbacks on
         ;; different threads with nothing else in common, so a fact one of them
@@ -857,7 +956,7 @@
     ;; mid-tool with no terminal frame, beside a `run/start` and no `:shutdown`,
     ;; is a run still going; beside a `:shutdown`, it is a process that was stopped.
     (hk/as-channel req
-                   {:on-open  (fn [ch] (run-agent! ch state input))
+                   {:on-open  (fn [ch] (run-agent! ch state input origin))
                     :on-close (fn [_ch status]
                                 (let [{:keys [terminal last]} @state]
                                   (if terminal
@@ -884,9 +983,14 @@
 ;; Responses are UTF-8 BYTES, like every other body this server writes -- the
 ;; JVM default charset is GBK here.
 
-(defn- api-response [status body]
+(defn- api-response
+  "One JSON answer. NO CORS HEADERS HERE: which origin an answer may name is a
+  fact about the REQUEST, and this function is handed a status and a body -- it
+  has ninety-odd call sites and none of them knows what page is asking. `handler`
+  merges them at the one exit instead, which is also where a reader should look."
+  [status body]
   {:status  status
-   :headers (merge cors {"Content-Type" "application/json; charset=utf-8"})
+   :headers {"Content-Type" "application/json; charset=utf-8"}
    :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
 
 (defn- query-params
@@ -2131,7 +2235,9 @@
   [req]
   (cond
     (= :options (:request-method req))
-    {:status 204 :headers cors}
+    ;; NO HEADERS BUILT HERE: what a preflight is answered with is decided in one
+    ;; place for every route -- see `with-cors`.
+    {:status 204}
 
     ;; THE AG-UI EDGE, and the only route here that answers SSE rather than JSON.
     ;; It IS a route, not the catch-all it used to be: the run endpoint sat at the
@@ -2249,6 +2355,24 @@
           ;; know is now exactly that, and says so.
           (api-response 404 {:error (str "no such route: " (:uri req))}))))))
 
+(defn- with-cors
+  "The CORS headers this request's answer carries, merged onto whatever the route
+  built.
+
+  ONE EXIT IS THE POINT. Every JSON answer in this file is built by `api-response`
+  and comes back through `handler`, and `api-response` is handed a status and a
+  body -- it cannot see what page is asking, which is the only thing this decision
+  turns on. Merging here also means a route cannot forget to: the OPTIONS route
+  returns its 204 with no headers at all and still gets them.
+
+  THE SSE ROUTE IS NOT COVERED BY THIS, and cannot be: its status and headers ride
+  on the first frame rather than on the ring response (see `runner`, which is
+  handed the same header)."
+  [req resp]
+  (if-some [headers (cors-headers (request-origin req))]
+    (update resp :headers merge headers)
+    resp))
+
 (defn handler
   "Every request, with a net under it.
 
@@ -2262,13 +2386,16 @@
   THE ROUTES ARE NOT REWRITTEN TO THROW. Most of them already catch what they
   expect and answer a 400 with a reason; this is for what they did not expect,
   and it deliberately does not try to tell the two apart -- a route that
-  answered a 400 never reaches here."
+  answered a 400 never reaches here.
+
+  IT IS ALSO WHERE THE CORS HEADERS GO ON, on both paths -- including the one that
+  just failed, since a browser cannot read a 500 body it was not allowed to read."
   [req]
   (try
-    (dispatch req)
+    (with-cors req (dispatch req))
     (catch Throwable t
       (log/error! :request-failed t {:method (:request-method req) :uri (:uri req)})
-      (api-response 500 {:error (or (ex-message t) "the request failed")}))))
+      (with-cors req (api-response 500 {:error (or (ex-message t) "the request failed")})))))
 
 ;; ---------------------------------------------------------------------- start
 
@@ -2315,7 +2442,7 @@
   was the one error that could not be: found by starting this on a busy port and
   watching a bare BindException go past with no log file."
   [& [opts]]
-  (let [opts (merge {:port port} opts)
+  (let [opts (merge {:port port :ui-origin ui-origin} opts)
         root (logging/configure!)
         ;; THE COMPOSITION ROOT INSTALLS THE APP'S CAPABILITIES, and this is the
         ;; one place in a real process where that happens. The kernel ships an
@@ -2341,6 +2468,18 @@
                    ;; capability per assembly instead of being handed a map.
                    (cap-mcp/install!)]]
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
+    ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
+    ;; the same shape as the port below it and for the same reason: both are facts
+    ;; about the process that the process itself did not choose. Pages on this
+    ;; machine need none of it (they are answered by rule, whatever port -- see
+    ;; `localhost-page?`); this is for a launcher that serves the UI somewhere else.
+    ;; `start!` is the composition root, so such a launcher says so HERE; see
+    ;; `named-origin` for why it cannot be a value baked into a header map at load
+    ;; time.
+    ;; `or` rather than the value itself: an explicit `:ui-origin nil` is the one
+    ;; way a caller could turn the named origin off by accident, and `merge` would
+    ;; let it through.
+    (reset! named-origin (or (:ui-origin opts) ui-origin))
     ;; A HOME THAT HAS NEVER BEEN CONFIGURED GETS A config.edn HERE, at boot: a
     ;; process about to SERVE from a home is the one that should hand a person a file
     ;; to edit. The reader does not do this -- `home/config` reads a missing file as an
@@ -2384,9 +2523,23 @@
   launcher wants -- it cannot know in advance which ports are taken, and the one
   that matters here is only knowable after the bind. Whichever it is, the bound
   port is what gets printed and logged (see start!), so a script can start this
-  on `0`, read the line, and point a proxy at it. Without the option the default
-  is unchanged (`port`, 8080)."
+  on `0`, read the line, and point a browser at it. Without the option the default
+  is unchanged (`port`, 8080).
+
+  `--ui-origin URL` NAMES ONE MORE ORIGIN this edge answers. It is not needed for
+  the ordinary dev loop and has not been since the rule changed: a page served
+  from this machine is answered whatever port it is on (`localhost-page?`), so
+  `scripts/dev.mjs` can give vite any port it likes without telling this process
+  anything. What is left is the case a rule cannot cover -- a UI served from
+  ANOTHER machine, whose origin nobody could guess -- and there it has to be said.
+  It is an argument rather than an environment variable because the caller already
+  knows the value, and a fact that is passed to one child should be passed to the
+  other the same way."
   [& args]
-  (let [asked (some (fn [[k v]] (when (= k "--port") v)) (partition 2 1 args))]
-    (start! (cond-> {} asked (assoc :port (Integer/parseInt (str asked)))))
+  (let [option (fn [name] (some (fn [[k v]] (when (= k name) v)) (partition 2 1 args)))
+        asked  (option "--port")
+        origin (option "--ui-origin")]
+    (start! (cond-> {}
+              asked  (assoc :port (Integer/parseInt (str asked)))
+              origin (assoc :ui-origin (str origin))))
     @(promise)))

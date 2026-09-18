@@ -1,0 +1,60 @@
+ERROR in (a-servers-question-parks-the-run-and-the-answer-finishes-it) (FileInputStream.java:-2)
+ERROR in (each-file-becomes-one-user-message-tagged-with-its-path) (FileOutputStream.java:-2)
+ERROR in (instructions-loaded-fires-once-per-file-folded) (FileInputStream.java:-2)
+ERROR in (post-tool-use-fires-after-a-tool-ran-and-is-told-which-one) (FileInputStream.java:-2)
+ERROR in (session-start-fires-once-on-a-sessions-first-run) (FileInputStream.java:-2)
+ERROR in (stop-fires-when-a-run-ends-normally) (FileInputStream.java:-2)
+ERROR in (the-hook-is-told-what-happened-on-stdin-as-json) (FileInputStream.java:-2)
+ERROR in (the-list-outlives-the-process-that-wrote-it) (FileInputStream.java:-2)
+ERROR in (the-payload-carries-only-what-the-point-declares) (FileInputStream.java:-2)
+ERROR in (two-runs-of-one-thread-start-it-once) (FileInputStream.java:-2)
+Files.java|the-permission-bits-come-back
+dispatch_test.clj|a-command-and-a-function-reach-the-same-verdict
+dispatch_test.clj|a-matcher-that-selects-this-call-runs-it
+dispatch_test.clj|an-unmatched-matcher-does-not-stop-a-later-declaration-from-running
+dispatch_test.clj|another-nonzero-is-a-failure-and-the-point-says-what-that-means
+dispatch_test.clj|exit-two-blocks-and-stderr-is-the-reason
+dispatch_test.clj|one-audit-line-per-trigger-that-had-work-to-do
+dispatch_test.clj|the-first-block-wins-in-declaration-order
+glob_test.clj|a-pattern-finds-the-files-that-match-it-at-any-depth
+glob_test.clj|hidden-files-are-listed
+glob_test.clj|the-answer-is-ordered-by-path-and-not-by-time
+glob_test.clj|the-fence-is-on-the-tool
+glob_test.clj|the-search-can-be-narrowed-to-a-subtree
+hooks_test.clj|a-broken-file-fails-by-name-with-its-absolute-path
+hooks_test.clj|a-disabled-hook-does-not-fire-and-turning-it-back-on-resumes-it
+hooks_test.clj|the-agent-grows-a-hook-through-eval-and-switches-it-off
+hooks_wired_test.clj|a-gate-that-allows-changes-nothing-about-the-run
+hooks_wired_test.clj|a-permission-request-hook-can-approve-a-parked-call
+hooks_wired_test.clj|a-permission-request-hook-can-deny-a-parked-call
+hooks_wired_test.clj|a-pretooluse-gate-can-refuse-a-call-and-the-model-is-told-why
+hooks_wired_test.clj|the-verdict-is-audited-with-the-point-and-the-outcome
+jobs_test.clj|a-job-outlives-the-call-that-started-it
+jobs_test.clj|stopping-a-job-takes-the-whole-tree-and-forgets-it
+jobs_test.clj|the-process-going-away-takes-its-jobs-and-their-records-with-it
+layers_test.clj|every-namespace-lives-where-its-name-says
+loop_test.clj|a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
+mcp_test.clj|a-declaration-that-goes-away-takes-its-process-with-it
+mcp_test.clj|a-server-that-writes-to-stderr-is-not-a-server-that-failed
+mcp_wired_test.clj|a-permission-request-hook-can-answer-for-a-server-call
+mcp_wired_test.clj|a-pretooluse-gate-can-refuse-a-server-call
+preamble_test.clj|a-configured-list-replaces-both-defaults
+project.clj|the-fence-lets-a-skill-reach-its-own-reference-files
+project_test.clj|a-binding-survives-a-real-restart
+providers_test.clj|the-root-rule-and-the-key-source-are-each-reported-truthfully
+read_test.clj|relative-paths-and-the-fence-are-untouched-by-the-mode
+shell_test.clj|a-bash-that-is-windows-wsl-launcher-does-not-count-as-a-bash
+skills_test.clj|a-broken-skill-is-a-diagnostic-not-a-failure
+skills_test.clj|a-configured-list-replaces-both-defaults
+skills_test.clj|a-slash-load-of-a-name-nobody-has-is-a-notice-not-a-silence
+skills_test.clj|the-layers-travel-with-the-roots
+string.clj|a-permission-request-hook-can-approve-a-parked-call
+string.clj|a-permission-request-hook-can-deny-a-parked-call
+system_prompt_test.clj|a-hook-that-refuses-still-lets-the-others-run
+system_prompt_test.clj|every-matched-declaration-appends-in-source-and-written-order
+todos_test.clj|the-list-outlives-the-process-that-wrote-it
+tools_test.clj|a-job-says-when-the-command-sends-its-own-output-away
+tools_test.clj|the-record-a-job-names-is-readable-with-bash
+undo_test.clj|a-record-outlives-the-process
+undo_test.clj|the-fence-and-the-re-root-are-untouched
+write_test.clj|the-fence-and-the-re-root-are-untouched-by-the-mode

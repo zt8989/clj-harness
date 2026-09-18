@@ -320,7 +320,7 @@ flush 一行，所以读它用的是模型手里**已经有的**那几个读法�
 ### 1) 一条命令起两个（推荐）
 
 ```bash
-node scripts/dev.mjs             # 后端交给 OS 挑端口，前端代理到它，浏览器开 http://localhost:5173
+node scripts/dev.mjs             # 后端交给 OS 挑端口，页面直连它（CORS），浏览器开 http://localhost:5173
 node scripts/dev.mjs --tmux      # 后端留在本窗格，前端开在右侧新窗格（要在 tmux 里跑）
 node scripts/dev.mjs --port 8080 # 钉死端口（老地址，需要时）
 node scripts/dev.mjs --scripted  # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
@@ -337,7 +337,8 @@ node scripts/dev.mjs --ui-port 5199  # 前端换端口
 三处各自分叉，`process.platform` 一看就知道走了哪条。跑 `node scripts/dev.mjs`（POSIX 上
 `./scripts/dev.mjs` 也行，它带 shebang）。脚本从自身位置往上找仓库根，所以在哪一级敲都不影响。
 仓库里**只有这一处**告诉前端后端在哪，而它不在源码里：脚本让后端**在 0 号端口上绑**（OS 分配），
-把后端**自己报出来的**那个端口交给 `HARNESS_BACKEND_URL`，`ui/vite.config.js` 拿它当代理目标。
+再拿后端**自己报出来的**那个端口填两个环境变量——`VITE_AGENT_URL`（页面直连后端用的绝对地址，
+见下）与 `HARNESS_BACKEND_URL`（`ui/vite.config.js` 那条 `/api` 反代规则的目标）。
 所以没有任何源文件知道端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
 端口是**读回来的不是猜的**：先探一个空闲端口再交给后端，是跟整台机器赛跑。
 
@@ -361,15 +362,31 @@ HARNESS_BACKEND_URL=http://127.0.0.1:<上面那个端口> npm run dev
 npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 ```
 
-### 3) 前端侧的形状（为什么是代理）
+（`HARNESS_BACKEND_URL` 只喂反代规则。这样分开起、又想让页面直连后端，就把
+`VITE_AGENT_URL=http://127.0.0.1:<上面那个端口> npm run dev` 也带上——页面在本机上，
+后端本来就放行它，不用再对端口做任何事。）
 
-**页面只跟自己的 origin 说话。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，
-其余都是 `/api/<什么>`——所以 `vite.config.js` 只需要**一条** `/api` 前缀规则转给后端。
+### 3) 前端侧的形状（为什么 dev 直连）
+
+**整个后端在一个前缀下**——run 端点是 `POST /api/agent`，其余都是 `/api/<什么>`——
 `src/lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方）与 `AGENT_URL`
-（`HttpAgent` 构造时用的那一个端点，=`${API_BASE}agent`）。两件事因此成立：浏览器
-**一个跨域请求都不发**（没有 preflight，也没有一份要跟着端口改的 CORS 白名单），而构建产物里
-**不带我们的地址**，换到任何部署自己的反代后面都一样。要直连后端（不走代理）就
-`VITE_AGENT_URL=http://…:8080`，那正是后端那条 CORS 放行存在的理由。
+（`HttpAgent` 构造时用的那一个端点，=`${API_BASE}agent`）。前缀后面接哪个地址由一个变量说了算：
+`VITE_AGENT_URL`。**`node scripts/dev.mjs` 把它填成后端的绝对地址，所以页面是跨域直连的**，
+后端那边按**请求自己带来的 `Origin`** 判断：本机的页面（`localhost` / `127.0.0.1` / `[::1]`，
+**端口不参与判断**）一律放行，并且把它**原样答回去**。所以 `--ui-port` 挑哪个端口都不用告诉后端，
+两边没有一个要一起改的数字。
+
+**为什么不再走 `vite.config.js` 那条反代**——那条规则留着（`HARNESS_BACKEND_URL` 是它的目标，
+`npm run dev` 单独用的时候它仍然是对的），但 2026-09-18 在这台机器上量到它**会丢流**：
+vite 8.3.0 自带的 http-proxy-3 1.23.3 转发 SSE 时偶发丢掉**最后一个 chunk**——帧一个不少，
+终止块 `0\r\n\r\n` 永远不来——浏览器的 fetch 因此永不落地。同一个带工具调用的脚本回合：
+走反代 16 次丢 3 次，直连后端 16 次一次不丢，经过手写的 Node 反代 28 次一次不丢。
+代价是**客户端永远停在「运行中」**：composer 一直显示停止按钮、侧边栏那一行一直转，
+而对话看着早就结束了。
+
+直连换来的一件事是**浏览器真的在发跨域请求**（有 preflight），所以说到底它靠的是后端那条
+CORS 放行；构建产物里**仍然不带我们的地址**（`VITE_AGENT_URL` 只在 dev server 里注入），
+换到任何部署自己的反代后面都一样。
 
 ### 4) 会话里的东西
 
@@ -381,9 +398,11 @@ npm run build    # tsc --noEmit + vite build → dist/（不需要 Java）
 **新建任务必须先有项目**：一个项目都没有时，它说的是「先添加一个项目」并给出入口。会话的记录落在
 `~/.clj-harness/projects/<workspace>/<threadId>.jsonl`。
 
-**5173 还在，但它不再是 CORS 契约。** 走后端那条放行的那半边（`VITE_AGENT_URL` 指绝对地址）
-才需要它；走代理时浏览器跟 5173 同源，白名单与它无关。`strictPort` 留着是因为第二个 dev server
-悄悄落到 5174 比启动失败更让人意外。
+**5173 不再是契约。** 后端放行的是**本机上任何端口**的页面（看 `Origin` 里的主机名，
+端口不参与），所以 dev 脚本给 vite 挑哪个端口都行，源码、配置、脚本里没有一处要跟着改；
+`strictPort` 留着是因为第二个 dev server 悄悄落到 5174 比启动失败更让人意外。
+`--ui-origin` 只剩一种用处：**UI 不在本机上**（页面从另一台机器打开）——那种 origin 猜不出来，
+得明说；本机的页面不需要谁说。
 
 ### 会话旁边还有一个「轨迹」
 

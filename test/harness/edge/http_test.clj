@@ -31,7 +31,15 @@
             HttpResponse HttpResponse$BodyHandlers]
            [java.nio.charset StandardCharsets]))
 
-(def ^:private ui-origin "http://localhost:5173")
+;; NO ORIGIN LITERAL HERE, AND NO PORT IN ONE. This file used to declare its own
+;; copy of the value the edge answers a request that names no page with
+;; (`http://localhost:5173`) -- a second place deciding one fact, and a port named
+;; in a test, which is what `*port*` below spends a paragraph refusing. What the
+;; cases below assert is the RELATIONSHIP: an answer carries the origin this
+;; PROCESS was started with, so the value is read from the one place that owns it
+;; (`harness.edge.http/ui-origin`, which `start!` uses when the caller names none).
+;; A page on this machine is answered by RULE instead and needs no value at all --
+;; see `says-which-origin-per-request-and-not-once-per-process`.
 
 (defn- read-lines
   "What `read` returned, as plain lines -- with the `anchor|` prefix stripped when
@@ -103,9 +111,17 @@
   "A real request for THREAD-ID. The run id is random so that two runs -- whether for
   different threads or for the same thread at different times -- never share frame ids.
   A repeated run id would make two runs' frames collide in a rebuilt conversation.
-  EXTRA is merged into the body, which is how a resume is sent."
-  ([thread-id] (post-run thread-id {}))
-  ([thread-id extra]
+  EXTRA is merged into the body, which is how a resume is sent.
+
+  ORIGIN, when given, is sent as the page this request comes from -- which is the
+  header a browser always sends on a cross-origin call and the one this file's
+  other callers leave out. The run edge is the case worth asking about that way:
+  its headers ride on the frames rather than on the ring response (see
+  harness.edge.http/runner), so a CORS rule that held for the management edge could
+  still be wrong here."
+  ([thread-id] (post-run thread-id {} nil))
+  ([thread-id extra] (post-run thread-id extra nil))
+  ([thread-id extra origin]
    (let [body (json/write-str (merge {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
                                       :messages [{:id "u1" :role "user"
                                                   :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
@@ -114,6 +130,7 @@
          req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")
                   (.header "Accept" "text/event-stream")
+                  (cond-> origin (.header "Origin" origin))
                   (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
                   (.build))]
      (.send (HttpClient/newHttpClient) req
@@ -171,7 +188,7 @@
        (testing "the headers a browser client needs, given it calls us directly"
          (is (= 200 (.statusCode resp)))
          (is (= "text/event-stream" (header resp "Content-Type")))
-         (is (= ui-origin (header resp "Access-Control-Allow-Origin"))))
+         (is (= http/ui-origin (header resp "Access-Control-Allow-Origin"))))
        (testing "a complete and structurally valid run reaches the CLIENT"
          (is (seq frames))
          (is (= "RUN_STARTED" (:type (first frames))))
@@ -1037,8 +1054,82 @@
                     (.build))
            resp (.send (HttpClient/newHttpClient) req (HttpResponse$BodyHandlers/discarding))]
        (is (= 204 (.statusCode resp)))
-       (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
+       (is (= http/ui-origin (header resp "Access-Control-Allow-Origin")))
        (is (str/includes? (header resp "Access-Control-Allow-Methods") "POST"))))))
+
+;; ---------------------------------------------------- which origin is answered
+
+(defn- ask-from
+  "A request to PATH carrying the `Origin` a browser sends from a page at ORIGIN --
+  the header every other caller in this file leaves out, because every other caller
+  is standing in for a tool or a curl rather than for a page."
+  [path origin method]
+  (let [b (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
+              (.header "Origin" origin))
+        b (if (= :options method)
+            (.method b "OPTIONS" (HttpRequest$BodyPublishers/noBody))
+            (.GET b))]
+    (.send (HttpClient/newHttpClient) (.build b)
+           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+
+(defn- answered-origins
+  "EVERY value of the answer's Access-Control-Allow-Origin, as a vector -- [] when
+  the answer names none.
+
+  A VECTOR RATHER THAN THE FIRST VALUE, because one header and two headers saying
+  the same thing are not the same answer. This route's headers are written on the
+  FIRST FRAME (see harness.edge.http/runner) while `handler` merges onto the ring
+  response, and a browser is entitled to refuse an answer that names an origin
+  twice. The `header` helper above reads `.firstValue` and cannot see that."
+  [resp]
+  (vec (.allValues (.headers resp) "Access-Control-Allow-Origin")))
+
+(deftest says-which-origin-per-request-and-not-once-per-process
+  ;; A PAGE ON THIS MACHINE IS ANSWERED WHATEVER PORT IT IS ON. The dev UI moves
+  ;; between ports on its own -- vite picks one, `--ui-port` moves it, the backend
+  ;; moves with `--port` -- and the rule used to be ONE origin settled at startup,
+  ;; which meant the launcher had to tell this process the port it had just handed
+  ;; vite, and go on telling it. What the rule reads now is the HOST in the
+  ;; request's own Origin, so there is no port for the two sides to keep in step.
+  ;;
+  ;; IT IS STILL A BOUNDARY. `localhost.example.com` is not `localhost`, which is
+  ;; why the host is matched WHOLE and never by suffix -- matching the tail of a
+  ;; name is how a rule becomes a hole. A page that is neither on this machine nor
+  ;; the one named at startup gets NO ORIGIN AT ALL, and refusing it is the
+  ;; browser's job once it has been told nothing: naming some third origin would
+  ;; only be a lie about who this process talks to.
+  (with-server
+   {"cors-origin" [{:content "\u597d\u3002"}]}
+   (fn []
+     (testing "every port on this machine is answered, and answered as itself"
+       ;; ARBITRARY PORTS, UNLIKE EACH OTHER ON PURPOSE, and one row written with no
+       ;; port at all -- none of these is the port of anything running, and the
+       ;; case is that none of it is READ.
+       (doseq [origin ["http://localhost" "http://localhost:5211"
+                       "http://127.0.0.1:8080" "https://localhost:443"
+                       "http://[::1]:3000"]]
+         (is (= [origin] (answered-origins (ask-from "/api/threads" origin :get)))
+             (str origin " is a page on this machine"))))
+
+     (testing "a name that merely ENDS in a local one is not on this machine"
+       (doseq [origin ["http://localhost.example.com" "http://127.0.0.1.example.com"
+                       "http://notlocalhost:1234"]]
+         (is (= [] (answered-origins (ask-from "/api/threads" origin :get)))
+             (str origin " is somewhere else"))))
+
+     (testing "and an opaque origin is not a page this edge can name"
+       (is (= [] (answered-origins (ask-from "/api/threads" "null" :get)))))
+
+     (testing "a preflight from this machine names it too"
+       (let [resp (ask-from "/api/threads" "http://localhost:5211" :options)]
+         (is (= 204 (.statusCode resp)))
+         (is (= ["http://localhost:5211"] (answered-origins resp)))))
+
+     (testing "the run edge answers on its FIRST FRAME, and exactly once"
+       (let [resp (post-run "cors-origin" {} "http://localhost:5211")]
+         (is (= 200 (.statusCode resp)))
+         (is (= ["http://localhost:5211"] (answered-origins resp)))
+         (is (str/includes? (.body resp) "RUN_FINISHED")))))))
 
 ;; ------------------------------------------------- the management edge
 
@@ -1123,7 +1214,7 @@
          (let [resp (api-call :get (str "/api/project?threadId=" tid) nil)]
            (is (= 200 (.statusCode resp)))
            (is (= {:threadId tid :dir nil} (read-json resp)))
-           (is (= ui-origin (header resp "Access-Control-Allow-Origin")))))
+           (is (= http/ui-origin (header resp "Access-Control-Allow-Origin")))))
        (testing "a GET without threadId is a 400"
          (is (= 400 (.statusCode (api-call :get "/api/project" nil)))))
        (testing "binding a real directory answers with its absolute path"
@@ -1514,7 +1605,7 @@
              (stub! (fn [] project-dir-2))
              (let [resp (api-call :post "/api/project/pick" nil)]
                (is (= 200 (.statusCode resp)))
-               (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
+               (is (= http/ui-origin (header resp "Access-Control-Allow-Origin")))
                (is (= project-dir-2 (:dir (read-json resp))))))
            (testing "cancelling is an answer (dir nil), not an error"
              (stub! (fn [] nil))
@@ -1982,7 +2073,7 @@
                rows (->> (json/read-str (.body resp) :key-fn keyword)
                          (filterv #(= tid (:threadId %))))]
            (is (= 200 (.statusCode resp)))
-           (is (= ui-origin (header resp "Access-Control-Allow-Origin")))
+           (is (= http/ui-origin (header resp "Access-Control-Allow-Origin")))
            (is (= 1 (count rows)))
            (is (pos? (:bytes (first rows))))
            (is (pos? (:lastActivity (first rows))))))

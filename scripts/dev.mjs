@@ -13,10 +13,36 @@
 //
 // WHY THIS EXISTS. `npm run dev` on its own expects a harness on 8080, and 8080 is
 // the one port a second checkout, a test run, or yesterday's forgotten session is
-// most likely to be holding. So the backend is started on a port the OS picks, that
-// port becomes the dev server's proxy target (`HARNESS_BACKEND_URL`, read by
-// ui/vite.config.js), and the browser keeps talking to its own origin -- no CORS
-// allowance to keep in step, and nothing in the source learns a port.
+// most likely to be holding. So the backend is started on a port the OS picks and
+// that port is handed to the dev server, which passes it on to the page as the
+// address to call; nothing in the source learns a port.
+//
+// -------------------------------------------------- and why not vite's own proxy
+//
+// THE CLIENT TALKS TO THE HARNESS DIRECTLY, ACROSS ORIGINS, and that is a
+// measurement rather than a preference. Vite's dev server can forward `/api` to
+// the backend (see ui/vite.config.js), and for a while that is what the page did.
+// What ended it is a defect in the FORWARDER, measured 2026-09-18 on this machine
+// (vite 8.3.0, its bundled http-proxy-3 1.23.3): a proxied SSE response
+// intermittently loses its last chunk -- every frame arrives, the terminating
+// chunk never does -- so the browser's fetch never settles. Sixteen runs of one
+// scripted tool-calling turn through the proxy lost it three times; the same
+// sixteen straight to the harness lost it none, and so did twenty-eight through a
+// hand-written Node proxy, with and without a keep-alive agent.
+//
+// WHAT THAT COST THE PAGE: the run's request never settles, so the runtime stays
+// "running" forever -- the composer keeps its Cancel button and the sidebar row
+// keeps its spinner -- while the conversation underneath is plainly finished.
+//
+// SO ONE ADDRESS IS PASSED, AND IT IS THE PAGE'S. The UI is handed
+// VITE_AGENT_URL, which `ui/src/lib/threads.ts` already reads as "talk to a
+// harness at this absolute address" -- the mode the harness's CORS allowance
+// exists for. NOTHING NEEDS TO BE SAID TO THE HARNESS IN RETURN: it answers a page
+// served from this machine whatever port it is on (see
+// `harness.edge.http/localhost-page?`), so the port this script handed vite is
+// vite's business and nobody else's. HARNESS_BACKEND_URL goes to the UI as well,
+// so vite's proxy rule still points somewhere correct for anyone reaching for
+// `npm run dev` by hand; the dev loop just no longer needs it.
 //
 // --TMUX IS THE SAME TWO PROCESSES, ARRANGED SO THAT NEITHER ONE BURIES THE OTHER.
 // vite's output (its startup banner, every HMR round) and the harness's log lines are
@@ -98,11 +124,13 @@ const USAGE = `Start the harness on a port nobody is using, and the UI in front 
   node scripts/dev.mjs --scripted my.json  ...with your own turns
   node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
 
-The backend is started on port 0 (the OS picks) and the port it announces is handed
-to the dev server as HARNESS_BACKEND_URL, which ui/vite.config.js uses as its proxy
-target. Ctrl-C stops both, and the two temp homes the scripted mode made are deleted
-with it -- their paths are printed when it starts, which is the only time they exist.
---tmux splits the pane it was run in, so it wants a shell that is inside tmux.`;
+The backend is started on port 0 (the OS picks); the port it announces becomes both the
+address the page is told to call (VITE_AGENT_URL) and vite's proxy target
+(HARNESS_BACKEND_URL). The UI's own port is vite's business alone: the harness answers a
+page served from this machine whatever port it is on, so nothing is reported back to it.
+Ctrl-C stops both, and the two temp homes the scripted mode made are deleted with it --
+their paths are printed when it starts, which is the only time they exist. --tmux splits
+the pane it was run in, so it wants a shell that is inside tmux.`;
 
 const argv = process.argv.slice(2);
 let port = 0;
@@ -240,6 +268,19 @@ function capture(command, args) {
   });
 }
 
+/// WHAT THE DEV SERVER IS TOLD, in one place because two paths start it (this
+/// process, and a tmux pane). `VITE_AGENT_URL` is the address the PAGE reads to
+/// talk to the harness directly; `HARNESS_BACKEND_URL` is the one vite's own proxy
+/// rule reads. Both name the same socket and both are said on purpose -- see the
+/// header for why the dev loop stopped going through the proxy, and why the rule
+/// is still pointed somewhere correct.
+function uiEnv(backendPort) {
+  return {
+    VITE_AGENT_URL: `http://127.0.0.1:${backendPort}`,
+    HARNESS_BACKEND_URL: `http://127.0.0.1:${backendPort}`,
+  };
+}
+
 /// The UI in a pane to the RIGHT of this one, and the pane's id back so `cleanup` can
 /// take it down again.
 ///
@@ -253,12 +294,20 @@ function capture(command, args) {
 /// be an empty path, which is worse than whatever the server has.)
 ///
 /// -k KEEPS THE PANE UP WHEN VITE EXITS, and that is for the failure rather than the
-/// success: 5173 is a contract (`strictPort`), so a dev server that would not start
-/// prints the one message there is no second copy of -- and a pane that closes on the
-/// way out takes it with it.
+/// success: `strictPort` is on, so a dev server that could not take the port it was
+/// given FAILS rather than quietly moving -- and the message it prints when it does
+/// is the one there is no second copy of, since a pane that closes on the way out
+/// takes it with it.
 async function openUiPane(backendPort, uiPort) {
-  const environment = [`HARNESS_BACKEND_URL=http://127.0.0.1:${backendPort}`];
+  // NAMED ONE BY ONE, not the whole environment: a pane takes these as argv, and
+  // handing tmux every variable this process happens to hold is both an argv
+  // length this script does not control and a copy of things a pane has no
+  // business reading.
+  const environment = [];
   if (process.env.PATH) environment.push(`PATH=${process.env.PATH}`);
+  for (const [name, value] of Object.entries(uiEnv(backendPort))) {
+    environment.push(`${name}=${value}`);
+  }
   const pane = await capture("tmux", [
     "split-window", "-h", "-d", "-k", "-c", UI_DIR,
     ...environment.flatMap((pair) => ["-e", pair]),
@@ -420,7 +469,7 @@ if (tmux) {
   ui = run("npm", ["run", "dev", "--", "--port", String(uiPort)], {
     cwd: UI_DIR,
     stdio: "inherit",
-    env: { ...process.env, HARNESS_BACKEND_URL: `http://127.0.0.1:${boundPort}` },
+    env: { ...process.env, ...uiEnv(boundPort) },
   });
 
   exitCode = await exitOf(ui);

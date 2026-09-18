@@ -72,8 +72,18 @@ function requireFacts(): HarnessFacts {
   return facts;
 }
 
+/// The address the running harness announced, or a throw.
+///
+/// NO FALLBACK TO A PORT. This used to answer the harness's DEFAULT address when
+/// nothing had been configured, and that is the one port a developer's own session,
+/// another checkout, or yesterday's forgotten server is most likely to be holding --
+/// so an unconfigured run would have quietly talked to a STRANGER, and could have
+/// passed against it. The spawner states the same rule in its own header
+/// (`test/support/harness.ts`: a run must not be satisfied by a stale server that
+/// happens to be listening); the three accessors below already refuse to guess, and
+/// this one now does too.
 export function url(): string {
-  return facts?.url ?? "http://localhost:8080/";
+  return requireFacts().url;
 }
 
 /// THE AG-UI ENDPOINT: where a `RunAgentInput` is POSTed. NOT `url()`, which is

@@ -62,16 +62,18 @@ lib/
                     旧名字说的是「整页在跑」，而那个前提没了
 ```
 
-**页面只跟自己的 origin 说话，dev server 把它转出去。** 整个后端在**一个前缀**下——run 端点是
-`POST /api/agent`，其余都是 `/api/<什么>`——所以 `ui/vite.config.js` 只要**一条** `/api` 前缀规则。
-`lib/threads.ts` 因此导出两个地址：`API_BASE`（管理调用挂的地方，`${HARNESS}api/`）与
-`AGENT_URL`（`HttpAgent({url})` 用的那一个端点，`${API_BASE}agent`）。目标来自
-`HARNESS_BACKEND_URL`，由 `node scripts/dev.mjs` 填：它让后端**在 0 号端口绑**（OS 分配）、读后端**自己报
-出来的**那个端口，所以源码里没有端口号，也不会有「8080 被上次忘了关的会话占着」这件事。
-浏览器因此**一个跨域请求都不发**（没有 preflight，CORS 白名单也不再是前端要跟着改的东西），
-构建产物里也不带我们的地址——换到任何部署自己的反代后面都一样。
-要直连后端就走 `VITE_AGENT_URL=http://127.0.0.1:<port>/`，那条路才是后端 CORS 放行存在的理由。
-`strictPort: true` 留着：第二个 dev server 悄悄落到 5174，比启动失败更让人意外。
+**dev 里页面直连后端，跨域。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，其余都是
+`/api/<什么>`——所以 `ui/vite.config.js` 只要**一条** `/api` 前缀规则（它还在，`npm run dev` 单独用时
+仍然对）。`lib/threads.ts` 导出两个地址：`API_BASE`（管理调用挂的地方，`${HARNESS}api/`）与
+`AGENT_URL`（`HttpAgent({url})` 用的那一个端点，`${API_BASE}agent`），而它们的**前缀**由一个变量说了算：
+`VITE_AGENT_URL`。`node scripts/dev.mjs` 把它填成后端**自己报出来的**那个绝对地址（后端在 0 号端口绑，
+OS 分配），所以源码里没有端口号，也不会有「8080 被上次忘了关的会话占着」这件事；**页面于是是跨域直连的**，
+后端那边按**请求自己带来的 `Origin`** 判：本机的页面（`localhost` / `127.0.0.1` / `[::1]`，端口不参与）
+一律放行并原样答回去，所以 vite 在哪个端口都行、没有谁要去对齐。**为什么不再走反代**：那条规则会丢 SSE 流的最后一个
+chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/dev.mjs` 的头注释与 `README.md` 3)。
+构建产物里**仍然不带我们的地址**（`VITE_AGENT_URL` 只在 dev server 里注入：vite 的 `import.meta.env`），
+换到任何部署自己的反代后面都一样。`strictPort: true` 留着：第二个 dev server 悄悄落到 5174，
+比启动失败更让人意外。
 
 ## 状态的归属
 

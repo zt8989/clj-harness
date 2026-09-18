@@ -16,18 +16,20 @@
 // glue the path onto the endpoint rather than the prefix.
 //
 // THE HARNESS'S ADDRESS IS THIS ORIGIN by default, not `http://localhost:8080/`.
-// The page and the harness are served from ONE address, and the dev server is what
-// forwards the harness's share of it (`ui/vite.config.js`, and `scripts/dev.mjs`
-// for starting the two together on a port it picks). Two things follow, and both are
-// the reason: the browser makes no cross-origin request at all -- so nothing here
-// depends on the harness's CORS allowance, which is a list of origins that has to
-// keep up with a port that no longer has to be 5173 -- and a build carries no
-// address of ours into it, so the same bundle works behind whatever a deployment
-// puts in front.
+// The page and the harness are served from ONE address then, and the dev server is
+// what forwards the harness's share of it (`ui/vite.config.js`, and
+// `scripts/dev.mjs` for starting the two together on a port it picks). A
+// deployment wants exactly that shape, and so does a hand-started dev server: the
+// browser makes no cross-origin request at all, and a build carries no address of
+// ours into it, so the same bundle works behind whatever a deployment puts in
+// front.
 //
-// VITE_AGENT_URL IS THE WAY BACK OUT. Pointed at an absolute address it talks to a
-// harness directly, exactly as this file used to; that is the mode the CORS
-// allowance exists for, and a page served by something with no proxy needs it.
+// VITE_AGENT_URL IS THE WAY OUT, AND IT IS WHAT THE DEV LOOP USES. Pointed at an
+// absolute address it talks to a harness directly, which is what makes the page's
+// requests cross-origin -- the mode the harness's CORS allowance exists for, and
+// the mode `scripts/dev.mjs` selects on purpose (its header says why: vite's own
+// forwarder intermittently loses the last chunk of an SSE response, and a run
+// whose response never ends leaves the composer stuck on Cancel forever).
 // The trailing slash is optional: `http://host:8080` and `http://host:8080/` are
 // the same address here rather than two, because getting it wrong would otherwise
 // be a URL with `api` glued to the host.
