@@ -9,6 +9,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.db :as db]
             [harness.cap.hashline.anchors :as anchors]
+            [harness.cap.hashline.reading :as reading]
             [harness.cap.hashline.store :as store]
             [harness.infra.home :as home]
             [harness.cap.project :as project]
@@ -75,6 +76,42 @@
 
 (defn- anchor-of [out line]
   (some (fn [[a l]] (when (= l line) a)) (rows out)))
+
+;; ------------------------------------------------- does the mark hold the lock?
+;;
+;; `served` has to stay a subset of `:anchors`: an edit PRUNES it in `advance-on!`
+;; (intersecting with the surviving anchors) while a marking UNIONS, so the read a
+;; marking is derived from and the marking itself may not be separated by an edit.
+;; The helper below asks the question DETERMINISTICALLY -- no gate, no race -- by
+;; swapping `store/mark-served!` for a stub that records whether the CALLING thread
+;; held the session lock at the instant of the call.
+
+(defn- lock-witness
+  "Call F with `store/mark-served!` wrapped: every call first records, under the
+  THREAD-ID it names, whether the calling thread held that session's lock, then
+  delegates to the original. Answers the witness {thread-id [held? ..]}.
+
+  DETERMINISTIC, NOT A RACE: the stub asks its own thread the question at the moment
+  of the call, so the answer is the same on every run. `alter-var-root`, not
+  `with-redefs`, because the tool seam is free to run the body on another thread.
+
+  The lock object comes out of the store's own table, keyed exactly as
+  `with-session-lock` keys it; it exists by the time the marking runs because the
+  `sync!` before it made one. A session with no lock at all is recorded as NOT held."
+  [f]
+  (let [original @#'store/mark-served!
+        seen     (atom {})
+        wrapped  (fn [thread-id path anchors]
+                   (let [^java.util.concurrent.ConcurrentHashMap locks
+                         @#'store/session-locks
+                         l (.get locks (str thread-id))]
+                     (swap! seen update (str thread-id) (fnil conj [])
+                            (boolean (and l (.isHeldByCurrentThread
+                                             ^java.util.concurrent.locks.ReentrantLock l)))))
+                   (original thread-id path anchors))]
+    (alter-var-root #'store/mark-served! (constantly wrapped))
+    (try (f) (finally (alter-var-root #'store/mark-served! (constantly original))))
+    @seen))
 
 (defn- clean-tables []
   (when (.exists (home/db-file))
@@ -383,3 +420,70 @@
                 (get-in plain-spec [:function :description]))))
     (testing "and the plain face takes exactly the path"
       (is (= #{"path"} (set (keys (get-in plain-spec [:function :parameters :properties]))))))))
+
+;; ------------------------------------------ the marking shares the read's lock
+
+(deftest the-read-marks-what-it-showed-under-the-session-lock
+  ;; THE BUG THIS PINS: `sync!` reads `:anchors` under the session lock, and the
+  ;; marking derived from that read used to happen after the lock was released. A
+  ;; concurrent edit in that gap prunes the freed anchors (`advance-on!`) and the
+  ;; marking unions them straight back in -- so `served` names an anchor that is no
+  ;; longer in `:anchors`. The stub turns 'was the lock held when the marking ran?'
+  ;; into a value a test can read, with no race and no scheduling to hope for.
+  (use-mode! "r-lock" ":hashline")
+  (put! "lock.txt" "one\ntwo\n")
+  (let [seen (lock-witness #(read-raw "r-lock" {:path "lock.txt"}))
+        held (get seen "r-lock")]
+    (is (seq held) "the read did mark the rows it showed")
+    (is (every? true? held)
+        (str "every mark-served! call must hold r-lock's session lock; got "
+             (pr-str held)))))
+
+(deftest a-concurrent-edit-cannot-leave-a-freed-anchor-marked-shown
+  ;; THE SECOND SAFETY NET, and it does not rest on the stub above. This one FORCES
+  ;; the interleaving the bug lives in instead of racing for it: the read is stopped
+  ;; in `reading/preview`, which sits exactly between `sync!` (the read) and
+  ;; `mark-served!` (the marking), and an edit of the same file is run there before
+  ;; the read is let go. Under the old code the edit prunes `served` in `advance-on!`
+  ;; and the marking unions the pruned names straight back, so `served` names an
+  ;; anchor no longer in `:anchors` -- the assertion below is that invariant. Under
+  ;; the fix the read holds the session lock across the window, so the edit waits its
+  ;; turn and the invariant survives.
+  (use-mode! "r-race" ":hashline")
+  (put! "race.txt" "one\ntwo\nthree\n")
+  (let [target (anchor-of (read-raw "r-race" {:path "race.txt"}) "three")
+        gate   (support/window-gate #'reading/preview)
+        r-err  (atom nil)
+        e-err  (atom nil)]
+    (try
+      (let [reader (Thread. (fn []
+                              (try (read-raw "r-race" {:path "race.txt"})
+                                   (catch Throwable t (reset! r-err t)))
+                              nil))
+            editor (Thread. (fn []
+                              (try (call "r-race" "replace"
+                                         {:remove_from target
+                                          :replacement_lines ["THREE"]})
+                                   (catch Throwable t (reset! e-err t)))
+                              nil))]
+        (.start reader)
+        (is (support/holds-within? #(<= 1 ((:entered gate))) 5000)
+            "the read reached the window between its anchors and the marking")
+        (.start editor)
+        ;; Let the edit either LAND in the window -- the bug, where the window is the
+        ;; read's own unprotected gap -- or settle against the session lock the read is
+        ;; holding -- the fix, where it cannot land at all. Bounded, so a read that
+        ;; never reaches the gate fails loudly instead of hanging the suite.
+        (support/holds-within? #(not (.isAlive editor)) 5000)
+        ((:release gate))
+        (.join reader 15000)
+        (.join editor 15000))
+      (finally ((:restore gate))))
+    (is (nil? @r-err) (str "the read threw: " @r-err))
+    (is (nil? @e-err) (str "the edit threw: " @e-err))
+    (let [st (store/state "r-race" (path-of "race.txt"))]
+      (is (some? st))
+      (testing "every served anchor still exists in :anchors"
+        (is (every? (set (:anchors st)) (:served st))
+            (str "served=" (pr-str (:served st))
+                 " anchors=" (pr-str (:anchors st))))))))

@@ -242,7 +242,14 @@
   ARGS is the tool's argument map; returns a STRING, or throws a named error.
   RESOLVE-PATH is the session's path resolution, applied to the search root AND to
   every file rg reports -- so the anchors the answer hands out are filed under the
-  same path an edit will look them up by."
+  same path an edit will look them up by.
+
+  THE RENDERING AND THE MARKING SHARE ONE SESSION LOCK. `render` reads each file's
+  anchors through `serve/sync!` under the session lock, and the `mark-served!` that
+  records what each block printed derives from that read. A concurrent edit landing
+  between them prunes the freed anchors in `advance-on!` and this unions them back
+  in, so a name no longer in `:anchors` would be recorded as shown. Holding the lock
+  across both closes the gap."
   [thread-id resolve-path args _config]
   (let [{:keys [pattern path glob ignore-case literal context limit]} args
         literal? (boolean literal)
@@ -278,9 +285,17 @@
                                   [abs ns]
                                   (catch Throwable _ nil))))
                             grouped))
-        result   (render thread-id prepared (assoc {:limit limit} :context context))]
-    (doseq [[abs anchors] (:shown result)]
-      (store/mark-served! thread-id abs anchors))
+        ;; THE RENDER ITSELF READS EACH FILE'S ANCHORS (`serve/sync!` inside
+        ;; `render`), so it and the marking below take the SAME session lock -- a
+        ;; concurrent edit must not land between the read and the mark (see the
+        ;; docstring: `advance-on!` prunes, `mark-served!` unions).
+        result   (store/with-session-lock
+                  thread-id
+                  (fn []
+                    (let [r (render thread-id prepared (assoc {:limit limit} :context context))]
+                      (doseq [[abs anchors] (:shown r)]
+                        (store/mark-served! thread-id abs anchors))
+                      r)))]
     (let [text (:text result)]
       (when (str/blank? text)
         (throw (ex-info (str "no matches for " (pr-str pattern)

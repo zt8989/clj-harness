@@ -106,44 +106,47 @@
       (throw (ex-info "`path` is required: name the file whose last edit you want back."
                       {:reason :missing-path})))
     (let [path (store/canonical (resolve-path given))]
-      (store/with-path-lock
-       path
+      (store/with-session-lock
+       thread-id
        (fn []
-         (let [undo (store/undo-for path)]
-           (when-not undo
-             (cannot! path (str "no edit to undo in " path ": either nothing has"
-                                " changed it, or the last change was a write (which"
-                                " clears the undo history), or it has already been"
-                                " undone. `undo_last_replace` takes back ONE edit,"
-                                " so check the file with read before assuming a"
-                                " change did not happen.")))
-           (borrowed! thread-id path undo)
-           (let [f      (java.io.File. ^String path)
-                 exists (.exists f)
-                 live   (when exists (:text (files/read-file path)))]
-             ;; The refusal that matters: the file is not what the edit left, so
-             ;; rolling back would quietly discard whatever changed it since.
-             (when (and exists (not= live (:resulting-text undo)))
-               (cannot! path (str "nothing was undone: " path " is no longer what"
-                                  " the last edit left behind, so something changed"
-                                  " it afterwards (an editor, another tool, a bash"
-                                  " command). Taking the edit back now would discard"
-                                  " that later change as well. The undo history is"
-                                  " kept -- read the file to see what it now holds,"
-                                  " and edit the lines you actually want changed.")))
-             (let [checks (anchors/line-checksums (:prior-text undo))
-                   _      (store/restore! thread-id path undo
-                                          (restore-change thread-id path undo checks))]
-               (files/write-file! path (:prior-text undo)
-                                  {:bom    (:bom undo)
-                                   :ending (:ending undo)
-                                   ;; The CAPTURED permissions, not the file's
-                                   ;; current ones: this is a restore, so what the
-                                   ;; edit saw is what comes back.
-                                   :mode   (files/mode-from-bits (:mode undo))})
-               (str "Undid the last edit to " path "."
-                    (when-not exists
-                      (str " The file had been deleted; it is restored from the undo"
-                           " history."))
-                    "\n\n" (undo-rows thread-id path))))))))))
+         (store/with-path-lock
+          path
+          (fn []
+            (let [undo (store/undo-for path)]
+              (when-not undo
+                (cannot! path (str "no edit to undo in " path ": either nothing has"
+                                   " changed it, or the last change was a write (which"
+                                   " clears the undo history), or it has already been"
+                                   " undone. `undo_last_replace` takes back ONE edit,"
+                                   " so check the file with read before assuming a"
+                                   " change did not happen.")))
+              (borrowed! thread-id path undo)
+              (let [f      (java.io.File. ^String path)
+                    exists (.exists f)
+                    live   (when exists (:text (files/read-file path)))]
+                ;; The refusal that matters: the file is not what the edit left, so
+                ;; rolling back would quietly discard whatever changed it since.
+                (when (and exists (not= live (:resulting-text undo)))
+                  (cannot! path (str "nothing was undone: " path " is no longer what"
+                                     " the last edit left behind, so something changed"
+                                     " it afterwards (an editor, another tool, a bash"
+                                     " command). Taking the edit back now would discard"
+                                     " that later change as well. The undo history is"
+                                     " kept -- read the file to see what it now holds,"
+                                     " and edit the lines you actually want changed.")))
+                (let [checks (anchors/line-checksums (:prior-text undo))
+                      _      (store/restore! thread-id path undo
+                                             (restore-change thread-id path undo checks))]
+                  (files/write-file! path (:prior-text undo)
+                                     {:bom    (:bom undo)
+                                      :ending (:ending undo)
+                                      ;; The CAPTURED permissions, not the file's
+                                      ;; current ones: this is a restore, so what the
+                                      ;; edit saw is what comes back.
+                                      :mode   (files/mode-from-bits (:mode undo))})
+                  (str "Undid the last edit to " path "."
+                       (when-not exists
+                         (str " The file had been deleted; it is restored from the undo"
+                              " history."))
+                       "\n\n" (undo-rows thread-id path))))))))))))
 

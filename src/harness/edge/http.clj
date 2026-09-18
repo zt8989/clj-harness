@@ -49,6 +49,17 @@
                    answered, then RUN_ERROR. Written BEFORE the frames it names,
                    so the record explains a terminal frame that no run emitted.
                    A log that ends where it should is untouched by this.
+    \"log/carried-back\" -- while the store could not answer (it was moved aside
+                   and rebuilt empty), a session's records landed in the reserved
+                   workspace; when the binding returned, the writer carried that
+                   segment back into the conversation's file -- append, then rename
+                   the source to <thread>.jsonl.carried-<stamp>. Names both paths
+                   and how many lines moved. See `carry-back!`.
+    \"log/carry-refused\" -- such a segment was found but NOT folded in, because
+                   the two files' timestamps overlap and appending would read as
+                   one conversation out of order. Names both paths and says why;
+                   both files are left as they were. Said once per session per
+                   process, not beside every record.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -147,12 +158,149 @@
   [thread-id]
   (home/log-file (log-dir-for thread-id) thread-id))
 
+;; ------------------------------------- carrying an unbound segment back home
+;;
+;; THE ACCIDENT THIS REPAIRS (2026-09-18): the store was moved aside and rebuilt
+;; empty, so project/identity-for answered nil for every session and the records a
+;; live run kept producing landed in projects/.unbound/<thread>.jsonl. When the
+;; store was restored the binding was back, so later records went to
+;; projects/<workspace>/<thread>.jsonl again -- ONE CONVERSATION IN TWO FILES.
+;; Replay, rebuild and the eval reader each read ONE file, so the unbound segment
+;; was invisible to all of them. Nothing here asks the store: the writer notices
+;; the leftover in the tree and puts it back.
+
+(defonce ^:private carry-back-checked
+  (atom #{}))
+;; thread-ids whose leftover unbound segment this process has already DEALT WITH.
+;; A third writer-side fact, kept apart from init-logged? and session-started? for
+;; the same reason they are kept apart from each other: one atom per fact, named for
+;; the fact it holds. It is set only when there WAS a segment to deal with, so a
+;; thread that is not split yet is still checked on the next record -- and once a
+;; carry (or a refusal) has happened, no later line repeats its audit.
+
+(defn- unbound-dir
+  "The reserved workspace, as the directory an unbound session's log lands in."
+  []
+  (io/file (home/projects-dir) unbound-workspace))
+
+(defn- ts-range
+  "The [earliest latest] :ts a jsonl file holds, or nil when the file is missing,
+  empty, or holds no line with a numeric :ts. A line that does not parse is
+  SKIPPED rather than treated as corruption: this reads a file another writer may
+  have been appending to, and the last line may be half-written."
+  [^java.io.File f]
+  (when (.exists f)
+    (let [ts (->> (str/split-lines (slurp f :encoding "UTF-8"))
+                  (keep (fn [line]
+                          (try (:ts (json/read-str line :key-fn keyword))
+                               (catch Throwable _ nil))))
+                  (filter number?)
+                  vec)]
+      (when (seq ts) [(reduce min ts) (reduce max ts)]))))
+
+(defn- carry-audit!
+  "One audit line about a leftover unbound segment, appended to F -- the
+  conversation's own file. runId is nil: this happens on the way to a record, not
+  inside a run. A caller that cannot afford this to throw swallows it."
+  [^java.io.File f kind payload]
+  (spit f (str (json/write-str {:ts (System/currentTimeMillis)
+                                :runId nil :kind kind :payload payload}) "\n")
+        :append true :encoding "UTF-8"))
+
+(defn- carry-back!
+  "If F -- THREAD-ID's destination log -- is in a PROJECT workspace and a segment
+  of this session's log is still sitting in the reserved workspace, fold that
+  segment back into F.
+
+  APPEND, THEN RENAME: the segment's lines are appended to F in file order, and the
+  source is renamed to <thread>.jsonl.carried-<stamp>. The new name deliberately
+  does NOT end in .jsonl, so the listing (replay/logs-under) will not pick it up as
+  a second conversation; the evidence stays on disk without being read as history.
+
+  NOTHING IS APPENDED UNLESS THE RANGES ARE DISJOINT AND IN ORDER -- F must end at
+  or before the segment begins. Any overlap, or a segment older than the file it
+  would follow, means appending would read as one conversation in the wrong order,
+  so both files are left as they were and an audit line names both paths and says
+  why. This is the check the 2026-09-18 hand-repair did first, with `cat`.
+
+  AT MOST ONCE PER THREAD PER PROCESS: once a segment has been carried or refused,
+  the thread is in `carry-back-checked` and later records do not look again -- a
+  refusal must not write its audit line beside every line of the conversation.
+
+  IT NEVER THROWS INTO THE WRITER: a logging call that fails must not take a run
+  down. Every failure -- an unreadable file, an unwritable tree, a rename that would
+  not go -- leaves both files as they were and says so in an audit line. A nil
+  parent (nowhere to write) is the only silent exit.
+
+  CALLED FROM log! WITH log-lock HELD, so its appends serialize with every other
+  writer in this process."
+  [thread-id ^java.io.File f]
+  (when-not (contains? @carry-back-checked thread-id)
+    (try
+      (let [dir (.getParentFile f)]
+        (when (and dir
+                   (not= (.getCanonicalPath ^java.io.File dir)
+                         (.getCanonicalPath (unbound-dir))))
+          ;; The destination is in a project workspace, so a leftover segment is
+          ;; the only thing that could still be in the reserved one.
+          (let [source (home/log-file (unbound-dir) thread-id)]
+            (when (and (.exists source)
+                       (pos? (.length source))
+                       (not= (.getCanonicalPath ^java.io.File source)
+                             (.getCanonicalPath f)))
+              (swap! carry-back-checked conj thread-id)
+              (let [dest-range (ts-range f)
+                    src-range  (ts-range source)
+                    from       (.getAbsolutePath ^java.io.File source)
+                    to         (.getAbsolutePath ^java.io.File f)]
+                (cond
+                  (nil? src-range)
+                  (carry-audit! f "log/carry-refused"
+                                {:reason "the leftover segment holds no timestamped lines, so the two ranges cannot be checked"
+                                 :from from :to to})
+
+                  (and dest-range (not (<= (second dest-range) (first src-range))))
+                  (carry-audit! f "log/carry-refused"
+                                {:reason (str "the two files' timestamps overlap, so appending would read as one conversation out of order"
+                                              " (the conversation's file ends at " (second dest-range)
+                                              ", the leftover segment begins at " (first src-range) ")")
+                                 :from from :to to
+                                 :destination-last (second dest-range)
+                                 :segment-first (first src-range)})
+
+                  :else
+                  (let [body    (slurp source :encoding "UTF-8")
+                        body    (if (str/ends-with? body "\n") body (str body "\n"))
+                        lines   (count (str/split-lines body))
+                        renamed (io/file (unbound-dir)
+                                         (str (home/sanitize thread-id) ".jsonl.carried-"
+                                              (System/currentTimeMillis)))]
+                    (spit f body :append true :encoding "UTF-8")
+                    (if (.renameTo source renamed)
+                      (carry-audit! f "log/carried-back"
+                                    {:from from :to to :lines lines
+                                     :kept-as (.getAbsolutePath ^java.io.File renamed)})
+                      (carry-audit! f "log/carry-refused"
+                                    {:reason "the segment was appended but its file could not be renamed; both copies remain"
+                                     :from from :to to})))))))))
+      (catch Throwable t
+        (try
+          (carry-audit! f "log/carry-refused"
+                        {:reason (str "carrying the leftover unbound segment failed: " (ex-message t))
+                         :from (.getAbsolutePath ^java.io.File (home/log-file (unbound-dir) thread-id))
+                         :to   (.getAbsolutePath ^java.io.File f)})
+          (catch Throwable _ nil))))))
+
 (defn- log! [thread-id run-id kind payload]
   (let [f (log-file-for thread-id)
         line (str (json/write-str {:ts (System/currentTimeMillis)
                                    :runId run-id :kind kind :payload payload}) "\n")]
     (.mkdirs (.getParentFile f))
     (locking log-lock
+      ;; BEFORE the record: a session whose binding came back after the store was
+      ;; rebuilt gets its unbound segment carried into THIS file first, so the line
+      ;; about to be written follows the segment rather than landing after a hole.
+      (carry-back! thread-id f)
       (spit f line :append true :encoding "UTF-8"))))
 
 (defn- move-log!
@@ -224,21 +372,34 @@
 ;; line yet" has to be remembered somewhere. It is a fact about the FILE, not a
 ;; copy of the conversation or of the provider.
 
-(defn- init-logged? [thread-id] (contains? @init-logged thread-id))
-
-(defn- mark-init-logged! [thread-id] (swap! init-logged conj thread-id))
-
 (defonce ^:private session-started
   (atom #{}))
 ;; thread-ids whose SessionStart has already fired. A SECOND writer-side fact,
-;; kept apart from init-logged? on purpose: the provider init LINE is not written
+;; kept apart from the init line on purpose: the provider init LINE is not written
 ;; when a scripted pin serves the session (there is no resolution to record), but
 ;; the session still started, and a hook bound to SessionStart must fire once for
 ;; it either way. One atom per fact, each named for the fact it holds.
 
-(defn- session-started? [thread-id] (contains? @session-started thread-id))
+(defn- claim-once!
+  "Add THREAD-ID to A and answer whether THIS call is the one that added it.
 
-(defn- mark-session-started! [thread-id] (swap! session-started conj thread-id))
+  ONE ATOM OPERATION, and it is the whole difference between 'fired once' and 'fired
+  once per concurrent run'. The shape it replaces -- `(when-not (seen? id) (do-work)
+  (mark-seen! id))` -- is three steps, and two runs of one thread both take the first
+  one, so `SessionStart` fires twice and the provider/init line is written twice,
+  against a document that promises exactly one line per thread. Two runs of one thread
+  is the ordinary case: two tabs, or any client that is not this UI.
+
+  THE CLAIM HAPPENS BEFORE THE WORK, deliberately. A run that dies in between leaves
+  the fact marked as done and the line unwritten, which is the direction to fail in:
+  what this exists to stop is the SECOND line, not to guarantee the first.
+
+  TWO ATOMS, ONE PER FACT, and they stay two: a scripted pin means the init line is
+  never written while the session still started, so 'the init line exists' and 'the
+  session started' are different facts about the same thread."
+  [^clojure.lang.Atom a thread-id]
+  (let [[before _] (swap-vals! a conj thread-id)]
+    (not (contains? before thread-id))))
 
 (defn- log-messages!
   "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
@@ -533,9 +694,8 @@
               ;; begins". It is an observer: its verdict is discarded. Every start is
               ;; a "new" one today; the rebuild path (:source "resume") is a later
               ;; ticket's.
-              (when-not (session-started? thread-id)
-                (hook/emit :session-start {:source "new"})
-                (mark-session-started! thread-id))
+              (when (claim-once! session-started thread-id)
+                (hook/emit :session-start {:source "new"}))
               ;; The provider timeline, part 1: ONE init line per session, on its
               ;; first run. It lands after the input line and before the first
               ;; message line, so a reader meets "here is what this conversation is
@@ -543,10 +703,9 @@
               ;; thread do not repeat it -- the timeline is init plus changes, not a
               ;; snapshot per run.
               (when (and (nil? (providers/pinned-provider thread-id))
-                         (not (init-logged? thread-id)))
+                         (claim-once! init-logged thread-id))
                 (log! thread-id run-id "provider/init"
-                      (provider-line provider (:source resolved)))
-                (mark-init-logged! thread-id))
+                      (provider-line provider (:source resolved))))
               ;; The decision record: what the human answered, next to the input that
               ;; carried it. The same verdict also lands on the resumed call's
               ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
@@ -1657,8 +1816,7 @@
                                          "; it takes provider, model, reasoning-effort and clear")})
 
           (:clear ok)
-          (let [before (providers/override-for thread-id)]
-            (providers/set-override! thread-id nil)
+          (let [{:keys [before]} (providers/swap-override! thread-id nil)]
             (log! thread-id nil "provider/session-changed"
                   {:before before :after nil :via "http"})
             (api-response 200 (providers/wire (providers/active-provider thread-id))))
@@ -1670,15 +1828,18 @@
                          (some? (:reasoning-effort ok)) (assoc :reasoning-effort (:reasoning-effort ok)))]
             (if (empty? change)
               (api-response 400 {:error "nothing to change: give at least one of provider, model, reasoning-effort"})
-              (let [before (providers/override-for thread-id)
-                    answer (try {:ok (providers/resolve-override (merge before change))}
+              ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the
+              ;; tier here and writing it back would lose a change the `session-configure`
+              ;; tool made in between -- both write this tier, from different threads --
+              ;; and this line would then record a before->after pair that never happened.
+              (let [answer (try {:ok (providers/swap-override! thread-id change)}
                                 (catch Throwable t {:error (ex-message t)}))]
                 (if-some [error (:error answer)]
                   (api-response 400 {:error error})
-                  (let [after (providers/set-override! thread-id (merge before change))]
+                  (let [{:keys [before after resolved]} (:ok answer)]
                     (log! thread-id nil "provider/session-changed"
                           {:before before :after after :via "http"
-                           :resolved (:ok answer)})
+                           :resolved resolved})
                     (api-response 200 (providers/wire (providers/active-provider thread-id)))))))))))))
 
 (defn- choices-get

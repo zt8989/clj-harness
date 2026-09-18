@@ -568,3 +568,60 @@
          (is (empty? (filter #(str/starts-with? (str (:kind %)) "hook/InstructionsLoaded") ls))))
        (testing "the run itself is complete -- a missing file is not a failure"
          (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))
+
+;; ------------------------------------------------------- two runs, one thread
+;;
+;; TWO RUNS OF ONE THREAD IS AN ORDINARY CASE -- two tabs, or any client that is not
+;; this UI -- and the facts a session establishes on its first run must be established
+;; once. The edge promises "every thread exactly one line"; the check and the mark used
+;; to be two atom operations with a side effect between them, which is wide enough for
+;; both runs to take the first one.
+
+(deftest two-runs-of-one-thread-start-it-once
+  (wipe!)
+  (support/write-hooks!
+   {:session-start [{:command (marker-script (str (home/root) "/hooks-fired.txt")
+                                             "session-start")}]})
+  (with-server
+   "hw-both"
+   (fn []
+     (io/delete-file (log-file "hw-both") true)
+     (let [a (future (post-run "hw-both"))
+           b (future (post-run "hw-both"))]
+       (is (not= ::timeout (deref a 30000 ::timeout)) "the first run finished")
+       (is (not= ::timeout (deref b 30000 ::timeout)) "and so did the second")
+       (let [ls (wait-for (log-file "hw-both")
+                          (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                          1500)]
+         (is (= 1 (count (filter #(= "hook/SessionStart" (:kind %)) ls)))
+             (str "SessionStart fired once, not once per run: "
+                  (pr-str (mapv :kind (hook-lines ls)))))
+         ;; The provider init LINE is not written at all under a scripted pin -- there is
+         ;; no resolution to record -- so its once-only half is what
+         ;; harness.edge.http-test's timeline case covers. What this case adds is the half
+         ;; that needs two runs at once.
+         (is (empty? (filter #(= "provider/init" (:kind %)) ls))
+             "no init line: this session is served by a scripted pin")
+         (is (str/includes? (slurp (str (home/root) "/hooks-fired.txt")) "session-start")
+             "the hook command really ran"))))))
+
+(deftest a-claim-is-taken-by-exactly-one-caller
+  ;; The primitive the two facts above are built on, on its own: sixteen threads released
+  ;; together, one winner. This one cannot be red against the old code -- the entry did
+  ;; not exist -- so it is the proof that the replacement is right rather than the proof
+  ;; that the old shape was wrong.
+  (let [gate    (support/start-gate 16)
+        a       (atom #{})
+        claims  (atom [])
+        workers (mapv (fn [i]
+                        (future
+                          ((:arrive gate))
+                          (swap! claims conj [(#'http/claim-once! a (str "t" i))
+                                              (#'http/claim-once! a (str "t" i))])))
+                      (range 16))]
+    (doseq [w workers] (is (not= ::timeout (deref w 20000 ::timeout)) "every claim finished"))
+    (is (= 16 (count (filter first @claims)))
+        (str "exactly one claim per thread-id was the first: " (pr-str @claims)))
+    (is (every? false? (map second @claims))
+        "and a second claim on a thread-id already claimed is always the loser")
+    (is (= 16 (count @a)) "the set holds one entry per thread-id")))

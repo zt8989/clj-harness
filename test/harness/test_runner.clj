@@ -35,6 +35,7 @@
 (def test-namespaces
   '[harness.kernel.install-test
     harness.kernel.event-test
+    harness.test-support-test
     harness.infra.db-test
     harness.infra.shell-test
     harness.infra.env-test

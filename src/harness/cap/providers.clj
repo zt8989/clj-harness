@@ -1118,6 +1118,42 @@
     {:selection folded
      :resolved  (fold-and-assemble folded)}))
 
+(defn swap-override!
+  "Fold CHANGE into THREAD-ID's session override, and answer the transition it made:
+
+    {:before <the override as it was> :after <what was stored, canonicalized, or nil>
+     :resolved <what the catalog assembled for :after>}
+
+  ONE ATOM OPERATION, and that is the whole of it. Reading the override, folding the
+  change in and writing it back is three steps, so two callers who do that LOSE one of
+  the two changes -- and, worse, both then record a before->after pair that never
+  happened. Two callers is the ordinary case, not a rare one: `session-configure` (on a
+  tool thread) and the model endpoint (on an http-kit thread) write to this same tier,
+  and the endpoint can be pressed while a run is deciding to reconfigure itself. Here the
+  write is a compare-and-set on the map itself, retried until it lands, and the pair it
+  answers with is the pair it made.
+
+  RESOLVE RUNS BEFORE THE WRITE AND OUTSIDE THE RETRY. `resolve-override` is what proves
+  the change can be served at all, and it throws when it cannot -- which is why it must
+  not live inside the `swap!` function: that function is re-run under contention, and a
+  throw there would abandon a write that had nothing wrong with it. A change that cannot
+  be served writes NOTHING, and the session keeps what it had.
+
+  CHANGE nil clears the override, and the answer is then {:after nil}. `set-override!` is
+  the same store without the transition, and stays for the callers that only want to set
+  a value."
+  [thread-id change]
+  (loop []
+    (let [m      @session-overrides
+          before (get m thread-id)
+          sel    (when change (selection (merge before change)))
+          ;; Throws when the change cannot be served -- before anything is written.
+          served (when sel (resolve-override sel))]
+      (if (compare-and-set! session-overrides m
+                            (if sel (assoc m thread-id sel) (dissoc m thread-id)))
+        {:before before :after sel :resolved (:resolved served)}
+        (recur)))))
+
 (defn effective-provider
   "The provider for THREAD-ID, without a run request: the default and session
   tiers plus the ENV-sourced api-key. Offline tools and replay use this -- they

@@ -102,17 +102,27 @@
 
   OPTS carries :offset and :limit, and the page's rows are all this returns; the
   anchors for the WHOLE file are stored regardless, because an edit is addressed
-  by an anchor and must not depend on which page happened to be read."
+  by an anchor and must not depend on which page happened to be read.
+
+  THE READ AND THE MARKING SHARE ONE SESSION LOCK. `sync!` reads `:anchors` under
+  the session lock and `mark-served!` writes the shown set derived from that read:
+  a concurrent edit landing in between prunes the freed anchors in `advance-on!`
+  and the marking unions them straight back in, recording as shown a name that is
+  no longer in `:anchors`. Holding the lock across both closes the gap."
   [thread-id path content {:keys [offset limit] :as opts}]
-  (let [view (sync! thread-id path content)
-        page (reading/preview content (:anchors view)
-                              {:offset offset :limit limit
-                               :path (store/canonical path)})]
-    ;; ...and record WHICH of those anchors the model actually saw. This is the half
-    ;; that makes 'owned' and 'shown' different facts: the page that was not
-    ;; returned holds anchors that exist and were never displayed.
-    (store/mark-served! thread-id path (:shown page))
-    (assoc page :anchors (:anchors view))))
+  (store/with-session-lock
+   thread-id
+   (fn []
+     (let [view (sync! thread-id path content)
+           page (reading/preview content (:anchors view)
+                                 {:offset offset :limit limit
+                                  :path (store/canonical path)})]
+       ;; ...and record WHICH of those anchors the model actually saw. This is the half
+       ;; that makes 'owned' and 'shown' different facts: the page that was not
+       ;; returned holds anchors that exist and were never displayed. Under the SAME
+       ;; session lock as the `sync!` above, so no edit can prune `served` in between.
+       (store/mark-served! thread-id path (:shown page))
+       (assoc page :anchors (:anchors view))))))
 
 (defn read!
   "The whole anchored read: classify PATH, take its text, serve it. Returns

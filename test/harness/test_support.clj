@@ -265,3 +265,99 @@
           (pred state) state
           (> (System/currentTimeMillis) deadline) state
           :else (do (Thread/sleep 50) (recur seen)))))))
+
+;; ------------------------------------------------- interleaving two threads
+;;
+;; A TEST THAT DOES NOT FORCE THE INTERLEAVING PASSES WHILE THE BUG IS PRESENT. Two
+;; threads started one after the other usually run one after the other, and the code
+;; under test then behaves exactly as it does with no bug at all: the assertion holds,
+;; the test is green, and nothing was checked. Both helpers here WITNESS what they
+;; forced, so a case can assert that the two threads really met instead of hoping.
+;;
+;; EVERY WAIT HAS A DEADLINE and a stuck one FAILS LOUDLY: a race case that hangs
+;; takes the whole suite with it, and a suite that never finishes reads like a broken
+;; machine rather than a broken test.
+
+(defn holds-within?
+  "Does PRED become true within MS? Polled, because what it asks about happens on
+  another thread and there is nothing to block on -- and bounded, so a case whose
+  premise never comes true fails with the assertion it was written for instead of
+  hanging the suite."
+  [pred ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (cond
+        (pred) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 10) (recur))))))
+
+(defn start-gate
+  "A gate N threads must all reach before any of them is let through.
+
+  Ask for one, hand `:arrive` to every thread, and call it as the last thing before the
+  work being raced. Answers {:arrive .. :witness .. :n ..}:
+
+    :arrive   what a thread calls -- returns once all N are there, and THROWS when
+              they never all turn up within MS (naming how many did), so a case that
+              failed to start its threads together fails instead of hanging
+    :witness  how many threads have reached the gate, for an assertion
+
+  The count is the point: it is what lets a test say 'these two were in flight at the
+  same moment' as a fact rather than as an assumption. The two-argument form exists so
+  the deadline itself can be tested without waiting half a minute for it."
+  ([n] (start-gate n 30000))
+  ([n ms]
+   (let [ready (java.util.concurrent.CountDownLatch. (int n))
+         there (atom 0)]
+     {:n n
+      :arrive  (fn []
+                 (swap! there inc)
+                 (.countDown ready)
+                 (when-not (.await ready (long ms) java.util.concurrent.TimeUnit/MILLISECONDS)
+                   (throw (ex-info (str "the start gate never opened: " @there " of " n
+                                        " threads arrived within " ms
+                                        "ms; the case is not racing anything")
+                                   {:arrived @there :wanted n}))))
+      :witness (fn [] @there)})))
+
+(defn window-gate
+  "Wrap the var SYM's value so that a call to it, while the gate is armed, BLOCKS
+  inside the window -- after it is entered, before it does its work.
+
+  This is how a race in the middle of a function is forced: wrap the var the window
+  sits behind (a predicate, a reader, a reconfigure), let one thread reach it and stop
+  there, then run the other thread's work and release.
+
+  ALTER-VAR-ROOT, NOT `binding`: the server runs on its own threads, and a thread-local
+  binding is silently ignored there -- the same reason `with-temp-env` uses it. Answers
+  {:entered .. :release .. :restore ..}:
+
+    :entered  how many calls have reached the window so far (the witness)
+    :release  let every waiting call continue
+    :restore  put the original value back -- call it in a `finally`
+
+  A caller that forgets :restore leaves the var wrapped for every test after it, so
+  this is deliberately a pair of calls in a try/finally rather than a macro with a body:
+  the window is usually entered by a thread the test body did not start. The two-argument
+  form sets how long a waiting call waits before going on without a release -- so the
+  deadline itself is testable without a half-minute wait.
+
+  THE THREE-ARGUMENT FORM HOLDS ONLY THE FIRST `hold` CALLS AND LETS THE REST THROUGH,
+  which is what a window in a FUNCTION BOTH THREADS RUN needs: holding the first caller
+  there while the second one runs to completion is the whole experiment, and holding the
+  second one too would make the test wait for a release that only the test can give.
+  `hold` 0 -- the default -- holds every call."
+  ([sym] (window-gate sym 30000 0))
+  ([sym ms] (window-gate sym ms 0))
+  ([sym ms hold]
+   (let [original @sym
+         entered  (atom 0)
+         go       (promise)]
+     (alter-var-root sym (fn [_] (fn [& args]
+                                   (let [n (swap! entered inc)]
+                                     (when (or (zero? hold) (<= n hold))
+                                       (deref go (long ms) false)))
+                                   (apply original args))))
+     {:entered (fn [] @entered)
+      :release (fn [] (deliver go true))
+      :restore (fn [] (alter-var-root sym (fn [_] original)))})))

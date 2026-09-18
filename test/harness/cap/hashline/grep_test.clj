@@ -125,6 +125,43 @@
 (defn- anchor-for [out content]
   (some (fn [[_ _ a c]] (when (= c content) a)) (rows out)))
 
+;; ------------------------------------------------- does the mark hold the lock?
+;;
+;; `served` has to stay a subset of `:anchors`: an edit PRUNES it in `advance-on!`
+;; (intersecting with the surviving anchors) while a marking UNIONS, so the read a
+;; marking is derived from and the marking itself may not be separated by an edit.
+;; The helper below asks the question DETERMINISTICALLY -- no gate, no race -- by
+;; swapping `store/mark-served!` for a stub that records whether the CALLING thread
+;; held the session lock at the instant of the call.
+
+(defn- lock-witness
+  "Call F with `store/mark-served!` wrapped: every call first records, under the
+  THREAD-ID it names, whether the calling thread held that session's lock, then
+  delegates to the original. Answers the witness {thread-id [held? ..]}.
+
+  DETERMINISTIC, NOT A RACE: the stub asks its own thread the question at the moment
+  of the call, so the answer is the same on every run. `alter-var-root`, not
+  `with-redefs`, because the tool seam is free to run the body on another thread.
+
+  The lock object comes out of the store's own table, keyed exactly as
+  `with-session-lock` keys it; it exists by the time the marking runs because the
+  `serve/sync!` that rendered each block made one. A session with no lock at all is
+  recorded as NOT held."
+  [f]
+  (let [original @#'store/mark-served!
+        seen     (atom {})
+        wrapped  (fn [thread-id path anchors]
+                   (let [^java.util.concurrent.ConcurrentHashMap locks
+                         @#'store/session-locks
+                         l (.get locks (str thread-id))]
+                     (swap! seen update (str thread-id) (fnil conj [])
+                            (boolean (and l (.isHeldByCurrentThread
+                                             ^java.util.concurrent.locks.ReentrantLock l)))))
+                   (original thread-id path anchors))]
+    (alter-var-root #'store/mark-served! (constantly wrapped))
+    (try (f) (finally (alter-var-root #'store/mark-served! (constantly original))))
+    @seen))
+
 ;; ------------------------------------------------------------- the basic use
 
 (deftest a-hit-comes-back-as-an-anchored-row
@@ -362,3 +399,21 @@
     (is (str/includes? desc "ANCHORED"))
     (is (str/includes? desc "never to edit by") "the line number's role is stated")
     (is (str/includes? desc "literal: true") "and the way out of a refused pattern")))
+
+;; ------------------------------------------ the marking shares the read's lock
+
+(deftest the-search-marks-what-it-printed-under-the-session-lock
+  ;; THE BUG THIS PINS: `render` reads each file's anchors through `serve/sync!`
+  ;; under the session lock, and the `mark-served!` that records what each block
+  ;; printed used to happen after it was released. A concurrent edit in that gap
+  ;; prunes the freed anchors (`advance-on!`) and the marking unions them back in --
+  ;; so `served` names an anchor no longer in `:anchors`. The stub turns 'was the
+  ;; lock held when the marking ran?' into a value, with no race to hope for.
+  (use-mode!)
+  (put! "src/a.clj" "one\nMARKER\n")
+  (let [seen (lock-witness #(grep! {:pattern "MARKER"}))
+        held (get seen tid)]
+    (is (seq held) "the search did mark what it printed")
+    (is (every? true? held)
+        (str "every mark-served! call must hold " tid "'s session lock; got "
+             (pr-str held)))))

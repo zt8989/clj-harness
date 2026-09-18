@@ -324,21 +324,16 @@
                     (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
     (when (empty? change)
       (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    (let [before (providers/override-for thread-id)
-          ;; Resolve BEFORE writing: this proves the change can actually be
-          ;; served and hands the writer the resolved shape, so the log records
-          ;; what the session became rather than what it was asked to become.
-          resolved (providers/resolve-override (merge before change))
-          ;; set-override! answers with what it stored, and THAT is what the
-          ;; change line records -- not `change` merged over `before` a second
-          ;; time here. The stored value is the one the next run folds; a
-          ;; parallel copy is how a log and a session drift apart.
-          after (providers/set-override! thread-id (merge before change))]
+    ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the tier here
+    ;; and writing it back would lose the change another thread made in between -- the
+    ;; model endpoint writes this same tier -- and the change line below would then
+    ;; record a before->after pair that never happened.
+    (let [{:keys [before after resolved]} (providers/swap-override! thread-id change)]
       (providers/record-provider-change! thread-id before after "session-configure"
-                                   after (:resolved resolved))
+                                   after resolved)
       (str "session reconfigured: " (pr-str change)
            " -- effective now for this thread only."
-           (when-let [m (:model (:resolved resolved))] (str " Serving " m "."))
+           (when-let [m (:model resolved)] (str " Serving " m "."))
            (when (nil? thread-id)
              " (warning: no session in scope; the change landed on the process-wide slot)")))))
 

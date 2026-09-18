@@ -15,7 +15,8 @@
             [clojure.test :refer [deftest is testing]]
             [harness.infra.db :as db]
             [harness.cap.providers :as providers]
-            [harness.infra.home :as home])
+            [harness.infra.home :as home]
+            [harness.test-support :as support])
   (:import (java.io File StringWriter)
            (java.nio.file Files OpenOption)
            (java.sql Connection DriverManager)))
@@ -82,6 +83,31 @@
     (Files/write (.toPath dest)
                  (java.util.Arrays/copyOf bytes (int (min n (alength bytes))))
                  (make-array OpenOption 0))))
+
+(defn- declare-more-pages!
+  "Make DEST's own header count MORE pages than the file holds, and return the size
+  it now declares. That is the state a checkpoint is in between writing page 1 --
+  which carries the new count -- and writing the pages page 1 counts, so it is what
+  a HEALTHY store looks like while it is being written to."
+  ^long [^File dest ^long extra]
+  (let [path  (.toPath dest)
+        bytes (Files/readAllBytes path)
+        be32  (fn [^long off]
+                (bit-or (bit-shift-left (bit-and (aget bytes off) 0xFF) 24)
+                        (bit-shift-left (bit-and (aget bytes (+ off 1)) 0xFF) 16)
+                        (bit-shift-left (bit-and (aget bytes (+ off 2)) 0xFF) 8)
+                        (bit-and (aget bytes (+ off 3)) 0xFF)))
+        page  (let [p (bit-or (bit-shift-left (bit-and (aget bytes 16) 0xFF) 8)
+                              (bit-and (aget bytes 17) 0xFF))]
+                (if (= p 1) 65536 p))
+        want  (+ (be32 28) extra)
+        with  (doto (aclone bytes)
+                (aset 28 (unchecked-byte (bit-shift-right want 24)))
+                (aset 29 (unchecked-byte (bit-shift-right want 16)))
+                (aset 30 (unchecked-byte (bit-shift-right want 8)))
+                (aset 31 (unchecked-byte want)))]
+    (Files/write path with (make-array OpenOption 0))
+    (* page want)))
 
 (declare raw-rows)
 
@@ -352,6 +378,78 @@
               (is (= 1 (:n (first (db/select "SELECT COUNT(*) AS n FROM projects"))))
                   "and it is writable"))))))))
 
+(deftest a-file-short-of-its-own-header-while-a-journal-is-beside-it-is-not-a-wreck
+  ;; THE ONE JUDGEMENT IN THIS NAMESPACE THAT CAN BE WRONG ABOUT A HEALTHY FILE. A
+  ;; store grows by writing page 1 first -- the header, carrying the new page count
+  ;; -- and the pages it counts afterwards, so while a checkpoint is in flight a
+  ;; healthy store really is shorter than its own header says. On 2026-09-18 that
+  ;; moment was judged three times and three healthy stores were moved aside.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (db/migrate!)
+        (let [db-file (home/db-file)]
+          (is (empty? (filter #(re-find #"-(wal|journal)$" (.getName %))
+                              (.listFiles dir)))
+              "a store at rest keeps no journal beside it")
+          (declare-more-pages! db-file 64)
+          (testing "with a journal beside it, 'short' is not a verdict"
+            (let [wal (io/file (str (.getPath db-file) "-wal"))]
+              ;; Only its PRESENCE is read by the judgement; what is inside it is
+              ;; noise on purpose. What the file being there means is 'a write is in
+              ;; flight', and that is the fact this case turns on.
+              (spit wal "not a journal, just something in the way\n")
+              (try
+                (let [answer (try (db/schema-version) (catch Exception e e))]
+                  (is (number? answer)
+                      (str "the read-only question answers instead of calling it a wreck"
+                           (when-not (number? answer) (str " -- said " (ex-message answer))))))
+                (is (empty? (filter #(str/includes? (.getName %) ".corrupt-")
+                                    (.listFiles dir)))
+                    "and nothing was moved aside")
+                (finally (io/delete-file wal true)))))
+          (testing "with nothing beside it, the same file is still a wreck"
+            (let [thrown (try (db/schema-version) nil (catch Exception e e))]
+              (is (= :damaged (:reason (ex-data thrown)))
+                  "a file that cannot be growing is still judged by what it says")
+              (testing "and the reason quotes the size it judged by, never a fresh look"
+                (let [nums (mapv parse-long (re-seq #"\d+" (:why (ex-data thrown))))]
+                  (is (= 2 (count nums)))
+                  (is (not= (first nums) (second nums))
+                      "two readings that agree is the shape of a file mid-write"))))))))))
+
+(deftest what-moves-a-store-aside-is-the-engines-answer-not-a-byte-reading
+  ;; A BYTE READING IS NOT A VERDICT. `inspect` reads a snapshot of a file another
+  ;; thread may be in the middle of writing, so what it reports is a hint about what to
+  ;; expect; the move happens one step below, when SQLite itself says the file cannot be
+  ;; used. MEASURED, and it is why this case is about the REASON rather than about some
+  ;; store the engine forgives: a file whose header counts more pages than the file holds
+  ;; is CORRUPT to SQLite too (`[SQLITE_CORRUPT] The database disk image is malformed`).
+  ;; The engine does not rescue that shape -- the WAL check in the judgement above is
+  ;; what keeps a live write from being judged at all. What this case pins is that the
+  ;; harness now moves a file on the engine's word, and says whose word it was.
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (db/migrate!)
+        (declare-more-pages! (home/db-file) 64)  ; the header now counts more than is there
+        (testing "the read-only question reports the byte reading, and moves nothing"
+          (let [before (fingerprint dir "harness.db")
+                thrown (try (db/schema-version) nil (catch Exception e e))]
+            (is (= :damaged (:reason (ex-data thrown))))
+            (is (str/includes? (ex-message thrown) "bytes alone")
+                (str "worded as a reading, not a verdict: " (ex-message thrown)))
+            (is (= before (fingerprint dir "harness.db")) "and it moved nothing")))
+        (testing "the healing path asks the engine, and the reason it records is the engine's"
+          (is (number? (db/migrate!)) "the store works by the time this returns")
+          (let [why (:why (last (db/recoveries)))]
+            (is (str/includes? why "SQLITE_CORRUPT")
+                (str "the reason recorded is SQLite's own: " why))
+            (is (not (str/includes? why "declares"))
+                "and not the byte reading, which used to be quoted as the cause")))))))
+
 ;; ------------------------------------------------------------------ migrations
 
 (deftest migration-steps-run-one-version-at-a-time-and-never-twice
@@ -570,13 +668,20 @@
 
 (defn- hammer
   "Run THREADS threads, each doing ROUNDS read-modify-write transactions on the
-  counter. Returns the failures they reported: empty when all is well."
+  counter. Returns the failures they reported: empty when all is well.
+
+  THE THREADS ARE RELEASED TOGETHER (harness.test-support/start-gate). Started one
+  after another they tend to run one after another, and a lost update needs two of
+  them to be inside their transactions at the same moment -- so a run without a gate
+  passes with the bug in place, which is the one outcome worse than a red test."
   [threads rounds]
-  (let [failures (atom [])
+  (let [gate     (support/start-gate threads)
+        failures (atom [])
         workers  (mapv (fn [_]
                          (Thread.
                           (fn []
                             (try
+                              ((:arrive gate))
                               (dotimes [_ rounds]
                                 (db/with-transaction
                                   (fn [^Connection c]
@@ -592,6 +697,9 @@
                        (range threads))]
     (doseq [w workers] (.start w))
     (doseq [w workers] (.join w 30000))
+    (when (not= threads ((:witness gate)))
+      (swap! failures conj (str "only " ((:witness gate)) " of " threads
+                                " threads reached the gate")))
     @failures))
 
 (deftest two-threads-writing-do-not-lose-each-others-updates
@@ -794,3 +902,59 @@
             (is (empty? (filter #(re-find forbidden %) (db/tables)))
                 (str "these tables look like records rather than state: "
                      (pr-str (filter #(re-find forbidden %) (db/tables)))))))))))
+
+;; ------------------------------------------------- quarantining is a race too
+;;
+;; EVERY CONNECTION RUNS THE JUDGEMENT, so several threads reach the quarantine at the
+;; same moment and only one of them finds the files still there. What the others must
+;; not do is fail, or record one incident as two.
+
+(deftest a-quarantine-somebody-else-already-did-is-not-a-failure
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (db/with-transaction
+          (fn [^Connection c]
+            (with-open [st (.createStatement c)]
+              (.execute st "CREATE TABLE before_the_cut (x INTEGER)"))))
+        (let [db-file (home/db-file)]
+          (truncate! db-file db-file 100)         ; past its header: a wreck, not a refusal
+          (let [before     (count (db/recoveries))
+                first-call (binding [*err* (StringWriter.)]
+                             (#'db/quarantine! db-file "cut down to its header"))]
+            (is (seq (:moved first-call)) "the first call takes the store")
+            (is (= (inc before) (count (db/recoveries))) "one incident, one fact")
+            (testing "and the second one, finding nothing to take, is not a failure"
+              (let [said  (StringWriter.)
+                    again (binding [*err* said]
+                            (#'db/quarantine! db-file "cut down to its header"))]
+                (is (empty? (:moved again)) "it moved nothing")
+                (is (= (inc before) (count (db/recoveries)))
+                    "and it did not record the same loss a second time")
+                (is (str/includes? (str said) "already been moved aside")
+                    (str "it said out loud what it found: " (str said)))))))))))
+
+(deftest eight-threads-quarantining-one-store-neither-fail-nor-double-count
+  (let [dir (fresh-root)]
+    (with-root
+      dir
+      (fn []
+        (db/migrate!)
+        (truncate! (home/db-file) (home/db-file) 100)
+        (let [before  (count (db/recoveries))
+              gate    (support/start-gate 8)
+              failed  (atom [])
+              workers (mapv (fn [_]
+                              (future
+                                (try
+                                  ((:arrive gate))
+                                  (db/migrate!)
+                                  (catch Throwable t (swap! failed conj (ex-message t))))))
+                            (range 8))]
+          (doseq [w workers] (is (not= ::timeout (deref w 60000 ::timeout)) "every thread finished"))
+          (is (empty? @failed)
+              (str "no thread failed to get a usable store: " (pr-str @failed)))
+          (is (= (inc before) (count (db/recoveries)))
+              (str "one store was lost, so one fact -- not one per thread: "
+                   (pr-str (drop before (db/recoveries))))))))))

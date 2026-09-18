@@ -1820,6 +1820,148 @@
                  (is (str/includes? (:error (read-json rb)) "harness-http-project")
                      "the refusal names the other half's directory"))))))))))
 
+;; ------------------------------------- records that landed in the reserved workspace
+
+(defn- project-log
+  "The file a thread bound to PROJECT-DIR writes to, computed the way the writer
+  computes it: the project's canonical path, sanitized, under the projects tree."
+  [project-dir tid]
+  (home/log-file (io/file (home/projects-dir)
+                          (home/sanitize (.getCanonicalPath (io/file project-dir))))
+                 tid))
+
+(defn- unbound-log
+  "The file an unbound thread's records land in -- the tree's reserved workspace."
+  [tid]
+  (home/log-file (io/file (home/projects-dir) http/unbound-workspace) tid))
+
+(defn- carried-files
+  "The evidence a carry leaves behind under DIR: files named
+  `<thread>.jsonl.carried-<stamp>`. They deliberately do not end in .jsonl, so the
+  listing does not read them as a second conversation."
+  [dir tid]
+  (->> (file-seq (io/file dir))
+       (filter #(and (.isFile ^java.io.File %)
+                     (str/starts-with? (.getName ^java.io.File %)
+                                       (str (home/sanitize tid) ".jsonl.carried-"))
+                     (not (str/ends-with? (.getName ^java.io.File %) ".jsonl"))))))
+
+(deftest records-that-landed-unbound-are-carried-back-into-the-project-file
+  ;; The 2026-09-18 accident, as a case: the store was moved aside and rebuilt
+  ;; empty, so project/identity-for answered nil for every session and the records a
+  ;; live run kept producing landed in projects/.unbound/<thread>.jsonl. When the
+  ;; store was restored the binding was back, so later records went to the project's
+  ;; workspace again -- ONE CONVERSATION IN TWO FILES. Replay, rebuild and the eval
+  ;; reader each read ONE file, so the unbound segment was invisible to all of them.
+  ;;
+  ;; The store is emptied HERE by dropping the binding (the same answer
+  ;; identity-for gives after a quarantine: nil) and restored by binding again --
+  ;; NOT through /api/project, which would itself have called move-log!. This is the
+  ;; WRITER that has to notice the leftover, which is the whole point of the case.
+  ;; Both homes are this test's own, and the project directory is planted under its
+  ;; root, so nothing here can reach the developer's real library.
+  (support/with-temp-env [root _home]
+    (let [proj-dir (io/file root "carry-project")
+          tid      (str "carry-" (java.util.UUID/randomUUID))
+          plog     (project-log proj-dir tid)
+          ulog     (unbound-log tid)]
+      (.mkdirs proj-dir)
+      (try
+        (testing "a bound session's records land in the project's workspace"
+          (project/bind! tid (str proj-dir))
+          (#'http/log! tid "r1" "input" {:n 1})
+          (#'http/log! tid "r1" "input" {:n 2})
+          (is (.exists plog))
+          (is (not (.exists ulog))))
+        (testing "the store answers nil for a while: records land in .unbound"
+          (project/bind! tid nil)
+          (#'http/log! tid "r2" "input" {:n 3})
+          (#'http/log! tid "r2" "input" {:n 4})
+          (is (.exists ulog))
+          (is (= 2 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))))
+        (testing "the binding comes back and the writer carries the segment home"
+          (project/bind! tid (str proj-dir))
+          (#'http/log! tid "r3" "input" {:n 5})
+          (let [lines  (mapv #(json/read-str % :key-fn keyword)
+                             (str/split-lines (slurp plog :encoding "UTF-8")))
+                inputs (filterv #(= "input" (:kind %)) lines)
+                ns     (mapv #(get-in % [:payload :n]) inputs)]
+            (testing "ONE file holds the whole conversation, in order"
+              (is (= [1 2 3 4 5] ns) "no line lost and none duplicated")
+              (is (= 5 (count inputs))))
+            (testing "and the timestamps do not go backwards"
+              (let [ts (mapv :ts inputs)]
+                (is (= ts (vec (sort ts))))))
+            (testing "the leftover source is renamed, not read as a second conversation"
+              (is (not (.exists ulog)))
+              (let [kept (carried-files (home/projects-dir) tid)]
+                (is (= 1 (count kept))))))
+          (testing "the listing sees exactly ONE log for this session"
+            (is (= 1 (count (replay/logs-for (home/projects-dir) tid))))))
+        (testing "and the carry is SAID OUT LOUD"
+          (let [lines (mapv #(json/read-str % :key-fn keyword)
+                            (str/split-lines (slurp plog :encoding "UTF-8")))
+                line  (first (filter #(= "log/carried-back" (:kind %)) lines))]
+            (is (some? line) "an audit line says the segment was carried back")
+            (is (= (.getAbsolutePath plog) (get-in line [:payload :to])))
+            (is (= (.getAbsolutePath ulog) (get-in line [:payload :from])))
+            (is (= 2 (get-in line [:payload :lines])) "and how many lines moved")))
+        (finally
+          (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
+
+(deftest a-carry-that-would-interleave-two-histories-is-refused-by-name
+  ;; The carry may only run when the conversation's file ENDS at or before the
+  ;; leftover segment begins. If the two ranges overlap -- here the segment begins
+  ;; before the file has ended -- appending would fold one history into another out
+  ;; of order (replay reads in FILE order), so the implementation refuses, names both
+  ;; files, and changes neither. This is the check the 2026-09-18 hand-repair did
+  ;; with `cat`: the ranges had to be shown disjoint first, and it is not assumed.
+  ;;
+  ;; The refused carry is said ONCE, not beside every record line that follows.
+  (support/with-temp-env [root _home]
+    (let [proj-dir (io/file root "carry-overlap")
+          tid      (str "overlap-" (java.util.UUID/randomUUID))
+          plog     (project-log proj-dir tid)
+          ulog     (unbound-log tid)
+          line     (fn [ts n] (str (json/write-str {:ts ts :runId "r" :kind "input"
+                                                     :payload {:n n}}) "\n"))]
+      (.mkdirs proj-dir)
+      (try
+        (project/bind! tid (str proj-dir))
+        (.mkdirs (.getParentFile plog))
+        (spit plog (str (line 2000 1) (line 3000 2)) :encoding "UTF-8")
+        (.mkdirs (.getParentFile ulog))
+        (spit ulog (str (line 2500 3) (line 3500 4)) :encoding "UTF-8")
+        (let [before-plog (slurp plog :encoding "UTF-8")
+              before-ulog (slurp ulog :encoding "UTF-8")]
+          (#'http/log! tid "r3" "input" {:n 5})
+          (let [lines   (mapv #(json/read-str % :key-fn keyword)
+                              (str/split-lines (slurp plog :encoding "UTF-8")))
+                refused (first (filter #(= "log/carry-refused" (:kind %)) lines))]
+            (testing "the refusal is on the record, naming BOTH paths"
+              (is (some? refused))
+              (is (= (.getAbsolutePath plog) (get-in refused [:payload :to])))
+              (is (= (.getAbsolutePath ulog) (get-in refused [:payload :from])))
+              (is (str/includes? (str (get-in refused [:payload :reason])) "overlap")))
+            (testing "neither file was merged or moved"
+              (is (.exists ulog) "the leftover is still where it was")
+              (is (= before-ulog (slurp ulog :encoding "UTF-8"))
+                  "byte for byte -- not appended to, not renamed")
+              (is (not-any? #(= 3 (get-in % [:payload :n])) lines)
+                  "not one of the segment's lines was folded in")
+              (is (not-any? #(= 4 (get-in % [:payload :n])) lines))
+              (is (str/starts-with? (slurp plog :encoding "UTF-8") before-plog)
+                  "the conversation's own lines are untouched; only the audit and this write followed"))
+            (testing "a refused carry is said once, not beside every record"
+              (#'http/log! tid "r3" "input" {:n 6})
+              (#'http/log! tid "r3" "input" {:n 7})
+              (let [n (count (filter #(= "log/carry-refused" (:kind %))
+                                     (mapv #(json/read-str % :key-fn keyword)
+                                           (str/split-lines (slurp plog :encoding "UTF-8")))))]
+                (is (= 1 n) "one audit line for one refusal")))))
+        (finally
+          (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
+
 (deftest threads-listing-and-rebuild-over-the-real-edge
   ;; Ticket 05 over the real edge: a real run writes a real log; the listing
   ;; finds it with its metadata; the rebuild endpoint hands the conversation
