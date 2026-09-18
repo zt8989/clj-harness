@@ -551,7 +551,17 @@
 
 (defn derived-injections
   "MESSAGES + ROOTS -> MESSAGES with the skill bodies this conversation has
-  loaded spliced in, each directly after the message that asked for it.
+  loaded spliced in, after the message that asked for it.
+
+  A TOOL ASK ENDS ITS BLOCK, NOT ITS OWN CALL. One model call may ask for a skill AND
+  something else in the same breath, and the kernel answers them in call order -- so
+  a body spliced directly behind its own tool result would land BETWEEN two results
+  of one assistant message. That is not tidiness: an OpenAI-shaped vendor refuses a
+  request whose assistant message with tool_calls is not followed, immediately, by a
+  tool message for each 'tool_call_id' (HTTP 400, 'insufficient tool messages
+  following tool_calls message'), so the body waits for the LAST result of the call
+  that asked. A person's slash is not a tool call, and still lands right behind the
+  message that asked.
 
   IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
   applepi's server holds the session, so its tool can push a message into history
@@ -598,11 +608,21 @@
     (if (and (empty? confirmations) (not-any? slash-of messages))
       messages
       (let [present (set (loaded-names messages))]
-        (loop [out [] seen present [m & more :as ms] messages]
+        (loop [out [] seen present pending [] [m & more :as ms] messages]
           (if (empty? ms)
             out
-            (let [out (conj out m)
-                  nm  (or (get name-of (:tool_call_id m)) (slash-of m))]
-              (if (and nm (not (contains? seen nm)))
-                (recur (conj out (skill-message nm (load-text roots nm))) (conj seen nm) more)
-                (recur out seen more)))))))))
+            (let [out     (conj out m)
+                  nm      (or (get name-of (:tool_call_id m)) (slash-of m))
+                  pending (cond-> pending nm (conj nm))]
+              (if (and (= "tool" (:role m)) (= "tool" (:role (first more))))
+                ;; MID-BLOCK: this result is not the last of its assistant message's,
+                ;; and nothing may come between those results (see above).
+                (recur out seen pending more)
+                (let [[out seen] (reduce (fn [[out seen] nm]
+                                           (if (contains? seen nm)
+                                             [out seen]
+                                             [(conj out (skill-message nm (load-text roots nm)))
+                                              (conj seen nm)]))
+                                         [out seen]
+                                         (distinct pending))]
+                  (recur out seen [] more))))))))))

@@ -5,17 +5,25 @@
   person's `/name`), which are two sources for one derivation and so are tested
   against each other as much as against themselves.
 
+  The derivation ends at the WIRE: a body spliced where a vendor refuses the request
+  was not placed at all, so one case here drives a whole run against a provider that
+  answers with that vendor's own 400.
+
   Every fixture here writes into the temp OS home the runner pins
   (harness.test-runner/isolate!), never the developer's real one -- which is the
   reason that pin exists: this machine has 51 skills in ~/.agents/skills, and a
   suite that read them would depend on one person's dotfiles."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.fake :as fake]
             [harness.infra.home :as home]
             [harness.cap.project :as project]
             [harness.cap.skills :as skills]
+            [harness.kernel.llm :as llm]
+            [harness.kernel.loop :as loop]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]))
 
@@ -481,6 +489,124 @@
     (testing "placed directly AFTER the tool result -- the calls stay adjacent"
       (is (= "tool" (:role (nth out 2))))
       (is (= "user" (:role (nth out 3)))))))
+
+(deftest a-load-never-splits-the-results-of-one-model-call
+  ;; THE 400 THIS EXISTS FOR (thread d841d970, 2026-09-18). An OpenAI-shaped vendor
+  ;; refuses a request whose assistant message with tool_calls is not followed,
+  ;; immediately, by a tool message for EVERY id that message asked for:
+  ;;
+  ;;   "An assistant message with 'tool_calls' must be followed by tool messages
+  ;;    responding to each 'tool_call_id'."
+  ;;
+  ;; One model call may ask for a skill AND something else in the same breath, and
+  ;; the kernel answers them in CALL order (`harness.kernel.loop/drive!`). Splicing
+  ;; a body "directly after the message that asked" then puts it BETWEEN two results
+  ;; of the SAME assistant message -- which is the refusal above, verbatim. The
+  ;; asking call's whole result block is what the body belongs behind.
+  (let [root (lay-user-skills! "alpha")
+        msgs [{:role "user" :content "please use alpha"}
+              {:role "assistant" :content ""
+               :tool_calls [(call "c1" "skill" {:name "alpha"})
+                            (call "c2" "bash" {:command "ls"})]}
+              (skill-result "c1" "alpha")
+              {:role "tool" :tool_call_id "c2" :content "a\nb"}]
+        out  (skills/derived-injections msgs [root])]
+    (testing "the body lands after the LAST result of the call that asked"
+      (is (= ["user" "assistant" "tool" "tool" "user"] (mapv :role out)))
+      (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) out)))
+          "the two results stay adjacent -- that is what the vendor checks")
+      (is (str/starts-with? (:content (nth out 4)) "<skill name=\"alpha\">")))
+
+    (testing "and the derivation is still idempotent there"
+      (is (= out (skills/derived-injections out [root]))))
+
+    (testing "two skills asked in one call both land behind the block, in call order"
+      (lay-skill! root "beta" (skill-md "beta" "b"))
+      (let [out (skills/derived-injections
+                 [{:role "user" :content "go"}
+                  {:role "assistant" :content ""
+                   :tool_calls [(call "c1" "skill" {:name "alpha"})
+                                (call "c2" "skill" {:name "beta"})]}
+                  (skill-result "c1" "alpha")
+                  (skill-result "c2" "beta")]
+                 [root])]
+        (is (= ["user" "assistant" "tool" "tool" "user" "user"] (mapv :role out)))
+        (is (str/starts-with? (:content (nth out 4)) "<skill name=\"alpha\">"))
+        (is (str/starts-with? (:content (nth out 5)) "<skill name=\"beta\">"))))))
+
+;; --------------------------------------- the request the vendor actually sees
+
+(def ^:private unanswered-call-refusal
+  "The vendor's own 400, byte for byte, as a real gateway answered it: an assistant message
+  whose tool_calls are not answered ADJACENTLY is refused before the model runs at all. Copied
+  rather than paraphrased, for the same reason harness.fake's thinking-mode refusal is: a test
+  must meet what production meets."
+  (json/write-str {:error {:message (str "An assistant message with 'tool_calls' must be followed"
+                                         " by tool messages responding to each 'tool_call_id'."
+                                         " (insufficient tool messages following tool_calls message)")
+                           :type "invalid_request_error"
+                           :param ""
+                           :code "invalid_request_error"}}))
+
+(defn- refuse-unanswered-calls!
+  "Answer the 400 a vendor answers when an assistant message's tool_calls are not followed,
+  immediately, by a tool message for every one of them."
+  [messages]
+  (let [unanswered? (some (fn [i]
+                           (let [ids (seq (map :id (:tool_calls (nth messages i))))]
+                             (when ids
+                               (let [answered (into #{}
+                                                    (keep :tool_call_id)
+                                                    (take-while #(= "tool" (:role %))
+                                                                (drop (inc i) messages)))]
+                                 (not (every? answered ids))))))
+                         (range (count messages)))]
+    (when unanswered?
+      (throw (ex-info (str "HTTP 400: " unanswered-call-refusal) {:status 400})))))
+
+;; A provider that IS the vendor's validator, then the scripted fake underneath it.
+;; A spy could only report the messages it was handed; this one REFUSES them the way
+;; the vendor does, so the run under test dies exactly where production died.
+(defmethod llm/stream! :vendor-shaped
+  [provider messages on-event thread-id]
+  (refuse-unanswered-calls! messages)
+  (llm/stream! (assoc provider :protocol :fake) messages on-event thread-id))
+
+(defn- drain-chan [ch]
+  (loop [acc []]
+    (if-let [ev (async/<!! ch)]
+      (if (= :run/done (:type ev))
+        {:history (:history ev) :seen acc}
+        (recur (conj acc ev)))
+      {:history nil :seen acc})))
+
+(deftest a-skill-loaded-beside-another-call-does-not-break-the-next-request
+  ;; END TO END, and the bug as it actually happened: one model call asked for `skill`
+  ;; AND `read`; the loop answered both in call order; the pre-LLM step spliced the
+  ;; body between them; and the NEXT request -- the one that must carry the whole
+  ;; round back -- was refused with the 400 above, ending the run on RUN_ERROR.
+  (let [root     (lay-user-skills! "alpha")
+        note     (str (io/file (home/root) "note.txt"))
+        _        (spit! note "hello\n")
+        provider (assoc (fake/scripted
+                         [{:content ""
+                           :tool-calls [{:id "c1" :name "skill" :arguments {:name "alpha"}}
+                                        {:id "c2" :name "read" :arguments {:path note}}]}
+                          {:content "done"}])
+                        :protocol :vendor-shaped)
+        {:keys [history seen]}
+        (drain-chan (loop/run-chan provider [] {:thread-id "sk-beside"
+                                               :before-llm project/before-llm}))]
+    (testing "the run finishes instead of dying on the vendor's refusal"
+      (is (not-any? #(= :run/error (:type %)) seen)
+          (str "saw " (pr-str (mapv :type seen)))))
+
+    (testing "and the body is in the conversation the second request carried"
+      (let [out (filter #(= "user" (:role %)) history)]
+        (is (some #(str/starts-with? (str (:content %)) "<skill name=\"alpha\">") out))))
+
+    (testing "every assistant message's results stay adjacent in what came back"
+      (is (nil? (refuse-unanswered-calls! history))))))
 
 (deftest derivation-is-idempotent-and-loads-once-per-name
   (let [root (lay-user-skills! "alpha")
