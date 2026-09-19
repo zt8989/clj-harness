@@ -11,10 +11,12 @@
 // turns our RUN_FINISHED+outcome into a resumable interrupt, and a real `resume`
 // array really drives the server's replay. Everything from the park onward is
 // what this file is for.
+import path from "node:path";
+
 import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
-import { type Case, type Suite, content, fileExists, rm, runUrl, script, threadId, tmpPath } from "../e2e";
+import { type Case, type Suite, content, fileExists, rm, runUrl, script, threadId, tmpDir } from "../e2e";
 
 /// "resolved" approves, "cancelled" vetoes -- the two statuses the AG-UI resume
 /// entry is allowed to carry.
@@ -91,51 +93,60 @@ const cases: Case[] = [
   {
     name: "a-parked-write-runs-only-after-approval",
     run: async () => {
-      const approved = tmpPath("harness-approval-approved.txt");
-      const vetoed = tmpPath("harness-approval-vetoed.txt");
+      // THE TWO MARKERS LIVE IN A DIRECTORY mkdtemp MADE, so there is nothing to
+      // clear first, no other run to collide with, and the directory goes away with
+      // the case. They used to be two fixed names directly in the system temp
+      // directory -- shared with every other process on the machine, and outliving
+      // this run.
+      const scratch = tmpDir("clj-harness-ui-approval-");
+      const approved = path.join(scratch, "approved.txt");
+      const vetoed = path.join(scratch, "vetoed.txt");
       const { agent, events, reset } = newAgent(threadId("approval"));
 
-      for (const p of [approved, vetoed]) rm(p);
-      script([
-        markedTurn,
-        { content: "marked" },
-        writeTurn("w1", approved),
-        { content: "wrote it" },
-        writeTurn("w2", vetoed),
-        { content: "done" },
-      ]);
-      await turn(agent, "mark this session as requiring approval for write");
+      try {
+        script([
+          markedTurn,
+          { content: "marked" },
+          writeTurn("w1", approved),
+          { content: "wrote it" },
+          writeTurn("w2", vetoed),
+          { content: "done" },
+        ]);
+        await turn(agent, "mark this session as requiring approval for write");
 
-      // -- the write parks
-      expect(events, "the session was marked through an eval call").toContain("tool:eval");
-      reset();
-      await turn(agent, `write ${approved}`);
+        // -- the write parks
+        expect(events, "the session was marked through an eval call").toContain("tool:eval");
+        reset();
+        await turn(agent, `write ${approved}`);
 
-      const parked = pending(agent);
-      expect(events, "the write run ended on an interrupt, not a finish").toContain("RUN_FINISHED/INTERRUPT");
-      expect(parked.length, "exactly one call parked").toBe(1);
-      expect(parked[0].reason, "the interrupt says why it parked").toBe("tool-approval");
-      expect(parked[0].toolCallId, "and it names the parked call").toBeDefined();
-      expect(fileExists(approved), "nothing was written yet").toBe(false);
-      expect(hasToolMessage(agent, "w1"), "and the parked call has no answer yet").toBe(false);
-      reset();
-      await resume(agent, "resolved", { decision: "approved" });
+        const parked = pending(agent);
+        expect(events, "the write run ended on an interrupt, not a finish").toContain("RUN_FINISHED/INTERRUPT");
+        expect(parked.length, "exactly one call parked").toBe(1);
+        expect(parked[0].reason, "the interrupt says why it parked").toBe("tool-approval");
+        expect(parked[0].toolCallId, "and it names the parked call").toBeDefined();
+        expect(fileExists(approved), "nothing was written yet").toBe(false);
+        expect(hasToolMessage(agent, "w1"), "and the parked call has no answer yet").toBe(false);
+        reset();
+        await resume(agent, "resolved", { decision: "approved" });
 
-      // -- approved
-      expect(fileExists(approved), "the approved call ran on the resume run").toBe(true);
-      expect(hasToolMessage(agent, "w1"), "its result came back as the call's answer").toBe(true);
-      expect(events, "the resume run finished normally").toContain("RUN_FINISHED");
-      reset();
-      await turn(agent, `write ${vetoed}`);
+        // -- approved
+        expect(fileExists(approved), "the approved call ran on the resume run").toBe(true);
+        expect(hasToolMessage(agent, "w1"), "its result came back as the call's answer").toBe(true);
+        expect(events, "the resume run finished normally").toContain("RUN_FINISHED");
+        reset();
+        await turn(agent, `write ${vetoed}`);
 
-      // -- a second write, vetoed
-      expect(pending(agent).length, "a second write parks again").toBe(1);
-      reset();
-      await resume(agent, "cancelled", { reason: "test: exercising the veto path" });
+        // -- a second write, vetoed
+        expect(pending(agent).length, "a second write parks again").toBe(1);
+        reset();
+        await resume(agent, "cancelled", { reason: "test: exercising the veto path" });
 
-      expect(fileExists(vetoed), "the vetoed call never ran").toBe(false);
-      expect(String(toolResultText(agent, "w2")), "the model was told the call was vetoed, reason included").toContain("vetoed by human");
-      expect(events, "and the run carried on to a normal end").toContain("RUN_FINISHED");
+        expect(fileExists(vetoed), "the vetoed call never ran").toBe(false);
+        expect(String(toolResultText(agent, "w2")), "the model was told the call was vetoed, reason included").toContain("vetoed by human");
+        expect(events, "and the run carried on to a normal end").toContain("RUN_FINISHED");
+      } finally {
+        rm(scratch);
+      }
     },
   },
   {

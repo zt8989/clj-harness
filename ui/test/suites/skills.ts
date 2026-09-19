@@ -14,12 +14,11 @@
 // browser -- ui/vitest.config.ts says so, and it is why a component test would need
 // a second driver and a DOM environment this repository does not have.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { expect } from "vitest";
 
-import { type Case, type Suite, homeDir, rm, threadId, url, userHomeDir } from "../e2e";
+import { type Case, type Suite, homeDir, rm, threadId, tmpDir, url, userHomeDir } from "../e2e";
 
 /// The wire shape, named here so a renamed field is a compile error rather than a
 /// test that reads `undefined` and passes.
@@ -43,12 +42,10 @@ function plantSkill(root: string, name: string, frontmatter: string, body = "bod
   fs.writeFileSync(path.join(dir, "SKILL.md"), `---\n${frontmatter}\n---\n\n${body}`, "utf8");
 }
 
-/// A throwaway directory to bind a session to. Names are unique per call, and the
-/// caller removes what it made.
+/// A throwaway directory to bind a session to, from `tmpDir` -- the name is one the
+/// OS picked rather than one this file guessed, and the caller removes what it made.
 function tempProject(tag: string): string {
-  const dir = path.join(os.tmpdir(), `clj-harness-ui-${tag}-${Math.random().toString(36).slice(2)}`);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return tmpDir(`clj-harness-ui-${tag}-`);
 }
 
 /// A private name per case, so two cases in one run cannot see each other's fixtures

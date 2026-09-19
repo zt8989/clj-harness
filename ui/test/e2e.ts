@@ -164,8 +164,15 @@ export async function fetchFrames(tid: string, rid: string, messages: readonly M
 
 // -------------------------------------------------------------- the filesystem
 
-export function tmpPath(name: string): string {
-  return path.join(os.tmpdir(), name);
+/// A directory of this case's own under the system temp directory, named for
+/// PREFIX. `mkdtempSync`, NOT `<tmpdir>/<name>`: the temp directory outlives this
+/// process, so a composed name is THE SAME PATH on the next run and in every
+/// process running beside it -- a marker file one run left behind is then read as
+/// this run's answer, and two runs at once write into one directory. mkdtemp asks
+/// the OS for a name nothing holds, in the same call that creates it, and hands
+/// back an EMPTY directory. The caller removes what it made (`rm`).
+export function tmpDir(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
 export function rm(p: string): void {
