@@ -525,8 +525,17 @@
                                                         (fn [ls] (some #(= "hook/SystemPrompt" (replay/kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 3 (get-in (replay/payload line) [:matched]))
-                 "the kernel's two rows and the file's one")))
+             ;; FOUR DECLARATIONS NOW, and the fourth is the interesting one: the
+             ;; subagents capability contributes a row at this point (the <subagent>
+             ;; block), so a real composition root has one more than the kernel's
+             ;; two and the file's one. It MATCHES on an ordinary thread -- this one
+             ;; -- and says NOTHING there: `join-blocks` drops a block whose stdout
+             ;; is empty, which is why the assertions above about the message's
+             ;; exact text still hold with the row installed. Counting it here is
+             ;; what keeps this number a fact about the wiring rather than a number
+             ;; that quietly followed the code.
+             (is (= 4 (get-in (replay/payload line) [:matched]))
+                 "the kernel's two rows, the file's one, and the subagent block's")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
            ;; written. The blocks' own tags are deliberately not among them: the

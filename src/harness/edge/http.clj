@@ -91,6 +91,7 @@
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
+            [harness.cap.subagents :as subagents]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
@@ -1650,6 +1651,180 @@
                                                 :status    status
                                                 :last      last}))))})))
 
+(defn- answer-of
+  "The last thing a subagent SAID, out of the history its run produced. Walks back
+  past the rounds that only called tools -- an assistant message whose content is
+  empty because the whole round was tool calls is a step, not an answer -- so what
+  goes back to the delegating model is the subagent's conclusion rather than
+  whatever happened to be on the wire last.
+
+  A history with nothing to say answers the sentence below rather than an empty
+  string, because those are different facts and only one of them is true: '' reads
+  as a subagent that chose to say nothing, which is not the same as one that never
+  got to say anything."
+  [history]
+  (or (->> history
+           (filter #(= "assistant" (:role %)))
+           (map #(str/trim (str (:content %))))
+           (remove str/blank?)
+           last)
+      (str "the subagent's run produced no answer -- it stopped before it said"
+           " anything. Treat the task as not done.")))
+
+(defn- run-subagent!
+  "The `run` door harness.cap.subagents installs: ONE delegation, as a whole
+  conversation on THREAD-ID -- its own provider request, its own tool calls, its own
+  record.
+
+  IT LIVES HERE BECAUSE RUNNING A CONVERSATION IS THE EDGE'S. The provider, the
+  session table, the jsonl writer and the hook sink are this namespace's, and a second
+  implementation of them inside the capability is how the two would drift. It is
+  `run-agent!`'s body MINUS everything a client owns: no SSE emitter, no run registry,
+  no interrupts, no claim at the door.
+
+  THE CONVERSATION IS THE SESSION'S, exactly as a person's is, and that is what makes
+  a delegation readable afterwards: the task is the subagent's own first entry
+  (`sessions/append!`, source `client` -- the delegating model is this session's
+  client and there is no other), and the ANSWER enters the same way a person's run's
+  does, by folding the run's own frames at the end (`sessions/settle!`). A record that
+  held only message rows would rebuild as a conversation with no answer in it.
+
+  THE SUBAGENT IS NOT REGISTERED AS A RUNNING SESSION, deliberately. `running?` is the
+  answer a conversation a PERSON can act on gives -- the composer's gate and the run
+  door's second-run refusal both read it -- and a subagent accepts neither. Its
+  liveness is `harness.cap.subagents/live`, keyed the same way, which is what the
+  sidebar and the panel ask.
+
+  NO FRAMES ARE SENT, AND THE FRAMES ARE STILL WRITTEN DOWN. Nothing is watching this
+  run: its entire output is one string, which is the result of the tool call that
+  asked for it, so there is no emitter, no client and nobody to fail to reach. What IS
+  built is the same AG-UI conversion a client's run gets, and every frame it produces
+  lands in the subagent's jsonl as an `event` line -- because the record's SHAPE is
+  what makes it readable, and both readers of a conversation (rebuild, and
+  replay/history) fold those lines and nothing else.
+
+  THE HOOK SINK IS REBOUND AROUND IT, and to the SUBAGENT's id: same reason the agent
+  route binds one at all (a hook whose verdict nobody records changes a run
+  silently), and so a hook fired inside a subagent's call lands in that subagent's
+  record rather than being filed under the conversation that delegated.
+
+  SYNCHRONOUS ON PURPOSE. The delegating call IS a tool call on the parent's run
+  thread, and its result is this function's return value -- there is nothing for that
+  thread to do until the answer exists, so it waits here rather than parking a
+  callback the parent's run would have to be joined back together from later. Two
+  delegations in one turn still run at the same time, because they are two tool calls
+  on two threads.
+
+  THE PROVIDER IS THE PARENT'S, RESOLVED NOW. A subagent has no session of its own to
+  resolve from, and re-resolving from the default tier would quietly move it to a
+  different model than the conversation that delegated to it is holding.
+
+  A RUN THAT DIED STILL LEAVES WHAT IT SAID. The frames collected so far are folded in
+  the `finally`, which is the agent route's own rule for the same reason, and the
+  answer is then the honest nothing `answer-of` words for an empty history -- the
+  delegation is a tool call, and a tool call that threw would take the parent's run
+  down with it."
+  [{:keys [parent-thread-id thread-id definition task]}]
+  (let [run-id   (str (java.util.UUID/randomUUID))
+        provider (providers/current-provider parent-thread-id)
+        ;; ONE converter per run, like the agent route's: it owns the open-message
+        ;; state machine, so building it per event would restart every message id.
+        convert  (ag/outbound thread-id run-id)
+        ;; THIS RUN'S FRAMES, collected for the one moment they become the
+        ;; conversation. The agent route keeps the same atom for the same reason: it is
+        ;; the one place that sees every frame exactly once.
+        frames   (atom [])]
+    (binding [hook/*sink* (sink-for thread-id run-id)]
+      (try
+        ;; THE TASK IS THIS CONVERSATION'S FIRST ENTRY, and it is NAMED by the run
+        ;; (`-task`) the way the converter names the messages it mints: an entry with
+        ;; no id cannot be deduped, by `append!`, by the fold or by a repeat.
+        (let [added (sessions/append! thread-id run-id
+                                      [{:id (str run-id "-task") :role "user" :content task}])]
+          ;; ONE ROW PER ENTRY, and the envelope says whose element of the array it
+          ;; was. `client` is the honest word here: this session has exactly one
+          ;; client -- the delegating model -- and `replay/conversation-sources` reads
+          ;; that source as a SPEAKING part of the conversation, which is what puts
+          ;; the task in front of a reader of the panel or of a rebuild.
+          (doseq [[i m] (map-indexed vector added)
+                  :let  [shown (first (ag/provider-messages (sessions/model-view [m])))]
+                  :when (some? shown)]
+            (log! thread-id run-id "message" shown
+                  (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
+                  (cond-> {:source "client"} (:id m) (assoc :id (:id m)))))
+          (let [;; THE CONVERSATION AS THE SESSION HOLDS IT, which by now includes the
+                ;; task above. The opening blocks are NOT spliced in here: they enter a
+                ;; conversation at its birth (`.scratch/session-opening`), and this
+                ;; conversation has exactly one birth -- the entry just written.
+                assembled (ag/inbound (sessions/model-view (sessions/messages thread-id))
+                                      (system-prompt/assemble thread-id)
+                                      nil)
+                ;; WHAT THE PRE-LLM STEP DERIVED FOR THIS RUN (a skill body, a job's
+                ;; ending) rides beside the conversation. The agent route's lines are
+                ;; these, and the boundary between them matters for the same reason
+                ;; there: what `before-llm` added is THIS run's own, and the rest of the
+                ;; array belongs to the runs that produced it.
+                applied   (project/before-llm assembled thread-id)
+                injected  (subvec applied (count assembled))
+                messages  (llm/thinking-mode-history applied provider)]
+            ;; THE SYSTEM MESSAGE IS A `message` ROW, like the agent route's, and for
+            ;; the same reason: a `message` row IS an element of the array the model
+            ;; read. THE `<subagent>` BLOCK IS IN IT -- that is what the capability's
+            ;; own SystemPrompt row contributes to `assemble`, and it is how the model
+            ;; is told which subagent it is and what it cannot do.
+            (let [prompt (or (some #(when (= "system" (:role %)) (:content %)) messages) "")]
+              (log! thread-id run-id "message" {:role "system" :content prompt} nil
+                    {:source "system-prompt" :hash (system-prompt/digest prompt)}))
+            (log-messages! thread-id run-id injected)
+            (log! thread-id run-id "provider/init" (provider-line provider :inherited))
+            (let [events (loop/run-chan provider messages {:thread-id  thread-id
+                                                           :resume     []
+                                                           :before-llm project/before-llm})]
+              (loop []
+                (if-let [ev (async/<!! events)]
+                  (if (= :run/done (:type ev))
+                    (do
+                      ;; THE RETURNED SIDE, AS THE KERNEL NAMES IT (`:added`), exactly
+                      ;; as the agent route reads it -- 'past the count of what we
+                      ;; handed in' would file an entry of the conversation as this
+                      ;; run's own. And the answer is the last thing the subagent
+                      ;; actually SAID rather than the last frame on the wire.
+                      (log-messages! thread-id run-id (:added ev))
+                      {:answer (answer-of (:history ev))})
+                    (do
+                      ;; Tool-lifecycle and model-call events are audit lines rather
+                      ;; than wire frames, keyed by toolCallId.
+                      (when-let [[kind payload] (lifecycle-record ev)]
+                        (log! thread-id run-id kind payload))
+                      ;; AND THE WIRE FRAMES GO ON THE RECORD, in the subagent's own
+                      ;; file. The terminal frame's line is the one this run's entries
+                      ;; land on (`sessions/land!`), which is how a rebuild reproduces
+                      ;; the same numbering a live session hands out.
+                      (doseq [frame (convert ev)]
+                        (log! thread-id run-id "event" frame
+                              (when (contains? terminal (:type frame))
+                                (fn [offset] (sessions/land! thread-id run-id offset))))
+                        (swap! frames conj frame))
+                      (recur)))
+                  ;; THE CHANNEL CLOSED. The kernel closes it after :run/done, so an
+                  ;; ordinary ending came through the branch above; arriving here means
+                  ;; the run stopped without saying goodbye, and the honest answer is
+                  ;; the one `answer-of` words for an empty history.
+                  {:answer (answer-of [])})))))
+        (catch Throwable t
+          ;; A DELEGATION THAT DIED IS NOT A DELEGATION THAT ANSWERED, and the parent
+          ;; hears the difference in the answer's own words. The reason goes to the
+          ;; process log: the whole conversation is on the record for whoever reads it
+          ;; next, and a throw out of here would take the parent's run down with it.
+          (log/error! :run/subagent-crashed t {:thread-id thread-id :run-id run-id})
+          {:answer (answer-of [])})
+        (finally
+          ;; THE FRAMES BECOME THE CONVERSATION NOW, once, at the end -- a half-written
+          ;; answer is not a turn. `settle!` also carries the state the terminal frame
+          ;; says (settled / unfinished), so the next reader of this session gets the
+          ;; same answer the record would give.
+          (sessions/settle! thread-id run-id @frames))))))
+
 (defn- handle-run
   "The door to the run edge: read the request, decide whether this is a run this home
   answers, and hand the rest over.
@@ -2232,15 +2407,21 @@
   Archived sessions are INCLUDED and flagged, not filtered: which group to draw
   them in is a decision for the screen, and a listing that quietly dropped them
   would make 'where did my session go' a question with no server-side answer.
-
   A TASK IS A SESSION WITH NO PROJECT AND NO REMEMBERED PROJECT (`project/tasks`):
   a conversation that never had a home. A session released by removing its project
   is NOT one of them, because it remembers where it was and is waiting for that
   directory to come back -- and an unknown id that has a jsonl in the tree is not a
   session either: the store decides which conversations are listed (GET /api/threads
-  is the raw tree view for anyone diagnosing)."
+  is the raw tree view for anyone diagnosing).
+
+  A SUBAGENT'S SESSION IS NOT LISTED, and this is the read that says so. Every row
+  here is a conversation a person can open, continue and type into; a subagent's is
+  none of those -- it belongs to the call that delegated to it, it ran once, and a
+  row offering to open it would be inviting somebody to talk to something that
+  cannot answer. It still HAS a store row and still appears in the tree, which is
+  what lets rebuild, trajectory and the subagent panel find it by id."
   [_req]
-  (let [by-project (group-by :project-id (project/sessions))
+  (let [by-project (group-by :project-id (remove :subagent (project/sessions)))
         tasks      (project/tasks)]
     (api-response 200
                   {:projects (mapv (fn [{:keys [id canonical-path]}]
@@ -2250,6 +2431,144 @@
                                                   (mapv session-row (get by-project id)))})
                                    (project/projects))
                    :tasks    (newest-first (mapv session-row tasks))})))
+
+(defn- subagent-run-row
+  "One delegation, as a panel reads it: which subagent ran, whose session
+  delegated it, where its record went, when it started, and whether it is running
+  NOW.
+
+  `running` IS THE ONE FIELD THAT IS NOT THE STORE'S, and it is here rather than
+  derived client-side because the client cannot see this process's live table --
+  the same reason `GET /api/settings` resolves rather than handing over the files.
+  It is FALSE for a delegation that finished and for one left by a previous
+  process, and those read the same on screen because they ARE the same fact about
+  now: nothing is running under that id.
+
+  `delegatedAt` is the store row's creation time, which for a subagent's session is
+  the moment its delegation opened it -- there is no earlier fact about it."
+  [row]
+  {:threadId    (:thread-id row)
+   :parent      (:parent row)
+   :subagent    (:subagent row)
+   :project     (:project row)
+   :delegatedAt (:delegated-at row)
+   :running     (:running row)})
+
+(defn- subagents-get
+  "GET /api/subagents -- the subagent panel's whole answer, and the settings page's
+  too: what this home's subagents ARE, and which delegations it has a record of.
+
+    {:subagents [{:name .. :description .. :baseline .. :exclude [..] :builtin <bool>}]
+     :problem   <string|nil>   ; the first thing the file said that could not be honoured
+     :path      <the user-level harness.edn>
+     :runs      [{:threadId .. :parent .. :subagent .. :project .. :delegatedAt .. :running}]}
+
+  TWO SOURCES, ONE ANSWER, and the split is the one the whole feature is built on:
+  the DEFINITIONS come from harness.edn (read fresh -- a save is in force on the
+  next delegation with no restart), while the RUNS come from the store plus this
+  process's live table. Neither can be derived from the other -- a subagent that
+  has never run has no row, and a record whose definition was since deleted has no
+  definition -- so the join happens here, on the reading side, exactly as the
+  sidebar's listing joins the store to the log tree.
+
+  THE `:problem` IS PART OF THE ANSWER, NOT A FAILURE. A harness.edn with a typo in
+  its :subagents block leaves a harness that still runs (see the reader's own
+  tolerance), so this route stays a 200 and hands the sentence over for the screen
+  to show. A HOME whose file cannot be parsed at all is the other case and refuses
+  by name, from the reader, with the path in it.
+
+  READ-ONLY, and therefore no audit line -- the same rule every other GET here
+  follows. Asking what a home's subagents are is not part of the record of a
+  delegation."
+  [_req]
+  (let [defs (subagents/definitions)]
+    (api-response 200 {:subagents (mapv subagents/wire-definition (:subagents defs))
+                       :problem   (:problem defs)
+                       :path      (:path defs)
+                       :runs      (mapv subagent-run-row (subagents/runs))})))
+
+(defn- subagents-post
+  "POST /api/subagents {name, description, baseline, exclude, replace} -- create or
+  replace ONE definition in the home's harness.edn, and answer it as the panel
+  reads it.
+
+  `replace` IS WHAT SEPARATES EDITING FROM ADDING, and it is the request's own
+  statement about which screen sent it: the form's edit view says true (it is
+  changing a row it is showing), the new-subagent view says false, and a false
+  whose name is already taken is refused rather than quietly obeyed. Without it
+  'add a subagent called explore' would silently rewrite the built-in -- a change
+  nobody asked for, delivered by a screen that said it was adding something. It
+  defaults to false, so a caller that has not thought about it gets the refusal
+  rather than the overwrite.
+
+  THE BASELINE ARRIVES AS A STRING (`\"all\"`, `\"read-only\"`), because that is what
+  JSON has; harness.cap.subagents/entry-from-wire turns it into the keyword the file
+  holds and leaves anything else for the validator to refuse BY NAME. Nothing here
+  re-implements a definition check: every refusal a person reads is that
+  namespace's sentence.
+
+  NOTHING IS WRITTEN UNTIL EVERY CHECK HAS PASSED, so the refusal a form shows is
+  also the proof that the home did not move -- which is what the screen promises
+  when it keeps the form open."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      :else
+      (let [allowed #{:name :description :baseline :exclude :replace}
+            extras  (sort (map name (remove allowed (keys ok))))]
+        (cond
+          (seq extras)
+          (api-response 400 {:error (str "does not understand " (pr-str (vec extras))
+                                         "; it takes name, description, baseline, exclude"
+                                         " and replace")})
+
+          (not (contains? ok :name))
+          (api-response 400 {:error "missing name"})
+
+          (and (contains? ok :replace) (not (boolean? (:replace ok))))
+          (api-response 400 {:error "replace must be true or false"})
+
+          :else
+          (let [answer (try {:ok (subagents/put-definition! (:name ok)
+                                                             (dissoc ok :name :replace)
+                                                             (true? (:replace ok)))}
+                            (catch Throwable t {:error (ex-message t)}))]
+            (if-some [error (:error answer)]
+              (api-response 400 {:error error})
+              (api-response 200 (subagents/wire-definition (:ok answer))))))))))
+
+(defn- subagents-remove-post
+  "POST /api/subagents/<name>/remove -- take ONE definition out of the home's
+  harness.edn.
+
+  THE NAME IS THE STEM, like every other verb-carrying route in this file, and it
+  is decoded before it is used -- a subagent name is an ordinary word today, and a
+  route that only worked for words somebody had ruled out would be a trap waiting
+  for the first name with a space in it.
+
+  BUILT-INS ARE REFUSED, by name and with the reason: they come from the code, so
+  there is nothing in the file to remove, and a fresh home with no subagents would
+  have no names to delegate to. The refusal points at the thing that CAN be done
+  to one -- edit it, since an entry with its name replaces it.
+
+  A 404 FOR A NAME THIS HOME DOES NOT HAVE, the same shape `remove-project-post`
+  answers an unknown directory with: the panel's row is out of date, and guessing
+  at which subagent it meant would delete the wrong one. A built-in is NOT a 404 --
+  the name exists and the request was understood; what is refused is the act."
+  [stem]
+  (let [answer (try {:ok (subagents/remove-definition! stem)}
+                    (catch Throwable t {:error (ex-message t) :data (ex-data t)}))]
+    (if-some [error (:error answer)]
+      (if (= :unknown-subagent (:reason (:data answer)))
+        (api-response 404 {:error error :name stem})
+        (api-response 400 {:error error :name stem}))
+      (api-response 200 (subagents/wire-definition (:ok answer))))))
 
 (def ^:private thread-verbs
   "The verbs this edge serves under /api/threads/<stem>/. A CLOSED SET, and that
@@ -2296,6 +2615,18 @@
   ONE VERB, and the other two actions are plain routes rather than verbs: creating
   and updating are the SAME act on one entry (the body carries the id), and it
   belongs on the collection."
+  #{"remove"})
+
+(def ^:private subagent-verbs
+  "The verbs this edge serves under /api/subagents/<stem>/. The third collection of
+  this shape, and closed for the same reason the other two are: a path segment is
+  not a good place to discover that.
+
+  ONE VERB, and the other two actions are plain routes rather than verbs -- the same
+  arrangement the provider catalog uses, because a subagent is managed the same way
+  an entry there is: creating and updating are one act on one entry (the body
+  carries the name), so they belong on the collection, and only removal has a
+  single row to point at."
   #{"remove"})
 
 (defn- stem-verb-route
@@ -3796,6 +4127,12 @@
       :get  (settings-get req)
       (api-response 405 {:error "method not allowed"}))
 
+    (= "/api/subagents" (:uri req))
+    (case (:request-method req)
+      :get  (subagents-get req)
+      :post (subagents-post req)
+      (api-response 405 {:error "method not allowed"}))
+
     (= "/api/project/pick" (:uri req))
     (case (:request-method req)
       :post (project-pick req)
@@ -3870,6 +4207,10 @@
           (case [(:request-method req) verb]
             [:post "remove"] (remove-project-post stem)
             (api-response 405 {:error "method not allowed"}))
+          (if-some [{:keys [verb stem]} (stem-verb-route "subagents" subagent-verbs (:uri req))]
+            (case [(:request-method req) verb]
+              [:post "remove"] (subagents-remove-post stem)
+              (api-response 405 {:error "method not allowed"}))
           ;; NOTHING ELSE. This used to be `(handle-run req)` -- the run endpoint
           ;; was the fallback for every unmatched path -- so a typo in a management
           ;; route arrived at the kernel as a run with no RunAgentInput in it, and
@@ -3884,7 +4225,7 @@
           ;; asked for.
           (or (ui/answer req)
               (ui/absent req)
-              (api-response 404 {:error (str "no such route: " (:uri req))})))))))
+              (api-response 404 {:error (str "no such route: " (:uri req))}))))))))
 
 (defn- with-cors
   "The CORS headers this request's answer carries, merged onto whatever the route
@@ -4003,7 +4344,15 @@
                    ;; are a question about the SESSION (which project's mcp.edn is
                    ;; in force, which server is up), so the seam asks this
                    ;; capability per assembly instead of being handed a map.
-                   (cap-mcp/install!)]]
+                   (cap-mcp/install!)
+                   ;; SUBAGENTS: the `agent` tool a session delegates with, the range
+                   ;; a subagent thread is held to, and the row that tells it who it
+                   ;; is. LAST, so the editing mode's subtraction is asked first and
+                   ;; a name both policies refuse is refused in the editing mode's
+                   ;; words -- it is the more specific statement about the session.
+                   ;; The runner is passed in because running a conversation is this
+                   ;; namespace's business, not a capability's.
+                   (subagents/install! {:run run-subagent!})]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.edge.record`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the

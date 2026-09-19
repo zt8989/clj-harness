@@ -46,6 +46,7 @@ import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
+import { subagentsSuite } from "./suites/subagents";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -53,8 +54,7 @@ import { toolRowSuite } from "./suites/tool-row";
 /// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
-/// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -243,7 +243,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// reached the subscriber, and the error it is handed instead carries the `AbortError`
 /// name the interface maps to "Cancelled" -- and it has to be a live client: the abort
 /// has to land on a stream that is genuinely in flight.
-const EXPECTED_CASES = 96;
+/// 96 -> 102: THE OTHER SIDE OF THIS MERGE -- the `subagents` suite's six, which are
+/// `.scratch/subagents`' UI half. The endpoint's wire shape (the two built-ins, their
+/// baselines, the `builtin` flag, the file a save would write, the problem that is part
+/// of a 200); a delegation row's three facts; one run in flight marked and the other
+/// not, in one list; the definitions group with and without a custom entry; the settings
+/// roster's built-in flag; and the same rows in both languages. Five of the six RENDER
+/// (`react-dom/server`), which is why the rows live in `components/subagent-list.tsx` --
+/// a module that must not reach `lib/i18n.ts`, whose `document` write would break this run.
+const EXPECTED_CASES = 102;
 
 let total = 0;
 for (const suite of SUITES) {

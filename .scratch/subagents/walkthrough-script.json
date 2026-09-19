@@ -1,0 +1,23 @@
+{
+  "turns": [
+    {
+      "content": "这一段交给探索子agent：它能读，不能写。",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "agent",
+          "arguments": {
+            "name": "explore",
+            "prompt": "列出 src/harness/cap 下面有哪些文件，一句话说清这个目录是干什么的。"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（脚本厂商：委派回来了。cap 下面都是能力，每个文件装一种工具。）"
+    },
+    {
+      "content": "（脚本厂商：主 agent 收尾。）"
+    }
+  ]
+}

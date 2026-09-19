@@ -3,6 +3,7 @@
     "status": "HTTP {{status}}",
     "listingProjects": "listing projects failed: HTTP {{status}}",
     "listingSessions": "listing sessions failed: HTTP {{status}}",
+    "listingSubagents": "listing subagents failed: HTTP {{status}}",
     "askingQuestion": "asking what this question was failed: HTTP {{status}}"
   },
   "attachment": {

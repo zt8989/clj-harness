@@ -44,6 +44,23 @@
     "settings": "设置",
     "settingsTitle": "设置：这个会话正在用什么跑，这个配置家可以选什么"
   },
+  "subagents": {
+    "title": "子agent",
+    "titleHint": "子agent——这个会话能把活交给谁，以及已经交出去过哪些",
+    "loading": "正在读子agent…",
+    "definitions": "这里定义了什么",
+    "runs": "委派记录",
+    "builtin": "内置",
+    "yours": "自建",
+    "running": "跑着",
+    "baselineAll": "这个会话的全部工具，除了 eval 和委派",
+    "baselineReadOnly": "只保留改不了任何东西的工具",
+    "minus": "再排除 {{tools}}",
+    "nothingElse": "没有其他排除",
+    "customEmpty": "还没有你自己建的子agent——去设置里加一个。",
+    "runsEmpty": "还没有委派过。",
+    "changeInSettings": "这一组只读，要改去设置里。"
+  },
   "addProject": {
     "path": "绝对路径——D:\\work\\lisp-harness",
     "pathLabel": "项目目录路径",

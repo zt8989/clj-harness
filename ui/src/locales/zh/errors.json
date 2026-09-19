@@ -3,6 +3,7 @@
     "status": "HTTP {{status}}",
     "listingProjects": "读取项目列表失败：HTTP {{status}}",
     "listingSessions": "读取会话列表失败：HTTP {{status}}",
+    "listingSubagents": "读取子agent列表失败：HTTP {{status}}",
     "askingQuestion": "读不出这个问题是什么：HTTP {{status}}"
   },
   "attachment": {

@@ -7,7 +7,8 @@
   "page": {
     "general": "General",
     "models": "Models",
-    "mcp": "MCP servers"
+    "mcp": "MCP servers",
+    "subagents": "子agent"
   },
   "panel": {
     "title": "设置",
@@ -127,5 +128,32 @@
       "disabled": "已关闭",
       "idle": "还没用上"
     }
+  },
+  "subagents": {
+    "loading": "正在读子agent…",
+    "title": "子agent",
+    "add": "新建子agent",
+    "back": "子agent",
+    "builtinNote": "内置的由代码提供，删不掉。在这里保存，是往 {{file}} 写一条同名的覆盖。",
+    "customNote": "写在 {{file}}。",
+    "fileNote": "这个表单保存时整个文件会被重写，改动前的内容留在它旁边。",
+    "name": "名字",
+    "nameHint": "主agent 就是用这个名字点它。字母、数字、短横线。",
+    "editingNameHint": "名字是主agent 问它要用的，改名等于新建一个再把现在这个删掉。",
+    "description": "它是干什么的",
+    "descriptionHint": "主agent 靠这句话判断该把活交给谁：写它擅长什么、什么时候该用它。",
+    "baseline": "它的工具",
+    "baselineHint": "范围 = 一条基线加一串排除。没有哪个字段能把工具加回来：eval 和委派工具永远不给任何子agent。",
+    "exclude": "排除掉",
+    "excludePlaceholder": "read, web_search",
+    "excludeHint": "工具名用逗号隔开。下一轮委派就生效——不用重启。",
+    "save": "保存子agent",
+    "create": "创建子agent",
+    "cancel": "取消",
+    "remove": "删除",
+    "removeTitle": "把这条从 harness.edn 里拿掉。改动前的文件留在它旁边。",
+    "errorNote": "什么都没写——harness.edn 与改之前一模一样。",
+    "problemLead": "harness.edn 的 :subagents 块里有认不下来的东西：",
+    "problemTail": " 这个会话用的还是那两个内置的。"
   }
 }
