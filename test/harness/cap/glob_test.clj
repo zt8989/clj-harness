@@ -74,11 +74,24 @@
   (try (.getCanonicalPath (io/file root)) (catch Exception _ root)))
 
 (defn- rel
+  "P as a name relative to ROOT, with `/` as the separator.
+
+  BOTH SIDES ARE PUT IN ONE SPELLING BEFORE ANY PREFIX IS STRIPPED, because the
+  platform spells them differently: the answer's paths come back through
+  `glob/tidy` (which is `java.io.File.getAbsoluteFile`, so backslashes on Windows),
+  while ROOT is `java.io.tmpdir` (which on macOS is `/var/...` where the
+  canonical form says `/private/var/...`). Stripping only the one spelling is how a
+  name silently fails to strip and the case then compares a full path against a
+  name."
   [^String p]
-  (let [prefixes (map #(str % "/") [root (canonical-root)])]
-    (if-let [pfx (first (filter #(str/starts-with? p %) prefixes))]
-      (subs p (count pfx))
-      p)))
+  (let [slashed  (fn [s] (str/replace (str s) "\\" "/"))
+        p'       (slashed p)
+        prefixes (->> (map slashed [root (canonical-root)])
+                      (map #(str % "/"))
+                      (sort-by count >))]
+    (if-let [pfx (first (filter #(str/starts-with? p' %) prefixes))]
+      (subs p' (count pfx))
+      p')))
 
 (use-fixtures :once support/with-builtins)
 
@@ -116,7 +129,12 @@
       (is (= [".hidden.clj" "a.clj" "src/nested/deep.clj" "src/one.clj" "src/two.clj"]
              (names content))))
     (testing "and the paths are absolute, so they can be handed straight to read"
-      (is (every? #(str/starts-with? % "/") (str/split-lines content))))))
+      ;; ABSOLUTE ON THIS PLATFORM, ASKED OF THE PLATFORM. `starts-with? % "/"` is
+      ;; the POSIX way of writing 'absolute', and a Windows path begins with a
+      ;; drive letter instead -- so the old check called every path here relative.
+      ;; The claim is that `read` can be handed these as they are, and
+      ;; `File.isAbsolute` is that claim.
+      (is (every? #(.isAbsolute (io/file %)) (str/split-lines content))))))
 
 (deftest a-pattern-with-no-slash-matches-file-names-at-any-depth
   ;; rg's own convention, and the one a model means by `*.clj`: without a `/` the
@@ -181,7 +199,7 @@
   (let [rule (:park-reason (get (tools/effective-tools tid) "glob"))]
     (is (fn? rule) "glob declares a park rule")
     (testing "which fires for a root outside the project and the configuration home"
-      (is (= :out-of-bounds (rule tid {:pattern "**/*.clj" :path "/etc"}))))
+      (is (= :out-of-bounds (rule tid {:pattern "**/*.clj" :path (support/outside-path)}))))
     (testing "and stays quiet for one inside it"
       (is (nil? (rule tid {:pattern "**/*.clj" :path "src"}))))
     (testing "and for a call with no path at all -- the argument check says that, one line later"

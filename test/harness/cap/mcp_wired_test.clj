@@ -129,6 +129,24 @@
           ls
           (do (Thread/sleep 50) (recur)))))))
 
+(defn- wait-marker
+  "The MARKER file's text, once PRED holds over it -- or what it says when MS runs
+  out.
+
+  `wait-for` IS FOR THE LOG, and this is the same wait on the other file. The marker
+  is written by the hook's own CHILD PROCESS, so it is the last thing to arrive:
+  there is a window in which the run's log already says everything and this file is
+  still a line short, and reading it once inside that window reports a hook that ran
+  as a hook that said nothing. The deadline is the ENGINE's own bound for a hook
+  (dispatch/default-timeout-ms), because a command is allowed to take that long."
+  [f pred ms]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (let [text (try (slurp f :encoding "UTF-8") (catch Throwable _ ""))]
+        (if (or (pred text) (> (System/currentTimeMillis) deadline))
+          text
+          (do (Thread/sleep 50) (recur)))))))
+
 (defn- wait-quiet
   "The log's lines, once the file has stopped growing.
 
@@ -228,7 +246,10 @@
         (spit gate (str "#!/bin/sh\necho \"not that server, not today\" 1>&2\nexit 2\n")
               :encoding "UTF-8")
         (.setExecutable gate true)
-        (support/write-hooks! {:pre-tool-use [{:command (str gate) :matcher "mcp__fake__"}]})
+        ;; A hook's :command is shell text, so its path is spelled for the shell --
+        ;; see harness.test-support/shell-path.
+        (support/write-hooks! {:pre-tool-use [{:command (support/shell-path gate)
+                                               :matcher "mcp__fake__"}]})
         (with-server thread script
                      (fn []
                        (io/delete-file (log-file thread) true)
@@ -261,7 +282,9 @@
         ;; The session asks for approval on the tool, and a RULE answers instead
         ;; of a person -- which is the point of the delegation.
         (tools/session-require-approval! thread "mcp__fake__echo")
-        (support/write-hooks! {:permission-request [{:command (str rule)}]})
+        ;; A hook's :command is shell text, so its path is spelled for the shell --
+        ;; see harness.test-support/shell-path.
+        (support/write-hooks! {:permission-request [{:command (support/shell-path rule)}]})
         (with-server thread script
                      (fn []
                        (io/delete-file (log-file thread) true)
@@ -310,15 +333,20 @@
 
 (defn- record-script
   "A hook command that appends its stdin payload to MARKER. Used for the two
-  elicitation points, whose payload is the thing worth asserting on."
+  elicitation points, whose payload is the thing worth asserting on.
+
+  BOTH PATHS ARE SPELLED FOR THE SHELL -- the command and the marker the script
+  redirects to -- because both are read by the shell the hook engine spawns. See
+  harness.test-support/shell-path."
   [marker label]
   (let [dir (str (home/root) "/hook-scripts")]
     (.mkdirs (io/file dir))
     (let [f (io/file dir (str label ".sh"))]
-      (spit f (str "#!/bin/sh\n{ echo \"--- " label "\"; cat; } >> " marker "\n")
+      (spit f (str "#!/bin/sh\n{ echo \"--- " label "\"; cat; } >> "
+                   (support/shell-path marker) "\n")
             :encoding "UTF-8")
       (.setExecutable f true)
-      (str f))))
+      (support/shell-path f))))
 
 (defn- interrupt-of
   "The interrupts a run ended on, read off the real wire -- not out of the
@@ -393,8 +421,21 @@
                          ;; re-issued, i.e. that the resume did something else.
                          (is (= 2 (count (of-kind ls "hook/Elicitation"))))
                          (testing "and the ANSWER was reported once, before it went back"
-                           (is (= 1 (count (of-kind ls "hook/ElicitationResult")))))
-                         (let [seen (slurp marker :encoding "UTF-8")]
+                           (let [fired (of-kind ls "hook/ElicitationResult")]
+                             (is (= 1 (count fired)))
+                             ;; A COUNT IS NOT THE WHOLE CLAIM: the audit line lands
+                             ;; even for a command the engine could not run to
+                             ;; completion -- it carries `:exit nil` and the reason --
+                             ;; so a hook that never appended would still be counted,
+                             ;; and the missing line below would read as a lost file
+                             ;; rather than as a hook that timed out. `exit 0` is the
+                             ;; engine's own record that the command ran and allowed.
+                             (is (= [0] (mapv :exit (mapcat (comp :results :payload) fired)))
+                                 (str "the result hook's own outcome: " (pr-str fired)))))
+                         ;; WAITED FOR, NOT READ ONCE -- see `wait-marker`: the block
+                         ;; above reads the LOG, which the run's own thread finishes
+                         ;; writing first, and this file is written by the hook's shell.
+                         (let [seen (wait-marker marker #(str/includes? % "Ada") 10000)]
                            (is (str/includes? seen "--- elicitation"))
                            (is (str/includes? seen "--- elicitation-result"))
                            (is (str/includes? seen "\"server\":\"fake\""))

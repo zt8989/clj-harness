@@ -25,12 +25,19 @@
 (defn- script!
   "A stub command that does BODY, on PATH-free absolute invocation. Written with
   a shebang and made executable; the payload it received is captured beside it so
-  a test can assert what the hook was TOLD, not just what it did."
+  a test can assert what the hook was TOLD, not just what it did.
+
+  THE PATH IS SPELLED FOR THE SHELL, because that is who is handed it: a
+  declaration's `:command` is shell text (harness.infra.shell/run), so a Windows
+  path written `C:\\…\\gate.sh` arrives at Git Bash as `C:…gate.sh` and the hook
+  fails with exit 127. See harness.test-support/shell-path. The same goes for every
+  path a BODY splices in -- a redirection target inside these scripts is read by
+  that same shell."
   [name body]
   (let [f (io/file scripts name)]
     (spit f (str "#!/bin/sh\n" body "\n") :encoding "UTF-8")
     (.setExecutable f true)
-    (str f)))
+    (support/shell-path f)))
 
 (defn- declared! [point decls]
   (support/write-hooks! {point decls}))
@@ -72,7 +79,9 @@
 
 (deftest a-matcher-that-selects-this-call-runs-it
   (let [marker (str root "/ran.txt")]
-    (declared! :pre-tool-use [{:command (script! "gate.sh" (str "echo ran > " marker " && exit 0"))
+    (declared! :pre-tool-use [{:command (script! "gate.sh" (str "echo ran > "
+                                                               (support/shell-path marker)
+                                                               " && exit 0"))
                                :matcher "bash|write"}])
     (let [r (fire :pre-tool-use {:tool_name "bash"})]
       (is (= :allow (:verdict r)))
@@ -141,7 +150,7 @@
 
 (deftest the-hook-is-told-what-happened-on-stdin-as-json
   (let [capture (str root "/payload.json")
-        cmd     (script! "capture.sh" (str "cat > " capture "; exit 0"))]
+        cmd     (script! "capture.sh" (str "cat > " (support/shell-path capture) "; exit 0"))]
     (declared! :pre-tool-use [{:command cmd}])
     (project/bind! "h-payload" root)
     (try
@@ -159,7 +168,7 @@
 
 (deftest the-payload-carries-only-what-the-point-declares
   (let [capture (str root "/payload2.json")
-        cmd     (script! "capture2.sh" (str "cat > " capture "; exit 0"))]
+        cmd     (script! "capture2.sh" (str "cat > " (support/shell-path capture) "; exit 0"))]
     (declared! :stop [{:command cmd}])
     (fire :stop {:tool_name "read" :secret_extra "nope"})
     (let [p (json/read-str (slurp capture))]
@@ -195,7 +204,9 @@
 (deftest an-unmatched-matcher-does-not-stop-a-later-declaration-from-running
   (let [marker (str root "/later.txt")]
     (declared! :pre-tool-use [{:command (script! "no.sh" "exit 2") :matcher "edit"}
-                              {:command (script! "yes.sh" (str "echo ran > " marker "; exit 0"))
+                              {:command (script! "yes.sh" (str "echo ran > "
+                                                               (support/shell-path marker)
+                                                               "; exit 0"))
                                :matcher "bash"}])
     (let [r (fire :pre-tool-use {:tool_name "bash"})]
       (is (= :allow (:verdict r)))

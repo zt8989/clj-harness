@@ -300,18 +300,20 @@
   (let [dir (support/temp-dir "tools-hang")
         pid-file (io/file dir "child.pid")
         started (System/currentTimeMillis)
+        ;; The child asks the OS for its own pid (`support/child-command`): `$!` here
+        ;; is MSYS's number, which `ProcessHandle/of` cannot resolve, and a
+        ;; `gone-within?` asked about it answers 'gone' before anything was killed.
         {:keys [content error]} (call "bash"
-                                      {:command (str "echo said-before-hanging; sleep 60 & echo $! > "
-                                                     (shell/quote-arg (.getAbsolutePath pid-file))
-                                                     "; wait")
-                                       :timeout 1500})
+                                      {:command (str "echo said-before-hanging; "
+                                                     (support/child-command pid-file))
+                                       :timeout 4000})
         elapsed (- (System/currentTimeMillis) started)]
     (try
       (testing "it is information, not a failed run"
         (is (false? error)))
       (testing "what it printed is kept, and the answer says where it stopped"
         (is (str/includes? content "said-before-hanging"))
-        (is (str/includes? content "[timed out after 1500ms")))
+        (is (str/includes? content "[timed out after 4000ms")))
       (testing "and the call came back at the limit, not at the end"
         (is (< elapsed 20000) (str "elapsed " elapsed "ms")))
       (testing "and the child the command started is gone with it"
@@ -413,15 +415,19 @@
         path   (second (re-find #"its record is (\S+)" answer))]
     (is (some? path) (str "the answer names the record: " answer))
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"two" (:answer %)) 10000)
-    (let [found  (:content (call "bash" {:command (str "grep two " path)}))
-          tailed (:content (call "bash" {:command (str "tail -1 " path)}))]
+    (let [found  (:content (call "bash" {:command (str "grep two " (support/shell-path path))}))
+          tailed (:content (call "bash" {:command (str "tail -1 " (support/shell-path path))}))]
       (is (str/includes? found "two") "`bash` can search the record")
       (is (= "two" (str/trim tailed)) "and read its last line"))
     (jobs/shutdown!)))
 
 (deftest a-job-says-when-the-command-sends-its-own-output-away
+  ;; THE COMMAND IS SHELL TEXT, so the path inside it is spelled the way the shell
+  ;; reads it (`support/shell-path`): a Windows path goes in with backslashes and
+  ;; arrives as `C:Userszhouteng..` -- the shell eats each `\` as an escape -- so the
+  ;; redirection would land somewhere else entirely and the note would name that.
   (let [tmp (io/file dir "redirected.txt")
-        target (.getAbsolutePath tmp)
+        target (support/shell-path (.getAbsolutePath tmp))
         answer (:content (call "job" {:command (str "echo hi > " target)}))]
     (testing "the command still runs -- a note is not a refusal"
       (is (some? (re-find #"job j\d+ started" answer))))

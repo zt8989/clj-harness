@@ -385,7 +385,7 @@
   (testing "an absolute path inside the project works too"
     (is (str/includes? (read-raw "r-fence" {:path (path-of "inside.txt")}) "here")))
   (testing "and one outside the project and the config home still parks"
-    (let [res (call "r-fence" "read" {:path "/etc/hosts"})]
+    (let [res (call "r-fence" "read" {:path (support/outside-path "hosts")})]
       (is (some? (:parked res)) "the call is waiting for a human")
       (is (= :out-of-bounds (:reason (:parked res)))))))
 

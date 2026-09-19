@@ -116,10 +116,14 @@
 (defn- marker-script [marker label]
   (let [dir (str (home/root) "/hook-scripts")]
     (.mkdirs (io/file dir))
-    (let [f (io/file dir (str label ".sh"))]
-      (spit f (str "#!/bin/sh\ncat >> " marker "\necho \"" label "\" >> " marker "\n") :encoding "UTF-8")
+    (let [f (io/file dir (str label ".sh"))
+          m (support/shell-path marker)]
+      ;; BOTH PATHS ARE SPELLED FOR THE SHELL: the command the hook engine hands
+      ;; to it, and the marker the script itself writes to. See
+      ;; harness.test-support/shell-path for why a Windows path cannot be used raw.
+      (spit f (str "#!/bin/sh\ncat >> " m "\necho \"" label "\" >> " m "\n") :encoding "UTF-8")
       (.setExecutable f true)
-      (str f))))
+      (support/shell-path f))))
 
 ;; --------------------------------------------------- nothing declared, nothing
 
@@ -284,7 +288,8 @@
       (spit f (str "#!/bin/sh\ncat > /dev/null\necho \"" reason "\" >&2\nexit " exit "\n")
             :encoding "UTF-8")
       (.setExecutable f true)
-      (str f))))
+      ;; The command is shell text, so its path is spelled for the shell.
+      (support/shell-path f))))
 
 (deftest a-pretooluse-gate-can-refuse-a-call-and-the-model-is-told-why
   (wipe!)
@@ -391,7 +396,8 @@
                    "echo '{\"decision\":\"" decision "\",\"reason\":\"" reason "\"}'\nexit 0\n")
             :encoding "UTF-8")
       (.setExecutable f true)
-      (str f))))
+      ;; The command is shell text, so its path is spelled for the shell.
+      (support/shell-path f))))
 
 (deftest a-permission-request-hook-can-approve-a-parked-call
   (wipe!)

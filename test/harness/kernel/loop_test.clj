@@ -86,32 +86,53 @@
 (deftest a-turn-of-slow-tools-finishes-in-the-max-not-the-sum
   ;; The slow tool lives on a session overlay, not the base registry: runtime
   ;; registration must never mutate the base other tests read.
-  (tools/session-register! "t-slow" "slow"
-                         {:description "Sleep MS then return."
-                          :parameters  {:type "object"
-                                        :properties {"ms" {:type "integer" :description "Millis."}}}
-                          :required    [:ms]
-                          :run         (fn [{:keys [ms]}] (Thread/sleep ms) "ok")})
-  (let [turns [{:content ""
-                :tool-calls [{:id "c1" :name "slow" :arguments {:ms 300}}
-                             {:id "c2" :name "slow" :arguments {:ms 300}}]}
-               {:content "done"}]
-        t0    (System/nanoTime)
-        {:keys [history seen]}
-        (drain-chan (loop/run-chan (fake/scripted turns) [] {:thread-id "t-slow"}))
-        ms    (/ (- (System/nanoTime) t0) 1e6)]
-    (testing "wall clock is the slower tool, not the sum of both"
-      ;; Concurrent: ~300ms plus scheduling slack. Serial would be >= 600ms.
-      ;; History and events are still asserted below, so a timing flake here
-      ;; cannot mask a broken run.
-      (is (< ms 550)))
-    (testing "both results came back clean"
-      (is (= #{"c1" "c2"} (set (mapv :id (filter #(= :tool/result (:type %)) seen)))))
-      (is (every? false? (map :error (filter #(= :tool/result (:type %)) seen)))))
-    (testing "and the run still terminates with a well-formed history"
-      (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))
-      (is (= "done" (:content (last history))))))
-  (tools/session-unregister! "t-slow" "slow"))
+  ;;
+  ;; THE OVERLAP IS WITNESSED, NOT TIMED, and that is the difference between a case
+  ;; about the loop and a case about the machine. A wall-clock ceiling was the obvious
+  ;; spelling -- "concurrent is ~300ms, serial is >=600" -- and it leaves only the
+  ;; slack for JIT, the thread pool and the drain loop: a loaded Windows machine spent
+  ;; 656ms on one run, which is inside the band where concurrent-with-overhead and
+  ;; serial-with-less-overhead are indistinguishable. So each call records when it
+  ;; entered and when it left, and the claim asserted is the one that MAKES the wall
+  ;; clock the slower tool: the two windows overlap. Serial execution cannot satisfy
+  ;; it, however fast the machine (test_support's own note -- a race case that does
+  ;; not witness the interleaving passes while the bug is present).
+  (let [windows (atom [])]
+    (tools/session-register! "t-slow" "slow"
+                             {:description "Sleep MS then return."
+                              :parameters  {:type "object"
+                                            :properties {"ms" {:type "integer" :description "Millis."}}}
+                              :required    [:ms]
+                              :run         (fn [{:keys [ms]}]
+                                             (let [entered (System/nanoTime)]
+                                               (Thread/sleep ms)
+                                               (let [left (System/nanoTime)]
+                                                 (swap! windows conj [entered left])
+                                                 "ok")))})
+    (try
+      (let [turns [{:content ""
+                    :tool-calls [{:id "c1" :name "slow" :arguments {:ms 300}}
+                                 {:id "c2" :name "slow" :arguments {:ms 300}}]}
+                   {:content "done"}]
+            {:keys [history seen]}
+            (drain-chan (loop/run-chan (fake/scripted turns) [] {:thread-id "t-slow"}))
+            calls  (vec (sort-by first @windows))]
+        (testing "wall clock is the slower tool, not the sum of both"
+          (is (= 2 (count calls)) "both calls ran")
+          (when (= 2 (count calls))
+            (let [[first-entered first-left] (first calls)
+                  [second-entered _]        (second calls)]
+              (is (< second-entered first-left)
+                  (str "the second call started " (/ (- second-entered first-left) 1e6)
+                       "ms before the first finished: the turn cost the slower tool,"
+                       " not the sum")))))
+        (testing "both results came back clean"
+          (is (= #{"c1" "c2"} (set (mapv :id (filter #(= :tool/result (:type %)) seen)))))
+          (is (every? false? (map :error (filter #(= :tool/result (:type %)) seen)))))
+        (testing "and the run still terminates with a well-formed history"
+          (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) history))))
+          (is (= "done" (:content (last history))))))
+      (finally (tools/session-unregister! "t-slow" "slow")))))
 
 (deftest every-model-call-is-bracketed-and-carries-the-vendors-report
   ;; The pair of audit lines the composer's status strip counts: one :model/start per

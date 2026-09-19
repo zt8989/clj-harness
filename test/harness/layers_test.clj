@@ -71,13 +71,23 @@
 
 (defn- expected-ns
   "The namespace a file at PATH must declare: the path relative to its source root,
-  with underscores as dashes and slashes as dots."
+  with underscores as dashes and separators as dots.
+
+  THE RELATIVE PART IS ASKED OF `java.nio.file.Path`, NOT SPELLED OUT. The rule
+  above is written with slashes, and on Windows `File.getPath` answers with
+  backslashes -- so stripping `(str root \"/\")` off the front matches nothing, no
+  separator is ever replaced, and every file in the tree is reported as declaring
+  the wrong namespace (98 of them, once, here). Relativizing two `Path`s and
+  re-rooting the answer's separator is the version of this that means the same
+  thing on both platforms: what is being asked is a relationship between two
+  files, and only the platform knows how that relationship is spelled."
   [root ^java.io.File file]
-  (-> (str (.getPath file))
-      (str/replace (str root "/") "")
-      (str/replace #"\.clj$" "")
-      (str/replace "_" "-")
-      (str/replace "/" ".")))
+  (let [base (.toAbsolutePath (.toPath (io/file root)))
+        path (.toAbsolutePath (.toPath file))]
+    (-> (str (.relativize base path))
+        (str/replace #"\.clj$" "")
+        (str/replace "_" "-")
+        (str/replace #"[\\/]" "."))))
 
 (defn- leaked
   "The requirements of FILE that a namespace in ITS-LAYER may not make, as

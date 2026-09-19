@@ -112,8 +112,13 @@
     (project/bind! "sk-2" proj)
 
     (testing "absolute entries pass through, in order"
-      (is (= ["/abs/one" "/abs/two"]
-             (skills/roots {:roots ["/abs/one" "/abs/two"]} proj))))
+      ;; ABSOLUTE ON THIS PLATFORM, which `/abs/one` is not on Windows: there it is a
+      ;; root-relative path, so it RESOLVES against the project and the case reads as
+      ;; 'absolute entries are rewritten'. `outside-path` is a real absolute path
+      ;; outside every root this session has.
+      (let [one (support/outside-path "one")
+            two (support/outside-path "two")]
+        (is (= [one two] (skills/roots {:roots [one two]} proj)))))
 
     (testing "a relative entry resolves against the project, like any tool path"
       (is (= [(str (io/file proj "skills"))]
@@ -145,8 +150,9 @@
     ;; a layer read off their order would be a guess dressed as a fact. The path
     ;; is there either way, and that is what a list falls back on.
     (let [proj  (tmp-project! "cfg-layers")
-          roots (skills/root-layers {:roots ["/abs/one" ".agents/skills"]} proj)]
-      (is (= ["/abs/one" (str (io/file proj ".agents" "skills"))] (mapv :path roots)))
+          one   (support/outside-path "one")
+          roots (skills/root-layers {:roots [one ".agents/skills"]} proj)]
+      (is (= [one (str (io/file proj ".agents" "skills"))] (mapv :path roots)))
       (is (not-any? #(contains? % :layer) roots))
       (testing "and an empty list is still a real answer: no roots, no layers"
         (is (= [] (skills/root-layers {:roots []} nil))))))
@@ -391,7 +397,14 @@
       (.setReadable (io/file root "locked" "SKILL.md") false false))
 
     (let [entries (skills/scan [root])
-          by-name (into {} (map (juxt :name identity)) entries)]
+          by-name (into {} (map (juxt :name identity)) entries)
+          ;; CAN THIS PLATFORM MAKE A FILE UNREADABLE AT ALL? Windows cannot: there is
+          ;; no read bit to clear, `setReadable false false` is accepted and ignored,
+          ;; and the fourth skill laid above loads like any other. So what loads is
+          ;; asked of the machine rather than written down -- the sibling case
+          ;; `an-unreadable-skill-file-is-broken-rather-than-fatal` makes the same
+          ;; admission for the same reason, one file over.
+          lockable? (not (.canRead (io/file root "locked" "SKILL.md")))]
       (testing "every one of them is IN the scan, with a reason"
         (is (some? (by-name "bare")))
         (is (some? (by-name "misnamed")))
@@ -402,7 +415,8 @@
         (is (false? (:available? (by-name "bare")))))
 
       (testing "and the run is not sunk by any of them"
-        (is (= ["good" ] (keep #(when (:available? %) (:name %)) entries))))
+        (is (= (if lockable? ["good"] ["good" "locked"])
+               (keep #(when (:available? %) (:name %)) entries))))
 
       (testing "the catalog lists only what works"
         (let [text (skills/catalog-text [root])]
@@ -757,7 +771,11 @@
                                     [{:role "user" :content "/nodesc go"}] [root])))]
         (is (str/includes? text "cannot be loaded"))
         (is (str/includes? text "no-description"))
-        (is (str/includes? text "nodesc/SKILL.md"))))))
+        ;; The place to look is a PATH, and it is spelled the way the platform spells
+        ;; paths -- see harness.test-support/shell-path for the same distinction made
+        ;; from the other side (there: text going to a shell, here: text coming back
+        ;; from the JVM).
+        (is (str/includes? text (str (io/file "nodesc" "SKILL.md"))))))))
 
 (deftest an-image-beside-a-slash-request-does-not-hide-it
   ;; A person can attach a picture and type the skill name in the same message.

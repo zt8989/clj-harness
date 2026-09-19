@@ -443,7 +443,12 @@
         (is (wait-gone (last-pid live) 3000)))
       (testing "it ended of its own accord or on our signal, and either way it is
                 not on this machine any more"
-        (is (some #{"term" "exit"} (lifecycle live)))
+        ;; The note is only there where a handler can run at all: Windows stops a
+        ;; process outright, so the fake server's own `term` / `exit` lines cannot be
+        ;; written there (see `support/graceful-stop?`). The claim that holds on both
+        ;; platforms is the one below it, and it is asked of the OS.
+        (when (support/graceful-stop?)
+          (is (some #{"term" "exit"} (lifecycle live))))
         (is (not (running? (last-pid live))))))))
 
 (deftest a-server-that-speaks-rubbish-is-named-and-then-replaced
@@ -468,9 +473,15 @@
   ;; stderr is DIAGNOSTICS. A server that logs a line there must be usable, and
   ;; its log must not be mistaken for protocol -- the same rule the hook engine
   ;; holds, for the same reason.
-  (write-servers! {"chatty" {:command (str "node -e 'console.error(\"a log line\"); require(\""
-                                           (.getAbsolutePath (io/file "test/harness/cap/fake_mcp_server.js"))
-                                           "\")'")}})
+  ;;
+  ;; A KNOB RATHER THAN A WRAPPER COMMAND. This used to be started as
+  ;; `node -e 'console.error(..); require(..)'`, and that spelling is a SHELL's: a
+  ;; declaration's `:command` is launched as a program plus flags (see
+  ;; harness.infra.shell/spawn-argv), so on Windows it goes to `cmd`, which does not
+  ;; read single quotes -- node was handed `'console.error(` and a stray argument,
+  ;; never started, and the test reported an empty tool table. The fake server's own
+  ;; knobs are the shape every other test here uses and they work wherever node does.
+  (write-servers! {"chatty" (fake-decl {:env {"MCP_FAKE_STDERR" "a log line"}})})
   (let [thread (str "mcp-stderr-" (System/currentTimeMillis))]
     (is (contains? (mcp/tools-for thread) "mcp__chatty__echo"))
     (is (= "echo: fine" (:content (call! thread "mcp__chatty__echo" {:text "fine"}))))))

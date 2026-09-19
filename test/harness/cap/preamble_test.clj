@@ -85,8 +85,12 @@
               {:files ["AGENTS.md" "docs/AGENTS.md"]} proj))))
 
     (testing "absolute entries pass through; relative ones resolve against the project"
-      (is (= ["/abs/AGENTS.md" (str (io/file proj "AGENTS.md"))]
-             (preamble/instruction-files {:files ["/abs/AGENTS.md" "AGENTS.md"]} proj))))
+      ;; ABSOLUTE ON THIS PLATFORM: `/abs/AGENTS.md` is a root-relative path on
+      ;; Windows, so it would resolve against the project and the case would read as
+      ;; 'absolute entries are rewritten'. See harness.test-support/outside-path.
+      (let [abs (support/outside-path "AGENTS.md")]
+        (is (= [abs (str (io/file proj "AGENTS.md"))]
+               (preamble/instruction-files {:files [abs "AGENTS.md"]} proj)))))
 
     (testing "an empty list is a real answer: read no instruction files"
       (is (= [] (preamble/instruction-files {:files []} proj))))))
@@ -169,11 +173,19 @@
       (is (str/includes? (:content (second msgs)) "project rules")))
 
     (testing "a quote in the path cannot break out of the attribute"
-      (let [weird (str proj "/we\"ird.md")]
-        (spit! weird "x\n")
-        (is (str/includes? (:content (first (preamble/messages
-                                             (preamble/gather {:files [weird]}))))
-                           "&quot;"))))))
+      ;; ASKED OF THE RENDERER, NOT OF THE FILESYSTEM. The rule belongs to the tag a
+      ;; path is interpolated into, and Windows cannot spell a filename holding a `"`
+      ;; at all -- a case that had to create one would test the escaping only where
+      ;; the platform allows such a name, and would fail on Windows with a
+      ;; FileNotFoundException that says nothing about escaping. `messages` is a pure
+      ;; function of the gathered map, so it is handed the path directly.
+      (let [weird   (str proj "/we\"ird.md")
+            content (:content (first (preamble/messages {:instructions [{:path weird
+                                                                         :content "x"}]})))]
+        (is (str/includes? content "path=\"") "the tag still carries an attribute")
+        (is (str/includes? content "&quot;") "and the path's own quote was escaped")
+        (is (= 2 (count (filter #{\"} content)))
+            "so exactly the attribute's two quotes are raw, and none leaked in")))))
 
 (deftest missing-and-empty-files-are-skipped-with-a-reason
   (let [proj    (tmp-project! "skip")

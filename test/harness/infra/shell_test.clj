@@ -89,13 +89,14 @@
   ;; which is how two test JVMs survived sixteen hours.
   (let [dir (support/temp-dir "shell-tree")
         pid-file (io/file dir "child.pid")
-        ;; `$!` is the backgrounded child's pid, and `wait` keeps the shell around
-        ;; so the shape under test is really two processes; without it the shell
-        ;; would exit and the child would be reparented before the limit is reached.
-        command (str "sleep 30 & echo $! > " (shell/quote-arg (.getAbsolutePath pid-file))
-                     "; wait")
+        ;; The child is kept alive and asked for its OWN pid (`support/child-command`):
+        ;; `$!` is MSYS's number here, not the one the OS handed the process, and a
+        ;; `gone-within?` asked about that number would answer 'gone' about a child
+        ;; still running. `wait` keeps the shell around either way, so the shape under
+        ;; test really is two processes.
+        command (support/child-command pid-file)
         started (System/currentTimeMillis)
-        res (shell/run {:command command :timeout-ms 2000})
+        res (shell/run {:command command :timeout-ms 4000})
         elapsed (- (System/currentTimeMillis) started)
         pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
     (testing "the call gives up at the limit rather than waiting for the command"
@@ -143,7 +144,20 @@
   ;; answers nothing at all; a chain that took it would report a shell that runs
   ;; nothing. The plant is a `bash.exe` under a directory called System32 and a real
   ;; pwsh next door: the lookup refuses the first and the chain walks to the second.
-  (let [sys32 (io/file (support/temp-dir "wsl-root") "System32")
+  ;;
+  ;; THE CHAIN WALKED HERE IS THE ONE WITHOUT THE PINNED GIT BASH ROWS, and that is
+  ;; the difference between a case about PATH and a case about this machine: those two
+  ;; rows name absolute install paths and are answered by an existence question, not by
+  ;; PATH -- so on a machine where Git really is installed (the ordinary one for this
+  ;; repo) they win, pwsh is never reached, and the case fails for a reason that has
+  ;; nothing to do with the WSL trap. What is under test here is the refusal and the
+  ;; walking, so the chain given to `select` holds only the rows PATH can answer for.
+  ;; The pinned rows are asserted in `the-chain-takes-the-first-step-that-is-there`,
+  ;; where the locator is fabricated and no machine has a say.
+  (let [path-chain [{:kind :bash :command "bash"}
+                    {:kind :pwsh :command "pwsh"}
+                    {:kind :cmd  :command "cmd"}]
+        sys32 (io/file (support/temp-dir "wsl-root") "System32")
         bin   (path-with "pwsh")]
     (.mkdirs sys32)
     (spit (io/file sys32 "bash.exe") "")
@@ -151,14 +165,14 @@
       (testing "the launcher is not a bash"
         (is (nil? ((shell/locator path) {:kind :bash :command "bash"}))))
       (testing "so the chain does not stop there"
-        (is (= :pwsh (:kind (shell/select shell/candidates (shell/locator path))))))
+        (is (= :pwsh (:kind (shell/select path-chain (shell/locator path))))))
       (testing "and with NOTHING but the launcher the answer is nothing at all"
         ;; Rather than the string "bash", which is the name of a program that
         ;; answers nothing on this machine.
-        (is (nil? (shell/select shell/candidates (shell/locator (str sys32)))))
+        (is (nil? (shell/select path-chain (shell/locator (str sys32)))))
         (testing "while a real bash elsewhere on PATH is taken"
           (let [bin (path-with "bash")]
-            (is (= :bash (:kind (shell/select shell/candidates (shell/locator bin)))))))))))
+            (is (= :bash (:kind (shell/select path-chain (shell/locator bin)))))))))))
 
 (deftest the-resolution-is-asked-once-per-process
   ;; A fact about the machine, asked once -- so a test can drive the chain, and so a

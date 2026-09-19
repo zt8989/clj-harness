@@ -30,6 +30,9 @@
 //
 //   MCP_FAKE_BANNER=1         print a non-JSON line on stdout at startup (a server
 //                             that pollutes the protocol stream -- named, never skipped)
+//   MCP_FAKE_STDERR=text      write a line to stderr at startup (a server that LOGS,
+//                             which must stay usable: stderr is diagnostics, and it is
+//                             not the protocol stream the banner above pollutes)
 //   MCP_FAKE_ROSTER_FILE=path read extra tool names from this file on every
 //                             tools/list, so a roster can CHANGE between
 //                             connections and a re-list is observable
@@ -136,6 +139,10 @@ function roster() {
 
 if (process.env.MCP_FAKE_BANNER === "1") {
   process.stdout.write("fake mcp server starting\n");
+}
+
+if (process.env.MCP_FAKE_STDERR) {
+  process.stderr.write(process.env.MCP_FAKE_STDERR + "\n");
 }
 
 function send(msg) {

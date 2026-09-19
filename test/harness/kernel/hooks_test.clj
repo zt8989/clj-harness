@@ -163,7 +163,11 @@
     (let [e (try (hooks/effective-hooks nil) nil (catch Exception e e))]
       (is (some? e))
       (is (str/includes? (ex-message e) "not valid EDN"))
-      (is (str/includes? (ex-message e) (str (home/root) "/hooks.edn")))))
+      ;; The file is named by the path the platform actually hands back -- spelled
+      ;; through io/file rather than spliced with "/", which on Windows would build
+      ;; a string no message ever contains (see harness.test-support/shell-path for
+      ;; the same distinction from the other side).
+      (is (str/includes? (ex-message e) (str (io/file (home/root) "hooks.edn"))))))
   (testing "valid EDN that is not a map"
     (user-hooks "[1 2 3]")
     (let [e (try (hooks/effective-hooks nil) nil (catch Exception e e))]
@@ -376,7 +380,8 @@
   (let [marker (str root "/fired.txt")
         _      (io/delete-file (io/file marker) true)
         id     (hooks/session-add! "hs-fire" :stop
-                                   {:command (str "echo fired > " marker "; exit 0")})]
+                                   {:command (str "echo fired > "
+                                                  (support/shell-path marker) "; exit 0")})]
     (hooks/session-disable! "hs-fire" id)
     (let [audits (atom [])
           r (dispatch/fire {:point :stop :thread-id "hs-fire" :fact {}
@@ -410,8 +415,14 @@
                              tid))
         fire   (fn [] (dispatch/fire {:point :stop :thread-id tid :fact {}}))]
     (testing "adding one is a tool call, and the id comes back readable"
+      ;; THE COMMAND IS BUILT AS A STRING INSIDE A STRING -- the marker lands in
+      ;; Clojure source the eval tool reads, and a raw Windows path there is not a
+      ;; path at all: `\U` is an unsupported escape and the READ fails before the
+      ;; hook is ever written. The shell spelling has no backslashes in it, so one
+      ;; conversion answers both readers.
       (let [r (call (str "(harness.kernel.hooks/session-add! \"" tid
-                         "\" :stop {:command \"echo grew > " marker "; exit 0\"})"))]
+                         "\" :stop {:command \"echo grew > "
+                         (support/shell-path marker) "; exit 0\"})"))]
         (is (false? (:error r)))
         (let [id (read-string (:content r))]
           (is (= "stop@1" id))

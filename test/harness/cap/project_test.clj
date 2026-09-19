@@ -322,12 +322,22 @@
   broken environment, not a case to skip.
 
   THE ANSWER COMES BACK THROUGH ANSWER, a file the child is handed by name, not
-  through stdout -- see `child-answer` for what stdout carries now."
+  through stdout -- see `child-answer` for what stdout carries now.
+
+  AND THE FORM TRAVELS AS A FILE RATHER THAN AS `-e <form>`, for a Windows reason
+  rather than a tidy one: the JVM builds the child's command line out of the argv
+  array, and an embedded double quote does not survive that trip -- `-e
+  (System/getenv \"X\")` arrives as `-e (System/getenv X)`, and the child dies with
+  'Unable to resolve symbol: X' before any of this runs. Every form here quotes a
+  string. `clojure -M <file>` has no such limit, and it is the same CLI on PATH."
   [^File dir ^File user-home ^File answer ^String form]
-  (let [pb (doto (ProcessBuilder. ^java.util.List
+  (let [script (io/file (.getParentFile ^File answer)
+                        (str (.getName ^File answer) ".form.clj"))
+        _      (spit script form :encoding "UTF-8")
+        pb (doto (ProcessBuilder. ^java.util.List
                                   (vec ["clojure"
                                         (str "-J-Duser.home=" (.getAbsolutePath ^File user-home))
-                                        "-M" "-e" form]))
+                                        "-M" (.getAbsolutePath script)]))
              (.directory (io/file (System/getProperty "user.dir")))
              (.redirectErrorStream true))]
     (.put (.environment pb) "CLJ_HARNESS_HOME" (.getAbsolutePath dir))
@@ -397,7 +407,11 @@
           (is (= (.getAbsolutePath proj) (child-answer write-to))))
         (testing "a SECOND process, which never saw the binding, answers it"
           (is (zero? (:exit read)) (str "second JVM failed:\n" (:out read)))
-          (is (= (str "\"" (.getAbsolutePath proj) "\"") (child-answer read-to))
+          ;; The child answers `pr-str` of the path, so a Windows path arrives with
+          ;; its backslashes escaped -- comparing it against the bare spelling is the
+          ;; comparison that fails here and passes on POSIX (see providers-test's
+          ;; `printed` for the same trap).
+          (is (= (pr-str (.getAbsolutePath proj)) (child-answer read-to))
               "the binding was read back out of the store by a fresh JVM")))
       (finally
         (doseq [d [dir user-hm tmp]] (support/wipe-tree! d))))))
@@ -711,7 +725,12 @@
 
          (testing "and a CONFIGURED root is what is allowed, not a hardcoded pair"
            (let [custom (support/temp-dir "custom-skills")]
-             (proj-edn! (str "{:skills {:roots [\"" custom "\"]}}"))
+             ;; WRITTEN AS EDN, rather than spliced into a template: a Windows path
+             ;; inside an EDN string literal is `\U`, which is not an escape -- the
+             ;; file this test wrote for itself came back 'invalid EDN' and the case
+             ;; failed naming harness.edn rather than the fence. `pr-str` is the same
+             ;; bytes on POSIX and the ones a person editing the file must write here.
+             (proj-edn! (pr-str {:skills {:roots [custom]}}))
              (is (false? (project/out-of-bounds? "pt-skills" (str (io/file custom "x.md")))))
              (is (true? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md"))))
                  "the default root is no longer in force, so it is no longer free")

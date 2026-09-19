@@ -1583,6 +1583,17 @@
   "(require (quote [harness.infra.home :as h]) (quote [harness.cap.providers :as p]))
    (let [s (p/settings nil)] (prn {:root (h/root) :origin (:origin (:home s)) :key (:key s)}))")
 
+(defn- printed
+  "PATH the way the child's `prn` carries it: Clojure's printed form of the string.
+
+  THE CHILD ANSWERS A MAP, so the root arrives as a PRINTED string, and a Windows
+  path is printed with its backslashes escaped -- `C:\\\\Users\\\\..`. Comparing that
+  against `.getAbsolutePath` fails here and would pass on POSIX, where there is
+  nothing to escape: a red suite that names nothing about the harness. Printing the
+  expected value the same way is the one comparison that holds on both."
+  [p]
+  (pr-str (str p)))
+
 (deftest the-root-rule-and-the-key-source-are-each-reported-truthfully
   ;; Two facts, and the second source of each needs a process whose environment
   ;; and user.home this JVM cannot change: the environment variable for the root
@@ -1602,7 +1613,7 @@
               comes from the environment because that home has no .env"
       (let [out (spawn-child env-home nil {"HARNESS_API_KEY" sentinel} report)]
         (is (str/includes? out ":environment") out)
-        (is (str/includes? out (str (.getAbsolutePath env-home))) out)
+        (is (str/includes? out (printed (.getAbsolutePath env-home))) out)
         (is (not (str/includes? out sentinel)) "and the key's VALUE is printed nowhere")
         (is (not (str/includes? out (subs sentinel 0 12))) out)))
 
@@ -1632,7 +1643,11 @@
     (testing "with no CLJ_HARNESS_HOME, the default rule is named"
       (let [out (spawn-child nil (.getAbsolutePath def-user) nil report)]
         (is (str/includes? out ":default") out)
-        (is (str/includes? out (str (.getAbsolutePath def-home))) out)
+        ;; The rule's OWN spelling, separators and all: `root` answers the JVM
+        ;; property with `/.clj-harness` appended, so the child prints a mixed
+        ;; `..\\harness-settings-user-X/.clj-harness` and a path built by `io/file`
+        ;; would not be the string it is being compared with.
+        (is (str/includes? out (printed (str (.getAbsolutePath def-user) "/.clj-harness"))) out)
         (is (str/includes? out ":present? false")
             "and a home with neither .env nor the variable reports no key at all")
         (is (str/includes? out "ALPHA") 

@@ -193,7 +193,11 @@
   (let [marker (str (System/getProperty "java.io.tmpdir") "/sp-late-ran.txt")]
     (io/delete-file (io/file marker) true)
     (support/write-hooks! {:system-prompt [{:command "echo no >&2; exit 2"}
-                                   {:command (str "echo ran > " marker "; exit 0")}]})
+                                           ;; The marker goes into a shell command,
+                                           ;; so it is spelled for the shell -- see
+                                           ;; harness.test-support/shell-path.
+                                           {:command (str "echo ran > "
+                                                          (support/shell-path marker) "; exit 0")}]})
     (is (some? (:error (assemble-run "sp-both"))))
     (is (.exists (io/file marker))
         "a later declaration is not skipped because an earlier one refused")

@@ -63,6 +63,13 @@
   not come through here at all (see below), so the file's bytes are what the
   provider sees whenever nothing is appended.
 
+  A LINE ENDING IS PART OF WHAT THE FILE 'HAPPENS TO END WITH', so the normalising
+  pattern takes the carriage return with the newline. prompt.md is checked out with
+  whatever `core.autocrlf` says -- it says true on the Windows machine this was
+  found on -- and against a CRLF file the LF-only pattern left a stray `\\r` behind
+  and the separator produced `\\r\\n\\n` instead of a blank line. The promise above
+  is about blank lines, not about which byte a line ends with.
+
   An EMPTY BLOCKS returns OPENING ITSELF, not an equal string: that is the path
   every caller without a bound sink takes -- and the path every run took before
   this feature existed -- so byte-identity there is the regression guarantee the
@@ -70,7 +77,7 @@
   [opening blocks]
   (if (empty? blocks)
     opening
-    (str (str/replace opening #"\n+$" "") "\n\n" (str/join "\n\n" blocks))))
+    (str (str/replace opening #"(?:\r?\n)+$" "") "\n\n" (str/join "\n\n" blocks))))
 
 (defn assemble
   "The text of THREAD-ID's system message on this run: prompt.md's frozen opening,

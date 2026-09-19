@@ -115,6 +115,86 @@
     (.mkdirs d)
     (str d)))
 
+(defn shell-path
+  "PATH spelled the way the shell this process spawns reads it: forward slashes.
+
+  A PATH THAT GOES INTO A SHELL COMMAND IS NOT THE STRING `java.io.File` HANDS BACK.
+  On Windows the JVM spells one `C:\\Users\\me\\gate.sh` and the shell `harness.infra.shell`
+  resolves there is Git Bash, where a backslash is an escape -- so that word arrives as
+  `C:Usersmegate.sh` and the command fails with `exit 127: command not found`, which reads
+  as 'your hook is missing' rather than 'your path was eaten'. A hook's `:command` is
+  SHELL TEXT (see harness.infra.shell/run), and so is anything spliced into a `bash` call,
+  so a test that writes one has to write it in the shell's own spelling -- exactly as a
+  person configuring a hook on Windows has to. Forward slashes are that spelling:
+  Git Bash, cmd and PowerShell all take them, and on POSIX there is nothing to change.
+
+  NOT FOR A PATH HANDED TO A TOOL. `read` / `write` / `glob` take the JVM's spelling
+  because the JVM is what resolves them; this is only for the text of a command.
+  (harness.cap.glob/tidy has the mirror-image note, and test/harness/kernel/tools_test.clj
+  the same comparison made the other way round, for what bash answers with.)"
+  [p]
+  (str/replace (str p) "\\" "/"))
+
+(defn outside-path
+  "An ABSOLUTE path outside the project directory and the configuration home, with
+  PARTS appended -- what a case hands a bound session when it wants the fence to
+  fire.
+
+  NOT `/etc/hosts`. That is the POSIX idiom for 'somewhere else' and it names
+  nothing on Windows: `/etc` there is a ROOT-RELATIVE path (`C:\\etc` at best, and
+  not absolute at all to `java.io.File`), so a bound session resolves it through
+  the project and the call lands IN bounds -- the case then reports 'the fence did
+  not fire' while the fence was never asked a question it could answer. What these
+  cases need is a real place, absolute on whatever platform is running, that is
+  neither of the two allowed roots; a sibling of this run's own temp trees is one
+  (`harness.test-runner/isolate!` puts the root and the OS home side by side under
+  the temp directory, and `with-temp-env` does the same, precisely so that neither
+  contains the other)."
+  [& parts]
+  (let [base (io/file (System/getProperty "java.io.tmpdir") "clj-harness-outside")]
+    (str (if (seq parts) (apply io/file base parts) base))))
+
+(defn posix-permissions?
+  "Does this platform track POSIX file permissions? Windows does not -- the calls
+  throw UnsupportedOperationException there, which is why
+  `harness.cap.hashline.files/mode-of` answers nil rather than an empty set: 'this
+  platform does not track it' and 'the file has no permissions' are two different
+  facts and only the second is worth restoring.
+
+  A CASE THAT ASSERTS BITS CAME BACK HAS TO ASK THIS FIRST. Otherwise it asserts a
+  POSIX-only capability on whatever machine runs the suite, and on Windows the
+  failure arrives as an UnsupportedOperationException thrown from the test's own
+  `setPosixFilePermissions` -- a red suite that names nothing about the harness.
+  Asked of the platform rather than hardcoded, so the POSIX branch is still the one
+  that runs where POSIX permissions exist."
+  []
+  (try
+    (java.nio.file.Files/getPosixFilePermissions
+     (.toPath (io/file (System/getProperty "java.io.tmpdir")))
+     (make-array java.nio.file.LinkOption 0))
+    true
+    (catch UnsupportedOperationException _ false)
+    (catch Exception _ false)))
+
+(defn graceful-stop?
+  "Can a process this harness stops still run a shutdown handler of its OWN before it
+  dies? False on Windows, true on POSIX.
+
+  `harness.infra.shell/kill-tree!` asks the process to stop -- `Process.destroy` --
+  and what that means is the platform's business: on POSIX it is SIGTERM, which a
+  handler may catch and answer with one last line, while on Windows it is
+  TerminateProcess, which runs nothing at all. A case that read a 'we were signalled'
+  note out of the child's own file was therefore asserting a POSIX-only outcome on
+  whatever machine ran the suite: it could only ever be green on one of them, and on
+  Windows it went red naming nothing about the harness.
+
+  Asked of the platform rather than hardcoded -- the same rule as
+  `posix-permissions?` -- so the branch that runs where handlers DO run is still the
+  one that runs there. What such a case must not give up is the claim that matters on
+  both: the process is gone (`wait-gone` / `gone-within?` ask the OS, not this)."
+  []
+  (not (str/includes? (str/lower-case (System/getProperty "os.name" "")) "win")))
+
 (defmacro with-temp-env
   "Run BODY with the configuration ROOT and the OS HOME pointed at a fresh pair of
   temp directories of this test's own, deleted on the way out. ROOT and HOME are
@@ -236,10 +316,80 @@
 (defn alive?
   "Is PID a live process? Asked of the OS rather than of a JVM object, because the pid
   in hand is usually a GRANDCHILD -- the one a command started -- and nothing in this
-  process holds a handle to it."
+  process holds a handle to it.
+
+  NIL IS NOT ALIVE, rather than an error: the pid usually comes from `child-pid`,
+  which answers nil when the child never booted, and `(is (alive? pid))` is meant to
+  report that as a failed assertion -- not to throw a NullPointerException out of a
+  case whose whole subject is a process that did not start."
   [pid]
-  (boolean (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
-             (.isAlive ^java.lang.ProcessHandle h))))
+  (boolean
+   (when (some? pid)
+     (when-let [h (.orElse (java.lang.ProcessHandle/of (long pid)) nil)]
+       (.isAlive ^java.lang.ProcessHandle h)))))
+
+(def ^:private child-pid-program
+  "The program a command's CHILD runs: print the pid the operating system gave it,
+  then stay alive until something kills it.
+
+  NODE, because this repo already needs it (the ui, the fake MCP server) and because
+  `process.pid` is the number `ProcessHandle/of` takes, on every platform. `sleep` is
+  the obvious choice and the wrong one: what the shell prints for it is not that
+  number -- see `child-command`.
+
+  SINGLE QUOTES, NOT DOUBLE. The command line is ONE argv element handed to `bash -lc`,
+  and on Windows the JVM builds the actual command line for that spawn -- where an
+  embedded double quote is not carried through, so `node -e \"..\"` reaches bash as
+  `node -e ..` and the shell then reads the program's own parentheses as syntax: the
+  child never starts and the pid file is never written. Single quotes mean the same
+  thing to bash on every platform and are not touched on the way in. (Measured on this
+  machine: the double-quoted form exits 1 with `syntax error near unexpected token`.)"
+  "node -e 'console.log(process.pid); setInterval(function(){}, 1000)'")
+
+(defn child-command
+  "A SHELL COMMAND that starts a background child and writes the child's OS PID to
+  PID-FILE, then waits -- so the process this command runs under is a shell with a
+  live child beneath it, and 'the whole tree' is a claim with more than one member.
+  How the tree then dies -- a timeout, a stop, a shutdown -- is the caller's business.
+
+  THE CHILD WRITES ITS OWN PID, and that is the point rather than a detail. Git
+  Bash's `$!` is MSYS's OWN number for the process, and `ProcessHandle/of` cannot
+  resolve it: `alive?` then answers false about a child that is very much running,
+  and a case asserting 'the child is gone' passes without anything having been
+  killed. Worse, the sanity check beside it -- 'the job really is running' -- fails,
+  which is how this was found. Asking the child to print the number the OS gave it is
+  the one spelling that is right on both platforms, and `wait` keeps the shell around
+  so the child is not reparented before the claim can be checked."
+  [^java.io.File pid-file]
+  (str child-pid-program " > " (shell/quote-arg (shell-path (.getAbsolutePath pid-file)))
+       " & wait"))
+
+(defn child-pid
+  "The pid the child `child-command` started wrote into PID-FILE, once it is there
+  -- or nil, having waited MS for it.
+
+  POLLED, NOT READ ONCE, and the difference is a test that fails about the machine
+  rather than about the harness. The record names the pid only after the child has
+  BOOTED (a shell, then node, then `console.log`), and how long that takes is not
+  this test's business: a fixed `(Thread/sleep 1000)` was enough on a quiet machine
+  and not enough when three namespaces ran back to back -- the read then got an empty
+  file (the shell's `>` created it before anything printed into it) and `parseLong`
+  threw NumberFormatException out of a case that meant to be asserting something
+  else.
+
+  THE SAME DEADLINE DISCIPLINE AS EVERY OTHER WAIT HERE: bounded, so a child that
+  never boots fails the case that was written about it rather than hanging the suite;
+  and nil rather than a throw, so the case can say what it saw."
+  [^java.io.File pid-file ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (let [pid (try (let [text (str/trim (slurp pid-file :encoding "UTF-8"))]
+                       (when (re-matches #"\d+" text) (Long/parseLong text)))
+                     (catch Exception _ nil))]
+        (cond
+          pid pid
+          (> (System/currentTimeMillis) deadline) nil
+          :else (do (Thread/sleep 25) (recur)))))))
 
 (defn gone-within?
   "Did PID disappear within MS? Polled rather than asked once: a process that was just

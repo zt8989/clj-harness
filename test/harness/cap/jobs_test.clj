@@ -12,7 +12,6 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.jobs :as jobs]
             [harness.infra.home :as home]
-            [harness.infra.shell :as shell]
             [harness.test-support :as support]))
 
 ;; Every job this namespace starts is stopped on the way out, whatever happened in
@@ -130,11 +129,9 @@
   ;; below.
   (let [dir (support/temp-dir "jobs-shutdown")
         pid-file (io/file dir "child.pid")
-        {:keys [id path]} (jobs/start! "jt-h" {:command (str "sleep 30 & echo $! > "
-                                                             (shell/quote-arg (.getAbsolutePath pid-file))
-                                                             "; wait")})
-        pid (do (Thread/sleep 1000)
-                (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8"))))]
+        {:keys [id path]} (jobs/start! "jt-h" {:command (support/child-command pid-file)})
+        pid (support/child-pid pid-file 10000)]
+    (is (some? pid) "the job's own child booted and named itself in the pid file")
     (is (support/alive? pid) "the job really is running")
     (jobs/shutdown!)
     (testing "the command and the child it started are both gone"
@@ -158,11 +155,9 @@
 (deftest stopping-a-job-takes-the-whole-tree-and-forgets-it
   (let [dir (support/temp-dir "jobs-stop")
         pid-file (io/file dir "child.pid")
-        {:keys [id path]} (jobs/start! "jt-i" {:command (str "sleep 30 & echo $! > "
-                                                             (shell/quote-arg (.getAbsolutePath pid-file))
-                                                             "; wait")})
-        pid (do (Thread/sleep 1000)
-                (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8"))))]
+        {:keys [id path]} (jobs/start! "jt-i" {:command (support/child-command pid-file)})
+        pid (support/child-pid pid-file 10000)]
+    (is (some? pid) "the job's own child booted and named itself in the pid file")
     (is (support/alive? pid) "the job really is running")
     (let [answer (jobs/stop! "jt-i" id)]
       (testing "the answer says this call stopped it, and where the record is"
@@ -189,7 +184,11 @@
   ;; not change what it can know: a stop that took the output with it would make the
   ;; model read first, before it knows whether it needs to.
   (let [{:keys [id path]} (jobs/start! "jt-j" {:command "echo nobody-read-this; sleep 30"})]
-    (Thread/sleep 1000)
+    ;; WAIT FOR THE LINE, not for a fixed interval: the shell has to boot before any
+    ;; of this command runs, and a stop that lands first leaves a record saying only
+    ;; `[stopped]` -- a case about what a stopped job KEEPS, failing over how long a
+    ;; process takes to start.
+    (record-until path #(re-find #"nobody-read-this" %) 10000)
     (jobs/stop! "jt-j" id)
     (is (some #{"nobody-read-this"} (record path)))
     (is (= "[stopped]" (last (record path))))))
@@ -232,12 +231,10 @@
   ;; 作业活得比发起它的那次调用久，也活得比本会话后来发起的调用久。
   (let [dir (support/temp-dir "jobs-outlive")
         pid-file (io/file dir "child.pid")
-        {:keys [path]} (jobs/start! "jt-n" {:command (str "sleep 30 & echo $! > "
-                                                          (shell/quote-arg (.getAbsolutePath pid-file))
-                                                          "; wait")})
-        pid (do (Thread/sleep 1000)
-                (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8"))))]
+        {:keys [path]} (jobs/start! "jt-n" {:command (support/child-command pid-file)})
+        pid (support/child-pid pid-file 10000)]
     (try
+      (is (some? pid) "the job's own child booted and named itself in the pid file")
       (is (support/alive? pid))
       ;; ...the session does other work (another job, read, stopped) and comes back:
       (let [other (:id (jobs/start! "jt-n" {:command "echo other; exit 0"}))]

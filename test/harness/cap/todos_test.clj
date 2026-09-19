@@ -108,12 +108,21 @@
   lines to stdout when sqlite-jdbc loads its native library, so a child's stdout
   carries noise that has nothing to do with the form. And a path crossing a process
   boundary belongs in an environment variable rather than in an interpolated argv
-  string (deps.edn's standing byte/encoding rule)."
+  string (deps.edn's standing byte/encoding rule).
+
+  NOR DOES THE FORM ITSELF TRAVEL IN ARGV, and this one is a Windows fact rather
+  than a style: the JVM builds the child's command line out of the argv array, and an
+  embedded double quote does not survive that trip -- `-e (System/getenv \"X\")`
+  arrives as `-e (System/getenv X)` and the child dies with 'Unable to resolve symbol:
+  X' (measured on this machine). Every form here quotes a string, so the form is
+  written to a file and `clojure -M <file>` runs it; a script file has no such limit."
   [^String form ^java.io.File out ^java.io.File user-home]
-  (let [pb (doto (ProcessBuilder. ^java.util.List
+  (let [script (io/file (.getParentFile out) (str (.getName out) ".form.clj"))
+        _      (spit script form :encoding "UTF-8")
+        pb (doto (ProcessBuilder. ^java.util.List
                                   (vec ["clojure"
                                         (str "-J-Duser.home=" (.getAbsolutePath user-home))
-                                        "-M" "-e" form]))
+                                        "-M" (.getAbsolutePath script)]))
              (.directory (io/file (System/getProperty "user.dir")))
              (.redirectErrorStream true))]
     (.put (.environment pb) "CLJ_HARNESS_HOME" (home/root))

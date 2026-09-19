@@ -107,22 +107,37 @@
       (is (str/includes? raw "one\r\ntwo\r\n") "and so are the CRLFs"))))
 
 (deftest the-permission-bits-come-back
+  ;; A PLATFORM WITHOUT POSIX PERMISSIONS HAS NOTHING TO PUT BACK, and the two
+  ;; branches below are the two honest answers rather than a skip: where the
+  ;; platform tracks a mode, the undo restores the EDIT's bits; where it does not,
+  ;; the record carries nil and says so (the distinction mode-of's docstring draws).
+  ;; `harness.test-support/posix-permissions?` asks the platform, so the POSIX half
+  ;; is the one that runs wherever POSIX permissions exist.
   (use-mode!)
   (spit file "one\ntwo\n" :encoding "UTF-8")
-  (Files/setPosixFilePermissions (.toPath file)
-                                 (java.util.EnumSet/of PosixFilePermission/OWNER_READ
-                                                       PosixFilePermission/OWNER_WRITE
-                                                       PosixFilePermission/OWNER_EXECUTE))
-  (let [before (modes file)
-        [_ b]  (read!)]
-    (call "replace" {:remove_from b :replacement_lines ["TWO"]})
-    ;; the write preserves them, so change them again to prove the UNDO puts back
-    ;; what the EDIT captured rather than what the file happens to have now
-    (Files/setPosixFilePermissions (.toPath file)
-                                   (java.util.EnumSet/of PosixFilePermission/OWNER_READ
-                                                         PosixFilePermission/OWNER_WRITE))
-    (undo!)
-    (is (= before (modes file)) "the edit's own permission bits, restored")))
+  (if-not (support/posix-permissions?)
+    (do
+      (let [[_ b] (read!)]
+        (call "replace" {:remove_from b :replacement_lines ["TWO"]})
+        (is (nil? (:mode (store/undo-for (path file))))
+            "a platform with no POSIX permissions records nil, not an empty set")
+        (is (false? (:error (undo!))) "and the undo is still an ordinary undo")
+        (is (= "one\ntwo\n" (slurp file :encoding "UTF-8")))))
+    (do
+      (Files/setPosixFilePermissions (.toPath file)
+                                     (java.util.EnumSet/of PosixFilePermission/OWNER_READ
+                                                           PosixFilePermission/OWNER_WRITE
+                                                           PosixFilePermission/OWNER_EXECUTE))
+      (let [before (modes file)
+            [_ b]  (read!)]
+        (call "replace" {:remove_from b :replacement_lines ["TWO"]})
+        ;; the write preserves them, so change them again to prove the UNDO puts back
+        ;; what the EDIT captured rather than what the file happens to have now
+        (Files/setPosixFilePermissions (.toPath file)
+                                       (java.util.EnumSet/of PosixFilePermission/OWNER_READ
+                                                             PosixFilePermission/OWNER_WRITE))
+        (undo!)
+        (is (= before (modes file)) "the edit's own permission bits, restored")))))
 
 (deftest the-anchors-come-back-and-are-usable
   ;; THE POINT OF THE TICKET. A model undoes an edit in order to make a different
@@ -262,7 +277,11 @@
       (is (= "one\nTWO\n" (:resulting-text u)))
       (is (seq (:anchors u)))
       (is (set? (:served u)) "the shown set rode along")
-      (is (some? (:mode u)) "and the permission bits, as a number"))))
+      (is (if (support/posix-permissions?)
+            (number? (:mode u))
+            (nil? (:mode u)))
+          "and the permission bits: a number where the platform tracks them, nil
+           where it does not -- the two facts mode-of keeps apart"))))
 
 (deftest an-anchor-that-moved-elsewhere-refuses-the-undo
   ;; Can the record name an anchor another file holds now? Yes: the edit freed it,
@@ -296,7 +315,7 @@
   (testing "a relative path resolves against the project"
     (is (false? (:error (undo!)))))
   (testing "and an out-of-bounds path parks for a human"
-    (let [res (call "undo_last_replace" {:path "/etc/hostname"})]
+    (let [res (call "undo_last_replace" {:path (support/outside-path "hostname")})]
       (is (some? (:parked res)))
       (is (= :out-of-bounds (:reason (:parked res)))))))
 

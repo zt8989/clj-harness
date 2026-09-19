@@ -271,7 +271,7 @@
     (is (false? (:error (write! "re-rooted\n"))))
     (is (= "re-rooted\n" (slurp file :encoding "UTF-8"))))
   (testing "and an out-of-bounds path still parks for a human"
-    (let [res (call "write" {:path "/etc/hostname" :content "nope\n"})]
+    (let [res (call "write" {:path (support/outside-path "hostname") :content "nope\n"})]
       (is (some? (:parked res)) "the call is waiting for a human")
       (is (= :out-of-bounds (:reason (:parked res)))))))
 
