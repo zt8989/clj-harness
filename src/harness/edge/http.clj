@@ -61,6 +61,18 @@
                    one conversation out of order. Names both paths and says why;
                    both files are left as they were. Said once per session per
                    process, not beside every record.
+    \"delegation\" -- ONE PER DELEGATION, written to the PARENT session's record
+                   by the delegating tool thread, at the moment the subagent's
+                   conversation is opened -- before the subagent's own first
+                   line lands, so a panel can be opened while the subagent is
+                   still running (that is the whole point of writing it first).
+                   It names the call that made it (:toolCallId, the key the
+                   card pairs on), which subagent ran (:subagent), and the
+                   child session's id (:threadId, the stem every read route
+                   takes). A RECORD ABOUT the parent's conversation, never a
+                   frame of it: rebuild folds only input/event/message, so
+                   this line changes no history the model sees -- asserted in
+                   the delegation test, not assumed.
 
   All of it is a RECORD, never a source of truth -- the client owns the conversation,
   and the server never reads the file back."
@@ -975,6 +987,20 @@
   delegations in one turn still run at the same time, because they are two tool calls
   on two threads.
 
+  THE PARENT'S RECORD LEARNS THE CHILD'S NAME FIRST, via the `delegation` line
+  below (see the header's kind list): who this run was delegated BY is also the
+  first thing the subagent's own `input` line says, but the parent's record is
+  what the card in the PARENT's conversation reads -- and it must say which of
+  the parent's calls opened which session, because that is a fact the parent
+  holds and the child cannot state for it. THE KEY IS tools/*tool-call-id*,
+  which the seam binds around every tool body: read HERE, on the tool thread
+  itself, rather than guessed from position -- two delegations in one turn are
+  two tool threads whose completion order has nothing to do with their start
+  order, and a positional guess would pair the wrong card to the wrong session
+  quietly. The line is written by `log!` on the parent's file, whose global
+  lock is what makes two concurrent delegations' lines land whole; one line,
+  one write, no torn records.
+
   THE PROVIDER IS THE PARENT'S, RESOLVED NOW. A subagent has no session of its own to
   resolve from, and re-resolving from the default tier would quietly move it to a
   different model than the conversation that delegated to it is holding."
@@ -984,6 +1010,16 @@
         ;; ONE converter per run, like the agent route's: it owns the open-message
         ;; state machine, so building it per event would restart every message id.
         convert  (ag/outbound thread-id run-id)]
+    ;; THE PARENT LEARNS THE CHILD, before the child writes a line of its own:
+    ;; a panel opened from the parent's card must find this row already there
+    ;; while the subagent is still working -- which is the entire point of the
+    ;; timing. (Written even when the tool-call id is somehow absent, as a nil
+    ;; -- the parent's card then simply never becomes clickable, and a missing
+    ;; id is the honest spelling of a pairing nobody can make.)
+    (log! parent-thread-id run-id "delegation"
+          {:toolCallId tools/*tool-call-id*
+           :subagent   (:name definition)
+           :threadId   thread-id})
     (log! thread-id run-id "input"
           {:threadId    thread-id
            :runId       run-id
@@ -1629,7 +1665,7 @@
   terms. The set stays closed and the 405 stays here -- what changed is that the
   sentence 'every verb on this shape is a POST' is no longer true, not where the
   refusal happens."
-  #{"rebuild" "archive" "stats" "trajectory"})
+  #{"rebuild" "archive" "stats" "trajectory" "delegations"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -1820,6 +1856,44 @@
 
       :else
       (api-response 200 (assoc (:ok folded) :threadId stem)))))
+
+(defn- delegations-get
+  "GET /api/threads/<stem>/delegations -- the delegation rows a PARENT session's
+  record holds: one {:toolCallId .. :subagent .. :threadId .. :at ..} per
+  `delegation` line, in file order. This is the read side of the line
+  `run-subagent!` writes when it opens a child (see the header's kind list),
+  and what ticket 04's card pairs its click against: the parent's toolCallId
+  names the card, :threadId names the conversation the panel opens.
+
+  READ-ONLY, like stats and trajectory: it reads the log and writes nothing,
+  and it takes the stats-style record reader rather than replay's strict one,
+  because a parent whose child is RUNNING RIGHT NOW is the case the card
+  exists for -- its last line may be half-written, and a half line is 'we read
+  this far', not damage.
+
+  LOCATION AND REFUSALS ARE STATS' -- `replay/locate`, 404 with the locator's
+  own sentence for a stem that is nowhere under the tree. A parent that simply
+  never delegated answers an empty list, which is an ordinary answer and not
+  an error: the rows are how the panel learns there is nothing to open."
+  [stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))
+        folded  (when (nil? (:error located))
+                  (try
+                    {:ok (->> (stats/read-records (:ok located))
+                              (filter #(= "delegation" (:kind %)))
+                              (mapv (fn [{:keys [ts payload]}]
+                                      (assoc payload :at ts))))}
+                    (catch Throwable t {:error (ex-message t)})))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+
+      (some? (:error folded))
+      (api-response 400 {:error (:error folded) :threadId stem})
+
+      :else
+      (api-response 200 {:threadId stem :delegations (:ok folded)}))))
 
 (defn- close-off-open-run!
   "Close every run a log left open, so the conversation can be CONTINUED instead of
@@ -2614,6 +2688,7 @@
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)
+        [:get "delegations"] (delegations-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

@@ -58,6 +58,7 @@
     harness.cap.git-test
     harness.cap.editing-test
     harness.cap.subagents-test
+    harness.cap.frame-bus-test
     harness.cap.editing-mode-tools-test
     harness.cap.hashline.anchors-test
     harness.cap.hashline.store-test
@@ -83,6 +84,7 @@
     harness.edge.context-test
     harness.edge.http-test
     harness.edge.delegation-test
+    harness.edge.delegation-line-test
     harness.layers-test])
 
 (def ^:private tmp-home
