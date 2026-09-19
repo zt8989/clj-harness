@@ -1788,14 +1788,22 @@
 
 (defn- elicitation-get
   "GET /api/elicitation?interruptId=.. -- the QUESTION behind a parked interrupt:
-  which server asked, what it asked, and the JSON Schema it wants filled in.
+  WHO asked, what they asked, and the JSON Schema it wants filled in.
 
   WHY THIS IS AN ENDPOINT AND NOT A FIELD ON THE INTERRUPT. AG-UI's interrupt
   object is a strict shape -- id, reason, message, toolCallId and a couple more, and
   a client's own validator refuses anything else -- so a form schema stuffed into it
   would be a protocol change this harness has no business making. The interrupt says
-  'a server is asking a question' and carries the question's sentence; the SHAPE of
+  'something is asking a question' and carries the question's sentence; the SHAPE of
   the answer is fetched here, by the client that is about to draw it.
+
+  WHO ASKED IS TWO FACTS, NOT ONE, and both are answered because a card has to say
+  it. `server` names the outside program that asked, for the questions harness.cap.mcp
+  brings in; `askedBy` is for the questions a tool of this harness asks on its own
+  (`ask`), where there is no server and where 'a server is asking you' would be
+  false. A question with neither is answered as such -- ABSENT KEYS, not nulls --
+  because the client tells the two apart by presence, and `null` would read as a
+  server whose name is null.
 
   Read-only, and therefore no audit line: it answers where a parked call already is,
   and asking about a decision must not become part of the record of it.
@@ -1811,11 +1819,12 @@
       :else
       (let [rec (tools/parked id)]
         (if (and rec (= :elicitation (:reason rec)))
-          (api-response 200 {:interruptId id
-                             :server      (:server rec)
-                             :prompt      (:prompt rec)
-                             :schema      (:schema rec)
-                             :expiresAt   (:expires-at rec)})
+          (api-response 200 (cond-> {:interruptId id
+                                     :prompt      (:prompt rec)
+                                     :schema      (:schema rec)}
+                              (:server rec)     (assoc :server (:server rec))
+                              (:asked-by rec)   (assoc :askedBy (name (:asked-by rec)))
+                              (:expires-at rec) (assoc :expiresAt (:expires-at rec))))
           (api-response 404 {:error (str "no elicitation is parked under " id)}))))))
 
 (defn- model-get

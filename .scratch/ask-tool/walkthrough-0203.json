@@ -1,0 +1,38 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "q1",
+          "name": "ask",
+          "arguments": {
+            "questions": [
+              {
+                "key": "db",
+                "question": "用哪个数据库？",
+                "options": ["postgres", "sqlite"],
+                "allow_other": true
+              },
+              {
+                "key": "targets",
+                "question": "这几个方案里你要哪些？",
+                "options": ["api", "web", "docs"],
+                "multiple": true
+              },
+              {
+                "key": "extras",
+                "question": "还要带上哪几样？",
+                "options": ["logs", "metrics"],
+                "multiple": true,
+                "allow_other": true
+              },
+              { "key": "note", "question": "还有什么要交代的？" }
+            ]
+          }
+        }
+      ]
+    },
+    { "content": "照你选的来：数据库、要改的地方、附带的东西，都按你给的办。" }
+  ]
+}

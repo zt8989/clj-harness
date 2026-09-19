@@ -1,7 +1,12 @@
 (ns harness.cap.tools
-  "The eighteen tools this harness ships: their bodies, their faces, and nothing
-  else. It is a CAPABILITY, so it lives here and not in harness.kernel.tools --
-  which holds the seam that runs a tool, not any particular tool.
+  "The tools this harness ships: their bodies, their faces, and nothing else. It is
+  a CAPABILITY, so it lives here and not in harness.kernel.tools -- which holds the
+  seam that runs a tool, not any particular tool.
+
+  NOBODY COUNTS THEM HERE. The roster is what this file's `register!` calls add up
+  to, and a number written into a sentence is a number that goes stale in silence
+  the next time a tool is added -- ask the table (`harness.kernel.tools/specs`)
+  rather than this paragraph.
 
   THE SEAM DOES NOT KNOW THESE EXIST. `harness.kernel.tools` has a registry, an
   install door and a spec vocabulary; none of the names below appear in it. They
@@ -952,6 +957,359 @@
                                     search/default-count ", at most "
                                     search/max-count ").")}}
         [:query] t-web-search))
+
+;; ----------------------------------------------------------------------- ask
+;;
+;; THE ONE TOOL WHOSE PURPOSE IS TO STOP. Every other tool here does something and
+;; then answers; this one answers by NOT running -- it parks the call on a question
+;; and the person's answer arrives as this call's result on the way back in. The
+;; machinery is the elicitation chain that harness.cap.mcp already drives for a
+;; server's `elicitation/create`, which is why none of it is new: `suspend!` parks
+;; under :reason :elicitation, `GET /api/elicitation` hands the client the question
+;; and its shape, and `resume` carries the answers.
+;;
+;; NOT MARKED :requires-approval, AND THAT IS THE DECISION RATHER THAN AN
+;; OVERSIGHT. Approving is something a person does TO a call that was going to run
+;; anyway; here the person is the one being asked, and the park IS the feature --
+;; a fence in front of it would ask somebody to approve asking them. It follows
+;; that this tool never reaches the seam's :approved/:vetoed arm, and so it takes
+;; its own decision exactly the way cap.mcp does (see t-ask).
+;;
+;; ONE CALL, A LIST OF QUESTIONS. The run stops once and the person answers
+;; everything in front of them; a tool that asked one question per call would make
+;; a conversation out of a form.
+;;
+;; A QUESTION MAY OFFER CANDIDATES. `options` becomes an `enum` on the property, so
+;; the card draws a choice with the client's EXISTING enum rule -- this tool does not
+;; invent a second way to draw one, and a question with no candidates is a text box
+;; exactly as before. `multiple` makes it a multi-select (an `array` of that enum);
+;; `allow_other` adds "or type your own" as a way out of a list that does not happen
+;; to contain their answer.
+;;
+;; THE "OR TYPE YOUR OWN" SWITCH IS EXPLICIT RATHER THAN ASSUMED, and that is the
+;; one place the same field rules serve two masters. The card draws a server's form
+;; from the server's schema too (harness.cap.mcp), and growing an extra input under
+;; every enum somebody else declared would be this client editing their question. So
+;; the permission rides on the schema as `x-allow-other` -- a key no server writes --
+;; and a schema without it renders exactly what it renders today.
+
+(def ^:private ask-description
+  (str "Ask the person one or more questions, and get their answers back as this "
+       "call's result. "
+       "The call PARKS the run until they answer, so put everything you need into "
+       "ONE call rather than asking in a series of single-question calls. "
+       "Use it for something only they can tell you -- a fact, a preference, a "
+       "choice between approaches -- and not for anything you can find out "
+       "yourself. "
+       "One entry per question: `question` is the sentence they read, and `key` "
+       "names that answer. Keep the key stable, so the same question asked later "
+       "carries the same one. "
+       "`options` offers a closed list to pick from; add `allow_other` when they may "
+       "need an answer that is not on it, and `multiple` when the answer may be "
+       "several of them. "
+       "What comes back is one line per question. A question they left blank comes "
+       "back as \"(no answer)\", a multiple-choice question they ticked nothing on "
+       "comes back as \"(nothing chosen)\", and a person who declines the form "
+       "altogether comes back as a refusal. None of them is an error, and none "
+       "means the run failed."))
+
+(defn- ask-options
+  "ENTRY's `options`, as the candidates in the order the model wrote them -- or nil
+  when the question offers none.
+
+  VERBATIM, because a candidate is the model's own word for a thing and the answer
+  is compared against it: a space in \"Hong Kong branch\" or a comma in \"a, b\" is
+  part of the word, and trimming or reordering here would put a DIFFERENT string on
+  the card than the one an answer will be matched to. Only the element's TYPE is
+  normalised (`str`), because a model may write `1` where it means the string \"1\".
+
+  A LIST NOBODY COULD PICK FROM IS REFUSED HERE rather than drawn: an empty one, or
+  one carrying a blank candidate, is a form with a line on it that cannot be
+  answered -- and the person is who would find that out."
+  [i m]
+  (when (some? (:options m))
+    (let [raw (:options m)]
+      (when-not (sequential? raw)
+        (throw (ex-info (str "ask's question " (inc i) " writes `options` as something"
+                             " other than a list. Give the candidates as a list of"
+                             " strings.")
+                        {:reason :options-not-a-list :index i})))
+      (let [os (mapv str raw)]
+        (when (empty? os)
+          (throw (ex-info (str "ask's question " (inc i) " offers an empty list of"
+                               " options, which is nothing to pick from. Leave"
+                               " `options` out to ask it as a written answer.")
+                          {:reason :empty-options :index i})))
+        (when-let [blank (first (filter str/blank? os))]
+          (throw (ex-info (str "ask's question " (inc i) " offers a blank candidate,"
+                               " which nobody could pick. Every entry of `options`"
+                               " has to say what it is.")
+                          {:reason :blank-option :index i :option blank})))
+        os))))
+
+(defn- ask-question
+  "One entry of `questions`, as {:key .. :question .. :options .. :multiple ..}.
+
+  A BARE STRING IS ACCEPTED as the question with no key, because a model reaches
+  for that shape when there is only one thing to ask, and the key it would have
+  written is `q1` anyway. A MISSING KEY IS DERIVED from the entry's position, for
+  the same reason: refusing a call whose meaning was never in doubt would cost a
+  person nothing and the model a round trip. A MISSING SENTENCE IS REFUSED -- there
+  would be nothing to put on the card, and a key is not a question.
+
+  `multiple` WITHOUT `options` IS REFUSED, and the reason is that the question would
+  have no shape: a multi-select is \"which of these\", and with nothing to choose
+  between, what the model meant is not recoverable from what it wrote -- \"list the
+  hosts\" is a written answer whose answer happens to have newlines in it, not a row
+  of tick boxes. `allow_other` without `options` is NOT refused: a written answer
+  already takes anything, so the form that comes out is the one that was asked for
+  and the switch is merely redundant.
+
+  BOTH SWITCHES ARE READ AS THE OBVIOUS BOOLEAN rather than refused for a non-boolean
+  truthy: a model that wrote `\"multiple\": \"true\"` meant one thing by it, and
+  costing a person the difference over the spelling would be pedantry with a price."
+  [i q]
+  (let [m           (if (map? q) q {:question q})
+        question    (some-> (:question m) str str/trim)
+        key         (some-> (:key m) str str/trim)
+        options     (ask-options i m)
+        multiple    (boolean (:multiple m))]
+    (when (str/blank? question)
+      (throw (ex-info (str "ask's question " (inc i) " carries no sentence to put on"
+                           " the card. Each entry needs a `question`.")
+                      {:reason :question-without-a-sentence :index i})))
+    (when (and multiple (nil? options))
+      (throw (ex-info (str "ask's question " (inc i) " asks for several answers but"
+                           " offers no `options` to choose them from. Selecting"
+                           " several needs a list to select from; leave `multiple`"
+                           " out to ask for a written answer.")
+                      {:reason :multiple-without-options :index i})))
+    {:key         (if (str/blank? key) (str "q" (inc i)) key)
+     :question    question
+     :options     options
+     :multiple    multiple
+     :allow-other (and (some? options) (boolean (:allow_other m)))}))
+
+(defn- ask-questions
+  "ARGS' question list, as [{:key .. :question ..} ..], in the order asked.
+
+  IT REFUSES BEFORE ANYBODY IS ASKED. A form nobody can answer correctly -- nothing
+  in it, or two questions that would come back under one key -- is a wasted
+  interruption, so it is refused here while the cost is still the model's, not a
+  person's."
+  [args]
+  (let [raw (or (:questions args) [])]
+    (when-not (sequential? raw)
+      (throw (ex-info "ask takes `questions` as a LIST of {key, question} entries."
+                      {:reason :questions-not-a-list})))
+    (let [qs (vec (map-indexed ask-question raw))]
+      (when (empty? qs)
+        (throw (ex-info "ask needs at least one question." {:reason :ask-with-no-questions})))
+      (let [dupes (->> qs (map :key) frequencies
+                       (keep (fn [[k n]] (when (> n 1) k))) sort)]
+        (when (seq dupes)
+          (throw (ex-info (str "ask needs one key per question, and these repeat: "
+                               (str/join ", " dupes)
+                               ". The key is what an answer comes back under, so two"
+                               " questions sharing one would lose an answer.")
+                          {:reason :duplicate-ask-keys :keys dupes}))))
+      qs)))
+
+(defn- ask-property
+  "ONE question as the schema property that draws it.
+
+  THREE SHAPES, and every one of them is a shape the client's field rules already
+  know -- this tool does not invent a way to draw a choice. A written answer is
+  `{\"type\" \"string\"}`, byte for byte what this tool has always sent and what a
+  server's own free-text field is. A choice is that same string carrying an `enum`
+  of the candidates, which those rules draw as a select. Several choices are an
+  `array` of that enum, which they draw as a row of tick boxes.
+
+  `x-allow-other` IS AN EXTENSION RATHER THAN JSON SCHEMA, and it is there because
+  the permission is a property of the FORM and the standard has no word for it. It
+  rides on the property (where the client reads it) and only on a property that HAS
+  candidates: a written answer needs nobody's permission to be written, so a schema
+  for one never carries the key -- which is what keeps a server's own elicitation
+  rendering exactly what it rendered before this existed."
+  [{:keys [question options multiple allow-other]}]
+  (let [typed (if multiple
+                {:type "array" :items {:type "string" :enum options}}
+                (cond-> {:type "string"} options (assoc :enum options)))]
+    (cond-> (assoc typed :description question)
+      allow-other (assoc :x-allow-other true))))
+
+(defn- ask-schema
+  "The questions as the JSON Schema the client draws.
+
+  THE KEY IS THE PROPERTY NAME, because an answer comes back as one map keyed by
+  property name -- that is the whole of what the client's form rules do -- and this
+  tool is the side that matches an answer to the question that asked for it. The
+  sentence rides as the description, which is where a card puts it.
+
+  An ARRAY MAP so the fields follow the order they were asked in, up to the size at
+  which Clojure promotes a small map to a hash map. Past that the order is the
+  client's; nothing here depends on it."
+  [questions]
+  {:type "object"
+   :properties (into (array-map) (map (juxt :key ask-property)) questions)})
+
+(defn- ask-prompt
+  "The question face as the one line an interrupt carries: every question, joined.
+
+  THE LINE IS THE INTERRUPT'S OWN, so a client that never fetches the schema still
+  has the questions in front of it -- and for the ordinary one-question call it is
+  that question verbatim. Joined rather than stacked because a card renders this as
+  one line, and a newline in it would be a break nobody sees."
+  [questions]
+  (str/join " / " (map :question questions)))
+
+(defn- answer-for
+  "The value this question came back with, or nil.
+
+  TOLERANT IN TWO DIRECTIONS, and the second one is the difference between a wrong
+  answer and no answer at all. The payload's keys are the CLIENT's -- this harness
+  parses the request with keyword keys, so a keyword is what is usually there, and a
+  client that did it differently is still answering. And a key no keyword can be
+  made from is looked up as the string it is rather than thrown on: the person has
+  already filled the form in by the time this runs, and losing their answer to a
+  lookup's opinion of a legal name would be the worst failure here."
+  [answers key]
+  (let [kw (try (keyword key) (catch Throwable _ nil))]
+    (or (get answers kw) (get answers key))))
+
+(def ^:private no-answer-label "(no answer)")
+
+(def ^:private nothing-chosen-label "(nothing chosen)")
+
+(defn- chosen-words
+  "One picked item as words, or nil when there is nothing worth saying."
+  [item]
+  (let [t (str/trim (str item))]
+    (when-not (str/blank? t) t)))
+
+(defn- answer-body
+  "ONE answer as the words the model reads.
+
+  THREE STATES, AND THEY ARE THREE DIFFERENT FACTS: an answer; an EMPTY collection,
+  which says \"none of these\" and is a real answer to a question that offered
+  choices; and nothing at all, which is the person leaving the line alone. The last
+  two are the pair a model cannot reconstruct by itself, so they are told apart
+  rather than collapsed into one silence -- each is something to act on that the
+  other is not.
+
+  A COLLECTION COMES BACK AS ITS ITEMS, comma-separated: the question was \"which
+  ones\" and what the model should get is the ones. Nothing here ever BUILDS a
+  joined string for the wire, though -- the picks crossed as a list because an
+  option may itself contain a comma (see the schema), and joining is only how the
+  answer is said out loud at the end."
+  [answer]
+  (cond
+    (sequential? answer) (if-let [items (seq (keep chosen-words answer))]
+                           (str/join ", " items)
+                           nothing-chosen-label)
+
+    (string? answer)     (or (chosen-words answer) no-answer-label)
+
+    (nil? answer)        no-answer-label
+
+    :else                (str answer)))
+
+(defn- answer-lines
+  "The answers as what the model reads: one line per question, in the order asked.
+
+  NO JSON DUMP. The model wrote the questions and is about to act on the answers, so
+  the matching is done here rather than handed over as a map for it to redo. A
+  question nobody answered SAYS SO rather than going missing, so 'they skipped it'
+  and 'the answer was empty' are the same fact stated once instead of inferred from
+  an absence."
+  [questions answers]
+  (str/join "\n"
+            (map (fn [{:keys [key question]}]
+                   (str "- " question " -> " (answer-body (answer-for answers key))))
+                 questions)))
+
+(defn- t-ask
+  "`ask`'s body: park the call on its questions, or -- on the way back in -- hand
+  the person's answers to the model.
+
+  THE DECISION IS TAKEN HERE, the way harness.cap.mcp takes an MCP server's. The
+  seam's own :approved/:vetoed arm belongs to calls that were PARKED FOR APPROVAL,
+  and this tool is never one of them -- it carries no :requires-approval and no
+  :park-reason, so `approval-reason` answers nil for it and that arm is unreachable.
+  Asking the parked record directly is therefore not a shortcut past the seam; it is
+  the only path this call has.
+
+  TAKEN, NOT READ. `take-decision!` hands a decision over exactly once, so a replay
+  of the same interrupt cannot answer the same call twice: the second transit finds
+  nothing, parks again, and the run stops on the same question rather than carrying
+  on with an answer nobody gave twice.
+
+  A REFUSAL IS AN ANSWER. `:vetoed` is a person declining the form, which is a thing
+  a model can act on -- it does not fail the call, and it does not read as a broken
+  tool. That is the same judgment cap.mcp makes when it folds a human's no into the
+  `decline` it sends a server."
+  [args]
+  (let [questions (ask-questions args)
+        rec       (kernel-tools/parked-for-call kernel-tools/*thread-id*
+                                                kernel-tools/*tool-call-id*)
+        decision  (when rec (kernel-tools/take-decision! (:interrupt-id rec)))]
+    (case (:verdict decision)
+      :approved (answer-lines questions (:payload decision))
+      :vetoed   "The person declined to answer."
+      (kernel-tools/suspend! kernel-tools/*thread-id* kernel-tools/*tool-call-id*
+                             {:asked-by :model
+                              :prompt   (ask-prompt questions)
+                              :schema   (ask-schema questions)}))))
+
+(register! "ask"
+  (tool ask-description
+        {"questions" {:type "array" :minItems 1
+                      :description (str "The questions to put to the person, in the order"
+                                        " they should read them.")
+                      :items {:type "object"
+                              :properties {"key" {:type "string"
+                                                  :description (str "A short, stable name"
+                                                                    " for this answer. The"
+                                                                    " same question asked"
+                                                                    " again carries the"
+                                                                    " same key.")}
+                                           "question" {:type "string"
+                                                       :description (str "The sentence the"
+                                                                         " person reads: one"
+                                                                         " question, asked"
+                                                                         " plainly.")}
+                                           "options" {:type "array"
+                                                      :items {:type "string"}
+                                                      :description (str "The answers to choose"
+                                                                        " from, when the answer"
+                                                                        " is one of a known set."
+                                                                        " Without it the question"
+                                                                        " is a box they type"
+                                                                        " into. Leave the list"
+                                                                        " out rather than"
+                                                                        " guessing at it, and"
+                                                                        " give each candidate"
+                                                                        " exactly as the answer"
+                                                                        " should come back.")}
+                                           "multiple" {:type "boolean"
+                                                       :description (str "True when they may pick"
+                                                                         " more than one of"
+                                                                         " `options`. Needs"
+                                                                         " `options`.")}
+                                           "allow_other" {:type "boolean"
+                                                          :description (str "True when they may"
+                                                                            " answer in their own"
+                                                                            " words instead of"
+                                                                            " picking, for a"
+                                                                            " candidate the list"
+                                                                            " does not have. Needs"
+                                                                            " `options` -- an"
+                                                                            " answer they type is"
+                                                                            " already what a"
+                                                                            " question without"
+                                                                            " them is.")}}
+                              :required ["key" "question"]}}}
+        [:questions] t-ask))
 
 ;; ------------------------------------------------------------------ installing
 

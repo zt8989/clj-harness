@@ -27,6 +27,7 @@ import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
 import { contextSuite } from "./suites/context";
 import { elicitationSuite } from "./suites/elicitation";
+import { elicitationCardSuite } from "./suites/elicitation-card";
 import { framesSuite } from "./suites/frames";
 import { i18nSuite } from "./suites/i18n";
 import { skillsSuite } from "./suites/skills";
@@ -39,7 +40,7 @@ import { sidebarSuite } from "./suites/sidebar";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -85,7 +86,22 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// at, and the parked word beside the id rather than inside a line that truncates. This
 /// is the suite that exists because the id line went blank in the i18n merge and a green
 /// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
-const EXPECTED_CASES = 44;
+/// 44 -> 46: `ask`, the one tool whose purpose is to stop. One case through the whole
+/// loop on the `elicitation` suite -- a BUILT-IN's question parks the run, the endpoint
+/// answers who is asking, and the answers come back as the call's result -- and one new
+/// suite beside it (`elicitation-card`) whose single case RENDERS the card's title in
+/// both languages: three askers, three distinct lines, and none of them inventing a
+/// server. The second is the sidebar lesson applied to the other card that names
+/// somebody: a title that draws nothing is invisible to every check about keys.
+/// 46 -> 50: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
+/// candidates driven verbatim with no own-words box assumed, the own-words answer that
+/// stands where the pick would have, and a list of answers that is never a joined
+/// string -- and one on `elicitation-card` that RENDERS a field for each kind and counts
+/// the `data-slot`s: one tick box per candidate, a select for a single choice, an
+/// own-words box only where the schema asked for one. The card's count is the claim, not
+/// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
+/// looks perfectly fine doing it.
+const EXPECTED_CASES = 50;
 
 let total = 0;
 for (const suite of SUITES) {

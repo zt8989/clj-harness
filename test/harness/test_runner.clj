@@ -46,6 +46,7 @@
     harness.cap.mcp-test
     harness.cap.jobs-test
     harness.cap.mcp-wired-test
+    harness.cap.ask-test
     harness.session-tools-test
     harness.approval-test
     harness.kernel.loop-test
