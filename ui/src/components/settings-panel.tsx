@@ -50,6 +50,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
+import { BASELINE_LABELS, DefinitionButtons } from "@/components/subagent-list";
 import {
   Dialog,
   DialogContent,
@@ -57,6 +58,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { setLanguage } from "@/lib/i18n";
 import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
@@ -73,6 +75,14 @@ import {
   type Registry,
 } from "@/lib/providers";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
+import {
+  listSubagents,
+  putSubagent,
+  removeSubagent,
+  type Baseline,
+  type SubagentDefinition,
+  type SubagentListing,
+} from "@/lib/subagents";
 
 /// The translator this face is worded through: the settings catalog, because every
 /// string below is drawn in the panel (see `locales/<lng>/settings.json`). The
@@ -994,6 +1004,369 @@ const ModelsPage: FC<{
   );
 };
 
+// ------------------------------------------------------------------ Subagents
+
+/// What the subagent form holds while it is open.
+type SubagentEdit = {
+  /// The name in the field. DISABLED while editing rather than merely ignored: the
+  /// name IS the row in harness.edn, so a "rename" is not an edit at all -- it is a
+  /// different subagent -- and the server refuses a name already in force rather than
+  /// quietly taking it over.
+  name: string;
+  description: string;
+  baseline: Baseline;
+  /// The exclusions as the ONE thing a person types: comma-separated tool names. This
+  /// side does not own the tool vocabulary and must not pretend to -- the server
+  /// judges the names and its sentence is what a refusal shows (see lib/subagents.ts).
+  exclude: string;
+  /// Which screen sent it. False means "add one under this name", and that is what
+  /// makes a name already in force a REFUSAL; true means "change the row I am showing".
+  editing: boolean;
+  /// Whether the row being edited is one the CODE supplies. Read off the listing
+  /// rather than compared against a list of two names here -- a second answer to that
+  /// question is a second thing to keep in step.
+  builtin: boolean;
+};
+
+const editOf = (d: SubagentDefinition): SubagentEdit => ({
+  name: d.name,
+  description: d.description,
+  baseline: d.baseline,
+  exclude: d.exclude.join(", "),
+  editing: true,
+  builtin: d.builtin,
+});
+
+/// A NEW SUBAGENT STARTS READ-ONLY, and the default is a decision rather than a
+/// placeholder: `:read-only` is the baseline whose worst case is a wasted delegation,
+/// where `:all` is a second pair of hands with write access to everything -- handed
+/// out by somebody who has not typed anything into the form yet.
+const blankSubagent = (): SubagentEdit => ({
+  name: "",
+  description: "",
+  baseline: "read-only",
+  exclude: "",
+  editing: false,
+  builtin: false,
+});
+
+/// The field's text -> the array the wire takes. Empty pieces are dropped, because a
+/// trailing comma is how a person ends a list, not a request to exclude a tool whose
+/// name is the empty string.
+const exclusionsOf = (text: string): string[] =>
+  text
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+
+/// THE FORM FOR ONE SUBAGENT, and the only thing in the app that writes harness.edn.
+///
+/// A REFUSAL LEAVES THE FORM OPEN AND THE FILE ALONE, which is the whole promise it
+/// makes. The server validates the entire block before it opens the file (see
+/// `check-block!`), so the sentence shown here is also the proof that nothing moved --
+/// and the note above the buttons is what tells a person which file that is and how to
+/// get the previous version back.
+const SubagentForm: FC<{
+  edit: SubagentEdit;
+  /// The user-level harness.edn these definitions live in, so the note can NAME the
+  /// file rather than describe it. The server always answers an absolute path, even
+  /// for a home that has no such file yet -- which is exactly when the name matters.
+  file: string;
+  onCancel: () => void;
+  onSaved: () => void;
+  onRemoved: () => void;
+}> = ({ edit: initial, file, onCancel, onSaved, onRemoved }) => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  // A SECOND TRANSLATOR, ON PURPOSE, and the only place in this panel that has one.
+  // The two baseline sentences are the FEATURE's vocabulary, not this form's: they are
+  // the same words the sidebar's block and the roster show (see subagent-list.tsx), so
+  // they are read from the catalog they live in rather than restated here in
+  // `settings`. A "settings.baselineAll" beside a "shell.baselineAll" would be two
+  // claims about one range, which is exactly what the shared module exists to prevent.
+  const { t: tSubagents } = useTranslation();
+  const [draft, setDraft] = useState<SubagentEdit>(initial);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const set = (patch: Partial<SubagentEdit>) => setDraft((d) => ({ ...d, ...patch }));
+
+  const save = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await putSubagent(
+        {
+          name: draft.name,
+          description: draft.description,
+          baseline: draft.baseline,
+          exclude: exclusionsOf(draft.exclude),
+        },
+        draft.editing,
+        tErrors,
+      );
+      onSaved();
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await removeSubagent(draft.name, tErrors);
+      onRemoved();
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-slot="settings-subagent-form" className="flex flex-col gap-3">
+      <Field
+        label={t("subagents.name")}
+        slot="settings-subagent-name"
+        hint={
+          draft.editing ? t("subagents.editingNameHint") : t("subagents.nameHint")
+        }
+      >
+        <Input
+          className="h-8 font-mono text-xs"
+          value={draft.name}
+          disabled={draft.editing || busy}
+          onChange={(e) => set({ name: e.target.value })}
+        />
+      </Field>
+
+      <Field
+        label={t("subagents.description")}
+        slot="settings-subagent-description"
+        hint={t("subagents.descriptionHint")}
+      >
+        <Textarea
+          className="min-h-16 text-xs"
+          value={draft.description}
+          disabled={busy}
+          onChange={(e) => set({ description: e.target.value })}
+        />
+      </Field>
+
+      <Field
+        label={t("subagents.baseline")}
+        slot="settings-subagent-baseline"
+        hint={t("subagents.baselineHint")}
+      >
+        <select
+          aria-label={t("subagents.baseline")}
+          className={inputClass}
+          value={draft.baseline}
+          disabled={busy}
+          onChange={(e) => set({ baseline: e.target.value as Baseline })}
+        >
+          {/* THE TWO OPTIONS ARE THE TWO SENTENCES the sidebar and the roster show,
+              from `subagent-list.tsx` -- the same wording in all three places, so a
+              person who picked "everything this session has, except eval and
+              delegating" here reads that phrase back on the row. */}
+          <option value="all">{BASELINE_LABELS.all(tSubagents)}</option>
+          <option value="read-only">{BASELINE_LABELS["read-only"](tSubagents)}</option>
+        </select>
+      </Field>
+
+      <Field
+        label={t("subagents.exclude")}
+        slot="settings-subagent-exclude"
+        hint={t("subagents.excludeHint")}
+      >
+        <Input
+          className="h-8 font-mono text-xs"
+          placeholder={t("subagents.excludePlaceholder")}
+          value={draft.exclude}
+          disabled={busy}
+          onChange={(e) => set({ exclude: e.target.value })}
+        />
+      </Field>
+
+      {failure !== null && (
+        <Refusal
+          slot="settings-subagent-error"
+          message={failure}
+          note={t("subagents.errorNote")}
+        />
+      )}
+
+      {/* WHERE THIS LANDS, IN WORDS, ON EVERY OPEN FORM -- because the two things a
+          person cannot see from inside a dialog are that a built-in has no row of its
+          own to change and that the file is rewritten whole. Both are said, and the
+          file is named, so "I broke my harness.edn" has an answer before it is asked. */}
+      <p
+        data-slot="settings-subagent-where"
+        className="text-muted-foreground text-xs break-words"
+      >
+        {draft.builtin
+          ? t("subagents.builtinNote", { file })
+          : t("subagents.customNote", { file })}{" "}
+        {t("subagents.fileNote")}
+      </p>
+
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          data-slot="settings-subagent-save"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          {busy && <Loader2Icon className="animate-spin" />}
+          {draft.editing ? t("subagents.save") : t("subagents.create")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-slot="settings-subagent-cancel"
+          disabled={busy}
+          onClick={onCancel}
+        >
+          {t("subagents.cancel")}
+        </Button>
+        {/* NO REMOVE ENTRY FOR A BUILT-IN, and none is drawn and disabled: a disabled
+            button is a promise that the action exists. A built-in is edited, never
+            removed, and the note above says why. */}
+        {draft.editing && !draft.builtin && (
+          <Button
+            variant="destructive"
+            size="sm"
+            data-slot="settings-subagent-remove"
+            title={t("subagents.removeTitle")}
+            disabled={busy}
+            className="ms-auto"
+            onClick={() => void remove()}
+          >
+            <TrashIcon /> {t("subagents.remove")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/// THE PAGE. A list, and -- once a row is clicked or Add is pressed -- the form.
+///
+/// IT READS ITS OWN ENDPOINT AND RELOADS ITSELF, unlike the two pages above. Those
+/// share `GET /api/settings` and the provider catalog because they are two readings of
+/// ONE file, config.edn; this page's file is harness.edn, and a page that refreshed
+/// somebody else's reading would be claiming a relationship that is not there. What
+/// they do share is the discipline: read fresh, show the server's sentence, never
+/// cache.
+const SubagentsPage: FC = () => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  const [listing, setListing] = useState<SubagentListing | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [draft, setDraft] = useState<SubagentEdit | null>(null);
+
+  /// A POST-WRITE RELOAD KEEPS THE OLD LIST UNTIL THE NEW ONE ARRIVES, unlike the
+  /// panel's first read, which clears. The difference is what would flash: a first
+  /// read clearing is a blank panel becoming full, and a reload clearing is a full
+  /// list blinking empty on its way to a list that differs from it by one row.
+  const load = useCallback(async () => {
+    try {
+      setListing(await listSubagents(tErrors));
+      setFailure(null);
+    } catch (f: unknown) {
+      setListing(null);
+      setFailure(f instanceof Error ? f.message : String(f));
+    }
+  }, [tErrors]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (draft !== null && listing !== null) {
+    return (
+      <>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-slot="settings-subagent-back"
+          className="-ml-2 mb-1"
+          onClick={() => setDraft(null)}
+        >
+          <ArrowLeftIcon /> {t("subagents.back")}
+        </Button>
+        <SubagentForm
+          key={`${draft.name}-${draft.editing}`}
+          edit={draft}
+          file={listing.path ?? ""}
+          onCancel={() => setDraft(null)}
+          onSaved={() => {
+            setDraft(null);
+            void load();
+          }}
+          onRemoved={() => {
+            setDraft(null);
+            void load();
+          }}
+        />
+      </>
+    );
+  }
+
+  return (
+    <div data-slot="settings-page-subagents" className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <SectionTitle>{t("subagents.title")}</SectionTitle>
+        <Button
+          variant="outline"
+          size="sm"
+          data-slot="settings-subagent-add"
+          onClick={() => setDraft(blankSubagent())}
+        >
+          <PlusIcon /> {t("subagents.add")}
+        </Button>
+      </div>
+
+      {failure !== null && <Refusal slot="settings-subagents-error" message={failure} />}
+
+      {listing === null && failure === null && (
+        <p
+          data-slot="settings-page-subagents-loading"
+          className="text-muted-foreground flex items-center gap-2 text-xs"
+        >
+          <Loader2Icon className="size-3.5 animate-spin" />
+          {t("subagents.loading")}
+        </p>
+      )}
+
+      {listing !== null && (
+        <>
+          {/* THE PROBLEM IS PART OF THE ANSWER, NOT AN ERROR STATE -- the same
+              distinction the sidebar's block draws, for the same reason: a typo in
+              harness.edn leaves a harness that still runs (the reader is tolerant and
+              the built-ins survive it), so the request answered 200 and this is one
+              more thing the page has to say. Until the block is fixed it cannot be
+              SAVED over either, which is what the refusal on a save attempt names. */}
+          {listing.problem !== null && (
+            <p
+              data-slot="settings-subagents-problem"
+              className="text-destructive text-xs break-words"
+            >
+              {t("subagents.problemLead")}
+              {listing.problem}
+              {t("subagents.problemTail")}
+            </p>
+          )}
+          <DefinitionButtons definitions={listing.subagents} onEdit={(d) => setDraft(editOf(d))} />
+        </>
+      )}
+    </div>
+  );
+};
+
 // ------------------------------------------------------------------- the rest
 
 // ------------------------------------------------------------------ the panel
@@ -1007,12 +1380,21 @@ const ModelsPage: FC<{
 /// ledger and switches servers on or off FOR THIS SESSION. It sits beside the
 /// others because it is one of the things a person asks about "what is this
 /// session running on", which is what this dialog is for.
-type Page = "general" | "models" | "mcp";
+///
+/// SUBAGENTS IS THE FOURTH PAGE, and the only one whose file is harness.edn. It is a
+/// page rather than a section of General because "where do I change what a session can
+/// hand work to" deserves the same answer as every other question about this session,
+/// and because a list of definitions plus a form that rewrites a file is not a row in
+/// somebody else's report.
+///
+/// `general` / `models` / `mcp` / `subagents`.
+type Page = "general" | "models" | "mcp" | "subagents";
 
 const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "general", label: (t) => t("page.general") },
   { id: "models", label: (t) => t("page.models") },
   { id: "mcp", label: (t) => t("page.mcp") },
+  { id: "subagents", label: (t) => t("page.subagents") },
 ];
 
 export const SettingsPanel: FC<{
@@ -1149,6 +1531,12 @@ export const SettingsPanel: FC<{
                 <McpPanel threadId={threadId} />
               </section>
             )}
+            {/* NO `threadId`, and that is the page's own claim rather than an
+                omission: a subagent is defined for the HOME, not for the session
+                looking at it. The sidebar's block and this form read the same file
+                and must give the same answer -- which is what "the settings form
+                writes the user level only" is for (see subagents.clj). */}
+            {page === "subagents" && <SubagentsPage />}
           </div>
         </div>
 

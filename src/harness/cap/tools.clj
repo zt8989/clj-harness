@@ -52,7 +52,17 @@
   "Put NAME->TOOL into THIS LAYER's table. The `:source` is stamped here, once,
   rather than at every call site: this map IS the built-in half of the table,
   so a row in it knows where it came from by construction. Rows from other
-  origins carry their own (an external server's say :mcp)."
+  origins carry their own (an external server's say :mcp).
+
+  `:read-only true` is the OTHER thing a row may declare about itself, and it is a
+  TOOL's statement rather than a switch: 'running me cannot change anything'. Only
+  five rows carry it, and every one of them is a tool whose body does nothing but
+  read -- a file, a tree, two web endpoints. It is not a hint and not a default: a
+  tool that does not say it is treated as one that can write, which is the whole
+  reason a `:read-only` subagent range can be derived without a list of names
+  somebody has to remember to update. Whether a DECLARATION is believable is the
+  derivation's question, not this one's -- see harness.cap.subagents, which trusts
+  it only from a source whose provenance it can prove."
   [name tool] (swap! built-ins assoc name (assoc tool :source :builtin)))
 
 ;; ------------------------------------------------------------------- helpers
@@ -395,6 +405,7 @@
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
          :park-reason (fence nil)
+         :read-only true
          ;; `read` and `write` are the two tools whose face follows the editing
          ;; mode: both keep their NAME (the user asked for one `read`, one `write`)
          ;; while what they do differs, so the description has to say which of the
@@ -644,7 +655,8 @@
                [:pattern] t-grep)
          ;; A search reads files, so the fence applies: when a project is bound, a
          ;; root outside it parks for a human exactly as a read does.
-         :park-reason (fence nil)))
+         :park-reason (fence nil)
+         :read-only true))
 
 ;; ---------------------------------------------------------------------- glob
 ;;
@@ -686,7 +698,8 @@
                [:pattern] t-glob)
          ;; A listing reads the tree, so the fence applies exactly as it does to a
          ;; search: a root outside the project parks for a human.
-         :park-reason (fence nil)))
+         :park-reason (fence nil)
+         :read-only true))
 
 (register! "bash"
   (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working"
@@ -914,11 +927,16 @@
   (web/fetch-text url))
 
 (register! "web_fetch"
-  (tool web-fetch-description
-        {"url" {:type "string"
-                :description (str "The full address to fetch, including the https://"
-                                  " prefix.")}}
-        [:url] t-web-fetch))
+  (assoc (tool web-fetch-description
+               {"url" {:type "string"
+                       :description (str "The full address to fetch, including the https://"
+                                         " prefix.")}}
+               [:url] t-web-fetch)
+         ;; It leaves the machine, which is why it carries no approval gate (see
+         ;; above) -- but it changes nothing anywhere, which is why a read-only
+         ;; range includes it: an exploring subagent that cannot look up a
+         ;; document is a subagent doing half the job.
+         :read-only true))
 
 ;; ----------------------------------------------------------------- web_search
 ;;
@@ -945,13 +963,14 @@
   (search/perform args))
 
 (register! "web_search"
-  (tool web-search-description
-        {"query" {:type "string" :description "What to search for."}
-         "count" {:type "integer" :minimum 1
-                  :description (str "How many results to ask for (default "
-                                    search/default-count ", at most "
-                                    search/max-count ").")}}
-        [:query] t-web-search))
+  (assoc (tool web-search-description
+               {"query" {:type "string" :description "What to search for."}
+                "count" {:type "integer" :minimum 1
+                         :description (str "How many results to ask for (default "
+                                           search/default-count ", at most "
+                                           search/max-count ").")}}
+               [:query] t-web-search)
+         :read-only true))
 
 ;; ------------------------------------------------------------------ installing
 

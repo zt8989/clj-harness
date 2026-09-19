@@ -36,10 +36,11 @@ import { pickerSuite } from "./suites/picker";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
+import { subagentsSuite } from "./suites/subagents";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite, subagentsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -85,7 +86,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// at, and the parked word beside the id rather than inside a line that truncates. This
 /// is the suite that exists because the id line went blank in the i18n merge and a green
 /// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
-const EXPECTED_CASES = 44;
+/// 44 -> 50: the `subagents` suite's six -- the endpoint's wire shape (the two built-ins,
+/// their baselines, the `builtin` flag, the file a save would write, the problem that is
+/// part of a 200); a delegation row's three facts; one run in flight marked and the other
+/// not, in one list; the definitions group with and without a custom entry; the settings
+/// roster's built-in flag; and the same rows in both languages. Five of the six RENDER
+/// (`react-dom/server`), which is why the rows live in `components/subagent-list.tsx` --
+/// a module that must not reach `lib/i18n.ts`, whose `document` write would break this run.
+const EXPECTED_CASES = 50;
 
 let total = 0;
 for (const suite of SUITES) {
