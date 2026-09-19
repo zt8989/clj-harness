@@ -17,12 +17,10 @@
   (:import (java.io File)
            (java.sql DriverManager)))
 
-(def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-project-test"))
-
-;; One scratch directory for the whole namespace; start it clean at load time
-;; so test ordering cannot break it (the tools-test precedent).
-(io/delete-file root true)
-(.mkdirs (io/file root))
+;; One scratch directory for the whole namespace, made by mkdtemp and therefore
+;; empty and nobody else's -- there is nothing to clear at load time and nothing a
+;; parallel run could have made first (the tools-test precedent).
+(def ^:private root (support/temp-dir "project"))
 (spit (str root "/file.txt") "plain file")
 
 (defn- tmp [name] (str root "/" name))
@@ -135,8 +133,7 @@
   ;; and .. escapes -- is out. The config home is exercised through the REAL
   ;; (test-runner-seeded) root, since allowing it is the fence's deliberate
   ;; carve-out: reading one's own config must not be an approval offense.
-  (let [outside (str (System/getProperty "java.io.tmpdir")
-                     "/harness-project-outside.txt")]
+  (let [outside (support/outside-path "harness-project-outside.txt")]
     (testing "an unbound session is never out of bounds -- the regression guarantee"
       (is (false? (project/out-of-bounds? "pt-fence" outside)))
       (is (false? (project/out-of-bounds? "pt-fence" "anything.txt"))))
@@ -219,8 +216,7 @@
 
 (deftest the-fence-obeys-harness-edn
   ;; The first real consumer of the assembly: the approval boundary.
-  (let [outside (str (System/getProperty "java.io.tmpdir")
-                     "/harness-project-outside2.txt")]
+  (let [outside (support/outside-path "harness-project-outside2.txt")]
     (.mkdirs (io/file root ".harness"))
     (project/bind! "pt-fence-cfg" root)
     (testing ":allow frees a declared path, resolved like any tool path"
@@ -377,18 +373,13 @@
   ;; home of its own so the child never reads the developer's ~/AGENTS.md. Nothing
   ;; here goes near the run-wide pair isolate! made, so there is nothing to wipe
   ;; afterwards beyond the trees this test made.
-  (let [dir      (io/file (System/getProperty "java.io.tmpdir")
-                          (str "harness-project-restart-" (System/nanoTime)))
-        user-hm  (io/file (System/getProperty "java.io.tmpdir")
-                          (str "harness-project-restart-home-" (System/nanoTime)))
+  (let [dir      (io/file (support/temp-dir "project-restart"))
+        user-hm  (io/file (support/temp-dir "project-restart-home"))
         proj     (io/file dir "workspace")
-        tmp      (io/file (System/getProperty "java.io.tmpdir")
-                          (str "harness-project-answers-" (System/nanoTime)))
+        tmp      (io/file (support/temp-dir "project-answers"))
         write-to (io/file tmp "write.txt")
         read-to  (io/file tmp "read.txt")]
     (.mkdirs proj)
-    (.mkdirs user-hm)
-    (.mkdirs tmp)
     (try
       (let [write (in-a-fresh-jvm
                    dir user-hm write-to

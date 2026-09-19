@@ -190,8 +190,7 @@
   ;; first one refuses: the second one's side effect is a fact about the trigger,
   ;; while the run stopping is a separate fact about the assembly.
   (support/without-builtins! "sp-both")
-  (let [marker (str (System/getProperty "java.io.tmpdir") "/sp-late-ran.txt")]
-    (io/delete-file (io/file marker) true)
+  (let [marker (str (io/file (support/temp-dir "sp-late") "ran.txt"))]
     (support/write-hooks! {:system-prompt [{:command "echo no >&2; exit 2"}
                                            ;; The marker goes into a shell command,
                                            ;; so it is spelled for the shell -- see
@@ -200,8 +199,7 @@
                                                           (support/shell-path marker) "; exit 0")}]})
     (is (some? (:error (assemble-run "sp-both"))))
     (is (.exists (io/file marker))
-        "a later declaration is not skipped because an earlier one refused")
-    (io/delete-file (io/file marker) true)))
+        "a later declaration is not skipped because an earlier one refused")))
 
 ;; -------------------------------------------------------- the kernel's own rows
 

@@ -8,15 +8,13 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.editing :as editing]
             [harness.infra.home :as home]
+            [harness.test-support :as support]
             [harness.cap.project :as project]))
 
-(def ^:private root
-  (str (System/getProperty "java.io.tmpdir") "/harness-editing-test"))
-
-;; One scratch project directory for the whole namespace; start it clean at load
-;; time so test ordering cannot break it (the tools-test precedent).
-(io/delete-file root true)
-(.mkdirs (io/file root))
+;; One scratch project directory for the whole namespace. mkdtemp makes it, so there
+;; is nothing to clear at load time and nothing for a second run to collide with
+;; (the tools-test precedent).
+(def ^:private root (support/temp-dir "editing"))
 
 (def ^:private user-file    (io/file (home/root) "harness.edn"))
 (def ^:private project-file (io/file root ".harness" "harness.edn"))

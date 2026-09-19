@@ -660,13 +660,12 @@
   ;; the client answers with resume, run two replays the answer. Approve and veto
   ;; both, each on its own thread -- the script's turns are consumed in run order,
   ;; so the two threads' turns are laid out alternately.
-  (let [ok   (str (System/getProperty "java.io.tmpdir") "/harness-http-approved.txt")
-        veto (str (System/getProperty "java.io.tmpdir") "/harness-http-vetoed.txt")
+  (let [markers (support/temp-dir "http-parked")
+        ok   (str (io/file markers "approved.txt"))
+        veto (str (io/file markers "vetoed.txt"))
         call (fn [path] {:content ""
                          :tool-calls [{:id "c1" :name "write"
                                        :arguments {:path path :content "written"}}]})
-        _    (io/delete-file ok true)
-        _    (io/delete-file veto true)
         _    (tools/session-require-approval! "http-approve" "write")
         _    (tools/session-require-approval! "http-veto" "write")]
     (with-server
@@ -1134,10 +1133,41 @@
 ;; ------------------------------------------------- the management edge
 
 (def ^:private project-dir
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-project"))
+  (support/temp-dir "http-project"))
 
 (def ^:private project-dir-2
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-project-2"))
+  (support/temp-dir "http-project-2"))
+
+(defn- wipe-dir!
+  "Empty DIR, making it if it is absent.
+
+  STILL WORTH HAVING WITH TEMP DIRECTORIES: the project directories below are one
+  per GROUP of tests rather than one per test, so a test that asserts on the WHOLE
+  content of a project's session list still has to start from nothing -- what it
+  must no longer do is clear against a previous RUN, which is what these blocks used
+  to be for and what mkdtemp does by construction (see
+  harness.test-support/temp-dir). Deepest-first, because `io/delete-file` does not
+  recurse: it calls File.delete, which refuses a non-empty directory and says
+  nothing when `silently` is true, so the one-line version leaves the tree exactly
+  where it was."
+  [d]
+  (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
+  (.mkdirs (io/file d)))
+
+(defn- same-dir?
+  "Are A and B two spellings of one directory?
+
+  BY CANONICAL PATH, NOT BY STRING, and not by NAME. Three honest differences are
+  in play and only the first is about spelling: `bind!` keeps what it was asked
+  for (harness.cap.project/absolute) while the server's answers come back through
+  canonicalization; on macOS the temp directory is reached through `/var` ->
+  `/private/var`; and these scratch directories are mkdtemp's, so their NAME ends
+  in a random run of digits -- an `ends-with?` check against the label, which is
+  what the assertions below used to say, stopped being true the day the directories
+  stopped being composed. None of the three is what any of them was about; the
+  directory the answer names is."
+  [a b]
+  (= (.getCanonicalPath (io/file a)) (.getCanonicalPath (io/file b))))
 
 (defn- bound-lines
   "The thread's project/bound audit lines, oldest first, read from wherever the
@@ -1204,8 +1234,7 @@
   ;; The management edge itself: bind through /api/project, see the binding on
   ;; GET, see exactly one project/bound audit line on disk -- and watch every
   ;; bad input leave no trace at all.
-  (io/delete-file project-dir true)
-  (.mkdirs (io/file project-dir))
+  (wipe-dir! project-dir)
   (with-server
    "it-proj"
    (fn []
@@ -1222,8 +1251,8 @@
                                (json/write-str {:threadId tid :dir project-dir}))
                reply (read-json resp)]
            (is (= 200 (.statusCode resp)))
-           (is (.isAbsolute (io/file (:dir reply))))
-           (is (str/ends-with? (:dir reply) "harness-http-project"))
+            (is (.isAbsolute (io/file (:dir reply))))
+            (is (same-dir? (:dir reply) project-dir))
            (testing "a GET now sees the binding"
              (is (= (:dir reply)
                     (:dir (read-json (api-call :get (str "/api/project?threadId=" tid) nil))))))))
@@ -1241,7 +1270,7 @@
            (is (nil? (:runId (first bound))) "a binding happens outside any run")
            (is (nil? (get-in (first bound) [:payload :before]))
                "a FIRST bind has no previous directory")
-           (is (str/ends-with? (get-in (first bound) [:payload :after]) "harness-http-project"))
+           (is (same-dir? (get-in (first bound) [:payload :after]) project-dir))
            (is (= "http" (get-in (first bound) [:payload :via]))))
          (testing "the two failed binds added no second line"
            (is (= 1 (count (filter #(= "project/bound" (:kind %)) bound)))))
@@ -1261,7 +1290,7 @@
   ;; namespace bind sessions into those, and this one asserts on the WHOLE content
   ;; of a project's session list. Sharing would make it pass or fail depending on
   ;; which tests ran first.
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-listing"))
+  (support/temp-dir "http-listing"))
 
 (def ^:private listing-dir-2 (str listing-dir "-2"))
 
@@ -1269,7 +1298,7 @@
   ;; Its own pair as well -- see listing-dir's note. This test asserts on the whole
   ;; session list of a project, so a shared directory would make it pass or fail
   ;; depending on which test ran first.
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-archive"))
+  (support/temp-dir "http-archive"))
 
 (def ^:private archive-dir-2 (str archive-dir "-2"))
 
@@ -1280,9 +1309,8 @@
   ;; join -- and the states that only exist BECAUSE the two sides are different:
   ;; a session in the store whose file is not there, and a log in the tree that no
   ;; session owns.
-  (doseq [d [listing-dir listing-dir-2]]
-    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
-    (.mkdirs (io/file d)))
+  (wipe-dir! listing-dir)
+  (wipe-dir! listing-dir-2)
   (with-server
    {"listing-a" script "listing-b" script "listing-unbound" script}
    (fn []
@@ -1393,9 +1421,8 @@
   ;; Its own directory pair, for the same reason the listing test has one: this
   ;; asserts on the WHOLE content of a project's session list, so a shared
   ;; directory would make it pass or fail depending on which test ran first.
-  (doseq [d [archive-dir archive-dir-2]]
-    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
-    (.mkdirs (io/file d)))
+  (wipe-dir! archive-dir)
+  (wipe-dir! archive-dir-2)
   (with-server
    {"arch-a" script "arch-b" script "arch-other" script}
    (fn []
@@ -1590,10 +1617,7 @@
   ;; calls the chooser is running on its own thread, so a `binding` here would
   ;; leave the real dialog wired up and the stub silently unused (the config-home
   ;; ticket hit exactly this; see test_runner's root override).
-  (doseq [d [project-dir-2]]
-    (doseq [f (reverse (file-seq (io/file d)))]
-      (io/delete-file f true))
-    (.mkdirs (io/file d)))
+  (wipe-dir! project-dir-2)
   (let [stub! (fn [f] (alter-var-root #'http/*directory-chooser* (constantly f)))
         real  http/*directory-chooser*]
     (try
@@ -1617,23 +1641,18 @@
              (is (= {:dir nil} (read-json (api-call :post "/api/project/pick" nil)))))
            (testing "GET is refused -- this call opens a window, so it is not cacheable"
              (is (= 405 (.statusCode (api-call :get "/api/project/pick" nil)))))
-           (testing "picking binds NOTHING: the ordinary POST is still the only route"
-             (stub! (fn [] project-dir-2))
-             ;; Compare directories by IDENTITY, not by spelling. Two honest
-             ;; differences are in play: `java.io.tmpdir` ends in a slash on
-             ;; macOS, so the constant spells a doubled one and bind! normalizes
-             ;; it; and /var is a symlink to /private/var, which canonicalization
-             ;; chases and `bind!` deliberately does not (it keeps what was asked
-             ;; for -- see harness.cap.project/absolute). Neither is what this test is
-             ;; about; the session landing in that directory is.
-             (let [canonical (fn [p] (.getCanonicalPath (io/file p)))
-                   picked    (:dir (read-json (api-call :post "/api/project/pick" nil)))]
-               (is (= (canonical project-dir-2) (canonical picked))
+             (testing "picking binds NOTHING: the ordinary POST is still the only route"
+              (stub! (fn [] project-dir-2))
+              ;; By IDENTITY (same-dir? -- see its note above), not by spelling: what
+              ;; this test is about is the session landing in the directory the picker
+              ;; answered with, not how that directory is spelled.
+             (let [picked (:dir (read-json (api-call :post "/api/project/pick" nil)))]
+               (is (same-dir? project-dir-2 picked)
                    "the picker hands back the directory it was told to")
                (is (nil? (project/binding-for tid)) "no binding until the POST lands")
                (is (= 200 (.statusCode (api-call :post "/api/project"
                                                  (json/write-str {:threadId tid :dir picked})))))
-               (is (= (canonical picked) (canonical (project/binding-for tid)))
+               (is (same-dir? picked (project/binding-for tid))
                    "binding lands the session in that same directory")
                (let [bounds (bound-lines tid)]
                  (is (= 1 (count bounds)) "exactly one audit line, from the POST")
@@ -1766,14 +1785,12 @@
   ;; audit line carries before -> after so the directory timeline reads
   ;; straight off the log. The UI switches with the same entry point: this
   ;; endpoint IS the entry point it uses.
-  ;; Recursive wipe, not plain delete-file: a directory survives a previous
-  ;; JVM with its e2e.txt inside, delete-file silently refuses non-empty
-  ;; directories, and the not-in-the-OLD-directory assertion would trip on
-  ;; that residue (deep-to-shallow file-seq delete, then mkdirs).
-  (doseq [d [project-dir project-dir-2]]
-    (doseq [f (reverse (file-seq (io/file d)))]
-      (io/delete-file f true))
-    (.mkdirs (io/file d)))
+  ;; Between tests, not against a previous run: both directories belong to this
+  ;; namespace and more than one test drives them, so the not-in-the-OLD-directory
+  ;; assertion starts from nothing. (A previous JVM's residue used to be the other
+  ;; half of this, and mkdtemp is what removed it.)
+  (wipe-dir! project-dir)
+  (wipe-dir! project-dir-2)
   (with-server
    {"rebind-run" bound-script}
    (fn []
@@ -1784,16 +1801,16 @@
            (is (= 200 (.statusCode resp))))
          (let [line (first (bound-lines tid))]
            (is (nil? (get-in line [:payload :before])))
-           (is (str/ends-with? (get-in line [:payload :after]) "harness-http-project"))))
-       (testing "rebinding answers and displays the new directory"
-         (let [resp (api-call :post "/api/project"
-                              (json/write-str {:threadId tid :dir project-dir-2}))]
-           (is (= 200 (.statusCode resp)))
-           (is (str/ends-with? (:dir (read-json resp)) "harness-http-project-2"))
-           (testing "GET reflects the switch"
-             (is (str/ends-with?
-                  (:dir (read-json (api-call :get (str "/api/project?threadId=" tid) nil)))
-                  "harness-http-project-2")))))
+            (is (same-dir? (get-in line [:payload :after]) project-dir))))
+        (testing "rebinding answers and displays the new directory"
+          (let [resp (api-call :post "/api/project"
+                               (json/write-str {:threadId tid :dir project-dir-2}))]
+            (is (= 200 (.statusCode resp)))
+            (is (same-dir? (:dir (read-json resp)) project-dir-2))
+            (testing "GET reflects the switch"
+              (is (same-dir?
+                   (:dir (read-json (api-call :get (str "/api/project?threadId=" tid) nil)))
+                   project-dir-2)))))
        (testing "a relative write after the switch lands in the NEW directory"
          (let [frames (wire/frames-from-sse (.body (post-run tid)))]
            (is (= "RUN_FINISHED" (:type (last frames))))
@@ -1803,8 +1820,8 @@
        (testing "the log reads as a before -> after timeline"
          (let [bounds (bound-lines tid)]
            (is (= 2 (count bounds)))
-           (is (str/ends-with? (get-in (nth bounds 1) [:payload :before]) "harness-http-project"))
-           (is (str/ends-with? (get-in (nth bounds 1) [:payload :after]) "harness-http-project-2"))))))))
+            (is (same-dir? (get-in (nth bounds 1) [:payload :before]) project-dir))
+            (is (same-dir? (get-in (nth bounds 1) [:payload :after]) project-dir-2))))))))
 
 (deftest a-bound-thread-writes-into-its-project-over-the-real-edge
   ;; The full vertical: bind through the management edge the way the UI will,
@@ -1900,7 +1917,7 @@
                ;; Rolling back would leave the store and the tree disagreeing anyway,
                ;; and the human's next step is the same in both cases: decide which
                ;; log is this conversation.
-               (is (str/ends-with? (:dir reply) "harness-http-project")))
+               (is (same-dir? (:dir reply) project-dir)))
              (testing "and from here the split is VISIBLE, not silent -- two files, one stem"
                (let [rows (->> (json/read-str (.body (api-call :get "/api/threads" nil))
                                               :key-fn keyword)
@@ -2106,9 +2123,7 @@
   ;; line and nothing else, so the log exists and holds no run -- and a 400 here
   ;; would make the session a person just created un-openable, for a reason
   ;; ('truncated') that is not true of it.
-  (let [dir (str (System/getProperty "java.io.tmpdir") "/harness-http-unrun")]
-    (run! #(io/delete-file % true) (reverse (file-seq (io/file dir))))
-    (.mkdirs (io/file dir))
+  (let [dir (support/temp-dir "http-unrun")]
     (with-server
      "never-run"
      (fn []
@@ -2125,9 +2140,9 @@
                          (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
 
 (def ^:private remove-dir-a
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-remove-a"))
+  (support/temp-dir "http-remove-a"))
 (def ^:private remove-dir-b
-  (str (System/getProperty "java.io.tmpdir") "/harness-http-remove-b"))
+  (support/temp-dir "http-remove-b"))
 
 (defn- workspace-of
   "The workspace directory for a project's CANONICAL path -- the naming rule read
@@ -2165,9 +2180,8 @@
   ;; theirs: the assertions are about the WHOLE content of a project's session list
   ;; and of a workspace tree, so a shared directory would make this pass or fail
   ;; depending on which test ran first.
-  (doseq [d [remove-dir-a remove-dir-b]]
-    (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
-    (.mkdirs (io/file d)))
+  (wipe-dir! remove-dir-a)
+  (wipe-dir! remove-dir-b)
   (with-server
    {"rm-a" script "rm-b" script "rm-other" script "rm-never-run" script}
    (fn []
@@ -2323,9 +2337,7 @@
   ;; to bind a session to a directory -- backwards for a product whose sessions
   ;; must belong to a project, because the first project would need a session
   ;; that had nowhere to go. So this route makes the DIRECTORY the project.
-  (let [adir (str (System/getProperty "java.io.tmpdir") "/harness-http-added")]
-    (run! #(io/delete-file % true) (reverse (file-seq (io/file adir))))
-    (.mkdirs (io/file adir))
+  (let [adir (support/temp-dir "http-added")]
     (with-server
      "add-project-unused"
      (fn []
@@ -3166,14 +3178,13 @@
          (is (nil? (:reasoning-effort body))))))))
 
 (def ^:private git-repo
-  ;; UNIQUE PER JVM, and never deleted. `io/delete-file` cannot reliably remove a
-  ;; `.git` directory -- it reports failure, and with `:silently true` that failure
-  ;; is swallowed -- so a fixture that cleared a fixed path would sometimes run
-  ;; `git init` inside the previous run's repository and assert against its
-  ;; leftovers. A fresh name costs one directory in the temp dir and removes the
-  ;; only thing this test could have been flaky about.
-  (str (io/file (System/getProperty "java.io.tmpdir")
-                (str "clj-harness-http-git-" (System/currentTimeMillis)))))
+  ;; A DIRECTORY OF THIS RUN'S OWN, and never deleted. `io/delete-file` cannot
+  ;; reliably remove a `.git` directory -- it reports failure, and with `:silently
+  ;; true` that failure is swallowed -- so a fixture that reuses one path would
+  ;; sometimes run `git init` inside the previous run's repository and assert
+  ;; against its leftovers. mkdtemp is the whole of the fix now; the per-JVM name
+  ;; this used to compose was the same idea and only closed half the window.
+  (support/temp-dir "http-git"))
 
 (defn- make-git-repo
   "A real repository, so the route meets git rather than a story about git.
@@ -3370,10 +3381,8 @@
 (deftest a-home-with-no-config-edn-is-given-one-by-the-server-that-starts-in-it
   ;; The composition root seeds it: a process about to serve from a home hands the
   ;; person a file to edit. The reader does not -- see providers/ensure-config!.
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "harness-noconfig-" (System/nanoTime)))
+  (let [dir (io/file (support/temp-dir "http-noconfig"))
         old (home/root)]
-    (.mkdirs dir)
     (try
       (with-redefs [home/root (constantly (str dir))]
         (let [stop (http/start! {:port 0})]

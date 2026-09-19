@@ -19,14 +19,14 @@
 (use-fixtures :once support/with-builtins)
 
 ;; CANONICALIZED through harness.cap.hashline.store, because that is how the store
-;; books a file. Two things make this necessary and they are the same thing twice:
-;; java.io.tmpdir ends with a separator on macOS, so `(str tmpdir "/name")` produces
-;; a DOUBLE slash; and on macOS the temp directory itself is reached through the
-;; `/var` -> `/private/var` symlink, so even `(io/file tmpdir name)` is a different
-;; string from what the store keys on. A test that compared either spelling would
-;; get nil back and look like a missing row.
+;; books a file: on macOS the temp directory is reached through the `/var` ->
+;; `/private/var` symlink, so `(io/file root name)` is a different string from what
+;; the store keys on, and a test that compared the other spelling would get nil back
+;; and look like a missing row. (The other half of this used to be the separator:
+;; `(str tmpdir "/name")` doubled it where tmpdir ends in one. Composed temp paths
+;; are gone -- `root` is mkdtemp's -- so a separator is no longer anything's job.)
 (def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-read-test")))
+  (support/temp-dir "hashline-read"))
 
 (defn- path-of
   "A file in the scratch project, spelled the way the tools resolve it."

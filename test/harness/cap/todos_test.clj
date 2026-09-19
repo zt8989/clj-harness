@@ -135,13 +135,11 @@
       {:exit (.exitValue p) :out out-text})))
 
 (deftest the-list-outlives-the-process-that-wrote-it
-  (let [dir   (io/file (System/getProperty "java.io.tmpdir")
-                       (str "harness-todos-" (System/nanoTime)))
-        uhome (io/file (System/getProperty "java.io.tmpdir")
-                       (str "harness-todos-home-" (System/nanoTime)))
+  (let [dir   (support/temp-dir "todos")
+        ;; `io/file` around the home because `in-a-fresh-jvm` spells it into the
+        ;; child's argv and takes a File to do it (`temp-dir` answers a path string).
+        uhome (io/file (support/temp-dir "todos-home"))
         out   (io/file dir "answer.txt")]
-    (.mkdirs dir)
-    (.mkdirs uhome)
     (try
       (todos/write! tid [{:content "survives a restart" :status "in_progress"}])
       (let [r (in-a-fresh-jvm

@@ -10,6 +10,7 @@
             [harness.infra.db :as db]
             [harness.cap.hashline.anchors :as anchors]
             [harness.cap.hashline.store :as store]
+            [harness.test-support :as support]
             [harness.infra.home :as home]))
 
 (def ^:private path "/tmp/harness-hashline-store-test/file.txt")
@@ -59,14 +60,13 @@
 (deftest the-anchor-tables-arrive-by-migration-and-only-add
   ;; The cross-feature edge this ticket carried: the store already had the home's
   ;; two tables, and this step has to add four without disturbing them.
-  (let [dir (io/file (System/getProperty "java.io.tmpdir") "hashline-migration")]
-    (is (<= 2 (db/target-version)) "the anchor tables are a step in the chain")
-    (is (contains? (set (db/tables)) "hashline_snapshots"))
-    (is (contains? (set (db/tables)) "hashline_ownership"))
-    (is (contains? (set (db/tables)) "hashline_sessions"))
-    (is (contains? (set (db/tables)) "hashline_undo"))
-    (is (contains? (set (db/tables)) "projects")
-        "and the tables that were already there are still there")))
+  (is (<= 2 (db/target-version)) "the anchor tables are a step in the chain")
+  (is (contains? (set (db/tables)) "hashline_snapshots"))
+  (is (contains? (set (db/tables)) "hashline_ownership"))
+  (is (contains? (set (db/tables)) "hashline_sessions"))
+  (is (contains? (set (db/tables)) "hashline_undo"))
+  (is (contains? (set (db/tables)) "projects")
+      "and the tables that were already there are still there"))
 
 (deftest a-store-with-the-home-tables-migrates-without-losing-a-row
   ;; The version walk, on the chain a real store would have taken: build at
@@ -83,9 +83,7 @@
   (let [step-1  [(first db/migrations)]
         full    db/migrations
         previous (var-get #'home/*root-override*)]
-    (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                       (str "hashline-migration-walk-" (System/currentTimeMillis)))]
-      (.mkdirs dir)
+    (let [dir (io/file (support/temp-dir "hashline-migration-walk"))]
       (alter-var-root #'home/*root-override* (constantly (str dir)))
       (try
         (db/migrate! step-1)
@@ -321,8 +319,7 @@
 ;; ------------------------------------------------------------- the locking
 
 (deftest the-path-lock-is-per-canonical-path-and-reentrant
-  (let [dir (io/file (System/getProperty "java.io.tmpdir") "hashline-lock-test")]
-    (.mkdirs dir)
+  (let [dir (io/file (support/temp-dir "hashline-lock"))]
     (let [a (str dir "/one.txt")
           b (str dir "/two.txt")]
       (testing "a nested call on the same path does not deadlock"
@@ -338,10 +335,8 @@
   ;; The reason the lock exists: `harness.kernel.loop/drive!` runs a turn's tool calls
   ;; concurrently, so two edits to one file in one turn would otherwise each read
   ;; the same base state and one of them would vanish with both reporting success.
-  (let [dir  (io/file (System/getProperty "java.io.tmpdir") "hashline-lock-concurrency")
+  (let [dir  (io/file (support/temp-dir "hashline-lock-concurrency"))
         file (io/file dir "counter.txt")]
-    (io/delete-file dir true)
-    (.mkdirs dir)
     (spit file "0" :encoding "UTF-8")
     (let [overlaps (atom 0)
           inside   (atom 0)

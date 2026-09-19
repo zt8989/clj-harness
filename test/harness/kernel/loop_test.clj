@@ -193,8 +193,7 @@
   ;; follow them now. This asserts that through the real loop, not the function --
   ;; and it passes the step the EDGE passes (harness.cap.project/before-llm),
   ;; because the loop no longer requires one: it applies whatever it is handed.
-  (let [root (str (System/getProperty "java.io.tmpdir")
-                  "/harness-loop-skills-" (System/nanoTime))]
+  (let [root (support/temp-dir "loop-skills")]
     ;; Under .agents/skills, which is the convention directory the default roots
     ;; point at -- laying it at the project root would make it a skill this
     ;; session never looks for.
@@ -228,8 +227,7 @@
   ;; The human's path, and the same "now" requirement the model's has: the person
   ;; asked in the message they just sent, so the body has to be in the FIRST call
   ;; of that turn -- not after a round of tool calls, and not next turn.
-  (let [root (str (System/getProperty "java.io.tmpdir")
-                  "/harness-loop-slash-" (System/nanoTime))]
+  (let [root (support/temp-dir "loop-slash")]
     (.mkdirs (java.io.File. root ".agents/skills/alpha"))
     (spit (str root "/.agents/skills/alpha/SKILL.md")
           "---\nname: alpha\ndescription: a thing\n---\n\n# alpha\n\nALPHA BODY\n"

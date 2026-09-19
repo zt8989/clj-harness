@@ -21,13 +21,10 @@
            (java.nio.file Files OpenOption)
            (java.sql Connection DriverManager)))
 
-;; One scratch directory for this namespace, wiped at load time so test ordering
-;; cannot break it (the project-test precedent).
+;; One scratch directory for this namespace, made by the runner's own mkdtemp --
+;; nothing to wipe and nothing another process could have made first.
 (def ^:private scratch
-  (io/file (System/getProperty "java.io.tmpdir") "harness-db-test"))
-
-(io/delete-file scratch true)
-(.mkdirs scratch)
+  (io/file (support/temp-dir "db")))
 
 (defn- fresh-root
   "A new, empty home directory for one test."

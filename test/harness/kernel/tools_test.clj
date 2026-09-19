@@ -14,11 +14,10 @@
 
 (use-fixtures :once support/with-builtins)
 
-(def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-tools-test"))
-
-;; Every test in this namespace shares one scratch directory; start it clean.
-;; Done at load time rather than in a test, so ordering cannot break it.
-(io/delete-file dir true)
+;; Every test in this namespace shares one scratch directory. It is empty because
+;; mkdtemp made it, so there is nothing to clear -- and there is nothing to collide
+;; with, which a composed name under java.io.tmpdir could not promise.
+(def ^:private dir (support/temp-dir "tools"))
 
 (defn- call [name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}}))
@@ -217,9 +216,7 @@
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
-  (let [pdir (str (System/getProperty "java.io.tmpdir") "/harness-tools-project")]
-    (io/delete-file pdir true)
-    (.mkdirs (io/file pdir))
+  (let [pdir (support/temp-dir "tools-project")]
     (project/bind! "tt-bound" pdir)
     (letfn [(call-as [name args]
               ;; run! binds *thread-id* to this thread around the tool body --

@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.git :as git]
+            [harness.test-support :as support]
             [harness.infra.shell :as shell]))
 
 (defn- run-in
@@ -48,8 +49,7 @@
   dir)
 
 (def ^:private dir
-  (str (io/file (System/getProperty "java.io.tmpdir")
-                (str "clj-harness-git-test-" (System/currentTimeMillis)))))
+  (support/temp-dir "git"))
 
 (deftest a-directory-that-is-not-a-repository-is-an-answer-not-a-failure
   ;; The strip has to draw for every session, and most directories are not
@@ -60,8 +60,7 @@
     (is (= {:repo? false} (git/state nil)))
     (is (= {:repo? false} (git/state ""))))
   (testing "a directory that exists but is not a repository"
-    (let [plain (str (io/file (System/getProperty "java.io.tmpdir") "clj-harness-git-plain"))]
-      (.mkdirs (io/file plain))
+    (let [plain (support/temp-dir "git-plain")]
       (is (= {:repo? false} (git/state plain)))))
   (testing "a directory that does not exist"
     (is (= {:repo? false} (git/state (str dir "-nope"))))))

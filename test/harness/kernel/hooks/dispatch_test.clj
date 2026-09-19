@@ -16,10 +16,9 @@
 
 (use-fixtures :once support/with-builtins)
 
-(def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-dispatch-test"))
+(def ^:private root (support/temp-dir "hooks-dispatch"))
 (def ^:private scripts (str root "/scripts"))
 
-(io/delete-file root true)
 (.mkdirs (io/file scripts))
 
 (defn- script!

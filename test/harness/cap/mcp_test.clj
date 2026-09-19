@@ -58,12 +58,13 @@
 (defn- tmp-dir
   "A temp directory, removed when F is done with it."
   [label f]
-  (let [d (io/file (System/getProperty "java.io.tmpdir")
-                   (str "mcp-" label "-" (System/currentTimeMillis)))]
-    (.mkdirs d)
+  (let [d (support/temp-dir (str "mcp-" label))]
     (try (f d)
          (finally
-           (doseq [x (reverse (file-seq d))]
+           ;; `io/file` AROUND IT: `file-seq` walks a `java.io.File`, and `temp-dir`
+           ;; answers a path string (the same as the fixed path it replaced, which
+           ;; `io/file` had already turned into one by the time it got here).
+           (doseq [x (reverse (file-seq (io/file d)))]
              (try (io/delete-file x true) (catch Exception _ nil)))))))
 
 (defn- call!

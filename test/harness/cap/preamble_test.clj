@@ -20,11 +20,9 @@
 (def ^:private tmp-dirs (atom []))
 
 (defn- tmp-project! [tag]
-  (let [d (io/file (System/getProperty "java.io.tmpdir")
-                   (str "harness-preamble-" tag "-" (System/nanoTime)))]
-    (.mkdirs d)
+  (let [d (support/temp-dir (str "preamble-" tag))]
     (swap! tmp-dirs conj d)
-    (str d)))
+    d))
 
 (defn- spit!
   "Write CONTENT to PATH, creating parents. Returns PATH -- the fixtures below

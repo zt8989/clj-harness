@@ -108,12 +108,26 @@
     (io/delete-file f true)))
 
 (defn temp-dir
-  "A fresh, empty directory under the system temp directory, named for LABEL."
+  "A fresh, empty directory under the system temp directory, named for LABEL.
+
+  MKDTEMP -- `Files/createTempDirectory` -- AND NOT A NAME COMPOSED HERE. `java.io.tmpdir`
+  outlives this JVM, so a path built as `<tmpdir>/<label>` names THE SAME directory on
+  every run and in every process at once: the tree a run left behind after a crash is
+  one the next run silently inherits (replay-test had to delete a fixed directory by
+  hand for exactly this, and http-test's git fixture had to invent a per-JVM name so it
+  would stop running `git init` inside the previous run's repository), and two runs side
+  by side -- the suite and a `--scripted` walkthrough, say -- write into one directory
+  each. A clock in the name narrows the window and closes nothing: two processes read
+  the same clock. Asking the OS for a name nothing holds, in the same call that creates
+  it, is the one spelling that has neither problem.
+
+  THE DIRECTORY COMES BACK EMPTY, so the delete-then-mkdir a fixed path needed first has
+  nothing left to do -- and doing it anyway would take away the directory this just
+  handed back."
   [label]
-  (let [d (io/file (System/getProperty "java.io.tmpdir")
-                   (str "clj-harness-" label "-" (System/nanoTime)))]
-    (.mkdirs d)
-    (str d)))
+  (str (java.nio.file.Files/createTempDirectory
+        (str "clj-harness-" label "-")
+        (make-array java.nio.file.attribute.FileAttribute 0))))
 
 (defn shell-path
   "PATH spelled the way the shell this process spawns reads it: forward slashes.

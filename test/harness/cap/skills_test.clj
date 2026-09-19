@@ -43,11 +43,9 @@
 (defn- tmp-project!
   "A throwaway directory to bind a session to, tracked for teardown."
   [tag]
-  (let [d (io/file (System/getProperty "java.io.tmpdir")
-                   (str "harness-skills-" tag "-" (System/nanoTime)))]
-    (.mkdirs d)
+  (let [d (support/temp-dir (str "skills-" tag))]
     (swap! tmp-dirs conj d)
-    (str d)))
+    d))
 
 (use-fixtures :each
   ;; A HOME PER TEST: the skills a case plants live in a directory the fixture

@@ -21,10 +21,7 @@
 (use-fixtures :once support/with-builtins)
 
 (def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-refusals-test")))
-
-(io/delete-file root true)
-(.mkdirs (io/file root))
+  (support/temp-dir "hashline-refusals"))
 
 (def ^:private user-file (io/file (home/root) "harness.edn"))
 (def ^:private project-file (io/file root ".harness" "harness.edn"))
@@ -215,12 +212,20 @@
   (write! (str/join "\n" (lines 4)))
   (let [[_ _ c] (read!)]
     (write! (str/join "\n" ["line1" "CHANGED" "line3" "line4"]))
-    (let [out (content-of (replace! {:remove_from c :replacement_lines ["X"]}))]
-      (is (not (re-find #"[0-9a-f]{16}" out)) "no truncated digest")
-      (is (not (str/includes? out "0x")) "no pointer")
-      (is (not (re-find #"@[0-9a-f]{6,}" out)) "no java object identity")
-      (is (not (str/includes? out "hashline_")) "no table names")
-      (is (not (str/includes? out "Exception")) "no exception class names"))))
+    (let [out (content-of (replace! {:remove_from c :replacement_lines ["X"]}))
+          ;; THE FILE'S OWN PATH COMES OUT FIRST, and it is not an internal: the
+          ;; refusal opens by naming the file it refused about, which is the first
+          ;; thing above a model can act on. It is taken out for the scan below
+          ;; because a mkdtemp name ends in a long run of DIGITS, and digits are
+          ;; within `[0-9a-f]` -- so a scratch path matches a rule written for a
+          ;; truncated digest, and this case would report a leak that is only the
+          ;; name the test itself asked for.
+          said (str/replace out (path) "<the file>")]
+      (is (not (re-find #"[0-9a-f]{16}" said)) "no truncated digest")
+      (is (not (str/includes? said "0x")) "no pointer")
+      (is (not (re-find #"@[0-9a-f]{6,}" said)) "no java object identity")
+      (is (not (str/includes? said "hashline_")) "no table names")
+      (is (not (str/includes? said "Exception")) "no exception class names"))))
 
 ;; --------------------------------------------------------- files never read
 

@@ -19,10 +19,7 @@
 (use-fixtures :once support/with-builtins)
 
 (def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-undo-test")))
-
-(io/delete-file root true)
-(.mkdirs (io/file root))
+  (support/temp-dir "hashline-undo"))
 
 (def ^:private user-file (io/file (home/root) "harness.edn"))
 (def ^:private project-file (io/file root ".harness" "harness.edn"))

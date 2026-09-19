@@ -17,8 +17,7 @@
             [harness.infra.rg :as rg]
             [harness.kernel.tools :as tools]))
 
-(def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-glob-test")))
+(def ^:private root (support/temp-dir "glob"))
 
 (defn- rm-rf
   "Delete a directory tree. `clojure.java.io/delete-file` does NOT recurse: it
@@ -66,8 +65,8 @@
   "ROOT as a bound session's paths are spelled.
 
   `project/bind!` STORES the canonical form and `resolve-path` re-roots through it,
-  so a session bound to this tree answers with `/private/var/...` on macOS where
-  `java.io.tmpdir` said `/var/...`. Both spellings are stripped below rather than
+  so a session bound to this tree answers with `/private/var/...` on macOS where the
+  path mkdtemp handed back says `/var/...`. Both spellings are stripped below rather than
   betting on which one comes back: a name that failed to strip would compare as a
   full path, and the case would fail for a reason that has nothing to do with glob."
   []
@@ -79,7 +78,7 @@
   BOTH SIDES ARE PUT IN ONE SPELLING BEFORE ANY PREFIX IS STRIPPED, because the
   platform spells them differently: the answer's paths come back through
   `glob/tidy` (which is `java.io.File.getAbsoluteFile`, so backslashes on Windows),
-  while ROOT is `java.io.tmpdir` (which on macOS is `/var/...` where the
+  while ROOT sits under `java.io.tmpdir` (which on macOS is `/var/...` where the
   canonical form says `/private/var/...`). Stripping only the one spelling is how a
   name silently fails to strip and the case then compares a full path against a
   name."

@@ -24,10 +24,7 @@
            [org.slf4j LoggerFactory]))
 
 (defn- fresh-home [name]
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "clj-harness-log-test-" name "-" (System/currentTimeMillis)))]
-    (.mkdirs dir)
-    (str dir)))
+  (ts/temp-dir (str "log-test-" name)))
 
 (defn- log-file [root]
   (io/file root "logs" "harness.infra.log"))

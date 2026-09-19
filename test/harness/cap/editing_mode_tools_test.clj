@@ -20,20 +20,12 @@
 
 (use-fixtures :once support/with-builtins)
 
-(def ^:private root
-  (str (System/getProperty "java.io.tmpdir") "/harness-editing-mode-tools-test"))
+(def ^:private root (support/temp-dir "editing-mode-tools"))
 
 ;; A SECOND project directory, because the mode is a property of the DIRECTORY a
 ;; session is bound to -- two threads sharing one project share its mode, which is
 ;; the point of putting :editing in the project-level file at all.
-(def ^:private other-root
-  (str (System/getProperty "java.io.tmpdir") "/harness-editing-mode-tools-other"))
-
-
-(io/delete-file root true)
-(io/delete-file other-root true)
-(.mkdirs (io/file root))
-(.mkdirs (io/file other-root))
+(def ^:private other-root (support/temp-dir "editing-mode-tools-other"))
 
 (def ^:private user-file (io/file (home/root) "harness.edn"))
 

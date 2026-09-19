@@ -19,7 +19,7 @@
 
 (use-fixtures :once support/with-builtins)
 
-(def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-approval-test"))
+(def ^:private dir (support/temp-dir "approval"))
 
 (defn- drain [ch]
   (loop [acc []]
@@ -312,8 +312,13 @@
 ;; surface (approval is a workflow convention, not a security boundary).
 
 (defn- rm-r!
-  "Recursive delete, deepest first (io/delete-file cannot remove a non-empty
-  directory, and java.io.tmpdir outlives the JVM -- the replay-test lesson)."
+  "Recursive delete, deepest first -- `io/delete-file` cannot remove a non-empty
+  directory, and with `silently` true that refusal becomes a scheduled deleteOnExit,
+  so the one-line version leaves the tree where it was.
+
+  Between tests, not against a previous RUN: `dir` is a mkdtemp now (see
+  harness.test-support/temp-dir), and the residue this guards against is another test
+  in this namespace sharing the scratch directory."
   [d]
   (run! #(.delete ^java.io.File %)
         (sort-by (fn [^java.io.File f] (count (.getPath f))) >
@@ -323,9 +328,9 @@
   "Bind THR to a fresh project directory holding one readable file."
   [thr]
   (let [pdir (str dir "/fence-project")]
-    ;; rm-r first: tmpdir survives across JVM runs, and a leftover
-    ;; .harness/harness.edn from the ticket-03 tests would silently re-tighten
-    ;; or re-widen the fence for these ticket-02 tests.
+    ;; rm-r first: a leftover .harness/harness.edn -- from the ticket-03 tests above,
+    ;; which share this scratch directory -- would silently re-tighten or re-widen
+    ;; the fence for these ticket-02 tests.
     (rm-r! pdir)
     (.mkdirs (io/file pdir))
     (spit (str pdir "/inside.txt") "inside" :encoding "UTF-8")

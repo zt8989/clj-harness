@@ -21,9 +21,8 @@
 (use-fixtures :once support/with-builtins)
 
 (def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-grep-test")))
+  (support/temp-dir "hashline-grep"))
 
-(io/delete-file root true)
 (.mkdirs (io/file root "src"))
 (.mkdirs (io/file root ".git"))
 

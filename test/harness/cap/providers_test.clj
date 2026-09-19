@@ -1367,9 +1367,7 @@
   else earlier namespaces left are sitting in it. A test whose claim is 'this home
   has no store' has to own its home."
   [config providers f]
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "harness-settings-" (System/nanoTime)))]
-    (.mkdirs dir)
+  (let [dir (io/file (support/temp-dir "settings"))]
     (when (or config providers)
       (spit (io/file dir "config.edn") (support/config-text config providers) :encoding "UTF-8"))
     (with-redefs [home/root (constantly (str dir))]
@@ -1600,12 +1598,10 @@
   ;; and the key, and the DEFAULT root -- which is only reachable when
   ;; CLJ_HARNESS_HOME is absent, so the child is given a user.home of its own
   ;; rather than being pointed at the developer's real home.
-  (let [env-home (io/file (System/getProperty "java.io.tmpdir")
-                          (str "harness-settings-env-" (System/nanoTime)))
-        def-user (io/file (System/getProperty "java.io.tmpdir")
-                          (str "harness-settings-user-" (System/nanoTime)))
+  (let [env-home (io/file (support/temp-dir "settings-env"))
+        def-user (io/file (support/temp-dir "settings-user"))
         def-home (io/file def-user ".clj-harness")]
-    (doseq [d [(io/file env-home) def-home]] (.mkdirs d))
+    (doseq [d [def-home]] (.mkdirs d))
     (doseq [d [env-home def-home]]
       (spit (io/file d "config.edn") (support/config-text (cfg :alpha) reg) :encoding "UTF-8"))
 

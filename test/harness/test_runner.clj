@@ -102,19 +102,17 @@
   would tamper with what the fence tests are asking."
   []
   (or @tmp-home
-      (let [stamp (System/currentTimeMillis)
-            dir   (io/file (System/getProperty "java.io.tmpdir")
-                           (str "clj-harness-test-" stamp))
-            home' (io/file (System/getProperty "java.io.tmpdir")
-                           (str "clj-harness-test-home-" stamp))]
-        (.mkdirs dir)
-        (.mkdirs home')
+      ;; MKDIR-TEMP, NOT `tmpdir + name`: the pair belongs to THIS process, and a
+      ;; composed name would be the same path for the run happening beside it -- see
+      ;; harness.test-support/temp-dir, which is where the how and the why live.
+      (let [dir   (support/temp-dir "test")
+            home' (support/temp-dir "test-home")]
         (support/seed-config! dir)
-        (alter-var-root #'home/*root-override* (constantly (str dir)))
-        (alter-var-root #'home/*user-home-override* (constantly (str home')))
-        (reset! tmp-home (str dir))
-        (reset! tmp-user-home (str home'))
-        (str dir))))
+        (alter-var-root #'home/*root-override* (constantly dir))
+        (alter-var-root #'home/*user-home-override* (constantly home'))
+        (reset! tmp-home dir)
+        (reset! tmp-user-home home')
+        dir)))
 
 (defn- cleanup! []
   (doseq [dir (remove nil? [@tmp-home @tmp-user-home])]

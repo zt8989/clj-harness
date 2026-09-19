@@ -120,8 +120,14 @@
   [path]
   (let [dir (if path
               (io/file path)
-              (io/file (System/getProperty "java.io.tmpdir")
-                       (str "clj-harness-e2e-home-" (System/nanoTime))))]
+              ;; MKDIR-TEMP, NOT `tmpdir + name`: the home belongs to this server, and a
+              ;; name composed here is one the run beside it would compose too. Written out
+              ;; rather than taken from harness.test-support/temp-dir because that helper is
+              ;; a test/ namespace and this is dev/ tooling -- the same one call, one place
+              ;; it may not borrow from.
+              (io/file (str (java.nio.file.Files/createTempDirectory
+                             "clj-harness-e2e-home-"
+                             (make-array java.nio.file.attribute.FileAttribute 0)))))]
     (.mkdirs dir)
     (alter-var-root #'home/*user-home-override* (constantly (str dir)))
     (str dir)))

@@ -34,10 +34,7 @@
   [thread-id]
   (remove #(= :built-in (:source %)) (vals (hooks/effective-hooks thread-id))))
 
-(def ^:private root (str (System/getProperty "java.io.tmpdir") "/harness-hooks-test"))
-
-(io/delete-file root true)
-(.mkdirs (io/file root))
+(def ^:private root (support/temp-dir "hooks"))
 
 (defn- tmp [name] (str root "/" name))
 

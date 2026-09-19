@@ -9,6 +9,7 @@
             [harness.infra.home :as home]
             [harness.kernel.llm :as llm]
             [harness.edge.replay :as replay]
+            [harness.test-support :as support]
             [harness.wire :as wire]))
 
 ;; The log lines below are produced by the REAL emitter, not hand-written frames. A
@@ -275,8 +276,7 @@
 
 ;; ------------------------------------------------------------------ seam B
 
-(def ^:private dir (str (System/getProperty "java.io.tmpdir") "/harness-replay-test"))
-(io/delete-file dir true)
+(def ^:private dir (support/temp-dir "replay"))
 
 (defn- write-log! [thread-id lines]
   (let [f (io/file dir (str thread-id ".jsonl"))]
@@ -340,14 +340,12 @@
     (is (str/includes? (str (ex-message e)) (.getAbsolutePath f)))))
 
 (deftest locate-finds-a-stem-anywhere-in-the-tree
-  (let [tdir (str (System/getProperty "java.io.tmpdir") "/harness-replay-locate")
-        ;; java.io.tmpdir outlives this JVM, so a previous run's tree would still
-        ;; be here and this test would count another run's files -- which is
-        ;; exactly the two-workspaces case it is about to create on purpose.
-        ;; Deepest-first, then fresh, the same discipline the listing test uses.
-        _    (run! #(.delete ^java.io.File %)
-                   (sort-by (fn [^java.io.File f] (count (.getPath f))) >
-                            (file-seq (io/file tdir))))
+  (let [tdir (support/temp-dir "replay-locate")
+        ;; NOTHING TO CLEAR FIRST, and on this test that is not tidiness: a tree
+        ;; this one did not make reads as a SECOND WORKSPACE holding the same stem,
+        ;; which is precisely the case the last half below creates on purpose. The
+        ;; deepest-first delete that used to stand here was guarding against a
+        ;; previous run's tree; mkdtemp is what makes it unnecessary.
         nested (io/file tdir "_Users_me_proj")]
     (.mkdirs nested)
     (spit (io/file nested "t-deep.jsonl") "x" :encoding "UTF-8")
@@ -378,15 +376,11 @@
 (deftest the-thread-listing-reads-the-tree
   ;; A tree of its OWN: the other tests in this namespace write logs into dir, and
   ;; a listing test that shared it would count their lines.
-  (let [ldir (str (System/getProperty "java.io.tmpdir") "/harness-replay-listing")]
-    ;; io/delete-file cannot remove a NON-EMPTY directory, and java.io.tmpdir
-    ;; outlives this JVM -- the files this test writes on one run would sit
-    ;; there on the next and break the empty-directory assertion. Remove the
-    ;; tree deepest-first, then start fresh.
-    (run! #(.delete ^java.io.File %)
-          (sort-by (fn [^java.io.File f] (count (.getPath f))) >
-                   (file-seq (io/file ldir))))
-    (.mkdirs (io/file ldir))
+  (let [ldir (support/temp-dir "replay-listing")]
+    ;; Empty by construction: the first assertion below is that an empty tree answers
+    ;; an empty list, and one file left by a previous run would make it a test about
+    ;; something else. That is what the deepest-first delete here used to be for --
+    ;; see locate, above, for the same reasoning.
     (testing "an empty tree is an empty list, not an error"
       (is (= [] (replay/threads ldir))))
     (testing "a MISSING tree is also an empty list -- a fresh install is normal"

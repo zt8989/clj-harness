@@ -19,9 +19,8 @@
 (use-fixtures :once support/with-builtins)
 
 (def ^:private root
-  (str (io/file (System/getProperty "java.io.tmpdir") "harness-hashline-write-test")))
+  (support/temp-dir "hashline-write"))
 
-(io/delete-file root true)
 (.mkdirs (io/file root "sub"))
 
 (def ^:private user-file (io/file (home/root) "harness.edn"))
