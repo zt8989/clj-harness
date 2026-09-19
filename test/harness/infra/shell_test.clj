@@ -81,6 +81,38 @@
       (is (= 0 exit) (str "the command ran (stderr: " (str/trim (str err)) ")"))
       (is (str/includes? (str out) "harness-shell-test")))))
 
+(deftest a-login-shells-logout-does-not-clear-the-pipe
+  ;; Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN `exit`
+  ;; ends it -- every COMPOUND command, since the last `exit` makes bash itself the
+  ;; thing that ends; a lone command is exec-optimized away and never reads the file
+  ;; -- runs /usr/bin/clear there when the shell believes it is one nesting level
+  ;; deep, i.e. a console. The wipe (ESC[H ESC[2J ESC[3J) rides the same stdout pipe
+  ;; as the command's own output: a jobs record that ends on a screen wipe, a hook
+  ;; answer with a clear in it. `with-shlvl!` pins the count above one -- INNER
+  ;; SHELL -- and the logout file, written for a person's last window, stands down.
+  ;; This is how the bug was found (2026-09-19: on Windows the jobs record of
+  ;; `echo one; echo two; echo three; exit 0` carried a wipe as its last line, two
+  ;; cases red; the same suite was green on mac, which ships no such file).
+  (testing "the pin reaches the child's environment and not this process's"
+    (let [before (System/getenv "SHLVL")]
+      (shell/with-shlvl! (fn []))
+      (is (= before (System/getenv "SHLVL")) "the parent's own environment is untouched")))
+  (testing "a compound command that ends the shell itself leaves no wipe in the pipe"
+    (let [{:keys [exit out]} (shell/run {:command "echo one; echo two; exit 0"
+                                         :timeout-ms 15000})]
+      (is (= 0 exit))
+      (is (not (re-find #"\x1B\[" (str out))) "no escape sequence rides the command's stdout")))
+  (testing "and the long-lived shape is pinned the same way"
+    (let [h (shell/start {:command "echo last; exit 0" :shape :shell})]
+      (try
+        (loop [v ((:next-line h) 5000), lines []]
+          (cond
+            (shell/timeout? v) (recur ((:next-line h) 5000) lines)
+            (shell/eof? v)     (is (not-any? #(re-find #"\x1B\[" %) lines)
+                                   "no line the record would hold is a screen wipe")
+            :else              (recur ((:next-line h) 5000) (conj lines v))))
+        (finally ((:close! h)))))))
+
 (deftest a-command-that-does-not-finish-is-stopped-together-with-what-it-started
   ;; THE CHILD IS NOT THE COMMAND. `<shell> -lc "..."` means the process this
   ;; namespace holds is a shell, and the one a person means by "the command" is its

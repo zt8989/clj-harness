@@ -34,6 +34,14 @@
   which cannot run is worse than one that admits there is none, so the chain has
   no guessed tail.
 
+  AND A LOGIN SHELL DOES ONE MORE THING ON THE WAY OUT, which is why every spawn
+  below pins SHLVL first: Git for Windows ships /etc/bash.bash_logout, and a
+  `bash -lc` whose OWN `exit` ends it (a compound command; a lone one is
+  exec-optimized away and never reads the file) sees `SHLVL=1` there and runs
+  /usr/bin/clear -- whose ESC[H ESC[2J ESC[3J lands in the same pipe as the
+  command's output. See `with-shlvl!`, and shell_test's case about it. mac ships
+  no such file, which is why this whole failure named Windows only.
+
   WHAT A SHELL IS, AS THIS NAMESPACE ANSWERS IT:
 
     {:command \"C:\\Program Files\\Git\\bin\\bash.exe\"   ; what is spawned
@@ -100,6 +108,55 @@
   "Does COMMAND name a place rather than a program to go looking for on PATH?"
   [command]
   (boolean (re-find #"[\\/]" (str command))))
+
+(def ^:dynamic *shlvl-override*
+  "The SHLVL with-shlvl! would pin, as a string -- nil when there is no override.
+  Read by `child-env` against ProcessBuilder's ALREADY-COPIED environment, so the
+  pin reaches exactly one child and this process's real environment is untouched."
+  nil)
+
+(defn with-shlvl!
+  "Run F with this process's SHLVL in the child's environment bumped by one, and
+  only that: the pin is delivered through ProcessBuilder's child environment, not
+  through this process's own.
+
+  WHY IT EXISTS: a `bash -lc` that outlives the command -- every COMPOUND command,
+  since the last `exit` in it makes bash itself the thing that ends -- reads
+  /etc/bash.bash_logout on its way out, and Git for Windows ships that file with
+
+    if [ \"$SHLVL\" = 1 ]; then clear; fi
+
+  SHLVL names how far a shell is nested, and a JVM that does not say is read as
+  one shell deep -- a CONSOLE, to that test. So /usr/bin/clear runs, and its
+  ESC[H ESC[2J ESC[3J lands in the same stdout pipe the command's own output is
+  being pumped down: a jobs record that ends on a screen wipe, a hook answer with
+  a clear in it. Pinning the count above one says INNER SHELL, and the logout file
+  -- written for a person's last window -- stands down. mac ships no such file,
+  which is why the same suite is green there untouched.
+
+  `inc` is the honest number rather than a lie like 2-with-no-shell-between: one
+  shell is about to be a child of this process, so one is the nesting it will see.
+  And it is a here-and-not-elsewhere fix because it is a property of SPAWNING --
+  of who is between the command and a console -- not of any one caller."
+  [f]
+  (let [shlvl (System/getenv "SHLVL")
+        n     (or (try (Long/parseLong (str/trim (str shlvl))) (catch NumberFormatException _ nil))
+                  0)]
+    (binding [*shlvl-override* (str (inc n))]
+      (f))))
+
+(defn- child-env
+  "PB's environment with the SHLVL pin applied when there is one. Mutating the map
+  ProcessBuilder.hands out is the documented way to set a child's environment --
+  it is a copy made at call time, not a view of this process's own. The Map hint
+  is load-bearing: the concrete class on Windows is ProcessEnvironment, whose own
+  reflection signature does not resolve, and the interface call is the documented
+  spelling."
+  [^java.lang.ProcessBuilder pb]
+  (when-let [v *shlvl-override*]
+    (let [^java.util.Map e (.environment pb)]
+      (.put e "SHLVL" v)))
+  pb)
 
 (defn- wsl-launcher?
   "Is PATH Windows' own bash.exe -- the WSL launcher, whose filesystem is not this
@@ -306,8 +363,13 @@
   'it exited 0'."
   [{:keys [command stdin dir timeout-ms]}]
   (let [r  (require-shell!)
-        pb (doto (ProcessBuilder. (vec (concat [(:command r)] (:argv-prefix r) [command])))
-             (.redirectErrorStream false))
+        ;; THE PIN WRAPS THE PB CONSTRUCTION, AND NOTHING ELSE: the child's
+        ;; environment is copied and adjusted in that one moment, and neither the
+        ;; wait nor the drains below has a use for it.
+        pb (with-shlvl!
+             #(child-env
+               (doto (ProcessBuilder. (vec (concat [(:command r)] (:argv-prefix r) [command])))
+                 (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
         p  (.start pb)
         w  (future
@@ -430,8 +492,14 @@
   `:env` is ADDED to the inherited environment rather than replacing it: a server
   declared with one token still needs PATH to find its own runtime."
   [{:keys [command dir env shape] :or {shape :program}}]
-  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv shape command)))
-             (.redirectErrorStream false))
+  (let [;; THE SAME PIN `run` GETS. A long-lived `:shell` command -- `jobs/start!`
+        ;; hands `start!` its compound commands exactly this way -- is a login
+        ;; shell whose own `exit` ends it, and without the pin its logout file's
+        ;; `clear` lands in the record as a last line of output.
+        pb (with-shlvl!
+             #(child-env
+               (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv shape command)))
+                 (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
         _  (when (seq env) (.putAll (.environment pb) (into {} env)))
         p  (.start pb)
