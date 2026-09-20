@@ -203,7 +203,7 @@
 (defn- select
   "The value of the I-TH pool member, 0-based. Callers have already range-checked."
   ^long [^long i]
-  (let [{:keys [bits ^longs select]} @pool
+  (let [{:keys [^bytes bits ^longs select]} @pool
         block (loop [lo 0, hi (dec (alength select))]
                 (if (>= lo hi)
                   lo
@@ -266,7 +266,7 @@
   caller wants the same answer to both: this is not a name we hand out."
   [^String anchor]
   (when-let [v (value-of anchor)]
-    (let [{:keys [bits ^longs select]} @pool]
+    (let [{:keys [^bytes bits ^longs select]} @pool]
       (when (bit-test (bit-and (aget bits (quot v 8)) 0xff) (bit-and v 7))
         (let [block (quot v superblock-bits)
               from  (* block superblock-bytes)]
