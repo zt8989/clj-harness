@@ -67,8 +67,8 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 
 - **缺失与空是同一件事**（= 什么都没说）；**存在却写坏一律指名绝对路径硬失败**。四个 `.edn` 都现读，
   改完不用重启；旧形状的 `config.edn` 启动时自动挪进 `:default`（旧的那份留作 `config.edn.bak`）。
-- **`config.edn` 不用自己造**：第一次启动会替你写一份带注释的空配置；`config.edn.example` 与
-  `harness.edn.example` 是带完整注释的参考起点。
+- **`config.edn` 不用自己造**：第一次启动会替你写一份带注释的空配置；`*.edn.example`（config /
+  harness / hooks / mcp）是带完整注释的参考起点。
 - **技能与指令读的是 OS 家目录**（`~/AGENTS.md`、`~/.agents/skills/`），**不跟随 `CLJ_HARNESS_HOME`**。
 - 首次使用：往 `~/.clj-harness/.env` 填 `HARNESS_API_KEY`（或某家厂商自己的 `<ID>_API_KEY`）。
 
