@@ -20,9 +20,15 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 
 **铁律：测试期间 `~/.clj-harness` 只读——一个字都不许写进去。** 两个进程抢同一个 `harness.db` 的那次，
 开发者 18M 的库被隔离重建清空了。后端 runner（`harness.test-runner`）已自动把配置根和 OS home
-指到**每进程唯一的临时目录**（跑完即删、结束校验真家未动），并行跑多个 JVM 也互不干扰——
-**不要**再手设 `CLJ_HARNESS_HOME` 指向固定路径，那反而让并行进程抢同一路径。
+指到**每进程唯一的临时目录**（跑完即删），并行跑多个 JVM 也互不干扰——**不要**再手设
+`CLJ_HARNESS_HOME` 指向固定路径，那反而让并行进程抢同一路径。
 自己的 `dev/scratch_*.clj` 起手先调 `(harness.test-runner/isolate!)`，走同一协议。
+
+跑完的判据分两半，因为它们说的不是一件事：**这个进程开过真家的库没有**（`harness.infra.db`
+记着本进程解析过的每一个库路径——开过就是 `ISOLATION FAILURE`，按名字报出来），以及**那个文件
+动没动**（`[bytes mtime]` 前后对一次）。文件动了而这个进程没开过它 ⇒ 那是别人写的：**你自己那个
+活着的 harness 会话**就在往同一个库里写锚点、待办、会话行 ⇒ 只报一行 `ISOLATION NOTE`，
+**不算失败**。见 `docs/rules/testing.md`。
 
 ### 单元测试（原生命令）
 
