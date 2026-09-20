@@ -77,6 +77,7 @@ import {
   useAgUiInterrupts,
   useAgUiRuntime,
 } from "@assistant-ui/react-ag-ui";
+import { cn } from "cn";
 import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -91,7 +92,7 @@ import {
   isParkedInterrupt,
 } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
-import { SidebarOpenButton, sidebarStartsOpen } from "@/components/sidebar-toggle";
+import { SidebarOpenButton, isWideWindow } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
 import { type SidebarListing } from "@/lib/projects";
@@ -419,16 +420,17 @@ const SessionColumn: FC<{
             assistant state in this body throws. The browser said so. */}
         <div
           data-slot="view-switch"
-          data-folded={folded ? "" : undefined}
-          className={
-            folded
-              ? // `ps-11` clears the 8px inset plus the 32px control in the corner. It
-                // keeps the tabs from being covered by a button that is drawn on top of
-                // them -- which is not a thing a stylesheet can see, so the two numbers
-                // are written here next to the class that produces the other one.
-                "flex shrink-0 items-center gap-1 border-b border-border py-1.5 pe-3 ps-11"
-              : "flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5"
-          }
+          // ONE CLASS STRING, ONE ADDITION, built rather than written twice -- `cn` is the
+          // same merge the copied shadcn primitives use, so there is no second place for
+          // the bar's own style to drift out of step with this one.
+          className={cn(
+            "flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5",
+            // `ps-11` CLEARS THE FLOATING CONTROL: 8px of inset plus its 32px, over the
+            // `px-3` above (which `ps-` replaces on that side). The tabs must not end up
+            // underneath a button the page draws on top of them -- and a stylesheet cannot
+            // see that, so the numbers that produce it are next to the class they clear.
+            folded && "ps-11",
+          )}
         >
           {(
             [
@@ -509,20 +511,48 @@ export function App() {
   // preference about sessions, and a stored one would surprise a reader on the
   // next launch.
   const [view, setView] = useState<"conversation" | "trajectory">("conversation");
-  // WHETHER THE SIDEBAR IS ON SCREEN, and it is the PAGE's state rather than the
-  // sidebar's for the one reason a component cannot solve: while the sidebar is
-  // folded away it does not exist, so it cannot draw the control that brings it
-  // back -- the floating corner button does, and that button is this file's. The
-  // pair and what they agree on are in `components/sidebar-toggle.tsx`.
+  // WHETHER THE SIDEBAR IS FOLDED AWAY, and it is the PAGE's state rather than the
+  // sidebar's for the one reason a component cannot solve: a folded sidebar is a hidden
+  // subtree, so it cannot draw the control that unfolds it -- the floating corner button
+  // does, and that button is this file's. The pair and what they agree on are in
+  // `components/sidebar-toggle.tsx`.
   //
-  // IT STARTS FROM THE WINDOW (`sidebarStartsOpen`, which is where the one reading of
-  // it lives): there on a wide one, folded away on a phone-sized one.
+  // IT STARTS FROM THE WINDOW (`isWideWindow`): there on a wide one, folded away on a
+  // phone-sized one. `useState` reads that ONCE, for the first render -- after that the
+  // person owns the bit, and the window only decides how it is DRAWN (`lg:` classes) and
+  // which of the drawer's courtesies apply (`foldDrawer` below).
   //
   // TRANSIENT, AND DELIBERATELY NOT PERSISTED, the same call `view` above makes:
   // folding the sidebar is a way of looking at the page, not a fact about the work,
   // and a remembered fold would meet somebody in a wide window with their project
   // list hidden for a reason they set on a narrow one.
-  const [sidebarOpen, setSidebarOpen] = useState(sidebarStartsOpen);
+  const [folded, setFolded] = useState(() => !isWideWindow());
+
+  /// FOLD IT IF THIS WINDOW HAS A DRAWER TO FOLD. On a wide window the sidebar is a
+  /// column beside the conversation and nothing is covering anything, so closing it on a
+  /// pick or on Escape would be taking the page apart for no reason; on a narrow one the
+  /// panel is over the conversation and staying open is what makes a pick look like it
+  /// did nothing.
+  ///
+  /// THE WIDTH IS READ NOW, at the moment of the decision, and not remembered from mount:
+  /// a window dragged across the breakpoint since then is exactly the case a cached answer
+  /// gets wrong. This is one of the three readers named in `isWideWindow`.
+  const foldDrawer = useCallback(() => {
+    if (!isWideWindow()) setFolded(true);
+  }, []);
+
+  // ESCAPE CLOSES THE DRAWER, because that is what Escape does to a panel drawn over the
+  // page. A Radix overlay that already took this key -- the remove-project dialog, a
+  // picker -- calls `preventDefault` before it dismisses, so the drawer does not fold out
+  // from under a dialog that just closed; `defaultPrevented` is that hand-off.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      foldDrawer();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [foldDrawer]);
 
   /// Show a session, hosting it if it has no host yet. `hydrate` says whether
   /// there is a conversation under that id to rebuild -- true when a row from the
@@ -584,17 +614,29 @@ export function App() {
 
   /// Show a session this client has just minted (and, for every path that has a
   /// project, just bound): nothing to rebuild, so no load.
+  ///
+  /// THIS AND `showExisting` ARE THE SIDEBAR'S TWO DOORS, and because they are, BOTH CLOSE
+  /// THE DRAWER on a narrow window (`foldDrawer`): the panel listed the conversation, and
+  /// leaving it over the one just chosen is a pick that looks like it did nothing.
+  ///
+  /// THE RESTORE DOES NOT COME THROUGH HERE -- `onListed` calls `show` directly -- and that
+  /// is the distinction worth keeping: a page landing on the session it already remembers
+  /// has nobody to get out of the way of.
   const showFresh = useCallback(
     (id: string) => {
+      foldDrawer();
       show(id, "none");
     },
-    [show],
+    [foldDrawer, show],
   );
+  /// The same door for a session that HAS a conversation: rebuild it once, through the
+  /// read that refuses to invent one for an id with no log (`HistoryRead`).
   const showExisting = useCallback(
     (id: string) => {
+      foldDrawer();
       show(id, "rebuild");
     },
-    [show],
+    [foldDrawer, show],
   );
 
   /// THE SESSION THE PAGE REMEMBERS, read ONCE at mount, and null once the restore has
@@ -672,41 +714,49 @@ export function App() {
           `components/sidebar-toggle.tsx`), so this row is the box they are placed
           against -- and it is the one element that knows the viewport's height. */}
       <div className="relative flex h-dvh">
-        {sidebarOpen ? (
-          <>
-            {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
-                over the conversation: a panel covering what you were reading needs a
-                way out that is not a hunt for the corner, and tapping beside it is
-                the gesture people already have. On a wide window the sidebar is a
-                column, nothing is covered, and `lg:hidden` keeps this from swallowing
-                the clicks of the conversation beside it. It is `aria-hidden` because
-                it carries no information: it is the second way to press the collapse
-                button, and that button is the one with a name. */}
-            <div
-              data-slot="sidebar-backdrop"
-              aria-hidden={true}
-              onClick={() => setSidebarOpen(false)}
-              className="absolute inset-0 z-20 bg-black/30 lg:hidden"
-            />
-            {/* OUTSIDE every runtime provider, because it manages ALL sessions:
-                its rows, their refusal sentences, and the projects they belong to.
-                It used to sit inside the one provider only to reach
-                `runtime.threads.switchToThread`, and it no longer has one. */}
-            <Sidebar
-              currentThreadId={roster.shown}
-              onListed={onListed}
-              statuses={statuses}
-              openErrors={openErrors}
-              onShow={showExisting}
-              onShowFresh={showFresh}
-              onCollapse={() => setSidebarOpen(false)}
-            />
-          </>
-        ) : (
-          // THE WAY BACK, and it lives here rather than in the sidebar for the
-          // reason the state does: there is no sidebar on screen to hold it.
-          <SidebarOpenButton onOpen={() => setSidebarOpen(true)} />
+        {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
+            over the conversation: a panel covering what you were reading needs a
+            way out that is not a hunt for the corner, and tapping beside it is
+            the gesture people already have. On a wide window the sidebar is a
+            column, nothing is covered, and `lg:hidden` keeps this from swallowing
+            the clicks of the conversation beside it. It is `aria-hidden` because
+            it carries no information: it is the second way to press the collapse
+            button, and that button is the one with a name. */}
+        {!folded && (
+          <div
+            data-slot="sidebar-backdrop"
+            aria-hidden={true}
+            onClick={() => setFolded(true)}
+            className="absolute inset-0 z-20 bg-black/30 lg:hidden"
+          />
         )}
+        {/* OUTSIDE every runtime provider, because it manages ALL sessions:
+            its rows, their refusal sentences, and the projects they belong to.
+            It used to sit inside the one provider only to reach
+            `runtime.threads.switchToThread`, and it no longer has one.
+
+            AND IT IS NEVER UNMOUNTED, folded or not -- `folded` is a `hidden` class
+            inside it, not a missing element. Its `refresh` is the only reader of
+            `GET /api/projects`, and that reading is where the mount restore learns
+            whether the remembered session still exists (`onListed`): a phone-sized
+            window starts folded, so unmounting it here would leave exactly those
+            windows unable to restore anything, with the remembered id going stale
+            until somebody unfolded the list. `components/sidebar.tsx` argues the
+            same property from its own side. */}
+        <Sidebar
+          currentThreadId={roster.shown}
+          onListed={onListed}
+          statuses={statuses}
+          openErrors={openErrors}
+          onShow={showExisting}
+          onShowFresh={showFresh}
+          folded={folded}
+          onCollapse={() => setFolded(true)}
+        />
+        {/* THE WAY BACK, and it lives here rather than in the sidebar for the
+            reason the state does: a folded sidebar is hidden, and a hidden subtree
+            cannot draw a control that is meant to be seen. */}
+        {folded && <SidebarOpenButton onOpen={() => setFolded(false)} />}
         {/* `min-w-0` IS LOAD-BEARING, not tidiness: a flex item's automatic minimum
             width is its content's min-content width, and the trajectory's rows are
             single-line mono JSON with no spaces -- so without this the column
@@ -728,7 +778,7 @@ export function App() {
                 threadId={host.id}
                 view={view}
                 onView={setView}
-                folded={!sidebarOpen}
+                folded={folded}
               />
             </SessionHost>
           ))}

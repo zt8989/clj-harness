@@ -287,10 +287,18 @@ type SidebarProps = {
   /// same question twice to get the same bytes.
   onListed: (listing: SidebarListing) => void;
   /// FOLD THIS COLUMN AWAY. The sidebar does not own that state and cannot put itself
-  /// back -- a component cannot draw its own way back after it has been unmounted --
-  /// so folding is a request to the page, which is also what draws the floating
-  /// control that unfolds it (see `components/sidebar-toggle.tsx`, where the pair and
-  /// the `aria-controls` they share are explained).
+  /// back -- a folded sidebar is a hidden subtree, which cannot draw a visible control --
+  /// so folding is a request to the page, which is also what draws the floating control
+  /// that unfolds it (see `components/sidebar-toggle.tsx`, where the pair and the
+  /// `aria-controls` they share are explained).
+  ///
+  /// FOLDED MEANS HIDDEN, NOT UNMOUNTED, and that is load-bearing rather than thrift:
+  /// this component's `refresh` is the ONE reader of `GET /api/projects`, and the page's
+  /// mount restore learns whether the session it remembers still exists from exactly that
+  /// reading (`app.tsx`, `onListed`). A fold that unmounted this would leave a phone-sized
+  /// window unable to restore anything -- and would throw away the list's own state (where
+  /// it was scrolled, which projects were folded open) on every fold.
+  folded: boolean;
   onCollapse: () => void;
 };
 
@@ -317,6 +325,7 @@ export const Sidebar: FC<SidebarProps> = ({
   onShow,
   onShowFresh,
   onListed,
+  folded,
   onCollapse,
 }) => {
   const { t } = useTranslation();
@@ -763,10 +772,17 @@ export const Sidebar: FC<SidebarProps> = ({
       // state: below `lg` this column FLOATS OVER the conversation instead of taking a
       // 288px bite out of it, because a phone-sized window has no room to give. That is
       // why the fold is worth having at all there, and why the unfolding control lives
-      // outside this component: while this element is away, something has to be on
-      // screen to ask for it back (`app.tsx` draws the floating corner button, and the
-      // backdrop it sits over).
-      className="bg-background absolute inset-y-0 start-0 z-30 flex h-full w-72 shrink-0 flex-col border-e lg:static lg:z-auto"
+      // outside this component: a hidden subtree cannot draw a control meant to be seen.
+      //
+      // FOLDED IS `hidden` AND NOT A MISSING ELEMENT -- `display: none` is what takes it
+      // out of the accessibility tree, and (unlike unmounting it) what keeps the list's own
+      // state: where it was scrolled, which projects were open, what was typed into the
+      // escape hatch. See the `folded` prop for why the difference is a correctness one.
+      className={
+        folded
+          ? "hidden"
+          : "bg-background absolute inset-y-0 start-0 z-30 flex h-full w-72 shrink-0 flex-col border-e lg:static lg:z-auto"
+      }
     >
       <header
         data-slot="sidebar-header"

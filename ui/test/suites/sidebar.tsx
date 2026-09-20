@@ -256,10 +256,11 @@ const cases: Case[] = [
       expect(attrOf(openControl("en"), "sidebar-open", "aria-controls")).toBe(SIDEBAR_ID);
       expect(attrOf(collapseControl("en"), "sidebar-collapse", "aria-controls")).toBe(SIDEBAR_ID);
 
-      // AND EACH REPORTS THE STATE IT IS OFFERING, which is not the state it is in: the
-      // control that exists only while the sidebar is away asks for it to be there
-      // (`false` -> expanded), and the one in the header asks for the opposite. Swapping
-      // the two would read as a control that lies about what pressing it does.
+      // AND EACH REPORTS THE STATE OF THE REGION IT NAMES (`aria-expanded` is that reading,
+      // not a statement of what pressing the button would do): the control that exists only
+      // while the sidebar is folded names a collapsed region and says `false`; the one in
+      // the header names the expanded one and says `true`. Swapping them would have a
+      // screen reader announce the opposite of what is on screen.
       expect(attrOf(openControl("en"), "sidebar-open", "aria-expanded")).toBe("false");
       expect(attrOf(collapseControl("en"), "sidebar-collapse", "aria-expanded")).toBe("true");
 

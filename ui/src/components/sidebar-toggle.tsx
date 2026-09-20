@@ -15,8 +15,8 @@
 // scrolls away with the conversation is one people have to go looking for. It
 // carries `z-40` so it sits above the column it floats over, a border and a
 // translucent background so it stays legible over whatever is behind it, and it is
-// drawn by the PAGE rather than by the sidebar: a component cannot draw its own
-// way back after it has been unmounted.
+// drawn by the PAGE rather than by the sidebar: a folded sidebar is a hidden
+// subtree, and a hidden subtree cannot draw a control that is meant to be seen.
 //
 // THE COLLAPSE BUTTON IS THE SIDEBAR'S HEADER'S, next to "New task" and the two
 // icon buttons, because that is where a person looks for the way out of a panel.
@@ -37,9 +37,9 @@
 // NOTHING HERE DECIDES HOW THE FOLD IS DRAWN, and the narrow presentation -- the
 // sidebar floating over the conversation instead of narrowing it, with a backdrop
 // behind it -- is a breakpoint in `sidebar.tsx`'s own classes and `app.tsx`'s. There
-// is no resize listener to keep mounted for a fact CSS already has: what this module
-// reads the viewport for is the one thing a media query cannot answer, which is what
-// the state should be INITIALIZED to (see `sidebarStartsOpen`).
+// is no resize listener to keep mounted for a fact CSS already has: the one thing
+// this module reads the viewport for is the set of decisions CSS CANNOT make, and
+// each is read at the moment it is made (`isWideWindow` names all three).
 import { PanelLeftCloseIcon, PanelLeftIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
@@ -60,21 +60,28 @@ export const SIDEBAR_ID = "app-sidebar";
 /// readers, rather than two numbers that happen to agree today.
 const WIDE_ENOUGH = "(min-width: 64rem)";
 
-/// WHETHER THE SIDEBAR STARTS OPEN ON THIS PAGE -- the one thing about the fold that
-/// CSS cannot answer, because a media query can say how the column is DRAWN and the
-/// fold is STATE, and state has to be initialized before anything is drawn.
+/// WHICH SHAPE THIS WINDOW HAS ROOM FOR: `true` beside the conversation (a column),
+/// `false` over it (a drawer).
 ///
-/// READ ONCE, AT MOUNT, and never again: there is no resize listener. A window dragged
-/// narrower keeps the sidebar where the person left it -- the CSS turns it into the
-/// floating panel, and the backdrop gives it a way out -- so this decides only the
-/// FIRST answer. On a wide window that answer is "there", and on a phone-sized one the
-/// page opens on the conversation with the floating control in the corner, which is the
-/// whole of the phone's shape: the list is one tap away instead of being the thing you
-/// have to dismiss first.
+/// READ ONE SHOT, AT THE MOMENT SOMETHING NEEDS TO KNOW -- the first render, a pick, an
+/// Escape -- so the answer is always this window's NOW and there is no listener to keep
+/// mounted for a fact CSS already has. The DRAWING of the two shapes is still the `lg:`
+/// classes and nothing here: both readers spell `64rem`, so there is one breakpoint.
 ///
-/// NO WINDOW (this suite's node process) ANSWERS `true`, which is the state that needs
-/// no viewport to be the right answer.
-export function sidebarStartsOpen(): boolean {
+/// THREE THINGS ASK, and each has to, because each is a thing that is right in one shape
+/// and wrong in the other:
+///
+///   * the INITIAL state of the fold (`app.tsx`): a phone-sized window opens on the
+///     conversation with the floating control in the corner, which is the whole of the
+///     phone's shape -- the list is one tap away instead of being the thing you have to
+///     dismiss first;
+///   * whether a PICK has to close the panel it was made in (there is nothing to close
+///     when the sidebar is a column beside the conversation);
+///   * whether ESCAPE closes it, for the same reason.
+///
+/// NO WINDOW (this suite's node process) ANSWERS `true`: the answer that needs no viewport
+/// to be the right one.
+export function isWideWindow(): boolean {
   return typeof window === "undefined" ? true : window.matchMedia(WIDE_ENOUGH).matches;
 }
 
@@ -93,9 +100,10 @@ export const SidebarOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
       size="icon"
       data-slot="sidebar-open"
       aria-controls={SIDEBAR_ID}
-      // The button EXISTS only in the folded state -- `app.tsx` draws it when the
-      // sidebar is away -- so the state it reports is the one it is asking for, not
-      // a state it is in: pressing it expands.
+      // `aria-expanded` REPORTS THE STATE OF THE REGION IT NAMES -- not what pressing the
+      // button does. This control is drawn only while the sidebar is folded, so the
+      // region is collapsed and the honest reading is `false`; a screen reader then says
+      // "collapsed, button", which is exactly what the person is looking at.
       aria-expanded={false}
       onClick={onOpen}
       title={t("sidebar.open")}
@@ -119,8 +127,8 @@ export const SidebarCollapseButton: FC<{ onCollapse: () => void }> = ({
       size="icon"
       data-slot="sidebar-collapse"
       aria-controls={SIDEBAR_ID}
-      // Drawn only while the sidebar is open, so this one reports the expanded
-      // state for the same reason the open button reports the folded one.
+      // `true`: the region this names is on screen and expanded (see the open button for
+      // why this is the region's state and not the button's intention).
       aria-expanded={true}
       onClick={onCollapse}
       title={t("sidebar.collapse")}
