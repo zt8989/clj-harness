@@ -45,6 +45,10 @@ cd ui && npm run typecheck # tsc
 cd ui && npm run build     # tsc + vite
 ```
 
+**后端一轮跑有硬限制**：一个命名空间超 **300s**（`CLJ_HARNESS_TEST_NAMESPACE_TIMEOUT_SECS`）、整轮超
+**1800s**（`CLJ_HARNESS_TEST_RUN_TIMEOUT_SECS`）就点名卡住的那家、打出它当时的栈，然后**退出 2**——
+0 绿、1 红、2 撞限制。细则与「为什么这么设计」：`docs/rules/testing.md`。
+
 ### E2E 走查（脚本）
 
 ```bash
