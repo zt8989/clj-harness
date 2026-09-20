@@ -115,8 +115,30 @@
 
 ## 状态
 
-**2026-09-20 立票，尚未开工。** 上面表里的实测数字都是这台机器（Windows、4 逻辑核、Git Bash
+**2026-09-20 立票，当日开工。** 上面表里的实测数字都是这台机器（Windows、4 逻辑核、Git Bash
 `C:\Program Files\Git\bin\bash.exe`）上量的，不是从别处抄的。
 
 基线（立票当天，`main` @ `2d2095f`）：
 `clojure -M:test -m harness.test-runner` → 972 用例 / 12036 断言 / 0 失败 / 0 错误。
+
+### 01 — `shell.clj` 按 kind 解析并缓存
+
+- **两张表，一张是派生的。** `candidates` 仍是「链的顺序」那一个 `def`；按 kind 找行是
+  `(group-by :kind candidates)`（`rows-by-kind`），**没有抄第二份** —— 一个 kind 能在链上被落到，
+  就能被调用方指名，两者不会对「Git Bash 的两个安装路径谁先」有不同意见。
+- **两个问题，一个造法。** `resolve*`（链）与 `resolve-kind*`（指名的 kind）都经 `as-resolution`
+  造那个 map：两个造法就是两次机会，让一个问题的答案多出另一个没有的键。
+- **缓存从一个格子改成一格一键。** 原来是 `(atom nil)` 装一个 vector（「问了，没有」也是缓存下来的
+  答案）；现在是一个 map 加 `contains?` —— 一个 nil 值表达的「问了，没有」对多少 key 都成立，而
+  单格 vector 只对一个成立。
+- **「没有」有两种来源，这一层故意不区分**：这台机器没装、与根本没有这个 kind，对 spawn site 是
+  同一件事（不要用一只没人要的壳去跑）。**指名拒绝的那句话在 `require-shell!`** —— 它把「这台机器
+  有什么」列出来，读的人才能把拼错与没装分开。
+- **`run` / `start` 收 `:kind`，缺了就是拒绝，不是回退。** 在**没人要的壳里跑**比不跑更糟：调用方
+  写的 `%VAR%` / `$env:VAR` 会被一个不懂它的人解释，而答案看起来像命令自己的 bug。
+- 接缝按 kind 断言，不靠改这台机器的 PATH：`kind-candidates` 是 `candidates` 的按 kind 版（纯），
+  `resolve-kind*` 是它的不纯读法（测试里 `with-redefs` 数调用次数，验两个缓存与 reset）。
+
+落地的数（本分支）：`harness.infra.shell-test` 10 用例 / 56 断言 → **14 / 83**；
+全量 972 / 12036 / 0 失败 / 0 错误 → **976 / 12063 / 0 / 0**（多出来的正是这四条用例）。
+
