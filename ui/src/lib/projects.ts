@@ -1,15 +1,24 @@
 // `GET /api/projects`: the sidebar's listing, typed thin.
 //
-// One call answers the whole sidebar, because the sidebar's two halves come from
-// two different places on the server and only the server can join them: the STORE
-// says which projects and sessions exist, which session belongs where and which
-// are archived; the TREE says how big each log is and when it last changed. A
-// client that tried to join them itself would need the log directory layout, and
-// that knowledge belongs on the side that writes the files.
+// One call answers the whole sidebar, because its two halves come from two
+// different places on the server and only the server can join them: the STORE says
+// which projects and sessions exist, which session belongs where, which are
+// archived and which conversations are TASKS; the TREE says how big each log is and
+// when it last changed. A client that tried to join them itself would need the log
+// directory layout, and that knowledge belongs on the side that writes the files.
 //
-// Every session of every project arrives in one answer. That is affordable at
-// this scale and it is what makes the sidebar a single render: no per-project
-// fetch, no page cursor, no half-drawn list.
+// THE ANSWER IS TWO LISTS, and they are the sidebar's two blocks: `projects`, each
+// with its sessions, and `tasks` -- conversations with no project at all, flat.
+// Every session of every project arrives in one answer, and every task with them.
+// That is affordable at this scale and it is what makes the sidebar a single render:
+// no per-project fetch, no page cursor, no half-drawn list, and no second request
+// that could disagree with the first about which conversations exist.
+//
+// `lastActivity` and `bytes` are NULLABLE, and that nullability is meaningful
+// rather than defensive: a session with no log yet -- one just created, before
+// its first run -- is a row with no disk facts. See the row component for how
+// that is drawn; the one thing it must never become is a zero-byte file, which
+// would be a lie about a broken log.
 //
 // `lastActivity` and `bytes` are NULLABLE, and that nullability is meaningful
 // rather than defensive: a session with no log yet -- one just created, before
@@ -48,10 +57,45 @@ export type ProjectSummary = {
   sessions: readonly SessionSummary[];
 };
 
-export async function listProjects(t: Translate): Promise<ProjectSummary[]> {
+/// THE WHOLE SIDEBAR, in one answer: the projects, and the tasks.
+///
+/// TWO HALVES RATHER THAN TWO CALLS, and that is a decision about what a snapshot
+/// is: the sidebar draws one moment, and two requests are two moments that can
+/// disagree about which conversation exists. The mount restore reads the same
+/// payload (`lib/session-memory.ts`), so "is the session I remember still a
+/// session" is answered by the same read that draws the list.
+export type SidebarListing = {
+  projects: readonly ProjectSummary[];
+  /// THE TASKS: conversations with no project and no memory of one, flat and
+  /// ungrouped -- the half that makes the sidebar two blocks instead of one.
+  /// Same row shape as a project's sessions, because they are the same kind of
+  /// thing: what differs is only that nothing owns them.
+  tasks: readonly SessionSummary[];
+};
+
+export async function listSidebar(t: Translate): Promise<SidebarListing> {
   const res = await fetch(`${API_BASE}projects`);
   if (!res.ok) throw new Error(t("http.listingProjects", { status: res.status }));
   return res.json();
+}
+
+/// Make one conversation a session of this home, with no project (POST
+/// /api/sessions). This is what the sidebar's "new task" does before a word has
+/// been typed, and it is FIND-OR-CREATE on the server: an id that already exists
+/// -- belonging to a project even -- is left exactly as it is, so this can never
+/// unbind anything.
+///
+/// ONE CONVERSATION PER CALL, named by the id the CLIENT minted: this product has
+/// never minted ids on the server, and a task is not an exception.
+export async function startTask(threadId: string, t: Translate): Promise<string> {
+  const res = await fetch(`${API_BASE}sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// A project's display name: its last path segment, or the whole path when there

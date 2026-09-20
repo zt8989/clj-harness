@@ -12,12 +12,23 @@
   throwaway, so making the override global here is exactly the intent -- production
   code never touches it.
 
-  The claim is checked at the END rather than assumed: the developer's real store
-  is fingerprinted before the root moves and again after the suite runs, and any
-  appearance or change fails the run. A file that simply sits there untouched --
-  which is the normal state of a working install, and the case a bare exists?
-  check would stop noticing -- passes, because an untouched file is exactly what
-  the assertion is about.
+  The claim is checked at the END rather than assumed, and it is checked TWO WAYS
+  because one of them cannot tell two very different things apart:
+
+    * WHAT THIS PROCESS DID -- `harness.infra.db/store-paths-opened`, emptied the
+      moment the root moves: a store the suite opened in the developer's real home
+      is the violation, and it is reported BY NAME.
+    * WHAT THE FILE LOOKS LIKE -- its [bytes mtime] before the root moved and again
+      after the suite ran. A change with no opening behind it is somebody ELSE's
+      write: a live harness session keeps anchors, todo lists and session rows in
+      that store while a person works, and blaming the suite for it is how a green
+      run gets reported as red (measured 2026-09-20: one anchored file read by the
+      live session moved the mtime, while a full suite run left the file
+      byte-and-mtime identical). That is REPORTED, and it is not a failure.
+
+  An untouched file -- the normal state of a working install, and the case a bare
+  exists? check would stop noticing -- passes, because an untouched file is exactly
+  what the assertion is about.
 
   THE OS HOME IS PINNED TOO, AND TO A SIBLING OF THE ROOT RATHER THAN TO THE ROOT
   ITSELF. The host's convention files live there -- ~/AGENTS.md and the skills in
@@ -29,11 +40,15 @@
   ask, so the arrangement would quietly answer one of them for itself."
   (:require [clojure.java.io :as io]
             [clojure.test :as t]
+            [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.test-support :as support]))
 
 (def test-namespaces
-  '[harness.kernel.install-test
+  ;; FIRST, because it is about the fixture every other namespace here runs under:
+  ;; the verdict that says this run never went to the developer's home.
+  '[harness.test-runner-test
+    harness.kernel.install-test
     harness.kernel.event-test
     harness.test-support-test
     harness.infra.db-test
@@ -134,13 +149,29 @@
   (when (.exists f)
     [(.length f) (.lastModified f)]))
 
-(defn- isolation-verdict
-  "The post-run half of the isolation claim. A store in the developer's real home
-  that APPEARED during this run, or changed while it ran, means some path resolved
-  there -- and the run must not report green, because a suite that quietly writes
-  to the real home is the exact failure the whole fixture exists to prevent (see
-  this namespace's docstring for how that was discovered). The file is left where
-  it is: tidying away evidence of the bug would be the second mistake.
+(defn isolation-verdict
+  "The post-run half of the isolation claim, decided from TWO facts: OPENED, the
+  store paths this process resolved (see harness.infra.db/store-paths-opened), and
+  BEFORE/AFTER, the developer's store fingerprinted as [bytes mtime] on either side
+  of the run (nil meaning absent).
+
+    this process opened the real store  ->  FAILURE, named
+    somebody else changed that file     ->  a NOTE, and the run stays green
+    neither                             ->  green, silently
+
+  WHY THE FIRST FACT DECIDES IT. 'The file moved' is evidence about a FILE, not
+  about a process, and the developer's machine has a second process that legitimately
+  writes that file all day: the harness session they are working in -- anchors from
+  every edit, todo lists, session rows -- whose own store IS the one the assertion
+  is about. A verdict made of the file alone therefore reports the fixture's own
+  neighbour as a violation (measured 2026-09-20: an idle full-suite run left the
+  file byte-and-mtime identical, while a single anchored `read` by the live session
+  moved its mtime). Naming the paths this process opened answers the question that
+  was actually being asked -- 'did the suite go to the developer's home' -- and the
+  fingerprint stays, demoted to what it can honestly say: somebody wrote it.
+
+  THE FILE IS LEFT WHERE IT IS in every branch: tidying away evidence would be the
+  second mistake.
 
   It answers TRUE OR FALSE, not 'nil-or-false': -main folds this into the exit
   code with `(if isolated? 0 1)`, and a `when-not` that let the good path fall off
@@ -152,18 +183,40 @@
   F is the File captured before `isolate!` ran, never one recomputed from
   harness.infra.home here -- by now the root points at the temp home, so asking again
   would compare the temp store against itself and pass while the real home was
-  being written."
-  [^java.io.File f before]
-  (let [after (store-state f)]
-    (if (= before after)
-      true
+  being written.
+
+  PUBLIC FOR THE SAME REASON `isolate!` AND `run-suite!` ARE: both branches of the
+  claim are driven from one place, and a branch only the happy path ever reaches is
+  a branch nobody has seen work. `test/harness/test_runner_test.clj` drives all
+  three."
+  [^java.io.File f before opened after]
+  (let [path (-> f .getAbsolutePath)
+        moved? (not= before after)]
+    (cond
+      (contains? opened path)
       (do (binding [*out* *err*]
-            (println (str "ISOLATION FAILURE: " (.getAbsolutePath f)
-                          " changed during this run: " (pr-str before) " -> " (pr-str after)
-                          " ([bytes mtime], nil meaning absent) -- some code path resolved"
-                          " the store against the developer's real home instead of through"
-                          " harness.infra.home.")))
-          false))))
+            (println (str "ISOLATION FAILURE: this process opened the developer's real store"
+                          " at " path " during the run, and that is the one thing the"
+                          " fixture exists to prevent -- some code path resolved the store"
+                          " against the developer's real home instead of through"
+                          " harness.infra.home. (The file itself is "
+                          (if moved? (str "changed: " (pr-str before) " -> " (pr-str after))
+                              "unchanged: a read in the wrong home is already the wrong home")
+                          ".)")))
+          false)
+
+      moved?
+      (do (binding [*out* *err*]
+            (println (str "ISOLATION NOTE: " path " changed during this run: "
+                          (pr-str before) " -> " (pr-str after)
+                          " ([bytes mtime], nil meaning absent) -- and THIS PROCESS NEVER"
+                          " OPENED IT, so it was another process: a live harness session"
+                          " keeps its own state (anchors, todo lists, session rows) in that"
+                          " store while somebody works. NOT a failure.")))
+          true)
+
+      :else
+      true)))
 
 (defn run-suite!
   "Run NAMESPACES under the isolation protocol, and answer the process's exit code.
@@ -186,6 +239,10 @@
   (let [store  (home/db-file)
         before (store-state store)
         dir    (isolate!)]
+    ;; FROM HERE ON, ANYTHING THAT OPENS THE DEVELOPER'S STORE IS THIS RUN'S FAULT, and
+    ;; the record starts empty so that it says exactly that: the two lines above --
+    ;; the fingerprint -- are the only business this process ever has there.
+    (db/forget-store-paths-opened!)
     (try
       (println "test config root:" dir)
       (println "test OS home:" @tmp-user-home)
@@ -193,7 +250,9 @@
                (if before (str "present (" (first before) " bytes, left alone)") "absent"))
       (apply require namespaces)
       (let [{:keys [fail error]} (apply t/run-tests namespaces)
-            isolated?            (isolation-verdict store before)
+            isolated?            (isolation-verdict store before
+                                                      (db/store-paths-opened)
+                                                      (store-state store))
             broken               (+ (or fail 0) (or error 0) (if isolated? 0 1))]
         (if (zero? broken) 0 1))
       ;; A NAMESPACE THAT WILL NOT LOAD THROWS OUT OF `require`, and the temp pair

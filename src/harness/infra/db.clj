@@ -228,6 +228,35 @@
 (defonce ^:private recovery-log
   (atom []))
 
+(defonce ^:private opened-stores
+  (atom #{}))
+
+(defn store-paths-opened
+  "Every store FILE this process has resolved and opened, as absolute paths --
+  which is the one thing a test run has to be able to prove about itself.
+
+  THE QUESTION IT ANSWERS IS 'DID WE GO TO THIS HOME?', and it is asked because the
+  answer used to be guessed from the file's [bytes mtime] and could therefore be
+  wrong in the one case that happens all day: a LIVE HARNESS SESSION keeps its own
+  state (anchors, todo lists, session rows) in that store while somebody runs the
+  suite, so the developer's store moves for reasons that have nothing to do with
+  the tests. `harness.test-runner` reads this set before it decides anything, and
+  a store this process never opened is somebody else's writing -- reported, not
+  blamed (see `isolation-verdict`).
+
+  Absolute paths, because that is the form a comparison with `home/db-file` can be
+  made in whatever root was in force when the connection opened."
+  []
+  @opened-stores)
+
+(defn forget-store-paths-opened!
+  "Empty the record above. ONE CALLER, AND IT IS THE REASON THIS EXISTS: isolation
+  is installed in the MIDDLE of a process's life, so everything resolved before it
+  (the runner's own look at the developer's store, to fingerprint it) has to be
+  forgotten or the verdict below would convict the fixture itself."
+  []
+  (reset! opened-stores #{}))
+
 (defonce ^:private store-open-lock
   ;; ONE THREAD OPENS OR BUILDS THE STORE AT A TIME. Every connection runs this, so
   ;; 'the store is not usable yet' and 'the store is not there yet' are answers several
@@ -963,6 +992,7 @@
   fresh JDBC connection per call anyway, and the queries that follow run unlocked."
   [steps]
   (let [f     (home/db-file)
+        _     (swap! opened-stores conj (.getAbsolutePath f))
         judge (fn []
                 (let [seen (inspect f)]
                   (case (:state seen)

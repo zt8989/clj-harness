@@ -1201,6 +1201,55 @@
 (defn- read-json [resp]
   (json/read-str (.body resp) :key-fn keyword))
 
+(defn- sidebar-listing
+  "GET /api/projects as the sidebar reads it: {:projects [..] :tasks [..]}.
+
+  ONE READER FOR THE SHAPE, because the shape itself is what these cases are about
+  and five call sites each digging into it by hand is five places to update the day it
+  moves -- which it did: the listing used to BE the vector of projects."
+  []
+  (read-json (api-call :get "/api/projects" nil)))
+
+(defn- listed-projects
+  "The projects in the sidebar's listing, in the order the server sent them."
+  []
+  (:projects (sidebar-listing)))
+
+(defn- listed-tasks
+  "The tasks in the sidebar's listing, in the order the server sent them."
+  []
+  (:tasks (sidebar-listing)))
+
+(defn- listed-row
+  "The row the sidebar draws for TID, wherever it is drawn: a project's session list
+  or the flat task list. Nil when this home lists no such conversation.
+
+  ASKED THE WAY THE SIDEBAR ASKS IT: one GET, the whole listing, no per-thread
+  endpoint -- a row is the client's whole view of the fact."
+  [tid]
+  (or (some (fn [project] (first (filter #(= tid (:threadId %)) (:sessions project))))
+            (listed-projects))
+      (first (filter #(= tid (:threadId %)) (listed-tasks)))))
+
+(defn- register-session!
+  "The route that makes one conversation a session of this home, called the way the
+  sidebar calls it."
+  [tid]
+  (api-call :post "/api/sessions" (json/write-str {:threadId tid})))
+
+(defn- task?
+  "Whether the sidebar draws TID in the flat task list."
+  [tid]
+  (some? (first (filter #(= tid (:threadId %)) (listed-tasks)))))
+
+(defn- projects-holding
+  "The canonical paths of the projects whose session list contains TID -- the other
+  half of 'where is this conversation drawn', which is never a task."
+  [tid]
+  (->> (listed-projects)
+       (filter #(some (fn [s] (= tid (:threadId s))) (:sessions %)))
+       (mapv :path)))
+
 (deftest the-run-edge-is-one-route-under-the-api-prefix
   ;; THE RUN USED TO BE THE CATCH-ALL. It sat at the server ROOT and every path the
   ;; table did not know fell to it, so a mistyped management route was read as a run
@@ -1314,8 +1363,7 @@
   (with-server
    {"listing-a" script "listing-b" script "listing-unbound" script}
    (fn []
-     (let [list-projects (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
-                                               :key-fn keyword))
+     (let [list-projects listed-projects
            project-named (fn [dir]
                            ;; By last path segment, matched EXACTLY: `-2` is a
                            ;; different project, and "ends with" would confuse the
@@ -1397,19 +1445,25 @@
          (bind! "listing-other" listing-dir-2)
          (is (= (.getCanonicalPath (io/file listing-dir-2)) (:path (project-named listing-dir-2))))
          (is (= 1 (count (:sessions (project-named listing-dir-2))))))
-       (testing "an unbound session is in no project -- there is no row to put it in"
-         (is (nil? (row-for listing-dir "not-bound-anywhere"))))
-       (testing "and an unbound session that RUNS is in no project either"
-         ;; It has a log, in the reserved workspace. GET /api/threads is the raw
-         ;; tree view that shows it; the sidebar's listing is about projects, and a
-         ;; session nobody owns has no project to be listed under.
+       (testing "a conversation nobody has ever owned is in no project AND is no task"
+         ;; The store decides which conversations exist, and it has never been told
+         ;; about this one: not a project session, not a task, nothing to draw -- and
+         ;; GET /api/threads still shows the file to anyone diagnosing.
+         (is (nil? (row-for listing-dir "not-bound-anywhere")))
+         (is (not (task? "not-bound-anywhere"))))
+       (testing "and an unbound session that RUNS is a TASK -- flat, outside every project"
+         ;; THIS IS WHAT CHANGED when the sidebar grew its second half. It used to be
+         ;; in no list at all (it has a log but nothing owned it); now the run itself
+         ;; is what makes it a session of this home, and the sidebar draws it in the
+         ;; flat task list. Still in no PROJECT -- that half is unchanged.
          (is (= "RUN_FINISHED"
                 (:type (last (wire/frames-from-sse (.body (post-run "listing-unbound")))))))
          (is (not-any? #(= "listing-unbound" (:threadId %))
                        (mapcat :sessions (list-projects))))
+         (is (task? "listing-unbound"))
          (is (some #(= "listing-unbound" (:threadId %))
                    (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))
-             "and the raw tree view still shows it, so nothing is hidden, only unowned"))))))
+             "and the raw tree view still shows it, so nothing is hidden"))))))
 
 (deftest archiving-a-session-is-a-row-write-and-never-a-file-write
   ;; Ticket 06. The whole claim is a NEGATIVE one -- archiving touches no log --
@@ -1433,8 +1487,7 @@
                       (api-call :post "/api/project"
                                 (json/write-str {:threadId tid :dir dir})))
            sessions (fn [dir]
-                      (->> (json/read-str (.body (api-call :get "/api/projects" nil))
-                                          :key-fn keyword)
+                      (->> (listed-projects)
                            (filter #(= (.getCanonicalPath (io/file dir)) (:path %)))
                            first
                            :sessions))
@@ -2199,8 +2252,7 @@
            archive! (fn [tid flag]
                       (api-call :post (str "/api/threads/" tid "/archive")
                                 (json/write-str {:archived flag})))
-           listing  (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
-                                          :key-fn keyword))
+           listing  listed-projects
            project  (fn [d] (first (filter #(= (canon d) (:path %)) (listing))))
            session  (fn [d tid] (first (filter #(= tid (:threadId %))
                                                (:sessions (project d)))))
@@ -2332,6 +2384,148 @@
              (is (seq (:messages reply))
                  "the conversation came back out of the file the removal left alone"))))))))
 
+(def ^:private task-dir
+  (support/temp-dir "http-tasks"))
+
+(def ^:private task-dir-2
+  (support/temp-dir "http-tasks-2"))
+
+
+(deftest a-task-is-a-session-with-no-project-and-no-memory
+  ;; Ticket 01: the sidebar's second half. Two different questions live here, and
+  ;; they are answered by two different owners -- WHICH conversations are tasks (the
+  ;; store's `project/tasks`, one WHERE clause) and WHERE a task's log facts come
+  ;; from (the tree's, by stem, because a task has no project to derive a workspace
+  ;; from).
+  ;;
+  ;; Every case below is a way of getting it wrong that LOOKS right: treating any
+  ;; unbound row as a task (removing a project would empty its sessions into the task
+  ;; list), registering a conversation that already belongs somewhere (which would
+  ;; unbind it), or reading a task's size out of projects/.unbound (which would say
+  ;; 'no log yet' about a conversation whose log is sitting in a project workspace).
+  (wipe-dir! task-dir)
+  (wipe-dir! task-dir-2)
+  (with-server
+   {"task-ran" script}
+   (fn []
+     (let [bind! (fn [tid dir]
+                   (api-call :post "/api/project"
+                             (json/write-str {:threadId tid :dir dir})))
+           remove! (fn [dir]
+                     (api-call :post
+                               (str "/api/projects/"
+                                    (java.net.URLEncoder/encode (.getCanonicalPath (io/file dir)) "UTF-8")
+                                    "/remove")
+                               nil))]
+       (testing "one snapshot carries BOTH halves, and both keys are always there"
+         (let [listing (sidebar-listing)]
+           (is (contains? listing :projects))
+           (is (contains? listing :tasks) "an empty list, not a missing key")
+           (is (vector? (:tasks listing)))))
+       (testing "registering a conversation makes it a TASK, before a word is typed"
+         (let [resp (register-session! "task-a")]
+           (is (= 200 (.statusCode resp)))
+           (is (= "task-a" (:threadId (read-json resp))) "the id it was handed, back")
+           (is (task? "task-a"))
+           (is (= [] (projects-holding "task-a")) "in no project: that is what a task is")
+           (let [row (listed-row "task-a")]
+             (is (false? (:archived row)))
+             (is (false? (:running row)))
+             (is (nil? (:bytes row)) "no log yet -- null, which is not a zero-byte file")
+             (is (nil? (:lastActivity row))))))
+       (testing "registering the SAME conversation again answers the same row"
+         ;; Both callers can race themselves: the button registers an id it just
+         ;; minted, and a second turn of the same conversation registers it again.
+         (is (= 200 (.statusCode (register-session! "task-a"))))
+         (is (= 1 (count (filter #(= "task-a" (:threadId %)) (listed-tasks))))))
+       (testing "registering a conversation that already has a project leaves it alone"
+         ;; The verb is 'exist', not 'be a task': it must be safe to say about a
+         ;; conversation that belongs somewhere, or a caller would have to know.
+         (is (= 200 (.statusCode (bind! "task-bound" task-dir))))
+         (is (= 200 (.statusCode (register-session! "task-bound"))))
+         (is (not (task? "task-bound")))
+         (is (= [(.getCanonicalPath (io/file task-dir))] (projects-holding "task-bound"))
+             "still bound to its directory -- registering does not unbind anybody"))
+       (testing "a body that is not JSON, or names no conversation, registers nothing"
+         (is (= 400 (.statusCode (api-call :post "/api/sessions" "{not json"))))
+         (is (= 400 (.statusCode (register-session! nil) )))
+         (is (not-any? #(= "" (:threadId %)) (listed-tasks))
+             "in particular the empty id is not a conversation"))
+
+       (testing "a conversation that RUNS becomes a session of this home"
+         ;; The page's own path: it mints an id before anything has been asked of
+         ;; it, so the run is the first moment there is a conversation to keep --
+         ;; and without this, that conversation is the one the sidebar cannot list.
+         (is (= "RUN_FINISHED"
+                (:type (last (wire/frames-from-sse (.body (post-run "task-ran")))))))
+         (is (task? "task-ran"))
+         (let [f (log-file "task-ran")]
+           ;; The returned side of the message record lands AFTER the terminal
+           ;; frame, so the size is measured once the writer is done.
+           (wait-for-recorded
+            f
+            (fn [ls] (and (some #(= "message" (:kind %)) ls)
+                          (some #(and (= "event" (:kind %))
+                                      (frames/terminal? (:payload %)))
+                                ls)))
+            5000)
+           (let [row (listed-row "task-ran")]
+             (is (= (.length f) (:bytes row)))
+             (is (= (.lastModified f) (:lastActivity row))))))
+
+       (testing "a jsonl nobody owns is NOT a task -- the store decides, not the tree"
+         ;; The store's rule, the one the whole sidebar rests on: a file in the tree
+         ;; that nothing ever asked to keep is not a conversation this interface
+         ;; lists. GET /api/threads still shows it to anyone diagnosing.
+         (spit (log-file "nobody-owns-this") "{}")
+         (is (not (task? "nobody-owns-this")))
+         (is (some #(= "nobody-owns-this" (:threadId %))
+                   (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))))
+
+       (testing "a session released on purpose IS a task, and its facts come from the tree"
+         ;; `bind! id nil` is not reachable over HTTP (the route refuses a blank dir),
+         ;; so this goes through the verb the route wraps. What it leaves behind is
+         ;; the interesting part: the log does NOT move, so the file stays in the
+         ;; PROJECT's workspace while the session stops having a project -- and a row
+         ;; that only looked in projects/.unbound would say 'no log yet' about a
+         ;; conversation whose log is right there.
+         (is (= 200 (.statusCode (bind! "task-released" task-dir))))
+         (project/bind! "task-released" nil)
+         (let [f (home/log-file (workspace-of (.getCanonicalPath (io/file task-dir)))
+                                "task-released")]
+           (is (.exists f) "releasing a session is not a file operation")
+           (is (task? "task-released"))
+           (is (= [] (projects-holding "task-released")))
+           (let [row (listed-row "task-released")]
+             (is (= (.length f) (:bytes row)))
+             (is (= (.lastModified f) (:lastActivity row))))))
+
+       (testing "a session released by REMOVING ITS PROJECT is not a task"
+         ;; It remembers where it was -- that memory is what re-adding the directory
+         ;; matches on -- so it is waiting for its project, not a conversation
+         ;; without one.
+         (is (= 200 (.statusCode (bind! "task-orphan" task-dir-2))))
+         (is (= 200 (.statusCode (remove! task-dir-2))))
+         (is (not (task? "task-orphan")))
+         (is (= [] (projects-holding "task-orphan")) "listed nowhere, as it was before this feature")
+         (is (= 1 (:adopted (read-json (api-call :post "/api/projects"
+                                                  (json/write-str {:dir task-dir-2}))))))
+         (is (= [(.getCanonicalPath (io/file task-dir-2))] (projects-holding "task-orphan"))
+             "and adding the directory back brings it home"))
+
+       (testing "a task whose stem has TWO logs says nothing about them rather than picking one"
+         (register-session! "task-two-logs")
+         (bind! "task-two-logs" task-dir)
+         (project/bind! "task-two-logs" nil)
+         (spit (log-file "task-two-logs") "{}")
+         (let [row (listed-row "task-two-logs")]
+           (is (nil? (:bytes row)))
+           (is (nil? (:lastActivity row))))
+         (let [resp (api-call :post "/api/threads/task-two-logs/rebuild" "")]
+           (is (= 404 (.statusCode resp))
+               "the same stem, refused by name: the row said nothing because the server will")
+           (is (str/includes? (:error (read-json resp)) "2 logs"))))
+       ))))
 (deftest adding-a-project-makes-a-project-with-no-session
   ;; Ticket 05's other half. Without this verb the ONLY way to get a project was
   ;; to bind a session to a directory -- backwards for a product whose sessions
@@ -2345,8 +2539,7 @@
              named (fn [dir]
                      (let [want (last (str/split (.getCanonicalPath (io/file dir)) #"/"))]
                        (first (filterv #(= want (last (str/split (:path %) #"/")))
-                                       (json/read-str (.body (api-call :get "/api/projects" nil))
-                                                      :key-fn keyword)))))]
+                                       (listed-projects)))))]
          (testing "a real directory becomes a project with NO sessions in it"
            (let [resp  (add! adir)
                  reply (read-json resp)]
@@ -2363,9 +2556,7 @@
                  second-id (:projectId (read-json (add! adir)))]
              (is (= first-id second-id) "find-or-create, keyed on the canonical path")
              (is (= 1 (count (filterv #(= (.getCanonicalPath (io/file adir)) (:path %))
-                                      (json/read-str
-                                       (.body (api-call :get "/api/projects" nil))
-                                       :key-fn keyword)))))))
+                                      (listed-projects)))))))
          (testing "a different SPELLING of the same directory is still the same project"
            ;; The whole point of keying on the canonical form: `dir/.` is the same
            ;; directory, and a person typing it must not get a second project.
@@ -3892,7 +4083,7 @@
     (some (fn [project]
             (when (= want (:path project))
               (first (filter #(= tid (:threadId %)) (:sessions project)))))
-          (json/read-str (.body (api-call :get "/api/projects" nil)) :key-fn keyword))))
+          (listed-projects))))
 
 (defn- row-running?
   [dir tid]
@@ -3924,6 +4115,32 @@
        (is (until #(false? (row-running? alive-dir "alive-a")) 5000)
            "the row still said running after the run had ended")
        (is (await-log #"terminal event=RUN_FINISHED .*run-id=run-alive"))))))
+
+(deftest a-task-s-row-answers-the-same-registry-question
+  ;; The third fact a row carries, for the second kind of row: `:running` comes from
+  ;; THIS PROCESS's registry, not from disk and not from the kind of conversation it is.
+  ;; A task has no project to ask, so a row that answered "not running" for the want of
+  ;; one would leave the spinner off exactly the sessions the page just made.
+  ;;
+  ;; THE WINDOW IS HELD OPEN ON PURPOSE -- same reason as the bound-session cases below
+  ;; (see `window-gate`): `loop/run-chan` is called after the thread is registered, so
+  ;; holding there makes "the row says running" an assertion rather than a race against a
+  ;; fast script.
+  (with-server
+   "task-alive"
+   (fn []
+     (register-session! "task-alive")
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "task-alive" "run-task-alive")]
+       (try
+         (testing "a task being answered right now says so on its own row"
+           (is (until #(true? (:running (listed-row "task-alive"))) 5000)
+               "the task's row never said running while its run was held"))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and it stops when the run reaches its terminal frame"
+       (is (until #(false? (:running (listed-row "task-alive"))) 5000)
+           "the task's row still said running after the run had ended")))))
+
 
 (deftest a-run-that-never-started-is-never-running
   (wipe-dir! refused-dir)

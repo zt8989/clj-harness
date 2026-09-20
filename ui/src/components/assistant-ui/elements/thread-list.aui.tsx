@@ -21,8 +21,9 @@
 // grouped by PROJECT and its threads come from the store through
 // `GET /api/projects`, because a session belongs to a project and the runtime has
 // no idea that projects exist. Search and date grouping are spec non-goals, and
-// `ThreadListNew`'s job is done by the sidebar's new-task button, which has to
-// refuse when there is no project to open the session under (ticket 05).
+// `ThreadListNew`'s job is done by the sidebar's new-task button -- which makes a
+// TASK, a conversation with no project, so that button never has to refuse for
+// want of one. The same row is drawn in both blocks: a task row is this row.
 //
 // LOCAL: removed the rename input and the Rename / Delete menu items. This
 // harness implements neither verb -- nothing renames a session (non-goal) and
@@ -76,6 +77,12 @@ export type ThreadListItemProps = {
   /// owes it an answer. Upstream's row has no such state; it is drawn in words
   /// because "stopped" and "waiting for you" want different reactions.
   parked?: boolean;
+  /// LOCAL: added with the sidebar's archived block. A word the row SAYS ABOUT
+  /// ITSELF, drawn beside the id -- today it is which PROJECT a filed-away
+  /// conversation came from, because that block is flat and this is the only place
+  /// the answer fits. Optional and generic on purpose: the row does not know what a
+  /// project is, and it must not start.
+  label?: string | null;
   onOpen: () => void;
   /// The refusal or failure that belongs to THIS row, or null. Rendered under the
   /// row it happened on and nowhere else: a message at the top of the list makes
@@ -93,6 +100,7 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
   busy,
   running,
   parked = false,
+  label = null,
   onOpen,
   error,
   actions,
@@ -164,6 +172,18 @@ export const ThreadListItem: FC<ThreadListItemProps> = ({
                 className="text-foreground shrink-0 text-[10px] tracking-wide"
               >
                 {t("session.parked")}
+              </span>
+            )}
+            {/* LOCAL: what this row says about itself (see the prop). BESIDE the id
+                and OUTSIDE its truncating element, for the same measured reason the
+                parked word is: a label inside a 36-character monospace line that
+                ellipsizes on every real row is a label nobody reads. */}
+            {label !== null && label !== "" && (
+              <span
+                data-slot="thread-list-item-label"
+                className="text-muted-foreground max-w-[8rem] shrink-0 truncate text-[10px]"
+              >
+                {label}
               </span>
             )}
             {/* LOCAL: upstream's literal `current` is gone from this file and

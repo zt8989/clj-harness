@@ -56,10 +56,21 @@ const refusing: SessionStorage = {
   },
 };
 
-const listing = (sessions: readonly { threadId: string; bytes: number | null }[]): readonly SessionListing[] => [
-  { sessions: [{ threadId: "other-1", bytes: 10 }, { threadId: "other-2", bytes: 20 }] },
-  { sessions: [...sessions] },
-];
+/// THE WHOLE LISTING, both halves, because that is what the sidebar hands the restore:
+/// the projects with their sessions, and the flat task list. `flat` is the half that
+/// would be forgotten -- a task is a session with no project, so a restore that looked
+/// only inside projects would forget a conversation the moment it stopped belonging
+/// anywhere.
+const listing = (
+  sessions: readonly { threadId: string; bytes: number | null }[],
+  tasks: readonly { threadId: string; bytes: number | null }[] = [],
+): SessionListing => ({
+  projects: [
+    { sessions: [{ threadId: "other-1", bytes: 10 }, { threadId: "other-2", bytes: 20 }] },
+    { sessions: [...sessions] },
+  ],
+  tasks: [...tasks],
+});
 
 const cases: Case[] = [
   {
@@ -128,8 +139,20 @@ const cases: Case[] = [
       // fact, not a guess.
       expect(listedSession("s-", projects)).toBe(null);
       expect(listedSession("S-1", projects)).toBe(null);
-      expect(listedSession("s-1", [])).toBe(null);
-      expect(listedSession("s-1", [{ sessions: [] }])).toBe(null);
+      expect(listedSession("s-1", { projects: [], tasks: [] })).toBe(null);
+      expect(listedSession("s-1", { projects: [{ sessions: [] }], tasks: [] })).toBe(null);
+      // AND A STORAGE THAT NEVER ANSWERED IS NOT A PAGE THAT CANNOT RESTORE: the
+      // listing is read before it arrives (the restore runs on the first one), so a
+      // null listing is 'nothing to come back to' rather than a crash.
+      expect(listedSession("s-1", null)).toBe(null);
+
+      // A TASK IS A SESSION TOO. It is drawn flat rather than under a project, and the
+      // page remembers where it was the same way -- so the flat half is searched, and
+      // searched by the same whole-id rule.
+      const withTask = listing([], [{ threadId: "t-1", bytes: null }]);
+      expect(listedSession("t-1", withTask)).toEqual({ threadId: "t-1", bytes: null });
+      expect(listedSession("t-", withTask)).toBe(null);
+      expect(listedSession("t-1", listing([]))).toBe(null);
     },
   },
 ];
