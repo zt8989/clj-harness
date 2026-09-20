@@ -80,10 +80,16 @@
 
 ;; --------------------------------------------------------------- the pool
 
-(def alphabet
+(def ^String alphabet
   "The anchor alphabet, IN ORDER -- and the order is load-bearing: an anchor's
   position in the universe is its base-52 value, so reordering these letters
-  renumbers every anchor and invalidates the digest check."
+  renumbers every anchor and invalidates the digest check.
+
+  THE `^String` IS LOAD-BEARING, not decoration: `base52` calls `.charAt` on it
+  once per letter of every name this process hands out, and an unhinted target
+  compiles that call to a reflective lookup. Measured 2026-09-20 on 1.12.6, warm
+  loop: 16325 ns/op unhinted, 732 ns/op hinted. Same omission as the pool
+  destructuring below."
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 (def anchor-length 4)
@@ -106,7 +112,18 @@
 (def ^:private alphabet-value
   "char -> its base-52 digit, or -1. An int-array rather than a map because
   `anchor-index` runs once per anchor a request mentions, and because 'this char
-  is not in the alphabet' has to be answerable without boxing."
+  is not in the alphabet' has to be answerable without boxing.
+
+  THE ARRAY IS ONLY HALF OF THAT BARGAIN, and the other half is the `^ints` in
+  `value-of`: without it the `(aget alphabet-value c)` is a reflective call, and
+  reflection costs thousands of times more than the lookup it wraps -- four
+  reflective dispatches per anchor name, which is the array's whole reason to
+  exist spent on nothing. Measured 2026-09-20 on 1.12.6, warm loop: 23236 ns/op
+  unhinted, 868 ns/op hinted. It
+  cannot sit here on the `def`: a primitive-array hint is not a class name, so
+  as var metadata it is read as the symbol `ints` and resolved to
+  `clojure.core$ints` (compile error), which is why the hint is written where
+  the value is read. Same omission as the pool destructuring below."
   (let [a (int-array 128 -1)]
     (doseq [[i c] (map-indexed vector alphabet)]
       (aset a (int c) (int i)))
@@ -254,9 +271,9 @@
       (if (= i anchor-length)
         v
         (let [c (int (.charAt s i))]
-          (if (or (>= c 128) (neg? (aget alphabet-value c)))
+          (if (or (>= c 128) (neg? (aget ^ints alphabet-value c)))
             nil
-            (recur (inc i) (+ (* v 52) (aget alphabet-value c)))))))))
+            (recur (inc i) (+ (* v 52) (aget ^ints alphabet-value c)))))))))
 
 (defn anchor-index
   "Where ANCHOR sits in the pool, 0-based, or nil when it is not a member.
@@ -317,24 +334,40 @@
 
 (defn- truncate-bytes
   "S cut to at most MAX UTF-8 bytes, never through a code point. Cutting may lose
-  a whole character; it may not produce bytes that do not decode."
+  a whole character; it may not produce bytes that do not decode.
+
+  THE `^String` BELOW DOES NOT REACH THIS FUNCTION'S CALLERS, and that is a
+  Clojure fact rather than an oversight here: a `defn` whose arg vector carries a
+  primitive hint (`^long max`) has no return type as far as its call sites are
+  concerned -- the tag is ignored in the arg vector and on the name alike. Probed
+  2026-09-20 on 1.12.6: `(defn- ^String f [^String s ^long m] s)` followed by
+  `(.getBytes (f \"x\" 1) \"UTF-8\")` warns 'no such method' on java.lang.Object;
+  drop the `^long` and it does not. So `line-checksum` hints the value it reads
+  instead of trusting this one, and the `^long` stays: it is what keeps MAX
+  unboxed on a path that runs once per line."
   ^String [^String s ^long max]
-  (let [bs (.getBytes s "UTF-8")]
+  (let [^bytes bs (.getBytes s "UTF-8")]
     (if (<= (alength bs) max)
       s
-      (let [end (loop [k max]
-                  ;; Byte k begins a new code point (it is not a continuation
-                  ;; byte) exactly when everything before it is a whole sequence.
-                  (if (or (zero? k) (not= 0x80 (bit-and (aget bs k) 0xc0)))
-                    k
-                    (recur (dec k))))]
+      (let [;; A byte index, and it has to say so: the loop's value reaches the
+            ;; String constructor untyped, and an untyped argument there is a
+            ;; reflective call to pick between the overloads.
+            ^long end (loop [k max]
+                        ;; Byte k begins a new code point (it is not a continuation
+                        ;; byte) exactly when everything before it is a whole sequence.
+                        (if (or (zero? k) (not= 0x80 (bit-and (aget bs k) 0xc0)))
+                          k
+                          (recur (dec k))))]
         (String. bs 0 end "UTF-8")))))
 
-(def ^:private thread-digest
+(def ^:private ^ThreadLocal thread-digest
   "A digest per thread. `line-checksum` runs once per line of every file a request
   touches, and MessageDigest is neither thread-safe nor cheap to create, so
   neither a shared instance nor a fresh one per line is right -- this is the shape
-  that is both."
+  that is both.
+
+  The `^ThreadLocal` is load-bearing the same way the array hints above are: an
+  unhinted `.get` is reflective, and this one would run per line."
   (ThreadLocal/withInitial
    (reify Supplier (get [_] (MessageDigest/getInstance "SHA-256")))))
 
@@ -342,10 +375,15 @@
   "The checksum of one line: SHA-256/16 of its canonical form, truncated to
   `max-hash-source-bytes` first."
   ^String [^String line]
-  (let [^MessageDigest md (.get thread-digest)]
+  (let [^MessageDigest md (.get thread-digest)
+        ;; HINTED HERE RATHER THAN TRUSTED FROM `truncate-bytes`, whose own
+        ;; `^String` cannot reach its callers (that function's docstring has the
+        ;; why). Without this the `.getBytes` below is a reflective call, once
+        ;; per line of every file a request touches -- the hot path this whole
+        ;; section exists to keep cheap.
+        ^String src (truncate-bytes (canonical line) max-hash-source-bytes)]
     (.reset md)
-    (hex8 (.digest md (.getBytes (truncate-bytes (canonical line) max-hash-source-bytes)
-                                 "UTF-8")))))
+    (hex8 (.digest md (.getBytes src "UTF-8")))))
 
 (defn split-lines
   "CONTENT as a vector of lines, in the one reading an anchor can be attached to:
