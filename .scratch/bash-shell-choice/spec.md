@@ -1,0 +1,122 @@
+# spec: `bash` 选壳 —— 一次调用指名它跑在哪只 shell 里
+
+2026-09-20 立。**要的是：`bash` 调用能指名用哪只壳跑。** 默认还是今天那只（Windows = Git Bash），
+但可以要 **cmd**、**PowerShell 7**（`pwsh`）、**PowerShell 5**（`powershell`）。前台与后台
+（`run_in_background`）都要能选。
+
+## 问题
+
+今天**一个进程只有一只壳**：`harness.infra.shell/resolution` 是个 `defonce`，链上第一个找得到的
+赢，此后每一次 spawn 都用它（Windows 上是 Git Bash）。模型想跑一条 cmd 或 PowerShell 的命令，
+只能把它**包在 bash 里再起一只**：
+
+    bash {command: "cmd /c \"dir %TEMP%\""}          ; 引号要过两层
+    bash {command: "pwsh -NoProfile -c 'Get-ChildItem $env:TEMP'"}   ; 而且 $env: 先被 bash 吃掉
+
+这样错的东西不止引号：`%VAR%` 与 `$env:VAR` 的展开、`&` 与 `;` 的分隔、退出码的传播，全都在
+两层壳之间被改写一遍，而报错指向的是**外面那只**。模型要么绕，要么放弃。
+
+## 决策
+
+1. **参数名 `shell`，不叫 `shape`。** `shape` 在本仓已经指**另一根轴**：`spawn-argv` / `start` 的
+   `:shape` 说的是「`:program`（程序 + 参数，Windows 上走 `cmd /c`）还是 `:shell`（一条写给 shell
+   的命令行）」。选壳这件事的词用 `candidates` 里已有的那个：`:kind`。取值即 kind：
+
+   | `shell` 的值 | 是什么 | 怎么起（`how-to-start`） |
+   |---|---|---|
+   | `git-bash` | Git Bash（**默认**，即今天的行为） | `-lc` |
+   | `cmd` | Windows 自己的 cmd | `/c` |
+   | `pwsh` | PowerShell 7+ | `-NoProfile -Command` |
+   | `powershell` | Windows PowerShell 5.1 | `-NoProfile -Command` |
+
+   不传 = 逐字保持今天的行为（链上解出来的那只）。**这是本期唯一不许动的兼容面。**
+
+2. **解析从「一进程一只」改成「按 kind 解析、各自缓存」。** `resolution` 今天缓存一个答案、而且
+   `require-shell!` / `require-posix!` 都读它。改成按 kind 缓存之后，那两个函数的语义一个字不变
+   （rg、git 仍然按名字要求一只 POSIX 壳），变的只是「问哪一只」多了一个参数。
+
+3. **只有 `bash` 工具吃这个参数。** `rg`（`anchor_grep` / `glob`）、`git`、hooks 拼的都是 POSIX
+   命令行，它们本来就 `require-posix!` 按名字拒绝非 POSIX 的壳 —— 让它们也能选壳要另一套引号契约
+   （`rg` 用的是它自己的 `quoted`，不是 `quote-arg`）。**不在本期。**
+
+4. **机器上没有那只壳 ⇒ 按名字拒绝，并说出这台机器有什么。** 这与本仓既有姿态同一条
+   （`resolution` 的注释：「A resolution that names a program which cannot run is worse than one
+   that admits there is none」）。在本机要 `shell: "pwsh"` 而没装 pwsh，答案必须说「没有 pwsh，
+   这台机器有 git-bash / cmd / powershell」，**不是**静默回退到默认壳 —— 静默回退会让模型以为
+   自己写的 `$env:` 语法被执行了。
+
+5. **`command` 始终是「写给那只壳的一行」。** 选了 cmd 就得写 `&`、`%VAR%`、`dir`；选了 pwsh 就得
+   写 `;`、`$env:VAR`。工具描述必须把这条说明白 —— 参数换的是**解释这行字的壳**，不是「同一行字
+   换个人执行」。`stdin` 与 `workdir` 不受影响（`run` 对三种壳都是写 stdin 再关、都用
+   `.directory` 设 cwd，实测三只壳都吃 Windows 路径）。
+
+6. **后台作业记住壳，但答案不加第三个事实。** `jobs/start!` 今天只带 `{:command :dir}`，壳取自
+   进程默认。这一票让它把 kind 带下去。**答案仍然是「job id + 记录路径」两条**：作业用哪只壳是
+   「这一行是谁写的」的属性，不是作业的身份，`job_output` 读记录时也不需要知道。
+
+7. **答案的形状一个字不改。** 仍然是被杀前的输出 +（到点时）那一条，仍然是按流封顶 + 记录文件。
+   换壳不新增表头行、不改 `[exit N]`。
+
+## 非目标
+
+- **WSL（`wsl.exe` / `System32\bash.exe`）本期不做。** 顺带把实测到的事实记在这里，因为
+  `wsl-launcher?` 的 docstring 里那条理由**已经不成立**：「from a JVM, answers nothing at all」
+  —— 2026-09-20 在本机实测，从 JVM spawn 它 `exit=0` 且输出正确（`echo hi; pwd` →
+  `/mnt/c/Users/...`），`.directory` 传 Windows 路径会被自动翻译，超时杀掉之后 WSL 里
+  `pgrep sleep` / `pgrep ping` 都是空的（没有漏在 Linux 侧）。真要做，要面对的是：**另一个文件
+  系统**（命令里的路径得是 POSIX 的 `/mnt/c/...`，`~` 是 Linux 的家），以及**冷启动 ~14s**
+  （热 ~1.9s）—— 一个短 `timeout` 的调用会在 VM 起来之前就被判超时。链继续按名字拒绝它是**对的**
+  （默认不该悄悄变成 WSL），这一票不动它。
+- 不让 `rg` / `git` / hooks / MCP 选壳（理由见决策 3）。
+- **不做「自动挑壳」**：没有「这条命令看起来像 PowerShell 就换过去」这种猜测。模型指名，或者不指。
+- 不动 `-lc`（那是超时杀树的承重结构，见 6652097）。
+
+## 验收主线
+
+- **每只壳都保住「到点回来 + 保住被杀之前的输出」**：这是本期最重要的一条，因为 `bash` 的时间保证
+  是模型的依靠。已实测（2026-09-20，本机，`timeout: 3000`）：
+
+  | 壳 | 到点回来 | 被杀前的输出 | 一次 spawn（热） |
+  |---|---|---|---|
+  | git-bash | 3034ms | 在 | ~770ms |
+  | cmd | 3031ms | 在 | 66ms |
+  | pwsh | 3041ms | 在 | 781ms |
+  | powershell | 3039ms | 在 | 1042ms |
+
+  四只**都没有 5s 拖尾**（拖尾正是 `-c` 那个陷阱的签名：见 6652097），也都没有丢输出。用例要一条
+  壳一条地钉住这两件事。
+- **默认逐字不变**：不给 `shell` 时，既有用例一条不改、全绿。
+- **两条拒绝各说各的**：`shell: "nope"`（不认识的词）与 `shell: "pwsh"`（认识、本机没有）是两句
+  不同的话，且后者列出本机有的。
+- 后台：`run_in_background: true` + `shell` 时，作业真的跑在那只壳里（用一条只有那只壳认得的写法
+  验，例如 cmd 的 `%CD%`）。
+- 全量报数两套（改前 / 改后），失败名单逐个比。
+
+## 跨特征对照
+
+- **`.scratch/bash-record-persistence`**（已落地，2d2095f）：记录活过写它的进程。作业的记录与壳无关
+  —— 记录里是命令说出来的话，不是谁解释的它。本特征不动记录。
+- **`shell.clj` 里「登录 shell 是承重的」**（6652097）：那条查的是**同一个 namespace** 的另一个
+  属性（启动成本 vs 杀树正确性）。本特征加的是「哪只壳」，**不碰**任何一只壳的 flag —— 尤其不许
+  顺手把 Git Bash 的 `-lc` 改掉。
+- **`.scratch/job-tools`**（已落地）：`bash` 收 `stdin` / `workdir` 那一票立了「参数从一处插值、
+  描述里说清默认值」的先例，`shell` 的描述照它办。
+- **`CONTEXT.md`**：运行时状态那张表里「作业 = 进程内存，命令的记录 = 文件」那一带，可能要加一句
+  「一次调用跑在哪只壳里由调用指名」——留给收口那张票定。
+
+## 交付顺序
+
+| # | 票 | Blocked by | 交付什么 |
+|---|---|---|---|
+| 01 | `shell.clj` 按 kind 解析并缓存 | — | 每个 kind 一份解析 + 缓存（默认答案与今天逐字相同）；`require-shell!` / `require-posix!` 语义不变；本机没有的 kind 能问出「没有」而不是抛 |
+| 02 | `bash` 加 `shell` 参数（前台） | 01 | 参数、取值校验、两条拒绝（不认识 / 本机没有）、描述里说清「command 是写给那只壳的一行」；答案形状不动 |
+| 03 | `run_in_background` 也带壳 | 02 | `jobs/start!` 带 kind，`shell/start` 按它起；答案仍是两条（决策 6）；一条只有那只壳认得的写法验它 |
+| 04 | 话术、文档、全量报数 | 03 | `CONTEXT.md` 那一句按需加、`docs/architecture/kernel.md` 的 shell 那一节、工具描述的最终一遍；两套全量报数；本特征自己的落地记录 |
+
+## 状态
+
+**2026-09-20 立票，尚未开工。** 上面表里的实测数字都是这台机器（Windows、4 逻辑核、Git Bash
+`C:\Program Files\Git\bin\bash.exe`）上量的，不是从别处抄的。
+
+基线（立票当天，`main` @ `2d2095f`）：
+`clojure -M:test -m harness.test-runner` → 972 用例 / 12036 断言 / 0 失败 / 0 错误。
