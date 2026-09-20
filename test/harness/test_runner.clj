@@ -95,6 +95,7 @@
     harness.edge.stats-test
     harness.edge.trajectory-test
     harness.edge.context-test
+    harness.edge.ui-test
     harness.edge.http-test
     harness.layers-test])
 

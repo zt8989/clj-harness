@@ -84,6 +84,9 @@
             [harness.edge.context :as context]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
+            ;; The built page, when this process has one: `ui/dist`, served at the
+            ;; root. See harness.edge.ui for why the server carries it at all.
+            [harness.edge.ui :as ui]
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
@@ -2677,7 +2680,16 @@
           ;; route arrived at the kernel as a run with no RunAgentInput in it, and
           ;; was answered with whatever that produced. A path this table does not
           ;; know is now exactly that, and says so.
-          (api-response 404 {:error (str "no such route: " (:uri req))}))))))
+          ;;
+          ;; THE BUILT PAGE SITS HERE, in front of the 404 and behind every route
+          ;; above it. It answers only GET/HEAD outside `/api` (harness.edge.ui
+          ;; refuses the rest), so nothing on the management edge can be shadowed
+          ;; by a file, and a request the table does not know is still a 404 --
+          ;; one that names the missing build when the page itself is what was
+          ;; asked for.
+          (or (ui/answer req)
+              (ui/absent req)
+              (api-response 404 {:error (str "no such route: " (:uri req))})))))))
 
 (defn- with-cors
   "The CORS headers this request's answer carries, merged onto whatever the route
@@ -2758,6 +2770,12 @@
 (defn start!
   "Start the server and return its stop fn. Default port is 8080.
 
+  TWO OPTIONS, and both are facts about the process the process did not choose
+  (`:ui-origin` names the one page answered by name, `:ui-dist` names the built
+  page this server puts in front of a browser; see `named-origin` and
+  `harness.edge.ui/serve-from!`). Either may be absent, which is the default:
+  `ui/dist` under the working directory, and `http://localhost:5173`.
+
   LOGGING COMES UP FIRST, BEFORE THE SOCKET. A server that cannot bind -- the
   port is taken, which on this machine is the ordinary case of a session already
   running -- failed to START, and that is precisely the kind of failure somebody
@@ -2804,6 +2822,12 @@
     ;; way a caller could turn the named origin off by accident, and `merge` would
     ;; let it through.
     (reset! named-origin (or (:ui-origin opts) ui-origin))
+    ;; ...AND THE PAGE THIS PROCESS SERVES, settled in the same breath and for the
+    ;; same reason: it is a fact about the process, chosen by whoever started it,
+    ;; and it has to be in place before the socket opens. `contains?` rather than
+    ;; `or`, so an explicit `:ui-dist nil` really is 'serve no page' instead of
+    ;; falling back to the default -- the same trap `:ui-origin` has above.
+    (ui/serve-from! (if (contains? opts :ui-dist) (:ui-dist opts) (ui/default-dir)))
     ;; A HOME THAT HAS NEVER BEEN CONFIGURED GETS A config.edn HERE, at boot: a
     ;; process about to SERVE from a home is the one that should hand a person a file
     ;; to edit. The reader does not do this -- `home/config` reads a missing file as an
@@ -2826,6 +2850,10 @@
             bound  (:local-port (meta server))]
         (println (str "harness listening on http://localhost:" bound)
                  "-- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)")
+        ;; WHAT IS AT `/`, which the line above does not say and a person starting
+        ;; this process wants to know before opening a browser: the built page and
+        ;; the directory it came from, or the fact that there is none.
+        (println (ui/banner))
         (log/started root bound)
         ;; ...AND ONE LINE FOR THE OTHER END OF THAT STORY. `:listening` marks
         ;; where the file's story begins; this marks where the process stopped
@@ -2858,12 +2886,21 @@
   ANOTHER machine, whose origin nobody could guess -- and there it has to be said.
   It is an argument rather than an environment variable because the caller already
   knows the value, and a fact that is passed to one child should be passed to the
-  other the same way."
+  other the same way.
+
+  `--ui-dist DIR` SAYS WHERE THE BUILT PAGE IS, and without it the page is
+  `ui/dist` under the working directory -- which is where `npm run build` puts it
+  and where `clojure -M:run` (run from the repo root, the only directory whose
+  `deps.edn` gives that command its classpath) will look. A directory with no
+  `index.html` in it is 'no page', not an error: this process then serves `/api`
+  alone, exactly as it did before it learned to serve a page at all."
   [& args]
   (let [option (fn [name] (some (fn [[k v]] (when (= k name) v)) (partition 2 1 args)))
         asked  (option "--port")
-        origin (option "--ui-origin")]
+        origin (option "--ui-origin")
+        dist   (option "--ui-dist")]
     (start! (cond-> {}
               asked  (assoc :port (Integer/parseInt (str asked)))
-              origin (assoc :ui-origin (str origin))))
+              origin (assoc :ui-origin (str origin))
+              dist   (assoc :ui-dist (str dist))))
     @(promise)))

@@ -91,6 +91,7 @@
 |---|---|
 | `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
+| `edge.ui` | **根上那一页**：把 `ui/dist`（`npm run build` 的产物）当静态资源发出去（只 `GET`/`HEAD`、只在 `/api` 之外、不回落 `index.html`），以及没有构建时那句指名道姓的 404。`clojure -M:run` 因此不用另外起 vite 也是一个完整应用 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
 | `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场。**端点那条载荷里还带着 `edge.context` 那一节**（一次读盘、两个折） |
 | `edge.context` | 记录的第**四**个读侧（`message` 那一半的第二个读者）：最近一次模型调用把上下文窗口填到了多少——分子是那次调用报的 `prompt_tokens`，分母是**那一次调用自己行上**的 `:context-window`——以及填进去的三样各占多少（按记录的字符数**摊**出来的估算，因此三块恰好加起来等于分子）。`records->context` 是对记录的纯函数，**没有自己的端点**：那一节并进 `GET /api/threads/<stem>/stats` 的载荷，composer 里 model 左边那颗圈与它的面板读它。见 [edge](architecture/edge.md) |
@@ -105,7 +106,7 @@
 0. **[layers](architecture/layers.md)** — **四层是什么**：判据、归属、允许的边、能力怎么装进核心
 1. **[overview](architecture/overview.md)** — 一次请求的完整路径，端到端；三条铁律；状态存在哪
 2. **[kernel](architecture/kernel.md)** — event / loop / llm / tools：一轮 run、执行缝的三个出口、悬置与它的 wire 形状
-3. **[edge](architecture/edge.md)** — `harness.edge.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫
+3. **[edge](architecture/edge.md)** — `harness.edge.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫；以及 `harness.edge.ui` 发的那一页
 4. **[home-and-storage](architecture/home-and-storage.md)** — 配置根、配置文件、sqlite、日志树、重建
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
