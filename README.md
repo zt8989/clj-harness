@@ -47,8 +47,9 @@ cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
 
 停止：`Ctrl+C`，或 `Get-Process clojure,node | Stop-Process`。
 
-验证：`node scripts/test.mjs`（`--backend` / `--ui` / `--build` 单跑，`--ns a,b` 只跑几个命名空间）。
-**别自己拼测试命令**——家目录隔离、端口由 OS 分配、跑完删临时目录都是**调用方式**的事，理由见 `AGENTS.md`。
+验证：`clojure -M:test -m harness.test-runner`（后端；只跑几个命名空间就把名字接在后面）、
+`cd ui && npm test`（前端 vitest）。**别自己拼 `(isolate!)` + `run-tests`**——家目录隔离、判据、
+跑完删临时目录都挂在 runner 上，理由见 `AGENTS.md`。
 
 ## 配置说明
 

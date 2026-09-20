@@ -1,7 +1,7 @@
 # 测试细则
 
-铁律和「怎么跑」在 `AGENTS.md`；这里放细则。脚本各自在守什么、漏掉会怎样，写在
-`scripts/test.mjs`、`scripts/dev.mjs` 的头注释里，这里不复述。
+铁律和「怎么跑」在 `AGENTS.md`；这里放细则。走查脚本守什么、漏掉会怎样，写在
+`scripts/dev.mjs` 的头注释里，这里不复述。
 
 ## 铁律的完整版：`~/.clj-harness` 只读
 
@@ -28,6 +28,16 @@
 developer's real home"）指向一个根本不存在的代码路径。两半一分开，"是谁写的"就有一个能站得住的名字。
 两个分支各有用例：`test/harness/test_runner_test.clj`（纯输入，不碰任何库）。
 
+### 定向跑：名字接在 runner 后面，不要自己拼（2026-09-20）
+
+只跑几个命名空间时，名字接在 runner 后面：`clojure -M:test -m harness.test-runner harness.cap.todos-test`。
+**不要**写成 `clojure -M:test -e "(isolate!) (run-tests 'x)"`：那是协议里方便的那半截——不查「真家
+动没动」的判据（于是判据挡的那条失败上照样报绿），也不收摊（每次调用留下一个临时 root）。
+`run-suite!` 存在的理由就是这个：指纹真家、隔离、require、跑、判据、收尾、给退出码，一次做完。
+
+**也没有哪个套件可以写死端口**，一律 `{:port 0}` 让 OS 分配：写死的端口要求「此刻这台机器上只有
+我在跑这套测试」，而开发者的会话、上一张票留下的 e2e server、另一个 worktree 都在同一台机器上。
+
 ## 界面走查：机器门替代不了的那一格
 
 2026-09-18 那次 i18n 合并，859 + 36 全绿、`tsc` 与打包都过，而侧栏每一行的标题都是空的。渲染那
@@ -40,7 +50,7 @@ developer's real home"）指向一个根本不存在的代码路径。两半一�
 一轮 run 的记录是**边跑边写**的，而 `--scripted` 的那对临时家**退出即删**：要看
 `projects/<workspace>/<thread>.jsonl` 就在它开着的时候看，路径它报在启动横幅里。
 
-## 写新用例时要自己守的（脚本管「怎么跑」，这几条它管不到）
+## 写新用例时要自己守的（runner 管「怎么跑」，这几条它管不到）
 
 - 要 home / 项目目录 / 配置目录的用例**自己造**：`harness.test-support/with-temp-env` 给它一对临时
   root + OS home（跑完连目录一起删掉），项目目录用 `temp-dir`；临时 root 里它会种一份最小

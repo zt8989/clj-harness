@@ -506,8 +506,8 @@ data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性
 
 ## 测试
 
-**怎么跑**用 `node scripts/test.mjs --ui`（它起的就是 `cd ui && npm test`，即 vitest；全套三条腿
-见 `AGENTS.md`）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
+**怎么跑**用 `cd ui && npm test`（vitest；三条腿与定向跑的完整入口见 `AGENTS.md`）。整套测试的
+**驱动只有一个文件**（`test/ui.test.ts`），
 `test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,concurrent}.ts`
 是被它 import 的普通模块：
 

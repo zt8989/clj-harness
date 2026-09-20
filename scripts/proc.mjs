@@ -1,10 +1,10 @@
 // The two things a launcher has to do differently per platform, in one place.
 //
-// `dev.mjs` and `test.mjs` both start a long-running child and both have to be able
-// to stop it again -- and on Windows each of those is a DIFFERENT MECHANISM rather
+// `dev.mjs` starts long-running children (a backend, a browser) and has to be able to
+// stop them again -- and on Windows each of those is a DIFFERENT MECHANISM rather
 // than a variation of the same one: a `.bat`/`.cmd` cannot be spawned without a
-// shell, and there is no process group to signal. Two copies of that would be two
-// places to get it wrong, so it lives here, with the reasons.
+// shell, and there is no process group to signal. Getting either wrong is silent,
+// so it lives here, with the reasons.
 import { spawn } from "node:child_process";
 
 /// CROSS-PLATFORM: on Windows `clojure` and `npm` are `.bat`/`.cmd`, and Node refuses

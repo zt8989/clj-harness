@@ -227,8 +227,9 @@
   isolate!'d but never checked the verdict would report green on exactly the
   failure the verdict exists for, and one that never cleaned up would leave a temp
   root behind for every invocation -- and both halves are easy to forget when the
-  caller assembles the run by hand. `-main` below is this function plus an exit,
-  and `scripts/test.mjs` is the caller that made the door necessary.
+  caller assembles the run by hand. `-main` below is this function plus an exit --
+  it is the caller that made the door necessary, and the namespaces handed to it on
+  the command line are the ones it runs.
 
   NOT `run!`: that name is `clojure.core`'s since 1.12, and shadowing it here would
   be a warning at load and a trap for whoever next requires this namespace."
@@ -263,5 +264,13 @@
       ;; property of the protocol rather than of the happy path.
       (finally (cleanup!)))))
 
-(defn -main [& _]
-  (System/exit (run-suite! test-namespaces)))
+(defn -main
+  "Run the suite -- all of it, or only the namespaces named on the command line.
+
+  A TARGETED RUN IS STILL THE WHOLE PROTOCOL: the namespace list is the only thing a
+  caller supplies, and the fingerprint, the isolation, the verdict, the cleanup and
+  the exit code all stay where `run-suite!` put them. The spelling this replaces --
+  `clojure -M:test -e \"(isolate!) (run-tests 'x)\"` -- is the convenient half of the
+  protocol and none of the rest."
+  [& args]
+  (System/exit (run-suite! (if (seq args) (mapv symbol args) test-namespaces))))

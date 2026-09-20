@@ -36,6 +36,9 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 # 后端（Clojure）
 clojure -M:test -m harness.test-runner
 
+# 只跑几个命名空间：名字接在后面（走同一条协议，别自己拼 `(isolate!)` + `run-tests`）
+clojure -M:test -m harness.test-runner harness.cap.todos-test harness.infra.db-test
+
 # 前端
 cd ui && npm test          # vitest
 cd ui && npm run typecheck # tsc

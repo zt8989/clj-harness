@@ -118,12 +118,14 @@
 ## 验证
 
 ```bash
-node scripts/test.mjs            # 三条腿：后端离线全量 + 前端类型门与构建 + 前端端到端全量
-node scripts/test.mjs --backend  # 只跑其中一条（--ui / --build / --ns <命名空间,..> 同理）
+clojure -M:test -m harness.test-runner   # 后端离线全量；只跑几个命名空间就把名字接在后面
+cd ui && npm test                        # 前端端到端全量（自带后端，不需要 api-key / 模型）
+cd ui && npm run build                   # tsc --noEmit + vite build
 ```
 
-**不要自己拼那几条命令**：家目录隔离、端口由 OS 分配、跑完删临时目录，都是**调用方式**的事。
-基线随分支变，报数带上分支与提交。细节见 `AGENTS.md` 与 `scripts/test.mjs` 的头注释。
+**定向跑也要走 runner 的那扇门**：`(isolate!)` 加 `run-tests` 只抄了协议的前半截——不查判据，
+也不收摊，于是**判据挡的那条失败上照样报绿**。所以定向跑是：`clojure -M:test -m harness.test-runner <命名空间,..>`。
+基线随分支变，报数带上分支与提交。细节见 `AGENTS.md` 与 `docs/rules/testing.md`。
 
 UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；
 它测什么由**脚本文件**决定，服务端不因此多一条测试专用路由。细节见 [client](architecture/client.md)。
