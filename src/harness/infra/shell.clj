@@ -34,13 +34,26 @@
   which cannot run is worse than one that admits there is none, so the chain has
   no guessed tail.
 
-  AND A LOGIN SHELL DOES ONE MORE THING ON THE WAY OUT, which is why every spawn
-  below pins SHLVL first: Git for Windows ships /etc/bash.bash_logout, and a
-  `bash -lc` whose OWN `exit` ends it (a compound command; a lone one is
-  exec-optimized away and never reads the file) sees `SHLVL=1` there and runs
-  /usr/bin/clear -- whose ESC[H ESC[2J ESC[3J lands in the same pipe as the
-  command's output. See `with-shlvl!`, and shell_test's case about it. mac ships
-  no such file, which is why this whole failure named Windows only.
+  THE LOGIN SHELL IS LOAD-BEARING, which is worth writing down because it looks like
+  pure cost. `-l` makes bash source /etc/profile -- whose profile.d scripts spawn
+  helpers of their own (`locale -uU`, `git --exec-path` plus git-completion, up to
+  seven `type -p` probes), and on Windows that is ~700ms of a ~770ms spawn. But an
+  experiment that skipped it (2026-09-20) found the profile is ALSO what keeps the
+  spawned tree KILLABLE: with `-c`, and equally with `--noprofile -lc`, a timed-out
+  `echo x; sleep 30` comes back in 12s with its output LOST, where `-lc` answers in 2s
+  with the output intact. So the flags stay, and the cost is NOT taken out of the flag:
+  the profile's three expensive branches are each guarded by an environment variable
+  (`WINELOADERNOEXEC`, `LANG`, `TERM`), which measured 770ms -> 333ms per command with
+  the killing still correct. That is a change to what every spawned command sees, so it
+  is a decision to take deliberately rather than a line to slip in beside a bug fix.
+
+  AND A LOGIN SHELL DOES ONE MORE THING ON THE WAY OUT, which is why every spawn pins
+  SHLVL too: Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN
+  `exit` ends it (a compound command; a lone one is exec-optimized away and never reads
+  the file) sees `SHLVL=1` there and runs /usr/bin/clear -- whose ESC[H ESC[2J ESC[3J
+  lands in the same pipe as the command's output. See `with-shlvl!`, and shell_test's
+  case about it. mac ships no such file, which is why this whole failure named Windows
+  only.
 
   WHAT A SHELL IS, AS THIS NAMESPACE ANSWERS IT:
 
@@ -83,7 +96,15 @@
 (def ^:private how-to-start
   "kind -> the argv a command goes behind. One table rather than a `case` at each
   spawn site: there are three spawn sites, and a second copy of this would
-  eventually be fixed in one of them."
+  eventually be fixed in one of them.
+
+  BASH KEEPS `-lc`, AND THE `-l` IS NOT DECORATION: skipping the profile breaks
+  TIMEOUT HANDLING. With `-c`, and equally with `--noprofile -lc`, a timed-out
+  `echo x; sleep 30` comes back in 12s with its output LOST; with `-lc` it answers in
+  2s with the output intact (measured 2026-09-20 on this repo's machine -- the exact
+  reason is not pinned down further than 'the profile has to have run'). The profile
+  is expensive all the same (~700ms of the ~770ms spawn), and the way to trim it is the
+  branches' own environment guards -- not the flag."
   {:git-bash   ["-lc"]
    :bash       ["-lc"]
    :pwsh       ["-NoProfile" "-Command"]

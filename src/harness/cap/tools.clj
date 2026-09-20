@@ -827,10 +827,13 @@
              " started, and the answer is a job id (like `j1`) and where that job's record is --"
              " the command's output is not in it. A job has NO timeout (so `timeout` does not"
              " apply here and `stdin` is refused); it runs until it ends or until `job_kill` stops"
-             " it, it lives only as long as this harness process, and WHEN IT ENDS YOU ARE TOLD:"
+             " it, and WHEN IT ENDS YOU ARE TOLD:"
              " its ending is put in front of you before your next model call, so you do not have"
              " to remember to ask. Read what it has said, or wait for it, with `job_output`;"
-             " stopping it is `job_kill`.")
+             " stopping it is `job_kill`. "
+             "The JOB lives only as long as this harness process; its RECORD does not -- it"
+             " stays in the configuration home, where `read` and `grep` reach it later, in this"
+             " session or in a later one.")
         {"command" {:type "string" :description "Command line."}
          "stdin"   {:type "string"
                     :description (str "Text to write to the command's standard input, then close"
@@ -875,7 +878,8 @@
        " `[stopped]` or `[exit N]`, and `job_output` reads it before or after stopping. "
        "Stopping does not wait for the process to go -- the answer comes back as soon as the"
        " kill is requested. Asking again is fine and answers the same thing, because a job that"
-       " is over is kept until this process ends; only an id this session never had is refused."))
+       " is over is kept until this process ends (the RECORD it left stays after that -- a file"
+       " `read` or `grep` can open); only an id this session never had is refused."))
 
 (defn- t-job-kill
   "`job_kill`'s body: stop it, and answer with where its record is -- and how it went,
@@ -905,7 +909,9 @@
        " is `[running]` with whatever the command has said so far. A job that ends while you"
        " are busy is announced to you before your next model call (see `bash`), so `wait` is for"
        " when you want to stand still and wait for it now. "
-       "A job that is over still answers: its record is kept until this process ends."))
+       "A job that is over still answers -- but only inside the process that started it: an"
+       " id does not survive a restart, and the record it left is a file `read` and `grep` still"
+       " open. A record this call cannot reach is therefore not a record that is gone."))
 
 (defn- t-job-output
   "`job_output`'s body: the facts harness.cap.jobs reads off the record, as the answer a
