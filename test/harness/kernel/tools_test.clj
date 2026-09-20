@@ -409,6 +409,94 @@
       (is (true? error))
       (is (str/includes? content "nothing is there")))))
 
+;; ------------------------------------------------------------- which shell
+;;
+;; A `bash` CALL MAY NAME THE SHELL THAT INTERPRETS ITS LINE. The default is untouched --
+;; no `shell` means this machine's own, exactly as before -- and a name that cannot be
+;; honoured is refused rather than substituted: running the caller's `%VAR%` line under a
+;; shell that does not read it would come back looking like a bug in the command.
+
+(defn- a-shell-this-machine-lacks
+  "The name of a kind this machine does NOT have, or nil when it has all of them. ASKED
+  of the machine rather than written down: which kinds exist is the one thing about this
+  that differs between the machines this suite runs on."
+  []
+  (->> shell/candidates (map :kind) distinct (map name)
+       (remove #(some? (shell/resolution (keyword %))))
+       first))
+
+(deftest a-call-can-name-the-shell-that-interprets-it
+  ;; `%CD%` IS THE PROOF, and it cannot be anything else: bash does not expand it, so a
+  ;; Windows path in the answer means cmd really read the line. Wrapping `cmd /c` inside a
+  ;; bash call -- the workaround this replaces -- cannot produce that, because bash would
+  ;; be the one handing the line over.
+  (when (shell/resolution :cmd)
+    (let [{:keys [content error]} (call "bash" {:command "echo %CD%" :shell "cmd"})]
+      (is (false? error))
+      (is (re-find #"[A-Za-z]:[\\/]" content)
+          (str "cmd expanded %CD%: " (pr-str content))))))
+
+(deftest leaving-the-shell-out-is-exactly-what-it-was
+  (let [{:keys [content error]} (call "bash" {:command "echo hi"})]
+    (is (false? error))
+    (is (= "hi" (str/trim content))
+        "no `shell` is not a new default -- it is no change at all")))
+
+(deftest a-shell-name-that-is-not-one-of-them-is-refused-as-a-word
+  (let [{:keys [content error]} (call "bash" {:command "echo hi" :shell "bash5"})]
+    (is (true? error))
+    (is (str/includes? content "`shell` must name one of")
+        "the sentence says what the list is: the reader fixes this one by reading it")
+    (is (str/includes? content "bash5") "and it quotes what was actually asked for")))
+
+(deftest a-shell-this-machine-lacks-is-refused-with-what-it-has
+  (if-let [absent (a-shell-this-machine-lacks)]
+    (let [{:keys [content error]} (call "bash" {:command "echo hi" :shell absent})]
+      (is (true? error))
+      (is (str/includes? content (str "no `" absent "` shell on this machine")))
+      (is (str/includes? content "what it has is")
+          "re-reading the list fixes nothing here, so it says what the machine DOES have"))
+    (is true "this machine has every kind the harness knows -- nothing to refuse")))
+
+(deftest the-background-mode-takes-the-same-shell
+  ;; THE SAME PROOF AS THE FOREGROUND CASE: `%CD%` is not something bash expands, so a
+  ;; Windows path in the RECORD means cmd really read the line -- and the record is the
+  ;; only place a job's output ever appears.
+  ;;
+  ;; AND THE ANSWER SAYS NOTHING ABOUT IT. Which shell ran a job is the caller's own
+  ;; choice, not part of the job's identity, and `job_output` never needs to know -- so a
+  ;; call that named a shell answers in exactly the shape a call that did not, and both
+  ;; are held to it here rather than only the new one.
+  (let [two-facts #"job \S+ started; its record is \S+"
+        default-answer (call "bash" {:command "echo hi" :run_in_background true})]
+    (is (re-matches two-facts (str/trim (:content default-answer)))
+        "the default background answer is still two facts, one line")
+    (when (shell/resolution :cmd)
+      (let [answer (:content (call "bash" {:command "echo %CD%"
+                                           :run_in_background true
+                                           :shell "cmd"}))
+            path   (second (re-find #"its record is (\S+)" answer))]
+        (is (re-matches two-facts (str/trim answer))
+            "and naming a shell does not add a third: two facts, one line")
+        (is (some? path) (str "the answer names the record: " answer))
+        (is (support/holds-within?
+             #(re-find #"[A-Za-z]:[\\/]" (slurp path :encoding "UTF-8")) 15000)
+            "the record holds what cmd printed, which bash could not have expanded")
+        (jobs/shutdown!)))))
+
+(deftest a-background-call-naming-a-missing-shell-registers-nothing
+  ;; THE REFUSAL HAPPENS BEFORE THE ID IS TAKEN, so a call that named a kind this machine
+  ;; does not have leaves no id, no record file and no process behind -- the same promise
+  ;; `start!` makes about a command that cannot be spawned at all.
+  (if-let [absent (a-shell-this-machine-lacks)]
+    (let [{:keys [content error]} (call "bash" {:command "echo hi"
+                                                :run_in_background true
+                                                :shell absent})]
+      (is (true? error))
+      (is (str/includes? content (str "no `" absent "` shell on this machine")))
+      (is (not (str/starts-with? content "job ")) "and nothing was registered for it"))
+    (is true "this machine has every kind the harness knows -- nothing to refuse")))
+
 ;; ------------------------------------------------------- what an answer may carry
 ;;
 ;; THE CEILING HAS A FLOOR: below it nothing changes at all -- `echo hi` is still

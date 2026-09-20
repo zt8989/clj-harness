@@ -677,9 +677,14 @@
   would be a command's last words that no command ever said.
 
   The command goes to the shell a foreground `bash` call would use (`:shape :shell`)
-  rather than to `cmd /c` on Windows -- the promise here is the same as `bash`'s."
-  [thread-id {:keys [command dir]}]
-  (let [handle (shell/start {:command command :dir dir :shape :shell})
+  rather than to `cmd /c` on Windows -- the promise here is the same as `bash`'s.
+
+  `:kind` NAMES WHICH SHELL, exactly as it does for a foreground call; without it this
+  machine's own is used. `shell/start` resolves it BEFORE the job id is taken, so a kind
+  this machine does not have throws with nothing registered -- the same promise the
+  paragraph above makes about a command that cannot be spawned at all."
+  [thread-id {:keys [command dir kind]}]
+  (let [handle (shell/start {:command command :dir dir :shape :shell :kind kind})
         job-id (next-id! thread-id)
         p      (record-path thread-id job-id)]
     (try

@@ -186,6 +186,49 @@
   two minutes after somebody changes the default."
   120000)
 
+(def ^:private shell-names
+  "The names a `bash` call may give for `shell` -- and the ONLY source of them: the
+  description advertises this list, the schema's `:enum` publishes it, the validation
+  accepts it and the refusal quotes it.
+
+  DERIVED FROM THE KINDS THE SHELL LAYER KNOWS, so a name a refusal offers is always a
+  name that is accepted. A hand-written list could drift into the one lie a refusal must
+  not tell -- an answer that says 'what it has is: bash' while `shell: \"bash\"` is then
+  rejected as a word nobody knows."
+  (->> shell/candidates (map :kind) distinct (mapv name)))
+
+(def ^:private shell-names-text
+  "The same list as prose, so the description and the refusals do not write it out again."
+  (str/join ", " (map #(str "`" % "`") shell-names)))
+
+(defn- named-shell
+  "The KIND a `bash` call named, or nil when it named none. The refusals happen here, and
+  there are TWO of them on purpose:
+
+    - a word that is not one of `shell-names`: the reader fixes that by reading the list,
+      and the sentence says what the list is;
+    - one of those names that THIS MACHINE does not have: re-reading fixes nothing, and
+      the sentence says what the machine does have instead.
+
+  BOTH REFUSE RATHER THAN FALLING BACK. Running a line under a shell nobody asked for
+  hands the caller's `%VAR%` or `$env:VAR` to somebody who does not read it, and the
+  answer then reads as a bug in the command rather than as a shell that was substituted."
+  [named]
+  (when (some? named)
+    (let [s (str named)]
+      (when-not (some #{s} shell-names)
+        (throw (ex-info (str "`shell` must name one of " shell-names-text
+                             ", or be left out to use this machine's own shell; "
+                             (pr-str s) " is not one of them.")
+                        {:argument :shell :reason :unknown-shell :value s})))
+      (try
+        (shell/require-shell! (keyword s))
+        (keyword s)
+        (catch clojure.lang.ExceptionInfo e
+          ;; `require-shell!` already wrote the sentence (and listed what this machine
+          ;; has); what it cannot know is that the caller named it as an ARGUMENT.
+          (throw (ex-info (ex-message e) (assoc (ex-data e) :argument :shell))))))))
+
 (defn- work-dir
   "The directory a `bash` call runs in: the session's project binding, or -- when the
   call names one -- `workdir`, resolved the way every other path in this table is
@@ -282,8 +325,11 @@
     - `stdin` IS REFUSED BY NAME, because nothing here feeds a background command:
       dropping what the caller asked for without a word is the kind of silent
       disagreement this codebase refuses everywhere else."
-  [{:keys [command timeout stdin workdir run_in_background]}]
-  (let [dir (work-dir kernel-tools/*thread-id* workdir)]
+  [{:keys [command timeout stdin workdir run_in_background] shell-named :shell}]
+  (let [dir  (work-dir kernel-tools/*thread-id* workdir)
+        ;; RESOLVED BEFORE ANYTHING IS STARTED, so a kind this machine does not have
+        ;; refuses without a job id, a record file or a half-started process to clean up.
+        kind (named-shell shell-named)]
     (when (and run_in_background (some? stdin))
       (throw (ex-info (str "`stdin` cannot be used with `run_in_background`: nothing feeds a"
                            " background command's standard input, so the text would be"
@@ -292,7 +338,7 @@
                       {:argument :stdin :reason :not-a-background-input})))
     (if run_in_background
       (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
-                                           {:command command :dir dir})]
+                                           {:command command :dir dir :kind kind})]
         ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
         ;; started), and advice about reading the record belongs in the description
         ;; rather than in every answer.
@@ -301,7 +347,8 @@
             {:keys [exit out err] stopped :timeout} (shell/run {:command command
                                                                 :stdin stdin
                                                                 :dir (when dir dir)
-                                                                :timeout-ms limit})
+                                                                :timeout-ms limit
+                                                                :kind kind})
             ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
             ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
             ;; the output did not fit, the record ends on this line and so does the
@@ -810,6 +857,12 @@
              " directory to run in (relative paths resolve against this session's project"
              " directory, which is also what a call without `workdir` uses; when no project is"
              " bound that is the process working directory). "
+             "`shell` names WHICH SHELL INTERPRETS `command`: " shell-names-text ", or leave it"
+             " out for this machine's own. It is NOT 'run the same line somewhere else' --"
+             " `command` is a line written FOR the shell you name: `echo %CD%` for cmd,"
+             " `Write-Output $env:TEMP` for the two PowerShells, `echo $PWD` for the bash ones."
+             " A name this machine does not have is refused by name, and so is a word that is"
+             " not one of the above; neither falls back to another shell. "
              "IT WAITS FOR THE COMMAND, or it does not -- that is the whole difference between"
              " this tool's two modes, and how long the command takes is not the question: if you"
              " are only going to wait for it, run it here and give it a big `timeout`; if you are"
@@ -835,6 +888,15 @@
              " stays in the configuration home, where `read` and `grep` reach it later, in this"
              " session or in a later one.")
         {"command" {:type "string" :description "Command line."}
+         "shell"   {:type "string" :enum shell-names
+                    :description (str "Which shell interprets `command` -- one of "
+                                      shell-names-text ", or left out for this machine's own"
+                                      " (Git Bash on Windows, the host's shell elsewhere)."
+                                      " `command` has to be written for the shell you name."
+                                      " A background command runs in it too."
+                                      " A name this machine does not have, or a word that is"
+                                      " not one of the above, is refused rather than falling"
+                                      " back to another shell.")}
          "stdin"   {:type "string"
                     :description (str "Text to write to the command's standard input, then close"
                                       " it. Nothing means an empty stream, closed. Foreground"
