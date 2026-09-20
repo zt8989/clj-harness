@@ -811,9 +811,11 @@
        " is NOT in it. Read what it has said with `job_output`, which also says how it went and"
        " can WAIT for it to end; the record is a plain file in this session's configuration"
        " home, so `bash` (`tail` / `grep` / `cat`), `read` and `grep` read it too."
-       " A job has NO timeout -- it runs until it ends or until it is stopped -- and NOTHING"
-       " TELLS YOU when it is over: `job_output` waits for it if you ask it to, and asking again"
-       " later is how you check. It lives only as long as this harness process. "
+       " A job has NO timeout -- it runs until it ends or until it is stopped -- and WHEN IT"
+       " ENDS YOU ARE TOLD: its ending is put in front of you before your next model call, so"
+       " you do not have to remember to ask. That is not a notification -- nothing wakes you"
+       " up, it rides the next thing you do. `job_output` is for looking now, or for standing"
+       " still and waiting. It lives only as long as this harness process. "
        "The working directory is this session's project directory when one is bound,"
        " otherwise the process working directory, exactly as `bash`."))
 
@@ -881,8 +883,9 @@
        " directly. "
        "`wait: true` blocks until the command is over -- or until `timeout` (default "
        jobs/job-output-default-timeout-ms "ms) runs out, and that is not an error: the answer"
-       " is `[running]` with whatever the command has said so far. NOTHING NOTIFIES YOU when a"
-       " job ends, so `wait` is how you wait and asking again later is how you check. "
+       " is `[running]` with whatever the command has said so far. A job that ends while you"
+       " are busy is announced to you before your next model call (see `job`), so `wait` is for"
+       " when you want to stand still and wait for it now. "
        "A job that is over still answers: its record is kept until this process ends."))
 
 (defn- t-job-output

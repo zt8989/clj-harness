@@ -647,6 +647,19 @@
   []
   120000)
 
+(defn- mark-told!
+  "Record that the ending of JOB-ID has been handed to the model.
+
+  THE GUARD IS THE POINT: `update-in` puts back whatever the function returns, so a
+  change written for a missing path would recreate the entry as nil -- the trap
+  `with-job` documents, and the same one a job that leaves the registry springs here."
+  [thread-id job-id]
+  (let [p (path thread-id job-id)]
+    (swap! registry (fn [reg]
+                      (if-let [job (get-in reg p)]
+                        (if (terminal? job) (assoc-in reg (conj p :told?) true) reg)
+                        reg)))))
+
 (defn output
   "What JOB-ID has said, and how it went, as
   `{:status .. :lines [..] :from .. :to .. :total ..}`:
@@ -681,6 +694,11 @@
   (let [job (with-job thread-id job-id (fn [reg _] reg))]
     (when (and wait (not (terminal? job)))
       (deref (:ended job) (long (or timeout job-output-default-timeout-ms)) ::timeout))
+    ;; HANDING BACK AN ENDING IS TELLING. A job whose ending the model has just been
+    ;; shown -- by a read, or by a wait that ended while it waited -- has no notice
+    ;; coming: an ending it has already read is not news. ASKED AFTER THE WAIT,
+    ;; because the wait is often exactly what ended it.
+    (when (terminal? job) (mark-told! thread-id job-id))
     (let [lines    (record-lines (:path job))
           over?    (terminal? job)
           status   (if over? (or (peek lines) "[exit ?]") "[running]")
@@ -736,7 +754,9 @@
 
   THROWS for a job id this session does not have."
   [thread-id job-id]
-  (let [job (with-job thread-id job-id (fn [reg _] reg))
+  ;; AND ITS ANSWER IS ALWAYS AN ENDING -- `[stopped]` or the one it had already
+  ;; written -- so this call tells the model, and no notice follows it.
+  (let [job (with-job thread-id job-id (fn [reg p] (assoc-in reg (conj p :told?) true)))
         running? (and (not (terminal? job)) ((:alive? (:handle job))))]
     (if running?
       (do (write-last-line! job "[stopped]")
@@ -746,6 +766,110 @@
       (write-exit-line! job))
     {:id job-id :path (:path job) :stopped? running?
      :ending (ending-of (:path job))}))
+
+;; ---------------------------------------------------- telling the model it is over
+;;
+;; A JOB NOBODY IS WAITING FOR STILL HAS TO BE HEARD FROM. The three verbs above are
+;; all things the MODEL does, and the whole reason a job exists is that the model went
+;; off to do something else -- so without a fourth channel the ending of a background
+;; command sits in a file until somebody remembers to ask, and a model that is running
+;; a synchronous loop does not remember to ask.
+;;
+;; SO THE ENDING IS PUT IN FRONT OF IT, as a message in the history the next model call
+;; is sent. The seam for that already exists and is not this namespace's: the kernel
+;; runs a session's pre-LLM step before EVERY call (`cap.project/before-llm`, which
+;; composes `before-llm` below with the skills half), so a job that ends while the model
+;; is busy is in front of it at the very next call, and one that ends after the turn is
+;; in front of it at the next turn's first call.
+;;
+;; IT IS NOT A PUSH. Nothing wakes the model up, no run is started for a notice, and no
+;; frame goes to the client: it rides whatever call comes next.
+;;
+;; AND IT IS SAID ONCE. That claim needs a place to live -- see `take-notices!`.
+
+(def notice-budget-bytes
+  "How many BYTES of a job's record one notice carries.
+  SMALLER THAN `answer-budget-bytes`, and by design: a notice is a nudge, not an answer.
+  It is there so the model can decide whether to look, and the whole record is one
+  `job_output` away (its path is on the tag). One source, like every other budget here."
+  1200)
+
+(defn- notice
+  "The message that tells the model JOB is over: a `<job-ended …>` block whose body is
+  the END of the job's record -- which ends on the ending line itself (`[exit N]` /
+  `[stopped]`), so the body needs no second account of how it went.
+
+  THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
+  `<skill name=…>` and `<instructions path=…>` are for their own blocks. The path is an
+  attribute rather than a sentence: it is metadata about the block, not something the
+  command said.
+
+  OVER BUDGET: the tail, and -- in front of it -- the same truncation line a `bash`
+  answer uses, saying how many bytes are missing and where the whole thing is. One
+  sentence, written once (`truncation-line`), for both readers.
+
+  THE PATH GOES IN UNESCAPED, and that is a judgement rather than an oversight: it is
+  this harness's own configuration home plus `home/sanitize`d id, whose rule admits only
+  `[A-Za-z0-9._-]`, so a quote can appear in it only if somebody named their home with
+  one -- and a check for that would be a lot of code for that."
+  [job]
+  (let [whole (try (slurp (:path job) :encoding "UTF-8") (catch Exception _ ""))
+        {:keys [text omitted]} (tail-within-budget whole notice-budget-bytes)
+        body (if (and (seq text) (not (str/ends-with? text "\n"))) (str text "\n") text)]
+    {:role "user"
+     :content (str "<job-ended id=\"" (:id job) "\" path=\"" (:path job) "\">\n"
+                   (when (pos? omitted) (str (truncation-line omitted (:path job)) "\n"))
+                   body
+                   "</job-ended>")}))
+
+(defn take-notices!
+  "The messages that tell THREAD-ID's model about jobs that have finished and whose
+  ending it has NOT been handed yet -- MARKING THEM TOLD in the same step.
+
+  THREE WAYS AN ENDING REACHES THE MODEL, and this is the third: `job_output` showed it
+  a terminal record, `job_kill` showed it how the command went, or this. Whichever came
+  first is the one that counts; a model that asked is not told again.
+
+  THE MARK IS THE ONLY MEMORY THIS CAN HAVE. A skill body can be recognised in the
+  history -- `<skill name=…>` stays in the conversation, because the CLIENT keeps
+  resending it -- so that derivation is idempotent for free. A notice has no such anchor:
+  the client never holds one (it is computed per call and sent to nobody), so 'has this
+  been said' lives here, in the registry: process-local, per session, the same lifetime
+  as the jobs themselves. A process that dies takes the unsaid endings with it, and the
+  records are still there to be asked about.
+
+  IN ONE STEP, the registry's own discipline: the entries this answers about and the
+  entries it leaves behind come from one snapshot, so a job ending at this very moment
+  is in this answer or in the next one -- never in both, never in neither.
+
+  A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `bash tail` on a record leaves no
+  trace here, so that job is announced once anyway. The notice is small and said once,
+  and being told something twice costs less than never being told at all."
+  [thread-id]
+  (let [pending? (fn [job] (and (terminal? job) (not (:told? job))))
+        [before _] (swap-vals! registry
+                               (fn [reg]
+                                 (if-let [jobs (get-in reg [thread-id :jobs])]
+                                   (reduce-kv (fn [r id job]
+                                                (if (pending? job)
+                                                  (assoc-in r [thread-id :jobs id :told?] true)
+                                                  r))
+                                              reg jobs)
+                                   reg)))]
+    (->> (vals (get-in before [thread-id :jobs]))
+         (filter pending?)
+         (sort-by :id)
+         (mapv notice))))
+
+(defn before-llm
+  "HISTORY with a notice appended for every job that has finished since the model was
+  last told -- the jobs half of a session's pre-LLM step, in the same shape
+  `harness.cap.project/before-llm` has (and composed by it).
+
+  WHAT IT LOOKS LIKE WHEN THERE IS NOTHING TO SAY IS THE HISTORY ITSELF, unchanged: a
+  session with no finished jobs pays a call to this function and nothing else."
+  [history thread-id]
+  (into (vec history) (take-notices! thread-id)))
 
 ;; -------------------------------------------------------- what a command sends away
 

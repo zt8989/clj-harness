@@ -69,7 +69,7 @@
 | 命名空间 | 是什么 |
 |---|---|
 | `cap.tools` | **十八个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `job` / `job_output` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`；批的计划器与编辑模式的收窄策略也从这里装上 |
-| `cap.jobs` | **后台作业与命令的记录**：起一条没人等的命令、写下它说了什么、读它、停掉它。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**读它有三条路**：`job_output`（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号）、`bash` / `read` / `grep` 直接读同一份文件、以及答案里那条路径。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行、不跨重启，进程退出时连文件一起收掉。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
+| `cap.jobs` | **后台作业与命令的记录**：起一条没人等的命令、写下它说了什么、读它、停掉它。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**读它有四条路**：`job_output`（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号）、`bash` / `read` / `grep` 直接读同一份文件、答案里那条路径、以及**它自己会说话**——一条没人等的作业结束时，它的结局会在**下一次模型调用前**作为 `<job-ended id="…" path="…">` 注入历史（`before-llm` 的第二半，`notice-budget-bytes` 有界），说一次、不推送（`job_output` / `job_kill` 已经交到模型手里的结局不重复）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行、不跨重启，进程退出时连文件一起收掉。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
@@ -78,7 +78,7 @@
 | `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
 | `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那两条行（工程目录 / 这台机器）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这些行要它，也要 `kernel.hooks.dispatch` |
-| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的技能注入） |
+| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：技能正文 + 作业结束的通知两半，一处组装） |
 | `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |

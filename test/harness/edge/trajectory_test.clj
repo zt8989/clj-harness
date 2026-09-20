@@ -169,6 +169,38 @@
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
       (is (= "run" (:source (item-of turn "context")))))))
 
+(deftest a-job-ending-is-injected-context-too
+  ;; THE OTHER SHAPE A TAIL USER MESSAGE COMES IN. A skill body is one; the ending of a
+  ;; background job (`harness.cap.jobs/before-llm`) is another, and the reader does not
+  ;; need to know which it is -- it shows the bytes and where they landed, which is the
+  ;; whole reason a new kind of injection costs this view nothing.
+  (testing "a notice in the returned tail is context, where it actually landed"
+    (let [[turn] (turns-of
+                  [(input 0 (user "u1" "\u5f00\u5de5"))
+                   (message 10 (system-msg "S"))
+                   (message 11 (user "u1" "\u5f00\u5de5"))
+                   finished
+                   (message 20 {:role "assistant" :content ""
+                                :tool_calls [(tool-call "c1" "job" "{\"command\":\"make\"}")]})
+                   (message 21 (tool-msg "c1" "job j1 started"))
+                   (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">\nDONE\n[exit 0]\n</job-ended>"))
+                   (message 23 (assistant "noted"))])]
+      (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
+      (is (= "run" (:source (item-of turn "context"))))
+      (is (str/includes? (:text (item-of turn "context")) "path=\"/home/jobs/j1.log\"")
+          "the bytes, verbatim -- the path is part of what the model read")))
+
+  (testing "and two jobs are two blocks, because the ids are part of the bytes"
+    (let [[turn] (turns-of
+                  [(input 0 (user "u1" "\u5f00\u5de5"))
+                   (message 10 (system-msg "S"))
+                   (message 11 (user "u1" "\u5f00\u5de5"))
+                   finished
+                   (message 20 (user "" "<job-ended id=\"j1\" path=\"/x/j1.log\">[exit 0]</job-ended>"))
+                   (message 21 (user "" "<job-ended id=\"j2\" path=\"/x/j2.log\">[stopped]</job-ended>"))])]
+      (is (= 2 (count (filter #(= "context" (:kind %)) (:items turn))))
+          "the de-duplication is by bytes, and these are different bytes"))))
+
 (deftest an-injection-is-shown-once-for-the-whole-session
   ;; The runs RESTATE their injections: the server holds no session, so every run re-reads
   ;; the instruction files, re-renders the catalog, and re-derives every skill body the

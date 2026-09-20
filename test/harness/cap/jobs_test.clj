@@ -77,6 +77,78 @@
       (testing "and the last line says how it ended"
         (is (= "[exit 0]" (last (str/split-lines answer))))))))
 
+;; --------------------------------------------------------- telling the model
+;;
+;; The three verbs above are all things the MODEL does, and nobody-waiting is the whole
+;; reason a job exists -- so there is a fourth channel: `take-notices!` hands back the
+;; jobs that finished whose ending the model has not been given yet. It is the jobs half
+;; of a session's pre-LLM step, and what these cases own is the arithmetic of "once":
+;; who has been told, and who has not.
+
+(deftest a-job-that-is-over-says-so-once
+  (let [t "jt-tell"
+        {:keys [id path]} (jobs/start! t {:command "echo said-this; exit 3"})]
+    (record-until path #(re-find #"\[exit" %) 10000)
+    (let [notices (jobs/take-notices! t)]
+      (testing "one job, one notice, in the shape the injection is read back by"
+        (is (= 1 (count notices)))
+        (is (= "user" (:role (first notices))) "a message like any other, like a skill body")
+        (is (str/starts-with? (:content (first notices))
+                              (str "<job-ended id=\"" id "\" path=\"")))
+        (is (str/ends-with? (:content (first notices)) "</job-ended>"))
+        (is (str/includes? (:content (first notices)) "said-this") "what it said is in it")
+        (is (str/includes? (:content (first notices)) "[exit 3]")
+            "and the body ends on the RECORD's own ending line, which is the status"))
+      (testing "and it is not said twice"
+        (is (= [] (jobs/take-notices! t)))))))
+
+(deftest a-job-that-is-still-running-has-nothing-to-say
+  (let [t "jt-quiet"
+        {:keys [path]} (jobs/start! t {:command "echo out; sleep 30"})]
+    (record-until path #(re-find #"out" %) 10000)
+    (is (= [] (jobs/take-notices! t)) "it has not finished, so there is no ending to hand over")))
+
+(deftest asking-a-job-yourself-counts-as-being-told
+  ;; A model that waited for it, or read it, has the ending in hand -- an ending it has
+  ;; already read is not news, and telling it again would teach it to ignore notices.
+  (let [t "jt-asked"
+        {:keys [id]} (jobs/start! t {:command "echo hi; exit 0"})]
+    (is (= "[exit 0]" (:status (jobs/output t id {:wait true :timeout 20000})))
+        "the wait handed the ending over")
+    (is (= [] (jobs/take-notices! t))))
+  (testing "and a plain read of an ended job counts too"
+    (let [t "jt-read-it"
+          {:keys [id path]} (jobs/start! t {:command "exit 5"})]
+      (record-until path #(re-find #"\[exit" %) 10000)
+      (is (= "[exit 5]" (:status (jobs/output t id {}))))
+      (is (= [] (jobs/take-notices! t))))))
+
+(deftest stopping-a-job-counts-as-being-told
+  (let [t "jt-stopped"
+        {:keys [id]} (jobs/start! t {:command "sleep 30"})]
+    (is (true? (:stopped? (jobs/stop! t id))))
+    (is (= [] (jobs/take-notices! t)) "its answer WAS the ending")))
+
+(deftest a-long-record-is-announced-by-its-tail
+  ;; The notice is a nudge, not an answer: bounded by its own (smaller) budget, and what
+  ;; it leaves out it says out loud -- with the same sentence a `bash` answer uses.
+  (let [t "jt-long"
+        {:keys [path]} (jobs/start! t {:command "seq 1 5000; exit 0"})]
+    (record-until path #(re-find #"\[exit" %) 20000)
+    (let [content (:content (first (jobs/take-notices! t)))]
+      (is (str/includes? content "[truncated: omitted ") "the bytes left out are named")
+      (is (str/includes? content "the whole output is ") "and so is where the rest is")
+      (is (str/includes? content "\n5000\n") "the tail is the END of the record")
+      (is (str/includes? content "[exit 0]") "which ends on the ending line")
+      (is (< (alength (.getBytes content "UTF-8")) (* 3 jobs/notice-budget-bytes))
+          "and the whole block stays inside the budget (plus its tag and one line)"))))
+
+(deftest the-pre-llm-half-leaves-a-history-alone-when-there-is-nothing-to-say
+  (let [history [{:role "user" :content "go"}]]
+    (is (= history (jobs/before-llm history "jt-nobody")))
+    (is (= "go" (:content (first (jobs/before-llm history "jt-nobody"))))
+        "byte for byte the history it was handed, not a re-built one")))
+
 (deftest a-job-that-has-not-printed-yet-has-an-empty-record
   (let [{:keys [path]} (jobs/start! "jt-b" {:command "sleep 30"})]
     (Thread/sleep 300)

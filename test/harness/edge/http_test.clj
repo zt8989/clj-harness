@@ -18,6 +18,7 @@
             [harness.kernel.loop :as loop]
             [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
+            [harness.cap.jobs :as jobs]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
@@ -388,6 +389,66 @@
            (is (= "RUN_FINISHED" (:type (last frames))))
            (is (empty? (wire/violations frames)))))))
     (finally (support/wipe-hooks!))))
+
+(deftest a-finished-job-is-announced-to-the-model-and-never-to-the-client
+  ;; THE WHOLE PATH, over real HTTP. A background job belongs to a session, it ends while
+  ;; nobody is looking, and the next run of that session carries its ending in the
+  ;; history the model is sent -- with no frame carrying a word of it, because the
+  ;; injection is the server's and the conversation stays the client's.
+  ;;
+  ;; AND IT IS SAID ONCE: the thing the client resends next time has no notice in it (it
+  ;; never had one), so "have we told it?" is a fact about the registry and not about the
+  ;; history. A run that re-derived the notice from the client's messages would announce
+  ;; the same ending on every turn for the rest of the session, which is the failure this
+  ;; case is here to make impossible.
+  (let [t "it-jobs"
+        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+    (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
+        "the job finished before the run was even asked for")
+    (try
+      (with-server t (into script script)
+                   (fn []
+                     (io/delete-file (log-file t) true)
+                     (let [first-body   (.body (post-run t))
+                           first-lines  (wait-for-recorded (log-file t)
+                                                           (fn [ls] (some #(= "message" (:kind %)) ls))
+                                                           2000)
+                           notices      (fn [lines]
+                                          (filter #(and (= "message" (:kind %))
+                                                        (= "user" (get-in % [:payload :role]))
+                                                        (str/includes? (str (get-in % [:payload :content]))
+                                                                       "<job-ended"))
+                                                  lines))]
+                       (testing "the model is sent the ending, without anybody asking"
+                         (let [sent (notices first-lines)]
+                           (is (= 1 (count sent)) "one job, one notice")
+                           (is (str/includes? (str (get-in (first sent) [:payload :content]))
+                                              "JOB-SAYS-SO"))
+                           (is (str/includes? (str (get-in (first sent) [:payload :content]))
+                                              (str "id=\"" id "\"")))))
+                       (testing "and the client is never told"
+                         ;; The same judgement the system message gets: it is the server's
+                         ;; injection, so it is in the record and in no frame.
+                         ;; THE MARKERS HAVE TO BE ONES ONLY THIS RUN'S INJECTION COULD
+                         ;; CARRY. The block's TAG is not one of them: this repository's
+                         ;; own README talks about `<job-ended …>` now, the scripted run
+                         ;; reads it, and a tool result is a legitimate way for those
+                         ;; bytes to reach the wire -- the same trap the system-message
+                         ;; case named. The record's path (a temp path nothing else
+                         ;; mentions) and the job's own output line are.
+                         (is (not (str/includes? first-body path)))
+                         (is (not (str/includes? first-body "JOB-SAYS-SO"))))
+                       ;; A second run of the same session: the client resends its whole
+                       ;; conversation, which has no notice in it.
+                       (io/delete-file (log-file t) true)
+                       (.body (post-run t))
+                       (let [second-lines (wait-for-recorded (log-file t)
+                                                             (fn [ls] (some #(= "message" (:kind %)) ls))
+                                                             2000)]
+                         (testing "while the second run is not told again"
+                           (is (= [] (vec (notices second-lines)))
+                               "the ending was handed over once, and that is the whole memory"))))))
+      (finally (jobs/shutdown!)))))
 
 (deftest switching-a-row-off-takes-its-text-out-of-the-next-runs-message
   ;; Both halves of the switch, at the edge and on a SECOND run of the same thread:

@@ -13,6 +13,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
             [harness.test-support :as support]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project])
   (:import (java.io File)
            (java.sql DriverManager)))
@@ -738,3 +739,34 @@
          (finally
            (project/bind! "pt-skills" nil)
            (doseq [d [proj skill-dir elsewhere]] (support/wipe-tree! d))))))))
+
+;; ---------------------------------------------------------------- the pre-LLM step
+;;
+;; ONE PLACE DECORATES A SESSION'S HISTORY, and this is it: the skill bodies a load asked
+;; for, and the endings of background jobs nobody waited for. The second half is the
+;; reason these cases live here rather than in either capability -- what is being
+;; asserted is that the SESSION's step carries both, and that it stays idempotent (the
+;; loop applies it before every call and promises that applying it twice changes
+;; nothing).
+
+(deftest the-session-step-carries-the-endings-of-jobs-nobody-waited-for
+  (let [t "pt-notice"
+        {:keys [path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+    ;; WAIT BY READING THE RECORD, not through a verb: `job_output` would count as
+    ;; telling the model, which is exactly the thing being tested here.
+    (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
+        "the job finished, and nobody asked about it")
+    (let [history [{:role "user" :content "hi"}]
+          once    (project/before-llm history t)]
+      (testing "a notice is appended, tagged like every other injection"
+        (is (= 2 (count once)))
+        (is (= "hi" (:content (first once))) "the client's own message is untouched")
+        (is (str/starts-with? (:content (second once)) "<job-ended"))
+        (is (str/includes? (:content (second once)) "JOB-SAYS-SO")))
+      (testing "and applying the step to its own output changes nothing"
+        ;; The loop's promise: a step that grew a second copy each time it ran would
+        ;; put the same notice in front of the model on every call of every turn.
+        (is (= once (project/before-llm once t))))
+      (testing "while a session with nothing to say gets its history back unchanged"
+        (is (= history (project/before-llm history "pt-nobody"))))))
+  (jobs/shutdown!))

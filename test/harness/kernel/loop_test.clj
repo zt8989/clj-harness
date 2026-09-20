@@ -3,6 +3,8 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.fake :as fake]
+            [harness.cap.jobs :as jobs]
+            [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
@@ -246,6 +248,42 @@
         (is (str/starts-with? (str (:content (second history))) "<skill name=\"alpha\">"))
         (is (str/includes? (str (:content (second history))) "ALPHA BODY"))))
     (project/bind! "t-slash" nil)))
+
+(deftest a-job-that-ends-mid-run-is-in-front-of-the-model-at-the-next-call
+  ;; THE FEATURE, seen from the loop: a background job is started, the model goes off to
+  ;; do something else, the job finishes while it is busy -- and the ending is in the
+  ;; history of the NEXT call, not the one already in flight and not "next turn".
+  ;;
+  ;; WHAT EACH CALL WAS SENT is recorded by wrapping the seam the loop calls, because
+  ;; the interesting half of the claim is the NEGATIVE one: the first call went out
+  ;; without the notice, since the job had not finished yet.
+  (let [t "t-notice"
+        {:keys [path]} (jobs/start! t {:command "sleep 1; echo JOB-SAYS-DONE; exit 0"})
+        orig llm/stream!
+        sent (atom [])]
+    (try
+      (with-redefs [llm/stream! (fn [provider messages emit thread-id]
+                                  (swap! sent conj messages)
+                                  (orig provider messages emit thread-id))]
+        (let [{:keys [history]}
+              (drain-chan (loop/run-chan (fake/scripted [{:content ""
+                                                          :tool-calls [{:id "c1" :name "bash"
+                                                                        :arguments {:command "sleep 2"}}]}
+                                                         {:content "done"}])
+                                         [{:role "user" :content "off you go"}]
+                                         {:thread-id t :before-llm project/before-llm}))]
+          (testing "the first call went out without it"
+            (is (not (str/includes? (str (first @sent)) "job-ended"))
+                "the job was still running when that call was made"))
+          (testing "and the second one had it, without anybody asking"
+            (is (str/includes? (str (second @sent)) "JOB-SAYS-DONE"))
+            (is (str/includes? (str (second @sent)) "job-ended")))
+          (testing "exactly once in the history the run ends with"
+            (is (= 1 (count (filter #(str/includes? (str (:content %)) "job-ended")
+                                    history)))))
+          (testing "and there is nothing left to say"
+            (is (= [] (jobs/take-notices! t))))))
+      (finally (jobs/shutdown!)))))
 
 (deftest the-pre-llm-step-is-applied-before-every-call
   ;; THE LOOP'S HALF OF THE SKILL CONTRACT, and the half that is actually this

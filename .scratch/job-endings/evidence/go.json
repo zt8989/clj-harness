@@ -1,0 +1,9 @@
+{"turns": [
+  {"content": "",
+   "tool-calls": [{"id": "c1", "name": "job",
+                   "arguments": {"command": "sleep 1; echo JOB-SAYS-SO"}}]},
+  {"content": "",
+   "tool-calls": [{"id": "c2", "name": "bash",
+                   "arguments": {"command": "sleep 3"}}]},
+  {"content": "我是助手：那条作业在我忙别的期间就结束了，我在下一次调用里收到了它的结局。"}
+]}

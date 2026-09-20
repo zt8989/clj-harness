@@ -134,7 +134,8 @@
 
   THE CALLER HANDS IN A PRE-LLM STEP, and the reason it takes one is worth stating
   because this used to require it: a session's loaded SKILL BODIES have to be back
-  in the history before EVERY LLM call. A load must be visible to the very next
+  in the history before EVERY LLM call -- and so does the ending of a background job
+  nobody waited for (harness.cap.jobs), which the same step carries. A load must be visible to the very next
   call -- the model asked for the instructions in order to follow them NOW -- and a
   load that only took effect on the following turn would have been pointless to
   issue. This remains the ONE place they can enter the conversation; what changed is

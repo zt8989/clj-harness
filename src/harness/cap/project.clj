@@ -51,6 +51,7 @@
             [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.cap.preamble :as preamble]
+            [harness.cap.jobs :as jobs]
             [harness.cap.skills :as skills])
   (:import (java.io File IOException)
            (java.sql Connection)))
@@ -738,6 +739,18 @@
   conversation that carries no skill bodies is a different conversation.
 
   The roots are resolved PER CALL, not once per run, so editing harness.edn
-  mid-run moves them -- matching every other configuration read in this codebase."
+  mid-run moves them -- matching every other configuration read in this codebase.
+
+  AND THE SESSION'S OTHER INJECTION IS HERE FOR THE SAME REASON: the endings of
+  background jobs nobody waited for (`harness.cap.jobs/before-llm`) ride the same step.
+  It is a different KIND of thing -- the skills half is derived from the conversation
+  and is idempotent for free, while a notice is remembered in the jobs registry because
+  the client never holds one -- but the two meet here for exactly the reason the skills
+  half is here at all: this is the one place a session's history gets decorated, and a
+  second place would be the copy that drifts. Every caller that hands the kernel a
+  pre-LLM step (both run paths and the author-side replay) therefore gets both halves
+  without knowing either exists."
   [history thread-id]
-  (skills/derived-injections history (skill-roots thread-id)))
+  (-> history
+      (skills/derived-injections (skill-roots thread-id))
+      (jobs/before-llm thread-id)))

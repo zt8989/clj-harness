@@ -35,7 +35,7 @@ drive! :
   emit :run/start
   [有 resume 就先 replay! —— 把人的决定重放进缝]
   loop:
-    施加 skills/derived-injections（技能正文，按会话自身重算；幂等）
+    施加会话的前置步骤（cap.project/before-llm = 技能正文 + 作业结束的通知；见下）
     emit :model/start → llm/stream!  流式一轮（事件边流边发）→ emit :model/end
       ├ 厂商报的用量、结束原因、回声的 model 挂在 end 上，逐字进记录，不重命名
       └ 中途抛也发 end（载荷空）：没有终点的那一段分不出「还在跑」与「跑死了」
@@ -49,10 +49,22 @@ drive! :
 第 n 次调用）：序号不记进记录，那是同一件事实的第二份（见 [edge](edge.md) 的行表）。
 把两条包起来的是 `harness.kernel.loop/model-call!`，它是「失败也要闭合」这唯一一件事的落点。
 
-**技能正文在每次 `llm/stream!` 之前重算一次**，就在这一行：模型调用 `skill` 是为了**现在**照着做，
-等下一轮等于白调；而它是**派生**的（从会话自己扫出加载过的技能，见
-[skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)），
-所以每轮施加不需要任何簿记。
+**会话自己的东西在每次 `llm/stream!` 之前重算一次**，就在这一行，共两半：
+
+- **技能正文**：模型调用 `skill` 是为了**现在**照着做，等下一轮等于白调；而它是**派生**的（从会话
+  自己扫出加载过的技能，见
+  [skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)），
+  所以每轮施加不需要任何簿记。
+- **后台作业的结束**（`harness.cap.jobs/before-llm`）：一条没人等的命令结束了，它的结局就作为一条
+  `<job-ended id="…" path="…">` 的尾随 user 消息摆在下一次调用面前——**这不是推送**（不唤醒、不新起
+  run、不发帧），而且**只说一次**。它与技能正文的唯一不同是幂等的来源：技能正文靠**历史里的标签**
+  （客户端每轮把 `<skill …>` 重发回来），通知没有那个锚（客户端从不持有它），所以「说过了」记在
+  **作业注册表**里（进程内、按会话、与作业同寿命）。模型自己 `job_output` / `job_kill` 拿到过结局的
+  作业**不再通知**——已经读过的东西不是新闻。
+
+两半都装在 `cap.project/before-llm` 里（一处组装，见 [architecture](../architecture.md) 的 `cap.project`
+一行）；一并施加的后果是**注入物照旧进 jsonl 的 `message` 行**，而客户端一个字节都收不到
+（与开场块、技能正文同一条纪律）。
 
 几个不显然的地方：
 
