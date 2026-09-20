@@ -42,9 +42,18 @@ export function browserStorage(): SessionStorage | null {
   }
 }
 
-/// What `listedSession` walks: the projects a listing holds, each with the sessions in
-/// it, and the two fields it reads off a session.
+/// What `listedSession` walks: THE SIDEBAR'S WHOLE LISTING -- the projects, each with
+/// the sessions in it, AND the flat task list. A session is a session wherever it is
+/// drawn, so a task can be the session this page comes back to (see `listedSession`).
 export type SessionListing = {
+  readonly projects: readonly ProjectSessionListing[];
+  readonly tasks: readonly ListedSession[];
+};
+
+/// One project as a listing writes it: the sessions it holds. Structural rather than
+/// the API's `ProjectSummary`, for the reason above -- this module asks for the one
+/// field it reads.
+export type ProjectSessionListing = {
   readonly sessions: readonly ListedSession[];
 };
 
@@ -71,9 +80,15 @@ export function rememberedSession(storage: SessionStorage | null | undefined): s
 /// The session ID in a listing, or null -- the restore's whole question about whether
 /// there is anything to come back to.
 ///
-/// STRUCTURAL RATHER THAN `ProjectSummary`, and that is what keeps this module free of
-/// the API's types: it asks for the two fields it reads, and `GET /api/projects`' own
-/// shape satisfies them as it stands.
+/// STRUCTURAL RATHER THAN THE API'S TYPES, and that is what keeps this module free of
+/// them: it asks for the fields it reads, and `GET /api/projects`' own shape satisfies
+/// it as it stands.
+///
+/// BOTH HALVES ARE SEARCHED, and the flat list is the one that would be forgotten: a
+/// task is a session with no project, so looking only inside projects would mean the
+/// page forgets a conversation the moment it stops belonging anywhere -- and the
+/// sidebar would come back to a fresh session while the row you were in is right
+/// there in the task list.
 ///
 /// IT ANSWERS THE ROW, NOT A BOOLEAN, because the page needs one more thing off it:
 /// whether the session has a LOG (`bytes`, which is null until it has run). A listed
@@ -85,12 +100,15 @@ export function rememberedSession(storage: SessionStorage | null | undefined): s
 /// (see `App`'s `onListed`).
 export function listedSession(
   id: string,
-  projects: readonly SessionListing[],
+  listing: SessionListing | null | undefined,
 ): ListedSession | null {
-  for (const project of projects) {
+  for (const project of listing?.projects ?? []) {
     for (const session of project.sessions) {
       if (session.threadId === id) return session;
     }
+  }
+  for (const session of listing?.tasks ?? []) {
+    if (session.threadId === id) return session;
   }
   return null;
 }

@@ -1021,6 +1021,19 @@
         (try (hk/close ch) (catch Throwable _ nil)))))))
 
 
+(defn- register-run-session!
+  "Make the conversation in INPUT a session of this home, if it is not one already.
+
+  The id is read the way the run reads it, but only a NON-BLANK STRING is registered:
+  `handle-run` below stringifies whatever it finds, and an input with no thread id at
+  all would otherwise register the empty string as a conversation. Nothing here is
+  registered twice -- `project/register-session!` leaves a known id alone -- and an id
+  that is already bound to a project stays bound."
+  [input]
+  (let [id (:threadId input)]
+    (when (and (string? id) (not (str/blank? id)))
+      (project/register-session! id))))
+
 (defn- handle-run [req]
   (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
         thread-id (str (:threadId input))
@@ -1034,6 +1047,18 @@
         ;; different threads with nothing else in common, so a fact one of them
         ;; knows and the other must report lives here.
         state     (atom {:terminal nil :last nil})]
+    ;; A CONVERSATION BECOMES A SESSION OF THIS HOME THE FIRST TIME IT RUNS, and this is
+    ;; the second of the two callers that say so -- the first is POST /api/sessions, which
+    ;; 'new task' calls so that a row exists before a word has been typed. The page mints
+    ;; its own id before anybody has said anything, so a run is the first moment there is
+    ;; a conversation worth keeping; WITHOUT THIS, a page that was loaded and then typed
+    ;; into is the ONE conversation the sidebar cannot list -- its log lands under
+    ;; projects/.unbound/ while the store has never heard of it.
+    ;;
+    ;; IT COMES AFTER THE PARSE, and that ordering is the whole no-trace promise: the
+    ;; read above is what decides this body is a run at all, so a request that is not one
+    ;; leaves no row behind, exactly as it leaves no log.
+    (register-run-session! input)
     ;; as-channel wants no status or headers of its own. run-agent! returns immediately
     ;; -- the run is driven by a go loop draining the core.async channel -- so it does
     ;; not block the worker that :on-open runs on.
@@ -1373,6 +1398,47 @@
               (do (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
                   (api-response 200 {:threadId thread-id :dir abs})))))))))
 
+(defn- sessions-post
+  "POST /api/sessions {threadId} -- make this conversation a session of this home,
+  belonging to no project. Answers {:threadId ..}.
+
+  THE VERB IS 'EXIST', NOT 'BE A TASK'. An id this home has never heard of becomes a
+  row with no project, no path and no remembered project -- a task, which is what the
+  sidebar draws it as. An id this home ALREADY knows is left exactly as it is, and
+  that is not a no-op to apologise for: 'make sure this conversation exists' is true
+  the moment it does, and a caller must be able to say it about a session that belongs
+  to a project without unbinding it (see `project/register-session!`). The answer is
+  the id because that is what the caller handed over and what it now holds; the rest of
+  the row is the LISTING's business, and the sidebar reads it in the same snapshot it
+  reads everything else.
+
+  THIS IS A ROUTE AND NOT A SIDE EFFECT OF THE RUN ENDPOINT, because 'a conversation
+  exists' is a thing the interface decides when a person asks for one -- 'new task'
+  puts a row in the sidebar before a single word has been typed. The run endpoint
+  registers the same way for an id nobody asked about (a page that was loaded and then
+  typed into), and both go through one verb so there cannot be two answers to 'when
+  does a conversation exist here'.
+
+  NO AUDIT LINE: this writes one row in the store and opens no file. Same rule as
+  adding a project -- a line is for what happened to a LOG, and nothing here touched
+  one. The 400 is for a body that is not JSON or names no thread id; nothing is
+  written on that path either."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                     :key-fn keyword)}
+                     (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed
+        thread-id (:threadId ok)]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (str thread-id))
+      (api-response 400 {:error "missing threadId: this route makes ONE conversation a session of this home, and needs to be told which"})
+
+      :else
+      (api-response 200 {:threadId (project/register-session! (str thread-id))}))))
+
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
   The listing is a DIRECTORY SCAN of files, so it knows nothing about whether a
@@ -1443,9 +1509,39 @@
   (let [key-of (fn [row] (or (:lastActivity row) Long/MAX_VALUE))]
     (vec (sort (fn [a b] (compare (key-of b) (key-of a))) rows))))
 
+(defn- task-row
+  "One TASK as the sidebar reads it: the store's id and archive flag, plus what the
+  TREE says about this stem -- anywhere under it.
+
+  THE DISK FACTS OF A TASK ARE ASKED OF THE TREE, NOT OF A WORKSPACE, and that is
+  the one place this differs from `session-row`. A session with a project has a log
+  directory that is a function of that project; a task has no project to derive one
+  from. The `.unbound` workspace is where a task's log USUALLY is, and the exception
+  is ordinary enough to matter: a session released by `bind! id nil` keeps the file
+  it already wrote, in the workspace of the project it used to belong to. Asking the
+  tree by stem is also asking exactly what `rebuild` asks when somebody clicks the
+  row, so a row can never disagree with the conversation clicking it shows.
+
+  NO FILE, OR MORE THAN ONE, both answer with two nulls. No log yet is a fact (it is
+  where every session starts, and it is not the same as a zero-byte file); a stem
+  with two logs is a conversation the server refuses to guess about (`replay/locate`
+  says why), so the row says nothing rather than picking a half.
+
+  `:running` is not on disk at all -- see `session-row` for the whole argument.
+  Both readers ask the same registry, so a task and a project session answer the
+  same question the same way."
+  [by-stem {:keys [id archived?]}]
+  (let [found  (get by-stem id)
+        single (when (= 1 (count found)) (first found))]
+    {:threadId     id
+     :archived     (boolean archived?)
+     :running      (running? id)
+     :lastActivity (when single (:last-activity single))
+     :bytes        (when single (:bytes single))}))
+
 (defn- projects-get
   "GET /api/projects -- the sidebar's listing: every project this home knows, each
-  with its sessions.
+  with its sessions, PLUS every task this home knows.
 
   TWO SOURCES, ONE ANSWER, AND THAT IS THE POINT OF THE ENDPOINT. The store says
   which projects and sessions exist, which session belongs where and which are
@@ -1455,22 +1551,40 @@
   not to migrate the old logs/), and the store must not mirror file sizes. So the
   two are joined here, on the reading side, and each field comes from its owner.
 
+  BOTH HALVES IN ONE ANSWER, because the sidebar is one screen and one snapshot:
+  two requests would be two lists that can disagree with each other about which
+  conversation exists. The client renders both from this one payload -- including
+  the restore that asks whether the session it remembers is still a session, which
+  is a question about exactly this listing.
+
   Archived sessions are INCLUDED and flagged, not filtered: which group to draw
   them in is a decision for the screen, and a listing that quietly dropped them
   would make 'where did my session go' a question with no server-side answer.
-  Unbound sessions are NOT included -- they belong to no project, so they have no
-  row here; GET /api/threads is the raw tree view for anyone diagnosing."
+
+  A TASK IS A SESSION WITH NO PROJECT AND NO REMEMBERED PROJECT (`project/tasks`):
+  a conversation that never had a home. A session released by removing its project
+  is NOT one of them, because it remembers where it was and is waiting for that
+  directory to come back -- and an unknown id that has a jsonl in the tree is not a
+  session either: the store decides which conversations are listed (GET /api/threads
+  is the raw tree view for anyone diagnosing)."
   [_req]
-  (let [by-project (group-by :project-id (project/sessions))]
+  (let [by-project (group-by :project-id (project/sessions))
+        tasks      (project/tasks)
+        ;; The tree is walked ONCE, and only when there is a task to ask it about:
+        ;; a home with no tasks pays nothing for a listing it does not need.
+        by-stem    (if (seq tasks)
+                     (group-by :thread-id (replay/threads (home/projects-dir)))
+                     {})]
     (api-response 200
-                  (mapv (fn [{:keys [id canonical-path]}]
-                          (let [ws (workspace-for canonical-path)]
-                            {:projectId id
-                             :path      canonical-path
-                             :sessions  (newest-first
-                                         (mapv #(session-row ws %)
-                                               (get by-project id)))}))
-                        (project/projects)))))
+                  {:projects (mapv (fn [{:keys [id canonical-path]}]
+                                     (let [ws (workspace-for canonical-path)]
+                                       {:projectId id
+                                        :path      canonical-path
+                                        :sessions  (newest-first
+                                                    (mapv #(session-row ws %)
+                                                          (get by-project id)))}))
+                                   (project/projects))
+                   :tasks    (newest-first (mapv #(task-row by-stem %) tasks))})))
 
 (def ^:private thread-verbs
   "The verbs this edge serves under /api/threads/<stem>/. A CLOSED SET, and that
@@ -2500,6 +2614,16 @@
     (= "/api/threads" (:uri req))
     (case (:request-method req)
       :get  (threads-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    ;; ONE CONVERSATION BECOMES A SESSION OF THIS HOME, under the collection that
+    ;; names the thing: the `sessions` table's own noun. It sits next to
+    ;; `/api/project(s)` deliberately -- those two move a conversation to a DIRECTORY,
+    ;; and this one is the other statement a caller can make about a conversation:
+    ;; that it exists at all.
+    (= "/api/sessions" (:uri req))
+    (case (:request-method req)
+      :post (sessions-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/projects" (:uri req))

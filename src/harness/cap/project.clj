@@ -294,20 +294,83 @@
   []
   (db/select "SELECT id, canonical_path, created_at FROM projects ORDER BY created_at, id"))
 
+(defn- as-session
+  "One `sessions` row as this namespace hands it out: {:id :project-id :path
+  :archived? :created-at}.
+
+  `:archived?` is a BOOLEAN, converted here rather than left as the column's 0/1 --
+  Clojure's `boolean` says 0 is true and a flag that means the opposite of what it
+  looks like is the kind of bug that survives review. ONE conversion, in one place,
+  for every reader: two readers each turning 0/1 into a boolean are two chances for
+  one of them to say it backwards."
+  [row]
+  (-> row
+      (assoc :archived? (pos? (long (:archived row))))
+      (dissoc :archived)))
+
+(def ^:private session-columns
+  "The columns a session reader asks for, so two queries over one table cannot drift
+  into handing out two shapes."
+  "id, project_id, path, archived, created_at")
+
 (defn sessions
   "Every session this home knows: {:id :project-id :path :archived? :created-at},
-  oldest first. `:archived?` is a BOOLEAN, converted here rather than left as
-  the column's 0/1 -- Clojure's `boolean` says 0 is true, and a flag that means
-  the opposite of what it looks like is the kind of bug that survives review.
+  oldest first.
 
-  Reading AND setting the flag live here: both are statements about the same
-  column, and a reader in another namespace would have to re-state the 0/1
-  conversion to write it. See `archive!`."
+  This is the WHOLE table, so it includes the sessions that belong to no project;
+  which of those is a TASK is `tasks`' question, not this one's. Reading AND setting
+  the archive flag live here: both are statements about the same column, and a reader
+  in another namespace would have to re-state the 0/1 conversion to write it. See
+  `archive!`."
   []
-  (mapv (fn [row] (-> row
-                      (assoc :archived? (pos? (long (:archived row))))
-                      (dissoc :archived)))
-        (db/select "SELECT id, project_id, path, archived, created_at FROM sessions ORDER BY created_at, id")))
+  (mapv as-session
+        (db/select (str "SELECT " session-columns " FROM sessions ORDER BY created_at, id"))))
+
+(defn tasks
+  "Every session this home knows that belongs to NO project and remembers none:
+  {:id :project-id :path :archived? :created-at} with `:project-id` and `:path` null,
+  oldest first.
+
+  TWO COLUMNS, NOT ONE, AND THE SECOND IS THE POINT. A session can be unbound for two
+  different reasons and they are not the same fact: `remove-project!` lets a directory
+  go and its sessions keep `last_project_path` -- the MEMORY of where they were, which
+  is what re-adding that directory matches on -- so such a session is waiting for its
+  project to come back and is not a task. A task is a conversation that never had a
+  home, or one whose home was released on purpose (`bind! id nil`, which clears the
+  memory too). Only the second kind is listed here, and this WHERE clause is the whole
+  of that distinction.
+
+  Empty is the ordinary answer: a home whose every conversation has a project."
+  []
+  (mapv as-session
+        (db/select (str "SELECT " session-columns " FROM sessions"
+                        " WHERE project_id IS NULL AND last_project_path IS NULL"
+                        " ORDER BY created_at, id"))))
+
+(defn register-session!
+  "Make THREAD-ID a session of this home, belonging to no project: a row with no
+  project, no path and no remembered project. Answers the id.
+
+  FIND-OR-CREATE, and both callers can be racing themselves: the sidebar's 'new task'
+  registers an id it has just minted, and the AG-UI edge registers an id it has never
+  heard of as the first thing a run does -- while being called again for every later
+  turn of that same conversation. So an id this home already knows is left EXACTLY as
+  it is: `DO NOTHING`, not `DO UPDATE`, because a session that belongs to a project
+  must not be unbound by somebody asking it to exist, and a session that remembers a
+  project must not have that memory cleared. Registering is a statement that a
+  conversation EXISTS, not a statement about where it lives.
+
+  THIS IS THE ONLY WAY A TASK IS BORN, and it is deliberately not `bind!`'s nil
+  direction: releasing a session and starting to keep one are two different
+  statements, and `bind!`'s docstring says why the first never creates a row."
+  [thread-id]
+  (db/with-transaction
+    (fn [^Connection c]
+      (db/execute! c "INSERT INTO sessions (id, project_id, path, last_project_path, created_at)
+                      VALUES (?, NULL, NULL, NULL, ?)
+                      ON CONFLICT(id) DO NOTHING"
+                   thread-id (System/currentTimeMillis))))
+  thread-id)
 
 (defn archive!
   "Mark THREAD-ID's session archived (true) or not (false), and answer the flag

@@ -24,13 +24,16 @@
     "moreTitle": "更多——这个项目的操作",
     "remove": "移除"
   },
+  "task": {
+    "section": "任务"
+  },
   "sidebar": {
     "newTask": "新建任务",
     "addProject": "添加项目",
     "addProjectTitle": "添加项目——打开文件夹选择器，你选的目录会成为项目",
     "refresh": "刷新",
     "refreshTitle": "从磁盘和库重新读取列表",
-    "empty": "还没有项目。会话属于项目，所以要新建任务，得先添加一个项目。",
+    "empty": "这里还什么都没有。添加一个项目，或者新建一个任务。",
     "settings": "设置",
     "settingsTitle": "设置：这个会话正在用什么跑，这个配置家可以选什么"
   },
@@ -42,8 +45,6 @@
     "emptyPath": "请填写目录的绝对路径——什么都没填。"
   },
   "refusal": {
-    "noProject": "先添加一个项目——会话属于项目。",
-    "noProjectSelected": "先选一个项目——会话属于项目。",
     "archiveRunning": "那个会话还在跑；结束之后再归档。",
     "archiveParked": "那个会话在等你回应；结束之后再归档。",
     "removeProjectRunning": "{{session}} 还在跑；结束之后再移除项目。",

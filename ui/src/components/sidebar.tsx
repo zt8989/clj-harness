@@ -17,10 +17,12 @@
 //
 // ------------------------------------------------------------- where data comes
 //
-// One fetch of `GET /api/projects` answers the whole sidebar. The store decides
-// which projects and sessions exist and which are archived; the tree supplies each
-// log's size and mtime. The client joins nothing -- see `lib/projects.ts` for why
-// that join is the server's.
+// One fetch of `GET /api/projects` answers the whole sidebar, and it answers it as
+// TWO BLOCKS: the projects, each with its sessions, and the tasks -- conversations
+// with no project and no memory of one, flat and ungrouped. The store decides which
+// conversations exist, which belong where and which are archived; the tree supplies
+// each log's size and mtime. The client joins nothing -- see `lib/projects.ts` for
+// why that join is the server's.
 //
 // THE LIST IS A SNAPSHOT, AND THE UI SAYS SO. Nothing here subscribes to the log
 // tree or the store, so a run that lands while the page is open does not change
@@ -31,37 +33,39 @@
 //
 // ----------------------------------------------------------- a new task's shape
 //
-// A new task is THREE STEPS IN THIS ORDER, and each one is load-bearing:
+// Starting a conversation is THREE STEPS IN THIS ORDER, and each one is
+// load-bearing:
 //
 //   1. mint an id (the client owns ids -- the server has never minted one),
-//   2. BIND that id to the selected project (POST /api/project), which is what
-//      makes the session exist at all: the store learns about a conversation
-//      when something asks for it to belong somewhere. Its log does not exist
-//      yet, and that is a state the listing already handles.
+//   2. REGISTER that id, which is what makes the conversation exist at all -- for a
+//      project session, BIND it (POST /api/project, which is also what makes it
+//      exist); for a task, `POST /api/sessions`, which records it with no project
+//      and no memory of one. Its log does not exist yet, and that is a state the
+//      listing already handles.
 //   3. SHOW that id -- `onShowFresh`, which is the page putting a host on screen
 //      and NOT rebuilding: the id is this client's, it just made it up, and there
 //      is no conversation under it yet.
 //
-// Step 3 is a page action now rather than a runtime one, and that is the whole of
-// ticket 02 in this file: `runtime.threads.switchToThread` and its
+// Step 3 is a page action rather than a runtime one, and that was the whole of the
+// parallel-sessions ticket in this file: `runtime.threads.switchToThread` and its
 // `switchToNewThread` sibling are gone, because their effect was to clear the core
 // before refilling it -- and the core that is now streaming belongs to a host that
 // never gets refilled. `onShowFresh` also keeps the id in this component's hands,
-// which the bind above needs; letting the runtime mint one would put it out of
-// reach.
+// which step 2 needs; letting the runtime mint one would put it out of reach.
 //
-// WITHOUT A PROJECT THERE IS NO NEW TASK, and the button says so instead of
-// opening a session with nowhere to live. That is the product rule the whole
-// feature rests on: every session belongs to a project, so the first one needs a
-// project to exist first.
+// A NEW TASK NEEDS NO PROJECT, and that is the rule this feature turned over. The
+// header's button used to start a session in the sidebar's SELECTED project and to
+// refuse outright when this home had no projects ("add a project first"); now it
+// mints an id, registers it as a conversation of this home with no project, and
+// shows it. It lands in the TASK LIST above the projects a moment later. The old
+// refusal was not a nudge -- it was the shape of the product, and the two sentences
+// that expressed it (`refusal.noProject`, `refusal.noProjectSelected`) are gone from
+// both catalogs rather than left behind as dead keys.
 //
-// THE SAME THREE STEPS ALSO RUN FROM A PROJECT'S OWN ROW. The header button
-// starts a session in the SELECTED project -- derived, because "another task
-// here" is what a person usually means -- and the row's button starts one in THAT
-// project, which is the unambiguous version of the same wish. Both are guarded
-// the same way and both land on the same helper; only the project differs, and
-// only the refusal's destination differs (the header for the button with no row,
-// the row itself for the one that has it).
+// THE SAME STEPS STILL RUN FROM A PROJECT'S OWN ROW, and that button is unchanged:
+// it starts a session in THAT project, which is now the ONLY way to say so. The two
+// buttons used to be one verb with a derived destination; they are two verbs now,
+// which is what makes "where did this land" a question nobody has to ask.
 //
 // The row's button REPLACES THE SESSION COUNT that used to sit there. The count
 // was a number you could read and do nothing with, drawn where an action belongs,
@@ -232,14 +236,16 @@ import {
 import {
   addProject,
   bindThread,
-  listProjects,
+  listSidebar,
   pickFolder,
   PickerUnavailableError,
   projectName,
   removeProject,
   setArchived,
+  startTask,
   type ProjectSummary,
   type SessionSummary,
+  type SidebarListing,
 } from "@/lib/projects";
 import {
   archiveRefusal,
@@ -278,7 +284,7 @@ type SidebarProps = {
   /// callback rather than a second fetch ON PURPOSE -- the sidebar is already reading
   /// every session of every project, and a page that asked again would be asking the
   /// same question twice to get the same bytes.
-  onListed: (projects: readonly ProjectSummary[]) => void;
+  onListed: (listing: SidebarListing) => void;
 };
 
 /// The refusal or failure that belongs to ONE row -- a refused switch, a list
@@ -310,7 +316,12 @@ export const Sidebar: FC<SidebarProps> = ({
   // would not load, a bind the server answered without a reason), so they come from
   // the `errors` catalog while the panel's own words stay in `shell`.
   const { t: tErrors } = useTranslation("errors");
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [listing, setListing] = useState<SidebarListing>({ projects: [], tasks: [] });
+  // THE TWO BLOCKS, read off the one snapshot. `projects` is named here so that
+  // every reader below keeps saying what it always said: the projects are one half
+  // of the answer, and `listing.tasks` is the other.
+  const projects = listing.projects;
+  const tasks = listing.tasks;
   const [listError, setListError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [rowError, setRowError] = useState<RowError>(null);
@@ -326,9 +337,16 @@ export const Sidebar: FC<SidebarProps> = ({
   const [typingPath, setTypingPath] = useState(false);
   const [typedPath, setTypedPath] = useState("");
   const [busy, setBusy] = useState(false);
-  // The project a new task will land in. Derived rather than owned: see the
-  // effect below. Only an explicit click pins it.
+  // WHICH PROJECT ROW IS LIT. It used to answer "where does the next task land" and
+  // no longer answers anything but that -- see `selected` below. Only an explicit
+  // click (or opening a session that has a project) sets it.
   const [pinned, setPinned] = useState<string | null>(null);
+  // THE ARCHIVED BLOCK'S own state, and it does NOT follow anything else: a session
+  // somebody filed away is one they asked not to be shown, so nothing here reopens it
+  // for them. It does open itself when the CURRENT session is in there -- archived from
+  // another window, from the API, or because you deliberately opened a row from this
+  // block. Either way, hiding it would be hiding the answer to "what am I reading".
+  const [archivedOpen, setArchivedOpen] = useState(false);
   // The settings report is a MODAL rather than a fourth region: it is read
   // once and closed, it does not compete with the list for the middle strip, and
   // it is drawn over the page so that reading it cannot be mistaken for
@@ -337,8 +355,8 @@ export const Sidebar: FC<SidebarProps> = ({
 
   const refresh = useCallback(async () => {
     try {
-      const listed = await listProjects(tErrors);
-      setProjects(listed);
+      const listed = await listSidebar(tErrors);
+      setListing(listed);
       setListError(null);
       onListed(listed);
     } catch (failure: unknown) {
@@ -355,19 +373,52 @@ export const Sidebar: FC<SidebarProps> = ({
     void refresh();
   }, [refresh, currentThreadId]);
 
-  // WHICH PROJECT A NEW TASK LANDS IN, derived so it cannot point at something
-  // that is gone. The current session's project wins when there is one, because
-  // "another task here" is what a person almost always means; otherwise the first
-  // project. An explicit click pins a project, and a pin that names a project no
-  // longer in the list is dropped -- otherwise signing a new task to a removed
-  // project would be a refusal nobody could explain.
+  // WHICH PROJECT ROW IS LIT, derived so it cannot point at something that is gone.
+  // The current session's project wins when it has one -- pointing at the project you
+  // are standing in is what a person means by "here" -- and an explicit click pins a
+  // project. A pin that names a project no longer in the list is dropped, otherwise
+  // the row would keep pointing at a directory that is gone.
+  //
+  // IT DECIDES NOTHING BUT THAT, and that is the whole of the change: this used to
+  // answer "where does the next task land", and the header's button makes a TASK now,
+  // which belongs to no project by definition -- so nothing here is a destination any
+  // more. What is left is what the row LOOKS like, and it is honest about the case that
+  // used to be papered over: a session with no project lights NO project row, instead
+  // of lighting the first one in the list.
   const currentProject = projects.find((p) =>
     p.sessions.some((s) => s.threadId === currentThreadId),
   );
   const pinnedStillListed = pinned !== null && projects.some((p) => p.path === pinned);
   const selected = pinnedStillListed
     ? projects.find((p) => p.path === pinned)!
-    : (currentProject ?? projects[0] ?? null);
+    : (currentProject ?? null);
+
+  /// EVERY ARCHIVED ROW, from both halves, as ONE list -- which is what makes the
+  /// archived block a block rather than a per-project footnote (ticket 03).
+  ///
+  /// A PROJECT SESSION CARRIES ITS PROJECT (or null for a task), because the block is
+  /// flat: with the grouping gone, nothing else on the row would say which directory
+  /// the conversation came from -- and its log is still under that project's
+  /// workspace.
+  ///
+  /// THE ORDER IS THE LISTING'S OWN RULE (`newest-first`), applied across the halves
+  /// rather than within one of them, so the block reads the way the lists above it do.
+  const archived = [
+    ...projects.flatMap((project) =>
+      project.sessions.filter((s) => s.archived).map((session) => ({ session, project })),
+    ),
+    ...tasks.filter((task) => task.archived).map((task) => ({ session: task, project: null })),
+  ].sort(
+    (a, b) =>
+      (b.session.lastActivity ?? Number.MAX_VALUE) -
+      (a.session.lastActivity ?? Number.MAX_VALUE),
+  );
+  // Whether the conversation on screen is IN that block -- a boolean, so the effect
+  // below has a dependency that does not change identity on every render.
+  const currentIsArchived = archived.some((row) => row.session.threadId === currentThreadId);
+  useEffect(() => {
+    if (currentIsArchived) setArchivedOpen(true);
+  }, [currentIsArchived]);
 
   const refuse = (id: string, message: string) => setRowError({ id, message });
 
@@ -380,7 +431,9 @@ export const Sidebar: FC<SidebarProps> = ({
   /// caught here) now belongs to the host: it loads its own history once, when it
   /// is first mounted. A history that will not load comes back through
   /// `openErrors`, so the sentence still lands on the row that was clicked.
-  const openThread = async (threadId: string, projectPath: string) => {
+  // `projectPath` is NULL for a TASK, and null is a fact rather than a missing
+  // argument: the pin is dropped instead of pointed at something (see `selected`).
+  const openThread = async (threadId: string, projectPath: string | null) => {
     if (busy || threadId === currentThreadId) return;
     setPinned(projectPath);
     setBusy(true);
@@ -393,13 +446,19 @@ export const Sidebar: FC<SidebarProps> = ({
     }
   };
 
-  /// Archive a session, or bring it back. REFUSED WHILE THAT SESSION HAS NOT
-  /// FINISHED -- running or parked -- whatever is on screen (see this file's
-  /// header, and ticket 04): a run is still writing to the log being filed away,
-  /// and a resume still has somewhere to write. Filing away a settled session you
-  /// are not reading is a pure row write and stays allowed.
+  /// Archive a session, or bring it back -- ONE VERB FOR BOTH BLOCKS, because a task
+  /// and a session in a project are the same kind of thing here (see the header).
+  /// REFUSED WHILE THAT SESSION HAS NOT FINISHED -- running or parked -- whatever is
+  /// on screen (see this file's header): a run is still writing to the log being filed
+  /// away, and a resume still has somewhere to write. Filing away a settled session
+  /// you are not reading is a pure row write and stays allowed.
+  ///
+  /// `project` is NULL FOR A TASK, and that is the only difference between the two
+  /// callers: it decides WHERE the page goes when the session it is reading is the one
+  /// being filed away (see `movesThePage` below), because "the session's own kind" is
+  /// the set you can be moved to.
   const archive = async (
-    project: ProjectSummary,
+    project: ProjectSummary | null,
     threadId: string,
     archived: boolean,
   ): Promise<void> => {
@@ -415,18 +474,32 @@ export const Sidebar: FC<SidebarProps> = ({
     try {
       await setArchived(threadId, archived, tErrors);
       if (movesThePage) {
-        // "Never be reading an archived session": the project's most recent
-        // unarchived session, which is the first one the server listed (the
-        // listing is newest-first), or -- when there is none -- the same three
-        // steps the New task button runs.
-        const next = project.sessions.find((s) => !s.archived && s.threadId !== threadId);
+        // "Never be reading an archived session", and where you land is decided by
+        // WHAT KIND of session was filed away:
+        //
+        //   * a project session -- the same PROJECT's most recent unarchived
+        //     session, which is the first one the server listed (the listing is
+        //     newest-first), or, when there is none, the three steps that project
+        //     row's own button runs;
+        //   * a task -- the most recent unarchived TASK, or a brand-new one.
+        //
+        // The sets are NOT interchangeable, and that is the point of the branch: a
+        // task is a conversation with no project, so being moved into some project's
+        // session would make archiving a way of acquiring a home.
+        const siblings = project === null ? tasks : project.sessions;
+        const next = siblings.find((s) => !s.archived && s.threadId !== threadId);
         if (next !== undefined) {
-          setPinned(project.path);
+          setPinned(project === null ? null : project.path);
           onShow(next.threadId);
         } else {
           const id = crypto.randomUUID();
-          await bindThread(id, project.path, tErrors);
-          setPinned(project.path);
+          if (project === null) {
+            await startTask(id, tErrors);
+            setPinned(null);
+          } else {
+            await bindThread(id, project.path, tErrors);
+            setPinned(project.path);
+          }
           onShowFresh(id);
         }
       }
@@ -493,8 +566,13 @@ export const Sidebar: FC<SidebarProps> = ({
           setPinned(next.p.path);
           onShow(next.s.threadId);
         } else {
+          // A BRAND-NEW TASK, and registered for the reason every other path
+          // registers: the page must never be parked on a conversation the sidebar
+          // cannot draw (see `newTask`, which is the same three steps).
+          const id = crypto.randomUUID();
+          await startTask(id, tErrors);
           setPinned(null);
-          onShowFresh(crypto.randomUUID());
+          onShowFresh(id);
         }
       }
       await refresh();
@@ -602,32 +680,35 @@ export const Sidebar: FC<SidebarProps> = ({
     onShowFresh(id);
   };
 
-  /// A new session from the header button: in the derived selection, with the
-  /// refusals landing under the header because that button has no row of its own.
+  /// NEW TASK: a conversation that belongs to NO PROJECT, minted and registered in
+  /// one go. The refusals land under the header, because that button has no row.
+  ///
+  /// THIS IS THE BUTTON THAT CHANGED MEANING, and it is the point of the feature: it
+  /// used to start a session in whatever project the sidebar had selected, and to
+  /// refuse outright when this home had no projects at all ("add a project first").
+  /// A task needs neither -- it is registered and then shown, and it appears in the
+  /// flat task list above the projects a moment later.
+  ///
+  /// STARTING A SESSION IN A PROJECT IS STILL AVAILABLE, one row down: each project
+  /// row has its own button, and that is the unambiguous version of the same wish.
+  /// The two are different verbs now rather than the same one with a selection.
   const newTask = async () => {
     if (busy) return;
     // NOT gated on a run in flight any more. Starting a session used to be
     // refused because it would abandon the one on screen; a new session gets its
     // own host now, and whatever is running keeps running in its own.
-    if (projects.length === 0) {
-      // The refusal names the state; it does NOT open the picker. Popping a
-      // modal OS window out of the button that says "New task" would be an
-      // answer nobody asked for, and the folder button that does want it is
-      // sitting next to this one.
-      setNewTaskError(t("refusal.noProject"));
-      return;
-    }
-    if (selected === null) {
-      setNewTaskError(t("refusal.noProjectSelected"));
-      return;
-    }
-    const project = selected;
+    const id = crypto.randomUUID();
     setBusy(true);
     setNewTaskError(null);
     setRowError(null);
     setProjectError(null);
     try {
-      await startSessionIn(project);
+      // REGISTERED BEFORE IT IS SHOWN, and in that order: the row exists on the
+      // server the moment it is asked for, so the refresh below lists it -- and a
+      // task that failed to register is never adopted, because switching to it
+      // would leave the page on a conversation this home does not have.
+      await startTask(id, tErrors);
+      onShowFresh(id);
       await refresh();
     } catch (failure: unknown) {
       setNewTaskError(failure instanceof Error ? failure.message : String(failure));
@@ -805,6 +886,58 @@ export const Sidebar: FC<SidebarProps> = ({
           </p>
         )}
 
+        {/* THE TASKS, ABOVE THE PROJECTS, and only when there are any: an empty
+            container is furniture, and furniture that appears and disappears is
+            worse than furniture that is simply not there (the same rule the
+            archived group follows).
+
+            THE TWO BLOCKS LOOK ALIKE ON PURPOSE -- a task row is the same row, with
+            the same id, the same size and mtime, the same current/running/parked
+            states -- because a task is the same kind of thing as a session in a
+            project. What differs is only that nothing owns it, and the block
+            heading is what says so. */}
+        {tasks.filter((task) => !task.archived).length > 0 && (
+          <section data-slot="sidebar-tasks-section" className="mb-1">
+            <h2
+              data-slot="sidebar-tasks-heading"
+              className="text-muted-foreground px-1.5 py-1 text-xs font-medium tracking-wide"
+            >
+              {t("task.section")}
+            </h2>
+            <ul data-slot="sidebar-tasks" className="flex flex-col gap-0.5">
+              {tasks
+                .filter((task) => !task.archived)
+                .map((task) => (
+                  <ThreadListItem
+                    key={task.threadId}
+                    session={task}
+                    current={task.threadId === currentThreadId}
+                    busy={busy}
+                    running={(statuses[task.threadId] ?? IDLE).running}
+                    parked={(statuses[task.threadId] ?? IDLE).parked}
+                    onOpen={() => void openThread(task.threadId, null)}
+                    error={
+                      rowError?.id === task.threadId
+                        ? rowError.message
+                        : (openErrors[task.threadId] ?? null)
+                    }
+                    actions={
+                      <ThreadListItemAction
+                        data-slot="thread-list-item-archive"
+                        disabled={busy}
+                        title={t("session.archiveTitle")}
+                        onClick={() => void archive(null, task.threadId, true)}
+                      >
+                        <ArchiveIcon className="size-3.5" />
+                        <span className="sr-only">{t("session.archive")}</span>
+                      </ThreadListItemAction>
+                    }
+                  />
+                ))}
+            </ul>
+          </section>
+        )}
+
         {projects.map((project) => (
           <ProjectSection
             key={project.projectId}
@@ -824,7 +957,71 @@ export const Sidebar: FC<SidebarProps> = ({
           />
         ))}
 
-        {loaded && projects.length === 0 && listError === null && (
+        {/* ONE ARCHIVED BLOCK FOR BOTH KINDS (ticket 03), at the END of the list and
+            collapsed by default: the point of archiving is to stop being asked about a
+            conversation, so it must not take the room it took before. Empty means not
+            drawn at all -- no heading, no chevron, no empty list -- because an empty
+            container is furniture and furniture that comes and goes is worse than
+            furniture that is not there.
+
+            A ROW FROM A PROJECT SAYS WHICH ONE (the `label` below). The block is flat,
+            so the row is the only place that answer can live -- and the answer matters,
+            because that conversation's log is still under that directory's workspace. */}
+        {archived.length > 0 && (
+          <div data-slot="sidebar-archived" className="mt-1">
+            <button
+              type="button"
+              data-slot="sidebar-archived-trigger"
+              aria-expanded={archivedOpen}
+              onClick={() => setArchivedOpen((was) => !was)}
+              className="text-muted-foreground hover:bg-muted/60 hover:text-foreground flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-start text-xs"
+            >
+              <ChevronRightIcon
+                aria-hidden
+                className={archivedOpen ? "size-3.5 shrink-0 rotate-90" : "size-3.5 shrink-0"}
+              />
+              <span className="flex-1">{t("session.archived")}</span>
+              <span className="shrink-0 tabular-nums">{archived.length}</span>
+            </button>
+            {archivedOpen && (
+              <ul data-slot="sidebar-archived-sessions" className="flex flex-col gap-0.5">
+                {archived.map(({ session, project }) => (
+                  <ThreadListItem
+                    key={session.threadId}
+                    session={session}
+                    // The project's display name, which is the last path segment --
+                    // the same word the project row above uses for the same directory.
+                    label={project === null ? null : projectName(project.path)}
+                    current={session.threadId === currentThreadId}
+                    busy={busy}
+                    running={(statuses[session.threadId] ?? IDLE).running}
+                    parked={(statuses[session.threadId] ?? IDLE).parked}
+                    onOpen={() => void openThread(session.threadId, project?.path ?? null)}
+                    error={
+                      rowError?.id === session.threadId
+                        ? rowError.message
+                        : (openErrors[session.threadId] ?? null)
+                    }
+                    actions={
+                      <ThreadListItemAction
+                        data-slot="thread-list-item-archive"
+                        data-archived=""
+                        disabled={busy}
+                        title={t("session.unarchiveTitle")}
+                        onClick={() => void archive(project, session.threadId, false)}
+                      >
+                        <ArchiveRestoreIcon className="size-3.5" />
+                        <span className="sr-only">{t("session.unarchive")}</span>
+                      </ThreadListItemAction>
+                    }
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {loaded && projects.length === 0 && tasks.length === 0 && listError === null && (
           <p data-slot="sidebar-empty" className="text-muted-foreground px-1.5 py-4 text-xs">
             {t("sidebar.empty")}
           </p>
@@ -861,9 +1058,16 @@ export const Sidebar: FC<SidebarProps> = ({
   );
 };
 
-/// One project and the sessions in it: the project's row, then its conversations
-/// in last-activity order (the server's order -- see `newest-first`), then -- when
-/// there are any -- an Archived group collapsed by default.
+/// One project and the sessions in it: the project's row, then its conversations in
+/// last-activity order (the server's order -- see `newest-first`).
+///
+/// ARCHIVED SESSIONS ARE NOT DRAWN HERE ANY MORE (ticket 03). This section used to end
+/// with its own collapsed "Archived" group; there is now ONE such block for the whole
+/// sidebar, at the bottom, holding the archived sessions of every project AND the
+/// archived tasks -- because archiving is one idea about one kind of thing, and two
+/// containers for it (plus a third the tasks would have needed) is three. This
+/// component therefore draws only the unarchived list, and the count of what a project
+/// holds is no longer the count of what is drawn.
 ///
 /// The row carries THREE hits: the row itself, which selects the project and
 /// folds it; a new-session button; and a "more" button that appears on hover and
@@ -912,8 +1116,8 @@ const ProjectSection: FC<{
   // If the session on screen is in this project -- among the ones the project
   // draws in its main list -- the project opens with it. A collapsed project
   // hiding the conversation being read would make the highlight invisible exactly
-  // when it matters most. An ARCHIVED current session is not this case: it is the
-  // Archived group's business below, because that is the list it is drawn in.
+  // when it matters most. An ARCHIVED current session is NOT this case: it is drawn
+  // in the sidebar's one archived block, which opens itself for it.
   const holdsCurrent = project.sessions.some(
     (s) => !s.archived && s.threadId === currentThreadId,
   );
@@ -921,18 +1125,6 @@ const ProjectSection: FC<{
   useEffect(() => {
     if (holdsCurrent) setOpen(true);
   }, [holdsCurrent]);
-  // The Archived group's own state, and it does NOT follow the project's: a
-  // session you filed away is one you asked not to be shown, so nothing here
-  // reopens it for you. It does open itself when the CURRENT session is in there
-  // -- which happens either because it was archived from elsewhere (another
-  // window, the API) or because you deliberately opened a row from this group.
-  // Either way, hiding it would be hiding the answer to "what am I reading".
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  useEffect(() => {
-    if (project.sessions.some((s) => s.archived && s.threadId === currentThreadId)) {
-      setArchivedOpen(true);
-    }
-  }, [project.sessions, currentThreadId]);
   // Whether the confirmation is up. Held here rather than in the sidebar because
   // the menu item that opens it belongs to this row, and a row that has been
   // removed -- or is being removed -- cannot have a dialog of its own.
@@ -946,7 +1138,8 @@ const ProjectSection: FC<{
   // The split is the client's because the SERVER sends both, flagged and in one
   // order -- see the endpoint's docstring: which group to draw them in is the
   // screen's decision, and a listing that dropped them would make "where did my
-  // session go" a question with no server-side answer.
+  // session go" a question with no server-side answer. Here the archived ones go
+  // to the sidebar's single block; this component draws the active list only.
   const active = sessions.filter((s) => !s.archived);
   const archived = sessions.filter((s) => s.archived);
 
@@ -1035,7 +1228,9 @@ const ProjectSection: FC<{
           onClick={() => {
             // Select AND toggle in one click, because the two are the same
             // intention here: pointing at a project is how you say "here". The
-            // selection is what a new task uses.
+            // selection is now only what the row LOOKS like (see `selected` on the
+            // sidebar) -- it no longer decides where a new conversation lands, since
+            // the header's button makes a task.
             onSelect();
             setOpen((was) => !was);
           }}
@@ -1199,6 +1394,10 @@ const ProjectSection: FC<{
             {active.map(row)}
             {active.length === 0 && (
               <li className="text-muted-foreground px-2.5 py-1 text-xs">
+                {/* TWO ABSENCES, and the reader can tell them apart: nothing here
+                    ever, or everything here filed away -- in which case the sessions
+                    are one block below, and this line says so rather than leaving
+                    the project looking empty. */}
                 {archived.length === 0
                   ? t("session.empty")
                   : t("session.allArchived")}
@@ -1206,33 +1405,10 @@ const ProjectSection: FC<{
             )}
           </ul>
 
-          {/* The whole group is one conditional: a project with nothing archived
-              draws no header, no chevron and no empty list. */}
-          {archived.length > 0 && (
-            <div data-slot="sidebar-archived" className="mt-0.5">
-              <button
-                type="button"
-                data-slot="sidebar-archived-trigger"
-                aria-expanded={archivedOpen}
-                onClick={() => setArchivedOpen((was) => !was)}
-                className="text-muted-foreground hover:bg-muted/60 hover:text-foreground flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-start text-xs"
-              >
-                <ChevronRightIcon
-                  aria-hidden
-                  className={
-                    archivedOpen ? "size-3.5 shrink-0 rotate-90" : "size-3.5 shrink-0"
-                  }
-                />
-                <span className="flex-1">{t("session.archived")}</span>
-                <span className="shrink-0 tabular-nums">{archived.length}</span>
-              </button>
-              {archivedOpen && (
-                <ul data-slot="sidebar-archived-sessions" className="flex flex-col gap-0.5">
-                  {archived.map(row)}
-                </ul>
-              )}
-            </div>
-          )}
+          {/* NO ARCHIVED GROUP HERE. It used to be this project's own, collapsed by
+              default; it is now the sidebar's single block at the bottom, holding the
+              archived sessions of every project and the archived tasks (ticket 03).
+              This component draws the active list and nothing else. */}
         </>
       )}
     </section>

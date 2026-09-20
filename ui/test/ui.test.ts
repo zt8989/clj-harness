@@ -90,7 +90,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// (the one key, the conditional forget, and a storage that throws rather than answers)
 /// and the single question it asks of a listing. Both pure; the reload itself is a
 /// browser's, and it is the walkthrough in `.scratch/session-after-refresh/`.
-const EXPECTED_CASES = 46;
+/// 46 -> 47: the `sidebar` suite's fourth -- the label a row can wear, which the flat
+/// archived block needs (a filed-away session has to say which project it came from,
+/// since nothing groups it any more). Same reason the other three are there: it is a
+/// thing the row SAYS, and only a render can see it.
+const EXPECTED_CASES = 47;
 
 let total = 0;
 for (const suite of SUITES) {

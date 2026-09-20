@@ -91,7 +91,7 @@ import {
 import { Sidebar } from "@/components/sidebar";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
-import { type ProjectSummary } from "@/lib/projects";
+import { type SidebarListing } from "@/lib/projects";
 import {
   browserStorage,
   forgetSession,
@@ -576,8 +576,10 @@ export function App() {
   /// 03). THREE THINGS ABOUT IT, and each is a decision:
   ///
   ///   * IT IS DRIVEN BY THE SIDEBAR'S LISTING, not by a fetch of its own: the page
-  ///     already reads every session of every project, so "is that id still a
-  ///     session" is a question about an answer that is on its way anyway.
+  ///     already reads every session of every project AND every task, so "is that id
+  ///     still a session" is a question about an answer that is on its way anyway --
+  ///     and a task can be the answer, which is why it is the whole listing that is
+  ///     handed over rather than the projects inside it.
   ///   * IT HAPPENS ONCE, and only on the FIRST listing: it is a restore, not a
   ///     policy -- an id that disappears from the list later (somebody archived it)
   ///     leaves the page where it is.
@@ -591,10 +593,10 @@ export function App() {
   /// which looking at must not disturb.
   const restored = useRef(false);
   const onListed = useCallback(
-    (projects: readonly ProjectSummary[]) => {
+    (listing: SidebarListing) => {
       if (restored.current || pending === null) return;
       restored.current = true;
-      const listed = listedSession(pending, projects);
+      const listed = listedSession(pending, listing);
       if (listed !== null) {
         // NO LOG YET means the conversation is empty by construction -- a session made
         // on the sidebar and never run -- so there is nothing to read and nothing to

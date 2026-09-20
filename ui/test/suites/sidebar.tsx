@@ -61,6 +61,7 @@ function row(
   s: Session,
   language: Language,
   flags: { current?: boolean; running?: boolean; parked?: boolean } = {},
+  label?: string,
 ): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
@@ -70,6 +71,7 @@ function row(
         busy={false}
         running={flags.running ?? false}
         parked={flags.parked ?? false}
+        label={label ?? null}
         onOpen={() => {}}
       />
     </I18nextProvider>,
@@ -159,6 +161,28 @@ const cases: Case[] = [
       expect(textOf(row(s, "zh", { parked: true }), "thread-list-item-parked").trim()).toBe(
         "等你回应",
       );
+    },
+  },
+  {
+    name: "a-row-can-say-which-project-it-came-from",
+    run: async () => {
+      // THE ARCHIVED BLOCK IS FLAT -- it holds the filed-away sessions of every project
+      // AND the filed-away tasks -- so the row is the only place that can say which
+      // project one came from, and the answer matters: that conversation's log is still
+      // under that directory's workspace.
+      const s = session();
+      const html = row(s, "en", {}, "clj-harness");
+
+      expect(textOf(html, "thread-list-item-label").trim()).toBe("clj-harness");
+      // BESIDE THE ID, NOT INSIDE IT, for the same measured reason the parked word is
+      // there: the id's element truncates, so a label inside it is clipped away on every
+      // real row -- and this one is what tells two identically-shaped rows apart.
+      expect(textOf(html, "thread-list-item-id")).toBe(s.threadId);
+
+      // AND A TASK HAS NO LABEL AT ALL. Not an empty span to be read as one: a task came
+      // from nowhere, and a blank slot where a project name goes would read as a bug.
+      expect(row(s, "en")).not.toContain('data-slot="thread-list-item-label"');
+      expect(row(s, "en", {}, "")).not.toContain('data-slot="thread-list-item-label"');
     },
   },
 ];

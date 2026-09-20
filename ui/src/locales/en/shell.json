@@ -24,13 +24,16 @@
     "moreTitle": "More — actions for this project",
     "remove": "Remove"
   },
+  "task": {
+    "section": "Tasks"
+  },
   "sidebar": {
     "newTask": "New task",
     "addProject": "Add project",
     "addProjectTitle": "Add a project — opens a folder picker, and the directory you choose becomes a project",
     "refresh": "Refresh",
     "refreshTitle": "Re-read the list from disk and the store",
-    "empty": "No projects yet. A session belongs to a project, so one has to be added before a task can start.",
+    "empty": "Nothing here yet. Add a project, or start a task.",
     "settings": "Settings",
     "settingsTitle": "Settings: what this session is running on, and what this home can be on"
   },
@@ -42,8 +45,6 @@
     "emptyPath": "Type the directory's absolute path — nothing was entered."
   },
   "refusal": {
-    "noProject": "Add a project first — a session belongs to a project.",
-    "noProjectSelected": "Pick a project first — a session belongs to a project.",
     "archiveRunning": "That session is still running; archive it once it settles.",
     "archiveParked": "That session is waiting on you; archive it once it settles.",
     "removeProjectRunning": "{{session}} is still running; remove the project once it settles.",
