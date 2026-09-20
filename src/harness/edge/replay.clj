@@ -81,18 +81,35 @@
   A frame that arrives after its run's terminal does not replace it: the first
   terminal ends the run (`frames/terminal?`'s rule, 'nothing may follow it'), and
   `:frames` keeps everything recorded for the run, so a reader can still name what
-  it left unsaid."
+  it left unsaid.
+
+  THE TERMINAL IS KEPT TWICE, as its `:type` and as the FRAME ITSELF
+  (`:terminal-frame`), because which frame ended a run matters as much as that one
+  did: a RUN_FINISHED carrying `outcome.interrupts` says the conversation is parked
+  on a human, and a reader that only had the type could not tell that from an
+  ordinary finish. First terminal wins for both, together."
   [records]
   (reduce
    (fn [found {:keys [kind runId payload]}]
      (case kind
-       "input" (if (some #(= runId (:run-id %)) found)
+      "input" (if (some #(= runId (:run-id %)) found)
                  found
-                 (conj found {:run-id runId :frames [] :terminal nil}))
-       "event" (mapv (fn [run]
+                 (conj found {:run-id runId :frames [] :terminal nil :terminal-frame nil}))
+      "event" (mapv (fn [run]
                        (if (= runId (:run-id run))
                          (if (frames/terminal? payload)
-                           (update run :terminal #(or % (:type payload)))
+                           ;; THE FIRST TERMINAL ENDS THE RUN, and the FRAME goes with
+                           ;; the type: `:terminal` says a run ended, `:terminal-frame`
+                           ;; says what it ended SAYING -- which is where a parked run's
+                           ;; interrupts live (RUN_FINISHED carrying
+                           ;; outcome.interrupts), and what a reader needs to tell
+                           ;; 'waiting on a human' from 'finished'. A later frame --
+                           ;; another terminal included -- changes nothing (see this
+                           ;; function's docstring).
+                           (if (nil? (:terminal run))
+                             (assoc run :terminal (:type payload)
+                                    :terminal-frame payload)
+                             run)
                            (update run :frames conj payload))
                          run))
                      found)
@@ -231,8 +248,16 @@
                                                " when the session was continued")})}))
          (open-runs records))))
 
-(defn records->messages
-  "Parsed log records -> the AG-UI message list they describe."
+(defn- fold-frames
+  "Parsed log records -> the AG-UI message list they describe, WITHOUT judging
+  whether the log is finished: seed (the FIRST input's messages) + every recorded
+  frame, in file order.
+
+  THE FOLD AND THE JUDGEMENT ARE TWO STEPS, which is why this is one function and the
+  two public readers below are the other two. What a log CONTAINS and whether it is
+  COMPLETE are different questions -- the first is answerable of a log that is still
+  being written, the second is not -- and a reader that had to fold in order to
+  refuse would answer the wrong one first."
   [records]
   (let [seed   (some->> records
                         (filter #(= "input" (:kind %)))
@@ -242,8 +267,45 @@
         frames (->> records
                     (filter #(= "event" (:kind %)))
                     (mapv :payload))]
-    (ensure-complete! records)
     (into (vec seed) (frames/apply-frames frames))))
+
+(defn records->messages
+  "Parsed log records -> the AG-UI message list they describe, REFUSING a log whose
+  runs did not all finish (`ensure-complete!`).
+
+  THE READER FOR A LOG THAT IS SUPPOSED TO BE DONE -- continuing a conversation,
+  handing one back to a client, rebuilding for the eval reader. A truncated log here
+  is a fact the caller must act on (close it off, or refuse the request) rather than
+  fold quietly: that is the contract this whole namespace exists to keep, and the
+  refusal names the run and its last frame so the caller can do something about it.
+
+  A LOG THAT MAY STILL BE GROWING IS THE OTHER READER'S: `messages-so-far`. The
+  difference between them is exactly this line, which is why the fold they share is
+  `fold-frames` and not a copy each."
+  [records]
+  (ensure-complete! records)
+  (fold-frames records))
+
+(defn messages-so-far
+  "Parsed log records -> what has been RECORDED of them so far, with no judgement
+  about whether the conversation is finished.
+
+  FOR A LOG SOMEBODY IS STILL WRITING. `ensure-complete!` refuses a run with no
+  terminal frame -- rightly, for every reader that means to CONTINUE the
+  conversation, because folding half a run and calling it the conversation would be
+  a quiet lie. But a client that wants to show what is on the screen NOW has the
+  opposite need: the frames are in the file the moment they are written (`log!` is a
+  per-frame append), so 'what has arrived' is a question worth answering and the
+  answer is allowed to be half a turn -- a half-written assistant message, a call
+  with no result yet.
+
+  NOT A LENIENT `records->messages`: it answers a different question. Whoever asks it
+  is responsible for saying in the answer that it is partial (harness.edge.http's
+  `sofar` verb does, with the registry's half of the fact -- see
+  docs/architecture/home-and-storage.md). Nothing here writes: reading a log that is
+  being appended to is a read."
+  [records]
+  (fold-frames records))
 
 (defn lines->messages
   "A thread's raw log lines -> the AG-UI message list they describe."
@@ -270,6 +332,68 @@
         input   (first-input records)]
     {:messages (records->messages records)
      :context  (:context input)}))
+
+(defn- record-state
+  "What a log's RECORD says about the conversation in it -- one of three, and
+  deliberately nothing about whether anyone is still writing it:
+
+    {:state :unfinished :open-runs [run-id ..]}   a run with no terminal frame
+    {:state :parked     :interrupts [frame ..]}   the newest run ended on an interrupt
+    {:state :settled}                             the newest run ended, and not on one
+
+  THE FILE'S ANSWER, NOT THE PROCESS'S. `:unfinished` is the honest name for what a
+  file can say: an input line with no terminal after it is a run still going OR a
+  process that was killed, and nothing in the file distinguishes them. The caller
+  that needs the difference asks the process (harness.edge.http/running?), which is
+  why the state is named for what IS known rather than for the answer wanted --
+  'running' here would be a guess dressed as a fact.
+
+  THE NEWEST RUN DECIDES :parked, because a park is the state of the CONVERSATION
+  and not of one run in it: the parked run ended on its interrupt, and if a resume
+  followed, that resume is the newest run and its terminal is what the conversation
+  is waiting on now."
+  [records]
+  (let [open   (open-runs records)
+        newest (last (runs records))
+        tf     (:terminal-frame newest)]
+    (cond
+      (seq open) {:state :unfinished :open-runs (mapv :run-id open)}
+      (= "interrupt" (get-in tf [:outcome :type]))
+      {:state      :parked
+       :interrupts (vec (get-in tf [:outcome :interrupts]))}
+      :else {:state :settled})))
+
+(defn sofar
+  "What has been recorded of a conversation SO FAR: the message list, the context, and
+  the state the record is in (`record-state`, plus what the fold could see).
+
+  FOR THE CLIENT THAT IS LOOKING AT A SESSION RIGHT NOW -- a page that just landed on
+  a conversation its own runtime knows nothing about (a refresh: the run belongs to
+  the process, not to the tab). It is the READ half of `rebuild`, and the difference
+  between them is one line: rebuild REFUSES a log whose run has not ended, because
+  handing half a conversation back as 'yours now' would be a lie; this one returns
+  what is there and says it is `:unfinished`.
+
+  THE STRICT READER IS STILL USED FOR A LOG THAT IS DONE -- `records->messages`, the
+  same call rebuild makes -- so a settled conversation cannot read differently through
+  the two doors; the lenient fold is only for the case that has no strict answer.
+
+  NOTHING HERE WRITES, and that is a requirement rather than a happy accident: this is
+  what a client POLLS while a run is being written, and a read path that repaired the
+  file it was reading would make every poll a write (see the flag: a run this process
+  is answering is not a truncated log)."
+  [^java.io.File f]
+  (let [records (lines->records (read-lines f))
+        input   (first-input records)
+        state   (record-state records)
+        open?   (= :unfinished (:state state))]
+    {:messages   (if open?
+                   (messages-so-far records)
+                   (records->messages records))
+     :context    (:context input)
+     :state      (:state state)
+     :open-runs  (:open-runs state)
+     :interrupts (:interrupts state)}))
 
 (defn- thread-id-of
   "The session a log FILE belongs to: its stem. The writer names the file through

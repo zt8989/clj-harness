@@ -79,6 +79,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
 | `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上**每一条**没终结的 run（按 run id 认；各补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建 | `session/rebuilt`，合上过则每一轮先有一行 `session/closed-off` |
+| `/api/threads/<stem>/sofar` | GET | **至今为止的对话**：客户端**轮询**用的只读读法——已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它 | 无（只读） |
 | `/api/projects` | GET | 侧边栏的数据：每个项目 + 它的会话 | 无 |
@@ -114,7 +115,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **provider 用它的 id**（它在 `config.edn` 里就是那个键，也是凭据名的来源）。
 **这个形状上不该被服务的动词**由这里答 405，而不是掉进 run 端点——那正是它从前会变成一个
 「body 根本不存在的 500」的原因。**方法说有没有副作用**：`rebuild` 与 `archive` 是 POST，
-`stats` 是这条形状上唯一的 GET（它只读日志，见下）。
+`stats` / `trajectory` / `sofar` 是 GET（三个都只读日志，见下）。
 
 **一个叫 `models` 的 provider 与那条精确路由不冲突**：新建与改写走 collection（`/api/providers`），
 删除走 verb 形状（`/api/providers/<id>/remove`），所以那条路径永远只可能是探询。

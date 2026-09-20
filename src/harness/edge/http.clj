@@ -1479,12 +1479,19 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  ONE OF THE FOUR IS A GET: `stats` only reads the log, so it has no effect to
-  report and nothing to add to it; `trajectory` is the second reader on the same
-  terms. The set stays closed and the 405 stays here -- what changed is that the
-  sentence 'every verb on this shape is a POST' is no longer true, not where the
-  refusal happens."
-  #{"rebuild" "archive" "stats" "trajectory"})
+  THREE OF THE FIVE ARE GETS: `stats` and `trajectory` only READ the log (a folded
+  view of a finished conversation, and the per-turn timeline) and `sofar` reads the
+  same file while it is still being written, to hand a client that just landed on a
+  session what has arrived. The set stays closed and the 405 stays here -- what
+  changed is that the sentence 'every verb on this shape is a POST' is no longer
+  true, not where the refusal happens.
+
+  `sofar` NAMES AN INTENT AND NOT A RESOURCE, which is why it is not `history`:
+  what it answers is not the conversation (a thing a client could take over) but
+  how much of it there IS at this moment -- the same log may answer differently a
+  second later, and the answer says so (`replay/sofar`'s `:state`). Rebuild remains
+  the door for 'give me the conversation, I will own it'."
+  #{"rebuild" "archive" "stats" "trajectory" "sofar"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -1690,26 +1697,38 @@
   terminal is the last FRAME of its run: a reader that meets a RUN_ERROR no run
   emitted must have met the line that explains it first.
 
+  AND IT ASKS THE REGISTRY FIRST (2026-09-20). 'No terminal frame' is not evidence
+  that a run is dead -- it is equally what a run still being answered looks like --
+  and this used to act on the file alone: a client that refreshed into a running
+  session (a new runtime, so `isRunning` is false) and opened that thread got a
+  TOOL_CALL_RESULT and a RUN_ERROR appended to a run that was still going, which
+  then wrote its own RUN_FINISHED later. TWO TERMINALS IN ONE RUN, and frames in
+  between: a lie in a record whose only asset is that every line of it is true.
+  So a run this process is answering is left ALONE (`harness.edge.http/running?`),
+  and the caller of this function -- a rebuild, today -- goes on to refuse the log by
+  name, which is the honest answer for a conversation that has not stopped yet.
+
   BEST EFFORT ON PURPOSE. A corrupt log throws here and is left to `rebuild` to
   refuse by name -- repairing is what this does, and the reader that follows says
   precisely what is wrong with a log nobody can repair."
   [stem ^java.io.File path]
-  (try
-    (when-let [closures (seq (replay/closing-frames
-                              (replay/lines->records (replay/read-lines path))))]
-      (doseq [{:keys [run-id last-frame frames]} closures]
-        (log! stem nil "session/closed-off" {:run-id     run-id
-                                             :last-frame last-frame
-                                             :frames     (mapv :type frames)})
-        (doseq [frame frames]
-          ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
-          ;; reader pairs a terminal frame with the run it ended.
-          (log! stem run-id "event" frame)))
-      (mapv (fn [{:keys [run-id frames]}] {:run-id run-id :frames (mapv :type frames)})
-            closures))
-    (catch Throwable t
-      (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
-      nil)))
+  (when-not (running? stem)
+    (try
+      (when-let [closures (seq (replay/closing-frames
+                                (replay/lines->records (replay/read-lines path))))]
+        (doseq [{:keys [run-id last-frame frames]} closures]
+          (log! stem nil "session/closed-off" {:run-id     run-id
+                                               :last-frame last-frame
+                                               :frames     (mapv :type frames)})
+          (doseq [frame frames]
+            ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
+            ;; reader pairs a terminal frame with the run it ended.
+            (log! stem run-id "event" frame)))
+        (mapv (fn [{:keys [run-id frames]}] {:run-id run-id :frames (mapv :type frames)})
+              closures))
+      (catch Throwable t
+        (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
+        nil))))
 
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
@@ -1745,6 +1764,74 @@
         (api-response 200 {:threadId stem
                            :messages messages
                            :context  (or context [])})))))
+
+(defn- sofar-get
+  "GET /api/threads/<stem>/sofar -- what has been recorded of this conversation so
+  far, plus the one thing the record cannot say about itself (whether this process is
+  still answering it).
+
+  THE READ A CLIENT POLLS, WHICH IS WHY IT WRITES NOTHING. `rebuild` is the other
+  door on the same file and it is a different act: it hands the conversation over
+  (and, for a log that was cut off, it CLOSES THE RUN OFF first, which is a write).
+  A reader that wanted to look at a session while it is being answered cannot use
+  that door -- it would be repairing the file it is reading, on every poll, and it
+  would be refused anyway (a live run reads as a truncated log to `ensure-complete!`).
+  So this one folds what is there and says how much of it there is.
+
+  THREE ANSWERS, and the third is a refusal:
+
+    run in flight here  200, state :running, with the open runs named -- the client
+                        shows what has arrived and knows not to send
+    parked              200, state :parked, with the interrupts the newest run
+                        ended on (the client's card, ticket 06)
+    settled             200, state :settled, the same message list rebuild gives
+    cut off             400 BY NAME, pointing at rebuild: nothing is folded and
+                        nothing is written -- a run that ended without a terminal and
+                        is not running here needs a human decision (rebuild closes it
+                        off), and this route is not where that decision is taken
+
+  THE TWO HALVES OF THE LIVENESS QUESTION ARE ANSWERED BY THEIR OWNERS: the file
+  says whether a run has a terminal frame (`replay/sofar`), and the process says
+  whether that run is still being answered (`running?`, the live-runs registry).
+  Neither is inferred from the other -- which is the whole point of having both."
+  [req stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))
+        read    (when (nil? (:error located))
+                  (try {:ok (replay/sofar (:ok located))}
+                       (catch Throwable t {:error (ex-message t)})))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located)})
+
+      (some? (:error read))
+      (api-response 400 {:error (:error read)})
+
+      :else
+      (let [{:keys [messages context state open-runs interrupts]} (:ok read)]
+        (cond
+          (= :unfinished state)
+          (if (running? stem)
+            (api-response 200 {:threadId stem
+                               :messages messages
+                               :context  (or context [])
+                               :state    "running"
+                               :openRuns open-runs})
+            ;; NOTHING IS WRITTEN HERE, not even the repair: closing a record off is
+            ;; `close-off-open-run!`'s job, it belongs to whoever asks to CONTINUE the
+            ;; conversation, and a poll must never be the thing that changes the file.
+            (api-response 400 {:error (str "this conversation's log ends mid-run ("
+                                        (str/join ", " open-runs) ") and this process is"
+                                        " not running it: the run was cut off. POST"
+                                        " /api/threads/" stem "/rebuild to close it off and read"
+                                        " it back, or start a new session.")}))
+
+          :else
+          (api-response 200 (cond-> {:threadId stem
+                                     :messages messages
+                                     :context  (or context [])
+                                     :state    (name state)}
+                              (seq interrupts) (assoc :interrupts interrupts))))))))
 
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
@@ -2451,6 +2538,7 @@
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)
+        [:get "sofar"]    (sofar-get req stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

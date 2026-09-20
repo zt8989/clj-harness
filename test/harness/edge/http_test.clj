@@ -4003,3 +4003,215 @@
            (is (until #(false? (row-running? lost-dir "lost-a")) 5000)
                "and the registration it made before that went with it")
            (finally (.close sock))))))))
+
+
+;; ------------------------ reading a conversation that has not stopped yet
+;;
+;; `rebuild` HANDS A CONVERSATION OVER, and that is why it cannot be used to LOOK at
+;; one: it closes off a log that ends mid-run (a write), and it refuses a log whose run
+;; has not ended at all. A client that has just landed on a session -- a refresh, where
+;; the run belongs to the process and not to the tab -- needs the other thing: what has
+;; been recorded so far, said to be partial, with nothing touched. That is the `sofar`
+;; verb, and the four cases below are its edges: a run in flight, a run that settled, a
+;; log that was cut off, and a rebuild aimed at a live run (which must write nothing).
+;;
+;; THE LIVE CASES HOLD THE RUN AT THE TOOL SEAM (`tools/run!`). That is the half-written
+;; state worth reading: an assistant message carrying a call whose result has not been
+;; written yet. Holding it before the run starts would make every assertion about an
+;; empty log, which is the shape of test that passes while the feature is broken.
+
+(def ^:private sofar-dir  (support/temp-dir "http-sofar"))
+(def ^:private sofar-dir-2 (support/temp-dir "http-sofar-2"))
+(def ^:private parked-dir  (support/temp-dir "http-sofar-parked"))
+
+(defn- sofar
+  "GET /api/threads/<TID>/sofar -- the raw answer, so a case can assert the status too."
+  [tid]
+  (api-call :get (str "/api/threads/" tid "/sofar") nil))
+
+(defn- log-records
+  "TID's log parsed AS IT IS RIGHT NOW -- no waiting, no retrying.
+
+  This section is about reading a file that is still being written, so the caller says
+  what it expects to already be true (`until`) and then looks; a helper that polled
+  would hide exactly the race these cases are about. A trailing half-written line is
+  dropped rather than failed on: the file may be mid-append, which is a fact about
+  reading a live log and not a corrupt log."
+  [tid]
+  (->> (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))
+       (keep (fn [line] (try (json/read-str line :key-fn keyword) (catch Throwable _ nil))))
+       (vec)))
+
+(defn- log-frames [tid]
+  (mapv :payload (filter #(= "event" (:kind %)) (log-records tid))))
+
+(defn- terminals [tid]
+  (filterv frames/terminal? (log-frames tid)))
+
+(defn- write-truncated-log!
+  "A record that stops mid-run, written by hand: an input, the run's start, and nothing
+  else. HAND-WRITTEN RATHER THAN PRODUCED BY A REAL KILL because the case is about what
+  a READER does with that shape -- a test that spawned a process in order to kill it
+  would be testing its own timing, and this is the same bytes either way."
+  [tid run-id]
+  (let [f (log-file tid)]
+    (io/delete-file f true)
+    (.mkdirs (.getParentFile f))
+    (let [line! (fn [kind payload]
+                  (spit f (str (json/write-str {:ts (System/currentTimeMillis)
+                                                :runId run-id :kind kind :payload payload})
+                               "\n")
+                        :append true :encoding "UTF-8"))]
+      (line! "input" {:threadId tid :runId run-id
+                      :messages [{:id "u1" :role "user" :content "看看这个项目"}]
+                      :tools [] :context []})
+      (doseq [frame ((ag/outbound tid run-id) (ev/run-start))]
+        (line! "event" frame)))))
+
+(deftest a-running-session-reads-what-has-arrived-and-nothing-is-written
+  (wipe-dir! sofar-dir)
+  (with-server
+   "sofar-a"
+   (fn []
+     (bind! "sofar-a" sofar-dir)
+     (let [gate (support/window-gate #'tools/run! 20000)
+           sock (fire-run! "sofar-a" "run-sofar")]
+       (try
+         ;; WAIT FOR THE TOOL SEAM TO BE REACHED, not merely for the file to have
+         ;; something in it: `seq` is satisfied by RUN_STARTED alone, and a read taken
+         ;; then races the model call that is still streaming its frames out. Entered
+         ;; gate + a recorded TOOL_CALL_START together say 'the turn is on the record and
+         ;; the call is now held', which is the state this case is about -- and the file
+         ;; stops growing exactly there, which is what the byte/mtime assertion needs.
+         (is (until #(and (pos? (long ((:entered gate))))
+                          (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-a")))
+                    5000)
+             "the model's turn is on the record and its call is held at the seam")
+         (let [resp   (sofar "sofar-a")
+               answer (read-json resp)]
+           (testing "the read says a run is in flight here, and names it"
+             (is (= 200 (.statusCode resp)))
+             (is (= "running" (:state answer)))
+             (is (= ["run-sofar"] (:openRuns answer)))
+             (is (true? (:running (session-row-of sofar-dir "sofar-a")))
+                 "and the sidebar row agrees with it: one registry, two doors"))
+           (testing "and it returns the half turn as it stands"
+             (let [calls (mapcat #(map :id (:toolCalls %)) (:messages answer))]
+               (is (= ["c1" "c2"] (vec calls))
+                   "the calls the model made a moment ago are readable")
+               (is (not-any? #(= "tool" (:role %)) (:messages answer))
+                   "no result has been written yet, and the read invents none")))
+           (testing "NOTHING WAS WRITTEN for it: no terminal, no close-off"
+             (is (empty? (terminals "sofar-a")))
+             (is (not-any? #(= "session/closed-off" (:kind %)) (log-records "sofar-a")))))
+         (testing "and polling it does not touch the file at all"
+           ;; THE JUDGEMENT A POLLING CLIENT DEPENDS ON: bytes and mtime are the two
+           ;; numbers a write cannot avoid moving.
+           (let [f      (log-file-for "sofar-a")
+                 before [(.length f) (.lastModified f)]]
+             (dotimes [_ 10]
+               (is (= 200 (.statusCode (sofar "sofar-a")))))
+             (is (= before [(.length f) (.lastModified f)]))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "once the run ends, the same log reads exactly as rebuild gives it"
+       (is (until #(false? (row-running? sofar-dir "sofar-a")) 5000))
+       (let [answer  (read-json (sofar "sofar-a"))
+             rebuilt (read-json (api-call :post "/api/threads/sofar-a/rebuild" "{}"))]
+         (is (= "settled" (:state answer)))
+         (is (nil? (:openRuns answer)))
+         (is (nil? (:interrupts answer)))
+         (is (= (:messages rebuilt) (:messages answer))
+             "two readers of one settled conversation must not diverge")
+         (is (= (:context rebuilt) (:context answer))))
+       (testing "and the run kept exactly ONE terminal frame"
+         (is (= 1 (count (terminals "sofar-a")))))))))
+
+(deftest a-parked-session-reads-as-parked-and-says-what-it-waits-on
+  ;; THE SECOND WAY A CONVERSATION IS UNFINISHED, and the one a client has to treat
+  ;; differently from a run in flight: nothing is executing, a HUMAN is being waited on.
+  ;; The record ends with its terminal -- a RUN_FINISHED carrying the interrupt -- which
+  ;; is why the file alone can answer this one and the registry is not asked.
+  (wipe-dir! parked-dir)
+  (tools/session-require-approval! "sofar-parked" "write")
+  (with-server
+   "sofar-parked"
+   [{:content "" :tool-calls [{:id "c1" :name "write"
+                               :arguments {:path (str (io/file parked-dir "asked.txt"))
+                                           :content "written"}}]}
+    {:content "done"}]
+   (fn []
+     (bind! "sofar-parked" parked-dir)
+     (let [asked (wire/frames-from-sse (.body (post-run "sofar-parked")))
+           iid   (get-in (last asked) [:outcome :interrupts 0 :id])]
+       (is (= "interrupt" (get-in (last asked) [:outcome :type])))
+       (let [resp   (sofar "sofar-parked")
+             answer (read-json resp)]
+         (testing "the read says the conversation is parked, and on what"
+           (is (= 200 (.statusCode resp)))
+           (is (= "parked" (:state answer)))
+           (is (= ["c1"] (mapv :toolCallId (:interrupts answer))))
+           (is (= [iid] (mapv :id (:interrupts answer)))))
+         (testing "the call it is waiting on is in the message list, unanswered"
+           (is (some #(= "c1" (:id %)) (mapcat :toolCalls (:messages answer))))
+           (is (not-any? #(= "c1" (:toolCallId %)) (:messages answer)))))
+       (testing "and a parked run is not a running one -- nothing to wait for in the process"
+         (is (false? (row-running? parked-dir "sofar-parked"))))))))
+
+(deftest a-log-that-was-cut-off-is-refused-by-name-and-rebuild-still-closes-it
+  (let [tid (str "sofar-dead-" (java.util.UUID/randomUUID))]
+    (write-truncated-log! tid "r1")
+    (with-server
+     tid
+     (fn []
+       (let [resp   (sofar tid)
+             answer (read-json resp)]
+         (testing "the READ refuses a cut-off log by name, and points at the door that repairs it"
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error answer)) "r1") "the run is named")
+           (is (str/includes? (str (:error answer)) "rebuild") "and so is the way out"))
+         (is (not-any? #(= "session/closed-off" (:kind %)) (log-records tid))
+             "a refused read writes nothing -- it is not the repairing door"))
+       (testing "rebuild still closes it off, exactly as it always did"
+         (let [rebuilt (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
+           (is (seq (:messages rebuilt)))
+           (is (some #(= "session/closed-off" (:kind %)) (log-records tid))
+               "the repair is unconditional for a log nobody is writing"))
+         (testing "and after that the same read returns it, settled"
+           (let [resp   (sofar tid)
+                 answer (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "settled" (:state answer)))
+             (is (= (:messages (read-json (api-call :post (str "/api/threads/" tid "/rebuild")
+                                                    "{}")))
+                    (:messages answer))))))))))
+
+(deftest a-rebuild-during-a-live-run-leaves-the-record-alone
+  ;; THE CASE THAT MOTIVATED THE REGISTRY. A client that refreshed into a running
+  ;; session has a fresh runtime, so its own `isRunning` is false and it may well aim
+  ;; rebuild at the thread -- and rebuild used to close the run off from the file alone:
+  ;; a TOOL_CALL_RESULT and a RUN_ERROR appended to a run that was still going, which
+  ;; then wrote its own RUN_FINISHED. TWO terminals for one run, in a record whose only
+  ;; asset is that every line of it is true.
+  (wipe-dir! sofar-dir-2)
+  (with-server
+   "sofar-b"
+   (fn []
+     (bind! "sofar-b" sofar-dir-2)
+     (let [gate (support/window-gate #'tools/run! 20000)
+           sock (fire-run! "sofar-b" "run-live")]
+       (try
+         (is (until #(and (pos? (long ((:entered gate))))
+                          (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-b")))
+                    5000)
+             "the run is under way: its call is recorded and held")
+         (let [resp (api-call :post "/api/threads/sofar-b/rebuild" "{}")]
+           (testing "the conversation cannot be handed over while it is still being written"
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (str (:error (read-json resp))) "mid-run")))
+           (testing "and NOTHING was appended to it"
+             (is (not-any? #(= "session/closed-off" (:kind %)) (log-records "sofar-b")))
+             (is (empty? (terminals "sofar-b")))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "the run finishes on its own, with one terminal and no help from anybody"
+       (is (until #(false? (row-running? sofar-dir-2 "sofar-b")) 5000))
+       (is (= 1 (count (terminals "sofar-b"))))))))
