@@ -492,6 +492,79 @@
   (let [[before _] (swap-vals! a conj thread-id)]
     (not (contains? before thread-id))))
 
+(defonce ^:private live-runs
+  (atom {}))
+;; thread-id -> {:run-id ..}: the runs THIS PROCESS has started and not yet finished.
+;;
+;; PROCESS-LOCAL, AND THAT IS THE WHOLE POINT. A run is a go block on this JVM's
+;; threads and nothing about it is on disk, so 'this conversation is being answered
+;; right now' is a fact no reader of the log can state: a jsonl with an input and no
+;; terminal frame is a run still going OR a process that was stopped, and the two are
+;; one file (harness.edge.replay/open-runs can only count lines -- see
+;; docs/architecture/home-and-storage.md). The file cannot tell them apart; this can,
+;; and the readers that have to choose between them ask HERE rather than guessing.
+;;
+;; ONE KEY PER THREAD, holding the run id rather than a bare true: `unregister-run!`
+;; compares ids instead of dissoc'ing blind, so a run that ends cannot erase a
+;; registration that is not its own -- two runs of one thread are the ordinary case
+;; (two tabs, any client that is not this UI), and the gate that refuses the second
+;; one is .scratch/session-after-refresh's ticket 05. Until it lands, this must not
+;; become a way for one run to make another invisible.
+
+(defn running?
+  "Is a run of THREAD-ID alive in this process right now?
+
+  THE FACT THAT IS NOT IN THE RECORD, and the reason it is asked here: an input line
+  whose run never terminated is either a run still going or a process that died
+  mid-flight. Every reader that has to choose (the sidebar row, the composer's gate,
+  the read side's 'may I close this off') asks this instead of inferring from the
+  file.
+
+  A THREAD ID IS COMPARED AS A STRING: ids arrive from JSON, from a path segment and
+  from a map key, and this is a lookup rather than a validation. Nil and the empty
+  string are not session ids anyone mints; they answer false."
+
+  [thread-id]
+  (contains? @live-runs (str thread-id)))
+
+(defn- register-run!
+  "Record that THREAD-ID's run RUN-ID is alive in this process, replacing any earlier
+  registration for that thread.
+
+  CALLED WHERE THE RUN ACTUALLY STARTS -- beside the `run/start` line, once the
+  provider resolved -- and not at the top of `run-agent!`. A run that never started
+  (the setup refusal above: no provider, an undeclared modality, a resume naming an
+  interrupt this process never parked) reaches no terminal frame through the emitter
+  and so has nothing that would ever remove a registration made early: it would leave
+  its thread claiming to be running for the life of the process, and every reader of
+  that answer -- the composer's gate, the read side's decision to close a record off
+  -- would be wrong forever rather than briefly."
+
+  [thread-id run-id]
+  (swap! live-runs assoc (str thread-id) {:run-id (str run-id)}))
+
+(defn- unregister-run!
+  "Forget THREAD-ID's run RUN-ID -- if that is the run this thread has registered.
+
+  PRESENCE, THEN DISSOCIATE, and no `update-in` with a default in sight: updating a
+  removed key RESURRECTS it as a map of nils (.scratch/bash-lifetime paid for that
+  lesson), and `running?` would then read a finished run as alive. Comparing the run
+  id is the other half -- a bare `(dissoc m k)` would let the older of two runs on one
+  thread take the newer one's registration down with it.
+
+  IDEMPOTENT ON PURPOSE: every ending calls it, and one run can reach two of them on
+  the way out (a terminal frame, and then a channel that closes; a throw after the
+  terminal was dispatched). The second call is a no-op, so 'exactly once' is a
+  property of the shape rather than something each call site has to arrange."
+
+  [thread-id run-id]
+  (let [k (str thread-id)]
+    (swap! live-runs
+           (fn [m]
+             (if (= (str run-id) (:run-id (get m k)))
+               (dissoc m k)
+               m)))))
+
 (defn- log-messages!
   "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
   the returned side of the message record both come through here."
@@ -585,6 +658,11 @@
             last? (contains? terminal (:type frame))]
         (reset! first? false)
         (when last?
+          ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS, and the emitter is
+          ;; the only place that sees it: this is where the registry stops saying the
+          ;; thread is running, rather than at whoever happens to drain the channel
+          ;; next (harness.edge.http/live-runs -- the fact the sidebar row reads).
+          (unregister-run! thread-id run-id)
           (swap! state assoc :terminal (:type frame)))
         (hk/send! ch (or head body) last?)
         (when last?
@@ -782,6 +860,12 @@
               ;; terminal, no close and no death beside it is one whose process
               ;; stopped between the two. The model rides along because 'which
               ;; provider did this go to' is the other half of 'and then what'.
+              ;; THE REGISTRY IS TOLD FIRST, deliberately: the line below is then a
+              ;; WITNESS for it. Anything that has seen `run/start` in the process log
+              ;; (a test, a person reading along) may rely on `running?` answering true
+              ;; for that thread -- which is the whole use of the fact, and an ordering
+              ;; the other way round would make every such reader race the registry.
+              (register-run! thread-id run-id)
               (log/info! :run/start {:thread-id thread-id :run-id run-id
                                      :model     (:model provider)
                                      :provider  (:provider provider)})
@@ -912,10 +996,23 @@
                 ;; closed from underneath -- and the record would otherwise end
                 ;; mid-sentence with nothing anywhere saying so.
                 (when-not (:terminal @state)
+                  ;; A CHANNEL THAT CLOSED WITHOUT A TERMINAL IS STILL AN ENDING, and a
+                  ;; registration left behind by it is exactly the 'forever running' this
+                  ;; registry must not produce. The `when-not` is what keeps that from
+                  ;; being a DOUBLE unregistration on the ordinary path (the terminal
+                  ;; frame already removed it) -- though the call would be harmless
+                  ;; there too: it is idempotent by its own design.
+                  (unregister-run! thread-id run-id)
                   (log/warn! :run/events-closed-without-terminal
                              {:thread-id thread-id :run-id run-id
                               :last      (:last @state)}))))))
       (catch Throwable t
+        ;; A CRASHED RUN IS NOT A RUNNING ONE, and this catch is the only place that
+        ;; knows a run died outside the emitter: without this the thread would claim to
+        ;; be running until the process ended. It is a no-op when the throw happened
+        ;; before the run started (this catch also covers the setup above it) -- the
+        ;; run-id it names is simply not the one registered.
+        (unregister-run! thread-id run-id)
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
         ;; THE STREAM IS ENDED RATHER THAN LEFT OPEN: a client parked on a run
@@ -1308,14 +1405,29 @@
   just created on the sidebar has not run by definition. Its two disk facts are
   null, which is a fact about the disk and not a zero-byte file.
 
-  The two facts are read FRESH from the file every time rather than kept in the
-  store, because they are the two things the store deliberately does not hold: a
-  size and an mtime are properties of a record, and the record lives in the file."
+  The two DISK facts are read FRESH from the file every time rather than kept in
+  the store, because they are the two things the store deliberately does not hold: a
+  size and an mtime are properties of a record, and the record lives in the file.
+
+  THE THIRD FACT IS NOT ON DISK AT ALL. `:running` is whether the run this session
+  is in the middle of is alive in THIS PROCESS -- the one question a file cannot
+  answer, since a log that stops without a terminal frame belongs equally to a run
+  still going and to a process that was killed (see `live-runs` below). It is read
+  from the registry, per request, for the same reason the other two are read per
+  request: the answer moves."
   [workspace {:keys [id archived?]}]
   (let [f (home/log-file workspace id)
         exists? (.exists f)]
     {:threadId     id
      :archived     (boolean archived?)
+     ;; WHETHER THIS PROCESS IS ANSWERING IT RIGHT NOW -- the third fact, and the one
+     ;; the other two cannot give: a file's size and mtime say nothing about whether
+     ;; the run that is growing it is alive or its process was killed. It comes from
+     ;; the live-runs registry (`running?`) rather than from disk, which is why it is
+     ;; HERE and not on /api/threads/<stem>/stats -- that endpoint folds the RECORD,
+     ;; and this fact is not in the record. The sidebar and the client that restores a
+     ;; session read this one payload, so both learn it in the same load.
+     :running      (running? id)
      :lastActivity (when exists? (.lastModified f))
      :bytes        (when exists? (.length f))}))
 

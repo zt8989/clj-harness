@@ -109,7 +109,14 @@
   close is the ordinary approval park -- its :run/interrupt ends the run and the
   answer arrives on the resume run -- so 'every call needs a result' would report
   the normal flow as damage and append a result to a call a human is still
-  deciding."
+  deciding.
+
+  AND AN OPEN RUN IS NOT NECESSARILY AN ENDED ONE: this reads a FILE, so a run that
+  is still going and a run whose process was killed look the same to it -- both are
+  'open'. Nothing here can tell them apart, and the caller that is about to act on
+  the answer has to ask the process for the half the file cannot give it
+  (harness.edge.http/running? -- the live-runs registry, which is exactly this
+  distinction kept where it can be known)."
   [records]
   (->> (runs records)
        (remove :terminal)

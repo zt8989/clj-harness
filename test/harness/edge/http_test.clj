@@ -3666,17 +3666,32 @@
   (let [f (io/file (home/root) "logs" "harness.infra.log")]
     (if (.exists f) (slurp f :encoding "UTF-8") "")))
 
-(defn- await-log
-  "Wait for PAT to appear in the process log. The writers are other threads -- a go
-  block, http-kit's own -- so polling is the honest way to ask, and 5s is far more
-  than a line takes to land."
-  [pat]
-  (let [deadline (+ (System/currentTimeMillis) 5000)]
+(defn- until
+  "Poll F until it answers truthy, or MS elapses -- answering F's last value either
+  way. THE ONE WAY THIS FILE ASKS A QUESTION OF ANOTHER THREAD: a run is a go block,
+  the log is written by whoever got there first, and http-kit calls back on its own
+  -- so a fact that has just been made true is asserted by waiting for it to become
+  visible, never by sleeping a fixed amount and hoping.
+
+  IT DOES NOT THROW ON TIMEOUT. A caller whose assertion is `(is (until ...))` gets
+  the failure it wrote; a caller that wants to see what it was waiting FOR reads the
+  answer and puts it in the message. `await-log` below is the first kind applied to
+  the process log."
+  [f ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
     (loop []
-      (cond
-        (re-find pat (process-log)) true
-        (< deadline (System/currentTimeMillis)) false
-        :else (do (Thread/sleep 50) (recur))))))
+      (let [v (f)]
+        (if (or v (< deadline (System/currentTimeMillis)))
+          v
+          (do (Thread/sleep 25) (recur)))))))
+
+(defn- await-log
+  "Wait for PAT to appear in the process log -- true once it is there, false after 5s.
+  Far more than a log line takes to land, and the deadline is a fixed one on purpose:
+  a case that needs to witness a line has no other way to ask, and a case that never
+  sees it has a real failure rather than a slow machine."
+  [pat]
+  (boolean (until #(re-find pat (process-log)) 5000)))
 
 (defn- fire-run!
   "Send a run over a socket of our OWN and do not read the answer.
@@ -3843,3 +3858,148 @@
            (is (not (str/includes? (str (:message err)) "insufficient tool messages"))))
          (testing "and nothing was sent to the scripted model -- it never got a turn"
            (is (not-any? #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))))
+
+
+;; ------------------------------------ a run that is alive is a fact, not a file
+;;
+;; A RECORD CANNOT SAY WHETHER IT IS STILL BEING WRITTEN. An input line with no
+;; terminal frame after it is a run that is still going OR a process that was killed
+;; mid-flight -- the two leave the same file, and every reader that has had to choose
+;; between them (the sidebar row, the composer's gate, the read side deciding whether
+;; it may close a record off) used to be guessing. `harness.edge.http/live-runs` is
+;; the process's own answer, and the three cases below are the three ways a run can
+;; end: an ordinary one, one that never started, and one that died in its own body.
+;;
+;; EVERY CASE HERE HOLDS THE RUN OPEN ON PURPOSE. `loop/run-chan` is called after the
+;; registration and before any frame, so wrapping it (harness.test-support/window-gate)
+;; gives the test a window in which the run is certainly alive -- which is what makes
+;; "the row says running" an assertion rather than a race against a fast script.
+
+(def ^:private alive-dir  (support/temp-dir "http-alive"))
+(def ^:private refused-dir (support/temp-dir "http-refused"))
+(def ^:private crashed-dir (support/temp-dir "http-crashed"))
+(def ^:private lost-dir    (support/temp-dir "http-lost"))
+
+(defn- session-row-of
+  "The row GET /api/projects gives for TID, under the project whose canonical path is
+  DIR -- nil when this home has no such project, or no such session in it.
+
+  ASKED THE WAY THE SIDEBAR ASKS IT: one GET, the whole listing, no thread endpoint of
+  its own. The row is the client's whole view of the fact, so a case that read the
+  registry directly would be testing something no client can see."
+  [dir tid]
+  (let [want (.getCanonicalPath (io/file dir))]
+    (some (fn [project]
+            (when (= want (:path project))
+              (first (filter #(= tid (:threadId %)) (:sessions project)))))
+          (json/read-str (.body (api-call :get "/api/projects" nil)) :key-fn keyword))))
+
+(defn- row-running?
+  [dir tid]
+  (boolean (:running (session-row-of dir tid))))
+
+(defn- bind!
+  "Bind TID to DIR through the ordinary route, asserting it worked."
+  [tid dir]
+  (is (= 200 (.statusCode (api-call :post "/api/project"
+                                    (json/write-str {:threadId tid :dir dir}))))
+      (str "binding " tid " to " dir)))
+
+(deftest a-run-that-is-alive-says-so-and-stops-when-it-ends
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-a"
+   (fn []
+     (bind! "alive-a" alive-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "alive-a" "run-alive")]
+       (try
+         (testing "while the run is being answered, the session's own row says so"
+           (is (until #(row-running? alive-dir "alive-a") 5000)
+               "the row never said running while the run was held")
+           (is (await-log #"start .*run-id=run-alive")
+               "and the registry was told before the line that witnesses it"))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and the moment the run reaches its terminal frame, it stops"
+       (is (until #(false? (row-running? alive-dir "alive-a")) 5000)
+           "the row still said running after the run had ended")
+       (is (await-log #"terminal event=RUN_FINISHED .*run-id=run-alive"))))))
+
+(deftest a-run-that-never-started-is-never-running
+  (wipe-dir! refused-dir)
+  (with-server
+   ;; THIS THREAD IS PINNED AND THE ONE UNDER TEST IS NOT, deliberately: a pin wins
+   ;; provider resolution outright, and this case needs resolution to FAIL.
+   "refused-other"
+   (fn []
+     (bind! "refused-a" refused-dir)
+     (let [gate (support/window-gate #'providers/resolve-provider 20000)
+           resp (future (post-run "refused-a" {:provider {:provider "no-such-provider"}}))]
+       (try
+         (testing "a run held inside setup -- before it has a provider -- is not running"
+           (is (until #(pos? (long ((:entered gate)))) 5000)
+               "the run never reached provider resolution")
+           ;; THIS IS THE ASSERTION THAT MATTERS, and it is why the window is held: a
+           ;; registration made above the refusal would be visible exactly here, and
+           ;; nothing would ever remove it -- the refusal path emits its two frames and
+           ;; returns without passing the emitter, so that session would claim to be
+           ;; running until the process restarted.
+           (is (false? (row-running? refused-dir "refused-a"))
+               "a run that has not started is in the registry"))
+         (finally ((:release gate))))
+       (let [frames (wire/frames-from-sse (.body ^HttpResponse @resp))]
+         (testing "the run is refused by name, before any model call"
+           (is (= ["RUN_STARTED" "RUN_ERROR"] (mapv :type frames))
+               (str "saw " (pr-str (mapv :type frames))))
+           (is (str/includes? (str (:message (last frames))) "no provider named")))
+         (testing "and the run that never started never appears in the registry"
+           (is (false? (row-running? refused-dir "refused-a")))))))))
+
+(deftest a-crashed-run-stops-claiming-to-be-running
+  (wipe-dir! crashed-dir)
+  (with-server
+   "crashed-a"
+   (fn []
+     (bind! "crashed-a" crashed-dir)
+     ;; THE REDEF IS IN PLACE FOR THE WHOLE CASE, not just around `fire-run!`: the
+     ;; frame conversion happens on the server's own thread, whenever it gets there,
+     ;; and a redef that had already been lifted would leave this case racing to
+     ;; crash. Same seam as the `diag-crashed` case above -- the first frame kills the
+     ;; consumer.
+     (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "crashed-a" "run-crashed-2")]
+         (try
+           (testing "the run is registered while it is alive"
+             ;; ASSERTED BEFORE THE CRASH ON PURPOSE: "false afterwards" would also
+             ;; pass for a run that had never registered at all, which is the failure
+             ;; the other half of this case pins.
+             (is (until #(row-running? crashed-dir "crashed-a") 5000)
+                 "the row never said running, so the run never registered"))
+           (finally (.close sock) ((:release gate)))))
+       (testing "and a death in its own body takes the registration with it"
+         (is (await-log #"crashed .*run-id=run-crashed-2") "the death is in the log")
+         (is (until #(false? (row-running? crashed-dir "crashed-a")) 5000)
+             "the thread still claims to be running after its run died"))))))
+
+(deftest a-run-whose-channel-closed-without-a-terminal-still-stops-running
+  ;; THE THIRD WAY OUT. A run that registers and then finds its event channel
+  ;; already closed never emits a terminal frame and never throws -- the go loop's own
+  ;; else branch is the only thing that runs -- so this is the exit neither the
+  ;; emitter nor the catch covers. Left unregistered, the thread would say it was
+  ;; running for the life of the process; that is the failure this pins, and it is
+  ;; asserted AFTER the warning line, because `await-log` is what proves the branch
+  ;; was reached rather than the run having crashed on its way somewhere else.
+  (wipe-dir! lost-dir)
+  (with-server
+   "lost-a"
+   (fn []
+     (bind! "lost-a" lost-dir)
+     (with-redefs [loop/run-chan (fn [& _] (doto (async/chan) async/close!))]
+       (let [sock (fire-run! "lost-a" "run-lost-2")]
+         (try
+           (is (await-log #"events-closed-without-terminal .*run-id=run-lost-2")
+               "the run's ending left a warning rather than a terminal frame")
+           (is (until #(false? (row-running? lost-dir "lost-a")) 5000)
+               "and the registration it made before that went with it")
+           (finally (.close sock))))))))
