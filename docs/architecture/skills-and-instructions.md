@@ -12,21 +12,28 @@
 
 ## 一场会话开场拿到什么
 
-一条 run 交给 provider 的消息向量，头部是固定的：
+一条 run 交给 provider 的消息向量，形状是固定的——**先问题，再为它准备好的料**：
 
 ```
 [system  组装的 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本]
-[user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
-[user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离对话更近）
-[user    <skills>…清单…</skills>]                                          能力菜单，最后一块开场内容
 [...客户端带来的会话消息...]
-[user    context（既有：每轮请求携带的 context，尾随）]
+[user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
+[user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离提问更近）
+[user    <skills>…清单…</skills>]                                          能力菜单，最后一块 context
+[user    context（既有：每轮请求携带的 context）]
+[user    <skill name="…">…正文…</skill>]                                    skill context，缺省没有（见「技能正文是派生的」）
 ```
 
-**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.cap.preamble/messages`。常驻规则在前、
-能力菜单在后、对话紧随其后——模型按顺序读到的是「必须先怎样」，然后才是「还能拿什么」。
-把它散落在调用点就是把这个决定藏进两行 `into`，所以不许。这个前缀随会话稳定，因此照旧被 provider
-的前缀缓存命中；只有改了 AGENTS.md 或技能集才会 miss 一次。
+**2026-09-18 起这个顺序是「system → 提问 → context → skill context」**：注入物从 system 之后、客户端消息
+之前挪到了**提问之后**——模型先读人问的那一句，再读为它准备的料，而最近的一段（技能正文）贴着问题。
+常驻规则排在能力菜单之前，这条没变：模型先知道「必须先怎样」，然后才拿到「还能拿什么」。
+
+**挪动不花 prefill 一个字节**：prompt cache 钉的是**稳定的前缀**，那个前缀是 system 加客户端每轮重发的
+历史，而注入物本来就在它之外——从前夹在两者之间，现在排在两者之后，前缀长度一模一样。
+
+**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.cap.preamble/messages` 定几块之间的先后，
+`harness.edge.ag_ui/inbound` 的 `tail-blocks` 把它们拼在**尾部**，技能正文由
+`harness.cap.skills/derived-injections` 追加在最后。散落在调用点就是把这个决定藏进两行 `into`，所以不许。
 
 **system 消息只有一条，这一页说的那些块一律 `role=user`。** 两条理由：
 `ag_ui/inbound` 关于 system 的规则只有「客户端带了就换成冻结的那条、没带就前置一条」——多加一条
@@ -89,7 +96,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
 
 一条纯函数：provider 形状的消息向量 → 同样的向量（`harness.cap.skills/derived-injections`）。它扫出
 assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对它的工具结果，**结果是那句加载确认**
-时，在该工具结果之后插入 `<skill name="X">…</skill>` 的 user 消息。
+时，在**历史末尾**追加 `<skill name="X">…</skill>` 的 user 消息。
 
 **为什么是派生的。** 参考实现（applepi）的服务端自己持有会话，所以它的工具能把注入物 `push` 进历史；
 本仓反过来——**对话归客户端所有，服务端每轮现收现算**。存服务端内存则刷新即失，发给客户端则前端会
@@ -102,8 +109,8 @@ assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对�
 
 | 谁在加载 | 怎么看出来 | 正文插在哪 |
 |---|---|---|
-| 模型 | assistant 消息里名为 `skill` 的 `tool_calls`，配上那句**加载确认** | 紧跟它的 tool 结果之后 |
-| 人 | 一条 user 消息**以 `/name ` 开头**（见「人也能加载」） | 紧跟那条消息之后 |
+| 模型 | assistant 消息里名为 `skill` 的 `tool_calls`，配上那句**加载确认** | 历史末尾（追加） |
+| 人 | 一条 user 消息**以 `/name ` 开头**（见「人也能加载」） | 历史末尾（追加，与上一条同一个位置） |
 
 两条都不是「被记住的」：`/name` 是人打出来的字，tool call 与它的结果在客户端手里，所以两条**下一次施加
 时都还在**——这正是「派生而非累积」在这里的用处。而**只认一个来源的地方只有一处**：`load-confirmations`
@@ -112,7 +119,9 @@ assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对�
 
 **施加点在 `harness.kernel.loop/drive!`：每次 `llm/stream!` 之前对 history 施加一次。** 不放在 `ag_ui/inbound`
 ——模型调用 `skill` 就是为了**现在**照着做，人打 `/name` 更是为了**这条消息**，等下一轮等于白调；
-幂等让「每轮施加」不需要任何簿记。
+幂等让「每轮施加」不需要任何簿记。**施加之后新加的那几条会说出去**：内核在一个 `swap-vals!` 里拿到前后
+两份历史，尾巴上多出来的每条发一个 `:context/injected` 事件，边把它转成 `CUSTOM` 帧——「模型被交给了什么、
+它自己没要」这件事从此不再沉默（见下）。
 
 **正文从根现读**（每轮现解析），与 config.edn / harness.edn 同一条纪律：改一份技能，
 下一轮就生效。代价写清楚：**正文因此不冻结在会话里**——技能在会话中途从根里消失时，注入位换成一句
@@ -123,7 +132,7 @@ assistant 消息里名为 `skill` 的 `tool_calls`，按 `tool_call_id` 配对�
 
 模型有 `skill` 工具，人有**输入框**：一条消息以 `/name `（名字后面跟空白，或消息到此为止）开头，
 harness 就把那份正文加载进来——**同一个派生、同一个 `<skill name="…">` 的 user 消息**，
-插在那条消息之后。两条路唯一的差别写在下面（`disable-model-invocation`）。
+追加在**历史末尾**。两条路唯一的差别写在下面（`disable-model-invocation`）。
 
 - **触发形状是严的**：`/` 在**消息开头**，名字后**必须有分隔**。所以 `/alpha/beta` 是路径、
   `see /alpha` 是一句关于技能的话、`/alphax` 是另一个（大概不存在的）名字，而不是 `alpha` 的前缀匹配。
@@ -239,15 +248,21 @@ context"），一直没有触发源；**本特征就是它的子系统**。
 的东西」——文档能给自己扩权是另一套安全故事，不是这次的范围。指令文件本身也**不经过围栏**：
 它们是服务端读的，不是 `read` 工具调的。
 
-## 前端零改动、wire 零改动
+## 看得见，但仍然不是会话的一部分
 
-**界面上只有一张普通的 `skill` 工具卡**（assistant-ui 既有的折叠形状），卡里那句话就是工具的返回。
-不新增面板、不加技能端点、`ui/` 一行未改。
+**2026-09-18 起注入物会以 AG-UI 帧出去**——这一页原先写的是「从不产生任何 AG-UI 帧」，那天起不再成立。
+一条注入 = 内核的 `:context/injected` 事件 = 一条 **`CUSTOM` 帧**（`name` 是 `injected-context`，值里是那条消息，
+`messageId` 是我们给的确定性 id），客户端把它画成**会话栏里一张可折叠的卡**
+（见 [client](client.md#注入物在会话栏里的一张卡)）。**但客户端不回发它**：适配器把 `CUSTOM` 落成一个 `data` part，
+而它的回发转换只带 text / reasoning / tool-call ——所以**它仍然不是会话的一部分**，模型下一轮收到的历史与
+从前逐字节相同。这条契约由用例钉住（`ui/test/suites/injections.ts` 第三条；适配器升级时第一个要看的就是它）。
 
-**不是靠前端过滤，而是这些消息从不产生任何 AG-UI 帧**：注入物只存在于服务端面向模型的那一侧。
-`ag_ui/inbound` 的 4-arity 把开场块**紧接在 system 消息之后**拼接（空块时返回原向量本身，不是等价的
-一个新向量——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状），这个函数仍是个转换器：
-块是递进来的，它自己不读任何东西。
+**立场没被推翻，只是被说准了**：注入物不在对话里——改的是「因此人也看不见它」这半句。
+
+**那几块拼在哪**：`ag_ui/inbound` 的 4-arity 把开场块拼在**客户端消息之后**（空块时返回原向量本身，不是
+等价的一个新向量——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状）。发帧的是**边**：块在它
+手里组装、走的也是它的 sink，内核从没见过它们是「它加的」。这个函数仍是个转换器：块是递进来的，它自己
+不读任何东西。
 
 `InstructionsLoaded` 走既有的 `hook/<Point>` 审计行；**不新增 jsonl 行种类、不改 AG-UI 帧形状、不动 CORS**。
 

@@ -64,6 +64,21 @@
          (patch-tool-call msgs (:toolCallId f)
                           #(update-in % [:function :arguments] str (:delta f)))
 
+         ;; AN INJECTED CONTEXT FRAME COMES BACK AS A CARD MESSAGE. The client draws
+         ;; it (a `data` part, see the UI's context-card) and never sends it back --
+         ;; `toAgUiMessages` has no case for a data part -- so a rebuilt conversation
+         ;; carries what was on screen without putting anything into what the model is
+         ;; asked next. The id is the frame's own, so the same card survives every
+         ;; rebuild under the same name.
+         ;;
+         ;; ANY OTHER CUSTOM FRAME IS DROPPED, which is the honest default: a frame
+         ;; this fold has never heard of is one the conversation does not contain.
+         (and (= t "CUSTOM") (= (:name f) "injected-context"))
+         (conj msgs {:id (or (:messageId f) (str "injected-" (count msgs)))
+                     :role "assistant"
+                     :content [{:type "data" :name (:name f)
+                                :data (get-in f [:value])}]})
+
          (= t "TOOL_CALL_RESULT")
          (conj msgs {:id (:messageId f) :role "tool"
                      :toolCallId (:toolCallId f) :content (:content f)})

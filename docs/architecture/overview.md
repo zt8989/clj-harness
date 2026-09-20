@@ -14,7 +14,8 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
   ├─ system-prompt/assemble        组装 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本
   │                                （内建两条：工程目录 / 这台机器）
   ├─ preamble/gather + messages     开场块：指令文件（每个折叠一次 InstructionsLoaded）+ 技能清单
-  ├─ ag_ui/inbound                 客户端的消息 → provider 形状；开场块拼在 system 之后，context 变尾部 user 消息
+  ├─ ag_ui/inbound                 客户端的消息 → provider 形状；开场块拼在**客户端消息之后**（提问 → context →
+  │                                skill context），每轮 context 仍变尾随 user 消息
   ├─ resume-decisions              客户端的 resume → 内核要重放的决定（未知 interrupt ⇒ 直接失败）
   │
   ├─ binding hook/*sink*           run 作用域的 hook sink（线程 + 审计写入者），**包住 set-up**，见 edge
@@ -22,12 +23,12 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
   │   ├─ log! "provider/init"      首次 run 落一行
   │   ├─ log! "approval/decided"   本次 resume 带的决定
   │   ├─ log! "provider/changed"   上一轮工具改过的 provider 档（outbox 排空）
-  │   └─ log! "message" × n        组装的 system 全文（冻结开头 + 各 hook 追加）+ 开场块 + 每条入站消息，逐字
+  │   └─ log! "message" × n        组装的 system 全文（冻结开头 + 各 hook 追加）+ 每条入站消息 + 开场块，逐字
   │
   ├─ loop/run-chan                 内核跑起来了；下面全是「事件 → 帧 + 审计行」
   │   │
   │   │  ┌─ 循环 ────────────────────────────────────────────────┐
-  │   │  │ skills/derived-injections  已加载技能的正文（幂等，可重算）
+  │   │  │ skills/derived-injections  已加载技能的正文（幂等，可重算）；新加的每条发 `:context/injected`
   │   │  │ llm/stream!      流式一轮；tool_calls 累积在 assistant 消息里
   │   │  │ tools/run! × n   本轮每个工具调用并发跑（各自一个线程）
   │   │  │                  pre / execute / post 三相事件骑同一条通道出去

@@ -88,7 +88,7 @@
   "Every key the inventory allows on an item. The check is a SUBSET, not an equality:
   a turn with no injected context has no `:source` anywhere, and 'the vendor reported
   no reasoning' is a missing key rather than an empty string."
-  #{:kind :text :initial :id :source :reasoning :toolCallId :name :argsText
+  #{:kind :text :initial :id :reasoning :toolCallId :name :argsText
     :result :error :executed :outcome :call
     :arrivedAt :resumedAt :executedAt :closedAt :at})
 
@@ -152,7 +152,8 @@
                    finished])]
       (is (= ["system" "context" "context" "user" "context"] (kinds turn))
           "the record's order, not the reference screenshot's: the blocks really do come first")
-      (is (= ["opening" "opening" "run"] (mapv :source (filter #(= "context" (:kind %)) (:items turn)))))
+      (is (= 3 (count (filter #(= "context" (:kind %)) (:items turn))))
+          "three injected blocks -- and the kind says nothing about where they sat")
       (is (= "<skills>a catalog</skills>" (:text (second (filter #(= "context" (:kind %)) (:items turn))))))))
 
   (testing "a skill body the model asked for mid-run is context too, where it landed"
@@ -167,7 +168,8 @@
                    (message 22 (user "" "<skill name=\"tdd\">red green refactor</skill>"))
                    (message 23 (assistant "got it"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
-      (is (= "run" (:source (item-of turn "context")))))))
+      (is (str/starts-with? (:text (item-of turn "context")) "<skill name=\"tdd\">")
+          "the body, as the bytes it is"))))
 
 (deftest a-job-ending-is-injected-context-too
   ;; THE OTHER SHAPE A TAIL USER MESSAGE COMES IN. A skill body is one; the ending of a
@@ -187,7 +189,6 @@
                    (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"))
                    (message 23 (assistant "noted"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
-      (is (= "run" (:source (item-of turn "context"))))
       (is (= "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"
              (:text (item-of turn "context")))
           "the bytes, verbatim -- and three facts is all there is to them")))
@@ -293,8 +294,8 @@
         ctx (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
     (is (= 2 (count turns)))
     (is (= ["system" "context" "user" "context" "assistant"] (kinds one)))
-    (is (= ["opening" "run"] (mapv :source (ctx one)))
-        "the blocks, then the body the ask put there")
+    (is (= 2 (count (ctx one)))
+        "the blocks, then the body the ask put there -- one kind, no source")
     (is (= ["user" "assistant"] (kinds two))
         "the second turn opens nothing: it is the same bytes, and the client's own message
          is not drawn as injected context"))

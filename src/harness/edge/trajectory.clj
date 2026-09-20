@@ -9,8 +9,8 @@
     - `stats` reads `input` + the `model/start` / `model/end` pair and answers in
       NUMBERS (turns, calls, tokens, durations);
     - this namespace reads `input` + `message` + `tools/*` and rebuilds WHAT THE MODEL
-      SAW: the frozen system message, the instructions and skill bodies spliced in
-      beside it, every user message, and each tool call with its arguments and result.
+      SAW: the frozen system message, the instructions and skill bodies injected behind
+      the client's messages, every user message, and each tool call with its arguments and result.
 
   The third one is not a nicer rendering of the first two: the conversation reader
   never sees the system message or the injected context (the client never holds them),
@@ -112,20 +112,22 @@
   {:before <opening blocks> :own <the client's messages>
    :between <injections that landed inside them> :after <what follows them>}.
 
-  A run's submitted block is [system] + [opening blocks…] + [the client's messages]
-  + [trailing context] -- that is `harness.edge.ag-ui/inbound`'s order, with the session's
-  own injections folded in where they belong. The client's messages are matched IN ORDER
-  and by role-and-content, and the three ends fall out: what precedes the first match is
-  the opening blocks (the session's instruction files and the skills catalog), what lies
-  BETWEEN two matches was injected too, and what follows the last match is what the run
-  put after the client's own words (the per-run context).
+  A run's submitted block is [system] + [the client's messages] + [the injections that
+  came after them] -- that is `harness.edge.ag-ui/inbound`'s order (system, question,
+  context, skill context), with the session's own injections folded in where they belong.
+  The client's messages are matched IN ORDER and by role-and-content, and the ends fall
+  out: what precedes the first match is what was injected before the conversation (the
+  layout every log written before 2026-09-18 has -- the blocks used to sit right after
+  the system message), what lies BETWEEN two matches was injected too (a `/name` body in
+  one of those older logs), and what follows the last match is what the run put after the
+  client's own words -- which today is all of it: the instruction files, the catalog, the
+  per-run context, and the skill bodies.
 
-  THE MATCH IS NOT CONTIGUOUS, and that is the difference a `/name` makes: the message
-  that asked for a skill body is still in the history on every later run (the client
-  restates its whole conversation), so the body is re-derived and spliced in AFTER it --
-  between two messages the client holds. A contiguous match finds nothing there and
-  files the whole block as opening context, which is the one answer this view may not
-  give: the client's own words would be drawn as something the server injected.
+  THE MATCH IS NOT CONTIGUOUS, which is what keeps those older logs readable: a body
+  spliced between two retransmitted messages makes a contiguous match find nothing there,
+  and that would file the whole block as 'the run opened with this' -- the one answer this
+  view may not give, because the client's own words would be drawn as something the server
+  injected.
 
   AN EMPTY CLIENT LIST MAKES THE WHOLE REST 'BEFORE': with nothing to match, the extra
   user messages are the blocks, not trailing context -- the alternative would file a
@@ -240,13 +242,17 @@
     :else                 (str content)))
 
 (defn- context-item
-  "One injected user message. SOURCE separates the two places a run's injected context
-  comes from and nothing more: `opening` is what was spliced in after the system message
-  (instruction files, the skills catalog), `run` is what the run appended later (its own
-  context, or a skill body loaded mid-run). Which FILE a block came from is not this
-  namespace's business: it shows the bytes, exactly as the record has them."
-  [source message]
-  {:kind "context" :source source :text (text-of (:content message))})
+  "One injected user message -- the instruction files, the skills catalog, the run's own
+  context, a skill body, the ending of a background job.
+
+  ONE KIND, NO SOURCE. This used to say WHERE the block sat relative to the client's
+  messages (`opening` for what was spliced before them, `run` for what came after), and
+  that was a fact about a layout that no longer exists: every injection now lands after
+  the client's messages, in one tail (see harness.edge.ag_ui/inbound -- system, question,
+  context, skill context). A source that is the same for every item is a field that says
+  nothing, and the block's own first line says what it is anyway."
+  [message]
+  {:kind "context" :text (text-of (:content message))})
 
 (defn- append-last
   "Append ITEMS to the last turn. A log with no turn open yet gets nothing appended:
@@ -261,11 +267,11 @@
   byte for byte.
 
   AN INJECTION IS SHOWN ONCE FOR THE WHOLE SESSION, not once per turn. A run RESTATES
-  its injections -- the opening blocks are spliced in on every run (the server holds no
-  session, so it re-reads the instruction files and re-renders the catalog every time),
-  and a skill body is re-derived on every turn its trigger is still in the history -- so
-  'show what the run carried' draws the same bytes under every turn, and a five-turn
-  session reads as if the opening happened five times. That is a picture of a flow that
+  its injections -- the instruction files and the catalog are re-read and re-rendered on
+  every run (the server holds no session), and a skill body is re-derived on every turn
+  its trigger is still in the history -- so 'show what the run carried' draws the same
+  bytes under every turn, and a five-turn session reads as if the opening happened five
+  times. That is a picture of a flow that
   did not happen, and it is the one thing this view may not do. So the question 'has
   this been shown?' is asked against the WHOLE trajectory.
 
@@ -276,7 +282,7 @@
 
   The caller hands in one run's blocks in the record's order, so what this drops is
   exactly the repeats."
-  [turns source messages]
+  [turns messages]
   (if (empty? turns)
     turns
     (let [i     (dec (count turns))
@@ -284,7 +290,7 @@
           shown (into #{}
                       (comp (filter #(= "context" (:kind %))) (map :text))
                       (mapcat :items turns))
-          items (mapv #(context-item source %) messages)
+          items (mapv context-item messages)
           fresh (remove #(contains? shown (:text %)) items)]
       (assoc-in turns [i :items] (into (:items turn) fresh)))))
 
@@ -429,7 +435,7 @@
                   current])
 
                "user"
-               [(conj items (cond-> (context-item "run" message)
+               [(conj items (cond-> (context-item message)
                               (some? current) (assoc :call current)))
                 next-call
                 current]
@@ -450,14 +456,16 @@
   "STATE + one run -> STATE. Turns are opened by new user messages, and everything the
   run showed goes under them in the record's order:
 
-    [system?] [opening blocks] [injected context] [user …] [trailing context] [assistant / tool …]
+    [system?] [user …] [injected context] [assistant / tool …]
 
-  THE INJECTED CONTEXT THAT LANDED INSIDE THE CLIENT'S OWN MESSAGES is drawn right after
-  the opening blocks and before this turn's own user message: the retransmitted history it
-  really sat between is not listed (a client restates its whole conversation on every run),
-  and 'this run carried it' is the fact that stays true when the message next to it is not
-  drawn. It is deduped like every other injection, so the ordinary case -- the same bytes
-  already shown in the turn that asked for them -- draws nothing here.
+  EVERY INJECTION LANDS AFTER THE CLIENT'S MESSAGES -- system, question, context, skill
+  context (see harness.edge.ag_ui/inbound) -- so a run's blocks are drawn after this
+  turn's own user message and before its answer. Blocks that arrived BETWEEN two
+  retransmitted messages (an older layout, and a `/name` body in a log written before
+  today) are drawn where they were too; the retransmitted history they sat inside is not
+  listed, because a client restates its whole conversation on every run. All of it is
+  deduped like every other injection, so the ordinary case -- the same bytes already
+  shown in the turn that asked for them -- draws nothing here.
 
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the
@@ -494,15 +502,15 @@
                       open-turn
                       (cond-> changed?
                         (append-last [(system-item texts (nil? shownSystem))]))
-                      (add-context "opening" before)
-                      (add-context "run" between)
+                      (add-context before)
+                      (add-context between)
                       (append-last [(user-item ins own-of (first fresh) at)]))
             turns (reduce (fn [turns message]
                             (-> turns open-turn (append-last [(user-item ins own-of message at)])))
                           turns
                           (rest fresh))
             turns (-> turns
-                      (add-context "run" after)
+                      (add-context after)
                       (append-last (returned-items (:returned run) call-of life-of
                                                    (when (seq calls) 0)))
                       (append-calls calls))]
@@ -511,9 +519,9 @@
       ;; No new user message: the run continues the turn it parked in. Its injections are
       ;; deduped like every other one, and its output lands after them.
       (let [turns (-> turns
-                      (add-context "opening" before)
-                      (add-context "run" between)
-                      (add-context "run" after)
+                      (add-context before)
+                      (add-context between)
+                      (add-context after)
                       (cond-> changed? (append-last [(system-item texts false)]))
                       (append-last (returned-items (:returned run) call-of life-of offset))
                       (append-calls calls))]
@@ -527,7 +535,7 @@
   :calls it made, and one :items vector whose entries are keyed by :kind --
 
     system     :text :initial
-    context    :text :source (opening | run)
+    context    :text
     user       :id :text
     assistant  :text :call :reasoning (only when the vendor reported some)
     tool       :toolCallId :name :argsText :result :executed

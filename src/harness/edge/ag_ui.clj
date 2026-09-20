@@ -80,6 +80,28 @@
      :message (str "Approve `" name "`? arguments: " args)
      :toolCallId tool-call-id}))
 
+(defn injected-frame
+  "The CUSTOM frame for one message a run was handed without the client sending it:
+  a skill body, an instruction block, a catalog, the ending of a background job.
+
+  ONE PLACE BUILDS THIS SHAPE, because two do emit it: the kernel's pre-LLM step
+  (through `step` below, for whatever it splices) and the edge itself, for the
+  session's opening blocks -- the edge assembles those (with their hooks) before the
+  kernel is handed anything, so it is the edge that knows they happened.
+
+  WHAT MAKES THIS FRAME SPECIAL, and the whole feature rests on it: the client draws
+  it and NEVER SENDS IT BACK. `@assistant-ui`'s adapter turns a CUSTOM event into a
+  `data` part, and its outgoing conversion carries text, reasoning and tool calls
+  only -- a data part has no case there. So a person sees what the model was handed,
+  and the conversation stays the client's.
+
+  `messageId` IS OURS AND DETERMINISTIC, unlike the text and tool ids: the rebuild
+  folds one card message per frame (`harness.kernel.frames/apply-frames`) and hands
+  the client the same ids back, so a card survives a refresh under the same name."
+  [message-id message]
+  {:type "CUSTOM" :name "injected-context" :messageId message-id
+   :value {:role (:role message) :text (str (:content message))}})
+
 (defn- step [s ev]
   (case (:type ev)
     :run/start
@@ -109,6 +131,25 @@
                                   :toolCallName (:name ev) :parentMessageId parent}
                                 {:type "TOOL_CALL_ARGS" :toolCallId (:id ev) :delta (:args ev)}
                                 {:type "TOOL_CALL_END" :toolCallId (:id ev)})))
+
+    :context/injected
+    ;; A CUSTOM FRAME, which is AG-UI's own extension point and the ONLY frame kind
+    ;; here the client does not send back: @assistant-ui's adapter turns it into a
+    ;; `data` part (in the order it arrived), and its outgoing conversion sends text,
+    ;; reasoning and tool calls only -- so the card is visible and is NOT part of the
+    ;; conversation. That is exactly what an injection needs to be: the model was
+    ;; given it, the client must not re-send it, and a person should still see it.
+    ;;
+    ;; THE TEXT IS NOT CLOSED AROUND IT: the part lands in the message that is open
+    ;; (a skill body arrives after the tool call that asked for it; a job's ending
+    ;; between two calls), which is where it arrived in the model's history too.
+    ;;
+    ;; `messageId` IS OURS AND DETERMINISTIC, unlike the text/tool ids: the rebuild
+    ;; (harness.kernel.frames/apply-frames) makes one card message per frame, and the
+    ;; same card has to come back with the same id after a refresh.
+    (-> s (update :n inc)
+          (update :frames conj (injected-frame (str (:run-id s) "-ctx" (:n s))
+                                               {:role (:role ev) :content (:text ev)})))
 
     :tool/result
     (let [id (str (:run-id s) "-t" (:n s))
@@ -352,19 +393,27 @@
     []
     (vec (sort (remove (set declared) (carried-input-types messages))))))
 
-(defn- after-system
-  "MSGS with BLOCKS spliced in directly after the leading system message and
-  ahead of the conversation. MSGS always starts with that message -- inbound
-  guarantees it -- so this is a splice, not a search.
+(defn- tail-blocks
+  "MSGS with BLOCKS spliced in AT THE END, after the conversation.
 
-  An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path
-  every caller takes when a session has no instruction files and no skills, and
-  the shape of the result is the regression guarantee the whole feature rests on
-  (a session with nothing configured sends byte-for-byte what it sent before)."
+  THE ORDER IS THE POINT: system prompt, then the question, then what the run was
+  handed for it (and a skill body last of all -- `cap.skills/derived-injections`
+  appends its own). A model reads the question first and the material for it
+  immediately after, which is where a person would put it.
+
+  IT COSTS THE PREFILL NOTHING. The prompt cache keys on a stable PREFIX: that prefix
+  is the system message plus the conversation the client re-states every turn, and the
+  injections were never part of it -- they used to sit between the two and are now
+  behind both, which leaves the prefix exactly as long as the client made it.
+
+  An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path every
+  caller takes when a session has no instruction files and no skills, and the shape of
+  the result is the regression guarantee the whole feature rests on (a session with
+  nothing configured sends byte-for-byte what it sent before)."
   [msgs blocks]
   (if (empty? blocks)
     msgs
-    (into [(first msgs)] (concat blocks (rest msgs)))))
+    (into msgs blocks)))
 
 (defn inbound
   "A client's AG-UI messages -> the provider's message vector.
@@ -374,11 +423,12 @@
   prefix, so a per-run system prompt would miss it every call -- so it rides as
   a trailing user message instead, after everything the client sent.
 
-  BLOCKS are the messages a run OPENS with -- the session's instruction files and
-  skills catalog (harness.cap.preamble), already rendered. They are spliced in after
-  the system message, so the frozen prefix survives them and the cache keeps
-  hitting; they are ordinary user messages, which is what keeps them off the
-  wire (nothing here becomes an AG-UI frame).
+  BLOCKS are what this run was handed on top of the conversation -- the session's
+  instruction files and skills catalog (harness.cap.preamble), already rendered. They
+  go AFTER the client's messages, in the order the model should read them: the
+  question first, then the material for it. They are ordinary user messages: nothing
+  in this namespace becomes an AG-UI frame (the edge emits one CUSTOM frame per block
+  it spliced, which is how a person sees them -- see `injected-frame`).
 
   This namespace stays a CONVERTER: it is handed the blocks rather than reading
   anything itself. The three-arity is the shape without them -- what the rebuild
@@ -391,7 +441,7 @@
          msgs (if (= "system" (get-in msgs [0 :role]))
                 (assoc msgs 0 sys)
                 (into [sys] msgs))
-         msgs (after-system msgs blocks)]
+         msgs (tail-blocks msgs blocks)]
      (if-let [ctx (context-message context)]
        (conj msgs ctx)
        msgs))))

@@ -37,10 +37,11 @@ import { restoreSuite } from "./suites/restore";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
+import { injectionSuite } from "./suites/injections";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -90,11 +91,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// (the one key, the conditional forget, and a storage that throws rather than answers)
 /// and the single question it asks of a listing. Both pure; the reload itself is a
 /// browser's, and it is the walkthrough in `.scratch/session-after-refresh/`.
+/// 47 -> 50: the `injections` suite's three -- what an injected-context card says (its
+/// title is the tag the block arrived with, its size is BYTES), how a rebuilt
+/// conversation gets its cards back, and the adapter contract the whole feature rests on
+/// (`toAgUiMessages` never sends a `data` part back).
 /// 46 -> 47: the `sidebar` suite's fourth -- the label a row can wear, which the flat
 /// archived block needs (a filed-away session has to say which project it came from,
 /// since nothing groups it any more). Same reason the other three are there: it is a
 /// thing the row SAYS, and only a render can see it.
-const EXPECTED_CASES = 47;
+const EXPECTED_CASES = 50;
 
 let total = 0;
 for (const suite of SUITES) {

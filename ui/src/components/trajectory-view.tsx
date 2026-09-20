@@ -416,12 +416,13 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
 
         {item.kind === "context" && (
           <>
+            {/* ONE FACT AND THE CALL IT RODE: where a block sat relative to the
+                client's messages used to be a second fact, and it stopped being one
+                when every injection moved behind the question (see
+                harness.edge.trajectory/context-item). */}
             <Facts
               pairs={[
-                [
-                  t("facts.injected"),
-                  item.source === "opening" ? t("values.whenOpened") : t("values.duringRun"),
-                ],
+                [t("facts.injected"), t("values.injected")],
                 [t("facts.by"), item.call === undefined ? null : t("call.label", { n: item.call })],
               ]}
             />

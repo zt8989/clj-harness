@@ -815,36 +815,52 @@
           ;; the point does not dispatch at all. A declaration at that point that
           ;; says no lands in the catch below as an ordinary refusal, with the
           ;; hook's own words as the RUN_ERROR reason.
-          (let [[provider messages decisions resolved]
-                (try (let [provider (providers/current-provider thread-id (:provider input))]
+          (let [[provider messages decisions resolved blocks injected]
+                (try (let [provider (providers/current-provider thread-id (:provider input))
+                           ;; THE SESSION'S OPENING BLOCKS, read fresh and RENDERED
+                           ;; HERE (they fire InstructionsLoaded through the sink the
+                           ;; binding above installed, which is why they are read
+                           ;; inside this try). They are returned out of it as well as
+                           ;; folded into the history, because the edge is what emits
+                           ;; their frames -- the kernel never sees them as something it
+                           ;; added.
+                           blocks (opening-blocks! thread-id)]
                        (guard-input-modalities! input provider)
-                       [provider
-                        ;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
-                        ;; list this run will log and send -- not inside `stream!`,
-                        ;; where it would be easier and would make the `message` audit
-                        ;; line disagree with what actually went out. See
-                        ;; harness.kernel.llm/thinking-mode-history.
-                        ;;
-                        ;; AND THE SESSION'S OWN INJECTIONS ARE PART OF WHAT THIS RUN SUBMITS,
-                        ;; so they are folded in HERE -- the `message` record's submitted
-                        ;; side, written a few lines below, is this same list. The kernel
-                        ;; still applies the same function before every LLM call (a skill
-                        ;; loaded mid-run has to be visible to the very next one), and
-                        ;; that is harmless because it is idempotent. It is also
-                        ;; LOAD-BEARING here: which half of the record a message belongs
-                        ;; to is decided by COUNT, so an injection the kernel made on its
-                        ;; own would shift that boundary and file a client message as
-                        ;; part of the kernel's answer.
-                        ;; See harness.edge.trajectory/run-segments.
-                        (llm/thinking-mode-history
-                         (project/before-llm
-                          (ag/inbound (:messages input) (system-prompt/assemble thread-id)
-                                      (opening-blocks! thread-id)
-                                      (:context input))
-                          thread-id)
-                         provider)
-                        (resume-decisions (:resume input))
-                        (providers/resolve-provider thread-id (:provider input))])
+                       (let [;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
+                             ;; list this run will log and send -- not inside `stream!`,
+                             ;; where it would be easier and would make the `message` audit
+                             ;; line disagree with what actually went out. See
+                             ;; harness.kernel.llm/thinking-mode-history.
+                             ;;
+                             ;; AND THE SESSION'S OWN INJECTIONS ARE PART OF WHAT THIS RUN SUBMITS,
+                             ;; so they are folded in HERE -- the `message` record's submitted
+                             ;; side, written a few lines below, is this same list. The kernel
+                             ;; still applies the same function before every LLM call (a skill
+                             ;; loaded mid-run has to be visible to the very next one), and
+                             ;; that is harmless because it is idempotent. It is also
+                             ;; LOAD-BEARING here: which half of the record a message belongs
+                             ;; to is decided by COUNT, so an injection the kernel made on its
+                             ;; own would shift that boundary and file a client message as
+                             ;; part of the kernel's answer.
+                             ;; See harness.edge.trajectory/run-segments.
+                             ;;
+                             ;; THE DIFF IS TAKEN FOR THE SAME REASON THE KERNEL TAKES IT
+                             ;; before every call: a body this session already carried (a
+                             ;; skill it loaded in an earlier turn, a job that ended between
+                             ;; two runs) is injected here and NOT by the kernel, so the
+                             ;; cards for those messages can only come from this side -- and
+                             ;; 'every injection is a card' is what the feature promises
+                             ;; (see ag-ui/injected-frame).
+                             assembled (ag/inbound (:messages input)
+                                                   (system-prompt/assemble thread-id)
+                                                   blocks (:context input))
+                             applied   (project/before-llm assembled thread-id)
+                             injected  (subvec applied (count assembled))]
+                         [provider
+                          (llm/thinking-mode-history applied provider)
+                          (resume-decisions (:resume input))
+                          (providers/resolve-provider thread-id (:provider input))
+                          blocks injected]))
                      (catch Throwable t
                        ;; A run that could not even be set up -- no provider, a
                        ;; refused model -- is reported to the client as a
@@ -989,7 +1005,27 @@
                                          {:thread-id thread-id :run-id run-id
                                           :tool      (:toolName payload)
                                           :outcome   outcome})))
-                          (doseq [frame (convert ev)] (emit frame))
+                          (doseq [frame (into (vec (convert ev))
+                                              (when (= :run/start (:type ev))
+                                                ;; EVERY MESSAGE THIS RUN OPENS WITH RIDES
+                                                ;; WITH ITS START: the instruction blocks and
+                                                ;; the injections folded in beside them (a
+                                                ;; body an earlier turn loaded, a job that
+                                                ;; ended between two runs) are all in the
+                                                ;; first model call's history, so a card for
+                                                ;; each is due before anything the model says.
+                                                ;; They are ordinary user messages to the
+                                                ;; provider; this is the only place a person
+                                                ;; gets to see them in the conversation column
+                                                ;; (see ag-ui/injected-frame for why the client
+                                                ;; never sends them back). THE ONE NUMBERING
+                                                ;; IS THE HISTORY'S OWN, so the frames come out
+                                                ;; in the order the model read them.
+                                                (map-indexed
+                                                 (fn [i message]
+                                                   (ag/injected-frame (str run-id "-open" i) message))
+                                                 (into (vec blocks) injected))))]
+                            (emit frame))
                           (recur)))))
                 ;; THE CHANNEL CLOSED, AND THIS IS WHERE A RUN SAYS WHETHER IT GOT
                 ;; TO SAY GOODBYE. The kernel closes it after :run/done, so every

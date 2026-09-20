@@ -49,10 +49,9 @@
   "values": {
     "initial": "initial",
     "changed": "changed since the last turn",
-    "whenOpened": "when the run opened",
-    "duringRun": "during the run",
     "yes": "yes",
-    "no": "no"
+    "no": "no",
+    "injected": "injected"
   },
   "blocks": {
     "reasoning": "reasoning",

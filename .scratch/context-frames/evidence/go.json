@@ -1,0 +1,12 @@
+{"turns": [
+  {"content": "第一轮的回答（这一轮还没绑定项目，所以没有开场块）。"},
+  {"content": "绑定之后这一句：这一轮的第一次调用带上了 <instructions>，会话栏里该多一张卡。"},
+  {"content": "",
+   "tool-calls": [{"id": "c1", "name": "bash",
+                   "arguments": {"command": "sleep 1; echo JOB-SAYS-SO", "run_in_background": true}}]},
+  {"content": "",
+   "tool-calls": [{"id": "c2", "name": "bash",
+                   "arguments": {"command": "sleep 3"}}]},
+  {"content": "我是助手：作业在我忙别的期间结束了，我在下一次调用里收到了它的结局。"},
+  {"content": "刷新之后这一句：客户端交上来的历史里没有那些卡。"}
+]}

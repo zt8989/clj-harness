@@ -159,7 +159,17 @@
         ;; same either way -- exactly how the unbound hook sink keeps its callers
         ;; free of a second branch.
         prepare (or before-llm (fn [h _thread-id] h))
-        with-skills (fn [] (swap! history prepare thread-id))]
+        ;; WHAT THE STEP JUST ADDED, SAID OUT LOUD. Applying the step is one atomic
+        ;; step (swap-vals! answers both sides of it), so the messages it appended are
+        ;; exactly the tail past the old count -- and each one is emitted as
+        ;; :context/injected, which the edge turns into a CUSTOM frame the client can
+        ;; draw. That is the whole of "the model was handed this and did not ask for
+        ;; it": the step itself stays as silent as it was, and this is where the run
+        ;; says what happened.
+        with-skills (fn []
+                      (let [[before after] (swap-vals! history prepare thread-id)]
+                        (doseq [message (subvec after (count before))]
+                          (emit (ev/context-injected message)))))]
     (emit (ev/run-start))
     (try
       (let [replayed (when (seq resume)

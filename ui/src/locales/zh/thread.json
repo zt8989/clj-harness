@@ -27,5 +27,6 @@
   "summary": {
     "calls_other": "{{count}} 次工具调用",
     "messages_other": "{{count}} 条消息"
-  }
+  },
+  "injection.name": "注入的上下文"
 }

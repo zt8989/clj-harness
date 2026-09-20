@@ -608,7 +608,7 @@
             out   (skills/derived-injections msgs2 [root])]
         (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out))))))
 
-    (testing "two DIFFERENT skills both arrive, each after the call that loaded it"
+    (testing "two DIFFERENT skills both arrive, in the order they were asked for"
       (lay-skill! root "beta" (skill-md "beta" "b"))
       (let [msgs2    (into msgs [(assistant-with-skill-call "c2" "beta")
                                  (skill-result "c2" "beta")])
@@ -617,7 +617,10 @@
         (is (= 2 (count injected)))
         (is (str/starts-with? (:content (first injected)) "<skill name=\"alpha\">"))
         (is (str/starts-with? (:content (second injected)) "<skill name=\"beta\">"))
-        (is (= ["user" "assistant" "tool" "user" "assistant" "tool" "user"]
+        ;; AT THE END, BOTH OF THEM: the bodies are the last two messages of the
+        ;; history, in the order they were asked for -- see the function's own note
+        ;; about where a body goes and why it moved there.
+        (is (= ["user" "assistant" "tool" "assistant" "tool" "user" "user"]
                (mapv :role out)))))))
 
 
@@ -695,24 +698,27 @@
     (is (nil? (skills/slash-request [{:type "text" :text "/alpha"}]))
         "a parts vector is a caller's problem -- see the derivation, which reads it")))
 
-(deftest a-slash-load-splices-the-body-after-the-message-that-asked
+(deftest a-slash-load-appends-the-body-at-the-end
   (let [root (lay-user-skills! "alpha")
         msgs [{:role "user" :content "/alpha go"}
               {:role "assistant" :content "on it"}]
         out  (skills/derived-injections msgs [root])]
     (testing "one more message, and it is a USER message carrying the whole body"
       (is (= 3 (count out)))
-      (is (= "user" (:role (nth out 1))))
-      (is (str/starts-with? (:content (nth out 1)) "<skill name=\"alpha\">"))
-      (is (str/includes? (:content (nth out 1)) "Body of alpha")))
+      (is (= "user" (:role (nth out 2))))
+      (is (str/starts-with? (:content (nth out 2)) "<skill name=\"alpha\">"))
+      (is (str/includes? (:content (nth out 2)) "Body of alpha")))
 
     (testing "the person's own words are left exactly as typed"
       ;; The trigger is not consumed: stripping it would need somewhere to
       ;; remember that it had been stripped, and there is nowhere to remember.
       (is (= "/alpha go" (:content (first out)))))
 
-    (testing "and the assistant's reply still follows it"
-      (is (= ["user" "user" "assistant"] (mapv :role out))))))
+    (testing "and the body is the LAST thing in the history"
+      ;; Where a body goes moved (see the function's own note): it used to sit right
+      ;; behind the message that asked, and now it is the closest thing to the end --
+      ;; the same order the run's other injections took.
+      (is (= ["user" "assistant" "user"] (mapv :role out))))))
 
 (deftest a-slash-load-is-idempotent-and-shares-one-load-per-name
   (let [root (lay-user-skills! "alpha")

@@ -309,19 +309,30 @@
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))
 
-(deftest opening-blocks-are-spliced-in-after-the-system-message
+(deftest opening-blocks-go-after-the-question
   (let [blocks [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
                 {:role "user" :content "<skills>\n- t: t\n</skills>"}]]
-    (testing "they sit between the frozen prompt and the conversation"
+    (testing "the order is: system prompt, the question, then the material for it"
+      ;; Where they sit MOVED (ticket 05 of .scratch/context-frames): after the
+      ;; system message and BEFORE the conversation used to be the shape; it is now
+      ;; the tail, in the order the model should read -- and the frozen prefix is
+      ;; unaffected either way, because it was never inside it.
       (is (= ["system" "user" "user" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}]
                                      "S" blocks nil))))
+      (is (= "hi" (:content (nth (ag/inbound [{:id "u1" :role "user" :content "hi"}]
+                                             "S" blocks nil) 1)))
+          "the client's own message is second, right behind the system prompt")
+      (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
+             (:content (nth (ag/inbound [{:id "u1" :role "user" :content "hi"}]
+                                        "S" blocks nil) 2)))
+          "then the conversation's instruction files")
       (is (= "S" (:content (first (ag/inbound [] "S" blocks nil))))))
 
-    (testing "and the per-run context still lands LAST, after them"
+    (testing "and the per-run context lands after them, at the very end"
       (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
                              "S" blocks [{:description "repo" :value "x"}])]
-        (is (= "<skills>\n- t: t\n</skills>" (:content (nth sent 2))))
+        (is (= "<skills>\n- t: t\n</skills>" (:content (nth sent 3))))
         (is (= "- repo: x" (:content (last sent))))))
 
     (testing "a client's own lead system message is still replaced, not displaced"

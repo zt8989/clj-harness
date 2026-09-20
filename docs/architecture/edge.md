@@ -39,6 +39,12 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 **每次 run 一个 converter、一个 emitter。** converter（`ag_ui/outbound`）持有「哪条消息开着」的状态机，
 逐事件重建它会把每条消息 id 重置、重复发 START 帧——AG-UI 客户端视为致命。
 
+**发出去的帧分三族**：`RUN_*`（一次 run 的起与终，含 `RUN_ERROR`）、`TEXT_MESSAGE_*` / `REASONING_*` /
+`TOOL_CALL_*`（对话本身）、以及 **`CUSTOM`**——AG-UI 自己的扩展点，本仓拿它发一种东西：**注入物**
+（`name` 是 `injected-context`，值里是那条消息、id 是确定性的）。**这一族是唯一客户端不回发的**：适配器把
+`CUSTOM` 落成一个 `data` part，而回发转换只带 text / reasoning / tool-call——于是注入物看得见、又**进不了**
+下一轮的请求（见 [client](client.md#注入物在会话栏里的一张卡)）。上面那五种只落审计行的事件照旧一个帧都不发。
+
 ### bind 的 hook sink
 
 这是**唯一**同时知道「这是哪个线程」和「审计行写哪」的地方，所以 run 作用域的 hook sink 在这里绑定：
@@ -259,15 +265,19 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 **翻译发生在 `harness.edge.ag-ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
 到协议层才翻会让那条日志撒谎。
 
-它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在 system 消息之后、客户端消息之前。
+它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在**客户端消息之后**——注入物的位置是
+**system → 提问 → context → skill context**（见 [skills-and-instructions](skills-and-instructions.md)）。
 它收到的 system 文本也是**已经组装好的**（`harness.cap.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
 它自己不读任何文件、不跑任何 hook（两样都是递进来的），所以这个命名空间仍是个转换器；空块时它返回
 **原向量本身**，而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
-见 [skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
+见 [skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)。
 
 **会话自己的注入不在 `inbound` 里，在它之后**：`/<名字>` 要的技能正文由 `harness.cap.project/before-llm`
 折进来，而 `harness.edge.http/run-agent!` 在**记 `message` 行之前**先施加一次——submitted 侧因此就是模型
 真收到的那一份（内核每次模型调用前还会再施加，幂等；内核自己插一条就会把按条数切的两半顶偏）。
+**这一次施加也取 diff**，和内核在每次调用前取的是同一个：两侧各为自己新加的那些消息发一张卡，
+否则「每一轮开头就带着的注入」（上一轮加载的技能正文、两次 run 之间结束的作业通知）在会话栏里没有
+任何东西替它说话——它们每一轮都被重新折进来，而折进来的那一处不是内核。
 
 ```
 AG-UI 入站                                        出网（OpenAI 兼容 chat-completions）

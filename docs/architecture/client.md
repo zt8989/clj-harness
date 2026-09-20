@@ -277,13 +277,14 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 真机证据（四条新工具的步骤行与各自展开后的参数、结果）在
 `.scratch/tool-parity/evidence/`。
 
-**`skill` 也是一次普通工具调用，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
-上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
-界面上只有一次普通的 `skill` 调用与它的返回。见
-[skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
+**`skill` 也是一次普通工具调用，工具卡那一套前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息
+塞进模型的上下文——**2026-09-18 起它们会以 `CUSTOM` 帧出来**、在会话栏里画成一张注入卡（下一节），
+**但客户端不回发它们**：帧落成一个 `data` part，而回发转换只带 text / reasoning / tool-call。
+除此之外界面上只有一次普通的 `skill` 调用与它的返回。见
+[skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)。
 
 **这句话有一个例外，只有一行**：`/name` 那条**人的**加载路径现在有输入面了——技能列表（下一节）。
-注入本身照旧零帧；多出来的是「有哪些名字可选」这一屏，而它读的是服务端一条只读端点。
+而**注入本身**（不管谁触发的）在会话栏里就是下一节那张卡；多出来的是「有哪些名字可选」这一屏，
 两者不是一回事：一个是模型看到什么，一个是人挑什么。
 
 ## 文案与语言（i18n）
@@ -424,6 +425,27 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 - 真机证据（粘贴 / 拖放 / `+` 三条路、被拒的两句话、记录里那两条行）在
   `.scratch/composer-image/evidence/`。
 
+## 注入物在会话栏里的一张卡
+
+**服务端每轮算出来的注入物，人也能在会话栏里看见**——一张与工具卡同一套壳的折叠卡：折着只有一行
+`上下文注入 · <首行> · N 字节`，点开是那段字节（等宽、可滚动），一次注入一张。
+
+**它不是一个消息，而是一个 `data` part。** 每条注入在服务端是一条 `CUSTOM` 帧（见 [edge](edge.md)），
+适配器把它按顺序落成 `{kind: "data", name, value}`；`lib/injections.ts` 从 part 里算出**标题**（首行的标签，
+如 `<job-ended …>` → `job-ended`，认不出就用首行）、**预览**与**字节数**（UTF-8，中文一个字三字节）；
+`components/context-card.tsx` 用 `makeAssistantDataUI({name: "injected-context"})` 画它——**注册就是那个组件
+的挂载**（`app.tsx` 里挂在 `AssistantRuntimeProvider` 之内），`thread.aui.tsx` 那句
+`case "data": return part.dataRendererUI` 是抄来的，一行未改。文案进 `thread` 命名空间（中英两份）。
+
+**刷新靠重建带回来。** 重建（seed + 记录里的帧）在 `harness.kernel.frames/apply-frames` 落成一条**只带那个
+data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性的，所以每次刷新是同一张卡）。而适配器的
+`fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，所以 `app.tsx` 的 `toThreadMessages` 让
+`keepInjectionCards`（纯函数，**按 id 配对**，不是按下标——重建会把下标的对应挪走）把它补回来。
+
+**回发时它被丢掉**，这是整件事干净的唯一依据：`toAgUiMessages` 只回 text / reasoning / tool-call，
+`data` part 在那儿没有分支。于是卡片看得见、却进不了下一轮的请求——适配器升级时第一个要看的就是这条
+契约（`test/suites/injections.ts` 第三条）。真机证据在 `.scratch/context-frames/evidence/`。
+
 ## 轨迹（`Conversation` / `Trajectory` 两个视图）
 
 线程列上方有一条切换：`Conversation` 是今天这个页面，`Trajectory` 换成**轨迹视图**——
@@ -443,8 +465,10 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 （表本身不在那里重复第二遍）。
 
 - **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、拼在它旁边的指令文件
-  与技能清单、技能正文、以及每次调用**照发出**的工具表，客户端一个都没有——它从来没有过，
-  AG-UI 帧里也没有。所以这一半由服务端从 jsonl 折出来（`harness.edge.trajectory`，
+- **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、每次调用**照发出**的工具表，
+  客户端从来没有过，AG-UI 帧里也没有（注入物是这里唯一的例外：它**会**以 `CUSTOM` 帧出来、画成上面那张卡——
+  但卡只是**一段字节**，`items` 的来源与分轮、这次调用带了几张表，都只有记录才有）。所以这一半由服务端从
+  jsonl 折出来（`harness.edge.trajectory`，
   见 [edge](edge.md)），从 `GET /api/threads/<stem>/trajectory` 吐出去，
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
@@ -484,7 +508,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 
 **怎么跑**用 `node scripts/test.mjs --ui`（它起的就是 `cd ui && npm test`，即 vitest；全套三条腿
 见 `AGENTS.md`）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,picker,concurrent}.ts`
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,concurrent}.ts`
 是被它 import 的普通模块：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。

@@ -288,6 +288,30 @@
             (is (= [] (jobs/take-notices! t))))))
       (finally (jobs/shutdown!)))))
 
+(deftest what-the-step-injects-is-said-out-loud
+  ;; THE LOOP'S OTHER HALF OF THE SAME CONTRACT: whatever the step adds is emitted as
+  ;; :context/injected, ONCE per message, in the order it was added. The edge turns
+  ;; that into the CUSTOM frame a person sees in the conversation; here it is asserted
+  ;; where it is made.
+  (let [inject (fn [history _thread-id]
+                 (conj history {:role "user" :content "<skill name=\"tdd\">red green</skill>"}))
+        {:keys [seen]} (drain-chan (loop/run-chan (fake/scripted [{:content ""
+                                                                  :tool-calls [{:id "c1" :name "eval"
+                                                                                :arguments {:code "40"}}]}
+                                                                 {:content "done"}])
+                                                [{:role "user" :content "go"}]
+                                                {:thread-id "t-inject" :before-llm inject}))
+        injected (filter #(= :context/injected (:type %)) seen)]
+    (testing "one event per injected message, per call"
+      (is (= 2 (count injected))
+          "two calls, and the step adds the same message to each -- each addition is said")
+      (is (every? #(str/includes? (:text %) "red green") injected))
+      (is (every? #(= "user" (:role %)) injected)
+          "an injection is a user message; the frame says which role it took"))
+    (testing "and a run nobody injects into says nothing"
+      (let [{:keys [seen]} (drive (fake/scripted [{:content "hi"}]) [{:role "user" :content "go"}])]
+        (is (empty? (filter #(= :context/injected (:type %)) seen)))))))
+
 (deftest the-pre-llm-step-is-applied-before-every-call
   ;; THE LOOP'S HALF OF THE SKILL CONTRACT, and the half that is actually this
   ;; namespace's: it applies whatever step it was handed immediately before EACH

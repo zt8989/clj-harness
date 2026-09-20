@@ -82,6 +82,8 @@ import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
+import { ContextCards } from "@/components/context-card";
+import { keepInjectionCards } from "@/lib/injections";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -128,7 +130,11 @@ const WATCH_INTERVAL_MS = 1200;
 type Reads = SofarState | null;
 
 function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
-  const converted = fromAgUiMessages(agUiMessages);
+  // `fromAgUiMessages` rebuilds text, reasoning and tool calls; the injection cards
+  // are put back right after it, because upstream's converter has no case for a `data`
+  // part (see `lib/injections.ts`). Everything else about a rebuilt message is
+  // upstream's.
+  const converted = keepInjectionCards(agUiMessages, fromAgUiMessages(agUiMessages));
   const last = converted.length - 1;
   return converted.map((message, index) =>
     fromThreadMessageLike(
@@ -431,6 +437,13 @@ const SessionColumn: FC<{
           ))}
         </div>
         <div className="min-h-0 flex-1">
+          {/* THE INJECTION CARD'S REGISTRATION, and it is a rendering: a data part's
+              renderer is registered by MOUNTING the component `makeAssistantDataUI`
+              answers, so this line is the whole of "the conversation column knows how
+              to draw an injected context". It draws nothing itself. It sits INSIDE
+              this provider (`AssistantRuntimeProvider` is above), because a
+              registration is scoped to the runtime that resolves the parts. */}
+          <ContextCards />
           {view === "conversation" ? (
             <Thread components={THREAD_COMPONENTS} />
           ) : (

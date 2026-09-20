@@ -3018,11 +3018,16 @@
   [{:content "done"}])
 
 
-(deftest an-opening-block-reaches-the-model-and-never-the-client
+(deftest an-opening-block-reaches-the-model-and-the-client-can-see-it
   ;; The whole shape, through the real edge: the instruction files and the skills
-  ;; catalog are in the RUN's message record (the model reads them) and absent
-  ;; from every AG-UI frame (the client never does). "The front end shows
-  ;; nothing" is not a filtering decision anywhere -- it is this.
+  ;; catalog are in the RUN's message record (the model reads them) and they are
+  ;; ALSO on the wire -- as one CUSTOM frame each, which the client draws as an
+  ;; injected-context card and never sends back (see
+  ;; harness.edge.ag_ui/injected-frame and the UI's context-card). THE TURN
+  ;; BEFORE THE LAST ONE SAID "NEVER RECEIVES": what changed is that a person can
+  ;; now see what the model was handed, without that thing becoming part of the
+  ;; conversation -- the card is a `data` part, and `toAgUiMessages` has no case
+  ;; for one.
   ;;
   ;; BOTH HOMES ARE THIS TEST'S OWN (support/with-temp-env): the conventions go in a
   ;; temp OS home and the project in a temp root, so nothing is planted in the pair
@@ -3056,26 +3061,58 @@
                                (filter #(= "message" (:kind %)) lines))
                wire-text (json/write-str frames)]
 
-           (testing "the model is handed the rules and then the catalog, in that order"
+           (testing "the order the model reads is: the question, then the material for it"
+             ;; THE CLIENT'S OWN MESSAGE COMES FIRST, and the blocks are behind it --
+             ;; system prompt, question, context, skill context (ticket 05 of
+             ;; .scratch/context-frames). Before that ticket the blocks sat between
+             ;; the system message and the conversation.
              (let [user-texts (mapv #(get-in % [:payload :content])
                                     (filter #(and (= "message" (:kind %))
                                                   (= "user" (get-in % [:payload :role])))
                                             lines))]
-               (is (str/includes? (first user-texts) "STANDING RULE"))
-               (is (str/includes? (second user-texts) "PROJECT RULE"))
-               (is (str/starts-with? (nth user-texts 2) "<skills>"))
-               (is (str/includes? (nth user-texts 2) "- alpha: alpha does a thing"))))
+               (is (str/includes? (first user-texts) "看看这个项目")
+                   "the client's own message is the first user message of the run")
+               (is (str/includes? (second user-texts) "STANDING RULE"))
+               (is (str/includes? (nth user-texts 2) "PROJECT RULE"))
+               (is (str/starts-with? (nth user-texts 3) "<skills>"))
+               (is (str/includes? (nth user-texts 3) "- alpha: alpha does a thing"))))
 
            (testing "loading it mid-run puts the BODY into the conversation"
              (is (some #(and (str/includes? % "ALPHA BODY")
                              (str/starts-with? % "<skill name=\"alpha\">"))
                        texts)))
 
-           (testing "and not one frame carries any of it -- a client cannot draw what it never receives"
-             (is (not (str/includes? wire-text "STANDING RULE")))
-             (is (not (str/includes? wire-text "PROJECT RULE")))
-             (is (not (str/includes? wire-text "ALPHA BODY")))
-             (is (not (str/includes? wire-text "- alpha:"))))
+           (testing "and each block is on the wire ONCE, as an injected-context frame"
+             ;; THE CARD A PERSON SEES. The frame carries the bytes and a
+             ;; deterministic id (the rebuild needs it to bring the card back after a
+             ;; refresh); the client's outgoing conversion has no case for a `data`
+             ;; part, which is why this does not put anything into the conversation.
+             (let [cards (filter #(and (= "CUSTOM" (:type %))
+                                       (= "injected-context" (:name %)))
+                                 frames)]
+               (is (= 4 (count cards))
+                   "both instruction files, the catalog, and the skill body the model asked for")
+               (is (every? #(re-find #"-open\d+$|-ctx\d+$" (str (:messageId %))) cards)
+                   "ids are the frames' own (run id + which one), not the adapter's")
+               (let [texts (mapv #(str (get-in % [:value :text])) cards)]
+                 (is (some #(str/includes? % "STANDING RULE") texts))
+                 (is (some #(str/includes? % "PROJECT RULE") texts))
+                 (is (some #(str/includes? % "ALPHA BODY") texts)))))
+
+           (testing "while those bytes ride NO other frame out -- the CUSTOM cards are the only ones"
+             ;; THE BACKEND'S HALF OF "THE CLIENT NEVER SENDS IT BACK". The other half is
+             ;; `toAgUiMessages` (upstream's, pinned in test/suites/injections.ts): it carries
+             ;; text, reasoning and tool calls, and a `data` part is none of those. What a run
+             ;; can show from here is WHY that is enough -- the injected bytes leave as a
+             ;; CUSTOM frame and nowhere else, so nothing in the client's own message shape
+             ;; (text deltas, tool results) can be holding a copy of them to re-send.
+             (let [others  (remove #(and (= "CUSTOM" (:type %)) (= "injected-context" (:name %)))
+                                   frames)
+                   as-text (json/write-str others)]
+               (is (not (str/includes? as-text "STANDING RULE")))
+               (is (not (str/includes? as-text "PROJECT RULE")))
+               (is (not (str/includes? as-text "ALPHA BODY")))
+               (is (not (str/includes? as-text "- alpha:")))))
 
            (testing "the skill call itself IS on the wire, as an ordinary tool card"
              (is (some #(= "skill" (:toolCallName %))
@@ -3192,12 +3229,15 @@
         (project/bind! "it-picker" nil)
         (support/wipe-tree! proj))))))
 
-(deftest a-slash-load-reaches-the-model-and-never-the-client
+(deftest a-slash-load-reaches-the-model-and-is-a-card-in-the-conversation
   ;; The SECOND source of an injected body, asserted at the edge for the reason the
-  ;; first one is: "the client never sees it" is nowhere a filter -- it is the
-  ;; absence of a frame -- and a new way for a body to enter is exactly what could
-  ;; reintroduce one. The provider here is scripted with NO tool call, so anything
-  ;; in the conversation got there because a person typed it.
+  ;; first one is: what the client HOLDS is decided by which frames go out, and a new
+  ;; way for a body to enter is exactly what could put one in the conversation. IT USED
+  ;; TO SAY "AND NEVER THE CLIENT" (there was no frame at all): since 2026-09-18 a body
+  ;; is an injected-context CUSTOM frame -- so it is SEEN, and the assertion that
+  ;; matters is that no OTHER frame carries it (the card is a `data` part, which
+  ;; `toAgUiMessages` does not send back). The provider here is scripted with NO tool
+  ;; call, so anything in the conversation got there because a person typed it.
   (support/with-temp-env
    [_root home]
    (let [proj      (support/temp-dir "http-slash")
@@ -3222,8 +3262,7 @@
                                          ls))
                           2000)
                texts     (mapv #(str (get-in % [:payload :content]))
-                               (filter #(= "message" (:kind %)) lines))
-               wire-text (json/write-str frames)]
+                               (filter #(= "message" (:kind %)) lines))]
 
            (testing "the person's own words reach the model exactly as typed"
              ;; NOT asserted against the frames: the client sent those words, so
@@ -3239,9 +3278,31 @@
                              (str/starts-with? % "<skill name=\"alpha\">"))
                        texts)))
 
-           (testing "and not one frame carries it -- same invisibility as the tool's load"
-             (is (not (str/includes? wire-text "ALPHA BODY")))
-             (is (not (str/includes? wire-text "<skill name="))))
+           (testing "and it is a CARD -- one CUSTOM frame, carrying exactly those bytes"
+             ;; THE `/name` PATH'S HALF OF THE FEATURE, and the one a person actually sees:
+             ;; the trigger is still the message they typed, the body is behind it, and the
+             ;; card is how a reader learns the model was handed it at all.
+             (let [cards (filter #(and (= "CUSTOM" (:type %))
+                                       (= "injected-context" (:name %)))
+                                 frames)]
+               (let [texts (mapv #(str (get-in % [:value :text])) cards)
+                     body  (first (filter #(str/starts-with? % "<skill name=\"alpha\">")
+                                          texts))]
+                 (is (= 2 (count cards))
+                     "the catalog this session's home offers, and the body the person asked for")
+                 (is (some #(str/starts-with? % "<skills>") texts))
+                 (is (some? body))
+                 (is (str/includes? (str body) "ALPHA BODY"))
+                 (is (every? #(re-find #"-open\d+$" (str (:messageId %))) cards)
+                     "named by the run and the position in its first request"))))
+
+           (testing "and no OTHER frame carries it -- the card is the only way out"
+             (let [others  (remove #(and (= "CUSTOM" (:type %))
+                                         (= "injected-context" (:name %)))
+                                   frames)
+                   as-text (json/write-str others)]
+               (is (not (str/includes? as-text "ALPHA BODY")))
+               (is (not (str/includes? as-text "<skill name=")))))
 
            (testing "no skill tool call happened -- nothing asked the model for anything"
              (is (not-any? #(= "skill" (:toolCallName %))
@@ -3279,10 +3340,15 @@
                                                  (= "first" (get-in % [:payload :content])))
                                            ls))
                             2000)
-         (post-run "it-slash-side"
-                   {:messages [ask {:id "a1" :role "assistant" :content "first"}
-                               {:id "u2" :role "user" :content "and another thing"}]})
-         (let [records (wait-for-recorded
+         ;; THE SECOND RUN'S OWN FRAMES: this run loaded nothing -- the ask that pulled the
+         ;; body is still in the client's history, so the edge folds the body in before the
+         ;; first call. Its cards are what the last block below reads.
+         (let [frames2 (wire/frames-from-sse
+                              (.body (post-run "it-slash-side"
+                                               {:messages [ask
+                                                           {:id "a1" :role "assistant" :content "first"}
+                                                           {:id "u2" :role "user" :content "and another thing"}]})))
+               records (wait-for-recorded
                         (log-file-for "it-slash-side")
                         (fn [ls] (some #(and (= "message" (:kind %))
                                              (= "second" (get-in % [:payload :content])))
@@ -3302,17 +3368,52 @@
              (is (empty? (filter body? (subvec records e2)))
                  "and it is NOT filed past the split, as if the kernel had added it"))
 
+           (testing "and the body this run did NOT load is a card too -- it opened with it"
+             ;; THE RUN THE KERNEL CANNOT SPEAK FOR. This one loaded nothing: the body is
+             ;; folded in by the EDGE, before the first call, because the ask that pulled it
+             ;; is still in the client's history. The kernel's own step then finds it already
+             ;; there and adds nothing, so without the edge taking the same diff the model
+             ;; would be reading a body that no card in the conversation column accounted for.
+             ;;
+             ;; TWO CARDS, IN THE ORDER THE MODEL READ THEM: the catalog (an opening block)
+             ;; first, the body behind it. Ids are the run's own, so a refresh rebuilds the
+             ;; same cards under the same names.
+             (let [cards (filter #(and (= "CUSTOM" (:type %))
+                                       (= "injected-context" (:name %)))
+                                 frames2)
+                   card-texts (mapv #(str (get-in % [:value :text])) cards)]
+               (is (= 2 (count cards)))
+               (is (str/starts-with? (first card-texts) "<skills>"))
+               (is (str/starts-with? (second card-texts) "<skill name=\"alpha\">"))
+               (is (str/includes? (second card-texts) "ALPHA BODY"))
+               (is (every? #(re-find #"-open\d+$" (str (:messageId %))) cards)
+                   "named by the run and the position in its first request")
+               (let [types   (mapv :type frames2)
+                     custom  (.indexOf types "CUSTOM")
+                     spoken  (.indexOf types "TEXT_MESSAGE_START")]
+                 (is (and (<= 0 custom) (< custom spoken))
+                     "and they are out with the run's start, before anything the model said")))
+
            (testing "the trajectory then draws the ask's turn carrying it, and nothing else"
+             ;; THE ORDER THE VIEW DRAWS IS THE ORDER THE MODEL READ: the client's
+             ;; own message first, the run's blocks behind it (the catalog from the
+             ;; edge, the body the ask pulled in). One `context` kind and no source:
+             ;; where a block sat used to be a fact, and it stopped being one when
+             ;; every injection moved behind the question.
              (let [turns (:turns (trajectory/records->trajectory (vec records)))
                    ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
                (is (= 2 (count turns)))
-               (is (= ["system" "context" "user" "context" "assistant"]
+               (is (= ["system" "user" "context" "context" "assistant"]
                       (mapv :kind (:items (first turns)))))
-               (is (= ["opening" "run"] (mapv :source (ctx (first turns))))
-                   "the catalog, then the body where the ask put it")
+               (is (some #(str/includes? (str (:text %)) "<skills>") (ctx (first turns)))
+                   "the catalog")
+               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx (first turns)))
+                   "the body the ask pulled in, both of them as the bytes they are")
+               (is (every? #(nil? (:source %)) (mapcat ctx turns))
+                   "and neither of them claims to have come from a place")
                (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
                    "no context this run did not carry -- and the client's own message is not
-                    drawn as one instead"))))))
+                    drawn as one instead")))))))
       (finally
         (project/bind! "it-slash-side" nil)
         (support/wipe-tree! proj))))))

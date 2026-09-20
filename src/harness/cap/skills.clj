@@ -434,8 +434,8 @@
 ;; THE HUMAN'S WAY IN. A skill is loaded by the model through the `skill` tool,
 ;; and by a person by typing "/name ..." in the composer -- and those are the only
 ;; two ways. They are not two mechanisms: both are SOURCES for the same
-;; derivation, both end as a `<skill name=..>` user message spliced in after the
-;; message that asked, and both obey the same one-load-per-name rule. Keeping them
+;; derivation, both end as a `<skill name=..>` user message appended at the end of the
+;; history (see derived-injections), and both obey the same one-load-per-name rule. Keeping them
 ;; one derivation is what stops the two paths from drifting apart.
 ;;
 ;; The trigger lives in the conversation rather than in a server-side record, for
@@ -551,17 +551,23 @@
 
 (defn derived-injections
   "MESSAGES + ROOTS -> MESSAGES with the skill bodies this conversation has
-  loaded spliced in, after the message that asked for it.
+  loaded appended AT THE END.
 
-  A TOOL ASK ENDS ITS BLOCK, NOT ITS OWN CALL. One model call may ask for a skill AND
-  something else in the same breath, and the kernel answers them in call order -- so
-  a body spliced directly behind its own tool result would land BETWEEN two results
-  of one assistant message. That is not tidiness: an OpenAI-shaped vendor refuses a
-  request whose assistant message with tool_calls is not followed, immediately, by a
-  tool message for each 'tool_call_id' (HTTP 400, 'insufficient tool messages
-  following tool_calls message'), so the body waits for the LAST result of the call
-  that asked. A person's slash is not a tool call, and still lands right behind the
-  message that asked.
+  WHERE A BODY GOES, AND WHY IT MOVED. It used to be spliced directly behind the
+  message that asked for it -- right after the tool result, or right after a person's
+  `/name`. It is now the LAST thing in the history, and that is the same order the
+  rest of a session's injections took: the system prompt, the question, the material
+  for it, and the skill body closest to the end (see `harness.edge.ag_ui/inbound`,
+  which puts the instruction files and the catalog just after the client's messages).
+  A model reads what it asked for beside the question it is answering, which is where
+  a person would put it.
+
+  THE VENDOR'S RULE IS WHY IT CANNOT GO ANYWHERE IT LIKES, and appending satisfies it
+  by construction: an OpenAI-shaped vendor refuses a request whose assistant message
+  with tool_calls is not followed, IMMEDIATELY, by a tool message for each
+  'tool_call_id' (HTTP 400, 'insufficient tool messages following tool_calls
+  message'). A body spliced into the middle of a batch of results breaks that; a body
+  at the very end is behind every result there is.
 
   IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
   applepi's server holds the session, so its tool can push a message into history
@@ -591,8 +597,10 @@
   is following are the last thing to drop silently, and a typo that loaded nothing
   must not look like a skill that loaded nothing TO SAY.
 
-  The result is a message vector and nothing else: no AG-UI frame is produced for
-  any of this, which is exactly why a client never sees these messages."
+  The result is a message vector and nothing else: the frames a person sees are the
+  run's, and they are emitted where the history is assembled and applied (see
+  `harness.edge.ag_ui/injected-frame`), not here -- a derivation that talked to a wire
+  would be a derivation that could not be tested without one."
   [messages roots]
   (let [confirmations (load-confirmations messages)
         name-of       (into {}
@@ -607,22 +615,19 @@
                               [(:id tc) (str (:name args))]))]
     (if (and (empty? confirmations) (not-any? slash-of messages))
       messages
-      (let [present (set (loaded-names messages))]
-        (loop [out [] seen present pending [] [m & more :as ms] messages]
-          (if (empty? ms)
-            out
-            (let [out     (conj out m)
-                  nm      (or (get name-of (:tool_call_id m)) (slash-of m))
-                  pending (cond-> pending nm (conj nm))]
-              (if (and (= "tool" (:role m)) (= "tool" (:role (first more))))
-                ;; MID-BLOCK: this result is not the last of its assistant message's,
-                ;; and nothing may come between those results (see above).
-                (recur out seen pending more)
-                (let [[out seen] (reduce (fn [[out seen] nm]
-                                           (if (contains? seen nm)
-                                             [out seen]
-                                             [(conj out (skill-message nm (load-text roots nm)))
-                                              (conj seen nm)]))
-                                         [out seen]
-                                         (distinct pending))]
-                  (recur out seen [] more))))))))))
+      ;; WHAT WAS ASKED FOR, IN ORDER, AND ONLY WHAT IS NOT ALREADY THERE. The walk
+      ;; is over the whole history because the ask can come from either source (a
+      ;; tool result and a person\'s `/name` are two ways to ask the same question),
+      ;; and `loaded-names` is what makes the step idempotent: a body already in the
+      ;; history contributes nothing, however many times it was asked for.
+      (let [present (set (loaded-names messages))
+            asked   (distinct
+                     (keep (fn [m]
+                             (or (get name-of (:tool_call_id m)) (slash-of m)))
+                           messages))
+            missing (remove (conj present nil) asked)]
+        (if (empty? missing)
+          messages
+          (into (vec messages)
+                (map (fn [nm] (skill-message nm (load-text roots nm))))
+                missing))))))

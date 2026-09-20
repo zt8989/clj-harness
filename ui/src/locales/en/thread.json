@@ -30,5 +30,6 @@
     "calls_other": "{{count}} tool calls",
     "messages_one": "{{count}} message",
     "messages_other": "{{count}} messages"
-  }
+  },
+  "injection.name": "Injected context"
 }
