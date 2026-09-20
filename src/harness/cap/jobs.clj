@@ -361,8 +361,10 @@
 
   DELETION IS BEST EFFORT. A file that will not go (permissions, a Windows handle) is
   skipped rather than raised: this runs on the way into running a command, and no
-  command should fail over housekeeping. The budget is the goal, not a promise -- if
-  everything deletable is gone and the tree is still over, that is where it stands."
+  command should fail over housekeeping. It IS logged, for the reason `delete-record!`
+  gives about one file -- a sweep that quietly stopped working is a sweep nobody knows
+  is gone. The budget is the goal, not a promise: if everything deletable is gone and
+  the tree is still over, that is where it stands."
   []
   (let [all        (record-files)
         held       (open-record-paths)
@@ -378,7 +380,8 @@
               bytes (.length f)]
           (if (.delete f)
             (recur (rest left) (- over bytes) (conj gone path))
-            (recur (rest left) over gone)))))))
+            (do (log/warn! :jobs/record-not-pruned {:path path})
+                (recur (rest left) over gone))))))))
 
 (defn- sweep-once!
   "`prune-records!` ONCE per process -- what the callers below actually ask for.
