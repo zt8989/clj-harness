@@ -458,17 +458,44 @@
           "re-reading the list fixes nothing here, so it says what the machine DOES have"))
     (is true "this machine has every kind the harness knows -- nothing to refuse")))
 
-(deftest the-shell-is-not-taken-by-the-background-mode-yet
-  ;; DECLARED-BUT-IGNORED IS THE ONE THING THIS TOOL REFUSES TO DO -- the `stdin` refusal
-  ;; above is the same rule. The mode that cannot honour the name says so, and says it
-  ;; BEFORE a job exists: no id, no record file, nothing left behind.
-  ;; TICKET 03 LIFTS THIS AND TURNS IT INTO A POSITIVE CASE.
-  (let [{:keys [content error]} (call "bash" {:command "echo hi"
-                                              :run_in_background true
-                                              :shell "cmd"})]
-    (is (true? error) "refused, not silently dropped")
-    (is (str/includes? content "`shell` cannot be used with `run_in_background`"))
-    (is (not (str/starts-with? content "job ")) "and no job was started for it")))
+(deftest the-background-mode-takes-the-same-shell
+  ;; THE SAME PROOF AS THE FOREGROUND CASE: `%CD%` is not something bash expands, so a
+  ;; Windows path in the RECORD means cmd really read the line -- and the record is the
+  ;; only place a job's output ever appears.
+  ;;
+  ;; AND THE ANSWER SAYS NOTHING ABOUT IT. Which shell ran a job is the caller's own
+  ;; choice, not part of the job's identity, and `job_output` never needs to know -- so a
+  ;; call that named a shell answers in exactly the shape a call that did not, and both
+  ;; are held to it here rather than only the new one.
+  (let [two-facts #"job \S+ started; its record is \S+"
+        default-answer (call "bash" {:command "echo hi" :run_in_background true})]
+    (is (re-matches two-facts (str/trim (:content default-answer)))
+        "the default background answer is still two facts, one line")
+    (when (shell/resolution :cmd)
+      (let [answer (:content (call "bash" {:command "echo %CD%"
+                                           :run_in_background true
+                                           :shell "cmd"}))
+            path   (second (re-find #"its record is (\S+)" answer))]
+        (is (re-matches two-facts (str/trim answer))
+            "and naming a shell does not add a third: two facts, one line")
+        (is (some? path) (str "the answer names the record: " answer))
+        (is (support/holds-within?
+             #(re-find #"[A-Za-z]:[\\/]" (slurp path :encoding "UTF-8")) 15000)
+            "the record holds what cmd printed, which bash could not have expanded")
+        (jobs/shutdown!)))))
+
+(deftest a-background-call-naming-a-missing-shell-registers-nothing
+  ;; THE REFUSAL HAPPENS BEFORE THE ID IS TAKEN, so a call that named a kind this machine
+  ;; does not have leaves no id, no record file and no process behind -- the same promise
+  ;; `start!` makes about a command that cannot be spawned at all.
+  (if-let [absent (a-shell-this-machine-lacks)]
+    (let [{:keys [content error]} (call "bash" {:command "echo hi"
+                                                :run_in_background true
+                                                :shell absent})]
+      (is (true? error))
+      (is (str/includes? content (str "no `" absent "` shell on this machine")))
+      (is (not (str/starts-with? content "job ")) "and nothing was registered for it"))
+    (is true "this machine has every kind the harness knows -- nothing to refuse")))
 
 ;; ------------------------------------------------------- what an answer may carry
 ;;

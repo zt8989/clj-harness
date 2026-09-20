@@ -336,19 +336,9 @@
                            " dropped without it ever being read. Run it in the foreground"
                            " to write to its stdin.")
                       {:argument :stdin :reason :not-a-background-input})))
-    (when (and run_in_background (some? kind))
-      ;; THE OTHER HALF OF THE `stdin` RULE, and the same reason: the parameter is on the
-      ;; wire now, and the mode that cannot honour it says so rather than dropping it. A
-      ;; silently ignored `shell` would answer as though the caller's `%VAR%` line had
-      ;; been run somewhere it had not.
-      (throw (ex-info (str "`shell` cannot be used with `run_in_background` yet: a background"
-                           " job still runs in this machine's own shell, so the name would be"
-                           " dropped without it ever being used. Run the command in the"
-                           " foreground to choose the shell it runs in.")
-                      {:argument :shell :reason :not-a-background-choice})))
     (if run_in_background
       (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
-                                           {:command command :dir dir})]
+                                           {:command command :dir dir :kind kind})]
         ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
         ;; started), and advice about reading the record belongs in the description
         ;; rather than in every answer.
@@ -903,6 +893,7 @@
                                       shell-names-text ", or left out for this machine's own"
                                       " (Git Bash on Windows, the host's shell elsewhere)."
                                       " `command` has to be written for the shell you name."
+                                      " A background command runs in it too."
                                       " A name this machine does not have, or a word that is"
                                       " not one of the above, is refused rather than falling"
                                       " back to another shell.")}
