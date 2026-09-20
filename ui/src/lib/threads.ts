@@ -75,28 +75,74 @@ export type RebuiltThread = {
   context: readonly unknown[];
 };
 
+/// THE SERVER'S OWN REFUSAL, when the body carries one, and THIS SIDE'S sentence when
+/// it does not. Every management route answers a refusal as `{:error ..}` -- the
+/// cut-off log's 400 names the run and the way out -- and that reason is the sentence
+/// the UI shows, passed through whole rather than wrapped (a paraphrase would be one
+/// more thing to distrust). Only a body with no `error` at all -- a proxy's 502, a
+/// route that answered empty -- leaves this side speaking, and then it speaks the
+/// interface's language: `HTTP 500` is a fact about the wire.
+async function refusalFrom(res: Response, t: Translate): Promise<string> {
+  const body: unknown = await res.json().catch(() => undefined);
+  return body !== undefined &&
+    typeof body === "object" &&
+    body !== null &&
+    "error" in body &&
+    typeof body.error === "string"
+    ? body.error
+    : t("http.status", { status: res.status });
+}
+
 export async function rebuildThread(threadId: string, t: Translate): Promise<RebuiltThread> {
   const res = await fetch(
     `${API_BASE}threads/${encodeURIComponent(threadId)}/rebuild`,
     { method: "POST" },
   );
-  const body: unknown = await res.json().catch(() => undefined);
-  if (!res.ok) {
-    // The server refuses a truncated or corrupt log with the reason on the
-    // 400. That reason is the sentence the row shows, so it is passed through
-    // whole, not wrapped in something friendlier -- the ticket asks for the
-    // server's words, and a wrapper's paraphrase would be one more thing to
-    // distrust. ONLY WHEN THE BODY HAS NO REASON does this side speak, and then
-    // it speaks the interface's language: `HTTP 500` is a fact about the wire.
-    const reason =
-      body !== undefined &&
-      typeof body === "object" &&
-      body !== null &&
-      "error" in body &&
-      typeof body.error === "string"
-        ? body.error
-        : t("http.status", { status: res.status });
-    throw new Error(reason);
-  }
-  return body as RebuiltThread;
+  if (!res.ok) throw new Error(await refusalFrom(res, t));
+  return (await res.json()) as RebuiltThread;
+}
+
+/// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it.
+///
+/// THREE ANSWERS AND NOT A BOOLEAN, because the client has three things to do and two
+/// of them are not 'normal'. `running` -- a run is being answered in the process right
+/// now: show what has arrived, and (ticket 04) do not send. `parked` -- the
+/// conversation has stopped to ask a human and is waiting for a decision. `settled`
+/// -- nothing is going on, and this is the ordinary case.
+///
+/// THE SERVER-PROCESS FACT, NOT THIS TAB'S. A refreshed page's own runtime has never
+/// run anything, so its `isRunning` is false while the process is in the middle of a
+/// run; this is the half that says so. It is also why the state cannot be derived
+/// from the message list: a partial conversation and a finished one differ by a fact
+/// that is not in the file.
+export type SofarState = "running" | "parked" | "settled";
+
+/// What `GET /api/threads/<id>/sofar` answers: what has been recorded so far, and how
+/// far along it is. `openRuns` names the runs still being written (present only for
+/// `running`); `interrupts` is what the newest run stopped on (present only for
+/// `parked`).
+export type ThreadSofar = {
+  threadId: string;
+  messages: readonly unknown[];
+  context: readonly unknown[];
+  state: SofarState;
+  openRuns?: readonly string[];
+  interrupts?: readonly unknown[];
+};
+
+/// READ THE CONVERSATION, WITHOUT TOUCHING IT. The read a page that has just landed
+/// on somebody else's session uses: unlike `rebuildThread` it does not hand the
+/// conversation over, it does not close a cut-off log off, and it answers for a run
+/// that is still going. See harness.edge.http/sofar-get for the three answers and the
+/// one refusal.
+///
+/// THE REFUSAL IS THE CUT-OFF LOG, and it is the one case where this and rebuild
+/// disagree instead of overlapping: a log that ends mid-run with nothing running it
+/// needs the repair only rebuild performs (`close-off-open-run!`), so the server
+/// refuses this read and names that door. A caller that has no human to relay it to
+/// -- the mount restore -- follows it (see `App`'s `restore`).
+export async function sofarThread(threadId: string, t: Translate): Promise<ThreadSofar> {
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/sofar`);
+  if (!res.ok) throw new Error(await refusalFrom(res, t));
+  return (await res.json()) as ThreadSofar;
 }

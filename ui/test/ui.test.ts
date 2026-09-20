@@ -33,13 +33,14 @@ import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
+import { restoreSuite } from "./suites/restore";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -85,7 +86,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// at, and the parked word beside the id rather than inside a line that truncates. This
 /// is the suite that exists because the id line went blank in the i18n merge and a green
 /// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
-const EXPECTED_CASES = 44;
+/// 44 -> 46: the `restore` suite's two -- the page's memory of which session it is in
+/// (the one key, the conditional forget, and a storage that throws rather than answers)
+/// and the single question it asks of a listing. Both pure; the reload itself is a
+/// browser's, and it is the walkthrough in `.scratch/session-after-refresh/`.
+const EXPECTED_CASES = 46;
 
 let total = 0;
 for (const suite of SUITES) {

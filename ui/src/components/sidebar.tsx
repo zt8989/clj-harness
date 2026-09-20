@@ -272,6 +272,13 @@ type SidebarProps = {
   /// log, and asking the server to rebuild one is asking it to find a file that
   /// is not there.
   onShowFresh: (threadId: string) => void;
+  /// EVERY LISTING THIS COMPONENT LANDS, handed up as it arrives. The page needs one
+  /// of them and only one: the mount restore asks whether the session it remembers is
+  /// still a session, and the answer is in exactly this payload (ticket 03). It is a
+  /// callback rather than a second fetch ON PURPOSE -- the sidebar is already reading
+  /// every session of every project, and a page that asked again would be asking the
+  /// same question twice to get the same bytes.
+  onListed: (projects: readonly ProjectSummary[]) => void;
 };
 
 /// The refusal or failure that belongs to ONE row -- a refused switch, a list
@@ -296,6 +303,7 @@ export const Sidebar: FC<SidebarProps> = ({
   openErrors,
   onShow,
   onShowFresh,
+  onListed,
 }) => {
   const { t } = useTranslation();
   // The failures this list can raise are THIS side's sentences (a listing that
@@ -329,14 +337,16 @@ export const Sidebar: FC<SidebarProps> = ({
 
   const refresh = useCallback(async () => {
     try {
-      setProjects(await listProjects(tErrors));
+      const listed = await listProjects(tErrors);
+      setProjects(listed);
       setListError(null);
+      onListed(listed);
     } catch (failure: unknown) {
       setListError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [onListed]);
 
   // On mount, and again whenever the current thread changes -- opening a session
   // rebuilds it from its log, which appends an audit line to that very file, so

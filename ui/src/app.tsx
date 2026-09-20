@@ -77,7 +77,7 @@ import {
   useAgUiInterrupts,
   useAgUiRuntime,
 } from "@assistant-ui/react-ag-ui";
-import { useCallback, useEffect, useMemo, useState, type FC, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
@@ -91,8 +91,21 @@ import {
 import { Sidebar } from "@/components/sidebar";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
-import { AGENT_URL, rebuildThread } from "@/lib/threads";
+import { type ProjectSummary } from "@/lib/projects";
+import {
+  browserStorage,
+  forgetSession,
+  listedSession,
+  rememberedSession,
+  rememberSession,
+} from "@/lib/session-memory";
+import { AGENT_URL, rebuildThread, sofarThread, type SofarState } from "@/lib/threads";
 import { type SessionStatus } from "@/lib/session-status";
+
+/// HOW OFTEN A WATCHED CONVERSATION IS READ AGAIN, in milliseconds. Long enough that
+/// a long run is not thousands of requests, short enough that a person watching it
+/// grow does not think it has stopped.
+const WATCH_INTERVAL_MS = 1200;
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
 /// rebuilds text, reasoning and tool calls -- and reads back
@@ -101,12 +114,30 @@ import { type SessionStatus } from "@/lib/session-status";
 /// the finished one. The runtime's own snapshot-import path runs this exact
 /// pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is
 /// upstream's, quoted rather than reinvented.
-function toThreadMessages(agUiMessages: readonly unknown[]) {
-  return fromAgUiMessages(agUiMessages).map((message) =>
-    fromThreadMessageLike(message, message.id ?? crypto.randomUUID(), {
-      type: "complete",
-      reason: "unknown",
-    }),
+/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is read
+/// back off `GET /api/threads/<id>/sofar` (a run being answered in the process, which
+/// this page may only be WATCHING), and null is every other case -- a session this
+/// client has just minted, or one that was rebuilt and is therefore over by
+/// definition.
+///
+/// THE LAST MESSAGE'S STATUS IS WHERE THAT LANDS, and it is not decoration:
+/// `lib/turns.ts` folds a turn's steps into a one-line summary exactly when its last
+/// message is settled, so a conversation still being written has to say so HERE or it
+/// renders as a finished answer that happens to stop mid-sentence. Nothing else gets a
+/// status of its own -- the messages before it really are complete.
+type Reads = SofarState | null;
+
+function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
+  const converted = fromAgUiMessages(agUiMessages);
+  const last = converted.length - 1;
+  return converted.map((message, index) =>
+    fromThreadMessageLike(
+      message,
+      message.id ?? crypto.randomUUID(),
+      index === last && reads === "running"
+        ? { type: "running" as const }
+        : { type: "complete" as const, reason: "unknown" as const },
+    ),
   );
 }
 
@@ -114,8 +145,8 @@ function toThreadMessages(agUiMessages: readonly unknown[]) {
 /// chain, each message parented to the one before it. Built here rather than with
 /// `ExportedMessageRepository.fromArray` because that helper assigns fresh ids,
 /// and these messages already have the ids the runtime recorded.
-function repositoryFrom(agUiMessages: readonly unknown[]) {
-  const messages = toThreadMessages(agUiMessages);
+function repositoryFrom(agUiMessages: readonly unknown[], reads: Reads = null) {
+  const messages = toThreadMessages(agUiMessages, reads);
   let parentId: string | null = null;
   const items = messages.map((message) => {
     const item = { parentId, message };
@@ -132,12 +163,57 @@ function repositoryFrom(agUiMessages: readonly unknown[]) {
 /// THE TRANSLATOR IS A PARAMETER, not a hook: this is not a component, and the one
 /// sentence it can raise is `rebuildThread`'s fallback -- the `errors` face, which
 /// the host that calls this already has (see `SessionHost`).
-function sessionHistory(threadId: string, hydrate: boolean, t: TFunction<"errors">) {
+/// WHICH DOOR A HOST READS ITS CONVERSATION THROUGH, decided wherever the host is
+/// created because it is a fact about WHY the session is being shown:
+///
+///   "none"    -- an id this client has just minted. There is no conversation under
+///                it, so there is nothing to read and nothing to ask the server for.
+///   "rebuild" -- a session opened from the sidebar: HAND IT OVER. That is the door
+///                that closes a cut-off log off and names a corrupt one, and the
+///                refusal belongs on the row that was clicked.
+///   "sofar"   -- the session this page was already in, landed in again (a reload).
+///                LOOK AT IT, do not take it over: it may be in the middle of a run,
+///                which `rebuild` refuses outright, and looking must not write.
+type HistoryRead = "none" | "rebuild" | "sofar";
+
+/// READ A CONVERSATION THE WAY A RESTORED PAGE MUST: the read that does not write,
+/// with the one fallback it needs.
+///
+/// `sofar` refuses exactly one log -- one that ends mid-run with nothing in the process
+/// running it, i.e. a process that was killed -- and its sentence names the door that
+/// repairs it (`rebuild`, which closes the run off). A page that landed here by itself
+/// has nobody to relay that sentence to, so it FOLLOWS it: rebuild, and the
+/// conversation comes back. Any other failure (a session that is gone, a server that
+/// is not answering) fails here too and is reported as it is -- the same refusal a
+/// `rebuild` door would have shown, because it is the same attempt.
+async function readSofar(threadId: string, t: TFunction<"errors">) {
+  try {
+    return await sofarThread(threadId, t);
+  } catch {
+    const rebuilt = await rebuildThread(threadId, t);
+    return { ...rebuilt, state: "settled" as const };
+  }
+}
+
+/// The read a host runs on mount, and what it reports back: `onReads` carries the
+/// conversation's own state out of the adapter, because the PAGE needs it -- the poll
+/// below keeps reading while it says `running`, and only the adapter has been told.
+function sessionHistory(
+  threadId: string,
+  read: HistoryRead,
+  t: TFunction<"errors">,
+  onReads: (reads: Reads) => void,
+) {
   return {
     load: async () => {
-      if (!hydrate) return { messages: [] };
-      const rebuilt = await rebuildThread(threadId, t);
-      return repositoryFrom(rebuilt.messages);
+      if (read === "none") return { messages: [] };
+      if (read === "rebuild") {
+        const rebuilt = await rebuildThread(threadId, t);
+        return repositoryFrom(rebuilt.messages);
+      }
+      const answer = await readSofar(threadId, t);
+      onReads(answer.state);
+      return repositoryFrom(answer.messages, answer.state);
     },
     // No-ops: the harness owns the log (see the header).
     append: async () => {},
@@ -168,6 +244,8 @@ const SessionStatusReporter: FC<{
   // it just reported. The page compares the two booleans, so a second report of
   // the same answer changes nothing and there is no loop to guard.
   useEffect(() => {
+    // [DEBUG-a4f2] the projection the Send/Cancel toggle reads.
+    console.log(`[DEBUG-a4f2] reporter ${threadId} running=${running} parked=${parked}`);
     onStatus(threadId, { running, parked });
   }, [threadId, running, parked, onStatus]);
 
@@ -184,13 +262,13 @@ const SessionStatusReporter: FC<{
 /// owning its run.
 const SessionHost: FC<{
   threadId: string;
-  hydrate: boolean;
+  read: HistoryRead;
   visible: boolean;
   onStatus: (id: string, status: SessionStatus) => void;
   onForget: (id: string) => void;
   onError: (id: string, message: string) => void;
   children: ReactNode;
-}> = ({ threadId, hydrate, visible, onStatus, onForget, onError, children }) => {
+}> = ({ threadId, read, visible, onStatus, onForget, onError, children }) => {
   // The agent is built ONCE for this host and owns this session's id for the
   // host's whole life. Rebuilding it would throw the thread away mid-run -- the
   // same reason the old single-agent memo had an empty dependency list, paid per
@@ -213,9 +291,21 @@ const SessionHost: FC<{
   // hook -- so the boolean is host state, fed by this host's own gate below.
   const [gateOpen, setGateOpen] = useState(false);
 
+  // WHAT THE CONVERSATION SAID ABOUT ITSELF when it was read, as a REF plus a counter
+  // rather than as state: the poll below has to re-arm while the answer STAYS
+  // `running`, and setting state to the same value is a no-op React happily skips --
+  // which would leave the last read on screen and the run still growing behind it. The
+  // counter is what re-runs the effect; the ref is what it reads.
+  const reads = useRef<Reads>(null);
+  const [readCount, setReadCount] = useState(0);
+  const onReads = useCallback((next: Reads) => {
+    reads.current = next;
+    setReadCount((count) => count + 1);
+  }, []);
+
   const history = useMemo(
-    () => sessionHistory(threadId, hydrate, tErrors),
-    [threadId, hydrate, tErrors],
+    () => sessionHistory(threadId, read, tErrors, onReads),
+    [threadId, read, tErrors, onReads],
   );
 
   const runtime = useAgUiRuntime({
@@ -236,6 +326,46 @@ const SessionHost: FC<{
     },
     onError: (error) => onError(threadId, error.message),
   });
+
+  // KEEP READING A CONVERSATION THIS PAGE IS ONLY WATCHING (ticket 03, spec decision
+  // one: read the record and poll, never a second streaming path).
+  //
+  // The run belongs to the PROCESS, not to the tab that started it, so a page that
+  // reloaded into a session somebody is still answering has no stream to attach to and
+  // no way to be told. What it has is the record, which is appended frame by frame --
+  // so it asks again, and each answer is imported into this host's own runtime. THAT
+  // IMPORT IS THE POINT of the poll: without it the conversation on screen would be
+  // whatever the first read found, and the turn would look finished because nothing on
+  // this page is running.
+  //
+  // IT STOPS WHEN THE ANSWER STOPS SAYING `running` -- a settled or parked
+  // conversation is not going to grow, and polling one would be a loop with no fact
+  // behind it. The interval is a compromise, not a rule: frames land in the file as
+  // they are written, so a slower poll lags and a faster one asks for the same bytes.
+  useEffect(() => {
+    if (read !== "sofar" || reads.current !== "running") return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const answer = await readSofar(threadId, tErrors);
+        if (cancelled) return;
+        reads.current = answer.state;
+        setReadCount((count) => count + 1);
+        runtime.thread.import(
+          repositoryFrom(answer.messages, answer.state) as Parameters<typeof runtime.thread.import>[0],
+        );
+      } catch {
+        // The read stopped working (the harness went away mid-run). Nothing to say
+        // here: the poll simply stops, and the conversation on screen stays as it was
+        // -- the last thing that was true.
+        if (!cancelled) reads.current = null;
+      }
+    }, WATCH_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [read, readCount, threadId, runtime, tErrors]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -316,7 +446,11 @@ const SessionColumn: FC<{
 /// when a session whose history would not load is opened again, and it is part of
 /// the React key -- so "open it again" is a genuine remount (and a genuine second
 /// load) rather than a no-op on a host that is already there.
-type HostSpec = { id: string; hydrate: boolean; attempt: number };
+///
+/// `read` is decided where the host is CREATED and read once, when it mounts -- see
+/// `HistoryRead`. It is not state the host can change later: which door a
+/// conversation was read through is a fact about why it was opened.
+type HostSpec = { id: string; read: HistoryRead; attempt: number };
 
 /// Which session is on screen, and every session that has a live host.
 type Roster = { shown: string; live: readonly HostSpec[] };
@@ -333,7 +467,7 @@ export function App() {
   // id has no log, and the server refuses to invent a conversation for one.
   const [roster, setRoster] = useState<Roster>(() => {
     const id = crypto.randomUUID();
-    return { shown: id, live: [{ id, hydrate: false, attempt: 0 }] };
+    return { shown: id, live: [{ id, read: "none", attempt: 0 }] };
   });
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
@@ -352,12 +486,12 @@ export function App() {
   /// ONCE, when the host mounts; showing a session that already has a host
   /// changes nothing about it.
   const show = useCallback(
-    (id: string, hydrate: boolean = true) => {
+    (id: string, read: HistoryRead = "rebuild") => {
       setRoster((prev) => {
         const existing = prev.live.find((host) => host.id === id);
         let live = prev.live;
         if (existing === undefined) {
-          live = [...live, { id, hydrate, attempt: 0 }];
+          live = [...live, { id, read, attempt: 0 }];
         } else if (openErrors[id] !== undefined) {
           // Its history would not load last time. Opening it again is a retry, so
           // the host is remounted (the key carries the attempt) and the load runs
@@ -408,15 +542,70 @@ export function App() {
   /// project, just bound): nothing to rebuild, so no load.
   const showFresh = useCallback(
     (id: string) => {
-      show(id, false);
+      show(id, "none");
     },
     [show],
   );
   const showExisting = useCallback(
     (id: string) => {
-      show(id, true);
+      show(id, "rebuild");
     },
     [show],
+  );
+
+  /// THE SESSION THE PAGE REMEMBERS, read ONCE at mount, and null once the restore has
+  /// dealt with it. It has to be read before anything is written: the id on screen at
+  /// mount is a fresh one this page has just minted, and remembering it first would
+  /// overwrite the very id the restore is about to look for.
+  const [pending, setPending] = useState<string | null>(() => rememberedSession(browserStorage()));
+
+  // WHAT IS ON SCREEN IS REMEMBERED -- one effect on `shown` rather than a line inside
+  // `show`, because THE FIRST SESSION IS MINTED BY `useState` AND NEVER GOES THROUGH
+  // `show` AT ALL, and that is the session a person's first message lands in: a restore
+  // that could not find it would hand them an empty conversation after every reload.
+  //
+  // AND NOT WHILE A RESTORE IS PENDING. The minted id is not yet the page's memory then;
+  // writing it would clobber the remembered one before the listing has had a chance to
+  // say whether it is still there (see `onListed`).
+  useEffect(() => {
+    if (pending !== null) return;
+    rememberSession(browserStorage(), roster.shown);
+  }, [roster.shown, pending]);
+
+  /// THE MOUNT RESTORE: the session this page was in before it was reloaded (ticket
+  /// 03). THREE THINGS ABOUT IT, and each is a decision:
+  ///
+  ///   * IT IS DRIVEN BY THE SIDEBAR'S LISTING, not by a fetch of its own: the page
+  ///     already reads every session of every project, so "is that id still a
+  ///     session" is a question about an answer that is on its way anyway.
+  ///   * IT HAPPENS ONCE, and only on the FIRST listing: it is a restore, not a
+  ///     policy -- an id that disappears from the list later (somebody archived it)
+  ///     leaves the page where it is.
+  ///   * A REMEMBERED ID THAT IS GONE FALLS BACK TO THE FRESH SESSION THE ROSTER
+  ///     ALREADY HAS, silently. A session that was deleted, archived or moved by hand
+  ///     is not a situation anybody can act on, so it is not a sentence either; the
+  ///     ID IS FORGOTTEN so the next reload does not ask again.
+  ///
+  /// `sofar` rather than `rebuild` is the host's door here, and that is the whole
+  /// ticket: the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and
+  /// which looking at must not disturb.
+  const restored = useRef(false);
+  const onListed = useCallback(
+    (projects: readonly ProjectSummary[]) => {
+      if (restored.current || pending === null) return;
+      restored.current = true;
+      const listed = listedSession(pending, projects);
+      if (listed !== null) {
+        // NO LOG YET means the conversation is empty by construction -- a session made
+        // on the sidebar and never run -- so there is nothing to read and nothing to
+        // ask for; a session WITH a log is read through the door that may only look.
+        show(pending, listed.bytes === null ? "none" : "sofar");
+      } else {
+        forgetSession(browserStorage(), pending);
+      }
+      setPending(null);
+    },
+    [pending, show],
   );
 
   return (
@@ -438,6 +627,7 @@ export function App() {
             `runtime.threads.switchToThread`, and it no longer has one. */}
         <Sidebar
           currentThreadId={roster.shown}
+          onListed={onListed}
           statuses={statuses}
           openErrors={openErrors}
           onShow={showExisting}
@@ -454,7 +644,7 @@ export function App() {
             <SessionHost
               key={`${host.id}:${host.attempt}`}
               threadId={host.id}
-              hydrate={host.hydrate}
+              read={host.read}
               visible={host.id === roster.shown}
               onStatus={reportStatus}
               onForget={forgetStatus}
