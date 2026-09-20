@@ -59,7 +59,8 @@
   (testing "bash does POSIX, and is handed the command with -lc"
     (is (true? (shell/posix? :bash)))
     (is (true? (shell/posix? :git-bash)))
-    (is (= ["-lc"] (shell/argv-prefix :bash))))
+    (is (= ["-lc"] (shell/argv-prefix :bash)))
+    (is (= ["-lc"] (shell/argv-prefix :git-bash))))
   (testing "PowerShell needs its own flags, and does not read POSIX quoting"
     (is (false? (shell/posix? :pwsh)))
     (is (= ["-NoProfile" "-Command"] (shell/argv-prefix :pwsh)))
@@ -144,6 +145,12 @@
 (deftest what-a-command-printed-before-the-limit-comes-back
   ;; The output is not discarded: a command that hangs after saying why it cannot
   ;; finish is exactly the case worth reading.
+  ;;
+  ;; THIS IS ALSO THE CASE THAT CATCHES A `-lc` -> `-c` "OPTIMIZATION", and it costs
+  ;; 10s of wall clock when it does -- both pipe drains run out their 5s default: with
+  ;; the profile skipped the timed-out child is never reaped, nothing closes the pipes,
+  ;; and the output is thrown away. Found exactly that way on 2026-09-20, when `-c`
+  ;; looked like a free 700ms off every spawn.
   (let [{:keys [out timeout]} (shell/run {:command "echo said-before-hanging; sleep 30"
                                           :timeout-ms 2000})]
     (is (true? timeout))
