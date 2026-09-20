@@ -1,5 +1,6 @@
 (ns harness.cap.jobs
-  "The commands this process is running in the background, and what they have said.
+  "The commands this process is running in the background, the records they leave
+  behind, and the verbs over both.
 
   A JOB IS NOT A SLOW TOOL CALL. `bash` returns when its command does, or at its
   own limit; a background job returns nothing at all until somebody asks, because
@@ -13,14 +14,24 @@
   run's end killed would be a background command nobody could ever check on, which
   is the only reason to start one.
 
-  A JOB'S OUTPUT IS A FILE, AND THE FILE IS THE RECORD. `start!` makes
-  `<root>/jobs/<thread-id>/<job-id>.log` in the configuration home, every line the
-  command prints is appended to it and flushed, and the model reads it with the
-  tools it already has: `bash` (`tail` / `grep` / `cat`), `read`, `grep`. So there
-  is nothing to lose and therefore nothing to report as lost -- no bounded tail, no
-  dropped-line count, no cursor recording how much of it this session has already
-  seen. A record is a file, and reading a file is a problem this repo does not need
-  to solve a second time.
+  A COMMAND'S OUTPUT IS A FILE, AND THE FILE IS THE RECORD. A background job gets one
+  from the moment it starts (`start!`: `<root>/jobs/<thread-id>/<job-id>.log`, every
+  line appended and flushed as it arrives), and a FOREGROUND `bash` call gets one when
+  its answer would not fit (`spill!`, `c1`, `c2`, …) -- the same directory, the same
+  lifetime, the same ending line, because it is the same thing: what a command said.
+  So there is nothing to lose and therefore nothing to report as lost -- no bounded
+  tail, no dropped-line count, no cursor recording how much of it this session has
+  already seen.
+
+  READING IS STILL A FILE, AND NOW ALSO A VERB. The tools the model already has --
+  `bash` (`tail` / `grep` / `cat`), `read`, `grep` -- read a record directly, which is
+  enough for 'what did it say'. What they cannot answer is 'is it over yet': the
+  caller's own loop is synchronous, so `output` (the face of `job_output`) answers
+  the record's last line plus a window of what it said, and `wait: true` blocks on
+  the job's own `:ended` promise until that line is written. The position in the
+  record is the CALLER'S (`offset`, a line number) -- there is no cursor here, and
+  that is on purpose: 'how much have I already seen' is a question this module has no
+  standing to answer, and every reader that answered it invented its own edges.
 
   AND ITS STATE IS ITS LAST LINE. The command's own output is whatever the command
   wrote; this repo appends exactly one line of its own when the job is over --
@@ -54,6 +65,7 @@
             [harness.infra.log :as log]
             [harness.infra.shell :as shell])
   (:import [java.io Writer]
+           [java.nio.charset StandardCharsets]
            [java.util.concurrent TimeUnit]
            [java.util.concurrent.atomic AtomicReference]))
 
@@ -88,6 +100,21 @@
   ;; will use it.
   (atom {}))
 
+(defonce ^:private record-counters
+  ;; thread-id -> how many FOREGROUND records it has spilled. A separate count from
+  ;; the job ids above, because `c3` and `j3` are two different kinds of thing: one
+  ;; is a file a `bash` answer pointed at, the other is a command that can be
+  ;; asked, stopped and waited for. Same discipline otherwise -- never reused.
+  (atom {}))
+
+(defonce ^:private spilled
+  ;; thread-id -> [path ..] -- the records this process wrote for commands it ran in
+  ;; the FOREGROUND. Nothing here is addressable and nothing here is live: a spilled
+  ;; record is finished the moment it is written. It is held for one reason only --
+  ;; `shutdown!` has to know what to take away (AGENTS.md's rule about what the
+  ;; configuration home may keep).
+  (atom {}))
+
 (defonce ^:private exit-hook-installed
   (atom false))
 
@@ -100,8 +127,8 @@
   assembled twice is a path that will eventually be assembled differently -- the same
   reason the default timeout is interpolated into `bash`'s description rather than
   repeated there."
-  [thread-id job-id]
-  (str (io/file (home/root) "jobs" (home/sanitize thread-id) (str job-id ".log"))))
+  [thread-id id]
+  (str (io/file (home/root) "jobs" (home/sanitize thread-id) (str id ".log"))))
 
 (defn- known-ids
   "This session's job ids, for a refusal that says what the caller could have meant."
@@ -134,6 +161,15 @@
   [thread-id]
   (let [[_ after] (swap-vals! counters update thread-id (fnil inc 0))]
     (str "j" (get after thread-id))))
+
+(defn- next-record-id!
+  "The session's next FOREGROUND record id -- `c1`, `c2`, … Same one-step arithmetic as
+  the job ids above, and the same promise: a number handed out is never handed out
+  again, so a `bash` answer quoting a record path can never be pointing at a later
+  command's record."
+  [thread-id]
+  (let [[_ after] (swap-vals! record-counters update thread-id (fnil inc 0))]
+    (str "c" (get after thread-id))))
 
 ;; ------------------------------------------------------------------- the record
 
@@ -174,9 +210,14 @@
   and a `stop!` stopping the job at that same moment. Whoever gets the Writer writes
   it; the other finds nil and leaves the record alone.
 
-  Answers true when this call is the one that wrote the line, false when somebody
   Answers true when this call is the one that wrote the line, and nil when the record
-  already had its last line -- neither is an error, and neither is reported as one."
+  already had its last line -- neither is an error, and neither is reported as one.
+
+  AND IT RELEASES EVERYBODY WAITING ON THIS JOB (`:ended`). The moment this line
+  lands is the moment a reader can know how the command went, so it is the moment a
+  `job_output {wait: true}` stops waiting -- whoever wrote the line, the pump or a
+  `stop!`. Delivering here rather than in each caller is what keeps that promise in
+  one place."
   [job line]
   (locking (:writer job)
     (when-let [^Writer w (.getAndSet ^AtomicReference (:writer job) nil)]
@@ -185,7 +226,9 @@
         (.flush w)
         true
         (catch Exception _ nil)
-        (finally (try (.close w) (catch Exception _ nil)))))))
+        (finally
+          (try (.close w) (catch Exception _ nil))
+          (when-let [ended (:ended job)] (deliver ended line)))))))
 
 (defn- close-record!
   "Let go of JOB's record file without writing anything more -- what `shutdown!`
@@ -196,16 +239,16 @@
       (try (.close w) (catch Exception _ nil)))))
 
 (defn- delete-record!
-  "Take JOB's record off the disk.
+  "Take the record at PATH off the disk.
 
   BEST EFFORT ON PURPOSE: a record that will not delete is a file in this process's
   own home, and failing a tool call -- or an exit -- over it helps nobody. It is
   logged all the same, because a cleanup that silently stopped working is a cleanup
   nobody knows is gone."
-  [job]
-  (let [f (io/file (:path job))]
+  [path]
+  (let [f (io/file path)]
     (when (and (.exists f) (not (.delete f)))
-      (log/warn! :jobs/record-not-deleted {:path (:path job)}))))
+      (log/warn! :jobs/record-not-deleted {:path path}))))
 
 (defn- ended-line
   "`[exit N]` for a process that is gone. Asked of the process rather than remembered,
@@ -258,7 +301,14 @@
   (future
     (try
       (loop []
-        (when (get-in @registry (path thread-id job-id))
+        (when (and (get-in @registry (path thread-id job-id))
+                   ;; AND THE RECORD IS STILL OPEN. An entry now OUTLIVES its job
+                   ;; (a stopped one stays, so `job_output` and a second `job_kill`
+                   ;; can answer for it), so the registry is no longer the thing that
+                   ;; says 'stop reading': the claimed Writer is. Without this the
+                   ;; loop would spin forever on a job whose pumps are cancelled,
+                   ;; asking a dead queue for a line every second.
+                   (some? (.get ^AtomicReference (:writer job))))
           (let [line ((:next-line (:handle job)) 1000)]
             (cond
               (shell/eof? line)     (do (settle! job)
@@ -289,17 +339,24 @@
   this and watching the processes go, never by forking.
 
   NOT called when a run ends: a background command that a run's end killed would be
-  one nobody could check on later, which is the whole point of starting it."
+  one nobody could check on later, which is the whole point of starting it.
+
+  THE FOREGROUND RECORDS GO WITH THE JOB ONES (`spill!`), for the same reason and on
+  the same clock: a `bash` answer that pointed at a file is as dead as the file when
+  this process goes, and both are this process's litter in its own home."
   []
-  (let [jobs (vec (mapcat (fn [[_ v]] (vals (:jobs v))) @registry))]
+  (let [jobs    (vec (mapcat (fn [[_ v]] (vals (:jobs v))) @registry))
+        records (vec (mapcat val @spilled))]
     (reset! registry {})
+    (reset! spilled {})
     ;; The order is the order of the filesystem: stop the processes, let go of the
     ;; records, and only then delete them -- a file still held open is a file
     ;; Windows will not delete. The pumps cannot write after the reset anyway (the
     ;; last line is claimed, and a claim is once).
     (doseq [j jobs] (close! j))
     (doseq [j jobs] (close-record! j))
-    (doseq [j jobs] (delete-record! j))
+    (doseq [j jobs] (delete-record! (:path j)))
+    (doseq [p records] (delete-record! p))
     nil))
 
 (defn install-hook!
@@ -330,6 +387,129 @@
   test drive the shell chain; a running process's hook is installed once and stays."
   []
   (reset! exit-hook-installed false))
+
+;; --------------------------------------------------------------- the answer
+;;
+;; A COMMAND CAN SAY MORE THAN AN ANSWER MAY CARRY, and this section is where that
+;; ceiling is decided and where the overflow goes. Three judgements are in it, and
+;; each of them is a decision rather than a detail:
+;;
+;;   BY BYTES, NOT BY LINES. One line of JSON can be a hundred kilobytes, so a line
+;;   budget is a budget with a hole in it.
+;;
+;;   THE TAIL, NOT THE HEAD. What a reader wants from a command that said a great
+;;   deal is where it ended up -- a test run's first lines are all `Testing …`. The
+;;   whole of it is in the record, and `grep` reaches the middle.
+;;
+;;   THE OVERFLOW IS WRITTEN, NOT DROPPED, and the answer says how many bytes are
+;;   missing and where the rest is. Silently cutting output is how a model comes to
+;;   believe it has seen everything (see .scratch/job-output/spec.md, which deleted
+;;   a whole verb that had a hole exactly like that one).
+;;
+;; ONE BUDGET, TWO READERS: `bash` cuts each of its two streams with it, and
+;; `job_output` answers with a window of a record that fits inside it. Both tool
+;; descriptions interpolate the number rather than writing their own.
+
+(def answer-budget-bytes
+  "How many bytes of a command's own output one answer carries before the rest is
+  left in the record for a reader to fetch.
+
+  ONE SOURCE. `bash` and `job_output` both interpolate this number into their own
+  descriptions and both cut their answers down to it -- a second literal would be a
+  second answer to 'how much fits', and the one in the description would be the
+  wrong one for however long it took somebody to notice."
+  8000)
+
+(defn- utf8-bytes [s]
+  (alength (.getBytes ^String s StandardCharsets/UTF_8)))
+
+(defn- char-bytes
+  "How many bytes CH takes in UTF-8, as an OVER-estimate: each half of a surrogate
+  pair counts three, so the pair comes to six where four would do. Over-counting is
+  the safe direction -- it is what keeps a multi-byte character from being cut in
+  half -- and the exact number comes from `utf8-bytes` once the cut is made."
+  [ch]
+  (let [c (int ch)]
+    (cond (< c 0x80) 1, (< c 0x800) 2, :else 3)))
+
+(defn- line-start
+  "I moved forward to the start of the next line, so a tail never begins with the back
+  half of a line. I itself when there is no line break after it: one enormous line is
+  still better than an empty answer."
+  [s i]
+  (if (or (zero? i) (= \newline (.charAt s (dec i))))
+    i
+    (if-let [j (str/index-of s "\n" i)]
+      (inc j)
+      i)))
+
+(defn tail-within-budget
+  "S as the largest TAIL of it that fits BUDGET bytes, and how many bytes that leaves
+  out: `{:text .. :omitted ..}`. Answers the whole of S -- with nothing omitted --
+  when it fits, so a caller can branch on `:omitted` alone.
+
+  THE CUT IS MADE AT A LINE BOUNDARY where there is one, and never inside a
+  character: an answer that began with the second half of a line, or with a broken
+  UTF-8 sequence, would be a bug the reader has to guess at. The omitted count is
+  exact -- it is measured against the text that is actually handed back, not against
+  the cut point."
+  [s budget]
+  (let [total (utf8-bytes s)]
+    (if (<= total budget)
+      {:text s :omitted 0}
+      (loop [i (count s), used 0]
+        (if (zero? i)
+          ;; Unreachable while every char counts at least one byte, and cheap
+          ;; insurance against a budget of zero.
+          {:text "" :omitted total}
+          (let [w (char-bytes (.charAt ^String s (dec i)))]
+            (if (> (+ used w) budget)
+              (let [text (subs s (line-start s i))]
+                {:text text :omitted (- total (utf8-bytes text))})
+              (recur (dec i) (+ used w)))))))))
+
+(defn truncation-line
+  "The line an answer carries when it could not carry everything: how many bytes are
+  missing (from WHICH stream, when the answer has two of them), and where the whole
+  of it can be read. NIL PATH means the record could not be written, and then the
+  line says that instead of naming a file that is not there."
+  ([omitted path] (truncation-line omitted path nil))
+  ([omitted path what]
+   (str "[truncated: omitted " omitted " bytes" (when what (str " of " what))
+        "; " (if path
+               (str "the whole output is " path)
+               "the whole output could not be written to a record")
+        "]")))
+
+(defn spill!
+  "Write TEXT as the record of a command THIS CALL ran in the foreground, and answer
+  where it is -- or nil when it could not be written.
+
+  A FOREGROUND RECORD IS NOT A JOB. There is no process to stop, no id anyone will
+  address, and nothing to read while it grows: it is written once, whole, by the call
+  that ran the command. It lives exactly where a job's record lives, though, and for
+  the same two reasons -- the configuration home is free of the fence, so `read` and
+  `grep` reach it with no human in the way, and `shutdown!` takes this process's
+  records with it.
+
+  FAILING TO WRITE IS NOT AN ERROR the caller has to handle: the answer it was going
+  to point at is already bounded, so the call still returns a tail and a line saying
+  the rest could not be kept. It is logged, because a record nobody can write is a
+  leak, not a hiccup."
+  [thread-id text]
+  (try
+    (let [p (record-path thread-id (next-record-id! thread-id))
+          f (io/file p)]
+      ;; REGISTERED BEFORE IT IS WRITTEN: a half-written file is litter too, and the
+      ;; exit hook has to know about it either way.
+      (swap! spilled update thread-id (fnil conj []) p)
+      (io/make-parents f)
+      (spit f text :encoding "UTF-8")
+      (ensure-exit-hook!)
+      p)
+    (catch Exception e
+      (log/warn! :jobs/record-not-written {:error (ex-message e)})
+      nil)))
 
 ;; ------------------------------------------------------------------- the verbs
 
@@ -366,47 +546,206 @@
         p      (record-path thread-id job-id)]
     (try
       (let [job {:id job-id :handle handle :path p
-                 :writer (AtomicReference. (open-record! thread-id job-id))}]
+                 :writer (AtomicReference. (open-record! thread-id job-id))
+                 ;; DELIVERED WHEN THE RECORD GETS ITS LAST LINE, whoever writes it.
+                 ;; A `job_output {wait: true}` blocks on this rather than polling the
+                 ;; file: the line and this and the moment are one event, so there is
+                 ;; nothing to poll for.
+                 :ended (promise)}]
         (ensure-exit-hook!)
         (swap! registry assoc-in (path thread-id job-id) job)
         (pumping! thread-id job-id job)
         {:id job-id :path p})
       (catch Throwable t
         (close! {:handle handle})
-        (delete-record! {:path p})
+        (delete-record! p)
         (throw t)))))
 
+;; --------------------------------------------------------------- reading a job
+;;
+;; TWO FACTS, AND THE RECORD ANSWERS BOTH. What a job SAID is its file, and how it
+;; went is the file's last line -- a convention this repo already keeps
+;; (`.scratch/job-output/spec.md` decision 6): `[exit N]` once the stream is drained
+;; and the process is gone, `[stopped]` when we stopped it, and NO such line means it
+;; is still running.
+;;
+;; THOSE ARE THE ONLY STATES. There is no separate enum of running/stopping/
+;; completed/killed/failed to invent, keep and get wrong: the two things a reader
+;; wants to know are whether it is over and how it ended, and the last line says
+;; both. `job_output`'s answer prints that line as its first line and the command's
+;; own output below it.
+
+(defn- record-lines
+  "PATH's record as a vector of lines -- empty when the file is empty, and empty when
+  it is not there at all (a caller asking about a record that has been taken away
+  gets an answer, not an exception)."
+  [path]
+  (try
+    (let [text (slurp path :encoding "UTF-8")]
+      (if (str/blank? text) [] (vec (str/split-lines text))))
+    (catch Exception _ [])))
+
+(defn- ending-of
+  "The last line of the record at PATH when it is one of the lines this repo appends
+
+  -- `[exit N]` or `[stopped]` -- and nil when the record does not end on one.
+
+  THE `[exit ?]` SPELLING IS INCLUDED because `ended-line` can produce it: it is what
+  is left for the moment between the process being gone and its exit code being
+  readable, and a reader that did not recognise it would report a finished job as a
+  running one."
+  [path]
+  (when-let [last (peek (record-lines path))]
+    (when (re-matches #"\[(exit [^\]]*|stopped)\]" last) last)))
+
+(defn- terminal?
+  "Is JOB over? Asked of the record rather than of the process, and asked as ONE fact:
+
+  `write-last-line!` claims the Writer at the same moment it writes the ending, so
+  'the record is closed' and 'the last line is written' cannot disagree. A write that
+  fails still closes the record -- what is over, is over."
+  [job]
+  (nil? (.get ^AtomicReference (:writer job))))
+
+(defn- line-bytes [line]
+  (alength (.getBytes ^String (str line "\n") StandardCharsets/UTF_8)))
+
+(defn- tail-window
+  "Where the largest SUFFIX of LINES that fits BUDGET bytes begins -- always at least
+  one line, so a single enormous line is answered with rather than swallowed."
+  [lines budget]
+  (let [n (count lines)]
+    (loop [i n, used 0]
+      (if (zero? i)
+        i
+        (let [b (line-bytes (nth lines (dec i)))]
+          (cond
+            (= i n)               (recur (dec i) b)
+            (> (+ used b) budget) i
+            :else                 (recur (dec i) (+ used b))))))))
+
+(defn- forward-window
+  "Where a window that BEGINS at START stops when it runs into BUDGET bytes -- at
+  least the line at START, for the same reason as `tail-window`."
+  [lines start budget]
+  (loop [i start, used 0]
+    (if (>= i (count lines))
+      i
+      (let [b (line-bytes (nth lines i))]
+        (if (or (= i start) (<= (+ used b) budget))
+          (recur (inc i) (+ used b))
+          i)))))
+
+(defn job-output-default-timeout-ms
+  "How long `job_output` waits for a job when the call says `wait` and does not say for
+  how long.
+
+  NOT A LIMIT ON THE JOB -- a job has none, and this changes nothing about it. It is
+  the caller saying 'this is how long I am willing to sit here', and when it runs out
+  the answer is the state of things as they are (`[running]`), which is an answer
+  and not an error. The tool's description interpolates it, so there is one number."
+  []
+  120000)
+
+(defn output
+  "What JOB-ID has said, and how it went, as
+  `{:status .. :lines [..] :from .. :to .. :total ..}`:
+
+  - `:status` -- the record's last line when the job is over (`[exit N]` / `[stopped]`),
+    else `[running]`. ONE LINE, because that is what the record itself says.
+  - `:lines`  -- the window of the command's own lines this answer carries. `:from`
+    and `:to` are its 1-based line numbers IN THE RECORD, so they can be checked
+    against `grep -n` on the same file, and `:total` is how many lines there are.
+
+  WHERE THE WINDOW IS, when the caller did not say: THE TAIL. 'What has it said
+  lately' is what a glance at a job asks, and a job that has printed ten thousand
+  lines should not answer with its first hundred. `offset` asks for a stretch that
+  begins somewhere (`read`'s own convention, 1-based, INTO the record), and `limit`
+  caps how many lines come back. Both are bounded by `answer-budget-bytes` -- the
+  same ceiling a `bash` answer has, from the same place.
+
+  WAIT MEANS WAIT FOR IT TO BE OVER: `wait: true` blocks until the record is closed
+  or `timeout` runs out, and a timeout is an ordinary answer (`[running]` plus
+  whatever it has said so far), never an error. There is nothing to poll and no way
+  to be notified otherwise -- a job is a command nobody is waiting for, and this is
+  how a caller decides to wait anyway.
+
+  IT WAITS FOR THE ENDING LINE, NOT FOR THE STREAM: a command that lets go of its
+  stdout and lives on (`exec 1>&-`) has an ended stream and no ending line, and no
+  ending line is the honest answer to 'is it over' -- so a `wait` on that one runs to
+  the timeout and says `[running]` rather than inventing an end for it.
+
+  THE JOB MUST BELONG TO THIS SESSION, and a job that is over still answers: its
+  record is kept until this process goes."
+  [thread-id job-id {:keys [offset limit wait timeout]}]
+  (let [job (with-job thread-id job-id (fn [reg _] reg))]
+    (when (and wait (not (terminal? job)))
+      (deref (:ended job) (long (or timeout job-output-default-timeout-ms)) ::timeout))
+    (let [lines    (record-lines (:path job))
+          over?    (terminal? job)
+          status   (if over? (or (peek lines) "[exit ?]") "[running]")
+          content  (if over? (vec (butlast lines)) lines)
+          total    (count content)
+          ;; WHERE THE WINDOW IS. `offset` starts one where the reader says (and a
+          ;; number past the end of the record is an EMPTY window rather than an
+          ;; error -- the status is still the truth, and `:from`/`:to`/`:total` say
+          ;; what happened). With no offset it is the TAIL: the last lines that fit,
+          ;; which is what a glance at a job asks for.
+          [from to] (if offset
+                      (let [start (min (dec offset) total)
+                            end   (min total (+ start (or limit
+                                                         (forward-window content start answer-budget-bytes))))]
+                        [start (max start end)])
+                      [(if limit
+                         (max 0 (- total limit))
+                         (tail-window content answer-budget-bytes))
+                       total])]
+      {:status status
+       :lines  (subvec content from to)
+       :from   (inc from)
+       :to     to
+       :total  total})))
+
 (defn stop!
-  "Stop JOB-ID -- it and everything it started -- and forget it. Answers
-  `{:id .. :path .. :stopped? ..}`: the record's location, and whether this call is
-  what stopped it or the command had already ended by itself.
+  "Stop JOB-ID -- it and everything it started. Answers
+  `{:id .. :path .. :stopped? .. :ending ..}`: the record's location, whether THIS
+  call is what stopped it, and the record's last line (which is how it went, whether
+  or not this call had anything to do with it).
 
   THE RECORD SURVIVES THE STOP, and that is the point of answering with its path:
   'stop it, then read what it said' is the ordinary order, and the alternative -- a
   stop that took the output with it -- would make the model decide whether to read
   before knowing whether it needed to.
 
-  `[stopped]` IS CLAIMED BEFORE THE KILL, so the pump that wakes to a dead process
-  cannot write `[exit N]` after we have said `[stopped]`. A command that had ALREADY
-  ended writes nothing here: its exit code is the honest last line, and the pump is
-  the one holding the tail it has not drained yet.
+  `[stopped]` IS CLAIMED BEFORE ANYTHING IS KILLED, so the pump that wakes to a dead
+  process cannot write `[exit N]` after we have said `[stopped]`. A command that had
+  ALREADY ended writes nothing here: its exit code is the honest last line, and the
+  pump is the one holding the tail it has not drained yet.
 
-  A JOB THAT HAS ALREADY ENDED IS FORGOTTEN TOO, and this is the only verb that
-  leaves the registry, so `job_kill` means 'stop caring about this job' in both
-  cases. Asking twice therefore gets the unknown-job refusal the second time --
-  idempotent in the only way that matters, since the second caller finds it gone
-  rather than finding it twice.
+  THE CALL DOES NOT WAIT FOR THE PROCESS TO DIE. Killing a tree is `destroy`, a
+  bounded wait and then `destroyForcibly` (see `infra.shell`), and that wait is the
+  wrong thing to spend a tool call on: what the caller asked for is 'stop it', and
+  the fact it needs back is the one `[stopped]` already states. So the tree is walked
+  on a thread of its own and the answer comes back at once.
+
+  THE JOB STAYS, AND ASKING AGAIN IS ALLOWED. A stopped (or finished) job keeps its
+  entry, with its record closed -- which is what makes `job_output` able to answer
+  for a job that is over, and a second `job_kill` able to answer the same thing
+  again instead of refusing an id it handed out itself. The entry holds a path and a
+  closed writer, and the process goes with this process.
 
   THROWS for a job id this session does not have."
   [thread-id job-id]
-  (let [job (with-job thread-id job-id
-                      (fn [reg _] (update-in reg [thread-id :jobs] dissoc job-id)))
-        running? ((:alive? (:handle job)))]
+  (let [job (with-job thread-id job-id (fn [reg _] reg))
+        running? (and (not (terminal? job)) ((:alive? (:handle job))))]
     (if running?
       (do (write-last-line! job "[stopped]")
-          (close! job))
+          (future (try (close! job) (catch Throwable _ nil))))
+      ;; NOT RUNNING: the exit line is written here only if the record is still open
+      ;; (the pump may have beaten us to it), and the claim makes asking twice safe.
       (write-exit-line! job))
-    {:id job-id :path (:path job) :stopped? running?}))
+    {:id job-id :path (:path job) :stopped? running?
+     :ending (ending-of (:path job))}))
 
 ;; -------------------------------------------------------- what a command sends away
 

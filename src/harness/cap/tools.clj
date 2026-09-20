@@ -186,6 +186,47 @@
   two minutes after somebody changes the default."
   120000)
 
+(defn- work-dir
+  "The directory a `bash` call runs in: the session's project binding, or -- when the
+  call names one -- `workdir`, resolved the way every other path in this table is
+  (relative to the project directory).
+
+  MEMBERSHIP IS NOT CHECKED, and that is not an oversight: `bash` has no fence at
+  all -- a command can `cd` anywhere or read anything inside its own string -- so
+  parking a `workdir` would gate a door the same command opens by itself. What IS
+  checked is the one thing the shell cannot fix: it has to be a directory, and
+  which of the two ways it is not one is said out loud.
+
+  `nil` (no `workdir` given) answers the binding, exactly as before -- including
+  the unbound case, where the binding is nil and the child inherits this process's
+  own working directory."
+  [thread-id workdir]
+  (if (nil? workdir)
+    (project/binding-for thread-id)
+    (let [d (project/resolve-path thread-id workdir)
+          f (io/file d)]
+      (when-not (.isDirectory f)
+        (throw (ex-info (str "`workdir` must be a directory; "
+                             (if (.exists f)
+                               (str d " is a file.")
+                               (str "nothing is there at " d ".")))
+                        {:argument :workdir :path d :reason :not-a-directory})))
+      d)))
+
+(defn- record-text
+  "What a spilled answer leaves in its record: the bytes the answer would have carried
+  if it were unbounded -- stdout and then stderr, the order the answer itself uses --
+  plus the ending line, terminated, so a reader of the record finds one account of
+  what the command said and how it ended.
+
+  The newline is put back when the command's own output did not end on one: without
+  it the ending would be welded onto the last line the command printed, and the
+  record's last line would be that line plus `[exit 0]`."
+  [out err ending]
+  (let [body (str out err)]
+    (str (if (and (seq body) (not (str/ends-with? body "\n"))) (str body "\n") body)
+         ending "\n")))
+
 (defn- t-bash
   "`bash`'s body: one command, a bounded wait, and the answer.
 
@@ -199,20 +240,44 @@
   A timeout is not an error: the command's own output is returned, with the limit
   appended in the same shape a non-zero exit gets. The model learns what happened
   and can try something narrower -- the same judgement `cap.git` makes about a git
-  that hung ('a fact the caller may want to report')."
-  [{:keys [command timeout]}]
-  (let [dir   (project/binding-for kernel-tools/*thread-id*)
+  that hung ('a fact the caller may want to report').
+
+  `stdin` IS WRITTEN AND THEN CLOSED (`infra.shell/run` has always done that): a
+  command that reads it sees EOF rather than waiting for a parent that is never
+  going to type. `workdir` is where it runs -- see `work-dir` for what is, and is
+  not, checked about it."
+  [{:keys [command timeout stdin workdir]}]
+  (let [dir   (work-dir kernel-tools/*thread-id* workdir)
         limit (or (positive-int :timeout timeout) bash-default-timeout-ms)
         {:keys [exit out err] stopped :timeout} (shell/run {:command command
+                                                            :stdin stdin
                                                             :dir (when dir dir)
                                                             :timeout-ms limit})
-        body  (str out err)]
-    (str (if (str/blank? body) "(no output)" body)
-         (cond
-           ;; A process that never finished has no exit code -- the limit is the
-           ;; fact, and `exit` is nil here, so a `(zero? exit)` would throw.
-           stopped           (str "\n[timed out after " limit "ms — the command was stopped]")
-           (not (zero? exit)) (str "\n[exit " exit "]")))))
+        ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
+        ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
+        ;; the output did not fit, the record ends on this line and so does the
+        ;; answer, so the two can never disagree about how the command ended.
+        ending (cond stopped (str "[timed out after " limit "ms — the command was stopped]")
+                     (not (zero? exit)) (str "[exit " exit "]"))
+        out*  (jobs/tail-within-budget out jobs/answer-budget-bytes)
+        err*  (jobs/tail-within-budget err jobs/answer-budget-bytes)
+        body  (str (:text out*) (:text err*))]
+    (if (and (zero? (:omitted out*)) (zero? (:omitted err*)))
+      (str (if (str/blank? body) "(no output)" body)
+           (when ending (str "\n" ending)))
+      ;; Over budget: the whole of it goes to a record, the answer keeps the tail of
+      ;; each stream -- they are counted separately, so a single line of stderr is
+      ;; never squeezed out by a loud stdout -- and the bytes left out are said out
+      ;; loud, per stream, next to where the rest can be read.
+      (let [ending (or ending "[exit 0]")
+            path   (jobs/spill! kernel-tools/*thread-id*
+                                (record-text out err ending))]
+        (str body
+             (when (pos? (:omitted out*))
+               (str "\n" (jobs/truncation-line (:omitted out*) path "stdout")))
+             (when (pos? (:omitted err*))
+               (str "\n" (jobs/truncation-line (:omitted err*) path "stderr")))
+             "\n" ending)))))
 
 (defn- t-eval [{:keys [code]}]
   (let [sw (java.io.StringWriter.)
@@ -689,15 +754,30 @@
          :park-reason (fence nil)))
 
 (register! "bash"
-  (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere). The working"
-             " directory is this session's project directory when one is bound, otherwise the"
-             " process working directory. "
+  (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere). "
+             "`stdin` is written to the command and then closed, so a command that reads its"
+             " input sees EOF rather than waiting for a parent that never types; `workdir` is the"
+             " directory to run in (relative paths resolve against this session's project"
+             " directory, which is also what a call without `workdir` uses; when no project is"
+             " bound that is the process working directory). "
              "The command gets " bash-default-timeout-ms "ms to finish; `timeout` overrides that,"
              " in milliseconds. When the limit is reached the command is stopped -- together with"
              " everything it started -- and whatever it printed by then comes back, with a line"
              " saying it was stopped. A very large `timeout` means this run really does wait that"
-             " long; for something that has to outlive the call, use `job` instead.")
+             " long; for something that has to outlive the call, use `job` instead."
+             " The answer carries at most " jobs/answer-budget-bytes " bytes of what the command"
+             " printed -- the tail of it, each stream counted on its own. When there is more,"
+             " the whole output is written to a file and the answer says how many bytes are"
+             " missing and where: read the rest with `bash` (`tail` / `grep`), or with `read` /"
+             " `grep`.")
         {"command" {:type "string" :description "Command line."}
+         "stdin"   {:type "string"
+                    :description (str "Text to write to the command's standard input, then close"
+                                      " it. Nothing means an empty stream, closed.")}
+         "workdir" {:type "string"
+                    :description (str "Directory to run in; relative paths resolve against this"
+                                      " session's project directory, as they do for `read`. It"
+                                      " must be a directory.")}
          "timeout" {:type "integer" :minimum 1
                     :description (str "How long to wait, in milliseconds. Default "
                                       bash-default-timeout-ms ".")}}
@@ -705,27 +785,35 @@
 
 ;; ---------------------------------------------------------------- 后台执行
 ;;
-;; TWO NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing
+;; THREE NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing
 ;; toolset's precedent (`replace` / `insert` / `undo_last_replace` are three names,
 ;; not one `edit {action}`): each schema then carries exactly its own arguments, so
 ;; the seam's missing-argument check answers for every verb, and a refusal belongs
-;; to one verb instead of to a branch. The cost is two descriptions in every
+;; to one verb instead of to a branch. The cost is three descriptions in every
 ;; request, which is the price of that clarity.
+;;
+;; START, READ, STOP. `job` hands a command to the background and answers an id;
+;; `job_output` reads what it has said and can wait for it; `job_kill` stops it.
+;; The reader is the newest of the three and the one the two others point at: a
+;; record is a file, and reading a file is a problem this repo already solved --
+;; but 'is it over yet' is not a question a file answers to a synchronous caller,
+;; which is what `wait` is for.
 ;;
 ;; THE WORK IS IN harness.cap.jobs. What is here is the faces.
 
 (def ^:private job-description
   (str "Run a shell command in the BACKGROUND: this call returns as soon as the command has"
-       " started, and the command keeps running. Use it for something that has to outlive the"
-       " call -- a dev server, a watcher, a slow test or build -- so you can carry on working"
-       " while it runs. "
+       " started, and the command keeps running. Use it for something that HAS TO OUTLIVE"
+       " the call -- a dev server, a watcher, a run you will come back to -- so you can carry"
+       " on working while it runs. (How long a command takes is not the question: if you are"
+       " only going to wait for it, use `bash` and give it a big `timeout`.) "
        "The answer is a job id (like `j1`) and where that job's record is; the command's output"
-       " is NOT in it. That output is kept in a file -- every line, nothing dropped, written as"
-       " it arrives -- so read it with `bash` (`tail` / `grep` / `cat`), or with `read` /"
-       " `grep`. Its last line says how the job ended: `[exit N]` once the command is gone,"
-       " `[stopped]` if it was stopped -- and no such line means it is still running. "
-       "A job has NO timeout -- it runs until it ends or until it is stopped -- and it lives"
-       " only as long as this harness process. "
+       " is NOT in it. Read what it has said with `job_output`, which also says how it went and"
+       " can WAIT for it to end; the record is a plain file in this session's configuration"
+       " home, so `bash` (`tail` / `grep` / `cat`), `read` and `grep` read it too."
+       " A job has NO timeout -- it runs until it ends or until it is stopped -- and NOTHING"
+       " TELLS YOU when it is over: `job_output` waits for it if you ask it to, and asking again"
+       " later is how you check. It lives only as long as this harness process. "
        "The working directory is this session's project directory when one is bound,"
        " otherwise the process working directory, exactly as `bash`."))
 
@@ -754,26 +842,72 @@
         {:keys [id path]} (jobs/start! kernel-tools/*thread-id*
                                        {:command command :dir dir})]
     (str "job " id " started; its record is " path
-         " -- read it with `bash` (`tail` / `grep`), or with `read` / `grep`."
+         " -- read it with `job_output`, or with `bash` / `read` / `grep`."
          (redirect-note command))))
 
 (def ^:private job-kill-description
-  (str "Stop a background job -- the command and everything it started -- and forget it."
-       " Use it when a job has done what you needed, has gone wrong, or is holding something"
-       " you want back (a port, a file). "
-       "The answer says where the job's record is, and whether this call stopped it or the"
-       " command had already ended by itself. The record stays where it is, its last line"
-       " `[stopped]` or `[exit N]`, so read it with `bash` (`tail` / `grep`), or with `read` /"
-       " `grep`, before or after stopping. Either way the job is gone afterwards -- stopping it"
-       " twice, or naming a job that is gone, finds nothing."))
+  (str "Stop a background job -- the command and everything it started. Use it when a job has"
+       " done what you needed, has gone wrong, or is holding something you want back (a port, a"
+       " file). "
+       "The answer says where the job's record is, and how it went -- `[stopped]` if this call"
+       " stopped it, or the last line it had already written. THE RECORD STAYS: its last line is"
+       " `[stopped]` or `[exit N]`, so `job_output` (or `bash` `tail` / `grep`, or `read`)"
+       " reads it before or after stopping. "
+       "Stopping does not wait for the process to go -- the answer comes back as soon as the"
+       " kill is requested. Asking again is fine and answers the same thing, because a job that"
+       " is over is kept until this process ends; only an id this session never had is refused."))
 
 (defn- t-job-kill
-  "`job_kill`'s body: stop it, forget it, and answer with where its record is."
+  "`job_kill`'s body: stop it, and answer with where its record is -- and how it went,
+  which is the record's own last line (the same line `job_output` would print)."
   [{:keys [job]}]
-  (let [{:keys [id path stopped?]} (jobs/stop! kernel-tools/*thread-id* job)]
-    (str "job " id (if stopped? " stopped" " had already ended")
+  (let [{:keys [id path stopped? ending]} (jobs/stop! kernel-tools/*thread-id* job)]
+    (str "job " id (if stopped? " stopped"
+                       (str " was already over" (when ending (str " (" ending ")"))))
          "; its record is " path
-         " -- read it with `bash` (`tail` / `grep`), or with `read` / `grep`.")))
+         " -- read it with `job_output`, or with `bash` / `read` / `grep`.")))
+
+(def ^:private job-output-description
+  (str "Read what a background job has said, and how it went. "
+       "The first line of the answer is how it stands: `[exit N]` once the command is gone,"
+       " `[stopped]` if it was stopped, `[running]` while it is still going (a job that has"
+       " said nothing yet is `[running]` too). Below that is what it has said -- by default the"
+       " LAST " jobs/answer-budget-bytes " bytes of it, so a command that has printed thousands"
+       " of lines answers with its end rather than its beginning. "
+       "`offset` (1-based, a line number of the record) reads from a given line instead, and"
+       " `limit` caps how many lines come back; the answer names which lines it showed and how"
+       " many there are in all, so a long record can be walked in order. Nothing is ever lost:"
+       " it is the job's record file, which `bash` (`tail` / `grep`), `read` and `grep` read"
+       " directly. "
+       "`wait: true` blocks until the command is over -- or until `timeout` (default "
+       jobs/job-output-default-timeout-ms "ms) runs out, and that is not an error: the answer"
+       " is `[running]` with whatever the command has said so far. NOTHING NOTIFIES YOU when a"
+       " job ends, so `wait` is how you wait and asking again later is how you check. "
+       "A job that is over still answers: its record is kept until this process ends."))
+
+(defn- t-job-output
+  "`job_output`'s body: the facts harness.cap.jobs reads off the record, as the answer a
+  model reads. The arithmetic -- which lines, what status -- is the module's; what is here
+  is the shape."
+  [{:keys [job offset limit wait timeout]}]
+  (let [{:keys [status lines from to total]}
+        (jobs/output kernel-tools/*thread-id* job
+                     {:offset  (positive-int :offset offset)
+                      :limit   (positive-int :limit limit)
+                      :wait    wait
+                      :timeout (positive-int :timeout timeout)})]
+    (str status "\n"
+         (cond
+           ;; THE TWO EMPTY CASES ARE DIFFERENT FACTS, and a reader can tell them
+           ;; apart: a job that has not printed is not a job whose lines the reader
+           ;; asked for by a number that is past the end of them.
+           (seq lines)     (str (str/join "\n" lines) "\n")
+           ;; `bash`'s words for a command that said nothing, so a model that has
+           ;; seen one of these has seen the other.
+           (zero? total)   "(no output)\n"
+           :else           "(no lines in that range)\n")
+         (when (and (seq lines) (or (> from 1) (< to total)))
+           (str "[" total " lines in all; this answer shows lines " from "-" to "]")))))
 
 (register! "job"
   (tool job-description
@@ -784,6 +918,23 @@
   (tool job-kill-description
         {"job" {:type "string" :description "Job id, as `job` answered."}}
         [:job] t-job-kill))
+
+(register! "job_output"
+  (tool job-output-description
+        {"job"     {:type "string" :description "Job id, as `job` answered."}
+         "offset"  {:type "integer" :minimum 1
+                    :description (str "Line number of the record to read from (1-based)."
+                                      " Default: the tail of it, within "
+                                      jobs/answer-budget-bytes " bytes.")}
+         "limit"   {:type "integer" :minimum 1
+                    :description "How many lines to return at most."}
+         "wait"    {:type "boolean"
+                    :description (str "Wait for the command to finish (or for `timeout`) before"
+                                      " answering. Default false: answer now.")}
+         "timeout" {:type "integer" :minimum 1
+                    :description (str "How long `wait` waits, in milliseconds. Default "
+                                      jobs/job-output-default-timeout-ms ".")}}
+        [:job] t-job-output))
 
 (register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."
@@ -862,7 +1013,6 @@
                           :required ["content" "status"]}
                   :description (str "The COMPLETE list, in order. [] clears it.")}}
         [:todos] t-todo-write))
-
 
 ;; Configure this session's provider. Marked :requires-approval so a model
 ;; cannot repoint its own session at another endpoint without a human saying so

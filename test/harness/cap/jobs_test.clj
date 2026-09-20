@@ -152,7 +152,7 @@
         (is (= 1 @installs) "three calls, one hook -- two would run the reap twice"))
       (finally (jobs/ensure-exit-hook!)))))
 
-(deftest stopping-a-job-takes-the-whole-tree-and-forgets-it
+(deftest stopping-a-job-takes-the-whole-tree-and-leaves-it-answerable
   (let [dir (support/temp-dir "jobs-stop")
         pid-file (io/file dir "child.pid")
         {:keys [id path]} (jobs/start! "jt-i" {:command (support/child-command pid-file)})
@@ -174,8 +174,15 @@
       ;; like a command still running.
       (Thread/sleep 1500)
       (is (= "[stopped]" (last (record path)))))
-    (testing "and the job is forgotten, so a second stop finds nothing"
-      (let [e (try (jobs/stop! "jt-i" id) nil (catch Exception e e))]
+    (testing "and the job is still there to be asked about"
+      ;; THE ENTRY OUTLIVES THE JOB, and that is what makes asking twice an ANSWER
+      ;; rather than a refusal: the id was handed out by this session, and 'it is
+      ;; over, here is how' is the truth about it. Only an id this session never had
+      ;; is refused.
+      (let [again (jobs/stop! "jt-i" id)]
+        (is (false? (:stopped? again)) "this call is not the one that stopped it")
+        (is (= "[stopped]" (:ending again))))
+      (let [e (try (jobs/stop! "jt-i" "j-never-handout") nil (catch Exception e e))]
         (is (= :unknown-job (:reason (ex-data e))))))
     (cleanup-dir! dir)))
 
@@ -193,16 +200,17 @@
     (is (some #{"nobody-read-this"} (record path)))
     (is (= "[stopped]" (last (record path))))))
 
-(deftest a-job-that-ended-gives-its-exit-code-and-is-forgotten
+(deftest a-job-that-ended-gives-its-exit-code
   (let [{:keys [id path]} (jobs/start! "jt-k" {:command "exit 3"})]
     (record-until path #(re-find #"\[exit" %) 10000)
     (is (= "[exit 3]" (last (record path))))
     (let [answer (jobs/stop! "jt-k" id)]
       (testing "a job that died on its own is not reported as stopped"
         (is (false? (:stopped? answer))))
-      (testing "and is still forgotten, because remembering it forever is a leak"
-        (let [e (try (jobs/stop! "jt-k" id) nil (catch Exception e e))]
-          (is (= :unknown-job (:reason (ex-data e)))))))))
+      (testing "and asking again answers the same ending rather than refusing"
+        (let [again (jobs/stop! "jt-k" id)]
+          (is (false? (:stopped? again)))
+          (is (= "[exit 3]" (:ending again))))))))
 
 (deftest the-exit-line-arrives-after-the-output-that-went-with-it
   ;; The invariant, stated once: the record that says `[exit N]` also carries the
@@ -282,3 +290,166 @@
                             ["echo x \\> /tmp/y"             nil]
                             ["echo hi"                      nil]]]
     (is (= target (jobs/output-redirect command)) (str "command: " command))))
+
+;; ------------------------------------------------------- the answer's ceiling
+;;
+;; A command can say more than one answer may carry. The arithmetic below is a pure
+;; function of a string and a number, so it is asserted where it lives -- and the tool
+;; seam's cases are about the ANSWER (a tail, an omitted count, a path, and a command
+;; too quiet to have any of that).
+
+(deftest a-tail-is-cut-by-bytes-and-at-a-line
+  (testing "what fits comes back whole, and says nothing was left out"
+    (is (= {:text "one\ntwo\n" :omitted 0}
+           (jobs/tail-within-budget "one\ntwo\n" 8))
+        "exactly at the budget is still inside it"))
+  (testing "over it, the TAIL is what is kept"
+    (let [{:keys [text omitted]} (jobs/tail-within-budget "one\ntwo\nthree\nfour\n" 12)]
+      (is (= "three\nfour\n" text) "the last lines, not the first")
+      (is (= 8 omitted) "and the bytes left out are counted, not estimated")))
+  (testing "a cut lands on a line, never in the middle of one"
+    (let [{:keys [text]} (jobs/tail-within-budget "alpha\nbravo\ncharlie\n" 10)]
+      (is (= "charlie\n" text) "`bravo`'s back half is not a line")))
+  (testing "and one enormous line is still better than nothing"
+    (let [{:keys [text]} (jobs/tail-within-budget (str "head\n" (apply str (repeat 100 "x"))) 20)]
+      (is (= (apply str (repeat 20 "x")) text) "no newline to cut at: the bytes are the answer")))
+  (testing "a multi-byte character is whole or absent, never half of one"
+    ;; Every character here is three bytes: a cut that ignored that would hand back
+    ;; bytes that decode to a replacement character, which reads as corruption.
+    (let [{:keys [text]} (jobs/tail-within-budget "一\n二\n三\n四\n" 8)]
+      (is (= "三\n四\n" text))
+      (is (= 8 (alength (.getBytes text "UTF-8")))))))
+
+(deftest a-truncation-line-names-what-is-missing-and-where-the-rest-is
+  (is (= "[truncated: omitted 12 bytes of stdout; the whole output is /tmp/x.log]"
+         (jobs/truncation-line 12 "/tmp/x.log" "stdout")))
+  (is (= "[truncated: omitted 12 bytes; the whole output is /tmp/x.log]"
+         (jobs/truncation-line 12 "/tmp/x.log")))
+  (testing "and when the record could not be written it says that instead of pointing"
+    (let [line (jobs/truncation-line 12 nil)]
+      (is (str/includes? line "could not be written"))
+      (is (not (str/includes? line "nil"))))))
+
+(deftest a-spilled-record-is-this-processs-and-goes-with-it
+  (let [dir (support/temp-dir "jobs-spill")]
+    (try
+      (let [path (jobs/spill! "jt-spill" "the whole of what it said\n[exit 0]\n")]
+        (is (str/starts-with? path (home/root)) "in the configuration home, where the fence is free")
+        (is (= "the whole of what it said\n[exit 0]\n" (slurp path :encoding "UTF-8")))
+        (testing "and it is not addressable as a job: nothing can be stopped or waited for"
+          (let [e (try (jobs/stop! "jt-spill" "c1") nil (catch Exception e e))]
+            (is (= :unknown-job (:reason (ex-data e))))))
+        (jobs/shutdown!)
+        (is (not (.exists (io/file path))) "the process's records are the process's to take away"))
+      (finally (cleanup-dir! dir)))))
+
+;; --------------------------------------------------------------- reading a job
+;;
+;; `output` answers two questions at once -- what it said, and whether it is over --
+;; and it answers both off the record: the lines are the file, the status is the
+;; file's last line. `wait` is the one thing a file cannot answer for a synchronous
+;; caller, so it blocks on the job's own `:ended` promise.
+
+(deftest a-reading-of-a-job-is-its-status-and-what-it-said
+  (let [t "jt-read"
+        {:keys [id]} (jobs/start! t {:command "echo one; echo two; sleep 30"})]
+    (is (support/holds-within? #(= 2 (:total (jobs/output t id {}))) 10000)
+        "the lines arrive as the command prints them")
+    (let [{:keys [status lines from to total]} (jobs/output t id {})]
+      (testing "a job that is still going says so, and shows what it has said"
+        (is (= "[running]" status))
+        (is (= ["one" "two"] lines))
+        (is (= 1 from))
+        (is (= 2 to))
+        (is (= 2 total))))
+    (testing "a job that has said nothing yet is running and empty, not an error"
+      (let [{:keys [id]} (jobs/start! t {:command "sleep 30"})]
+        (is (= {:status "[running]" :lines [] :from 1 :to 0 :total 0}
+               (jobs/output t id {})))))
+    (testing "and an id this session never had is refused by name"
+      (let [e (try (jobs/output t "j-not-mine" {}) nil (catch Exception e e))]
+        (is (= :unknown-job (:reason (ex-data e))))))))
+
+(deftest a-line-that-looks-like-an-ending-is-not-one-while-the-job-runs
+  ;; THE RECORD'S LAST LINE IS READ BACK, BUT IT IS NOT THE ONLY FACT: the claim on
+  ;; the Writer is what makes the record closed, and a command is free to print
+  ;; something that looks exactly like an ending line. Reading only the text would
+  ;; report a running job as finished -- the same mistake in the opposite direction
+  ;; from the `[exit N]` that arrives before the tail it belongs to.
+  (let [t "jt-lookalike"
+        {:keys [id]} (jobs/start! t {:command "echo '[exit 0]'; sleep 30"})]
+    (is (support/holds-within? #(= 1 (:total (jobs/output t id {}))) 10000))
+    (let [{:keys [status lines]} (jobs/output t id {})]
+      (is (= "[running]" status) "the Writer is still open, so no ending has been written")
+      (is (= ["[exit 0]"] lines) "while the line the command printed is shown as its output"))))
+
+(deftest a-reading-can-wait-for-the-job-to-be-over
+  (let [t "jt-wait"
+        {:keys [id]} (jobs/start! t {:command "echo done; sleep 1; echo later"})]
+    (let [started (System/currentTimeMillis)
+          {:keys [status lines]} (jobs/output t id {:wait true :timeout 20000})
+          elapsed (- (System/currentTimeMillis) started)]
+      (testing "the answer is the ENDING, which is what waiting was for"
+        (is (= "[exit 0]" status))
+        (is (= ["done" "later"] lines)))
+      (testing "and it really waited for it rather than guessing"
+        (is (>= elapsed 900) (str "elapsed " elapsed "ms"))))
+    (testing "and it waits for the ENDING, not for the stream to end"
+      ;; `exec 1>&-` closes stdout and goes on living: its stream ends, its RECORD
+      ;; does not. A `wait` that watched the stream would come back at once and be
+      ;; wrong about a command that is still running.
+      (let [{:keys [id]} (jobs/start! t {:command "exec 1>&-; echo hidden; sleep 30"})]
+        (Thread/sleep 500)
+        (let [started (System/currentTimeMillis)
+              {:keys [status]} (jobs/output t id {:wait true :timeout 400})
+              elapsed (- (System/currentTimeMillis) started)]
+          (is (= "[running]" status) "no ending line means no end to report")
+          (is (>= elapsed 300) (str "so the wait ran out rather than returning early: "
+                                    elapsed "ms")))))
+    (testing "while a wait that runs out answers the state of things, not an error"
+      (let [{:keys [id]} (jobs/start! t {:command "sleep 30"})
+            started (System/currentTimeMillis)
+            {:keys [status]} (jobs/output t id {:wait true :timeout 300})
+            elapsed (- (System/currentTimeMillis) started)]
+        (is (= "[running]" status))
+        (is (< elapsed 10000) (str "it came back at the timeout, not at the command's end: "
+                                  elapsed "ms"))))))
+
+(deftest a-reading-walks-a-record-with-offset-and-limit
+  ;; The window is the TAIL by default -- what a job has just said -- and `offset`
+  ;; asks for a stretch that begins somewhere, the way `read` does. The numbers in the
+  ;; answer are the record's own line numbers, so they can be checked with `grep -n`.
+  (let [t "jt-window"
+        {:keys [id]} (jobs/start! t {:command "i=1; while [ $i -le 200 ]; do echo line-$i; i=$((i+1)); done; sleep 30"})]
+    (is (support/holds-within? #(= 200 (:total (jobs/output t id {}))) 20000))
+    (let [{:keys [lines from to total]} (jobs/output t id {})]
+      (testing "the default window is the end of it, and a short record fits whole"
+        (is (= 200 total))
+        (is (= "line-200" (last lines)))
+        (is (= 1 from) "200 short lines are inside the budget, so nothing is left out")
+        (is (= total to))))
+    (let [{:keys [lines from to]} (jobs/output t id {:offset 5 :limit 2})]
+      (testing "and an explicit `offset` reads forward from a line the reader names"
+        (is (= ["line-5" "line-6"] lines))
+        (is (= 5 from))
+        (is (= 6 to))))
+    (testing "an offset past the end is an empty window, not an error"
+      (let [{:keys [lines from to total]} (jobs/output t id {:offset 5000})]
+        (is (= [] lines))
+        (is (= 200 total) "the record still says how much it has")
+        (is (= 201 from) "and the answer names the line after the last one")
+        (is (< to from) "an empty window, said with numbers rather than with an error")))))
+
+(deftest a-window-that-does-not-fit-stops-at-a-line-and-says-so
+  (let [t "jt-big"
+        {:keys [id]} (jobs/start! t {:command "seq 1 5000; sleep 30"})]
+    (is (support/holds-within? #(= 5000 (:total (jobs/output t id {}))) 20000))
+    (let [{:keys [lines from to total]} (jobs/output t id {})]
+      (is (= 5000 total) "the record has every line of it")
+      (is (= "5000" (last lines)))
+      (is (> from 1))
+      (is (= total to) "the window runs to the last line the command wrote")
+      (is (< (alength (.getBytes (str/join "\n" lines) "UTF-8"))
+             (* 2 jobs/answer-budget-bytes))
+          "and it is inside the budget"))))
+

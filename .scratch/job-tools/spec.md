@@ -172,11 +172,101 @@ stdin、换不了工作目录**，它的答案**没有上界**（`(str out err)`
 
 ## 状态
 
-**2026-09-18 立票，五张，一张未开工。**
+**2026-09-18 立票，2026-09-18 落地。** 五张票走完（01 → 02 → 03 → 04 → 05），票面按仓库约定删除。
 
 三个复议答案（牛总，立票当天）：**读的位置复用调用者给的 `offset`**（不立服务端游标）、
 **要 `wait`**（`.scratch/bash-lifetime` 决策 10 与 `.scratch/bash-record` 决策 4 因此划删除线）、
 **`.scratch/bash-record` 丢弃**（票面删除，它的设计不复用）。
 
-基线在 05 那一票里对着自己落地那天的树重新实测（立票当天不重跑：`bash-record` 与 `job-output`
-之间只隔几个提交，而报数要对着自己落地那天的树）。
+### 01 — `bash` 的进路：`stdin` 与 `workdir`
+
+- `cap.tools` 多一个 `work-dir`：不给 `workdir` 就是本会话的项目绑定（与从前逐字相同，未绑定时子进程
+  继承本进程的 cwd），给了就按 `cap.project/resolve-path` 解析——**与 `read` 同一处**。判据只有一条：
+  它得是个目录；两种不是的方式分开说（是文件 / 那里什么都没有）。
+- `t-bash` 只多传一个 `:stdin`（`infra.shell/run` 一直收着它，写完即关）。
+- **不挂围栏**：`bash` 本来就能 `cd` 到任何地方，给 `workdir` 挂 park 是拿装样子换一次审批。
+- 描述里两个新参数各自的默认值都在描述串里，`workdir` 与项目目录的关系照 `read` 的说法写。
+
+### 02 — 答案有上界：按字节、留尾部、带省略量与溢出路径
+
+- `cap.jobs` 多一节「the answer」：`answer-budget-bytes`（8000，**一个 `def`**）、`tail-within-budget`
+  （按字节从尾部切，切点落在行首；UTF-8 的多字节字符**要么整个在、要么整个不在**）、
+  `truncation-line`（`[truncated: omitted N bytes of stdout; the whole output is <path>]`）、
+  `spill!`（前台的一次性记录）。
+- **前台记录是 `cN`，作业是 `jN`**：两个计数器，两种东西（一个是文件，一个是能被问、被停、被等的命令）。
+  目录仍是 `<配置家>/jobs/<会话>/`，`shutdown!` 一并收掉（`spilled` 那张表就是为此存在的）。
+- `t-bash`：stdout / stderr **各自**切（一行 stderr 不会被大 stdout 挤掉），**不超预算时逐字不变、
+  一个字节都不落盘**；超了才写记录，答案 = 尾部 + 每条被切流的省略行 + 结束行。
+- **结束行在溢出时一定出现**（`[exit 0]` 也写）：记录末行与答案末行是同一句话，两者不可能对不上。
+  不溢出时保持老样子（`[exit N]` 只在非零时出现）——**这就是「下面那条纪律的例外只发生在溢出这一侧」**。
+- `clip` 一个字没动（它仍是 `eval` 的：字符数、留头部）。
+
+### 03 — `job_output`：读作业说了什么，可以等到它结束
+
+- `cap.jobs/output`：状态 = 记录的末行（`terminal?` 问的是 writer 有没有被认领——它与「末行写完了」
+  是同一件事，因为 `write-last-line!` 两件事一起做），窗口 = 尾部（无 `offset`）/ 从 `offset` 往前
+  （有），都受 `answer-budget-bytes` 约束；`:from` / `:to` / `:total` 是**记录自己的行号**，`grep -n` 数
+  的是同一批。
+- **`wait` 挂的是 `:ended` 这个 promise**（`write-last-line!` 里 `deliver`），不轮询文件：末行写完、
+  `wait` 醒、`terminal?` 为真是同一刻。超时（默认 `job-output-default-timeout-ms` = 120000）到点答
+  `[running]`。
+- **条目活过终点**：`stop!` 不再把作业移出注册表。这是 `job_output` 能回答一条已经结束的作业、以及
+  04 的幂等能成立的前提。排空线程的循环因此加了一条「writer 还被认领吗」——不然它会对着一条
+  已经被 `close!` 掉、永不再出行的队列每秒轮询一次。
+- 工具面 17 → 18：三处硬编码清单、`CONTEXT.md` 的闭清单、`bash` / `job` 两个描述串里的轴
+  （「接下来只会等它 → `bash`（`timeout` 开大）；要干别的 → `job` 起，回头 `job_output` 等它」）。
+  两个答案串（`job` 与 `job_kill`）也都改成指 `job_output`。
+- `.scratch/bash-lifetime/spec.md` 决策 10 划删除线 + 日期注（「不做半阻塞」那一半被翻，
+  「没有人通知」那一半不动）。
+
+### 04 — `job_kill` 幂等且不阻塞
+
+- `stop!` 答 `{:id :path :stopped? :ending}`：`ending` 是记录末行，工具面据此说「stopped」或
+  「was already over ([stopped])」——**第二次问同一个 id 是回答，不是拒绝**；只有本会话没发过的 id 才拒。
+- 收整棵树移到**另一个线程**（`future`）：调用立刻返回，`destroy` / 有界等待 / `destroyForcibly`
+  仍照旧走完。`bash` 前台到点收树那条路一个字不改（那里等到死透正是对的）。
+- 不变的是：`[stopped]` 仍**先认领再杀**（排空线程不可能在它后面补一个 `[exit 137]`），记录仍不删。
+
+### 05 — 收口
+
+- `CONTEXT.md`：立三个词（**作业的读法**、**答案上界**、**`stdin` 与 `workdir`**），闭清单加
+  `job_output`，作业那个词条跟着改（状态 = 末行、条目活过终点、读法两条）。
+- `docs/architecture.md`：`cap.tools` 十七 → **十八**（`job_output` 进名单）、`cap.jobs` 一行重写成
+  「后台作业**与命令的记录**」（两种情形各写一份、读它有三条路、状态就是末行）、`infra.shell` 一行
+  点明 `run` 一直收着的 `:stdin` / `:dir` 现在被前台用上了。
+- `docs/architecture/kernel.md`：模式表加 `job_output`（三个后台工具同属「没有编辑家族」那一类）、
+  记录落在配置家那一段补上前台那一半、`wait` 是唯一会阻塞的后台动作、审批那句「不做超时」的旁边
+  再点一次「`job_output` 的 `timeout` 也不是作业的时限」。
+- `docs/architecture/overview.md`：状态表那一行改成「句柄、状态、记录路径」，并说清「作业结束了条目仍在」。
+- `docs/architecture/client.md` 核过一遍：**一个字没改**（`ui/` 一个字节没动，新工具在
+  `TOOL_ICONS` 里没有就退到扳手，`subjectOf` 取第一个字符串参数 = 那个 id；那张表的既有说法仍成立）。
+- README 那一节：`bash` 的两行（`stdin` / `workdir` / 答案上界）与三个后台动词那段（读法、`wait`、
+  幂等、记录在哪）。
+
+### 落地记录：与票面不一致的三处（按现状记，不追改票面）
+
+1. **票 03 的验收里那句「紧接着再 `job_output {job}` → 没有新东西」没有成立，也不该成立**：位置在
+   调用者手里（复议选的就是这个），所以没有「上次读到哪」可言，一次裸调用给的是**尾部**（同一段，
+   再读一次还是同一段）。这不是缺口：**重复本身就是答案**，而且比一个会撒谎的游标安全。
+   spec 决策 5 里照抄参考规格的那半句「有未读内容立即返回」同理不适用——`wait` 的语义是**等到终态**。
+2. **票 03 写的「进程结束也一样（离开注册表）」在落地前就是错的**：作业自己结束**从来不**离开注册表，
+   只有 `stop!` 会。真正的改动只有一处——`stop!` 不再移出。
+3. **`cap.tools` 的 ns docstring 回到真话**：`job-output` 那次报「18 → 17」时漏了这一句（它一直写着
+   「The eighteen tools」），本特性加回第 18 个工具之后它与三处清单终于对得上。
+
+### 撞上的坑
+
+- `insert` / `replace` 工具对**只含空白的重复行**会去重：`  []` 这种「文件里已经有过」的行插不进去
+  （它判定「加的就是已经在那儿的」）。三处 docstring 里的空行也被我自己写成了 `  " ` 这种断字符串的
+  东西，编译期就炸（`120000 - failed: vector?`）——**都是同一类失误：肉眼看着对，读起来才知道断了**。
+
+### 基线
+
+- **立票当天（2026-09-18，`main` @ `086beb8` 那一版，动手之前实测）：后端 922 / 11782，
+  0 failures / 0 errors，退出码 0**。
+- **落地当天（同一分支，改完之后）：后端 943 / 11899，0 failures / 0 errors，退出码 0**。
+- `AGENTS.md` 那条「动过 `ui/src` 就走一次 `node scripts/dev.mjs --scripted`」不适用：本特征
+  **一个字节没碰 `ui/`**（新工具在 `TOOL_ICONS` 里没有就退到扳手，`subjectOf` 取第一个字符串参数）。
+- 前端：`node scripts/test.mjs --ui` → 47 passed，退出码 0（本特征没动 `ui/`，那两次跑只是确认这一点）。
+- 定向：`--ns harness.cap.jobs-test,harness.kernel.tools-test,harness.cap.editing-mode-tools-test`
+  → 76 tests / 351 assertions，0 failures / 0 errors。

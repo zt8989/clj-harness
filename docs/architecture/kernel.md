@@ -123,19 +123,26 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
 `harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
 （它落库，见 [home-and-storage](home-and-storage.md#任务清单的表)）；两个 `web_*` 碰的是**网**。
-**最后一列里的两个后台工具同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
+**最后一列里的三个后台工具同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
 `harness.cap.editing/families` 里）。它们都属于「没有编辑家族」那一类——`harness.cap.editing/families`
 **一个字都没改**，因为那张表登记的是
 「与编辑有关的名字」，没登记的名字两种模式都服务。
 
-**`job` 的记录落在配置家**（`<root>/jobs/<会话>/<句柄>.log`），不在会话的 jsonl 那棵树里：一份文件，
-`bash` / `read` / `grep` 都能读，而配置家是围栏的自由路径（见 [projects](projects.md)）。
+**命令的记录落在配置家**（`<root>/jobs/<会话>/句柄.log`），不在会话的 jsonl 那棵树里：一份文件，
+`bash` / `read` / `grep` 都能读，而配置家是围栏的自由路径（见 [projects](projects.md)）。**两种情形各写一份**：
+后台作业从一开始就写，前台 `bash` 只在答案超过 `answer-budget-bytes` 时把整份落下来（答案本身只带尾部、
+省略了多少字节、以及这个路径）。
+
+**`job_output` 读的就是那份文件，而它的 `wait` 是唯一会阻塞的后台动作**：状态行是记录自己的末行
+（`[exit N]` / `[stopped]` / 没写就是 `[running]`），`offset` 是记录自己的行号，`wait: true` 挂到
+**记录写完末行**那一刻（`write-last-line!` 里 `deliver`，不轮询文件）。`timeout` 到了就答 `[running]`——
+**那是「我这次等多久」，不是作业的时限**；作业照样没有时限。
 
 **命令自己把输出重定向走时（`… > 文件`），`job` 只在答案里指名说一声，绝不拒绝**：判据是尽力而为的
 （引号、变量、`$(mktemp)` 都可能漏），拿一个尽力而为的判定去拦一条可能正当的命令（`> report.csv`
@@ -234,7 +241,8 @@ thread-id → {:added {name tool}   ; presence：本会话贡献的定义
 **不做超时，也不做跨进程持久化**：人一直不响应，这个 thread 就一直待决——这是可接受的语义，
 不是缺陷（interrupt 也不填 `expiresAt`，延续本仓「不写 sleep、不重试」的纪律）。
 **这一条讲的只是审批**：命令自己的**时限**是另一件事，已经有了——`bash` 的 `timeout`（毫秒，
-默认 120000，到点连子孙一起停掉），而**后台作业反过来没有时限**。「人一直不响应就一直等」是有意的
+默认 120000，到点连子孙一起停掉），而**后台作业反过来没有时限**（`job_output` 的 `timeout` 也不是它：
+那是「这一次我等你多久」）。「人一直不响应就一直等」是有意的
 无限等待，「一条命令不许无限跑」是命令的边界；两条不要读成同一条纪律。
 两个开启悬置的来源都不删：工具自带 `:requires-approval` 与 `session-require-approval!`，
 它们是「给这个工具装一条悬置型判定」的两种来源，与 `hooks.edn` 里写的门禁同一族。

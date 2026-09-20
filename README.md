@@ -113,8 +113,14 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 - `web_fetch` 取 URL 正文（**有损的文本抽取器**，不是渲染器）；`web_search` 的键按
   **Brave → Exa → Tavily**（`BRAVE_API_KEY` / `EXA_API_KEY` / `TAVILY_API_KEY`）顺序取，全都没有就指名拒绝。
   两个出网工具**不带审批**——这是决定（`bash` 今天就能 `curl`），要这道坎的会话自己装规则。
-- `bash` 有 `timeout`（默认 120000ms，到点**连子孙一起**停）；跑得比一次调用久用 `job` / `job_kill`，
-  记录在 `<配置家>/jobs/<会话>/<句柄>.log`，末行 `[exit N]` / `[stopped]`，**没有末行 = 还在跑**。
+- `bash` 有 `timeout`（默认 120000ms，到点**连子孙一起**停）、`stdin`（写完随即关掉，读它的命令看到
+  EOF）与 `workdir`（不给就是本会话的项目目录）。**答案有上界**：默认带命令输出的最后 8000 字节
+  （stdout 与 stderr **各算各的**），超出时整份落成一份记录，答案里写着**省略了多少字节、那份记录在哪**——
+  再大的输出也读得回来（`bash` / `read` / `grep` 读同一个路径）。
+- 跑得比一次调用久用 `job`；读它用 `job_output`（头一行是状态，正文是它说过的最后一段；`offset` 从头翻，
+  `wait: true` 挂到它结束，超时答 `[running]` 而不是报错）；停它用 `job_kill`（不等到进程死透，
+  停过之后**再问一次照样答**）。记录在 `<配置家>/jobs/<会话>/句柄.log`，末行 `[exit N]` / `[stopped]`，
+  **没有末行 = 还在跑**。
 
 设计与代价（system 消息怎么拼、技能怎么加载、围栏与审批、日志每一行长什么样）见
 [`docs/architecture.md`](docs/architecture.md)。

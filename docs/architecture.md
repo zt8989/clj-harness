@@ -48,7 +48,7 @@
 | `infra.db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
 | `infra.logging` | 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 | `infra.log` | 一次调用同时写 stderr 与文件的门面（**后端自己的错误日志**，与 session jsonl 是两回事） |
-| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用）：一条**写明的候选链**（Git Bash → bash → pwsh → PowerShell → cmd）+ 每种 shell 自己的起法（`-lc` / `-NoProfile -Command` / `/c`）；Windows 上那个 `bash` 是 WSL 启动器时它**拒绝**并把链走下一级。两种 spawn：**一次性**的 `run`（stdin、`:dir`、`:timeout-ms`，**到点连子孙一起收**并把已经读到的输出还回来）与**长活**的 `start`（stdout 排队、`:close!` 收整棵树）；后者的 argv 有两种形状——`:program`（启动一个程序，Windows 上走 `cmd /c` 以保住反斜杠路径）与 `:shell`（一条 shell 命令，走解析出来的那个 shell） |
+| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用）：一条**写明的候选链**（Git Bash → bash → pwsh → PowerShell → cmd）+ 每种 shell 自己的起法（`-lc` / `-NoProfile -Command` / `/c`）；Windows 上那个 `bash` 是 WSL 启动器时它**拒绝**并把链走下一级。两种 spawn：**一次性**的 `run`（stdin 写完即关、`:dir`、`:timeout-ms`，**到点连子孙一起收**并把已经读到的输出还回来——`bash` 的 `stdin` / `workdir` 就是它一直收着的这两个参数）与**长活**的 `start`（stdout 排队、`:close!` 收整棵树）；后者的 argv 有两种形状——`:program`（启动一个程序，Windows 上走 `cmd /c` 以保住反斜杠路径）与 `:shell`（一条 shell 命令，走解析出来的那个 shell） |
 | `infra.env` | **这台机器长什么样**（`<env>` 块的事实来源）：平台、shell（读 `infra.shell` 的解析）、以及一份声明名单里这个 shell 看得见哪些命令行增强工具。每进程探一次并缓存，**探测走同一个 shell**，`System/getenv` 不算数 |
 | `infra.rg` | **怎么跑 ripgrep**：二进制名、超时、以及「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句字符串——后者也是 `rg` 对**不存在的搜索根**说的话）。`cap.hashline.grep` 与 `cap.glob` 共用它，而 `--json` 的解析留在 `grep` 自己手里 |
 
@@ -68,8 +68,8 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `cap.tools` | **十七个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `job` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`；批的计划器与编辑模式的收窄策略也从这里装上 |
-| `cap.jobs` | **后台作业**：起一条没人等的命令、写下它说了什么、停掉它。**作业的记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行、不跨重启，进程退出时连文件一起收掉。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
+| `cap.tools` | **十八个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `job` / `job_output` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.jobs` | **后台作业与命令的记录**：起一条没人等的命令、写下它说了什么、读它、停掉它。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**读它有三条路**：`job_output`（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号）、`bash` / `read` / `grep` 直接读同一份文件、以及答案里那条路径。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行、不跨重启，进程退出时连文件一起收掉。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |

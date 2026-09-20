@@ -7,6 +7,7 @@
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
             [harness.fake :as fake]
+            [harness.infra.home :as home]
             [harness.infra.shell :as shell]
             [harness.kernel.loop :as loop]
             [harness.kernel.tools :as tools]
@@ -203,16 +204,16 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job" "job_kill" "read"
-              "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
+      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job" "job_kill" "job_output"
+              "read" "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
               "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "edit" "eval" "glob" "job" "job_kill" "read" "session-configure"
-              "skill" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
+              "session-configure" "skill" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
@@ -331,6 +332,151 @@
     (is (str/includes? content "[exit 3]"))
     (is (not (str/includes? content "timed out"))))
   (is (= "(no output)" (str/trim (:content (call "bash" {:command "true"}))))))
+;; ----------------------------------------------------------- the way in
+;;
+;; A `bash` call could only ever say things BY the command string: feeding a program
+;; some text meant `echo … | …` (quoting, newlines and size all the model's
+;; problem), and running it somewhere else meant a `cd … &&` prefix -- which the
+;; `job` tool does not need, since it resolves its cwd the same way this one does.
+;; These two arguments come from `infra.shell/run`, which has always taken them.
+
+(deftest a-bash-call-carries-its-own-stdin
+  ;; `sort` with nothing on the pipe would BLOCK rather than answer: the point of
+  ;; the case is that the text got there AND that the stream was closed after it.
+  (let [{:keys [content error]} (call "bash" {:command "sort" :stdin "b\na\n"})]
+    (is (false? error))
+    (is (= ["a" "b"] (str/split-lines content)))))
+
+(deftest stdin-reaches-the-executor-as-the-call-gave-it
+  ;; Through a stand-in, so the assertion is about what the TOOL asked for rather
+  ;; than about a shell's spelling -- the same shape the timeout case uses.
+  (let [asked (atom [])]
+    (with-redefs [shell/run (fn [opts] (swap! asked conj opts) {:exit 0 :out "" :err ""})]
+      (call "bash" {:command "true" :stdin "hello"})
+      (is (= "hello" (:stdin (first @asked)))
+          "stdin goes to the executor, which closes it after writing it")
+      (call "bash" {:command "true"})
+      (is (nil? (:stdin (second @asked)))
+          "and a call that says nothing about stdin is exactly what it was"))))
+
+(deftest bash-runs-in-the-directory-the-call-named
+  (let [pdir (io/file dir "workdir-project")
+        sub  (io/file pdir "sub")]
+    (.mkdirs sub)
+    ;; Two files with the SAME relative name, one in the project and one below it:
+    ;; a relative `cat` can only find one of them, so which one came back says
+    ;; where the command was sitting -- without parsing `pwd`, whose spelling
+    ;; differs between Git Bash and the JVM.
+    (spit (io/file pdir "marker.txt") "project-root" :encoding "UTF-8")
+    (spit (io/file sub "marker.txt") "the-subdirectory" :encoding "UTF-8")
+    (project/bind! "tt-workdir" (.getAbsolutePath pdir))
+    (try
+      (letfn [(run [args] (tools/run! {:function {:name "bash"
+                                                  :arguments (json/write-str args)}}
+                                      "tt-workdir"))]
+        (testing "`workdir` is resolved the way every other path in this table is"
+          (is (= "the-subdirectory" (str/trim (:content (run {:command "cat marker.txt"
+                                                              :workdir "sub"}))))))
+        (testing "and no `workdir` still means the project directory"
+          (is (= "project-root" (str/trim (:content (run {:command "cat marker.txt"})))))))
+      (finally (project/bind! "tt-workdir" nil)))))
+
+(deftest a-workdir-that-is-not-a-directory-is-refused-by-name
+  ;; Two different facts, two different sentences: a file is there and is not a
+  ;; directory, or there is nothing there at all. Guessing between them is how a
+  ;; model ends up hunting for a typo it did not make.
+  (let [a-file (io/file dir "not-a-dir.txt")
+        missing (io/file dir "no-such-place")]
+    (spit a-file "x" :encoding "UTF-8")
+    (let [{:keys [content error]} (call "bash" {:command "true"
+                                                :workdir (.getAbsolutePath a-file)})]
+      (is (true? error))
+      (is (str/includes? content "`workdir` must be a directory"))
+      (is (str/includes? content "is a file")))
+    (let [{:keys [content error]} (call "bash" {:command "true"
+                                                :workdir (.getAbsolutePath missing)})]
+      (is (true? error))
+      (is (str/includes? content "nothing is there")))))
+
+;; ------------------------------------------------------- what an answer may carry
+;;
+;; THE CEILING HAS A FLOOR: below it nothing changes at all -- `echo hi` is still
+;; `hi`, with no path and no file -- which is why that is asserted first. Above it the
+;; answer is a tail, a count of the bytes left out and where the rest of them are.
+
+(deftest a-command-that-fits-is-answered-as-it-always-was-and-writes-nothing
+  (let [records (io/file (home/root) "jobs")
+        files   (fn [] (count (filter #(.isFile %) (file-seq records))))]
+    (let [before (files)
+          {:keys [content error]} (call "bash" {:command "echo hi"})]
+      (is (false? error))
+      (is (= "hi" (str/trim content)) "byte for byte what it always was")
+      (is (not (str/includes? content "[truncated")))
+      (is (= before (files)) "echoing `hi` is not worth a file"))))
+
+(deftest a-huge-answer-comes-back-as-a-tail-and-a-way-to-read-the-rest
+  (let [{:keys [content error]} (call "bash" {:command "seq 1 200000"})]
+    (is (false? error))
+    (let [path (second (re-find #"the whole output is (\S+)\]" content))]
+      (is (some? path) (str "the answer names the record: " (subs content 0 160)))
+      (is (.exists (io/file path)) "and the file is there to be read")
+      (let [whole (slurp path :encoding "UTF-8")
+            ;; what the command itself printed: the record, without the line this repo
+            ;; appends to say how it ended.
+            own   (subs whole 0 (str/last-index-of whole "[exit 0]"))
+            kept  (first (str/split content #"\n\[truncated:"))
+            omitted (Long/parseLong (second (re-find #"omitted (\d+) bytes" content)))]
+        (testing "the record holds ALL of it -- one line per number, nothing dropped"
+          (is (= 200000 (count (str/split-lines own))))
+          (is (= "1" (first (str/split-lines own))))
+          (is (= "200000" (last (str/split-lines own)))))
+        (testing "the answer is the TAIL: the end of it is here, the beginning is not"
+          (is (str/includes? content "\n200000"))
+          (is (not (str/includes? content "\n1\n"))))
+        (testing "and the bytes it left out are the bytes that are missing, exactly"
+          (is (= (alength (.getBytes ^String own "UTF-8"))
+                 (+ omitted (alength (.getBytes ^String kept "UTF-8")))))))
+      (testing "a reader following the answer needs no human and no new verb"
+        ;; The record is in the configuration home, which the fence lists as free --
+        ;; so all three readers reach it, and the path in the answer is a live one.
+        (let [cmd (str "grep -c '^199999$' " (support/shell-path path))]
+          (is (= "1" (str/trim (:content (call "bash" {:command cmd}))))))
+        (is (some #(str/includes? % "199999")
+                  (read-lines (:content (call "read" {:path path :offset 199990}))))
+            "the `read` tool reads the same file")
+        (is (str/includes? (:content (call "anchor_grep" {:pattern "^199999$" :path path}))
+                           "199999")
+            "and so does `grep`")))))
+
+(deftest a-loud-stdout-does-not-eat-a-line-of-stderr
+  ;; The two streams are counted on their own: one line of stderr is not a casualty of
+  ;; a hundred thousand lines of stdout.
+  (let [answer (:content (call "bash" {:command "seq 1 200000; echo BOOM >&2"}))]
+    (is (str/includes? answer "BOOM"))
+    (is (= 1 (count (re-seq #"\[truncated" answer))) "only stdout was over budget")
+    (is (str/includes? answer "of stdout"))))
+
+(deftest a-quiet-stdout-does-not-save-a-loud-stderr
+  ;; The mirror of the case above, and not symmetry for its own sake: a budget that
+  ;; counted the two streams together would let a loud stdout decide how much of a
+  ;; loud stderr survives -- and a failed build's whole account is on stderr.
+  (let [answer (:content (call "bash" {:command "seq 1 200000 >&2; exit 7"}))]
+    (is (= 1 (count (re-seq #"\[truncated" answer))) "only stderr was over budget")
+    (is (str/includes? answer "of stderr"))
+    (is (str/includes? answer "200000") "what it kept is the end of it")
+    (is (str/ends-with? answer "[exit 7]") "and the ending line comes last, as it always did")))
+
+(deftest a-command-stopped-at-the-limit-leaves-what-it-had-said
+  ;; The record's last line and the answer's last line are the SAME line, so the two
+  ;; can never disagree about how the command ended.
+  (let [{:keys [content]} (call "bash" {:command "seq 1 5000; sleep 300" :timeout 1500})
+        path (second (re-find #"the whole output is (\S+)\]" content))
+        ending (str "[timed out after 1500ms — the command was stopped]")]
+    (is (str/includes? content ending))
+    (let [whole (slurp path :encoding "UTF-8")]
+      (is (= ending (last (str/split-lines whole))))
+      (is (= 5000 (count (remove #(str/starts-with? % "[") (str/split-lines whole))))
+          "everything it printed before the limit is in the record"))))
 
 ;; ------------------------------------------------------------------ background
 ;;
@@ -400,9 +546,10 @@
 
 (deftest the-background-tools-take-the-arguments-they-need
   ;; The seam's missing-argument check is per tool, which is one of the reasons
-  ;; these are two names rather than one with an `action`.
+  ;; these are three names rather than one with an `action`.
   (is (str/includes? (:content (call "job" {})) "missing required argument"))
-  (is (str/includes? (:content (call "job_kill" {})) "missing required argument")))
+  (is (str/includes? (:content (call "job_kill" {})) "missing required argument"))
+  (is (str/includes? (:content (call "job_output" {})) "missing required argument")))
 
 (deftest the-record-a-job-names-is-readable-with-bash
   ;; The answer hands the model a path and says how to read it; this is that path
@@ -442,31 +589,117 @@
         (is (not (str/includes? plain "record will stay empty")))))
     (jobs/shutdown!)))
 
-(deftest a-background-job-can-be-stopped-and-is-then-gone
+(deftest a-background-job-can-be-stopped-and-is-then-readable
   (let [started (:content (call "job" {:command "sleep 30"}))
         job-id  (second (re-find #"job (j\d+) started" started))
         path    (second (re-find #"its record is (\S+)" started))
-        answer  (:content (call "job_kill" {:job job-id}))]
+        started-at (System/currentTimeMillis)
+        answer  (:content (call "job_kill" {:job job-id}))
+        elapsed (- (System/currentTimeMillis) started-at)]
     (is (some? job-id))
     (testing "the answer says it was stopped, and where the record is"
       (is (str/includes? answer "stopped"))
       (is (str/includes? answer path)))
+    (testing "and it does NOT wait for the process to die before answering"
+      ;; Killing a tree is `destroy`, a bounded wait, then `destroyForcibly`; that
+      ;; wait belongs to the killing, not to the tool call that asked for it.
+      (is (< elapsed 1500) (str "the call came back in " elapsed "ms")))
     (testing "the record survives the stop, with `[stopped]` as its last line"
       (is (= "[stopped]" (last (str/split-lines (slurp path :encoding "UTF-8"))))))
-    (testing "and stopping it again is the same as one that never existed"
+    (testing "and the job still answers when asked how it went"
+      ;; THE ID IS NOT REFUSED THE SECOND TIME: it was handed out by this session,
+      ;; and 'it is over' is an answer, not an unknown id.
+      (let [{:keys [content error]} (call "job_output" {:job job-id})]
+        (is (false? error))
+        (is (str/starts-with? content "[stopped]"))))
+    (testing "while stopping it again answers the same thing instead of refusing"
       (let [{:keys [content error]} (call "job_kill" {:job job-id})]
-        (is (true? error))
-        (is (str/includes? content (str "unknown job: " job-id))))))
-  (testing "a job that ended on its own is reported as ended, not as stopped"
+        (is (false? error))
+        (is (str/includes? content "was already over"))
+        (is (str/includes? content "[stopped]")))))
+  (testing "a job that ended on its own is reported with its own exit line"
     (let [started (:content (call "job" {:command "exit 3"}))
           job-id  (second (re-find #"job (j\d+) started" started))
           path    (second (re-find #"its record is (\S+)" started))]
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
-      ;; different facts, and only the second one is true once the command is gone.
+      (is (some? path) (str "the job call answered: " started))
+      ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
       (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"\[exit" (:answer %)) 10000)
       (let [answer (:content (call "job_kill" {:job job-id}))]
-        (is (str/includes? answer "had already ended"))
+        (is (str/includes? answer "was already over"))
+        (is (str/includes? answer "[exit 3]"))
         (is (= "[exit 3]" (last (str/split-lines (slurp path :encoding "UTF-8")))))))))
+
+;; ------------------------------------------------------- reading a job's output
+;;
+;; The face is thin: harness.cap.jobs reads the record and answers the facts (status,
+;; window, totals) and what is here is an answer a model can read. What only a tool
+;; call can show -- and what these cases are for -- is the WAITING, which is the one
+;; thing no reader of a file can do.
+
+(deftest the-three-faces-say-what-they-are-for
+  ;; THE AXIS, asserted rather than assumed: how long a command takes is not the
+  ;; question -- 'am I going to wait for it' is. A model that reads `job` as "the slow
+  ;; one" ends up with `job` + `sleep`, which is a `join` it had to build itself
+  ;; (`.scratch/bash-record/spec.md` has that session).
+  (let [spec (fn [name] (get-in (first (filter #(= name (get-in % [:function :name]))
+                                               (tools/specs)))
+                                [:function :description]))]
+    (testing "`bash` is for waiting, and says how long it will wait"
+      (is (str/includes? (spec "bash") "for something that has to outlive the call, use `job`"))
+      (is (str/includes? (spec "bash") (str jobs/answer-budget-bytes " bytes"))))
+    (testing "`job` is for NOT waiting, and names the verb that reads it"
+      (is (str/includes? (spec "job") "job_output"))
+      (is (str/includes? (spec "job") "if you are only going to wait for it, use `bash`")))
+    (testing "`job_output` is the one that can wait, and the one that says how it went"
+      (is (str/includes? (spec "job_output") "`wait: true` blocks"))
+      (is (str/includes? (spec "job_output") (str jobs/job-output-default-timeout-ms "ms"))))))
+
+(deftest a-job-output-call-can-wait-for-the-command-to-finish
+  (let [started (:content (call "job" {:command "echo one; sleep 1; echo two"}))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        t0      (System/currentTimeMillis)
+        {:keys [content error]} (call "job_output" {:job job-id :wait true :timeout 20000})
+        elapsed (- (System/currentTimeMillis) t0)]
+    (is (some? job-id))
+    (is (false? error))
+    (testing "the first line is how it went, and it is the record's own last line"
+      (is (str/starts-with? content "[exit 0]\n")))
+    (testing "below it, what the command said"
+      (is (str/includes? content "\none\ntwo")))
+    (testing "and the call really waited: it came back after the command, not before"
+      (is (>= elapsed 900) (str "elapsed " elapsed "ms")))
+    (jobs/shutdown!)))
+
+(deftest a-wait-that-runs-out-is-an-answer-not-an-error
+  (let [started (:content (call "job" {:command "sleep 30"}))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        t0      (System/currentTimeMillis)
+        {:keys [content error]} (call "job_output" {:job job-id :wait true :timeout 300})
+        elapsed (- (System/currentTimeMillis) t0)]
+    (is (false? error) "a job that outlives the wait is not a failure")
+    (is (str/starts-with? content "[running]"))
+    (is (< elapsed 10000) (str "it answered at the timeout: " elapsed "ms"))
+    (jobs/shutdown!)))
+
+(deftest a-job-output-call-reads-a-window-of-the-record
+  (let [started (:content (call "job" {:command "echo one; echo two; echo three; sleep 30"}))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        path    (second (re-find #"its record is (\S+)" started))]
+    (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"three" (:answer %)) 10000)
+    (testing "an offset in the record, exactly as `grep -n` would number the same lines"
+      (let [answer (:content (call "job_output" {:job job-id :offset 2 :limit 1}))]
+        (is (= ["[running]" "two" "[3 lines in all; this answer shows lines 2-2]"]
+               (str/split-lines answer)))))
+    (testing "and no offset means the tail -- what it has just said"
+      (let [answer (:content (call "job_output" {:job job-id}))]
+        (is (str/starts-with? answer "[running]"))
+        (is (str/includes? answer "three"))))
+    (testing "an unknown job is refused, naming what this session does have"
+      (let [{:keys [content error]} (call "job_output" {:job "j-not-a-job"})]
+        (is (true? error))
+        (is (str/includes? content "unknown job: j-not-a-job"))))
+    (jobs/shutdown!)))
 
 ;; ------------------------------------------------- the turn plan, per session
 ;;
