@@ -12,6 +12,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.jobs :as jobs]
             [harness.infra.home :as home]
+            [harness.infra.log :as log]
             [harness.test-support :as support]))
 
 ;; Every job this namespace starts is stopped on the way out, whatever happened in
@@ -491,6 +492,42 @@
             (is (.exists f))
             (is (str/includes? (slurp path :encoding "UTF-8") "not yet"))))
         (jobs/stop! "jt-held" id)))))
+
+(deftest a-sweep-that-cannot-delete-says-so-and-carries-on
+  ;; THE FAILURE BRANCH IS THE HALF THAT NEEDS A TEST. A delete that WORKED is
+  ;; visible in the answer -- the paths come back -- so that half is already held by
+  ;; the cases above. A delete that did NOT work is visible NOWHERE unless the line
+  ;; gets written: the sweep is best effort on purpose (no exception is coming), and
+  ;; it leaves the tree over budget, which looks exactly like a tree that was small
+  ;; enough all along. `delete-record!` makes the same argument about one file.
+  ;;
+  ;; THE CANDIDATE THAT WILL NOT GO IS A PATH THAT HAS VANISHED between the listing
+  ;; and the delete. `File.delete` answers false for a file that is not there on
+  ;; every platform, which is what makes this a test rather than a bet on one
+  ;; filesystem's permissions or on a Windows handle being held open. The real file
+  ;; listed behind it is the other half of the claim: the sweep must go ON, not stop
+  ;; at the first thing that would not delete.
+  (let [dir (support/temp-dir "jobs-stuck")]
+    (binding [home/*root-override* dir]
+      (try
+        (let [tree   (io/file (home/root) "jobs" "jt-stuck")
+              stuck  (io/file tree "vanished.log")
+              real   (io/file tree "real.log")
+              warned (atom [])]
+          (io/make-parents real)
+          (spit real (apply str (repeat 900 "x")))
+          (with-redefs [jobs/record-files            (fn [] [stuck real])
+                        jobs/record-tree-budget-bytes 0
+                        log/warn!                     (fn [kind ctx] (swap! warned conj [kind ctx]))]
+            (let [deleted (jobs/prune-records!)]
+              (testing "the one that would not go is named, path and all"
+                (is (= [[:jobs/record-not-pruned {:path (str stuck)}]] @warned)))
+              (testing "and the sweep carried on instead of stopping there"
+                (is (= [(str real)] deleted) "the deletable one still went")
+                (is (not (.exists real))))
+              (testing "and nothing was raised -- this runs on the way into a command"
+                (is (vector? deleted) "the answer is still the paths that went")))))
+          (finally (cleanup-dir! dir))))))
 
 ;; --------------------------------------------------------------- reading a job
 ;;
