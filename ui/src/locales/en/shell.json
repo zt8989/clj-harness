@@ -29,6 +29,8 @@
   },
   "sidebar": {
     "newTask": "New task",
+    "open": "Open sidebar",
+    "collapse": "Collapse sidebar",
     "addProject": "Add project",
     "addProjectTitle": "Add a project — opens a folder picker, and the directory you choose becomes a project",
     "refresh": "Refresh",

@@ -91,6 +91,7 @@ import {
   isParkedInterrupt,
 } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
+import { SidebarOpenButton, sidebarStartsOpen } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
 import { type SidebarListing } from "@/lib/projects";
@@ -398,7 +399,14 @@ const SessionColumn: FC<{
   threadId: string;
   view: "conversation" | "trajectory";
   onView: (view: "conversation" | "trajectory") => void;
-}> = ({ threadId, view, onView }) => {
+  /// WHETHER THE FLOATING CONTROL IS SITTING IN THIS BAR'S LEADING CORNER. The
+  /// fold button is drawn by the page, absolutely positioned over this column
+  /// (`components/sidebar-toggle.tsx`), so the bar it lands on has to make room for
+  /// it -- and it is a prop rather than a fixed leading pad because the room is only
+  /// needed while the control is there. Every host gets it: they all draw the same
+  /// bar, and only the one on screen is what a person is looking at.
+  folded: boolean;
+}> = ({ threadId, view, onView, folded }) => {
   const { t } = useTranslation();
   return (
     // The composer's chrome needs to know which session it is configuring -- the
@@ -411,7 +419,16 @@ const SessionColumn: FC<{
             assistant state in this body throws. The browser said so. */}
         <div
           data-slot="view-switch"
-          className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5"
+          data-folded={folded ? "" : undefined}
+          className={
+            folded
+              ? // `ps-11` clears the 8px inset plus the 32px control in the corner. It
+                // keeps the tabs from being covered by a button that is drawn on top of
+                // them -- which is not a thing a stylesheet can see, so the two numbers
+                // are written here next to the class that produces the other one.
+                "flex shrink-0 items-center gap-1 border-b border-border py-1.5 pe-3 ps-11"
+              : "flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5"
+          }
         >
           {(
             [
@@ -492,6 +509,20 @@ export function App() {
   // preference about sessions, and a stored one would surprise a reader on the
   // next launch.
   const [view, setView] = useState<"conversation" | "trajectory">("conversation");
+  // WHETHER THE SIDEBAR IS ON SCREEN, and it is the PAGE's state rather than the
+  // sidebar's for the one reason a component cannot solve: while the sidebar is
+  // folded away it does not exist, so it cannot draw the control that brings it
+  // back -- the floating corner button does, and that button is this file's. The
+  // pair and what they agree on are in `components/sidebar-toggle.tsx`.
+  //
+  // IT STARTS FROM THE WINDOW (`sidebarStartsOpen`, which is where the one reading of
+  // it lives): there on a wide one, folded away on a phone-sized one.
+  //
+  // TRANSIENT, AND DELIBERATELY NOT PERSISTED, the same call `view` above makes:
+  // folding the sidebar is a way of looking at the page, not a fact about the work,
+  // and a remembered fold would meet somebody in a wide window with their project
+  // list hidden for a reason they set on a narrow one.
+  const [sidebarOpen, setSidebarOpen] = useState(sidebarStartsOpen);
 
   /// Show a session, hosting it if it has no host yet. `hydrate` says whether
   /// there is a conversation under that id to rebuild -- true when a row from the
@@ -634,20 +665,48 @@ export function App() {
           `min-h-0 flex-1`. `Thread`'s root is `h-full`, so it reads the height off
           this wrapper -- which is why `min-h-0` is here and not on the thread:
           without it a flex child will not shrink below its content, and the whole
-          page scrolls instead of the message list. */}
-      <div className="flex h-dvh">
-        {/* OUTSIDE every runtime provider now, because it manages ALL sessions:
-            its rows, their refusal sentences, and the projects they belong to.
-            It used to sit inside the one provider only to reach
-            `runtime.threads.switchToThread`, and it no longer has one. */}
-        <Sidebar
-          currentThreadId={roster.shown}
-          onListed={onListed}
-          statuses={statuses}
-          openErrors={openErrors}
-          onShow={showExisting}
-          onShowFresh={showFresh}
-        />
+          page scrolls instead of the message list.
+
+          `relative` IS FOR THE FOLD. On a narrow window the sidebar and the control
+          that brings it back are `absolute` (see `components/sidebar.tsx` and
+          `components/sidebar-toggle.tsx`), so this row is the box they are placed
+          against -- and it is the one element that knows the viewport's height. */}
+      <div className="relative flex h-dvh">
+        {sidebarOpen ? (
+          <>
+            {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
+                over the conversation: a panel covering what you were reading needs a
+                way out that is not a hunt for the corner, and tapping beside it is
+                the gesture people already have. On a wide window the sidebar is a
+                column, nothing is covered, and `lg:hidden` keeps this from swallowing
+                the clicks of the conversation beside it. It is `aria-hidden` because
+                it carries no information: it is the second way to press the collapse
+                button, and that button is the one with a name. */}
+            <div
+              data-slot="sidebar-backdrop"
+              aria-hidden={true}
+              onClick={() => setSidebarOpen(false)}
+              className="absolute inset-0 z-20 bg-black/30 lg:hidden"
+            />
+            {/* OUTSIDE every runtime provider, because it manages ALL sessions:
+                its rows, their refusal sentences, and the projects they belong to.
+                It used to sit inside the one provider only to reach
+                `runtime.threads.switchToThread`, and it no longer has one. */}
+            <Sidebar
+              currentThreadId={roster.shown}
+              onListed={onListed}
+              statuses={statuses}
+              openErrors={openErrors}
+              onShow={showExisting}
+              onShowFresh={showFresh}
+              onCollapse={() => setSidebarOpen(false)}
+            />
+          </>
+        ) : (
+          // THE WAY BACK, and it lives here rather than in the sidebar for the
+          // reason the state does: there is no sidebar on screen to hold it.
+          <SidebarOpenButton onOpen={() => setSidebarOpen(true)} />
+        )}
         {/* `min-w-0` IS LOAD-BEARING, not tidiness: a flex item's automatic minimum
             width is its content's min-content width, and the trajectory's rows are
             single-line mono JSON with no spaces -- so without this the column
@@ -665,7 +724,12 @@ export function App() {
               onForget={forgetStatus}
               onError={hostFailed}
             >
-              <SessionColumn threadId={host.id} view={view} onView={setView} />
+              <SessionColumn
+                threadId={host.id}
+                view={view}
+                onView={setView}
+                folded={!sidebarOpen}
+              />
             </SessionHost>
           ))}
         </div>

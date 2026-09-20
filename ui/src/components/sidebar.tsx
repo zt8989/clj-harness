@@ -219,6 +219,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsPanel } from "@/components/settings-panel";
+import { SIDEBAR_ID, SidebarCollapseButton } from "@/components/sidebar-toggle";
 import {
   Dialog,
   DialogContent,
@@ -285,6 +286,12 @@ type SidebarProps = {
   /// every session of every project, and a page that asked again would be asking the
   /// same question twice to get the same bytes.
   onListed: (listing: SidebarListing) => void;
+  /// FOLD THIS COLUMN AWAY. The sidebar does not own that state and cannot put itself
+  /// back -- a component cannot draw its own way back after it has been unmounted --
+  /// so folding is a request to the page, which is also what draws the floating
+  /// control that unfolds it (see `components/sidebar-toggle.tsx`, where the pair and
+  /// the `aria-controls` they share are explained).
+  onCollapse: () => void;
 };
 
 /// The refusal or failure that belongs to ONE row -- a refused switch, a list
@@ -310,6 +317,7 @@ export const Sidebar: FC<SidebarProps> = ({
   onShow,
   onShowFresh,
   onListed,
+  onCollapse,
 }) => {
   const { t } = useTranslation();
   // The failures this list can raise are THIS side's sentences (a listing that
@@ -745,8 +753,20 @@ export const Sidebar: FC<SidebarProps> = ({
 
   return (
     <aside
+      // THE ELEMENT BOTH TOGGLE CONTROLS NAME (`aria-controls`): see
+      // `components/sidebar-toggle.tsx`, and the suite that compares the two strings
+      // -- there is no DOM here to resolve the reference, so the pair is pinned by
+      // reading it rather than by asking the browser.
+      id={SIDEBAR_ID}
       data-slot="sidebar"
-      className="bg-background flex h-full w-72 shrink-0 flex-col border-e"
+      // THE NARROW-WINDOW SHAPE, and it is a breakpoint rather than a second piece of
+      // state: below `lg` this column FLOATS OVER the conversation instead of taking a
+      // 288px bite out of it, because a phone-sized window has no room to give. That is
+      // why the fold is worth having at all there, and why the unfolding control lives
+      // outside this component: while this element is away, something has to be on
+      // screen to ask for it back (`app.tsx` draws the floating corner button, and the
+      // backdrop it sits over).
+      className="bg-background absolute inset-y-0 start-0 z-30 flex h-full w-72 shrink-0 flex-col border-e lg:static lg:z-auto"
     >
       <header
         data-slot="sidebar-header"
@@ -789,6 +809,11 @@ export const Sidebar: FC<SidebarProps> = ({
           />
           <span className="sr-only">{t("sidebar.refresh")}</span>
         </Button>
+        {/* THE WAY OUT, at the end of the row of icon buttons. It is the last thing in
+            the header rather than the first because the header's leading space belongs
+            to "New task" -- the verb this column exists for -- and an exit is read for
+            once, in the corner where a panel's close control is expected. */}
+        <SidebarCollapseButton onCollapse={onCollapse} />
       </header>
 
       {/* The refusals about starting a session go under the header, where the

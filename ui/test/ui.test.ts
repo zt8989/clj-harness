@@ -99,7 +99,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// archived block needs (a filed-away session has to say which project it came from,
 /// since nothing groups it any more). Same reason the other three are there: it is a
 /// thing the row SAYS, and only a render can see it.
-const EXPECTED_CASES = 50;
+/// 50 -> 52: the `sidebar` suite's fifth and sixth -- the two controls that fold the
+/// sidebar away and bring it back (`components/sidebar-toggle.tsx`): the word each one
+/// says in both languages, and the two `aria-*` facts that make them one verb (one
+/// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
+/// run cannot reach -- the sidebar's own element -- is read as source in the same case.
+const EXPECTED_CASES = 52;
 
 let total = 0;
 for (const suite of SUITES) {

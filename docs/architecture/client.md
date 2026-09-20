@@ -20,6 +20,10 @@ app.tsx             **一场会话一份 runtime（一份 `SessionHost`）**，�
                     （附件适配器也在这里交出：`adapters.attachments` 一行）
 components/
   sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
+                    窄窗（< `lg`）时整列**浮在对话上**、配一层背板；`lg` 起才是并排的一列
+  sidebar-toggle.tsx  折叠那一对控件：收起在侧边栏头部，展开是左上角那颗浮标
+                    （浮标归 `app.tsx` 画——侧边栏收起来之后画不了自己的回头路）；
+                    两端共用同一个 `SIDEBAR_ID` 指同一块（`aria-controls`）
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
@@ -118,6 +122,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 - **切换与新建不再被 run 拦住**（一场会话一份 runtime，切走不打扰任何一场的 run）。仍然拒绝的是**归档 /
   删掉一场没完（在跑或悬置）的会话**，判据是**那条会话自己**在不在跑（App 的注册表），不是当前页在不在跑；
   句子落在**那一行**上（归档）或**项目那一行**上（删项目，且点名是哪一场），说辞在 `lib/session-status.ts`。
+- **侧边栏收不收起是页面的临时状态**（`sidebarOpen`，**不落盘**，跟 `view` 同一个理由：这是「这会儿怎么看」，
+  不是「这份工作是什么」——在窄窗收起来、回到宽窗被记着藏起项目列表，是没人要的惊喜）。收起时左上角浮一颗
+  按钮把它打开：控制项归 `app.tsx`，因为侧边栏没了就画不了自己的回头路，两端共用 `SIDEBAR_ID`
+  （`components/sidebar-toggle.tsx`，那一对与它们约定的事都写在那儿）。**窄窗（< `lg`）是断点、不是第二份状态**：
+  侧边栏 `absolute` 浮在对话上、盖一层背板，所以「多宽算窄」只有 `lg` 一个出处，也没有 resize 监听要养。
 - **状态条那五格读的是记录，不是客户端手里的对话。** 客户端确实持有 conversation，所以它数得出轮与步、
   也估算得出 tok/s（运行时的 `chars ÷ 4`），但**它不这么做**：缓存命中它根本不知道，而估算出来的用量
   冒充厂商报的量就是编。那五个数由 `GET /api/threads/<stem>/stats` 从会话的 jsonl 折出来

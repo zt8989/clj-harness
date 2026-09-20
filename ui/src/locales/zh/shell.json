@@ -29,6 +29,8 @@
   },
   "sidebar": {
     "newTask": "新建任务",
+    "open": "打开侧边栏",
+    "collapse": "收起侧边栏",
     "addProject": "添加项目",
     "addProjectTitle": "添加项目——打开文件夹选择器，你选的目录会成为项目",
     "refresh": "刷新",

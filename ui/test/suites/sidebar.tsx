@@ -30,6 +30,16 @@ import { expect } from "vitest";
 import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
 import { ThreadListItem } from "../../src/components/assistant-ui/elements/thread-list.aui";
+import {
+  SIDEBAR_ID,
+  SidebarCollapseButton,
+  SidebarOpenButton,
+} from "../../src/components/sidebar-toggle";
+// THE ONE FILE IN THIS SUITE THAT IS IMPORTED AS TEXT RATHER THAN AS CODE, and the
+// reason is in the case that reads it: the sidebar cannot be executed in this run, so
+// the id its element carries is checked by reading the source. `?raw` is vite's own
+// switch, so this is still the build's file list -- not a second notion of the source.
+import sidebarSource from "../../src/components/sidebar.tsx?raw";
 import type { Language } from "../../src/lib/language";
 
 /// A session as `GET /api/projects` writes one: an id, an archived flag, and the two
@@ -94,6 +104,45 @@ function textOf(html: string, slot: string): string {
   const match = new RegExp(`<([a-z]+)[^>]*data-slot="${slot}"[^>]*>([\\s\\S]*?)</\\1>`).exec(html);
   if (match === null) throw new Error(`no [data-slot="${slot}"] in the rendered row: ${html}`);
   return match[2]!.replace(/<[^>]*>/g, "");
+}
+
+/// ONE ATTRIBUTE OF ONE SLOT: the element found by its `data-slot`, the named attribute
+/// read off its opening tag. The toggle below is an icon button whose whole meaning is a
+/// pair of attributes (`aria-controls`, `aria-expanded`) -- there is no text to read and
+/// nothing else in the markup that says what that control does.
+function attrOf(html: string, slot: string, name: string): string {
+  const element = new RegExp(`<([a-z]+)[^>]*data-slot="${slot}"[^>]*>`).exec(html);
+  if (element === null) throw new Error(`no [data-slot="${slot}"] in the rendered control: ${html}`);
+  const attribute = new RegExp(`\\b${name}="([^"]*)"`).exec(element[0]);
+  if (attribute === null) {
+    throw new Error(`[data-slot="${slot}"] carries no ${name}: ${element[0]}`);
+  }
+  return attribute[1]!;
+}
+
+/// THE FOLDING CONTROLS, rendered the way their two owners render them: each inside a real
+/// i18n instance, with the one callback it exists to call.
+///
+/// THEY ARE RENDERED HERE RATHER THAN THE WHOLE SIDEBAR, and that is a boundary of this
+/// run rather than a choice: `sidebar.tsx` imports `settings-panel.tsx`, which imports
+/// `lib/i18n.ts`, which touches `document` as it initializes -- and this run has no
+/// browser (see `vitest.config.ts` and `test/support/locale.ts`). The panel itself cannot
+/// be rendered here; the pair of controls can, and they are where the words and the two
+/// `aria-*` contracts live.
+function openControl(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <SidebarOpenButton onOpen={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
+function collapseControl(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <SidebarCollapseButton onCollapse={() => {}} />
+    </I18nextProvider>,
+  );
 }
 
 /// The states a person actually reads off this row: sitting still with facts, brand new
@@ -183,6 +232,44 @@ const cases: Case[] = [
       // from nowhere, and a blank slot where a project name goes would read as a bug.
       expect(row(s, "en")).not.toContain('data-slot="thread-list-item-label"');
       expect(row(s, "en", {}, "")).not.toContain('data-slot="thread-list-item-label"');
+    },
+  },
+  {
+    name: "the-fold-controls-say-what-they-do-in-both-languages",
+    run: async () => {
+      // TWO CONTROLS, ONE WORD EACH, and they are icon buttons -- so the words below are
+      // the WHOLE of what either one says to a person who cannot see the glyph. A missing
+      // one of these leaves a button in the corner with no name, which is invisible to
+      // every other check in the tree (the same shape of hole the id line fell through).
+      expect(textOf(openControl("en"), "sidebar-open")).toBe("Open sidebar");
+      expect(textOf(openControl("zh"), "sidebar-open")).toBe("打开侧边栏");
+      expect(textOf(collapseControl("en"), "sidebar-collapse")).toBe("Collapse sidebar");
+      expect(textOf(collapseControl("zh"), "sidebar-collapse")).toBe("收起侧边栏");
+    },
+  },
+  {
+    name: "both-ends-of-the-fold-name-the-same-region",
+    run: async () => {
+      // THE TWO CONTROLS ARE ONE VERB, so each has to name the thing it folds: a screen
+      // reader arriving at either button is told WHICH region it belongs to. Both say the
+      // same id, and they say it about the element `sidebar.tsx` draws.
+      expect(attrOf(openControl("en"), "sidebar-open", "aria-controls")).toBe(SIDEBAR_ID);
+      expect(attrOf(collapseControl("en"), "sidebar-collapse", "aria-controls")).toBe(SIDEBAR_ID);
+
+      // AND EACH REPORTS THE STATE IT IS OFFERING, which is not the state it is in: the
+      // control that exists only while the sidebar is away asks for it to be there
+      // (`false` -> expanded), and the one in the header asks for the opposite. Swapping
+      // the two would read as a control that lies about what pressing it does.
+      expect(attrOf(openControl("en"), "sidebar-open", "aria-expanded")).toBe("false");
+      expect(attrOf(collapseControl("en"), "sidebar-collapse", "aria-expanded")).toBe("true");
+
+      // THE THIRD REFERENCE IS READ AS SOURCE, not rendered -- and the reason is worth
+      // stating rather than hiding: `sidebar.tsx` cannot be imported into this run at all
+      // (it reaches `lib/i18n.ts`, which touches `document`; see the helper above), so the
+      // element the id is written on is the one link of this chain a render cannot reach.
+      // Without this line the pair above could name a region that does not exist and every
+      // case here would stay green -- the exact failure this suite was built for.
+      expect(sidebarSource).toMatch(/id=\{SIDEBAR_ID\}[\s\S]*?data-slot="sidebar"/);
     },
   },
 ];
