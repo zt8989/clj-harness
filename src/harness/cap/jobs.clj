@@ -47,13 +47,18 @@
   `stop!` stopping the job at that same moment. Whoever claims it writes it; the
   other finds the record closed.
 
-  THE RECORD LIVES IN THE CONFIGURATION HOME, and that is a decision rather than a
-  convenience: `cap.project/fence` lists the config home as free, so `read` and
-  `grep` reach a record without parking a human, and `bash` (which has no fence of
-  its own) can `tail` it. It is NOT session history -- into no jsonl, no database,
-  no audit line, and it does not survive the process: the exit hook deletes this
-  process's records on the way out (`shutdown!`). A hard-killed process leaves them
-  behind, which is the one moment they are most worth reading.
+  THE RECORD LIVES IN THE CONFIGURATION HOME AND OUTLIVES THE PROCESS, and both halves
+  are decisions rather than conveniences: `cap.project/fence` lists the config home as
+  free, so `read` and `grep` reach a record without parking a human -- which is what
+  makes keeping one worth anything -- and `bash` (which has no fence of its own) can
+  `tail` it. It is NOT session history -- into no jsonl, no database, no audit line --
+  but it IS a file somebody can come back to: 'what did yesterday's `npm test` say?' is
+  the question a record answers, and a file deleted on the way out answered only the
+  easier one. What a process's exit takes with it is the JOBS -- the registry, the ids,
+  the processes -- never the records: a file that outlives the id that named it is
+  still readable by the path an answer gave. The tree is capped by TOTAL BYTES rather
+  than by age (`prune-records!`): a record's worth is not a function of its age, and
+  bytes are what the home actually pays.
 
   ONE READER PER STREAM. `infra.shell/start` owns the two pipe pumps; the thread
   here is that queue's consumer and nothing else may read it. A queue nobody drains
@@ -107,28 +112,67 @@
   ;; asked, stopped and waited for. Same discipline otherwise -- never reused.
   (atom {}))
 
-(defonce ^:private spilled
-  ;; thread-id -> [path ..] -- the records this process wrote for commands it ran in
-  ;; the FOREGROUND. Nothing here is addressable and nothing here is live: a spilled
-  ;; record is finished the moment it is written. It is held for one reason only --
-  ;; `shutdown!` has to know what to take away (AGENTS.md's rule about what the
-  ;; configuration home may keep).
-  (atom {}))
+(defonce ^:private this-process
+  ;; This process's half of every record's filename -- nil until something needs a
+  ;; path. See `process-tag`.
+  (atom nil))
+
+(def ^:dynamic *tag-override*
+  "Test-only override for the stamp that names this process's records -- the same seam,
+  and the same rule, as harness.infra.home's `*root-override*`: UNBOUND in production,
+  where `process-tag` reads the clock and the pid. Bound by a test that has to be two
+  runs of one session, which is the one thing a single JVM cannot otherwise be."
+  nil)
+
+(defonce ^:private pruned?
+  ;; Has THIS process swept the record tree yet? Once is what `prune-records!` promises: the
+  ;; sweep walks every record this home holds, so it is not a per-write cost.
+  (atom false))
 
 (defonce ^:private exit-hook-installed
   (atom false))
 
 (defn- path [thread-id job-id] [thread-id :jobs job-id])
 
+(defn- process-tag
+  "Which PROCESS this is, as the stamp that goes into every record's filename: the
+  moment it first needed one, and its pid.
+
+  AN ID IS NOT ENOUGH, and that is the whole reason this exists. `j1` is unique only
+  inside one process (`counters` is per session and in memory), while the file is
+  opened TRUNCATING (`open-record!`) -- so a session's second run would write its own
+  `j1.log` straight over the first run's, and a record that survives its process would
+  survive exactly until the next one. The tag says which RUN a record belongs to, and
+  the id in front of it goes on saying which command.
+
+  The pid is what makes two processes that start in the same second -- a server and a
+  replay, two test JVMs side by side -- two names rather than one, and the milliseconds
+  in the clock half are what stop a RECYCLED pid from landing on an earlier run's name.
+  The clock half is also sorted: two runs of one session list in the order they happened.
+
+  ASKED ONCE AND ANSWERED THE SAME WAY AFTERWARDS, which is not an optimisation: an
+  answer quotes a path, and a stamp that moved would leave the answer pointing at a
+  file nobody is writing. `*tag-override*` is the seam for the one caller that cannot
+  be a second process -- a test."
+  []
+  (or *tag-override*
+      @this-process
+      (swap! this-process
+             #(or % (str (format "%1$tY%1$tm%1$tdT%1$tH%1$tM%1$tS%1$tL" (java.util.Date.))
+                          "-" (.pid (java.lang.ProcessHandle/current)))))))
+
 (defn- record-path
-  "Where THREAD-ID's JOB-ID keeps its record, under the configuration home.
+  "Where THREAD-ID's ID keeps its record, under the configuration home:
+  `<root>/jobs/<session>/<id>-<process tag>.log`.
 
   ONE PLACE BUILDS THIS STRING. The answers the tools give quote it back, and a path
   assembled twice is a path that will eventually be assembled differently -- the same
   reason the default timeout is interpolated into `bash`'s description rather than
-  repeated there."
+  repeated there. THE TAG IS PART OF IT for the reason `process-tag` gives: a record
+  that outlives its process must not be writable-over by the next one."
   [thread-id id]
-  (str (io/file (home/root) "jobs" (home/sanitize thread-id) (str id ".log"))))
+  (str (io/file (home/root) "jobs" (home/sanitize thread-id)
+                (str id "-" (process-tag) ".log"))))
 
 (defn- known-ids
   "This session's job ids, for a refusal that says what the caller could have meant."
@@ -145,7 +189,8 @@
                   (if (seq ids)
                     (str "This session's jobs are " (str/join ", " ids) ".")
                     "This session has no background jobs.")
-                  " A job lives only as long as this harness process.")
+                  " A job lives only as long as this harness process; its RECORD does not -- the"
+                  " file is still on disk, and `read`, `grep` or `bash` opens it.")
              {:reason :unknown-job :job job-id :known ids})))
 
 (defn- next-id!
@@ -177,12 +222,16 @@
   "Start JOB-ID's record file, under the config home, and answer the Writer that
   appends to it.
 
-  TRUNCATING rather than appending: job ids do not repeat inside a process, so the
-  only file this can find is one a HARD-KILLED earlier process left behind, and that
-  file belongs to a command that is not this one. The parent directory is made here
-  too -- the record's own directory is the only thing a job adds to the home. UTF-8,
-  because that is what `infra.shell` decoded the command's output with: a record that
-  re-encoded those lines would turn a command's own bytes into a guess."
+  TRUNCATING rather than appending, and the NAME is what makes that safe: an id is
+  unique inside its process and the tag says which process, so the file this can find
+  is at worst one THIS run already wrote there (the id was spent on a job that then
+  failed to register). Another run's record cannot be reached from here at all -- which
+  is the whole reason the tag is in the name (`process-tag`).
+
+  The parent directory is made here too -- the record's own directory is the only thing
+  a job adds to the home. UTF-8, because that is what `infra.shell` decoded the
+  command's output with: a record that re-encoded those lines would turn a command's own
+  bytes into a guess."
   [thread-id job-id]
   (let [f (io/file (record-path thread-id job-id))]
     (io/make-parents f)
@@ -232,7 +281,8 @@
 
 (defn- close-record!
   "Let go of JOB's record file without writing anything more -- what `shutdown!`
-  wants, since its records are about to be deleted."
+  wants: the Writer is a handle nothing will ever write through again, and the file
+  it was holding is staying."
   [job]
   (locking (:writer job)
     (when-let [^Writer w (.getAndSet ^AtomicReference (:writer job) nil)]
@@ -249,6 +299,97 @@
   (let [f (io/file path)]
     (when (and (.exists f) (not (.delete f)))
       (log/warn! :jobs/record-not-deleted {:path path}))))
+
+;; ------------------------------------------------------------ what the tree may cost
+;;
+;; RECORDS DO NOT DISAPPEAR WHEN THE PROCESS DOES, so something has to say how much of
+;; the configuration home they may hold. That is this section, and it is deliberately
+;; ONE rule with ONE knob rather than a policy language. Three judgements are in it:
+;;
+;;   BYTES, NOT AGE. A record's worth is not a function of its age -- the one somebody
+;;   wants tomorrow may be a month old -- and bytes are what the home actually pays.
+;;   So nothing is deleted at all while the tree fits, and when it does not, the OLDEST
+;;   goes first: the newest is the last thing to survive.
+;;
+;;   A RECORD STILL BEING WRITTEN IS NOT A CANDIDATE. A job that has printed nothing
+;;   since Tuesday has a Tuesday-old mtime; taking its file away would be taking it out
+;;   from under a running command.
+;;
+;;   ONCE PER PROCESS. The sweep walks every record this home holds, and it runs on the
+;;   way into running a command -- the one path that has to stay cheap.
+
+(def record-tree-budget-bytes
+  "How many bytes of records the configuration home's `jobs/` tree may hold.
+
+  SIXTY-FOUR MEGABYTES is a great deal of text (a few million lines) and nothing at
+  all next to a home that already holds a sqlite database and every session's jsonl.
+  It is a `def` rather than a constant because a test binds it down to something a
+  case can actually reach -- the sweep is the same code either way, so what a test
+  exercises is the judgement and not a miniature of it."
+  (* 64 1024 1024))
+
+(defn- record-files
+  "Every record file in this home's `jobs/` tree, OLDEST FIRST (by last-modified time).
+
+  A DIRECTORY IS NOT A RECORD, and the `jobs/` root is named rather than the home: the
+  home holds things that are not this module's (harness.db, projects/, config.edn), and a
+  sweep that walked the whole of it would be a sweep with no business being there."
+  []
+  (->> (file-seq (io/file (home/root) "jobs"))
+       (filter #(.isFile ^java.io.File %))
+       (sort-by #(.lastModified ^java.io.File %))))
+
+(defn- open-record-paths
+  "The records THIS process is still writing -- job ids it holds in its registry."
+  []
+  (into #{} (map :path) (mapcat (fn [[_ v]] (vals (:jobs v))) @registry)))
+
+(defn prune-records!
+  "Delete the OLDEST records until this home's `jobs/` tree fits
+  `record-tree-budget-bytes`; answer the paths deleted, oldest first.
+
+  THE WHOLE TREE IS THE BUDGET'S SUBJECT: every record in every session's directory,
+  not just this session's or this process's. The home is one disk, and a session that
+  ran a great deal yesterday is exactly what a session starting today has to make room
+  for. (A record this process is writing is counted but not a candidate -- see below.)
+
+  A RECORD THIS PROCESS IS STILL WRITING IS SKIPPED, whatever its mtime says, and
+  skipped rather than merely protected from deletion: a job quiet since Tuesday must not
+  cost its own file OR push other files out to compensate for bytes it is still using.
+  A record another LIVE harness process holds open is past what this can see; two
+  processes on one session id is the case no file here can arbitrate.
+
+  DELETION IS BEST EFFORT. A file that will not go (permissions, a Windows handle) is
+  skipped rather than raised: this runs on the way into running a command, and no
+  command should fail over housekeeping. The budget is the goal, not a promise -- if
+  everything deletable is gone and the tree is still over, that is where it stands."
+  []
+  (let [all        (record-files)
+        held       (open-record-paths)
+        total      (reduce + 0 (map #(.length ^java.io.File %) all))
+        candidates (remove #(contains? held (str %)) all)]
+    (loop [left candidates, over (- total record-tree-budget-bytes), gone []]
+      (if (or (empty? left) (<= over 0))
+        gone
+        (let [^java.io.File f (first left)
+              path (str f)
+              ;; READ BEFORE THE FILE GOES: `length` of a deleted file is 0, and a budget
+              ;; that never comes down is a budget that deletes the whole tree.
+              bytes (.length f)]
+          (if (.delete f)
+            (recur (rest left) (- over bytes) (conj gone path))
+            (recur (rest left) over gone)))))))
+
+(defn- sweep-once!
+  "`prune-records!` ONCE per process -- what the callers below actually ask for.
+
+  The flag is set BEFORE the sweep, so two commands starting at the same moment cannot
+  both walk the tree (and the loser of that race does not walk it again after).
+  `prune-records!` itself is not cached, which is what lets a test drive the sweep
+  directly without a seam to clear."
+  []
+  (when (compare-and-set! pruned? false true)
+    (prune-records!)))
 
 (defn- ended-line
   "`[exit N]` for a process that is gone. Asked of the process rather than remembered,
@@ -326,12 +467,19 @@
 
 (defn shutdown!
   "Stop every background job this process started, in every session, and forget
-  them all -- records included.
+  them all -- and LEAVE EVERY RECORD WHERE IT IS.
 
-  THE RECORDS GO BECAUSE THE ANSWER THAT NAMED THEM IS GONE TOO. A job lives as long
-  as this process and no longer, and a record pointing at a command nobody can ask
-  about any more is litter in the configuration home. It is also why `stop!` does NOT
-  delete: there, the path was just handed to a caller to read.
+  THE RECORDS STAY BECAUSE THE COMMAND'S WORDS OUTLIVE THE COMMAND. A job lives as
+  long as this process and no longer, but what it said is a file, and 'what did that
+  test run say yesterday?' is the question worth keeping a file for -- which is why
+  this used to be the wrong way round (it deleted them, on the argument that a record
+  nobody can ask about is litter; the day somebody came back to read one, that
+  argument was over). `stop!` never deleted for the same reason: there the path had
+  just been handed to a caller.
+
+  THE FILE IS CLOSED, THOUGH, and that is the one thing the exit still has to do: an
+  open Writer is a handle nothing will ever write to again, and on Windows a held-open
+  file is also an undeletable one. Closing is not deleting.
 
   Called by the JVM-exit hook below, and callable directly -- which is how it is
   tested. A forked JVM against this repo's config home is a known hang
@@ -339,24 +487,15 @@
   this and watching the processes go, never by forking.
 
   NOT called when a run ends: a background command that a run's end killed would be
-  one nobody could check on later, which is the whole point of starting it.
-
-  THE FOREGROUND RECORDS GO WITH THE JOB ONES (`spill!`), for the same reason and on
-  the same clock: a `bash` answer that pointed at a file is as dead as the file when
-  this process goes, and both are this process's litter in its own home."
+  one nobody could check on later, which is the whole point of starting it."
   []
-  (let [jobs    (vec (mapcat (fn [[_ v]] (vals (:jobs v))) @registry))
-        records (vec (mapcat val @spilled))]
+  (let [jobs (vec (mapcat (fn [[_ v]] (vals (:jobs v))) @registry))]
     (reset! registry {})
-    (reset! spilled {})
-    ;; The order is the order of the filesystem: stop the processes, let go of the
-    ;; records, and only then delete them -- a file still held open is a file
-    ;; Windows will not delete. The pumps cannot write after the reset anyway (the
-    ;; last line is claimed, and a claim is once).
+    ;; The order is the order of the filesystem: stop the processes first, then let go
+    ;; of the records. Nothing is deleted -- see the docstring -- and the pumps cannot
+    ;; write after the reset anyway (the last line is claimed, and a claim is once).
     (doseq [j jobs] (close! j))
     (doseq [j jobs] (close-record! j))
-    (doseq [j jobs] (delete-record! (:path j)))
-    (doseq [p records] (delete-record! p))
     nil))
 
 (defn install-hook!
@@ -489,8 +628,7 @@
   address, and nothing to read while it grows: it is written once, whole, by the call
   that ran the command. It lives exactly where a job's record lives, though, and for
   the same two reasons -- the configuration home is free of the fence, so `read` and
-  `grep` reach it with no human in the way, and `shutdown!` takes this process's
-  records with it.
+  `grep` reach it with no human in the way, and it stays there when the process goes.
 
   FAILING TO WRITE IS NOT AN ERROR the caller has to handle: the answer it was going
   to point at is already bounded, so the call still returns a tail and a line saying
@@ -500,12 +638,9 @@
   (try
     (let [p (record-path thread-id (next-record-id! thread-id))
           f (io/file p)]
-      ;; REGISTERED BEFORE IT IS WRITTEN: a half-written file is litter too, and the
-      ;; exit hook has to know about it either way.
-      (swap! spilled update thread-id (fnil conj []) p)
+      (sweep-once!)
       (io/make-parents f)
       (spit f text :encoding "UTF-8")
-      (ensure-exit-hook!)
       p)
     (catch Exception e
       (log/warn! :jobs/record-not-written {:error (ex-message e)})
@@ -545,6 +680,10 @@
         job-id (next-id! thread-id)
         p      (record-path thread-id job-id)]
     (try
+      ;; BEFORE THE RECORD IS OPENED, so that what this call is about to write is not in
+      ;; the tree the sweep is looking at (and could not be a candidate if it were: see
+      ;; `prune-records!`).
+      (sweep-once!)
       (let [job {:id job-id :handle handle :path p
                  :writer (AtomicReference. (open-record! thread-id job-id))
                  ;; DELIVERED WHEN THE RECORD GETS ITS LAST LINE, whoever writes it.
@@ -688,8 +827,10 @@
   ending line is the honest answer to 'is it over' -- so a `wait` on that one runs to
   the timeout and says `[running]` rather than inventing an end for it.
 
-  THE JOB MUST BELONG TO THIS SESSION, and a job that is over still answers: its
-  record is kept until this process goes."
+  THE JOB MUST BELONG TO THIS SESSION, and a job that is over still answers -- for as
+  long as this process lives. Its RECORD outlives the process and this verb does not,
+  which is a distinction a reader can be caught by: after a restart the file is still
+  on disk and waiting to be read, and `job_output` answers `unknown job` about it."
   [thread-id job-id {:keys [offset limit wait timeout]}]
   (let [job (with-job thread-id job-id (fn [reg _] reg))]
     (when (and wait (not (terminal? job)))

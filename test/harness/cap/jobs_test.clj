@@ -16,8 +16,10 @@
 
 ;; Every job this namespace starts is stopped on the way out, whatever happened in
 ;; the test: a suite that leaves a `sleep 30` behind is the leak this feature exists
-;; to make impossible. The records go with it (`shutdown!`), so a case cannot read
-;; one left by the case before it.
+;; to make impossible. The RECORDS do NOT go with it: they are what outlives the process,
+;; so a case that wants a home to itself says so itself (a `binding` of
+;; `home/*root-override*`, the way `a-record-still-being-written-is-not-a-candidate`
+;; does) rather than counting on the teardown to have swept up.
 (use-fixtures :each (fn [f] (try (f) (finally (jobs/shutdown!)))))
 
 (defn- cleanup-dir!
@@ -198,7 +200,7 @@
         (is (str/includes? (ex-message e) a))
         (is (str/includes? (ex-message e) b))))))
 
-(deftest the-process-going-away-takes-its-jobs-and-their-records-with-it
+(deftest the-process-going-away-takes-its-jobs-and-not-its-records
   ;; `shutdown!` is what the exit hook runs, and it is asserted by CALLING it: a
   ;; forked JVM against this repo's config home hangs (harness.cap.mcp-test records
   ;; that), so the reap is measured here and the hook's installation by the count
@@ -209,14 +211,19 @@
         pid (support/child-pid pid-file 10000)]
     (is (some? pid) "the job's own child booted and named itself in the pid file")
     (is (support/alive? pid) "the job really is running")
-    (jobs/shutdown!)
-    (testing "the command and the child it started are both gone"
-      (is (support/gone-within? pid 5000)))
-    (testing "and the record is gone with them -- a job lives as long as the process"
-      (is (not (.exists (io/file path)))))
-    (testing "and no session can stop it any more"
-      (let [e (try (jobs/stop! "jt-h" id) nil (catch Exception e e))]
-        (is (= :unknown-job (:reason (ex-data e))))))
+    (let [said (slurp path :encoding "UTF-8")]
+      (jobs/shutdown!)
+      (testing "the command and the child it started are both gone"
+        (is (support/gone-within? pid 5000)))
+      (testing "and the record stays -- the job is the process's, the file is not"
+        (is (.exists (io/file path)))
+        (is (str/starts-with? (slurp path :encoding "UTF-8") said)
+            "and what it had already said is still there, word for word"))
+      (testing "and no session can ask about it any more"
+        (let [e (try (jobs/stop! "jt-h" id) nil (catch Exception e e))]
+          (is (= :unknown-job (:reason (ex-data e))))
+          (is (str/includes? (ex-message e) "RECORD")
+              "the refusal says the file is still there, so a reader does not take 'unknown job' for 'gone'"))))
     (cleanup-dir! dir)))
 
 (deftest the-exit-hook-is-installed-once-and-only-once
@@ -406,7 +413,7 @@
       (is (str/includes? line "could not be written"))
       (is (not (str/includes? line "nil"))))))
 
-(deftest a-spilled-record-is-this-processs-and-goes-with-it
+(deftest a-spilled-record-outlives-the-process-that-wrote-it
   (let [dir (support/temp-dir "jobs-spill")]
     (try
       (let [path (jobs/spill! "jt-spill" "the whole of what it said\n[exit 0]\n")]
@@ -416,8 +423,74 @@
           (let [e (try (jobs/stop! "jt-spill" "c1") nil (catch Exception e e))]
             (is (= :unknown-job (:reason (ex-data e))))))
         (jobs/shutdown!)
-        (is (not (.exists (io/file path))) "the process's records are the process's to take away"))
+        (testing "and the process going away leaves it exactly as it was"
+          (is (.exists (io/file path)))
+          (is (= "the whole of what it said\n[exit 0]\n" (slurp path :encoding "UTF-8")))))
       (finally (cleanup-dir! dir)))))
+
+;; ------------------------------------------------------------- the file that stays
+;;
+;; A RECORD IS THE ONE THING HERE THAT OUTLIVES ITS PROCESS, which makes two questions
+;; worth asking that a shorter-lived file would not raise: what a process's file is
+;; CALLED (so that the next run cannot write over it), and what a home is allowed to
+;; cost (so that 'kept' does not become 'unbounded').
+
+(deftest a-records-name-says-which-run-wrote-it
+  ;; The collision this guards against is silent: the ids restart at `j1` in every
+  ;; process (they are per session and in memory) and the file is opened TRUNCATING, so
+  ;; without the tag the next run of this session would write its `j1` over this one's.
+  (let [one (binding [jobs/*tag-override* "run-one"] (#'jobs/record-path "jt-run" "j1"))
+        two (binding [jobs/*tag-override* "run-two"] (#'jobs/record-path "jt-run" "j1"))]
+    (is (str/starts-with? one (home/root)) "still a path in the configuration home")
+    (is (not= one two) "the same session and the same id, from another run, is another file")
+    (is (str/ends-with? one "j1-run-one.log"))))
+
+(deftest a-process-has-one-stamp-for-as-long-as-it-lives
+  (let [tag (#'jobs/process-tag)]
+    (is (= tag (#'jobs/process-tag))
+        "asked twice, one answer -- a path an answer quoted must keep pointing at the same file")
+    (is (re-matches #"\d{8}T\d{9}-\d+" tag)
+        "this process's start, and the pid that keeps two of them apart")))
+
+(deftest the-record-tree-is-capped-by-bytes-and-the-oldest-goes-first
+  (let [dir (support/temp-dir "jobs-prune")]
+    ;; A HOME OF THIS TEST'S OWN: the budget is about the whole tree, so the arithmetic
+    ;; here has to be the only arithmetic in it.
+    (binding [home/*root-override* dir]
+      (let [tree (io/file (home/root) "jobs" "jt-prune")]
+        (try
+          (io/make-parents (io/file tree "old.log"))
+          (doseq [[name age] [["old.log" 1000] ["middle.log" 2000] ["new.log" 3000]]]
+            (let [f (io/file tree name)]
+              (spit f (apply str (repeat 1000 "x")))
+              (.setLastModified f (long age))))
+          (with-redefs [jobs/record-tree-budget-bytes 2500]
+            (let [gone (map #(.getName (io/file %)) (jobs/prune-records!))]
+              (is (= ["old.log"] gone)
+                  "one file is enough to get back under the budget, and it is the oldest")
+              (is (.exists (io/file tree "middle.log")))
+              (is (.exists (io/file tree "new.log")) "the newest is the last thing to go")))
+          (testing "and under the budget nothing is deleted at all"
+            (let [f (io/file tree "fresh.log")]
+              (spit f "kept")
+              (is (= [] (jobs/prune-records!)))))
+          (finally (cleanup-dir! dir)))))))
+
+(deftest a-record-still-being-written-is-not-a-candidate
+  (let [dir (support/temp-dir "jobs-held")]
+    ;; A HOME OF THIS TEST'S OWN: the sweep is over the whole tree by design, and what it
+    ;; does to the rest of the tree is other cases' business.
+    (binding [home/*root-override* dir]
+      (let [{:keys [id path]} (jobs/start! "jt-held" {:command "printf 'not yet\n'; sleep 30"})
+            f (io/file path)]
+        (is (support/holds-within? #(str/includes? (slurp path :encoding "UTF-8") "not yet") 10000))
+        (.setLastModified f 1000)
+        (testing "however old its mtime says it is"
+          (with-redefs [jobs/record-tree-budget-bytes 0]
+            (is (= [] (jobs/prune-records!)) "nothing else is there to delete, and this one is held")
+            (is (.exists f))
+            (is (str/includes? (slurp path :encoding "UTF-8") "not yet"))))
+        (jobs/stop! "jt-held" id)))))
 
 ;; --------------------------------------------------------------- reading a job
 ;;

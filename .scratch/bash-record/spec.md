@@ -39,7 +39,8 @@
    是**它为什么需要一个文件**。
 
 5. **作业那套记录机器已经全在了。** 一份文件、一个写入者、每行 flush、末行自答（`[exit N]` /
-   `[stopped]`，缺席即「还在跑」）、进程退出时收掉、住在配置家所以围栏自由（`cap/jobs.clj:16-45`，
+   `[stopped]`，缺席即「还在跑」）、~~进程退出时收掉~~（**2026-09-20**：`.scratch/bash-record-persistence/
+   spec.md` 翻掉这句——记录留下来）、住在配置家所以围栏自由（`cap/jobs.clj:16-45`，
    `cap/project.clj:636` 把 `home/root` 列在 `:free`，`test/harness/cap/project_test.clj:149-150` 钉着）。
    缺的只是**它的位置和它的名字**：`record-path`（`:96-104`，docstring 就写着「ONE PLACE BUILDS THIS
    STRING」）今天只服务「后台」这一档，目录就叫 `jobs/`。
