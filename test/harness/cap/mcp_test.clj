@@ -487,6 +487,29 @@
     (is (contains? (mcp/tools-for thread) "mcp__chatty__echo"))
     (is (= "echo: fine" (:content (call! thread "mcp__chatty__echo" {:text "fine"}))))))
 
+(deftest declaration-args-arrive-as-one-argument-each
+  ;; The quoting regression. A declaration's :args are spliced into one command LINE,
+  ;; and the line is spawned by `harness.infra.shell` -- which on Windows sends a
+  ;; long-lived :program line to `cmd /c`. The args were quoted as POSIX words
+  ;; (single quotes), which cmd does not read: `@playwright/mcp@latest` arrived at
+  ;; npm as the literal `@playwright/mcp@latest'` -- quotes on -- and npm looked for
+  ;; a package.json under a directory named after it. The quote now follows the
+  ;; spawn (shell/quote-arg answers the word for the shell this process would
+  ;; actually use), and this test reads the SERVER's own argv to hold the line.
+  (let [args ["@scope/pkg@latest" "a b" "say \"hi\""]
+        decl (fake-decl {:env {"MCP_FAKE_ARGV" "1"}
+                         :args args})]
+    (write-servers! {"argv" decl})
+    (let [thread (str "mcp-argv-" (System/currentTimeMillis))
+          table  (mcp/tools-for thread)]
+      (is (contains? table "mcp__argv__argv"))
+      (let [answer (:content (call! thread "mcp__argv__argv" {}))
+            argv    (json/read-str answer)]
+        ;; the server's script path, then EVERY declared arg, each one argument,
+        ;; each one stripped of whatever quoting the spawn added:
+        (is (= (rest argv) args)
+            (pr-str {:argv argv :expected args}))))))
+
 (deftest one-broken-server-does-not-cost-another-its-tools
   (let [live (lifecycle-file "isolation")]
     (write-servers! {"good" (fake-decl {:env {"MCP_FAKE_LIFECYCLE" live}})

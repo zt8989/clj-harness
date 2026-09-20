@@ -301,17 +301,38 @@
                            " comes back.")
                       {:reason :no-posix-shell :shell (:kind r)})))))
 
-(defn quote-arg
-  "S as a single-quoted POSIX word, for a caller that is BUILDING a command line
-  rather than passing one. The `'\\''` dance is the only way to put a quote
-  inside a single-quoted word.
-
-  Here rather than in the two namespaces that need it, for this namespace's own
-  reason: a command line goes through `bash -lc`, so how a value is quoted is a
-  property of how this process spawns things -- and a second copy of it is a
-  second chance for one caller to be fixed and the other left open."
+(defn- quote-posix
+  "S as a single-quoted POSIX word. The `'\\''` dance is the only way to put a quote inside a single-quoted word."
   [s]
   (str "'" (str/replace (str s) "'" "'\\''") "'"))
+
+(defn- quote-cmd
+  "S as one word for `cmd /c`: wrapped in double quotes, with a literal quote inside
+  spelled `\"\"` -- cmd's own rule for the arguments it hands a program, and the
+  only rule its parent can rely on. Verified against a real `cmd /c node` on this
+  repository's machines; MSVCRT's own doubling rule is a different sentence and is
+  NOT what cmd does with a line it was handed."
+  [s]
+  (let [s (str s)]
+    (if (re-find #"[\s\"\^&|<>()]" s)
+      (str "\"" (str/replace s "\"" "\"\"") "\"")
+      s)))
+
+(defn quote-arg
+  "S as a single word of the command line the LONG-LIVED spawn of THIS process will
+  build -- POSIX single quotes when the line goes to a shell that reads them, cmd's
+  double quotes when on Windows it goes to `cmd /c` (see `windows-argv`). A caller
+  is BUILDING a line, not passing one, and must quote for the shell the line will
+  actually land in: a POSIX-quoted arg handed to cmd arrives with its quotes on, as
+  literal characters of the argument.
+
+  Here rather than in the callers that need it, for this namespace's own reason: HOW
+  a line is quoted is a property of how this process spawns things -- and a second
+  copy of it is a second chance for one caller to be fixed and the other left open."
+  [s]
+  (if (windows?)
+    (quote-cmd s)
+    (quote-posix s)))
 
 (defn- kill-tree!
   "Stop P and everything it started.
