@@ -423,7 +423,8 @@
                          (let [sent (notices first-lines)]
                            (is (= 1 (count sent)) "one job, one notice")
                            (is (str/includes? (str (get-in (first sent) [:payload :content]))
-                                              "JOB-SAYS-SO"))
+                                              "[exit 0]")
+                               "how it went -- and nothing of what it said")
                            (is (str/includes? (str (get-in (first sent) [:payload :content]))
                                               (str "id=\"" id "\"")))))
                        (testing "and the client is never told"

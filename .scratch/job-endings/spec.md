@@ -33,9 +33,12 @@
 2. **形状：尾随 user 消息，块名就是框。** `<job-ended id="j1" path="…/j1.log">` … `</job-ended>`，
    先例是 `<skill name="…">` / `<instructions path="…">`：块名是模型读的框，也是读侧认它的锚。
    正文是**记录的尾部**——末端就是那条结论行（`[exit N]` / `[stopped]`），因为记录本来就这么结束。
-3. **有界，而且是按字节的有界。** 一个 `def`（`notice-budget-bytes`，比一次答案的预算小：通知是提醒，
+~~3. **有界，而且是按字节的有界。** 一个 `def`（`notice-budget-bytes`，比一次答案的预算小：通知是提醒，
    不是回答）。超了就写成尾部，并在前面补一行**同一处**的截断话术
-   （`truncation-line`，答案里那句就是它）。路径就在标签上，`job_output` 读得到全部。
+   （`truncation-line`，答案里那句就是它）。路径就在标签上，`job_output` 读得到全部。~~
+   **2026-09-18（同日更晚）**：`.scratch/bash-background/spec.md` 把它收成**三样事实**
+   （`<job-ended id="…" path="…">[exit N]</job-ended>`）——通知是事实，不是答案：没有尾部、
+   没有截断话术、也不提怎么读。`notice-budget-bytes` 退场。
 4. **一次，永远一次。** 注册表给每个作业记一个**已告知**（`:told?`）。三条路都算告知：
    `job_output` 把终态交回给模型、`job_kill` 把结局交回给模型、通知本身。标记与读在**同一次 `swap!`**
    里完成（`.scratch/immutable-data` 的纪律：读写都在同一个 `swap!` 里）。

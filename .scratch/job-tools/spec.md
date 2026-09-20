@@ -42,12 +42,15 @@ stdin、换不了工作目录**，它的答案**没有上界**（`(str out err)`
 
 ## 决策
 
-1. **`bash` 多两个参数：`stdin` 与 `workdir`，后台**不**多一个 `run_in_background`。**
+~~1. **`bash` 多两个参数：`stdin` 与 `workdir`，后台**不**多一个 `run_in_background`。**
    `stdin` 写进去随即**关掉**（`run` 已经这么干：一个读 stdin 的命令看到的是 EOF，不是
    「等一个不会打字的父进程」）。`workdir` 是本会话项目绑定之下的一个目录，**解析与本仓其它路径同一处**
    （相对路径就是相对项目目录），不是目录就**指名拒绝**（说出它是文件 / 不在）。后台**不**引
    `run_in_background`：本仓的后台是一个**独立动词**（`job`，名字不带 `bash_` 是 `omp-parity` 那次复议
-   的规矩），而 `.scratch/bash-record` 的轴（接下来会不会等）已经写在两条描述里。
+   的规矩），而 `.scratch/bash-record` 的轴（接下来会不会等）已经写在两条描述里。~~
+   **2026-09-18（同日更晚）**：`.scratch/bash-background/spec.md` 翻掉后半句——`run_in_background`
+   **引了**，`job` 退场：两个模式回到一个动词里。前半句（`stdin` / `workdir` 是 `bash` 的参数）不动，
+   它只是多了一句「后台不喂 `stdin`（指名拒绝）、`timeout` 也不适用」。
 
 2. **一次调用的答案有上界：按字节、留尾部、带省略量与溢出路径。** 一个 `def` 决定预算（描述里
    插值 —— `bash-default-timeout-ms` 的先例：写第二个 `120000` 就是留一次「改了默认值、描述没跟上」），

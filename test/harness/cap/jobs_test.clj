@@ -90,15 +90,12 @@
         {:keys [id path]} (jobs/start! t {:command "echo said-this; exit 3"})]
     (record-until path #(re-find #"\[exit" %) 10000)
     (let [notices (jobs/take-notices! t)]
-      (testing "one job, one notice, in the shape the injection is read back by"
+      (testing "one job, one notice, and it is THREE facts and nothing else"
         (is (= 1 (count notices)))
         (is (= "user" (:role (first notices))) "a message like any other, like a skill body")
-        (is (str/starts-with? (:content (first notices))
-                              (str "<job-ended id=\"" id "\" path=\"")))
-        (is (str/ends-with? (:content (first notices)) "</job-ended>"))
-        (is (str/includes? (:content (first notices)) "said-this") "what it said is in it")
-        (is (str/includes? (:content (first notices)) "[exit 3]")
-            "and the body ends on the RECORD's own ending line, which is the status"))
+        (is (= (str "<job-ended id=\"" id "\" path=\"" path "\">[exit 3]</job-ended>")
+               (:content (first notices)))
+            "which job, where its record is, and how it went -- no tail, no advice"))
       (testing "and it is not said twice"
         (is (= [] (jobs/take-notices! t)))))))
 
@@ -129,19 +126,26 @@
     (is (true? (:stopped? (jobs/stop! t id))))
     (is (= [] (jobs/take-notices! t)) "its answer WAS the ending")))
 
-(deftest a-long-record-is-announced-by-its-tail
-  ;; The notice is a nudge, not an answer: bounded by its own (smaller) budget, and what
-  ;; it leaves out it says out loud -- with the same sentence a `bash` answer uses.
-  (let [t "jt-long"
-        {:keys [path]} (jobs/start! t {:command "seq 1 5000; exit 0"})]
-    (record-until path #(re-find #"\[exit" %) 20000)
-    (let [content (:content (first (jobs/take-notices! t)))]
-      (is (str/includes? content "[truncated: omitted ") "the bytes left out are named")
-      (is (str/includes? content "the whole output is ") "and so is where the rest is")
-      (is (str/includes? content "\n5000\n") "the tail is the END of the record")
-      (is (str/includes? content "[exit 0]") "which ends on the ending line")
-      (is (< (alength (.getBytes content "UTF-8")) (* 3 jobs/notice-budget-bytes))
-          "and the whole block stays inside the budget (plus its tag and one line)"))))
+(deftest a-notice-is-the-same-size-whatever-the-record-is
+  ;; A NOTICE IS A FACT, NOT AN ANSWER. It used to carry the end of the record (up to a
+  ;; budget, with the truncation sentence when it did not fit); that made a reminder the
+  ;; size of an answer, and a command that printed five thousand lines is announced in
+  ;; exactly the same few bytes as one that printed nothing.
+  (let [t "jt-size"
+        big  (jobs/start! t {:command "seq 1 5000; exit 0"})
+        none (jobs/start! t {:command "exit 0"})]
+    (record-until (:path big) #(re-find #"\[exit" %) 20000)
+    (record-until (:path none) #(re-find #"\[exit" %) 10000)
+    (let [notices (jobs/take-notices! t)
+          bytes   (fn [m] (alength (.getBytes ^String (:content m) "UTF-8")))]
+      (is (= 2 (count notices)) "two jobs, two notices")
+      (doseq [n notices]
+        (is (str/includes? (:content n) "[exit 0]"))
+        (is (not (str/includes? (:content n) "5000"))
+            "nothing of what the command said -- the record is one call away")
+        (is (< (bytes n) 400) (str "a notice is a line, not a report: " (bytes n) " bytes")))
+      (is (< (- (bytes (first notices)) (bytes (second notices))) 200)
+          "and the two are the same size, because what differs is not in them"))))
 
 (deftest the-pre-llm-half-leaves-a-history-alone-when-there-is-nothing-to-say
   (let [history [{:role "user" :content "go"}]]

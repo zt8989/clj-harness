@@ -23,6 +23,17 @@
 (defn- call [name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}}))
 
+(defn- background
+  "`bash` in its background mode -- the ONE way to start a job now that the two modes
+  are one tool. The answer is the same id-and-path pair the cases below parse, and
+  `bash-as` is the same call under a session of its own."
+  ([command] (call "bash" {:command command :run_in_background true}))
+  ([thread-id command] (tools/run! {:function {:name "bash"
+                                                :arguments (json/write-str
+                                                            {:command command
+                                                             :run_in_background true})}}
+                                    thread-id)))
+
 ;; ...and the ONE session that is deliberately the other editing mode. Everything
 ;; else here runs unbound, which since ticket 12 means anchor editing.
 (use-fixtures :each
@@ -204,15 +215,15 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job" "job_kill" "job_output"
-              "read" "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
+      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job_kill" "job_output" "read"
+              "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
               "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
+      (is (= ["bash" "edit" "eval" "glob" "job_kill" "job_output" "read"
               "session-configure" "skill" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
@@ -493,10 +504,7 @@
     (spit (io/file pdir "marker.txt") "job-here" :encoding "UTF-8")
     (project/bind! "tt-job" (.getAbsolutePath pdir))
     (try
-      (let [answer (:content (tools/run! {:function {:name "job"
-                                                     :arguments (json/write-str
-                                                                 {:command "cat marker.txt"})}}
-                                         "tt-job"))
+      (let [answer (:content (background "tt-job" "cat marker.txt"))
             job-id (second (re-find #"job (j\d+) started" answer))
             path   (second (re-find #"its record is (\S+)" answer))]
         (is (some? job-id) (str "the tool answered with a job id: " answer))
@@ -533,10 +541,51 @@
 (deftest a-background-call-comes-back-before-the-command-does
   ;; The whole point: the call is not the command's lifetime.
   (let [started (System/currentTimeMillis)
-        answer  (:content (call "job" {:command "sleep 30"}))
+        answer  (:content (background "sleep 30"))
         elapsed (- (System/currentTimeMillis) started)]
     (is (re-find #"job j\d+ started" answer))
     (is (< elapsed 5000) (str "it returned while the command was still running (" elapsed "ms)"))
+    (jobs/shutdown!)))
+
+(deftest the-two-modes-of-one-tool-differ-in-exactly-one-thing
+  ;; THE MERGE, as behaviour rather than as a parameter list. Waiting or not waiting is
+  ;; the difference; everything else about the command -- where it runs, what it writes
+  ;; its record into, what tool answers for it -- is the same.
+  (testing "`timeout` is not a limit on a background command"
+    (let [t0     (System/currentTimeMillis)
+          answer (:content (call "bash" {:command "sleep 2; echo late"
+                                         :run_in_background true
+                                         :timeout 1}))
+          elapsed (- (System/currentTimeMillis) t0)
+          path   (second (re-find #"its record is (\S+)" answer))]
+      (is (some? path) (str "the answer names the record: " answer))
+      (is (< elapsed 1000) (str "the call came back at once: " elapsed "ms"))
+      (testing "and the command really is still running"
+        ;; A limit of 1ms that was applied would have stopped it long before this.
+        (Thread/sleep 1200)
+        (is (not (str/includes? (slurp path :encoding "UTF-8") "[exit"))))
+      (jobs/shutdown!)))
+  (testing "and `stdin` is refused by name instead of being dropped"
+    ;; Nothing feeds a background command, so accepting the text would be a silent
+    ;; disagreement about what the call asked for.
+    (let [{:keys [content error]} (call "bash" {:command "cat"
+                                                :run_in_background true
+                                                :stdin "x"})]
+      (is (true? error))
+      (is (str/includes? content "`stdin` cannot be used with `run_in_background`"))
+      (is (str/includes? content "foreground")))))
+
+(deftest the-answers-state-facts-and-not-instructions
+  ;; How to read a record belongs in a DESCRIPTION -- which is in front of the model on
+  ;; every request -- and not repeated in every answer. What an answer says is what
+  ;; happened: which job, how it went, where its record is.
+  (let [started (:content (background "sleep 30"))
+        job-id  (second (re-find #"job (j\d+) started" started))]
+    (is (not (str/includes? started "read it with")))
+    (is (not (str/includes? (:content (call "job_output" {:job job-id})) "read it with")))
+    (let [killed (:content (call "job_kill" {:job job-id}))]
+      (is (not (str/includes? killed "read it with")))
+      (is (str/includes? killed "its record is") "the fact is still there"))
     (jobs/shutdown!)))
 
 (deftest an-unknown-job-reaches-the-model-as-an-error
@@ -546,8 +595,9 @@
 
 (deftest the-background-tools-take-the-arguments-they-need
   ;; The seam's missing-argument check is per tool, which is one of the reasons
-  ;; these are three names rather than one with an `action`.
-  (is (str/includes? (:content (call "job" {})) "missing required argument"))
+  ;; these are two names rather than one with an `action`. Starting a job is not one
+  ;; of them any more: it is `bash`, and what it needs is still a command.
+  (is (str/includes? (:content (call "bash" {})) "missing required argument"))
   (is (str/includes? (:content (call "job_kill" {})) "missing required argument"))
   (is (str/includes? (:content (call "job_output" {})) "missing required argument")))
 
@@ -555,7 +605,7 @@
   ;; The answer hands the model a path and says how to read it; this is that path
   ;; being readable, with the tool the answer names -- which is the whole reason the
   ;; job module does not keep a read verb of its own any more.
-  (let [answer (:content (call "job" {:command "echo one; echo two; sleep 30"}))
+  (let [answer (:content (background "echo one; echo two; sleep 30"))
         path   (second (re-find #"its record is (\S+)" answer))]
     (is (some? path) (str "the answer names the record: " answer))
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"two" (:answer %)) 10000)
@@ -572,7 +622,7 @@
   ;; redirection would land somewhere else entirely and the note would name that.
   (let [tmp (io/file dir "redirected.txt")
         target (support/shell-path (.getAbsolutePath tmp))
-        answer (:content (call "job" {:command (str "echo hi > " target)}))]
+        answer (:content (background (str "echo hi > " target)))]
     (testing "the command still runs -- a note is not a refusal"
       (is (some? (re-find #"job j\d+ started" answer))))
     (testing "and the answer says where the output went, and why the record stays empty"
@@ -585,12 +635,12 @@
       (is (support/holds-within?
            #(and (.exists tmp) (= "hi" (str/trim (slurp tmp :encoding "UTF-8")))) 5000)))
     (testing "while a command that sends nothing away is not given the note"
-      (let [plain (:content (call "job" {:command "sleep 30"}))]
+      (let [plain (:content (background "sleep 30"))]
         (is (not (str/includes? plain "record will stay empty")))))
     (jobs/shutdown!)))
 
 (deftest a-background-job-can-be-stopped-and-is-then-readable
-  (let [started (:content (call "job" {:command "sleep 30"}))
+  (let [started (:content (background "sleep 30"))
         job-id  (second (re-find #"job (j\d+) started" started))
         path    (second (re-find #"its record is (\S+)" started))
         started-at (System/currentTimeMillis)
@@ -618,7 +668,7 @@
         (is (str/includes? content "was already over"))
         (is (str/includes? content "[stopped]")))))
   (testing "a job that ended on its own is reported with its own exit line"
-    (let [started (:content (call "job" {:command "exit 3"}))
+    (let [started (:content (background "exit 3"))
           job-id  (second (re-find #"job (j\d+) started" started))
           path    (second (re-find #"its record is (\S+)" started))]
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
@@ -639,24 +689,28 @@
 
 (deftest the-three-faces-say-what-they-are-for
   ;; THE AXIS, asserted rather than assumed: how long a command takes is not the
-  ;; question -- 'am I going to wait for it' is. A model that reads `job` as "the slow
-  ;; one" ends up with `job` + `sleep`, which is a `join` it had to build itself
+  ;; question -- 'am I going to wait for it' is -- and since the two modes are ONE tool
+  ;; the axis is a parameter rather than a choice between two names. That is the whole
+  ;; reason for the merge: a model reading two descriptions in which one said 'slow'
+  ;; picked that one and then built its own `join` out of `sleep`
   ;; (`.scratch/bash-record/spec.md` has that session).
   (let [spec (fn [name] (get-in (first (filter #(= name (get-in % [:function :name]))
                                                (tools/specs)))
                                 [:function :description]))]
-    (testing "`bash` is for waiting, and says how long it will wait"
-      (is (str/includes? (spec "bash") "for something that has to outlive the call, use `job`"))
+    (testing "`bash` carries both modes, and says what the background one costs"
+      (is (str/includes? (spec "bash") "run_in_background"))
+      (is (str/includes? (spec "bash") "A job has NO timeout")
+          "a `timeout` handed to the background mode limits nothing, and it is not implied")
+      (is (str/includes? (spec "bash") "WHEN IT ENDS YOU ARE TOLD"))
       (is (str/includes? (spec "bash") (str jobs/answer-budget-bytes " bytes"))))
-    (testing "`job` is for NOT waiting, and names the verb that reads it"
-      (is (str/includes? (spec "job") "job_output"))
-      (is (str/includes? (spec "job") "if you are only going to wait for it, use `bash`")))
     (testing "`job_output` is the one that can wait, and the one that says how it went"
       (is (str/includes? (spec "job_output") "`wait: true` blocks"))
-      (is (str/includes? (spec "job_output") (str jobs/job-output-default-timeout-ms "ms"))))))
+      (is (str/includes? (spec "job_output") (str jobs/job-output-default-timeout-ms "ms"))))
+    (testing "and neither face is left holding a stale name"
+      (is (nil? (spec "job")) "the merged name is gone from the table"))))
 
 (deftest a-job-output-call-can-wait-for-the-command-to-finish
-  (let [started (:content (call "job" {:command "echo one; sleep 1; echo two"}))
+  (let [started (:content (background "echo one; sleep 1; echo two"))
         job-id  (second (re-find #"job (j\d+) started" started))
         t0      (System/currentTimeMillis)
         {:keys [content error]} (call "job_output" {:job job-id :wait true :timeout 20000})
@@ -672,7 +726,7 @@
     (jobs/shutdown!)))
 
 (deftest a-wait-that-runs-out-is-an-answer-not-an-error
-  (let [started (:content (call "job" {:command "sleep 30"}))
+  (let [started (:content (background "sleep 30"))
         job-id  (second (re-find #"job (j\d+) started" started))
         t0      (System/currentTimeMillis)
         {:keys [content error]} (call "job_output" {:job job-id :wait true :timeout 300})
@@ -683,7 +737,7 @@
     (jobs/shutdown!)))
 
 (deftest a-job-output-call-reads-a-window-of-the-record
-  (let [started (:content (call "job" {:command "echo one; echo two; echo three; sleep 30"}))
+  (let [started (:content (background "echo one; echo two; echo three; sleep 30"))
         job-id  (second (re-find #"job (j\d+) started" started))
         path    (second (re-find #"its record is (\S+)" started))]
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"three" (:answer %)) 10000)

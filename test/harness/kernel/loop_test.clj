@@ -276,8 +276,11 @@
             (is (not (str/includes? (str (first @sent)) "job-ended"))
                 "the job was still running when that call was made"))
           (testing "and the second one had it, without anybody asking"
-            (is (str/includes? (str (second @sent)) "JOB-SAYS-DONE"))
-            (is (str/includes? (str (second @sent)) "job-ended")))
+            ;; THE NOTICE CARRIES THE JOB'S ID, WHERE ITS RECORD IS, AND HOW IT WENT --
+            ;; what the command SAID is not in it (`job_output`, or the file, is a call
+            ;; away), so the output line is deliberately NOT one of the markers here.
+            (is (str/includes? (str (second @sent)) "job-ended"))
+            (is (str/includes? (str (second @sent)) (str "[exit 0]"))))
           (testing "exactly once in the history the run ends with"
             (is (= 1 (count (filter #(str/includes? (str (:content %)) "job-ended")
                                     history)))))

@@ -181,14 +181,16 @@
                    (message 11 (user "u1" "\u5f00\u5de5"))
                    finished
                    (message 20 {:role "assistant" :content ""
-                                :tool_calls [(tool-call "c1" "job" "{\"command\":\"make\"}")]})
-                   (message 21 (tool-msg "c1" "job j1 started"))
-                   (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">\nDONE\n[exit 0]\n</job-ended>"))
+                                :tool_calls [(tool-call "c1" "bash"
+                                                        "{\"command\":\"make\",\"run_in_background\":true}")]})
+                   (message 21 (tool-msg "c1" "job j1 started; its record is /home/jobs/j1.log"))
+                   (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"))
                    (message 23 (assistant "noted"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
       (is (= "run" (:source (item-of turn "context"))))
-      (is (str/includes? (:text (item-of turn "context")) "path=\"/home/jobs/j1.log\"")
-          "the bytes, verbatim -- the path is part of what the model read")))
+      (is (= "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"
+             (:text (item-of turn "context")))
+          "the bytes, verbatim -- and three facts is all there is to them")))
 
   (testing "and two jobs are two blocks, because the ids are part of the bytes"
     (let [[turn] (turns-of

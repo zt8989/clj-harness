@@ -762,7 +762,10 @@
         (is (= 2 (count once)))
         (is (= "hi" (:content (first once))) "the client's own message is untouched")
         (is (str/starts-with? (:content (second once)) "<job-ended"))
-        (is (str/includes? (:content (second once)) "JOB-SAYS-SO")))
+        (is (str/includes? (:content (second once)) "[exit 0]") "how it went")
+        (is (str/includes? (:content (second once)) path) "and where its record is")
+        (is (not (str/includes? (:content (second once)) "JOB-SAYS-SO"))
+            "nothing of what the command said: a notice is three facts"))
       (testing "and applying the step to its own output changes nothing"
         ;; The loop's promise: a step that grew a second copy each time it ran would
         ;; put the same notice in front of the model on every call of every turn.

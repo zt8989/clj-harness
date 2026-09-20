@@ -787,40 +787,30 @@
 ;;
 ;; AND IT IS SAID ONCE. That claim needs a place to live -- see `take-notices!`.
 
-(def notice-budget-bytes
-  "How many BYTES of a job's record one notice carries.
-  SMALLER THAN `answer-budget-bytes`, and by design: a notice is a nudge, not an answer.
-  It is there so the model can decide whether to look, and the whole record is one
-  `job_output` away (its path is on the tag). One source, like every other budget here."
-  1200)
-
 (defn- notice
-  "The message that tells the model JOB is over: a `<job-ended …>` block whose body is
-  the END of the job's record -- which ends on the ending line itself (`[exit N]` /
-  `[stopped]`), so the body needs no second account of how it went.
+  "The message that tells the model JOB is over, and ONLY THAT: which job, where its
+  record is, and the line the record ends on.
+
+  THREE THINGS AND NOTHING ELSE. A notice is a fact, not an answer: it does not carry a
+  tail of what the command said (a record of five thousand lines is announced in the
+  same few bytes as an empty one), it does not repeat the truncation sentence, and it
+  says nothing about how to read the record -- the tool descriptions are where that
+  belongs, and they are in front of the model on every request.
 
   THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
-  `<skill name=…>` and `<instructions path=…>` are for their own blocks. The path is an
-  attribute rather than a sentence: it is metadata about the block, not something the
-  command said.
-
-  OVER BUDGET: the tail, and -- in front of it -- the same truncation line a `bash`
-  answer uses, saying how many bytes are missing and where the whole thing is. One
-  sentence, written once (`truncation-line`), for both readers.
+  `<skill name=…>` and `<instructions path=…>` are for their own blocks. The path rides
+  on it as an attribute rather than as a sentence: it is metadata about the block, not
+  something the command said.
 
   THE PATH GOES IN UNESCAPED, and that is a judgement rather than an oversight: it is
-  this harness's own configuration home plus `home/sanitize`d id, whose rule admits only
-  `[A-Za-z0-9._-]`, so a quote can appear in it only if somebody named their home with
-  one -- and a check for that would be a lot of code for that."
+  this harness's own configuration home plus a `home/sanitize`d id, whose rule admits
+  only `[A-Za-z0-9._-]`, so a quote can appear in it only if somebody named their home
+  with one -- and a check for that would be a lot of code for that."
   [job]
-  (let [whole (try (slurp (:path job) :encoding "UTF-8") (catch Exception _ ""))
-        {:keys [text omitted]} (tail-within-budget whole notice-budget-bytes)
-        body (if (and (seq text) (not (str/ends-with? text "\n"))) (str text "\n") text)]
+  (let [ending (or (ending-of (:path job)) "[exit ?]")]
     {:role "user"
-     :content (str "<job-ended id=\"" (:id job) "\" path=\"" (:path job) "\">\n"
-                   (when (pos? omitted) (str (truncation-line omitted (:path job)) "\n"))
-                   body
-                   "</job-ended>")}))
+     :content (str "<job-ended id=\"" (:id job) "\" path=\"" (:path job) "\">"
+                   ending "</job-ended>")}))
 
 (defn take-notices!
   "The messages that tell THREAD-ID's model about jobs that have finished and whose
@@ -842,8 +832,8 @@
   entries it leaves behind come from one snapshot, so a job ending at this very moment
   is in this answer or in the next one -- never in both, never in neither.
 
-  A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `bash tail` on a record leaves no
-  trace here, so that job is announced once anyway. The notice is small and said once,
+  A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `tail` on a record leaves no trace
+  here, so that job is announced once anyway. The notice is three facts and said once,
   and being told something twice costs less than never being told at all."
   [thread-id]
   (let [pending? (fn [job] (and (terminal? job) (not (:told? job))))

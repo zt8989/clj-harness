@@ -56,8 +56,9 @@ drive! :
   [skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)），
   所以每轮施加不需要任何簿记。
 - **后台作业的结束**（`harness.cap.jobs/before-llm`）：一条没人等的命令结束了，它的结局就作为一条
-  `<job-ended id="…" path="…">` 的尾随 user 消息摆在下一次调用面前——**这不是推送**（不唤醒、不新起
-  run、不发帧），而且**只说一次**。它与技能正文的唯一不同是幂等的来源：技能正文靠**历史里的标签**
+  `<job-ended id="…" path="…">[exit N]</job-ended>` 的尾随 user 消息摆在下一次调用面前——**三样事实
+  （哪条作业、记录在哪、怎么结束的），与记录多大无关**；**这不是推送**（不唤醒、不新起 run、不发帧），
+  而且**只说一次**。它与技能正文的唯一不同是幂等的来源：技能正文靠**历史里的标签**
   （客户端每轮把 `<skill …>` 重发回来），通知没有那个锚（客户端从不持有它），所以「说过了」记在
   **作业注册表**里（进程内、按会话、与作业同寿命）。模型自己 `job_output` / `job_kill` 拿到过结局的
   作业**不再通知**——已经读过的东西不是新闻。
@@ -135,13 +136,13 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
 `harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
 （它落库，见 [home-and-storage](home-and-storage.md#任务清单的表)）；两个 `web_*` 碰的是**网**。
-**最后一列里的三个后台工具同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
+**最后一列里与作业有关的那两个同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
 `harness.cap.editing/families` 里）。它们都属于「没有编辑家族」那一类——`harness.cap.editing/families`
 **一个字都没改**，因为那张表登记的是
 「与编辑有关的名字」，没登记的名字两种模式都服务。
@@ -156,7 +157,7 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 **记录写完末行**那一刻（`write-last-line!` 里 `deliver`，不轮询文件）。`timeout` 到了就答 `[running]`——
 **那是「我这次等多久」，不是作业的时限**；作业照样没有时限。
 
-**命令自己把输出重定向走时（`… > 文件`），`job` 只在答案里指名说一声，绝不拒绝**：判据是尽力而为的
+**命令自己把输出重定向走时（`… > 文件`），后台模式的答案里只指名说一声，绝不拒绝**：判据是尽力而为的
 （引号、变量、`$(mktemp)` 都可能漏），拿一个尽力而为的判定去拦一条可能正当的命令（`> report.csv`
 是真正的活）是拿真事换姿态。漏了，只是不提醒。
 

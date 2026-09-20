@@ -8,7 +8,9 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 
 `go.json` 三轮，正好一次「起一条没人等的作业 → 去干别的 → 收尾」：
 
-1. 模型调 `job` 起一条 1 秒就结束的作业（`sleep 1; echo JOB-SAYS-SO`），拿到句柄就继续；
+1. 模型调 `bash {command: "sleep 1; echo JOB-SAYS-SO", run_in_background: true}` 起一条 1 秒就结束的
+   作业，拿到句柄就继续（**起作业的动词在 2026-09-18 晚些并进了 `bash`**，见
+   `.scratch/bash-background/spec.md`：那天的脚本写的是 `job`，工具合并后这一行跟着改）；
 2. 模型调 `bash {sleep 3}`——这一轮里作业跑完了，而模型在忙；
 3. 模型的第三次调用（就是它下一次开口）之前，前置步骤把 `<job-ended id="j…">` 注入进历史。
 
@@ -34,3 +36,13 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 
 - 后端日志（那一场的 jsonl）里同一条：`message` 行，`role: user`，`content` 就是上面那段，
   位置在两次工具结果之后、收尾那条 assistant 之前。
+
+## 合并之后又跑了一次（2026-09-18，工具并进 `bash` 之后）
+
+同一个脚本（`go.json` 已改成 `bash {run_in_background: true}`）重跑，一轮里看见的：
+
+- 工具卡：`bash {"command":"sleep 1; echo JOB-SAYS-SO","run_in_background":true}` → 完成；
+  结果就是 `job j1 started; its record is <路径>`（**没有「read it with …」**）。
+- 轨道上比之前少一张脸：`job` 这个名字整个不在了。
+- 注入那一格还在：`上下文` / `<job-ended id="j1" path="…">[exit 0]</job-ended>` —— 一行、三样事实，
+  **没有尾部**（记录里那句 `JOB-SAYS-SO` 不在通知里）。

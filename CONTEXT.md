@@ -107,7 +107,7 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 *别叫成* 备份、历史（都不保留多次）。
 
 **工具名的写法**：`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` /
-`anchor_grep` / `bash` / `job` / `job_kill` / `job_output` / `eval` / `glob` / `todo_write` /
+`anchor_grep` / `bash` / `job_kill` / `job_output` / `eval` / `glob` / `todo_write` /
 `web_fetch` / `web_search` —— 就是这些名字，
 不给它们起别名，也不把 `edit` 叫成"旧编辑"、把 `replace` 叫成"锚点编辑"。
 一律小写、多词用下划线（`undo_last_replace` 就是那个先例）：不写 `camelCase`、不写 `PascalCase`
@@ -121,7 +121,8 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 时限讲的是**命令**的边界，两件事不要读成一件。
 *别叫成* deadline、执行预算、超时配置。
 
-**后台作业（job）** —— 一条**没人等**的命令：`job` 起它、`job_output` 读它（可以挂到终态）、`job_kill` 停它。
+**后台作业（job）** —— 一条**没人等**的命令：`bash {run_in_background: true}` 起它（**一条命令的两个模式，
+不是两个动词**）、`job_output` 读它（可以挂到终态）、`job_kill` 停它。
 作业**没有时限**（跑到自己结束，或跑到被停），它打出来的**每一行**都落进自己那份记录
 （`<配置家>/jobs/<会话>/句柄.log`，一份作业一份，随进程退出消失），末行说它怎么了：`[exit N]` / `[stopped]`，
 没有那一行就是还在跑 —— **状态就是这一行，本仓不另立一套枚举**。读它的一是 `job_output`（状态 + 一段窗口 +
@@ -138,7 +139,7 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 
 **注入（injection）** —— 「每次模型调用前，把会话该有的东西摆到历史里」这件事，以及被摆进去的那些块：
 **开场块**（指令文件、技能清单）、**技能正文**（`skill` 工具或人的 `/name` 触发）、**作业结束的通知**
-（`<job-ended id="…" path="…">`）三种用户。它们都是**服务端现算**的：客户端从不持有，只有这一轮发给
+（`<job-ended id="…" path="…">[exit N]</job-ended>`——**三样事实，与记录多大无关**）三种用户。它们都是**服务端现算**的：客户端从不持有，只有这一轮发给
 模型的那一份（所以也只写进 jsonl 的 `message` 行，**从不产生 AG-UI 帧**——界面里去看「轨迹」那一栏）。
 一处组装：`cap.project/before-llm`。
 *别叫成* 上下文（太宽：上下文还包括客户端自己的历史）、系统消息（那是 `system` 角色的那条，另一件事）、
