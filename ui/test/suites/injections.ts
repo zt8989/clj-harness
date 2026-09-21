@@ -14,6 +14,12 @@
 // what makes the card a view rather than a message, so an injection can be visible in
 // the conversation without being part of it. When the adapter is upgraded, this is
 // the case that has to be re-read first.
+//
+// THE FOURTH IS THE CONVERSATION'S OPENING (`.scratch/session-opening`), where a card
+// and the text the model read sit in the SAME message: it pins that the card wins on
+// screen, and that the copy the client sends back is the text under the entry's stable
+// id -- which is what lets the server drop the repeat instead of writing the opening
+// into the conversation a second time.
 import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
@@ -174,6 +180,67 @@ const cases: readonly Case[] = [
       const sent = toAgUiMessages(mixed as never);
       expect(sent).toHaveLength(1);
       expect(JSON.stringify(sent)).not.toContain(INJECTION_PART);
+    },
+  },
+  {
+    name: "an-opening-entry-keeps-its-card-and-not-the-text-beside-it",
+    run: async () => {
+      // THE CONVERSATION'S OPENING IS ONE MESSAGE WITH TWO READINGS
+      // (`.scratch/session-opening`): a `data` part that is the card a person sees and
+      // a text part that is what the model read. The adapter keeps the text (it has no
+      // case for the part), so without this the rebuilt message would draw the block
+      // twice -- as prose and as the card. `keepInjectionCards` replaces the whole
+      // content with the card, so the block is read once, in the shape it arrived in.
+      const opening = [
+        {
+          id: "session-opening-0",
+          role: "assistant" as const,
+          content: [
+            {
+              type: "data" as const,
+              name: INJECTION_PART,
+              data: { role: "user", text: "<instructions>STANDING RULE</instructions>" },
+            },
+            { type: "text" as const, text: "<instructions>STANDING RULE</instructions>" },
+          ],
+        },
+      ];
+      const converted = [
+        {
+          id: "session-opening-0",
+          role: "assistant" as const,
+          content: "<instructions>STANDING RULE</instructions>",
+        },
+      ];
+      expect(keepInjectionCards(opening, converted)[0]?.content).toEqual([
+        {
+          type: "data",
+          name: INJECTION_PART,
+          data: { role: "user", text: "<instructions>STANDING RULE</instructions>" },
+        },
+      ]);
+
+      // AND WHAT CROSSES THE WIRE IS THE TEXT, which is the other half of the same
+      // fact: the client holds the opening like any other message of the conversation
+      // and sends its own copy of it, so the entry needs a STABLE id -- the server
+      // recognises the repeat by id and drops it (`harness.edge.sessions/append!`), and
+      // the opening is read once even though every run carries it.
+      const sent = toAgUiMessages([
+        {
+          id: "session-opening-0",
+          role: "user" as const,
+          content: [
+            { type: "text" as const, text: "<instructions>STANDING RULE</instructions>" },
+            {
+              type: "data" as const,
+              name: INJECTION_PART,
+              data: { role: "user", text: "<instructions>STANDING RULE</instructions>" },
+            },
+          ],
+        },
+      ] as never);
+      expect(JSON.stringify(sent)).not.toContain(INJECTION_PART);
+      expect(JSON.stringify(sent)).toContain("STANDING RULE");
     },
   },
 ];

@@ -564,6 +564,10 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 的挂载**（`app.tsx` 里挂在 `AssistantRuntimeProvider` 之内），`thread.aui.tsx` 那句
 `case "data": return part.dataRendererUI` 是抄来的，一行未改。文案进 `thread` 命名空间（中英两份）。
 
+**开场块的那张卡随 entry 一起到。** 会话出生时写进对话的那几条 opening entry 自带**同一个**
+`data` part（`harness.edge.ag_ui/injected-part-name`），所以画法一模一样；区别只在它**不走 `CUSTOM` 帧**，
+而是随会话的窗口（feed / `sofar`）来的——一次开场一张卡，而不是每一轮重复一遍。
+
 **刷新靠重建带回来。** 重建（seed + 记录里的帧）在 `harness.kernel.frames/apply-frames` 落成一条**只带那个
 data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性的，所以每次刷新是同一张卡）。而适配器的
 `fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，所以 `app.tsx` 的 `toThreadMessages` 让

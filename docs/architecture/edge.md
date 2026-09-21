@@ -45,6 +45,11 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 `CUSTOM` 落成一个 `data` part，而交给下一轮的会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）
 ——于是注入物看得见、又**进不了**模型的向量（见 [client](client.md#注入物在会话栏里的一张卡)）。上面那五种只落审计行的事件照旧一个帧都不发。
 
+**会话的开场不是帧**（2026-09-21 起，`.scratch/session-opening`）：指令文件与技能清单在会话出生时
+写进对话本身，卡片随那条 entry 走（`harness.edge.ag_ui/opening-entries` 给每条 message 同时带
+`data` part 与 `text` part），所以不会每一轮重发同一个 `CUSTOM` 帧。`CUSTOM` 帧发的是**这一轮自己派生
+出来的**注入——技能正文、后台作业的结尾——身份仍是「这一轮加进去的」。
+
 ### bind 的 hook sink
 
 这是**唯一**同时知道「这是哪个线程」和「审计行写哪」的地方，所以 run 作用域的 hook sink 在这里绑定：

@@ -828,11 +828,11 @@
                        :declared (vec (sort-by name (:input provider)))})))))
 
 (defn- opening-blocks!
-  "The messages this run OPENS WITH, other than the frozen system prompt: the
-  session's instruction files, read fresh, and (from the skills ticket) the
-  catalog. Runs INSIDE the edge's hook-sink binding, because folding an
-  instruction file is a hook point and this is where it happens -- see
-  run-agent! for why the binding wraps the set-up.
+  "The messages a conversation OPENS WITH, other than the frozen system prompt: the
+  session's instruction files, read fresh, and (from the skills ticket) the catalog.
+  Runs INSIDE the edge's hook-sink binding, because folding an instruction file is a
+  hook point and this is where it happens -- see `sink-for` and `run-agent!` for why
+  the binding wraps the call.
 
   Every file that was folded fires InstructionsLoaded with its path, and the
   verdict is DISCARDED: the point is an observer (:gate? false, :on-error
@@ -841,10 +841,13 @@
   nothing was folded, and a hook announced for something that did not happen is
   worse than no hook.
 
-  Reads the session's files on EVERY run rather than caching them per thread.
-  The alternative -- remember what was loaded and only inject what changed -- is
-  how an edited AGENTS.md stops taking effect until somebody restarts, and the
-  cost of not caching is one small file read per run."
+  IT IS READ ONCE PER CONVERSATION, not once per run (`.scratch/session-opening`).
+  The opening is part of what a conversation was born with: the run that births one
+  writes these into it (`ag/opening-entries`) and every later run continues from them
+  as history, so an edited AGENTS.md takes effect at the NEXT opening -- a new session,
+  or a compaction that rebuilds one -- rather than mid-conversation. That is the price
+  of the opening being an event rather than a per-run splice, and it is the trade this
+  function's call site makes deliberately."
   [thread-id]
   (let [gathered (preamble/gather
                   {:files (project/preamble-files thread-id)
@@ -852,6 +855,23 @@
     (doseq [{:keys [path]} (:instructions gathered)]
       (hook/emit :instructions-loaded {:path path}))
     (preamble/messages gathered)))
+
+(defn- sink-for
+  "The hook sink ONE run records through: every hook this run fires is audited under
+  its run id, in the record, next to the rest of that run.
+
+  A FUNCTION RATHER THAN A LITERAL IN TWO PLACES because there are two moments in a run
+  that fire hooks and they are on different sides of the `async/go`: the opening is read
+  before the run body starts (it belongs to the conversation, not to the run) and the
+  system prompt is assembled inside it. Both are the same run, so both must audit under
+  the same name."
+  [thread-id run-id]
+  {:thread-id thread-id
+   :run-id    run-id
+   :audit     (fn [payload]
+                (log! thread-id run-id
+                      (str "hook/" (:point payload))
+                      (dissoc payload :point)))})
 
 (defn- run-agent!
   "Drive ONE run: log its input, set the conversation up, and stream what comes back.
@@ -867,51 +887,15 @@
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
         emit    (runner thread-id run-id ch state origin)
-        convert (ag/outbound thread-id run-id)
-        ;; WHAT THIS RUN CONTINUES FROM, read once, here, before anything starts. The
-        ;; session holds the conversation (harness.edge.sessions); the client no longer
-        ;; sends it. What the client DOES send is this action's own entries (`append`),
-        ;; and they go into the session BEFORE the run is set up, so a run that then
-        ;; fails (no provider, a refused modality) still leaves the question in the
-        ;; conversation -- which is where the record's own input line puts it.
-        ;;
-        ;; AND THE OPENING CONTEXT IS ONLY EVER TAKEN ONCE, at the birth of the
-        ;; conversation -- that is what makes it part of the history every later run
-        ;; continues from, instead of a message re-appended (and re-paid for) on every
-        ;; run. A session that already has messages has already been born.
-        ;;
-        ;; `:added` IS WHAT THIS ACTION MEANT, next to the payload the client typed: the
-        ;; two differ when a retry sends a message the conversation already has (nothing
-        ;; enters) and at birth (the context enters, and the client never sent it). The
-        ;; record keeps both because the fold reads `:added` and a reader asking 'why is
-        ;; my message not in here' needs to see what was sent.
-        history  (sessions/messages thread-id)
-        born?    (empty? history)
-        entries  (cond-> (vec (:append input))
-                   born? (into (when-some [e (ag/context-entry (:context input))] [e])))
-        added    (sessions/append! thread-id run-id entries)
-        input    (assoc input :added added)]
-    ;; THE LINE THAT CARRIES THEM IS THE LINE THAT NUMBERS THEM: the landing callback
-    ;; is how these entries get their record offsets (ticket 05), and it is attached
-    ;; HERE rather than at the enqueue because the writer is what knows the file.
-    (log! thread-id run-id "input" input
-          (fn [offset] (sessions/land! thread-id run-id offset)))
-    ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place and
-    ;; for the same reason the input frame is written here: this is the one moment the
-    ;; server holds 'the person pressed send'. It writes once per session and is a
-    ;; no-op for every later run (`cap.project/remember-send!`'s `COALESCE(title, ?)`),
-    ;; and it is called with the SESSION's first user turn rather than by reading the
-    ;; log -- the log is where the same words already are, and a listing that had to
-    ;; derive a title from 50 logs would pay for it on every sidebar refresh.
-    ;;
-    ;; WHY `history` AND NOT THE ACTION: main retired `:messages` in the run body (ADR
-    ;; 0002 decision 9), so the client's words for THIS action are all an action ever
-    ;; carries -- and on the fortieth send that is the newest message, not the first.
-    ;; The session is the authority, so the first user turn of `history` is the honest
-    ;; name (a session that ran before this column existed is named correctly the next
-    ;; time it runs); this action's own entries cover the birth, when `history` is
-    ;; empty. Reading the log instead would be the second truth ADR 0002 refuses.
-    (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+        convert (ag/outbound thread-id run-id)]
+    ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
+    ;; writing the input line and naming the session -- HAPPENS INSIDE THE GO BLOCK
+    ;; BELOW, on purpose. Reading the instruction files can fail (an unreadable
+    ;; AGENTS.md), and a failure on the way in has to leave the client a TERMINATED RUN
+    ;; rather than a stream that never says anything: the go block's `try` is where that
+    ;; is turned into a RUN_ERROR frame, so the birth is on its side of the parens.
+    ;; `input`, `thread-id`, `run-id` and the two stateful closures above are all it
+    ;; needs.
     (async/go
       ;; A GO BLOCK'S EXCEPTION GOES NOWHERE: core.async throws it into the block's
       ;; own channel, which nobody reads -- so a consumer that dies takes the run
@@ -920,25 +904,85 @@
       ;; with nothing anywhere saying why. That is the one failure in this file
       ;; that cannot be allowed to be quiet, so the whole run body is wrapped.
       (try
-        (binding [hook/*sink* {:thread-id thread-id
-                               :audit     (fn [payload]
-                                            (log! thread-id run-id
-                                                  (str "hook/" (:point payload))
-                                                  (dissoc payload :point)))
-                               :run-id    run-id}]
-          ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
-          ;; a text-only model -- or a resume naming an interrupt this process never
-          ;; parked -- blows up before the run starts. Catch it here and push a
-          ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
-          ;; run rather than a broken stream.
+        (binding [hook/*sink* (sink-for thread-id run-id)]
+          ;; ------------------------------------------------------------------ the birth
+          ;; WHAT THIS RUN CONTINUES FROM, read once, before anything starts. The session
+          ;; holds the conversation (harness.edge.sessions); the client no longer sends
+          ;; it. What the client DOES send is this action's own entries (`append`), and
+          ;; they go into the session BEFORE the run is set up, so a run that then fails
+          ;; (no provider, a refused modality) still leaves the question in the
+          ;; conversation -- which is where the record's own input line puts it.
           ;;
-          ;; THE SYSTEM MESSAGE IS ASSEMBLED HERE, and it has to be HERE -- inside
-          ;; the binding above -- or it silently loses its hooks: harness.system-
-          ;; prompt fires SystemPrompt through this sink, and an unbound sink means
-          ;; the point does not dispatch at all. A declaration at that point that
-          ;; says no lands in the catch below as an ordinary refusal, with the
-          ;; hook's own words as the RUN_ERROR reason.
-          (let [[provider messages decisions resolved blocks injected]
+          ;; AND THE WHOLE OPENING IS ONLY EVER TAKEN ONCE, at the birth of the
+          ;; conversation -- the opening context AND the opening blocks (the session's
+          ;; instruction files and skills catalog, `.scratch/session-opening`). That is
+          ;; what makes them part of the history every later run continues from, instead
+          ;; of messages re-appended (and re-paid for, and read after the answer) on
+          ;; every run. A session that already has messages has already been born.
+          ;;
+          ;; IT IS READ INSIDE THIS BINDING because folding an instruction file is a hook
+          ;; point and this is where it happens -- and INSIDE THIS TRY, because a failure
+          ;; to read it (an unreadable AGENTS.md) is a run that never starts, and the
+          ;; client has to get a terminated run rather than a broken stream.
+          ;;
+          ;; ITS FAILURE IS RAISED A FEW LINES LOWER, AFTER THE APPEND, and that ordering
+          ;; is the point: the person's own message must enter the conversation even when
+          ;; the run it was sent for never starts, or a reload would show a question that
+          ;; the session has no record of.
+          ;;
+          ;; `:added` IS WHAT THIS ACTION MEANT, next to the payload the client typed:
+          ;; the two differ when a retry sends a message the conversation already has
+          ;; (nothing enters) and at birth (the opening enters, and the client never sent
+          ;; it). The record keeps both because the fold reads `:added` and a reader
+          ;; asking 'why is my message not in here' needs to see what was sent.
+          (let [history  (sessions/messages thread-id)
+                born?    (empty? history)
+                [opening opening-failure]
+                (if born?
+                  (try [(ag/opening-entries (opening-blocks! thread-id)) nil]
+                       (catch Throwable t [nil t]))
+                  [nil nil])
+                entries  (cond-> (into (vec opening) (:append input))
+                           born? (into (when-some [e (ag/context-entry (:context input))] [e])))
+                added    (sessions/append! thread-id run-id entries)
+                input    (assoc input :added added)]
+            ;; THE LINE THAT CARRIES THEM IS THE LINE THAT NUMBERS THEM: the landing
+            ;; callback is how these entries get their record offsets (ticket 05), and it
+            ;; is attached HERE rather than at the enqueue because the writer is what
+            ;; knows the file.
+            (log! thread-id run-id "input" input
+                  (fn [offset] (sessions/land! thread-id run-id offset)))
+            ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place
+            ;; and for the same reason the input frame is written here: this is the one
+            ;; moment the server holds 'the person pressed send'. It writes once per
+            ;; session and is a no-op for every later run
+            ;; (`cap.project/remember-send!`'s `COALESCE(title, ?)`), and it is called
+            ;; with the SESSION's first user turn rather than by reading the log -- the
+            ;; log is where the same words already are, and a listing that had to derive
+            ;; a title from 50 logs would pay for it on every sidebar refresh.
+            ;;
+            ;; WHY `history` AND NOT THE ACTION: main retired `:messages` in the run body
+            ;; (ADR 0002 decision 9), so the client's words for THIS action are all an
+            ;; action ever carries -- and on the fortieth send that is the newest
+            ;; message, not the first. The session is the authority, so the first user
+            ;; turn of `history` is the honest name (a session that ran before this
+            ;; column existed is named correctly the next time it runs); this action's
+            ;; own entries cover the birth, when `history` is empty. Reading the log
+            ;; instead would be the second truth ADR 0002 refuses.
+            (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+            ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
+            ;; a text-only model -- or a resume naming an interrupt this process never
+            ;; parked -- blows up before the run starts. Catch it here and push a
+            ;; well-formed RUN_STARTED..RUN_ERROR pair so the client sees a terminated
+            ;; run rather than a broken stream.
+            ;;
+            ;; THE SYSTEM MESSAGE IS ASSEMBLED HERE, and it has to be HERE -- inside
+            ;; the binding above -- or it silently loses its hooks: harness.system-
+            ;; prompt fires SystemPrompt through this sink, and an unbound sink means
+            ;; the point does not dispatch at all. A declaration at that point that
+            ;; says no lands in the catch below as an ordinary refusal, with the
+            ;; hook's own words as the RUN_ERROR reason.
+            (let [[provider messages decisions resolved injected]
                 (try (let [;; THE PROVIDER IS THE SESSION'S, NOT THE REQUEST'S. It used to
                            ;; be layered with whatever `:provider` the run body carried,
                            ;; which made the selection a thing a CLIENT said per request --
@@ -947,15 +991,14 @@
                            ;; override is written and where the change is recorded), and a
                            ;; run is served by whatever that action left in force. `input`
                            ;; is not consulted here at all, which is the point.
-                           provider (providers/current-provider thread-id)
-                           ;; THE SESSION'S OPENING BLOCKS, read fresh and RENDERED
-                           ;; HERE (they fire InstructionsLoaded through the sink the
-                           ;; binding above installed, which is why they are read
-                           ;; inside this try). They are returned out of it as well as
-                           ;; folded into the history, because the edge is what emits
-                           ;; their frames -- the kernel never sees them as something it
-                           ;; added.
-                           blocks (opening-blocks! thread-id)]
+                           provider (providers/current-provider thread-id)]
+                       ;; THE OPENING THAT COULD NOT BE READ, raised here -- now that the
+                       ;; conversation holds what the person sent -- so it lands in this
+                       ;; try's own catch, beside every other could-not-start failure, and
+                       ;; the client gets the file's name in a RUN_ERROR frame instead of
+                       ;; a stream that stops mid-sentence.
+                       (when opening-failure
+                         (throw opening-failure))
                        ;; THE ACTION'S OWN ENTRIES ARE WHAT IS CHECKED, not the
                        ;; conversation: everything already in the history was accepted
                        ;; by the model that produced it, and blaming a model for an
@@ -996,9 +1039,24 @@
                              ;; so the `context` argument below is for a caller with a
                              ;; conversation that has no beginning yet, which after ticket
                              ;; 03 is nobody: the edge has already put it in.
-                             assembled (ag/inbound (into history added)
+                             ;; NOTHING IS SPLICED IN HERE ANY MORE FOR THE OPENING
+                             ;; (`.scratch/session-opening`): the instruction files and the
+                             ;; skills catalog entered the conversation at its birth, so
+                             ;; they are part of the list below and stand in front of the
+                             ;; question. What this run still derives for itself is
+                             ;; `before-llm` on the next line -- the half that changes while
+                             ;; a conversation lives.
+                             ;;
+                             ;; THE MODEL VIEW, ASKED FOR ONCE FOR THE WHOLE LIST. `history`
+                             ;; is already the session's model view; `added` is NOT --
+                             ;; `append!` answers with the entries as the RECORD keeps them,
+                             ;; which for the opening means the card part too (the record is
+                             ;; what the page draws from). Handing that to a provider is the
+                             ;; one thing `ag/provider-part` refuses by name, so the two
+                             ;; halves go through `sessions/model-view` together.
+                             assembled (ag/inbound (sessions/model-view (into history added))
                                                    (system-prompt/assemble thread-id)
-                                                   blocks nil)
+                                                   nil)
                              applied   (project/before-llm assembled thread-id)
                              injected  (subvec applied (count assembled))]
                          [provider
@@ -1008,7 +1066,7 @@
                           ;; same answer `provider` above resolved, and the map the
                           ;; provider/init and provider/changed lines are written from.
                           (providers/resolve-provider thread-id)
-                          blocks injected]))
+                          injected]))
                      (catch Throwable t
                        ;; A run that could not even be set up -- no provider, a
                        ;; refused model -- is reported to the client as a
@@ -1155,12 +1213,11 @@
                                           :outcome   outcome})))
                           (doseq [frame (into (vec (convert ev))
                                               (when (= :run/start (:type ev))
-                                                ;; EVERY MESSAGE THIS RUN OPENS WITH RIDES
-                                                ;; WITH ITS START: the instruction blocks and
-                                                ;; the injections folded in beside them (a
-                                                ;; body an earlier turn loaded, a job that
-                                                ;; ended between two runs) are all in the
-                                                ;; first model call's history, so a card for
+                                                ;; EVERY MESSAGE THIS RUN DERIVED FOR ITSELF RIDES
+                                                ;; WITH ITS START: the injections folded in beside
+                                                ;; the conversation (a body an earlier turn loaded,
+                                                ;; a job that ended between two runs) are all in
+                                                ;; the first model call's history, so a card for
                                                 ;; each is due before anything the model says.
                                                 ;; They are ordinary user messages to the
                                                 ;; provider; this is the only place a person
@@ -1168,11 +1225,23 @@
                                                 ;; (see ag-ui/injected-frame for why the client
                                                 ;; never sends them back). THE ONE NUMBERING
                                                 ;; IS THE HISTORY'S OWN, so the frames come out
-                                                ;; in the order the model read them.
+                                                ;; in the order the model read them -- and the id
+                                                ;; is the run's own name plus that place (`-ctx<i>`,
+                                                ;; the same spelling the kernel's own injection
+                                                ;; frames carry in `ag_ui/step`).
+                                                ;;
+                                                ;; THE SESSION'S OPENING BLOCKS ARE NOT HERE,
+                                                ;; and that is the change of
+                                                ;; `.scratch/session-opening`: they are written
+                                                ;; into the conversation once, at birth, and
+                                                ;; their card is that entry -- a CUSTOM frame
+                                                ;; per run would be the same card drawn again
+                                                ;; on every run, which is what 'the opening
+                                                ;; happened once' has to look like on screen.
                                                 (map-indexed
                                                  (fn [i message]
-                                                   (ag/injected-frame (str run-id "-open" i) message))
-                                                 (into (vec blocks) injected))))]
+                                                   (ag/injected-frame (str run-id "-ctx" i) message))
+                                                 injected)))]
                             (emit frame))
                           (recur)))))
                 ;; THE CHANNEL CLOSED, AND THIS IS WHERE A RUN SAYS WHETHER IT GOT
@@ -1192,7 +1261,7 @@
                   (unregister-run! thread-id run-id)
                   (log/warn! :run/events-closed-without-terminal
                              {:thread-id thread-id :run-id run-id
-                              :last      (:last @state)}))))))
+                              :last      (:last @state)})))))))
       (catch Throwable t
         ;; A CRASHED RUN IS NOT A RUNNING ONE, and this catch is the only place that
         ;; knows a run died outside the emitter: without this the thread would claim to
@@ -1365,8 +1434,8 @@
         ;; are not the conversation until the run is over.
         state     (atom {:terminal nil :last nil :frames []})]
     ;; as-channel wants no status or headers of its own. run-agent! returns immediately
-    ;; -- the run is driven by a go loop draining the core.async channel -- so it does
-    ;; not block the worker that :on-open runs on.
+    ;; -- everything it does, the birth included, happens on the go block's thread, so it
+    ;; does not block the worker that :on-open runs on.
     ;;
     ;; ONE LINE PER STREAM END, SAYING WHETHER THE RUN SAID GOODBYE. Paired with
     ;; `run/start`, that is what a reader needs to tell a finished run from one

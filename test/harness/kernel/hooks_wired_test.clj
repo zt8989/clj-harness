@@ -553,7 +553,14 @@
              (is (every? #(= "InstructionsLoaded" (:hook %)) payloads))))
 
          (testing "and the folded text really reached the model, as user messages"
-           (let [texts (map #(str (get-in % [:payload :content]))
+           ;; THE OPENING ENTRIES CARRY PARTS, not a bare string (`.scratch/session-opening`:
+           ;; one message, two readings -- a card for the screen, this text for the model), so
+           ;; the reading here is 'what text would the provider take out of this message'.
+           (let [reading (fn [content]
+                           (if (sequential? content)
+                             (str/join "\n" (keep :text content))
+                             (str content)))
+                 texts (map #(reading (get-in % [:payload :content]))
                             (filter #(= "message" (:kind %)) ls))]
              (is (some #(str/includes? % "user rules") texts))
              (is (some #(str/includes? % "project rules") texts))

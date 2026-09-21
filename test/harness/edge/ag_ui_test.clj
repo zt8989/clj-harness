@@ -3,6 +3,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.edge.ag-ui :as ag]
+            [harness.edge.sessions :as sessions]
             [harness.kernel.event :as ev]
             [harness.fake :as fake]
             [harness.kernel.frames :as frames]
@@ -319,59 +320,60 @@
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))
 
-(deftest opening-blocks-go-after-the-question
-  (let [blocks [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
-                {:role "user" :content "<skills>\n- t: t\n</skills>"}]]
-    (testing "the order is: system prompt, the question, then the material for it"
-      ;; Where they sit MOVED (ticket 05 of .scratch/context-frames): after the
-      ;; system message and BEFORE the conversation used to be the shape; it is now
-      ;; the tail, in the order the model should read -- and the frozen prefix is
-      ;; unaffected either way, because it was never inside it.
-      (is (= ["system" "user" "user" "user"]
-             (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}]
-                                     "S" blocks nil))))
-      (is (= "hi" (:content (nth (ag/inbound [{:id "u1" :role "user" :content "hi"}]
-                                             "S" blocks nil) 1)))
-          "the client's own message is second, right behind the system prompt")
-      (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
-             (:content (nth (ag/inbound [{:id "u1" :role "user" :content "hi"}]
-                                        "S" blocks nil) 2)))
-          "then the conversation's instruction files")
-      (is (= "S" (:content (first (ag/inbound [] "S" blocks nil))))))
-
-    (testing "and the session's opening context moves NOTHING: it is inside the
-              conversation, and this run's material stays behind all of it"
-      ;; THE CONTEXT IS NOT A TRAILING BLOCK ANY MORE (ticket 03), so it can no longer be
-      ;; what 'the end' of the run is: a session born with a context has it in its
-      ;; conversation, and the blocks of the run being served come after everything --
-      ;; context included -- in the order the model should read them.
-      (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
-                             "S" blocks [{:description "repo" :value "x"}])]
-        (is (= ["system" "user" "user" "user" "user"] (mapv :role sent)))
-        (is (= "- repo: x" (:content (nth sent 2))) "the context, where the conversation puts it")
+(deftest the-opening-enters-the-conversation-once-in-front-of-the-question
+  ;; `.scratch/session-opening`. The blocks used to arrive as an argument and be spliced
+  ;; in AFTER the conversation; they are now entries the conversation is born with
+  ;; (`opening-entries`), so every run after the birth reads them in front of the
+  ;; question -- and nothing is appended behind the conversation for a run's own answer
+  ;; to land after.
+  (let [blocks  [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
+                 {:role "user" :content "<skills>\n- t: t\n</skills>"}]
+        entries (ag/opening-entries blocks)]
+    (testing "one entry per block, numbered, in the order cap.preamble decided"
+      (is (= ["session-opening-0" "session-opening-1"] (mapv :id entries)))
+      (is (= ["user" "user"] (mapv :role entries)))
+      (is (every? ag/opening-entry? entries))
+      (is (not (ag/opening-entry? {:id "u1" :role "user" :content "hi"}))
+          "a client's own message is not an opening entry"))
+    (testing "one message, two readings: the card for the screen, the text for the model"
+      (is (= (:content (first blocks))
+             (-> entries first :content second :text))
+          "the text half is the block, byte for byte")
+      (is (= {:type "data" :name ag/injected-part-name
+              :data {:role "user" :text (:content (first blocks))}}
+             (first (:content (first entries))))
+          "the card half is the shape the UI already parses, under the frame's own name"))
+    (testing "the model view drops the card and keeps the text"
+      ;; `sessions/model-view` is the one reader that decides this, and the opening
+      ;; entry is the message that carries both halves on purpose.
+      (let [view (sessions/model-view entries)]
+        (is (= ["user" "user"] (mapv :role view)))
         (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
-               (:content (nth sent 3))))
-        (is (= "<skills>\n- t: t\n</skills>" (:content (last sent)))
-            "and the run's own material is still the tail")))
-
-    (testing "a client's own lead system message is still replaced, not displaced"
-      (let [sent (ag/inbound [{:role "system" :content "theirs"} {:role "user" :content "hi"}]
-                             "S" blocks nil)]
+               (-> view first :content first :text)))
+        (is (not-any? #(some (fn [p] (= "data" (:type p))) (:content %)) view)
+            "a data part must never reach a provider -- provider-part refuses one by name")))
+    (testing "so the provider vector reads: system, the opening, then the conversation"
+      (let [sent (ag/inbound (into (sessions/model-view entries)
+                                   [{:id "u1" :role "user" :content "hi"}])
+                             "S" nil)]
         (is (= ["system" "user" "user" "user"] (mapv :role sent)))
-        (is (= "S" (:content (first sent))))))
-
-    (testing "no blocks: byte-for-byte what the three-arity produced before"
-      (let [msgs [{:id "u1" :role "user" :content "hi"}]
-            ctx  [{:description "repo" :value "x"}]]
-        (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" [] ctx)))
-        (is (= (ag/inbound msgs "S" ctx) (ag/inbound msgs "S" nil ctx)))))))
+        (is (= "S" (:content (first sent))))
+        (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
+               (-> sent second :content first :text))
+            "the standing rules stand in front of the question")
+        (is (= "hi" (:content (nth sent 3)))
+            "and the client's own turn comes after the whole opening -- nothing of ours
+             is spliced behind it"))
+      (let [sent (ag/inbound (sessions/model-view entries) "S" nil)]
+        (is (= 1 (count (filter #(= "system" (:role %)) sent)))
+            "and the frozen system prompt is still the only system message")))))
 
 (deftest a-field-the-client-carried-itself-is-not-dropped
   ;; The whitelist rebuild used to keep only the FOLDED reasoning (a preceding
   ;; `reasoning`-role message) and throw away a field carried on the assistant
   ;; message itself. Both are the same fact stated by different clients, and the
   ;; second is what a thinking-mode vendor insists on getting back.
-  (let [inbound (fn [msgs] (ag/inbound msgs "SYS" nil nil))
+  (let [inbound (fn [msgs] (ag/inbound msgs "SYS" nil))
         assistant (fn [msgs] (first (filter #(= "assistant" (:role %)) (inbound msgs))))]
 
     (testing "carried on the message, with no reasoning message before it"
@@ -445,6 +447,18 @@
     (is (nil? (ag/first-user-text [{:id ag/context-entry-id :role "user"
                                     :content "- repo: this one"}]))
         "the context alone is not a name"))
+  (testing "and neither are the opening blocks"
+    ;; `.scratch/session-opening`: the instruction files and the skills catalog are user
+    ;; messages in the conversation now, so a name taken from the first user turn would
+    ;; otherwise become an excerpt of AGENTS.md.
+    (is (= "真的第一句"
+           (ag/first-user-text (into (ag/opening-entries
+                                      [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
+                                       {:role "user" :content "<skills>\n- t: t\n</skills>"}])
+                                     [{:role "user" :content "真的第一句"}]))))
+    (is (nil? (ag/first-user-text (ag/opening-entries
+                                   [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}])))
+        "a conversation opened with nothing but its opening has no name yet"))
   (testing "content parts contribute their text and nothing else"
     (is (= "看看这张图\n第二行"
            (ag/first-user-text [{:role "user"

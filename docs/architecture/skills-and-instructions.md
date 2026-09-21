@@ -12,29 +12,43 @@
 
 ## 一场会话开场拿到什么
 
-一条 run 交给 provider 的消息向量，形状是固定的——**先问题，再为它准备好的料**：
+一条 run 交给 provider 的消息向量，形状是固定的——**system、这场会话的开场、然后才是对话**：
 
 ```
 [system  组装的 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本]
-[...这场会话的消息（服务端内存里那份；出生那一条 context 也在里面）...]
 [user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
 [user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离提问更近）
 [user    <skills>…清单…</skills>]                                          能力菜单，开场块里的最后一块
+[...这场会话的消息（出生那一条 context 与提问都在里面）...]
 [user    <skill name="…">…正文…</skill>]                                    skill context，缺省没有（见「技能正文是派生的」）
 ```
 
-**2026-09-18 起注入物排在「提问之后」**：从前它们夹在 system 与对话之间，现在排在两者之后，
-于是模型先读人问的那一句，再读为它准备的料，而最近的一段（技能正文）贴着问题。
+**开场块在会话出生的那一刻写进对话，一次**（`.scratch/session-opening`，2026-09-21）：
+指令文件与技能清单**不进** system 消息（role 仍是 `user`，标签仍是它们的边界），但**位置**变了——
+出生那一轮把它们写进对话本身（`harness.edge.ag-ui/opening-entries` 成形，
+`harness.edge.sessions/append!` 落进会话），此后每一轮都是历史的一部分。**除出生那一轮外，
+没有哪条 run 会追加开场块。** 代价明写在这里：**「改了 AGENTS.md 立刻生效」不再成立**——
+改动在下一次开场（新会话，或将来的压缩重建）被采纳，会话中途不换。
+
+**注入物有两族，规矩因此是两条。** 2026-09-18 那次挪动只讲了其中一条（派生物）：
+
+| | 谁 | 落点 | 为什么 |
+| --- | --- | --- | --- |
+| **开场块**（不变量） | 指令文件、技能清单 | 会话**最前**（出生时写入，之后是历史） | 它们随会话不变，进稳定前缀是划算的；更重要的是**排在末尾会盖住这条 run 自己的答案**——厂商要求 tool 结果紧跟自己那条 assistant 消息，末尾多出来的块会挡在中间 |
+| **派生物**（每轮现算） | 技能正文（`cap.skills/derived-injections`）、后台作业的结尾（`cap.jobs/before-llm`） | 对话**之后** | 它们每轮都可能变（加载一个技能就变），一变就把它后面整段作废——所以留在稳定前缀之外；而且工具往返发生在它们**之前**，不会被打断 |
+
 常驻规则排在能力菜单之前，这条没变：模型先知道「必须先怎样」，然后才拿到「还能拿什么」。
 
-**挪动只让 prefill 更划算**：prompt cache 钉的是**一段连续**的稳定前缀，而它现在从 system 一路穿过
-这场对话——前缀是**对话自己有多长就有多长**。从前注入物夹在 system 与对话之间，前缀到那里就断了
-（注入物每轮都可能变——加载一个技能就变——一变就把它后面整段对话一起作废）。注入物永远在它之外，
-这也是它们不许进 system 消息的那个理由的另一面。
+**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.cap.preamble/messages` 定开场块之间的先后，
+`harness.edge.ag_ui/opening-entries` 按这个顺序编号、并把每块做成**一条消息两种读法**
+（`data` part 是页面画的卡片，`text` part 是模型读的文本——`harness.edge.sessions/model-view`
+去掉前者留下后者，`harness.edge.ag-ui/injected-part-name` 是两个读者共用的那个名字）；
+技能正文由 `harness.cap.skills/derived-injections` 追加在最后。散落在调用点就是把这个决定藏进两行 `into`，所以不许。
 
-**顺序是语义，不是排版，所以它只有一个地方决定**：`harness.cap.preamble/messages` 定几块之间的先后，
-`harness.edge.ag_ui/inbound` 的 `tail-blocks` 把它们拼在**尾部**，技能正文由
-`harness.cap.skills/derived-injections` 追加在最后。散落在调用点就是把这个决定藏进两行 `into`，所以不许。
+**压缩（尚未实现）是唯二的另一个时点。** 压缩会把开场连同被压缩掉的消息一起从对话里拿走，
+所以重建出的会话**必须再写一次开场**——而且必须与重建后的 system prompt 发生在同一次重建里，
+否则「开头的约定内容」会静默消失。`harness.kernel.hooks` 的 `:pre-compact` / `:post-compact`
+是它要挂的两个点；在那之前，「开场只发生一次」是这条规矩的完整表述。
 
 **system 消息只有一条，这一页说的那些块一律 `role=user`。** 两条理由：
 `ag_ui/inbound` 关于 system 的规则只有「对话开头那条是 system 就换成冻结的那条、不是就前置一条」——

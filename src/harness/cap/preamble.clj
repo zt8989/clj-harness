@@ -1,15 +1,27 @@
 (ns harness.cap.preamble
-  "The blocks a run opens with, other than the frozen system prompt.
+  "The blocks a conversation opens with, other than the frozen system prompt.
 
   Everything here is injected on the USER side. prompt.md stays the one and only
   system message -- it is frozen so the provider's prefill cache keeps hitting,
   and a second system message would turn harness.edge.ag-ui/inbound's rule ('a leading
   system message is replaced by the frozen prompt, otherwise it is prepended')
   into a rule about a family of them. Everything else the model is handed at the
-  start of a run -- the instruction files, the skills catalog -- arrives as an
-  ordinary user message whose tag says what it is. That is also what makes these
-  blocks invisible to the client: they never become an AG-UI frame, so there is
-  nothing for a front end to filter and nothing for one to draw.
+  start of a conversation -- the instruction files, the skills catalog -- arrives as an
+  ordinary user message whose tag says what it is.
+
+  THEY ENTER THE CONVERSATION ONCE, WHEN IT IS BORN (`.scratch/session-opening`):
+  the run that births a session writes these messages into it
+  (`harness.edge.ag-ui/opening-entries`) and every later run continues from them as
+  history. They are not re-appended per run, so an edited AGENTS.md takes effect at the
+  next opening rather than mid-conversation. That is the point of the change: a block
+  appended to the END of a run's list lands after whatever that run is about to answer,
+  and it made a conversation's own answers unreadable to the vendor's adjacency rule.
+
+  AND THE PAGE DRAWS ONE AS A CARD, not as prose: the entry the conversation is born
+  with carries both readings (`harness.edge.ag-ui/opening-entries`), and the card part
+  (`harness.edge.ag-ui/injected-part-name`) is what the client shows -- its outgoing
+  conversion drops that part, so the person's next request carries the TEXT of these
+  blocks under the same entry id and the server drops the repeat.
 
   THIS NAMESPACE OWNS THE ASSEMBLY, in the sense that matters: the order the
   blocks come out in is a decision rather than an accident of how they were
@@ -152,7 +164,7 @@
     {:role "user" :content (str "<skills>\n" text "\n</skills>")}))
 
 (defn messages
-  "GATHERED -> the ordered user messages a run opens with.
+  "GATHERED -> the ordered user messages a conversation opens with.
 
   THE ORDER IS THE DECISION THIS FUNCTION EXISTS TO MAKE, and it is semantics
   rather than typography:
@@ -160,9 +172,12 @@
     1. the instruction files, in the order they were resolved -- the OS home's
        first, the project's second, so the more specific statement is the nearer
        one;
-    2. the skills catalog, last of the opening blocks. Where the blocks land is
-       `ag_ui/inbound`'s to decide and it puts them AFTER the conversation (the
-       question first, the material for it right behind) -- see `tail-blocks`.
+    2. the skills catalog, last of the opening blocks.
+
+  WHERE THEY LAND IS NOT THIS FUNCTION'S QUESTION: it answers the order among the
+  blocks and nothing else. They enter the conversation once, in front of the question,
+  when it is born -- `harness.edge.ag-ui/opening-entries` shapes them into the entries
+  that do that, and numbers them in the order they come out of here.
 
   Standing rules first, then the menu of what else is available: a model that
   reads in order meets the constraints it must always honour before the optional

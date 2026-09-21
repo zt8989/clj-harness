@@ -26,6 +26,7 @@
   place that decides what a vendor key MEANS, and it does not rename it."
   (:require [clojure.data.json :as json]
             [harness.kernel.frames :as frames]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]))
 
 ;; --------------------------------------------------------------- reading lines
@@ -73,6 +74,13 @@
   contract, when that WAS what the input brought -- an old log keeps counting the way
   it always did.
 
+  AND NOT EVERY USER-ROLE ENTRY IS A TURN. The session's opening -- its context and its
+  instruction files and skills catalog -- enters as ordinary user messages
+  (`.scratch/session-opening`), and a turn is something a PERSON said, so `ag_ui/injected?`
+  is asked here too. Without it a session's first run would count as one turn plus one
+  per instruction file, and every listing in the sidebar would agree with the wrong
+  number.
+
   PUBLIC, like `incomplete?`, because BOTH READERS need exactly this answer: this
   namespace counts the turns, harness.edge.trajectory groups the items by them. 'What
   counts as a user message in an input' is one rule, and a second copy of it is a second
@@ -81,6 +89,7 @@
   (->> (get-in record [:payload (if (contains? (:payload record) :added)
                                   :added
                                   :messages)])
+       (remove ag/injected?)
        (filter #(= "user" (:role %)))
        (keep :id)))
 

@@ -80,14 +80,31 @@
      :message (str "Approve `" name "`? arguments: " args)
      :toolCallId tool-call-id}))
 
+(def injected-part-name
+  "The name of the `data` part an injected message is carried by, on both ends: the
+  CUSTOM frame a run emits for something the client never sent, and the opening entry
+  the session owns. `harness.kernel.frames/apply-frames` folds a frame into a card by
+  this name and the UI looks it up by it (`ui/src/lib/injections.ts`), so a second
+  spelling on this side would be a card that draws nowhere."
+  "injected-context")
+
+(defn- injection-value
+  "One injected message -> the value both readers of `injected-part-name` take: what the
+  card says (the role it arrived with and its text). Built here rather than at each
+  emitter because the UI's parser reads this exact shape by name."
+  [message]
+  {:role (:role message) :text (str (:content message))})
+
 (defn injected-frame
   "The CUSTOM frame for one message a run was handed without the client sending it:
   a skill body, an instruction block, a catalog, the ending of a background job.
 
   ONE PLACE BUILDS THIS SHAPE, because two do emit it: the kernel's pre-LLM step
   (through `step` below, for whatever it splices) and the edge itself, for the
-  session's opening blocks -- the edge assembles those (with their hooks) before the
-  kernel is handed anything, so it is the edge that knows they happened.
+  injections it folded in before handing the history over (which is why the edge is
+  the one that knows they happened). The session's OPENING blocks are no longer among
+  them -- they enter the conversation once at birth (`opening-entries`) and their card
+  is written by that entry, not by a frame.
 
   WHAT MAKES THIS FRAME SPECIAL, and the whole feature rests on it: the client draws
   it and NEVER SENDS IT BACK. `@assistant-ui`'s adapter turns a CUSTOM event into a
@@ -99,8 +116,8 @@
   folds one card message per frame (`harness.kernel.frames/apply-frames`) and hands
   the client the same ids back, so a card survives a refresh under the same name."
   [message-id message]
-  {:type "CUSTOM" :name "injected-context" :messageId message-id
-   :value {:role (:role message) :text (str (:content message))}})
+  {:type "CUSTOM" :name injected-part-name :messageId message-id
+   :value (injection-value message)})
 
 (defn- step [s ev]
   (case (:type ev)
@@ -369,6 +386,75 @@
      :role    "user"
      :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
 
+(def opening-entry-prefix
+  "The prefix `opening-entries` numbers the conversation's opening with: `session-opening-0`,
+  `session-opening-1`, ...
+
+  EXPORTED FOR THE SAME REASON `context-entry-id` IS, and it is the same question one
+  message further along: the opening blocks are ordinary user messages by design, so a
+  reader asking 'what did the PERSON first say' has to tell them apart from the client's
+  own turns. A prefix rather than a table of names because the blocks are NUMBERED --
+  how many there are is what `cap.preamble` read off the disk, not a constant."
+  "session-opening-")
+
+(defn opening-entry?
+  "Is MESSAGE one of the conversation's opening blocks (`opening-entries`)?
+
+  BY ID AND NOT BY POSITION, for the reason `first-user-text` skips the context entry
+  the same way: the opening enters the conversation at birth, and every later run sees
+  it wherever the birth put it."
+  [message]
+  (boolean (some-> (:id message) (str/starts-with? opening-entry-prefix))))
+
+(defn injected?
+  "Is MESSAGE one the EDGE put into a conversation rather than one a PERSON typed?
+
+  TWO OF THEM ENTER AS ORDINARY USER MESSAGES, and that is by design: the session's
+  opening context (`context-entry`) and its opening blocks (`opening-entries`). Every
+  reader asking 'what did the person say' therefore has to tell them apart, and this is
+  that rule NAMED ONCE -- `first-user-text` (which names a session after the first thing
+  somebody said) asks it, and so do the record's readers
+  (`harness.edge.stats/user-ids`, which counts turns, and `harness.edge.trajectory`,
+  which draws them). A copy of the test at each of those would be a second place deciding
+  which message is ours, which is exactly what `context-entry-id`'s docstring refuses."
+  [message]
+  (or (= context-entry-id (:id message))
+      (opening-entry? message)))
+
+(defn opening-entries
+  "BLOCKS -> the conversation's OPENING, as the session entries the run that BIRTHS a
+  conversation writes in front of the question.
+
+  THE OPENING HAPPENS ONCE (`.scratch/session-opening`). Each entry goes into the
+  conversation through `harness.edge.sessions/append!` and is continued from by every
+  later run, instead of being re-read and re-appended behind the conversation on every
+  run -- which is what this replaces, and what made a run's own answer land after the
+  material for a question that had already been asked (`tail-blocks`, retired).
+
+  THE ID IS FIXED rather than generated, exactly as `context-entry-id`'s is and for the
+  same reason: the conversation deduplicates by id, so a session that is born twice --
+  a retry of the very first action, an id that was created and asked for again -- owns
+  one opening and not two.
+
+  ONE MESSAGE, TWO READINGS, and both are needed here. The `data` part is the CARD the
+  page draws (`injected-part-name`), the same one the frames carry for a run's own
+  injections; the `text` part is what the MODEL reads. `sessions/model-view` drops
+  the first and keeps the second, so the model view needs no case for a card and the
+  screen needs no new renderer -- the two readings the table already keeps for a
+  conversation.
+
+  THE ORDER IS `cap.preamble/messages`'s DECISION, not this function's: it numbers what
+  it is handed and never reorders (instruction files first, the skills catalog last)."
+  [blocks]
+  (mapv (fn [i block]
+          (let [text (str (:content block))]
+            {:id      (str opening-entry-prefix i)
+             :role    (:role block)
+             :content [{:type "data" :name injected-part-name :data (injection-value block)}
+                       {:type "text" :text text}]}))
+        (range)
+        blocks))
+
 ;; ------------------------------------------------------------ input modality
 ;;
 ;; What a run is ABOUT to send, as modality keywords, so it can be checked against
@@ -425,10 +511,17 @@
     s
     (subs s 0 (.offsetByCodePoints s 0 n))))
 
-(defn- message-text
+(defn message-text
   "One message's text, as a person would read it: a string content as it stands, a
   part vector with its text parts joined by newlines. Parts of other modalities
-  contribute nothing -- an image is not a name."
+  contribute nothing -- an image is not a name.
+
+  PUBLIC BECAUSE TWO SIDES HAVE TO AGREE ON IT. The record's conversation carries an
+  injected message's CARD part and the submitted side never does
+  (`harness.edge.sessions/model-view` drops it), so `harness.edge.trajectory/shape`
+  compares this reading rather than the raw content -- otherwise every opening entry
+  would look like a message the client never sent, and the alignment would file the
+  person's own question as something the server injected."
   [message]
   (let [c (:content message)]
     (cond
@@ -455,18 +548,20 @@
 
   ONLY `user` ROLES COUNT, for the reason `carried-input-types` gives one screen up:
   everything else in the vector is ours -- the system prompt, the assistant's own
-  turns, tool results. The user messages in it are the CLIENT's, with ONE exception
-  that is skipped by name: the opening context this edge splices in
-  (`context-entry`) is an ordinary user message by design, and it is not something a
-  person said. Skipped by `context-entry-id` rather than by position, because it enters
-  the conversation at birth and every later run sees it wherever the birth put it.
+  turns, tool results. The user messages in it are the CLIENT's, with TWO exceptions
+  that are skipped by name (`injected?`, which is the one place that rule lives): the
+  opening context this edge writes in at birth (`context-entry`) and the session's
+  opening blocks (`opening-entries`). Both are ordinary user messages by design and
+  neither is something a person said. Skipped by id rather than by position, because
+  they enter the conversation at birth and every later run sees them wherever the birth
+  put them.
 
   BLANK TURNS ARE SKIPPED RATHER THAN NAMED: the first message that SAYS something is
   the answer, which is what 'the first thing they said' means when the first thing
   they sent was an empty line."
   [messages]
   (let [said (->> messages
-                  (remove #(= context-entry-id (:id %)))
+                  (remove injected?)
                   (filter #(= "user" (:role %)))
                   (keep message-text)
                   (map str/trim)
@@ -486,61 +581,37 @@
     []
     (vec (sort (remove (set declared) (carried-input-types messages))))))
 
-(defn- tail-blocks
-  "MSGS with BLOCKS spliced in AT THE END, after the conversation.
-
-  THE ORDER IS THE POINT: system prompt, then the question, then what the run was
-  handed for it (and a skill body last of all -- `cap.skills/derived-injections`
-  appends its own). A model reads the question first and the material for it
-  immediately after, which is where a person would put it.
-
-  IT COSTS THE PREFILL NOTHING. The prompt cache keys on a stable PREFIX: that prefix
-  is the system message plus the conversation as the session has it, and the injections
-  were never part of it -- they used to sit between the two and are now behind both,
-  which leaves the cacheable prefix exactly as long as the conversation made it.
-
-  An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path every
-  caller takes when a session has no instruction files and no skills, and the shape of
-  the result is the regression guarantee the whole feature rests on (a session with
-  nothing configured sends byte-for-byte what it sent before)."
-  [msgs blocks]
-  (if (empty? blocks)
-    msgs
-    (into msgs blocks)))
-
 (defn inbound
   "A conversation's AG-UI messages -> the provider's message vector.
   PROMPT is the FROZEN system prompt text. A leading system message is replaced
   by it; otherwise it is prepended. CONTEXT, when given, becomes the message the
   session was born with (`context-entry`), placed after the messages that are already
-  in the conversation and before this run's blocks. IT MUST NEVER TOUCH THE SYSTEM
-  MESSAGE -- the provider's prefill (prompt cache) keys on a stable prefix, so a
-  per-run system prompt would miss it every call.
+  in the conversation. IT MUST NEVER TOUCH THE SYSTEM MESSAGE -- the provider's prefill
+  (prompt cache) keys on a stable prefix, so a per-run system prompt would miss it
+  every call.
+
+  NOTHING IS SPLICED IN HERE, and that is the change of 2026-09-21
+  (`.scratch/session-opening`). The session's opening blocks -- the instruction files
+  and the skills catalog (`harness.cap.preamble`) -- used to arrive as a BLOCKS argument
+  and go AFTER the conversation. They now enter the conversation itself, ONCE, when the
+  conversation is born (`opening-entries`), so they arrive here as ordinary entries of
+  MESSAGES and stand in front of the question on every run that follows. What a run
+  still derives for itself -- a skill body, a job's ending -- is folded in by the CALLER
+  (`harness.cap.project/before-llm`) and stays behind the conversation, which is where
+  the prefill note above wants the changing half anyway.
 
   A RUN NO LONGER CARRIES THE CONVERSATION and no longer carries a per-run context
   either (ticket 03 of `.scratch/sessions-live-on-the-server`): the edge hands over the
   session's messages, which already hold the opening context, and CONTEXT is what the
   VERY FIRST of those runs passes so that the message enters the conversation. It stays
   an argument because this is a converter and the caller is the one that knows whether
-  the conversation has a beginning yet.
-
-  BLOCKS are what this run was handed on top of the conversation -- the session's
-  instruction files and skills catalog (harness.cap.preamble), already rendered. They
-  go AFTER the conversation, in the order the model should read them: the question
-  first, then the material for it. They are ordinary user messages: nothing
-  in this namespace becomes an AG-UI frame (the edge emits one CUSTOM frame per block
-  it spliced, which is how a person sees them -- see `injected-frame`).
-
-  This namespace stays a CONVERTER: it is handed the blocks rather than reading
-  anything itself. The three-arity is the shape without them -- what the rebuild
-  path and the protocol tests use -- and a session with nothing configured passes
-  the same thing through it."
-  ([messages prompt context] (inbound messages prompt [] context))
-  ([messages prompt blocks context]
-   (let [msgs (absorbed (cond-> (vec messages)
-                          (seq context) (conj (context-entry context))))
-         sys  {:role "system" :content prompt}
-         msgs (if (= "system" (get-in msgs [0 :role]))
-                (assoc msgs 0 sys)
-                (into [sys] msgs))]
-     (tail-blocks msgs blocks))))
+  the conversation has a beginning yet -- the rebuild path and the protocol tests pass
+  what the record holds."
+  [messages prompt context]
+  (let [msgs (absorbed (cond-> (vec messages)
+                         (seq context) (conj (context-entry context))))
+        sys  {:role "system" :content prompt}
+        msgs (if (= "system" (get-in msgs [0 :role]))
+               (assoc msgs 0 sys)
+               (into [sys] msgs))]
+    msgs))

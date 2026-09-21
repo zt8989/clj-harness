@@ -175,7 +175,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// message is not the conversation's first -- and this run cannot reach that rule at all
 /// (`components/sidebar.tsx` cannot be imported here, so the `sidebar` suite reads it as
 /// text and the behaviour itself is the browser walkthrough's).
-const EXPECTED_CASES = 82;
+/// 82 -> 83: `injections`' fourth -- the OPENING ENTRY, which is one message with two
+/// readings (a card part and the text the model read). It pins both halves of
+/// `.scratch/session-opening` that only this side can see: the card replaces the text
+/// rather than joining it, and the copy that goes back out is the text under the same
+/// id, which is what makes the server drop the repeat.
+const EXPECTED_CASES = 83;
 
 let total = 0;
 for (const suite of SUITES) {

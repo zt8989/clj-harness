@@ -9,8 +9,9 @@
     - `stats` reads `input` + the `model/start` / `model/end` pair and answers in
       NUMBERS (turns, calls, tokens, durations);
     - this namespace reads `input` + `message` + `tools/*` and rebuilds WHAT THE MODEL
-      SAW: the frozen system message, the instructions and skill bodies injected behind
-      the client's messages, every user message, and each tool call with its arguments and result.
+      SAW: the frozen system message, the session's opening in front of the question,
+      whatever a run derived for itself behind it, every user message, and each tool call
+      with its arguments and result.
 
   The third one is not a nicer rendering of the first two: the conversation reader
   never sees the system message or the injected context (the client never holds them),
@@ -39,11 +40,14 @@
   refuses, because half a conversation handed to a client is worse than no answer. Here
   the honest answer is 'this is as far as it got'.
 
-  ORDER IS THE RECORD'S ORDER, not the reference screenshot's. `harness.edge.ag-ui/inbound`
-  splices the opening blocks AFTER the system message and before the client's messages,
-  and appends the run's context as a trailing user message; skill bodies land where the
-  call that wanted them did. All of that is what the model saw, so it is what this returns."
+  ORDER IS THE RECORD'S ORDER, not the reference screenshot's. The session's opening --
+  its instruction files and skills catalog -- enters the conversation when it is born
+  (`.scratch/session-opening`), so it stands in FRONT of the question on every run after
+  that; the run's own context entry is a user message behind the question, and skill
+  bodies land where the call that wanted them did. All of that is what the model saw, so
+  it is what this returns."
   (:require [clojure.string :as str]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]))
 
 ;; ------------------------------------------------------------------- the runs
@@ -102,26 +106,33 @@
 
 (defn- shape
   "A message reduced to the two things the submitted side and the client's side can
-  agree on: role and content. Everything else differs by construction -- the client's
-  copy carries an :id, the provider's does not."
+  agree on: role and TEXT. Everything else differs by construction -- the client's copy
+  carries an :id, the provider's does not.
+
+  TEXT AND NOT THE RAW CONTENT, because the two sides differ by a card: the record's
+  conversation carries an injected message's `data` part (that is what the page draws)
+  and the submitted side never does (`harness.edge.sessions/model-view` takes it out).
+  Comparing the raw contents would make the sides disagree about every message the
+  session's opening consists of, the match would fail, and the alignment would degrade
+  to 'nothing matched' -- filing the person's own question as something the server
+  injected. `ag_ui/message-text` is the reading both sides can answer."
   [message]
-  [(:role message) (:content message)])
+  [(:role message) (ag/message-text message)])
 
 (defn- align
   "Where the client's own messages sit inside a run's submitted block:
   {:before <opening blocks> :own <the client's messages>
    :between <injections that landed inside them> :after <what follows them>}.
 
-  A run's submitted block is [system] + [the client's messages] + [the injections that
-  came after them] -- that is `harness.edge.ag-ui/inbound`'s order (system, question,
-  context, skill context), with the session's own injections folded in where they belong.
-  The client's messages are matched IN ORDER and by role-and-content, and the ends fall
-  out: what precedes the first match is what was injected before the conversation (the
-  layout every log written before 2026-09-18 has -- the blocks used to sit right after
-  the system message), what lies BETWEEN two matches was injected too (a `/name` body in
-  one of those older logs), and what follows the last match is what the run put after the
-  client's own words -- which today is all of it: the instruction files, the catalog, the
-  per-run context, and the skill bodies.
+  A run's submitted block is [system] + [the conversation this run continued, its own
+  entries included] + [what the run derived for itself] (see
+  `harness.edge.ag-ui/inbound`). The client's messages are matched IN ORDER and by
+  role-and-content, and the ends fall out: what precedes the first match is what was
+  injected before the conversation (the layout every log written before 2026-09-18 has,
+  and every log since `.scratch/session-opening`: the opening is in front), what lies
+  BETWEEN two matches was injected too (a `/name` body in one of those older logs), and
+  what follows the last match is what the run put after the client's own words -- a skill
+  body, a job's ending.
 
   THE MATCH IS NOT CONTIGUOUS, which is what keeps those older logs readable: a body
   spliced between two retransmitted messages makes a contiguous match find nothing there,
@@ -233,11 +244,21 @@
 (defn- text-of
   "A message's content as text. A string is itself; a content-parts vector keeps every
   text part and renders the rest as data, so a picture referenced in a message is not
-  silently dropped from a view whose whole promise is 'this is what the model had'."
+  silently dropped from a view whose whole promise is 'this is what the model had'.
+
+  AN INJECTED MESSAGE'S CARD IS THE ONE PART THAT IS NOT RENDERED: a `data` part is the
+  screen's copy of an injection, never anything a provider read
+  (`harness.edge.sessions/model-view` drops it for the model), so showing its EDN would
+  put a card's own source in the middle of a view about what the model had."
   [content]
   (cond
     (string? content)     content
-    (sequential? content) (str/join "\n" (map #(if (some? (:text %)) (:text %) (pr-str %)) content))
+    (sequential? content) (str/join "\n" (keep (fn [p]
+                                                 (cond
+                                                   (some? (:text p))      (:text p)
+                                                   (= "data" (:type p))   nil
+                                                   :else                  (pr-str p)))
+                                               content))
     (nil? content)        ""
     :else                 (str content)))
 
@@ -456,16 +477,26 @@
   "STATE + one run -> STATE. Turns are opened by new user messages, and everything the
   run showed goes under them in the record's order:
 
-    [system?] [user …] [injected context] [assistant / tool …]
+    [system?] [injected context] [user …] [injected context] [assistant / tool …]
 
-  EVERY INJECTION LANDS AFTER THE CLIENT'S MESSAGES -- system, question, context, skill
-  context (see harness.edge.ag_ui/inbound) -- so a run's blocks are drawn after this
-  turn's own user message and before its answer. Blocks that arrived BETWEEN two
-  retransmitted messages (an older layout, and a `/name` body in a log written before
+  THE INJECTIONS SIT ON BOTH SIDES OF THE USER'S MESSAGE NOW, and which side is a fact
+  about where they were read rather than a preference. The session's OPENING -- its
+  instruction files and skills catalog -- enters the conversation at its birth
+  (`.scratch/session-opening`), so it is IN FRONT of the question on every run after that
+  and is drawn there; the session's own context entry sits behind it, where ticket 03 of
+  `.scratch/sessions-live-on-the-server` put it. What a run DERIVES for itself (a skill
+  body, a job's ending) still lands after the client's messages -- system, question,
+  context, skill context (see harness.edge.ag_ui/inbound) -- so those blocks are drawn
+  after this turn's own user message and before its answer. Blocks that arrived BETWEEN
+  two retransmitted messages (an older layout, and a `/name` body in a log written before
   today) are drawn where they were too; the retransmitted history they sat inside is not
   listed, because a client restates its whole conversation on every run. All of it is
   deduped like every other injection, so the ordinary case -- the same bytes already
   shown in the turn that asked for them -- draws nothing here.
+
+  AN INJECTION IS NOT A TURN: the opening enters as ordinary user messages, and a turn
+  belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule
+  `stats/user-ids` counts turns with too).
 
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the
@@ -529,18 +560,33 @@
     (if (seq fresh)
       ;; A new turn: the system message opens it when it is new or different, then the
       ;; injected blocks, then the user message itself.
-      (let [turns (-> turns
+      (let [;; WHERE THE INJECTIONS SIT, relative to the person's own words: the session's
+            ;; opening stands IN FRONT (it enters the conversation first, so every run
+            ;; after the birth reads it there), and the session's context entry sits
+            ;; BEHIND the question, where ticket 03 put it. Both are drawn in the place
+            ;; the model read them, and neither opens a turn.
+            lead  (take-while ag/injected? fresh)
+            rest' (drop-while ag/injected? fresh)
+            tail  (filter ag/injected? rest')
+            said  (remove ag/injected? rest')
+            turns (-> turns
                       open-turn
                       (cond-> changed?
                         (append-last [(system-item texts (nil? shownSystem))]))
                       (add-context before)
-                      (add-context between)
-                      (append-last [(user-item ins own-of (first fresh) at)]))
-            turns (reduce (fn [turns message]
-                            (-> turns open-turn (append-last [(user-item ins own-of message at)])))
-                          turns
-                          (rest fresh))
+                      (add-context lead)
+                      (add-context between))
+            ;; A RUN CAN BRING NOTHING BUT INJECTIONS (the opening, on a first action that
+            ;; carried no words of its own): then no turn is opened beyond the one the
+            ;; run's own output will land in.
+            turns (if (seq said)
+                    (reduce (fn [turns message]
+                              (-> turns open-turn (append-last [(user-item ins own-of message at)])))
+                            (append-last turns [(user-item ins own-of (first said) at)])
+                            (rest said))
+                    turns)
             turns (-> turns
+                      (add-context tail)
                       (add-context after)
                       (append-last (returned-items (:returned run) call-of life-of
                                                    (when (seq calls) 0)))

@@ -16,13 +16,23 @@
     - THE SYSTEM MESSAGE. It is assembled per run (`harness.cap.system-prompt`: the
       frozen opening plus what the `SystemPrompt` hooks append), and a copy kept here
       would be a sentence that stopped being true the moment a binding moved.
-    - THE INJECTIONS -- instruction files, the skills catalog, a skill body, a job's
-      ending. Sharper still: the instruction files are re-read on EVERY run so that an
-      edited AGENTS.md takes effect without a restart (`harness.edge.http/opening-blocks!`
-      says why). Freezing them here is exactly the '改了没生效' failure the design refuses.
+    - THE DERIVED INJECTIONS -- a skill body, a job's ending. They are recomputed from
+      the conversation on every run (`harness.cap.project/before-llm`), so a copy kept
+      here would be a copy that stopped matching what it was derived from.
 
-  SO THIS TABLE DOES NOT MAKE INJECTIONS STOP BEING RECOMPUTED. It takes the CLIENT out
-  of the loop, which is the half that was never a decision.
+  THE SESSION'S OPENING IS NOT ON THAT LIST, and that is the change of 2026-09-21
+  (`.scratch/session-opening`). The instruction files and the skills catalog are part of
+  what a conversation is BORN with, so they enter ONCE, here, through
+  `harness.edge.http/run-agent!` -- and every later run continues from them as history
+  instead of being handed them again. They used to be re-read and re-appended behind the
+  conversation on every run, which put them after the answer the run itself was about to
+  write; that is why they moved, and `harness.edge.ag-ui/opening-entries` is where they
+  are shaped. THE CONSEQUENCE TO KNOW ABOUT: an edited AGENTS.md takes effect at the NEXT
+  opening -- a new session, or a compaction that rebuilds one -- rather than mid
+  conversation. That is deliberate: the opening is an event, not a per-run splice.
+
+  SO THIS TABLE DOES NOT MAKE THE DERIVED INJECTIONS STOP BEING RECOMPUTED. It takes the
+  CLIENT out of the loop, which is the half that was never a decision.
 
   WHAT IT HOLDS IS THE VIEW A CLIENT DRAWS, numbers and all. Each entry is the message
   plus the arrival it came in (`:group`) and the RECORD OFFSET of the line it arrived in
@@ -35,7 +45,7 @@
   never had them. The table used to drop them at birth, which made memory and the record
   two different conversations -- exactly the drift the feed was built to end -- so the
   cards are KEPT here (they are what the page draws, and what `sofar` answers) and the
-  model view is `without-cards` of them, computed where a run asks for its history
+  model view is `model-view` of them, computed where a run asks for its history
   (`messages`). One conversation, two readings of it, and the reading that must not see a
   `data` part (`harness.edge.ag-ui/provider-part` refuses one by name) is the one that
   filters.
@@ -194,13 +204,28 @@
 
 ;; ------------------------------------------------------------------- the views
 
-(defn- without-cards
-  "MESSAGES with the injected-context cards taken out.
+(defn model-view
+  "MESSAGES -> the conversation AS A PROVIDER MAY BE HANDED IT: the cards taken out.
 
-  A card is a message the log carries so the screen can draw it again; it is not
-  something the model ever read. Dropping the whole message is right because a card IS
-  its own message (`apply-frames` makes one per frame), and a message left with no parts
-  at all is dropped with it rather than sent as an empty turn."
+  A card is a message (or part) the record carries so the screen can draw it again; it
+  is not something the model ever read. `harness.edge.ag-ui/provider-part` refuses a
+  `data` part BY NAME, and it should keep refusing: this is the function that makes sure
+  one is never offered.
+
+  DROPPING A WHOLE MESSAGE IS RIGHT because a card is usually its own message
+  (`harness.kernel.frames/apply-frames` makes one per frame), and a message left with no
+  parts at all is dropped with it rather than sent as an empty turn.
+
+  AN OPENING ENTRY IS THE ONE MESSAGE THAT CARRIES BOTH (`harness.edge.ag-ui/opening-entries`):
+  the `data` half is the card the page draws, the `text` half is what the model reads. So
+  removing the `data` part leaves exactly what the model is owed -- which is why the
+  session's opening needs no case of its own and no second reader anywhere else.
+
+  PUBLIC BECAUSE A RUN NEEDS IT FOR WHAT IT IS ABOUT TO ADD, not only for what the
+  session already holds: `append!` answers with the entries as the RECORD keeps them --
+  cards and all, they are what the log needs -- so the edge asks for this view of the
+  list it is about to hand over (`harness.edge.http/run-agent!`). One decision, asked
+  twice."
   [messages]
   (into []
         (keep (fn [m]
@@ -336,14 +361,14 @@
 
 (defn messages
   "THREAD-ID's conversation AS A RUN CONTINUES FROM IT: the entries a provider may be
-  handed, which is the entries minus the cards (`without-cards`).
+  handed, which is the entries minus the cards (`model-view`).
 
   GET-OR-CREATE, and it counts as somebody dealing with the session -- the page drawing
   it is what keeps it alive."
   [thread-id]
   (let [id (str thread-id)]
     (touch! id)
-    (without-cards (mapv :message (:entries (get @registry id))))))
+    (model-view (mapv :message (:entries (get @registry id))))))
 
 (defn- as-sent
   "ENTRIES as a reader sees them: the record offset and the message, without the run
@@ -780,13 +805,13 @@
   about a later moment (see docs/rules/concurrency.md).
 
   `:entries` COUNTS WHAT THE CLIENT SEES (cards included) and `:messages` what a run
-  would be handed (`without-cards`), so the two differ exactly where the conversation
+  would be handed (`model-view`), so the two differ exactly where the conversation
   carries a card."
   []
   (into {}
         (map (fn [[tid e]]
                [tid {:entries    (count (:entries e))
-                     :messages   (count (without-cards (mapv :message (:entries e))))
+                     :messages   (count (model-view (mapv :message (:entries e))))
                      :runs       (:runs e)
                      :state      (:state e)
                      :touched-at (:touched-at e)
