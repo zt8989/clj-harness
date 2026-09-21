@@ -10,6 +10,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
+            [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.kernel.event :as ev]
             [harness.kernel.frames :as frames]
@@ -18,6 +19,7 @@
             [harness.kernel.loop :as loop]
             [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
+            [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
@@ -1495,6 +1497,157 @@
          (is (not (.exists (log-file "carries-the-old-face"))))
          (is (= [] (sessions/messages "carries-the-old-face"))))))))
 
+;; ------------------------------------------------- a conversation another process serves
+;;
+;; THE CROSS-PROCESS HALF OF 'ONE AUTHORITY PER CONVERSATION' (ADR 0002 decision 7).
+;; `refuse-second-run!` below is the same rule INSIDE one process; the in-process
+;; registry cannot see another JVM at all, and this is what does -- a row in the store
+;; (`harness.cap.claims`) that says which process is serving the conversation. What a
+;; client gets is a 409 naming that process, and what it does NOT get is a run: the
+;; record is a file two writers interleave into, and nothing in a line says whose it is.
+;;
+;; THE LIVE-OTHER-PROCESS ROWS HERE ARE WRITTEN BY HAND, and that is honest rather than
+;; a shortcut: a claim row is pid + start instant + instance id, and this process's own
+;; pid with somebody else's instance is exactly what a live second process leaves.
+;; harness.cap.claims-test forks the real thing; what THIS file owes is the edge's own
+;; behavior -- the status, the sentence, the body, and what stays open.
+
+(defn- claim-row [thread-id]
+  (first (db/select "SELECT * FROM session_claims WHERE thread_id = ?" (str thread-id))))
+
+(defn- served-elsewhere!
+  "Leave the row a LIVE OTHER PROCESS would leave for THREAD-ID, REPLACING whatever
+  this process had: the question these cases ask is what the EDGE does when somebody
+  else holds the conversation, and a case that had just run a conversation of its own
+  holds a claim too."
+  [thread-id]
+  (let [us (claims/this-process)]
+    (db/with-transaction
+      (fn [c]
+        (db/execute! c "DELETE FROM session_claims WHERE thread_id = ?" (str thread-id))
+        (db/execute! c "INSERT INTO session_claims
+                          (thread_id, instance, token, pid, started_at, since)
+                        VALUES (?, ?, ?, ?, ?, ?)"
+                     (str thread-id) "another-process" (str (java.util.UUID/randomUUID))
+                     (:pid us) (:started-at us) (System/currentTimeMillis))))))
+
+(defn- settled-file
+  "F's [bytes mtime] once two reads 50ms apart agree, or the last reading after MS.
+
+  THE RECORD LAGS THE SESSION BY DESIGN, and the writer flushes in its own time: the
+  run's own frames reach the client before every line has landed on disk, so 'what the
+  file holds' is only a fact once it stops changing. `record/pending?` is not enough --
+  it counts what has been handed to the writer, and the writer's own write can still be
+  in flight behind an empty queue (measured: a 20KB `model/start` line landed 3ms after
+  the queue went quiet)."
+  [f ms]
+  (loop [last nil
+         left (long ms)]
+    (let [now [(.length f) (.lastModified f)]]
+      (if (or (= now last) (pos? left))
+        (if (= now last)
+          now
+          (do (Thread/sleep 50) (recur now (- left 50))))
+        now))))
+
+(defn- with-no-claims [f]
+  (let [wipe #(db/with-transaction (fn [c] (db/execute! c "DELETE FROM session_claims")))]
+    (wipe)
+    (try (f) (finally (wipe)))))
+
+(deftest a-run-against-a-conversation-another-process-serves-is-refused-and-says-by-whom
+  (with-no-claims
+   (fn []
+     (with-server
+      "served-elsewhere"
+      (fn []
+        ;; A CONVERSATION THAT EXISTS, so the read-only half below has something to
+        ;; read: a session with no log at all answers 404 on every log route, which
+        ;; would make "reads still work" pass for the wrong reason.
+        (is (= 200 (.statusCode (post-run "served-elsewhere"))))
+        (served-elsewhere! "served-elsewhere")
+        (let [before (settled-file (log-file "served-elsewhere") 10000)
+              resp (raw-run {:threadId "served-elsewhere"
+                             :append   [{:id "u2" :role "user" :content "go"}]
+                             :tools    []})
+              body (read-json resp)]
+          (testing "409, and the answer names the PROCESS that is in the way"
+            (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp)))
+            (is (= (:pid (claims/this-process)) (get-in body [:holder :pid])))
+            (is (pos? (get-in body [:holder :since])))
+            (is (str/includes? (str (:error body)) (str (:pid (claims/this-process))))
+                "a person reading the refusal can find the process to stop"))
+          (testing "and it says the way out -- stop it, or wait"
+            (is (str/includes? (str (:error body)) "Stop that process")))
+          (testing "NO RUN STARTED: the record did not grow a byte"
+            (is (= before (settled-file (log-file "served-elsewhere") 10000))
+                "the log is the thing two writers would interleave into")
+            (is (= "another-process" (:instance (claim-row "served-elsewhere")))
+                "and the refusal did not take the claim over"))
+          (testing "READING IS STILL OPEN -- the rule is about actions, not access"
+            (is (= 200 (.statusCode (api-call :get "/api/threads" nil))))
+            (is (= 200 (.statusCode (api-call :post (str "/api/threads/served-elsewhere/rebuild") nil))))
+          (testing "and once nobody is serving it, the same run is served here"
+            ;; Both halves of 'nobody', because they are two different facts: the row
+            ;; is gone from the store, and this process's own view of the session --
+            ;; which the refused run never touched -- is put away, so the next ask
+            ;; builds it again and claims it.
+            (db/with-transaction
+              (fn [c] (db/execute! c "DELETE FROM session_claims WHERE thread_id = ?" "served-elsewhere")))
+            (sessions/drop! "served-elsewhere")
+            (let [again (post-run "served-elsewhere")]
+              (is (= 200 (.statusCode again)))
+              (is (claims/mine? (claims/holder "served-elsewhere"))
+                  "the run that was served is the one that claimed it"))))))))))
+
+(deftest a-claim-whose-process-is-gone-does-not-refuse-anything
+  ;; THE OTHER HALF OF THE DECISION, and the one that keeps the feature from turning a
+  ;; crash into a dead conversation: a process that was killed leaves its row behind,
+  ;; and the next process takes it over. The pid here is this process's own and the
+  ;; start instant is not -- which is exactly what a REUSED pid looks like, and the
+  ;; reason a claim records when its owner started rather than only its number.
+  (with-no-claims
+   (fn []
+     (with-server
+      "stale-claim"
+      (fn []
+        (let [us (claims/this-process)]
+          (db/with-transaction
+            (fn [c]
+              (db/execute! c "INSERT INTO session_claims
+                                (thread_id, instance, token, pid, started_at, since)
+                              VALUES (?, ?, ?, ?, ?, ?)"
+                           "stale-claim" "the-previous-owner" (str (java.util.UUID/randomUUID))
+                           (:pid us) 1 (System/currentTimeMillis))))
+          (let [resp (post-run "stale-claim")]
+            (is (= 200 (.statusCode resp)) (str "got " (.statusCode resp)))
+            (is (= (:instance us) (:instance (claim-row "stale-claim")))
+                "the run took the claim over from a process that is gone"))))))))
+
+(deftest a-rebind-does-not-move-a-log-another-process-is-serving
+  ;; BINDING IS THE OTHER THING THAT ACTS ON A LOG: the rebind direction MOVES the
+  ;; session's file, and a writer in the serving process holds the path it opened, so a
+  ;; move underneath it splits one conversation across two files. Same read-only rule,
+  ;; same sentence, one route over.
+  (wipe-dir! project-dir)
+  (with-no-claims
+   (fn []
+     (with-server
+      "bind-elsewhere"
+      (fn []
+        (let [tid  "bind-elsewhere"
+              bind (api-call :post "/api/project" (json/write-str {:threadId tid :dir project-dir}))]
+          (is (= 200 (.statusCode bind)) "the premise: it binds while nobody is serving it")
+          (let [bound (:dir (read-json bind))]
+            (served-elsewhere! tid)
+            (let [resp (api-call :post "/api/project"
+                                 (json/write-str {:threadId tid :dir project-dir}))
+                  body (read-json resp)]
+              (testing "409 by name, and the binding it would have moved is untouched"
+                (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp)))
+                (is (= (:pid (claims/this-process)) (get-in body [:holder :pid])))
+                (is (= bound (project/binding-for tid))
+                    "the binding it would have moved is exactly where it was"))))))))))
 (deftest a-provider-in-the-run-body-is-not-consulted
   ;; CHOOSING A MODEL IS AN ACTION (`POST /api/model`, which writes the session's slice
   ;; and records the change), NOT A FIELD A RUN CARRIES (ticket 03, judgement 4). The

@@ -47,9 +47,17 @@
   05's business to refuse, and until it does, the table must still be correct about the
   one fact it owns -- that the session may not be put away while ANY of them is going.
 
-  Nothing here writes: no sqlite, no jsonl, no process log. That is asserted, not
-  assumed (see the test)."
-  (:require [harness.edge.replay :as replay]
+  ONE ROW OUTSIDE THIS TABLE, AND IT IS THE CLAIM. A session's lifetime here IS a
+  claim on the conversation (`harness.cap.claims`): it is taken as the entry is built
+  and handed back as the entry is put away, so no other process serves a conversation
+  this one is serving -- and an idle conversation does not hold a claim forever either.
+  That is ticket 04 of `.scratch/sessions-live-on-the-server`, and it is the reason
+  this namespace requires a capability at all.
+
+  Nothing else here writes: no jsonl, no process log, nothing under the log tree. That
+  is asserted, not assumed (see the test)."
+  (:require [harness.cap.claims :as claims]
+            [harness.edge.replay :as replay]
             [harness.infra.home :as home]
             [harness.kernel.frames :as frames])
   (:import (java.util.concurrent Executors ScheduledExecutorService ThreadFactory
@@ -153,13 +161,34 @@
   `swap!` may call its function more than once under contention, and a second read of
   the log would be a second answer to a question that has one. So a racing pair both
   build and one is discarded -- the bytes are equal, so which one won cannot be told,
-  which is the property that makes discarding one safe."
+  which is the property that makes discarding one safe.
+
+  THE CLAIM IS NOT DISCARDABLE, though, which is why it is taken BEFORE the swap: a
+  build that loses the race must not leave a claim behind it either. Each take mints a
+  token of its own (see `harness.cap.claims/release!` on why), so the row can end up
+  carrying the LOSER's token while the entry that won holds a different one; the
+  losing branch below is where that is straightened out (`hand-over!`), because the
+  loser is the one party that can see both tokens.
+
+  A CLAIM ANOTHER LIVE PROCESS HOLDS THROWS, by name, out of here. That is not the
+  path a client normally sees -- `harness.edge.http/handle-run` asks the same question
+  at the door, so the answer is a status rather than a half-written stream -- but it is
+  the invariant this table exists for, and it has to hold wherever a session is asked
+  for, not only at that door."
   [thread-id]
   (if-some [e (get @registry thread-id)]
     e
-    (let [built {:messages (build thread-id) :touched-at (System/currentTimeMillis) :runs #{}}]
-      (get (swap! registry (fn [m] (if (contains? m thread-id) m (assoc m thread-id built))))
-           thread-id))))
+    (let [claim (claims/take! thread-id)
+          built {:messages   (build thread-id)
+                 :touched-at (System/currentTimeMillis)
+                 :runs       #{}
+                 :claim      (:token claim)}
+          [before after] (swap-vals! registry
+                                     (fn [m] (if (contains? m thread-id) m (assoc m thread-id built))))]
+      (if-some [won (get before thread-id)]
+        (do (claims/hand-over! thread-id (:token claim) (:claim won))
+            (get after thread-id))
+        (get after thread-id)))))
 
 (defn touch!
   "Say that somebody is dealing with THREAD-ID now -- which is both 'it exists' and
@@ -295,12 +324,19 @@
     nil))
 
 (defn drop!
-  "Put THREAD-ID away now, whoever is running it. The explicit door: `sweep!` is the
-  one that respects the pins, and callers that want to forget a session outright
-  (a test between cases, an archive action) say so here."
+  "Put THREAD-ID away now, whoever is running it, and hand its claim back. The explicit
+  door: `sweep!` is the one that respects the pins, and callers that want to forget a
+  session outright (a test between cases, an archive action) say so here.
+
+  THE CLAIM GOES BACK WITH IT, in both directions of this file: a conversation this
+  process has stopped serving is one another process may serve, whether it went away
+  because nobody asked for it for a while (`sweep!`) or because somebody said so."
   [thread-id]
-  (swap! registry dissoc (str thread-id))
-  nil)
+  (let [id (str thread-id)
+        [before _] (swap-vals! registry dissoc id)]
+    (when-some [e (get before id)]
+      (claims/release! id (:claim e)))
+    nil))
 
 (defn- evictable?
   "May TID's ENTRY be put away as of NOW? Three things, and every one of them is a
@@ -319,19 +355,27 @@
   [now]
   (let [[before after] (swap-vals! registry
                                    (fn [m]
-                                     (into {} (remove (fn [[tid e]] (evictable? tid e now))) m)))]
-    (vec (remove #(contains? after %) (keys before)))))
+                                     (into {} (remove (fn [[tid e]] (evictable? tid e now))) m)))
+        gone            (vec (remove #(contains? after %) (keys before)))]
+    ;; THE CLAIM FOLLOWS THE ENTRY OUT, and it is handed back with the token the
+    ;; ENTRY carried rather than by thread id: a request that arrives between the swap
+    ;; above and these releases births the session again, and that new birth's claim
+    ;; must not be the one this deletes (`harness.cap.claims/release!`).
+    (doseq [tid gone]
+      (claims/release! tid (:claim (get before tid))))
+    gone))
 
 (defn live
   "What is in the table right now: thread-id -> {:messages <count> :runs <set>
-  :touched-at <ms>}. FOR A READER -- a test, a report, the sidebar later. It answers
-  with a snapshot, and a snapshot is not a fact about a later moment (see
-  docs/rules/concurrency.md)."
+  :touched-at <ms> :claim <token>}. FOR A READER -- a test, a report, the sidebar
+  later. It answers with a snapshot, and a snapshot is not a fact about a later
+  moment (see docs/rules/concurrency.md)."
   []
   (into {}
         (map (fn [[tid e]] [tid {:messages   (count (:messages e))
                                  :runs       (:runs e)
-                                 :touched-at (:touched-at e)}]))
+                                 :touched-at (:touched-at e)
+                                 :claim      (:claim e)}]))
         @registry))
 
 (defn running-count

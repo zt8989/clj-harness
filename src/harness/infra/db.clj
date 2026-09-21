@@ -742,6 +742,36 @@
               items      TEXT NOT NULL,
               updated_at INTEGER NOT NULL)"))
 
+(defn- session-claims
+  "WHICH PROCESS IS SERVING A CONVERSATION: one row per live claim, gone when the
+  claim is handed back.
+
+  A CLAIM IS NOT A SESSION ROW, and the two lifetimes are why it is its own table.
+  `sessions` says which conversations this home KEEPS -- for good, one row each,
+  read by every listing. This says which of them a PROCESS is serving right now:
+  seconds to minutes, one row each while it lasts, read by the run edge. A column on
+  the other table would be NULL for almost every session and would need clearing by
+  a process that died without clearing it, which is precisely the case the row's
+  own contents have to answer (harness.cap.claims).
+
+  THREE FACTS ABOUT THE OWNER, because they answer different questions: `instance`
+  is a random id the owning process minted for itself, so 'is this row mine?' needs
+  no OS call; `pid` and `started_at` are what a LATER process asks the OS about to
+  decide whether the owner is still there. `started_at` is the owner's own start
+  instant, and it is the column that keeps a REUSED pid from pinning a conversation
+  forever. `token` belongs to the CLAIM rather than to the process -- see
+  `harness.cap.claims/release!` for the race it closes.
+
+  `since` is when this claim was taken, for the sentence a refused client reads."
+  [^Connection c]
+  (ddl! c "CREATE TABLE session_claims (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              instance   TEXT NOT NULL,
+              token      TEXT NOT NULL,
+              pid        INTEGER NOT NULL,
+              started_at INTEGER NOT NULL,
+              since      INTEGER NOT NULL)"))
+
 (def migrations
   "The forward migration chain, as NAMED steps.
 
@@ -801,7 +831,12 @@
     :run      hashline-undo-served}
    {:name     "todos"
     :present? #(table? % "todos")
-    :run      todos-table}])
+    :run      todos-table}
+   ;; APPENDED, like every step after the first: a store written before this table
+   ;; existed has no record of it, and the probe is what says whether it needs it.
+   {:name     "session-claims"
+    :present? #(table? % "session_claims")
+    :run      session-claims}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

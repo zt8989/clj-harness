@@ -110,14 +110,15 @@
 | 01 | 会话表：出生、寿命、上界 | — | **已落地**。`thread-id → 会话` 的内存表；出生时从记录重建一次；空闲 30s 放掉；两个钉子（正在跑 / 还有没落盘的）；限制同时运行的会话数。修正项见该票末尾（序号、窗口读法、`running?` 二份） |
 | 02 | 异步写：每帧、失败进降级态 | 01 | **已落地**。帧入队、单消费者逐行 append、每帧；`flushed-seq` 是一条序号（`(+ flushed pending)` = 下一条要铸的序号）；写失败 ⇒ 降级态，`sofar` / `rebuild` 带 `:record`，界面上一根常驻的条；退出时收干净。修正项（prepare 每行一问、水位重新基准化）见该票末尾 |
 | 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | **已落地**。动作的载荷是新字段 `append`（不是 AG-UI 的 `messages`）；`messages` 具名 400、不认识的 id 具名 404、`runId` 门里铸并进记录、`provider` 只认会话档、`context` 只在出生那一轮读；页面不再铸任何会话 id（`POST /api/sessions` / `POST /api/project` 由服务端铸）；客户端那半是 `ui/src/lib/agent.ts` 的 `HarnessAgent`。落地记录见下（含留给 04/05/06 的边界） |
-| 04 | 认领：一个 thread 归一个进程 | 01 | 锁文件／库里一行 owner；后到的只读或拒绝；**认领易主 ⇒ generation 作废**；非 owner 的只读页面有没有增量 |
+| 04 | 认领：一个 thread 归一个进程 | 01 | **已落地**。库里一行 owner（`session_claims`，不是锁文件）；会话出生时认领、放掉会话（显式 `drop!` 或空闲 30s）时交还、进程正常退出走 shutdown hook 交还；`kill -9` 留下的行靠 **pid + 起始时刻**判死并明说易主；后到的进程**只读 + 明说**（动作 409 点名 pid，读路由照常）；认领的 token 就是票 05 的 generation。落地记录见下 |
 | 05 | 会话 feed：尾页、增量、补页 | 01 | **一条 source 三个动词**（`tail` / `append` / `prepend`）；序号可从记录重放；`since` 与 generation；`rebuild` / `sofar` 的 live 语义读内存；放掉时的终态 |
 | 06 | 副本：窗口、补页、刷新 | 03, 05 | 窗口 `{entries, baseSeq, hasMore, revision}`；「显示更早」那颗按钮；补一页 vs 重开的两种处置；刷新走内存；打字 / 滚动的锚定 |
 | 07 | 收口：两条铁律、状态表、文档、报数 | 02–06 | `overview.md` 铁律 1 与 3 的新措辞 + 状态表（+ 窗口那一行）；`edge.md` / `client.md` / `kernel.md` / `skills-and-instructions.md` 的推导；`CONTEXT.md` 术语；两套全量 + 走查证据；落地记录 |
 
 ## 状态
 
-**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03 已落地（01/02 的文件留在 `issues/` 里当落地记录，票 07 收口时再把它们折进这里）；04–07 `ready-for-agent`，等前置。
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03、04 已落地（01/02 的文件留在
+`issues/` 里当落地记录，票 07 收口时再把它们折进这里）；05–07 `ready-for-agent`，等前置。
 
 ## 已验证到什么程度
 
@@ -231,3 +232,90 @@ exit 0）。新用例落在 `edge/http_test.clj`：不认识的 id 具名 404、
 逐条打印，都能看见 `{threadId, append:[这一条], tools}`，没有 `messages` / `runId`；刷新回同一场且
 **没有再问一次** id；从页面里敲一个不认识的 id，得到 404 和那句点名的话；`GET /api/threads` 里那个 id
 只出现一次，记录里三条 `input` 各带服务端铸的 `runId`。
+
+## 票 04 落地记录（2026-09-22）
+
+**认领是一行库里的 owner，不是锁文件。** 选择理由写在新模块的 docstring 里，一句话版：库已经是
+「同一个 home 的两个进程唯一会达成一致的地方」（`with-transaction` 用 `BEGIN IMMEDIATE` 开，
+读-改-写不会输给抢跑的进程），而认领正好是库擅长的那种东西——**可重写的一行状态**，不是记录。
+锁文件要自带目录、原子创建和它自己的「放哪儿」，而 pid 活性那一问它答得和这里一模一样，
+所以它只多一套机制，不多一个答案。
+
+### 接口
+
+- **表**：`session_claims (thread_id PK, instance, token, pid, started_at, since)`，迁移链上多一步
+  `session-claims`（append-only，`test/harness/infra/db_test.clj` 的「store 里有哪些表」守卫同步更新）。
+- **`harness.cap.claims`**：`holder`（**活着的**持有者，陈旧行答 nil）、`mine?`、
+  `take!`（活着的别人 ⇒ 抛 `:session-claimed`，异常里带着那一行；陈旧行 ⇒ 接手并写一行 WARN）、
+  `release!`（**按 token**）、`release-all!`（按 instance，退出钩子用）、`hand-over!`（下面那条竞态用）、
+  `held`（给读者看全部行）。`take!` 自己装退出钩子（幂等），所以**不靠「谁启动了 server」**——
+  一个只认领不开 http 的进程也要正常退出时交还。
+- **接线**：`sessions/ensure-session` 在**建表那一步**认领（认领属于会话的寿命，不属于 run）；
+  `sessions/drop!` 与 `sweep!` 交还（按**条目里那个 token**，不按 thread-id）；`http/handle-run` 在
+  门口问一次 `holder`，是别人的 ⇒ `refuse-served-elsewhere!`（409，body 里有 `:holder {:pid :since
+  :instance}`，句子说得出「停掉那个进程或等它退出」）；`http/project-post` 同一条规则——因为**改绑会
+  移动日志文件**，那是在别的进程的写者脚下抽地板。
+
+### 三个决定，以及为什么不是另一种
+
+1. **owner = instance + pid + 起始时刻，三个事实各答一问**：`instance` 是进程自己铸一次的随机 id，
+   「这行是不是我的」是字符串比较、不碰 OS；`pid` + `started_at` 才是后到进程问 OS 的东西。
+   **只要 pid 会犯错**：pid 会被复用，一个复用的号会让一场对话被一个陌生人钉住——起始时刻就是判这个的。
+   没有心跳：心跳要每个进程一个定时器，而 OS 直接答同一个问题；心跳唯一能多买到的是「发现卡住的进程」，
+   而卡住的进程**仍然是**主人，抢它的认领正是这一票要防的两份权威。
+2. **粒度是进程、寿命是会话**（判断 3/4）：run 结束不让认领（否则下一轮要重新认领，而重建是冷的）；
+   空闲 30s 放掉会话时**一起放**，否则空闲会话会永远占着一个进程。两票的接口就在 `sweep!` 里对齐。
+3. **后到的是「只读 + 明说」**（判断 5/9）：看（列表、`rebuild`、`sofar`、统计、轨迹）照常——那些读的是
+   文件；动作（run、改绑）409 并点名 pid。**非 owner 的页面没有增量，就是降级**（判断 9 的选定）：
+   代理要引入一条跨进程长连接、它的寿命、重连与背压，而「只读」要买的只是「看得见历史」。
+
+### 两个竞态，写下来免得后人重新踩
+
+- **放掉会话是「先摘表、后交还」，两者之间那一场可能已经重生**：所以 `take!` 每次**换一个 token**，
+  `release!` 按 token 删。按 thread-id 删会删掉刚重生的新认领，留下一个没有认领却被人服务的会话——
+  比「删不掉」坏得多（两份权威）。
+- **同一进程里两次出生抢一张表**（运行边的门口检查与 `register-run!` 之间那个众所周知的窗口，见
+  `handle-run` 的 docstring）：两次 `take!` 都会铸 token，赢下 `swap-vals!` 的那个条目的 token 可能不是
+  行里那个。**输的一方**在两个 token 都看得见，所以由它把行交过去（`hand-over!`）；不做这件事的话，
+  那一行会一直挂到进程退出为止，期间别的进程**连一场这个进程早就不服务的对话也拿不到**。
+
+### 与票 05 的接口（判断 8）
+
+**认领的 token 就是 generation。** 会话表条目里带着 `:claim`（`(sessions/live)` 也读得出来），
+`take!` / `hand-over!` 换 token、`release!` 删行——所以「这一场易主或放掉」和「副本窗口作废」是
+**同一个时刻的同一个事实**，票 05 只要拿窗口建立时的 token 与 `holder` 比一次就知道该发终态。
+本票不造 feed（票 05 的活），只把这条缝对齐并用用例钉住：`sessions_test` 里「放掉会话 ⇒ 行没了」，
+`claims_test` 里「正常退出 ⇒ 行没了」「被杀 ⇒ 行留着且下一次接手会明说」。
+
+### 验证
+
+**后端全量：1028 tests / 12355 assertions / 0 failures / 0 errors**（2026-09-22，本 worktree，exit 0）。
+新用例三处，各有各的理由：
+
+- `test/harness/cap/claims_test.clj`（10 个用例 59 条断言）：行的三个事实、重复 `take!` 换 token、
+  活着的陌生进程被具名拒绝、死 pid 与**复用 pid**两种陈旧、按 token 释放、`hand-over!`、`release-all!`
+  不碰别人的行、退出钩子只装一次；再加**两个真 JVM**：第二个进程（`sessions/touch!` 走真正的出生路径）
+  活着时本进程被点名拒绝 → 正常退出 ⇒ 行没了、本进程接手 → 再起一个 **`destroyForcibly`** ⇒ 行留着、
+  `holder` 答 nil、接手时日志里有一行 `taken-over`。这一条是整票唯一一件进程内测不了的事
+  （`alive?` 问的是 OS，退出钩子只有真的退出才跑）。
+- `test/harness/edge/sessions_test.clj`（+4 个用例）：出生即认领且条目带着 token；`drop!` 与**空闲扫除**
+  都交还；别人正服务的会话在这里**生不出来**、被拒之后表里没有残留条目；陈旧行被接手。
+- `test/harness/edge/http_test.clj`（+3 个用例）：门里 409 且 body 点名 pid/`since`、日志**一个字节没长**
+  （等文件稳定再比——记录是异步的，`pending?` 空了之后行还可能在落盘路上，实测 20KB 的
+  `model/start` 晚 3ms 才落）；读路由（列表、`rebuild`）照常 200；没人服务时同一条 run 立刻能跑；
+  复用 pid 的陈旧行不拒任何东西；改绑别的进程正服务的会话 ⇒ 409 且绑定一动不动。
+- `test/harness/infra/db_test.clj` 与 `test/harness/cap/hashline/store_test.clj` 的表清单/列名守卫跟着
+  加了 `session_claims`（这两条守卫就是设计来逼人写清「为什么它是状态不是记录」的）。
+
+**判据没变的那一半**：`running?` 的既有用例（同会话第二条 run 的拒绝）全绿——本票补的是跨进程那一半，
+没有替换它（判断 2）。**UI 一行没动**：非 owner 的页面今天拿到的就是「降级」——它读的是 `rebuild` /
+`sofar`，没有增量；真要发动作会拿到那句 409，落进既有的错误卡。
+
+### 边界（写给票 05/06/07）
+
+- **feed 的终态还没人发**（票 05）：本票给的是缝（token = generation + 「行没了」这个事实），
+  终态那一帧是 feed 自己的事。
+- **`POST /api/project` 里只有「具名改绑」被挡**：`dir` 必填，所以走这条路一定会移动日志；
+  「解除绑定」这条 HTTP 路今天不存在，等它出现时同样要问认领。
+- **`sessions` 表的**其余**写入没有新增第二份**（判断 7）：锚点、待办仍然只存在库里按 thread-id 分家，
+  本票在进程内只多了一个 `:claim` 字符串（token），没有多出任何对话内容。

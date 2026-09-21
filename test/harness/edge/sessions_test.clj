@@ -3,8 +3,10 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.cap.claims :as claims]
             [harness.edge.ag-ui :as ag]
             [harness.edge.sessions :as sessions]
+            [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.kernel.event :as ev]))
 
@@ -167,6 +169,84 @@
   (testing "a run the table already holds is not a second one"
     (sessions/run-started! "t-limit-0" "r0")
     (is (= sessions/max-running (sessions/running-count)))))
+
+;; ----------------------------------------------------------- and it claims them
+;;
+;; A SESSION'S LIFETIME IS A CLAIM ON THE CONVERSATION (ticket 04, ADR 0002 decision
+;; 7): born claiming, put away handing it back. What that buys is on the far side of a
+;; process boundary -- two processes serving one conversation interleave their frames
+;; into one append-only file, and the result reads as a conversation that happened --
+;; so the cases here are about the LIFETIME. The cross-process half, and what the OS
+;; says about a pid, live in harness.cap.claims-test.
+
+(defn- claim-row [thread-id]
+  (first (db/select "SELECT * FROM session_claims WHERE thread_id = ?" (str thread-id))))
+
+(defn- claimed-by-somebody-else!
+  "Leave the row a LIVE OTHER PROCESS would leave: this process's own pid and start
+  instant, so the OS says a process is there, under an instance that is not ours.
+  That pair is exactly what a second process serving a conversation puts in the store,
+  and it needs no second process to write it."
+  [thread-id]
+  (let [us (claims/this-process)]
+    (db/with-transaction
+      (fn [c]
+        (db/execute! c "INSERT INTO session_claims
+                          (thread_id, instance, token, pid, started_at, since)
+                        VALUES (?, ?, ?, ?, ?, ?)"
+                     (str thread-id) "another-process" (str (java.util.UUID/randomUUID))
+                     (:pid us) (:started-at us) (System/currentTimeMillis))))))
+
+(deftest a-session-claims-its-conversation-as-it-is-born
+  (sessions/messages "t-claim")
+  (let [row (claim-row "t-claim")]
+    (is (some? row) "asking for a session is what claims it")
+    (is (= (:instance (claims/this-process)) (:instance row)))
+    (is (= (:pid (claims/this-process)) (:pid row)))
+    (testing "and the entry carries the claim's token, so the put-away can hand it back"
+      (is (= (:token row) (:claim (get (sessions/live) "t-claim")))))
+    (testing "asking again does not open a second claim"
+      (sessions/messages "t-claim")
+      (is (= 1 (count (db/select "SELECT * FROM session_claims WHERE thread_id = ?" "t-claim")))))))
+
+(deftest putting-one-away-hands-the-claim-back
+  (testing "explicitly"
+    (sessions/touch! "t-hand-back")
+    (is (some? (claim-row "t-hand-back")))
+    (sessions/drop! "t-hand-back")
+    (is (nil? (claim-row "t-hand-back")) "a conversation this process stopped serving is free"))
+  (testing "and by going idle"
+    (sessions/touch! "t-hand-back-idle")
+    (let [touched (:touched-at (get (sessions/live) "t-hand-back-idle"))]
+      (is (= ["t-hand-back-idle"] (sessions/sweep! (+ touched sessions/idle-ttl-ms))))
+      (is (nil? (claim-row "t-hand-back-idle"))))))
+
+(deftest a-conversation-another-process-is-serving-cannot-be-born-here
+  (claimed-by-somebody-else! "t-taken")
+  (let [e (try (sessions/touch! "t-taken") nil (catch clojure.lang.ExceptionInfo e e))]
+    (is (some? e) "a live claim elsewhere is a refusal, not a shrug")
+    (is (= :session-claimed (:reason (ex-data e))))
+    (is (= "another-process" (:instance (:holder (ex-data e)))))
+    (testing "and the refused birth left nothing behind in this process's table"
+      (is (not (contains? (sessions/live) "t-taken")))))
+  (testing "the row is still theirs -- a refused ask must not steal it"
+    (is (= "another-process" (:instance (claim-row "t-taken"))))))
+
+(deftest a-claim-left-by-a-process-that-is-gone-is-taken-over
+  ;; The pid is LIVE -- it is this process's own -- and the start instant is not: that
+  ;; is what a reused pid looks like, and it is the reason a claim records when its
+  ;; owner started rather than only which number it had.
+  (let [us (claims/this-process)]
+    (db/with-transaction
+      (fn [c]
+        (db/execute! c "INSERT INTO session_claims
+                          (thread_id, instance, token, pid, started_at, since)
+                        VALUES (?, ?, ?, ?, ?, ?)"
+                     "t-stale" "the-previous-owner" (str (java.util.UUID/randomUUID))
+                     (:pid us) 1 (System/currentTimeMillis))))
+    (sessions/touch! "t-stale")
+    (is (= (:instance us) (:instance (claim-row "t-stale")))
+        "the session was born here, over a claim whose owner is gone")))
 
 ;; ------------------------------------------------------------- and it writes nothing
 

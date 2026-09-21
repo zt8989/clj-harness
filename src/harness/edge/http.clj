@@ -80,6 +80,7 @@
             [harness.cap.providers :as providers]
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
+            [harness.cap.claims :as claims]
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
@@ -1221,6 +1222,43 @@
                 " THIS ACTION adds -- send those as \"append\".")
     :field "messages"}))
 
+(defn- refuse-served-elsewhere!
+  "The answer a client gets when the conversation it is aiming an action at is being
+  served by ANOTHER PROCESS of this home. 409, and a sentence naming that process.
+
+  THE CROSS-PROCESS HALF OF 'ONE AUTHORITY PER CONVERSATION' (ADR 0002 decision 7).
+  `refuse-second-run!` below is the same rule inside this process; this is the case the
+  in-process registry cannot see at all -- another JVM, its own memory table, its own
+  record writer, appending to the same file. Nothing in a log line says which process
+  put it there, so two writers do not produce a detectable conflict: they produce a
+  record that reads as a conversation that happened.
+
+  READ-ONLY IS THE REST OF IT, and this refusal is deliberately only about ACTIONS: the
+  listing, the conversation (`rebuild`), `sofar`, the statistics and the trajectory all
+  read files, and a second process reading them is exactly what those routes are for.
+  What it may not do is WRITE to the conversation -- which is the run, and the one other
+  action that moves a session's log file.
+
+  IT NAMES THE PID AND WHEN THE CLAIM WAS TAKEN, because a refusal a person cannot act
+  on is not much better than silence: the move is to stop that process (or wait for it
+  to exit) and send again. The instance is in the body for whoever is matching this
+  against a log line."
+  [thread-id held]
+  (api-response
+   409
+   {:error    (str "conversation " (pr-str (str thread-id)) " is being served by another"
+                   " harness process (pid " (:pid held) ", which has held it since "
+                   (str (java.time.Instant/ofEpochMilli (:since held))) "), so this action"
+                   " was refused: two processes serving one conversation write two"
+                   " conversations into one record, and nothing in the record says which"
+                   " is which. This process can still READ it -- the sidebar, the"
+                   " conversation, the statistics -- but not act on it. Stop that process"
+                   " (or wait for it to exit) and send again.")
+    :threadId thread-id
+    :holder   {:pid      (:pid held)
+               :since    (:since held)
+               :instance (:instance held)}}))
+
 (defn- refuse-second-run!
   "The answer a client gets when it asks for a run of a session this process is already
   running. 409, and a sentence naming the session and the run that is in the way.
@@ -1323,7 +1361,7 @@
   "The door to the run edge: read the request, decide whether this is a run this home
   answers, and hand the rest over.
 
-  FOUR DECISIONS, IN THIS ORDER, and the order is the point -- each one is cheaper and
+  FIVE DECISIONS, IN THIS ORDER, and the order is the point -- each one is cheaper and
   more basic than the next, and none of them may leave a trace:
 
     1. THE BODY MUST NOT CARRY `messages`. That field retired (ADR 0002 decision 9): the
@@ -1332,13 +1370,21 @@
     2. THE SESSION MUST EXIST. A run continues a conversation; if this home has no row
        for the id, the run is refused by name and NOTHING is created (ticket 03 removed
        the silent create -- see `refuse-unknown-session!`).
-    3. THE RUN ID IS MINTED HERE, not taken from the body. It names a run in this process
+    3. NO OTHER PROCESS MAY BE SERVING IT. This is the cross-process half of 'one
+       authority per conversation' (ADR 0002 decision 7), asked of the STORE -- the one
+       place two processes of a home agree (`harness.cap.claims`), because the registry
+       the next decision reads cannot see another JVM at all. A stale claim -- a process
+       that is gone -- is nobody's, and the birth below takes it over.
+    4. ONE RUN PER SESSION AT A TIME IN THIS PROCESS. The check is `running?` -- the
+       registry the run registers itself in when it actually starts -- and a refused run
+       must leave NO trace: the file would take a second `input` line that the reader's
+       arithmetic is not written for (see `refuse-second-run!`).
+    5. THE RUN ID IS MINTED HERE, not taken from the body. It names a run in this process
        and it goes into the record, and two runs sharing one would interleave into a
        conversation that reads as if it happened once.
-    4. ONE RUN PER SESSION AT A TIME. The check is `running?` -- the registry the run
-       registers itself in when it actually starts -- and a refused run must leave NO
-       trace: the file would take a second `input` line that the reader's arithmetic is
-       not written for (see `refuse-second-run!`).
+
+  ASKING THE STORE ON EVERY RUN IS THE PRICE OF THE THIRD DECISION, and it is small: one
+  row of a local file, against a run that costs a model call.
 
   WHAT THE FOURTH DECISION CANNOT SEE, said plainly rather than papered over: `running?`
   is the fact that a run STARTED, and the registration is made where the run actually
@@ -1354,13 +1400,20 @@
   [req]
   (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
         thread-id (str (:threadId input))
-        run-id    (str (java.util.UUID/randomUUID))]
+        run-id    (str (java.util.UUID/randomUUID))
+        ;; A LIVE CLAIM ON THIS CONVERSATION, read once for the third decision. A stale
+        ;; row -- left by a process that is gone -- answers nil here
+        ;; (`harness.cap.claims/holder`); the session's birth takes that over.
+        held      (claims/holder thread-id)]
     (cond
       (contains? input :messages)
       (refuse-retired-messages!)
 
       (not (project/session-exists? thread-id))
       (refuse-unknown-session! thread-id)
+
+      (and (some? held) (not (claims/mine? held)))
+      (refuse-served-elsewhere! thread-id held)
 
       (running? thread-id)
       (refuse-second-run! thread-id)
@@ -1615,7 +1668,9 @@
   session is the one thing a client may no longer make (ADR 0002 decision 9).
   The answer carries the id it minted, and that is the id to use from here on.
   A body that DOES name one is the rebind direction, unchanged: an id this home
-  already knows moves, and the answer says which one it was.
+  already knows moves, and the answer says which one it was -- UNLESS another process of
+  this home is serving that conversation, in which case this is refused by name: the
+  rebind MOVES THE LOG FILE out from under that process's writer (see the cond below).
 
   THE LOG TRAVELS WITH THE BINDING. Which workspace a session's log belongs in
   is decided by its project, so a rebind that did not carry the file would split
@@ -1641,13 +1696,27 @@
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
                      (catch Throwable _ {:bad true}))
-        {:keys [ok bad]} parsed]
+        {:keys [ok bad]} parsed
+        ;; WHO IS SERVING THE NAMED CONVERSATION, if anybody: read once, for the third
+        ;; decision below.
+        named (str (:threadId ok))
+        held  (when-not (str/blank? named) (claims/holder named))]
     (cond
       bad
       (api-response 400 {:error "request body is not valid JSON"})
 
       (str/blank? (str (:dir ok)))
       (api-response 400 {:error "missing dir"})
+
+      ;; AN ACTION ON A CONVERSATION ANOTHER PROCESS IS SERVING, and this one MOVES THE
+      ;; LOG FILE (`move-log!` below): a writer in that other process holds the path it
+      ;; opened, so a move underneath it splits one conversation across two files. The
+      ;; same read-only rule the run edge answers with (`refuse-served-elsewhere!`),
+      ;; asked here because binding is the other thing that acts on a log. A body that
+      ;; names nobody -- the ordinary 'start a conversation in this directory' -- has
+      ;; nothing to be serving, so this cannot refuse it.
+      (and (some? held) (not (claims/mine? held)))
+      (refuse-served-elsewhere! named held)
 
       :else
       (let [thread-id (if (str/blank? (str (:threadId ok)))

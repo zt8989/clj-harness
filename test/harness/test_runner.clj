@@ -77,6 +77,7 @@
     harness.evals-test
     harness.cap.providers-test
     harness.cap.project-test
+    harness.cap.claims-test
     harness.infra.log-test
     harness.cap.git-test
     harness.cap.editing-test
