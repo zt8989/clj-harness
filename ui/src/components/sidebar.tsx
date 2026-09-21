@@ -33,34 +33,35 @@
 //
 // ----------------------------------------------------------- a new task's shape
 //
-// Starting a conversation is THREE STEPS IN THIS ORDER, and each one is
-// load-bearing:
+// Starting a conversation is TWO STEPS IN THIS ORDER, and each one is load-bearing:
 //
-//   1. mint an id (the client owns ids -- the server has never minted one),
-//   2. REGISTER that id, which is what makes the conversation exist at all -- for a
-//      project session, BIND it (POST /api/project, which is also what makes it
-//      exist); for a task, `POST /api/sessions`, which records it with no project
-//      and no memory of one. Its log does not exist yet, and that is a state the
-//      listing already handles.
-//   3. SHOW that id -- `onShowFresh`, which is the page putting a host on screen
-//      and NOT rebuilding: the id is this client's, it just made it up, and there
-//      is no conversation under it yet.
+//   1. ASK FOR AN ID, which is also what makes the conversation exist at all: for a
+//      project session `POST /api/project` names it AND binds it in one action; for a
+//      task `POST /api/sessions`, which records it with no project and no memory of
+//      one. The answer names the session, and the id is the SERVER'S to mint (ticket
+//      03 of `.scratch/sessions-live-on-the-server`) -- a client-made id was one the
+//      run edge used to accept and quietly register, which is how a page could hold an
+//      id no store had ever heard of. Its log does not exist yet, and that is a state
+//      the listing already handles.
+//   2. SHOW that id -- `onShowFresh`, which is the page putting a host on screen
+//      and NOT rebuilding: nothing has run under it yet, so there is no conversation
+//      to read.
 //
-// Step 3 is a page action rather than a runtime one, and that was the whole of the
+// Step 2 is a page action rather than a runtime one, and that was the whole of the
 // parallel-sessions ticket in this file: `runtime.threads.switchToThread` and its
 // `switchToNewThread` sibling are gone, because their effect was to clear the core
 // before refilling it -- and the core that is now streaming belongs to a host that
 // never gets refilled. `onShowFresh` also keeps the id in this component's hands,
-// which step 2 needs; letting the runtime mint one would put it out of reach.
+// which step 1 needs; letting the runtime mint one would put it out of reach.
 //
 // A NEW TASK NEEDS NO PROJECT, and that is the rule this feature turned over. The
 // header's button used to start a session in the sidebar's SELECTED project and to
 // refuse outright when this home had no projects ("add a project first"); now it
-// mints an id, registers it as a conversation of this home with no project, and
-// shows it. It lands in the TASK LIST above the projects a moment later. The old
-// refusal was not a nudge -- it was the shape of the product, and the two sentences
-// that expressed it (`refusal.noProject`, `refusal.noProjectSelected`) are gone from
-// both catalogs rather than left behind as dead keys.
+// registers a conversation of this home with no project and shows it. It lands in the
+// TASK LIST above the projects a moment later. The old refusal was not a nudge -- it
+// was the shape of the product, and the two sentences that expressed it
+// (`refusal.noProject`, `refusal.noProjectSelected`) are gone from both catalogs
+// rather than left behind as dead keys.
 //
 // THE SAME STEPS STILL RUN FROM A PROJECT'S OWN ROW, and that button is unchanged:
 // it starts a session in THAT project, which is now the ONLY way to say so. The two
@@ -122,7 +123,7 @@
 // -- that is the kind of wrong-looking-right state nobody notices until they type
 // into it. So archiving what you are reading switches to the project's most
 // recent UNARCHIVED session, and when the project has none left, it does what
-// "New task" does: mints an id, binds it to this project and switches to it. That
+// "New task" does: starts a session in this project and switches to it. That
 // is the honest landing place, because it is exactly where pressing New task
 // would have left you -- on an empty conversation in the project you are standing
 // in. It is also why there is no "you archived the last one" special case: the
@@ -236,13 +237,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   addProject,
-  bindThread,
   listSidebar,
   pickFolder,
   PickerUnavailableError,
   projectName,
   removeProject,
   setArchived,
+  startSessionIn,
   startTask,
   type ProjectSummary,
   type SessionSummary,
@@ -496,7 +497,7 @@ export const Sidebar: FC<SidebarProps> = ({
         //
         //   * a project session -- the same PROJECT's most recent unarchived
         //     session, which is the first one the server listed (the listing is
-        //     newest-first), or, when there is none, the three steps that project
+        //     newest-first), or, when there is none, the two steps that project
         //     row's own button runs;
         //   * a task -- the most recent unarchived TASK, or a brand-new one.
         //
@@ -509,14 +510,14 @@ export const Sidebar: FC<SidebarProps> = ({
           setPinned(project === null ? null : project.path);
           onShow(next.threadId);
         } else {
-          const id = crypto.randomUUID();
-          if (project === null) {
-            await startTask(id, tErrors);
-            setPinned(null);
-          } else {
-            await bindThread(id, project.path, tErrors);
-            setPinned(project.path);
-          }
+          // A FRESH ONE, and the id comes from the server: `startTask` for a task,
+          // `startSessionIn` for the project (which mints the id AND binds it in one
+          // action, so a refused bind cannot leave an unbound conversation behind).
+          const id =
+            project === null
+              ? await startTask(tErrors)
+              : await startSessionIn(project.path, tErrors);
+          setPinned(project === null ? null : project.path);
           onShowFresh(id);
         }
       }
@@ -566,10 +567,10 @@ export const Sidebar: FC<SidebarProps> = ({
         // SOMEWHERE ELSE, in this order: the most recent unarchived session of
         // any remaining project (the lists are already newest-first), and --
         // when this was the last project -- a BRAND-NEW thread with no project
-        // at all. That last branch is `onShowFresh` with an id nobody bound --
-        // minted here rather than by the runtime, which no longer mints: there is
-        // nothing left to bind to, and the server tolerates a session with no
-        // project by design. What neither branch does is leave the chat on the
+        // at all. That last branch is `onShowFresh` with the id the SERVER named
+        // (`startTask`, which is what registers it as a task): there is nothing
+        // left to bind to, and a session with no project is a state this home
+        // keeps by design. What neither branch does is leave the chat on the
         // project just removed, or invent a project to hold the new session.
         const rest = projects.filter((p) => p.path !== project.path);
         const next = rest
@@ -585,9 +586,8 @@ export const Sidebar: FC<SidebarProps> = ({
         } else {
           // A BRAND-NEW TASK, and registered for the reason every other path
           // registers: the page must never be parked on a conversation the sidebar
-          // cannot draw (see `newTask`, which is the same three steps).
-          const id = crypto.randomUUID();
-          await startTask(id, tErrors);
+          // cannot draw (see `newTask`, which is the same two steps).
+          const id = await startTask(tErrors);
           setPinned(null);
           onShowFresh(id);
         }
@@ -685,26 +685,33 @@ export const Sidebar: FC<SidebarProps> = ({
     }
   };
 
-  /// The shared core of every "new session": mint, bind, switch. See this file's
-  /// header for why in that order -- and note that an id whose bind FAILED is
+  /// A new session from a PROJECT'S OWN ROW: the server names the id and binds it in
+  /// ONE action (`startSessionIn`), and the answer is what the page switches to. See
+  /// this file's header for the order -- and note that an id whose bind FAILED is
   /// never adopted, because the session does not exist and switching to it would
   /// leave the page on a thread with no home. Throws what the server threw; which
   /// slot that lands in is the caller's business, since only the caller knows
   /// which button was clicked.
-  const startSessionIn = async (project: ProjectSummary): Promise<void> => {
-    const id = crypto.randomUUID();
-    await bindThread(id, project.path, tErrors);
+  const newSessionInProject = async (project: ProjectSummary): Promise<void> => {
+    const id = await startSessionIn(project.path, tErrors);
     onShowFresh(id);
   };
 
-  /// NEW TASK: a conversation that belongs to NO PROJECT, minted and registered in
-  /// one go. The refusals land under the header, because that button has no row.
+  /// NEW TASK: a conversation that belongs to NO PROJECT, registered the moment it is
+  /// asked for. The refusals land under the header, because that button has no row.
   ///
   /// THIS IS THE BUTTON THAT CHANGED MEANING, and it is the point of the feature: it
   /// used to start a session in whatever project the sidebar had selected, and to
   /// refuse outright when this home had no projects at all ("add a project first").
   /// A task needs neither -- it is registered and then shown, and it appears in the
   /// flat task list above the projects a moment later.
+  ///
+  /// THE ID IS THE SERVER'S (`startTask` with nothing to name), and that is this
+  /// ticket's other change: a client-made id was one the run edge used to accept and
+  /// silently register, so the id a page held could name a conversation no store had
+  /// ever heard of. An answer that names the session is the id this page uses from
+  /// here on -- and a session that failed to register is never adopted, because
+  /// switching to it would leave the page on a conversation this home does not have.
   ///
   /// STARTING A SESSION IN A PROJECT IS STILL AVAILABLE, one row down: each project
   /// row has its own button, and that is the unambiguous version of the same wish.
@@ -714,17 +721,14 @@ export const Sidebar: FC<SidebarProps> = ({
     // NOT gated on a run in flight any more. Starting a session used to be
     // refused because it would abandon the one on screen; a new session gets its
     // own host now, and whatever is running keeps running in its own.
-    const id = crypto.randomUUID();
     setBusy(true);
     setNewTaskError(null);
     setRowError(null);
     setProjectError(null);
     try {
       // REGISTERED BEFORE IT IS SHOWN, and in that order: the row exists on the
-      // server the moment it is asked for, so the refresh below lists it -- and a
-      // task that failed to register is never adopted, because switching to it
-      // would leave the page on a conversation this home does not have.
-      await startTask(id, tErrors);
+      // server the moment it is asked for, so the refresh below lists it.
+      const id = await startTask(tErrors);
       onShowFresh(id);
       await refresh();
     } catch (failure: unknown) {
@@ -734,7 +738,7 @@ export const Sidebar: FC<SidebarProps> = ({
     }
   };
 
-  /// A new session from a PROJECT'S OWN ROW: the same three steps in the project
+  /// A new session from a PROJECT'S OWN ROW: the same two steps in the project
   /// that was clicked, and the refusal lands on that row -- which is the whole
   /// reason this exists next to `newTask` rather than inside it. The project is
   /// not pinned: the switch makes this session the current one, and the selection
@@ -747,7 +751,7 @@ export const Sidebar: FC<SidebarProps> = ({
     setRowError(null);
     setNewTaskError(null);
     try {
-      await startSessionIn(project);
+      await newSessionInProject(project);
       await refresh();
     } catch (failure: unknown) {
       setProjectError({

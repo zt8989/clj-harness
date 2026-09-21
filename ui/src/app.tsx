@@ -69,7 +69,6 @@
 // identity survives re-renders.
 import type { TFunction } from "i18next";
 
-import { HttpAgent } from "@ag-ui/client";
 import { fromThreadMessageLike } from "@assistant-ui/core";
 import { AssistantRuntimeProvider, useAuiState } from "@assistant-ui/react";
 import {
@@ -95,8 +94,9 @@ import {
 import { Sidebar } from "@/components/sidebar";
 import { SidebarOpenButton, isWideWindow } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
+import { HarnessAgent } from "@/lib/agent";
 import { imageAttachments } from "@/lib/attachments";
-import { type SidebarListing } from "@/lib/projects";
+import { startTask, type SidebarListing } from "@/lib/projects";
 import {
   browserStorage,
   forgetSession,
@@ -299,7 +299,7 @@ const SessionHost: FC<{
   // same reason the old single-agent memo had an empty dependency list, paid per
   // session now instead of once for the page.
   const agent = useMemo(() => {
-    const created = new HttpAgent({ url: AGENT_URL });
+    const created = new HarnessAgent({ url: AGENT_URL });
     created.threadId = threadId;
     return created;
   }, [threadId]);
@@ -594,12 +594,28 @@ const dropKey = <T,>(record: Record<string, T>, key: string): Record<string, T> 
 };
 
 export function App() {
-  // THE ROSTER. The first session is minted here and hosted EMPTY: a brand-new
-  // id has no log, and the server refuses to invent a conversation for one.
-  const [roster, setRoster] = useState<Roster>(() => {
-    const id = crypto.randomUUID();
-    return { shown: id, live: [{ id, read: "none", attempt: 0 }] };
-  });
+  // THE ROSTER, AND IT STARTS EMPTY. The page no longer mints the first session's id:
+  // an id belongs to the process that keeps the conversation (ADR 0002 decision 9), so
+  // the page asks for one -- `startTask` below, or the sidebar's own buttons -- and
+  // shows what it is given. What used to be here was `crypto.randomUUID()`, an id the
+  // server had never heard of, which the run edge then quietly registered on the first
+  // run; that silent create is gone (the edge refuses an unknown session by name), and
+  // with it the client's licence to name a conversation.
+  //
+  // EMPTY IS A STATE THE PAGE IS ALLOWED TO BE IN, and it lasts one listing: the
+  // restore below either lands on the session this page remembers or asks the server
+  // for a fresh one. In between, the column area holds the sentence that says what
+  // went wrong if that ask failed -- never a blank page pretending to be a session.
+  const [roster, setRoster] = useState<Roster>(() => ({ shown: "", live: [] }));
+  // WHY THERE IS NO SESSION ON SCREEN, when there is none because the ask failed. The
+  // server's own sentence (`startTask`'s refusal), drawn where the conversation would
+  // be: an empty column is indistinguishable from a page still loading, and a page
+  // that lost its only session to a 500 has to say so.
+  const [freshError, setFreshError] = useState<string | null>(null);
+  /// The page's translator for the sentences the SERVER did not write: `startTask`
+  /// speaks this interface's fallback words, and which language that is has nothing to
+  /// do with a session (the hosts below each keep their own).
+  const { t: tErrors } = useTranslation("errors");
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
   // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
@@ -726,16 +742,17 @@ export function App() {
     });
   }, []);
 
-  /// Show a session this client has just minted (and, for every path that has a
-  /// project, just bound): nothing to rebuild, so no load.
+  /// Show a session the server has just named (and, for every path from the sidebar
+  /// that has a project, just bound): nothing to rebuild, so no load.
   ///
   /// THIS AND `showExisting` ARE THE SIDEBAR'S TWO DOORS, and because they are, BOTH CLOSE
   /// THE DRAWER on a narrow window (`foldDrawer`): the panel listed the conversation, and
   /// leaving it over the one just chosen is a pick that looks like it did nothing.
   ///
-  /// THE RESTORE DOES NOT COME THROUGH HERE -- `onListed` calls `show` directly -- and that
-  /// is the distinction worth keeping: a page landing on the session it already remembers
-  /// has nobody to get out of the way of.
+  /// THE PAGE'S OWN TWO PATHS DO NOT COME THROUGH HERE -- `onListed` and `openFresh` call
+  /// `show` directly -- and that is the distinction worth keeping: a page landing on the
+  /// session it already remembers, or on a fresh one it just asked the server for, has
+  /// nobody to get out of the way of.
   const showFresh = useCallback(
     (id: string) => {
       foldDrawer();
@@ -753,27 +770,47 @@ export function App() {
     [foldDrawer, show],
   );
 
+  /// ASK THE SERVER FOR A CONVERSATION AND SHOW IT. The page's own door onto
+  /// `POST /api/sessions`: with no id to bring, the answer names the session (see the
+  /// roster's comment for why the page may not name one itself), and it is hosted EMPTY,
+  /// because an id that has just been named has no log to read.
+  ///
+  /// A REFUSAL IS A SENTENCE, NOT AN EMPTY PAGE. There is nothing else on screen in this
+  /// case -- the reason this ask happens at all is that the page has no session -- so a
+  /// failure that said nothing would leave a blank column that looks exactly like a page
+  /// still loading. The server's own words go up (`startTask` throws its `{:error ..}`),
+  /// in the box the conversation would have been drawn in.
+  const openFresh = useCallback(async () => {
+    try {
+      const id = await startTask(tErrors);
+      setFreshError(null);
+      show(id, "none");
+    } catch (failure: unknown) {
+      setFreshError(failure instanceof Error ? failure.message : String(failure));
+    }
+  }, [show, tErrors]);
+
   /// THE SESSION THE PAGE REMEMBERS, read ONCE at mount, and null once the restore has
-  /// dealt with it. It has to be read before anything is written: the id on screen at
-  /// mount is a fresh one this page has just minted, and remembering it first would
-  /// overwrite the very id the restore is about to look for.
+  /// dealt with it. It has to be read before anything is written, because the restore's
+  /// answer -- the remembered session, or the fresh one the server names when there is
+  /// nothing to come back to -- is what the page will remember from then on.
   const [pending, setPending] = useState<string | null>(() => rememberedSession(browserStorage()));
 
   // WHAT IS ON SCREEN IS REMEMBERED -- one effect on `shown` rather than a line inside
-  // `show`, because THE FIRST SESSION IS MINTED BY `useState` AND NEVER GOES THROUGH
-  // `show` AT ALL, and that is the session a person's first message lands in: a restore
-  // that could not find it would hand them an empty conversation after every reload.
+  // `show`, because an effect is what can wait for `pending` to settle.
   //
-  // AND NOT WHILE A RESTORE IS PENDING. The minted id is not yet the page's memory then;
-  // writing it would clobber the remembered one before the listing has had a chance to
-  // say whether it is still there (see `onListed`).
+  // AND NOT WHILE A RESTORE IS PENDING: the page has nothing on screen yet, and writing
+  // that down would erase the very id the first listing is about to look for (see
+  // `onListed`). An EMPTY `shown` is not written down either -- there is no session to
+  // remember, and a remembered empty string is a value the reader would have to know to
+  // ignore (`rememberedSession` does, and this is why it has to).
   useEffect(() => {
-    if (pending !== null) return;
+    if (pending !== null || roster.shown === "") return;
     rememberSession(browserStorage(), roster.shown);
   }, [roster.shown, pending]);
 
   /// THE MOUNT RESTORE: the session this page was in before it was reloaded (ticket
-  /// 03). THREE THINGS ABOUT IT, and each is a decision:
+  /// 03). FOUR THINGS ABOUT IT, and each is a decision:
   ///
   ///   * IT IS DRIVEN BY THE SIDEBAR'S LISTING, not by a fetch of its own: the page
   ///     already reads every session of every project AND every task, so "is that id
@@ -783,10 +820,15 @@ export function App() {
   ///   * IT HAPPENS ONCE, and only on the FIRST listing: it is a restore, not a
   ///     policy -- an id that disappears from the list later (somebody archived it)
   ///     leaves the page where it is.
-  ///   * A REMEMBERED ID THAT IS GONE FALLS BACK TO THE FRESH SESSION THE ROSTER
-  ///     ALREADY HAS, silently. A session that was deleted, archived or moved by hand
-  ///     is not a situation anybody can act on, so it is not a sentence either; the
-  ///     ID IS FORGOTTEN so the next reload does not ask again.
+  ///   * A REMEMBERED ID THAT IS GONE IS FORGOTTEN, and is not a sentence: a session
+  ///     that was deleted, archived or moved by hand is not a situation anybody can act
+  ///     on, so the page says nothing about it. What it does NOT do is keep a page with
+  ///     no session on it.
+  ///   * NOTHING TO RESTORE MEANS ASK FOR A SESSION, which is the other half of the
+  ///     roster's starting empty: a first-ever load has no id to come back to, and the
+  ///     page cannot make one up any more. It asks (`openFresh`), and the server names
+  ///     the conversation -- so "somebody loaded the page and typed" is a session the
+  ///     sidebar can list, with the log under the id the server chose.
   ///
   /// `sofar` rather than `rebuild` is the host's door here, and that is the whole
   /// ticket: the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and
@@ -794,20 +836,21 @@ export function App() {
   const restored = useRef(false);
   const onListed = useCallback(
     (listing: SidebarListing) => {
-      if (restored.current || pending === null) return;
+      if (restored.current) return;
       restored.current = true;
-      const listed = listedSession(pending, listing);
-      if (listed !== null) {
+      const listed = pending === null ? null : listedSession(pending, listing);
+      if (pending !== null && listed !== null) {
         // NO LOG YET means the conversation is empty by construction -- a session made
         // on the sidebar and never run -- so there is nothing to read and nothing to
         // ask for; a session WITH a log is read through the door that may only look.
         show(pending, listed.bytes === null ? "none" : "sofar");
       } else {
-        forgetSession(browserStorage(), pending);
+        if (pending !== null) forgetSession(browserStorage(), pending);
+        void openFresh();
       }
       setPending(null);
     },
-    [pending, show],
+    [openFresh, pending, show],
   );
 
   return (
@@ -878,6 +921,15 @@ export function App() {
             scrolls sideways with every preview running off the edge. The chat never
             needed it because its text wraps. */}
         <div className="min-h-0 min-w-0 flex-1">
+          {/* A PAGE WITH NO SESSION SAYS SO, when the reason is that the ask for one
+              failed: `openFresh` is the only way a session appears out of nothing, and a
+              refusal there would otherwise be an empty column, which is what a page still
+              loading looks like. The sentence is the server's own. */}
+          {freshError !== null && roster.live.length === 0 && (
+            <p data-slot="no-session" className="text-destructive p-6 text-sm">
+              {freshError}
+            </p>
+          )}
           {roster.live.map((host) => (
             <SessionHost
               key={`${host.id}:${host.attempt}`}

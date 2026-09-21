@@ -91,7 +91,7 @@ const wireCase: Case = {
       const tid = threadId("elicit-wire");
       askScript();
 
-      const first = await postRun(tid, "r1", [{ id: "u1", role: "user", content: "go" }]);
+      const first = await postRun(tid, [{ id: "u1", role: "user", content: "go" }]);
       const body = await first.text();
       const ints = interruptsOf(body);
 
@@ -116,7 +116,6 @@ const wireCase: Case = {
       // The answer rides `resume`, and the call finishes with it.
       const resumed = await postRun(
         tid,
-        "r2",
         [{ id: "u1", role: "user", content: "go" }],
         {
           resume: [

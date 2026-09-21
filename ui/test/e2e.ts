@@ -18,6 +18,8 @@ import path from "node:path";
 
 import type { Message } from "@ag-ui/client";
 
+import { HarnessAgent, appendOf } from "@/lib/agent";
+
 /// One test: a name, and a body. Registration belongs to the driver, so the
 /// driver is also the place that can refuse to run a suite that contributed
 /// nothing (see test/ui.test.ts).
@@ -132,18 +134,29 @@ export function content(m: Message): string {
   return typeof m.content === "string" ? m.content : "";
 }
 
-/// POST an AG-UI RunAgentInput, answered with the raw Response. `extra` is
-/// merged over the four required keys, which is how a resume is sent.
+/// POST an AG-UI action, answered with the raw Response. `extra` is merged over the
+/// three keys every action carries, which is how a resume is sent.
+///
+/// THE BODY IS AN ACTION'S, NOT A CONVERSATION'S (ticket 03 of
+/// `.scratch/sessions-live-on-the-server`): no `messages`, no `runId` -- the run edge
+/// refuses the first by name and mints the second, and both rules are asserted in
+/// `test/suites/client.ts`. What MESSAGES contributes is the trailing run of user
+/// messages (`appendOf`, the page's own rule), so a suite can keep writing the
+/// conversation it means and have the wire carry only what a run adds.
+///
+/// THE SESSION IS MADE FIRST, on the same door the page uses: an id the run edge has
+/// never heard of is refused, so a suite that posted a run for a fresh `threadId(..)`
+/// would be testing the refusal rather than the run.
 export async function postRun(
   tid: string,
-  rid: string,
   messages: readonly Message[],
   extra?: Record<string, unknown>,
 ): Promise<Response> {
+  await ensureSession(tid);
   return fetch(runUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ threadId: tid, runId: rid, messages, tools: [], context: [], ...extra }),
+    body: JSON.stringify({ threadId: tid, append: appendOf(messages), tools: [], ...extra }),
   });
 }
 
@@ -157,9 +170,40 @@ export function framesFromSse(body: string): Frame[] {
     .map((line) => JSON.parse(line.slice(5).trim()) as Frame);
 }
 
-export async function fetchFrames(tid: string, rid: string, messages: readonly Message[]): Promise<Frame[]> {
-  const resp = await postRun(tid, rid, messages);
+export async function fetchFrames(tid: string, messages: readonly Message[]): Promise<Frame[]> {
+  const resp = await postRun(tid, messages);
   return framesFromSse(await resp.text());
+}
+
+/// MAKE SURE THIS HOME KNOWS TID, answering the id to use (POST /api/sessions).
+///
+/// Find-or-create, and never an unbind (the server's own rule), so a case may say this
+/// about any conversation, at any point, more than once. It is the page's
+/// `lib/projects.startTask` with no id to bring, then with one: a suite's ids are its
+/// own making, which is what `threadId(..)` is for -- and registering is how an id this
+/// suite made up becomes a conversation this home keeps.
+export async function ensureSession(tid: string): Promise<string> {
+  const resp = await fetch(`${url()}api/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId: tid }),
+  });
+  if (!resp.ok) throw new Error(`POST /api/sessions refused ${tid}: HTTP ${resp.status} ${await resp.text()}`);
+  return ((await resp.json()) as { threadId: string }).threadId;
+}
+
+/// THE PAGE'S OWN AGENT, for a session this home knows: the class `app.tsx` builds
+/// (`lib/agent.HarnessAgent`), driving the address the running harness announced.
+///
+/// A SUITE THAT BUILT ITS OWN CLIENT WOULD PROVE NOTHING ABOUT THE PAGE, which is the
+/// whole reason this exists: the thing that changed in ticket 03 is what a run's BODY
+/// is, and the body is built by this class. `ensureSession` runs first because the
+/// agent's first request would otherwise be refused by name.
+export async function agentFor(tid: string): Promise<HarnessAgent> {
+  await ensureSession(tid);
+  const agent = new HarnessAgent({ url: runUrl() });
+  agent.threadId = tid;
+  return agent;
 }
 
 // -------------------------------------------------------------- the filesystem

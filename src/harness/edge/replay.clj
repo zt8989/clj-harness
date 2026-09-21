@@ -9,11 +9,16 @@
   a run. Rebuilding is an explicit management action, outside any run -- which
   is also why every rebuild action leaves its own audit line at the edge.
 
-  The reconstruction rule is one line: seed from the FIRST input's messages, then fold
-  every recorded frame onto it in order. Later inputs are ignored rather than merged --
-  a client's second input already restates everything before it, so folding it in would
-  duplicate the conversation. The frames are the source of truth; the inputs are only a
-  starting point.
+  The reconstruction rule is one line: WALK THE RECORD IN FILE ORDER, and let each input
+  line say what that action brought while the frames that follow it say what came of it
+  (see `fold-frames`). Until ticket 03 of `.scratch/sessions-live-on-the-server` that
+  line read differently: seed from the FIRST input's messages, then fold every frame onto
+  it, ignoring later inputs, because a client's second input restates everything before
+  it. The difference is not a detail: a client's restatement was the only
+  reason to ignore the later lines, and the same restatement is why a rebuild could not
+  show a second run's question at all (no frame ever carries the message the CLIENT
+  wrote). An action's own entries are what enter the conversation, and the id is what
+  keeps a restated one from entering twice.
 
   The DIRECTORY is the caller's -- this namespace stays a pure reader and never
   learns where the process keeps its home. That is why every entry point but the
@@ -248,10 +253,42 @@
                                                " when the session was continued")})}))
          (open-runs records))))
 
+(defn- append-new
+  "BASE with ENTRIES the conversation does not already hold, in order.
+
+  THE ID IS THE IDENTITY, and that is what lets one fold read records written under
+  both contracts. Until ticket 03 of `.scratch/sessions-live-on-the-server` a client
+  sent the WHOLE conversation every run, so each input line repeats everything before
+  it; from that ticket on, an input line carries only what its action added. Deduping by
+  `:id` -- the same rule `harness.edge.sessions/append!` applies live, and the ids are
+  the frames' own, so the assistant messages match too -- reads both the same way: what
+  the line adds, it adds once. An entry with no id cannot be recognised and is kept."
+  [base entries]
+  (let [[out _] (reduce (fn [[out seen] e]
+                          (if (and (:id e) (contains? seen (:id e)))
+                            [out seen]
+                            [(conj out e) (cond-> seen (:id e) (conj (:id e)))]))
+                        [(vec base) (into #{} (keep :id) base)]
+                        entries)]
+    out))
+
 (defn- fold-frames
   "Parsed log records -> the AG-UI message list they describe, WITHOUT judging
-  whether the log is finished: seed (the FIRST input's messages) + every recorded
-  frame, in file order.
+  whether the log is finished.
+
+  THE RECORD IS READ IN FILE ORDER, and the order is the conversation's: an input line
+  says what that action ADDED, and the frames that follow are what came of it, folded in
+  one group per run. A run's frames are folded as a group rather than one by one because
+  they are not independent: the text of a message lives in a START and its CONTENT
+  frames, and a fold that saw only the content would have nothing to patch.
+
+  WHICH FIELD OF THE INPUT LINE SAYS WHAT WAS ADDED DEPENDS ON WHO WROTE IT, and both
+  are read: `:added` is what the edge writes since ticket 03 (the entries that actually
+  entered the conversation -- a retried message enters nothing, and the birth context
+  enters without the client ever having sent it), while `:messages` is what a client sent
+  under the old contract, when that WAS the whole conversation. `append-new` dedupes by
+  id, which is what makes the old shape read correctly: an old input line repeats
+  everything before it, and the repetition is dropped rather than doubled.
 
   THE FOLD AND THE JUDGEMENT ARE TWO STEPS, which is why this is one function and the
   two public readers below are the other two. What a log CONTAINS and whether it is
@@ -259,15 +296,25 @@
   being written, the second is not -- and a reader that had to fold in order to
   refuse would answer the wrong one first."
   [records]
-  (let [seed   (some->> records
-                        (filter #(= "input" (:kind %)))
-                        first
-                        :payload
-                        :messages)
-        frames (->> records
-                    (filter #(= "event" (:kind %)))
-                    (mapv :payload))]
-    (into (vec seed) (frames/apply-frames frames))))
+  (let [flushed (fn [{:keys [messages pending]}]
+                  {:messages (into messages (frames/apply-frames pending))
+                   :pending  []})]
+    ;; THE LAST RUN IS FLUSHED TOO, and that is not a formality: a log ENDS with the
+    ;; frames of its last run, so the pending group is non-empty at the end of every
+    ;; complete record. A fold that only flushed on the next input line would answer
+    ;; every conversation with everything except the answer that was just given.
+    (:messages
+     (flushed
+      (reduce (fn [acc {:keys [kind payload]}]
+                (case kind
+                  "input" (-> acc
+                              flushed
+                              (update :messages append-new (or (:added payload)
+                                                               (:messages payload))))
+                  "event" (update acc :pending conj payload)
+                  acc))
+              {:messages [] :pending []}
+              records)))))
 
 (defn records->messages
   "Parsed log records -> the AG-UI message list they describe, REFUSING a log whose
@@ -313,8 +360,10 @@
   (records->messages (lines->records lines)))
 
 (defn- first-input
-  "The first input line's payload -- the seed messages and the run context both
-  come from there."
+  "The first input line's payload -- where a log keeps the run CONTEXT from before
+  ticket 03 (see `rebuild`). The seed messages used to come from here too, when the first
+  line was the whole conversation and the frames were everything after it; the fold reads
+  every line now, so nothing needs this but the context."
   [records]
   (some->> records
            (filter #(= "input" (:kind %)))
@@ -322,16 +371,25 @@
            :payload))
 
 (defn rebuild
-  "What a client needs to RE-OWN its conversation: the AG-UI message list
-  (seed + every recorded frame folded in, reasoning and tool calls included)
-  plus the context the conversation was started with. The client takes both
-  into its next ordinary RunAgentInput -- the server holds no rebuilt state,
+  "What a client needs to RE-OWN its conversation: the AG-UI message list (every
+  action's own message, folded in file order with every recorded frame of the run it
+  started, reasoning and tool calls included) plus whatever context the log carries at
+  its start, which since ticket 03 is also an ordinary message in that list. The client
+  takes both into its next ordinary RunAgentInput -- the server holds no rebuilt state,
   exactly as it holds no conversation state ever."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
         input   (first-input records)]
+    ;; THE CONTEXT IS A MESSAGE NOW, NOT A FIELD (ticket 03): the conversation is born
+    ;; with the session's context as its own entry (`ag/context-entry`, id
+    ;; "session-context"), so `:messages` above already carries it and there is nothing
+    ;; separate to hand back. What is still read here is the OLD shape: a log whose
+    ;; first input line names a context -- every log written before this ticket, and the
+    ;; rebuild tool's own fixtures -- keeps answering with it, because a reader that
+    ;; dropped it would silently change what those conversations continue from. An
+    ;; answer of [] is the honest answer for a log that says nothing about context.
     {:messages (records->messages records)
-     :context  (:context input)}))
+     :context  (vec (:context input))}))
 
 (defn- record-state
   "What a log's RECORD says about the conversation in it -- one of three, and

@@ -111,7 +111,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// reason and the plural of how much is waiting. It exists for the same reason the
 /// `sidebar` suite does: a sentence that reaches the screen is the one thing a green
 /// tree could not see.
-const EXPECTED_CASES = 54;
+/// 54 -> 56: the `client` suite's two, and they are ticket 03's UI half. ONE reads the
+/// wire: a run's body carries `append` (this action's own entries) and NOT the
+/// accumulated `messages` nor a client `runId` -- the second run's `append` holds only
+/// the second question, which is the whole change. THE OTHER reads the other end of the
+/// same contract: `startTask` with nothing to name comes back with an id the SERVER
+/// minted, listed as a conversation this home keeps and usable for a run -- where a
+/// page-made id used to be quietly registered by the run edge.
+const EXPECTED_CASES = 56;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -18,10 +18,22 @@
 
 (defn- log-line [m] (json/write-str m))
 
-(defn- input-line [run-id messages]
+(defn- input-line
+  "An input line as a client wrote it BEFORE ticket 03 of
+  `.scratch/sessions-live-on-the-server`: the whole conversation it held, restated on
+  every run. Kept because a log written then is a log somebody has, and reading one still
+  has to work -- see `action-line` for the shape the edge writes now."
+  [run-id messages]
   (log-line {:ts 1 :runId run-id :kind "input"
              :payload {:threadId "t1" :runId run-id :messages messages
                        :tools [] :context []}}))
+
+(defn- action-line
+  "An input line as the edge has written it since ticket 03: what the ACTION added
+  (`:added`), not the conversation it added it to -- the server holds that."
+  [run-id added]
+  (log-line {:ts 1 :runId run-id :kind "input"
+             :payload {:threadId "t1" :runId run-id :added added :tools []}}))
 
 (defn- event-lines [run-id events]
   (let [emit (ag/outbound "t1" run-id)]
@@ -72,23 +84,40 @@
                       vec)]
       (is (empty? (wire/violations frames))))))
 
-(deftest seeds-from-the-first-input-and-ignores-later-ones
-  ;; A client's second input already contains the first run's output, so folding it in
-  ;; would duplicate the conversation. The frames are the source; the inputs are only
-  ;; the starting point.
-  (let [stale {:id "u2" :role "user" :content "STALE-CLIENT-VIEW"}
-        lines (concat (one-run-lines)
-                      [(input-line "r2" [seed stale])]
-                      (event-lines "r2" [(ev/run-start)
-                                         (ev/text-delta "second turn")
-                                         (ev/run-end)]))]
-    (let [messages (replay/lines->messages lines)]
-      (testing "the stale client view never appears"
-        (is (not-any? #(= "STALE-CLIENT-VIEW" (:content %)) messages)))
-      (testing "the second run's output is appended"
-        (is (= "second turn" (:content (last messages)))))
-      (testing "no message was duplicated"
-        (is (= 6 (count messages)))))))
+(deftest a-later-action-adds-what-it-brought-and-nothing-twice
+  ;; THIS TEST USED TO CLAIM THE OPPOSITE, and the reason it did is worth keeping: an
+  ;; input line used to restate the whole conversation, so the fold seeded from the FIRST
+  ;; line and ignored every later one, and a second run's QUESTION was therefore missing
+  ;; from every rebuild -- the client's own message is in no frame. Ticket 03 of
+  ;; `.scratch/sessions-live-on-the-server` made the line say what the action ADDED
+  ;; (`:added`, `action-line`), which is exactly the thing the fold needed, and the
+  ;; restatement is now handled the way the live conversation handles it: BY ID
+  ;; (`harness.edge.sessions/append!`, and `append-new` here).
+  (let [q2      {:id "u2" :role "user" :content "\u7b2c\u4e8c\u4e2a\u95ee\u9898"}
+        run-two (fn [line entries]
+                  (concat (one-run-lines)
+                          [(line "r2" entries)]
+                          (event-lines "r2" [(ev/run-start)
+                                             (ev/text-delta "second turn")
+                                             (ev/run-end)])))]
+    (testing "the action's own entry lands in file order, behind the run it followed"
+      (let [messages (replay/lines->messages (run-two action-line [q2]))]
+        (is (= ["user" "reasoning" "assistant" "tool" "assistant" "user" "assistant"]
+               (mapv :role messages)))
+        (is (= "\u7b2c\u4e8c\u4e2a\u95ee\u9898" (:content (nth messages 5)))
+            "the question this action brought, which no frame could have carried")
+        (is (= "second turn" (:content (last messages))) "and the run's output is appended")))
+
+    (testing "an entry the conversation already holds does not enter a second time"
+      ;; The retry (a page re-sending its question after a socket died), and also every
+      ;; line of a log written under the OLD contract, where the whole conversation was
+      ;; restated on every run.
+      (doseq [[shape line] {"the action's own entries" action-line
+                            "the old restatement"       input-line}]
+        (let [messages (replay/lines->messages (run-two line [seed q2]))]
+          (is (= 7 (count messages)) (str shape ": seven entries, not eight"))
+          (is (= 1 (count (filter #(= "u2" (:id %)) messages)))
+              (str shape ": and the new entry entered once")))))))
 
 (deftest a-run-that-never-terminated-fails-loudly
   (testing "a log cut off mid-run must not silently yield half a conversation"

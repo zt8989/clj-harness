@@ -33,6 +33,12 @@
   (`harness.edge.ag-ui/provider-part` refuses one by name, which is the failure this
   keeps from happening).
 
+  THE BUILD IS THE ONLY READ OF DISK. Everything after it arrives through `append!` --
+  the entries a client's action carried, with an entry the conversation already holds
+  dropped by id -- and through `settle!`, the run's own frames folded at the moment the
+  run ends. That pair is what makes this table the AUTHORITY rather than a cache: a run
+  continues from here, not from a file, and not from what the browser remembers.
+
   ONE ATOM, ONE TABLE. The registry is the single home of every fact about a live
   session -- its messages, when it was last asked for, and which runs of it are going.
   That is deliberate: `sweep!` must not put away a session a run is in the middle of,
@@ -44,7 +50,8 @@
   Nothing here writes: no sqlite, no jsonl, no process log. That is asserted, not
   assumed (see the test)."
   (:require [harness.edge.replay :as replay]
-            [harness.infra.home :as home])
+            [harness.infra.home :as home]
+            [harness.kernel.frames :as frames])
   (:import (java.util.concurrent Executors ScheduledExecutorService ThreadFactory
                          TimeUnit)))
 
@@ -172,6 +179,60 @@
   (let [id (str thread-id)]
     (touch! id)
     (:messages (get @registry id))))
+
+(defn append!
+  "Put ENTRIES at the end of THREAD-ID's conversation and answer the ones that ENTERED.
+
+  AN ENTRY THE CONVERSATION ALREADY HOLDS IS DROPPED, and that is the property that
+  makes an action repeatable: a page whose run died on the way -- a refresh, a retry, a
+  socket that went away -- sends the same bytes again, and the conversation must not end
+  up with the question twice. The identity is the message's own `:id`, which is also
+  what the record folds by (`harness.edge.replay/fold-frames`), so a conversation that
+  was rebuilt from disk dedupes against the same names a live one does. An entry with
+  NO id cannot be recognised and is therefore kept -- guessing that two unnamed messages
+  are the same one would be inventing an identity.
+
+  IT ANSWERS THE ENTRIES THAT ENTERED, which is not always the ones it was handed: a
+  repeat drops out, and the record wants to say what the action MEANT rather than what it
+  typed (the edge logs both -- see `harness.edge.http/run-agent!`)."
+  [thread-id entries]
+  (let [id  (str thread-id)
+        _   (touch! id)
+        add (fn [msgs e]
+              (if (and (:id e) (some #(= (:id %) (:id e)) msgs))
+                msgs
+                (conj msgs e)))
+        [before after] (swap-vals! registry
+                                   (fn [m]
+                                     (update-in m [id :messages]
+                                                (fn [msgs] (reduce add (vec msgs) entries)))))
+        n (- (count (get-in after [id :messages]))
+             (count (get-in before [id :messages])))]
+    (vec (take-last n (get-in after [id :messages])))))
+
+(defn settle!
+  "Fold the frames a run emitted into THREAD-ID's conversation, so the next run of it
+  continues from what just happened.
+
+  THE RUN'S OWN FRAMES ARE THE CONVERSATION'S OTHER HALF, and they are folded from
+  FRAMES for the same reason the record is: the kernel's events are the model's shape
+  and the log's frames are the conversation's, and a run that kept its answer in any
+  other form would be a second vocabulary for one fact. Folding a run's frames on their
+  own is exact because every id the converter mints is namespaced by the run (`runId-mN`,
+  `runId-openN`) -- no frame of this run can patch a message of an earlier one.
+
+  AT THE END OF THE RUN, not per frame: the frames of a run only become 'the
+  conversation' together (a half-written assistant message is not a turn), and the
+  per-frame cost of folding is O(all frames of the run) each time. The one thing this
+  owes the next run is that it happens BEFORE the run is unregistered -- see the emitter
+  in `harness.edge.http`, where the terminal frame is the moment both are done.
+
+  Called with the frames a run emitted, in order. Answers the messages that entered,
+  same as `append!` -- a run that produced nothing (a refusal) answers []."
+  [thread-id frames]
+  (if (seq frames)
+    (append! thread-id (without-cards (frames/apply-frames frames)))
+    []))
 
 (defn- refuse!
   "The one sentence this table says when it is full. A FUNCTION because it is thrown from

@@ -109,7 +109,7 @@
 |---|---|---|---|
 | 01 | 会话表：出生、寿命、上界 | — | **已落地**。`thread-id → 会话` 的内存表；出生时从记录重建一次；空闲 30s 放掉；两个钉子（正在跑 / 还有没落盘的）；限制同时运行的会话数。修正项见该票末尾（序号、窗口读法、`running?` 二份） |
 | 02 | 异步写：每帧、失败进降级态 | 01 | **已落地**。帧入队、单消费者逐行 append、每帧；`flushed-seq` 是一条序号（`(+ flushed pending)` = 下一条要铸的序号）；写失败 ⇒ 降级态，`sofar` / `rebuild` 带 `:record`，界面上一根常驻的条；退出时收干净。修正项（prepare 每行一问、水位重新基准化）见该票末尾 |
-| 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | 五样逐条落（表在 ADR 0002 决策 9）；动作是 feed 的写侧；前端 adapter 的**写侧**改掉 |
+| 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | **已落地**。动作的载荷是新字段 `append`（不是 AG-UI 的 `messages`）；`messages` 具名 400、不认识的 id 具名 404、`runId` 门里铸并进记录、`provider` 只认会话档、`context` 只在出生那一轮读；页面不再铸任何会话 id（`POST /api/sessions` / `POST /api/project` 由服务端铸）；客户端那半是 `ui/src/lib/agent.ts` 的 `HarnessAgent`。落地记录见下（含留给 04/05/06 的边界） |
 | 04 | 认领：一个 thread 归一个进程 | 01 | 锁文件／库里一行 owner；后到的只读或拒绝；**认领易主 ⇒ generation 作废**；非 owner 的只读页面有没有增量 |
 | 05 | 会话 feed：尾页、增量、补页 | 01 | **一条 source 三个动词**（`tail` / `append` / `prepend`）；序号可从记录重放；`since` 与 generation；`rebuild` / `sofar` 的 live 语义读内存；放掉时的终态 |
 | 06 | 副本：窗口、补页、刷新 | 03, 05 | 窗口 `{entries, baseSeq, hasMore, revision}`；「显示更早」那颗按钮；补一页 vs 重开的两种处置；刷新走内存；打字 / 滚动的锚定 |
@@ -117,7 +117,7 @@
 
 ## 状态
 
-**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02 已落地；03–07 `ready-for-agent`，等前置。
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03 已落地（01/02 的文件留在 `issues/` 里当落地记录，票 07 收口时再把它们折进这里）；04–07 `ready-for-agent`，等前置。
 
 ## 已验证到什么程度
 
@@ -144,3 +144,90 @@
 而**走查正是在那里抓到一个真洞**：自己在驱动这一轮的页面原本收不到跑中的降级（见票 02 的落地记录），
 修完之后走查 GREEN。这正是 `.scratch/session-title-blank/` 那次的教训形状，所以那句话被提成了一个
 能渲染的组件。
+
+## 票 03 落地记录（2026-09-22）
+
+**交付物**：`edge/sessions.clj`（`append!` / `settle!`）、`edge/ag_ui.clj`（`context-entry` 与新的
+`inbound`）、`edge/replay.clj`（追加折叠与 `:added`）、`edge/http.clj`（四道路口 + `run-agent!`）、
+`cap/project.clj`（`session-exists?` / `register-session!` / `bind!`）、`edge/stats.clj` 与
+`edge/trajectory.clj`（读 `:added`）；UI 侧的 `src/lib/agent.ts`、`src/lib/projects.ts`、
+`src/app.tsx`、`src/components/sidebar.tsx`。票面文件已按 `docs/agents/issue-tracker.md` 删掉
+（它的结论在这里）。
+
+### 线上形状（票面判断 1 要的「选一个」）
+
+动作的载荷走**一个新字段 `append`**，不叫 `messages`：这样「客户端还在送旧的那个形状」是一件
+**能具名拒绝**的事——400，`:field "messages"`，句子里点名 `append`——而不是被悄悄读成新的意思。
+于是 run 的请求体是 `{threadId, append, tools, resume?}`：
+
+- **`append`**：这次动作**新加进对话**的条目（AG-UI 消息形状，带 id）。服务端按 id 去重
+  （`sessions/append!` 用 `swap-vals!` 判「谁真的进去了」），所以客户端重发同一条是幂等的。
+- **`messages`** ⇒ 400（具名）。**`runId`** 不再被读：门里铸 UUID，它进记录（`input` 行的 `:runId`）
+  和帧，所以「同一场同一轮重建两次，卡的 id 相同」靠的是记录，不是「再铸一枚一模一样的」。
+  客户端还送 `runId` 也不报错，只是不看。
+- **`provider`**：`current-provider` 只按 `thread-id` 取，请求里那层不再被 consult（但请求体原样
+  进 `input` 行，事后能追问）。
+- **`context`**：只在 **出生那一轮**（会话还是空的）被读，构成一条 id 为 `session-context` 的 user
+  消息，跟着 `append` 一起进会话——此后它就在历史里，不再进输入面。
+- **不认识的 `threadId`** ⇒ 404，句子点名那个 id 并指路 `POST /api/sessions`。**不静默建**
+  （这一条退掉了 ADR 0001 决策 3 那个补丁：挂载铸一枚 id ⇒ 每刷新一次多一条空会话）。
+- **`resume`** 行为不动（`resume-decisions`，认不出就拒），只是它现在与 `append` 并列在同一条动作里。
+
+### 客户端那半
+
+`ui/src/lib/agent.ts` 的 `HarnessAgent extends HttpAgent`，只覆盖 `requestInit`：剥掉 `messages` 与
+`runId`，把 `appendOf(messages)`（**最后一条非 user 消息之后的那段 user 消息**）塞进 `append`。
+页面不再铸任何**会话** id：新任务 = `POST /api/sessions`（body 不具名），项目里的新会话 =
+`POST /api/project {dir}`（一次调用里铸 + bind，所以不会留下没绑上的空会话）；`sidebar.tsx` 里
+四处 `crypto.randomUUID()` 都换成了这两个动词，`app.tsx` 的 `onListed` 在「没有可恢复的会话」时
+问服务端要一枚（要不到就把服务端那句话画在对话区，`data-slot="no-session"`）。
+
+### 实现时才发现、写票时没写到的
+
+1. **`POST /api/sessions` 早就有**（脚本与测试在用），把它变成「页面铸 id 的动词」之后，
+   `project/register-session!` 得是 `INSERT … ON CONFLICT DO NOTHING`——具名要两次同一枚 id 不是错，
+   但**不能**铸出第二行。
+2. **记录的 `input` 行多了一个 `:added`**：请求体原样 + 「这次真的进去了什么」。两者不同出现在
+   重发（什么都没进）与出生（context 进去了，而客户端没送过它）。`stats` / `trajectory` / `rebuild`
+   都改读 `:added`（老记录回落到 `:messages`），`trajectory/one-run` 的 `:history` = `added` + 返回的。
+3. **会话在「帧发出去之前」落定**：终帧先 `sessions/settle!` 再发给客户端，否则一个快的客户端在
+   收到 RUN_FINISHED 之后立刻发下一步动作，会在「run 结束了」与「它的话进了对话」之间赛跑。
+   run 崩掉那条路也 settle（已经发出去的半句是模型说过的话，丢掉它会让下一轮从一段没有半点
+   痕迹的对话继续）。
+4. **UI 的两套 E2E 都得换客户端**：`ui/test/e2e.ts` 里那些 `new HttpAgent(...)` 造出来的 body 现在会
+   被服务端拒（它们送 `messages`），所以 `postRun` 改成送 `append`、并加了 `ensureSession` /
+   `agentFor`；`suites/turn.ts`、`client.ts`、`approval.ts`、`concurrent.ts` 改用它。
+5. **模型模态守门改看 `:append`**：`guard-input-modalities!` 以前检查「客户端递上来的整份」，
+   现在检查这次动作自己的条目——三轮前的一张图不该让这一轮被拒。
+
+### 边界（写给票 04/05/06）
+
+- **`context` 出生时只有一个来源，而今天没人往里放东西**：服务端会在出生那一轮读请求里的
+  `context`，页面却始终没有构造过它，所以出生 context 现在是空的。真要放，入口是出生那一轮。
+- **页面手里那份 `agent.messages` 还在长**（运行时的副本），只是不再送出去；窗口（票 06）才是给它
+  上界的地方。
+- **`(sessions/messages thread-id)` 仍是全量读**（票 01 的修正项 1），票 05 换成窗口。
+- **`sessions/runs` 与 `http/live-runs` 仍是两份**（票 01 的修正项 3），票 05 合并。
+
+### 验证
+
+**后端全量：1011 tests / 12258 assertions / 0 failures / 0 errors**（2026-09-21，本 worktree，
+exit 0）。新用例落在 `edge/http_test.clj`：不认识的 id 具名 404、带 `messages` 的 body 具名 400、
+请求里的 `provider` 不被读、run id 在门里铸且**记录**是命名它的地方、出生 context 只进一次、
+项目里的新会话由服务端铸并绑上、同一会话的第二条 run 仍被拒。`ag_ui_test` / `replay_test` /
+`stats_test` / `trajectory_test` 跟着 `:added` 改（老记录回落 `:messages`）；`test_support.clj`
+多了 `support/start-session!`——**五个驱动 run 的命名空间原来靠运行边的静默登记**，那条路没了之后
+每个 fixture 得自己先把会话建出来。
+
+**UI：56 cases 全绿**（54 → 56），`tsc --noEmit` 与 `vite build` 干净。两条新用例在
+`ui/test/suites/client.ts`：一条读**线上的 body**（用 `HttpAgent` 自己的 `fetch` 缝抓下来）——
+没有 `messages`、没有 `runId`，第二轮 `append` 只有第二条问题；另一条证明服务端铸的 id 是页面下一步
+能用的（列得出来、跑得起来）。`suites/turn.ts` / `client.ts` / `approval.ts` / `concurrent.ts`
+都改用页面自己的 `HarnessAgent`（`test/e2e.ts` 的 `agentFor` / `ensureSession`），因为旧写法送
+`messages`，现在会被服务端拒——**这条本身就是那次改动最好的回归门**。
+
+**真浏览器走查 GREEN**（`evidence/03-walkthrough.mjs` + `03-go.json` + `03-action-body.png`）：
+空 localStorage 的新页面 → `POST /api/sessions` body 是 `{}` → 服务端答一枚 id；三轮 body
+逐条打印，都能看见 `{threadId, append:[这一条], tools}`，没有 `messages` / `runId`；刷新回同一场且
+**没有再问一次** id；从页面里敲一个不认识的 id，得到 404 和那句点名的话；`GET /api/threads` 里那个 id
+只出现一次，记录里三条 `input` 各带服务端铸的 `runId`。

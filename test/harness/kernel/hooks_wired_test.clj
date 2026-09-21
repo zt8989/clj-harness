@@ -41,6 +41,7 @@
 
 (defn- with-server [thread f]
   (providers/use-provider! thread (fake/scripted script))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
@@ -48,9 +49,11 @@
 
 (defn- post-run [thread-id]
   (let [body (json/write-str {:threadId thread-id
-                              :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "go"}]
-                              :tools [] :context []})
+                              ;; THE ACTION'S OWN ENTRIES (ticket 03): the server
+                              ;; holds the conversation, and `with-server` has made sure
+                              ;; this thread is a session of it.
+                              :append [{:id "u1" :role "user" :content "go"}]
+                              :tools []})
         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                  (.header "Content-Type" "application/json")
                  (.header "Accept" "text/event-stream")
@@ -264,6 +267,10 @@
     :stop          [{:command (marker-script (str (home/root) "/hooks-fired.txt")
                                              "stop")}]})
   (providers/use-provider! "hw-frames-off" (fake/scripted script))
+  ;; THE SECOND THREAD IS A SESSION TOO: this case compares two runs, and the one that is
+  ;; not the fixture's own thread has to exist before it can run (ticket 03 refuses a run
+  ;; of an id the store has never heard of).
+  (support/start-session! "hw-frames-off")
   (with-server
    "hw-frames-on"
    (fn []
