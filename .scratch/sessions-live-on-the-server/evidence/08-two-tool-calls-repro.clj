@@ -12,11 +12,16 @@
     5. run a SECOND action on that same session and print its terminal frame
 
   WHAT SHOULD HAPPEN: the second run answers (RUN_FINISHED).
-  WHAT DOES HAPPEN (main as of 47bdeb3, and the merged tree): RUN_ERROR, refused by
-  harness.kernel.loop/drive! before any provider call --
+  WHAT IT GUARDS NOW: FIXED by `parallel-call-parent` (merged into main as e0d05a4) --
+  `harness.edge.ag_ui/outbound` opens ONE assistant message per MODEL CALL, so the session
+  holds assistant{c1,c2}, tool{c1}, tool{c2} and the second run is answered. A green run
+  here means that shape is still in place; the regression suites proper are
+  `test/harness/edge/ag_ui_test.clj` and `ui/test/suites/frames.ts`. The failure this file
+  was written for looked like this (main as of 47bdeb3, before the fix): RUN_ERROR, refused
+  by harness.kernel.loop/drive! before any provider call --
     'this run's history leaves 1 tool call unanswered ... (c1)'
-  because `harness.edge.ag-ui/outbound` emits one assistant TEXT_MESSAGE per tool call,
-  so the session holds assistant{c1}, assistant{c2}, tool{c1}, tool{c2} -- and
+  because the writer emitted one assistant TEXT_MESSAGE per tool call, so the session held
+  assistant{c1}, assistant{c2}, tool{c1}, tool{c2} -- and
   `harness.kernel.llm/unanswered-tool-calls` implements the vendor's rule as ADJACENCY
   (tool messages directly behind the assistant message that named them).
 
