@@ -5,11 +5,16 @@
   A stubbed git would test the stub. The three things worth knowing are all
   properties of git itself -- that a branch listing is what it says it is, that a
   switch actually moves HEAD, and that git refuses a dirty switch in a sentence
-  nobody here wrote -- so the fixtures below are real `git init`s and the
-  assertions are read back off the repository rather than off our own answer."
+  nobody here wrote -- so the fixture is a real `git init` and the assertions are
+  read back off the repository rather than off our own answer.
+
+  IT IS BUILT ONCE AND COPIED PER CASE. Every case wants the same repository and
+  every case wants it clean, so the eight processes that make it are spent once and
+  each case gets a copy -- which costs no process at all, and is the stronger
+  isolation besides. See `scratch-repo`."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.git :as git]
             [harness.test-support :as support]
             [harness.infra.shell :as shell]))
@@ -24,10 +29,17 @@
       (throw (ex-info (str "fixture command failed: " command) {:exit exit :err err})))
     (str/trim (str out))))
 
-(defn- scratch-repo
-  "A fresh repository at DIR with one commit on `main` and a second branch `side`
-  pointing at the same commit. Identity is set per-repository so the fixture does
-  not depend on -- or touch -- the developer's global git config.
+(defn- build-repo!
+  "A repository at DIR, built by REAL git: one commit on `main` and a second branch
+  `side` pointing at the same commit. Identity is set per-repository so the fixture
+  does not depend on -- or touch -- the developer's global git config.
+
+  THIS IS THE EIGHT-PROCESS PART AND IT RUNS ONCE PER NAMESPACE, which is why
+  everything else copies its answer instead (`scratch-repo`). It is still git that
+  builds it, and that is not an implementation detail: every assertion in this file
+  is read back OUT of a repository git made, so a pre-fabricated `.git` would
+  replace the thing under test rather than speed it up. What was worth saving is the
+  NUMBER of spawns, never the realness of the repository.
 
   THE DEFAULT BRANCH IS RENAMED RATHER THAN NAMED AT INIT, and that is a real
   constraint rather than tidiness: this machine runs git 2.23, where `git init -b`
@@ -46,6 +58,81 @@
   (run-in dir "git commit -q -m first")
   (run-in dir "git branch -m main")
   (run-in dir "git branch side")
+  dir)
+
+(def ^:private template-root
+  "The per-process root the template is built under, from the same
+  `support/temp-dir` every other fixture here uses -- it is under the system temp
+  directory but uniquely named for THIS process, so two runs side by side (the
+  suite and a `--scripted` walkthrough, say) cannot build into one directory. See
+  `docs/rules/testing.md`."
+  (support/temp-dir "git-template"))
+
+(def ^:private template
+  "The one repository this namespace builds, and the reason it builds only one.
+
+  BUILT ONCE PER RUN RATHER THAN ONCE PER PROCESS, which is why this is an atom and
+  not a delay: the `:once` fixture below deletes the template when its run ends -- a
+  directory left behind in the system temp directory is the thing
+  `docs/rules/testing.md` is about -- and a delay would hand a second run of this
+  namespace in the same JVM the path of a directory that is no longer there."
+  (atom nil))
+
+(defn- template-repo
+  "The template, built if this run has not built it yet. THE EIGHT PROCESSES HAPPEN
+  HERE, at most once per run; every case below copies the answer instead."
+  []
+  (or @template
+      (reset! template (build-repo! (str template-root "/repo")))))
+
+(use-fixtures :once
+  (fn [run]
+    ;; Before any case runs, so that a template which failed to build reports as a
+    ;; fixture failure rather than as every case in the file failing on its own.
+    (template-repo)
+    (try (run)
+         ;; THE TEMPLATE GOES WITH THE RUN. The copies the cases made live under
+         ;; their own roots, not this one -- see `docs/rules/testing.md` for why a
+         ;; directory that outlives the run is worth this trouble at all.
+         (finally (support/wipe-tree! template-root)
+                  (reset! template nil)))))
+
+(defn- copy-tree!
+  "SRC copied to DST with plain file operations -- no process, which is the whole
+  point: this is what replaced seven of the eight spawns per case.
+
+  PATHS ARE RELATIVIZED WITH `java.nio.file.Path`, NOT SLICED AS STRINGS. On Windows
+  `File.getPath` answers with backslashes, so subtracting a prefix spelled with
+  slashes matches nothing and the copy lands in the wrong place or nowhere --
+  `harness.layers-test`'s own docstring is about the day that happened, and this is
+  the version of the arithmetic that means the same thing on both platforms."
+  [src dst]
+  (let [root (io/file src)
+        src  (.toPath root)
+        dst  (.toPath (io/file dst))
+        none (make-array java.nio.file.attribute.FileAttribute 0)]
+    (doseq [f (file-seq root)]
+      (let [target (.resolve dst (.relativize src (.toPath f)))]
+        (if (.isDirectory f)
+          (java.nio.file.Files/createDirectories target none)
+          (do (java.nio.file.Files/createDirectories (.getParent target) none)
+              (java.nio.file.Files/copy (.toPath f) target
+                                        (make-array java.nio.file.CopyOption 0))))))))
+
+(defn- scratch-repo
+  "A fresh repository at DIR: a COPY of the template, which is what eight processes
+  bought for every case until this was written.
+
+  THE COPY IS THE ISOLATION, and it is a stronger one than cleaning a shared
+  repository would be. Cases in this file DO write -- an untracked file, a modified
+  file, a commit that makes the two branches actually differ -- and `git clean`
+  would have to be trusted to undo exactly that and nothing else. A copy cannot fail
+  to undo anything: 'did the last case leave something behind' has no way to be
+  answered wrongly, and the dirty-switch cases below are where a wrong answer would
+  go unnoticed, because a repository somebody else dirtied makes 'git refused' true
+  for the wrong reason."
+  [dir]
+  (copy-tree! (template-repo) dir)
   dir)
 
 (def ^:private dir
@@ -187,3 +274,35 @@
 (deftest switching-needs-a-directory
   (is (str/includes? (:error (git/switch! nil "main")) "not a git working tree"))
   (is (str/includes? (:error (git/switch! "/tmp" "main")) "not a git working tree")))
+
+(deftest each-case-gets-its-own-repository-and-the-template-collects-nothing
+  ;; THE COPY HAS TO BE AN ISOLATION AND NOT ONLY A SPEED-UP, and this is the case
+  ;; that would catch it if it were not. TWO COPIES AT ONCE, rather than 'this case
+  ;; against the one before it': clojure.test's order is not a promise this file
+  ;; ever made, and what is being asked -- is a's writing invisible in b -- has an
+  ;; answer whatever order the cases run in.
+  ;;
+  ;; Both halves matter for the same reason. A shared repository would make the
+  ;; dirty-switch cases below pass for the wrong reason (git refuses in a repository
+  ;; somebody else dirtied too), and a template that collected the cases' writes
+  ;; would make the NEXT case start from a repository that is not the one this
+  ;; file's assertions describe.
+  (let [a (scratch-repo (str dir "-own-a"))
+        b (scratch-repo (str dir "-own-b"))]
+    (spit (io/file a "one-case-only.txt") "x\n" :encoding "UTF-8")
+    (spit (io/file a "README.md") "changed in a\n" :encoding "UTF-8")
+    (is (= 2 (:dirty (git/state a))) "a is exactly as dirty as this case made it")
+    (is (zero? (:dirty (git/state b))) "and none of it reached b")
+    (is (not (.exists (io/file b "one-case-only.txt"))))
+    (is (= "hello\n" (slurp (io/file b "README.md") :encoding "UTF-8"))
+        "b still has the file the one commit put there")
+    (is (= (run-in a "git rev-parse HEAD") (run-in b "git rev-parse HEAD"))
+        "both copies are of the same repository, made by git and not by hand")
+    ;; Asserted on the FILES rather than with `git status`, because 'the template is
+    ;; untouched' is exactly 'this case's writes are not in it' -- and a case that
+    ;; asked git about the template would add two processes to a namespace whose
+    ;; fixture cost is the thing `dev/scratch_git_spawns.clj` is measuring.
+    (is (not (.exists (io/file (template-repo) "one-case-only.txt")))
+        "and none of it reached the template every case copied")
+    (is (= "hello\n" (slurp (io/file (template-repo) "README.md") :encoding "UTF-8"))
+        "which is still the repository git made, untouched")))

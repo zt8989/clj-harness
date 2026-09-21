@@ -21,10 +21,18 @@
   name, and a repository whose index git cannot read used to answer a branch and
   ':dirty 0' -- everything except 'we could not read it'.
 
+  AND IT MEASURES THE FIXTURE, not only the subject: it runs the whole `git-test`
+  namespace twice -- once from the baseline revision's own file, where every case
+  built itself a real repository, and once from this one, where every case copies a
+  single build -- counting the spawns whose command is one of the eight a build
+  runs. That is ticket 02's 40 -> 8, measured rather than argued.
+
   Run: clojure -M:dev -m scratch-git-spawns"
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.test :as test]
             [harness.cap.git :as git]
+            [harness.cap.git-test]
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
             [harness.test-runner :as runner]))
@@ -32,6 +40,7 @@
 ;; The code that ships, held onto before anything wraps it.
 (def ^:private real-run shell/run)
 (def ^:private spawns (atom 0))
+(def ^:private spawned-commands (atom []))
 
 ;; THE FIXTURE IS COUNTED AT ITS OWN SEAM, not through the wrapper: `sh!` runs the
 ;; real `shell/run` on purpose (a fixture built through the instrumented one would
@@ -43,14 +52,16 @@
   "One spawn, counted, and then the real thing -- same arguments, same answer."
   [& args]
   (swap! spawns inc)
+  (swap! spawned-commands conj (:command (first args)))
   (apply real-run args))
 
 (defn- counted
   "F's ANSWER and what it cost in processes."
   [f]
   (reset! spawns 0)
+  (reset! spawned-commands [])
   (let [answer (with-redefs [shell/run counting-run] (f))]
-    {:answer answer :spawns @spawns}))
+    {:answer answer :spawns @spawns :commands @spawned-commands}))
 
 ;; ---------------------------------------------------------------------------
 ;; fixtures -- real repositories, built with the same seam the code under test
@@ -101,6 +112,58 @@
     (when-not (= 0 exit)
       (throw (ex-info "cannot read the previous git.clj out of the baseline revision" {:err err})))
     (load-string (str/replace out "(ns harness.cap.git\n" "(ns harness.cap.git-old\n"))))
+
+(def ^:private fixture-commands
+  "The eight commands `build-repo!` runs, spelled exactly as the fixture spells
+  them. A spawn that is one of these is a repository being BUILT; every other spawn
+  is a case asking a question. Nothing else needs classifying, because a copy is not
+  a spawn at all."
+  #{"git init -q"
+    "git config user.email test@example.invalid"
+    "git config user.name 'harness test'"
+    "git config commit.gpgsign false"
+    "git add README.md"
+    "git commit -q -m first"
+    "git branch -m main"
+    "git branch side"})
+
+(defn- load-baseline-test!
+  "`git_test.clj` as of `baseline-rev`, under its own namespace name, so a whole run
+  of the file can be counted the way the ticket counted it -- a real repository per
+  case -- against this one, where every case copies a single build."
+  []
+  (let [{:keys [exit out err]} (real-run {:command (str "git show " baseline-rev
+                                                        ":test/harness/cap/git_test.clj")
+                                          :dir (System/getProperty "user.dir")
+                                          :timeout-ms 20000})]
+    (when-not (= 0 exit)
+      (throw (ex-info "cannot read the baseline git_test.clj" {:err err})))
+    (load-string (str/replace out "(ns harness.cap.git-test\n"
+                                 "(ns harness.cap.git-baseline-test\n"))))
+
+(def ^:private build-marker
+  "The one command that only a repository BUILD runs, so that counting it counts
+  builds: `build-repo!` sets `commit.gpgsign` and the unborn case below -- which has
+  to make a repository with NO commit, something no copy of the template can be --
+  configures an identity but has nothing to sign."
+  "git config commit.gpgsign false")
+
+(defn- suite-spawns
+  "What one run of TEST-NS costs: every process, how many of them were repository
+  builds, and how many matched the fixture's command shapes at all.
+
+  THE SUITE'S OUTPUT GOES TO A StringWriter. This is a measurement, not a report, and
+  two suites' worth of dots would bury the number being measured."
+  [test-ns]
+  (reset! spawns 0)
+  (reset! spawned-commands [])
+  (let [quiet (java.io.StringWriter.)]
+    (binding [test/*test-out* quiet]
+      (with-redefs [shell/run counting-run]
+        (test/run-tests test-ns)))
+    {:all @spawns
+     :builds (count (filter #{build-marker} @spawned-commands))
+     :fixture-shaped (count (filter fixture-commands @spawned-commands))}))
 
 (def ^:private results (atom {:pass 0 :fail 0}))
 
@@ -207,6 +270,28 @@
       (println (format "\n  new state   %s" (pr-str (:answer state-n))))
       (println (format "  new switch! %s\n"
                        (pr-str (or (:ok (:answer switch-n)) (:answer switch-n))))))
+
+    (println "\n== FIXTURES: what one run of the namespace spends on repositories ==")
+    (load-baseline-test!)
+    (let [before (suite-spawns 'harness.cap.git-baseline-test)
+          after  (suite-spawns 'harness.cap.git-test)
+          cost   8]  ;; one build, measured in the section above
+      (println (format "  the baseline file (7 cases, a real repository each): %d builds = %d spawns"
+                       (:builds before) (* cost (:builds before))))
+      (println (format "  this file        (10 cases, ONE build, copied):      %d build  = %d spawns"
+                       (:builds after) (* cost (:builds after))))
+      (println (format "  whole runs, for scale: %d spawns before, %d now" (:all before) (:all after)))
+      (println (format "  this file's other %d repository-shaped spawns are the unborn case, which\n  must build a repository with NO commit -- no copy of the template can be one"
+                       (- (:fixture-shaped after) (* cost (:builds after)))))
+      (check "repositories built: 5 -> 1, so the fixture costs 40 -> 8 processes"
+             (and (= 5 (:builds before)) (= 1 (:builds after)))
+             (str "before " (:builds before) " after " (:builds after)))
+      ;; The template's root, read off the namespace under test rather than guessed:
+      ;; what is being checked is that the run put it back.
+      (let [troot (io/file (str @#'harness.cap.git-test/template-root))]
+        (check "and the template went with its run, not into the temp directory for the night"
+               (not (.exists troot))
+               (str "still there: " troot))))
 
     (println (format "%d passed, %d failed\n" (:pass @results) (:fail @results)))
     (System/exit (if (zero? (:fail @results)) 0 1))))
