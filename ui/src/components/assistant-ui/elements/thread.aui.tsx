@@ -156,17 +156,52 @@ const isHistoryLoadingView = (s: AssistantState) =>
 // because one TEXT_MESSAGE per assistant message is what the wire says -- and
 // the steps of a turn are therefore adjacent assistant messages, while two turns
 // are separated by the user message that started the second one. `isTurnEnd` is
-// "nothing of mine follows", `isTurnContinuation` is "something of mine came
-// before"; both are answered by the neighbours in the thread's own message list.
+// "nothing of mine follows" (what the action bar is keyed on), and `isStepAfter` is
+// "the thing before me was a step of this conversation too" (what the step spacing is
+// keyed on); both are answered by the neighbours in the thread's own message list.
 //
 // Upstream never asks either question, because upstream's `AssistantMessage` is
-// written for a runtime whose turns are single messages. The pair is what the
-// action bar (below) and the step spacing are keyed on.
+// written for a runtime whose turns are single messages.
 const isTurnEnd = (s: AssistantState) =>
   s.thread.messages[s.message.index + 1]?.role !== "assistant";
 
-const isTurnContinuation = (s: AssistantState) =>
-  s.thread.messages[s.message.index - 1]?.role === "assistant";
+// LOCAL: IS THE MESSAGE BEFORE THIS ONE A STEP of the conversation -- a thing the RUN
+// did, rather than the person asking? Two kinds of message answer yes: an assistant
+// message, and an injected-context card (a card the session was born with, or one the
+// rebuild made its own message; see `components/context-card.tsx`). Everything else -- a
+// person's message -- is the turn boundary the message group's own `gap-y-6` is for.
+//
+// A CARD IS A STEP AND NOT A TURN. It says what the model was handed, which is the same
+// kind of fact as what a tool call came back with, and a reader meets both in one list: a
+// row of `bash`, a row of `思考`, a row of `注入的上下文`. So it takes the same spacing as
+// the rows around it -- `STEP_SPACING` below -- instead of a turn's.
+//
+// Answered from the neighbours in the thread's own message list rather than from a field
+// somebody has to keep in step, for the reason `isTurnEnd` gives.
+const isStepAfter = (s: AssistantState) => {
+  const previous = s.thread.messages[s.message.index - 1];
+  if (previous === undefined) return false;
+  return (
+    previous.role === "assistant" ||
+    isCardOnly(previous.parts) ||
+    isOpeningEntryId(previous.id)
+  );
+};
+
+// LOCAL: WHAT TWO ADJACENT STEPS ARE SEPARATED BY, spelled once because three places draw
+// one: an assistant message, an injected-context card, and the rows inside them.
+//
+// THE ARITHMETIC. The message group spaces its children by `gap-y-6` (24px), and every step
+// row carries its own `py-1.5` (6px each side). Two rows inside ONE message are therefore
+// 12px apart -- the rows' own padding and nothing else, which is the rule
+// `.scratch/flat-step-rows/spec.md` states and `message-parts.tsx` repeats. Two steps in
+// DIFFERENT messages get that 24px gap on top of it unless the message cancels it, and
+// `-mt-6` cancels ALL of it (it was `-mt-4`, which cancelled 16 of the 24 -- so a card, or a
+// step of a turn, sat 8px further from its neighbour than the row inside the same message
+// did, and a card the session was born with sat a whole turn's 24px away). Now every pair of
+// adjacent steps is the same 12px, whatever kind of step they are and whichever message
+// each one landed in.
+const STEP_SPACING = "-mt-6";
 
 // LOCAL: upstream's literal "Loading conversation" is gone from this file and read
 // from the `elements-thread` catalog instead. It is the status line a screen reader
@@ -510,13 +545,14 @@ const AssistantMessage: FC = () => {
   // copy.
   const { t } = useTranslation("elements-thread");
 
-  // LOCAL: the two neighbours, read off the thread's message list (see
-  // `isTurnEnd`). `continuation` tightens the gap ABOVE this message so a turn's
-  // steps read as one answer rather than as four separate ones: the message
-  // group's `gap-y-6` stays for the space between turns, and this cancels most
-  // of it between the steps of one turn.
+  // LOCAL: the two neighbours, read off the thread's message list (see `isTurnEnd` and
+  // `isStepAfter`). `continues` tightens the gap ABOVE this message so a turn's steps
+  // read as one answer rather than as four separate ones: the message group's `gap-y-6`
+  // stays for the space between turns, and `STEP_SPACING` cancels the whole of it after
+  // a step -- which is what makes two steps in two messages the same 12px apart as two
+  // rows in one.
   const turnEnd = useAuiState(isTurnEnd);
-  const continuation = useAuiState(isTurnContinuation);
+  const continues = useAuiState(isStepAfter);
 
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
   // of it except the answer, which stays where it is -- and its first message
@@ -541,7 +577,7 @@ const AssistantMessage: FC = () => {
       data-fold={fold}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
-        continuation && "-mt-4",
+        continues && STEP_SPACING,
         fold === "step" && "hidden",
       )}
     >
@@ -745,15 +781,30 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 // the one block (`harness.edge.ag_ui/opening-entries`), so the row and its numbers are
 // the same either way. WHICH CASE IT IS is read off the parts, not off the id: a
 // message that carries the part draws it.
+// LOCAL: IT IS A STEP, SO IT IS SPACED LIKE ONE. The card says what the model was handed,
+// and the rows of `bash` / `思考` / `注入的上下文` are one list -- so a card that came in as its
+// own message (a session's opening blocks) tightens the gap above it exactly as a step of a
+// turn does (`isStepAfter` / `STEP_SPACING`). It used to keep the message group's whole
+// `gap-y-6`, which put a stack of opening cards a turn's 24px apart while the rows inside a
+// message sat 12px apart. A card that came in beside rows in the SAME message gets that
+// spacing from the message it landed in, and needs nothing here.
+//
+// AND A PERSON'S MESSAGE IS NOT A STEP: a card drawn under one (the run that answers it
+// starts with its own `<instructions>`) keeps the turn gap, because the bubble above it is
+// where the previous turn ended.
 const UserInjectionCard: FC = () => {
   const cardOnly = useAuiState((s) => isCardOnly(s.message.parts));
+  const continues = useAuiState(isStepAfter);
   const text = useAuiState((s) =>
     isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
   );
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-injection-root"
-      className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        continues && STEP_SPACING,
+      )}
       data-role="user"
     >
       {cardOnly ? (

@@ -1,0 +1,12 @@
+{"turns": [
+  {"content": "第一轮的回答：这个会话一生下来就绑在这个仓库上。"},
+  {"reasoning": "先起一条后台作业，然后我就能去干别的了——这一轮的第一次调用要带着这段想法一起画出来。",
+   "content": "",
+   "tool-calls": [{"id": "c1", "name": "bash",
+                   "arguments": {"command": "sleep 1; echo JOB-SAYS-SO", "run_in_background": true}}]},
+  {"content": "",
+   "tool-calls": [{"id": "c2", "name": "bash",
+                   "arguments": {"command": "sleep 3"}}]},
+  {"reasoning": "去收一下那条作业的结局，顺手把这一轮说完。",
+   "content": "我是助手：作业在我忙别的期间结束了。"}
+]}
