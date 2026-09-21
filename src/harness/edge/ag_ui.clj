@@ -135,14 +135,40 @@
 
     :text/delta
     (let [s (-> s close-reasoning open-text)]
-      (update s :frames conj {:type "TEXT_MESSAGE_CONTENT"
-                              :messageId (:text s) :delta (:text ev)}))
+      ;; THE TURN'S ASSISTANT MESSAGE IS THE ONE ITS TOOL CALLS WILL HANG OFF, and
+      ;; this is where it is chosen: text arrives before the calls of the same
+      ;; message, so the message the text just opened is the message that owns them.
+      ;; Remembering it is what lets a turn's SECOND call reuse the first one's
+      ;; parent instead of opening an assistant message of its own.
+      (-> s (assoc :parent (:text s))
+            (update :frames conj {:type "TEXT_MESSAGE_CONTENT"
+                                  :messageId (:text s) :delta (:text ev)})))
+
+    :model/start
+    ;; ONE MODEL CALL IS ONE ASSISTANT MESSAGE, so a new call ends the previous
+    ;; turn's ownership of a parent: without this, a call-only turn that follows
+    ;; another would hang its calls on the message the earlier turn used, and the
+    ;; record would describe the two turns as one. It carries no frame of its own
+    ;; (audit only), exactly like :model/end below.
+    (assoc s :parent nil)
 
     :tool/call
     ;; The parent must be named, then closed, before the call is announced -- that is
     ;; the order the protocol's own example uses.
-    (let [s      (-> s close-reasoning open-text)
-          parent (:text s)]
+    ;;
+    ;; ONE PARENT FOR THE WHOLE TURN, and the reason is the bug this branch used to
+    ;; carry: opening a fresh TEXT_MESSAGE per call turned a two-call turn into TWO
+    ;; assistant messages with one call each, and the first of them was then followed
+    ;; by an assistant message instead of its tool message -- a history no
+    ;; OpenAI-shaped vendor will accept, and one a rebuilt conversation cannot
+    ;; continue from (see harness.kernel.loop's refusal). The real client applies the
+    ;; same rule we do here: @ag-ui/core resolves `parentMessageId` to the assistant
+    ;; message and pushes EVERY call of the turn onto it.
+    (let [s      (if (:parent s)
+                   s
+                   (let [opened (-> s close-reasoning open-text)]
+                     (assoc opened :parent (:text opened))))
+          parent (:parent s)]
       (-> s close-text
             (update :frames conj {:type "TOOL_CALL_START" :toolCallId (:id ev)
                                   :toolCallName (:name ev) :parentMessageId parent}
@@ -175,7 +201,7 @@
                               :content (:content ev) :role "tool"}))
 
     (:tool/pre-execute :tool/execute :tool/post-execute
-     :model/start :model/end)
+     :model/end)
     ;; The audit-only events carry no AG-UI frame at all: the edge records them as
     ;; jsonl lines. Passing the event through unchanged keeps the fold total
     ;; without inventing wire frames for audit data. (The constants share one
@@ -187,7 +213,8 @@
     ;; up: tok/s and cache hits are numbers the CONVERSATION has no use for, and
     ;; adding a frame for them would be changing a protocol to carry a statistic.
     ;; The client learns them from the management edge (harness.edge.stats), and
-    ;; the run it is watching looks exactly as it did before.
+    ;; the run it is watching looks exactly as it did before. :model/start is the
+    ;; one of the pair that also carries state, and it is handled above.
     s
 
     :run/end
@@ -215,7 +242,7 @@
   "Stateful converter. Returns (fn [kernel-event] -> vector of AG-UI wire frames)."
   [thread-id run-id]
   (let [s (atom {:thread-id thread-id :run-id run-id :n 0
-                 :reasoning nil :text nil :frames []})]
+                 :reasoning nil :text nil :parent nil :frames []})]
     (fn [ev]
       (let [next (step (assoc @s :frames []) ev)]
         (reset! s (assoc next :frames []))

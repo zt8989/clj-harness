@@ -7,6 +7,7 @@
             [harness.kernel.event :as ev]
             [harness.fake :as fake]
             [harness.kernel.frames :as frames]
+            [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
             [harness.test-support :as support]
             [harness.wire :as wire]))
@@ -76,6 +77,28 @@
       (let [ids (map :messageId (filter #(= "TEXT_MESSAGE_START" (:type %)) frames))]
         (is (= 2 (count ids)))
         (is (= 2 (count (distinct ids))))))))
+
+(deftest parallel-calls-of-one-turn-are-one-assistant-message
+  ;; TWO CALLS IN ONE TURN ARE ONE ASSISTANT MESSAGE WITH TWO tool_calls: that is
+  ;; what the kernel appends to its history and what an OpenAI-shaped vendor demands
+  ;; back. If the second call opens a TEXT_MESSAGE of its own, the record describes
+  ;; two assistant messages with one call each -- and the first is then followed by
+  ;; an assistant message instead of its tool message, so a rebuild of that record
+  ;; is a request the vendor refuses. That is the 2026-09-21 incident, verbatim:
+  ;; harness.infra.log's RUN_ERROR named four calls left unanswered, three of them
+  ;; from two parallel-call turns split exactly this way.
+  (let [frames  (wire [(ev/run-start)
+                       (ev/tool-call "c1" "read" "{}")
+                       (ev/tool-call "c2" "bash" "{}")
+                       (ev/tool-result "c1" "one" false)
+                       (ev/tool-result "c2" "two" false)
+                       (ev/run-end)])
+        parents (mapv :parentMessageId (filter #(= "TOOL_CALL_START" (:type %)) frames))
+        rebuilt (ag/inbound (frames/apply-frames frames) "SYSTEM" [])]
+    (testing "both calls are parented to the turn's one assistant message"
+      (is (= 1 (count (distinct parents)))))
+    (testing "so the conversation folds back to a history the vendor's rule accepts"
+      (is (= [] (vec (llm/unanswered-tool-calls rebuilt)))))))
 
 (deftest reasoning-frames-carry-what-the-shipped-schema-demands
   ;; The shipped EventSchemas union is a zod discriminated union, and @ag-ui/client

@@ -92,6 +92,36 @@ const cases: Case[] = [
     },
   },
   {
+    name: "parallel-calls-of-one-turn-share-one-assistant-message",
+    // Two calls in ONE model turn are one assistant message with two tool_calls --
+    // that is what the provider is asked to answer and what the record has to fold
+    // back to. A fresh parent message per call splits the turn into two assistant
+    // messages, and the first is then followed by an assistant message instead of
+    // its tool result: a history an OpenAI-shaped vendor refuses outright. That is
+    // the 2026-09-21 RUN_ERROR ("4 tool calls unanswered") in harness.infra.log,
+    // so this pins the wire contract at the real client, schema check included.
+    run: async () => {
+      script([
+        {
+          content: "",
+          "tool-calls": [
+            { id: "p1", name: "read", arguments: { path: "deps.edn" } },
+            { id: "p2", name: "read", arguments: { path: "README.md" } },
+          ],
+        },
+        { content: "done" },
+      ]);
+      const frames = await fetchFrames(threadId("parallelframes"), []);
+
+      const starts = frames.filter((f) => f.type === "TOOL_CALL_START");
+      expect(starts.length, "both calls of the turn were announced").toBe(2);
+      const parents = new Set(starts.map((f) => f.parentMessageId));
+      expect(parents.size, "and one assistant message owns them both").toBe(1);
+      expect([...parents][0], "the parent is a message the run actually opened").toBeTruthy();
+      expect(last(types(frames)), "and the run still ends normally").toBe("RUN_FINISHED");
+    },
+  },
+  {
     name: "no-chunk-frames-reach-the-client",
     // The client materialises complete messages; a CHUNK frame is the old
     // streaming shape and would arrive as an unknown type.

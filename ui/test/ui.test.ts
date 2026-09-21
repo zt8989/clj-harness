@@ -175,12 +175,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// message is not the conversation's first -- and this run cannot reach that rule at all
 /// (`components/sidebar.tsx` cannot be imported here, so the `sidebar` suite reads it as
 /// text and the behaviour itself is the browser walkthrough's).
-/// 82 -> 83: `injections`' fourth -- the OPENING ENTRY, which is one message with two
-/// readings (a card part and the text the model read). It pins both halves of
-/// `.scratch/session-opening` that only this side can see: the card replaces the text
+/// 82 -> 83: `parallel-call-parent`'s sixth `frames` case -- two tool calls in one turn
+/// are ONE assistant message. On that branch it was 65 -> 66, because it forked before the
+/// sidebar work; here the same case adds one to the merged total. The provider refuses the
+/// split shape outright (the 2026-09-21 RUN_ERROR: "leaves 4 tool calls unanswered"), so
+/// the wire contract is worth a real-client case rather than an offline fold alone.
+/// 83 -> 84: `injections`' fourth -- the OPENING ENTRY, which is one message with two
+/// readings (a card part and the text the model read, `.scratch/session-opening`). It pins
+/// both halves of that change that only this side can see: the card replaces the text
 /// rather than joining it, and the copy that goes back out is the text under the same
-/// id, which is what makes the server drop the repeat.
-const EXPECTED_CASES = 83;
+/// entry id, which is what makes the server drop the repeat instead of writing the opening
+/// into the conversation twice.
+const EXPECTED_CASES = 84;
 
 let total = 0;
 for (const suite of SUITES) {
