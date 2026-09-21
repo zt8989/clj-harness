@@ -111,14 +111,14 @@
 | 02 | 异步写：每帧、失败进降级态 | 01 | **已落地**。帧入队、单消费者逐行 append、每帧；`flushed-seq` 是一条序号（`(+ flushed pending)` = 下一条要铸的序号）；写失败 ⇒ 降级态，`sofar` / `rebuild` 带 `:record`，界面上一根常驻的条；退出时收干净。修正项（prepare 每行一问、水位重新基准化）见该票末尾 |
 | 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | **已落地**。动作的载荷是新字段 `append`（不是 AG-UI 的 `messages`）；`messages` 具名 400、不认识的 id 具名 404、`runId` 门里铸并进记录、`provider` 只认会话档、`context` 只在出生那一轮读；页面不再铸任何会话 id（`POST /api/sessions` / `POST /api/project` 由服务端铸）；客户端那半是 `ui/src/lib/agent.ts` 的 `HarnessAgent`。落地记录见下（含留给 04/05/06 的边界） |
 | 04 | 认领：一个 thread 归一个进程 | 01 | **已落地**。库里一行 owner（`session_claims`，不是锁文件）；会话出生时认领、放掉会话（显式 `drop!` 或空闲 30s）时交还、进程正常退出走 shutdown hook 交还；`kill -9` 留下的行靠 **pid + 起始时刻**判死并明说易主；后到的进程**只读 + 明说**（动作 409 点名 pid，读路由照常）；认领的 token 就是票 05 的 generation。落地记录见下 |
-| 05 | 会话 feed：尾页、增量、补页 | 01 | **一条 source 三个动词**（`tail` / `append` / `prepend`）；序号可从记录重放；`since` 与 generation；`rebuild` / `sofar` 的 live 语义读内存；放掉时的终态 |
+| 05 | 会话 feed：尾页、增量、补页 | 01 | **已落地**。`GET …/feed`（SSE：窗口帧 → 每落盘一批推一帧 → 终态帧 `end`）与 `GET …/page?beforeSeq=N`；序号 = **记录偏移**，写者落盘时报出、不由人预测；窗口在**批**的边界上切（不重叠不丢）；`since` 落在窗口外或 generation 不对 ⇒ 409 且 body 带当前值；`rebuild` / `sofar` 对活会话读内存；放掉 / 易主都是一帧终态。落地记录见下 |
 | 06 | 副本：窗口、补页、刷新 | 03, 05 | 窗口 `{entries, baseSeq, hasMore, revision}`；「显示更早」那颗按钮；补一页 vs 重开的两种处置；刷新走内存；打字 / 滚动的锚定 |
 | 07 | 收口：两条铁律、状态表、文档、报数 | 02–06 | `overview.md` 铁律 1 与 3 的新措辞 + 状态表（+ 窗口那一行）；`edge.md` / `client.md` / `kernel.md` / `skills-and-instructions.md` 的推导；`CONTEXT.md` 术语；两套全量 + 走查证据；落地记录 |
 
 ## 状态
 
-**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03、04 已落地（01/02 的文件留在
-`issues/` 里当落地记录，票 07 收口时再把它们折进这里）；05–07 `ready-for-agent`，等前置。
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03、04、05 已落地（01/02 的文件
+留在 `issues/` 里当落地记录，票 07 收口时再把它们折进这里）；06、07 等前置。
 
 ## 已验证到什么程度
 
@@ -319,3 +319,95 @@ exit 0）。新用例落在 `edge/http_test.clj`：不认识的 id 具名 404、
   「解除绑定」这条 HTTP 路今天不存在，等它出现时同样要问认领。
 - **`sessions` 表的**其余**写入没有新增第二份**（判断 7）：锚点、待办仍然只存在库里按 thread-id 分家，
   本票在进程内只多了一个 `:claim` 字符串（token），没有多出任何对话内容。
+
+## 票 05 落地记录（2026-09-23）
+
+**一条 source，三个动词，落在同一个窗口状态上。** 服务端把一场会话当作一条 feed：
+`GET /api/threads/<stem>/feed`（SSE：首帧是窗口或增量，此后每落盘一批推一帧，结束发一帧 `end`）
+与 `GET /api/threads/<stem>/page?beforeSeq=N`（补页，一次一页）。两个动词都由
+`harness.edge.sessions` 里**同一组纯函数**算出来（`tail` / `since` / `before`），所以 `hasMore`
+与 `baseSeq` 只有一处说了算——这是判断 3 的全部内容。
+
+### 接口
+
+- **`harness.edge.sessions`**：注册表条目的 `:entries` 从「消息的向量」变成
+  `[{:seq N :message M}]`（`:seq` 是**记录偏移**，nil = 写者还没落盘）。新增
+  `watch!` / `unwatch!` / `ring!`（一个**只报事实、不报状态**的门铃：`{:kind :entries}` 或
+  `{:kind :gone :reason :put-away|:idle}`）、`generation`（= 票 04 认领的 token）、
+  `messages` / `display` / `drawn` 三种读法、`append!` / `settle!` / `land!`，以及窗口的三个纯函数。
+  `page-size` = **50，是一个判断**（参考实现同数），docstring 里写明了。
+- **`harness.edge.record/append!`**：多一个 4 元版 `[thread-id file line lands]`，在锁**里面**取到
+  这一行落地的偏移、在锁**外面**成功后回调一次。**偏移由写者报告，不由任何人预测**——这是判断 1
+  那句「会话铸号必须与写者落盘一致」的机械保证：没有第二条路径能产生一个序号。
+- **`harness.edge.replay/entries`**：把记录折成 `[{:seq :message}]`，序号就是那一行在文件里的下标
+  （0 起）。`fold-frames` / `rebuild` / `sofar` 都改从它取，`sofar` 与 `rebuild` 因此多一个 `:entries`。
+- **路由**：`thread-verbs` 多两个动词（`feed` / `page`）；`rebuild` 与 `sofar` 对**活着的**会话读内存
+  （`sofar` 只在**没有 run 在跑**时读内存——跑着的时候记录才是权威，见下）；`stats` / `trajectory`
+  仍读记录，但多一个 `:behind`（= `record/pending-count`，为 0 时不出现）。
+- **`live-runs` 那份第二权威没了**：`running?` / `running-run-id` / `register-run!` / `unregister-run!`
+  现在都问 `sessions`，`http.clj` 里的那张表被删掉。
+
+### 五个决定，以及为什么不是另一种
+
+1. **序号 = 记录偏移，而不是内存计数器，也不是写进 jsonl 的新字段。** 三个约束（不改格式 / 可重放 /
+   两套折叠对「第几条」的回答不同）同时成立只有这一个坐标系。代价写在票面上：内存里比记录新的条目
+   还没号，所以 `:seq` 可以是 nil，**而帧可以因此重发**——读者的游标只前进到「已经落盘的最后一个号」，
+   于是同一批条目可能在两帧里各出现一次。这不是缺陷，是 `:seq` 必须诚实：把游标推到一个写者还没确认的
+   号，等于让副本去请求一个**没有任何东西按它编号**的区间。副本按消息 id 去重（票 03 的 `append`
+   本来就要按 id 认账）。
+2. **窗口按「批」切，不按条目切。** 一次 `append!` 落成一条 jsonl 行（票 02），所以一批条目的 `:seq`
+   相同。`tail` / `since` / `before` 都在批的边界上切，于是 `before` **不可能**与读者手上的那页重叠、
+   也不可能漏掉半批。若按条目切，补页会把一批拆成两半，而拆开的那一半与读者已持有的部分谁也不知道
+   边界在哪——这正是「不重叠、不丢」那条验收的全部难点。
+3. **门铃不携带状态（ADR 0003 决策 7）。** watcher 收到 `{:kind :entries}` 只做一件事：
+   把一槽的 `async/chan`（`sliding-buffer 1`）填上。feed 的循环醒来后**从自己的游标重读增量**，
+   不数事件、不记偏移。所以十几个 ring 折成一次重读、一次由 append 触发的 ring 与随后由落盘触发的
+   ring 不会互相丢——「没有轮询」与「不丢唤醒」在这里是同一件事。
+4. **`since` 落在窗口外 ⇒ 409，body 带当前的 `generation` 与 `baseSeq`**（判断 5）：不从头发（会重复）、
+   不静默断（副本会以为到齐了）。**认领易主与放掉会话是同一个事实**（票 04 的 token 就是 generation），
+   所以「窗口作废」只有一条规则。
+5. **`rebuild` / `sofar` 的 live 语义是「读内存」，但有一个例外。** 活着的会话从内存读，**不调**
+   `close-off-open-run!`（那是对**死掉的**会话做的收尾）；冷启动 / 归档 / `evals` 仍读记录。
+   例外是 **有 run 正在跑的时候**：那一刻记录才是权威，因为内存里可能还缺正在写的那些帧的落盘结果，
+   而 `sofar` 的语义是「记录到哪里了」。分岔写进了两个路由的 docstring。
+
+### 踩出来的两个坑（都会重犯，所以写下来）
+
+- **`hk/send!` 的第三个参数不是可选的。** `(hk/send! ch body)` 是「这就是整个响应」：http-kit 会算一个
+  `content-length`、把响应收掉，此后每一帧都被丢掉。症状极具欺骗性——**窗口那一帧正常到达、socket 也
+  开着**，只是再也不推任何东西，而且 `:on-close` 立刻报 `:server-close`。SSE 必须是
+  `(send! ch head false)` 打头、后续 `false`、最后一帧 `true`（`runner` 早就是这三段式，本票照抄）。
+  探针之所以能一眼看出：`AsyncChannel.firstWrite` 里 `close?` 决定 `Content-Length` 还是
+  `Transfer-Encoding: chunked`。
+- **go block 里的异常是静默的**（`http.clj` 里已有一次同名教训）。feed 的循环在 go block 里读增量、
+  发帧，第一版因为上面那条把响应收掉之后 `send!` 抛了，异常进了没人读的 channel **而 watch 被
+  `finally` 摘掉**：表现是「连接还在、门铃还在响、就是没有帧」。所以 feed 的每一处结束都写一行
+  `:feed/stream-closed`（跟着 http-kit 报的状态），这是唯一能事后区分「没人发」与「发不出去」的证据。
+
+### 验证
+
+**后端全量：1042 tests / 12455 assertions / 0 failures / 0 errors**（2026-09-23，本 worktree，exit 0）。
+本票新写的用例：
+
+- `test/harness/edge/sessions_test.clj`（+7 个用例，与票 01 的合计 23 个 95 条断言）：序号从记录自己的
+  行里来（不靠预测）、落盘填号且幂等、窗口按批切、`before` 不重叠不丢、`since` 的边界、
+  门铃只报事实、generation 就是认领 token、settle 把终态与 interrupts 存下来。
+- `test/harness/edge/replay_test.clj`（+3 个用例）：`entries` 的编号——一个动作自己的条目按**它那一行**
+  编号、一个 run 的条目全部按**它的终局行**编号（所以一批一个号）、同一份记录读两次号相同、第二个
+  run 按自己的行而不是第一个 run 的、日志断在 run 中间时那半句按**记录停下的那一行**编号。
+- `test/harness/edge/http_test.clj`（+3 个用例）：300 条消息的会话只拿尾页且 `hasMore` 为真、
+  `beforeSeq` 补页不重叠、坏游标具名 400、**没有会话的冷 stem 从记录读且 `:live false`**、
+  `?since=` 落在窗口外与 generation 不对两种 409（body 带当前值）、**真 socket 打开的 feed**：
+  首帧窗口 → 落盘后**没人再问**也收到一帧（带号）→ `drop!` 之后收到 `{:type "end" :reason "put-away"}`
+  然后 EOF。
+- `test/harness/edge/http_test.clj` 的既有用例改动一条：跑中 `rebuild` 现在是 200 + 读内存 +
+  「记录一个字节没长」。
+
+### 边界（写给票 06/07）
+
+- **走查那一格（没有轮询）留给票 06**：本票只保证服务端推，副本这一半（窗口 `{entries, baseSeq,
+  hasMore, revision}`、「显示更早」、刷新走内存、锚定）是票 06 的活；停在 `sofar` 轮询上的 UI 要到
+  票 06 才拆掉，所以「全程没有 `sofar` 轮询」这条验收在那时才可测。
+- **`stats` / `trajectory` 只加了 `:behind`**，没有做「从内存读同一场会话」的第二份实现：它们读的是
+  记录的聚合（行数、帧数、时长），内存里那份少了落盘这一环，做第二份就是在两个算法之间维护一个
+  必须永远相等的不变量。落后多少由 `:behind` 说出来，界面自己决定要不要等（票 06）。

@@ -480,3 +480,68 @@
     (is (re-find #"(?i)terminat|incomplete|truncat" (str (ex-message e))))))
 
 
+
+;; ------------------------------------------------- the numbers a window hands out
+
+(deftest every-entry-wears-the-record-offset-of-the-line-it-arrived-in
+  ;; THE NUMBER IS THE WINDOW'S WHOLE COORDINATE SYSTEM (ticket 05 of
+  ;; `.scratch/sessions-live-on-the-server`, ADR 0003 decisions 1 and 9): a page cuts at
+  ;; it, a delta is filtered by it, and a replica rebuilds its window from it. So it has
+  ;; to be REPLAYABLE -- the same record has to give the same numbers twice -- and it has
+  ;; to be the number the LIVE session minted, or a refresh would renumber the
+  ;; conversation under a client that is holding the old numbers.
+  (let [records (mapv #(json/read-str % :key-fn keyword) (one-run-lines))
+        run-end (dec (count records))
+        entries (replay/entries records)]
+    (testing "one entry per message, in order, and each carries the message itself"
+      (is (= (mapv :role (replay/lines->messages (one-run-lines)))
+             (mapv (comp :role :message) entries))))
+    (testing "an action's own entry is numbered by ITS line -- the line it was written on"
+      (is (= 0 (:seq (first entries))) "the first line of the thread is 0, not 1")
+      (is (= "u1" (:id (:message (first entries))))))
+    (testing "a run's entries are numbered by the run's TERMINAL line, all of them"
+      ;; One action, one run, ONE number: everything the run produced arrived in the
+      ;; same batch, which is what lets a page cut between runs instead of through one.
+      (is (= (repeat 4 run-end) (mapv :seq (rest entries)))
+          (str "expected the run's four entries at line " run-end))
+      (is (= 1 (count (distinct (map :seq (rest entries))))))
+      (is (< (long (:seq (first entries))) (long (:seq (second entries))))
+          "an earlier action's number is strictly smaller"))
+    (testing "reading the same record again gives the same numbers"
+      (is (= (mapv :seq entries)
+             (mapv :seq (replay/entries (mapv #(json/read-str % :key-fn keyword)
+                                              (one-run-lines)))))))))
+
+(deftest a-second-run-is-numbered-by-its-own-line-not-by-the-first-runs
+  (let [q2  {:id "u2" :role "user" :content "second question"}
+        raw (vec (concat (one-run-lines)
+                         [(action-line "r2" [q2])]
+                         (event-lines "r2" [(ev/run-start)
+                                            (ev/text-delta "second turn")
+                                            (ev/run-end)])))
+        records (mapv #(json/read-str % :key-fn keyword) raw)
+        entries (replay/entries records)
+        ;; The second action's line is where its own entry arrived, and the second run's
+        ;; terminal is the last line of the file.
+        action2 (count (one-run-lines))
+        end2    (dec (count raw))
+        by-seq  (group-by :seq entries)]
+    (is (= ["second question"] (mapv (comp :content :message) (get by-seq action2)))
+        "the second action's entry carries the second action's line")
+    (is (= ["second turn"] (mapv (comp :content :message) (get by-seq end2)))
+        "and the second run's answer carries its own terminal, not the first run's")
+    (is (= (sort (map :seq entries)) (map :seq entries))
+        "the numbers come out in file order, so a reader can walk them forward")))
+
+(deftest a-log-that-stops-mid-run-numbers-its-partial-answer-last
+  ;; THE LENIENT READING, and it is `entries` rather than `rebuild` on purpose: an
+  ;; unfinished run has no terminal line to be numbered by, and the honest number for it
+  ;; is the last line the record holds -- where the writing stopped. A window can then
+  ;; still show a partial answer, and when the run is closed later its entries move to
+  ;; the closing line exactly once.
+  (let [raw     (vec (concat [(action-line "r1" [seed])]
+                             (event-lines "r1" [(ev/run-start)
+                                                (ev/text-delta "half a thought")])))
+        entries (replay/entries (mapv #(json/read-str % :key-fn keyword) raw))]
+    (is (= [0 (dec (count raw))] (mapv :seq entries)))
+    (is (= "half a thought" (:content (:message (last entries)))))))

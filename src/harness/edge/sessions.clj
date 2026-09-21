@@ -1,5 +1,5 @@
 (ns harness.edge.sessions
-  "The server's LIVE conversations: thread-id -> the messages the next run continues
+  "The server's LIVE conversations: thread-id -> the entries the next run continues
   from. This is the table ADR 0002 decides for
   (docs/adr/0002-sessions-live-on-the-server.md): the conversation lives HERE, and the
   browser stops being its author.
@@ -10,9 +10,8 @@
   it is put away again; the build is cheap enough to repeat because it is a fold over
   a file, and the file is the thing that outlives this process.
 
-  WHAT IT HOLDS, AND WHAT IT DELIBERATELY DOES NOT. It holds the CONVERSATION -- the
-  messages a client used to send back every turn -- and nothing the run derives for
-  itself. Two things are absent on purpose:
+  WHAT IT HOLDS, AND WHAT IT DELIBERATELY DOES NOT. It holds the CONVERSATION and
+  nothing the run derives for itself. Two things are absent on purpose:
 
     - THE SYSTEM MESSAGE. It is assembled per run (`harness.cap.system-prompt`: the
       frozen opening plus what the `SystemPrompt` hooks append), and a copy kept here
@@ -25,13 +24,21 @@
   SO THIS TABLE DOES NOT MAKE INJECTIONS STOP BEING RECOMPUTED. It takes the CLIENT out
   of the loop, which is the half that was never a decision.
 
-  AND THE CARDS ARE NOT PART OF IT. A log carries a message per injected-context frame
-  so a rebuilt conversation can draw the cards again
-  (`harness.kernel.frames/apply-frames`); those messages are for the screen and the
-  model never had them, so `build` leaves them out -- they would otherwise be handed to
-  a provider that has no idea what a `data` part is
-  (`harness.edge.ag-ui/provider-part` refuses one by name, which is the failure this
-  keeps from happening).
+  WHAT IT HOLDS IS THE VIEW A CLIENT DRAWS, numbers and all. Each entry is the message
+  plus the arrival it came in (`:group`) and the RECORD OFFSET of the line it arrived in
+  (`:seq`, nil until that line is on disk) -- ticket 05 of
+  `.scratch/sessions-live-on-the-server`, and the unit the feed's window is cut in.
+
+  THE CARDS ARE PART OF IT, AND THE MODEL VIEW IS DERIVED FROM IT. A log carries a
+  message per injected-context frame so a rebuilt conversation can draw the cards again
+  (`harness.kernel.frames/apply-frames`); those messages are for the screen and the model
+  never had them. The table used to drop them at birth, which made memory and the record
+  two different conversations -- exactly the drift the feed was built to end -- so the
+  cards are KEPT here (they are what the page draws, and what `sofar` answers) and the
+  model view is `without-cards` of them, computed where a run asks for its history
+  (`messages`). One conversation, two readings of it, and the reading that must not see a
+  `data` part (`harness.edge.ag-ui/provider-part` refuses one by name) is the one that
+  filters.
 
   THE BUILD IS THE ONLY READ OF DISK. Everything after it arrives through `append!` --
   the entries a client's action carried, with an entry the conversation already holds
@@ -40,19 +47,29 @@
   continues from here, not from a file, and not from what the browser remembers.
 
   ONE ATOM, ONE TABLE. The registry is the single home of every fact about a live
-  session -- its messages, when it was last asked for, and which runs of it are going.
+  session -- its entries, when it was last asked for, and which runs of it are going.
   That is deliberate: `sweep!` must not put away a session a run is in the middle of,
   and if 'a run is going' lived anywhere else the two would race. It is also why the
-  run set is a SET: two runs of one session is `.scratch/session-after-refresh` ticket
-  05's business to refuse, and until it does, the table must still be correct about the
-  one fact it owns -- that the session may not be put away while ANY of them is going.
+  run set is a SET: two runs of one session are refused at the door
+  (`harness.edge.http/refuse-second-run!`), and until that refusal existed the table
+  still had to be correct about the one fact it owns -- that the session may not be put
+  away while ANY of them is going.
 
   ONE ROW OUTSIDE THIS TABLE, AND IT IS THE CLAIM. A session's lifetime here IS a
   claim on the conversation (`harness.cap.claims`): it is taken as the entry is built
   and handed back as the entry is put away, so no other process serves a conversation
   this one is serving -- and an idle conversation does not hold a claim forever either.
   That is ticket 04 of `.scratch/sessions-live-on-the-server`, and it is the reason
-  this namespace requires a capability at all.
+  this namespace requires a capability at all. THE CLAIM'S TOKEN IS ALSO THE FEED'S
+  GENERATION (ticket 05): a window is only meaningful while the same process, on the
+  same claim, is serving the conversation, so the token that names the claim names the
+  window.
+
+  AND IT SAYS WHEN SOMETHING CHANGED. `watch!` is the doorbell a connected replica
+  rings on -- it is rung by the writer's landing, not by the entries going in, because
+  what a window addresses is the RECORD's numbering. There is no subscription state
+  here: a watcher is a fn, it carries no cursor and no identity, and the connection it
+  belongs to says 'since N' every time it reads (ADR 0003 decision 7).
 
   Nothing else here writes: no jsonl, no process log, nothing under the log tree. That
   is asserted, not assumed (see the test)."
@@ -91,17 +108,36 @@
   than up to a TTL late."
   5000)
 
+(def page-size
+  "How many entries a feed page holds.
+
+  FIFTY, BECAUSE THE REFERENCE IMPLEMENTATION SAYS FIFTY (`events.open({ maxMessages:
+  50 })` in the client this repo mirrors), and because a screenful is a few dozen turns
+  -- so it is a JUDGEMENT, not a measurement: nobody here has timed a page against a
+  conversation. What matters is that there IS a number and that it is written down
+  (`.scratch/sessions-live-on-the-server` ticket 05, judgement 2): 'a page' would make
+  the cost of opening a conversation unsayable, and the whole point of the window is
+  that opening one costs a bound instead of its length."
+  50)
+
 ;; ------------------------------------------------------------------- the table
 
 (defonce ^:private registry
-  ;; thread-id -> {:messages [..] :touched-at <ms> :runs #{run-id ..}}
+  ;; thread-id -> {:entries [{:group <run-id> :seq <line-offset|nil> :message <ag-ui>} ..]
+  ;;               :context [..] :state :unfinished|:parked|:settled|nil
+  ;;               :touched-at <ms> :runs #{run-id ..} :claim <token>}
+  ;;
+  ;; `:entries` IS IN CONVERSATION ORDER and it is the one structure: `messages` is a
+  ;; reading of it, the window is a slice of it, and `settle!`/`append!` are the only
+  ;; things that add to it. `:seq` is nil while the line the entry arrived in is still
+  ;; in the writer's queue (`land!` fills it in from the writer's answer).
   (atom {}))
 
 (defonce ^:private unflushed?
-  ;; TICKET 02 FILLS THIS IN. A session whose bytes are not all on disk may not be put
-  ;; away, because putting it away would mean rebuilding from a record that is behind it
-  ;; -- and the difference would be silent. Until the async writer exists there is
-  ;; nothing behind anything, so the honest default is 'nothing is pending'.
+  ;; A session whose bytes are not all on disk may not be put away, because putting it
+  ;; away would mean rebuilding from a record that is behind it -- and the difference
+  ;; would be silent. TICKET 02 OWNS THE ANSWER (`harness.edge.record/pending?`), and
+  ;; this is the seam it reaches the table through.
   (atom (constantly false)))
 
 (defn watch-unflushed!
@@ -109,10 +145,54 @@
   thread-id; `sweep!` will not put away a session it answers true for.
 
   A seam rather than a field because the answer belongs to the writer
-  (`harness.edge.http/log!` and ticket 02's queue), and this namespace must not grow a
-  second opinion about what has been written."
+  (`harness.edge.record`), and this namespace must not grow a second opinion about
+  what has been written."
   [f]
   (reset! unflushed? f))
+
+;; ------------------------------------------------------------------ the doorbell
+
+(defonce ^:private watchers
+  ;; thread-id -> #{fn}. SEE `watch!`: a notification, not a subscription.
+  (atom {}))
+
+(defn watch!
+  "Call F -- (fn [thread-id event]) -- when THREAD-ID changes. Answers F, so a caller
+  can hand the same value to `unwatch!`.
+
+  IT IS A DOORBELL, NOT A SUBSCRIPTION, and the difference is ADR 0003 decision 7:
+  what a watcher may not be is a place where the server remembers WHAT A CLIENT HAS.
+  It carries no cursor, no identity, and no per-client state -- the connected replica
+  that rings it says 'since N' on every read, so the truth about what it holds lives
+  on its side of the wire and a missed ring costs one delayed read, never a wrong one.
+
+  EVENTS: {:kind :entries} -- come and read, something about the session changed (an
+  entry arrived, a line landed, a run of it started or finished); {:kind :gone :reason
+  ..} -- the session was put away or its claim changed hands, and the window built on it
+  is over. `:reason` is a value the reader can be told (`harness.edge.http`'s feed sends
+  it as the last frame), because a stream that just stops leaves a replica believing
+  it has everything."
+  [thread-id f]
+  (swap! watchers update (str thread-id) (fnil conj #{}) f)
+  f)
+
+(defn unwatch!
+  "Stop calling F for THREAD-ID."
+  [thread-id f]
+  (swap! watchers update (str thread-id) disj f)
+  nil)
+
+(defn- ring!
+  "Tell THREAD-ID's watchers that EVENT happened. A watcher that throws is not allowed
+  to stop the others, or to reach the caller: this runs on the writer's consumer thread
+  (the landing) as well as on request threads, and a doorbell that can break the thing
+  ringing it is worse than a missed one -- the next read catches up anyway."
+  [thread-id event]
+  (doseq [f (get @watchers (str thread-id))]
+    (try (f (str thread-id) event) (catch Throwable _ nil)))
+  nil)
+
+;; ------------------------------------------------------------------- the views
 
 (defn- without-cards
   "MESSAGES with the injected-context cards taken out.
@@ -132,8 +212,8 @@
         messages))
 
 (defn- build
-  "THREAD-ID's conversation, read out of its record. Empty when the thread has never
-  run.
+  "THREAD-ID's conversation as the record has it: {:entries .. :context .. :state ..}.
+  Empty when the thread has never run.
 
   `find-log` answers nil rather than refusing, and that nil is the right answer HERE:
   a session that has never run has nothing recorded, and a page opening it must get an
@@ -145,11 +225,17 @@
   rebuild refuses a log whose run has not ended, and a session is born exactly when
   somebody looks at it -- which after a process restart is a log that ends mid-run. The
   door that answers that is the one that says so, and it still uses the strict reader
-  for a log that IS finished."
+  for a log that IS finished.
+
+  THE ENTRIES COME WITH THEIR NUMBERS (`harness.edge.replay/entries`), which is the
+  whole reason the session can answer a feed page the moment it is born: the numbers are
+  the record's own line offsets, so a client that was talking to a previous process can
+  keep them."
   [thread-id]
   (if-some [f (replay/find-log (home/projects-dir) thread-id)]
-    (without-cards (:messages (replay/sofar f)))
-    []))
+    (let [{:keys [entries context state]} (replay/sofar f)]
+      {:entries (vec entries) :context (vec context) :state state})
+    {:entries [] :context [] :state nil}))
 
 (defn- count-running [m]
   (count (filter #(seq (:runs %)) (vals m))))
@@ -178,11 +264,11 @@
   [thread-id]
   (if-some [e (get @registry thread-id)]
     e
-    (let [claim (claims/take! thread-id)
-          built {:messages   (build thread-id)
-                 :touched-at (System/currentTimeMillis)
-                 :runs       #{}
-                 :claim      (:token claim)}
+    (let [claim  (claims/take! thread-id)
+          built  (merge {:touched-at (System/currentTimeMillis)
+                         :runs       #{}
+                         :claim      (:token claim)}
+                        (build thread-id))
           [before after] (swap-vals! registry
                                      (fn [m] (if (contains? m thread-id) m (assoc m thread-id built))))]
       (if-some [won (get before thread-id)]
@@ -199,49 +285,157 @@
     (swap! registry update id assoc :touched-at (System/currentTimeMillis))
     nil))
 
+(defn live-entry
+  "THREAD-ID's entry, or nil when this process is not holding the conversation --
+  A LOOKUP, NOT A BIRTH. The read routes ask this one: a GET that created a session
+  would take a claim and rebuild a conversation on behalf of somebody who only wanted
+  to look, and `harness.edge.http/sofar-get` in particular must be able to answer
+  'nobody here is holding this' without making it true."
+  [thread-id]
+  (get @registry (str thread-id)))
+
+(defn generation
+  "The name of the window a reader of THREAD-ID is looking at: the claim token of the
+  session holding it, or nil when nobody here holds it.
+
+  IT IS THE CLAIM'S TOKEN BECAUSE THAT IS THE FACT (ticket 04, and ADR 0003 decision
+  6): a window is only meaningful while the SAME claim serves the conversation -- put
+  away, taken over, rebuilt in another process, and every number in the reader's hands
+  is about a session that no longer exists. The claim already moves its token on every
+  take and loses its row on every release, so the generation inherits both properties
+  rather than inventing a second thing to keep in step."
+  [thread-id]
+  (:claim (live-entry thread-id)))
+
+(defn running?
+  "Is a run of THREAD-ID alive in THIS PROCESS right now?
+
+  THE FACT THAT IS NOT IN THE RECORD, and the reason it is asked here: an input line
+  whose run never terminated is either a run still going or a process that died
+  mid-flight. Every reader that has to choose (the sidebar row, the composer's gate,
+  the read side's 'may I close this off') asks this instead of inferring from the
+  file.
+
+  IT IS THE SESSION TABLE'S OWN FACT NOW (ticket 05, discharging ticket 01's correction
+  3 in `.scratch/sessions-live-on-the-server`): the edge used to keep a second registry
+  of live runs, which meant 'this process is answering it' had two homes and two ways to
+  be wrong. The run ids here are the same ones `run-started!` pinned, so the answer has
+  one owner."
+
+  [thread-id]
+  (boolean (seq (:runs (live-entry thread-id)))))
+
+(defn running-run-id
+  "The run id THREAD-ID's live run was registered under, or nil. FOR A REFUSAL that has
+  to say what is in the way: the client that got a 409 did not choose its run id (the
+  server mints it), so the only useful name here is the one already going."
+  [thread-id]
+  (first (:runs (live-entry thread-id))))
+
+;; -------------------------------------------------------------- the conversation
+
 (defn messages
-  "THREAD-ID's conversation: the messages the next run continues from.
+  "THREAD-ID's conversation AS A RUN CONTINUES FROM IT: the entries a provider may be
+  handed, which is the entries minus the cards (`without-cards`).
 
   GET-OR-CREATE, and it counts as somebody dealing with the session -- the page drawing
   it is what keeps it alive."
   [thread-id]
   (let [id (str thread-id)]
     (touch! id)
-    (:messages (get @registry id))))
+    (without-cards (mapv :message (:entries (get @registry id))))))
+
+(defn- as-sent
+  "ENTRIES as a reader sees them: the record offset and the message, without the run
+  that carried them (`:group` is how this table fills a number in, not something a
+  client can act on). ONE SHAPE ON THE WIRE -- `display`, a page and a feed delta all
+  answer this, so a reader that handles entries from one handles them from all."
+  [entries]
+  (mapv (fn [e] {:seq (:seq e) :message (:message e)}) entries))
+
+(defn display
+  "THREAD-ID's conversation AS A CLIENT DRAWS IT: every entry in order, cards included,
+  each with the seq of the record line it arrived in (`nil` while that line is still in
+  the writer's queue). GET-OR-CREATE, like `messages`.
+
+  TWO READINGS, ONE CONVERSATION: this is the one the window, `sofar` and the feed
+  answer with, and `messages` is the model's. They differ by the cards and nothing
+  else, which is why they are derived from one vector rather than kept as two."
+  [thread-id]
+  (let [id (str thread-id)]
+    (touch! id)
+    (as-sent (:entries (get @registry id)))))
+
+(defn drawn
+  "THREAD-ID's conversation as MESSAGES a client draws -- `display` without the numbers.
+  THE OTHER HALF OF `messages`: where that one is what a provider may be handed, this is
+  what the page puts on the screen, cards and all. Both are readings of the one entry
+  vector, and neither is stored twice."
+  [thread-id]
+  (mapv :message (display thread-id)))
+
+(defn context
+  "THREAD-ID's opening context, as the record carried it, or []."
+  [thread-id]
+  (:context (live-entry thread-id)))
+
+(defn state
+  "What the conversation's own record last said about it -- :unfinished, :parked or
+  :settled -- or nil for a session that has never run. `running?` is the other half of
+  the question and is deliberately not folded in here (see `harness.edge.http/sofar-get`)."
+  [thread-id]
+  (:state (live-entry thread-id)))
+
+(defn- wrap
+  "An entry of the conversation as this table holds it: the message, the ARRIVAL it came
+  in (`:group`, the run whose line will carry it), and the record offset of that line
+  once the writer says where it landed."
+  [group message]
+  {:group (str group) :seq nil :message message})
 
 (defn append!
-  "Put ENTRIES at the end of THREAD-ID's conversation and answer the ones that ENTERED.
+  "Put ENTRIES at the end of THREAD-ID's conversation as part of run GROUP, and answer
+  the ones that ENTERED.
 
   AN ENTRY THE CONVERSATION ALREADY HOLDS IS DROPPED, and that is the property that
   makes an action repeatable: a page whose run died on the way -- a refresh, a retry, a
   socket that went away -- sends the same bytes again, and the conversation must not end
   up with the question twice. The identity is the message's own `:id`, which is also
-  what the record folds by (`harness.edge.replay/fold-frames`), so a conversation that
-  was rebuilt from disk dedupes against the same names a live one does. An entry with
-  NO id cannot be recognised and is therefore kept -- guessing that two unnamed messages
-  are the same one would be inventing an identity.
+  what the record folds by (`harness.edge.replay/entries`), so a conversation that was
+  rebuilt from disk dedupes against the same names a live one does. An entry with NO id
+  cannot be recognised and is therefore kept -- guessing that two unnamed messages are
+  the same one would be inventing an identity.
+
+  GROUP IS THE RUN WHOSE LINE WILL CARRY THEM, and it is an argument rather than
+  something this table invents because the writer is the one that knows: the edge hands
+  the same group to `land!` when the line it wrote comes back with an offset. An action
+  that continues a session puts its entries in the run that action starts; a run's own
+  messages go in through `settle!` under the same name (`harness.edge.http/run-agent!`).
 
   IT ANSWERS THE ENTRIES THAT ENTERED, which is not always the ones it was handed: a
   repeat drops out, and the record wants to say what the action MEANT rather than what it
   typed (the edge logs both -- see `harness.edge.http/run-agent!`)."
-  [thread-id entries]
+  [thread-id group entries]
   (let [id  (str thread-id)
+        g   (str group)
         _   (touch! id)
-        add (fn [msgs e]
-              (if (and (:id e) (some #(= (:id %) (:id e)) msgs))
-                msgs
-                (conj msgs e)))
+        add (fn [es m]
+              (if (and (:id m) (some #(= (:id %) (:id m)) (map :message es)))
+                es
+                (conj es (wrap g m))))
         [before after] (swap-vals! registry
                                    (fn [m]
-                                     (update-in m [id :messages]
-                                                (fn [msgs] (reduce add (vec msgs) entries)))))
-        n (- (count (get-in after [id :messages]))
-             (count (get-in before [id :messages])))]
-    (vec (take-last n (get-in after [id :messages])))))
+                                     (update-in m [id :entries]
+                                                (fn [es] (reduce add (vec es) entries)))))
+        n (- (count (get-in after [id :entries]))
+             (count (get-in before [id :entries])))]
+    (when (pos? n)
+      (ring! id {:kind :entries}))
+    (mapv :message (take-last n (get-in after [id :entries])))))
 
 (defn settle!
   "Fold the frames a run emitted into THREAD-ID's conversation, so the next run of it
-  continues from what just happened.
+  continues from what just happened. GROUP is the run id those frames belong to.
 
   THE RUN'S OWN FRAMES ARE THE CONVERSATION'S OTHER HALF, and they are folded from
   FRAMES for the same reason the record is: the kernel's events are the model's shape
@@ -256,12 +450,65 @@
   owes the next run is that it happens BEFORE the run is unregistered -- see the emitter
   in `harness.edge.http`, where the terminal frame is the moment both are done.
 
+  THE STATE COMES WITH IT, because the frame that ends a run is the only place the
+  conversation's own state is said: a terminal carrying an interrupt leaves it
+  `:parked`, any other terminal leaves it `:settled`, and a run that died without one
+  leaves it `:unfinished` -- which is exactly what the record would say, read back
+  (`harness.edge.replay/record-state`), and the two must agree because one of them is
+  what a client is shown.
+
   Called with the frames a run emitted, in order. Answers the messages that entered,
   same as `append!` -- a run that produced nothing (a refusal) answers []."
-  [thread-id frames]
-  (if (seq frames)
-    (append! thread-id (without-cards (frames/apply-frames frames)))
-    []))
+  [thread-id group frames]
+  (let [entered (if (seq frames)
+                  (append! thread-id group (frames/apply-frames frames))
+                  [])
+        tf      (last (filter frames/terminal? frames))
+        st      (if (seq frames)
+                  (if-some [t tf]
+                    (if (= "interrupt" (get-in t [:outcome :type])) :parked :settled)
+                    :unfinished)
+                  (:state (live-entry thread-id)))]
+    (when (seq frames)
+      ;; THE INTERRUPTS COME WITH THE STATE, because the client's approval card is
+      ;; drawn from them and a live session is what `sofar` answers from now: a parked
+      ;; conversation whose interrupts lived only in the record would come back from
+      ;; memory with nothing to approve.
+      (swap! registry update (str thread-id)
+             (fn [e] (-> e
+                         (assoc :state st)
+                         (assoc :interrupts (vec (get-in tf [:outcome :interrupts]))))))
+      (ring! (str thread-id) {:kind :entries}))
+    entered))
+
+(defn land!
+  "The line that carried GROUP's entries is on disk, at OFFSET -- the record offset the
+  writer answered with, counted from the start of the thread's file.
+
+  THIS IS WHERE AN ENTRY GETS ITS NUMBER (ticket 05's judgement 1). The number cannot be
+  predicted when the entry goes in: the offset depends on the file's length, which the
+  writer counts -- and re-counts, if the carry-back moved the file -- on its own thread.
+  So the number comes back from the writer rather than being guessed here, and an entry
+  whose line has not landed yet carries nil rather than a number that might be wrong.
+
+  BY GROUP, NOT BY POSITION: the entries of one action and the entries of one run arrive
+  under the same group name (`append!`), and a group that has already landed (or never
+  will, because the run died before its terminal) is left exactly as it is. Idempotent."
+  [thread-id group offset]
+  (let [id (str thread-id)
+        g  (str group)
+        n  (long offset)]
+    (swap! registry update-in [id :entries]
+           (fn [es]
+             (mapv (fn [e]
+                     (if (and (= g (:group e)) (nil? (:seq e)))
+                       (assoc e :seq n)
+                       e))
+                   (or es []))))
+    (ring! id {:kind :entries})
+    nil))
+
+;; -------------------------------------------------------------- what runs here
 
 (defn- refuse!
   "The one sentence this table says when it is full. A FUNCTION because it is thrown from
@@ -288,7 +535,12 @@
   behind: it never ran, and an entry for it would be this process holding a conversation
   on behalf of something that did not happen -- paid for with a rebuild as well. And it
   is asked AGAIN inside the swap, because the first one is only a look; the atomic step
-  is the one that decides."
+  is the one that decides.
+
+  THIS IS THE WHOLE REGISTRY OF 'A RUN IS GOING IN THIS PROCESS' (ticket 05 merged the
+  edge's second one into it -- `.scratch/sessions-live-on-the-server` ticket 01's
+  correction 3): `running?` reads it, the sidebar's row reads it, and the run edge's
+  door refuses a second run off it."
   [thread-id run-id]
   (let [id (str thread-id)]
     (when (and (<= max-running (count-running @registry))
@@ -303,6 +555,7 @@
           held?     (contains? (get-in before [id :runs] #{}) (str run-id))]
       (when (and (<= max-running (count-running before)) (not held?))
         (refuse! id run-id))
+      (ring! id {:kind :entries})
       nil)))
 
 (defn run-finished!
@@ -321,7 +574,143 @@
                    (update-in [id :runs] disj (str run-id))
                    (assoc-in [id :touched-at] (System/currentTimeMillis)))
                m)))
+    (ring! id {:kind :entries})
     nil))
+
+;; ------------------------------------------------------------------ the window
+
+(defn- arrivals-of
+  "ENTRIES grouped by the arrival they share -- one action's entries, or one run's -- in
+  order: [{:seq <n|nil> :entries [message ..]} ..].
+
+  THE GROUP IS THE LINE, AND THE LINE IS THE GROUP: entries that arrived together share
+  the record offset they were numbered with, and entries still in flight share the run
+  they came from. Which is the same partition a replay produces
+  (`harness.edge.replay/entries` numbers by line), so a page cut here and a page cut
+  after a refresh fall in the same places.
+
+  IT TAKES ENTRIES RATHER THAN A THREAD, because the same cut has to be made of a
+  RECORD: `page` answers a conversation this process is not holding by folding it
+  (`harness.edge.http/page-get`), and a second copy of this arithmetic for that path is
+  exactly how two windows start disagreeing about where a page begins."
+  [entries]
+  (->> entries
+       (partition-by (fn [e] (if (some? (:seq e))
+                               [:line (:seq e)]
+                               [:pending (:group e)])))
+       (mapv (fn [g] {:seq (:seq (first g))
+                      :entries (vec g)}))))
+
+(defn- page-from
+  "ARRIVALS from index I up to (not including) J, as a page:
+  {:entries .. :baseSeq .. :hasMore ..}.
+
+  `:entries` ARE THE NUMBERED ENTRIES THEMSELVES (`{:seq N :message M}`), not the bare
+  messages: a page is what a client ADDRESSES, and an entry without its record offset
+  cannot be told apart from one the client already holds. `:hasMore` is about I rather
+  than J -- what is in front of the page -- so a prepend page answers it the same way
+  the tail does."
+  [arrivals i j]
+  (let [taken   (subvec (vec arrivals) i j)
+        entries (as-sent (mapcat :entries taken))]
+    {:entries entries
+     ;; THE BASE IS A NUMBER THE READER CAN HOLD, and a group still in flight has none:
+     ;; the first LANDED offset in the page is the honest answer, and nil says the whole
+     ;; page is still in the writer's queue (a conversation younger than one page, where
+     ;; the reader's next move is to open the tail again anyway).
+     :baseSeq (or (:seq (first taken)) (some :seq taken))
+     :hasMore (pos? i)}))
+
+(defn tail-of
+  "The tail page of ENTRIES: the last `page-size` of them, cut back to the start of the
+  arrival they came in (so a page never begins mid-turn).
+
+  THE PAGE THE CLIENT OPENS WITH (ADR 0003 decision 2, ticket 05's `tail`). The cut is
+  what makes `before` safe: a page that started in the middle of a group would leave the
+  rest of that group unreachable -- `before` pages strictly in front of a group, so the
+  entries a page did not take must be a whole number of groups.
+
+  A GROUP LARGER THAN THE PAGE IS TAKEN WHOLE, which is why this can answer with more
+  than `page-size` entries: a turn is not divisible, and half a turn is not something a
+  reader can use.
+
+  THE ENTRIES IT ANSWERS WITH ARE NUMBERED (`{:seq N :message M}`) -- see `display` for
+  the same shape read whole."
+  [entries]
+  (let [as (arrivals-of entries)]
+    (loop [i (dec (count as)) n 0]
+      (if (neg? i)
+        (page-from as 0 (count as))
+        (let [n' (+ n (count (:entries (nth as i))))]
+          (if (<= page-size n')
+            (page-from as i (count as))
+            (recur (dec i) n')))))))
+
+(defn tail
+  "The tail page of THREAD-ID's LIVE conversation (`tail-of` of its own entries)."
+  [thread-id]
+  (tail-of (:entries (live-entry thread-id))))
+
+(defn since-of
+  "Every entry of ENTRIES that arrived AFTER record offset SEQ -- what a connected
+  replica is missing (the `append` direction of ADR 0003 decision 3).
+
+  UNLANDED ENTRIES COUNT AS AFTER ANYTHING: a group still in the writer's queue is the
+  newest thing there is, and a reader that had 'everything through N' has not been told
+  about it. A NIL CURSOR IS 'I HAVE NOTHING', so it answers the whole conversation --
+  the feed route never asks that way (no cursor means the tail page), but the reading
+  should be the obvious one for anyone holding this function. It may be handed the same entry twice across a reconnect (its line had
+  not landed when the reader asked, and its number came back afterwards) -- which is why
+  entries carry their ids and every reader of this dedupes by them."
+  [entries seq-n]
+  (let [as (arrivals-of entries)]
+    (as-sent (mapcat :entries
+                     (filter (fn [{:keys [seq]}]
+                               (or (nil? seq-n)
+                                   (nil? seq)
+                                   (< (long seq-n) (long seq))))
+                             as)))))
+
+(defn since
+  "THREAD-ID's LIVE entries after SEQ (`since-of` of its own entries)."
+  [thread-id seq-n]
+  (since-of (:entries (live-entry thread-id)) seq-n))
+
+(defn before-of
+  "The page of ENTRIES immediately before record offset SEQ: the `page-size` entries in
+  front of it, cut back to the start of their arrival (the `prepend` direction, ADR 0003
+  decision 4).
+
+  STRICTLY IN FRONT, AND THAT IS THE WHOLE CORRECTNESS ARGUMENT: a reader holds a window
+  whose oldest entry sits at the start of an arrival (every page this table hands out
+  does), so the entries it does not have are all in front of that arrival and none of
+  them is inside it. Paging 'up to and including' SEQ would hand back entries the reader
+  already holds; paging by count would lose the ones between.
+
+  SEQ THAT MATCHES NOTHING lands after the nearest arrival ahead of it -- offsets come
+  from the record, and a reader whose number is stale (a page it never received) still
+  gets a page that ends somewhere sensible instead of an error it cannot act on."
+  [entries seq-n]
+  (let [as  (arrivals-of entries)
+        end (or (first (keep-indexed (fn [i {:keys [seq]}]
+                                       (when (and (some? seq) (<= (long seq-n) (long seq)))
+                                         i))
+                                     as))
+                (count as))]
+    (loop [i (dec end) n 0]
+      (if (neg? i)
+        (page-from as 0 end)
+        (let [n' (+ n (count (:entries (nth as i))))]
+          (if (<= page-size n')
+            (page-from as i end)
+            (recur (dec i) n')))))))
+
+(defn before
+  "THREAD-ID's LIVE page in front of SEQ (`before-of` of its own entries)."
+  [thread-id seq-n]
+  (before-of (:entries (live-entry thread-id)) seq-n))
+
+;; ------------------------------------------------------------------- put away
 
 (defn drop!
   "Put THREAD-ID away now, whoever is running it, and hand its claim back. The explicit
@@ -330,12 +719,15 @@
 
   THE CLAIM GOES BACK WITH IT, in both directions of this file: a conversation this
   process has stopped serving is one another process may serve, whether it went away
-  because nobody asked for it for a while (`sweep!`) or because somebody said so."
+  because nobody asked for it for a while (`sweep!`) or because somebody said so. And
+  every connected window is told, because a reader that is not told keeps a window open
+  on a conversation this process no longer holds (ADR 0003 decision 6)."
   [thread-id]
   (let [id (str thread-id)
         [before _] (swap-vals! registry dissoc id)]
     (when-some [e (get before id)]
       (claims/release! id (:claim e)))
+    (ring! id {:kind :gone :reason :put-away})
     nil))
 
 (defn- evictable?
@@ -362,20 +754,28 @@
     ;; above and these releases births the session again, and that new birth's claim
     ;; must not be the one this deletes (`harness.cap.claims/release!`).
     (doseq [tid gone]
-      (claims/release! tid (:claim (get before tid))))
+      (claims/release! tid (:claim (get before tid)))
+      (ring! tid {:kind :gone :reason :idle}))
     gone))
 
 (defn live
-  "What is in the table right now: thread-id -> {:messages <count> :runs <set>
-  :touched-at <ms> :claim <token>}. FOR A READER -- a test, a report, the sidebar
-  later. It answers with a snapshot, and a snapshot is not a fact about a later
-  moment (see docs/rules/concurrency.md)."
+  "What is in the table right now: thread-id -> {:entries <count> :messages <count>
+  :runs <set> :touched-at <ms> :state <state> :claim <token>}. FOR A READER -- a test, a
+  report, the sidebar later. It answers with a snapshot, and a snapshot is not a fact
+  about a later moment (see docs/rules/concurrency.md).
+
+  `:entries` COUNTS WHAT THE CLIENT SEES (cards included) and `:messages` what a run
+  would be handed (`without-cards`), so the two differ exactly where the conversation
+  carries a card."
   []
   (into {}
-        (map (fn [[tid e]] [tid {:messages   (count (:messages e))
-                                 :runs       (:runs e)
-                                 :touched-at (:touched-at e)
-                                 :claim      (:claim e)}]))
+        (map (fn [[tid e]]
+               [tid {:entries    (count (:entries e))
+                     :messages   (count (without-cards (mapv :message (:entries e))))
+                     :runs       (:runs e)
+                     :state      (:state e)
+                     :touched-at (:touched-at e)
+                     :claim      (:claim e)}]))
         @registry))
 
 (defn running-count

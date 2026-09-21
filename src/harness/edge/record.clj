@@ -192,16 +192,28 @@
   FILE IS RESOLVED BY THE CALLER and carried with the line, because where a
   record belongs is a fact about the session's project (see the namespace note).
   The line is written in the order this was called, once per call -- there is no
-  batching, and nothing here decides to skip or merge one."
-  [thread-id ^File file line]
-  (let [tid (str thread-id)
-        q   (:queue (entry-for tid))]
-    ;; COUNT FIRST, THEN ENQUEUE: the consumer decrements on the way out, and an
-    ;; increment that lost that race would make the counter speak a negative.
-    (swap! pending inc)
-    (.add q {:file file :line line})
-    (.put dirty tid)
-    nil))
+  batching, and nothing here decides to skip or merge one.
+
+  LANDS, WHEN GIVEN, IS CALLED WITH THE OFFSET THIS LINE GOT -- once, on the
+  consumer thread, after the line is on disk. That is ticket 05's half of the
+  sequence-number contract: an entry of a conversation is numbered by the record
+  offset of the line it arrived in, and the offset is not knowable when the line
+  is handed over (the base is counted, and possibly RE-based by the prepare step,
+  on the consumer). So the number comes back from the writer rather than being
+  predicted by the caller -- a prediction would be a lie exactly when the
+  carry-back moved the file. A line that cannot be written calls nothing: it is
+  still at the head of the queue, and `retry!` will land it later."
+  ([thread-id ^File file line]
+   (append! thread-id file line nil))
+  ([thread-id ^File file line lands]
+   (let [tid (str thread-id)
+         q   (:queue (entry-for tid))]
+     ;; COUNT FIRST, THEN ENQUEUE: the consumer decrements on the way out, and an
+     ;; increment that lost that race would make the counter speak a negative.
+     (swap! pending inc)
+     (.add q {:file file :line line :lands lands})
+     (.put dirty tid)
+     nil)))
 
 (defn pending-count
   "How many of THREAD-ID's lines have been handed over and not yet written."
@@ -292,6 +304,7 @@
               ;; THE TRY IS INSIDE THE LOOP, NOT AROUND THE `recur`: a recur may
               ;; not cross a try, and reaching for the next line after a failure
               ;; is the one thing this loop must not do anyway.
+              landed (atom nil)
               outcome (try
                         (locking lock
                           (when-some [parent (.getParentFile f)] (.mkdirs parent))
@@ -305,6 +318,14 @@
                           (.poll q)
                           (swap! pending dec)
                           (swap! threads update-in [tid :written] (fnil inc 0))
+                          ;; THE OFFSET THIS LINE GOT: the file held base+written
+                          ;; lines before the write above, so the line that just
+                          ;; landed is the one at index base+written-1. Counted in
+                          ;; here, where the base and the write agree, and REPORTED
+                          ;; OUT THERE -- a callback is the caller's code, and the
+                          ;; lock is not the place for it.
+                          (let [e (get @threads tid)]
+                            (reset! landed (+ (long (:base e)) (dec (long (:written e))))))
                           (.notifyAll lock))
                         :written
                         (catch Throwable t
@@ -314,7 +335,9 @@
                           (locking lock (.notifyAll lock))
                           :blocked))]
           (if (= outcome :written)
-            (recur)
+            (do (when-some [lands (:lands item)]
+                  (try (lands @landed) (catch Throwable _ nil)))
+                (recur))
             outcome))
         :drained))))
 

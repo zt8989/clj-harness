@@ -5217,10 +5217,19 @@
                           (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-b")))
                     5000)
              "the run is under way: its call is recorded and held")
-         (let [resp (api-call :post "/api/threads/sofar-b/rebuild" "{}")]
-           (testing "the conversation cannot be handed over while it is still being written"
-             (is (= 400 (.statusCode resp)))
-             (is (str/includes? (str (:error (read-json resp))) "mid-run")))
+         (let [resp (api-call :post "/api/threads/sofar-b/rebuild" "{}")
+              body (read-json resp)]
+           (testing "the conversation is handed over FROM MEMORY, with the run left alone"
+             ;; TICKET 05 CHANGED THE ANSWER HERE, NOT THE REASON. It used to be a 400
+             ;; -- a rebuild refused a log that ends mid-run, and this log does -- but
+             ;; the session is right here, so the conversation can be handed over
+             ;; without touching the file at all. What the test is actually about is
+             ;; the line below it: the run's record must not be closed off from under
+             ;; it, because the run is still writing to it.
+             (is (= 200 (.statusCode resp)))
+             (is (seq (:messages body)) "the conversation so far")
+             (is (= ["user"] (mapv :role (:messages body)))
+                 "and it is what has SETTLED: the answer still being written is not a turn"))
            (testing "and NOTHING was appended to it"
              (is (not-any? #(= "session/closed-off" (:kind %)) (log-records "sofar-b")))
              (is (empty? (terminals "sofar-b")))))
@@ -5277,3 +5286,203 @@
          (record/retry! tid)
          (is (= 0 (:pending (record/flush! 10000))))
          (is (nil? (:record (read-json (sofar tid))))))))))
+
+;; -------------------------------------------------------- the window (ticket 05)
+
+(defn- fill-live-window!
+  "Put GROUPS arrivals of TEN entries each into THREAD-ID's live session, each landed at
+  its own record offset. A window is meant to be a slice of a conversation too long to
+  send, so the test has to HAVE one -- and building it through the same two calls the
+  edge uses (`append!` then `land!`) is what keeps the numbers the ones the server would
+  have minted."
+  [tid groups]
+  (dotimes [g groups]
+    (let [run (str "win-r" g)]
+      (sessions/append! tid run (mapv (fn [i] {:id (str run "-" i)
+                                               :role "user"
+                                               :content (str run "/" i)})
+                                      (range 10)))
+      (sessions/land! tid run (* 10 g)))))
+
+(defn- feed-open!
+  "Open THREAD-ID's feed on a socket of our own and answer [sock next-frame]:
+  `next-frame` reads the next `data:` frame, or nil at end of stream.
+
+  A RAW SOCKET RATHER THAN `api-call`, because this route does not end: what matters is
+  what arrives AFTER the response, and `ofString` would wait for a body that only closes
+  when the window does. The read timeout is the deadline -- a frame that never comes is a
+  stack rather than a hung suite."
+  ([tid] (feed-open! tid ""))
+  ([tid query]
+   (let [sock (java.net.Socket. "127.0.0.1" (int *port*))
+         _    (.setSoTimeout sock 5000)
+         out  (.getOutputStream sock)
+         in   (.getInputStream sock)
+         text (atom "")
+         head (atom true)
+         buf  (byte-array 4096)]
+     (.write out (.getBytes (str "GET /api/threads/" tid "/feed" query
+                                 " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                 "Accept: text/event-stream\r\n\r\n")
+                            StandardCharsets/UTF_8))
+     (.flush out)
+     (letfn [(more! []
+               (let [n (try (.read in buf)
+                            (catch java.net.SocketTimeoutException _ -1))]
+                 (when (pos? n)
+                   (swap! text str (String. buf 0 n StandardCharsets/UTF_8))
+                   true)))
+             (next-frame []
+               (loop []
+                 (let [t @text]
+                   (if @head
+                     ;; THE RESPONSE HEAD, ONCE: split on the CRLFCRLF that ends it, so
+                     ;; no header value can be mistaken for a frame.
+                     (let [i (.indexOf t "\r\n\r\n")]
+                       (if (neg? i)
+                         (when (more!) (recur))
+                         (do (reset! head false)
+                             (reset! text (subs t (+ i 4)))
+                             (recur))))
+                     (let [i (.indexOf t "\n\n")]
+                       (if (neg? i)
+                         (when (more!) (recur))
+                         (let [block (subs t 0 i)]
+                           (reset! text (subs t (+ i 2)))
+                           (when-some [[_ payload] (re-find #"(?m)^data: (.*)$" block)]
+                             (json/read-str payload :key-fn keyword)))))))))]
+       [sock next-frame]))))
+
+(deftest a-page-is-cut-at-the-arrivals-the-conversation-was-written-in
+  (with-server
+   "win-page"
+   (fn []
+     (fill-live-window! "win-page" 30)
+     (testing "no cursor is the tail page, and it is a slice rather than the whole thing"
+       (let [resp (api-call :get "/api/threads/win-page/page" nil)
+             body (read-json resp)]
+         (is (= 200 (.statusCode resp)))
+         (is (= 50 (count (:entries body))) "`page-size` entries")
+         (is (= 250 (:baseSeq body)) "starting at the oldest arrival's own number")
+         (is (true? (:hasMore body)) "and there is more in front of it")
+         (is (true? (:live body)) "answered from the session this process is holding")
+         (is (some? (:generation body)) "under the generation the window belongs to")
+         (is (= 290 (:cursor body)) "and the reader's next cursor is the newest number")
+         (is (= 0 (count (:entries (read-json (api-call :get
+                                                        "/api/threads/win-page/page?beforeSeq=0"
+                                                        nil)))))
+             "and a reader holding from the very first arrival has nothing in front of it")))
+     (testing "a cursor is the page IN FRONT of it -- no overlap, nothing skipped"
+       (let [body (read-json (api-call :get "/api/threads/win-page/page?beforeSeq=250" nil))]
+         (is (= "page" (:type body)))
+         (is (= 50 (count (:entries body))))
+         (is (= 200 (:baseSeq body)))
+         (is (empty? (filter #(<= 250 (long (:seq %))) (:entries body)))
+             "nothing the client already holds is handed back")))
+     (testing "a cursor that is not a record offset is refused BY NAME"
+       (let [resp (api-call :get "/api/threads/win-page/page?beforeSeq=abc" nil)]
+         (is (= 400 (.statusCode resp)))
+         (is (str/includes? (:error (read-json resp)) "beforeSeq"))))
+     (testing "and a conversation nobody here holds is READ, not refused"
+       ;; The record is still the way to page through a conversation another process is
+       ;; serving -- or one nobody is: a read does not need to hold anything.
+       (write-truncated-log! "win-cold" "r1")
+       (let [resp (api-call :get "/api/threads/win-cold/page" nil)
+             body (read-json resp)]
+         (is (= 200 (.statusCode resp)))
+         (is (false? (:live body)) "read from the record, and it says so")
+         (is (= ["u1"] (mapv (comp :id :message) (:entries body))))
+         (is (= [0] (mapv :seq (:entries body)))
+             "numbered by its own line in the record -- the same numbers a live session mints")))
+     (testing "a stem with neither a session nor a log is a 404"
+       (is (= 404 (.statusCode (api-call :get "/api/threads/win-nothing/page" nil))))))))
+
+(deftest a-feed-whose-window-is-over-is-refused-before-it-streams
+  (with-server
+   "win-stale"
+   (fn []
+     (fill-live-window! "win-stale" 30)
+     (let [generation (sessions/generation "win-stale")]
+       (testing "a cursor behind the tail page would make the delta the whole conversation"
+         (let [resp (api-call :get "/api/threads/win-stale/feed?since=3" nil)
+               body (read-json resp)]
+           (is (= 409 (.statusCode resp)))
+           (is (str/includes? (str (:error body)) "window"))
+           (is (= 250 (:baseSeq body)) "and it carries where the window starts now")
+           (is (= generation (:generation body)))))
+       (testing "a generation that is not this window's is the same refusal, from the other side"
+         (let [resp (api-call :get "/api/threads/win-stale/feed?since=290&generation=gone" nil)
+               body (read-json resp)]
+           (is (= 409 (.statusCode resp)))
+           (is (= generation (:generation body)))
+           (is (= 250 (:baseSeq body)))))
+       (testing "and a cursor the window still covers is let through to the stream"
+         ;; Proved by the stream itself in the case below; here what matters is that the
+         ;; door did NOT answer JSON -- the response is an event stream that stays open.
+         (let [[sock next-frame] (feed-open! "win-stale"
+                                             (str "?since=290&generation=" generation))]
+           (try
+             (let [frame (next-frame)]
+               (is (= "append" (:type frame))
+                   "the answer is a stream frame, not a 409 body")
+               (is (empty? (:entries frame)) "with nothing in it: the reader is current")
+               (is (= 290 (:cursor frame))))
+             (finally (.close sock)))))))))
+
+(deftest the-feed-opens-with-the-window-pushes-what-lands-and-ends-when-it-must
+  (with-server
+   "win-feed"
+   (fn []
+     ;; FOUR arrivals -- 40 entries, under `page-size` -- so the tail page is the WHOLE
+     ;; conversation and every number in the test is one it can predict. A conversation
+     ;; longer than a page is the case the page route above is about.
+     (fill-live-window! "win-feed" 4)
+     (let [generation (sessions/generation "win-feed")
+           [sock next-frame] (feed-open! "win-feed")]
+       (try
+         (let [window (next-frame)]
+           (testing "the first frame is the window"
+             (is (= "window" (:type window)))
+             (is (= 40 (count (:entries window))))
+             (is (= 0 (:baseSeq window)) "the first arrival's number")
+             (is (= 30 (:cursor window)) "the newest number the reader now holds")
+             (is (false? (:hasMore window)) "and there is nothing in front of it")
+             (is (= generation (:generation window))
+                 "under the generation the session is being served with")))
+         (testing "an entry that lands is pushed -- without anybody asking again"
+           (sessions/append! "win-feed" "win-r99" [{:id "win-r99-0" :role "user"
+                                                    :content "新的一条"}])
+           (sessions/land! "win-feed" "win-r99" 40)
+           ;; TWO TELLINGS ARE POSSIBLE AND BOTH ARE RIGHT: the append rings before the
+           ;; line lands (the entry has no number yet) and the landing rings again. A
+           ;; reader sees the entry once or twice, and the LAST telling carries its
+           ;; number -- which is exactly the re-delivery the entries' ids are for.
+           (let [told (loop [seen []]
+                        (let [frame (next-frame)
+                              entries (:entries frame)]
+                          (if (and (seq entries) (some? (:seq (first entries))))
+                            (conj seen frame)
+                            (if (nil? frame)
+                              seen
+                              (recur (conj seen frame))))))
+                 last-telling (last told)]
+             (is (seq told) "the landing was pushed")
+             (is (= "append" (:type last-telling)))
+             (is (= ["win-r99-0"] (mapv (comp :id :message) (:entries last-telling))))
+             (is (= [40] (mapv :seq (:entries last-telling))) "with its record number")
+             (is (= 40 (:cursor last-telling)) "and the reader's cursor has moved")))
+         (testing "putting the session away ends the stream, SAYING WHY"
+           (sessions/drop! "win-feed")
+           (let [frame (loop [f (next-frame)]
+                         (if (or (nil? f) (not= "append" (:type f)))
+                           f
+                           (recur (next-frame))))]
+             (is (= "end" (:type frame)))
+             (is (= "put-away" (:reason frame))
+                 "a stream that just stopped would leave a reader believing it holds everything")
+             (is (= generation (:generation frame))
+                 "...and it names the window that just ended, so a reader can tell it
+                  apart from whatever holds the conversation next")))
+         (testing "and then it is closed"
+           (is (nil? (next-frame))))
+         (finally (.close sock)))))))

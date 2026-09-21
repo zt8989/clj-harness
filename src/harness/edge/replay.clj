@@ -272,9 +272,78 @@
                         entries)]
     out))
 
+(defn entries
+  "Parsed log records -> the conversation's entries IN ORDER, each numbered:
+  [{:seq N :message M} ..].
+
+  THE NUMBER IS THE RECORD OFFSET OF THE LINE THE ENTRY ARRIVED IN -- 0 for a
+  thread's first line, one more for each line after it. ADR 0003 decision 1 asks for
+  a monotonic number per entry and decision 9 asks that it be REPLAYABLE; the line
+  ordinal is both. It is not a field of the record (the format is frozen) and not an
+  in-memory counter (a counter is only replayable if it is derived from the record --
+  which the ordinal already is).
+
+  WHICH LINE AN ENTRY ARRIVED IN IS THIS FOLD'S READING, and it is the same reading
+  the edge mints live (`harness.edge.sessions/land!` reads the writer's answer), so
+  the numbers a live session hands out and the numbers a replay reproduces agree:
+
+    - an entry an `input` line ADDED is numbered by THAT line -- the action's own
+      line, the first line of its run;
+    - an entry a run's FRAMES produced is numbered by the run's TERMINAL line, which
+      is the line the edge attaches its landing callback to;
+    - a run that never reached a terminal (a log that stops mid-run, read leniently)
+      numbers its entries by the LAST line of the run, which is where the record
+      stops -- a partial answer is allowed to move once the run ends.
+
+  ENTRIES NUMBERED ALIKE ARRIVED TOGETHER: one action's entries, or one run's. That is
+  what makes a page cut at a group boundary unambiguously right, and it is why the
+  window carries numbers rather than a slice of the message list (ticket 05's
+  `tail` / `since` / `before`, and ticket 06's replica).
+
+  THE FOLD ITSELF IS `fold-frames`' AND UNCHANGED -- the messages this returns are
+  exactly the ones the readers below have always answered; numbering them is the only
+  addition. A message still enters once (`append-new` drops a repeat by id, which is
+  how an old input line that carried the whole conversation reads the same as a new
+  one that carried only what it added)."
+  [records]
+  (let [add   (fn [acc seq-n msgs]
+                (update acc :entries into (map (fn [m] {:seq seq-n :message m}) msgs)))
+        folded (fn [acc] (mapv :message (:entries acc)))
+        flush (fn [acc fallback]
+                (let [new (frames/apply-frames (:pending acc))
+                      at  (or (:after acc) fallback)]
+                  (-> (if (seq new) (add acc at new) acc)
+                      (assoc :pending [] :after nil))))]
+    (:entries
+     (flush
+      (reduce (fn [acc [i {:keys [kind payload]}]]
+                (case kind
+                  "input" ;; `append-new` answers BASE AND THE NEW ONES TOGETHER (the
+                          ;; fold replaces its message list with it); what ENTERED is the
+                          ;; tail of that, and a fold that appended the whole answer
+                          ;; would put every entry in twice.
+                          (let [acc  (flush acc (max 0 (dec i)))
+                                base (folded acc)
+                                all  (vec (append-new base (or (:added payload)
+                                                               (:messages payload))))]
+                            (add acc i (subvec all (count base))))
+                  "event" (let [acc (update acc :pending conj payload)]
+                            ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the
+                            ;; frames after a terminal belong to a line this reader
+                            ;; would otherwise number short. (A run has one terminal;
+                            ;; `frames/terminal?` is the same rule `runs` pairs by.)
+                            (if (frames/terminal? payload)
+                              (assoc acc :after i)
+                              acc))
+                  acc))
+              {:entries [] :pending [] :after nil}
+              (map-indexed vector records))
+      (max 0 (dec (count records)))))))
+
 (defn- fold-frames
   "Parsed log records -> the AG-UI message list they describe, WITHOUT judging
-  whether the log is finished.
+  whether the log is finished. THE MESSAGES OF `entries`, which is where the fold
+  and its numbering live; this is the reader every message-only caller wants.
 
   THE RECORD IS READ IN FILE ORDER, and the order is the conversation's: an input line
   says what that action ADDED, and the frames that follow are what came of it, folded in
@@ -296,25 +365,12 @@
   being written, the second is not -- and a reader that had to fold in order to
   refuse would answer the wrong one first."
   [records]
-  (let [flushed (fn [{:keys [messages pending]}]
-                  {:messages (into messages (frames/apply-frames pending))
-                   :pending  []})]
-    ;; THE LAST RUN IS FLUSHED TOO, and that is not a formality: a log ENDS with the
-    ;; frames of its last run, so the pending group is non-empty at the end of every
-    ;; complete record. A fold that only flushed on the next input line would answer
-    ;; every conversation with everything except the answer that was just given.
-    (:messages
-     (flushed
-      (reduce (fn [acc {:keys [kind payload]}]
-                (case kind
-                  "input" (-> acc
-                              flushed
-                              (update :messages append-new (or (:added payload)
-                                                               (:messages payload))))
-                  "event" (update acc :pending conj payload)
-                  acc))
-              {:messages [] :pending []}
-              records)))))
+  ;; THE LAST RUN IS FLUSHED TOO, and that is not a formality: a log ENDS with the
+  ;; frames of its last run, so the pending group is non-empty at the end of every
+  ;; complete record. A fold that only flushed on the next input line would answer
+  ;; every conversation with everything except the answer that was just given --
+  ;; `entries` flushes it (see there).
+  (mapv :message (entries records)))
 
 (defn records->messages
   "Parsed log records -> the AG-UI message list they describe, REFUSING a log whose
@@ -376,7 +432,13 @@
   started, reasoning and tool calls included) plus whatever context the log carries at
   its start, which since ticket 03 is also an ordinary message in that list. The client
   takes both into its next ordinary RunAgentInput -- the server holds no rebuilt state,
-  exactly as it holds no conversation state ever."
+  exactly as it holds no conversation state ever.
+
+  IT ALSO ANSWERS THE ENTRIES, NUMBERED (`entries` below): the same conversation with
+  the record offset each entry arrived at. A caller that wants the window -- a client
+  that refreshed, a page being cut -- needs those numbers, and they are the same numbers
+  the live edge mints (`harness.edge.sessions/land!`), so the two readings of one record
+  cannot disagree."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
         input   (first-input records)]
@@ -389,6 +451,7 @@
     ;; dropped it would silently change what those conversations continue from. An
     ;; answer of [] is the honest answer for a log that says nothing about context.
     {:messages (records->messages records)
+     :entries  (entries records)
      :context  (vec (:context input))}))
 
 (defn- record-state
@@ -439,7 +502,12 @@
   NOTHING HERE WRITES, and that is a requirement rather than a happy accident: this is
   what a client POLLS while a run is being written, and a read path that repaired the
   file it was reading would make every poll a write (see the flag: a run this process
-  is answering is not a truncated log)."
+  is answering is not a truncated log).
+
+  `:entries` IS THE SAME CONVERSATION WITH ITS NUMBERS, and it is what lets a session be
+  born already able to answer a window: the session keeps the entries, and the numbers
+  are the record's own line offsets rather than anything this process remembers. The
+  fold is the same one `:messages` comes from (`entries`), so the two cannot drift."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
         input   (first-input records)
@@ -448,6 +516,7 @@
     {:messages   (if open?
                    (messages-so-far records)
                    (records->messages records))
+     :entries    (entries records)
      :context    (:context input)
      :state      (:state state)
      :open-runs  (:open-runs state)

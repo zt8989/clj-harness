@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.claims :as claims]
             [harness.edge.ag-ui :as ag]
+            [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
@@ -274,3 +275,186 @@
       (is (fn? stop))
       (is (fn? stop2) "a second start answers a stop fn rather than a second clock")
       (finally (stop) (stop2)))))
+
+;; -------------------------------------------------------- the window (ticket 05)
+
+(deftest an-entry-is-numbered-by-the-record-line-it-arrived-in
+  ;; ADR 0003 DECISION 1 AND 9, AS ONE ASSERTION: the number is monotonic per entry, and
+  ;; it is REPLAYABLE -- derived from the record rather than remembered. So the test does
+  ;; not compare against numbers it chose; it reads the FILE's lines and says which line
+  ;; each entry came from.
+  (let [f       (write-log! "t-seq")
+        entries (sessions/display "t-seq")
+        lines   (str/split-lines (slurp f :encoding "UTF-8"))]
+    (testing "nothing is unnumbered in a session built from a finished record"
+      (is (every? some? (map :seq entries))))
+    (testing "the action's own entry is numbered by the input line it arrived in"
+      (is (= 0 (:seq (first entries))))
+      (is (= seed (:message (first entries)))))
+    (testing "and a run's entries by the line the run ENDED on -- its terminal frame"
+      (is (= (dec (count lines)) (:seq (last entries)))
+          "the record's last line is the run's terminal, and the answer is numbered there")
+      (is (= 1 (count (distinct (map :seq (rest entries)))))
+          "everything the run produced shares that one number: it arrived together"))
+    (testing "and the numbers agree with the fold a replay would do"
+      ;; The same conversation, read the OTHER way: `harness.edge.replay/entries` is the
+      ;; call the session itself was built from, so this is really 'the session did not
+      ;; mangle what it was handed' -- which is the whole of the replayability claim.
+      (is (= (mapv :seq entries)
+             (mapv :seq (replay/entries (replay/lines->records (replay/read-lines f)))))))))
+
+(deftest a-number-arrives-when-the-line-that-carries-it-lands
+  (let [tid "t-land"]
+    (sessions/append! tid "r9" [{:id "u1" :role "user" :content "hi"}])
+    (testing "an entry still in the writer's queue carries NO number, not a guess"
+      (is (= [nil] (mapv :seq (sessions/display tid)))))
+    (testing "and the writer's answer is what numbers it"
+      (sessions/land! tid "r9" 7)
+      (is (= [7] (mapv :seq (sessions/display tid)))))
+    (testing "a second landing cannot renumber an entry that already has one"
+      ;; The retry path: the same line reported twice, or a later line's number arriving
+      ;; for a group that had already landed. Numbers only ever get FILLED IN.
+      (sessions/land! tid "r9" 99)
+      (is (= [7] (mapv :seq (sessions/display tid)))))
+    (testing "a landing for a group this session never had changes nothing"
+      (sessions/land! tid "r-other" 3)
+      (is (= [7] (mapv :seq (sessions/display tid)))))
+    (testing "and one action's entries enter once, however many times it is sent"
+      ;; The identity is the message's own id -- the retry, the double-submit, and the
+      ;; record's own dedupe all read the same name.
+      (let [again (sessions/append! tid "r9" [{:id "u1" :role "user" :content "hi"}])]
+        (is (= [] again) "nothing entered")
+        (is (= 1 (count (sessions/display tid))))))))
+
+(defn- fill-window!
+  "Put GROUPS arrivals of TEN entries each into THREAD-ID, each landed at its own line
+  offset -- 30 arrivals, 300 entries. A window of `page-size` is meant to be a slice of
+  a conversation that is too long to send, so the test has to HAVE one."
+  [tid groups]
+  (dotimes [g groups]
+    (let [run (str "r" g)]
+      (sessions/append! tid run (mapv (fn [i] {:id (str run "-" i)
+                                               :role "user"
+                                               :content (str run "/" i)})
+                                      (range 10)))
+      (sessions/land! tid run (* 10 g)))))
+
+(deftest the-tail-is-a-page-and-never-begins-mid-arrival
+  (let [tid "t-window"]
+    (fill-window! tid 30)
+    (let [page (sessions/tail tid)]
+      (is (= 50 (count (:entries page))) "a page is `page-size` entries")
+      (is (true? (:hasMore page)))
+      (is (= 250 (:baseSeq page))
+          "the page starts at the oldest entry it holds, which is an ARRIVAL's first")
+      (is (= (vec (for [g (range 25 30) i (range 10)] (str "r" g "/" i)))
+             (mapv (comp :content :message) (:entries page)))
+          "and it begins at an arrival boundary rather than ten entries into one"))))
+
+(deftest loading-earlier-neither-overlaps-nor-skips
+  (let [tid   "t-before"
+        _     (fill-window! tid 30)
+        tail  (sessions/tail tid)
+        front (sessions/before tid (:baseSeq tail))]
+    (testing "the page in front of the window ends exactly where the window begins"
+      (is (= 50 (count (:entries front))))
+      (is (= 200 (:baseSeq front)))
+      (is (true? (:hasMore front)))
+      (is (= (vec (for [g (range 20 25) i (range 10)] (str "r" g "/" i)))
+             (mapv (comp :content :message) (:entries front)))
+          "the twenty-fifth arrival is not in it: the client already has that one")
+      (is (empty? (filter (set (map (comp :id :message) (:entries tail)))
+                          (map (comp :id :message) (:entries front))))
+          "NO OVERLAP: nothing is handed back twice")
+      (is (= 100 (count (distinct (map (comp :id :message)
+                                       (concat (:entries front) (:entries tail))))))
+          "and nothing is lost either: the two pages are 100 distinct entries")
+      (is (let [next-page (sessions/before tid (:baseSeq front))]
+            (and (= 50 (count (:entries next-page)))
+                 (= 150 (:baseSeq next-page))))
+          "the page in front of THAT one follows the same rule, all the way up"))
+    (testing "the first page has no more in front of it"
+      (let [first-page (sessions/before tid 10)]
+        (is (= 10 (count (:entries first-page))) "one arrival's worth")
+        (is (false? (:hasMore first-page)))
+        (is (= 0 (:baseSeq first-page)))))))
+
+(deftest since-answers-only-what-the-reader-is-missing
+  (let [tid "t-since"
+        _   (fill-window! tid 30)]
+    (is (= 50 (count (sessions/since tid 249)))
+        "everything after the twenty-fifth arrival's number: the tail page's own entries")
+    (is (= 10 (count (sessions/since tid 289)))
+        "the reader holds through 289: the arrival numbered 290 is missing")
+    (is (= [] (sessions/since tid 290)) "a reader that holds 290 is current")
+    (is (= [] (sessions/since tid 299)) "the reader is current")
+    (is (= 300 (count (sessions/since tid nil)))
+        "a reader that holds nothing is missing everything")
+    (testing "an entry that has not landed yet counts as after anything"
+      ;; The newest arrival is in the writer's queue: it has no number yet, and a reader
+      ;; that was current a moment ago has not been told about it. It may be handed the
+      ;; same entry twice across a reconnect -- which is why every entry carries its id.
+      (sessions/append! tid "r30" [{:id "r30-0" :role "user" :content "r30/0"}])
+      (let [delta (sessions/since tid 299)]
+        (is (= ["r30-0"] (mapv (comp :id :message) delta)))
+        (is (nil? (:seq (first delta))) "and it is handed over without a number")))))
+
+(deftest a-watcher-is-rung-when-there-is-something-to-read
+  ;; THE DOORBELL (`watch!`): a fn, no cursor, no identity -- rung by the writer's
+  ;; LANDING rather than by the entry going in, because what a window addresses is the
+  ;; record's numbering and an unlanded entry cannot be addressed yet.
+  (let [tid    "t-bell"
+        rings  (atom [])
+        f      (fn [id event] (swap! rings conj [id event]))]
+    (sessions/watch! tid f)
+    (try
+      (sessions/append! tid "r1" [{:id "u1" :role "user" :content "hi"}])
+      (sessions/land! tid "r1" 0)
+      (sessions/append! tid "r2" [{:id "u2" :role "user" :content "again"}])
+      (sessions/run-started! tid "r2")
+      (sessions/run-finished! tid "r2")
+      (sessions/drop! tid)
+      (is (= [:entries :entries :entries :entries :entries :gone]
+             (mapv (comp :kind second) @rings)))
+      (is (= tid (ffirst @rings)))
+      (is (= :put-away (:reason (second (last @rings))))
+          "the last ring says WHY the window is over -- a reader is told, not dropped")
+      (finally (sessions/unwatch! tid f)))
+    (testing "and an unwatched id is not rung again"
+      (reset! rings [])
+      (sessions/append! tid "r3" [{:id "u3" :role "user" :content "quiet"}])
+      (is (= [] @rings)))))
+
+(deftest the-generation-is-the-token-of-the-claim-that-holds-the-session
+  ;; A window is only meaningful while the SAME claim serves the conversation (ADR 0003
+  ;; decision 6), so the generation IS the claim's token rather than a second thing kept
+  ;; in step with it.
+  (sessions/touch! "t-gen")
+  (let [first-generation (sessions/generation "t-gen")]
+    (is (some? first-generation))
+    (is (= first-generation (:claim (sessions/live-entry "t-gen"))))
+    (sessions/drop! "t-gen")
+    (is (nil? (sessions/generation "t-gen")) "nobody holds it, so there is no window")
+    (sessions/touch! "t-gen")
+    (is (not= first-generation (sessions/generation "t-gen"))
+        "a new hold is a new window, and every number read under the old one is stale")))
+
+(deftest settling-writes-down-what-the-frame-that-ended-the-run-said
+  (let [tid "t-settle-state"]
+    (sessions/append! tid "r1" [seed])
+    (sessions/settle! tid "r1" ((ag/outbound tid "r1") (ev/run-end)))
+    (is (= :settled (sessions/state tid)))
+    (testing "an interrupted run leaves it parked, and keeps the card's own bytes"
+      ;; The terminal is built here the way the run path builds it (http-test reads the
+      ;; same shape off a real run: `:outcome {:type \"interrupt\" :interrupts [..]}`);
+      ;; what is under test is what `settle!` DOES with it, not the shape.
+      (let [terminal {:type "RUN_FINISHED"
+                      :outcome {:type "interrupt"
+                                :interrupts [{:id "i1" :toolCallId "c1"
+                                              :reason "may I?"}]}}]
+        (sessions/append! tid "r2" [{:id "u2" :role "user" :content "second"}])
+        (sessions/settle! tid "r2" [terminal])
+        (is (= :parked (sessions/state tid)))
+        (is (= [{:id "i1" :toolCallId "c1" :reason "may I?"}]
+               (:interrupts (sessions/live-entry tid)))
+            "the card survives a refresh because it is part of the conversation's state")))))
