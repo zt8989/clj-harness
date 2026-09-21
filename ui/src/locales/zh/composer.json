@@ -31,5 +31,8 @@
   },
   "attach": {
     "label": "添加附件"
+  },
+  "run": {
+    "stillAnswered": "这一场还在跑；等它结束再发。"
   }
 }

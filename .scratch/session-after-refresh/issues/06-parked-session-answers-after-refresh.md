@@ -83,6 +83,13 @@ fromThreadMessageLike(message, message.id ?? crypto.randomUUID(), {
 **三、不该由本票做的**：不给悬置新加一套界面。卡片、门、`decide` 那条路都已经在
 `ui/src/components/approval-gate.tsx` 里，本票只让**刷新回来的那一份状态**重新满足它们的入口条件。
 
+**四、本票还要接上票 04 剩下的那一半**（2026-09-21 补记）。票 04 落地的是**「在跑」**那一半
+（服务端窗口说 `running` ⇒ composer 不发 + 一句话；见 spec 的落地一节），**「悬置」那一半正等着本票**：
+`lib/session-status.ts` 的 `statusOf` 今天**故意**不从服务端取 `parked`——卡片回不来的时候，为它关上的门
+是一扇**出不去**的门。所以本票让卡片回得来之后，要顺手把那一格也接上服务端那个词，并把
+`ui/test/suites/running.tsx` 里钉住这个决定的那条用例改成**新的事实**（它现在断言的是
+「服务端的 `parked` 不算在跑」，那正是要改掉的那一条）。
+
 ## 验收
 
 - [ ] 后端用例：`rebuild` 一条以 `RUN_FINISHED(outcome.interrupts)` 结束的日志 ⇒ 返回的消息里那条助手消息

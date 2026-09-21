@@ -58,6 +58,43 @@ export type SessionStatus = {
 /// The resting answer, for a session no host has reported on yet.
 export const IDLE: SessionStatus = { running: false, parked: false };
 
+/// ONE SESSION'S ANSWER, FROM THE TWO READINGS THE PAGE HAS.
+///
+///   `local`  -- what THIS page's runtime is doing (`thread.isRunning`, and whether the
+///               run has stopped to ask a human). It is the only reading that knows about
+///               a run this page just sent, and the only one that knows the composer's
+///               own interrupt gate.
+///   `server` -- the SERVER'S OWN WORD for the conversation, as the window's `state`
+///               reports it (`running` / `parked` / `settled` / `unfinished`), or null
+///               when this host holds no window at all. It is the only reading that can
+///               say a run started BEFORE this page existed is still going: a run belongs
+///               to the process, so a page that reloaded into one is watching it, not
+///               running it.
+///
+/// THE UNION, NOT A REPLACEMENT, for the reason `sidebar.tsx` gives about the same pair:
+/// neither reading is a superset of the other, so either one being true means a run is in
+/// flight. This is the answer the sidebar draws and the one ticket 04 of
+/// `.scratch/session-after-refresh` is about -- before it, the composer offered Send for a
+/// conversation the server was still answering, and the only thing that came back was the
+/// run edge's 409.
+///
+/// THE TWO READINGS ARE KEPT APART ELSEWHERE, and this function is not the place they are
+/// merged for the HOST as well: `SessionHost` bookkeeps its own `ownRun` from the LOCAL
+/// reading alone, because `isOwnRun` decides whether the window feed may import into this
+/// runtime -- and a conversation this page is only watching is exactly what the feed is
+/// for. Merging here and reusing that value there would suppress the imports that keep a
+/// watched turn growing.
+///
+/// `parked` IS NOT TAKEN FROM THE SERVER YET, deliberately: a parked run's own card comes
+/// back through ticket 06 (`isParkedInterrupt`), and until it does, closing the composer on
+/// a server-side `parked` would be a door with no way through it. The server's `parked` is
+/// therefore read where it is drawn -- the run has ENDED, so it is not a run in flight --
+/// and the ticket records the half that is still open.
+export const statusOf = (local: SessionStatus, server: string | null): SessionStatus => ({
+  running: local.running || server === "running",
+  parked: local.parked,
+});
+
 /// Whether this session must not be filed away or have its project removed: it
 /// has work that is not finished with the log.
 export const blocked = (status: SessionStatus): boolean =>

@@ -35,6 +35,7 @@ import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
 import { restoreSuite } from "./suites/restore";
+import { runningSuite } from "./suites/running";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
@@ -53,8 +54,9 @@ import { windowSuite } from "./suites/window";
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
 /// list is a concatenation rather than a choice. `ask` is the third side: it added
-/// `elicitationCardSuite` beside the `elicitation` suite it belongs to.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
+/// `elicitationCardSuite` beside the `elicitation` suite it belongs to, and
+/// `session-after-refresh` is the fourth (`runningSuite`, after `restoreSuite`).
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -194,14 +196,20 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// stayed green while the app drew the person's AGENTS.md as a bubble they had typed. The
 /// fifth pins the test that stops it, over the PARTS rather than the role, because the role
 /// is the one thing the two kinds of message share.
-/// 86 -> 88: `ask`, the one tool whose purpose is to stop. One case through the whole
+/// 86 -> 88: the `running` suite's two, which are ticket 04 of `.scratch/session-after-refresh`
+/// -- a conversation the SERVER is still answering must not offer Send. One is the union as
+/// arithmetic (`statusOf`: this page's own run OR the window's word, and which words do NOT
+/// mean in flight); the other RENDERS the sentence in both languages. Two readings of one
+/// session used to disagree and the only reply was the run edge's 409 -- found in a browser,
+/// because nothing in this run could see either half.
+/// 88 -> 90: `ask`, the one tool whose purpose is to stop. One case through the whole
 /// loop on the `elicitation` suite -- a BUILT-IN's question parks the run, the endpoint
 /// answers who is asking, and the answers come back as the call's result -- and one new
 /// suite beside it (`elicitation-card`) whose single case RENDERS the card's title in
 /// both languages: three askers, three distinct lines, and none of them inventing a
 /// server. The second is the sidebar lesson applied to the other card that names
 /// somebody: a title that draws nothing is invisible to every check about keys.
-/// 88 -> 92: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
+/// 90 -> 94: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
 /// candidates driven verbatim with no own-words box assumed, the own-words answer that
 /// stands where the pick would have, and a list of answers that is never a joined
 /// string -- and one on `elicitation-card` that RENDERS a field for each kind and counts
@@ -209,7 +217,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// own-words box only where the schema asked for one. The card's count is the claim, not
 /// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
 /// looks perfectly fine doing it.
-const EXPECTED_CASES = 92;
+const EXPECTED_CASES = 94;
 
 let total = 0;
 for (const suite of SUITES) {

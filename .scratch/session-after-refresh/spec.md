@@ -140,7 +140,8 @@ park 以 `RUN_FINISHED` 带 `outcome.interrupts` 结束（`ag_ui.clj:144-150`）
 - **01** 活着的 run 是服务端说得出的一个事实（无阻塞）
 - **02** 还在被写的记录：读得回来，且不被结掉（阻塞：01）
 - **03** 刷新回到刚才那一场（阻塞：02）
-- **04** 那一场没完的时候，输入框不装作能发（阻塞：01、03）
+- **04** 那一场没完的时候，输入框不装作能发（阻塞：01、03）——**「还在跑」那一半已落地
+  （2026-09-21）**；「悬置」那一半等票 06，见文末。
 - **05** 服务端拒绝同一会话的第二条 run（阻塞：01）——**已落地（2026-09-21）**，见文末。
 - **06** parked 的那一场，刷新回来还能答（阻塞：03）
 - **07** 服务端：一条 run 停得下来（取消到得了循环，terminal 诚实）（阻塞：01）
@@ -178,3 +179,54 @@ run、说出规矩（一次一条）、并告诉调用者怎么回来。`api-res
 
 **后端全量**：`1005 tests / 12196 assertions / 0 failures / 0 errors`（本分支，含新用例）。基线 1003 /
 12180 是这两条用例落地之前的数。
+
+## 落地（2026-09-21）：票 04 的「还在跑」那一半
+
+**为什么是「一半」**：票面要的是两种没完都不装作能发——**在跑**的与**悬置**的。落的这一半是前者：
+刷新落进一场**服务端正在回答**的会话，composer 不再假装能发。悬置那一半**故意没落**：悬置的判据在
+服务端说得出来（窗口的 `state` 就是 `parked`），但那一场刷新回来时**卡片还回不来**（票 06），
+门一旦为它关上就是**一扇出不去的门**——所以在 `lib/session-status.ts` 的 `statusOf` 里
+`parked` 仍是**本页自己**的读数，服务端的 `parked` 一个字都不取（有一条用例把这个决定钉住）。
+
+**现场（对着真浏览器核过，不是推理）**：脚本替身第一轮调 `bash` 跑 `sleep 45`，等**服务端自己说
+`running`**（`GET /api/threads/<stem>/page` 的 `state`）之后刷新。刷新之后那一刻：窗口把那一轮画成
+**没完**（不折叠）、侧边栏那一行**在转**、而 composer 的按钮**亮着**——按下去，服务端回
+**409**：`this session already has a run in this process … (threadId …, the run going is …)`。
+这就是主人报的那两半：「展示不再运行」+「点击发送提示正在运行中」。**这一步的量法本身也是一条教训，
+写进走查脚本的头注释**：run 边写下 `input` 之后要花**约两秒**装配系统提示词才登记 run，所以「刷新完
+再点发送」如果落在那两秒里，门会答「没有在跑」，然后**真的起第二条 run**——第一版走查就是这么量出一条
+服务端允许的并发写，只好改成等 `state` 说 `running`。
+
+**落了什么，四处**：
+
+- **事实的来源**：`App` 的 `SessionHost` 把窗口自己那个 `state` 收成 `runState`
+  （`useWindowFeed` 新增 `onState`，在**读到的尾页**与**每一次 commit** 两处上报），它既是
+  `isSendDisabled` 的第二个理由，也是那句话与侧边栏那一行的依据。窗口的 `state` 是票 01 那个事实
+  （`live-state`：本进程有没有这条 run 在跑），所以这一条**没有新的服务端形状**。
+- **门**：`isSendDisabled: gateOpen || runState === "running"`。**只认 `running` 这一个词**：
+  `parked`/`unfinished` 都不是「在跑」，而 `settled` 之后它自己会回到 false（feed 为「只变状态、没有
+  新条目」专门发的那一帧，`stream-feed!` 里写着为什么）——「跑完之后接着发」是走查的一条验收。
+- **那句话**：新文件 `components/session-run-notice.tsx`（`data-slot="session-running"`，
+  文案在 `locales/{en,zh}/composer.json` 的 `run.stillAnswered`）。**单开一个模块**是因为它要在 UI
+  套件里渲染出来读回去，而 `composer-chrome.tsx` 进不了那个运行（经 `lib/attachments.ts` 摸到
+  `lib/i18n.ts`，后者加载时碰 `document`）。它是 context 而不是 prop：composer 在抄来的 `<Thread/>`
+  里面，host 只能给 `children`，给不了 prop。
+- **两个读数在哪儿合、在哪儿不合**：`lib/session-status.ts` 新增 `statusOf(本页自己的, 服务端那个词)`
+  ——**并**，上报给**页面**的那一份（侧边栏那一行据此点灯：列表是快照，可能拍在 run 登记之前，
+  实测确实拍到了「没在跑」）。而 `onOwnRun` 上报的仍是**本页自己的**读数：`isOwnRun` 决定 feed 的帧
+  能不能 import 进这个 runtime，把服务端的词并进去就等于**让刷新回来的那一轮冻住**——正好把这个特征
+  要的东西弄没。这一条写在 `app.tsx` 的类型注释里，也在 `docs/architecture/client.md` 的审批门一节。
+
+**验证**：
+
+| 层 | 做了什么 | 结果 |
+|---|---|---|
+| 界面 | `node scripts/dev.mjs --scripted evidence/04-go.json --ui-port 5319` + `walkthrough.mjs` | 修前 **2 RED**（按钮亮着、没有那句话），修后 **ALL GREEN**，含「settled 之后又能发，且发进同一场（200）」 |
+| 客户端用例 | `cd ui && npm test` | **87 通过 / 1 失败**，失败的是 `skills > asking-for-the-list-changes-nothing`，**基线就有**（改动前两次都红，同一处、同一条）；新增 `running` 两条都绿（`EXPECTED_CASES` 86 → 88） |
+| 类型与构建 | `cd ui && npm run typecheck`、`npm run build` | 都过 |
+| 后端 | `clojure -M:test -m harness.test-runner` | 本票未动后端；失败用例名与基线一致（见提交信息） |
+
+**没做的事，说清楚**：走查里那句 `bash · sleep 45 && echo slept待审批`——一条**正在跑**的工具调用在
+记录折回来之后被画成「待审批」。那不是本票的范围（它与票 06 的卡片、以及工具行状态的重建是一族），
+本票没有碰它，也没有假装它不存在。
+
