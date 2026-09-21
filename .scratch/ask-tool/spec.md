@@ -78,11 +78,12 @@
 **2026-09-19 落地，2026-09-21 收口。** 分支 `workbuddy/main-e0b4cd9a`，从 `main` @ `a3847ea` 切出、
 当日 rebase 到 `main` @ `c5e8940`，三张票按 01 → 02 → 03 走完。
 
-**收口那一轮**（`main` 已走到 `3dbbc13`，中间 **64 个提交 / 290 个文件**）把 `main` 并进这条线：
-四处冲突按 main 的新词汇解掉，测试的 wire 形状从退役的 `messages` 迁到**动作**（`append`），
-文档的名册补上 `ask`。落点在**工作区内的 `.worktrees/ask-tool`**（分支 `ask-tool`，从
-`workbuddy/main-e0b4cd9a` 切出）：合并提交 + 逐条账见下面「收口」一节，
-真浏览器重走的证据在 `evidence/README-merge-2026-09-21.md`。
+**2026-09-21 收口**（`main` 已走到 `3dbbc13`，中间 **64 个提交 / 290 个文件**；收口途中 `main`
+又往前走了一票，`852fc88`，一并并进来）把 `main` 并进这条线：文本冲突按 main 的新词汇解掉，
+测试的 wire 形状从退役的 `messages` 迁到**动作**（`append`），文档的名册补上 `ask`。落点在
+**工作区内的 `.worktrees/ask-tool`**（分支 `ask-tool`，从 `workbuddy/main-e0b4cd9a` 切出）：
+两个合并提交 + 逐条账见下面「收口」一节，真浏览器重走的证据在
+`evidence/README-merge-2026-09-21.md`。
 
 ## 基线
 
@@ -117,9 +118,10 @@
 - 宽度那一批（`mcp-wired` / `session-tools` / `approval` / `evals` / `loop` / `layers`）：
   **68 例 / 496 断言，0 失败 0 错误**（`merge-breadth.log`）。其中 `mcp-wired-test` 走的是
   **同一条 elicitation 链**——它证明 `askedBy` 那次改动没有动服务器那一侧。
-- 前端：`tsc --noEmit` 绿；`--ui`（vitest）**92 例 / 1 失败**，而 pristine main 是
+- 前端：`tsc --noEmit` 绿；`--ui`（vitest）**94 例 / 1 失败**，而 pristine main 是
   **86 例 / 同一条失败**（`skills > asking-for-the-list-changes-nothing`，同样在等异步写入的时序）：
-  **+6 例、失败集合的差为零**；`EXPECTED_CASES` 86 → 92（`baseline-ui.log`）。
+  多出来的 8 条是 `ask` 的 6 条 + `running` 的 2 条（后者是 `main` @ `852fc88` 那一票自己带的），
+  **失败集合的差为零**；`EXPECTED_CASES` 86 → 94（`baseline-ui.log`）。
 - 真浏览器走查：两轮重走，六张截图 + 记录在 `evidence/README-merge-2026-09-21.md`。
 
 ## 落地记录
@@ -180,3 +182,7 @@
 - **没做的**：`TOOL_ICONS` / `subjectOf` 两张表不加 `ask`（认不出的走扳手 + 第一个字符串参数，
   这是它们留好的口子，加进去是**可读性**不是可用性）；工具行旁边那格仍写「待审批」
   （`c5e8940` 起就是这样，见证据那篇的「它没有证明什么」）。
+- **收口途中 `main` 又走了一票**（`852fc88`，「刷新落进一场还在跑的会话」），也并了进来：两处冲突
+  同在一行上（`ui.test.ts` 的 `SUITES` / `EXPECTED_CASES`，`client.md` 审批门那条 bullet 的续写），
+  各自保留两侧（`EXPECTED_CASES` 86 → 88 → 94）。顺手补上 `main` 漏掉的一格：`client.md` 的
+  suites 清单里没有它自己新加的 `running`（`SUITES` 里有），既然那一行本来就在改，就让它对齐。
