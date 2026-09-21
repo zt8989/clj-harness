@@ -1176,20 +1176,31 @@
                         (doseq [e (cap-mcp/take-events!)]
                           (log! thread-id run-id "mcp/server" e))
                       ;; Returned side of the message record: every message the kernel
-                      ;; appended after the vector it was handed -- assistant replies
-                      ;; VERBATIM (the history holds the provider message unrebuilt,
-                      ;; reasoning and tool calls intact) and each tool result as the
-                      ;; tool message submitted on the next call. THE COUNT IS TAKEN
-                      ;; AGAINST THAT SAME VECTOR -- the one logged a few lines up -- and
-                      ;; that is what keeps the halves from overlapping: the history
-                      ;; STARTS as exactly the messages on the record, so everything
-                      ;; past their count is the kernel's own. :run/done follows
-                      ;; RUN_ERROR too, so any run the kernel started leaves its full
-                      ;; message tail on disk -- but it lands one beat AFTER the
-                      ;; terminal frame, so a reader racing the consumer may not see
-                      ;; it yet.
-                      (log-messages! thread-id run-id
-                                     (subvec (:history ev) (count messages))))
+                      ;; added -- assistant replies VERBATIM (the history holds the
+                      ;; provider message unrebuilt, reasoning and tool calls intact)
+                      ;; and each tool result as the tool message submitted on the next
+                      ;; call, plus the injections the pre-LLM step derived along the
+                      ;; way. THE KERNEL SAYS WHICH ONES (`:added` on :run/done) and
+                      ;; this line does not work it out: a resumed run puts a replayed
+                      ;; call's answer BEHIND the call it answers
+                      ;; (`.scratch/session-opening` ticket 02), so 'past the count of
+                      ;; what we handed in' would file one of the CLIENT's messages as
+                      ;; this run's own and drop the one that really was. :run/done
+                      ;; follows RUN_ERROR too, so any run the kernel started leaves its
+                      ;; full returned side on disk -- but it lands one beat AFTER the
+                      ;; terminal frame, so a reader racing the consumer may not see it
+                      ;; yet.
+                      (log-messages! thread-id run-id (:added ev))
+                      ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
+                      ;; the message went to the end of the history instead of behind
+                      ;; its call, which is the shape the vendor refuses on the next
+                      ;; request. It is not thrown -- the run was answered as well as
+                      ;; this history allows -- but somebody reading the log later needs
+                      ;; to see it.
+                      (when (seq (:unplaced ev))
+                        (log/warn! :run/replay-unplaced
+                                   {:thread-id thread-id :run-id run-id
+                                    :tool-call-ids (:unplaced ev)})))
                       (do ;; Tool-lifecycle events are audit lines, not wire frames:
                           ;; each lands as its own jsonl line, keyed by toolCallId.
                           (when-let [[kind payload] (lifecycle-record ev)]

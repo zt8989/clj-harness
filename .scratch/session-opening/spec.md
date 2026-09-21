@@ -112,3 +112,36 @@ prompt cache 的稳定前缀只能"从 system 一路穿过这场对话"，而开
 
 **一个被 UI 套件第四条钉住的事实**：客户端会把开场条目原样发回去（`buildUserContent` 只带走
 text part，id 不变），服务端按 id 去重丢掉这份重复（`sessions/append!`）——所以开场不会被写第二遍。
+
+## 票 02 的实现（2026-09-21，同一分支）
+
+**落地形状**——要落地的判断照原样，只是把"报一份"和"记一行"分开给两侧：
+
+1. **`loop.clj` 的 `answer!`：插在点名它的那条 assistant 消息正后面。** 找那条消息用的
+   `call-position` 与 `llm/unanswered-tool-calls` **同一个读法**（assistant 的 `:tool_calls` 里
+   有它的 `:id`），插在 `(inc i)` 处，于是相邻判定立刻满足。**找不到时不猜**：退回末尾并答
+   `false`，`replay!` 把那个 `tool_call_id` 收进 `:unplaced`——这条历史本来就没有那条消息
+   （客户端重建窗口时弄丢了），猜一个相邻比说一声更坏。要落地判断里那条"记一行"落在**边**上：
+   `:run/done` 报事实，`edge/http.clj` 为它写 `log/warn! :run/replay-unplaced`（带 thread-id /
+   run-id / 那几个 id）。内核因此仍然不需要 `harness.infra.log`。
+2. **内核自报"这次加了哪几条"：`drive!` 返回 `{:history :added :unplaced}`，`:run/done` 原样带上。**
+   `added` 是**记发生的次序**，不是历史尾部的切片：`answer!` 的插入、`added!` 的追加、
+   `with-skills` 新折进来的派生注入，三处各记一份（`swap-vals!` 的前后差）。边写 `message` 行
+   改用 `:added`——`(subvec (:history ev) (count messages))` 那条计数切片删掉，理由写进
+   `http.clj` 的注释与 `docs/architecture/{kernel,edge,client}.md`。
+3. **厂商那条规则一个字没动**：`llm/unanswered-tool-calls` 的相邻判定是本票的**依据**，不是对象。
+4. **"消费过的 park 仍算停着"照原样留着**，见票里的第 4 条。
+
+**两个新用例，各自先证明过会在旧行为下红**（把 `answer!` 改回永远末尾 + 边改回计数切片那一版）：
+
+- `kernel.loop-test/a-replayed-answer-lands-behind-the-call-that-asked-for-it`：交给 run 的历史里
+  停住的那条 assistant 后面坐了一条注入，批准后要求 `:run/end`（旧行为红在 `:run/interrupt`），
+  tool 消息紧跟在调用后面，且 `:added` 是 `["tool" "assistant"]` 而"计数切片"是 `["user" "assistant"]`
+  ——正好把客户端那条记成内核的、丢掉真答案。
+- `edge.http-test/an-answer-lands-behind-its-call-even-with-a-message-behind-the-call`：真 socket
+  上 park → 批准（这次动作自己还带一条 `append`，于是尾部一定有东西）→ resume 必须
+  `RUN_FINISHED` **不带 outcome**、`TOOL_CALL_RESULT` 在、工具只跑一次；记录里用
+  `trajectory/run-segments` 读回，返回侧是 `["tool" "assistant"]` 且不含人的那句话。
+  旧行为红在 `(contains? (last resumed) :outcome)`——**正是现场那个"再停一次"**。
+- 另加一条退路用例 `a-replayed-answer-with-no-call-to-sit-behind-goes-to-the-end-and-says-so`：
+  没有那条 assistant 消息时落末尾、`:unplaced` 报出 `c1`、run 照旧 `:run/end`。

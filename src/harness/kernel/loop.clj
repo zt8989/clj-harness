@@ -9,6 +9,70 @@
             [harness.kernel.llm :as llm]
             [harness.kernel.tools :as tools]))
 
+(defn- added!
+  "Put MESSAGE at the end of HISTORY and note it among the messages this run ADDED."
+  [history added message]
+  (swap! history conj message)
+  (swap! added conj message))
+
+(defn- call-position
+  "The index in HISTORY of the assistant message that NAMED CALL-ID, or nil when no
+  message in it does.
+
+  THE SAME READING `harness.kernel.llm/unanswered-tool-calls` DOES, and deliberately:
+  that function is the rule, this is the position the rule talks about, and a second
+  opinion about how a call is named would be a second chance to disagree with it."
+  [history call-id]
+  (first (keep-indexed (fn [i message]
+                         (when (and (= "assistant" (:role message))
+                                    (some #(= call-id (:id %)) (:tool_calls message)))
+                           i))
+                       history)))
+
+(defn- answer-position
+  "Where in HISTORY an answer to the call named by the assistant message at INDEX goes:
+  directly behind that message, and behind the answers already sitting there.
+
+  THE SECOND HALF IS CALL ORDER, and it is not the vendor's rule but this harness's. A
+  turn with two parked calls is replayed one decision at a time, so 'directly behind the
+  assistant message' would put the second answer in FRONT of the first and the history
+  would list a turn's answers backwards
+  (`harness.approval-test/a-mixed-decision-list-is-answered-in-call-order`). The vendor
+  needs the answers adjacent to the call; the order among them is the call order."
+  [history index]
+  (loop [j (inc index)]
+    (if (= "tool" (:role (nth history j nil)))
+      (recur (inc j))
+      j)))
+
+(defn- answer!
+  "Put the TOOL message that answers a call into HISTORY where the vendor's rule wants
+  it -- behind the assistant message that named that call (`answer-position`) -- and
+  note it among the messages this run added. Answers true when it landed there.
+
+  WHY NOT THE END, which is where it used to go: what the vendor checks is ADJACENCY
+  (`harness.kernel.llm/unanswered-tool-calls`), and a history this run was HANDED may
+  have something behind that assistant message -- the edge applies its pre-LLM step
+  before handing the run over, so a skill body or a job's ending can be sitting there.
+  A tool message appended past it answers nothing: the run asks the same question
+  again, and approving it a second time runs the tool again. This is what
+  `.scratch/session-opening` ticket 02 is about.
+
+  FALSE IS AN ANSWER AND NOT A FAILURE: a history that does not carry that assistant
+  message at all (a client that rebuilt a conversation from a window that lost it) has
+  no place to put the answer, so it goes to the end -- where the run's own reader can
+  still find it -- and the caller reports it as unplaced. Inventing an adjacency would
+  be worse than saying so."
+  [history added message]
+  (if-some [i (call-position @history (:tool_call_id message))]
+    (do (swap! history (fn [h]
+                         (let [at (answer-position h i)]
+                           (vec (concat (subvec h 0 at) [message] (subvec h at))))))
+        (swap! added conj message)
+        true)
+    (do (added! history added message)
+        false)))
+
 (defn- replay!
   "Answer the parked calls a human decided on, before the next LLM call. Each
   decision is written into the parked record and its call goes through the seam
@@ -21,28 +85,35 @@
   An interrupt this process never parked is a caller error -- surfaced as a run
   error, never guessed into an approval.
 
-  Returns the calls that had to be parked AGAIN: a verdict is spent once, so a
-  replay of a decided interrupt parks afresh and the run must stop on that
-  interrupt rather than carry on to the provider with an unanswered call."
-  [decisions thread-id emit history]
-  (vec
-   (keep (fn [{:keys [interrupt-id verdict payload]}]
-           (let [rec (tools/parked interrupt-id)]
-             (when-not rec
-               (throw (ex-info (str "unknown interrupt: " interrupt-id) {})))
-             (tools/decide-approval! interrupt-id verdict payload)
-             (let [call-id (:tool-call-id rec)
-                   {:keys [content error parked]}
-                   (tools/run! {:id call-id
-                                :function {:name (:name rec) :arguments (:args rec)}}
-                               thread-id emit)]
-               (if parked
-                 parked
-                 (do (emit (ev/tool-result call-id content error))
-                     (swap! history conj {:role "tool" :tool_call_id call-id
-                                          :content content})
-                     nil)))))
-         decisions)))
+  Each answer goes in behind the call it answers (`answer!`), never at the end of the
+  history: this run was handed what the session held, and an injection may be sitting
+  behind that call already.
+
+  Answers {:parked <the calls that had to be parked AGAIN> :unplaced <the ids whose
+  answer had no call to sit behind>}. A verdict is spent once, so a replay of a decided
+  interrupt parks afresh and the run must stop on that interrupt rather than carry on to
+  the provider with an unanswered call."
+  [decisions thread-id emit history added]
+  (let [outcomes (mapv (fn [{:keys [interrupt-id verdict payload]}]
+                         (let [rec (tools/parked interrupt-id)]
+                           (when-not rec
+                             (throw (ex-info (str "unknown interrupt: " interrupt-id) {})))
+                           (tools/decide-approval! interrupt-id verdict payload)
+                           (let [call-id (:tool-call-id rec)
+                                 {:keys [content error parked]}
+                                 (tools/run! {:id call-id
+                                              :function {:name (:name rec) :arguments (:args rec)}}
+                                             thread-id emit)]
+                             (if parked
+                               {:parked parked}
+                               (do (emit (ev/tool-result call-id content error))
+                                   (if (answer! history added {:role "tool" :tool_call_id call-id
+                                                               :content content})
+                                     {}
+                                     {:unplaced call-id}))))))
+                       decisions)]
+    {:parked   (vec (keep :parked outcomes))
+     :unplaced (vec (keep :unplaced outcomes))}))
 
 (defn- model-call!
   "One model call with its boundaries emitted: :model/start before the request,
@@ -151,9 +222,27 @@
 
   EVERY MODEL CALL IS BRACKETED by :model/start / :model/end (`model-call!`, just
   above): the pair is what lets the record say how long a call took and what the
-  vendor reported for it, without the kernel timing anything itself."
+  vendor reported for it, without the kernel timing anything itself.
+
+  ANSWERS WHAT THE RUN ADDED, rather than only the history it ended with: the caller
+  needs 'the messages this run put in' to write the returned side of its record, and
+  the history's tail is no longer that answer. A replayed call's tool message is
+  inserted BEHIND the call it answers (`answer!`), so counting past the messages the
+  run was handed would file one of the CLIENT's messages as the kernel's own and drop
+  the one that really was. So the run keeps its own account: {:history <the final
+  history> :added <the messages it added, in the order it added them> :unplaced <the
+  replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm] :as _opts}]
   (let [history (atom (vec messages))
+        ;; WHAT THIS RUN ADDED, said by the run itself (see the docstring above): every
+        ;; site that puts a message into `history` notes it here. `with-skills` counts
+        ;; too -- a derived injection is a message this run put in the conversation,
+        ;; and the record has always shown it on the returned side.
+        added   (atom [])
+        ;; REPLAYED CALLS WHOSE ANSWER HAD NOWHERE TO SIT (`answer!`): collected out here
+        ;; rather than inside the try, because :run/done reports them whether the run
+        ;; went on to the provider or died on the way.
+        unplaced (atom [])
         ;; (history, thread-id) -> history, called immediately before every LLM
         ;; call. Identity when the caller passed nothing, so the code path is the
         ;; same either way -- exactly how the unbound hook sink keeps its callers
@@ -167,13 +256,18 @@
         ;; it": the step itself stays as silent as it was, and this is where the run
         ;; says what happened.
         with-skills (fn []
-                      (let [[before after] (swap-vals! history prepare thread-id)]
-                        (doseq [message (subvec after (count before))]
+                      (let [[before after] (swap-vals! history prepare thread-id)
+                            fresh         (subvec after (count before))]
+                        (swap! added into fresh)
+                        (doseq [message fresh]
                           (emit (ev/context-injected message)))))]
     (emit (ev/run-start))
     (try
-      (let [replayed (when (seq resume)
-                       (replay! resume thread-id emit history))
+      (let [replay   (if (seq resume)
+                       (replay! resume thread-id emit history added)
+                       {:parked [] :unplaced []})
+            replayed (:parked replay)
+            _        (swap! unplaced into (:unplaced replay))
             ;; WHAT THIS HISTORY LEAVES UNANSWERED, read before the first model call
             ;; because it decides whether there is one to make. A run that parks a call
             ;; ENDS on :run/interrupt with the call unanswered (see drive!'s own note
@@ -213,7 +307,7 @@
                 (let [_         (with-skills)
                       assistant (model-call! provider @history emit thread-id)
                       calls     (:tool_calls assistant)]
-                  (swap! history conj assistant)
+                  (added! history added assistant)
                   (if (seq calls)
                     ;; One buffered channel per call: the tool thread never blocks
                     ;; on put, and alts!! over them hands back results as they
@@ -268,7 +362,7 @@
                         ;; stays unanswered until a human decides.
                         (doseq [{:keys [id content] :as result} results
                                 :when (nil? (:parked result))]
-                          (swap! history conj {:role "tool" :tool_call_id id :content content}))
+                          (added! history added {:role "tool" :tool_call_id id :content content}))
                         (if (seq parked)
                           parked
                           (recur))))
@@ -296,14 +390,18 @@
                 (ev/run-end))))
       (catch Throwable t
         (emit (ev/run-error (ex-message t)))))
-    @history))
+    {:history  @history
+     :added    @added
+     :unplaced @unplaced}))
 
 (defn run-chan
   "Drive one run, returning a channel of harness.kernel.event values. After the run a
-  terminal event {:type :run/done :history <final-history>} is put, then the
-  channel closes. The channel is unbuffered and the producer BLOCKS on every
-  put (>!!): a slow consumer applies natural backpressure rather than dropping
-  events or queueing them up.
+  terminal event {:type :run/done :history <final-history> :added <what this run put
+  in> :unplaced <replayed calls with no call to sit behind>} is put, then the channel
+  closes. `:added` is what the edge writes as the message record's RETURNED side -- the
+  history's tail would be a guess (see `drive!`). The channel is unbuffered and the
+  producer BLOCKS on every put (>!!): a slow consumer applies natural backpressure
+  rather than dropping events or queueing them up.
 
   The producer runs on async/thread because the run does blocking I/O (the
   network stream and the tools), so it must not occupy a go block."
@@ -311,7 +409,7 @@
   ([provider messages {:keys [thread-id] :as opts}]
    (let [ch (async/chan)]
      (async/thread
-       (let [history (drive! provider messages #(async/>!! ch %) opts)]
-         (async/>!! ch {:type :run/done :history history})
+       (let [{:keys [history added unplaced]} (drive! provider messages #(async/>!! ch %) opts)]
+         (async/>!! ch {:type :run/done :history history :added added :unplaced unplaced})
          (async/close! ch)))
      ch)))

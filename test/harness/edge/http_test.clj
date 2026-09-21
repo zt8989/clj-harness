@@ -876,6 +876,72 @@
                (is (some #(= "needs-approval" (get-in % [:payload :outcome])) pre))
                (is (some #(= "approved" (get-in % [:payload :outcome])) pre))))))))))
 
+(deftest an-answer-lands-behind-its-call-even-with-a-message-behind-the-call
+  ;; TICKET 02 of `.scratch/session-opening`, over a real socket and a real record.
+  ;;
+  ;; The edge hands a run the session's history with its pre-LLM step ALREADY APPLIED,
+  ;; so something the session holds -- a derived skill body, a job's ending -- can be
+  ;; sitting behind the parked assistant message when the resume arrives. This case puts
+  ;; a NEW ENTRY there as well (the action that approves carries a message of its own),
+  ;; which is the plainest form of the same shape.
+  ;;
+  ;; What used to happen: the replayed answer was appended to the END of the list, where
+  ;; the vendor's adjacency rule (`harness.kernel.llm/unanswered-tool-calls`) cannot see
+  ;; it. The run then read its own history as still-parked and asked the same question
+  ;; over again -- an interrupt, not an answer -- and a human approving it a second time
+  ;; would have run the tool a second time.
+  (let [markers (support/temp-dir "http-answer")
+        ok      (str (io/file markers "answered.txt"))]
+    (tools/session-require-approval! "http-answer" "write")
+    (with-server
+     {"http-answer" [{:content ""
+                      :tool-calls [{:id "c1" :name "write"
+                                    :arguments {:path ok :content "written"}}]}
+                     {:content "wrote it"}]}
+     (fn []
+       (let [asked (wire/frames-from-sse (.body (post-run "http-answer")))
+             iid   (get-in (last asked) [:outcome :interrupts 0 :id])]
+         (testing "the first run parks, as it always did"
+           (is (= "interrupt" (get-in (last asked) [:outcome :type])))
+           (is (false? (.exists (io/file ok)))))
+
+         (let [resumed (wire/frames-from-sse
+                        (.body (post-run "http-answer"
+                                         {:append [{:id "u2" :role "user" :content "and hurry"}]
+                                          :resume [{:interruptId iid :status "resolved"
+                                                    :payload {:decision "approved"}}]})))]
+           (testing "the resumed run ANSWERS the parked call instead of asking again"
+             (is (empty? (wire/violations resumed)))
+             (is (= "RUN_FINISHED" (:type (last resumed))))
+             (is (not (contains? (last resumed) :outcome))
+                 "a natural end carries no outcome; a re-park would carry the interrupt")
+             (is (some #(= "TOOL_CALL_RESULT" (:type %)) resumed))
+             (is (= 1 (count (filter #(= "RUN_FINISHED" (:type %)) resumed)))))
+
+           (testing "and the tool ran once, not twice"
+             (is (= "written" (slurp ok :encoding "UTF-8"))))
+
+           (testing "the record's returned side is what the KERNEL added, not the tail"
+             ;; The submitted side is everything handed in; the returned side is what the
+             ;; run put in. Counting past the first would file the person's own message
+             ;; ("and hurry") as the kernel's answer AND lose the tool message that
+             ;; really was one -- which is why the kernel says which messages it added
+             ;; (:added on :run/done) and the edge does not work it out.
+             (let [records  (wait-for-recorded
+                             (log-file "http-answer")
+                             (fn [ls] (some #(and (= "message" (:kind %))
+                                                  (= "wrote it" (get-in % [:payload :content])))
+                                            ls))
+                             5000)
+                   runs     (trajectory/run-segments records)
+                   returned (:returned (last runs))]
+               (is (= 2 (count runs)) "the park and the resume are two runs")
+               (is (= ["tool" "assistant"] (mapv :role returned)))
+               (is (= "c1" (:tool_call_id (first returned))))
+               (is (= "wrote it" (:content (second returned))))
+               (is (not-any? #(= "and hurry" (:content %)) returned)
+                   "the person's message is not this run's own")))))))))
+
 (deftest an-unknown-interrupt-is-refused-over-http
   ;; A restart loses the parking; a client resuming an interrupt this process
   ;; never parked must be told so, never quietly granted.

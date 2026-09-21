@@ -16,12 +16,39 @@
   (loop [acc []]
     (if-let [ev (async/<!! ch)]
       (if (= :run/done (:type ev))
-        {:history (:history ev) :seen acc}
+        {:history  (:history ev)
+         :added    (:added ev)
+         :unplaced (:unplaced ev)
+         :seen     acc}
         (recur (conj acc ev)))
-      {:history nil :seen acc})))
+      {:history nil :added nil :unplaced nil :seen acc})))
 
-(defn- drive [provider messages]
-  (drain-chan (loop/run-chan provider messages)))
+(defn- drive
+  ([provider messages] (drive provider messages nil))
+  ([provider messages opts] (drain-chan (loop/run-chan provider messages opts))))
+
+(defn- interrupt-id
+  "The interrupt id of a park run's terminal event."
+  [park-run]
+  (:id (first (:interrupts (last (:seen park-run))))))
+
+(defn- call-index
+  "Where the assistant message that named CALL-ID sits in HISTORY, or nil."
+  [history call-id]
+  (first (keep-indexed (fn [i message]
+                         (when (some #(= call-id (:id %)) (:tool_calls message)) i))
+                       history)))
+
+(defn- parked-write
+  "A run that parks one `write` call, for THREAD-ID, and answers the interrupt id."
+  [thread-id path]
+  (let [_    (tools/session-require-approval! thread-id "write")
+        park (drive (fake/scripted [{:content ""
+                                     :tool-calls [{:id "c1" :name "write"
+                                                   :arguments {:path path :content "placed!"}}]}])
+                    []
+                    {:thread-id thread-id})]
+    [park (interrupt-id park)]))
 
 (defn- joined [seen type]
   (apply str (map :text (filter #(= type (:type %)) seen))))
@@ -337,3 +364,72 @@
       (is (not-any? #(= "STEP" (:content %)) history))
       (is (= ["user" "assistant"] (mapv :role history))
           "the history is exactly what was passed in plus what the kernel appended"))))
+
+(deftest a-replayed-answer-lands-behind-the-call-that-asked-for-it
+  ;; TICKET 02 of `.scratch/session-opening`. The edge hands a run the history with its
+  ;; pre-LLM step ALREADY APPLIED, so a skill body or a job's ending can be sitting
+  ;; behind the parked assistant message. Answering at the end of the list leaves the
+  ;; call unanswered by the vendor's adjacency rule (`llm/unanswered-tool-calls`): the
+  ;; run asks the same question over again, and approving it a second time runs the tool
+  ;; a second time.
+  (let [thr  "thr-replay-behind"
+        path (str (support/temp-dir "loop-replay-behind") "/placed.txt")
+        [park iid] (parked-write thr path)
+        ;; WHAT THE EDGE HANDS OVER: the parked turn, and behind it the injection the
+        ;; session's pre-LLM step derived when the run was set up.
+        handed (conj (:history park) {:role "user"
+                                      :content "<skill name=\"alpha\">\nBODY\n</skill>"})
+        {:keys [seen history added unplaced]}
+        (drive (fake/scripted [{:content "finished"}])
+               handed
+               {:thread-id thr :resume [{:interrupt-id iid :verdict :approved}]})]
+
+    (testing "the approved call runs"
+      (is (= "placed!" (slurp path :encoding "UTF-8"))))
+
+    (testing "its answer sits DIRECTLY behind the assistant message that named it"
+      (let [i (call-index history "c1")]
+        (is (some? i))
+        (is (= ["tool" "c1"] [(:role (nth history (inc i)))
+                              (:tool_call_id (nth history (inc i)))]))
+        (is (= "user" (:role (nth history (+ i 2))))
+            "and the injection it was behind stays behind both")))
+
+    (testing "so the run reaches the provider instead of asking the same question again"
+      (is (= :run/end (:type (last seen))))
+      (is (= "finished" (:content (last history)))))
+
+    (testing "and the run says what it ADDED, which is not the history's tail"
+      ;; The whole reason :run/done carries this: with the answer inserted behind its
+      ;; call, the slice past the messages this run was HANDED holds one it was GIVEN
+      ;; (the injection) and misses the one it added (the answer) -- so a reader that
+      ;; counted would file the injection as the kernel's own and lose the answer.
+      (is (= ["tool" "assistant"] (mapv :role added)))
+      (is (= ["user" "assistant"] (mapv :role (subvec history (count handed))))
+          "what counting past what was handed in would have called the kernel's own")
+      (is (empty? unplaced)))))
+
+(deftest a-replayed-answer-with-no-call-to-sit-behind-goes-to-the-end-and-says-so
+  ;; The other half of the same judgement: a history that does not carry the assistant
+  ;; message at all (a client whose window was rebuilt without it) has nowhere to put the
+  ;; answer. It goes to the end -- findable, and still not an adjacency this process
+  ;; invented -- and the run reports it, so the edge can write a line about it.
+  (let [thr  "thr-replay-nowhere"
+        path (str (support/temp-dir "loop-replay-nowhere") "/placed.txt")
+        [park iid] (parked-write thr path)
+        orphaned (vec (remove #(= "assistant" (:role %)) (:history park)))
+        {:keys [seen history added unplaced]}
+        (drive (fake/scripted [{:content "finished"}])
+               orphaned
+               {:thread-id thr :resume [{:interrupt-id iid :verdict :approved}]})]
+
+    (testing "the answer goes to the end, and nothing is guessed about where it belongs"
+      (is (= ["tool" "assistant"] (mapv :role history)))
+      (is (= "placed!" (slurp path :encoding "UTF-8"))))
+
+    (testing "and the run names the call it could not place"
+      (is (= ["c1"] unplaced))
+      (is (= ["tool" "assistant"] (mapv :role added))))
+
+    (testing "the run still finishes -- nothing about it is unanswered"
+      (is (= :run/end (:type (last seen)))))))
