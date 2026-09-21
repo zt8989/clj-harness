@@ -11,3 +11,7 @@ ui/dist/
 .playwright-mcp/
 .workbuddy/
 .zvec-grep/
+
+# Isolated checkouts of this repo (`git worktree add .worktrees/<name>`): a second
+# working tree is a place to work, not a thing to commit.
+.worktrees/
