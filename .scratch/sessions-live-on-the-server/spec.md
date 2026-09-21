@@ -61,6 +61,9 @@
 4. **落后可见但不假装完整**：进程在 run 中途被杀 → 重开时重建先 `close-off-open-run!` 补收尾帧，
    客户端看见的是「它在那儿断了」。
 5. **写失败说出来**：把记录目录变成不可写 → 那个会话进降级态并在界面上说出来，run 不因此静默丢历史。
+   （**2026-09-21 票 02 落地**：降级是**写者**的状态——那一行停在队首，记录因此永远是有序前缀，
+   `retry!` 是回来的路；会话照跑。界面那一半是 `:record` 字段 + 一根常驻的条。
+   证据：`test/harness/edge/record_test.clj`、`http_test.clj` 的一个用例、`ui/test/suites/record.tsx`。）
 6. **（作废，2026-09-20 实现票 01 时发现）注入仍然每轮重算，卡仍然每轮一张。** 会话持有的是**对话**，
    不是 system 消息、也不是注入物：指令文件与清单每轮现读现拼（`opening-blocks!` 的 docstring 写着
    「改了没生效」正是它要防的），冻结进会话就是把那条纪律换掉。所以本特征**不解**这个问题；
@@ -83,7 +86,9 @@
 - **`.scratch/skills-and-instructions`**：「对话归客户端所有，服务端每轮现收现算」那一节的推导要重写
   （票 07），但「技能正文是派生的」**不改**。
 - **`.scratch/parallel-sessions` / `.scratch/immutable-data`**：认领（决策 7）与新的一堆进程内状态要和它们
-  的既得分家规矩对齐，票 04 核。
+  的既得分家规矩对齐，票 04 核。**票 02 已经动了其中一处描述**：`immutable-data/spec.md` 把 carry-back 写成
+  「在 `log-lock` 内」办的事，而 `log-lock` 已随单消费者写者退役（`harness.edge.record`），那条措辞不再成立
+  ——收口（文档层面）留给票 07。
 - **`.scratch/jsonl-message-record`**：`message` 行是「那次真送出去的那份」这一定义**不动**；它是验收 1
   的凭据。注意它同时是**序号重放**的底座：记录 append-only、一个写者，第 N 条就是第 N 条（票 05 判断 1）。
 - **参考实现（DeepSeek Harness）**：ADR 0003 的形状来自它的 `dsh-api-session-controller`
@@ -97,7 +102,7 @@
 | # | 票 | Blocked by | 交付什么 |
 |---|---|---|---|
 | 01 | 会话表：出生、寿命、上界 | — | **已落地**。`thread-id → 会话` 的内存表；出生时从记录重建一次；空闲 30s 放掉；两个钉子（正在跑 / 还有没落盘的）；限制同时运行的会话数。修正项见该票末尾（序号、窗口读法、`running?` 二份） |
-| 02 | 异步写：每帧、失败进降级态 | 01 | 帧入队、单消费者逐行 append、每帧；**水位是一条序号**（与会话的 `next-seq` 对得上）；写失败 ⇒ 降级态并在界面上说出来；退出时收干净 |
+| 02 | 异步写：每帧、失败进降级态 | 01 | **已落地**。帧入队、单消费者逐行 append、每帧；`flushed-seq` 是一条序号（`(+ flushed pending)` = 下一条要铸的序号）；写失败 ⇒ 降级态，`sofar` / `rebuild` 带 `:record`，界面上一根常驻的条；退出时收干净。修正项（prepare 每行一问、水位重新基准化）见该票末尾 |
 | 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | 五样逐条落（表在 ADR 0002 决策 9）；动作是 feed 的写侧；前端 adapter 的**写侧**改掉 |
 | 04 | 认领：一个 thread 归一个进程 | 01 | 锁文件／库里一行 owner；后到的只读或拒绝；**认领易主 ⇒ generation 作废**；非 owner 的只读页面有没有增量 |
 | 05 | 会话 feed：尾页、增量、补页 | 01 | **一条 source 三个动词**（`tail` / `append` / `prepend`）；序号可从记录重放；`since` 与 generation；`rebuild` / `sofar` 的 live 语义读内存；放掉时的终态 |
@@ -106,14 +111,30 @@
 
 ## 状态
 
-**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01 已落地；02–07 `ready-for-agent`，等前置。
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02 已落地；03–07 `ready-for-agent`，等前置。
 
 ## 已验证到什么程度
 
-**票 01 已落地**（`src/harness/edge/sessions.clj` + `test/harness/edge/sessions_test.clj`，11 个用例
-36 条断言）。后端全量：**956 tests / 11983 assertions / 0 failures / 0 errors**（2026-09-20，
-`.worktrees/sessions-live-on-the-server`；基线是 955 / 11956）。UI 套件与走查**未跑**——票 01 没动
-`ui/src/`。
+**票 01**（`src/harness/edge/sessions.clj` + `test/harness/edge/sessions_test.clj`，11 个用例）
+与**票 02**（`src/harness/edge/record.clj` + `test/harness/edge/record_test.clj`，9 个用例 51 条断言；
+`http.clj` 的接线 + `http_test.clj` 的一个用例；UI 的 `lib/record-health.ts` /
+`components/record-notice.tsx` / `test/suites/record.tsx`）已落地。
 
-**ADR 0003 与七张票是 2026-09-20 重切的，尚未落地**：没有一个新的用例、没有一行 feed 的代码。
-票 01 的落地数字仍然是上面那一行，不因重切而变化。
+后端全量：**1003 tests / 12180 assertions / 0 failures / 0 errors**（2026-09-21，
+`.worktrees/sessions-live-on-the-server`）。UI：**54 cases 全绿**，`tsc --noEmit` 与 `vite build` 干净；
+真浏览器走查 **GREEN**（`node scripts/dev.mjs --scripted .scratch/sessions-live-on-the-server/evidence/go.json`
++ `evidence/walkthrough.mjs`：一个会话第一轮正常落盘，第二轮之前把那个 jsonl 改成只读，跑完之后
+**不刷新**页面上多出一条常驻的条，`sofar` 同时报 `state=degraded`，记录行数 14 → 14 一个字节没动；
+图与记录在 `evidence/`）。
+
+**这个分母和票 01 记的不是同一个，原因值得留着**：`test/harness/test_runner.clj` 的
+`test-namespaces` 是一张**字面清单**，票 01 的 `sessions-test` 与自己新写的 `record-test`
+都没有进去——票 01 那句「982 / 12083」因此**从未包含 sessions-test**（一个从不运行的命名空间
+不可能是红的）。两张都已登记，上面这个数才是真的跑了它们的数。
+
+**「界面说出来」验到哪一步**：降级态在两条读路由上的形状、以及它渲染成一句话（两种语言、复数形式）
+都有用例；`app.tsx` 里的**接线与位置**（读到的 `:record` 交给这根条、摆在视图切换下面）没有自动用例
+——那个文件在 vitest 里渲染不了（它要走 `lib/i18n.ts` 与 assistant runtime），靠类型门 + 真浏览器走查，
+而**走查正是在那里抓到一个真洞**：自己在驱动这一轮的页面原本收不到跑中的降级（见票 02 的落地记录），
+修完之后走查 GREEN。这正是 `.scratch/session-title-blank/` 那次的教训形状，所以那句话被提成了一个
+能渲染的组件。

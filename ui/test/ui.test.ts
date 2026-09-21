@@ -38,10 +38,11 @@ import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
 import { injectionSuite } from "./suites/injections";
+import { recordSuite } from "./suites/record";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, recordSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -104,7 +105,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// says in both languages, and the two `aria-*` facts that make them one verb (one
 /// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
 /// run cannot reach -- the sidebar's own element -- is read as source in the same case.
-const EXPECTED_CASES = 52;
+/// 52 -> 54: the `record` suite's two -- a record with nothing to say (nothing drawn,
+/// and a state this client does not know is silence rather than the wire value on
+/// screen) and a degraded one RENDERED in both languages, carrying the writer's own
+/// reason and the plural of how much is waiting. It exists for the same reason the
+/// `sidebar` suite does: a sentence that reaches the screen is the one thing a green
+/// tree could not see.
+const EXPECTED_CASES = 54;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -52,6 +52,9 @@
     "removeProjectRunning": "{{session}} 还在跑；结束之后再移除项目。",
     "removeProjectParked": "{{session}} 在等你回应；结束之后再移除项目。"
   },
+  "record": {
+    "degraded_other": "这段对话没能存到磁盘上：{{reason}}。还有 {{count}} 行在等着写。"
+  },
   "dialog": {
     "removeTitle": "移除这个项目？",
     "removeLeaves": "离开了侧边栏。它的会话保留在磁盘上——",

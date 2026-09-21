@@ -81,6 +81,7 @@
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.record :as record]
             [harness.edge.context :as context]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
@@ -196,14 +197,13 @@
 
 ;; ------------------------------------------------------------------- logging
 
-(defonce ^:private log-lock
-  ;; One line is one JSON object, and a reader parses the file line by line --
-  ;; so a half-written line is not a smaller record, it is a broken file. Most
-  ;; writers are the run's single consumer thread, but a hook fires where its
-  ;; point is (a tool call's PostToolUse runs on that call's own thread), so two
-  ;; lines can now be in flight at once. Serializing the append is what keeps the
-  ;; writer's guarantee true without asking every caller to know about it.
-  (Object.))
+;; THE LOCK IS GONE (ticket 02). One line is one JSON object and a reader parses
+;; the file line by line, so a half-written line is not a smaller record, it is a
+;; broken file -- and `log!` is called from a hook's own thread as well as from a
+;; run's consumer, so the appends had to be serialized. That is now the record
+;; writer's single consumer thread (`harness.edge.record`), which is a better
+;; answer than a lock: there is exactly one writer by construction, so there is
+;; nothing to serialize and no lock to hold on the response path.
 
 (def unbound-workspace
   "The workspace for sessions that belong to no project. RESERVED BY
@@ -326,8 +326,21 @@
   not go -- leaves both files as they were and says so in an audit line. A nil
   parent (nowhere to write) is the only silent exit.
 
-  CALLED FROM log! WITH log-lock HELD, so its appends serialize with every other
-  writer in this process."
+  IT ANSWERS WHETHER IT CHANGED F, because the writer measures a thread's record
+  offset in that file: a carried segment (or an audit line about a refused one)
+  moves every offset after it, so the writer re-bases when this answers true
+  (`harness.edge.record/prepare-with!`). Nothing to do answers nil.
+
+  CALLED BY THE RECORD WRITER'S CONSUMER BEFORE EVERY LINE (`harness.edge.record`),
+  which is this process's only writer -- that is what replaced `log-lock`, and it is
+  why this needs no lock of its own. THE CALL IS PER LINE, THE WORK IS AT MOST ONCE:
+  the guard above is what makes it so, and the ordering it exists for is only that a
+  carried segment precedes the line about to be written. Asking every time is not
+  belt-and-braces -- the `when-not` cannot answer for a line that has not been
+  written yet, and a segment that appears while this thread is running (a store
+  rebuilt under it) is carried by the NEXT line, not by the one that has already
+  gone. A thread with no leftover segment pays one `exists` on a file that is not
+  there."
   [thread-id ^java.io.File f]
   (when-not (contains? @carry-back-checked thread-id)
     (try
@@ -349,18 +362,20 @@
                     to         (.getAbsolutePath ^java.io.File f)]
                 (cond
                   (nil? src-range)
-                  (carry-audit! f "log/carry-refused"
-                                {:reason "the leftover segment holds no timestamped lines, so the two ranges cannot be checked"
-                                 :from from :to to})
+                  (do (carry-audit! f "log/carry-refused"
+                                    {:reason "the leftover segment holds no timestamped lines, so the two ranges cannot be checked"
+                                     :from from :to to})
+                      true)
 
                   (and dest-range (not (<= (second dest-range) (first src-range))))
-                  (carry-audit! f "log/carry-refused"
-                                {:reason (str "the two files' timestamps overlap, so appending would read as one conversation out of order"
-                                              " (the conversation's file ends at " (second dest-range)
-                                              ", the leftover segment begins at " (first src-range) ")")
-                                 :from from :to to
-                                 :destination-last (second dest-range)
-                                 :segment-first (first src-range)})
+                  (do (carry-audit! f "log/carry-refused"
+                                    {:reason (str "the two files' timestamps overlap, so appending would read as one conversation out of order"
+                                                  " (the conversation's file ends at " (second dest-range)
+                                                  ", the leftover segment begins at " (first src-range) ")")
+                                     :from from :to to
+                                     :destination-last (second dest-range)
+                                     :segment-first (first src-range)})
+                      true)
 
                   :else
                   (let [body    (slurp source :encoding "UTF-8")
@@ -376,7 +391,8 @@
                                      :kept-as (.getAbsolutePath ^java.io.File renamed)})
                       (carry-audit! f "log/carry-refused"
                                     {:reason "the segment was appended but its file could not be renamed; both copies remain"
-                                     :from from :to to})))))))))
+                                     :from from :to to}))
+                    true)))))))
       (catch Throwable t
         (try
           (carry-audit! f "log/carry-refused"
@@ -385,17 +401,21 @@
                          :to   (.getAbsolutePath ^java.io.File f)})
           (catch Throwable _ nil))))))
 
-(defn- log! [thread-id run-id kind payload]
-  (let [f (log-file-for thread-id)
+(defn- log!
+  "The line goes to the record writer, which appends it off this thread's own
+  path (`harness.edge.record`). NOTHING HERE TOUCHES THE FILE: the File is
+  resolved here -- where a session's record belongs is a fact about its project,
+  and this is the namespace that joins the two -- and the bytes are the writer's.
+
+  That the file is resolved on THIS thread is deliberate: `home`'s root can be
+  moved by a test's binding, and a binding is per-thread. A consumer thread that
+  resolved it itself would write to whatever root the process had, not the one
+  the caller is running under."
+  [thread-id run-id kind payload]
+  (let [f    (log-file-for thread-id)
         line (str (json/write-str {:ts (System/currentTimeMillis)
                                    :runId run-id :kind kind :payload payload}) "\n")]
-    (.mkdirs (.getParentFile f))
-    (locking log-lock
-      ;; BEFORE the record: a session whose binding came back after the store was
-      ;; rebuilt gets its unbound segment carried into THIS file first, so the line
-      ;; about to be written follows the segment rather than landing after a hole.
-      (carry-back! thread-id f)
-      (spit f line :append true :encoding "UTF-8"))))
+    (record/append! thread-id f line)))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -1883,6 +1903,25 @@
         (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
         nil))))
 
+(defn- record-health
+  "What the record writer says about THREAD-ID, or nil when there is nothing to say.
+
+  NIL IS THE ORDINARY ANSWER, and absence is the client's 'fine': a session whose
+  bytes have all reached the record has no story, and a `:record {:state \"ok\"}` on
+  every answer would be a field nobody acts on. What the field exists for is the
+  one case ADR 0002 decision 6 refuses to leave silent -- the writer could not put
+  the bytes on disk, and the browser has to say so (ticket 02).
+
+  IT IS READ FROM MEMORY, not from the file. The whole point of the fact is that
+  the file is BEHIND (or, here, unwritable), so a reader that asked the file could
+  learn nothing; `harness.edge.record` is where the failure lives."
+  [thread-id]
+  (when-some [d (record/degraded thread-id)]
+    {:state   "degraded"
+     :reason  (:reason d)
+     :pending (:pending d)
+     :at      (:at d)}))
+
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
   the AG-UI message list (seed + every recorded frame, reasoning and tool
@@ -1900,7 +1939,13 @@
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
         _       (when (nil? (:error located))
-                  (close-off-open-run! stem (:ok located)))
+                  (close-off-open-run! stem (:ok located))
+                  ;; READ YOUR OWN WRITE. The closing frames are the thing that
+                  ;; makes the file whole, and the rebuild below reads the file --
+                  ;; through the queue they would not be there yet, and this route
+                  ;; would refuse a log it had just repaired. Draining is what
+                  ;; makes the repair and the read one act (ticket 02).
+                  (record/flush! 5000))
         result  (when (nil? (:error located))
                   (try {:ok (replay/rebuild (:ok located))}
                        (catch Throwable t {:error (ex-message t)})))]
@@ -1912,11 +1957,13 @@
       (api-response 400 {:error (:error result)})
 
       :else
-      (let [{:keys [messages context]} (:ok result)]
+      (let [{:keys [messages context]} (:ok result)
+            health (record-health stem)]
         (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"})
-        (api-response 200 {:threadId stem
-                           :messages messages
-                           :context  (or context [])})))))
+        (api-response 200 (cond-> {:threadId stem
+                                   :messages messages
+                                   :context  (or context [])}
+                            (some? health) (assoc :record health)))))))
 
 (defn- sofar-get
   "GET /api/threads/<stem>/sofar -- what has been recorded of this conversation so
@@ -1961,15 +2008,17 @@
       (api-response 400 {:error (:error read)})
 
       :else
-      (let [{:keys [messages context state open-runs interrupts]} (:ok read)]
+      (let [{:keys [messages context state open-runs interrupts]} (:ok read)
+            health (record-health stem)]
         (cond
           (= :unfinished state)
           (if (running? stem)
-            (api-response 200 {:threadId stem
-                               :messages messages
-                               :context  (or context [])
-                               :state    "running"
-                               :openRuns open-runs})
+            (api-response 200 (cond-> {:threadId stem
+                                       :messages messages
+                                       :context  (or context [])
+                                       :state    "running"
+                                       :openRuns open-runs}
+                                (some? health) (assoc :record health)))
             ;; NOTHING IS WRITTEN HERE, not even the repair: closing a record off is
             ;; `close-off-open-run!`'s job, it belongs to whoever asks to CONTINUE the
             ;; conversation, and a poll must never be the thing that changes the file.
@@ -1984,7 +2033,8 @@
                                      :messages messages
                                      :context  (or context [])
                                      :state    (name state)}
-                              (seq interrupts) (assoc :interrupts interrupts))))))))
+                              (seq interrupts) (assoc :interrupts interrupts)
+                              (some? health)   (assoc :record health))))))))
 
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
@@ -2845,6 +2895,15 @@
                    ;; in force, which server is up), so the seam asks this
                    ;; capability per assembly instead of being handed a map.
                    (cap-mcp/install!)]]
+    ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
+    ;; line this process produces goes through it (`harness.edge.record`), and the
+    ;; carry-back that must precede a session's first line is ITS step -- so the
+    ;; edge hands its own carry-back over here, where a capability is told which
+    ;; implementation it runs with. It has no teardown: one writer serves every
+    ;; server this process starts, and a suite that starts a hundred must not
+    ;; leave a hundred writer threads behind (or stop the one it has).
+    (record/prepare-with! carry-back!)
+    (record/start!)
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
     ;; the same shape as the port below it and for the same reason: both are facts

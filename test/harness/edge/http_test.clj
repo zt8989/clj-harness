@@ -22,6 +22,7 @@
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.record :as record]
             [harness.edge.trajectory :as trajectory]
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
@@ -41,6 +42,28 @@
 ;; (`harness.edge.http/ui-origin`, which `start!` uses when the caller names none).
 ;; A page on this machine is answered by RULE instead and needs no value at all --
 ;; see `says-which-origin-per-request-and-not-once-per-process`.
+
+(defn- drained!
+  "Wait for the record writer to have written everything logged so far (ticket 02:
+  the write is QUEUED, so a case that reads the file straight after an action has
+  to say so). The timeout is a deadline for a failure, not a duration -- an empty
+  queue returns at once -- and it is deliberately short: a test that needs the
+  writer to be slow is a different test."
+  []
+  (record/flush! 5000))
+
+(defn- wait-degraded!
+  "Wait until the record writer has given up on THREAD-ID, answering what it says
+  (or nil if that never happens). A case that wants to assert the DEGRADED state
+  cannot read the queue's failure the instant it made the write fail: the write is
+  the consumer's, and it has not been attempted yet."
+  [tid]
+  (let [deadline (+ (System/currentTimeMillis) 3000)]
+    (loop []
+      (or (record/degraded tid)
+          (when (< (System/currentTimeMillis) deadline)
+            (Thread/sleep 10)
+            (recur))))))
 
 (defn- read-lines
   "What `read` returned, as plain lines -- with the `anchor|` prefix stripped when
@@ -2094,17 +2117,20 @@
           (project/bind! tid (str proj-dir))
           (#'http/log! tid "r1" "input" {:n 1})
           (#'http/log! tid "r1" "input" {:n 2})
+          (drained!)
           (is (.exists plog))
           (is (not (.exists ulog))))
         (testing "the store answers nil for a while: records land in .unbound"
           (project/bind! tid nil)
           (#'http/log! tid "r2" "input" {:n 3})
           (#'http/log! tid "r2" "input" {:n 4})
+          (drained!)
           (is (.exists ulog))
           (is (= 2 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))))
         (testing "the binding comes back and the writer carries the segment home"
           (project/bind! tid (str proj-dir))
           (#'http/log! tid "r3" "input" {:n 5})
+          (drained!)
           (let [lines  (mapv #(json/read-str % :key-fn keyword)
                              (str/split-lines (slurp plog :encoding "UTF-8")))
                 inputs (filterv #(= "input" (:kind %)) lines)
@@ -2158,6 +2184,7 @@
         (let [before-plog (slurp plog :encoding "UTF-8")
               before-ulog (slurp ulog :encoding "UTF-8")]
           (#'http/log! tid "r3" "input" {:n 5})
+          (drained!)
           (let [lines   (mapv #(json/read-str % :key-fn keyword)
                               (str/split-lines (slurp plog :encoding "UTF-8")))
                 refused (first (filter #(= "log/carry-refused" (:kind %)) lines))]
@@ -2178,6 +2205,7 @@
             (testing "a refused carry is said once, not beside every record"
               (#'http/log! tid "r3" "input" {:n 6})
               (#'http/log! tid "r3" "input" {:n 7})
+              (drained!)
               (let [n (count (filter #(= "log/carry-refused" (:kind %))
                                      (mapv #(json/read-str % :key-fn keyword)
                                            (str/split-lines (slurp plog :encoding "UTF-8")))))]
@@ -4595,3 +4623,52 @@
      (testing "the run finishes on its own, with one terminal and no help from anybody"
        (is (until #(false? (row-running? sofar-dir-2 "sofar-b")) 5000))
        (is (= 1 (count (terminals "sofar-b"))))))))
+
+;; ------------------------------------------------- the record that could not be written
+
+(deftest a-record-that-cannot-be-written-is-said-on-the-routes-the-client-reads
+  ;; ADR 0002 DECISION 6: writing can be BEHIND, it may not be SILENT. The failure
+  ;; is the record writer's (`harness.edge.record/degraded`), and this is the half
+  ;; the browser can see: the two doors it reads a conversation through say so, so
+  ;; the page has something to put on screen. The other half -- that a DEGRADED
+  ;; session keeps running and holds its lines -- is asserted in record-test.
+  ;;
+  ;; THE FAILURE IS INJECTED at the writer's own write, rather than by chmod-ing a
+  ;; directory: a permission bit means nothing to a root test process, means
+  ;; something different on Windows, and would leave a mode to restore. What the
+  ;; route is being asked is whether it REPORTS a degradation, not how one arises.
+  (let [tid (str "degraded-" (java.util.UUID/randomUUID))]
+    (with-server
+     {tid script}
+     (fn []
+       ;; A COMPLETE CONVERSATION FIRST. The read below is the ordinary settled one;
+       ;; if the terminal frame never landed, `sofar` would answer the cut-off
+       ;; refusal instead, and the test would be asking a different question.
+       (post-run tid)
+       (record/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
+       (try
+         (#'http/log! tid nil "session/rebuilt" {:messages 0 :via "test"})
+         (is (some? (wait-degraded! tid)) "the writer stopped on a line it could not write")
+         (testing "GET /sofar -- the read the page polls -- says the record is degraded"
+           (let [answer (read-json (sofar tid))]
+             (is (= "degraded" (get-in answer [:record :state])))
+             (is (str/includes? (str (get-in answer [:record :reason])) "disk is full")
+                 "with the writer's own reason, not a paraphrase of it")
+             (is (pos? (get-in answer [:record :pending]))
+                 "and how many lines are waiting behind the one that failed")))
+         (testing "POST /rebuild -- the read a session is opened through -- says it too"
+           (let [answer (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
+             (is (= "degraded" (get-in answer [:record :state])))))
+         (finally (record/reset-sink!)))
+       (testing "and a session with nothing wrong carries NO record field at all"
+         ;; Absence is the client's 'fine'. A field that said 'ok' on every answer
+         ;; would be a field nobody acts on, and the one case worth reading would
+         ;; have to be told apart from the noise.
+         ;;
+         ;; THE HEALTHY WRITE HAS TO BE BACK BEFORE THE RETRY: `retry!` resumes at the
+         ;; line that failed, and a retry against the same broken disk fails again --
+         ;; which would leave this assertion reading a record that is still degraded
+         ;; for a reason this test made up rather than one it is asking about.
+         (record/retry! tid)
+         (is (= 0 (:pending (record/flush! 10000))))
+         (is (nil? (:record (read-json (sofar tid))))))))))

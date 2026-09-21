@@ -52,6 +52,10 @@
     "removeProjectRunning": "{{session}} is still running; remove the project once it settles.",
     "removeProjectParked": "{{session}} is waiting on you; remove the project once it settles."
   },
+  "record": {
+    "degraded_one": "This conversation could not be saved to disk: {{reason}}. {{count}} line is waiting to be written.",
+    "degraded_other": "This conversation could not be saved to disk: {{reason}}. {{count}} lines are waiting to be written."
+  },
   "dialog": {
     "removeTitle": "Remove this project?",
     "removeLeaves": "leaves the sidebar. Its sessions are kept on disk — nothing under",

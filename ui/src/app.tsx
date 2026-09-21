@@ -84,6 +84,7 @@ import { useTranslation } from "react-i18next";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { ContextCards } from "@/components/context-card";
+import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -105,6 +106,7 @@ import {
 } from "@/lib/session-memory";
 import { AGENT_URL, rebuildThread, sofarThread, type SofarState } from "@/lib/threads";
 import { type SessionStatus } from "@/lib/session-status";
+import { type RecordHealth } from "@/lib/record-health";
 
 /// HOW OFTEN A WATCHED CONVERSATION IS READ AGAIN, in milliseconds. Long enough that
 /// a long run is not thousands of requests, short enough that a person watching it
@@ -206,21 +208,31 @@ async function readSofar(threadId: string, t: TFunction<"errors">) {
 /// The read a host runs on mount, and what it reports back: `onReads` carries the
 /// conversation's own state out of the adapter, because the PAGE needs it -- the poll
 /// below keeps reading while it says `running`, and only the adapter has been told.
+/// `onRecord` carries the record's health out with it (ADR 0002 decision 6), for the
+/// same reason: it arrives on this read, and the column that says so is not the thing
+/// that made the request.
+///
+/// IT IS REPORTED ON BOTH DOORS, including `rebuild` -- a conversation handed over
+/// from a record the writer could not add to is exactly the case a reader needs told,
+/// and it is the door a session is opened through.
 function sessionHistory(
   threadId: string,
   read: HistoryRead,
   t: TFunction<"errors">,
   onReads: (reads: Reads) => void,
+  onRecord: (record: RecordHealth | null) => void,
 ) {
   return {
     load: async () => {
       if (read === "none") return { messages: [] };
       if (read === "rebuild") {
         const rebuilt = await rebuildThread(threadId, t);
+        onRecord(rebuilt.record ?? null);
         return repositoryFrom(rebuilt.messages);
       }
       const answer = await readSofar(threadId, t);
       onReads(answer.state);
+      onRecord(answer.record ?? null);
       return repositoryFrom(answer.messages, answer.state);
     },
     // No-ops: the harness owns the log (see the header).
@@ -275,8 +287,13 @@ const SessionHost: FC<{
   onStatus: (id: string, status: SessionStatus) => void;
   onForget: (id: string) => void;
   onError: (id: string, message: string) => void;
+  /// WHAT THIS SESSION'S RECORD LOOKS LIKE, reported to the page rather than kept
+  /// here: the sentence is drawn by the column, which this host renders as
+  /// `children` and therefore cannot hand a prop to. `null` is the ordinary answer
+  /// and means the record has nothing to say.
+  onRecord: (id: string, record: RecordHealth | null) => void;
   children: ReactNode;
-}> = ({ threadId, read, visible, onStatus, onForget, onError, children }) => {
+}> = ({ threadId, read, visible, onStatus, onForget, onError, onRecord, children }) => {
   // The agent is built ONCE for this host and owns this session's id for the
   // host's whole life. Rebuilding it would throw the thread away mid-run -- the
   // same reason the old single-agent memo had an empty dependency list, paid per
@@ -311,9 +328,72 @@ const SessionHost: FC<{
     setReadCount((count) => count + 1);
   }, []);
 
+  // The record's health, out to the page. NOT a ref-and-counter like `reads` above:
+  // nothing in this host's effects re-runs on it, and the page's own state is what
+  // decides whether the sentence is on screen.
+  const reportRecord = useCallback(
+    (record: RecordHealth | null) => onRecord(threadId, record),
+    [threadId, onRecord],
+  );
+
+  // WHETHER A RUN THIS HOST DROVE IS IN FLIGHT, and whether one ever was. Taken from
+  // the same reading the page's registry gets (`SessionStatusReporter` below), for the
+  // one effect that has to know: the record re-read after a run ends.
+  //
+  // A REF ALONGSIDE THE STATE, because "was there ever a run" is not a thing to
+  // re-render for -- it only decides whether the effect below has anything to ask
+  // about -- while `ownRun` IS state, because flipping it is what runs the effect.
+  const ranSomething = useRef(false);
+  const [ownRun, setOwnRun] = useState(false);
+  const reportStatus = useCallback(
+    (id: string, status: SessionStatus) => {
+      if (status.running) ranSomething.current = true;
+      setOwnRun(status.running);
+      onStatus(id, status);
+    },
+    [onStatus],
+  );
+
+  /// ASK HOW THE RECORD IS DOING ONCE A RUN THIS PAGE DROVE HAS ENDED.
+  ///
+  /// THE HOLE THIS FILLS IS THE ONE THE BROWSER WALKTHROUGH FOUND (2026-09-21): the
+  /// read that opens a session answers BEFORE the run exists, and the poll below only
+  /// runs for a session this page is WATCHING -- so a write failure during a run
+  /// somebody is driving themselves reached nobody, and the conversation went on
+  /// unsaved in silence. That is the one thing ADR 0002 decision 6 refuses.
+  ///
+  /// THE SAME READ THE MOUNT USES, fallback included, and the fallback is not an
+  /// accident: a degraded record is exactly when the log can end mid-run, and
+  /// `readSofar` follows its refusal into the rebuild that closes the run off -- which
+  /// is what makes the conversation readable again AND what reports the health. There
+  /// is no new endpoint and no new read path; this is one read per run.
+  ///
+  /// IT REPORTS AND NOTHING ELSE -- no `import`. This host is the one streaming that
+  /// run, and the record LAGS it: importing the log back over the live conversation
+  /// would draw the answer backwards. The watching poll may import precisely because a
+  /// watcher has no stream of its own to regress.
+  useEffect(() => {
+    if (ownRun || !ranSomething.current) return undefined;
+    ranSomething.current = false;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const answer = await readSofar(threadId, tErrors);
+        if (!cancelled) reportRecord(answer.record ?? null);
+      } catch {
+        // The read failed -- a session that is gone, a harness that is not answering.
+        // Nothing to say about the record, and the conversation on screen stays as it
+        // was: the same reasoning the poll below writes down.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ownRun, threadId, tErrors, reportRecord]);
+
   const history = useMemo(
-    () => sessionHistory(threadId, read, tErrors, onReads),
-    [threadId, read, tErrors, onReads],
+    () => sessionHistory(threadId, read, tErrors, onReads, reportRecord),
+    [threadId, read, tErrors, onReads, reportRecord],
   );
 
   const runtime = useAgUiRuntime({
@@ -359,6 +439,11 @@ const SessionHost: FC<{
         if (cancelled) return;
         reads.current = answer.state;
         setReadCount((count) => count + 1);
+        // A RECORD THAT WENT DEGRADED MID-RUN IS SAID HERE, on the poll that is
+        // already running: the read that opened this session answered before the
+        // failure existed, so without this the sentence would wait for the next
+        // reload -- which is the silence ADR 0002 decision 6 refuses.
+        reportRecord(answer.record ?? null);
         runtime.thread.import(
           repositoryFrom(answer.messages, answer.state) as Parameters<typeof runtime.thread.import>[0],
         );
@@ -373,13 +458,16 @@ const SessionHost: FC<{
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [read, readCount, threadId, runtime, tErrors]);
+  }, [read, readCount, threadId, runtime, tErrors, reportRecord]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <SessionStatusReporter
         threadId={threadId}
-        onStatus={onStatus}
+        // THE WRAPPED ONE, not the page's: this host reads its own run state out of the
+        // same report (`reportStatus` above), and the page's registry is the wrong place
+        // to read it back from -- a host that is not on screen still owns its run.
+        onStatus={reportStatus}
         onForget={onForget}
       />
       {/* Per host, and BELOW this host's provider because it reads ITS pending
@@ -407,7 +495,12 @@ const SessionColumn: FC<{
   /// needed while the control is there. Every host gets it: they all draw the same
   /// bar, and only the one on screen is what a person is looking at.
   folded: boolean;
-}> = ({ threadId, view, onView, folded }) => {
+  /// THE RECORD'S HEALTH FOR THIS SESSION, or null when it has nothing to say. It is
+  /// a prop from the page rather than something this column reads because the fact
+  /// arrives on the HOST's read (see `SessionHost`), which renders this column as
+  /// `children` and so cannot hand it anything.
+  record: RecordHealth | null;
+}> = ({ threadId, view, onView, folded, record }) => {
   const { t } = useTranslation();
   return (
     // The composer's chrome needs to know which session it is configuring -- the
@@ -455,6 +548,12 @@ const SessionColumn: FC<{
             </button>
           ))}
         </div>
+        {/* THE CONVERSATION THAT COULD NOT BE SAVED (ADR 0002 decision 6, ticket 02).
+            Above the conversation and below the tab strip, so it is read before the
+            text it is about -- and it is a STRIP rather than a floating toast because
+            it stays true until somebody acts on it. The sentence itself lives in
+            `components/record-notice.tsx`, where a test run can render it. */}
+        <RecordNotice record={record} />
         <div className="min-h-0 flex-1">
           {/* THE INJECTION CARD'S REGISTRATION, and it is a rendering: a data part's
               renderer is registered by MOUNTING the component `makeAssistantDataUI`
@@ -503,6 +602,11 @@ export function App() {
   });
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
+  // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
+  // their host on the read that opens the session and on every poll after it. A
+  // session that is absent from this map is FINE -- that is the ordinary answer, and
+  // the same absence the server sends (`lib/record-health.ts`).
+  const [records, setRecords] = useState<Record<string, RecordHealth>>({});
   // The sessions whose history would not load, keyed by session, so the refusal
   // lands on the row that was clicked.
   const [openErrors, setOpenErrors] = useState<Record<string, string>>({});
@@ -610,6 +714,16 @@ export function App() {
 
   const forgetStatus = useCallback((id: string) => {
     setStatuses((prev) => dropKey(prev, id));
+  }, []);
+
+  /// Take one session's record health, or drop it when the host reports there is
+  /// nothing to say. THE NO-NEWS PATH IS THE COMMON ONE and returns the same object,
+  /// so the page does not re-render every poll with an unchanged (empty) answer.
+  const reportRecord = useCallback((id: string, record: RecordHealth | null) => {
+    setRecords((prev) => {
+      if (record === null) return prev[id] === undefined ? prev : dropKey(prev, id);
+      return { ...prev, [id]: record };
+    });
   }, []);
 
   /// Show a session this client has just minted (and, for every path that has a
@@ -773,12 +887,14 @@ export function App() {
               onStatus={reportStatus}
               onForget={forgetStatus}
               onError={hostFailed}
+              onRecord={reportRecord}
             >
               <SessionColumn
                 threadId={host.id}
                 view={view}
                 onView={setView}
                 folded={folded}
+                record={records[host.id] ?? null}
               />
             </SessionHost>
           ))}

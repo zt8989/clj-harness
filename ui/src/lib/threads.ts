@@ -35,6 +35,8 @@
 // be a URL with `api` glued to the host.
 import type { TFunction } from "i18next";
 
+import type { RecordHealth } from "./record-health";
+
 const HARNESS = `${(import.meta.env.VITE_AGENT_URL ?? "/").replace(/\/+$/, "")}/`;
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
@@ -73,6 +75,9 @@ export type RebuiltThread = {
   threadId: string;
   messages: readonly unknown[];
   context: readonly unknown[];
+  /// Same field, same absence, as `ThreadSofar`: a rebuilt conversation whose
+  /// record could not be written says so here too.
+  record?: RecordHealth;
 };
 
 /// THE SERVER'S OWN REFUSAL, when the body carries one, and THIS SIDE'S sentence when
@@ -128,6 +133,9 @@ export type ThreadSofar = {
   state: SofarState;
   openRuns?: readonly string[];
   interrupts?: readonly unknown[];
+  /// THE RECORD'S OWN HEALTH, and its absence is the ordinary answer -- only a
+  /// session whose writer gave up on a line carries one (see `lib/record-health.ts`).
+  record?: RecordHealth;
 };
 
 /// READ THE CONVERSATION, WITHOUT TOUCHING IT. The read a page that has just landed
