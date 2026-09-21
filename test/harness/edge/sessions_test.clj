@@ -138,6 +138,23 @@
     (is (= [] (sessions/sweep! (+ touched (* 100 sessions/idle-ttl-ms))))
         "r1 ending must not unpin a session r2 is still running")))
 
+(deftest a-session-somebody-is-watching-is-not-put-away
+  ;; A CONNECTED WINDOW IS A PIN (ticket 06). Without it a page left open on a
+  ;; conversation is swept every thirty seconds: the feed ends, the client reopens the
+  ;; tail, and the same thing happens again -- a reader who never asked for anything
+  ;; watching their conversation get rebuilt on a timer. The pin ends where the
+  ;; connection does (`unwatch!`, which is http-kit's close handler).
+  (sessions/touch! "t-watched")
+  (sessions/watch! "t-watched" (fn [_ _] nil))
+  (let [touched (:touched-at (get (sessions/live) "t-watched"))
+        later   (+ touched (* 100 sessions/idle-ttl-ms))]
+    (testing "however long nobody touches it, a watched session stays"
+      (is (= [] (sessions/sweep! later)))
+      (is (contains? (sessions/live) "t-watched")))
+    (testing "and when the window closes it is eligible again"
+      (sessions/unwatch! "t-watched" (first (get (deref (var-get #'sessions/watchers)) "t-watched")))
+      (is (= ["t-watched"] (sessions/sweep! later))))))
+
 (deftest bytes-that-have-not-reached-the-record-hold-a-session
   (sessions/touch! "t-pending")
   (sessions/watch-unflushed! #(= % "t-pending"))

@@ -87,7 +87,10 @@ export type RebuiltThread = {
 /// more thing to distrust). Only a body with no `error` at all -- a proxy's 502, a
 /// route that answered empty -- leaves this side speaking, and then it speaks the
 /// interface's language: `HTTP 500` is a fact about the wire.
-async function refusalFrom(res: Response, t: Translate): Promise<string> {
+///
+/// EXPORTED FOR THE WINDOW (`lib/feed.ts`), which is the other half of this wire and
+/// reads refusals the same way: one place decides what a body without a sentence says.
+export async function refusalFrom(res: Response, t: Translate): Promise<string> {
   const body: unknown = await res.json().catch(() => undefined);
   return body !== undefined &&
     typeof body === "object" &&
@@ -107,7 +110,9 @@ export async function rebuildThread(threadId: string, t: Translate): Promise<Reb
   return (await res.json()) as RebuiltThread;
 }
 
-/// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it.
+/// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it -- and as
+/// a window states it too (`lib/window.ts`), because it is the same fact about the same
+/// conversation and both reads carry it.
 ///
 /// THREE ANSWERS AND NOT A BOOLEAN, because the client has three things to do and two
 /// of them are not 'normal'. `running` -- a run is being answered in the process right
@@ -115,12 +120,17 @@ export async function rebuildThread(threadId: string, t: Translate): Promise<Reb
 /// conversation has stopped to ask a human and is waiting for a decision. `settled`
 /// -- nothing is going on, and this is the ordinary case.
 ///
+/// `unfinished` IS THE FOURTH, and it is the RECORD's word rather than the process's: a
+/// log that ends mid-run says exactly that, and whether anybody is still writing it is
+/// the question `running` answers. It has always been on the wire (`replay/record-state`)
+/// and was missing from this type until ticket 06 needed it for window frames.
+///
 /// THE SERVER-PROCESS FACT, NOT THIS TAB'S. A refreshed page's own runtime has never
 /// run anything, so its `isRunning` is false while the process is in the middle of a
 /// run; this is the half that says so. It is also why the state cannot be derived
 /// from the message list: a partial conversation and a finished one differ by a fact
 /// that is not in the file.
-export type SofarState = "running" | "parked" | "settled";
+export type SofarState = "running" | "parked" | "settled" | "unfinished";
 
 /// What `GET /api/threads/<id>/sofar` answers: what has been recorded so far, and how
 /// far along it is. `openRuns` names the runs still being written (present only for

@@ -730,20 +730,35 @@
     (ring! id {:kind :gone :reason :put-away})
     nil))
 
+(defn- watched?
+  "Is anything connected to TID's window right now? (`watch!` / `unwatch!`;
+  `harness.edge.http/stream-feed!` is the one caller that holds a connection open.)"
+  [tid]
+  (boolean (seq (get @watchers (str tid)))))
+
 (defn- evictable?
-  "May TID's ENTRY be put away as of NOW? Three things, and every one of them is a
-  reason not to: somebody is running it, its bytes are not all on disk, it was touched
-  recently."
+  "May TID's ENTRY be put away as of NOW? FOUR things, and every one of them is a reason
+  not to: somebody is running it, its bytes are not all on disk, somebody is WATCHING it,
+  and it was touched recently.
+
+  A CONNECTED WINDOW IS A PIN (ticket 06), and it took a browser to show why: a reader
+  who leaves a conversation open is looking at it, so sweeping the session out from under
+  them ends the feed every thirty seconds -- the window says it was reopened, the reader
+  never asked for anything, and the server does the same thing again half a minute later.
+  A poll used to keep such a session alive by touching it on every read; a feed's
+  connection is the same fact without the traffic, and `unwatch!` is what ends it
+  (http-kit's close handler, so a tab that goes away releases it)."
   [tid entry now]
   (and (empty? (:runs entry))
        (not (@unflushed? tid))
+       (not (watched? tid))
        (<= idle-ttl-ms (- now (:touched-at entry)))))
 
 (defn sweep!
   "Put away every session that has been idle past `idle-ttl-ms`, that has no run going,
-  and whose bytes have all reached the record. NOW is milliseconds. Answers the ids it
-  put away, in no particular order -- an answer rather than a count, because 'which one'
-  is the only thing a reader can act on."
+  that nothing is watching, and whose bytes have all reached the record. NOW is
+  milliseconds. Answers the ids it put away, in no particular order -- an answer rather
+  than a count, because 'which one' is the only thing a reader can act on."
   [now]
   (let [[before after] (swap-vals! registry
                                    (fn [m]

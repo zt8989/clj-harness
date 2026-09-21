@@ -39,10 +39,11 @@ import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
 import { injectionSuite } from "./suites/injections";
 import { recordSuite } from "./suites/record";
+import { windowSuite } from "./suites/window";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, recordSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -118,7 +119,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// same contract: `startTask` with nothing to name comes back with an id the SERVER
 /// minted, listed as a conversation this home keeps and usable for a run -- where a
 /// page-made id used to be quietly registered by the run edge.
-const EXPECTED_CASES = 56;
+/// 56 -> 65: the `window` suite's nine, and they are ticket 06's UI half -- the rules
+/// that turn feed frames into a copy, the control that asks for older history, the
+/// sentences owed when the answer is not simply "more messages", and the arithmetic
+/// that keeps a reader's place when a page is prepended. The three answers that are not
+/// "append" are the reason it exists: a hole, a reopen and a copy that is ahead of the
+/// conversation are all SILENT failures when they go wrong, and silence is not
+/// something a later test can notice.
+const EXPECTED_CASES = 65;
 
 let total = 0;
 for (const suite of SUITES) {

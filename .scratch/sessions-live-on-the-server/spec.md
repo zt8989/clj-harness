@@ -112,13 +112,13 @@
 | 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | **已落地**。动作的载荷是新字段 `append`（不是 AG-UI 的 `messages`）；`messages` 具名 400、不认识的 id 具名 404、`runId` 门里铸并进记录、`provider` 只认会话档、`context` 只在出生那一轮读；页面不再铸任何会话 id（`POST /api/sessions` / `POST /api/project` 由服务端铸）；客户端那半是 `ui/src/lib/agent.ts` 的 `HarnessAgent`。落地记录见下（含留给 04/05/06 的边界） |
 | 04 | 认领：一个 thread 归一个进程 | 01 | **已落地**。库里一行 owner（`session_claims`，不是锁文件）；会话出生时认领、放掉会话（显式 `drop!` 或空闲 30s）时交还、进程正常退出走 shutdown hook 交还；`kill -9` 留下的行靠 **pid + 起始时刻**判死并明说易主；后到的进程**只读 + 明说**（动作 409 点名 pid，读路由照常）；认领的 token 就是票 05 的 generation。落地记录见下 |
 | 05 | 会话 feed：尾页、增量、补页 | 01 | **已落地**。`GET …/feed`（SSE：窗口帧 → 每落盘一批推一帧 → 终态帧 `end`）与 `GET …/page?beforeSeq=N`；序号 = **记录偏移**，写者落盘时报出、不由人预测；窗口在**批**的边界上切（不重叠不丢）；`since` 落在窗口外或 generation 不对 ⇒ 409 且 body 带当前值；`rebuild` / `sofar` 对活会话读内存；放掉 / 易主都是一帧终态。落地记录见下 |
-| 06 | 副本：窗口、补页、刷新 | 03, 05 | 窗口 `{entries, baseSeq, hasMore, revision}`；「显示更早」那颗按钮；补一页 vs 重开的两种处置；刷新走内存；打字 / 滚动的锚定 |
+| 06 | 副本：窗口、补页、刷新 | 03, 05 | **已落地**。浏览器手里是一段窗口 `{entries, baseSeq, hasMore, cursor, generation, state, revision}`（`revision` 是副本自己的「窗口变过几次」，不是消息序号）；`GET …/feed` 是那条连接（断档 / 重连 ⇒ 拉尾页**对齐**、保住读者的位置；`end` / generation 作废 ⇒ **重开**并说出来）；「显示更早」一次一页、一次只有一个在飞；刷新拉尾页 ⇒ 落点是最新（走内存）；打字 / 输一半的字 / 滚动位置都不动（锚点是一条消息的文本，不是它的 DOM 节点）。落地记录见下 |
 | 07 | 收口：两条铁律、状态表、文档、报数 | 02–06 | `overview.md` 铁律 1 与 3 的新措辞 + 状态表（+ 窗口那一行）；`edge.md` / `client.md` / `kernel.md` / `skills-and-instructions.md` 的推导；`CONTEXT.md` 术语；两套全量 + 走查证据；落地记录 |
 
 ## 状态
 
-**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01、02、03、04、05 已落地（01/02 的文件
-留在 `issues/` 里当落地记录，票 07 收口时再把它们折进这里）；06、07 等前置。
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。** 票 01–06 已落地（01/02 的票面文件留在
+`issues/` 里当落地记录，票 07 收口时再把它们折进这里；03–06 的落地记录都在下面）；07 等前置。
 
 ## 已验证到什么程度
 
@@ -411,3 +411,141 @@ exit 0）。新用例落在 `edge/http_test.clj`：不认识的 id 具名 404、
 - **`stats` / `trajectory` 只加了 `:behind`**，没有做「从内存读同一场会话」的第二份实现：它们读的是
   记录的聚合（行数、帧数、时长），内存里那份少了落盘这一环，做第二份就是在两个算法之间维护一个
   必须永远相等的不变量。落后多少由 `:behind` 说出来，界面自己决定要不要等（票 06）。
+
+## 票 06 落地记录（2026-09-23）
+
+**浏览器从「每隔 1200ms 重读一遍记录」变成「手里握着一段窗口」。** 这一票把票 05 那条 feed 接上：
+开窗拉尾页、增量走 feed、更早的打一页、断档时对齐、窗口作废时重开、刷新回同一场看到最新。票 03
+留下的那个轮询（`sofar`）在这里拆掉——除了一个门（见决定 9），页面上再也不问「记录到哪了」。
+
+### 接口
+
+- **`ui/src/lib/window.ts`（新）**：窗口的形状是
+  `{entries, baseSeq, hasMore, cursor, generation, state, revision}`，纯函数 `windowFrom` /
+  `applied` / `prepended` / `aligned` / `aheadOf` / `unseen` / `newest` 就是全部规则；
+  `Effect` 只有四种（`none` / `align` / `reopen` / `rebuilt`），句子是 `WindowNotice`
+  （`reopened` / `rebuilt{dropped}` / `ahead{count}` / `failed{message}`）+ `windowNotice(t, …)`。
+  「什么都没变」时 `applied` **按身份**把原窗口还回去，调用者据此决定要不要 import。
+- **`ui/src/lib/feed.ts`（新）**：`feedThread(id, {since, generation}, handlers)` 拿 `fetch` +
+  `AbortController` 读 SSE（不是 `EventSource`，见决定 7），配一个纯的 `feedFrames(text)`
+  （按空行切帧、丢认不出的、把剩下的还回来给下一次调用）。
+- **`ui/src/lib/window-scroll.ts`（新）**：`measure` / `restoredTop` / `correctedTop` 三行纯算术
+  （用例里测），加 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事。
+- **`ui/src/components/window-top.tsx`（新）**：消息上方那一行——`hasMore` 时才画按钮（补页中
+  禁用）、有一句话时画 `[data-slot="window-notice"]`。
+- **`ui/src/app.tsx`**：`HistoryRead` 从三个读法变成 `none | rebuild | window`（`sofar` 那扇门没了）；
+  `useWindowFeed` 拿窗口、帧、两种修理和补页；票 03 的 `sofar` 轮询 effect 删掉。
+- **`ui/src/components/assistant-ui/elements/thread.aui.tsx`**：viewport 注册给锚点用，
+  `window` 这一行插在骨架与消息之间（补页长在**消息下面**，锚的才是读者在看的内容）。
+- **服务端（票 06 补的）**：`window-frame` 多带 `:state`（读者要知道对面的 run 停了没有）与
+  `:record`（票 02 的降级态跟着窗口一起到）；`live-state` 是那句话的唯一来源；`read-entries` 的
+  两个分支都答 `:state`；`sessions/watched?` 进了 `evictable?`；`replay/record-state` 变公开。
+
+### 五个决定，以及为什么不是另一种
+
+1. **`revision` 是副本自己的计数，不是消息序号**（判断 1）。每次窗口内容真的变了加一，`windowFrom`
+   开窗时置 1；消息的号是 `seq`（记录偏移，票 05），两个名字在这个文件里从头到尾没有混用过。用例专
+   门盯着这一条：一帧什么都不改时，`applied` 返回的是**同一个对象**（身份），`revision` 不动。
+2. **游标只进不退，而且只接受服务端送来的数**（`newest`）。一帧里条目全还在写者队列里时它不带
+   `cursor`，此时旧值照旧——「我已经被告知到哪」这个问题，猜一个数就是让下一次去请求一个没有任何
+   东西按它编号的区间。`applied` 与 `aligned` 都走 `newest`。
+3. **`applied` 的五问顺序就是五种答案**：`end` ⇒ 重开；generation 变了 ⇒ 重开；整窗帧（feed 的首帧、
+   `page` 的 tail 答案）⇒ 交给 `aligned`（能接上就合、接不上就**重建并从尾页重来**，把丢掉的
+   `dropped` 数说出来）；`baseSeq > cursor`（断档）⇒ 拉尾页对齐；否则追加。**整窗帧不能当追加处理**：
+   它说的是「窗口从哪里到哪里」，对副本手里更早的那些一个字都没说，当追加会既丢内容又谎报丢了多少。
+4. **两种处置是两件事，触发条件写下来：** 断档 / 重连 ⇒ `align`（拉尾页，`windowFrom` + `aligned`，
+   **保住读者的位置**）；`end` / generation 作废 ⇒ `reopen`（尾页 + `adopt`，把「重开了」这句话
+   **最后**说——先说的话会被后面那次 `commit` 的清理顺手抹掉）。重连失败不猜：`RECONNECT_MS`（1s）
+   之后再来一次。
+5. **副本超前说得出来**（判断 5）。`aheadOf(before, frame)` 只看「我手里有、seq 落在这一页覆盖的
+   区间里、而这一页没有」的条目——落在页外面的不算（副本可能合法地比尾页更早），没有 id 的也不算。
+   有了就 `setNotice({kind:"ahead"})`，绝不静默丢。服务端那一半（一个窗口一个权威）已经让这种状态
+   在本特征之后不可能出现，这条是保险丝。
+
+### 另外五条，都是被走查逼出来的
+
+6. **锚点是消息的文本，不是它的 DOM 节点。** 第一版拿屏幕上那个元素当锚（`isConnected` 判死活），
+   走查当场证伪：assistant-ui 按**位置**保留消息节点，import 之后本来画「第 3 轮」的那个节点还是第一
+   个孩子、位置几乎没动，里面已经换成了「第一轮」——量到的数是 `top 83 → 49`，而上面多了 4437px，
+   算出来的修正是 0。节点不是消息，文本才是；再加一条索引检查（补页只会把消息往后推，匹配到更靠前
+   的位置说明是另一条说了同样话的消息，宁可不锚也不能锚反几万像素）。
+7. **`EventSource` 换成 `fetch` + `AbortController`。** 两件事 `EventSource` 做不到：它自己重连
+   （重连要带 `since` 和 `generation`，还要按 409 的 body 分辨「窗口作废」），以及它看不见响应状态
+   与 body——窗口作废是一条具名的 409，看不见就只能瞎重连。
+8. **一次只有一页在飞，但「补页中」和「修理中」是两个标记**（不是同一个 loading）。合成一个的两种
+   坏法都真实：读者点「显示更早」会吞掉一次断档修理（窗口就一直落后到下次有事发生），而一次修理
+   会把为旧窗口取回的那一页拼进去（`earlier` 在 await 之后**重查 `baseSeq`** 正是为这个）。
+9. **自己驱动的那一轮只在「没有窗口」的门上读一次 `sofar`。** 有窗口的页面由 feed 报降级
+   （每帧都带 `:record`），再问一次就是每跑一轮一问、说的还是连接已经说过的事；`read: none`
+   （本页刚铸的会话）、`rebuild`（侧栏点开 / 修好的断头记录）这两个门没有连接可听，那一次读留着。
+   走查里 27 轮只看到 **1** 次 `sofar` 请求，就是这一条。
+10. **连着的窗口把会话钉住**（`evictable?` 多一条 `(not (watched? tid))`）。不加的话，一个页面开着
+    超过 30s，会话会被扫地出门 ⇒ 页面收到 `end` ⇒ 重开 ⇒ 再被扫，来回循环。这是「窗口是一条连接」
+    这句话在会话寿命上的代价，用例 `a-session-somebody-is-watching-is-not-put-away` 盯着。
+
+### 踩出来的坑（都会重犯）
+
+- **`:state` 为 nil 的「没新闻」帧**（一次 flake 抓到的）：一轮 run 结束是**两步**——`run-finished!`
+  摘钉子、`settle!` 折完帧并把状态写下来——两步之间 `live-state` 答 `nil`，而 `(not= nil "running")`
+  为真 ⇒ feed 推了一帧「这个会话从来没跑过」。修法是「一帧要有新闻」：有增量就发，只有状态变了才发
+  而且状态必须不是 nil。这一条修完连跑 6 次两套件全绿（修之前 2/6 红）。**第一版修错了**：写成
+  `(and (some? state) (or (seq delta) …))`，把「条目落了但会话还没状态」的帧也吞了 ⇒ 5 个用例红。
+- **React 提交完，布局还没完**：补页之后量到 10729px，200ms 后是 8327px（一轮跑的时候画成展开的
+  回合，import 回来是折叠的）。一次校正必然算错，所以校正分三趟（rAF + 80ms + 160ms），公式幂等
+  （锚点回到原位后，下一趟算出来是 0）。
+- **页面刚铸的会话没有窗口**（`read: none`，本页自己的 run 走 run 自己那条流）⇒ 走查第一场要断言的
+  是「刷新回来才有窗口」，不是「一开场就有 feed」。
+- **测试里没有 DOM**（`renderToStaticMarkup`）：`scrollHeight` 恒为 0，锚定那一格只能靠真浏览器走查，
+  这也正是本票把算术（纯函数，有用例）与接线（走查）分开的原因。
+
+### 验证
+
+**后端全量：1044 tests / 12466 assertions / 0 failures / 0 errors**（2026-09-23，本 worktree，exit 0）。
+`sessions` + `http` 两套 **115 tests / 1100 assertions / 0 failures / 0 errors**，连跑 6 次全绿。
+本票新写的用例：
+
+- `test/harness/edge/sessions_test.clj`（+1）：有窗口连着的会话不被放掉（`evictable?` 的第四个条件）。
+- `test/harness/edge/http_test.clj`（+4）：一页按会话写成的那几批切（`?beforeSeq` 不重叠不丢）；
+  窗口已经不在时 feed **在推任何字节之前**就 409；真 socket 的 feed：首帧窗口 → 落盘后没人再问也
+  收到一帧 → 终态一帧 `end`；**只变了状态的一帧**（一个 run 没说话就结束）带 `:state`、不带条目、
+  游标不动。
+- `ui/test/suites/window.tsx`（新，9 个用例）：追加 / 去重 / 静默帧不改 `revision`；缺口 ⇒ `align`；
+  接不上 ⇒ `rebuilt` 且报 `dropped`；接得上 ⇒ 合并且不丢；`end` / generation / 整窗帧；补页的顺序与
+  `hasMore` / `state`；`aheadOf` 的三种范围规则；`WindowTop` 画不画按钮；两种语言的句子；
+  `feedFrames` 的解析；`measure` / `restoredTop` / `correctedTop` 的算术。
+  `ui/test/ui.test.ts` 的 `EXPECTED_CASES` 从 56 提到 **65**。
+
+**UI**：`npx tsc --noEmit` 干净、`npm test` **65 passed**、`npm run build` 通过。
+
+**走查 GREEN**（`node scripts/dev.mjs --scripted .scratch/sessions-live-on-the-server/evidence/06-go.json
+--ui-port 5226` + `evidence/06-walkthrough.mjs <ui-url> <config-root>`，四个场面）：
+
+1. 新页面（服务端铸 id）→ 跑一轮 → 改一次模型选择。刚铸的会话**没有窗口**（`page 0 / feed 0`），
+   这是对的：没有记录可读，自己那一轮的答案走 run 自己的流。
+2. 刷新回同一场：`GET /page` 的答案是 `{live: true, baseSeq: 0, hasMore: false}`（**走内存**，
+   判断 7），并开一条 feed；模型选择还在。
+3. **第二个页面看着第一个页面跑**（票 05 边界里留给本票的那一格）：它自己一轮都没驱动，
+   全程 `sofar` 请求 **0** 次（断言的就是「没有轮询」），那一轮的内容由 feed 送达；对面那一轮跑完，
+   它一次请求都没多发（`page 0 / feed 0 / sofar 0`）。
+4. 长会话（27 轮，每 5 轮刷新一次直到尾部**前面还有东西**）⇒ 滚到顶、点一次「显示更早」：
+   两次同步点击**只上了一次网**（`page` 请求 +1）、到达的是紧邻的那一页（`baseSeq 31 → 0`）、
+   被读的那条消息从 `83` 挪到 `82.5`（4px 以内）、输入框里打了一半的字还在、截图
+   `evidence/06-window-earlier.png`（读者停在原地，上面多了 4 组）。同期页面的窗口请求计数：
+   `page 7 / feed 6 / sofar 1`（6 次刷新 6 条 feed + 1 次补页；`sofar` 那 1 次就是决定 9 说的那个门）。
+
+验收对照：尾页 + 「显示更早」+ 紧邻（走查 4 与 `a-page-is-cut-at-the-arrivals…`）；`hasMore` 为假
+不画按钮（`WindowTop` 用例 + 走查里补到头的两帧）；连点只有一页在飞（走查 4 的两次同步点击）；
+打字 / 滚动不动（走查 4）；「内存比记录新 ⇒ 刷新看到新的那份」（走查 2 的 `live: true`）；序号缺口
+⇒ 补一页对齐（`window.ts` 的 `align` 用例 + `aligned` 的两种答案）；generation 作废 ⇒ 重开并说出来
+（用例）；副本超前 ⇒ 说出来（`aheadOf` 用例）。
+
+### 边界（写给票 07）
+
+- **跳转（`loadThrough(seq)`）没做**（判断 4）：本票只有「补一页」，从轨迹点跳到某一轮需要一个属于
+  轨迹视图的入口，不在副本自己手里。
+- **窗口只往前长，不裁剪**：一页页补上去的内容一直留着（内存随会话增长），ADR 0003 的窗口管的是
+  **传输与重建的范围**，不是客户端的内存上界。要做裁剪是另一张票。
+- **拿不到锚点文本时退回容器高度算法**：误差是同一瞬间**消息上方**变了多少——实际会发生的是
+  「显示更早」那条控制条在最后一页到位后消失，五十几个像素。
+- **走查里滚到顶用的是真滚轮**（`mouse.wheel`）：程序化 `scrollTo(0)` 会被 assistant-ui 的
+  「贴着最新」吃掉（量过：scrollTop 又回到 6225），而滚轮正是它认为「读者自己动了」的信号。

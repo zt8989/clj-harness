@@ -2455,10 +2455,26 @@
                                           "Cache-Control" "no-cache"})
    :body    bytes})
 
+(defn- live-state
+  "The state of a conversation THIS PROCESS HOLDS, in the same words `sofar` answers
+  with (`harness.edge.http/sofar-get`): `running` when a run of it is alive here, else
+  what the session's own memory last said (`harness.edge.sessions/state`, written by
+  `settle!` from the frame that ended the run).
+
+  WHY A WINDOW CARRIES IT AT ALL (ticket 06 of `.scratch/sessions-live-on-the-server`):
+  a replica that opened a window and then watched somebody ELSE's run needs to know when
+  that run settles -- the difference is whether the turn on screen is still being written
+  -- and the window is the only connection it has. Polling `sofar` for the same fact is
+  what the window exists to replace. `nil` for a session that has never run, which reads
+  as 'not running' on the other side."
+  [stem]
+  (if (running? stem) "running" (some-> (sessions/state stem) name)))
+
 (defn- window-frame
   "A page as a feed frame: the entries, where the page starts in the record, whether
-  there is more in front of it, where the reader's cursor now is, and WHICH WINDOW this
-  is -- the session's generation (`harness.edge.sessions/generation`).
+  there is more in front of it, where the reader's cursor now is, WHICH WINDOW this is --
+  the session's generation (`harness.edge.sessions/generation`) -- and how far along the
+  conversation is (`state`, see `live-state`).
 
   THE CURSOR IS THE LAST ENTRY'S `:seq`, and nil when the page's entries have not landed
   yet: a reader that kept a number the writer has not confirmed would be inventing one,
@@ -2476,15 +2492,23 @@
     `end`     the window is over: the session was put away, swept or taken over
 
   Three of them come off the feed and two off the page route, and a client switches on
-  the type the same way either way."
-  [thread-id type {:keys [entries baseSeq hasMore]}]
-  (let [entries (vec entries)]
-    {:type       type
-     :entries    entries
-     :baseSeq    baseSeq
-     :hasMore    (boolean hasMore)
-     :cursor     (or (:seq (peek entries)) baseSeq)
-     :generation (sessions/generation thread-id)}))
+  the type the same way either way.
+
+  THE RECORD'S HEALTH RIDES ALONG, absent when there is nothing to say -- ADR 0002
+  decision 6 asks that a write failure reach whoever is looking, and a window is now one
+  of the reads somebody looks through (`harness.edge.http/record-health`, the same fact
+  `rebuild` and `sofar` carry)."
+  [thread-id type state {:keys [entries baseSeq hasMore]}]
+  (let [entries (vec entries)
+        health  (record-health thread-id)]
+    (cond-> {:type       type
+             :entries    entries
+             :baseSeq    baseSeq
+             :hasMore    (boolean hasMore)
+             :cursor     (or (:seq (peek entries)) baseSeq)
+             :generation (sessions/generation thread-id)
+             :state      state}
+      (some? health) (assoc :record health))))
 
 (defn- read-entries
   "The entries a WINDOW route answers with: the live session's when this process holds
@@ -2492,20 +2516,27 @@
 
   {:ok [..]} or {:error <sentence>}: an unknown stem and a log that cannot be read are
   the two failures, and they are told apart the way `rebuild` tells them apart (404 for
-  'not here', 400 for 'here and broken')."
+  'not here', 400 for 'here and broken').
+
+  IT ANSWERS THE STATE AS WELL, because a page that draws a conversation has to know
+  whether its last turn is still being written: memory for a session this process holds
+  (`live-state`), and the RECORD's own reading for one it does not (`replay/record-state`
+  -- `:unfinished` is the honest word for a log that ends mid-run, and it is also the flag
+  that sends a client to the `rebuild` door that closes it off)."
   [stem]
   (if-some [e (sessions/live-entry stem)]
     (if-some [split (ambiguous-stem stem)]
       {:error split :status 404}
       (do (sessions/touch! stem)
-          {:ok (:entries e) :live true}))
+          {:ok (:entries e) :live true :state (live-state stem)}))
     (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                        (catch Throwable t {:error (ex-message t)}))]
       (if-some [err (:error located)]
         {:error err :status 404}
-        (try {:ok (vec (replay/entries (replay/lines->records
-                                        (replay/read-lines (:ok located)))))
-              :live false}
+        (try (let [records (vec (replay/lines->records (replay/read-lines (:ok located))))]
+               {:ok (vec (replay/entries records))
+                :live false
+                :state (name (:state (replay/record-state records)))})
              (catch Throwable t {:error (ex-message t) :status 400}))))))
 
 (defn- number-param
@@ -2546,6 +2577,7 @@
                        (sessions/tail-of es))]
             (api-response 200 (assoc (window-frame stem
                                                    (if (:ok before) "page" "tail")
+                                                   (:state read)
                                                    page)
                                      :live (boolean (:live read))))))))))
 
@@ -2590,9 +2622,10 @@
                                          :hasMore false})
                                 frame (window-frame stem
                                                     (if (nil? since) "window" "append")
+                                                    (live-state stem)
                                                     page)]
                             (hk/send! ch (feed-head origin (feed-bytes frame)) false)
-                            (loop [cursor (:cursor frame)]
+                            (loop [cursor (:cursor frame) state-0 (:state frame)]
                               (async/<! wake)
                               (if (nil? (sessions/live-entry stem))
                                 ;; THE WINDOW IS OVER, AND IT SAYS SO: the session was put
@@ -2606,13 +2639,32 @@
                                                :generation generation})
                                           true)
                                 (let [delta (sessions/since stem cursor)
-                                      frame (window-frame stem "append"
+                                      ;; THE STATE IS READ BEFORE THE FRAME IS BUILT, and
+                                      ;; it is worth a frame of its own: a run that settled
+                                      ;; without adding an entry (nothing was said) still
+                                      ;; changes what the reader should draw, and a frame
+                                      ;; sent only for entries would leave the turn on
+                                      ;; screen looking unfinished forever.
+                                      state (live-state stem)
+                                      frame (window-frame stem "append" state
                                                           {:entries delta
                                                            :baseSeq cursor
                                                            :hasMore false})]
-                                  (when (seq delta)
+                                  ;; A FRAME HAS TO CARRY NEWS, AND `nil` STATE IS NOT NEWS.
+                                  ;; Ending a run is two steps -- `run-finished!` unpins it,
+                                  ;; `settle!` folds the frames and writes the state -- and
+                                  ;; between them the conversation is neither running nor
+                                  ;; anything else yet, so `live-state` answers nil. Telling a
+                                  ;; reader "never run" for those milliseconds would be a lie,
+                                  ;; and telling it nothing is exactly right: the fold rings on
+                                  ;; its own, and the frame that follows says `unfinished` or
+                                  ;; `settled`, which is the truth. (The suite caught this as a
+                                  ;; flake: the state-only frame was the FIRST of the two, and
+                                  ;; it said nothing.)
+                                  (when (or (seq delta)
+                                            (and (some? state) (not= state state-0)))
                                     (hk/send! ch (feed-bytes frame) false))
-                                  (recur (or (:cursor frame) cursor))))))
+                                  (recur (or (:cursor frame) cursor) state)))))
                           (finally
                             (sessions/unwatch! stem f)))))
                     ;; ONE LINE PER FEED END, SAYING WHAT http-kit THINKS HAPPENED, for

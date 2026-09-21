@@ -5358,6 +5358,10 @@
    "win-page"
    (fn []
      (fill-live-window! "win-page" 30)
+     ;; A RUN OF IT IS ALIVE IN THIS PROCESS, which is the one fact about a conversation
+     ;; that is in neither the record nor the entries -- a page has to carry it, because
+     ;; the turn on screen is drawn as finished or unfinished by it (ticket 06).
+     (sessions/run-started! "win-page" "win-r0")
      (testing "no cursor is the tail page, and it is a slice rather than the whole thing"
        (let [resp (api-call :get "/api/threads/win-page/page" nil)
              body (read-json resp)]
@@ -5368,6 +5372,8 @@
          (is (true? (:live body)) "answered from the session this process is holding")
          (is (some? (:generation body)) "under the generation the window belongs to")
          (is (= 290 (:cursor body)) "and the reader's next cursor is the newest number")
+         (is (= "running" (:state body))
+             "and how far along it is: a run of this session is alive here")
          (is (= 0 (count (:entries (read-json (api-call :get
                                                         "/api/threads/win-page/page?beforeSeq=0"
                                                         nil)))))
@@ -5393,7 +5399,11 @@
          (is (false? (:live body)) "read from the record, and it says so")
          (is (= ["u1"] (mapv (comp :id :message) (:entries body))))
          (is (= [0] (mapv :seq (:entries body)))
-             "numbered by its own line in the record -- the same numbers a live session mints")))
+             "numbered by its own line in the record -- the same numbers a live session mints")
+         (is (= "unfinished" (:state body))
+             "and the state is the RECORD's own reading: a log that stops mid-run with
+              nothing in this process running it says exactly that, and it is the flag
+              that sends a client to the `rebuild` door that closes it off")))
      (testing "a stem with neither a session nor a log is a 404"
        (is (= 404 (.statusCode (api-call :get "/api/threads/win-nothing/page" nil))))))))
 
@@ -5485,4 +5495,35 @@
                   apart from whatever holds the conversation next")))
          (testing "and then it is closed"
            (is (nil? (next-frame))))
+         (finally (.close sock)))))))
+
+(deftest a-feed-says-when-the-conversation-moves-without-new-entries
+  ;; THE STATE IS PART OF THE WINDOW, and this is the case that proves why: a run that
+  ;; SETTLES without saying anything still changes what the reader should draw (the turn
+  ;; on screen stops being unfinished), and a frame sent only when entries land would
+  ;; leave that turn looking live forever. So the feed pushes when EITHER moved.
+  (with-server
+   "win-state"
+   (fn []
+     (fill-live-window! "win-state" 2)
+     (sessions/run-started! "win-state" "win-r-current")
+     (let [[sock next-frame] (feed-open! "win-state")
+           opened (next-frame)]
+       (try
+         (testing "the opening frame says a run of this conversation is alive"
+           (is (= "window" (:type opened)))
+           (is (= "running" (:state opened))))
+         (sessions/run-finished! "win-state" "win-r-current")
+         ;; A RUN THAT SAID NOTHING: the frames are the run's own start and nothing else,
+         ;; so `apply-frames` folds no messages -- what changed is the state.
+         (sessions/settle! "win-state" "win-r-current" [(ev/run-start)])
+         (testing "and a frame arrives for the state alone"
+           (let [frame (next-frame)]
+             (is (= "append" (:type frame)) "a frame arrives for the state alone")
+             (is (empty? (:entries frame)) "carrying no entries")
+             (is (= "unfinished" (:state frame))
+                 "and saying what this process now knows: a run of it ended without a
+                  terminal frame, which is a fact the record agrees with")
+             (is (= (:cursor opened) (:cursor frame))
+                 "the reader's cursor has not moved -- there was nothing to number")))
          (finally (.close sock)))))))

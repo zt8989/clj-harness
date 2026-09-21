@@ -63,5 +63,12 @@
     "removeSessions_other": "{{count}} 个会话将不再在这里列出。",
     "keep": "保留",
     "removeSubmit": "移除项目"
+  },
+  "window": {
+    "earlier": "显示更早",
+    "loadingEarlier": "正在加载更早的消息",
+    "reopened": "这一场在服务端已经关掉，窗口在新消息处重新打开了。",
+    "rebuilt_other": "窗口中间有一段补不回来，已按最新一页重建：丢了 {{count}} 条。",
+    "ahead_other": "这个页面显示过 {{count}} 条这场对话里已经没有的内容，已经去掉。"
   }
 }

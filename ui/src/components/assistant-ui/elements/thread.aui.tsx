@@ -39,7 +39,10 @@ import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-ic
 import { TurnStepsTrigger, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+// LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
+import { WindowTop, type WindowTopProps } from "@/components/window-top";
 import { cn } from "@/lib/utils";
+import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -115,6 +118,11 @@ export type ThreadComponents = {
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  // LOCAL (ticket 06): the window's top, drawn inside the viewport above the messages.
+  // The page hands it down because the window belongs to the SESSION and this file is
+  // the conversation's own furniture; `null` -- every session read through the sidebar,
+  // and every page whose log had to be repaired -- draws nothing at all.
+  window?: WindowTopProps | null | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -186,20 +194,22 @@ const ThreadHistorySkeleton: FC = () => {
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
+  window = null,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} window={window} />
     </ThreadComponentsContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
-  isEmpty,
-  autoFocus,
-}) => {
+const ThreadRoot: FC<{
+  isEmpty: boolean;
+  autoFocus: boolean;
+  window: WindowTopProps | null;
+}> = ({ isEmpty, autoFocus, window }) => {
   const { Welcome = ThreadWelcome, ComposerFrame = PassthroughFrame } =
     useContext(ThreadComponentsContext);
 
@@ -229,6 +239,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           the bottom, whether by that click or by hand. */}
       <ThreadPrimitive.Viewport
         data-slot="aui_thread-viewport"
+        // LOCAL (ticket 06): the scroll container, registered where the window's
+        // "show earlier" can anchor against it (`lib/window-scroll.ts`). It is a ref on
+        // the viewport rather than a lookup by `data-slot` for the reason the helper
+        // writes down: the element a prepend pushes down is THIS one, and a query would
+        // need a mounted page to find it.
+        ref={registerViewport}
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
         <div
@@ -243,6 +259,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
+
+          {/* LOCAL (ticket 06): the window's top sits between the skeleton and the
+              messages, which is above every message in the conversation -- so a prepend
+              grows the content BELOW it and the anchoring works on the messages the
+              reader is actually looking at. */}
+          {window !== null && <WindowTop {...window} />}
 
           <div
             data-slot="aui_message-group"

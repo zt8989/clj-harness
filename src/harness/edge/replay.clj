@@ -454,7 +454,7 @@
      :entries  (entries records)
      :context  (vec (:context input))}))
 
-(defn- record-state
+(defn record-state
   "What a log's RECORD says about the conversation in it -- one of three, and
   deliberately nothing about whether anyone is still writing it:
 
@@ -472,7 +472,12 @@
   THE NEWEST RUN DECIDES :parked, because a park is the state of the CONVERSATION
   and not of one run in it: the parked run ended on its interrupt, and if a resume
   followed, that resume is the newest run and its terminal is what the conversation
-  is waiting on now."
+  is waiting on now.
+
+  PUBLIC BECAUSE A WINDOW NEEDS IT TOO (ticket 06 of
+  `.scratch/sessions-live-on-the-server`): a page route asked for a conversation this
+  process does not hold answers its entries AND this state, and it has the records in
+  hand already -- asking `sofar` for the same answer would fold the log a second time."
   [records]
   (let [open   (open-runs records)
         newest (last (runs records))
