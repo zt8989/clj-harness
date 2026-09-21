@@ -26,68 +26,67 @@
   place that decides what a vendor key MEANS, and it does not rename it."
   (:require [clojure.data.json :as json]
             [harness.kernel.frames :as frames]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]))
 
 ;; --------------------------------------------------------------- reading lines
 
-(defn- last-line-record
-  "The last line, parsed -- or nil when it will not parse.
-
-  A LIVE LOG'S LAST LINE MAY BE HALF-WRITTEN, and this is the one reader that
-  must care: the writer appends whole lines under a lock, but a reader can still
-  catch a line mid-flush, and the composer's strip asks while a run is streaming.
-  Dropping it is the honest answer -- the rest of the log is what has happened so
-  far -- and it is NOT the same as replay's choice, which is to refuse the whole
-  file because a rebuild that silently loses its tail would hand a client a
-  shorter conversation than it had."
-  [line]
-  (try
-    (json/read-str line :key-fn keyword)
-    (catch Exception _ nil)))
-
 (defn read-records
-  "FILE -> its records. Every line but the last is parsed STRICTLY (harness.edge.replay/
-  lines->records, which names a line it cannot parse); the last one is dropped if
-  it is half-written (see last-line-record)."
+  "FILE -> its records, for a file that may be being written RIGHT NOW: every line but the
+  last is parsed strictly and the last is dropped if it is half-written.
+
+  THE RULE LIVES IN `harness.edge.replay/read-records` -- this is its second caller (the
+  composer's strip asks while a run streams) and it delegates rather than spelling the rule
+  again, so the two readers cannot answer differently about the same file."
   [f]
-  (let [lines (replay/read-lines f)]
-    (if (empty? lines)
-      []
-      (let [head (replay/lines->records (butlast lines))
-            tail (last-line-record (last lines))]
-        (cond-> (vec head) (some? tail) (conj tail))))))
+  (replay/read-records f))
 
 ;; ---------------------------------------------------------------------- turns
 
 (defn user-ids
-  "The ids of the user messages an INPUT record brings, in order. Ids, not content: two
-  identical user messages are two turns, and the system message changes between runs,
-  so content comparison would be wrong at both ends.
+  "The ids of the user message ONE RECORD brings, in order -- for a `message` row, the one
+  message it carries. Ids, not content: two identical user messages are two turns, and the
+  system message changes between runs, so content comparison would be wrong at both ends.
+
+  WHAT A ROW BRINGS IS ITSELF, and the row's `source` says whether it was the person's
+  (`.scratch/jsonl-two-kinds` 票 02: every message the model was handed is its own row, and
+  the envelope says who put it in the array). ONLY `client` COUNTS HERE, because a turn is
+  something a PERSON said: the conversation's birth entries (the session's context and its
+  opening blocks) ride as ordinary user messages too -- `source` = `injection` / `opening`,
+  which `ag/injected?` names -- and counting them would make a session's first run one turn
+  plus one per instruction file. The `input` row this used to read is gone; so is the
+  question 'was this the whole conversation or just what it added', which is what made an
+  old log count differently from a new one.
 
   PUBLIC, like `incomplete?`, because BOTH READERS need exactly this answer: this
   namespace counts the turns, harness.edge.trajectory groups the items by them. 'What
-  counts as a user message in an input' is one rule, and a second copy of it is a second
+  counts as a user message a run brought' is one rule, and a second copy of it is a second
   chance to disagree about where one turn ends."
   [record]
-  (->> (get-in record [:payload :messages])
-       (filter #(= "user" (:role %)))
-       (keep :id)))
+  (let [message (replay/payload record)]
+    (when (and (= "client" (:source record))
+               (= "user" (:role message)))
+      ;; THE ID IS THE ENVELOPE'S when the record has one -- the payload is the verbatim
+      ;; provider message, and a provider message has no such field (`ag/inbound` strips it
+      ;; on the way in, `.scratch/jsonl-two-kinds` 票 02 puts it back on the way out).
+      ;; `keep :id` WOULD ANSWER NIL HERE: the envelope's id IS the id, so there is no
+      ;; second lookup to make -- the shape `keep` is for.
+      (let [id (or (:id record) (:id message))]
+        (when (some? id) [id])))))
 
 (defn- turns
   "How many turns RECORDS hold.
 
   A TURN IS ONE USER MESSAGE and all the output it caused (CONTEXT.md), so a turn
-  is counted per user message that had NOT been seen before -- and a single input
-  that brings two new ones brings two turns. A resume sends a second `input` with
-  the same runId and no new user message (the client restates the whole history),
-  and it opens none: that run is the continuation of the turn that parked."
+  is counted per user message that had NOT been seen before -- and one run that brings two
+  new ones brings two turns. A RESUME brings no user message at all (what the parked run
+  left in the conversation is already there), so it opens none: that run is the continuation
+  of the turn that parked."
   [records]
   (:n (reduce (fn [{:keys [seen n]} record]
-                (if (= "input" (:kind record))
-                  (let [ids (set (user-ids record))]
-                    {:seen (into seen ids)
-                     :n    (+ n (count (remove seen ids)))})
-                  {:seen seen :n n}))
+                (let [ids (set (user-ids record))]
+                  {:seen (into seen ids)
+                   :n    (+ n (count (remove seen ids)))}))
               {:seen #{} :n 0}
               records)))
 
@@ -106,7 +105,7 @@
   mid-stream), and every question below is asked with `(seq usage)` -- an empty map
   would answer 'yes, this call reported usage'."
   [pending end-record]
-  (let [usage (:usage (:payload end-record))]
+  (let [usage (:usage (replay/payload end-record))]
     {:usage (when (seq usage) usage)
      :ms    (when-some [started (:ts pending)] (- (:ts end-record) started))}))
 
@@ -126,11 +125,11 @@
       (nil? record)
       (if pending (conj acc {:usage nil :ms nil}) acc)
 
-      (= "model/start" (:kind record))
+      (= "model/start" (replay/kind record))
       ;; A previous start with no end is a call that never closed; keep it as one.
       (recur more record (if pending (conj acc {:usage nil :ms nil}) acc))
 
-      (= "model/end" (:kind record))
+      (= "model/end" (replay/kind record))
       (recur more nil (conj acc (close-call pending record)))
 
       :else
@@ -229,8 +228,8 @@
   caveat, harness.edge.trajectory as a turn's. One rule, one spelling -- the
   alternative is two readers that can disagree about whether a log is finished."
   [records]
-  (let [last-frame (last (filter #(= "event" (:kind %)) records))]
-    (boolean (and last-frame (not (frames/terminal? (:payload last-frame)))))))
+  (let [last-frame (last (filter #(= "event" (replay/kind %)) records))]
+    (boolean (and last-frame (not (frames/terminal? (replay/payload last-frame)))))))
 
 ;; ----------------------------------------------------------------- the answer
 

@@ -93,7 +93,7 @@ import {
   type Choices,
   type ModelAnswer,
 } from "@/lib/composer";
-import { bindThread, listProjects, projectName } from "@/lib/projects";
+import { bindThread, listSidebar, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";
@@ -140,8 +140,11 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   // The fetch failures below are this side's fallback sentences (see
   // lib/projects.ts and lib/composer.ts), so they are drawn from `errors`.
   const { t: tErrors } = useTranslation("errors");
+  // THE PROJECTS HALF OF THE SIDEBAR'S LISTING, because that is what a session can
+  // be bound to: the tasks in the same payload are conversations with no directory,
+  // and this picker is the thing that gives one -- so lists them nothing to offer.
   const projects = useRemote(
-    useCallback(() => listProjects(tErrors), [tErrors]),
+    useCallback(() => listSidebar(tErrors), [tErrors]),
   );
   const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
   const [error, setError] = useState<string | null>(null);
@@ -150,7 +153,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   // The label is the last path segment -- a row has to be scannable -- and the
   // whole path rides along as the hint: it is what the row is searched by (a
   // person remembers `workspace`) and what it shows when the list is open.
-  const dirs = (projects.data ?? []).map((p) => ({
+  const dirs = (projects.data?.projects ?? []).map((p) => ({
     value: p.path,
     label: projectName(p.path),
     hint: p.path,

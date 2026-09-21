@@ -30,8 +30,8 @@
   VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
   mentions `reasoning_content` on every round, empty when the round had no reasoning,
   and it demands the field back -- so an empty mention is kept as an empty value rather
-  than dropped (`consume-sse`). A history that arrives WITHOUT it -- the client sent it
-  back, or a round predates this rule -- is repaired on the way out by
+  than dropped (`consume-sse`). A history that arrives WITHOUT it -- a session rebuilt
+  from a record written before this rule -- is repaired on the way out by
   `thinking-mode-history`, which the edge applies before the `message` audit line is
   written. See .scratch/reasoning-round-trip/spec.md for the verified vendor behaviour.
 
@@ -243,9 +243,14 @@
   vendor never enters thinking mode, the field means nothing to it, and adding one
   would be our invention rather than its requirement.
 
-  CALLED WHERE THE RUN'S MESSAGES ARE ASSEMBLED rather than inside `stream!`: the
-  `message` audit line's contract is 'what the LLM actually saw, verbatim', so the
-  padding has to happen before that line is written. See harness.edge.http/run-agent!."
+  CALLED WHERE THE RUN'S MESSAGES ARE ASSEMBLED rather than inside `stream!`, so that the
+  array handed to the provider is the array the run reasoned about -- and NOT inside the
+  record's writer: since `.scratch/jsonl-two-kinds` 票 02 a run logs the ENTRIES it was
+  handed (each one a `message` row, in the provider's own shape), and this pad is the
+  wire's requirement rather than a statement about what entered the conversation -- it
+  writes an empty `reasoning_content` onto a message nobody sent one for. The record keeps
+  the message; the vendor's demand is met on the way out. See
+  harness.edge.http/run-agent!."
   [messages provider]
   (if-not (:reasoning-effort provider)
     messages

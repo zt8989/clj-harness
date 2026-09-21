@@ -112,6 +112,21 @@
                       {:reason :system-prompt-blocked :thread-id thread-id})))
     (join-blocks (llm/prompt) blocks)))
 
+(defn digest
+  "TEXT's SHA-256, as lowercase hex.
+
+  THE NAME A RUN CAN CALL THE SYSTEM PROMPT IT WAS HANDED. The record keeps the text
+  ONCE per conversation and this hash EVERY run (`.scratch/jsonl-two-kinds`, supplement
+  of 2026-09-21), because the assembled text is the per-run thing a reader cannot
+  otherwise compare -- and the comparison is the point: the prefill (prompt cache) rests
+  on a stable prefix, so 'this run read the same system message as the last one' is a
+  fact worth being able to check, and a run whose hooks moved the prompt says so by
+  carrying a different hash."
+  [text]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (.getBytes (str text) java.nio.charset.StandardCharsets/UTF_8))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
 ;; -------------------------------------------------------- the kernel's own rows
 ;;
 ;; TWO rows at the SystemPrompt point, registered from here because building one

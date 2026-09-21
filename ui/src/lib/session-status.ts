@@ -23,7 +23,9 @@
 //     translator is a PARAMETER rather than a hook here for the same reason
 //     `run-state.ts` passed one: this is not a component, and its caller already
 //     holds the `shell` translator, which is the face the sidebar's own refusals
-//     live in (`refusal.*` -- the same group `refusal.noProject` sits in).
+//     live in (`refusal.*` -- the group the archive and remove sentences sit in;
+//     the two that used to live here, `refusal.noProject*`, went with the rule that
+//     a new task needed a project).
 //
 // WHAT IS NO LONGER REFUSED: switching sessions, and starting one. Those were
 // refused because a switch would orphan a streaming run -- true when one core

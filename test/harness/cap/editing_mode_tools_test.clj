@@ -94,7 +94,7 @@
   ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
   ;; anchor editing, and this is the assertion that would move first if somebody
   ;; changed it back by accident -- or changed it to something that is neither.
-  (is (= ["anchor_grep" "ask" "bash" "eval" "glob" "insert" "job" "job_kill"
+  (is (= ["anchor_grep" "ask" "bash" "eval" "glob" "insert" "job_kill" "job_output"
           "read" "replace" "session-configure" "skill" "todo_write"
           "undo_last_replace" "web_fetch" "web_search" "write"]
          (spec-names nil))
@@ -171,7 +171,7 @@
   (let [names (spec-names "emt-anchor")]
     (is (not (contains? (set names) "edit")))
     (testing "and everything that is not an editing tool is untouched"
-      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "read" "session-configure"
+      (is (= ["ask" "bash" "eval" "glob" "job_kill" "job_output" "read" "session-configure"
               "skill" "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-anchor"))))))
 
@@ -186,7 +186,7 @@
     (testing "and `edit` does"
       (is (contains? (set names) "edit")))
     (testing "with everything else untouched"
-      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "read" "session-configure"
+      (is (= ["ask" "bash" "eval" "glob" "job_kill" "job_output" "read" "session-configure"
               "skill" "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-strrep"))))))
 

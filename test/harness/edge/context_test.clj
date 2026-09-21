@@ -12,11 +12,13 @@
   them honest -- they ADD UP to the vendor's total, they MOVE with the bytes of the
   part they describe, and they are ABSENT when the record does not describe the
   prompt. Those are the three groups below."
-  (:require [clojure.data.json :as json]
+  (:require [harness.edge.replay :as replay]
+            [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
             [harness.edge.context :as context]
             [harness.edge.http :as http]
+            [harness.test-support :as support]
             [harness.fake :as fake])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -26,9 +28,20 @@
 ;; ------------------------------------------------------------------ the records
 
 (defn- record
-  "One jsonl record: {:ts ms, :runId s, :kind s, :payload v}, as the edge writes it."
+  "One ROW of the record, as the file spells it and as every reader now sees it: `message`
+  and `event` are the two types, `ts`/`runId` ride the envelope, and a harness FACT -- a
+  provider change, a tool's three moments, a model call's start and end -- is an `event`
+  carrying a CUSTOM frame named after it. KIND is the reader's answer (`replay/kind`):
+  `message`, `event`, or that fact's name, which is why a fixture reads the way an
+  assertion does."
   ([ts kind payload] (record ts "r1" kind payload))
-  ([ts run-id kind payload] {:ts ts :runId run-id :kind kind :payload payload}))
+  ([ts run-id kind payload]
+   (if (= "message" kind)
+     {:ts ts :runId run-id :type "message" :payload payload}
+     {:ts ts :runId run-id :type "event"
+      :payload (if (= "event" kind)
+                 payload
+                 {:type "CUSTOM" :name kind :value payload})})))
 
 (defn- input [ts & msgs]
   (record ts "input" {:threadId "t" :messages (vec msgs)}))
@@ -37,6 +50,14 @@
 
 (defn- message [ts role text]
   (record ts "message" {:role role :content text}))
+
+(defn- system-prompt
+  "The system message as the record holds it (owner, 2026-09-21): a `message` row -- the
+  prompt IS the first element of the array the model was handed -- carrying `:source` =
+  `system-prompt` and the bytes' `:hash` on its envelope."
+  [ts text]
+  (assoc (record ts "message" {:role "system" :content text})
+         :source "system-prompt" :hash "h"))
 
 (defn- start
   "A `model/start` line. WINDOW and TOOLS are written only when the test has one --
@@ -76,7 +97,7 @@
   ;; parts are this namespace's own division -- and a division that does not reach
   ;; its own total draws a bar that stops short of its own number.
   (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (message 1 "system" "you are a coding agent")
+                            (system-prompt 1 "you are a coding agent")
                             (message 2 "user" "hi")
                             (start 10 1000 (tool-table 40))
                             (end 20 (usage 500 10))
@@ -96,7 +117,7 @@
   ;; The split is measured, not decoration: grow one part and ITS number moves.
   (let [records (fn [system-text table-size conversation-text]
                   [(input 0 (user "u1" "hi"))
-                   (message 1 "system" system-text)
+                   (system-prompt 1 system-text)
                    (message 2 "user" conversation-text)
                    (start 10 1000 (tool-table table-size))
                    (end 20 (usage 1000 10))
@@ -114,7 +135,7 @@
   ;; the token or two of drift goes to the largest bucket rather than to whichever
   ;; one happened to be last.
   (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (message 1 "system" "s")
+                            (system-prompt 1 "s")
                             (message 2 "user" (apply str (repeat 3000 "c")))
                             (start 10 1000 (tool-table 30))
                             (end 20 (usage 1001 10))
@@ -129,7 +150,7 @@
 
 (deftest a-call-that-reported-nothing-does-not-erase-the-last-measurement
   (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (message 1 "system" "s")
+                            (system-prompt 1 "s")
                             (message 2 "user" "hi")
                             (start 10 1000 nil)
                             (end 20 (usage 700 5))
@@ -144,7 +165,7 @@
 (deftest nothing-reported-is-not-zero
   (testing "no call reported a prompt: no number at all"
     (let [answer (context-of [(input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (start 10 1000 nil)
                               (end 20 nil)
                               finished])]
@@ -157,7 +178,7 @@
 (deftest the-window-comes-from-the-call-itself
   (testing "the call's own line is the primary source"
     (let [answer (context-of [(input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               ;; a session that was switched to another model: the
                               ;; timeline says 8000, the call that actually ran says 1000
                               (record 5 "provider/init" {:provider "openrouter" :model "m" :context-window 8000})
@@ -178,7 +199,7 @@
                                                          :context-window 2000
                                                          :source "default"})
                               (input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (message 2 "user" "hi")
                               (start 10 nil nil)          ;; written before the key existed
                               (end 20 (usage 500 5))
@@ -195,7 +216,7 @@
                                                                         :model "m"
                                                                         :context-window 5000}})
                               (input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (message 2 "user" "hi")
                               (start 10 nil nil)
                               (end 20 (usage 500 5))
@@ -207,7 +228,7 @@
 
   (testing "a window that moved later in the session is not the one an earlier call ran under"
     (let [answer (context-of [(input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (message 2 "user" "hi")
                               (start 10 nil nil)
                               (end 20 (usage 500 5))
@@ -218,7 +239,7 @@
 
   (testing "nobody said a window: the number is there, the percentage is not"
     (let [answer (context-of [(input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (message 2 "user" "hi")
                               (start 10 nil nil)
                               (end 20 (usage 500 5))
@@ -230,7 +251,7 @@
 
   (testing "a window no one could divide by is not one -- and is not a crash either"
     (let [answer (context-of [(input 0 (user "u1" "hi"))
-                              (message 1 "system" "s")
+                              (system-prompt 1 "s")
                               (message 2 "user" "hi")
                               (start 10 0 nil)
                               (end 20 (usage 500 5))
@@ -244,7 +265,7 @@
   ;; it was sent cannot be complete yet (the returned side of the message record
   ;; lands one beat after the run's terminal frame).
   (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (message 1 "system" "s")
+                            (system-prompt 1 "s")
                             (message 2 "user" "hi")
                             (start 10 1000 nil)
                             (end 20 (usage 500 5))])]
@@ -259,7 +280,7 @@
   ;; message tail one beat later. Counting only what is on disk would divide the
   ;; prompt by a conversation that has not arrived.
   (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (message 1 "system" "s")
+                            (system-prompt 1 "s")
                             (message 2 "user" "hi")
                             (start 10 1000 nil)
                             (end 20 (usage 500 5))
@@ -271,14 +292,14 @@
   ;; Two turns in one log: the numbers and the parts belong to the SECOND, not to
   ;; some average of the session.
   (let [answer (context-of [(input 0 (user "u1" "first"))
-                            (message 1 "system" "s")
+                            (system-prompt 1 "s")
                             (message 2 "user" "first")
                             (start 10 1000 (tool-table 10))
                             (end 20 (usage 100 5))
                             (record 30 "event" {:type "RUN_FINISHED" :threadId "t" :runId "r1"})
                             (message 40 "assistant" "one")
                             (input 5000 (user "u2" "second"))
-                            (message 5001 "system" "s")
+                            (system-prompt 5001 "s")
                             (message 5002 "user" "second")
                             (start 5010 1000 (tool-table 10))
                             (end 5020 (usage 900 5))
@@ -291,6 +312,7 @@
 
 (defn- with-server [thread-id turns f]
   (providers/use-provider! thread-id (fake/scripted turns))
+  (support/start-session! thread-id)
   (let [stop (http/start! {:port 0})]
     (try
       (f (:local-port (meta stop)))
@@ -299,9 +321,11 @@
         (providers/use-provider! thread-id nil)))))
 
 (defn- send-run! [port thread-id]
-  (let [body (json/write-str {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "看看这个项目"}]
-                              :tools [] :context []})
+  (let [body (json/write-str {:threadId thread-id
+                              ;; THE ACTION'S OWN ENTRIES (ticket 03), not the
+                              ;; conversation: the server holds that.
+                              :append [{:id "u1" :role "user" :content "看看这个项目"}]
+                              :tools []})
         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/agent")))
                  (.header "Content-Type" "application/json")
                  (.header "Accept" "text/event-stream")
@@ -317,6 +341,28 @@
                     (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
     [(.statusCode resp) (json/read-str (.body resp) :key-fn keyword)]))
 
+(defn- stats-until-complete
+  "GET THREAD-ID's stats until the route reports the SPLIT, or give up after ~3s and
+  answer the last read.
+
+  THE RETURNED SIDE LANDS ONE BEAT AFTER THE TERMINAL FRAME. `harness.edge.context`
+  turns that into a rule -- a run whose tail has not landed has no parts at all, because
+  half a message set would make the conversation look like a small share of a large
+  prompt -- and this case reads the endpoint the instant the SSE body closes, so on a
+  loaded machine it can read the record one line short of complete and see the vendor's
+  numbers with no split beside them. That is what happened once here (the strip's
+  numbers arrived, `:parts` was absent) while another suite ran in the same shell.
+
+  So the case waits for the run to be WHOLE, which is the state it is about: what the
+  route folds once a real run has finished. 'Absent while the run is still going' is
+  pinned on hand-written records above, where it is deterministic."
+  [port thread-id]
+  (loop [tries 0]
+    (let [answer (get-json port (str "/api/threads/" thread-id "/stats"))]
+      (if (or (seq (get-in answer [1 :context :parts])) (>= tries 120))
+        answer
+        (do (Thread/sleep 25) (recur (inc tries)))))))
+
 (deftest the-endpoint-answers-the-context-section-over-real-http
   ;; The whole path once: a real run writes the log, the route folds it, and the
   ;; composer's one GET carries both the strip's numbers and the ring's context.
@@ -328,7 +374,7 @@
         :usage {:prompt_tokens 1200 :completion_tokens 8 :total_tokens 1208}}]
       (fn [port]
         (send-run! port thread-id)
-        (let [[status body] (get-json port (str "/api/threads/" thread-id "/stats"))
+        (let [[status body] (stats-until-complete port thread-id)
               ctx (:context body)]
           (is (= 200 status))
           (is (= 2 (:steps body)) "the strip's numbers are still there beside it")

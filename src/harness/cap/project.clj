@@ -51,6 +51,7 @@
             [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.cap.preamble :as preamble]
+            [harness.cap.jobs :as jobs]
             [harness.cap.skills :as skills])
   (:import (java.io File IOException)
            (java.sql Connection)))
@@ -294,20 +295,136 @@
   []
   (db/select "SELECT id, canonical_path, created_at FROM projects ORDER BY created_at, id"))
 
+(defn- as-session
+  "One `sessions` row as this namespace hands it out: {:id :project-id :path
+  :archived? :created-at}.
+
+  `:archived?` is a BOOLEAN, converted here rather than left as the column's 0/1 --
+  Clojure's `boolean` says 0 is true and a flag that means the opposite of what it
+  looks like is the kind of bug that survives review. ONE conversion, in one place,
+  for every reader: two readers each turning 0/1 into a boolean are two chances for
+  one of them to say it backwards."
+  [row]
+  (-> row
+      (assoc :archived? (pos? (long (:archived row))))
+      (dissoc :archived)))
+
+(def ^:private session-columns
+  "The columns a session reader asks for, so two queries over one table cannot drift
+  into handing out two shapes."
+  "id, project_id, path, archived, created_at, title, last_sent_at")
+
 (defn sessions
   "Every session this home knows: {:id :project-id :path :archived? :created-at},
-  oldest first. `:archived?` is a BOOLEAN, converted here rather than left as
-  the column's 0/1 -- Clojure's `boolean` says 0 is true, and a flag that means
-  the opposite of what it looks like is the kind of bug that survives review.
+  oldest first.
 
-  Reading AND setting the flag live here: both are statements about the same
-  column, and a reader in another namespace would have to re-state the 0/1
-  conversion to write it. See `archive!`."
+  This is the WHOLE table, so it includes the sessions that belong to no project;
+  which of those is a TASK is `tasks`' question, not this one's. Reading AND setting
+  the archive flag live here: both are statements about the same column, and a reader
+  in another namespace would have to re-state the 0/1 conversion to write it. See
+  `archive!`."
   []
-  (mapv (fn [row] (-> row
-                      (assoc :archived? (pos? (long (:archived row))))
-                      (dissoc :archived)))
-        (db/select "SELECT id, project_id, path, archived, created_at FROM sessions ORDER BY created_at, id")))
+  (mapv as-session
+        (db/select (str "SELECT " session-columns " FROM sessions ORDER BY created_at, id"))))
+
+(defn session-exists?
+  "Does this home know THREAD-ID as a session?
+
+  THE QUESTION THE RUN EDGE ASKS BEFORE IT WRITES ANYTHING (ticket 03 of
+  `.scratch/sessions-live-on-the-server`), and it is a different question from 'is
+  there a log': a log can be sitting in the tree that this home never agreed to keep,
+  and the record that matters is the ROW. `sessions` and `tasks` answer 'which ones'
+  -- this answers 'this one', which is what a request carries.
+
+  READ FROM THE STORE, not from the sessions table in memory: the row is the durable
+  statement that a conversation exists here, and a process that has just started holds
+  no conversations at all."
+  [thread-id]
+  (when (some? thread-id)
+    (boolean (seq (db/select "SELECT 1 FROM sessions WHERE id = ?" (str thread-id))))))
+
+(defn tasks
+  "Every session this home knows that belongs to NO project and remembers none:
+  {:id :project-id :path :archived? :created-at} with `:project-id` and `:path` null,
+  oldest first.
+
+  TWO COLUMNS, NOT ONE, AND THE SECOND IS THE POINT. A session can be unbound for two
+  different reasons and they are not the same fact: `remove-project!` lets a directory
+  go and its sessions keep `last_project_path` -- the MEMORY of where they were, which
+  is what re-adding that directory matches on -- so such a session is waiting for its
+  project to come back and is not a task. A task is a conversation that never had a
+  home, or one whose home was released on purpose (`bind! id nil`, which clears the
+  memory too). Only the second kind is listed here, and this WHERE clause is the whole
+  of that distinction.
+
+  Empty is the ordinary answer: a home whose every conversation has a project."
+  []
+  (mapv as-session
+        (db/select (str "SELECT " session-columns " FROM sessions"
+                        " WHERE project_id IS NULL AND last_project_path IS NULL"
+                        " ORDER BY created_at, id"))))
+
+(defn remember-send!
+  "THE PERSON PRESSED SEND in THREAD-ID's conversation: stamp the time, and let
+  that same arrival name the session if it has no name yet. Answers whether a row
+  was written.
+
+  ONE STATEMENT, TWO COLUMNS, BECAUSE THEY ARE ONE EVENT. `last_sent_at` is what
+  the sidebar sorts and labels rows by, and it moves on EVERY send; `title` is
+  written ONCE, from the first send's own text. Writing them together is not a
+  convenience -- it is the reason a second statement cannot drift from the first
+  (a code path that stamped the time and forgot the name, or the other way round,
+  would be a row whose two facts came from different turns).
+
+  THE NAME'S ONE-WAY RULE IS `COALESCE`: the second, third and fortieth send all
+  take this same statement, and `COALESCE(title, ?)` leaves an existing name EXACTLY
+  as it is. A BLANK OR ABSENT TEXT therefore writes nothing to the name -- a run
+  whose messages carry no user turn (`harness.edge.ag-ui/first-user-text` answers nil
+  for one) still stamps the time, because a run did happen.
+
+  A SESSION THAT RAN BEFORE EITHER COLUMN EXISTED heals itself the next time it
+  runs: SAID is the first user turn of the conversation the session holds -- the
+  session is the authority (ADR 0002 decision 1) and the action no longer carries
+  the conversation (`harness.edge.http/run-agent!` hands over the session's own
+  messages first, then this action's entries) -- so it is still the session's FIRST
+  send, whatever the newest one says. The name is not backfilled (the owner's call
+  -- an old conversation keeps its id until somebody talks to it again) and the TIME
+  is (`sessions-remember-their-last-send` walks the logs once, because a row with no
+  time at all is a row the sidebar cannot draw)."
+  [thread-id said]
+  (let [named (when-not (str/blank? (str said)) said)]
+    (pos?
+     (db/with-transaction
+       (fn [^Connection c]
+         (db/execute! c (str "UPDATE sessions"
+                             "   SET last_sent_at = ?, title = COALESCE(title, ?)"
+                             " WHERE id = ?")
+                      (System/currentTimeMillis) named thread-id))))))
+
+(defn register-session!
+  "Make THREAD-ID a session of this home, belonging to no project: a row with no
+  project, no path and no remembered project. Answers the id.
+
+  FIND-OR-CREATE, and both callers can be racing themselves: the sidebar's 'new task'
+  registers an id it has just minted, and the AG-UI edge registers an id it has never
+  heard of as the first thing a run does -- while being called again for every later
+  turn of that same conversation. So an id this home already knows is left EXACTLY as
+  it is: `DO NOTHING`, not `DO UPDATE`, because a session that belongs to a project
+  must not be unbound by somebody asking it to exist, and a session that remembers a
+  project must not have that memory cleared. Registering is a statement that a
+  conversation EXISTS, not a statement about where it lives.
+
+  THIS IS THE ONLY WAY A TASK IS BORN, and it is deliberately not `bind!`'s nil
+  direction: releasing a session and starting to keep one are two different
+  statements, and `bind!`'s docstring says why the first never creates a row."
+  [thread-id]
+  (db/with-transaction
+    (fn [^Connection c]
+      (db/execute! c "INSERT INTO sessions (id, project_id, path, last_project_path, created_at)
+                      VALUES (?, NULL, NULL, NULL, ?)
+                      ON CONFLICT(id) DO NOTHING"
+                   thread-id (System/currentTimeMillis))))
+  thread-id)
 
 (defn archive!
   "Mark THREAD-ID's session archived (true) or not (false), and answer the flag
@@ -675,6 +792,18 @@
   conversation that carries no skill bodies is a different conversation.
 
   The roots are resolved PER CALL, not once per run, so editing harness.edn
-  mid-run moves them -- matching every other configuration read in this codebase."
+  mid-run moves them -- matching every other configuration read in this codebase.
+
+  AND THE SESSION'S OTHER INJECTION IS HERE FOR THE SAME REASON: the endings of
+  background jobs nobody waited for (`harness.cap.jobs/before-llm`) ride the same step.
+  It is a different KIND of thing -- the skills half is derived from the conversation
+  and is idempotent for free, while a notice is remembered in the jobs registry because
+  the client never holds one -- but the two meet here for exactly the reason the skills
+  half is here at all: this is the one place a session's history gets decorated, and a
+  second place would be the copy that drifts. Every caller that hands the kernel a
+  pre-LLM step (both run paths and the author-side replay) therefore gets both halves
+  without knowing either exists."
   [history thread-id]
-  (skills/derived-injections history (skill-roots thread-id)))
+  (-> history
+      (skills/derived-injections (skill-roots thread-id))
+      (jobs/before-llm thread-id)))

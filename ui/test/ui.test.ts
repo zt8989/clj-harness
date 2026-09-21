@@ -34,13 +34,27 @@ import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
+import { restoreSuite } from "./suites/restore";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
+import { sessionTitleSuite } from "./suites/session-title";
+import { relativeTimeSuite } from "./suites/relative-time";
+import { sidebarRowsSuite } from "./suites/sidebar-rows";
+import { injectionSuite } from "./suites/injections";
+import { recordSuite } from "./suites/record";
+import { windowSuite } from "./suites/window";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, pickerSuite, i18nSuite, concurrentSuite, sidebarSuite];
+///
+/// THIS LIST IS THE MERGED ONE, and both sides of the merge grew it: `brand-header`
+/// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
+/// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
+/// `windowSuite`. Neither side touched the other's additions, which is why the resolved
+/// list is a concatenation rather than a choice. `ask` is the third side: it added
+/// `elicitationCardSuite` beside the `elicitation` suite it belongs to.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -86,14 +100,108 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// at, and the parked word beside the id rather than inside a line that truncates. This
 /// is the suite that exists because the id line went blank in the i18n merge and a green
 /// tree could not see it -- see suites/sidebar.tsx and vitest.config.ts.
-/// 44 -> 46: `ask`, the one tool whose purpose is to stop. One case through the whole
+/// 44 -> 46: the `restore` suite's two -- the page's memory of which session it is in
+/// (the one key, the conditional forget, and a storage that throws rather than answers)
+/// and the single question it asks of a listing. Both pure; the reload itself is a
+/// browser's, and it is the walkthrough in `.scratch/session-after-refresh/`.
+/// 47 -> 50: the `injections` suite's three -- what an injected-context card says (its
+/// title is the tag the block arrived with, its size is BYTES), how a rebuilt
+/// conversation gets its cards back, and the adapter contract the whole feature rests on
+/// (`toAgUiMessages` never sends a `data` part back).
+/// 46 -> 47: the `sidebar` suite's fourth -- the label a row can wear, which the flat
+/// archived block needs (a filed-away session has to say which project it came from,
+/// since nothing groups it any more). Same reason the other three are there: it is a
+/// thing the row SAYS, and only a render can see it.
+/// 50 -> 52: the `sidebar` suite's fifth and sixth -- the two controls that fold the
+/// sidebar away and bring it back (`components/sidebar-toggle.tsx`): the word each one
+/// says in both languages, and the two `aria-*` facts that make them one verb (one
+/// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
+/// run cannot reach -- the sidebar's own element -- is read as source in the same case.
+/// 52 -> 69: THE `brand-header` SIDE OF THIS MERGE, counted from the same base as the
+/// other chain below. Two of them are the new
+/// `session-title` suite, which pins a session's title as arithmetic over literal
+/// messages -- the first text the user said, what whitespace becomes, the 60-code-point
+/// clip (an emoji is two UTF-16 units, so the cut is by character), the fallback word in
+/// both languages, and the `· clj-harness` tail -- because a title is derived, not
+/// stored, and a browser tab has no ellipsis. The third is the `sidebar` suite's: the
+/// brand row's own name and mark, and (read as source, like the `id` beside it) that the
+/// collapse control left the header row and now ends the brand row.
+/// 55 -> 56: the rail (`sidebar-rail`) -- the mark alone with no wordmark, and the list
+/// hidden-but-mounted, both read out of the sidebar's source because this run cannot
+/// render that file at all. What the rail LOOKS like is the browser walkthrough's.
+/// 60 -> 62: two of the `sidebar` suite's, for the store-backed row: one case was
+/// REWRITTEN rather than added (the row is one line now, so the case that read its second
+/// line asserts that line's ABSENCE instead), and the two new ones pin the relative age
+/// as the row words it -- both languages -- and the indent slot the spinner goes in.
+/// 62 -> 65: the `relative-time` suite's three -- the ladder's boundaries (where two
+/// branches meet, which is where an off-by-one hides), a clock running ahead (the server
+/// writes the number, this machine reads it), and the counts being whole and floored.
+/// Pure: `lib/relative-time.ts` imports nothing, which is why it answers a bucket and the
+/// row answers the words.
+/// 65 -> 69: the `sidebar-rows` suite's four, for "一个项目（或任务那一块）最多画 5 行":
+/// the fold itself and the count it reports, the row being read never being the one that
+/// folds away, a block opened by hand versus one the current session outranks, and the
+/// list not being copied when nothing is folded. Same reason to be pure: `lib/sidebar-rows.ts`
+/// imports nothing, and the two callers (`components/sidebar.tsx`) cannot be imported here
+/// at all -- so where the control lands and whether clicking it draws the rows are the
+/// browser walkthrough's.
+/// 52 -> 65: THE `sessions-live-on-the-server` SIDE, and it starts from the same 52 as the
+/// chain above -- the two sides were counted independently, so these two totals are two
+/// branches of one arithmetic, not a continuation of each other.
+/// 52 -> 54: the `record` suite's two -- a record with nothing to say (nothing drawn,
+/// and a state this client does not know is silence rather than the wire value on
+/// screen) and a degraded one RENDERED in both languages, carrying the writer's own
+/// reason and the plural of how much is waiting. It exists for the same reason the
+/// `sidebar` suite does: a sentence that reaches the screen is the one thing a green
+/// tree could not see.
+/// 54 -> 56: the `client` suite's two, and they are ticket 03's UI half. ONE reads the
+/// wire: a run's body carries `append` (this action's own entries) and NOT the
+/// accumulated `messages` nor a client `runId` -- the second run's `append` holds only
+/// the second question, which is the whole change. THE OTHER reads the other end of the
+/// same contract: `startTask` with nothing to name comes back with an id the SERVER
+/// minted, listed as a conversation this home keeps and usable for a run -- where a
+/// page-made id used to be quietly registered by the run edge.
+/// 56 -> 65: the `window` suite's nine, and they are ticket 06's UI half -- the rules
+/// that turn feed frames into a copy, the control that asks for older history, the
+/// sentences owed when the answer is not simply "more messages", and the arithmetic
+/// that keeps a reader's place when a page is prepended. The three answers that are not
+/// "append" are the reason it exists: a hole, a reopen and a copy that is ahead of the
+/// conversation are all SILENT failures when they go wrong, and silence is not
+/// something a later test can notice.
+/// 69 + 13 = 82: THE RESOLVED TREE. The addition is exact because neither side rewrote a
+/// case the other added: `brand-header`'s seventeen (69 - 52) and `main`'s thirteen
+/// (65 - 52) land in different files -- the sidebar's own suites on one side, the record
+/// and the window on the other -- so the two counts add. What the MERGE itself changed
+/// in these suites is one rule rather than a case count: the page speaks a live title
+/// only for a session it MINTED (`app.tsx`'s `minted`), because a window's first user
+/// message is not the conversation's first -- and this run cannot reach that rule at all
+/// (`components/sidebar.tsx` cannot be imported here, so the `sidebar` suite reads it as
+/// text and the behaviour itself is the browser walkthrough's).
+/// 82 -> 83: `parallel-call-parent`'s sixth `frames` case -- two tool calls in one turn
+/// are ONE assistant message. On that branch it was 65 -> 66, because it forked before the
+/// sidebar work; here the same case adds one to the merged total. The provider refuses the
+/// split shape outright (the 2026-09-21 RUN_ERROR: "leaves 4 tool calls unanswered"), so
+/// the wire contract is worth a real-client case rather than an offline fold alone.
+/// 83 -> 84: `injections`' fourth -- the OPENING ENTRY, which is one message with two
+/// readings (a card part and the text the model read, `.scratch/session-opening`). It pins
+/// both halves of that change that only this side can see: the card replaces the text
+/// rather than joining it, and the copy that goes back out is the text under the same
+/// entry id, which is what makes the server drop the repeat instead of writing the opening
+/// into the conversation twice.
+/// 84 -> 85: `injections`' fifth -- `isCardOnly`, the shape an opening entry is DRAWN in
+/// (ticket 02 of `.scratch/session-opening`). The fourth case had spelled that entry
+/// `role: "assistant"`, which is not what the server writes, and that is why every gate
+/// stayed green while the app drew the person's AGENTS.md as a bubble they had typed. The
+/// fifth pins the test that stops it, over the PARTS rather than the role, because the role
+/// is the one thing the two kinds of message share.
+/// 86 -> 88: `ask`, the one tool whose purpose is to stop. One case through the whole
 /// loop on the `elicitation` suite -- a BUILT-IN's question parks the run, the endpoint
 /// answers who is asking, and the answers come back as the call's result -- and one new
 /// suite beside it (`elicitation-card`) whose single case RENDERS the card's title in
 /// both languages: three askers, three distinct lines, and none of them inventing a
 /// server. The second is the sidebar lesson applied to the other card that names
 /// somebody: a title that draws nothing is invisible to every check about keys.
-/// 46 -> 50: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
+/// 88 -> 92: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
 /// candidates driven verbatim with no own-words box assumed, the own-words answer that
 /// stands where the pick would have, and a list of answers that is never a joined
 /// string -- and one on `elicitation-card` that RENDERS a field for each kind and counts
@@ -101,7 +209,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// own-words box only where the schema asked for one. The card's count is the claim, not
 /// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
 /// looks perfectly fine doing it.
-const EXPECTED_CASES = 50;
+const EXPECTED_CASES = 92;
 
 let total = 0;
 for (const suite of SUITES) {

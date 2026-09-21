@@ -28,6 +28,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
+            [harness.cap.project :as project]
+            [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
@@ -569,3 +572,33 @@
   [provider messages on-event thread-id]
   (refuse-unanswered-calls! messages)
   (llm/stream! (assoc provider :protocol :fake) messages on-event thread-id))
+
+
+;; ------------------------------------------------------- a session that exists
+
+(defn start-session!
+  "Begin THREAD-ID as a session of this home with NOTHING in it: the row a run needs,
+  an empty conversation, and no record.
+
+  A RUN OF AN ID THE STORE HAS NEVER HEARD OF IS REFUSED, and what that means in a test
+  is that every case has to say 'this session exists' before it sends anything -- in the
+  page, the new-task action is what says it (see `.scratch/sessions-live-on-the-server`,
+  ticket 03). A fixture that names the threads it serves says it here, once, instead of
+  at every call site.
+
+  ALL THREE PARTS ARE NEEDED, and the reason is the same for each: the row, because the
+  run edge insists on it; the drop, because the session TABLE is process-wide while the
+  fixture is not, so an earlier case's conversation would otherwise be this one's history
+  under the same id; and THE RECORD, because a conversation is BORN FROM ITS LOG when the
+  table has none (`harness.edge.sessions/build`) -- deleting the entry alone would just
+  make the next run read the previous case's bytes off disk and continue from those.
+
+  `replay/find-log` is what finds the record, so a thread bound to a project is emptied
+  where its log actually is. A case that runs the same session twice keeps all three by
+  not calling this again."
+  [thread-id]
+  (let [id (str thread-id)]
+    (sessions/drop! id)
+    (when-some [f (replay/find-log (home/projects-dir) id)]
+      (io/delete-file f true))
+    (project/register-session! id)))

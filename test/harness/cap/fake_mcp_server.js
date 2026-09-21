@@ -36,6 +36,8 @@
 //   MCP_FAKE_ROSTER_FILE=path read extra tool names from this file on every
 //                             tools/list, so a roster can CHANGE between
 //                             connections and a re-list is observable
+//   MCP_FAKE_ARGV=1          expose the process's own argv as an `argv` tool, so a test
+//                             can see how the client QUOTED a declaration's :args
 //   MCP_FAKE_LIFECYCLE=path   append start/term/exit lines here, so a test can see
 //                             that a process really was started and really is gone
 
@@ -141,6 +143,16 @@ if (process.env.MCP_FAKE_BANNER === "1") {
   process.stdout.write("fake mcp server starting\n");
 }
 
+if (process.env.MCP_FAKE_ARGV === "1") {
+  // The argv this process was actually started with, as one more tool: the only
+  // way a test can see how the client QUOTED a declaration's :args.
+  TOOLS.push({
+    name: "argv",
+    description: "Answer with this process's own argv as JSON.",
+    inputSchema: { type: "object", properties: {} },
+  });
+}
+
 if (process.env.MCP_FAKE_STDERR) {
   process.stderr.write(process.env.MCP_FAKE_STDERR + "\n");
 }
@@ -175,6 +187,8 @@ function text(s) {
 
 function call(name, args) {
   switch (name) {
+    case "argv":
+      return text(JSON.stringify(process.argv.slice(1)));
     case "echo":
       return text("echo: " + String(args.text));
     case "where":

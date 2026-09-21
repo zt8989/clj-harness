@@ -10,7 +10,11 @@
             [clojure.test :refer [deftest is testing]]
             [harness.evals :as evals]))
 
-(defn- record [kind payload] {:ts 1 :runId "r1" :kind kind :payload payload})
+(defn- record
+  "An in-memory RECORD -- the shape a reader folds (`{:kind .. :payload ..}`), which since
+  `.scratch/jsonl-two-kinds` is DERIVED from a row of the file rather than written to it."
+  [kind payload]
+  {:ts 1 :runId "r1" :kind kind :payload payload})
 
 (defn- assistant-with-eval [call-id code]
   (record "message"
@@ -152,5 +156,7 @@
   ;; knows the guarantee holds on its path too.
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"line 2"
                         (evals/evals-in
-                         (let [good (json/write-str (assistant-with-eval "c1" "(+ 1 2)"))]
+                         (let [good (json/write-str
+                                     (merge {:ts 1 :runId "r1" :type "message"}
+                                            {:payload (:payload (assistant-with-eval "c1" "(+ 1 2)"))}))]
                            (harness.edge.replay/lines->records [good "{truncated"]))))))

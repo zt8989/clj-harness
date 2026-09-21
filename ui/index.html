@@ -10,6 +10,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      THE TITLE BEFORE THE FIRST PAINT, and only before it: once the page runs,
+      `/src/lib/session-title.ts` owns this string and rewrites it whenever the
+      session on screen changes (`<the session's title> · clj-harness`). It cannot be
+      written correctly here -- this file is static and the answer depends on which
+      session the page lands on -- which is the same shape as `lang` above: a static
+      fallback for the moment before the script, and a module that owns it after.
+    -->
     <title>clj-harness</title>
   </head>
   <body>

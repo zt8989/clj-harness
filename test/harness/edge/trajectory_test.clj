@@ -12,11 +12,13 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             [harness.fake :as fake]
+            [harness.test-support :as support]
             [harness.infra.home :as home]
             [harness.kernel.frames :as frames])
   (:import [java.net URI]
@@ -27,27 +29,105 @@
 ;; ------------------------------------------------------------------ the records
 
 (defn- record
-  "One jsonl record: {:ts ms, :runId s, :kind s, :payload v}, exactly as the edge
-  writes it."
+  "One ROW of the record, as the file spells it and as every reader now sees it: `message`
+  and `event` are the two types, `ts`/`runId` ride the envelope, and a harness FACT -- a
+  provider change, a tool's three moments, a model call's start and end -- is an `event`
+  carrying a CUSTOM frame named after it. KIND is the reader's answer (`replay/kind`):
+  `message`, `event`, or that fact's name, which is why a fixture reads the way an
+  assertion does."
   ([ts kind payload] (record ts "r1" kind payload))
-  ([ts run-id kind payload] {:ts ts :runId run-id :kind kind :payload payload}))
+  ([ts run-id kind payload]
+   (if (= "message" kind)
+     {:ts ts :runId run-id :type "message" :payload payload}
+     {:ts ts :runId run-id :type "event"
+      :payload (if (= "event" kind)
+                 payload
+                 {:type "CUSTOM" :name kind :value payload})})))
+
+(defn- row-json
+  "A ROW -> the line the writer would put on disk. ONE SHAPE NOW (`.scratch/jsonl-two-kinds`
+  票 02): the reader holds the file's own row, so a fixture that was already built by `record`
+  needs no translation to be written -- which is the seam this ticket removed."
+  [row]
+  (json/write-str row))
+
+(declare system-prompt)
 
 (defn- input
-  "An `input` line carrying a client's message list."
+  "The lines ONE ACTION writes (`.scratch/jsonl-two-kinds` 票 02): the system message the run
+  was handed -- the row that OPENS a run (`replay/system-prompt?`) -- and then one `message`
+  row per message the person sent, each carrying its own identity on the ENVELOPE (`:id`) and
+  the verbatim provider message (id stripped) as the payload.
+
+  A BLOCK OF ROWS, not one: the record has no line that carries a conversation any more, so a
+  fixture that wants one splices this block and `rows` below keeps the fixture flat."
   [ts & msgs]
-  (record ts "input" {:threadId "t" :messages (vec msgs)}))
+  (into [(system-prompt ts "You are a coding agent.")]
+        (map (fn [m]
+               (cond-> (record ts "message" (dissoc m :id))
+                 ;; THE EDGE'S OWN RULE, not a second one invented here: a message an
+                 ;; action brought is the client's unless the session wrote it
+                 ;; (`http/entry-source`, and `ag/injected?` is its reader).
+                 (:id m) (assoc :id (:id m) :source (http/entry-source m))))
+             msgs)))
 
 (defn- user [id text] {:id id :role "user" :content text})
 (defn- assistant [text] {:role "assistant" :content text})
 (defn- tool-msg [call-id content] {:role "tool" :tool_call_id call-id :content content})
 
 (defn- message
-  "A `message` line: one provider-shaped message, VERBATIM, as harness.edge.http/
-  log-messages! writes it."
+  "A `message` row for one message a RUN put in the array -- what the model returned or a
+  tool answered. The payload is the provider message verbatim and the envelope carries the
+  `source` the writer computes for it (`http/returned-source`), so a fixture says the same
+  thing the record would."
   [ts m]
-  (record ts "message" m))
+  (assoc (record ts "message" m) :source (http/returned-source m)))
 
-(defn- system-msg [text] {:role "system" :content text})
+(defn- system-prompt
+  "The system message as the record holds it (owner, 2026-09-21): a `message` row LIKE EVERY
+  OTHER element of the array the model was handed, whose envelope says the prompt put it
+  there (`:source` = `system-prompt`) and names those bytes (`:hash`). The payload stays the
+  provider's own map, verbatim, as every message row's does."
+  [ts text]
+  (assoc (record ts "message" {:role "system" :content text})
+         :source "system-prompt" :hash "h"))
+
+(defn- client
+  "A `message` row for one message the CLIENT sent: the verbatim provider message (id
+  stripped) as the payload, and the envelope carrying the id the session dedupes by plus
+  the `source` that says a person put these bytes in the array."
+  [ts m]
+  (cond-> (record ts "message" (dissoc m :id))
+    (:id m) (assoc :id (:id m) :source "client")))
+
+(defn- opening
+  "One of the conversation's OPENING blocks as its birth writes it: a `message` row whose id
+  is the one `ag/opening-entry?` names, `source` = `opening`. ENTRY -- it has an id -- which
+  is what tells it from the same file re-read by a later run (`derived`)."
+  [ts i text]
+  (assoc (record ts "message" {:role "user" :content text})
+         :id (str "session-opening-" i) :source "opening"))
+
+(defn- birth-context
+  "The session's own CONTEXT entry (`ag/context-entry-id`), written where the conversation is
+  born: an entry, so it carries its id."
+  [ts text]
+  (assoc (record ts "message" {:role "user" :content text})
+         :id ag/context-entry-id :source "injection"))
+
+(defn- derived
+  "A block a RUN derived for itself -- a skill body, a job's ending, a re-read of the context
+  or of an instruction file -- as the writer logs it: no id (nothing appended it to the
+  conversation) and the `source` its provenance gives it."
+  [ts source text]
+  (assoc (record ts "message" {:role "user" :content text}) :source source))
+
+(defn- rows
+  "A FIXTURE -> the rows it is made of, flat. A map is ONE row; a collection is rows to be
+  spliced (which is what `input` answers, so a fixture can read as one action's lines rather
+  than as a list of lists)."
+  [records]
+  (vec (mapcat #(if (map? %) [%] %) records)))
 
 (defn- tool-call
   "A provider-shaped tool call inside an assistant message."
@@ -71,7 +151,7 @@
   "RECORDS -> the folded turns. A collection, not loose arguments: a record is a map,
   and a map splatted as arguments becomes its ENTRIES."
   [records]
-  (:turns (trajectory/records->trajectory (vec records))))
+  (:turns (trajectory/records->trajectory (rows records))))
 
 (defn- items-of [turns] (mapv :items turns))
 
@@ -88,7 +168,7 @@
   "Every key the inventory allows on an item. The check is a SUBSET, not an equality:
   a turn with no injected context has no `:source` anywhere, and 'the vendor reported
   no reasoning' is a missing key rather than an empty string."
-  #{:kind :text :initial :id :source :reasoning :toolCallId :name :argsText
+  #{:kind :text :initial :id :reasoning :toolCallId :name :argsText
     :result :error :executed :outcome :call
     :arrivedAt :resumedAt :executedAt :closedAt :at})
 
@@ -97,9 +177,8 @@
   ;; holds, the user's own words, and the tool call with BOTH halves -- the name and
   ;; arguments from the call side, the result from the answer.
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "读一下 README"))
-                 (message 10 (system-msg "You are a coding agent."))
-                 (message 11 (user "u1" "读一下 README"))
+                [(client 0 (user "u1" "读一下 README"))
+                 (system-prompt 10 "You are a coding agent.")
                  (pre-execute 20 "c1" "read")
                  (executed 21 "c1" "read")
                  (post-execute 25 "c1" "read")
@@ -129,9 +208,8 @@
   ;; at a line the record actually has. An assertion rather than a convention, because
   ;; a field that appeared from nowhere is exactly the thing this feature must not do.
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  finished
                  (message 20 (assistant "ok"))])]
     (is (= #{:kind :text :initial} (set (keys (item-of turn "system")))))
@@ -143,23 +221,22 @@
 (deftest injected-context-is-context-and-lands-where-it-arrived
   (testing "opening blocks come before the client's message; the run's own context after it"
     (let [[turn] (turns-of
-                  [(input 0 (user "u1" "hi"))
-                   (message 10 (system-msg "S"))
-                   (message 11 (user "" "<instructions path=\"AGENTS.md\">rules</instructions>"))
-                   (message 12 (user "" "<skills>a catalog</skills>"))
-                   (message 13 (user "u1" "hi"))
-                   (message 14 (user "" "- project: clj-harness"))
+                  [(system-prompt 0 "S")
+                   (opening 11 0 "<instructions path=\"AGENTS.md\">rules</instructions>")
+                   (opening 12 1 "<skills>a catalog</skills>")
+                   (client 13 (user "u1" "hi"))
+                   (derived 14 "injection" "- project: clj-harness")
                    finished])]
       (is (= ["system" "context" "context" "user" "context"] (kinds turn))
           "the record's order, not the reference screenshot's: the blocks really do come first")
-      (is (= ["opening" "opening" "run"] (mapv :source (filter #(= "context" (:kind %)) (:items turn)))))
+      (is (= 3 (count (filter #(= "context" (:kind %)) (:items turn))))
+          "three injected blocks -- and the kind says nothing about where they sat")
       (is (= "<skills>a catalog</skills>" (:text (second (filter #(= "context" (:kind %)) (:items turn))))))))
 
   (testing "a skill body the model asked for mid-run is context too, where it landed"
     (let [[turn] (turns-of
-                  [(input 0 (user "u1" "load it"))
-                   (message 10 (system-msg "S"))
-                   (message 11 (user "u1" "load it"))
+                  [(client 0 (user "u1" "load it"))
+                   (system-prompt 10 "S")
                    finished
                    (message 20 {:role "assistant" :content ""
                                 :tool_calls [(tool-call "c1" "skill" "{\"name\":\"tdd\"}")]})
@@ -167,7 +244,39 @@
                    (message 22 (user "" "<skill name=\"tdd\">red green refactor</skill>"))
                    (message 23 (assistant "got it"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
-      (is (= "run" (:source (item-of turn "context")))))))
+      (is (str/starts-with? (:text (item-of turn "context")) "<skill name=\"tdd\">")
+          "the body, as the bytes it is"))))
+
+(deftest a-job-ending-is-injected-context-too
+  ;; THE OTHER SHAPE A TAIL USER MESSAGE COMES IN. A skill body is one; the ending of a
+  ;; background job (`harness.cap.jobs/before-llm`) is another, and the reader does not
+  ;; need to know which it is -- it shows the bytes and where they landed, which is the
+  ;; whole reason a new kind of injection costs this view nothing.
+  (testing "a notice in the returned tail is context, where it actually landed"
+    (let [[turn] (turns-of
+                  [(client 0 (user "u1" "\u5f00\u5de5"))
+                   (system-prompt 10 "S")
+                   finished
+                   (message 20 {:role "assistant" :content ""
+                                :tool_calls [(tool-call "c1" "bash"
+                                                        "{\"command\":\"make\",\"run_in_background\":true}")]})
+                   (message 21 (tool-msg "c1" "job j1 started; its record is /home/jobs/j1.log"))
+                   (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"))
+                   (message 23 (assistant "noted"))])]
+      (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
+      (is (= "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"
+             (:text (item-of turn "context")))
+          "the bytes, verbatim -- and three facts is all there is to them")))
+
+  (testing "and two jobs are two blocks, because the ids are part of the bytes"
+    (let [[turn] (turns-of
+                  [(client 0 (user "u1" "\u5f00\u5de5"))
+                   (system-prompt 10 "S")
+                   finished
+                   (message 20 (user "" "<job-ended id=\"j1\" path=\"/x/j1.log\">[exit 0]</job-ended>"))
+                   (message 21 (user "" "<job-ended id=\"j2\" path=\"/x/j2.log\">[stopped]</job-ended>"))])]
+      (is (= 2 (count (filter #(= "context" (:kind %)) (:items turn))))
+          "the de-duplication is by bytes, and these are different bytes"))))
 
 (deftest an-injection-is-shown-once-for-the-whole-session
   ;; The runs RESTATE their injections: the server holds no session, so every run re-reads
@@ -176,18 +285,15 @@
   ;; turn, and a five-turn session would read as if it had opened five times.
   (testing "the opening blocks are re-spliced into every run and are shown once"
     (let [turns (turns-of
-                 [(input 0 (user "u1" "first"))
-                  (message 10 (system-msg "S"))
+                 [(system-prompt 10 "S")
                   (message 11 (user "" "<instructions>rules</instructions>"))
                   (message 12 (user "" "<skills>a catalog</skills>"))
-                  (message 13 (user "u1" "first"))
+                  (client 0 (user "u1" "first"))
                   finished
-                  (input 100 (user "u1" "first") (user "u2" "second"))
-                  (message 110 (system-msg "S"))
+                  (system-prompt 110 "S")
                   (message 111 (user "" "<instructions>rules</instructions>"))
                   (message 112 (user "" "<skills>a catalog</skills>"))
-                  (message 113 (user "u1" "first"))
-                  (message 114 (user "u2" "second"))
+                  (client 100 (user "u2" "second"))
                   finished])]
       (is (= 2 (count turns)))
       (is (= ["system" "context" "context" "user"] (kinds (first turns))))
@@ -196,16 +302,13 @@
 
   (testing "bytes that CHANGED are bytes nobody has seen, so they are shown again"
     (let [turns (turns-of
-                 [(input 0 (user "u1" "first"))
-                  (message 10 (system-msg "S"))
+                 [(system-prompt 10 "S")
                   (message 11 (user "" "<instructions>rules</instructions>"))
-                  (message 12 (user "u1" "first"))
+                  (client 0 (user "u1" "first"))
                   finished
-                  (input 100 (user "u1" "first") (user "u2" "second"))
-                  (message 110 (system-msg "S"))
+                  (system-prompt 110 "S")
                   (message 111 (user "" "<instructions>rules and more</instructions>"))
-                  (message 112 (user "u1" "first"))
-                  (message 113 (user "u2" "second"))
+                  (client 100 (user "u2" "second"))
                   finished])]
       (is (= ["context" "user"] (kinds (second turns))))
       (is (= "<instructions>rules and more</instructions>"
@@ -215,69 +318,56 @@
 
   (testing "the run's own trailing context obeys the same rule"
     (let [turns (turns-of
-                 [(input 0 (user "u1" "first"))
-                  (message 10 (system-msg "S"))
-                  (message 11 (user "u1" "first"))
+                 [(system-prompt 10 "S")
+                  (client 0 (user "u1" "first"))
                   (message 12 (user "" "- project: clj-harness"))
                   finished
-                  (input 100 (user "u1" "first") (user "u2" "second"))
-                  (message 110 (system-msg "S"))
-                  (message 111 (user "u1" "first"))
-                  (message 112 (user "u2" "second"))
+                  (system-prompt 110 "S")
+                  (client 100 (user "u2" "second"))
                   (message 113 (user "" "- project: clj-harness"))
                   finished])]
       (is (= ["system" "user" "context"] (kinds (first turns))))
       (is (= ["user"] (kinds (second turns)))
           "the same trailing context, and it is not drawn a second time"))))
 
-(deftest an-injection-between-the-client-s-own-messages-does-not-break-the-alignment
-  ;; The `/name` that asked for a body is still in the history on every later run -- the
-  ;; client restates its whole conversation -- so the body is re-derived and spliced in
-  ;; after it, BETWEEN two messages the client holds. Matching the client's stretch
-  ;; contiguously finds nothing there and files the whole block as opening context, which
-  ;; would draw the client's own words as something the server injected.
+(deftest a-derived-block-is-not-the-client-s-own-words
+  ;; The `/name` that asked for a body is in the conversation already, so every later run
+  ;; re-derives the body and splices it in beside the client's own message. The alignment
+  ;; that asks 'which of the array's user messages did this run BRING' must not hand the
+  ;; client's words to the injected pile: a reader would see the person's own question
+  ;; drawn as something the server added.
   (let [turns (turns-of
-               [(input 0 (user "u1" "/alpha fix the bug"))
-                (message 10 (system-msg "S"))
+               [(system-prompt 10 "S")
+                (client 0 (user "u1" "/alpha fix the bug"))
                 (message 11 (user "" "<skills>a catalog</skills>"))
-                (message 12 (user "u1" "/alpha fix the bug"))
                 (message 13 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
                 finished
                 (message 20 (assistant "done"))
-                (input 100 (user "u1" "/alpha fix the bug")
-                       (assistant "done")
-                       (user "u2" "and another thing"))
-                (message 110 (system-msg "S"))
+                (system-prompt 110 "S")
+                (client 100 (user "u2" "and another thing"))
                 (message 111 (user "" "<skills>a catalog</skills>"))
-                (message 112 (user "u1" "/alpha fix the bug"))
                 (message 113 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
-                (message 114 (assistant "done"))
-                (message 115 (user "u2" "and another thing"))
                 finished
                 (message 120 (assistant "right"))])
         [one two] turns
         ctx (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
     (is (= 2 (count turns)))
-    (is (= ["system" "context" "user" "context" "assistant"] (kinds one)))
-    (is (= ["opening" "run"] (mapv :source (ctx one)))
-        "the blocks, then the body the ask put there")
+    (is (= ["system" "user" "context" "context" "assistant"] (kinds one))
+        "the person's message first -- it is what the run brought -- then the blocks it derived")
+    (is (= 2 (count (ctx one)))
+        "the blocks, then the body the ask put there -- one kind, no source")
     (is (= ["user" "assistant"] (kinds two))
         "the second turn opens nothing: it is the same bytes, and the client's own message
          is not drawn as injected context"))
 
   (testing "a body nobody has shown yet lands with the turn that carried it"
-    ;; The asking message is behind us, so the retransmitted neighbours this really sat
-    ;; between are not drawn either; 'this run carried it' is the fact that survives.
     (let [turns (turns-of
-                 [(input 0 (user "u1" "/alpha fix the bug"))
-                  (message 10 (system-msg "S"))
-                  (message 11 (user "u1" "/alpha fix the bug"))
+                 [(system-prompt 10 "S")
+                  (client 0 (user "u1" "/alpha fix the bug"))
                   finished
-                  (input 100 (user "u1" "/alpha fix the bug") (user "u2" "go on"))
-                  (message 110 (system-msg "S"))
-                  (message 111 (user "u1" "/alpha fix the bug"))
+                  (system-prompt 110 "S")
                   (message 112 (user "" "<skill name=\"alpha\">ALPHA BODY</skill>"))
-                  (message 113 (user "u2" "go on"))
+                  (client 100 (user "u2" "go on"))
                   finished])]
       (is (= ["context" "user"] (kinds (second turns))))
       (is (= "<skill name=\"alpha\">ALPHA BODY</skill>"
@@ -289,17 +379,16 @@
   ;; turn's own material. Listing the restatement would show every message once per
   ;; run, and the second turn would look like it said everything twice.
   (let [turns (turns-of
-               [(input 0 (user "u1" "first"))
-                (message 10 (system-msg "S"))
-                (message 11 (user "u1" "first"))
+               [(system-prompt 10 "S")
+                (client 0 (user "u1" "first"))
                 finished
                 (message 20 (assistant "one"))
-                ;; the client's second input: history + the new message
-                (input 100 (user "u1" "first") (assistant "one") (user "u2" "second"))
-                (message 110 (system-msg "S"))
-                (message 111 (user "u1" "first"))
-                (message 112 (assistant "one"))
-                (message 113 (user "u2" "second"))
+                ;; a client retrying what it already said: the SAME id, the same bytes -- the
+                ;; session holds that entry once (`sessions/append!`), and the fold here must
+                ;; not turn the repeat into this turn's material either
+                (system-prompt 110 "S")
+                (client 100 (user "u1" "first"))
+                (client 100 (user "u2" "second"))
                 finished
                 (message 120 (assistant "two"))])]
     (is (= 2 (count turns)))
@@ -308,24 +397,21 @@
         "the retransmitted history is not this turn's material")))
 
 (deftest a-resume-continues-the-parked-turn
-  ;; A park/resume writes a SECOND input with the same runId and no new user message.
-  ;; It is the same turn -- and its injections are not listed twice.
+  ;; A park/resume hands the same conversation to the model AGAIN under the same runId and
+  ;; brings no new user message: the prompt row is written once more, which is what says a
+  ;; second array went out. It is the same turn -- and its injections are not listed twice.
   (let [turns (turns-of
-               [(input 0 (user "u1" "读 /etc/hosts"))
-                (message 10 (system-msg "S"))
+               [(system-prompt 10 "S")
                 (message 11 (user "" "<instructions>rules</instructions>"))
-                (message 12 (user "u1" "读 /etc/hosts"))
+                (client 0 (user "u1" "读 /etc/hosts"))
                 (pre-execute 20 "c1" "read" "needs-approval")
                 (post-execute 21 "c1" "read")
                 (frame 30 "RUN_FINISHED" {:threadId "t" :runId "r1"})
                 (message 40 {:role "assistant" :content ""
                              :tool_calls [(tool-call "c1" "read" "{\"path\":\"/etc/hosts\"}")]})
-                ;; the human vetoed it, and the client sent everything back
-                (input 100 (user "u1" "读 /etc/hosts")
-                       {:role "assistant" :content ""})
-                (message 110 (system-msg "S"))
+                ;; the human vetoed it, so the run goes out again over the same conversation
+                (system-prompt 110 "S")
                 (message 111 (user "" "<instructions>rules</instructions>"))
-                (message 112 (user "u1" "读 /etc/hosts"))
                 (message 113 {:role "assistant" :content ""})
                 (pre-execute 120 "c1" "read" "vetoed")
                 (post-execute 121 "c1" "read")
@@ -344,9 +430,8 @@
   ;; The gap between the lines is the story: 'it arrived' and 'it ran' are different
   ;; facts, and only the second one is a duration.
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  (pre-execute 20 "c1" "bash" "vetoed")
                  (post-execute 21 "c1" "bash")
                  finished
@@ -359,20 +444,15 @@
 
 (deftest the-system-message-appears-again-only-when-it-changes
   (let [turns (turns-of
-               [(input 0 (user "u1" "first"))
-                (message 10 (system-msg "S1"))
-                (message 11 (user "u1" "first"))
+               [(system-prompt 10 "S1")
+                (client 0 (user "u1" "first"))
                 finished
-                (input 100 (user "u1" "first") (user "u2" "second"))
-                (message 110 (system-msg "S1"))
-                (message 111 (user "u1" "first"))
-                (message 112 (user "u2" "second"))
+                (system-prompt 110 "S1")
+                (client 100 (user "u2" "second"))
                 finished
                 ;; the third run's system message has grown a block
-                (input 200 (user "u2" "second") (user "u3" "third"))
-                (message 210 (system-msg "S1\n<project>clj-harness</project>"))
-                (message 211 (user "u2" "second"))
-                (message 212 (user "u3" "third"))
+                (system-prompt 210 "S1\n<project>clj-harness</project>")
+                (client 200 (user "u3" "third"))
                 finished])]
     (is (= 3 (count turns)))
     (is (= ["system" "user"] (kinds (first turns))))
@@ -381,12 +461,29 @@
     (is (not (contains? (item-of (nth turns 2) "system") :initial))
         "only the first one is the initial prompt")))
 
+(deftest every-run-carries-the-prompt-it-was-handed
+  ;; THE PROMPT IS A MESSAGE ROW (owner, 2026-09-21: a `message` row IS an element of the
+  ;; messages array the model was handed, and the prompt is that array's first element). So
+  ;; each run's submitted side starts with ITS OWN copy of those bytes -- no carry-forward, no
+  ;; synthesis: a reader asks the row. `.scratch/jsonl-two-kinds` 票 02's whole point is that
+  ;; what is on disk is what was handed over.
+  (let [records [(system-prompt 10 "S1")
+                 (client 0 (user "u1" "first"))
+                 finished
+                 (system-prompt 110 "S1\n<project>moved</project>")
+                 (client 100 (user "u2" "second"))
+                 finished]
+        runs    (trajectory/run-segments records)]
+    (is (= "S1" (:content (first (:submitted (first runs)))))
+        "the first element of the array the model read")
+    (is (= "S1\n<project>moved</project>" (:content (first (:submitted (second runs)))))
+        "and the second run's row is what THAT run was handed -- the prompt moved, and the row says so")))
+
 (deftest an-input-that-brings-two-user-messages-brings-two-turns
   (let [turns (turns-of
-               [(input 0 (user "u1" "a") (user "u2" "b"))
-                (message 10 (system-msg "S"))
-                (message 11 (user "u1" "a"))
-                (message 12 (user "u2" "b"))
+               [(client 0 (user "u1" "a"))
+                (client 0 (user "u2" "b"))
+                (system-prompt 10 "S")
                 finished
                 (message 20 (assistant "answered"))])]
     (is (= 2 (count turns)))
@@ -399,9 +496,8 @@
   ;; and it is shown as it was -- not resolved again from today's session.
   (let [specs [{:type "function" :function {:name "read" :description "Read a file"}}]
         [turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  (record 15 "model/start" {:model "deepseek-chat" :base-url "http://x/v1" :tools specs})
                  (record 16 "model/end" {})
                  (record 17 "model/start" {:model "deepseek-chat" :base-url "http://x/v1"})
@@ -414,24 +510,22 @@
         "one entry per call, in order; the second call sent no table and says so by omission"))
 
   (testing "a record from before the model lines has no :calls at all"
-    (let [[turn] (turns-of [(input 0 (user "u1" "hi"))
-                            (message 10 (system-msg "S"))
-                            (message 11 (user "u1" "hi"))
+    (let [[turn] (turns-of [(client 0 (user "u1" "hi"))
+                            (system-prompt 10 "S")
                             finished])]
       (is (not (contains? turn :calls))
           "absent, not []: 'the record cannot tell' is not 'no call was made'")))
 
   (testing "two runs of one turn each contribute their calls, in order"
     (let [turns (turns-of
-                 [(input 0 (user "u1" "hi"))
-                  (message 10 (system-msg "S"))
-                  (message 11 (user "u1" "hi"))
+                 [(system-prompt 10 "S")
+                  (client 0 (user "u1" "hi"))
                   (record 15 "model/start" {:model "m"})
                   (record 16 "model/end" {})
                   finished
-                  (input 100 (user "u1" "hi"))
-                  (message 110 (system-msg "S"))
-                  (message 111 (user "u1" "hi"))
+                  (system-prompt 110 "S")
+                  ;; the retry says what it already said: same id, so it is not new material
+                  (client 100 (user "u1" "hi"))
                   (record 115 "model/start" {:model "m"})
                   (record 116 "model/end" {})
                   finished])]
@@ -440,9 +534,8 @@
 
 (deftest a-call-carries-its-span-and-what-the-vendor-said
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  (record 100 "model/start" {:model "deepseek-chat"})
                  (record 250 "model/end" {:usage {:prompt_tokens 769
                                                   :completion_tokens 324
@@ -462,9 +555,8 @@
         "and does NOT repeat the call's times -- one fact, one place"))
 
   (testing "a call that reported nothing is a call with a span and no usage"
-    (let [[turn] (turns-of [(input 0 (user "u1" "hi"))
-                            (message 10 (system-msg "S"))
-                            (message 11 (user "u1" "hi"))
+    (let [[turn] (turns-of [(client 0 (user "u1" "hi"))
+                            (system-prompt 10 "S")
                             (record 100 "model/start" {:model "m"})
                             (record 250 "model/end" {})
                             finished])]
@@ -474,11 +566,9 @@
   (testing "an unterminated call is a call with a start and no end"
     ;; The session is being read while it runs: the last call has not come back.
     (let [answer (trajectory/records->trajectory
-                  [(input 0 (user "u1" "hi"))
-                   (message 10 (system-msg "S"))
-                   (message 11 (user "u1" "hi"))
-                   (record 100 "model/start" {:model "m"})
-                   (frame 120 "RUN_STARTED" {:threadId "t" :runId "r1"})])]
+                  (rows [(client 0 (user "u1" "hi"))
+                         (record 100 "model/start" {:model "m"})
+                         (frame 120 "RUN_STARTED" {:threadId "t" :runId "r1"})]))]
       (is (= [{:index 0 :model "m" :startedAt 100}] (:calls (first (:turns answer)))))
       (is (true? (:incomplete answer))))))
 
@@ -488,9 +578,8 @@
   ;; mistake that draws every tool as instantaneous, and it is a mistake the line's own
   ;; name invites (it says `execute`, not `executed`).
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  (pre-execute 20 "c1" "read")
                  (executed 1020 "c1" "read")        ;; the tool took a second
                  (post-execute 1022 "c1" "read")
@@ -507,9 +596,8 @@
 
   (testing "a park puts the human's wait in :resumedAt, and it is not the tool's own time"
     (let [[turn] (turns-of
-                  [(input 0 (user "u1" "hi"))
-                   (message 10 (system-msg "S"))
-                   (message 11 (user "u1" "hi"))
+                  [(client 0 (user "u1" "hi"))
+                   (system-prompt 10 "S")
                    (pre-execute 20 "c1" "read" "needs-approval")
                    (pre-execute 5000 "c1" "read" "pass")   ;; the human said yes
                    (executed 5010 "c1" "read")
@@ -526,9 +614,8 @@
 
   (testing "a vetoed call never ran, so it has no executedAt at all"
     (let [[turn] (turns-of
-                  [(input 0 (user "u1" "hi"))
-                   (message 10 (system-msg "S"))
-                   (message 11 (user "u1" "hi"))
+                  [(client 0 (user "u1" "hi"))
+                   (system-prompt 10 "S")
                    (pre-execute 20 "c1" "read" "vetoed")
                    (post-execute 22 "c1" "read")
                    finished
@@ -541,9 +628,8 @@
 
 (deftest a-tool-call-knows-which-call-asked-for-it
   (let [[turn] (turns-of
-                [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
+                [(client 0 (user "u1" "hi"))
+                 (system-prompt 10 "S")
                  (record 20 "model/start" {:model "m"})
                  (record 60 "model/end" {})
                  (record 61 "model/start" {:model "m"})
@@ -568,10 +654,8 @@
 (deftest an-unfinished-run-is-a-flag-not-a-refusal
   ;; replay refuses this log; the trajectory reads it, because looking at a session
   ;; while it runs is the ordinary case.
-  (let [records [(input 0 (user "u1" "hi"))
-                 (message 10 (system-msg "S"))
-                 (message 11 (user "u1" "hi"))
-                 (frame 20 "RUN_STARTED" {:threadId "t" :runId "r1"})]
+  (let [records (rows [(client 0 (user "u1" "hi"))
+                       (frame 20 "RUN_STARTED" {:threadId "t" :runId "r1"})])
         answer  (trajectory/records->trajectory records)]
     (is (true? (:incomplete answer)))
     (is (= 1 (count (:turns answer))) "as far as it got")
@@ -581,8 +665,8 @@
 (deftest a-half-written-last-line-is-dropped-and-the-rest-still-reads
   (let [f (java.io.File/createTempFile "trajectory-lines" ".jsonl")]
     (try
-      (spit f (str (json/write-str (input 0 (user "u1" "hi"))) "\n"
-                   (json/write-str (message 10 (system-msg "S"))) "\n"
+      (spit f (str (row-json (client 0 (user "u1" "hi"))) "\n"
+                   (row-json (system-prompt 10 "S")) "\n"
                    "{\"ts\":20,\"runId\":\"r1\",\"kind\":\"mess")
             :encoding "UTF-8")
       (let [answer (trajectory/log-trajectory f)]
@@ -597,6 +681,7 @@
   same shape harness.edge.stats-test uses: one thread, one script, one GET."
   [thread-id turns f]
   (providers/use-provider! thread-id (fake/scripted turns))
+  (support/start-session! thread-id)
   (let [stop (http/start! {:port 0})]
     (try
       (f (:local-port (meta stop)))
@@ -607,9 +692,11 @@
 (defn- send-run!
   "One real AG-UI run, drained. Returns its response body."
   [port thread-id]
-  (let [body (json/write-str {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "看看这个项目"}]
-                              :tools [] :context []})
+  (let [body (json/write-str {:threadId thread-id
+                              ;; THE ACTION'S OWN ENTRIES (ticket 03), not the
+                              ;; conversation: the server holds that.
+                              :append [{:id "u1" :role "user" :content "看看这个项目"}]
+                              :tools []})
         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/agent")))
                  (.header "Content-Type" "application/json")
                  (.header "Accept" "text/event-stream")
@@ -632,7 +719,7 @@
   trusting the fold's copy of them."
   [thread-id]
   (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
-       (filter #(= "message" (:kind %)))))
+       (filter #(= "message" (replay/kind %)))))
 
 (defn- await-run-recorded!
   "Wait until THREAD-ID's log has stopped being written, and answer its records.
@@ -653,10 +740,10 @@
   [thread-id ms]
   (let [f      (replay/locate (home/projects-dir) thread-id)
         ended? (fn [records]
-                 (and (some #(and (= "event" (:kind %))
-                                  (frames/terminal? (:payload %)))
+                 (and (some #(and (= "event" (replay/kind %))
+                                  (frames/terminal? (replay/payload %)))
                             records)
-                      (= "message" (:kind (last records)))))
+                      (= "message" (replay/kind (last records)))))
         finish (+ (System/currentTimeMillis) ms)]
     (loop []
       (let [records (stats/read-records f)]
@@ -668,6 +755,12 @@
   ;; The whole path, once, over real HTTP: a real run writes the log, and the route
   ;; folds it. The system message is checked BYTE FOR BYTE against the line the edge
   ;; wrote -- that equality is the feature's promise, and a screenshot cannot show it.
+  ;;
+  ;; AND THE LINE IS AN EVENT NOW (2026-09-21): the assembled prompt is a fact about the
+  ;; run (`system-prompt`, text once per conversation plus a per-run hash), so the record
+  ;; no longer carries it as a message row and the route synthesizes the item from the
+  ;; event. The two sides of the equality are the same bytes either way -- which is why
+  ;; the assertion below did not change, only where it reads them from.
   (let [thread-id "trajectory-endpoint"]
     (with-server thread-id
       [{:content "" :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}]}
@@ -680,9 +773,9 @@
         (let [[status body] (get-json port (str "/api/threads/" thread-id "/trajectory"))
               items   (:items (first (:turns body)))
               by      (fn [k] (first (filter #(= k (:kind %)) items)))
-              written (->> (log-messages thread-id)
-                           (filter #(= "system" (get-in % [:payload :role])))
-                           first :payload :content)]
+              written (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
+                           (filter replay/system-prompt?)
+                           first replay/payload :content)]
           (is (= 200 status))
           (is (= thread-id (:threadId body)))
           (is (false? (:incomplete body)))

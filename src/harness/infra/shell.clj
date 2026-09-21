@@ -34,13 +34,26 @@
   which cannot run is worse than one that admits there is none, so the chain has
   no guessed tail.
 
-  AND A LOGIN SHELL DOES ONE MORE THING ON THE WAY OUT, which is why every spawn
-  below pins SHLVL first: Git for Windows ships /etc/bash.bash_logout, and a
-  `bash -lc` whose OWN `exit` ends it (a compound command; a lone one is
-  exec-optimized away and never reads the file) sees `SHLVL=1` there and runs
-  /usr/bin/clear -- whose ESC[H ESC[2J ESC[3J lands in the same pipe as the
-  command's output. See `with-shlvl!`, and shell_test's case about it. mac ships
-  no such file, which is why this whole failure named Windows only.
+  THE LOGIN SHELL IS LOAD-BEARING, which is worth writing down because it looks like
+  pure cost. `-l` makes bash source /etc/profile -- whose profile.d scripts spawn
+  helpers of their own (`locale -uU`, `git --exec-path` plus git-completion, up to
+  seven `type -p` probes), and on Windows that is ~700ms of a ~770ms spawn. But an
+  experiment that skipped it (2026-09-20) found the profile is ALSO what keeps the
+  spawned tree KILLABLE: with `-c`, and equally with `--noprofile -lc`, a timed-out
+  `echo x; sleep 30` comes back in 12s with its output LOST, where `-lc` answers in 2s
+  with the output intact. So the flags stay, and the cost is NOT taken out of the flag:
+  the profile's three expensive branches are each guarded by an environment variable
+  (`WINELOADERNOEXEC`, `LANG`, `TERM`), which measured 770ms -> 333ms per command with
+  the killing still correct. That is a change to what every spawned command sees, so it
+  is a decision to take deliberately rather than a line to slip in beside a bug fix.
+
+  AND A LOGIN SHELL DOES ONE MORE THING ON THE WAY OUT, which is why every spawn pins
+  SHLVL too: Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN
+  `exit` ends it (a compound command; a lone one is exec-optimized away and never reads
+  the file) sees `SHLVL=1` there and runs /usr/bin/clear -- whose ESC[H ESC[2J ESC[3J
+  lands in the same pipe as the command's output. See `with-shlvl!`, and shell_test's
+  case about it. mac ships no such file, which is why this whole failure named Windows
+  only.
 
   WHAT A SHELL IS, AS THIS NAMESPACE ANSWERS IT:
 
@@ -50,10 +63,11 @@
                                                           ;   anything here?
      :argv-prefix [\"-lc\"]}                                ; how the command is handed over
 
-  IT IS RESOLVED ONCE PER PROCESS, because it is a fact about the machine rather
-  than about a call, and the resolution is a pure function of the chain plus an
-  existence question (`select`) -- so the Windows-only steps are asserted on a
-  machine that has neither Git Bash nor pwsh."
+  IT IS RESOLVED ONCE PER PROCESS -- AND ONCE PER KIND, because a call may NAME the
+  shell it wants (see `resolve-kind*`, and `resolution`'s one-argument arity). Both are
+  the same pure function of the chain plus an existence question (`select`), which is
+  why every step of it -- Git Bash, the WSL refusal, pwsh, cmd, none at all, and a kind
+  this harness has never heard of -- can be asserted on a machine that has none of them."
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.io BufferedReader]
@@ -80,10 +94,35 @@
    {:kind :powershell :command "powershell"}
    {:kind :cmd        :command "cmd"}])
 
+(def ^:private rows-by-kind
+  "KIND -> the rows `candidates` holds for it, in the chain's own order. DERIVED, not
+  written a second time: a kind the chain can land on is a kind a call can NAME, and
+  the two can never drift apart about where Git Bash lives or which of its two install
+  paths is asked for first."
+  (group-by :kind candidates))
+
+(defn kind-candidates
+  "The rows this harness knows for KIND, in `candidates`' own order -- the pure question
+  behind `(resolution kind)`, exactly as `candidates` is the pure one behind
+  `(resolution)`.
+
+  EMPTY WHEN KIND IS NOT A KIND THIS HARNESS KNOWS, and that is load-bearing: a
+  mis-spelled kind resolves to nil rather than falling back to somebody else's shell."
+  [kind]
+  (get rows-by-kind kind))
+
 (def ^:private how-to-start
   "kind -> the argv a command goes behind. One table rather than a `case` at each
   spawn site: there are three spawn sites, and a second copy of this would
-  eventually be fixed in one of them."
+  eventually be fixed in one of them.
+
+  BASH KEEPS `-lc`, AND THE `-l` IS NOT DECORATION: skipping the profile breaks
+  TIMEOUT HANDLING. With `-c`, and equally with `--noprofile -lc`, a timed-out
+  `echo x; sleep 30` comes back in 12s with its output LOST; with `-lc` it answers in
+  2s with the output intact (measured 2026-09-20 on this repo's machine -- the exact
+  reason is not pinned down further than 'the profile has to have run'). The profile
+  is expensive all the same (~700ms of the ~770ms spawn), and the way to trim it is the
+  branches' own environment guards -- not the flag."
   {:git-bash   ["-lc"]
    :bash       ["-lc"]
    :pwsh       ["-NoProfile" "-Command"]
@@ -220,6 +259,19 @@
   [candidates locate]
   (some (fn [c] (when-let [found (locate c)] (assoc c :command found))) candidates))
 
+(defn- as-resolution
+  "A candidate ROW as the map every spawn site reads: what to spawn, which kind it is,
+  whether it reads POSIX words, and the flags a command goes behind.
+
+  One place, because `resolve*` and `resolve-kind*` must answer in EXACTLY the same
+  shape -- two shape-builders would be two chances for one question to answer with a
+  key the other has not."
+  [c]
+  {:command     (:command c)
+   :kind        (:kind c)
+   :posix?      (posix? (:kind c))
+   :argv-prefix (argv-prefix (:kind c))})
+
 (defn resolve*
   "This process's shell, asked of the REAL machine -- the uncached read behind
   `resolution`:
@@ -231,45 +283,98 @@
   caller that needs one says so through `require-shell!`."
   []
   (when-let [c (select candidates (locator (System/getenv "PATH")))]
-    {:command     (:command c)
-     :kind        (:kind c)
-     :posix?      (posix? (:kind c))
-     :argv-prefix (argv-prefix (:kind c))}))
+    (as-resolution c)))
+
+(defn resolve-kind*
+  "The resolution for one NAMED kind, asked of the REAL machine -- the uncached read
+  behind `(resolution kind)`, and the same shape `resolve*` answers in.
+
+  NIL IS AN ANSWER, in two different situations that this layer deliberately does not
+  tell apart: 'this machine has no pwsh', and 'there is no such kind'. Both mean the
+  same thing to a spawn site -- do not run this command under a shell that was not
+  asked for -- and the caller that NAMED the kind is the one that can put either into
+  a sentence (see `require-shell!`)."
+  [kind]
+  (when-let [c (select (kind-candidates kind) (locator (System/getenv "PATH")))]
+    (as-resolution c)))
+
+(def ^:private the-machines-shell
+  "The cache key for 'this machine's shell' -- whatever the CHAIN lands on, which is not
+  a kind any caller named. A keyword no kind can collide with, so the machine's own
+  answer and the answer for a named kind cannot overwrite one another."
+  ::the-machines-shell)
 
 (defonce ^:private resolved
-  ;; A fact about the MACHINE, and machines do not change under a running process,
-  ;; so it is asked once -- the same defonce and the same reason as the `binary`
-  ;; it replaces. Held in a vector so that "asked, and there is none" is a cached
-  ;; answer too, rather than a question asked again at every spawn.
-  (atom nil))
+  ;; A fact about the MACHINE, and machines do not change under a running process, so
+  ;; every question is asked once -- now PER KEY, because a call may name a kind. A map
+  ;; with `contains?` rather than a vector with truthiness: "asked, and there is none"
+  ;; must be a cached answer too, and a map says that for however many keys are asked
+  ;; about where a one-slot vector said it for exactly one.
+  (atom {}))
 
-(defn resolution
-  "The process's shell -- {:command :kind :posix? :argv-prefix} -- resolved once
-  per process, or nil when the machine has none of the chain's candidates."
-  []
-  (if-let [cached @resolved]
-    (first cached)
-    (let [r (resolve*)]
-      (reset! resolved [r])
+(defn- resolution-cached
+  "ASK once per KEY, then answer from the cache -- INCLUDING a nil answer, which is why
+  the check is `contains?` and not truthiness."
+  [k ask]
+  (if (contains? @resolved k)
+    (get @resolved k)
+    (let [r (ask)]
+      (swap! resolved assoc k r)
       r)))
 
-(defn reset-resolution!
-  "Forget the cached answer so the next `resolution` asks again. For tests that
-  drive the chain; a running process's machine does not change under it."
+(defn resolution
+  "The process's shell -- {:command :kind :posix? :argv-prefix} -- resolved once per
+  process, or nil when the machine has none of the chain's candidates.
+
+  WITH A KIND, the same question about THAT shell: `(resolution :cmd)` is cmd on this
+  machine, or nil when this machine has no cmd. Nil is an answer and not a failure --
+  the caller that NAMED the kind is the one that can say a sentence about it, and
+  `require-shell!` is where that sentence lives."
+  ([] (resolution nil))
+  ([kind]
+   (if (nil? kind)
+     (resolution-cached the-machines-shell resolve*)
+     (resolution-cached kind #(resolve-kind* kind)))))
+
+(defn shells-here
+  "The kinds this machine actually has, in the chain's own order. A refusal sentence
+  needs it to be able to say what the machine DOES have -- 'you spelled it wrong' and
+  'it is not installed' are different next moves for whoever reads the answer."
   []
-  (reset! resolved nil))
+  (->> (distinct (map :kind candidates))
+       (filter #(some? (resolution %)))))
+
+(defn reset-resolution!
+  "Forget every cached answer -- the machine's own shell and each kind's -- so the next
+  `resolution` asks again. For tests that drive the chain; a running process's machine
+  does not change under it."
+  []
+  (reset! resolved {}))
 
 (defn require-shell!
   "The resolution, or a refusal that NAMES what is missing. A spawn site asks this
   rather than dereferencing `resolution` itself, so 'this machine has no shell' is
-  a sentence instead of a null dereference three frames down."
-  []
-  (or (resolution)
-      (throw (ex-info (str "this machine has no shell this harness can spawn: Git Bash,"
-                           " bash, pwsh, PowerShell and cmd were all looked for and none"
-                           " was found, so nothing can be run. Install one of them -- Git"
-                           " for Windows is what this harness knows how to talk to.")
-                      {:reason :no-shell}))))
+  a sentence instead of a null dereference three frames down.
+
+  WITH A KIND, the refusal names THAT kind and says which kinds this machine does
+  have -- the caller cannot assemble that list for itself without asking about each
+  one, and without it the reader cannot tell a mis-spelling from a missing install."
+  ([] (require-shell! nil))
+  ([kind]
+   (or (resolution kind)
+       (throw (ex-info
+               (if (nil? kind)
+                 (str "this machine has no shell this harness can spawn: Git Bash,"
+                      " bash, pwsh, PowerShell and cmd were all looked for and none"
+                      " was found, so nothing can be run. Install one of them -- Git"
+                      " for Windows is what this harness knows how to talk to.")
+                 (str "no `" (name kind) "` shell on this machine; what it has is: "
+                      (let [here (shells-here)]
+                        (if (seq here)
+                          (str/join ", " (map name here))
+                          "nothing this harness can spawn"))))
+               {:reason (if (nil? kind) :no-shell :no-such-shell)
+                :kind   kind})))))
 
 (defn require-posix!
   "The resolution, or a refusal BY NAME when the shell this process spawns is not
@@ -301,17 +406,38 @@
                            " comes back.")
                       {:reason :no-posix-shell :shell (:kind r)})))))
 
-(defn quote-arg
-  "S as a single-quoted POSIX word, for a caller that is BUILDING a command line
-  rather than passing one. The `'\\''` dance is the only way to put a quote
-  inside a single-quoted word.
-
-  Here rather than in the two namespaces that need it, for this namespace's own
-  reason: a command line goes through `bash -lc`, so how a value is quoted is a
-  property of how this process spawns things -- and a second copy of it is a
-  second chance for one caller to be fixed and the other left open."
+(defn- quote-posix
+  "S as a single-quoted POSIX word. The `'\\''` dance is the only way to put a quote inside a single-quoted word."
   [s]
   (str "'" (str/replace (str s) "'" "'\\''") "'"))
+
+(defn- quote-cmd
+  "S as one word for `cmd /c`: wrapped in double quotes, with a literal quote inside
+  spelled `\"\"` -- cmd's own rule for the arguments it hands a program, and the
+  only rule its parent can rely on. Verified against a real `cmd /c node` on this
+  repository's machines; MSVCRT's own doubling rule is a different sentence and is
+  NOT what cmd does with a line it was handed."
+  [s]
+  (let [s (str s)]
+    (if (re-find #"[\s\"\^&|<>()]" s)
+      (str "\"" (str/replace s "\"" "\"\"") "\"")
+      s)))
+
+(defn quote-arg
+  "S as a single word of the command line the LONG-LIVED spawn of THIS process will
+  build -- POSIX single quotes when the line goes to a shell that reads them, cmd's
+  double quotes when on Windows it goes to `cmd /c` (see `windows-argv`). A caller
+  is BUILDING a line, not passing one, and must quote for the shell the line will
+  actually land in: a POSIX-quoted arg handed to cmd arrives with its quotes on, as
+  literal characters of the argument.
+
+  Here rather than in the callers that need it, for this namespace's own reason: HOW
+  a line is quoted is a property of how this process spawns things -- and a second
+  copy of it is a second chance for one caller to be fixed and the other left open."
+  [s]
+  (if (windows?)
+    (quote-cmd s)
+    (quote-posix s)))
 
 (defn- kill-tree!
   "Stop P and everything it started.
@@ -360,9 +486,15 @@
 
   A command that cannot be spawned at all throws -- :exit only means anything for
   a process that started, and callers must not read 'we never ran it' as
-  'it exited 0'."
-  [{:keys [command stdin dir timeout-ms]}]
-  (let [r  (require-shell!)
+  'it exited 0'.
+
+  `:kind` NAMES THE SHELL this one command runs in; without it the machine's own shell
+  is used, so a caller that does not care never learns there was a choice. A kind this
+  machine does not have is a refusal by name (`require-shell!`), NEVER a quiet fallback
+  to the machine's own -- running under a shell nobody asked for is the one outcome
+  worse than not running."
+  [{:keys [command stdin dir timeout-ms kind]}]
+  (let [r  (require-shell! kind)
         ;; THE PIN WRAPS THE PB CONSTRUCTION, AND NOTHING ELSE: the child's
         ;; environment is copied and adjusted in that one moment, and neither the
         ;; wait nor the drains below has a use for it.
@@ -490,15 +622,22 @@
   engine refuses to make.
 
   `:env` is ADDED to the inherited environment rather than replacing it: a server
-  declared with one token still needs PATH to find its own runtime."
-  [{:keys [command dir env shape] :or {shape :program}}]
-  (let [;; THE SAME PIN `run` GETS. A long-lived `:shell` command -- `jobs/start!`
+  declared with one token still needs PATH to find its own runtime.
+
+  `:kind` is `run`'s `:kind` for the `:shell` shape: a named shell for this one spawn,
+  resolved HERE, before anything is started -- so a missing kind is a refusal rather
+  than a handle to a process that never appeared. The `:program` shape ignores it on
+  Windows, where a program goes to `cmd /c` whatever the caller named (see
+  `spawn-argv`)."
+  [{:keys [command dir env shape kind] :or {shape :program}}]
+  (let [shell-res (when kind (require-shell! kind))
+        ;; THE SAME PIN `run` GETS. A long-lived `:shell` command -- `jobs/start!`
         ;; hands `start!` its compound commands exactly this way -- is a login
         ;; shell whose own `exit` ends it, and without the pin its logout file's
         ;; `clear` lands in the record as a last line of output.
         pb (with-shlvl!
              #(child-env
-               (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv shape command)))
+               (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String (spawn-argv shape command (windows?) shell-res)))
                  (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
         _  (when (seq env) (.putAll (.environment pb) (into {} env)))

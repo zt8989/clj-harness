@@ -11,15 +11,35 @@
  :stop              [{:command "scripts/notify.sh"}]}
 ```
 
-声明里有四个键：`:matcher`（正则，与**该点声明的那个 payload 字段**比较）、`:timeout`（毫秒）、
-`:run`（可调用的函数），以及 `:command`（非空字符串）。**一条声明说它跑什么，且只说一样**：恰好
-`:command` 或 `:run` 之一——两个都没有、两个都给，都指名报错。
+**一条声明说它跑什么，且只说一样**：恰好 `:command`（一条命令）或 `:run`（一个进程内的函数）之一——
+两个都没有、两个都给，都指名报错。**能写在哪一档也是规则的一部分**：`:run` 只在会话与内核那两档成立，
+`hooks.edn` 里写它被指名拒绝。逐键的取值、默认值，以及每一条会被指名拒绝的写法，都在下一节。
 
-**`:run` 是会话与内核那一侧的事**：`hooks.edn` 里写 `:run` 被**指名拒绝**（文件里放不了函数），
-理由里说清该写 `:command`、还是该从会话 `session-add!`、还是那本来就是一条 `:built-in` 行。
-这不是特例，是与 `:timeout` / `:matcher` 同一套逐字段校验。**任何别的键都指名失败**——`:commnd`
-这种拼错会静默丢掉，然后那条声明就变成「声明了一条什么都不跑的 hook」，比报错更糟。同理，
-`:timeout` 配 `:run` 也指名失败：`run` 没有 spawn 可限时，静默接受一个不起作用的字段正是这条校验存在的理由。
+## 声明里能写什么
+
+一条声明说它跑什么，**恰好一样**：
+
+| 键 | 必填 | 是什么 | 写错会怎样 |
+|---|---|---|---|
+| `:command` | 二者之一 | 非空字符串，经 shell spawn，payload 走 stdin | 空串 / 不是字符串 / 与 `:run` 同时给 / 两个都不给 —— 一律指名报错 |
+| `:run` | 二者之一 | 本进程里的可调用（`fn` of payload map） | **`hooks.edn` 里写 `:run` 被指名拒绝**：文件放不了函数。要写得从会话 `session-add!`，或者那本来就是 `:built-in` 的一行 |
+| `:matcher` | 否 | 正则，**`re-find` 语义（部分匹配，不是全匹配）**，对象是该点 `:matches` 指名的那个 payload 字段 | 点没有匹配对象时被拒绝（并列出哪些点有）；**编译不过的正则在读文件时就报错**，不留到触发那一刻 |
+| `:timeout` | 否，默认 **10000** | 正整数毫秒，限住**等待**命令的时间 | 非正整数报错；与 `:run` 同给也报错——`run` 没有 spawn 可限，收下一个不起作用的字段正是这条校验存在的理由（文件里 `:run` 先被拒，所以这一条只在会话 `session-add!` 那一侧撞得到）|
+
+**除这四个键以外的任何键都指名失败。** `:commnd` 这种拼错不会静默丢掉：那会让声明变成「一条什么都不跑的
+hook」，比报错更糟。
+
+文件层还有四条规矩，**都在读文件时就成立**：
+
+| 情形 | 结果 |
+|---|---|
+| 文件不存在 | `{}`——什么都没说。不 spawn、不等待、不落审计行 |
+| 文件存在，但**零字节**或**只有注释** | **指名失败**。空内容读出来是 `nil` 而不是空 map，所以「我没有 hook」要写成 `{}` |
+| 不是 EDN、不是 map、点键不认识、点的值不是 vector、声明不合法 | 指名失败，消息里带**绝对路径**与该键 |
+| — | 逐点替换：配置家的 `hooks.edn` 被绑定项目的 `.harness/hooks.edn` 覆盖，**一个点写了就整个换掉那个点**，两份不叠加 |
+
+**每次触发现读**：改完下一次触发就生效，不用重启。可复制的完整起点在仓库根目录的
+[`hooks.edn.example`](../../hooks.edn.example)，逐键参考与可跑的例子都在那里。
 
 ## 契约
 
@@ -40,6 +60,53 @@
   `:run` 是进程内的一次调用，抛异常 = 起不来（`{:exit nil :err <消息>}`）。两者都折进同一个
   `{:exit :out :err :timeout}`，所以退出码语义、失败策略、审计行在下面完全一样。
 - **一次真触发的落一行 `hook/<Point>` 审计行**；没匹配到任何声明 = 不 spawn、不等待、不落行。
+  审计行的字段：`{point, thread_id, matched, verdict, reason, answer?, results[{exit, timeout,
+  outcome, verdict, reason, answer?}]}`——一条声明一个 `results`，`reason` 是第一条没放行的声明写的。
+- **`:reason` 那句话是谁写的**：退出 **2** 时逐字是命令的 stderr，没有前缀；**其他非零退出**与**超时**
+  由引擎加一句前缀（`hook exited 3: ` / `hook timed out after its timeout: `），后面才是命令自己的话
+  ——stderr 为空时用 stdout。审计行里的 `reason` 与执行缝返回的是同一句。
+
+### 命令是在什么条件下被问的
+
+上面说的是「命令怎么回答」，这一节说的是**它在什么条件下被问**。六条，都是写 hook 时会被咬到的：
+
+- **工作目录是 harness 进程启动时那个目录，不是会话的项目目录。** hook 命令不给工作目录
+  （`harness.infra.shell/run` 的 `:dir` 这条路不给），所以相对路径的 `:command`、以及命令自己写的相对
+  路径，都按**进程的 cwd** 解析。**写绝对路径。**（对照：stdio 的 MCP 服务器**是**给了工作目录的，
+  给的是绑定项目的 canonical 目录——见 [mcp](mcp.md#stdio-服务器在哪个目录起来)。）
+- **经钉住的登录 shell 起**（本机 `bash -lc`；Windows 上是 Git Bash、`pwsh -NoProfile -Command` 或
+  `cmd /c`）。登录 shell 会重新 source profile，**命令看到的 PATH 可以与 JVM 的不同**——而那正是人在
+  终端里拿到的那一份。
+- **stdin 写一次随即关掉**：命令读到底是 EOF，不会无谓地挂住；反过来，**等更多输入的命令会一直等到
+  超时**。
+- **超时到了杀的是整棵进程树**，不是握着的那条 shell。`npx` 这种再包一层的命令是常态，只杀 shell
+  会留下真正的服务器。
+- **hook 是同步的**：它在 run 自己的路径上跑完才走。`:pre-tool-use` 上一条慢 hook，就是在拖慢它正在
+  检查的那次工具调用。
+- **命令这一侧的每个 payload 值都是文本**（`str` 渲染）。所以 `tool_input` 到手上是它的**打印形式**
+  ——`{:path "src/x.clj", :offset 3}`，不是 JSON。`:run` 拿到的是有类型的值，那两边唯一的差别
+  （见 [上面契约](#契约) 第一条）。
+
+payload 是 stdin 上的一个 JSON 对象，键名 snake_case：三个公共键 `hook` / `thread_id` / `project_dir`，
+加上该点自己的字段（下一张表）。**`project_dir` 在没有绑定项目的会话里是 `null`**。
+
+### 装上去之前先试一次
+
+一条 hook 就是「stdin 收一段 JSON、用退出码回答」的普通程序，所以不用开着 agent 试：
+
+```sh
+echo '{"hook":"PreToolUse","thread_id":"t","project_dir":null,
+       "tool_name":"bash","tool_input":"{:command \"ls\"}"}' \
+  | /abs/scripts/fence-check.sh ; echo "exit=$?"
+```
+
+- **退出码 0 / 2 / 别的**就是上面那张表说的一切（`2` 时 stderr 原样回喂给模型）。先在这一行上把判定
+  调对，再装进 `hooks.edn`。
+- **写坏了不会静默**：不是 EDN、点键拼错、`:matcher` 编译不过……都在**下一次触发**时按**绝对路径 + 那个
+  键**报出来。所以「装上去好像没反应」这种含糊状态没有立足之地——要么它跑了，要么有句话指出了是哪一行。
+- **看现在到底生效了哪些**：在会话里 `eval` 一句 `harness.kernel.hooks/declarations-at`（按点问，已经滤掉
+  被关掉的），或者 `effective-hooks`（三层折在一起，每条带 `:id` 与 `:source`）——见
+  [三个来源](#三个来源一条读取)。
 
 ## 27 个点，全部是数据
 
@@ -47,20 +114,50 @@
 `{:name :when :payload :matches :gate? :on-error}`，另有一格可选：`:stdout`。**加点 = 加一行**，
 引擎里没有 per-point 代码——这是整个 hook 设计赖以成立的性质。
 
-| 状态 | 点 |
-|---|---|
-| **已接线（9）** | `SessionStart`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`、**`SystemPrompt`**、`InstructionsLoaded`、**`Elicitation`**、**`ElicitationResult`** |
-| 已登记、无触发源（18） | `UserPromptSubmit`、`PermissionDenied`、`PostToolUseFailure`、`StopFailure`、`Notification`、`ConfigChange`、`CwdChanged`、`SessionEnd`、`FileChanged`、`PreCompact`、`PostCompact`、`SubagentStart/Stop`、`TeammateIdle`、`TaskCreated/Completed`、`WorktreeCreate/Remove` |
+**一张表查完**：怎么写（EDN 键）、它给你什么（payload 字段）、能不能拦（门禁）、跑砸了算哪边。
+`点` 列是 payload 与审计行里的拼法，**EDN 键**列是你写进 `hooks.edn` 的那一个。
 
-**没有触发源的点永不触发——这是设计，不是遗漏。** 这就是为什么一个 P3 点的代价是一行数据，
-而不是一个接口。它们等各自的子系统（文件监视、上下文压缩、子代理、任务、worktree）落地时再接。
+| EDN 键 | 点 | 有触发源 | payload 额外字段 | `:matcher` 对象 | 门禁 | 超时 / 起不来 |
+|---|---|---|---|---|---|---|
+| `:session-start` | `SessionStart` | ✓ | `source` | — | 观察者 | 放行 |
+| `:user-prompt-submit` | `UserPromptSubmit` | — | `prompt` | — | **门禁** | 阻断 |
+| `:pre-tool-use` | `PreToolUse` | ✓ | `tool_name` `tool_input` | `tool_name` | **门禁** | 阻断 |
+| `:permission-request` | `PermissionRequest` | ✓ | `tool_name` `tool_input` `interrupt_id` | `tool_name` | **门禁** | 阻断 |
+| `:permission-denied` | `PermissionDenied` | — | `tool_name` `reason` | `tool_name` | 观察者 | 放行 |
+| `:post-tool-use` | `PostToolUse` | ✓ | `tool_name` `tool_input` `result` | `tool_name` | 观察者 | 放行 |
+| `:post-tool-use-failure` | `PostToolUseFailure` | — | `tool_name` `tool_input` `error` | `tool_name` | 观察者 | 放行 |
+| `:stop` | `Stop` | ✓ | — | — | 观察者 | 放行 |
+| `:stop-failure` | `StopFailure` | — | `error` | — | 观察者 | 放行 |
+| `:notification` | `Notification` | — | `message` | — | 观察者 | 放行 |
+| `:system-prompt` | `SystemPrompt` | ✓ | — | — | **门禁** | 阻断 |
+| `:instructions-loaded` | `InstructionsLoaded` | ✓ | `path` | — | 观察者 | 放行 |
+| `:config-change` | `ConfigChange` | — | `what` | — | 观察者 | 放行 |
+| `:cwd-changed` | `CwdChanged` | — | `project_dir` `before` | — | 观察者 | 放行 |
+| `:session-end` | `SessionEnd` | — | — | — | 观察者 | 放行 |
+| `:file-changed` | `FileChanged` | — | `file` | `file` | 观察者 | 放行 |
+| `:elicitation` | `Elicitation` | ✓ | `server` `request` | — | 观察者 | 放行 |
+| `:elicitation-result` | `ElicitationResult` | ✓ | `server` `response` | — | 观察者 | 放行 |
+| `:pre-compact` | `PreCompact` | — | — | — | 观察者 | 放行 |
+| `:post-compact` | `PostCompact` | — | — | — | 观察者 | 放行 |
+| `:subagent-start` | `SubagentStart` | — | `subagent` | — | 观察者 | 放行 |
+| `:subagent-stop` | `SubagentStop` | — | `subagent` | — | 观察者 | 放行 |
+| `:teammate-idle` | `TeammateIdle` | — | `teammate` | — | 观察者 | 放行 |
+| `:task-created` | `TaskCreated` | — | `task` | — | 观察者 | 放行 |
+| `:task-completed` | `TaskCompleted` | — | `task` | — | 观察者 | 放行 |
+| `:worktree-create` | `WorktreeCreate` | — | `path` | — | 观察者 | 放行 |
+| `:worktree-remove` | `WorktreeRemove` | — | `path` | — | 观察者 | 放行 |
+
+「有触发源」列是「**今天真的会触发**」——9 个点。**没标的 18 个永不触发，这是设计，不是遗漏**：
+它们声明得下、校验得过、进得了表，只是等各自的子系统（文件监视、上下文压缩、子代理、任务、worktree）
+落地时才接——这就是为什么一个 P3 点的代价是一行数据，而不是一个接口。另外两处读表时要留意：
+**匹配对象是 `—` 的点拒绝 `:matcher`**；**`:system-prompt` 的 stdout 不是答案而是内容**（下一节）。
 
 两个装配点**并排**，各管 run 开场的一半，且**不可能交错**（不同的 message role）：
 
 | 点 | 管什么 | 什么时候 |
 |---|---|---|
 | `SystemPrompt` | system 消息（`prompt.md` 的冻结开头 + 各声明追加的文本） | 第一条消息正在被组装，模型看到它之前 |
-| `InstructionsLoaded` | user 侧开场块（指令文件、技能清单） | 一个指令文件被折进 run 的上下文 |
+| `InstructionsLoaded` | user 侧开场块（指令文件、技能清单） | 会话出生那一轮，一个指令文件被折进对话（`.scratch/session-opening`；此后它只是历史） |
 
 `InstructionsLoaded` 是这套说法最近一次被兑现的例子：它自引擎落地起就声明着（`payload #{:path}`），
 触发源是一个指令文件被折进 run 的上下文——见

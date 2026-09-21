@@ -211,7 +211,8 @@
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
+                  "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
+                  "todos"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
@@ -364,7 +365,8 @@
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                      "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
+                      "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
+                      "todos"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
@@ -515,6 +517,92 @@
             (is (= 1 (:project-id row)))
             (is (= "/before/the/migration" (:path row)))
             (is (= 1 (:archived row)))))))))
+
+(defn- chain-up-to
+  "Today's migration chain UP TO (not including) the step named NAME -- how the cases
+  below build 'a store written before this step existed', which they then walk up
+  with `db/migrate!`.
+
+  IT IS A PREFIX BY NAME AND NOT `butlast`, which is what these cases used until a
+  second step was appended after the one they were about: from that day on
+  `butlast` meant 'one step behind the NEWEST step', so the titles case was quietly
+  building a store that already had titles and then asserting the column was there.
+  A case that names its boundary cannot drift like that."
+  [name]
+  (vec (take-while #(not= name (:name %)) db/migrations)))
+
+(deftest a-store-written-before-titles-has-none
+  ;; `sessions-remember-their-title`, and the half of its contract that is a
+  ;; DECISION rather than a mechanism: THE COLUMN ARRIVES EMPTY. There is no
+  ;; backfill (the owner's call -- '老的不管'), so a session that ran before this
+  ;; column existed is UNNAMED in the sidebar until it runs again, and a migration
+  ;; that quietly walked every log would be the opposite of what was asked for.
+  ;;
+  ;; Built the way the other migration case builds one: today's chain UP TO the step
+  ;; before this one, rows seeded through `raw-connection` (db's own helpers would
+  ;; migrate the store first and leave nothing to observe), then walked up.
+  (let [dir   (fresh-root)
+        older (chain-up-to "sessions-remember-their-title")
+        id    "ran-before-titles"]
+    (with-root
+      dir
+      (fn []
+        (is (= (count older) (db/migrate! older)) "a store one step behind")
+        (with-open [c (raw-connection (home/db-file))]
+          (with-open [st (.createStatement c)]
+            (.execute st (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                                 VALUES ('" id "', NULL, NULL, 0, 1)"))))
+        (is (= (db/target-version) (db/migrate!)) "today's harness walks it up")
+        (testing "the column is there"
+          (is (some #(= "title" (:name %))
+                    (db/select "PRAGMA table_info(sessions)"))))
+        (testing "and the session that predates it is UNNAMED rather than guessed at"
+          (is (nil? (:title (first (db/select "SELECT title FROM sessions WHERE id = ?" id))))))))))
+
+(deftest a-store-written-before-last-send-times-learns-them-from-the-logs
+  ;; `sessions-remember-their-last-send`, and the half of its contract that is the
+  ;; OPPOSITE of the titles case above: THIS COLUMN IS BACKFILLED. `老的不管` was the
+  ;; owner's call about NAMES, and about times the same sentence would leave every old
+  ;; row in the sidebar with no time at all -- the one thing the panel was just asked
+  ;; to show.
+  ;;
+  ;; The value is the log's mtime, which is exactly what the listing displayed before
+  ;; this column existed, so the old rows keep the number they had; from then on the
+  ;; value is the SEND time. A row with no log stays NULL, and the client draws that
+  ;; absence in words instead of inventing a time.
+  (let [dir   (fresh-root)
+        older (chain-up-to "sessions-remember-their-last-send")
+        ran   "ran-before-the-column"
+        never "registered-and-never-used"]
+    (with-root
+      dir
+      (fn []
+        (is (= (count older) (db/migrate! older)) "a store one step behind")
+        (with-open [c (raw-connection (home/db-file))]
+          (with-open [st (.createStatement c)]
+            (.execute st (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                                 VALUES ('" ran "', NULL, NULL, 0, 1)"))
+            (.execute st (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                                 VALUES ('" never "', NULL, NULL, 0, 2)"))))
+        ;; A log from before the column, with a distinctive mtime (2020-01-02Z) -- and
+        ;; the walk has to find it the way a real home's is found: in one of the
+        ;; tree's WORKSPACES, not at the root. The paths are built HERE, inside the
+        ;; root, because `projects-dir` is a function of it.
+        (let [log (io/file (home/projects-dir) ".unbound" (str ran ".jsonl"))]
+          (io/make-parents log)
+          (spit log "{}\n")
+          (is (.setLastModified log 1577923200000) "the file's time is the fact being adopted")
+          (is (= (db/target-version) (db/migrate!)) "today's harness walks it up")
+          (testing "the column is there"
+            (is (some #(= "last_sent_at" (:name %))
+                      (db/select "PRAGMA table_info(sessions)"))))
+          (testing "and the session that predates it adopts the time its log already had"
+            (is (= (.lastModified log)
+                   (:last-sent-at (first (db/select "SELECT last_sent_at FROM sessions WHERE id = ?" ran))))))
+          (testing "while a session with no log keeps the honest NULL"
+            ;; Not 'now' and not zero: nothing has been sent to it, and the client has
+            ;; a word for that (`session.neverRun`).
+            (is (nil? (:last-sent-at (first (db/select "SELECT last_sent_at FROM sessions WHERE id = ?" never)))))))))))
 
 (deftest two-chains-share-one-store-without-either-refusing-it
   ;; THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the fix.
@@ -826,12 +914,31 @@
 (deftest sessions-hold-no-conversation-content
   ;; The column-level half of the boundary `no-table-in-the-store-mirrors-a-log`
   ;; guards at table level. That test catches a whole new table; this one catches
-  ;; the cheaper mistake -- adding a `title` or a `summary` column to `sessions`
-  ;; so the sidebar can show something prettier. A title IS conversation content,
-  ;; and copying it here would be the second truth this store may not hold.
+  ;; the cheaper mistake -- adding a `summary` column to `sessions` so the sidebar
+  ;; can show something prettier, where the store would then hold a second copy of
+  ;; something the log owns and can keep changing.
   ;;
   ;; The list is exact, like the table list: a column arrives here only when
   ;; somebody writes down why it is state and not a record.
+  ;;
+  ;; `sessions.last_sent_at` NEEDED NO ARGUMENT AT ALL, and that is the difference
+  ;; worth noticing: it is a NUMBER, the same kind of fact as `created_at`, and the
+  ;; guard below is about the store mirroring the LOG's content rather than about it
+  ;; knowing when things happened. It arrived with the owner's rule that the whole
+  ;; left panel is served from the store -- which is also why the listing's old disk
+  ;; facts (a log's size and mtime, read per row) are gone.
+  ;;
+  ;; `sessions.title` IS THE ONE COLUMN THAT HAD TO BE ARGUED FOR, and it is worth
+  ;; reading before adding another. It was the EXAMPLE this test named as forbidden
+  ;; (2026-09-21, `session-titles-in-the-store`): the log answers 'what did they
+  ;; first say' just as well, and reading every log's head costs 0.15 MB and 39 ms
+  ;; for a 53-session home. The owner overruled the boundary anyway, and the reason
+  ;; it can be overruled HERE and not generally is that THE FIRST MESSAGE CANNOT
+  ;; CHANGE: a stored title is not a copy of a growing record (that is what makes a
+  ;; `summary` column the second truth this test is about) but a name the session
+  ;; acquires once. What it costs is written down in `harness.infra.db/sessions-
+  ;; remember-their-title`: a hand-edited log can disagree with it, and a deleted log
+  ;; leaves the title behind.
   (let [dir (fresh-root)]
     (with-root
       dir
@@ -839,7 +946,7 @@
         (let [declared-state-columns
               {"projects"           #{"id" "canonical_path" "created_at"}
                "sessions"           #{"id" "project_id" "path" "archived" "created_at"
-                                      "last_project_path"}
+                                      "last_project_path" "title" "last_sent_at"}
                ;; The anchor store (harness.cap.hashline.store).
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
                                       "anchors" "line_checksums" "served" "updated_at"}
@@ -862,8 +969,20 @@
                ;; element -- which is why it is one column and not a row per item;
                ;; the name is chosen against the guard below, where `content` would
                ;; both trip it and say less.
-               "todos"              #{"thread_id" "items" "updated_at"}}
-              forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|titles?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
+               "todos"              #{"thread_id" "items" "updated_at"}
+               ;; WHO IS SERVING A CONVERSATION RIGHT NOW (harness.cap.claims): a
+               ;; row per live claim, DELETED when the claim is handed back, and
+               ;; rewritten in place when one process takes over from a process
+               ;; that is gone. It holds no message, no frame and no path -- the
+               ;; three facts about the OWNER, the claim's own token, and when it
+               ;; was taken -- which is why it is state rather than a record.
+               "session_claims"     #{"thread_id" "instance" "token" "pid"
+                                      "started_at" "since"}}
+              ;; `titles?` LEFT THIS LIST with `sessions.title` (see the comment above):
+              ;; the exact list below is what keeps a column a decision, and a name
+              ;; pattern that has to exempt the one column it was written to forbid
+              ;; would be pretending rather than guarding.
+              forbidden #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?|summar(y|ies)|previews?|snippets?|bodies|body)\b"]
           (is (pos? (db/target-version)) "the store has a schema to inspect")
           (doseq [[table columns] declared-state-columns]
             (let [actual (set (map :name (db/select (str "PRAGMA table_info(" table ")"))))]
@@ -891,7 +1010,8 @@
       (fn []
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
-                                      "hashline_sessions" "hashline_undo" "todos"}
+                                      "hashline_sessions" "hashline_undo" "todos"
+                                      "session_claims"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))

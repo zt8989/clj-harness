@@ -14,6 +14,19 @@
 (defn text-delta [text] {:type :text/delta :text text})
 (defn reasoning-delta [text] {:type :reasoning/delta :text text})
 
+(defn context-injected
+  "MESSAGE was put into the history by the session's pre-LLM step, immediately
+  before the model call that is about to be made.
+
+  THE ONE EVENT THAT SAYS WHAT THE MODEL WAS GIVEN THAT IT DID NOT ASK FOR. A skill
+  body, an instruction block, the ending of a background job -- they are all just
+  messages the step spliced in (see harness.cap.project/before-llm), and until this
+  event existed the run did them SILENTLY: the history grew, the provider got it, the
+  record's `message` lines had it, and the client was never told. The edge turns this
+  into a CUSTOM frame, which the client renders and never sends back."
+  [message] {:type :context/injected
+             :role (:role message) :text (str (:content message))})
+
 (defn tool-call
   "ARGS is the fully accumulated argument text, not a fragment."
   [id name args] {:type :tool/call :id id :name name :args args})

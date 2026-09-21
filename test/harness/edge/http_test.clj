@@ -10,6 +10,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.fake :as fake]
+            [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.kernel.event :as ev]
             [harness.kernel.frames :as frames]
@@ -18,9 +19,13 @@
             [harness.kernel.loop :as loop]
             [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
+            [harness.cap.claims :as claims]
+            [harness.cap.jobs :as jobs]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.record :as record]
+            [harness.edge.sessions :as sessions]
             [harness.edge.trajectory :as trajectory]
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
@@ -41,6 +46,28 @@
 ;; A page on this machine is answered by RULE instead and needs no value at all --
 ;; see `says-which-origin-per-request-and-not-once-per-process`.
 
+(defn- drained!
+  "Wait for the record writer to have written everything logged so far (ticket 02:
+  the write is QUEUED, so a case that reads the file straight after an action has
+  to say so). The timeout is a deadline for a failure, not a duration -- an empty
+  queue returns at once -- and it is deliberately short: a test that needs the
+  writer to be slow is a different test."
+  []
+  (record/flush! 5000))
+
+(defn- wait-degraded!
+  "Wait until the record writer has given up on THREAD-ID, answering what it says
+  (or nil if that never happens). A case that wants to assert the DEGRADED state
+  cannot read the queue's failure the instant it made the write fail: the write is
+  the consumer's, and it has not been attempted yet."
+  [tid]
+  (let [deadline (+ (System/currentTimeMillis) 3000)]
+    (loop []
+      (or (record/degraded tid)
+          (when (< (System/currentTimeMillis) deadline)
+            (Thread/sleep 10)
+            (recur))))))
+
 (defn- read-lines
   "What `read` returned, as plain lines -- with the `anchor|` prefix stripped when
   this session's mode puts one there. The row shape is the mode's business and has
@@ -51,6 +78,54 @@
             (subs line (inc i))
             line))
         (str/split-lines content)))
+
+(defn- row-json
+  "A record row AS THE WRITER EMITS IT since `.scratch/jsonl-two-kinds`: the file has two
+  kinds of row -- `message` (what a person said or an LLM returned) and `event` (every other
+  fact) -- with `ts`/`runId` OUTSIDE the payload.
+
+  THE FIXTURES HERE SPELL A ROW THE WAY THE READER READS IT -- `{:kind .. :payload ..}` -- and
+  this is the one place that knows the FILE writes it otherwise, so a case can lay down a
+  record the writer would recognize without re-stating an envelope every time."
+  [{:keys [kind payload source id hash] :as m}]
+  (json/write-str (cond-> (merge (select-keys m [:ts :runId])
+                                 (cond
+                                   (= "message" kind) {:type "message" :payload payload}
+                                   (= "event" kind)   {:type "event" :payload payload}
+                                   :else              {:type "event"
+                                                       :payload {:type "CUSTOM" :name kind
+                                                                 :value payload}}))
+                    source (assoc :source source)
+                    id     (assoc :id id)
+                    hash   (assoc :hash hash))))
+
+(defn- action-rows
+  "ONE ACTION'S OWN ROWS, as the writer lays them down since `.scratch/jsonl-two-kinds` 票 02:
+  a `message` row per entry the action brought -- the entry's own name on the envelope, the
+  payload the provider reads. The prompt row is the RUN's and a fixture that wants one says so
+  (a run's own copy: kind `message`, source `system-prompt`, its bytes' `hash`); a fixture that
+  only has to be readable as 'this run was open' needs neither."
+  [ts run-id msgs]
+  (mapv (fn [m]
+          (row-json (cond-> {:ts ts :runId run-id :kind "message"
+                             :source (if (:id m) "client" "injection")
+                             :payload (dissoc m :id)}
+                      (:id m) (assoc :id (:id m)))))
+        msgs))
+
+(defn- client-rows
+  "The rows an action brought into the conversation: the `message` rows the CLIENT sent. 票 02
+  took the `input` row away, so 'the action's line' is the row that carries its entry."
+  [records]
+  (filter #(and (= "message" (replay/kind %)) (= "client" (:source %))) records))
+
+(def ^:private test-probe
+  "A NAME FOR A LINE THAT IS ONLY A LINE, in the cases about where a record is written and
+  how it is moved (`log!` routing, the carry-back, the overlap refusal). Those cases never fold
+  the line -- they count it and look at its payload -- so it carries no meaning; spelling it
+  after a fact the harness really emits would invite a reader to think it does, and spelling it
+  `input` would name the row `.scratch/jsonl-two-kinds` 票 02 deleted."
+  "test/probe")
 
 (def ^:private reasoning "\u9700\u8981\u5148\u770b\u4e00\u773c deps.edn\u3002")
 
@@ -76,6 +151,36 @@
   A test that wants the port to build a URL by hand reads this var. See AGENTS.md."
   nil)
 
+;; Declared rather than moved up to it: each is used by a case near the top of the file
+;; and belongs with its own kind further down (the bare fixture with the fixtures, the
+;; two log readers with the cases about reading a log).
+(declare with-bare-server process-log log-lines-for feed-open! feed-first-frame)
+
+(defn- start-session!
+  "A session of this home with nothing in it -- see `harness.test-support/start-session!`,
+  which is the same verb for every namespace that drives the edge."
+  [thread-id]
+  (support/start-session! thread-id))
+
+(defn- ensure-session!
+  "Make sure this home knows THREAD-ID, the way the page's new-task action would have.
+
+  SINCE TICKET 03 A RUN OF AN ID THE STORE HAS NEVER HEARD OF IS REFUSED
+  (`refuse-unknown-session!`), and a test that had to remember that at every call site
+  would be a test written half about sessions. So the two request helpers say it: the
+  premise of `post-run`/`fire-run!` is 'the page sends a run for a session that exists',
+  and that is what they set up. The refusal itself is asserted by a case that goes
+  around them (`a-run-aimed-at-a-session-this-home-does-not-know-is-refused-by-name`).
+
+  IT DOES NOT RESET ANYTHING, deliberately: this is the door the request helpers use, and
+  a helper that emptied the conversation it was asked to continue would break every case
+  about a second run. Starting clean is `start-session!`, and that is the fixture's call,
+  not the request's."
+  [thread-id]
+  (when-not (project/session-exists? (str thread-id))
+    (sessions/drop! (str thread-id))
+    (project/register-session! (str thread-id))))
+
 (defn- with-server
   "Run F against a live server, with a scripted provider pinned to each thread
   the test serves.
@@ -92,6 +197,14 @@
   There is deliberately no process-wide slot to fall back on -- a test that
   pinned globally would pass while the per-thread wiring was broken.
 
+  EVERY THREAD IT NAMES IS ALSO REGISTERED AS A SESSION OF THIS HOME, which since
+  ticket 03 is what a run needs to exist: the run edge refuses an id the store has
+  never heard of (`refuse-unknown-session!`), and in the real page that row is made by
+  the new-task action before a word is typed. Doing it here is the same premise, and
+  it is one line instead of one per case. A case that wants an id the home does NOT
+  know asks for one directly -- that refusal is asserted by naming an id no test
+  registers.
+
   The port is ASKED OF THE OS after the bind, which is why it can be neither an
   argument nor a literal -- see *port*."
   ([threads f]
@@ -101,16 +214,17 @@
                 (map? threads) threads
                 (coll? threads) (into {} (map (fn [t] [t turns])) threads)
                 :else           {threads turns})]
-     (doseq [[t ts] pins] (providers/use-provider! (str t) (fake/scripted ts)))
+     (doseq [[t ts] pins]
+       (providers/use-provider! (str t) (fake/scripted ts))
+       (start-session! t))
      (let [stop (http/start! {:port 0})
            port (:local-port (meta stop))]
        (try (binding [*port* port] (f))
             (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
 
 (defn- post-run
-  "A real request for THREAD-ID. The run id is random so that two runs -- whether for
-  different threads or for the same thread at different times -- never share frame ids.
-  A repeated run id would make two runs' frames collide in a rebuilt conversation.
+  "A real request for THREAD-ID -- which must be a session this home knows, and
+  `with-server` registers every thread it names so that every caller's premise holds.
   EXTRA is merged into the body, which is how a resume is sent.
 
   ORIGIN, when given, is sent as the page this request comes from -- which is the
@@ -122,10 +236,16 @@
   ([thread-id] (post-run thread-id {} nil))
   ([thread-id extra] (post-run thread-id extra nil))
   ([thread-id extra origin]
-   (let [body (json/write-str (merge {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
-                                      :messages [{:id "u1" :role "user"
-                                                  :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
-                                      :tools [] :context []}
+   (let [_    (ensure-session! thread-id)
+         body (json/write-str (merge {:threadId thread-id
+                                      ;; THE ACTION'S OWN ENTRIES, not the conversation: the
+                                      ;; server holds that (ticket 03). The id is stable so
+                                      ;; that posting the same run twice means "the same
+                                      ;; question again" -- which is what a retry IS, and the
+                                      ;; conversation must not grow a second copy of it.
+                                      :append [{:id "u1" :role "user"
+                                                :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
+                                      :tools []}
                                      extra))
          req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")
@@ -230,7 +350,12 @@
                          (keep-indexed
                           (fn [i line]
                             (try
-                              (json/read-str line :key-fn keyword)
+                              ;; THROUGH THE RECORD'S OWN READER, not `json/read-str`: a row
+                              ;; of the file is `{:type "event"|"message" :payload ..}` and
+                              ;; reading it is what validates it and hands back the row itself
+                              ;; (`.scratch/jsonl-two-kinds` 票 02: there is no derived
+                              ;; `{:kind ..}` shape any more -- `replay/kind` asks the row).
+                              (first (harness.edge.replay/lines->records [line]))
                               (catch Throwable t
                                 ;; The LAST line may be half-written: the file is
                                 ;; still growing. Anywhere else it is corruption,
@@ -263,32 +388,54 @@
                                     ;; writer and sees half a tail.
                                     (fn [ls]
                                       (some (fn [l]
-                                              (and (= "message" (:kind l))
-                                                   (= "assistant" (get-in l [:payload :role]))
+                                              (and (= "message" (replay/kind l))
+                                                   (= "assistant" (get-in (replay/payload l) [:role]))
                                                    (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
-                                                      (get-in l [:payload :content]))))
+                                                      (get-in (replay/payload l) [:content]))))
                                             ls))
                                     2000)
-           msgs  (mapv :payload (filter #(= "message" (:kind %)) lines))]
-       (testing "both the inbound input and every emitted frame are on disk"
-         (is (contains? (set (map :kind lines)) "input"))
-         (is (contains? (set (map :kind lines)) "event")))
-       (testing "the record holds the raw RunAgentInput, not a summary"
-         (is (some #(= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
-                       (get-in % [:payload :messages 0 :content]))
-                   lines)))
-       (testing "the submitted system message is on disk VERBATIM"
-         (let [sys (first (filter #(= "system" (:role %)) msgs))]
-           (is (some? sys))
+           msgs  (mapv replay/payload (filter #(= "message" (replay/kind %)) lines))]
+       (testing "the entries and every emitted frame are on disk"
+         (is (contains? (set (map replay/kind lines)) "message"))
+         (is (contains? (set (map replay/kind lines)) "event")))
+       (testing "the client's own message is a row of its own, in the provider's shape"
+         ;; 票 02: the raw RunAgentInput is NOT a row any more -- that whole inbound vector,
+         ;; written once per run, was the second copy this ticket deletes. What entered the
+         ;; conversation is what is kept, one row per element, named by its own id.
+         (let [mine (first (filter #(and (= "message" (replay/kind %))
+                                         (= "client" (:source %)))
+                                   lines))]
+           (is (= "u1" (:id mine)) "the entry keeps the name the client gave it")
+           (is (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
+                  (get-in (replay/payload mine) [:content]))
+               "and the bytes it carried")))
+       (testing "the submitted system message is on disk VERBATIM -- as a message row"
+         ;; A MESSAGE ROW AND THE ARRAY'S FIRST ELEMENT (owner, 2026-09-21): what a run reads
+         ;; from prompt.md plus its SystemPrompt hooks IS what it hands the model, so it is
+         ;; stored the way the model got it -- verbatim -- with `:source` saying the prompt
+         ;; put it there and `:hash` naming those bytes, and it is kept EVERY run rather than
+         ;; once per conversation, because a stable prefix is what the provider's cache reads.
+         (let [row (->> lines (filter replay/system-prompt?) first)
+               sys (replay/payload row)]
+           (is (some? row) "the run recorded the prompt it handed the model")
+           (is (= "system" (:role sys)) "as a system message, the array's first element")
+           (is (= 64 (count (:hash row))) "named by its SHA-256, on the row's envelope")
            ;; Context never touches the system message -- it rides as a trailing
-           ;; user message -- so what was submitted is prompt.md's frozen opening
-           ;; with the SystemPrompt hooks' text behind it, in every run. The
-           ;; opening is compared TRIMMED because the assembly normalises its
-           ;; trailing newlines before adding a block.
+           ;; user message -- so what the row carries is prompt.md's frozen opening
+           ;; with the SystemPrompt hooks' text behind it. The opening is compared
+           ;; TRIMMED because the assembly normalises its trailing newlines before
+           ;; adding a block.
            (is (str/starts-with? (:content sys)
                                  (str/trimr (slurp "prompt.md" :encoding "UTF-8"))))
            (is (str/includes? (:content sys) "<env>")
-               "and the kernel's own text is behind it")))
+               "and the kernel's own text is behind it")
+           (is (every? (fn [f] (< (.indexOf lines row) (.indexOf lines f)))
+                       (filter replay/frame? lines))
+               "the prompt is written before the run's first frame: the array's first element --
+                and the action's own row (the client's message) sits in front of the whole run")
+           (is (some #(= "system" (:role %)) msgs)
+               "and it reaches the reader as the message it is -- the CLIENT filter is elsewhere (see
+                the-assembled-system-message-reaches-the-model-and-never-the-client)")))
        (testing "the user's message is recorded in the provider's shape"
          (is (some #(and (= "user" (:role %))
                          (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee" (:content %)))
@@ -325,22 +472,28 @@
 ;; ------------------------------------- the assembled system message, at the edge
 
 (defn- system-texts
-  "Every system message a thread's log holds, in order."
+  "Every system message a thread's log holds, in order -- ONE PER RUN.
+
+  READ OFF ITS OWN `message` ROW (owner, 2026-09-21: a `message` row IS an element of the
+  array the model was handed, the prompt is that array's first element, and its envelope
+  says so -- `:source` = `system-prompt`, `:hash` naming those bytes). Every run writes its
+  own copy, so the list is one text per run, in the order the runs froze them."
   [thread-id]
   (->> (wait-for-recorded (log-file thread-id)
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "assistant" (get-in % [:payload :role])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "assistant" (get-in (replay/payload %) [:role])))
                                          ls))
                           2000)
-       (filter #(= "system" (get-in % [:payload :role])))
-       (mapv #(str (get-in % [:payload :content])))))
+       (filter replay/system-prompt?)
+       (mapv #(get-in (replay/payload %) [:content]))
+       (mapv str)))
 
 (deftest the-assembled-system-message-reaches-the-model-and-never-the-client
   ;; The whole shape, through the real edge: prompt.md's opening plus what the
-  ;; hooks appended is in the run's message record (the model reads it) and in NO
-  ;; AG-UI frame (the client never does). "The front end shows nothing" is not a
-  ;; filtering decision anywhere -- it is the absence of a frame, and this is the
-  ;; only layer that can prove it.
+  ;; hooks appended is what the run hands the model and it is recorded as the
+  ;; `system-prompt` event -- and in NO AG-UI frame (the client never sees it).
+  ;; "The front end shows nothing" is not a filtering decision anywhere -- it is the
+  ;; absence of a frame, and this is the only layer that can prove it.
   ;;
   ;; A hooks.edn declaration is in the mix too, so the test covers all three
   ;; sources at once: the kernel's own rows, a file's, and (in the test below) the
@@ -367,12 +520,12 @@
            (is (str/includes? text "A DECLARED BLOCK"))
            (is (< (str/index-of text "<env>") (str/index-of text "A DECLARED BLOCK"))))
          (testing "the trigger is on the record, with what it collected"
-           (let [line (first (filter #(= "hook/SystemPrompt" (:kind %))
+           (let [line (first (filter #(= "hook/SystemPrompt" (replay/kind %))
                                      (wait-for-recorded (log-file "it-system")
-                                                        (fn [ls] (some #(= "hook/SystemPrompt" (:kind %)) ls))
+                                                        (fn [ls] (some #(= "hook/SystemPrompt" (replay/kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 3 (get-in line [:payload :matched]))
+             (is (= 3 (get-in (replay/payload line) [:matched]))
                  "the kernel's two rows and the file's one")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
@@ -388,6 +541,67 @@
            (is (= "RUN_FINISHED" (:type (last frames))))
            (is (empty? (wire/violations frames)))))))
     (finally (support/wipe-hooks!))))
+
+(deftest a-finished-job-is-announced-to-the-model-and-never-to-the-client
+  ;; THE WHOLE PATH, over real HTTP. A background job belongs to a session, it ends while
+  ;; nobody is looking, and the next run of that session carries its ending in the
+  ;; history the model is sent -- with no frame carrying a word of it, because the
+  ;; injection is the server's and the conversation stays the client's.
+  ;;
+  ;; AND IT IS SAID ONCE: the thing the client resends next time has no notice in it (it
+  ;; never had one), so "have we told it?" is a fact about the registry and not about the
+  ;; history. A run that re-derived the notice from the client's messages would announce
+  ;; the same ending on every turn for the rest of the session, which is the failure this
+  ;; case is here to make impossible.
+  (let [t "it-jobs"
+        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+    (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
+        "the job finished before the run was even asked for")
+    (try
+      (with-server t (into script script)
+                   (fn []
+                     (io/delete-file (log-file t) true)
+                     (let [first-body   (.body (post-run t))
+                           first-lines  (wait-for-recorded (log-file t)
+                                                           (fn [ls] (some #(= "message" (replay/kind %)) ls))
+                                                           2000)
+                           notices      (fn [lines]
+                                          (filter #(and (= "message" (replay/kind %))
+                                                        (= "user" (get-in (replay/payload %) [:role]))
+                                                        (str/includes? (str (get-in (replay/payload %) [:content]))
+                                                                       "<job-ended"))
+                                                  lines))]
+                       (testing "the model is sent the ending, without anybody asking"
+                         (let [sent (notices first-lines)]
+                           (is (= 1 (count sent)) "one job, one notice")
+                           (is (str/includes? (str (get-in (replay/payload (first sent)) [:content]))
+                                              "[exit 0]")
+                               "how it went -- and nothing of what it said")
+                           (is (str/includes? (str (get-in (replay/payload (first sent)) [:content]))
+                                              (str "id=\"" id "\"")))))
+                       (testing "and the client is never told"
+                         ;; The same judgement the system message gets: it is the server's
+                         ;; injection, so it is in the record and in no frame.
+                         ;; THE MARKERS HAVE TO BE ONES ONLY THIS RUN'S INJECTION COULD
+                         ;; CARRY. The block's TAG is not one of them: this repository's
+                         ;; own README talks about `<job-ended …>` now, the scripted run
+                         ;; reads it, and a tool result is a legitimate way for those
+                         ;; bytes to reach the wire -- the same trap the system-message
+                         ;; case named. The record's path (a temp path nothing else
+                         ;; mentions) and the job's own output line are.
+                         (is (not (str/includes? first-body path)))
+                         (is (not (str/includes? first-body "JOB-SAYS-SO"))))
+                       ;; A second run of the same session: the client resends its whole
+                       ;; conversation, which has no notice in it.
+                       (io/delete-file (log-file t) true)
+                       (.body (post-run t))
+                       (let [second-lines (wait-for-recorded (log-file t)
+                                                             (fn [ls] (some #(= "message" (replay/kind %)) ls))
+                                                             2000)]
+                         (testing "while the second run is not told again"
+                           (is (= [] (vec (notices second-lines)))
+                               "the ending was handed over once, and that is the whole memory"))))))
+      (finally (jobs/shutdown!)))))
 
 (deftest switching-a-row-off-takes-its-text-out-of-the-next-runs-message
   ;; Both halves of the switch, at the edge and on a SECOND run of the same thread:
@@ -464,8 +678,8 @@
        (post-run "replay-e2e")
        (wait-for-recorded
         log
-        (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
-                      (>= (count (filter #(= "message" (:kind %)) ls)) 4)))
+        (fn [ls] (and (some #(= "provider/init" (replay/kind %)) ls)
+                      (>= (count (filter #(= "message" (replay/kind %)) ls)) 4)))
         3000)
        (let [history (replay/history (log-file "replay-e2e"))]
          (testing "the reader found the file the writer wrote, and rebuilt a conversation"
@@ -504,14 +718,14 @@
                    {:type "image_url"
                     :image_url {:url "data:image/jpeg;base64,AAAB"}}]]
        (io/delete-file log true)
-       (post-run "images" {:messages [{:id "u1" :role "user" :content parts}]})
+       (post-run "images" {:append [{:id "u1" :role "user" :content parts}]})
        (let [lines (wait-for-recorded
                     log
-                    (fn [ls] (some #(= "message" (:kind %)) ls))
+                    (fn [ls] (some #(= "message" (replay/kind %)) ls))
                     3000)
              sent  (->> lines
-                        (filter #(= "message" (:kind %)))
-                        (map :payload)
+                        (filter #(= "message" (replay/kind %)))
+                        (map replay/payload)
                         (filter #(= "user" (:role %))))]
          (testing "what the LLM saw is the provider's part shape, not the client's"
            (is (= [expect] (mapv :content sent)))
@@ -524,6 +738,47 @@
              (is (= [expect] rebuilt)
                  "a resumed conversation sends what the live run sent"))))))))
 
+(defn- sse-frames
+  "The frames an SSE answer carried, in order -- what the CLIENT was handed."
+  [body]
+  (->> (str/split-lines (str body))
+       (keep #(when (str/starts-with? % "data:")
+                (json/read-str (str/trim (subs % 5)) :key-fn keyword)))
+       vec))
+
+(deftest the-frames-a-run-sends-are-the-frames-its-record-rebuilds
+  ;; TICKET 03 OF `.scratch/jsonl-two-kinds` -- THE WHOLE POINT OF THE TWO ROWS. One real
+  ;; run over a real socket, and the answer is two comparisons that say the record lost
+  ;; nothing: the frames the client was handed are, frame for frame, the frames the record
+  ;; holds (the harness's own facts filtered out -- `model/start` and `hook/*` are rows and
+  ;; were never on the wire), and the conversation the fold rebuilds out of the rows alone
+  ;; is the conversation the session was holding when the run ended. The deleted `input` row
+  ;; used to be the second source of truth; if any case in this suite could be satisfied by
+  ;; it, this is the one that would fail without it.
+  (with-server
+   "frames-rebuilt"
+   (fn []
+     (let [log (log-file "frames-rebuilt")]
+       (io/delete-file log true)
+       (let [sent (sse-frames (.body (post-run "frames-rebuilt")))]
+         (is (seq sent) "the run answered with frames at all")
+         (is (some #(= "TOOL_CALL_START" (:type %)) sent)
+             "and with the tool round-trip in them, not just text")
+         (wait-for-recorded
+          log
+          (fn [ls] (>= (count (filter #(= "event" (replay/kind %)) ls)) (count sent)))
+          5000)
+         (testing "what the socket carried is what the record kept, frame for frame"
+           (is (= sent (mapv replay/payload
+                             (filter replay/frame?
+                                     (replay/lines->records (replay/read-lines log)))))))
+         (testing "and the record alone rebuilds the conversation the session held"
+           (let [rebuilt (mapv #(select-keys % [:role :content])
+                               (replay/lines->messages (replay/read-lines log)))
+                 live    (mapv #(select-keys % [:role :content])
+                               (sessions/messages "frames-rebuilt"))]
+             (is (= live rebuilt)))))))))
+
 (defn- with-declaring-server
   "Like with-server, but the scripted pin DECLARES an input modality set -- which
   is how a pinned provider can stand in for a model with a stated capability.
@@ -533,6 +788,7 @@
   assert the provider was never called: a drained script is a provider that ran."
   [thread-id declared turns f]
   (let [script (atom (vec turns))]
+    (start-session! thread-id)
     (providers/use-provider! thread-id (assoc (fake/scripted turns) :input declared
                                         :script script))
     (let [stop (http/start! {:port 0})
@@ -551,7 +807,7 @@
    [{:content "should never be reached"}]
    (fn [script]
      (let [resp   (post-run "guarded"
-                            {:messages [{:id "u1" :role "user"
+                            {:append [{:id "u1" :role "user"
                                          :content [{:type "text" :text "what is this"}
                                                    {:type "image"
                                                     :source {:type "url"
@@ -579,7 +835,7 @@
    [{:content "saw it"}]
    (fn [script]
      (let [resp (post-run "unguarded"
-                          {:messages [{:id "u1" :role "user"
+                          {:append [{:id "u1" :role "user"
                                        :content [{:type "text" :text "what is this"}
                                                  {:type "image"
                                                   :source {:type "url"
@@ -611,7 +867,7 @@
    [{:content "went through"}]
    (fn [script]
      (let [body (.body (post-run "silent"
-                                 {:messages [{:id "u1" :role "user"
+                                 {:append [{:id "u1" :role "user"
                                               :content [{:type "image"
                                                          :source {:type "url"
                                                                   :value "https://x/i.png"}}]}]}))]
@@ -631,12 +887,12 @@
      (let [f     (log-file "lifecycle")
            lines (wait-for-recorded f
                                     (fn [ls]
-                                      (>= (count (filter #(= "tools/post-execute" (:kind %)) ls)) 2))
+                                      (>= (count (filter #(= "tools/post-execute" (replay/kind %)) ls)) 2))
                                     2000)
-           phases (group-by :kind (filter #(.startsWith ^String (str (:kind %)) "tools/") lines))
-           pre    (mapv :payload (get phases "tools/pre-execute"))
-           ex     (mapv :payload (get phases "tools/execute"))
-           post   (mapv :payload (get phases "tools/post-execute"))]
+           phases (group-by replay/kind (filter #(.startsWith ^String (str (replay/kind %)) "tools/") lines))
+           pre    (mapv replay/payload (get phases "tools/pre-execute"))
+           ex     (mapv replay/payload (get phases "tools/execute"))
+           post   (mapv replay/payload (get phases "tools/post-execute"))]
        (testing "both calls entered, executed and closed the seam, keyed by id"
          (is (= #{"c1" "c2"} (set (map :toolCallId pre))))
          (is (= #{"c1" "c2"} (set (map :toolCallId ex))))
@@ -686,9 +942,13 @@
 
          (let [resumed (wire/frames-from-sse
                         (.body (post-run "http-approve"
-                                         {:messages [{:id "u1" :role "user" :content "go"}
-                                                     (assistant-with-call
-                                                      "c1" "write" {:path ok :content "written"})]
+                                         ;; THE ACTION IS THE DECISION. Nothing is appended:
+                                         ;; the parked assistant message with its unanswered
+                                         ;; call is in the SESSION's history (settled at the end
+                                         ;; of run one), and re-sending it would put a SECOND
+                                         ;; copy of the same call in front of the vendor -- the
+                                         ;; shape the history guard refuses.
+                                         {:append []
                                           :resume [{:interruptId iid :status "resolved"
                                                     :payload {:decision "approved"}}]})))]
            (testing "the approved call really runs on the resume run"
@@ -706,9 +966,7 @@
                iid-v   (get-in (last asked-v) [:outcome :interrupts 0 :id])
                vetoed  (wire/frames-from-sse
                         (.body (post-run "http-veto"
-                                         {:messages [{:id "u1" :role "user" :content "go"}
-                                                     (assistant-with-call
-                                                      "c1" "write" {:path veto :content "written"})]
+                                         {:append []
                                           :resume [{:interruptId iid-v :status "cancelled"
                                                     :payload {:reason "not on my watch"}}]})))]
            (testing "a veto never runs the tool"
@@ -726,19 +984,85 @@
            (testing "both decisions are on disk: the audit line and the resumed transit"
              (let [lines (wait-for-recorded
                           (log-file "http-approve")
-                          (fn [ls] (some #(= "approval/decided" (:kind %)) ls))
+                          (fn [ls] (some #(= "approval/decided" (replay/kind %)) ls))
                           2000)
-                   decided (filter #(= "approval/decided" (:kind %)) lines)
-                   pre     (filter #(and (= "tools/pre-execute" (:kind %))
-                                          (= "c1" (get-in % [:payload :toolCallId])))
+                   decided (filter #(= "approval/decided" (replay/kind %)) lines)
+                   pre     (filter #(and (= "tools/pre-execute" (replay/kind %))
+                                          (= "c1" (get-in (replay/payload %) [:toolCallId])))
                                    lines)]
                ;; The verdict is a keyword in the event and a string on disk --
                ;; json has no keywords.
-               (is (= "approved" (get-in (first decided) [:payload :verdict])))
-               (is (= "c1" (get-in (first decided) [:payload :tool-call-id])))
-               (is (= "approved" (get-in (first decided) [:payload :payload :decision])))
-               (is (some #(= "needs-approval" (get-in % [:payload :outcome])) pre))
-               (is (some #(= "approved" (get-in % [:payload :outcome])) pre))))))))))
+               (is (= "approved" (get-in (replay/payload (first decided)) [:verdict])))
+               (is (= "c1" (get-in (replay/payload (first decided)) [:tool-call-id])))
+               (is (= "approved" (get-in (replay/payload (first decided)) [:payload :decision])))
+               (is (some #(= "needs-approval" (get-in (replay/payload %) [:outcome])) pre))
+               (is (some #(= "approved" (get-in (replay/payload %) [:outcome])) pre))))))))))
+
+(deftest an-answer-lands-behind-its-call-even-with-a-message-behind-the-call
+  ;; TICKET 02 of `.scratch/session-opening`, over a real socket and a real record.
+  ;;
+  ;; The edge hands a run the session's history with its pre-LLM step ALREADY APPLIED,
+  ;; so something the session holds -- a derived skill body, a job's ending -- can be
+  ;; sitting behind the parked assistant message when the resume arrives. This case puts
+  ;; a NEW ENTRY there as well (the action that approves carries a message of its own),
+  ;; which is the plainest form of the same shape.
+  ;;
+  ;; What used to happen: the replayed answer was appended to the END of the list, where
+  ;; the vendor's adjacency rule (`harness.kernel.llm/unanswered-tool-calls`) cannot see
+  ;; it. The run then read its own history as still-parked and asked the same question
+  ;; over again -- an interrupt, not an answer -- and a human approving it a second time
+  ;; would have run the tool a second time.
+  (let [markers (support/temp-dir "http-answer")
+        ok      (str (io/file markers "answered.txt"))]
+    (tools/session-require-approval! "http-answer" "write")
+    (with-server
+     {"http-answer" [{:content ""
+                      :tool-calls [{:id "c1" :name "write"
+                                    :arguments {:path ok :content "written"}}]}
+                     {:content "wrote it"}]}
+     (fn []
+       (let [asked (wire/frames-from-sse (.body (post-run "http-answer")))
+             iid   (get-in (last asked) [:outcome :interrupts 0 :id])]
+         (testing "the first run parks, as it always did"
+           (is (= "interrupt" (get-in (last asked) [:outcome :type])))
+           (is (false? (.exists (io/file ok)))))
+
+         (let [resumed (wire/frames-from-sse
+                        (.body (post-run "http-answer"
+                                         {:append [{:id "u2" :role "user" :content "and hurry"}]
+                                          :resume [{:interruptId iid :status "resolved"
+                                                    :payload {:decision "approved"}}]})))]
+           (testing "the resumed run ANSWERS the parked call instead of asking again"
+             (is (empty? (wire/violations resumed)))
+             (is (= "RUN_FINISHED" (:type (last resumed))))
+             (is (not (contains? (last resumed) :outcome))
+                 "a natural end carries no outcome; a re-park would carry the interrupt")
+             (is (some #(= "TOOL_CALL_RESULT" (:type %)) resumed))
+             (is (= 1 (count (filter #(= "RUN_FINISHED" (:type %)) resumed)))))
+
+           (testing "and the tool ran once, not twice"
+             (is (= "written" (slurp ok :encoding "UTF-8"))))
+
+           (testing "the record's returned side is what the KERNEL added, not the tail"
+             ;; The submitted side is everything handed in; the returned side is what the
+             ;; run put in. Counting past the first would file the person's own message
+             ;; ("and hurry") as the kernel's answer AND lose the tool message that
+             ;; really was one -- which is why the kernel says which messages it added
+             ;; (:added on :run/done) and the edge does not work it out.
+             (let [records  (wait-for-recorded
+                             (log-file "http-answer")
+                             (fn [ls] (some #(and (= "message" (replay/kind %))
+                                                  (= "wrote it" (get-in (replay/payload %) [:content])))
+                                            ls))
+                             5000)
+                   runs     (trajectory/run-segments records)
+                   returned (:returned (last runs))]
+               (is (= 2 (count runs)) "the park and the resume are two runs")
+               (is (= ["tool" "assistant"] (mapv :role returned)))
+               (is (= "c1" (:tool_call_id (first returned))))
+               (is (= "wrote it" (:content (second returned))))
+               (is (not-any? #(= "and hurry" (:content %)) returned)
+                   "the person's message is not this run's own")))))))))
 
 (deftest an-unknown-interrupt-is-refused-over-http
   ;; A restart loses the parking; a client resuming an interrupt this process
@@ -829,7 +1153,7 @@
    [{:content "unreachable"}]
    (fn []
      (let [id     "http-guard"
-           image  {:messages [{:id "u1" :role "user"
+           image  {:append [{:id "u1" :role "user"
                                :content [{:type "text" :text "look"}
                                          {:type "image"
                                           :source {:type "url" :value "https://x/i.png"}}]}]}
@@ -850,31 +1174,41 @@
            (is (nil? (error (.body (post-run id image))))))
          (finally (providers/set-override! id nil)))))))
 
-(deftest a-run-naming-a-count-is-refused-rather-than-silently-dropped
-  ;; The third entry, over the real edge. A run may name the three knobs; naming a
-  ;; model's counts there is a mistake, and the honest answer is a terminated run
-  ;; that says which field it could not use -- not a run that starts, ignores it,
-  ;; and reports success. The client learns the same way it learns about a bad
-  ;; model id: a RUN_ERROR frame naming the offending field.
-  (with-resolved-config
-   [{:content "unreachable"}]
-   (fn []
-     (let [id    "http-count-in"
-           error (fn [body]
-                   (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
-                                   (when (= "RUN_ERROR" (:type f)) f))
-                                (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
-       (io/delete-file (log-file id) true)
-       (let [e (error (.body (post-run id {:provider {:context-window 200000}})))]
-         (is (some? e) "the run is terminated rather than served with the field dropped")
-         (is (str/includes? (:message e) "context-window") "the field is named")
-         (is (str/includes? (:message e) ":providers")
-             "and the run says where it belongs instead"))
-       (testing "and nothing was resolved or recorded for it"
-         (is (nil? (providers/override-for id)))
-         (let [lines (str/split-lines (slurp (log-file id) :encoding "UTF-8"))]
-           (is (not-any? #(str/includes? % "provider/init") lines)
-               "a run that could not resolve writes no init line")))))))
+(deftest a-configuration-naming-a-count-is-refused-rather-than-silently-dropped
+  ;; A TIER MAY NOT CARRY A MODEL'S COUNTS, and after ticket 03 that rule is about the
+  ;; CONFIGURATION rather than about a request: a run cannot name a provider any more, so
+  ;; the mistake is made where a session's selection is made -- config.edn (or the
+  ;; session override, or `session-configure`), all of which meet the same `selection`.
+  ;; The rule is unchanged, and so is what it costs to meet it: the run is TERMINATED
+  ;; with the catalog's own sentence, naming the field it could not use and where the
+  ;; field belongs instead -- not a run that starts, ignores it, and reports success.
+  ;; The run is the one that resolves the configuration, so the refusal surfaces here.
+  ;;
+  ;; A HOME OF ITS OWN, because the mistake is planted in config.edn, and NO PIN, because
+  ;; a pinned provider wins resolution outright -- a case that pinned would never resolve
+  ;; and would pass while the rule was broken.
+  (support/with-temp-env [root _home]
+   (spit (io/file root "config.edn")
+         "{:default {:provider :beta :context-window 200000}}\n"
+         :encoding "UTF-8")
+   (with-bare-server
+    (fn []
+      (let [id    "count-in"
+            error (fn [body]
+                    (first (keep #(let [f (json/read-str (str/trim (subs % 5)) :key-fn keyword)]
+                                    (when (= "RUN_ERROR" (:type f)) f))
+                                 (filter #(str/starts-with? % "data:") (str/split-lines body)))))]
+        (ensure-session! id)
+        (let [e (error (.body (post-run id)))]
+          (is (some? e) "the run is terminated rather than served with the field dropped")
+          (is (str/includes? (:message e) "context-window") "the field is named")
+          (is (str/includes? (:message e) ":providers")
+              "and the run says where it belongs instead"))
+        (testing "and nothing was resolved or recorded for it"
+          (is (nil? (providers/override-for id)))
+          (let [lines (str/split-lines (slurp (log-file id) :encoding "UTF-8"))]
+            (is (not-any? #(str/includes? % "provider/init") lines)
+                "a run that could not resolve writes no init line"))))))))
 
 (deftest the-provider-timeline-is-init-once-then-changes
   ;; Ticket 03, over the real edge. A session's provider history lands as
@@ -889,15 +1223,25 @@
        (post-run id)
        (let [after-first (wait-for-recorded
                           (log-file id)
-                          (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                          (fn [ls] (some #(= "provider/init" (replay/kind %)) ls))
                           2000)]
-         (testing "the first run lands exactly one init line, before any message"
-           (let [kinds (mapv :kind after-first)]
+         (testing "the first run lands exactly one init line, before the run's own messages"
+           (let [kinds    (mapv replay/kind after-first)
+                 prompt-i (first (keep-indexed (fn [i r]
+                                                 (when (= "system-prompt" (:source r)) i))
+                                               after-first))]
              (is (= 1 (count (filter #(= "provider/init" %) kinds))))
-             (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
-             (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
+             ;; THE ACTION'S ROWS COME FIRST -- the person's message enters the conversation
+             ;; before the run that serves it exists -- and the run's OWN rows start with the
+             ;; prompt it assembled (`:source "system-prompt"`). 票 02: both are `message`
+             ;; rows now, which is why the assertion names the SOURCE rather than the kind.
+             (is (< (.indexOf kinds "message") (.indexOf kinds "provider/init")))
+             (is (some? prompt-i) "the run recorded the prompt it assembled")
+             (is (< (.indexOf kinds "provider/init") prompt-i)
+                 "and the init line is in front of it: a reader meets what served the
+                  conversation before it meets the conversation")))
          (testing "it carries the selection, what it resolved to, the source, and NO key value"
-           (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
+           (let [p (replay/payload (first (filter #(= "provider/init" (replay/kind %)) after-first)))]
              (is (= "alpha" (:provider p)) "the provider that was selected")
              (is (= "alpha-small" (:model p)) "the model id that was selected")
              (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
@@ -916,10 +1260,10 @@
          (post-run id)
          (let [after-second (wait-for-recorded
                              (log-file id)
-                             (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
+                             (fn [ls] (>= (count (filter #(and (= "message" (replay/kind %)) (= "client" (:source %))) ls)) 2))
                              2000)]
            (testing "a later run of the same thread does not repeat the init"
-             (is (= 1 (count (filter #(= "provider/init" (:kind %)) after-second)))))))))))
+             (is (= 1 (count (filter #(= "provider/init" (replay/kind %)) after-second)))))))))))
 
 (deftest a-session-configure-lands-as-a-changed-line
   ;; The write half, end to end: the agent changes its reasoning effort, the
@@ -953,9 +1297,9 @@
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
                       2000)
-               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
            (testing "the change is on disk, before -> after, marked approved"
              (is (= "approved" (:verdict changed)))
              (is (= "alpha-big" (get-in changed [:before :model]))
@@ -987,10 +1331,10 @@
              (post-run id)
              (let [lines (wait-for-recorded
                           (log-file id)
-                          (fn [ls] (>= (count (filter #(= "provider/changed" (:kind %)) ls)) 2))
+                          (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
                           2000)
-                   changes (filter #(= "provider/changed" (:kind %)) lines)
-                   [a b]   (mapv :payload changes)]
+                   changes (filter #(= "provider/changed" (replay/kind %)) lines)
+                   [a b]   (mapv replay/payload changes)]
                (is (= "high" (get-in a [:after :reasoning-effort])))
                (is (= "high" (get-in b [:before :reasoning-effort]))
                    "the second change starts where the first ended")
@@ -1029,9 +1373,9 @@
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
                       2000)
-               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
            (is (= "beta" (get-in changed [:after :provider]))
                "the change line names the vendor that was selected")
            (is (not= {} (:after changed))
@@ -1183,8 +1527,8 @@
   [tid]
   (->> (str/split-lines
         (slurp (log-file-for tid) :encoding "UTF-8"))
-       (mapv #(json/read-str % :key-fn keyword))
-       (filterv #(= "project/bound" (:kind %)))))
+       (replay/lines->records)
+       (filterv #(= "project/bound" (replay/kind %)))))
 
 (defn- api-call
   "A plain JSON call to the management edge -- the /api/* endpoints, not the
@@ -1200,6 +1544,64 @@
 
 (defn- read-json [resp]
   (json/read-str (.body resp) :key-fn keyword))
+
+(defn- sidebar-listing
+  "GET /api/projects as the sidebar reads it: {:projects [..] :tasks [..]}.
+
+  ONE READER FOR THE SHAPE, because the shape itself is what these cases are about
+  and five call sites each digging into it by hand is five places to update the day it
+  moves -- which it did: the listing used to BE the vector of projects."
+  []
+  (read-json (api-call :get "/api/projects" nil)))
+
+(defn- listed-projects
+  "The projects in the sidebar's listing, in the order the server sent them."
+  []
+  (:projects (sidebar-listing)))
+
+(defn- listed-tasks
+  "The tasks in the sidebar's listing, in the order the server sent them."
+  []
+  (:tasks (sidebar-listing)))
+
+(defn- all-listed-rows
+  "EVERY row the sidebar would draw, both halves in one sequence: the sessions of every
+  project, then the flat tasks. For a question about the listing as a WHOLE -- 'did that
+  request add a conversation this home now lists' -- which the two halves would otherwise
+  each answer wrongly."
+  []
+  (concat (mapcat :sessions (listed-projects)) (listed-tasks)))
+
+(defn- listed-row
+  "The row the sidebar draws for TID, wherever it is drawn: a project's session list
+  or the flat task list. Nil when this home lists no such conversation.
+
+  ASKED THE WAY THE SIDEBAR ASKS IT: one GET, the whole listing, no per-thread
+  endpoint -- a row is the client's whole view of the fact."
+  [tid]
+  (or (some (fn [project] (first (filter #(= tid (:threadId %)) (:sessions project))))
+            (listed-projects))
+      (first (filter #(= tid (:threadId %)) (listed-tasks)))))
+
+(defn- register-session!
+  "The route that makes one conversation a session of this home, called the way the
+  sidebar calls it. TID may be nil, which is the body a caller sends when it wants the
+  server to name the conversation (ticket 03)."
+  [tid]
+  (api-call :post "/api/sessions" (json/write-str {:threadId tid})))
+
+(defn- task?
+  "Whether the sidebar draws TID in the flat task list."
+  [tid]
+  (some? (first (filter #(= tid (:threadId %)) (listed-tasks)))))
+
+(defn- projects-holding
+  "The canonical paths of the projects whose session list contains TID -- the other
+  half of 'where is this conversation drawn', which is never a task."
+  [tid]
+  (->> (listed-projects)
+       (filter #(some (fn [s] (= tid (:threadId s))) (:sessions %)))
+       (mapv :path)))
 
 (deftest the-run-edge-is-one-route-under-the-api-prefix
   ;; THE RUN USED TO BE THE CATCH-ALL. It sat at the server ROOT and every path the
@@ -1222,6 +1624,351 @@
          (is (str/includes? (str (:error (read-json resp))) "no such route"))))
      (testing "and so is anything else the table does not know"
        (is (= 404 (.statusCode (api-call :get "/nope" nil))))))))
+
+;; ------------------------------------------------------------ the action's face
+;;
+;; WHAT A RUN MAY CARRY, after ADR 0002 decision 9 landed in ticket 03 of
+;; `.scratch/sessions-live-on-the-server`: `threadId`, `append`, `tools` and `resume`.
+;; THREE THINGS LEFT that face -- the accumulated `messages`, the client's own `runId`,
+;; and a per-request `provider` -- and the cases below are about what the door does with
+;; each. They go AROUND `post-run` on purpose: its premise is "the page sends a run for a
+;; session that exists", and every question here is about the door itself.
+
+(defn- raw-run
+  "POST BODY to /api/agent exactly as written: no session made for it, no field added.
+  Answers the raw HttpResponse -- the caller decides whether it is a refusal or a stream."
+  [body]
+  (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
+                (.header "Content-Type" "application/json")
+                (.header "Accept" "text/event-stream")
+                (.POST (HttpRequest$BodyPublishers/ofString (json/write-str body)
+                                                            StandardCharsets/UTF_8))
+                (.build))]
+    (.send (HttpClient/newHttpClient) req
+           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+
+(deftest a-run-of-a-session-this-home-does-not-know-is-refused-by-name
+  ;; THE SILENT CREATE IS GONE, and the silence was the worse half of it: the edge used to
+  ;; register whatever id arrived, so a typo, a stale bookmark or a hand-written curl
+  ;; produced a NEW conversation that looked exactly like the one that was meant. A run is
+  ;; an action ON a conversation, and an action on something that does not exist is an
+  ;; error -- the one that says which (ticket 03, judgement 2).
+  (with-server
+   "the-one-session-this-home-knows"
+   (fn []
+     (let [resp (raw-run {:threadId "a-conversation-nobody-made"
+                          :append   [{:id "u1" :role "user" :content "go"}]
+                          :tools    []})
+           body (read-json resp)]
+       (testing "404, and the answer names the id it could not find"
+         (is (= 404 (.statusCode resp)) (str "got " (.statusCode resp)))
+         (is (str/includes? (str (:error body)) (pr-str "a-conversation-nobody-made"))
+             (str "the id is not in the refusal: " (pr-str (:error body)))))
+       (testing "and it says what DOES make one"
+         (is (str/includes? (str (:error body)) "POST /api/sessions")))
+       (testing "the refusal creates NOTHING: no row, no record, no conversation"
+         (is (false? (project/session-exists? "a-conversation-nobody-made")))
+         (is (not (.exists (log-file "a-conversation-nobody-made")))))))))
+
+(deftest a-run-body-that-still-carries-messages-is-refused-by-name
+  ;; NOT IGNORED, AND NOT MERGED, which is the whole point of retiring the field: a client
+  ;; written against the old contract sends the conversation it holds, and a server that
+  ;; read that as an append would DOUBLE the conversation -- the failure this feature
+  ;; exists to end, dressed up as compatibility. So the door says which field it did not
+  ;; take and what to send instead.
+  (with-server
+   "carries-the-old-face"
+   (fn []
+     (let [resp (raw-run {:threadId "carries-the-old-face"
+                          ;; both fields, because that is what an old client sends
+                          :messages [{:id "u1" :role "user" :content "看看这个项目"}]
+                          :append   [{:id "u2" :role "user" :content "看看这个项目"}]
+                          :tools    []})
+           body (read-json resp)]
+       (testing "400, by name"
+         (is (= 400 (.statusCode resp)) (str "got " (.statusCode resp)))
+         (is (= "messages" (:field body))
+             "the field is named as a FIELD, so a client can go and find it in its code")
+         (is (str/includes? (str (:error body)) "append")
+             "and the answer points at what replaced it"))
+       (testing "no run started: the record is empty and the conversation is untouched"
+         (is (not (.exists (log-file "carries-the-old-face"))))
+         (is (= [] (sessions/messages "carries-the-old-face"))))))))
+
+;; ------------------------------------------------- a conversation another process serves
+;;
+;; THE CROSS-PROCESS HALF OF 'ONE AUTHORITY PER CONVERSATION' (ADR 0002 decision 7).
+;; `refuse-second-run!` below is the same rule INSIDE one process; the in-process
+;; registry cannot see another JVM at all, and this is what does -- a row in the store
+;; (`harness.cap.claims`) that says which process is serving the conversation. What a
+;; client gets is a 409 naming that process, and what it does NOT get is a run: the
+;; record is a file two writers interleave into, and nothing in a line says whose it is.
+;;
+;; THE LIVE-OTHER-PROCESS ROWS HERE ARE WRITTEN BY HAND, and that is honest rather than
+;; a shortcut: a claim row is pid + start instant + instance id, and this process's own
+;; pid with somebody else's instance is exactly what a live second process leaves.
+;; harness.cap.claims-test forks the real thing; what THIS file owes is the edge's own
+;; behavior -- the status, the sentence, the body, and what stays open.
+
+(defn- claim-row [thread-id]
+  (first (db/select "SELECT * FROM session_claims WHERE thread_id = ?" (str thread-id))))
+
+(defn- served-elsewhere!
+  "Leave the row a LIVE OTHER PROCESS would leave for THREAD-ID, REPLACING whatever
+  this process had: the question these cases ask is what the EDGE does when somebody
+  else holds the conversation, and a case that had just run a conversation of its own
+  holds a claim too."
+  [thread-id]
+  (let [us (claims/this-process)]
+    (db/with-transaction
+      (fn [c]
+        (db/execute! c "DELETE FROM session_claims WHERE thread_id = ?" (str thread-id))
+        (db/execute! c "INSERT INTO session_claims
+                          (thread_id, instance, token, pid, started_at, since)
+                        VALUES (?, ?, ?, ?, ?, ?)"
+                     (str thread-id) "another-process" (str (java.util.UUID/randomUUID))
+                     (:pid us) (:started-at us) (System/currentTimeMillis))))))
+
+(defn- settled-file
+  "F's [bytes mtime] once two reads 50ms apart agree, or the last reading after MS.
+
+  THE RECORD LAGS THE SESSION BY DESIGN, and the writer flushes in its own time: the
+  run's own frames reach the client before every line has landed on disk, so 'what the
+  file holds' is only a fact once it stops changing. `record/pending?` is not enough --
+  it counts what has been handed to the writer, and the writer's own write can still be
+  in flight behind an empty queue (measured: a 20KB `model/start` line landed 3ms after
+  the queue went quiet)."
+  [f ms]
+  (loop [last nil
+         left (long ms)]
+    (let [now [(.length f) (.lastModified f)]]
+      (if (or (= now last) (pos? left))
+        (if (= now last)
+          now
+          (do (Thread/sleep 50) (recur now (- left 50))))
+        now))))
+
+(defn- with-no-claims [f]
+  (let [wipe #(db/with-transaction (fn [c] (db/execute! c "DELETE FROM session_claims")))]
+    (wipe)
+    (try (f) (finally (wipe)))))
+
+(deftest a-run-against-a-conversation-another-process-serves-is-refused-and-says-by-whom
+  (with-no-claims
+   (fn []
+     (with-server
+      "served-elsewhere"
+      (fn []
+        ;; A CONVERSATION THAT EXISTS, so the read-only half below has something to
+        ;; read: a session with no log at all answers 404 on every log route, which
+        ;; would make "reads still work" pass for the wrong reason.
+        (is (= 200 (.statusCode (post-run "served-elsewhere"))))
+        (served-elsewhere! "served-elsewhere")
+        (let [before (settled-file (log-file "served-elsewhere") 10000)
+              resp (raw-run {:threadId "served-elsewhere"
+                             :append   [{:id "u2" :role "user" :content "go"}]
+                             :tools    []})
+              body (read-json resp)]
+          (testing "409, and the answer names the PROCESS that is in the way"
+            (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp)))
+            (is (= (:pid (claims/this-process)) (get-in body [:holder :pid])))
+            (is (pos? (get-in body [:holder :since])))
+            (is (str/includes? (str (:error body)) (str (:pid (claims/this-process))))
+                "a person reading the refusal can find the process to stop"))
+          (testing "and it says the way out -- stop it, or wait"
+            (is (str/includes? (str (:error body)) "Stop that process")))
+          (testing "NO RUN STARTED: the record did not grow a byte"
+            (is (= before (settled-file (log-file "served-elsewhere") 10000))
+                "the log is the thing two writers would interleave into")
+            (is (= "another-process" (:instance (claim-row "served-elsewhere")))
+                "and the refusal did not take the claim over"))
+          (testing "READING IS STILL OPEN -- the rule is about actions, not access"
+            (is (= 200 (.statusCode (api-call :get "/api/threads" nil))))
+            (is (= 200 (.statusCode (api-call :post (str "/api/threads/served-elsewhere/rebuild") nil))))
+          (testing "and once nobody is serving it, the same run is served here"
+            ;; Both halves of 'nobody', because they are two different facts: the row
+            ;; is gone from the store, and this process's own view of the session --
+            ;; which the refused run never touched -- is put away, so the next ask
+            ;; builds it again and claims it.
+            (db/with-transaction
+              (fn [c] (db/execute! c "DELETE FROM session_claims WHERE thread_id = ?" "served-elsewhere")))
+            (sessions/drop! "served-elsewhere")
+            (let [again (post-run "served-elsewhere")]
+              (is (= 200 (.statusCode again)))
+              (is (claims/mine? (claims/holder "served-elsewhere"))
+                  "the run that was served is the one that claimed it"))))))))))
+
+(deftest a-claim-whose-process-is-gone-does-not-refuse-anything
+  ;; THE OTHER HALF OF THE DECISION, and the one that keeps the feature from turning a
+  ;; crash into a dead conversation: a process that was killed leaves its row behind,
+  ;; and the next process takes it over. The pid here is this process's own and the
+  ;; start instant is not -- which is exactly what a REUSED pid looks like, and the
+  ;; reason a claim records when its owner started rather than only its number.
+  (with-no-claims
+   (fn []
+     (with-server
+      "stale-claim"
+      (fn []
+        (let [us (claims/this-process)]
+          (db/with-transaction
+            (fn [c]
+              (db/execute! c "INSERT INTO session_claims
+                                (thread_id, instance, token, pid, started_at, since)
+                              VALUES (?, ?, ?, ?, ?, ?)"
+                           "stale-claim" "the-previous-owner" (str (java.util.UUID/randomUUID))
+                           (:pid us) 1 (System/currentTimeMillis))))
+          (let [resp (post-run "stale-claim")]
+            (is (= 200 (.statusCode resp)) (str "got " (.statusCode resp)))
+            (is (= (:instance us) (:instance (claim-row "stale-claim")))
+                "the run took the claim over from a process that is gone"))))))))
+
+(deftest a-rebind-does-not-move-a-log-another-process-is-serving
+  ;; BINDING IS THE OTHER THING THAT ACTS ON A LOG: the rebind direction MOVES the
+  ;; session's file, and a writer in the serving process holds the path it opened, so a
+  ;; move underneath it splits one conversation across two files. Same read-only rule,
+  ;; same sentence, one route over.
+  (wipe-dir! project-dir)
+  (with-no-claims
+   (fn []
+     (with-server
+      "bind-elsewhere"
+      (fn []
+        (let [tid  "bind-elsewhere"
+              bind (api-call :post "/api/project" (json/write-str {:threadId tid :dir project-dir}))]
+          (is (= 200 (.statusCode bind)) "the premise: it binds while nobody is serving it")
+          (let [bound (:dir (read-json bind))]
+            (served-elsewhere! tid)
+            (let [resp (api-call :post "/api/project"
+                                 (json/write-str {:threadId tid :dir project-dir}))
+                  body (read-json resp)]
+              (testing "409 by name, and the binding it would have moved is untouched"
+                (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp)))
+                (is (= (:pid (claims/this-process)) (get-in body [:holder :pid])))
+                (is (= bound (project/binding-for tid))
+                    "the binding it would have moved is exactly where it was"))))))))))
+(deftest a-provider-in-the-run-body-is-not-consulted
+  ;; CHOOSING A MODEL IS AN ACTION (`POST /api/model`, which writes the session's slice
+  ;; and records the change), NOT A FIELD A RUN CARRIES (ticket 03, judgement 4). The
+  ;; strongest form of that claim is a body naming a vendor THIS HOME DOES NOT HAVE: if
+  ;; the request tier were still layered on top, the run would be refused by that name.
+  (with-server
+   "request-tier"
+   [{:content "the session's own model answered"}]
+   (fn []
+     (let [resp (post-run "request-tier" {:provider {:provider :no-such-vendor
+                                                     :model    "theirs"}})]
+       (testing "the run is served by the SESSION's tier"
+         (is (= 200 (.statusCode resp)) (str "got " (.statusCode resp)))
+         (is (str/includes? (str (:content (last (sessions/messages "request-tier"))))
+                            "the session's own model answered")
+             "the answer in the conversation is not the pinned model's"))
+       (testing "and the request's tier is never resolved"
+         (is (not (str/includes? (process-log) "no-such-vendor"))))
+       (testing "and the record names the tier that WAS used, never the body's"
+         ;; 票 02 TOOK THE `input` ROW AWAY, and the request's own fields with it: a run no
+         ;; longer logs the whole inbound vector, only the entries it was handed and the facts
+         ;; about itself. What this guard needs is still here -- the provider/init row says
+         ;; which tier ran, and it is not the one the body named.
+         ;; THE RUN'S OWN CALL LINE NAMES WHAT IT WENT TO: `model/start` is written from the
+         ;; provider the SERVER resolved, so the body's tier appearing nowhere on the record is
+         ;; the same statement as 'it was never resolved'.
+         (let [call (first (filter #(= "model/start" (replay/kind %))
+                                   (wait-for-recorded
+                                    (log-file-for "request-tier")
+                                    (fn [ls] (some #(= "model/start" (replay/kind %)) ls))
+                                    2000)))]
+           (is (some? call) "the run recorded the call it made")
+           (is (not (str/includes? (json/write-str (replay/payload call)) "no-such-vendor"))
+               "the body's tier appears nowhere: it was never resolved")
+           (is (not (str/includes? (json/write-str (replay/payload call)) "theirs"))
+               "nor its model")))))))
+
+(deftest the-run-id-is-minted-here-and-the-record-is-what-names-it
+  ;; JUDGEMENT 3: a client that can NAME a run can collide with one and replay one, so the
+  ;; server mints the id -- and because the record is what carries it, a rebuild answers
+  ;; the SAME names back rather than minting look-alikes.
+  (with-server
+   "minted-run"
+   [{:content "first"} {:content "second"}]
+   (fn []
+     (let [resp (raw-run {:threadId "minted-run"
+                          :append   [{:id "u1" :role "user" :content "go"}]
+                          :tools    []
+                          :runId    "the-name-the-client-wanted"})]
+       (is (= 200 (.statusCode resp))
+           "a body carrying runId is not refused -- the field simply has no say")
+       (let [runs (fn [] (mapv :runId (filter #(and (= "message" (replay/kind %))
+                                                    (= "client" (:source %)))
+                                              (log-lines-for "minted-run"))))
+             first-run (first (runs))]
+         (testing "the run on the record is named by the server, not by the body"
+           (is (string? first-run))
+           (is (not= "the-name-the-client-wanted" first-run))
+           (is (not (str/includes? first-run "the-name-the-client-wanted"))))
+         (testing "every run of the session gets its own name"
+           (post-run "minted-run" {:append [{:id "u2" :role "user" :content "again"}]})
+           (is (= 2 (count (runs))))
+           (is (apply distinct? (runs)) "two runs share one name, and the record cannot tell them apart"))
+         (testing "and a rebuild answers those names back -- twice the same"
+           ;; THE STABLE IDS COME FROM THE RECORD, not from an id that could be minted
+           ;; again: the frames carry the run they belong to, and the rebuild only reads.
+           (let [rebuild (fn [] (read-json (api-call :post "/api/threads/minted-run/rebuild" nil)))
+                 r1      (rebuild)
+                 r2      (rebuild)]
+             (is (seq (:messages r1)))
+             (is (= (:messages r1) (:messages r2)) "two rebuilds of one log disagreed about the ids")
+             (let [assistants (filter #(= "assistant" (:role %)) (:messages r1))]
+               (is (= 2 (count assistants)) "one answer per run, so both names are under test")
+               (is (str/starts-with? (str (:id (first assistants))) first-run)
+                   "the first run's answer is not named after the run the record names")
+               (is (every? (fn [m] (some #(str/starts-with? (str (:id m)) %) (runs)))
+                           assistants)
+                   "an answer is named after a run this record does not have")))))))))
+
+(deftest the-session-s-opening-context-enters-the-conversation-once
+  ;; JUDGEMENT 5, and the reason it is about CACHING as much as about tidiness: the
+  ;; context used to be rendered as a trailing user message on EVERY run, so the prefix a
+  ;; provider caches grew a new tail each turn and missed every time. It is a message the
+  ;; SESSION is born with now, and a later action that still sends one is ignored -- its
+  ;; conversation has a beginning already.
+  (with-server
+   "born-with-context"
+   [{:content "one"} {:content "two"} {:content "three"}]
+   (fn []
+     (post-run "born-with-context" {:context [{:description "repo" :value "x"}]})
+     (testing "the birth action puts it in the conversation, once"
+       (let [messages (sessions/messages "born-with-context")]
+         (is (= ["u1" "session-context"]
+                (mapv :id (take 2 messages)))
+             "the context rides in the conversation, behind the client's own message")
+         (is (= "- repo: x" (:content (second messages))))
+         (is (= 1 (count (filter #(= "session-context" (:id %)) messages))))))
+     (testing "and no later action adds a second one, however loudly it asks"
+       (post-run "born-with-context" {:append  [{:id "u2" :role "user" :content "two"}]
+                                      :context [{:description "repo" :value "x"}]})
+       (post-run "born-with-context" {:append [{:id "u3" :role "user" :content "three"}]})
+       (let [messages (sessions/messages "born-with-context")]
+         (is (= 1 (count (filter #(= "session-context" (:id %)) messages)))
+             "the context entered a second time: the birth action is the only one that may")
+         (is (= ["u1" "session-context" "u2" "u3"]
+                (mapv :id (filter #(= "user" (:role %)) messages)))
+             "the conversation is the two questions and the one context, in order")))
+     (testing "and the record says what each action BROUGHT, not what it typed"
+       ;; `:added` is the fold's field: the birth action brought two entries (its own
+       ;; message and the context, which the client never sent), and each later one
+       ;; brought exactly its own message.
+       ;; THE ROWS THEMSELVES SAY IT (票 02): an entry is a `message` row whose envelope
+       ;; carries its `id`, so 'what did this action bring' is 'which id-bearing rows did it
+       ;; write'. The birth action brought two -- its own message and the context, which the
+       ;; client never sent -- and every later one brought exactly its own.
+       (let [brought (->> (log-lines-for "born-with-context")
+                          (filter #(and (= "message" (replay/kind %)) (:id %)))
+                          (partition-by :runId)
+                          (mapv #(mapv :id %)))]
+         (is (= 3 (count brought)))
+         (is (= ["u1" "session-context"] (first brought)))
+         (is (= ["u2"] (second brought)))
+         (is (= ["u3"] (nth brought 2))))))))
 
 ;; The scripted run that proves a bound thread's relative write lands in the
 ;; project: turn one writes a RELATIVE path, turn two replies.
@@ -1268,22 +2015,78 @@
          (testing "exactly ONE project/bound audit line is on disk"
            (is (= 1 (count bound)))
            (is (nil? (:runId (first bound))) "a binding happens outside any run")
-           (is (nil? (get-in (first bound) [:payload :before]))
+           (is (nil? (get-in (replay/payload (first bound)) [:before]))
                "a FIRST bind has no previous directory")
-           (is (same-dir? (get-in (first bound) [:payload :after]) project-dir))
-           (is (= "http" (get-in (first bound) [:payload :via]))))
+           (is (same-dir? (get-in (replay/payload (first bound)) [:after]) project-dir))
+           (is (= "http" (get-in (replay/payload (first bound)) [:via]))))
          (testing "the two failed binds added no second line"
-           (is (= 1 (count (filter #(= "project/bound" (:kind %)) bound)))))
+           (is (= 1 (count (filter #(= "project/bound" (replay/kind %)) bound)))))
          (testing "and the line landed in the workspace the bind moved the session to"
            ;; The audit line is written AFTER the bind, so it is the first thing
            ;; this session writes in its new home -- which is the whole reason the
            ;; log is moved rather than left behind: a session's timeline is one file.
-           (is (empty? (filter #(= "project/bound" (:kind %))
-                               (try (mapv #(json/read-str % :key-fn keyword)
+           (is (empty? (filter #(= "project/bound" (replay/kind %))
+                               (try (replay/lines->records
                                           (str/split-lines
                                            (slurp (log-file tid) :encoding "UTF-8")))
                                     (catch java.io.FileNotFoundException _ []))))
                "the reserved workspace holds no binding line for this thread")))))))
+
+(deftest a-new-session-in-a-project-is-named-by-the-server
+  ;; TICKET 03, the other half of the id question: 'start a conversation in this
+  ;; directory' is ONE action. The body names no thread, so the server names it AND
+  ;; binds it -- which is why the page does not call /api/sessions and then bind what
+  ;; came back: a bind that failed would leave an UNBOUND conversation behind, and an
+  ;; empty session is the one thing a client may no longer make (ADR 0002 decision 9).
+  ;;
+  ;; WHAT THE PAGE LEANS ON is asserted here: the id it is handed is a session of this
+  ;; home the moment the answer lands -- bound to the directory that was asked for, in
+  ;; the listing the sidebar draws -- because the next thing the page does is switch to
+  ;; it and let a run be sent under that id.
+  (wipe-dir! project-dir)
+  (with-server
+   "it-proj-mint"
+   (fn []
+     (testing "a body with no threadId is GIVEN one, bound to the directory"
+       (let [resp   (api-call :post "/api/project" (json/write-str {:dir project-dir}))
+             body   (read-json resp)
+             minted (:threadId body)]
+         (is (= 200 (.statusCode resp)))
+         (is (string? minted))
+         (is (not= "" minted))
+         (is (same-dir? (:dir body) project-dir))
+         (testing "it is a session OF THE PROJECT, not a task"
+           (is (not (task? minted)))
+           (is (= [(.getCanonicalPath (io/file project-dir))] (projects-holding minted))))
+         (testing "and it is a row in the listing the sidebar reads"
+           ;; It has a log ALREADY, and that is not a mistake: the bind lands a
+           ;; project/bound audit line, so the file exists before a word is typed (a
+           ;; row's figures come from the tree). What matters here is that the row IS
+           ;; there, in the project, the moment the answer landed.
+           (is (some? (listed-row minted)))
+           (is (false? (:running (listed-row minted)))))))
+     (testing "the next ask is a SECOND conversation"
+       ;; MINTING IS PER REQUEST: two clicks on the project's button are two
+       ;; conversations, and neither of them is a conversation the page made up.
+       (let [again (:threadId (read-json (api-call :post "/api/project"
+                                                   (json/write-str {:dir project-dir}))))]
+         (is (string? again))
+         (is (not= "" again))
+         (is (= 1 (count (filter #(= again (:threadId %)) (all-listed-rows))))
+             "and each of them is listed exactly once")))
+     (testing "a body that DOES name one still binds that one"
+       (let [named "proj-named-by-the-caller"]
+         (is (= named (:threadId (read-json (api-call :post "/api/project"
+                                                      (json/write-str {:threadId named
+                                                                       :dir project-dir}))))))
+         (is (= [(.getCanonicalPath (io/file project-dir))] (projects-holding named)))))
+     (testing "a body with no dir is still a 400, and mints nothing"
+       (let [before (count (all-listed-rows))]
+         (is (= 400 (.statusCode (api-call :post "/api/project" (json/write-str {})))))
+         (is (= before (count (all-listed-rows)))
+             (str "a refused bind leaves no conversation behind -- which is the whole"
+                  " reason the id is minted inside this route rather than by a caller"
+                  " who would then bind it")))))))
 
 (def ^:private listing-dir
   ;; Its own directory pair, not the shared project-dir: other tests in this
@@ -1314,8 +2117,7 @@
   (with-server
    {"listing-a" script "listing-b" script "listing-unbound" script}
    (fn []
-     (let [list-projects (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
-                                               :key-fn keyword))
+     (let [list-projects listed-projects
            project-named (fn [dir]
                            ;; By last path segment, matched EXACTLY: `-2` is a
                            ;; different project, and "ends with" would confuse the
@@ -1341,75 +2143,87 @@
            (is (some? (:projectId project)))
            (is (= "listing-a" (:threadId session)))
            (is (false? (:archived session)))
-           (testing "and the bind itself wrote the session's first line -- its own audit trail"
-             ;; Worth locking, because it is WHY a freshly bound session already has
-             ;; a file: the audit line lands in the workspace the bind just created
-             ;; (see project-post's ordering note). So the disk facts are present.
-             (is (pos? (:bytes session)))
-             (is (= (.length (log-file-for "listing-a")) (:bytes session))))))
-       (testing "after a real run the facts follow the file, read fresh from disk"
-         (let [before (:bytes (row-for listing-dir "listing-a"))]
-           (is (= "RUN_FINISHED"
-                  (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
-           (let [f (log-file-for "listing-a")]
-             ;; THE RUN IS STILL WRITING WHEN THE CLIENT SEES ITS LAST FRAME: the
-             ;; returned side of the message record lands AFTER the terminal frame, so
-             ;; sizes taken now would be compared against a file that grows again a beat
-             ;; later -- which is how these two assertions failed in a full suite (the
-             ;; listing's snapshot said 165736 where the file already said 165916). Wait
-             ;; for the writer's own end of sequence, then measure.
-             (wait-for-recorded
-              f
-              (fn [ls] (and (some #(= "message" (:kind %)) ls)
-                            (some #(and (= "event" (:kind %))
-                                        (frames/terminal? (:payload %)))
-                                  ls)
-                            (= "message" (:kind (last ls)))))
-              5000)
-             (let [session (row-for listing-dir "listing-a")]
-               (is (< before (:bytes session)) "the run appended to the same file")
-               (is (= (.length f) (:bytes session)))
-               (is (= (.lastModified f) (:lastActivity session)))))))
-       (testing "a session whose file is NOT there is still a row, with null facts"
-         ;; The state the sidebar must survive: the store says this session exists,
-         ;; the disk says nothing about it. Null is the honest answer and it is NOT
-         ;; a zero-byte file -- a real 0-byte log would be a broken one.
-         (bind! "listing-b" listing-dir)
-         (let [f (log-file-for "listing-b")]
-           (is (.delete f) "the file is removed by hand, as a person tidying the tree would")
-           (let [session (row-for listing-dir "listing-b")]
-             (is (= "listing-b" (:threadId session)) "the row is still there")
-             (is (nil? (:bytes session)))
-             (is (nil? (:lastActivity session)))
-             (testing "and it sorts FIRST, because 'no log yet' is the newest state there is"
-               (is (= ["listing-b" "listing-a"]
-                      (map :threadId (:sessions (project-named listing-dir)))))))))
-       (testing "a run does NOT outrank a session that has never started"
-         ;; The rule is 'no log sorts first', not 'newest file wins', because a
-         ;; session with no log is one that has not started -- which is newer than
-         ;; any activity, however recent. So a just-created session stays at the
-         ;; top of its project instead of sinking under a busy conversation.
-         (Thread/sleep 20)
-         (post-run "listing-a")
-         (is (= ["listing-b" "listing-a"]
-                (map :threadId (:sessions (project-named listing-dir))))))
+           (testing "and nothing has been said in it yet, so it has no name"
+             ;; `:firstUserText` is the store's answer rather than the log's, and a
+             ;; session that has never run has nothing in the store to answer with.
+             ;; The sidebar falls back to the id for these (the client's business).
+             (is (nil? (:firstUserText session))))
+                      (testing "and the listing says NOTHING about the file the bind just wrote"
+            ;; The bind does write one line -- its own audit trail, in the workspace it just
+            ;; created (see project-post's ordering note). What changed is that the LISTING
+            ;; reports nothing read off a log: the two disk facts it used to carry are gone
+            ;; from the payload entirely, and this is the case that would notice if either
+            ;; came back.
+            (is (.exists (log-file-for "listing-a")) "the audit line is on disk")
+            (is (not (contains? session :bytes)))
+            (is (not (contains? session :lastActivity)))
+            (is (nil? (:lastSentAt session))
+                "and nothing has been SENT to it yet -- a bind is not a send"))
+           (testing "after a real run the row carries the name and the send time, both store facts"
+            (let [before (System/currentTimeMillis)]
+              (is (= "RUN_FINISHED"
+                     (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
+              (testing "and the session has acquired a NAME from the run that carried its first message"
+                ;; `post-run` sends '看看这个项目' as the run's user message, and that is what
+                ;; `remember-send!` writes -- once. Read back through the LISTING rather than
+                ;; through any endpoint of its own, because the listing is the only place a
+                ;; client ever sees this fact.
+                (is (= "看看这个项目" (:firstUserText (row-for listing-dir "listing-a")))))
+              (let [sent (:lastSentAt (row-for listing-dir "listing-a"))]
+                (is (integer? sent) "the send is stamped in the store")
+                (is (<= before sent (System/currentTimeMillis))
+                    "and it is the moment of THIS send, not a file's mtime"))))
+           (testing "a session whose file is NOT there is still a row -- and the store never noticed"
+            ;; The state the sidebar must survive: the store says this session exists, the disk
+            ;; says nothing about it. It used to be visible as two nulls in the listing; now the
+            ;; row's facts are the store's, so the only thing that changed is that the log is gone.
+            (bind! "listing-b" listing-dir)
+            (let [f (log-file-for "listing-b")]
+              (is (.delete f) "the file is removed by hand, as a person tidying the tree would")
+              (let [session (row-for listing-dir "listing-b")]
+                (is (= "listing-b" (:threadId session)) "the row is still there")
+                (is (nil? (:lastSentAt session))
+                    "nothing has been sent to it -- null, which is not a zero-byte file")
+                (testing "and it sorts LAST: 'never sent to' is not 'brand new'"
+                  ;; The old order put a row with no log FIRST, because such a row was one somebody
+                  ;; had just asked for. A session is created by its first send now, so a row with
+                  ;; no time is an abandoned one.
+                  (is (= ["listing-a" "listing-b"]
+                         (map :threadId (:sessions (project-named listing-dir)))))))))
+           (testing "and a run moves a session back to the top -- the order is the store's clock"
+            ;; What replaced 'no log sorts first': two sends, in order, and the row sent to most
+            ;; recently is first. Nothing here reads a file's mtime.
+            (Thread/sleep 20)
+            (post-run "listing-b")
+            (is (= ["listing-b" "listing-a"]
+                   (map :threadId (:sessions (project-named listing-dir)))))
+            (Thread/sleep 20)
+            (post-run "listing-a")
+            (is (= ["listing-a" "listing-b"]
+                   (map :threadId (:sessions (project-named listing-dir))))))))
        (testing "a different directory is a different project"
          (bind! "listing-other" listing-dir-2)
          (is (= (.getCanonicalPath (io/file listing-dir-2)) (:path (project-named listing-dir-2))))
          (is (= 1 (count (:sessions (project-named listing-dir-2))))))
-       (testing "an unbound session is in no project -- there is no row to put it in"
-         (is (nil? (row-for listing-dir "not-bound-anywhere"))))
-       (testing "and an unbound session that RUNS is in no project either"
-         ;; It has a log, in the reserved workspace. GET /api/threads is the raw
-         ;; tree view that shows it; the sidebar's listing is about projects, and a
-         ;; session nobody owns has no project to be listed under.
+       (testing "a conversation nobody has ever owned is in no project AND is no task"
+         ;; The store decides which conversations exist, and it has never been told
+         ;; about this one: not a project session, not a task, nothing to draw -- and
+         ;; GET /api/threads still shows the file to anyone diagnosing.
+         (is (nil? (row-for listing-dir "not-bound-anywhere")))
+         (is (not (task? "not-bound-anywhere"))))
+       (testing "and an unbound session that RUNS is a TASK -- flat, outside every project"
+         ;; THIS IS WHAT CHANGED when the sidebar grew its second half. It used to be
+         ;; in no list at all (it has a log but nothing owned it); now the run itself
+         ;; is what makes it a session of this home, and the sidebar draws it in the
+         ;; flat task list. Still in no PROJECT -- that half is unchanged.
          (is (= "RUN_FINISHED"
                 (:type (last (wire/frames-from-sse (.body (post-run "listing-unbound")))))))
          (is (not-any? #(= "listing-unbound" (:threadId %))
                        (mapcat :sessions (list-projects))))
+         (is (task? "listing-unbound"))
          (is (some #(= "listing-unbound" (:threadId %))
                    (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))
-             "and the raw tree view still shows it, so nothing is hidden, only unowned"))))))
+             "and the raw tree view still shows it, so nothing is hidden"))))))
 
 (deftest archiving-a-session-is-a-row-write-and-never-a-file-write
   ;; Ticket 06. The whole claim is a NEGATIVE one -- archiving touches no log --
@@ -1433,8 +2247,7 @@
                       (api-call :post "/api/project"
                                 (json/write-str {:threadId tid :dir dir})))
            sessions (fn [dir]
-                      (->> (json/read-str (.body (api-call :get "/api/projects" nil))
-                                          :key-fn keyword)
+                      (->> (listed-projects)
                            (filter #(= (.getCanonicalPath (io/file dir)) (:path %)))
                            first
                            :sessions))
@@ -1484,14 +2297,20 @@
            (is (= before (snap "arch-a"))
                "three writes to the ROW, and not one to the file")))
 
-       (testing "an archived session still lists -- flagged -- with its disk facts"
-         ;; The server does not decide what to DO with the flag: grouping is the
-         ;; screen's business, and a listing that dropped archived rows would make
-         ;; 'where did my session go' a question with no server-side answer.
-         (let [r (row archive-dir "arch-a")]
-           (is (true? (:archived r)))
-           (is (pos? (:bytes r)))
-           (is (= (.length (log-file-for "arch-a")) (:bytes r)))))
+       (testing "an archived session still lists -- flagged -- and its send time did not move"
+           ;; The server does not decide what to DO with the flag: grouping is the
+           ;; screen's business, and a listing that dropped archived rows would make
+           ;; 'where did my session go' a question with no server-side answer. Flipping
+           ;; the flag is a ROW write, and the clock is the row's other fact -- if the
+           ;; archival path had re-derived it from the file, this is where it would show.
+           (let [before (:lastSentAt (row archive-dir "arch-a"))]
+             (is (true? (:archived (row archive-dir "arch-a"))))
+             (archive! "arch-a" false)
+             (is (false? (:archived (row archive-dir "arch-a"))))
+             (is (= before (:lastSentAt (row archive-dir "arch-a"))))
+             (archive! "arch-a" true)
+             (is (true? (:archived (row archive-dir "arch-a"))))
+             (is (= before (:lastSentAt (row archive-dir "arch-a"))))))
 
        (testing "archiving a session with no log at all is legal"
          ;; The flag is a property of the CONVERSATION, not of the file -- and a
@@ -1656,7 +2475,7 @@
                    "binding lands the session in that same directory")
                (let [bounds (bound-lines tid)]
                  (is (= 1 (count bounds)) "exactly one audit line, from the POST")
-                 (is (= "http" (get-in (first bounds) [:payload :via])))))))))
+                 (is (= "http" (get-in (replay/payload (first bounds)) [:via])))))))))
       (finally (alter-var-root #'http/*directory-chooser* (constantly real))))))
 
 (deftest the-folder-picker-knows-which-dialog-this-platform-has
@@ -1800,8 +2619,8 @@
                               (json/write-str {:threadId tid :dir project-dir}))]
            (is (= 200 (.statusCode resp))))
          (let [line (first (bound-lines tid))]
-           (is (nil? (get-in line [:payload :before])))
-            (is (same-dir? (get-in line [:payload :after]) project-dir))))
+           (is (nil? (get-in (replay/payload line) [:before])))
+            (is (same-dir? (get-in (replay/payload line) [:after]) project-dir))))
         (testing "rebinding answers and displays the new directory"
           (let [resp (api-call :post "/api/project"
                                (json/write-str {:threadId tid :dir project-dir-2}))]
@@ -1820,8 +2639,8 @@
        (testing "the log reads as a before -> after timeline"
          (let [bounds (bound-lines tid)]
            (is (= 2 (count bounds)))
-            (is (same-dir? (get-in (nth bounds 1) [:payload :before]) project-dir))
-            (is (same-dir? (get-in (nth bounds 1) [:payload :after]) project-dir-2))))))))
+            (is (same-dir? (get-in (replay/payload (nth bounds 1)) [:before]) project-dir))
+            (is (same-dir? (get-in (replay/payload (nth bounds 1)) [:after]) project-dir-2))))))))
 
 (deftest a-bound-thread-writes-into-its-project-over-the-real-edge
   ;; The full vertical: bind through the management edge the way the UI will,
@@ -1977,23 +2796,26 @@
       (try
         (testing "a bound session's records land in the project's workspace"
           (project/bind! tid (str proj-dir))
-          (#'http/log! tid "r1" "input" {:n 1})
-          (#'http/log! tid "r1" "input" {:n 2})
+          (#'http/log! tid "r1" test-probe {:n 1})
+          (#'http/log! tid "r1" test-probe {:n 2})
+          (drained!)
           (is (.exists plog))
           (is (not (.exists ulog))))
         (testing "the store answers nil for a while: records land in .unbound"
           (project/bind! tid nil)
-          (#'http/log! tid "r2" "input" {:n 3})
-          (#'http/log! tid "r2" "input" {:n 4})
+          (#'http/log! tid "r2" test-probe {:n 3})
+          (#'http/log! tid "r2" test-probe {:n 4})
+          (drained!)
           (is (.exists ulog))
           (is (= 2 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))))
         (testing "the binding comes back and the writer carries the segment home"
           (project/bind! tid (str proj-dir))
-          (#'http/log! tid "r3" "input" {:n 5})
-          (let [lines  (mapv #(json/read-str % :key-fn keyword)
+          (#'http/log! tid "r3" test-probe {:n 5})
+          (drained!)
+          (let [lines  (replay/lines->records
                              (str/split-lines (slurp plog :encoding "UTF-8")))
-                inputs (filterv #(= "input" (:kind %)) lines)
-                ns     (mapv #(get-in % [:payload :n]) inputs)]
+                inputs (filterv #(= test-probe (replay/kind %)) lines)
+                ns     (mapv #(get-in (replay/payload %) [:n]) inputs)]
             (testing "ONE file holds the whole conversation, in order"
               (is (= [1 2 3 4 5] ns) "no line lost and none duplicated")
               (is (= 5 (count inputs))))
@@ -2007,15 +2829,91 @@
           (testing "the listing sees exactly ONE log for this session"
             (is (= 1 (count (replay/logs-for (home/projects-dir) tid))))))
         (testing "and the carry is SAID OUT LOUD"
-          (let [lines (mapv #(json/read-str % :key-fn keyword)
+          (let [lines (replay/lines->records
                             (str/split-lines (slurp plog :encoding "UTF-8")))
-                line  (first (filter #(= "log/carried-back" (:kind %)) lines))]
+                line  (first (filter #(= "log/carried-back" (replay/kind %)) lines))]
             (is (some? line) "an audit line says the segment was carried back")
-            (is (= (.getAbsolutePath plog) (get-in line [:payload :to])))
-            (is (= (.getAbsolutePath ulog) (get-in line [:payload :from])))
-            (is (= 2 (get-in line [:payload :lines])) "and how many lines moved")))
+            (is (= (.getAbsolutePath plog) (get-in (replay/payload line) [:to])))
+            (is (= (.getAbsolutePath ulog) (get-in (replay/payload line) [:from])))
+            (is (= 2 (get-in (replay/payload line) [:lines])) "and how many lines moved")))
         (finally
           (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
+
+(deftest a-bind-that-arrives-while-the-writer-is-mid-run-leaves-one-file
+  ;; THE CASE 'BIND AT FIRST SEND' ADDED. The sidebar no longer binds a new session when
+  ;; the row is minted; it binds when the session's first message arrives -- i.e. WHILE THE
+  ;; RUN IS ALREADY WRITING (`app.tsx`, `reportTitle`). So a bind can now land in the middle
+  ;; of a conversation's records, and it does two things that same writer is looking at: it
+  ;; changes the binding the writer asks where a line goes, and it MOVES the file the writer
+  ;; is appending to. The two are serialized on `log-lock` (see `log!` and the /api/project
+  ;; handler), and this case pins what that buys, in the only form that is checkable: no
+  ;; matter who gets there first, the whole conversation ends in ONE file -- the last
+  ;; project's -- with every line in it, in order, and no fragment left behind anywhere.
+  ;;
+  ;; The writer is a real one (`#'http/log!`, the function every record goes through), on its
+  ;; own thread, because a case that binds first and writes afterwards would only exercise
+  ;; the ordinary first-bind shape. It REBINDS, twelve times, between two directories: the
+  ;; window this is about is a few microseconds wide, and one bind usually misses it -- a
+  ;; dozen of them, against a writer that never stops, is what makes the case able to fail.
+  ;; (It did: the pre-fix code answered 400 "could not move the log" -- the writer's own
+  ;; carrying of the leftover segment and the bind's move raced over one rename.)
+  (wipe-dir! project-dir)
+  (wipe-dir! project-dir-2)
+  (with-server
+   "it-proj"
+   (fn []
+     (let [tid    (str "mid-write-" (java.util.UUID/randomUUID))
+           dirs   [project-dir project-dir-2]
+           ulog   (unbound-log tid)
+           writer (future
+                    (try
+                      (dotimes [i 120]
+                        (#'http/log! tid "r1" test-probe {:n i})
+                        (Thread/sleep 1))
+                      (catch Throwable _ nil)))]
+       ;; THE FILE APPEARS AS THE CONSUMER WRITES IT (ticket 02), and it can be seen the
+       ;; instant it exists and before a byte is on it -- so the premise this case needs
+       ;; is a file with a LINE in it. Waiting for a positive length is what makes the
+       ;; assertion below a statement about the run rather than about a scheduler.
+       (let [deadline (+ (System/currentTimeMillis) 5000)]
+         (while (and (or (not (.exists ulog)) (zero? (.length ulog)))
+                     (< (System/currentTimeMillis) deadline))
+           (Thread/sleep 2)))
+       (testing "the run got its first lines down before any bind arrived"
+         (is (.exists ulog) "the session's log is in the reserved workspace")
+         (is (pos? (.length ulog))))
+       (testing "every bind is accepted while the run is still writing"
+         (dotimes [i 12]
+           (let [dir  (nth dirs (mod i 2))
+                 resp (api-call :post "/api/project"
+                                (json/write-str {:threadId tid :dir (str dir)}))]
+             (is (= 200 (.statusCode resp))
+                 (str "bind " i " to " (.getName (io/file dir)) ": " (:error (read-json resp))))
+             (is (same-dir? (:dir (read-json resp)) dir)))))
+       @writer
+       ;; AND THE WRITER'S OWN TAIL IS WAITED FOR. `log!` only HANDS a line to the
+       ;; record writer now (ticket 02): the bytes are the consumer's, so the read
+       ;; below would be whatever happened to have landed at that instant -- a shorter
+       ;; conversation, asserted as if a line had been lost. `drained!` is the honest
+       ;; wait, and it changes nothing about the guarantee this case pins.
+       (drained!)
+       ;; THE LAST BIND IS THE ONE IN FORCE, so the conversation has to be in that
+       ;; directory's workspace -- and only there.
+       (let [plog (project-log (nth dirs (mod 11 2)) tid)
+             other (project-log (nth dirs (mod 12 2)) tid)
+             ns   (->> (str/split-lines (slurp plog :encoding "UTF-8"))
+                       (keep (fn [line]
+                               (try (:n (replay/payload (first (replay/lines->records [line]))))
+                                    (catch Throwable _ nil))))
+                       vec)]
+         (testing "EVERY line of the conversation is in the last project's file, in order"
+           (is (= (vec (range 120)) ns)))
+         (testing "and the directory it left kept nothing"
+           (is (not (.exists other))))
+         (testing "and the reserved workspace kept no fragment of it either"
+           (is (not (.exists ulog))))
+         (testing "so the listing reads this session as ONE conversation"
+           (is (= 1 (count (replay/logs-for (home/projects-dir) tid))))))))))
 
 (deftest a-carry-that-would-interleave-two-histories-is-refused-by-name
   ;; The carry may only run when the conversation's file ENDS at or before the
@@ -2031,7 +2929,7 @@
           tid      (str "overlap-" (java.util.UUID/randomUUID))
           plog     (project-log proj-dir tid)
           ulog     (unbound-log tid)
-          line     (fn [ts n] (str (json/write-str {:ts ts :runId "r" :kind "input"
+          line     (fn [ts n] (str (row-json {:ts ts :runId "r" :kind test-probe
                                                      :payload {:n n}}) "\n"))]
       (.mkdirs proj-dir)
       (try
@@ -2042,29 +2940,31 @@
         (spit ulog (str (line 2500 3) (line 3500 4)) :encoding "UTF-8")
         (let [before-plog (slurp plog :encoding "UTF-8")
               before-ulog (slurp ulog :encoding "UTF-8")]
-          (#'http/log! tid "r3" "input" {:n 5})
-          (let [lines   (mapv #(json/read-str % :key-fn keyword)
+          (#'http/log! tid "r3" test-probe {:n 5})
+          (drained!)
+          (let [lines   (replay/lines->records
                               (str/split-lines (slurp plog :encoding "UTF-8")))
-                refused (first (filter #(= "log/carry-refused" (:kind %)) lines))]
+                refused (first (filter #(= "log/carry-refused" (replay/kind %)) lines))]
             (testing "the refusal is on the record, naming BOTH paths"
               (is (some? refused))
-              (is (= (.getAbsolutePath plog) (get-in refused [:payload :to])))
-              (is (= (.getAbsolutePath ulog) (get-in refused [:payload :from])))
-              (is (str/includes? (str (get-in refused [:payload :reason])) "overlap")))
+              (is (= (.getAbsolutePath plog) (get-in (replay/payload refused) [:to])))
+              (is (= (.getAbsolutePath ulog) (get-in (replay/payload refused) [:from])))
+              (is (str/includes? (str (get-in (replay/payload refused) [:reason])) "overlap")))
             (testing "neither file was merged or moved"
               (is (.exists ulog) "the leftover is still where it was")
               (is (= before-ulog (slurp ulog :encoding "UTF-8"))
                   "byte for byte -- not appended to, not renamed")
-              (is (not-any? #(= 3 (get-in % [:payload :n])) lines)
+              (is (not-any? #(= 3 (get-in (replay/payload %) [:n])) lines)
                   "not one of the segment's lines was folded in")
-              (is (not-any? #(= 4 (get-in % [:payload :n])) lines))
+              (is (not-any? #(= 4 (get-in (replay/payload %) [:n])) lines))
               (is (str/starts-with? (slurp plog :encoding "UTF-8") before-plog)
                   "the conversation's own lines are untouched; only the audit and this write followed"))
             (testing "a refused carry is said once, not beside every record"
-              (#'http/log! tid "r3" "input" {:n 6})
-              (#'http/log! tid "r3" "input" {:n 7})
-              (let [n (count (filter #(= "log/carry-refused" (:kind %))
-                                     (mapv #(json/read-str % :key-fn keyword)
+              (#'http/log! tid "r3" test-probe {:n 6})
+              (#'http/log! tid "r3" test-probe {:n 7})
+              (drained!)
+              (let [n (count (filter #(= "log/carry-refused" (replay/kind %))
+                                     (replay/lines->records
                                            (str/split-lines (slurp plog :encoding "UTF-8")))))]
                 (is (= 1 n) "one audit line for one refusal")))))
         (finally
@@ -2110,13 +3010,13 @@
              (testing "and the final assistant answer closes it"
                (is (= "assistant" (:role (last msgs))))))))
        (testing "the rebuild action landed its audit line"
-         (let [lines (mapv #(json/read-str % :key-fn keyword)
+         (let [lines (replay/lines->records
                            (str/split-lines (slurp (log-file tid) :encoding "UTF-8")))
-               rb    (filterv #(= "session/rebuilt" (:kind %)) lines)]
+               rb    (filterv #(= "session/rebuilt" (replay/kind %)) lines)]
            (is (= 1 (count rb)))
            (is (nil? (:runId (first rb))) "a rebuild happens outside any run")
-           (is (pos? (get-in (first rb) [:payload :messages])))
-           (is (= "http" (get-in (first rb) [:payload :via])))))))))
+           (is (pos? (get-in (replay/payload (first rb)) [:messages])))
+           (is (= "http" (get-in (replay/payload (first rb)) [:via])))))))))
 
 (deftest rebuilding-a-session-that-has-never-run-answers-an-empty-conversation
   ;; The sidebar's very first click on a brand-new session. Binding wrote an audit
@@ -2135,8 +3035,8 @@
          (is (= [] (:messages reply)) "nothing has happened in this conversation yet")
          (is (= [] (:context reply))))
        (testing "and the audit line it did write is still on disk, untouched"
-         (is (some #(= "project/bound" (:kind %))
-                   (mapv #(json/read-str % :key-fn keyword)
+         (is (some #(= "project/bound" (replay/kind %))
+                   (replay/lines->records
                          (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
 
 (def ^:private remove-dir-a
@@ -2199,8 +3099,7 @@
            archive! (fn [tid flag]
                       (api-call :post (str "/api/threads/" tid "/archive")
                                 (json/write-str {:archived flag})))
-           listing  (fn [] (json/read-str (.body (api-call :get "/api/projects" nil))
-                                          :key-fn keyword))
+           listing  listed-projects
            project  (fn [d] (first (filter #(= (canon d) (:path %)) (listing))))
            session  (fn [d tid] (first (filter #(= tid (:threadId %))
                                                (:sessions (project d)))))
@@ -2215,20 +3114,22 @@
        (post-run "rm-a")
        (post-run "rm-b")
        (post-run "rm-other")
-       ;; A session with NO log at all. Binding one writes an audit line, so the
-       ;; file would otherwise exist -- it is removed by hand, which is the state
-       ;; the listing calls "null facts" rather than a zero-byte file. The removal
-       ;; must not special-case it: the verb is about a project row, and whether a
-       ;; conversation has a file is not that row's business.
+       ;; A session nothing was ever SENT to. Binding one writes an audit line, so a
+       ;; file would otherwise exist -- it is removed by hand, which is the state the
+       ;; listing used to call "null facts". The listing does not look at the file at
+       ;; all now: the row has no send time because no send ever happened, and the
+       ;; removal must not special-case it (the verb is about a project row, and
+       ;; whether a conversation has a file is not that row's business).
        (is (= 200 (.statusCode (add! remove-dir-b))))
        (is (= 200 (.statusCode (bind! "rm-never-run" remove-dir-b))))
        (is (.delete (log-file-for "rm-never-run")) "the file is removed by hand")
-       (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
-           "the listing calls that null facts, not a zero-byte file")
+       (is (nil? (:lastSentAt (session remove-dir-b "rm-never-run")))
+           "no send, so no time -- null, which is not a zero-byte file")
        (is (= 200 (.statusCode (archive! "rm-b" true))))
        (Thread/sleep 20)                        ; so a file write would move an mtime
 
-       (let [before-a (file-facts ws-a)
+       (let [sent-a   (:lastSentAt (session remove-dir-a "rm-a"))
+             before-a (file-facts ws-a)
              before-b (file-facts ws-b)]
          (is (seq before-a) "the first project has logs on disk to protect")
          (is (seq before-b))
@@ -2309,18 +3210,20 @@
            (testing "INCLUDING the archive flag, which the removal never touched"
              (is (true? (:archived (session remove-dir-a "rm-b"))))
              (is (false? (:archived (session remove-dir-a "rm-a")))))
-           (testing "and with the disk facts read off the very same files"
+           (testing "and the send times came back with them, exactly as they were"
+             ;; Removing and re-adding a project writes ROWS. A time re-derived from the
+             ;; files on the way back would be an mtime here; a store fact survives the
+             ;; trip unchanged.
              (is (= before-a (file-facts ws-a))
                  "re-adding is a row write too: not one byte moved either way")
-             (is (pos? (:bytes (session remove-dir-a "rm-a"))))
-             (is (= (.length (log-file-for "rm-a")) (:bytes (session remove-dir-a "rm-a"))))))
+             (is (= sent-a (:lastSentAt (session remove-dir-a "rm-a"))))))
          (testing "and so does the pair where one of them never ran"
            (is (= 2 (:adopted (read-json (add! remove-dir-b)))))
            (is (= #{"rm-other" "rm-never-run"}
                   (set (map :threadId (:sessions (project remove-dir-b))))))
-           (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
-               "still no log facts -- null, which is not a zero-byte file")
-           (is (pos? (:bytes (session remove-dir-b "rm-other")))))
+           (is (nil? (:lastSentAt (session remove-dir-b "rm-never-run")))
+               "still no time -- nothing was ever sent to it")
+           (is (integer? (:lastSentAt (session remove-dir-b "rm-other")))))
 
          (testing "and the history is intact -- the same file rebuilds the conversation"
            ;; The ticket's last promise, and the one a "tidy up while we are here"
@@ -2332,6 +3235,170 @@
              (is (seq (:messages reply))
                  "the conversation came back out of the file the removal left alone"))))))))
 
+(def ^:private task-dir
+  (support/temp-dir "http-tasks"))
+
+(def ^:private task-dir-2
+  (support/temp-dir "http-tasks-2"))
+
+
+(deftest a-task-is-a-session-with-no-project-and-no-memory
+  ;; Ticket 01: the sidebar's second half. Two different questions live here, and
+  ;; they are answered by two different owners -- WHICH conversations are tasks (the
+  ;; store's `project/tasks`, one WHERE clause) and WHERE a task's log facts come
+  ;; from (the tree's, by stem, because a task has no project to derive a workspace
+  ;; from).
+  ;;
+  ;; Every case below is a way of getting it wrong that LOOKS right: treating any
+  ;; unbound row as a task (removing a project would empty its sessions into the task
+  ;; list), registering a conversation that already belongs somewhere (which would
+  ;; unbind it), or reading a task's size out of projects/.unbound (which would say
+  ;; 'no log yet' about a conversation whose log is sitting in a project workspace).
+  (wipe-dir! task-dir)
+  (wipe-dir! task-dir-2)
+  (with-server
+   {"task-ran" script}
+   (fn []
+     (let [bind! (fn [tid dir]
+                   (api-call :post "/api/project"
+                             (json/write-str {:threadId tid :dir dir})))
+           remove! (fn [dir]
+                     (api-call :post
+                               (str "/api/projects/"
+                                    (java.net.URLEncoder/encode (.getCanonicalPath (io/file dir)) "UTF-8")
+                                    "/remove")
+                               nil))]
+       (testing "one snapshot carries BOTH halves, and both keys are always there"
+         (let [listing (sidebar-listing)]
+           (is (contains? listing :projects))
+           (is (contains? listing :tasks) "an empty list, not a missing key")
+           (is (vector? (:tasks listing)))))
+       (testing "registering a conversation makes it a TASK, before a word is typed"
+         (let [resp (register-session! "task-a")]
+           (is (= 200 (.statusCode resp)))
+           (is (= "task-a" (:threadId (read-json resp))) "the id it was handed, back")
+           (is (task? "task-a"))
+           (is (= [] (projects-holding "task-a")) "in no project: that is what a task is")
+           (let [row (listed-row "task-a")]
+             (is (false? (:archived row)))
+             (is (false? (:running row)))
+             (is (nil? (:bytes row)) "no log yet -- null, which is not a zero-byte file")
+             (is (nil? (:lastActivity row))))))
+       (testing "registering the SAME conversation again answers the same row"
+         ;; Both callers can race themselves: the button registers an id it just
+         ;; minted, and a second turn of the same conversation registers it again.
+         (is (= 200 (.statusCode (register-session! "task-a"))))
+         (is (= 1 (count (filter #(= "task-a" (:threadId %)) (listed-tasks))))))
+       (testing "registering a conversation that already has a project leaves it alone"
+         ;; The verb is 'exist', not 'be a task': it must be safe to say about a
+         ;; conversation that belongs somewhere, or a caller would have to know.
+         (is (= 200 (.statusCode (bind! "task-bound" task-dir))))
+         (is (= 200 (.statusCode (register-session! "task-bound"))))
+         (is (not (task? "task-bound")))
+         (is (= [(.getCanonicalPath (io/file task-dir))] (projects-holding "task-bound"))
+             "still bound to its directory -- registering does not unbind anybody"))
+       (testing "a body that is not JSON registers nothing"
+         (is (= 400 (.statusCode (api-call :post "/api/sessions" "{not json"))))
+         (is (not-any? #(= "" (:threadId %)) (listed-tasks))
+             "in particular the empty id is not a conversation"))
+       (testing "and a body that names no conversation is GIVEN one"
+         ;; TICKET 03: the id is the server's to mint. A conversation is named here,
+         ;; by the process that keeps it, so a new task is one request instead of the
+         ;; page inventing a name in a namespace it does not own -- and the ANSWER is
+         ;; the name to use from then on.
+         (let [resp   (register-session! nil)
+               minted (:threadId (read-json resp))]
+           (is (= 200 (.statusCode resp)))
+           (is (string? minted) "the answer names the conversation")
+           (is (not= "" minted))
+           (is (task? minted) "a task, before a word has been typed")
+           (is (some #(= minted (:threadId %)) (listed-tasks))
+               "and the row is in the same listing the sidebar reads")))
+
+       (testing "a registered conversation that RUNS gets its figures from the log"
+         ;; TICKET 03 CHANGED WHAT THIS CASE IS ABOUT. It used to be "a conversation
+         ;; that RUNS becomes a session of this home" -- because the run edge quietly
+         ;; registered whatever id arrived. That silent create is gone: the run refuses
+         ;; an id this home does not know by name, and the registration is a step of its
+         ;; own (`post-run` makes it here, as the page does before it can send anything).
+         ;; What is left to assert is the half that never changed: WHERE a task's row
+         ;; facts come from -- the tree, by stem, because a task has no project to
+         ;; derive a workspace from.
+         (is (= "RUN_FINISHED"
+                (:type (last (wire/frames-from-sse (.body (post-run "task-ran")))))))
+         (is (task? "task-ran"))
+         (let [f (log-file "task-ran")]
+           ;; The returned side of the message record lands AFTER the terminal
+           ;; frame, so the size is measured once the writer is done.
+           (wait-for-recorded
+            f
+            (fn [ls] (and (some #(= "message" (replay/kind %)) ls)
+                          (some #(and (= "event" (replay/kind %))
+                                      (frames/terminal? (replay/payload %)))
+                                ls)))
+            5000)
+           (let [row (listed-row "task-ran")]
+             (is (integer? (:lastSentAt row)) "the run stamped the send")
+             (is (= "看看这个项目" (:firstUserText row))
+                 "and named the session from the first message it carried"))))
+
+       (testing "a jsonl nobody owns is NOT a task -- the store decides, not the tree"
+         ;; The store's rule, the one the whole sidebar rests on: a file in the tree
+         ;; that nothing ever asked to keep is not a conversation this interface
+         ;; lists. GET /api/threads still shows it to anyone diagnosing.
+         (spit (log-file "nobody-owns-this") "{}")
+         (is (not (task? "nobody-owns-this")))
+         (is (some #(= "nobody-owns-this" (:threadId %))
+                   (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))))
+
+       (testing "a session released on purpose IS a task, and it keeps every fact it had"
+         ;; `bind! id nil` is not reachable over HTTP (the route refuses a blank dir),
+         ;; so this goes through the verb the route wraps. What it leaves behind is
+         ;; the interesting part: the log does NOT move, so the file stays in the PROJECT's
+         ;; workspace while the session stops having a project -- and a row that READ THE
+         ;; TREE would have to know where to look (`.unbound` would tell it 'no log yet'
+         ;; about a conversation whose log is right there). A row that reads the STORE
+         ;; has nothing to get wrong, which is the point of this whole change.
+         (is (= 200 (.statusCode (bind! "task-released" task-dir))))
+         (post-run "task-released")
+         (project/bind! "task-released" nil)
+         (let [f (home/log-file (workspace-of (.getCanonicalPath (io/file task-dir)))
+                                "task-released")]
+           (is (.exists f) "releasing a session is not a file operation")
+           (is (task? "task-released"))
+           (is (= [] (projects-holding "task-released")))
+           (let [row (listed-row "task-released")]
+             (is (= "task-released" (:threadId row)))
+             (is (and (= "看看这个项目" (:firstUserText row))
+                      (integer? (:lastSentAt row)))
+                 "the facts it earned while bound, kept after the release"))))
+
+       (testing "a session released by REMOVING ITS PROJECT is not a task"
+         ;; It remembers where it was -- that memory is what re-adding the directory
+         ;; matches on -- so it is waiting for its project, not a conversation
+         ;; without one.
+         (is (= 200 (.statusCode (bind! "task-orphan" task-dir-2))))
+         (is (= 200 (.statusCode (remove! task-dir-2))))
+         (is (not (task? "task-orphan")))
+         (is (= [] (projects-holding "task-orphan")) "listed nowhere, as it was before this feature")
+         (is (= 1 (:adopted (read-json (api-call :post "/api/projects"
+                                                  (json/write-str {:dir task-dir-2}))))))
+         (is (= [(.getCanonicalPath (io/file task-dir-2))] (projects-holding "task-orphan"))
+             "and adding the directory back brings it home"))
+
+       (testing "a task whose stem has TWO logs is still ONE row -- the store counts sessions"
+         (register-session! "task-two-logs")
+         (bind! "task-two-logs" task-dir)
+         (project/bind! "task-two-logs" nil)
+         (spit (log-file "task-two-logs") "{}")
+         (let [row (listed-row "task-two-logs")]
+           (is (= "task-two-logs" (:threadId row)))
+           (is (nil? (:lastSentAt row)) "nothing was ever sent to it"))
+         (let [resp (api-call :post "/api/threads/task-two-logs/rebuild" "")]
+           (is (= 404 (.statusCode resp))
+               "the door that must pick one conversation still refuses")
+           (is (str/includes? (:error (read-json resp)) "2 logs"))))
+       ))))
 (deftest adding-a-project-makes-a-project-with-no-session
   ;; Ticket 05's other half. Without this verb the ONLY way to get a project was
   ;; to bind a session to a directory -- backwards for a product whose sessions
@@ -2345,8 +3412,7 @@
              named (fn [dir]
                      (let [want (last (str/split (.getCanonicalPath (io/file dir)) #"/"))]
                        (first (filterv #(= want (last (str/split (:path %) #"/")))
-                                       (json/read-str (.body (api-call :get "/api/projects" nil))
-                                                      :key-fn keyword)))))]
+                                       (listed-projects)))))]
          (testing "a real directory becomes a project with NO sessions in it"
            (let [resp  (add! adir)
                  reply (read-json resp)]
@@ -2363,9 +3429,7 @@
                  second-id (:projectId (read-json (add! adir)))]
              (is (= first-id second-id) "find-or-create, keyed on the canonical path")
              (is (= 1 (count (filterv #(= (.getCanonicalPath (io/file adir)) (:path %))
-                                      (json/read-str
-                                       (.body (api-call :get "/api/projects" nil))
-                                       :key-fn keyword)))))))
+                                      (listed-projects)))))))
          (testing "a different SPELLING of the same directory is still the same project"
            ;; The whole point of keying on the canonical form: `dir/.` is the same
            ;; directory, and a person typing it must not get a second project.
@@ -2560,11 +3624,9 @@
   (let [tid  "old-logs-thread"
         old  (io/file (home/root) "logs")
         file (io/file old (str tid ".jsonl"))
-        body (str (json/write-str
-                   {:ts 1 :runId "r0" :kind "input"
-                    :payload {:threadId tid :runId "r0"
-                              :messages [{:id "u1" :role "user" :content "old"}]
-                              :tools [] :context []}})
+        body (str (row-json
+                   {:ts 1 :runId "r0" :kind "message" :source "client" :id "u1"
+                    :payload {:role "user" :content "old"}})
                   "\n")]
     (.mkdirs old)
     (spit file body :encoding "UTF-8")
@@ -2603,17 +3665,13 @@
              frames  (vec (mapcat (ag/outbound tid "r1")
                                   [(ev/run-start)
                                    (ev/tool-call "c1" "read" "{}")]))
-             records #(mapv (fn [l] (json/read-str l :key-fn keyword))
+             records #(replay/lines->records
                             (str/split-lines (slurp f :encoding "UTF-8")))]
          (.mkdirs (.getParentFile f))          ; the writer creates it; a fixture must not assume
          (spit f (str (str/join "\n"
-                                (concat [(json/write-str
-                                          {:ts 1 :runId "r1" :kind "input"
-                                           :payload {:threadId tid :runId "r1"
-                                                     :messages [{:id "u1" :role "user" :content "hi"}]
-                                                     :tools [] :context []}})]
+                                (concat (action-rows 1 "r1" [{:id "u1" :role "user" :content "hi"}])
                                         (map (fn [frame]
-                                               (json/write-str
+                                               (row-json
                                                 {:ts 2 :runId "r1" :kind "event"
                                                  :payload frame}))
                                              frames)))
@@ -2624,31 +3682,27 @@
            (is (= 200 (.statusCode resp)) "a log one frame short of readable is not a refusal")
            (is (seq (:messages reply)))
            (testing "the record says who closed it, and what was appended"
-             (let [kinds   (mapv :kind (records))
-                   closing (first (filter #(= "session/closed-off" (:kind %)) (records)))]
+             (let [kinds   (mapv replay/kind (records))
+                   closing (first (filter #(= "session/closed-off" (replay/kind %)) (records)))]
                (is (= 1 (count (filter #(= "session/closed-off" %) kinds))))
                (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
                        :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
-                      (:payload closing)))
+                      (replay/payload closing)))
                (testing "and the frames follow it, the terminal frame last"
                  (is (= ["session/closed-off" "event" "event" "session/rebuilt"]
-                        (mapv :kind (take-last 4 (records)))))
+                        (mapv replay/kind (take-last 4 (records)))))
                  (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
                         (->> (records)
-                             (filter #(= "event" (:kind %)))
+                             (filter #(= "event" (replay/kind %)))
                              (take-last 2)
-                             (mapv #(get-in % [:payload :type]))))))))
+                             (mapv #(get-in (replay/payload %) [:type]))))))))
            (testing "so the next reader gets a whole conversation"
              (is (seq (replay/lines->messages (str/split-lines (slurp f :encoding "UTF-8"))))))))
        (testing "and a second rebuild appends nothing: the log closed once"
          (let [tid (str "trunc2-" (java.util.UUID/randomUUID))
                f   (log-file tid)]
            (.mkdirs (.getParentFile f))
-           (spit f (str (json/write-str
-                         {:ts 1 :runId "r1" :kind "input"
-                          :payload {:threadId tid :runId "r1"
-                                    :messages [{:id "u1" :role "user" :content "hi"}]
-                                    :tools [] :context []}})
+           (spit f (str (str/join "\n" (action-rows 1 "r1" [{:id "u1" :role "user" :content "hi"}]))
                         "\n")
                  :encoding "UTF-8")
            (let [first-lines (count (str/split-lines (slurp f :encoding "UTF-8")))]
@@ -2671,20 +3725,15 @@
        ;; closed and the conversation comes back.
        (let [tid   (str "trunc-earlier-" (java.util.UUID/randomUUID))
              f     (log-file tid)
-             input (fn [ts run-id]
-                     (json/write-str
-                      {:ts ts :runId run-id :kind "input"
-                       :payload {:threadId tid :runId run-id
-                                 :messages [{:id "u1" :role "user" :content "hi"}]
-                                 :tools [] :context []}}))
+             input (fn [ts run-id] (action-rows ts run-id [{:id "u1" :role "user" :content "hi"}]))
              frames (fn [ts run-id evs]
                       (map (fn [frame]
-                             (json/write-str {:ts ts :runId run-id :kind "event" :payload frame}))
+                             (row-json {:ts ts :runId run-id :kind "event" :payload frame}))
                            (mapcat (ag/outbound tid run-id) evs)))
-             log-lines (concat [(input 1 "r1")]
+             log-lines (concat (input 1 "r1")
                                (frames 2 "r1" [(ev/run-start)
                                                (ev/tool-call "c1" "read" "{}")])
-                               [(input 3 "r2")]
+                               (input 3 "r2")
                                (frames 4 "r2" [(ev/run-start)
                                                (ev/text-delta "继续")
                                                (ev/run-end)]))]
@@ -2692,22 +3741,22 @@
          (spit f (str (str/join "\n" log-lines) "\n") :encoding "UTF-8")
          (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)
-               rs    (mapv #(json/read-str % :key-fn keyword)
+               rs    (replay/lines->records
                            (str/split-lines (slurp f :encoding "UTF-8")))]
            (is (= 200 (.statusCode resp)) "a log the repair can close is not a refusal")
            (is (seq (:messages reply)))
            (testing "the closed line names r1 -- the run that never ended"
-             (let [closing (first (filter #(= "session/closed-off" (:kind %)) rs))]
+             (let [closing (first (filter #(= "session/closed-off" (replay/kind %)) rs))]
                (is (some? closing))
                (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
                        :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
-                      (:payload closing)))))
+                      (replay/payload closing)))))
            (testing "and the frames appended for it carry ITS run id"
              (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
                     (->> rs
-                         (filter #(and (= "r1" (:runId %)) (= "event" (:kind %))))
+                         (filter #(and (= "r1" (:runId %)) (= "event" (replay/kind %))))
                          (take-last 2)
-                         (mapv #(get-in % [:payload :type]))))
+                         (mapv #(get-in (replay/payload %) [:type]))))
                  "how a reader pairs the appended terminal with the run it ended"))
            (testing "so the next reader gets a whole conversation"
              (is (seq (replay/lines->messages
@@ -2737,11 +3786,9 @@
              two  (home/log-file (io/file (home/projects-dir)
                                           (home/sanitize (.getCanonicalPath (io/file project-dir))))
                                  tid)
-             line (json/write-str
-                   {:ts 1 :runId "r1" :kind "input"
-                    :payload {:threadId tid :runId "r1"
-                              :messages [{:id "u1" :role "user" :content "hi"}]
-                              :tools [] :context []}})]
+             line (row-json
+                   {:ts 1 :runId "r1" :kind "message" :source "client" :id "u1"
+                    :payload {:role "user" :content "hi"}})]
          (.mkdirs (.getParentFile ^java.io.File two))
          (spit one (str line "\n") :encoding "UTF-8")
          (spit two (str line "\n") :encoding "UTF-8")
@@ -2765,11 +3812,15 @@
   [{:content "done"}])
 
 
-(deftest an-opening-block-reaches-the-model-and-never-the-client
-  ;; The whole shape, through the real edge: the instruction files and the skills
-  ;; catalog are in the RUN's message record (the model reads them) and absent
-  ;; from every AG-UI frame (the client never does). "The front end shows
-  ;; nothing" is not a filtering decision anywhere -- it is this.
+(deftest an-opening-block-reaches-the-model-and-the-client-can-see-it
+  ;; The whole shape, through the real edge, AFTER `.scratch/session-opening`: the
+  ;; instruction files and the skills catalog are part of what the CONVERSATION was
+  ;; born with -- they are written into it once, in front of the question, and every
+  ;; later run continues from them. A person still sees each one as an
+  ;; injected-context card, but the card now travels with that entry rather than being
+  ;; re-emitted as a CUSTOM frame on every run; what a frame carries is what a run
+  ;; DERIVED for itself (here: the skill body the model asked for). The card is a
+  ;; `data` part, which the client's outgoing conversion never sends back.
   ;;
   ;; BOTH HOMES ARE THIS TEST'S OWN (support/with-temp-env): the conventions go in a
   ;; temp OS home and the project in a temp root, so nothing is planted in the pair
@@ -2795,34 +3846,110 @@
                frames    (wire/frames-from-sse resp)
                lines     (wait-for-recorded
                           (log-file-for "it-skills")
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "followed it" (get-in % [:payload :content])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "followed it" (get-in (replay/payload %) [:content])))
                                          ls))
                           2000)
-               texts     (mapv #(str (get-in % [:payload :content]))
-                               (filter #(= "message" (:kind %)) lines))
+               texts     (mapv #(str (get-in (replay/payload %) [:content]))
+                               (filter #(= "message" (replay/kind %)) lines))
                wire-text (json/write-str frames)]
 
-           (testing "the model is handed the rules and then the catalog, in that order"
-             (let [user-texts (mapv #(get-in % [:payload :content])
-                                    (filter #(and (= "message" (:kind %))
-                                                  (= "user" (get-in % [:payload :role])))
-                                            lines))]
-               (is (str/includes? (first user-texts) "STANDING RULE"))
-               (is (str/includes? (second user-texts) "PROJECT RULE"))
-               (is (str/starts-with? (nth user-texts 2) "<skills>"))
-               (is (str/includes? (nth user-texts 2) "- alpha: alpha does a thing"))))
+            (testing "the order the model reads is: the question, then the opening"
+              ;; THE QUESTION COMES FIRST (ticket 03 of `.scratch/session-opening`): the
+              ;; opening is written into the conversation at its birth and read by every
+              ;; run after it -- ONE TIME, which is the half that mattered -- but it is
+              ;; written BEHIND the question that caused it, which is the order
+              ;; `.scratch/context-frames` decision 7 and `CONTEXT.md`'s 注入 entry
+              ;; state. Ticket 01 of this feature had it in front of the question; this
+              ;; ticket is the correction. Per-run material (the skill body the model
+              ;; asks for) still lands behind the whole conversation.
+              ;; The reading is by TEXT because an opening entry carries parts (a card for
+              ;; the screen, this text for the model).
+              (let [reading    (fn [content]
+                                 (if (sequential? content)
+                                   (str/join "\n" (keep :text content))
+                                   (str content)))
+                    user-texts (mapv #(reading (get-in (replay/payload %) [:content]))
+                                     (filter #(and (= "message" (replay/kind %))
+                                                   (= "user" (get-in (replay/payload %) [:role])))
+                                             lines))]
+                (is (str/includes? (first user-texts) "看看这个项目")
+                    "the person's own words open the conversation")
+                (is (str/includes? (second user-texts) "STANDING RULE")
+                    "then the OS home's rules")
+                (is (str/includes? (nth user-texts 2) "PROJECT RULE")
+                    "then the project's -- the more specific statement is the nearer one")
+                (is (str/starts-with? (nth user-texts 3) "<skills>"))
+                (is (str/includes? (nth user-texts 3) "- alpha: alpha does a thing")
+                    "and the catalog is the last thing the opening says")))
 
            (testing "loading it mid-run puts the BODY into the conversation"
              (is (some #(and (str/includes? % "ALPHA BODY")
                              (str/starts-with? % "<skill name=\"alpha\">"))
                        texts)))
 
-           (testing "and not one frame carries any of it -- a client cannot draw what it never receives"
-             (is (not (str/includes? wire-text "STANDING RULE")))
-             (is (not (str/includes? wire-text "PROJECT RULE")))
-             (is (not (str/includes? wire-text "ALPHA BODY")))
-             (is (not (str/includes? wire-text "- alpha:"))))
+           (testing "the opening is on the wire TOO, as the CONVERSATION this run wrote"
+             ;; WHY IT IS HERE AT ALL: the page that MINTED this session holds no window
+             ;; and follows no feed, so the run that wrote the opening is the only wire
+             ;; those messages can arrive on -- without them that page draws the question
+             ;; and nothing else. AND WHY IT IS A MESSAGE LIST: a card frame is a PART,
+             ;; and the adapter hangs a part on the message it is streaming (`CUSTOM`'s
+             ;; `messageId` is dropped on the way in, by the parser and by the aggregator
+             ;; alike), so a card for a message the client never held lands under the
+             ;; answer. A `MESSAGES_SNAPSHOT` carries the messages themselves
+             ;; (`ag-ui/conversation-snapshot`).
+             (let [cards    (filterv #(and (= "CUSTOM" (:type %))
+                                           (= "injected-context" (:name %)))
+                                     frames)
+                   derived  (filterv #(re-find #"-ctx\d+$" (str (:messageId %))) cards)
+                   snapshot (first (filter #(= "MESSAGES_SNAPSHOT" (:type %)) frames))
+                   messages (:messages snapshot)
+                   opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
+                                     messages)
+                   ;; THE SNAPSHOT'S MESSAGES ARE PROJECTED (text, not parts): the wire's
+                   ;; schema takes no `data` part, so this reads the entry's text either way.
+                   text-of  (fn [m] (let [c (:content m)]
+                                      (if (sequential? c)
+                                        (str/join "\n" (keep :text c))
+                                        (str c))))
+                   card-text (fn [card] (str (get-in card [:value :text])))]
+               (is (= 1 (count cards))
+                   "the only CUSTOM card is the body this run derived for itself")
+               (is (str/includes? (card-text (first derived)) "ALPHA BODY"))
+               (is (some? snapshot) "and the birth's opening rides as a snapshot")
+               (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
+                      (mapv :id opening))
+                   "one message per entry, under the entry's OWN id, in the order the model read them")
+               (is (some #(= "看看这个项目" (:content %))
+                         (filter #(= "user" (:role %)) messages))
+                   "and the person's own message is in it, in front of the opening")
+               (is (str/includes? (text-of (first opening)) "STANDING RULE"))
+               (is (str/includes? (text-of (nth opening 1)) "PROJECT RULE"))
+               (is (str/starts-with? (text-of (nth opening 2)) "<skills>"))
+               (is (str/includes? (text-of (nth opening 2)) "- alpha: alpha does a thing")
+                   "the text is the same bytes the model read -- the other reading of one entry")))
+
+            (testing "while the opening is the SESSION's own -- one entry per block, card and all"
+              ;; WHERE A PERSON SEES IT. The entry carries the same `data` part a frame
+              ;; does (`injected-part-name`), so the page draws the same card; the model
+              ;; view drops that part and keeps the text (`sessions/model-view`). The ids
+              ;; are FIXED, so a session born twice owns one opening rather than two.
+              (let [messages (:messages (read-json
+                                         (api-call :get "/api/threads/it-skills/sofar" nil)))
+                    opening  (filterv ag/opening-entry? messages)]
+                (is (= 3 (count opening))
+                    "the two instruction files and the catalog are the session's opening")
+                (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
+                       (mapv :id opening)))
+                (is (every? #(= "injected-context" (get-in % [:content 0 :name])) opening))
+                (is (str/includes? (str (get-in (first opening) [:content 0 :data :text]))
+                                   "STANDING RULE")
+                    "the card carries the bytes the model read")
+                (is (= "看看这个项目"
+                       (:content (first (filter #(and (= "user" (:role %))
+                                                      (not (ag/opening-entry? %)))
+                                                messages))))
+                    "and the person's own message is an entry of its own, IN FRONT of the opening")))
 
            (testing "the skill call itself IS on the wire, as an ordinary tool card"
              (is (some #(= "skill" (:toolCallName %))
@@ -2939,12 +4066,15 @@
         (project/bind! "it-picker" nil)
         (support/wipe-tree! proj))))))
 
-(deftest a-slash-load-reaches-the-model-and-never-the-client
+(deftest a-slash-load-reaches-the-model-and-is-a-card-in-the-conversation
   ;; The SECOND source of an injected body, asserted at the edge for the reason the
-  ;; first one is: "the client never sees it" is nowhere a filter -- it is the
-  ;; absence of a frame -- and a new way for a body to enter is exactly what could
-  ;; reintroduce one. The provider here is scripted with NO tool call, so anything
-  ;; in the conversation got there because a person typed it.
+  ;; first one is: what the client HOLDS is decided by which frames go out, and a new
+  ;; way for a body to enter is exactly what could put one in the conversation. IT USED
+  ;; TO SAY "AND NEVER THE CLIENT" (there was no frame at all): since 2026-09-18 a body
+  ;; is an injected-context CUSTOM frame -- so it is SEEN, and the assertion that
+  ;; matters is that no OTHER frame carries it (the card is a `data` part, which
+  ;; `toAgUiMessages` does not send back). The provider here is scripted with NO tool
+  ;; call, so anything in the conversation got there because a person typed it.
   (support/with-temp-env
    [_root home]
    (let [proj      (support/temp-dir "http-slash")
@@ -2959,18 +4089,17 @@
        "it-slash" slash-script
        (fn []
          (let [resp      (.body (post-run "it-slash"
-                                          {:messages [{:id "u1" :role "user"
+                                          {:append [{:id "u1" :role "user"
                                                        :content "/alpha fix the bug"}]}))
                frames    (wire/frames-from-sse resp)
                lines     (wait-for-recorded
                           (log-file-for "it-slash")
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "done" (get-in % [:payload :content])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "done" (get-in (replay/payload %) [:content])))
                                          ls))
                           2000)
-               texts     (mapv #(str (get-in % [:payload :content]))
-                               (filter #(= "message" (:kind %)) lines))
-               wire-text (json/write-str frames)]
+               texts     (mapv #(str (get-in (replay/payload %) [:content]))
+                               (filter #(= "message" (replay/kind %)) lines))]
 
            (testing "the person's own words reach the model exactly as typed"
              ;; NOT asserted against the frames: the client sent those words, so
@@ -2986,9 +4115,48 @@
                              (str/starts-with? % "<skill name=\"alpha\">"))
                        texts)))
 
-           (testing "and not one frame carries it -- same invisibility as the tool's load"
-             (is (not (str/includes? wire-text "ALPHA BODY")))
-             (is (not (str/includes? wire-text "<skill name="))))
+            (testing "and it is a CARD -- one CUSTOM frame, carrying exactly those bytes"
+              ;; THE `/name` PATH'S HALF OF THE FEATURE, and the one a person actually sees:
+              ;; the trigger is still the message they typed, the body is behind it, and the
+              ;; card is how a reader learns the model was handed it at all. IT IS THE EDGE'S
+              ;; OWN FRAME here (the ask that pulled the body is in the history the client
+              ;; sent, so the body is folded in before the first call) -- hence `-pre<i>`,
+              ;; where the kernel's mid-run splices are `-ctx<n>`.
+              ;;
+              ;; THE SESSION'S OPENING RIDES AS THE CONVERSATION HERE TOO, and that is
+              ;; the other half of the fix: this run BIRTHS the conversation, and the page
+              ;; that minted it follows no feed -- so the messages the birth wrote travel
+              ;; with this run's start (`ag-ui/conversation-snapshot`). The CATALOG is not
+              ;; a derived card any more (it is the opening entry the conversation was born
+              ;; with), which is what the two assertions below now say separately.
+              (let [cards    (filterv #(and (= "CUSTOM" (:type %))
+                                            (= "injected-context" (:name %)))
+                                      frames)
+                    derived  (filterv #(re-find #"-pre\d+$" (str (:messageId %))) cards)
+                    snapshot (first (filter #(= "MESSAGES_SNAPSHOT" (:type %)) frames))
+                    opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
+                                      (:messages snapshot))
+                    texts    (mapv #(str (get-in % [:value :text])) derived)
+                    body     (first (filter #(str/starts-with? % "<skill name=\"alpha\">")
+                                            texts))]
+                (is (= 1 (count derived))
+                    "the body the person asked for -- and nothing else this run derived")
+                (is (some? body))
+                (is (str/includes? (str body) "ALPHA BODY"))
+                (is (= ["session-opening-0"] (mapv :id opening))
+                    "and the birth's own opening, as the message the entry is")
+                (is (str/starts-with? (if (sequential? (:content (first opening)))
+                                        (str/join "\n" (keep :text (:content (first opening))))
+                                        (str (:content (first opening))))
+                                      "<skills>"))))
+
+            (testing "and no OTHER frame carries it -- the card is the only way out"
+              (let [others  (remove #(and (= "CUSTOM" (:type %))
+                                          (= "injected-context" (:name %)))
+                                    frames)
+                    as-text (json/write-str others)]
+                (is (not (str/includes? as-text "ALPHA BODY")))
+                (is (not (str/includes? as-text "<skill name=")))))
 
            (testing "no skill tool call happened -- nothing asked the model for anything"
              (is (not-any? #(= "skill" (:toolCallName %))
@@ -3018,29 +4186,39 @@
       (with-server
        "it-slash-side" [{:content "first"} {:content "second"}]
        (fn []
-         (post-run "it-slash-side" {:messages [ask]})
+         (post-run "it-slash-side" {:append [ask]})
          ;; Wait for the FIRST run to be written through its returned side before sending
          ;; the second: the second run's input has to land after that tail in the file.
          (wait-for-recorded (log-file-for "it-slash-side")
-                            (fn [ls] (some #(and (= "message" (:kind %))
-                                                 (= "first" (get-in % [:payload :content])))
+                            (fn [ls] (some #(and (= "message" (replay/kind %))
+                                                 (= "first" (get-in (replay/payload %) [:content])))
                                            ls))
                             2000)
-         (post-run "it-slash-side"
-                   {:messages [ask {:id "a1" :role "assistant" :content "first"}
-                               {:id "u2" :role "user" :content "and another thing"}]})
-         (let [records (wait-for-recorded
+         ;; THE SECOND RUN'S OWN FRAMES: this run loaded nothing -- the ask that pulled the
+         ;; body is still in the client's history, so the edge folds the body in before the
+         ;; first call. Its cards are what the last block below reads.
+         (let [frames2 (wire/frames-from-sse
+                              (.body (post-run "it-slash-side"
+                                               ;; ONLY WHAT THIS ACTION ADDS (ticket 03). The
+                                               ;; ask that pulled the body is in the SESSION's
+                                               ;; history -- it was appended by run one -- so
+                                               ;; the edge still folds the body in before this
+                                               ;; run's first call, which is what the blocks
+                                               ;; below are about. Sending the ask again would
+                                               ;; be sending what the server already holds.
+                                               {:append [{:id "u2" :role "user" :content "and another thing"}]})))
+               records (wait-for-recorded
                         (log-file-for "it-slash-side")
-                        (fn [ls] (some #(and (= "message" (:kind %))
-                                             (= "second" (get-in % [:payload :content])))
+                        (fn [ls] (some #(and (= "message" (replay/kind %))
+                                             (= "second" (get-in (replay/payload %) [:content])))
                                        ls))
                         2000)
-               text-of (fn [r] (str (get-in r [:payload :content])))
-               body?   (fn [r] (and (= "message" (:kind r))
-                                    (= "user" (get-in r [:payload :role]))
+               text-of (fn [r] (str (get-in (replay/payload r) [:content])))
+               body?   (fn [r] (and (= "message" (replay/kind r))
+                                    (= "user" (get-in (replay/payload r) [:role]))
                                     (str/starts-with? (text-of r) "<skill name=\"alpha\">")))
-               input?  (fn [r] (= "input" (:kind r)))
-               event?  (fn [r] (= "event" (:kind r)))
+               input?  (fn [r] (and (= "message" (replay/kind r)) (= "client" (:source r))))
+               event?  (fn [r] (= "event" (replay/kind r)))
                i2      (second (keep-indexed (fn [i r] (when (input? r) i)) records))
                e2      (first (keep-indexed (fn [i r] (when (and (event? r) (> i i2)) i))
                                            records))]
@@ -3049,17 +4227,59 @@
              (is (empty? (filter body? (subvec records e2)))
                  "and it is NOT filed past the split, as if the kernel had added it"))
 
+            (testing "and the body this run did NOT load is a card too -- it opened with it"
+              ;; THE RUN THE KERNEL CANNOT SPEAK FOR. This one loaded nothing: the body is
+              ;; folded in by the EDGE, before the first call, because the ask that pulled it
+              ;; is still in the client's history. The kernel's own step then finds it already
+              ;; there and adds nothing, so without the edge taking the same diff the model
+              ;; would be reading a body that no card in the conversation column accounted for.
+              ;;
+              ;; ONE CARD, AND IT IS THE BODY: the catalog is the opening entry the
+              ;; conversation was born with (drawn from the session, not from a frame here),
+              ;; and this run's own injection is the body. Ids are the run's own, so a
+              ;; refresh rebuilds the same cards under the same names.
+              (let [cards (filter #(and (= "CUSTOM" (:type %))
+                                        (= "injected-context" (:name %)))
+                                  frames2)
+                    card-texts (mapv #(str (get-in % [:value :text])) cards)]
+                (is (= 1 (count cards)))
+                (is (str/starts-with? (first card-texts) "<skill name=\"alpha\">"))
+                (is (str/includes? (first card-texts) "ALPHA BODY"))
+                (is (every? #(re-find #"-pre\d+$" (str (:messageId %))) cards)
+                    (str "named by the run and the place among the injections it started"
+                         " with -- `-pre`, never the kernel's `-ctx` (two families counting"
+                         " from zero would fold two cards into one)"))
+                (is (= (count (map :messageId cards))
+                       (count (distinct (map :messageId cards))))
+                    "and no two of a run's injection cards share an id")
+                (let [types   (mapv :type frames2)
+                      custom  (.indexOf types "CUSTOM")
+                      spoken  (.indexOf types "TEXT_MESSAGE_START")]
+                  (is (and (<= 0 custom) (< custom spoken))
+                      "and they are out with the run's start, before anything the model said")))
+
            (testing "the trajectory then draws the ask's turn carrying it, and nothing else"
+             ;; THE ORDER THE VIEW DRAWS IS THE ORDER THE MODEL READ: the question first
+             ;; (ticket 03: the opening sits BEHIND it, `.scratch/session-opening`), then
+             ;; the session's opening -- here the catalog -- and the body the ask pulled
+             ;; in, both of them as context. One `context` kind and no source: WHERE a
+             ;; block sat stopped being a fact when the injections stopped all sitting in
+             ;; one place.
              (let [turns (:turns (trajectory/records->trajectory (vec records)))
                    ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
                (is (= 2 (count turns)))
-               (is (= ["system" "context" "user" "context" "assistant"]
-                      (mapv :kind (:items (first turns)))))
-               (is (= ["opening" "run"] (mapv :source (ctx (first turns))))
-                   "the catalog, then the body where the ask put it")
+               (is (= ["system" "user" "context" "context" "assistant"]
+                      (mapv :kind (:items (first turns))))
+                   "the ask, then the two blocks the model read behind it")
+               (is (some #(str/includes? (str (:text %)) "<skills>") (ctx (first turns)))
+                   "the catalog")
+               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx (first turns)))
+                   "the body the ask pulled in, both of them as the bytes they are")
+               (is (every? #(nil? (:source %)) (mapcat ctx turns))
+                   "and neither of them claims to have come from a place")
                (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
                    "no context this run did not carry -- and the client's own message is not
-                    drawn as one instead"))))))
+                    drawn as one instead")))))))
       (finally
         (project/bind! "it-slash-side" nil)
         (support/wipe-tree! proj))))))
@@ -3083,7 +4303,7 @@
 (defn- log-lines-for
   "Every line of THREAD-ID's log, in order, read from wherever its log IS."
   [tid]
-  (mapv #(json/read-str % :key-fn keyword)
+  (replay/lines->records
         (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))))
 
 (deftest the-choices-endpoint-offers-the-catalog-and-no-secret
@@ -3234,16 +4454,16 @@
            (is (= "side" (str/trim (:out (shell/run {:command "git rev-parse --abbrev-ref HEAD"
                                                     :dir git-repo})))))))
        (testing "and the audit line records the move, before -> after"
-         (let [lines (filterv #(= "git/branch" (:kind %)) (log-lines-for id))]
+         (let [lines (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))]
            (is (= 1 (count lines)))
-           (is (= "main" (get-in (first lines) [:payload :before])))
-           (is (= "side" (get-in (first lines) [:payload :after])))))
+           (is (= "main" (get-in (replay/payload (first lines)) [:before])))
+           (is (= "side" (get-in (replay/payload (first lines)) [:after])))))
        (testing "a branch the worktree does not have is refused, and writes no line"
          (let [resp (api-call :post "/api/git"
                               (json/write-str {:threadId id :branch "nope"}))]
            (is (= 400 (.statusCode resp)))
            (is (str/includes? (:error (read-json resp)) "nope")))
-         (is (= 1 (count (filterv #(= "git/branch" (:kind %)) (log-lines-for id))))
+         (is (= 1 (count (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))))
              "the refusal left no trace on disk"))))))
 
 ;; ------------------------------------------------ the provider catalog, over HTTP
@@ -3542,15 +4762,15 @@
                       :reasoning-effort "high")
         assistant-messages (fn []
                              (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
-                                  (mapv #(json/read-str % :key-fn keyword))
-                                  (filter #(= "message" (:kind %)))
-                                  (map :payload)
+                                  (replay/lines->records)
+                                  (filter #(= "message" (replay/kind %)))
+                                  (map replay/payload)
                                   (filter #(= "assistant" (:role %)))))]
     (providers/use-provider! thread pin)
     (let [stop (http/start! {:port 0})]
       (try
         (binding [*port* (-> stop meta :local-port)]
-          (let [body (.body (post-run thread {:messages [{:id "u1" :role "user" :content "read deps.edn"}]}))]
+          (let [body (.body (post-run thread {:append [{:id "u1" :role "user" :content "read deps.edn"}]}))]
             (is (str/includes? body "RUN_FINISHED")
                 "the run finishes -- so the SECOND request was accepted")
             (is (not (str/includes? body "must be passed back"))
@@ -3565,8 +4785,8 @@
           ;; lands one beat after the terminal frame (see wait-for-recorded), so a
           ;; reader that races the consumer sees half a conversation.
           (wait-for-recorded (log-file thread)
-                             #(<= 2 (count (filter (fn [r] (and (= "message" (:kind r))
-                                                               (= "assistant" (get-in r [:payload :role]))))
+                             #(<= 2 (count (filter (fn [r] (and (= "message" (replay/kind r))
+                                                               (= "assistant" (get-in (replay/payload r) [:role]))))
                                                    %)))
                              5000)
           (let [assistant (assistant-messages)]
@@ -3590,29 +4810,31 @@
                   (let [stop (http/start! {:port 0})]
                     (try
                       (binding [*port* (-> stop meta :local-port)]
-                        (.body (post-run thread {:messages history})))
+                        (.body (post-run thread {:append history})))
                       (finally (stop) (providers/use-provider! thread nil))))
                   (wait-for-recorded
                    (log-file thread)
-                   #(some (fn [r] (and (= "message" (:kind r))
-                                       (= "assistant" (get-in r [:payload :role]))))
+                   #(some (fn [r] (and (= "message" (replay/kind r))
+                                       (= "assistant" (get-in (replay/payload r) [:role]))))
                           %)
                    5000)
                   (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
-                       (mapv #(json/read-str % :key-fn keyword))
-                       (filter #(= "message" (:kind %)))
-                       (map :payload)
+                       (replay/lines->records)
+                       (filter #(= "message" (replay/kind %)))
+                       (map replay/payload)
                        (filter #(= "assistant" (:role %)))))
         reply (fn [] [{:content "ok"}])]
 
-    (testing "a thinking-mode provider gets the field added, and the log shows it"
+    (testing "a thinking-mode provider gets the field added on the way OUT"
       ;; The strict vendor is in the room: without the pad this run is a 400.
       (let [body (run "t-pad-on" (assoc (fake/scripted (reply) {:thinking true})
                                         :reasoning-effort "high"))]
         (is (not (str/includes? body "must be passed back"))
             "the request the client sent would have been refused as-is")
-        (is (contains? (first body) :reasoning_content)
-            "and the field is on the message the vendor was shown -- before the audit line")))
+        (is (not (contains? (first body) :reasoning_content))
+            "and the RECORD keeps the client's own message: the pad is the vendor's requirement
+             met on the wire (`llm/thinking-mode-history`), not something that entered the
+             conversation -- an empty field nobody sent is not a fact about what was said")))
 
     (testing "a provider with no reasoning effort is untouched"
       (let [logged (run "t-pad-off" (fake/scripted (reply)))]
@@ -3630,17 +4852,17 @@
         (let [stop (http/start! {:port 0})]
           (try
             (binding [*port* (-> stop meta :local-port)]
-              (post-run "t-client-field" {:messages with-field}))
+              (post-run "t-client-field" {:append with-field}))
             (finally (stop) (providers/use-provider! "t-client-field" nil))))
         (wait-for-recorded (log-file "t-client-field")
-                           #(some (fn [r] (and (= "message" (:kind r))
-                                               (= "assistant" (get-in r [:payload :role]))))
+                           #(some (fn [r] (and (= "message" (replay/kind r))
+                                               (= "assistant" (get-in (replay/payload r) [:role]))))
                                   %)
                            5000)
         (let [assistant (->> (str/split-lines (slurp (log-file "t-client-field") :encoding "UTF-8"))
-                             (mapv #(json/read-str % :key-fn keyword))
-                             (filter #(= "message" (:kind %)))
-                             (map :payload)
+                             (replay/lines->records)
+                             (filter #(= "message" (replay/kind %)))
+                             (map replay/payload)
                              (filter #(= "assistant" (:role %))))]
           (is (= "I looked it up" (:reasoning_content (first assistant)))
               "the client's own words reached the vendor"))))))
@@ -3666,17 +4888,32 @@
   (let [f (io/file (home/root) "logs" "harness.infra.log")]
     (if (.exists f) (slurp f :encoding "UTF-8") "")))
 
-(defn- await-log
-  "Wait for PAT to appear in the process log. The writers are other threads -- a go
-  block, http-kit's own -- so polling is the honest way to ask, and 5s is far more
-  than a line takes to land."
-  [pat]
-  (let [deadline (+ (System/currentTimeMillis) 5000)]
+(defn- until
+  "Poll F until it answers truthy, or MS elapses -- answering F's last value either
+  way. THE ONE WAY THIS FILE ASKS A QUESTION OF ANOTHER THREAD: a run is a go block,
+  the log is written by whoever got there first, and http-kit calls back on its own
+  -- so a fact that has just been made true is asserted by waiting for it to become
+  visible, never by sleeping a fixed amount and hoping.
+
+  IT DOES NOT THROW ON TIMEOUT. A caller whose assertion is `(is (until ...))` gets
+  the failure it wrote; a caller that wants to see what it was waiting FOR reads the
+  answer and puts it in the message. `await-log` below is the first kind applied to
+  the process log."
+  [f ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
     (loop []
-      (cond
-        (re-find pat (process-log)) true
-        (< deadline (System/currentTimeMillis)) false
-        :else (do (Thread/sleep 50) (recur))))))
+      (let [v (f)]
+        (if (or v (< deadline (System/currentTimeMillis)))
+          v
+          (do (Thread/sleep 25) (recur)))))))
+
+(defn- await-log
+  "Wait for PAT to appear in the process log -- true once it is there, false after 5s.
+  Far more than a log line takes to land, and the deadline is a fixed one on purpose:
+  a case that needs to witness a line has no other way to ask, and a case that never
+  sees it has a real failure rather than a slow machine."
+  [pat]
+  (boolean (until #(re-find pat (process-log)) 5000)))
 
 (defn- fire-run!
   "Send a run over a socket of our OWN and do not read the answer.
@@ -3686,10 +4923,11 @@
   to end, and a body only ends with a terminal frame -- would block forever. The
   caller closes the socket; the server does not care (nothing cancels a run when a
   client goes), which is what makes walking away a legitimate client."
-  [thread-id run-id]
-  (let [body  (json/write-str {:threadId thread-id :runId run-id
-                               :messages [{:id "u1" :role "user" :content "hi"}]
-                               :tools [] :context []})
+  [thread-id]
+  (let [_     (ensure-session! thread-id)
+        body  (json/write-str {:threadId thread-id
+                               :append [{:id "u1" :role "user" :content "hi"}]
+                               :tools []})
         bytes (.getBytes body StandardCharsets/UTF_8)
         sock  (java.net.Socket. "127.0.0.1" (int *port*))
         out   (.getOutputStream sock)]
@@ -3741,9 +4979,9 @@
    "diag-lost-stream"
    (fn []
      (with-redefs [loop/run-chan (fn [& _] (doto (async/chan) async/close!))]
-       (let [sock (fire-run! "diag-lost-stream" "run-lost-stream")]
+       (let [sock (fire-run! "diag-lost-stream")]
          (try
-           (is (await-log #"events-closed-without-terminal .*run-id=run-lost-stream"))
+           (is (await-log #"events-closed-without-terminal .*thread-id=diag-lost-stream"))
            (finally (.close sock))))))))
 
 (deftest a-run-whose-own-body-throws-says-so-and-ends-the-stream
@@ -3756,9 +4994,9 @@
    "diag-crashed"
    (fn []
      (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
-       (let [sock (fire-run! "diag-crashed" "run-crashed")]
+       (let [sock (fire-run! "diag-crashed")]
          (try
-           (is (await-log #"crashed .*run-id=run-crashed") "the crash is in the log")
+           (is (await-log #"crashed .*thread-id=diag-crashed") "the crash is in the log")
            (is (await-log #"no frames today") "with the throwable, not just a kind")
            (finally (.close sock))))))))
 
@@ -3787,6 +5025,7 @@
   about that shape needs a provider that would die on it, not a fake that would happily
   answer."
   [thread f]
+  (start-session! thread)
   (providers/use-provider! thread (assoc (fake/scripted [{:content "done"}])
                                          :protocol :vendor-shaped))
   (let [stop (http/start! {:port 0})]
@@ -3815,7 +5054,7 @@
      (tools/park-approval! "int-park-ask"
                            {:thread-id "park-ask" :tool-call-id "c1" :name "read"
                             :args "{}" :reason "tool-approval"})
-     (let [resp   (post-run "park-ask" {:messages (parked-history "c1")})
+     (let [resp   (post-run "park-ask" {:append (parked-history "c1")})
            frames (wire/frames-from-sse (.body resp))
            fin    (terminal-frame frames)]
        (testing "the vendor is never asked a question it refuses before the model runs"
@@ -3833,7 +5072,7 @@
     (with-vendor-shaped
      "park-dead"
      (fn []
-       (let [resp   (post-run "park-dead" {:messages (parked-history "call_dead1")})
+       (let [resp   (post-run "park-dead" {:append (parked-history "call_dead1")})
              frames (wire/frames-from-sse (.body resp))
              err    (last (filter #(= "RUN_ERROR" (:type %)) frames))]
          (is (= 200 (.statusCode resp)))
@@ -3843,3 +5082,1034 @@
            (is (not (str/includes? (str (:message err)) "insufficient tool messages"))))
          (testing "and nothing was sent to the scripted model -- it never got a turn"
            (is (not-any? #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))))
+
+
+;; ------------------------------------ a run that is alive is a fact, not a file
+;;
+;; A RECORD CANNOT SAY WHETHER IT IS STILL BEING WRITTEN. An input line with no
+;; terminal frame after it is a run that is still going OR a process that was killed
+;; mid-flight -- the two leave the same file, and every reader that has had to choose
+;; between them (the sidebar row, the composer's gate, the read side deciding whether
+;; it may close a record off) used to be guessing. `harness.edge.http/live-runs` is
+;; the process's own answer, and the three cases below are the three ways a run can
+;; end: an ordinary one, one that never started, and one that died in its own body.
+;;
+;; EVERY CASE HERE HOLDS THE RUN OPEN ON PURPOSE. `loop/run-chan` is called after the
+;; registration and before any frame, so wrapping it (harness.test-support/window-gate)
+;; gives the test a window in which the run is certainly alive -- which is what makes
+;; "the row says running" an assertion rather than a race against a fast script.
+
+(def ^:private alive-dir  (support/temp-dir "http-alive"))
+(def ^:private refused-dir (support/temp-dir "http-refused"))
+(def ^:private crashed-dir (support/temp-dir "http-crashed"))
+(def ^:private lost-dir    (support/temp-dir "http-lost"))
+
+(defn- session-row-of
+  "The row GET /api/projects gives for TID, under the project whose canonical path is
+  DIR -- nil when this home has no such project, or no such session in it.
+
+  ASKED THE WAY THE SIDEBAR ASKS IT: one GET, the whole listing, no thread endpoint of
+  its own. The row is the client's whole view of the fact, so a case that read the
+  registry directly would be testing something no client can see."
+  [dir tid]
+  (let [want (.getCanonicalPath (io/file dir))]
+    (some (fn [project]
+            (when (= want (:path project))
+              (first (filter #(= tid (:threadId %)) (:sessions project)))))
+          (listed-projects))))
+
+(defn- row-running?
+  [dir tid]
+  (boolean (:running (session-row-of dir tid))))
+
+(defn- bind!
+  "Bind TID to DIR through the ordinary route, asserting it worked."
+  [tid dir]
+  (is (= 200 (.statusCode (api-call :post "/api/project"
+                                    (json/write-str {:threadId tid :dir dir}))))
+      (str "binding " tid " to " dir)))
+
+(deftest a-run-that-is-alive-says-so-and-stops-when-it-ends
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-a"
+   (fn []
+     (bind! "alive-a" alive-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "alive-a")]
+       (try
+         (testing "while the run is being answered, the session's own row says so"
+           (is (until #(row-running? alive-dir "alive-a") 5000)
+               "the row never said running while the run was held")
+           (is (await-log #"start .*thread-id=alive-a")
+               "and the registry was told before the line that witnesses it"))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and the moment the run reaches its terminal frame, it stops"
+       (is (until #(false? (row-running? alive-dir "alive-a")) 5000)
+           "the row still said running after the run had ended")
+       (is (await-log #"terminal event=RUN_FINISHED .*thread-id=alive-a"))))))
+
+(deftest a-task-s-row-answers-the-same-registry-question
+  ;; The third fact a row carries, for the second kind of row: `:running` comes from
+  ;; THIS PROCESS's registry, not from disk and not from the kind of conversation it is.
+  ;; A task has no project to ask, so a row that answered "not running" for the want of
+  ;; one would leave the spinner off exactly the sessions the page just made.
+  ;;
+  ;; THE WINDOW IS HELD OPEN ON PURPOSE -- same reason as the bound-session cases below
+  ;; (see `window-gate`): `loop/run-chan` is called after the thread is registered, so
+  ;; holding there makes "the row says running" an assertion rather than a race against a
+  ;; fast script.
+  (with-server
+   "task-alive"
+   (fn []
+     (register-session! "task-alive")
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "task-alive")]
+       (try
+         (testing "a task being answered right now says so on its own row"
+           (is (until #(true? (:running (listed-row "task-alive"))) 5000)
+               "the task's row never said running while its run was held"))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and it stops when the run reaches its terminal frame"
+       (is (until #(false? (:running (listed-row "task-alive"))) 5000)
+           "the task's row still said running after the run had ended")))))
+
+
+(deftest a-run-that-never-started-is-never-running
+  ;; WHERE THE BAD PROVIDER COMES FROM CHANGED WITH TICKET 03, and the case moved with
+  ;; it: a run cannot name a provider any more (the selection is the SESSION's, changed
+  ;; by its own actions), so the unresolvable name is planted in the home's default
+  ;; tier -- the same tier a session's selection is merged onto. What is under test is
+  ;; unchanged and is why the case exists: a run that never got as far as a provider
+  ;; must never be in the registry, and must answer with the refusal rather than a
+  ;; finished run. A HOME OF ITS OWN, because writing config.edn is how it is planted.
+  (wipe-dir! refused-dir)
+  (support/with-temp-env [root _home]
+   (spit (io/file root "config.edn")
+         "{:default {:provider \"no-such-provider\"}}\n"
+         :encoding "UTF-8")
+   (with-server
+    ;; THIS THREAD IS PINNED AND THE ONE UNDER TEST IS NOT, deliberately: a pin wins
+    ;; provider resolution outright, and this case needs resolution to FAIL.
+    "refused-other"
+    (fn []
+     (bind! "refused-a" refused-dir)
+     (let [gate (support/window-gate #'providers/resolve-provider 20000)
+           resp (future (post-run "refused-a"))]
+       (try
+         (testing "a run held inside setup -- before it has a provider -- is not running"
+           (is (until #(pos? (long ((:entered gate)))) 5000)
+               "the run never reached provider resolution")
+           ;; THIS IS THE ASSERTION THAT MATTERS, and it is why the window is held: a
+           ;; registration made above the refusal would be visible exactly here, and
+           ;; nothing would ever remove it -- the refusal path emits its two frames and
+           ;; returns without passing the emitter, so that session would claim to be
+           ;; running until the process restarted.
+           (is (false? (row-running? refused-dir "refused-a"))
+               "a run that has not started is in the registry"))
+         (finally ((:release gate))))
+       (let [frames (wire/frames-from-sse (.body ^HttpResponse @resp))]
+         (testing "the run is refused by name, before any model call"
+           (is (= ["RUN_STARTED" "RUN_ERROR"] (mapv :type frames))
+               (str "saw " (pr-str (mapv :type frames))))
+           (is (str/includes? (str (:message (last frames))) "no provider named")))
+         (testing "and the run that never started never appears in the registry"
+           (is (false? (row-running? refused-dir "refused-a"))))))))))
+
+(deftest a-crashed-run-stops-claiming-to-be-running
+  (wipe-dir! crashed-dir)
+  (with-server
+   "crashed-a"
+   (fn []
+     (bind! "crashed-a" crashed-dir)
+     ;; THE REDEF IS IN PLACE FOR THE WHOLE CASE, not just around `fire-run!`: the
+     ;; frame conversion happens on the server's own thread, whenever it gets there,
+     ;; and a redef that had already been lifted would leave this case racing to
+     ;; crash. Same seam as the `diag-crashed` case above -- the first frame kills the
+     ;; consumer.
+     (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "crashed-a")]
+         (try
+           (testing "the run is registered while it is alive"
+             ;; ASSERTED BEFORE THE CRASH ON PURPOSE: "false afterwards" would also
+             ;; pass for a run that had never registered at all, which is the failure
+             ;; the other half of this case pins.
+             (is (until #(row-running? crashed-dir "crashed-a") 5000)
+                 "the row never said running, so the run never registered"))
+           (finally (.close sock) ((:release gate)))))
+       (testing "and a death in its own body takes the registration with it"
+         (is (await-log #"crashed .*thread-id=crashed-a") "the death is in the log")
+         (is (until #(false? (row-running? crashed-dir "crashed-a")) 5000)
+             "the thread still claims to be running after its run died"))))))
+
+
+(deftest a-run-whose-channel-closed-without-a-terminal-still-stops-running
+  ;; THE THIRD WAY OUT. A run that registers and then finds its event channel
+  ;; already closed never emits a terminal frame and never throws -- the go loop's own
+  ;; else branch is the only thing that runs -- so this is the exit neither the
+  ;; emitter nor the catch covers. Left unregistered, the thread would say it was
+  ;; running for the life of the process; that is the failure this pins, and it is
+  ;; asserted AFTER the warning line, because `await-log` is what proves the branch
+  ;; was reached rather than the run having crashed on its way somewhere else.
+  (wipe-dir! lost-dir)
+  (with-server
+   "lost-a"
+   (fn []
+     (bind! "lost-a" lost-dir)
+     (with-redefs [loop/run-chan (fn [& _] (doto (async/chan) async/close!))]
+       (let [sock (fire-run! "lost-a")]
+         (try
+           (is (await-log #"events-closed-without-terminal .*thread-id=lost-a")
+               "the run's ending left a warning rather than a terminal frame")
+           (is (until #(false? (row-running? lost-dir "lost-a")) 5000)
+               "and the registration it made before that went with it")
+           (finally (.close sock))))))))
+
+
+;; ------------------------ reading a conversation that has not stopped yet
+;;
+;; `rebuild` HANDS A CONVERSATION OVER, and that is why it cannot be used to LOOK at
+;; one: it closes off a log that ends mid-run (a write), and it refuses a log whose run
+;; has not ended at all. A client that has just landed on a session -- a refresh, where
+;; the run belongs to the process and not to the tab -- needs the other thing: what has
+;; been recorded so far, said to be partial, with nothing touched. That is the `sofar`
+;; verb, and the four cases below are its edges: a run in flight, a run that settled, a
+;; log that was cut off, and a rebuild aimed at a live run (which must write nothing).
+;;
+;; THE LIVE CASES HOLD THE RUN AT THE TOOL SEAM (`tools/run!`). That is the half-written
+;; state worth reading: an assistant message carrying a call whose result has not been
+;; written yet. Holding it before the run starts would make every assertion about an
+;; empty log, which is the shape of test that passes while the feature is broken.
+
+(def ^:private sofar-dir  (support/temp-dir "http-sofar"))
+(def ^:private sofar-dir-2 (support/temp-dir "http-sofar-2"))
+(def ^:private parked-dir  (support/temp-dir "http-sofar-parked"))
+
+(defn- sofar
+  "GET /api/threads/<TID>/sofar -- the raw answer, so a case can assert the status too."
+  [tid]
+  (api-call :get (str "/api/threads/" tid "/sofar") nil))
+
+(defn- log-records
+  "TID's log parsed AS IT IS RIGHT NOW -- no waiting, no retrying.
+
+  This section is about reading a file that is still being written, so the caller says
+  what it expects to already be true (`until`) and then looks; a helper that polled
+  would hide exactly the race these cases are about. A trailing half-written line is
+  dropped rather than failed on: the file may be mid-append, which is a fact about
+  reading a live log and not a corrupt log."
+  [tid]
+  ;; THROUGH THE RECORD'S OWN READER (`.scratch/jsonl-two-kinds` 票 02): a row is
+  ;; `{:type .. :payload ..}`; reading it is what validates it and hands back the row
+  ;; itself, and the assertions here ask `replay/kind` what that row is. The `try` is for
+  ;; the half-written last line.
+  (->> (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))
+       (keep (fn [line] (try (first (replay/lines->records [line])) (catch Throwable _ nil))))
+       (vec)))
+
+(defn- log-frames [tid]
+  (mapv replay/payload (filter #(= "event" (replay/kind %)) (log-records tid))))
+
+(defn- terminals [tid]
+  (filterv frames/terminal? (log-frames tid)))
+
+;; ------------------------ one session, one run at a time
+;;
+;; The door standing in front of the run edge. TWO RUNS OF ONE THREAD INTERLEAVE their
+;; frames into one append-only file, and everything downstream is written for one run at
+;; a time (`replay/ensure-complete!` counts inputs against terminals, `open-run` takes the
+;; LAST of each, the fold reads the input lines in file order) -- so the second run is refused
+;; BY NAME before it can register, log or start. What must NOT be refused is a second
+;; SESSION: `.scratch/parallel-sessions/` is built on two threads genuinely running at
+;; once, and that feature's docs ticket asks for the case below and says so in one place.
+
+(deftest a-session-answers-one-run-at-a-time-and-two-sessions-still-both-run
+  ;; THE REFUSAL AND THE PERMISSION ARE ONE CASE, deliberately: "two requests for one
+  ;; session are not both answered" and "two requests for two sessions are both answered"
+  ;; are the same assertion about the same server at the same moment. Split into two
+  ;; cases, a GLOBAL lock would pass both.
+  ;;
+  ;; BOTH RUNS ARE HELD AT `loop/run-chan`, which is called AFTER the thread is
+  ;; registered -- so "both are alive right now" is a state this case establishes rather
+  ;; than one it races a fast script for. The gate holds the first two calls and lets
+  ;; every later one through, which is what the re-send at the end needs.
+  (with-server
+   ["gate-a" "gate-b"]
+   [{:content "the first run's answer"} {:content ""}]
+   (fn []
+     (let [gate (support/window-gate #'loop/run-chan 20000 2)
+           a    (fire-run! "gate-a")
+           b    (fire-run! "gate-b")]
+       (try
+         (testing "two sessions are two runs, both alive at once"
+           (is (until #(and (http/running? "gate-a") (http/running? "gate-b")) 5000)
+               "the second session's run never started -- a gate that refuses THIS is a
+                global lock, and every parallel-session case in the repo is built on it"))
+         (testing "the second run asked for one of them is refused by name"
+           (let [refused (post-run "gate-a")]
+             (is (= 409 (.statusCode refused)) (str "got " (.statusCode refused)))
+             (let [body (read-json refused)]
+               (is (str/includes? (str (:error body)) "gate-a")
+                   (str "the refusal does not name the session: " (pr-str (:error body))))
+               (is (str/includes? (str (:error body)) "one run per session")
+                   "and does not say what the rule is")
+               (is (= "gate-a" (:threadId body))))))
+         (finally
+           (.close a)
+           (.close b)
+           ((:release gate))
+           ((:restore gate)))))
+     (testing "the refused run wrote nothing at all -- not even its input line"
+       ;; ON THE FILE, not on the response: a run that is refused but logs an input is
+       ;; refused in the answer and started anyway, which is the bug this pins.
+       (is (= 1 (count (client-rows (log-lines-for "gate-a"))))
+           "the refused run left no row of its own in gate-a's record"))
+     (testing "both runs that were let through reach their own terminal"
+       (is (until #(and (not (http/running? "gate-a")) (not (http/running? "gate-b"))) 5000))
+       (is (= 1 (count (terminals "gate-a"))) "gate-a has one run's ending")
+       (is (= 1 (count (terminals "gate-b"))) "gate-b has one run's ending")
+       ;; THE OTHER SESSION'S RUN ID, read out of ITS record rather than named by this
+       ;; case: the server mints run ids now (ticket 03), so the only way to ask "did
+       ;; gate-b's run bleed into gate-a's file" is to look up what gate-b's run is
+       ;; called. A leaked frame would carry it.
+       (let [b-run (->> (log-lines-for "gate-b")
+                        client-rows
+                        first
+                        :runId)]
+         (is (string? b-run) "gate-b's run has no name on the record")
+         (is (not (str/includes? (slurp (log-file-for "gate-a") :encoding "UTF-8") (str b-run)))
+             "the other session's run leaked into gate-a's record")))
+     (testing "and the session that was refused can run again once its run has ended"
+       (let [again (post-run "gate-a")]
+         (is (= 200 (.statusCode again)) (str "got " (.statusCode again)))
+         (is (str/includes? (.body again) "RUN_FINISHED")
+             "the second run of gate-a did not finish"))))))
+
+(deftest a-crashed-run-does-not-close-its-session-for-good
+  ;; THE DOOR IS ONLY AS GOOD AS ITS UNREGISTRATION. A gate keyed on "this process has a
+  ;; run going" turns a leaked registration into a session nobody can ever run again --
+  ;; the sidebar would spin forever and the only way out would be a restart. This is the
+  ;; same exit `a-crashed-run-stops-claiming-to-be-running` pins from the other side.
+  (with-server
+   "crash-gate"
+   [{:content "after the crash"}]
+   (fn []
+     ;; In place for the whole crash, not just around `fire-run!`: the frame conversion
+     ;; happens on the server's own thread (same seam as the case above).
+     (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
+       ;; THE RUN IS HELD FIRST, and that is not decoration: the crash lands four
+       ;; milliseconds after the registration, so a case that merely waits for `running?`
+       ;; is racing the death it is about to assert. Holding at `loop/run-chan` -- called
+       ;; after the registration and before the first frame is converted -- makes "it
+       ;; registered" a state rather than a coincidence; the release is what kills it.
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "crash-gate")]
+         (try
+           (is (until #(http/running? "crash-gate") 5000)
+               "the run never registered, so this case cannot tell anything")
+           (finally (.close sock) ((:release gate))))))
+     (is (await-log #"crashed .*thread-id=crash-gate") "the death is in the process log")
+     (is (until #(not (http/running? "crash-gate")) 5000)
+         "the thread still claims to be running after its run died")
+     (testing "so the door opens again"
+       (is (= 200 (.statusCode (post-run "crash-gate")))
+           "the session was locked out by a run that crashed")))))
+
+(deftest an-old-record-is-refused-by-name-over-http
+  ;; 拍定 3 OF `.scratch/jsonl-two-kinds`: an old-contract record is NOT migrated, not read
+  ;; leniently, and not quietly made to work -- the sentence a person meets sends them to a
+  ;; new conversation. The READER's refusal is pinned in `replay_test`; what is pinned HERE is
+  ;; that a client meets it as an ANSWER (`400` and a reason) rather than as a 500, an empty
+  ;; conversation, or a repair that rewrites a file this build cannot honestly fold.
+  (let [tid  (str "old-contract-" (java.util.UUID/randomUUID))
+        f    (log-file tid)
+        body (str (json/write-str {:ts 1 :runId "r1" :kind "input"
+                                   :payload {:threadId tid
+                                             :append [{:id "u1" :role "user" :content "hi"}]}})
+                  "\n")]
+    (.mkdirs (.getParentFile f))
+    (spit f body :encoding "UTF-8")
+    (with-server
+     "old-contract-read"
+     (fn []
+       (testing "reading it is a 400 that names the contract and says what to do"
+         (let [resp (api-call :get (str "/api/threads/" tid "/page") nil)
+               reply (read-json resp)]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error reply)) "old contract"))
+           (is (str/includes? (str (:error reply)) "start a new conversation"))))
+       (testing "and the rebuild door refuses the same file for the same reason"
+         (let [resp (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (read-json resp)]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error reply)) "old contract"))))
+       (testing "and the file is left EXACTLY as it was: unread, unmoved, unmigrated"
+         (is (= body (slurp f :encoding "UTF-8"))))))))
+
+(defn- write-truncated-log!
+  "A record that stops mid-run, written by hand: an input, the run's start, and nothing
+  else. HAND-WRITTEN RATHER THAN PRODUCED BY A REAL KILL because the case is about what
+  a READER does with that shape -- a test that spawned a process in order to kill it
+  would be testing its own timing, and this is the same bytes either way."
+  [tid run-id]
+  (let [f (log-file tid)]
+    (io/delete-file f true)
+    (.mkdirs (.getParentFile f))
+    (let [line! (fn [kind payload & [extra]]
+                  (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                 :runId run-id :kind kind :payload payload}
+                                                extra))
+                               "\n")
+                        :append true :encoding "UTF-8"))]
+      ;; THE SHAPE THE EDGE WRITES (票 02): the run's own first message row -- the prompt it
+      ;; assembled -- and then a `message` row per entry the action brought. The `input` row
+      ;; that used to carry the request as it arrived is gone; what ENTERED the conversation
+      ;; is the rows themselves, which is why the fold reads them and not a field.
+      (line! "message" {:role "system" :content "S"} {:source "system-prompt" :hash "h1"})
+      (line! "message" {:role "user" :content "看看这个项目"} {:source "client" :id "u1"})
+      (doseq [frame ((ag/outbound tid run-id) (ev/run-start))]
+        (line! "event" frame)))))
+
+(deftest a-running-session-reads-what-has-arrived-and-nothing-is-written
+  (wipe-dir! sofar-dir)
+  (with-server
+   "sofar-a"
+   (fn []
+     (bind! "sofar-a" sofar-dir)
+     (let [gate (support/window-gate #'tools/run! 20000)
+           sock (fire-run! "sofar-a")]
+       (try
+         ;; WAIT FOR THE TOOL SEAM TO BE REACHED, not merely for the file to have
+         ;; something in it: `seq` is satisfied by RUN_STARTED alone, and a read taken
+         ;; then races the model call that is still streaming its frames out. Entered
+         ;; gate + a recorded TOOL_CALL_START together say 'the turn is on the record and
+         ;; the call is now held', which is the state this case is about -- and the file
+         ;; stops growing exactly there, which is what the byte/mtime assertion needs.
+         (is (until #(and (pos? (long ((:entered gate))))
+                          (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-a")))
+                    5000)
+             "the model's turn is on the record and its call is held at the seam")
+         (let [resp   (sofar "sofar-a")
+               answer (read-json resp)]
+           (testing "the read says a run is in flight here, and names it"
+             (is (= 200 (.statusCode resp)))
+             (is (= "running" (:state answer)))
+             ;; THE ID IS THE SERVER'S NOW (ticket 03 mints it), so the assertion reads
+             ;; the name out of the record instead of naming one: what matters is that
+             ;; the two doors -- this read and the sidebar row below -- are answering
+             ;; about the SAME run, and the record is where the name is written down.
+             (is (= [(->> (log-records "sofar-a") client-rows first :runId)]
+                    (:openRuns answer))
+                 "the read names the run the record says is open")
+             (is (true? (:running (session-row-of sofar-dir "sofar-a")))
+                 "and the sidebar row agrees with it: one registry, two doors"))
+           (testing "and it returns the half turn as it stands"
+             (let [calls (mapcat #(map :id (:toolCalls %)) (:messages answer))]
+               (is (= ["c1" "c2"] (vec calls))
+                   "the calls the model made a moment ago are readable")
+               (is (not-any? #(= "tool" (:role %)) (:messages answer))
+                   "no result has been written yet, and the read invents none")))
+           (testing "and a window that arrives NOW sees the same half turn"
+             ;; TICKET 04 OF `.scratch/session-opening`. `settle!` folds a run's frames at its
+             ;; END ('half an answer is not a turn'), so a page that read the session table
+             ;; mid-run used to show the question and none of the work -- a refresh that landed
+             ;; on a long turn looked like an empty turn. The frames are on the RECORD the
+             ;; moment they are written (`log!` is a per-frame append), so the window reads the
+             ;; record while a run of this session is in flight, and this is that promise.
+             (let [resp (api-call :get "/api/threads/sofar-a/page" nil)
+                   body (read-json resp)]
+               (is (= 200 (.statusCode resp)) "a window can be read while the run is going")
+               (is (true? (:live body)) "and it says this process is serving the session")
+               (is (= "running" (:state body))
+                   "and that the turn on screen is still being written")
+               (is (= (:messages answer) (mapv :message (:entries body)))
+                   "the page carries every message `sofar` does -- one record, two doors")
+               (testing "and the FEED opens on that same page"
+                 (let [opened (feed-first-frame "sofar-a")]
+                   (is (= "window" (:type opened)))
+                   (is (= "running" (:state opened)))
+                   (is (= (mapv :seq (:entries body)) (mapv :seq (:entries opened)))
+                       "the stream and the one-shot read agree entry for entry")
+                   (is (false? (:hasMore opened))
+                       "and nothing older lies beyond this page: the turn is the start")))))
+           (testing "NOTHING WAS WRITTEN for it: no terminal, no close-off"
+             (is (empty? (terminals "sofar-a")))
+             (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records "sofar-a")))))
+         (testing "and polling it does not touch the file at all"
+           ;; THE JUDGEMENT A POLLING CLIENT DEPENDS ON: bytes and mtime are the two
+           ;; numbers a write cannot avoid moving.
+           (let [f      (log-file-for "sofar-a")
+                 before [(.length f) (.lastModified f)]]
+             (dotimes [_ 10]
+               (is (= 200 (.statusCode (sofar "sofar-a")))))
+             (is (= before [(.length f) (.lastModified f)]))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "once the run ends, the same log reads exactly as rebuild gives it"
+       (is (until #(false? (row-running? sofar-dir "sofar-a")) 5000))
+       (let [answer  (read-json (sofar "sofar-a"))
+             rebuilt (read-json (api-call :post "/api/threads/sofar-a/rebuild" "{}"))]
+         (is (= "settled" (:state answer)))
+         (is (nil? (:openRuns answer)))
+         (is (nil? (:interrupts answer)))
+         (is (= (:messages rebuilt) (:messages answer))
+             "two readers of one settled conversation must not diverge")
+         (is (= (:context rebuilt) (:context answer))))
+       (testing "and the window shows the conversation ONCE -- the half turn was not a copy"
+         ;; THE OTHER HALF OF TICKET 04: mid-run the window answered from the RECORD, and at
+         ;; settle it answers from the session table. Same entries, same ids -- so the switch
+         ;; must not put a second copy of the turn on screen (the reader dedupes by id), and
+         ;; this is the record read back through the window saying so.
+         (let [resp    (api-call :get "/api/threads/sofar-a/page" nil)
+               body    (read-json resp)
+               ;; THE ID IS THE MESSAGE'S OWN (the table's entries are `{:seq .. :message ..}`
+               ;; and the record's carry one too): it is what the reader dedupes by, which is
+               ;; the whole reason the source changing mid-conversation is safe.
+               ids     (mapv (comp :id :message) (:entries body))
+               settled (read-json (sofar "sofar-a"))]
+           (is (= 200 (.statusCode resp)))
+           (is (= (count ids) (count (distinct ids)))
+               "no entry appears twice after the source changed")
+           (is (= (:messages settled) (mapv :message (:entries body)))
+               "and the window says what `sofar` says about the settled conversation")))
+       (testing "and the run kept exactly ONE terminal frame"
+         (is (= 1 (count (terminals "sofar-a")))))))))
+
+(deftest a-parked-session-reads-as-parked-and-says-what-it-waits-on
+  ;; THE SECOND WAY A CONVERSATION IS UNFINISHED, and the one a client has to treat
+  ;; differently from a run in flight: nothing is executing, a HUMAN is being waited on.
+  ;; The record ends with its terminal -- a RUN_FINISHED carrying the interrupt -- which
+  ;; is why the file alone can answer this one and the registry is not asked.
+  (wipe-dir! parked-dir)
+  (tools/session-require-approval! "sofar-parked" "write")
+  (with-server
+   "sofar-parked"
+   [{:content "" :tool-calls [{:id "c1" :name "write"
+                               :arguments {:path (str (io/file parked-dir "asked.txt"))
+                                           :content "written"}}]}
+    {:content "done"}]
+   (fn []
+     (bind! "sofar-parked" parked-dir)
+     (let [asked (wire/frames-from-sse (.body (post-run "sofar-parked")))
+           iid   (get-in (last asked) [:outcome :interrupts 0 :id])]
+       (is (= "interrupt" (get-in (last asked) [:outcome :type])))
+       (let [resp   (sofar "sofar-parked")
+             answer (read-json resp)]
+         (testing "the read says the conversation is parked, and on what"
+           (is (= 200 (.statusCode resp)))
+           (is (= "parked" (:state answer)))
+           (is (= ["c1"] (mapv :toolCallId (:interrupts answer))))
+           (is (= [iid] (mapv :id (:interrupts answer)))))
+         (testing "the call it is waiting on is in the message list, unanswered"
+           (is (some #(= "c1" (:id %)) (mapcat :toolCalls (:messages answer))))
+           (is (not-any? #(= "c1" (:toolCallId %)) (:messages answer)))))
+       (testing "and a parked run is not a running one -- nothing to wait for in the process"
+         (is (false? (row-running? parked-dir "sofar-parked"))))))))
+
+(deftest a-log-that-was-cut-off-is-refused-by-name-and-rebuild-still-closes-it
+  (let [tid (str "sofar-dead-" (java.util.UUID/randomUUID))]
+    (with-server
+     tid
+     (fn []
+       ;; PLANTED HERE, not before the fixture: `with-server` starts every thread it
+       ;; names from nothing -- row, conversation and record -- so a log written before
+       ;; it would be the file the case is about to look for, deleted on the way in.
+       (write-truncated-log! tid "r1")
+       (let [resp   (sofar tid)
+             answer (read-json resp)]
+         (testing "the READ refuses a cut-off log by name, and points at the door that repairs it"
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error answer)) "r1") "the run is named")
+           (is (str/includes? (str (:error answer)) "rebuild") "and so is the way out"))
+         (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records tid))
+             "a refused read writes nothing -- it is not the repairing door"))
+       (testing "rebuild still closes it off, exactly as it always did"
+         (let [rebuilt (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
+           (is (seq (:messages rebuilt)))
+           (is (some #(= "session/closed-off" (replay/kind %)) (log-records tid))
+               "the repair is unconditional for a log nobody is writing"))
+         (testing "and after that the same read returns it, settled"
+           (let [resp   (sofar tid)
+                 answer (read-json resp)]
+             (is (= 200 (.statusCode resp)))
+             (is (= "settled" (:state answer)))
+             (is (= (:messages (read-json (api-call :post (str "/api/threads/" tid "/rebuild")
+                                                    "{}")))
+                    (:messages answer))))))))))
+
+(deftest a-rebuild-during-a-live-run-leaves-the-record-alone
+  ;; THE CASE THAT MOTIVATED THE REGISTRY. A client that refreshed into a running
+  ;; session has a fresh runtime, so its own `isRunning` is false and it may well aim
+  ;; rebuild at the thread -- and rebuild used to close the run off from the file alone:
+  ;; a TOOL_CALL_RESULT and a RUN_ERROR appended to a run that was still going, which
+  ;; then wrote its own RUN_FINISHED. TWO terminals for one run, in a record whose only
+  ;; asset is that every line of it is true.
+  (wipe-dir! sofar-dir-2)
+  (with-server
+   "sofar-b"
+   (fn []
+     (bind! "sofar-b" sofar-dir-2)
+     (let [gate (support/window-gate #'tools/run! 20000)
+           sock (fire-run! "sofar-b")]
+       (try
+         (is (until #(and (pos? (long ((:entered gate))))
+                          (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-b")))
+                    5000)
+             "the run is under way: its call is recorded and held")
+         (let [resp (api-call :post "/api/threads/sofar-b/rebuild" "{}")
+              body (read-json resp)]
+           (testing "the conversation is handed over FROM MEMORY, with the run left alone"
+             ;; TICKET 05 CHANGED THE ANSWER HERE, NOT THE REASON. It used to be a 400
+             ;; -- a rebuild refused a log that ends mid-run, and this log does -- but
+             ;; the session is right here, so the conversation can be handed over
+             ;; without touching the file at all. What the test is actually about is
+             ;; the line below it: the run's record must not be closed off from under
+             ;; it, because the run is still writing to it.
+             (is (= 200 (.statusCode resp)))
+             (is (seq (:messages body)) "the conversation so far")
+             (is (= ["user"] (mapv :role (:messages body)))
+                 "and it is what has SETTLED: the answer still being written is not a turn"))
+           (testing "and NOTHING was appended to it"
+             (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records "sofar-b")))
+             (is (empty? (terminals "sofar-b")))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "the run finishes on its own, with one terminal and no help from anybody"
+       (is (until #(false? (row-running? sofar-dir-2 "sofar-b")) 5000))
+       (is (= 1 (count (terminals "sofar-b"))))))))
+
+(deftest a-run-names-the-session-once-and-only-once
+  ;; The whole path of `sessions.title` over the real edge: the browser's action
+  ;; arrives at POST /api/agent, the store gets a name from the SESSION's first user
+  ;; turn, and the SIDEBAR's listing -- one GET, every session -- carries it back.
+  ;;
+  ;; THE NAME COMES FROM THE SESSION, NOT FROM THE REQUEST. ADR 0002 decision 9 retired
+  ;; the run body's `messages`: an action carries only what it ADDS (`append`), so the
+  ;; fortieth send holds the newest words and nothing earlier. A session that ran before
+  ;; this column existed would then be named after its latest message instead of its
+  ;; first -- a failure a case written only against the first send cannot see.
+  ;;
+  ;; The second run is the point of the test rather than a repetition of the first: a
+  ;; conversation that has been named must keep that name when it says something else,
+  ;; and the rule lives in the UPDATE (`COALESCE(title, ?)`), where a future edit that
+  ;; 'refreshes' the title would be caught here.
+  ;;
+  ;; A PLAIN SCRIPT WITH NO TOOL CALLS, deliberately. This case turns the conversation
+  ;; twice, and the default `script` answers its first turn with TWO tool calls in one
+  ;; provider message -- which `ag/outbound` emits as two separate assistant messages,
+  ;; so the conversation a second run continues from is not the shape a vendor accepts
+  ;; (`llm/unanswered-tool-calls` sees `c1` with an assistant message behind it and
+  ;; refuses). That is a defect of its own, unrelated to naming, and it would make this
+  ;; case fail for a reason it is not about.
+  (wipe-dir! task-dir)
+  (with-server
+   {"named-once" [{:content "这是一个 Clojure 项目。"}
+                  {:content "测试用 `clojure -M:test` 跑。"}]
+    "no-words"   [{:content "没有说话的一轮。"}]}
+   (fn []
+     (is (= 200 (.statusCode (register-session! "named-once"))))
+     (testing "a session that has not run yet is unnamed"
+       (is (nil? (:firstUserText (listed-row "named-once")))))
+     (testing "the first send names it after the first thing said"
+       (is (= "RUN_FINISHED"
+              (:type (last (wire/frames-from-sse (.body (post-run "named-once")))))))
+       (is (= "看看这个项目" (:firstUserText (listed-row "named-once")))))
+     (testing "and a later send that says something else does not rename it"
+       (is (= "RUN_FINISHED"
+              (:type (last (wire/frames-from-sse
+                            (.body (post-run "named-once"
+                                             {:append [{:id "u2" :role "user"
+                                                        :content "那它的测试怎么跑？"}]})))))))
+       (is (= "看看这个项目" (:firstUserText (listed-row "named-once")))
+           "the name is the session's first message, not its latest"))
+     (testing "a run with no user turn stamps the time and stores no name"
+       ;; The other half of `COALESCE(title, ?)`: a run DID happen, so `last_sent_at`
+       ;; moves; there is nothing to name the session with, so the name stays nil. A
+       ;; title invented from the system prompt or from the opening context would be a
+       ;; name the person never said.
+       (is (= "RUN_FINISHED"
+              (:type (last (wire/frames-from-sse
+                            (.body (post-run "no-words" {:append []})))))))
+       (let [row (listed-row "no-words")]
+         (is (nil? (:firstUserText row)) "nothing was said, so there is no name")
+         (is (some? (:lastSentAt row)) "but a run did happen, so the time moved"))))))
+
+
+;; ------------------------------------------------- the record that could not be written
+
+(deftest a-record-that-cannot-be-written-is-said-on-the-routes-the-client-reads
+  ;; ADR 0002 DECISION 6: writing can be BEHIND, it may not be SILENT. The failure
+  ;; is the record writer's (`harness.edge.record/degraded`), and this is the half
+  ;; the browser can see: the two doors it reads a conversation through say so, so
+  ;; the page has something to put on screen. The other half -- that a DEGRADED
+  ;; session keeps running and holds its lines -- is asserted in record-test.
+  ;;
+  ;; THE FAILURE IS INJECTED at the writer's own write, rather than by chmod-ing a
+  ;; directory: a permission bit means nothing to a root test process, means
+  ;; something different on Windows, and would leave a mode to restore. What the
+  ;; route is being asked is whether it REPORTS a degradation, not how one arises.
+  (let [tid (str "degraded-" (java.util.UUID/randomUUID))]
+    (with-server
+     {tid script}
+     (fn []
+       ;; A COMPLETE CONVERSATION FIRST. The read below is the ordinary settled one;
+       ;; if the terminal frame never landed, `sofar` would answer the cut-off
+       ;; refusal instead, and the test would be asking a different question.
+       (post-run tid)
+       (record/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
+       (try
+         (#'http/log! tid nil "session/rebuilt" {:messages 0 :via "test"})
+         (is (some? (wait-degraded! tid)) "the writer stopped on a line it could not write")
+         (testing "GET /sofar -- the read the page polls -- says the record is degraded"
+           (let [answer (read-json (sofar tid))]
+             (is (= "degraded" (get-in answer [:record :state])))
+             (is (str/includes? (str (get-in answer [:record :reason])) "disk is full")
+                 "with the writer's own reason, not a paraphrase of it")
+             (is (pos? (get-in answer [:record :pending]))
+                 "and how many lines are waiting behind the one that failed")))
+         (testing "POST /rebuild -- the read a session is opened through -- says it too"
+           (let [answer (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
+             (is (= "degraded" (get-in answer [:record :state])))))
+         (finally (record/reset-sink!)))
+       (testing "and a session with nothing wrong carries NO record field at all"
+         ;; Absence is the client's 'fine'. A field that said 'ok' on every answer
+         ;; would be a field nobody acts on, and the one case worth reading would
+         ;; have to be told apart from the noise.
+         ;;
+         ;; THE HEALTHY WRITE HAS TO BE BACK BEFORE THE RETRY: `retry!` resumes at the
+         ;; line that failed, and a retry against the same broken disk fails again --
+         ;; which would leave this assertion reading a record that is still degraded
+         ;; for a reason this test made up rather than one it is asking about.
+         (record/retry! tid)
+         (is (= 0 (:pending (record/flush! 10000))))
+         (is (nil? (:record (read-json (sofar tid))))))))))
+
+;; -------------------------------------------------------- the window (ticket 05)
+
+(defn- fill-live-window!
+  "Put GROUPS arrivals of TEN entries each into THREAD-ID's live session, each landed at
+  its own record offset. A window is meant to be a slice of a conversation too long to
+  send, so the test has to HAVE one -- and building it through the same two calls the
+  edge uses (`append!` then `land!`) is what keeps the numbers the ones the server would
+  have minted."
+  [tid groups]
+  (dotimes [g groups]
+    (let [run (str "win-r" g)]
+      (sessions/append! tid run (mapv (fn [i] {:id (str run "-" i)
+                                               :role "user"
+                                               :content (str run "/" i)})
+                                      (range 10)))
+      (sessions/land! tid run (* 10 g)))))
+
+(defn- feed-open!
+  "Open THREAD-ID's feed on a socket of our own and answer [sock next-frame]:
+  `next-frame` reads the next `data:` frame, or nil at end of stream.
+
+  A RAW SOCKET RATHER THAN `api-call`, because this route does not end: what matters is
+  what arrives AFTER the response, and `ofString` would wait for a body that only closes
+  when the window does. The read timeout is the deadline -- a frame that never comes is a
+  stack rather than a hung suite."
+  ([tid] (feed-open! tid ""))
+  ([tid query]
+   (let [sock (java.net.Socket. "127.0.0.1" (int *port*))
+         _    (.setSoTimeout sock 5000)
+         out  (.getOutputStream sock)
+         in   (.getInputStream sock)
+         text (atom "")
+         head (atom true)
+         buf  (byte-array 4096)]
+     (.write out (.getBytes (str "GET /api/threads/" tid "/feed" query
+                                 " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                 "Accept: text/event-stream\r\n\r\n")
+                            StandardCharsets/UTF_8))
+     (.flush out)
+     (letfn [(more! []
+               (let [n (try (.read in buf)
+                            (catch java.net.SocketTimeoutException _ -1))]
+                 (when (pos? n)
+                   (swap! text str (String. buf 0 n StandardCharsets/UTF_8))
+                   true)))
+             (next-frame []
+               (loop []
+                 (let [t @text]
+                   (if @head
+                     ;; THE RESPONSE HEAD, ONCE: split on the CRLFCRLF that ends it, so
+                     ;; no header value can be mistaken for a frame.
+                     (let [i (.indexOf t "\r\n\r\n")]
+                       (if (neg? i)
+                         (when (more!) (recur))
+                         (do (reset! head false)
+                             (reset! text (subs t (+ i 4)))
+                             (recur))))
+                     (let [i (.indexOf t "\n\n")]
+                       (if (neg? i)
+                         (when (more!) (recur))
+                         (let [block (subs t 0 i)]
+                           (reset! text (subs t (+ i 2)))
+                           (when-some [[_ payload] (re-find #"(?m)^data: (.*)$" block)]
+                             (json/read-str payload :key-fn keyword)))))))))]
+       [sock next-frame]))))
+
+(defn- feed-first-frame
+  "Open THREAD-ID's feed, read its OPENING frame, close the socket, answer the frame.
+
+  The `try`/`finally` lives here rather than in a case because a socket closed on the way
+  out of a deep `testing` nest is exactly where a stray paren hides; a case that wants the
+  FIRST frame (what a page sees the moment it opens the conversation) says so in one line."
+  [tid]
+  (let [[sock next-frame] (feed-open! tid)]
+    (try (next-frame)
+         (finally (.close sock)))))
+
+(deftest a-page-is-cut-at-the-arrivals-the-conversation-was-written-in
+  (with-server
+   "win-page"
+   (fn []
+     (fill-live-window! "win-page" 30)
+     ;; A RUN OF IT IS ALIVE IN THIS PROCESS, which is the one fact about a conversation
+     ;; that is in neither the record nor the entries -- a page has to carry it, because
+     ;; the turn on screen is drawn as finished or unfinished by it (ticket 06).
+     (sessions/run-started! "win-page" "win-r0")
+     (testing "no cursor is the tail page, and it is a slice rather than the whole thing"
+       (let [resp (api-call :get "/api/threads/win-page/page" nil)
+             body (read-json resp)]
+         (is (= 200 (.statusCode resp)))
+         (is (= 50 (count (:entries body))) "`page-size` entries")
+         (is (= 250 (:baseSeq body)) "starting at the oldest arrival's own number")
+         (is (true? (:hasMore body)) "and there is more in front of it")
+         (is (true? (:live body)) "answered from the session this process is holding")
+         (is (some? (:generation body)) "under the generation the window belongs to")
+         (is (= 290 (:cursor body)) "and the reader's next cursor is the newest number")
+         (is (= "running" (:state body))
+             "and how far along it is: a run of this session is alive here")
+         (is (= 0 (count (:entries (read-json (api-call :get
+                                                        "/api/threads/win-page/page?beforeSeq=0"
+                                                        nil)))))
+             "and a reader holding from the very first arrival has nothing in front of it")))
+     (testing "a cursor is the page IN FRONT of it -- no overlap, nothing skipped"
+       (let [body (read-json (api-call :get "/api/threads/win-page/page?beforeSeq=250" nil))]
+         (is (= "page" (:type body)))
+         (is (= 50 (count (:entries body))))
+         (is (= 200 (:baseSeq body)))
+         (is (empty? (filter #(<= 250 (long (:seq %))) (:entries body)))
+             "nothing the client already holds is handed back")))
+     (testing "a cursor that is not a record offset is refused BY NAME"
+       (let [resp (api-call :get "/api/threads/win-page/page?beforeSeq=abc" nil)]
+         (is (= 400 (.statusCode resp)))
+         (is (str/includes? (:error (read-json resp)) "beforeSeq"))))
+     (testing "and a conversation nobody here holds is READ, not refused"
+       ;; The record is still the way to page through a conversation another process is
+       ;; serving -- or one nobody is: a read does not need to hold anything.
+       (write-truncated-log! "win-cold" "r1")
+       (let [resp (api-call :get "/api/threads/win-cold/page" nil)
+             body (read-json resp)]
+         (is (= 200 (.statusCode resp)))
+         (is (false? (:live body)) "read from the record, and it says so")
+         (is (= ["u1"] (mapv (comp :id :message) (:entries body))))
+         (is (= [1] (mapv :seq (:entries body)))
+             "numbered by its own line in the record -- line 0 is the run's prompt row, and the
+              entry is the line that carries it, the same numbers a live session mints")
+         (is (= "unfinished" (:state body))
+             "and the state is the RECORD's own reading: a log that stops mid-run with
+              nothing in this process running it says exactly that, and it is the flag
+              that sends a client to the `rebuild` door that closes it off")))
+     (testing "a stem with neither a session nor a log is a 404"
+       (is (= 404 (.statusCode (api-call :get "/api/threads/win-nothing/page" nil))))))))
+
+(deftest a-feed-whose-window-is-over-is-refused-before-it-streams
+  (with-server
+   "win-stale"
+   (fn []
+     (fill-live-window! "win-stale" 30)
+     (let [generation (sessions/generation "win-stale")]
+       (testing "a cursor behind the tail page would make the delta the whole conversation"
+         (let [resp (api-call :get "/api/threads/win-stale/feed?since=3" nil)
+               body (read-json resp)]
+           (is (= 409 (.statusCode resp)))
+           (is (str/includes? (str (:error body)) "window"))
+           (is (= 250 (:baseSeq body)) "and it carries where the window starts now")
+           (is (= generation (:generation body)))))
+       (testing "a generation that is not this window's is the same refusal, from the other side"
+         (let [resp (api-call :get "/api/threads/win-stale/feed?since=290&generation=gone" nil)
+               body (read-json resp)]
+           (is (= 409 (.statusCode resp)))
+           (is (= generation (:generation body)))
+           (is (= 250 (:baseSeq body)))))
+       (testing "and a cursor the window still covers is let through to the stream"
+         ;; Proved by the stream itself in the case below; here what matters is that the
+         ;; door did NOT answer JSON -- the response is an event stream that stays open.
+         (let [[sock next-frame] (feed-open! "win-stale"
+                                             (str "?since=290&generation=" generation))]
+           (try
+             (let [frame (next-frame)]
+               (is (= "append" (:type frame))
+                   "the answer is a stream frame, not a 409 body")
+               (is (empty? (:entries frame)) "with nothing in it: the reader is current")
+               (is (= 290 (:cursor frame))))
+             (finally (.close sock)))))))))
+
+(deftest the-feed-opens-with-the-window-pushes-what-lands-and-ends-when-it-must
+  (with-server
+   "win-feed"
+   (fn []
+     ;; FOUR arrivals -- 40 entries, under `page-size` -- so the tail page is the WHOLE
+     ;; conversation and every number in the test is one it can predict. A conversation
+     ;; longer than a page is the case the page route above is about.
+     (fill-live-window! "win-feed" 4)
+     (let [generation (sessions/generation "win-feed")
+           [sock next-frame] (feed-open! "win-feed")]
+       (try
+         (let [window (next-frame)]
+           (testing "the first frame is the window"
+             (is (= "window" (:type window)))
+             (is (= 40 (count (:entries window))))
+             (is (= 0 (:baseSeq window)) "the first arrival's number")
+             (is (= 30 (:cursor window)) "the newest number the reader now holds")
+             (is (false? (:hasMore window)) "and there is nothing in front of it")
+             (is (= generation (:generation window))
+                 "under the generation the session is being served with")))
+         (testing "an entry that lands is pushed -- without anybody asking again"
+           (sessions/append! "win-feed" "win-r99" [{:id "win-r99-0" :role "user"
+                                                    :content "新的一条"}])
+           (sessions/land! "win-feed" "win-r99" 40)
+           ;; TWO TELLINGS ARE POSSIBLE AND BOTH ARE RIGHT: the append rings before the
+           ;; line lands (the entry has no number yet) and the landing rings again. A
+           ;; reader sees the entry once or twice, and the LAST telling carries its
+           ;; number -- which is exactly the re-delivery the entries' ids are for.
+           (let [told (loop [seen []]
+                        (let [frame (next-frame)
+                              entries (:entries frame)]
+                          (if (and (seq entries) (some? (:seq (first entries))))
+                            (conj seen frame)
+                            (if (nil? frame)
+                              seen
+                              (recur (conj seen frame))))))
+                 last-telling (last told)]
+             (is (seq told) "the landing was pushed")
+             (is (= "append" (:type last-telling)))
+             (is (= ["win-r99-0"] (mapv (comp :id :message) (:entries last-telling))))
+             (is (= [40] (mapv :seq (:entries last-telling))) "with its record number")
+             (is (= 40 (:cursor last-telling)) "and the reader's cursor has moved")))
+         (testing "putting the session away ends the stream, SAYING WHY"
+           (sessions/drop! "win-feed")
+           (let [frame (loop [f (next-frame)]
+                         (if (or (nil? f) (not= "append" (:type f)))
+                           f
+                           (recur (next-frame))))]
+             (is (= "end" (:type frame)))
+             (is (= "put-away" (:reason frame))
+                 "a stream that just stopped would leave a reader believing it holds everything")
+             (is (= generation (:generation frame))
+                 "...and it names the window that just ended, so a reader can tell it
+                  apart from whatever holds the conversation next")))
+         (testing "and then it is closed"
+           (is (nil? (next-frame))))
+         (finally (.close sock)))))))
+
+(deftest a-feed-says-when-the-conversation-moves-without-new-entries
+  ;; THE STATE IS PART OF THE WINDOW, and this is the case that proves why: a run that
+  ;; SETTLES without saying anything still changes what the reader should draw (the turn
+  ;; on screen stops being unfinished), and a frame sent only when entries land would
+  ;; leave that turn looking live forever. So the feed pushes when EITHER moved.
+  (with-server
+   "win-state"
+   (fn []
+     (fill-live-window! "win-state" 2)
+     (sessions/run-started! "win-state" "win-r-current")
+     (let [[sock next-frame] (feed-open! "win-state")
+           opened (next-frame)]
+       (try
+         (testing "the opening frame says a run of this conversation is alive"
+           (is (= "window" (:type opened)))
+           (is (= "running" (:state opened))))
+         (sessions/run-finished! "win-state" "win-r-current")
+         ;; A RUN THAT SAID NOTHING: the frames are the run's own start and nothing else,
+         ;; so `apply-frames` folds no messages -- what changed is the state.
+         (sessions/settle! "win-state" "win-r-current" [(ev/run-start)])
+         (testing "and a frame arrives for the state alone"
+           (let [frame (next-frame)]
+             (is (= "append" (:type frame)) "a frame arrives for the state alone")
+             (is (empty? (:entries frame)) "carrying no entries")
+             (is (= "unfinished" (:state frame))
+                 "and saying what this process now knows: a run of it ended without a
+                  terminal frame, which is a fact the record agrees with")
+             (is (= (:cursor opened) (:cursor frame))
+                 "the reader's cursor has not moved -- there was nothing to number")))
+         (finally (.close sock)))))))
+
+
+(deftest the-record-holds-exactly-two-kinds-of-row
+  ;; 拍定 2026-09-21 (`.scratch/jsonl-two-kinds`): `message` is what a person said or an LLM
+  ;; returned; EVERY other fact is an `event` whose payload is a frame -- the wire's frames
+  ;; themselves, and the harness's own facts as CUSTOM frames named after them.
+  ;;
+  ;; This reads the FILE raw, on purpose. Every other case in this file asks
+  ;; `replay/kind` / `replay/payload` about a row; a case about the FORMAT has to see the
+  ;; bytes the writer actually put down.
+  (with-server
+   "two-kinds"
+   (fn []
+     (post-run "two-kinds" {:append [{:id "u1" :role "user" :content "hi"}]})
+     (let [rows (until (fn []
+                         (let [rs (->> (str/split-lines (slurp (log-file "two-kinds")
+                                                                :encoding "UTF-8"))
+                                       (keep #(try (json/read-str % :key-fn keyword)
+                                                   (catch Throwable _ nil)))
+                                       vec)]
+                           (when (some #(= "message" (:type %)) rs) rs)))
+                       5000)]
+       (testing "every row is one of the two, and carries a payload"
+         (is (seq rows))
+         (is (every? #(contains? #{"event" "message"} (:type %)) rows)
+             (str "rows seen: " (pr-str (mapv :type rows))))
+         (is (every? #(contains? % :payload) rows)))
+       (testing "and none of them is written in the old contract"
+         (is (not-any? #(contains? % :kind) rows)
+             "`kind` at the top level is the row this build refuses to read")
+         (is (not-any? #(contains? (:payload %) :kind) rows)
+             "nor does the envelope's vocabulary leak into a payload"))
+       (testing "a message row keeps the provider's own map, verbatim"
+         (let [msg (first (filter #(and (= "message" (:type %))
+                                        (= "user" (get-in % [:payload :role])))
+                                  rows))]
+           (is (some? msg) "the person's own message is a `message` row")
+           (is (= "hi" (get-in msg [:payload :content])))
+           (is (empty? (filter #(contains? (:payload msg) %)
+                               [:type :payload :ts :runId :source :hash]))
+               "identity and time live on the envelope, never inside the payload")))
+       (testing "the system prompt is a message row too -- and the array's FIRST one"
+         ;; OWNER, 2026-09-21: a `message` row IS an element of the messages array the model
+         ;; was handed, and the prompt is that array's first element, so it is stored the way
+         ;; the model got it -- verbatim, `:source` saying the prompt put it there and `:hash`
+         ;; naming those bytes. Every run writes its own copy (a stable prefix is what the
+         ;; provider's cache reads), which is why `harness.edge.replay/entries` -- the
+         ;; conversation, and with it everything a client is ever handed -- is the ONE place
+         ;; that has to leave it out.
+         (let [prompt (first (filter #(and (= "message" (:type %))
+                                           (= "system-prompt" (:source %)))
+                                     rows))]
+           (is (some? prompt) "the run recorded the prompt it handed the model")
+           (is (= "system" (get-in prompt [:payload :role])) "as a system message")
+           (is (string? (get-in prompt [:payload :content])))
+           (is (= 64 (count (:hash prompt))) "named by its SHA-256, on the envelope")
+           (let [first-wire (first (filter #(= "RUN_STARTED" (get-in % [:payload :type])) rows))]
+             (is (some? first-wire) "the run's own first frame is on the record")
+             (is (< (.indexOf rows prompt) (.indexOf rows first-wire))
+                 "the run wrote it before its first wire frame; what sits IN FRONT of the
+                  prompt is the action's own rows -- the client's message, which arrived
+                  first (票 02) -- and the hook facts that fire while the run is set up"))))
+       (testing "a wire frame is an event whose payload IS the frame"
+         (let [terminal (first (filter #(= "RUN_FINISHED" (get-in % [:payload :type])) rows))]
+           (is (some? terminal) "a run's terminal frame is on the record")
+           (is (= "event" (:type terminal)))
+           (is (= "two-kinds" (get-in terminal [:payload :threadId]))
+               "and it is the frame itself, not a copy of its fields")))
+       (testing "a fact the harness knows on its own is an event too -- a CUSTOM frame"
+         (let [fact (first (filter #(= "model/start" (get-in % [:payload :name])) rows))]
+           (is (some? fact) "the model call's start is a fact with no wire frame of its own")
+           (is (= "event" (:type fact)))
+           (is (map? (get-in fact [:payload :value])) "carrying what the fact knew")
+           (is (nil? (get-in fact [:payload :messageId]))
+               "and no message id: nothing on screen draws it"))
+         (is (not-any? #(= "input" (get-in % [:payload :name])) rows)
+             "and the `input` row 票 02 deletes is GONE -- what an action brought is its own
+              message rows, not a fact restating them"))))))

@@ -59,7 +59,8 @@
   (testing "bash does POSIX, and is handed the command with -lc"
     (is (true? (shell/posix? :bash)))
     (is (true? (shell/posix? :git-bash)))
-    (is (= ["-lc"] (shell/argv-prefix :bash))))
+    (is (= ["-lc"] (shell/argv-prefix :bash)))
+    (is (= ["-lc"] (shell/argv-prefix :git-bash))))
   (testing "PowerShell needs its own flags, and does not read POSIX quoting"
     (is (false? (shell/posix? :pwsh)))
     (is (= ["-NoProfile" "-Command"] (shell/argv-prefix :pwsh)))
@@ -80,6 +81,85 @@
                                              :timeout-ms 10000})]
       (is (= 0 exit) (str "the command ran (stderr: " (str/trim (str err)) ")"))
       (is (str/includes? (str out) "harness-shell-test")))))
+
+(deftest a-resolution-can-be-asked-for-a-named-kind
+  ;; THE MACHINE'S OWN SHELL IS ONE QUESTION; a kind the caller NAMES is another. They
+  ;; have to agree where they overlap, or `bash {shell: "cmd"}` would run somewhere
+  ;; other than where `(resolution :cmd)` promised -- which is worse than refusing.
+  (let [r (shell/resolution)]
+    (is (some? r) "this machine resolves a shell at all")
+    (is (= r (shell/resolution (:kind r)))
+        "the kind the chain landed on is reachable BY NAME and answers the same thing"))
+  (testing "every kind this harness knows answers with that kind, or with nothing"
+    ;; Nothing is a legitimate answer. A resolution that came back as a DIFFERENT kind
+    ;; would mean the name was ignored -- and a fallback is the one outcome worse than a
+    ;; refusal, so it is asserted against rather than assumed away.
+    (doseq [k [:git-bash :bash :pwsh :powershell :cmd]]
+      (let [r (shell/resolution k)]
+        (is (or (nil? r) (= k (:kind r)))
+            (str (name k) " answered as " (pr-str (:kind r)))))))
+  (testing "and a kind nobody has heard of is nothing, not somebody else's shell"
+    (is (nil? (shell/resolution :nope)))
+    (is (empty? (shell/kind-candidates :nope))
+        "no candidates is WHY -- a mis-spelling has nowhere to fall to")))
+
+(deftest a-named-kinds-answer-is-cached-too
+  ;; One rule for both caches: a fact about the machine is asked once. The MISS matters
+  ;; as much as the hit -- "this machine has no pwsh" is exactly the answer that must not
+  ;; be re-derived at every spawn.
+  (let [asked (atom 0)
+        fake  {:command "/fake/cmd" :kind :cmd :posix? false :argv-prefix ["/c"]}]
+    (try
+      (shell/reset-resolution!)
+      (with-redefs [shell/resolve-kind* (fn [k] (swap! asked inc) (when (= k :cmd) fake))]
+        (is (= fake (shell/resolution :cmd)))
+        (is (= fake (shell/resolution :cmd)))
+        (is (= 1 @asked) "asked once; the second answer came out of the cache")
+        (is (nil? (shell/resolution :pwsh)))
+        (is (nil? (shell/resolution :pwsh)))
+        (is (= 2 @asked) "and a MISS is cached too: two kinds asked, two questions")
+        (shell/reset-resolution!)
+        (is (= fake (shell/resolution :cmd)))
+        (is (= 3 @asked) "reset forgets the named answers too, not just the machine's"))
+      (finally (shell/reset-resolution!)))))
+
+(deftest a-kind-this-machine-lacks-is-refused-by-name
+  ;; NEVER A QUIET FALLBACK. Running a command under a shell nobody asked for is worse
+  ;; than not running it: the caller's `%VAR%` or `$env:VAR` would be read by somebody
+  ;; who does not understand it, and the answer would look like a bug in the command.
+  (let [e (try (shell/require-shell! :nope) nil (catch Exception e e))]
+    (is (some? e) "a kind nobody has heard of is a refusal, not a nil dereference")
+    (is (= :no-such-shell (:reason (ex-data e))))
+    (is (= :nope (:kind (ex-data e))))
+    (is (str/includes? (ex-message e) "nope") "the sentence names what was asked for")
+    (is (str/includes? (ex-message e) "what it has is")
+        "and says what this machine does have, so a missing install reads differently"))
+  (testing "and the spawn sites refuse rather than falling back"
+    (doseq [f [#(shell/run {:command "echo hi" :kind :nope :timeout-ms 5000})
+               #(shell/start {:command "echo hi" :shape :shell :kind :nope})]]
+      (let [e (try (f) nil (catch Exception e e))]
+        (is (= :no-such-shell (:reason (ex-data e))))))))
+
+(deftest a-call-can-name-the-shell-it-runs-in
+  ;; `%CD%` IS THE PROOF, and it has to be: bash cannot expand it, so a Windows path in
+  ;; the answer is not a coincidence -- it means cmd really interpreted the line. That is
+  ;; the whole point of naming a shell instead of wrapping `cmd /c` inside bash.
+  (when (shell/resolution :cmd)
+    (testing "foreground"
+      (let [{:keys [exit out]} (shell/run {:command "echo %CD%" :kind :cmd :timeout-ms 20000})]
+        (is (= 0 exit))
+        (is (re-find #"[A-Za-z]:[\\/]" (str out)) (str "cmd expanded %CD%: " (pr-str out)))))
+    (testing "and the long-lived shape takes the same kind"
+      (let [h (shell/start {:command "echo %CD%" :shape :shell :kind :cmd})]
+        (try
+          (let [lines (loop [v ((:next-line h) 20000), lines []]
+                        (cond
+                          (shell/timeout? v) (recur ((:next-line h) 20000) lines)
+                          (shell/eof? v)     lines
+                          :else              (recur ((:next-line h) 20000) (conj lines v))))]
+            (is (re-find #"[A-Za-z]:[\\/]" (str/join "\n" lines))
+                (str "asked for cmd, got: " (pr-str lines))))
+          (finally ((:close! h))))))))
 
 (deftest a-login-shells-logout-does-not-clear-the-pipe
   ;; Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN `exit`
@@ -144,6 +224,12 @@
 (deftest what-a-command-printed-before-the-limit-comes-back
   ;; The output is not discarded: a command that hangs after saying why it cannot
   ;; finish is exactly the case worth reading.
+  ;;
+  ;; THIS IS ALSO THE CASE THAT CATCHES A `-lc` -> `-c` "OPTIMIZATION", and it costs
+  ;; 10s of wall clock when it does -- both pipe drains run out their 5s default: with
+  ;; the profile skipped the timed-out child is never reaped, nothing closes the pipes,
+  ;; and the output is thrown away. Found exactly that way on 2026-09-20, when `-c`
+  ;; looked like a free 700ms off every spawn.
   (let [{:keys [out timeout]} (shell/run {:command "echo said-before-hanging; sleep 30"
                                           :timeout-ms 2000})]
     (is (true? timeout))

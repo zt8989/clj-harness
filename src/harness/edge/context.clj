@@ -5,7 +5,7 @@
 
   THE FOURTH READER OF THE SAME LOG, beside harness.edge.replay (the conversation),
   harness.edge.stats (the numbers) and harness.edge.trajectory (what the model saw).
-  What it reads is the `input` / `message` / `model/*` lines and the provider
+  What it reads is the `message` / `model/*` lines and the provider
   timeline, and the question it answers is none of the other three's: 'this call was
   sent N tokens -- out of how much room, and what was in them'.
 
@@ -29,7 +29,8 @@
   the live resolution would divide one call's prompt by another model's window."
   (:require [clojure.data.json :as json]
             [harness.edge.stats :as stats]
-            [harness.edge.trajectory :as trajectory]))
+            [harness.edge.trajectory :as trajectory]
+            [harness.edge.replay :as replay]))
 
 ;; ----------------------------------------------------------------- measured size
 
@@ -62,10 +63,10 @@
       (nil? record)
       (cond-> acc pending (conj {:start pending :end nil}))
 
-      (= "model/start" (:kind record))
+      (= "model/start" (replay/kind record))
       (recur more record (cond-> acc pending (conj {:start pending :end nil})))
 
-      (= "model/end" (:kind record))
+      (= "model/end" (replay/kind record))
       (recur more nil (conj acc {:start pending :end record}))
 
       :else
@@ -82,7 +83,7 @@
   [runs]
   (reduce (fn [acc [i run]]
             (reduce (fn [acc call]
-                      (let [prompt (get-in call [:end :payload :usage :prompt_tokens])]
+                      (let [prompt (get-in (replay/payload (:end call)) [:usage :prompt_tokens])]
                         (if (number? prompt)
                           {:run i :start (:start call) :end (:end call)}
                           acc)))
@@ -102,7 +103,7 @@
   whose session never changed provider -- which is most of them, and the failure looks
   like 'this model declares no window' rather than like a bug."
   [record]
-  (let [payload (:payload record)]
+  (let [payload (replay/payload record)]
     (or (get-in payload [:resolved :context-window])
         (:context-window payload))))
 
@@ -117,7 +118,7 @@
   from the call's own line, which is why that is the primary source."
   [records end-record]
   (->> records
-       (filter #(contains? #{"provider/init" "provider/changed"} (:kind %)))
+       (filter #(contains? #{"provider/init" "provider/changed"} (replay/kind %)))
        ;; By the clock, not by position: the lines a session's provider timeline is
        ;; made of land outside runs too, and a log's :ts only ever goes forwards.
        (filter #(<= (:ts %) (:ts end-record)))
@@ -197,8 +198,8 @@
       {}
       (let [run       (nth runs (:run chosen))
             start     (:start chosen)
-            payload   (:payload start)
-            usage     (:payload (:end chosen))
+            payload   (replay/payload start)
+            usage     (replay/payload (:end chosen))
             used      (get-in usage [:usage :prompt_tokens])
             window    (or (:context-window payload) (timeline-window records (:end chosen)))
             ;; THE SPLIT NEEDS THE RUN'S MESSAGE SIDE TO BE ON DISK. Two ways it is

@@ -18,7 +18,7 @@ import { API_BASE } from "@/lib/threads";
 /// One thing in a turn, in the order the model had it.
 export type TrajectoryItem =
   | { kind: "system"; text: string; initial?: boolean }
-  | { kind: "context"; text: string; source: "opening" | "run"; call?: number }
+  | { kind: "context"; text: string; call?: number }
   | { kind: "user"; text: string; id?: string; at?: number }
   | { kind: "assistant"; text: string; reasoning?: string; call?: number }
   | {

@@ -6,7 +6,7 @@
 
 **它曾经是 ClojureScript + helix + CopilotKit。** 那次换语言换库的完整记录在
 `.scratch/assistant-ui/`（历史文档，记的是当时）。协议侧一字未改——
-AG-UI 帧的形状、interrupt/resume 的语义、以及「服务端不持有会话」这条，换客户端都没有碰。
+AG-UI 帧的形状与 interrupt/resume 的语义，换客户端都没有碰。
 
 ## 装配
 
@@ -15,11 +15,33 @@ main.tsx            React root
 app.tsx             **一场会话一份 runtime（一份 `SessionHost`）**，各带自己的 HttpAgent、
                     `useAgUiRuntime`、`ApprovalBatchProvider` 与 <Thread/>。App 持有的是
                     「现在看哪一场」（`shown`）、「哪些会话有活着的 host」（roster）、
-                    以及每场自己的 `{:running? :parked?}` 注册表（侧边栏按 id 查）
+                    每场自己的 `{:running? :parked?}` 注册表（侧边栏按 id 查）、
+                    每场手里那段**窗口**（`windows`）与要画在它顶上的那颗按钮（`controls`）、
+                    记录的降级态（`records`），以及打不开的那几场各自的错（`openErrors`）
                     侧边栏在 provider **之外**（它管全部会话），THREAD_COMPONENTS 仍在此注入
                     （附件适配器也在这里交出：`adapters.attachments` 一行）
 components/
-  sidebar.tsx       三段位：钉住的「新建任务」、唯一滚动的项目区、钉住的「设置」
+  sidebar.tsx       四段位：钉住的**品牌行**（logo + `clj-harness` + 收起那顆）、钉住的「新建任务」
+                     与加项目 / 刷新、唯一滚动的项目区、钉住的「设置」
+                     窄窗（< `lg`）时整列**浮在对话上**、配一层背板；`lg` 起才是并排的一列
+                     **折叠有两种样子，`lg` 决定哪一种**：宽窗是一条 **48px 的 rail**（列还在、只剩
+                     图标与 logo：顶格平时是记号、hover/聚焦才换成那颗「展开」，会话/项目列表 `hidden`、
+                     设置那颗 32px 居中），窄窗仍旧 `display: none`。两种都由 `lg:` 类产出，不加监听
+                     rail 与列表都是 `hidden` 而不是卸载（它是 `/api/projects` 唯一的读者，见下）
+  app-brand.tsx     品牌行的记号（内联 SVG，`aria-hidden`）与产品名；产品名是常量不是词表条目，
+                     所以它从 `lib/session-title.ts` 取（同一个词在 tab 尾巴上还要说一遍）
+  session-title.tsx 对话列顶栏那行标题：读这一场的第一句用户消息，画出来，并让浏览器 tab 跟上
+                     （只有 `visible` 的那个 host 渲染它，所以「哪一场可见」不用问页面）。
+                     顶栏是 `app.tsx` 里一个 **`h-12`（= demo 的 `3rem`）的两行块**：
+                     上行标题、下行 视图页签。这个高度是**与侧边栏品牌行对齐**用的——
+                     两边各自 `border-b`，两条线因此落在同一个 y、看上去是整页一条，
+                     加上侧边栏那条 `border-e` 就是 demo 顶左角那个十字（spec 二版一节有量到的数）
+  sidebar-toggle.tsx  折叠/展开那几颗：收起在**品牌行末位**（`ms-auto`）；展开是同一个组件的两种
+                    `shape`——`corner`（默认）是窄窗左上角那颗浮标，`rail` 是宽窗 rail 顶格里那颗
+                    （平时 `opacity-0`，hover/`focus-visible` 才显形，所以键盘也走得到）。
+                    浮标归 `app.tsx` 画（折起来的侧边栏在窄窗是隐藏子树，画不了要被看见的按钮），
+                    且带 `lg:hidden`：三处共用同一个 `SIDEBAR_ID`（`aria-controls`），
+                    任一窗口**同时只有一颗**在屏幕上。外加 `isWideWindow`：窄不窄只此一处 `matchMedia`，当场读
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
   message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
@@ -41,7 +63,9 @@ lib/
   threads.ts        两个地址：`API_BASE`（`${HARNESS}api/`，管理调用挂的地方）与 `AGENT_URL`
                     （`${API_BASE}agent`，`HttpAgent` 用的那一个端点）。`HARNESS` 默认 `/`（本 origin），
                     `VITE_AGENT_URL` 可指绝对地址。外加 rebuild 调用
-  projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
+  projects.ts       GET /api/projects 的类型化薄封装，外加**动作**那几发：`bindThread`（换绑）、
+                    `startTask`（按 id 登记一场任务，或让服务端铸一枚）、`startSessionIn`（在某个
+                    目录里开一场）、`addProject` / `removeProject` / `pickFolder` / `setArchived`
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
@@ -60,6 +84,34 @@ lib/
   session-status.ts 一场会话的 `{:running? :parked?}`（host 报上去、侧边栏按 id 查）
                     与仍然要拒的两句话（归档 / 删项目）。**改名自 `run-state.ts`**：
                     旧名字说的是「整页在跑」，而那个前提没了
+  session-title.ts  一场会话的**标题**：原始一句人话变成标题的那条规矩（`titleOf`：空白折叠 +
+                    按**码点**裁到 60 并加 `…`）、从运行时消息里取第一句（`firstUserText`）、
+                    没说过话时用的那句词（`sessionTitle`，词由调用方传），
+                    以及 tab 尾巴上的 `<标题> · clj-harness`（`documentTitle`）与产品名常量。
+                    **零 import**（只有类型），被 UI 套件当成数来测。
+                    **标题有两个来源、却只有这一条规矩**：库里 `sessions.title` 那份（第一次
+                    收到消息的那次 run 写下的，列表给每一行都带着）与页面自己握着的运行时那份
+                    （`firstUserText`，刚打完的那句立刻就在）。两份都过 `titleOf`，所以行与顶栏
+                    永远不会对「什么是标题」有不同看法
+  reveal.ts         「够着才出现」那串类（行上的归档 / 取消归档 / 删除、项目那行的「更多」）：
+                    **一处定义**，因为两个调用点曾经以同一种方式错——`Button` 底座的
+                    `disabled:opacity-50` 与揭示用的 `opacity-0` 是**同一个工具类的同一个变体**，
+                    `cn`（tailwind-merge）只留最后一个，于是**侧栏一忙（比如等原生选目录框）**
+                    满列表的归档按钮就一起冒出来（量到 `0.5`）。所以常量里必须带 `disabled:opacity-0`，
+                    再用更具体的 `group-hover:disabled:opacity-50` 让「已揭示的禁用控制」仍旧发灰。
+                    **零 import**（就是一条字符串），被 UI 套件渲染出来读回去
+  session-memory.ts 「刷新回到刚才那一场」记的那个 id（`localStorage`，就是这里）
+  agent.ts          `HttpAgent` 那几行：地址、`threadId` 交给谁、以及 run 结束的回调
+  record-health.ts  记录降级态那一个字段（`:record`）的类型与 `recordNotice`：
+                    把它变成一句话，**没有问题时不出现**
+  window.ts         窗口这个值本身：`{entries, baseSeq, hasMore, cursor, generation, state,
+                    revision}` 与它的全部规则（`windowFrom` / `applied` / `prepended` /
+                    `aligned` / `aheadOf`）。**全是纯函数**，所以 UI 套件直接测它；
+                    `revision` 是「这份窗口变过几次」，与消息号 `seq` 不是一回事
+  feed.ts           那条 SSE 连接：`fetch` + `AbortController`（不是 `EventSource`——它自己
+                    重连、又看不见 409 的 body），加一个纯的 `feedFrames` 切帧
+  window-scroll.ts  补页时的锚：`measure` / `restoredTop` / `correctedTop` 三行算术（用例测）
+                    与 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事
 ```
 
 **dev 里页面直连后端，跨域。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，其余都是
@@ -81,21 +133,91 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   HttpAgent、自己调一次 `useAgUiRuntime`，于是自己有一份 core。`threadList` 适配器里**只传 threadId**，
   `onSwitchToThread` / `onSwitchToNewThread` 两个回调退场——它们的效果是「先清空当前 core、再灌新消息」，
   而那份 core 现在正在流。host 一旦存在就**不再卸载、也不再重建**（core 归 hook 的 ref 所有，不归 DOM 子树），
-  所以「这个会话没在显示」不等于「它的 run 死了」；`agent.threadId` 也不再有回写者（`adoptThread` 已删），
-  服务端照旧零会话状态。
+  所以「这个会话没在显示」不等于「它的 run 死了」；`agent.threadId` 也不再有回写者（`adoptThread` 已删）。
+- **会话归服务端，浏览器是只读副本，它只发动作**（ADR 0002）：发送、换模型、审批回答、停止、归档
+  ——画什么由服务端给的帧与页决定（`append` / `update` 两个适配器因此是空的，见下）。
+- **它手里是一段窗口，不是整场会话**（`lib/window.ts`）：
+  `{entries, baseSeq, hasMore, cursor, generation, state, revision}`。`entries` 是 `{seq, message}`——
+  **`seq` 是这条消息所在那一行在记录里的偏移**（服务端铸、谁都不许预测）；`baseSeq` 与 `cursor` 是
+  这段窗口最老、最新那个号（`cursor` 就是副本对服务端说「我拿到哪儿」的那句话）；`generation` 是这段
+  窗口属于哪一次服务（认领的 token，放掉或易主就换号）；`state` 是对面的 run 停没停；**`revision`
+  是副本自己的**「这段窗口变过几次」——它不是一个位置，与 `seq` 混用是这一份专门防的错。
+- **三扇门，两种读法**（`HistoryRead`）：`rebuild`（**侧栏点开**的那场：交给我，整段历史——它会合上
+  断头日志、也会指名一份坏日志）、`window`（**这一页本来就在**的那场，比如刷新回来：看它，尾页 +
+  一条 feed，一个字都不写）、`none`（本页刚铸、还没有会话的那场：没有可读的）。所以「侧栏点开」
+  与「刷新回来」是两件事：前者接手，后者只看。
+- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走 **feed 一条连接**
+  （`GET …/feed?since=<cursor>&generation=<G>`）。服务端**还持有**这场会话时尾页走**内存**（答案是
+  `live: true`），记录的落后因此不会把人送回更早的一版——「刷新走内存」（ADR 0002 决策 8）就是这一条；
+  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。feed 连上之后帧都来自内存，
+  游标由副本自己带着重连。
+- **两种修理是两件事**（`lib/window.ts` 的 `Effect`）：**断档 / 连接断了** ⇒ 拉尾页**对齐**
+  （接得上就合、接不上就重建并从尾页重来），**读者的位置保住**；**`end` 帧 / generation 作废**
+  （会话被放掉、被接管、换了进程）⇒ **重开**，并把「重开了」这句话画出来。副本手里有服务端没有的
+  条目时**说得出来**（`aheadOf`），不静默丢。
+- **「显示更早」一次一页，而且必须锚定**：补页是 `prepend`，会把它下面的一切往下推，所以问之前量、
+  答之后修（`lib/window-scroll.ts`），一次也只有一个在飞（按钮的禁用态就是这一条）。**锚点是一条
+  消息的文本，不是它的 DOM 节点**：assistant-ui 按位置保留消息节点，用节点当锚会算错——量到过节点
+  的 `top` 从 `83` 走到 `49`、上面多了四千多像素，而算出来的修正是 0。打字、打到一半的字、选中
+  位置都因此不动。
+- **记录的健康由谁来说**：有窗口的页面由 **feed 每帧带的 `:record`** 说；**没有窗口**的那几扇门
+  （本页刚铸的会话、侧栏点开的、修好的断头记录）在自己驱动的那一轮结束之后读一次 `sofar`。
+  从前那条每 1200ms 的 `sofar` 轮询没有了——它正是窗口要替掉的东西。
+- **一次 host 只读一次，判据是「那份 host 在不在」**：读走运行时自己的 `history` 适配器，它每个 core
+  只 `load()` 一次（`__internal_load`）。已经活着的 host 再显示多少次都不重读——它 core 里那份
+  conversation 可能还在长，拿整段重建的结果盖上去就是又一次孤儿（而窗口那条连接还在往同一个 core
+  里送帧）。
 - **「现在看哪一场」是 App 的 state**（`shown`），带两个动作：`onShow`（这场有 conversation，第一次
   host 时重建）与 `onShowFresh`（这场是客户端刚 mint 的，没有日志可重建，host 空着起）。
-- **第一次打开才 rebuild，判据是「那份 host 在不在」**：重建走运行时自己的 `history` 适配器，它每个
-  core 只 `load()` 一次（`__internal_load`）。已经活着的 host 再显示多少次都不重建——它 core 里那份
-  conversation 可能还在长，拿 rebuild 的结果盖上去就是又一次孤儿。
 - **恢复的转换仍与 runtime 自己的快照导入路径逐字相同**（引上游，不另写）：`fromAgUiMessages` +
   `fromThreadMessageLike`，只是交给适配器的形状是 `{messages: [{parentId, message}]}`。
 - **history 适配器的 `append`/`update` 是空实现**：日志归服务端所有，客户端一个字节都不往回写。
   host 的 `load()` 失败（截断 / 损坏的日志）走 `onError` 上报，句子仍旧落在**所点的行**上，
   而失败的那份 host 会被丢掉、页面退回上一场——所以点它一次就是重试一次。
-- **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目，
-  也没有日志的体积与 mtime）。**列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取，
-  界面上明说这一点。
+- **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目、
+  没有「谁是任务」）。**一份快照答两块**：`projects`（按目录分组）与 `tasks`（未绑定的会话，平铺不分组）。
+  **这份列表只由库回答**：id、归属、归档、名字（`sessions.title`）、**上次发送时间**
+  （`sessions.last_sent_at`）全是库里那几列，页面上唯一一个库答不了的是 `running`——它来自进程内的
+  live-runs 注册表，也是主人说的那条例外（取舍在 `.scratch/store-backed-sidebar/spec.md` 一节）。
+  于是行上不再有日志体积与 mtime，刷新也不再 walk 那棵树：一次 SELECT 加一次注册表查。
+  **列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取；**发送之后不用等刷新**——侧边栏握着一个
+  「有标题、不在列表里、也不在跑」的会话时会自己再问一次库（每个 id 每次页面加载最多一次，`asked` ref，
+  所以成不了环）。
+- **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只铸一枚 id、
+  在页面里打开一场空会话**：不写库、不刷新、列表上什么都不出现——**会话是第一次发送才诞生的**
+  （主人这一版的原话：「点击新增不立刻会话，发送才新建」）——那条路见
+  `.scratch/store-backed-sidebar/spec.md`。
+  那一刻之前服务端什么都没听见，所以这枚 id 必须在那一场的第一次 run 请求**之前**登记一次：
+  项目会话带着这枚 id 与目录走一次 `POST /api/project`（`bind!` 是 upsert，同时把它移进项目），
+  任务走一次 `POST /api/sessions`（find-or-create，认调用方给的 id、幂等，已经有就原样不动）。
+  **先登记、再发 run**，因为服务端那条规矩是：一轮 run 只继续这个家听说过的那场会话，瞄准陌生 id
+  的一轮是 404（ADR 0002 决策 9；run 那条边从前那次静默创建没有了，页面不再依赖它）。**不登记就
+  没有会话**——这正是懒创建要的：点一下不产生任何东西，有东西可留的时候才留。落在项目里的路只剩
+  一条：**项目行自己那颗「新建会话」**。任务的记录落在 `projects/.unbound/`。
+- **缩进那一条就是 spinner 的槽。** 会话行整体缩进到项目行**名字**的起点（走查量到的是 36px：
+  项目行 `px-1.5`(6) + 图标(16) + `gap-1.5`(6)，会话行是 `ps-2`(8) + 槽(14) + `gap-1.5`(6)），
+  槽宽就是 spinner 的 `size-3.5`，所以跑起来时 spinner 落在槽里、**标题的 x 一个像素都不动**
+  （走查量过 36 → 36）——主人那句「留下的缩进刚好显示 loading 状态」就是这一条。
+  行是**单行**：`[槽][标题 …][右端相对时间]`，hover 时右端才出归档/更多；`CURRENT` 那个词去掉了，
+  当前会话只用底色。**`bytes` 与第二行整条退场**（主人：「去除文件大小」）。
+- **一块最多画 5 行，其余的折起来**（`lib/sidebar-rows.ts`，唯一一处判据）：每个项目的会话列与
+  顶部那块任务各自最多画 `ROWS_BEFORE_FOLD`（5）行，之后一行折叠控件说 `还有 N 个`（N 是**折起来的**
+  行数，不是总数），点开画全、控件变 `收起`。**正在读的那一场排在第 6 个之后时，那一块画全、并且不画
+  控件**——能收起的控件等于把正在读的那一行藏起来，而这正是这条规矩要防的（刷新页面时最容易看见：
+  页面从记忆里恢复那一场，列表就得把它画出来）。两个块的展开状态各记各的、不落盘，与侧栏折叠、
+  项目展开、归档块同一个理由。**「已归档」那块不限**：它本来就是「存起来的东西」，而且默认折起、
+  要手动打开。上限是**画几行**不是**库留几条**：`GET /api/projects` 照旧把库里有的全给。
+- **时间是相对的，而且是库里的那个时刻**：`刚刚 / N 分钟 / N 小时 / N 天`，超过 7 天给日期
+  （`lib/relative-time.ts`：零依赖纯函数 + 阶梯）；完整绝对时间与 thread-id 一起进 hover 的 tooltip
+  （两行）。`lastSentAt` 为 null 的行（这一列存在之前注册过、又没有日志的空行）说 `session.neverRun`——
+  **老会话不在这条里**：迁移用日志 mtime 回填过一次，这正是要显示那一列的原因。
+- **归档是一块，装两种。** 每个项目底部那个折叠组已经收掉：整个列表最下面一块「已归档」，
+  里面既有归档的任务、也有归档的项目会话（默认折叠、空则不画；项目会话那一行用行上的 label
+  写出它原来属于哪个项目——分组没了，行上不说就没人说得出）。归档当前会话时页面照旧会走开，
+  落点是**同一类**里最近活动的那一场（项目会话 → 同一个项目；任务 → 另一条任务），
+  一场都不剩就按那一类各自的「新建」三步落一个。
+- **恢复（刷新回到刚才那一场）在那份 payload 的**两块**里找**：任务也是可以被记住的会话
+  （`lib/session-memory.ts`），只在 projects 里找会让页面在会话失去项目的那一刻忘掉它。
 - **添加项目有两个入口但只有一条路**：正常情况是一次点击直接开**原生选目录窗**，
   窗答什么就加什么（那份被删掉的表单见 sidebar 头部）；服务端答 501（这台机器上**没有**窗可开，
   见 [edge](edge.md#管理边路由表) 的三态）时才多一样东西——一行绝对路径输入框。
@@ -107,6 +229,21 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 - **切换与新建不再被 run 拦住**（一场会话一份 runtime，切走不打扰任何一场的 run）。仍然拒绝的是**归档 /
   删掉一场没完（在跑或悬置）的会话**，判据是**那条会话自己**在不在跑（App 的注册表），不是当前页在不在跑；
   句子落在**那一行**上（归档）或**项目那一行**上（删项目，且点名是哪一场），说辞在 `lib/session-status.ts`。
+- **侧边栏折没折是页面的临时状态**（`folded`，**不落盘**，跟 `view` 同一个理由：这是「这会儿怎么看」，
+  不是「这份工作是什么」——在窄窗折起来、回到宽窗被记着藏起项目列表，是没人要的惊喜）。折起来之后**宽窄两重天**
+  （`.scratch/sidebar-rail`）：宽窗是一条 48px 的 rail，列还在、出口长在它自己的顶格里；窄窗才整个消失、由
+  左上角那颗浮标把它打开（那颗归 `app.tsx` 画，因为窄窗折起来的是隐藏子树，画不了一颗要被看见的按钮）。
+  三处出口共用 `SIDEBAR_ID`（`components/sidebar-toggle.tsx`，它们与它们约定的事都写在那儿）。
+- **折 ≠ 卸载**，而且这是正确性、不是省事：`sidebar.tsx` 是 `GET /api/projects` **唯一**的读者，挂载恢复
+  正是从那一次读取里知道「记住的那一场还在不在」（`app.tsx` 的 `onListed`）。手机宽的窗口一开就是折着的，
+  卸载它等于让**这些窗口恢复不了任何东西**，记住的 id 一直陈旧到有人把列表展开；列表自己那份状态
+  （滚到哪儿、哪个项目是展开的）也会每折一下丢一次。
+- **窄窗（< `lg`）是断点，不是第二份状态**：侧边栏 `absolute` 浮在对话上、盖一层背板，所以「多宽算窄」
+  只有 `lg`（`64rem`）一个出处，JS 侧只有一处 `matchMedia`，且三处都是**当场读**（`isWideWindow`：
+  初值、选一场会话要不要把抽屉收走、Esc 要不要收）——没有 resize 监听，也没有第二份宽度状态。
+  抽屉另带两条礼貌：**选中会话就收**（否则刚选的那一场还盖在面板底下，点了像没反应；恢复不走这里，
+  页面落到自己记住的那一场没有谁需要让路）与 **Esc 收**（Radix 的浮层先 `preventDefault`，
+  所以它关自己的对话框时不会顺带把抽屉折了）。
 - **状态条那五格读的是记录，不是客户端手里的对话。** 客户端确实持有 conversation，所以它数得出轮与步、
   也估算得出 tok/s（运行时的 `chars ÷ 4`），但**它不这么做**：缓存命中它根本不知道，而估算出来的用量
   冒充厂商报的量就是编。那五个数由 `GET /api/threads/<stem>/stats` 从会话的 jsonl 折出来
@@ -116,7 +253,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   行写下来之后才存在，所以一次长调用进行中这条就停在上一格，那是不撒谎的代价。
   **这套触发条件现在只有一份实现**（`components/composer-numbers.tsx`），状态条与那颗圈共用它：
   两个读者各问一次就是两个瞬间的同一条日志。**外加两次按需的追一问**，都写在那一处（run 结束后
-  隔一拍再问一次，因为记录的写者比它自己的终帧晚一拍——run 的 message 尾巴落在 `:run/done`；
+  隔一拍再问一次，因为记录的写者比它自己的终帧晚一拍——run 的返回侧（`message` 行）落在 `:run/done`；
   打开面板时再问一次，因为那一下正是有人在问）。两次都不是轮询：一次 run 只多一次，不开面板不问。
 
 ## 上下文占用：model 左边那颗圈
@@ -220,7 +357,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 |---|---|
 | `src/components/assistant-ui/elements/` | 12 份抄自 assistant-ui registry：thread、thread-list、tool-fallback、tool-group、reasoning、reasoning.aui、markdown-text、attachment、file、image、follow-up-suggestions、tooltip-icon-button。**九份带 `LOCAL:` 标注**——文案进了目录（spec 决策 5），另有结构性的几处（`thread.aui.tsx` 的五处见下，`thread-list.aui.tsx` 的重写见再下面）。**三份没有可译的文案，因此仍是原样**：`reasoning.aui.tsx`、`follow-up-suggestions.aui.tsx`、`tooltip-icon-button.tsx`。`tool-group.aui.tsx` 仍在清单里、仍只被抄来的 `thread.aui.tsx` 用（注入点已不再导入它，见下） |
 | `src/components/ui/` | 10 份 shadcn 基件：button、dialog、dropdown-menu、input、textarea、tooltip、avatar、collapsible、skeleton、popover。**其中 `dialog.tsx` 带 `LOCAL:` 标注**：它的 `Close` 进了目录（`sr-only` 与页脚那颗按钮两处）；`popover.tsx` 是本特征加的那一份（读的那种浮层，与「选一个」的 dropdown-menu 各管一摊） |
-| `src/hooks/` | 2 份 hook，不含文案，未改 |
+| `src/hooks/` | 3 份 hook，不含文案：`use-copy-to-clipboard`、`use-attachment-src`，以及本特征加的 `use-document-title`（把当前会话的标题写进浏览器 tab，卸载时还原成产品名） |
 
 **两份带改动，改动逐处标注**。`thread.aui.tsx` 不是被重写的，是被**加了三个 `LOCAL:` 插入点**
 （`ComposerFrame` 套在 composer 外面、`ComposerTools` 画在动作行右侧、`ComposerAddAttachment` 顶替动作行
@@ -229,7 +366,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 读一次折叠钩子（`useStepFold` / `useTurnFolded`），据此把整条消息 `hidden`、或在轮首画那一行摘要，
 **逻辑一行都不在这份文件里**（`components/turn-steps.tsx` 与 `lib/turns.ts`），它只问「我该被收起来吗」。
 上面五处是**结构**上的改动；这份文件的**文案**也就地搬进了目录（spec 决策 5），所以它和 `thread-list.aui.tsx` 一样，不再与上游逐字节相同——**抄来的文件如今就地改，每一处有意改动都标 `LOCAL:`**。标记是逐字节对账的替代品：它说明「这里是有意改的」，不说明「上游改了什么」。`thread-list.aui.tsx` 则是**就地重写过**：上游那份是给另一种产品形态的扁平、
-按日期分组的线程列表，本仓要的是按**项目**分组、行上带日志体积与 mtime 的列表。保留的是行的骨架与
+按日期分组的线程列表，本仓要的是按**项目**分组、单行、带缩进槽与相对时间的列表。保留的是行的骨架与
 它那条 running 指示（**这一行的 `running` 是这一行自己的会话在不在跑**，不再是「当前页在不在跑」；
 另加一格 `parked`，悬置时那行说 `Waiting on you`——`isRunning` 在悬置时是 `false`，两种说法是两件事），
 删掉的是重命名 / 删除菜单项（本仓没有这两个动词）与把 Promise 丢掉的 `ThreadListItemPrimitive.Trigger`
@@ -266,13 +403,14 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 真机证据（四条新工具的步骤行与各自展开后的参数、结果）在
 `.scratch/tool-parity/evidence/`。
 
-**`skill` 也是一次普通工具调用，前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息塞进模型的
-上下文，而那些消息**从不产生任何 AG-UI 帧**——所以前端不是「过滤掉了它们」，是根本收不到；
-界面上只有一次普通的 `skill` 调用与它的返回。见
-[skills-and-instructions](skills-and-instructions.md#前端零改动wire-零改动)。
+**`skill` 也是一次普通工具调用，工具卡那一套前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息
+塞进模型的上下文——**2026-09-18 起它们会以 `CUSTOM` 帧出来**、在会话栏里画成一张注入卡（下一节），
+**但它们不进那场对话**：帧落成一个 `data` part，而会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）——下一轮交给模型的向量里没有注入物的字节。
+除此之外界面上只有一次普通的 `skill` 调用与它的返回。见
+[skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)。
 
 **这句话有一个例外，只有一行**：`/name` 那条**人的**加载路径现在有输入面了——技能列表（下一节）。
-注入本身照旧零帧；多出来的是「有哪些名字可选」这一屏，而它读的是服务端一条只读端点。
+而**注入本身**（不管谁触发的）在会话栏里就是下一节那张卡；多出来的是「有哪些名字可选」这一屏，
 两者不是一回事：一个是模型看到什么，一个是人挑什么。
 
 ## 文案与语言（i18n）
@@ -327,7 +465,8 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 
 理由不只是省事：**工具结果同时是模型的上下文**（它是模型读完才决定下一步的那份记录）。把它翻成随
 界面变化的两种语言，等于让同一份记录不再唯一——同一段 run，在两个不同语言的浏览器里，模型看到的
-东西会不一样。这与「服务端不持有会话」是同一个方向：**记录是记录，界面是界面。**
+东西会不一样。这与「会话归服务端、记录只有一份、浏览器只是画它」是同一个方向：**记录是记录，
+界面是界面。**
 
 界面上另一处不翻的是**模型的词汇**：工具名逐字（`read` / `bash` / `todo_write`，见
 [CONTEXT.md](../../CONTEXT.md) 的「工具名的写法」），参数与结果的正文是模型写的，也不翻。
@@ -413,6 +552,48 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 - 真机证据（粘贴 / 拖放 / `+` 三条路、被拒的两句话、记录里那两条行）在
   `.scratch/composer-image/evidence/`。
 
+## 注入物在会话栏里的一张卡
+
+**服务端每轮算出来的注入物，人也能在会话栏里看见**——一张与工具卡同一套壳的折叠卡：折着只有一行
+`上下文注入 · <首行> · N 字节`，点开是那段字节（等宽、可滚动），一次注入一张。
+
+**它不是一个消息，而是一个 `data` part。** 每条注入在服务端是一条 `CUSTOM` 帧（见 [edge](edge.md)），
+适配器把它按顺序落成 `{kind: "data", name, value}`；`lib/injections.ts` 从 part 里算出**标题**（首行的标签，
+如 `<job-ended …>` → `job-ended`，认不出就用首行）、**预览**与**字节数**（UTF-8，中文一个字三字节）；
+`components/context-card.tsx` 用 `makeAssistantDataUI({name: "injected-context"})` 画它——**注册就是那个组件
+的挂载**（`app.tsx` 里挂在 `AssistantRuntimeProvider` 之内），`thread.aui.tsx` 那句
+`case "data": return part.dataRendererUI` 是抄来的，一行未改。文案进 `thread` 命名空间（中英两份）。
+
+**开场块的那张卡有两条路来。** 会话出生时写进对话的那几条 opening entry 自带**同一个**
+`data` part（`harness.edge.ag_ui/injected-part-name`），所以画法一模一样，但它们**属于 user 消息**：
+
+- **出生那一轮把对话本身交给页面**（2026-09-21 拍定；`ag_ui/conversation-snapshot`）：那一轮的
+  `RUN_STARTED` 之后跟着一帧 `MESSAGES_SNAPSHOT`，带的是**这一轮写进对话的 entry**。**服务端发，前端画**
+  ——这条分工是拍定的原话，也是票 05 那次改动的由来：最初写的是「每个条目发一张 `CUSTOM` 卡」，而
+  `CUSTOM` 只是**一个 part**，适配器把它挂到**正在流的那条消息**上（`run-aggregator.js` 的 CUSTOM 分支
+  不看 `messageId`），客户端手里没有那条 user 消息时，卡就落到答案底下、而不是人的那一栏；改成快照之后，
+  消息、id 一起走，落位由消息自己决定。快照的 `content` 是**文本**（`ag_ui/wire-message` 投影）：AG-UI
+  对它解析的每一帧做 schema 校验，`data` part 会当场把这一轮打死（实测：界面上一条 Zod 报错），而**卡
+  由读者按 id 和文本自己画**——`thread.aui.tsx` 的 `UserMessage` 因此认两条：`isCardOnly(parts)`（这一条
+  只带一张卡）或 `isOpeningEntryId(id)`（`session-opening-<i>`：快照把它变成一条带文本的 user 消息，part
+  没了、id 还在）。**这条路上不再有任何「跑完读一次记录」**：`app.tsx` 的那次 import 已随这次拍定去掉，
+  跑完只剩一次健康检查式的读数上报。
+- **此后每一轮它只是历史**：随会话的窗口（feed / `sofar`）来，一次开场一张卡，而不是每一轮重复一遍。
+  窗口里那一条是 user 消息、内容是「只有一张卡」，`UserMessage` 同样交给 `UserInjectionCard`——**不画成
+  那个人的气泡**，这是 ticket 02 的修正。
+
+**刷新靠重建带回来。** 重建（窗口的 entry + 记录里的帧）在 `harness.kernel.frames/apply-frames` 把派生注入
+落成一条**只带那个 data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性的，所以每次刷新是同一张卡）。
+而**开场那一张是 user 消息**：记录里那几条开场 `message` 行（信封 `source: "opening"`）先折出条目（user + 两张 part），帧再按同一个 id
+折一遍时被丢掉（`replay/append-new`、`sessions/append!` 都是先到先得）——所以重建之后开场卡在**人的那一栏**，
+源出派生注入的卡在助手那一栏。适配器的 `fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，
+所以 `app.tsx` 的 `toThreadMessages` 让 `keepInjectionCards`（纯函数，**按 id 配对**，不是按下标——重建会把
+下标的对应挪走）把它补回来。**同一条规则也接住了快照那条路**：part 丢在适配器里，而 id 与文本留着。
+
+**回发时它被丢掉**，这是整件事干净的唯一依据：`toAgUiMessages` 只回 text / reasoning / tool-call，
+`data` part 在那儿没有分支。于是卡片看得见、却进不了下一轮的请求——适配器升级时第一个要看的就是这条
+契约（`test/suites/injections.ts` 第三条）。真机证据在 `.scratch/context-frames/evidence/`。
+
 ## 轨迹（`Conversation` / `Trajectory` 两个视图）
 
 线程列上方有一条切换：`Conversation` 是今天这个页面，`Trajectory` 换成**轨迹视图**——
@@ -432,8 +613,10 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 （表本身不在那里重复第二遍）。
 
 - **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、拼在它旁边的指令文件
-  与技能清单、技能正文、以及每次调用**照发出**的工具表，客户端一个都没有——它从来没有过，
-  AG-UI 帧里也没有。所以这一半由服务端从 jsonl 折出来（`harness.edge.trajectory`，
+- **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、每次调用**照发出**的工具表，
+  客户端从来没有过，AG-UI 帧里也没有（注入物是这里唯一的例外：它**会**以 `CUSTOM` 帧出来、画成上面那张卡——
+  但卡只是**一段字节**，`items` 的来源与分轮、这次调用带了几张表，都只有记录才有）。所以这一半由服务端从
+  jsonl 折出来（`harness.edge.trajectory`，
   见 [edge](edge.md)），从 `GET /api/threads/<stem>/trajectory` 吐出去，
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
@@ -471,10 +654,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 
 ## 测试
 
-**怎么跑**用 `node scripts/test.mjs --ui`（它起的就是 `cd ui && npm test`，即 vitest；全套三条腿
-见 `AGENTS.md`）。整套测试的**驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,picker,concurrent}.ts`
-是被它 import 的普通模块：
+**怎么跑**用 `cd ui && npm test`（vitest；三条腿与定向跑的完整入口见 `AGENTS.md`）。整套测试的
+**驱动只有一个文件**（`test/ui.test.ts`），
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,i18n,restore,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
+是被它 import 的普通模块（`sidebar` / `record` / `window` 那三份是 `.tsx`：它们
+`renderToStaticMarkup` 组件、把渲染出来的那句话读回来）：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」
@@ -496,16 +680,41 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   外加 2 MB 那个边界的两侧；`suites/turns.ts` 引 `src/lib/turns.ts`，为的是把折起来那条规则的
   **算术**钉住——轮的边界、什么时候算停、那一行数出来是几（这三件事在浏览器里只看得到结果）；
   `suites/picker.ts` 引 `src/lib/picker.ts`，为的是把「查什么」与「同组怎么并」钉住（同样是
-  只在浏览器里看结果、看不出规则的那一类）。
+  只在浏览器里看结果、看不出规则的那一类）；`suites/session-title.ts` 引
+  `src/lib/session-title.ts`，为的是把**标题怎么从消息里派出来**钉住——哪条消息算、空白变成什么、
+   60 个码点在哪切（一个 emoji 占两个 UTF-16 码元，`slice` 会把它劈成半个）、没说过话时是哪句词，
+   以及 tab 那条 `· clj-harness` 的尾巴。
 - **一个套件测什么，写在自己文件头上**：`suites/skills.ts` 断的是**端点**（两层、同名归谁、只读不留痕），
   它**不**断菜单怎么画、哪个键选什么；`suites/stats.ts` 断的是端点折出来的数**与那五格的字符串**，
   它**不**断那条灰线的位置与字号；`suites/attachments.ts` 两条**都是纯的**，它**不**断那颗按钮的
   disabled 状态与那句拒话画在哪——那些在真 Chromium 里量（下一段）。
 
+**会话标题的两个来源**（`session-title.ts` 与 `lib/projects.ts` 的 `firstUserText`）值得单说，
+因为它是这个仓里**唯一一处「库里存了对话内容」**：第一次收到消息的那次 run 把第一句 user 消息写进
+`sessions.title`（`harness.infra.db/sessions-remember-their-title` 里有完整的取舍，包括它推翻了
+`sessions-hold-no-conversation-content` 那条守卫、以及推翻后仍然付的代价），侧边栏每一行照它写；
+同一个页面**自己握着**的那些会话另有更新的一份（host 上报、页面按 id 存、与 `statuses` 同一条路），
+所以刚发出去的第一句当场就在行上，不用等下一次列表。老会话（这一列存在之前跑过的）没有这份，
+**不回填**，显示 thread-id。
+
 界面侧另有**真 Chromium 走查**，截图留在 `.scratch/<feature>/evidence/`：那是各票验收的一部分
 （三段位、归档、移除、设置的哨兵搜索、技能列表的弹层与键盘、**设置两页与 provider 表单的整条路**、
-**composer 下面那条状态条**、**附件的粘贴 / 拖放 / `+` 三条路与两句拒话**），
-不是自动化套件。
+**composer 下面那条状态条**、**附件的粘贴 / 拖放 / `+` 三条路与两句拒话**、
+**顶部品牌行与会话标题**——后者量的是顶栏那两行（标题 / 页签）在不在同一个 48px 块里、
+两条 `border-b` 落不落在同一个 y、折起来时两行让不让开浮标、点会话标题与 tab 换不换，
+全是渲染看不到布局的那一格）、**侧栏行上的标题**（新建任务先是 thread-id、发第一句**不点刷新**
+行上就变成那句话、第二句不改写它、hover 的 tooltip 是完整 id、**刷新页面之后还在**——最后这一格
+才是库那一列在起作用）、**一块只画 5 行**（一个项目与任务那一块各造 6 条以上：只画 5 行 + `还有 N 个`、
+点开画全、再点收回 5 行；控件文字与行标题同一个 x；选中第 6 条之后刷新，那一块仍画全、当前那一行还在、
+且没有折叠控件；「已归档」6 条全画、没有控件）、**只读库的那份列表**（新建任务**一行业都不出现**、库里也没有新行、
+第一句之后才出现且在**最上面**、项目里的新会话落在**那个项目**下且库里那行 `project_id` 正确、
+行上没有体积、刷新之后行仍在；缩进是量出来的：槽 14px、标题 x 与项目名 x 相等、跑起来时 spinner
+落在槽里而标题 x 不动）、**折叠的两种样子**（宽窗 48px rail 里那四颗图标是不是只有图标、
+顶格 hover 换不换得出「展开」、列表 `hidden` 之后还在不在 DOM 里、窄窗那 48px 有没有整个消失
+而浮标回到 (8,8)：全是渲染看不到布局的那一格），不是自动化套件。走查与量到的数在
+`.scratch/brand-header/spec.md`、`.scratch/sidebar-rail/spec.md`、
+`.scratch/session-titles-in-the-store/spec.md`、`.scratch/store-backed-sidebar/spec.md` 与
+`.scratch/sidebar-five-rows/spec.md`。
 
 ### 设置面板：两页，两页都会写
 

@@ -13,17 +13,17 @@
 // what this file is for.
 import path from "node:path";
 
-import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
-import { type Case, type Suite, content, fileExists, rm, runUrl, script, threadId, tmpDir } from "../e2e";
+import { type Case, type Suite, agentFor, content, fileExists, rm, script, threadId, tmpDir } from "../e2e";
+import { type HarnessAgent } from "@/lib/agent";
 
 /// "resolved" approves, "cancelled" vetoes -- the two statuses the AG-UI resume
 /// entry is allowed to carry.
 type Decision = "resolved" | "cancelled";
 
-function newAgent(tid: string): { agent: HttpAgent; events: string[]; reset: () => void } {
-  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
+async function newAgent(tid: string): Promise<{ agent: HarnessAgent; events: string[]; reset: () => void }> {
+  const agent = await agentFor(tid);
   const events: string[] = [];
   agent.subscribe({
     onRunFinishedEvent: (b) => {
@@ -41,33 +41,28 @@ function newAgent(tid: string): { agent: HttpAgent; events: string[]; reset: () 
   return { agent, events, reset: () => { events.length = 0; } };
 }
 
-function pending(agent: HttpAgent) {
+function pending(agent: HarnessAgent) {
   return agent.pendingInterrupts;
 }
 
-async function turn(agent: HttpAgent, prompt: string): Promise<void> {
+async function turn(agent: HarnessAgent, prompt: string): Promise<void> {
   agent.addMessage({ id: `u-${Date.now()}-${Math.random()}`, role: "user", content: prompt });
-  await agent.runAgent({ runId: `run-${Date.now()}-${Math.random()}`, tools: [], context: [] });
+  await agent.runAgent({ tools: [], context: [] });
 }
 
 /// Answer every parked interrupt with `status` and `payload`, exactly as the UI's
 /// approval card does.
-async function resume(agent: HttpAgent, status: Decision, payload: unknown): Promise<void> {
+async function resume(agent: HarnessAgent, status: Decision, payload: unknown): Promise<void> {
   const decisions = agent.pendingInterrupts.map((i) => ({ interruptId: i.id, status, payload }));
-  await agent.runAgent({
-    runId: `run-${Date.now()}-${Math.random()}`,
-    tools: [],
-    context: [],
-    resume: decisions,
-  });
+  await agent.runAgent({ tools: [], context: [], resume: decisions });
 }
 
-function toolResultText(agent: HttpAgent, callId: string): string | undefined {
+function toolResultText(agent: HarnessAgent, callId: string): string | undefined {
   const m = agent.messages.find((msg) => msg.role === "tool" && msg.toolCallId === callId);
   return m === undefined ? undefined : content(m);
 }
 
-function hasToolMessage(agent: HttpAgent, callId: string): boolean {
+function hasToolMessage(agent: HarnessAgent, callId: string): boolean {
   return toolResultText(agent, callId) !== undefined;
 }
 
@@ -101,7 +96,7 @@ const cases: Case[] = [
       const scratch = tmpDir("clj-harness-ui-approval-");
       const approved = path.join(scratch, "approved.txt");
       const vetoed = path.join(scratch, "vetoed.txt");
-      const { agent, events, reset } = newAgent(threadId("approval"));
+      const { agent, events, reset } = await newAgent(threadId("approval"));
 
       try {
         script([
@@ -156,7 +151,7 @@ const cases: Case[] = [
     // RUN_ERROR frame -- nothing thrown locally, because the server owns the
     // decision.
     run: async () => {
-      const { agent, events } = newAgent(threadId("unknown-interrupt"));
+      const { agent, events } = await newAgent(threadId("unknown-interrupt"));
       script([{ content: "no tools here" }]);
       await agent.runAgent({
         tools: [],

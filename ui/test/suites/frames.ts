@@ -41,7 +41,7 @@ const cases: Case[] = [
         },
         { content: "这是一个 Clojure 项目。" },
       ]);
-      const frames = await fetchFrames(threadId("frames"), "r1", []);
+      const frames = await fetchFrames(threadId("frames"), []);
 
       expect(frames.length, "the run produced frames at all").toBeGreaterThan(0);
 
@@ -62,7 +62,7 @@ const cases: Case[] = [
     // role must be the literal "reasoning".
     run: async () => {
       script([{ reasoning: "先看一下。", content: "ok" }]);
-      const frames = await fetchFrames(threadId("reasoning"), "r1", []);
+      const frames = await fetchFrames(threadId("reasoning"), []);
 
       const starts = frames.filter((f) => f.type === "REASONING_MESSAGE_START");
       expect(starts.length, "the run emitted reasoning frames").toBeGreaterThan(0);
@@ -79,7 +79,7 @@ const cases: Case[] = [
         { content: "", "tool-calls": [{ id: "c9", name: "read", arguments: { path: "deps.edn" } }] },
         { content: "done" },
       ]);
-      const frames = await fetchFrames(threadId("toolframes"), "r1", []);
+      const frames = await fetchFrames(threadId("toolframes"), []);
 
       const idOf = (f: Frame): string | undefined => f.toolCallId ?? f.id;
       const starts = frames.filter((f) => f.type === "TOOL_CALL_START");
@@ -92,12 +92,42 @@ const cases: Case[] = [
     },
   },
   {
+    name: "parallel-calls-of-one-turn-share-one-assistant-message",
+    // Two calls in ONE model turn are one assistant message with two tool_calls --
+    // that is what the provider is asked to answer and what the record has to fold
+    // back to. A fresh parent message per call splits the turn into two assistant
+    // messages, and the first is then followed by an assistant message instead of
+    // its tool result: a history an OpenAI-shaped vendor refuses outright. That is
+    // the 2026-09-21 RUN_ERROR ("4 tool calls unanswered") in harness.infra.log,
+    // so this pins the wire contract at the real client, schema check included.
+    run: async () => {
+      script([
+        {
+          content: "",
+          "tool-calls": [
+            { id: "p1", name: "read", arguments: { path: "deps.edn" } },
+            { id: "p2", name: "read", arguments: { path: "README.md" } },
+          ],
+        },
+        { content: "done" },
+      ]);
+      const frames = await fetchFrames(threadId("parallelframes"), []);
+
+      const starts = frames.filter((f) => f.type === "TOOL_CALL_START");
+      expect(starts.length, "both calls of the turn were announced").toBe(2);
+      const parents = new Set(starts.map((f) => f.parentMessageId));
+      expect(parents.size, "and one assistant message owns them both").toBe(1);
+      expect([...parents][0], "the parent is a message the run actually opened").toBeTruthy();
+      expect(last(types(frames)), "and the run still ends normally").toBe("RUN_FINISHED");
+    },
+  },
+  {
     name: "no-chunk-frames-reach-the-client",
     // The client materialises complete messages; a CHUNK frame is the old
     // streaming shape and would arrive as an unknown type.
     run: async () => {
       script([{ reasoning: "r", content: "hello" }]);
-      const frames = await fetchFrames(threadId("chunks"), "r1", []);
+      const frames = await fetchFrames(threadId("chunks"), []);
 
       expect(frames.some((f) => f.type.includes("CHUNK")), "no frame type carries CHUNK").toBe(false);
     },
@@ -111,7 +141,7 @@ const cases: Case[] = [
     // it, and is exactly the sort of client mistake the edge has to survive.
     run: async () => {
       script([{ content: "unused" }]);
-      const resp = await postRun(threadId("errframes"), "r1", [], {
+      const resp = await postRun(threadId("errframes"), [], {
         resume: [{ interruptId: "never-parked", status: "resolved" }],
       });
       const frames = framesFromSse(await resp.text());

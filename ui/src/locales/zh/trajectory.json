@@ -47,10 +47,9 @@
   "values": {
     "initial": "初始",
     "changed": "自上一轮起有变化",
-    "whenOpened": "这次运行开始时",
-    "duringRun": "运行途中",
     "yes": "是",
-    "no": "否"
+    "no": "否",
+    "injected": "已注入"
   },
   "blocks": {
     "reasoning": "思考",

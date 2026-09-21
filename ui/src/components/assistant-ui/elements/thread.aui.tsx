@@ -39,7 +39,14 @@ import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-ic
 import { TurnStepsTrigger, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+// LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
+import { WindowTop, type WindowTopProps } from "@/components/window-top";
+// LOCAL (ticket 02): the test that tells an opening entry (a `user` message that is
+// only a card) from something a person typed.
+import { InjectionCard } from "@/components/context-card";
+import { isCardOnly, isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
+import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -115,6 +122,11 @@ export type ThreadComponents = {
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  // LOCAL (ticket 06): the window's top, drawn inside the viewport above the messages.
+  // The page hands it down because the window belongs to the SESSION and this file is
+  // the conversation's own furniture; `null` -- every session read through the sidebar,
+  // and every page whose log had to be repaired -- draws nothing at all.
+  window?: WindowTopProps | null | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -186,20 +198,22 @@ const ThreadHistorySkeleton: FC = () => {
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
+  window = null,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} window={window} />
     </ThreadComponentsContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
-  isEmpty,
-  autoFocus,
-}) => {
+const ThreadRoot: FC<{
+  isEmpty: boolean;
+  autoFocus: boolean;
+  window: WindowTopProps | null;
+}> = ({ isEmpty, autoFocus, window }) => {
   const { Welcome = ThreadWelcome, ComposerFrame = PassthroughFrame } =
     useContext(ThreadComponentsContext);
 
@@ -229,6 +243,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           the bottom, whether by that click or by hand. */}
       <ThreadPrimitive.Viewport
         data-slot="aui_thread-viewport"
+        // LOCAL (ticket 06): the scroll container, registered where the window's
+        // "show earlier" can anchor against it (`lib/window-scroll.ts`). It is a ref on
+        // the viewport rather than a lookup by `data-slot` for the reason the helper
+        // writes down: the element a prepend pushes down is THIS one, and a query would
+        // need a mounted page to find it.
+        ref={registerViewport}
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
         <div
@@ -243,6 +263,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
+
+          {/* LOCAL (ticket 06): the window's top sits between the skeleton and the
+              messages, which is above every message in the conversation -- so a prepend
+              grows the content BELOW it and the anchoring works on the messages the
+              reader is actually looking at. */}
+          {window !== null && <WindowTop {...window} />}
 
           <div
             data-slot="aui_message-group"
@@ -698,7 +724,58 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
+// LOCAL (ticket 02 of `.scratch/session-opening`): a message that is ONLY an
+// injected-context card is not a bubble.
+//
+// The opening's entries are `role: "user"` -- user messages to the provider, which is
+// what the record says about them -- so without this branch the thread draws the
+// person's AGENTS.md and skills catalog the way it draws anything they typed:
+// right-aligned, in a grey bubble, with an Edit pencil beside them. Nobody typed them.
+// `isCardOnly` is the test; what the row below renders is the SAME card a run streams
+// for its own injections (the assistant path draws it through `dataRendererUI`, and both
+// paths land on the one renderer registered in `components/context-card.tsx`), left
+// where the model read it. The action bar is gone on purpose: there is nothing here to
+// edit or to copy back, because a card is never sent to the server.
+//
+// LOCAL (2026-09-21): AND SOMETIMES THE CARD PART IS NOT THERE. A message the adapter
+// imported from a `MESSAGES_SNAPSHOT` -- which is how a session's birth reaches the page
+// that minted it -- keeps its id and its text and loses the `data` part, because
+// upstream's snapshot conversion has no case for one. So the card is drawn from the
+// message's own text in that case: the server builds the text and the part's value from
+// the one block (`harness.edge.ag_ui/opening-entries`), so the row and its numbers are
+// the same either way. WHICH CASE IT IS is read off the parts, not off the id: a
+// message that carries the part draws it.
+const UserInjectionCard: FC = () => {
+  const cardOnly = useAuiState((s) => isCardOnly(s.message.parts));
+  const text = useAuiState((s) =>
+    isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
+  );
+  return (
+    <MessagePrimitive.Root
+      data-slot="aui_user-injection-root"
+      className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      data-role="user"
+    >
+      {cardOnly ? (
+        <MessagePrimitive.Parts />
+      ) : (
+        <InjectionCard value={{ role: "user", text }} />
+      )}
+    </MessagePrimitive.Root>
+  );
+};
+
 const UserMessage: FC = () => {
+  // LOCAL: the branch above. The selectors answer a BOOLEAN (and a string) on purpose --
+  // `useAuiState` compares a selector's answer by value, so handing back the parts
+  // themselves would re-render this row on every store update.
+  //
+  // TWO WAYS TO BE A CARD: the message IS only a card (`isCardOnly`), or it is one of the
+  // opening entries the server wrote (whose card part this client may never have had).
+  const card = useAuiState(
+    (s) => isCardOnly(s.message.parts) || isOpeningEntryId(s.message.id),
+  );
+  if (card) return <UserInjectionCard />;
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"

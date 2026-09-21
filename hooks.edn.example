@@ -1,0 +1,155 @@
+;; hooks.edn -- what runs at each hook point, as data.
+;;
+;; Copy this to ~/.clj-harness/hooks.edn (the configuration home) and edit. A
+;; project can also carry its own at <project>/.harness/hooks.edn, and the two
+;; compose PER POINT: a project that writes :pre-tool-use REPLACES the user
+;; level's :pre-tool-use whole. Nothing appends across the two files.
+;;
+;; Order is by SOURCE, never by cleverness: rows the kernel registers itself come
+;; first, then this file's rows, then anything a running session adds. Within one
+;; source, the order is the order they are written in.
+;;
+;; A MISSING file is "nothing was said": no hook fires, nothing is spawned, no
+;; audit line is written, and the run is byte-identical to a run before this
+;; capability existed. A file that EXISTS and cannot be read -- not EDN, not a
+;; map, an unknown point, a declaration that does not validate -- is a NAMED
+;; failure carrying the absolute path. An ignored hooks.edn and one that says
+;; nothing must not look the same from outside.
+;;
+;; AN EMPTY FILE IS NOT THE EMPTY CONFIGURATION. A file of zero bytes, or one
+;; holding nothing but comments, reads as `nil` and is refused by name. The way
+;; to say "no hooks" in a file that exists is the empty map, which is what this
+;; file's own body is.
+;;
+;; Both files are re-read on EVERY trigger: an edit takes effect at the next tool
+;; call, not at the next restart.
+;;
+;; ---------------------------------------------------------------------------
+;; ONE DECLARATION RUNS EXACTLY ONE THING
+;;
+;;   {:command ".."}    a non-empty string, spawned by the shell with the
+;;                      payload on stdin. THE ONLY KIND A FILE MAY HOLD.
+;;   {:run f}           a callable, invoked in this process -- refused in this
+;;                      file, because a file cannot hold a function. Declare it
+;;                      from the running session instead.
+;;
+;; Optional keys, both validated here rather than at trigger time:
+;;
+;;   {:matcher "re"}    a regex, tested with `re-find` (a PARTIAL match) against
+;;                      the point's match target -- one payload field, named per
+;;                      point in the table in docs/architecture/hooks.md. No
+;;                      matcher means "always run". A point with no match target
+;;                      refuses a matcher rather than inventing a meaning for it,
+;;                      and a matcher that does not compile is refused too: a
+;;                      hook that never fires looks exactly like one that ran and
+;;                      allowed.
+;;   {:timeout 10000}   milliseconds, positive integer, default 10000. Bounds
+;;                      the WAIT for the command. At the limit the command's
+;;                      whole process tree is stopped, not just the shell.
+;;                      Refused together with :run, which has no spawn to bound.
+;;
+;; Anything else -- including a misspelling such as :commnd -- fails by name. A
+;; silently dropped key turns a declaration into one that runs nothing, which is
+;; worse than an error.
+;;
+;; ---------------------------------------------------------------------------
+;; THE EXIT CODE IS THE VERDICT
+;;
+;;   0      allow
+;;   2      BLOCK. stderr is the reason, and it is fed back to the model.
+;;   other  per the point's failure policy: a GATE blocks, an OBSERVER carries
+;;          on with a reason recorded. A timeout and a command that will not
+;;          start land here too -- "I could not decide" is not "I decided yes".
+;;          The reason the model sees is the engine's prefix ("hook exited 3: ",
+;;          "hook timed out after its timeout: ") followed by the command's own
+;;          words -- its stderr, or its stdout when stderr is empty.
+;;
+;; At every point EXCEPT :system-prompt, stdout is read only as an optional JSON
+;; OBJECT answering something the exit code cannot (today only :permission-request
+;; uses it: {"decision":"approve"|"deny","reason":".."}), and only on exit 0. At
+;; :system-prompt, stdout IS the text appended to the system message.
+;;
+;; ---------------------------------------------------------------------------
+;; WHERE A COMMAND ACTUALLY RUNS
+;;
+;;   shell   The pinned login shell for this platform (`bash -lc` here; Git Bash,
+;;           `pwsh -NoProfile -Command` or `cmd /c` elsewhere). Because it is a
+;;           LOGIN shell it re-sources the profile, so the PATH the command sees
+;;           can differ from the harness process's -- and it is the one a person
+;;           would get at a terminal.
+;;   cwd     The directory the harness process was started in. NOT the session's
+;;           project: a hook command is not given a working directory, so a
+;;           relative :command resolves against wherever the harness was launched.
+;;           Use absolute paths.
+;;   stdin   The payload JSON, written once and then CLOSED. A command that reads
+;;           until EOF sees it; a command that waits for more input waits until
+;;           its timeout.
+;;   env     Inherited from the harness process, plus whatever the shell adds.
+;;   time    Synchronous: a hook runs on the run's own path and the run waits.
+;;           A hook on :pre-tool-use delays the tool call it is inspecting.
+;;
+;; The payload is one JSON object on stdin, snake_case:
+;;
+;;   {"hook" "PostToolUse", "thread_id" "..", "project_dir" ".." | null,
+;;    ..the fields the point adds, per the table in docs/architecture/hooks.md}
+;;
+;; `project_dir` is null for a session bound to no project.
+;;
+;; ---------------------------------------------------------------------------
+;; THE BODY. This is the default state: a map with no points in it. Copy the file
+;; as it stands and nothing fires.
+{}
+
+;; ---------------------------------------------------------------------------
+;; WORKED EXAMPLES. Each is a COMPLETE FILE BODY: replace the `{}` above with the
+;; whole map, not just the line you are interested in. Everything outside the map
+;; is a comment.
+;;
+;; 1. A GATE with a matcher. :pre-tool-use is a gate, so exit 2 blocks the call
+;;    and hands the model what the script wrote to stderr.
+;;
+;;    {:pre-tool-use [{:matcher "bash|write"
+;;                     :command "/abs/scripts/fence-check.sh"
+;;                     :timeout 5000}]}
+;;
+;; 2. An OBSERVER that cannot cost the run anything: :post-tool-use neither gates
+;;    nor fails open into a block. A broken command is recorded, not fatal.
+;;
+;;    {:post-tool-use [{:command "/abs/scripts/record.sh"}]}
+;;
+;; 3. THE ONE POINT WHOSE STDOUT IS CONTENT. Every matched declaration runs and
+;;    every non-empty stdout is appended to the system message, in declaration
+;;    order -- one hook cannot eat another's text. Empty output says nothing,
+;;    which is not an error.
+;;
+;;    {:system-prompt [{:command "/abs/scripts/print-policy.sh"}]}
+;;
+;; 4. ANSWERING A PARK INSTEAD OF A HUMAN. :permission-request is where a rule
+;;    may speak for the person being asked; :elicitation is deliberately NOT --
+;;    a rule may answer an approval, but filling in someone's form is not the
+;;    same delegation. The answer is the JSON object on stdout.
+;;
+;;    {:permission-request [{:matcher "bash"
+;;                           :command "/abs/scripts/auto-approve.sh"}]}
+;;
+;;    ...where auto-approve.sh prints {"decision":"approve","reason":".."} on
+;;    stdout and exits 0.
+;;
+;; 5. TWO POINTS AT ONCE -- the normal shape of a real file. Nothing appends
+;;    across the two FILES, but any number of declarations sit under one point.
+;;
+;;    {:pre-tool-use  [{:command "/abs/scripts/fence-check.sh" :timeout 5000}]
+;;     :post-tool-use [{:command "/abs/scripts/record.sh"}]
+;;     :stop          [{:command "/abs/scripts/notify.sh"}]}
+;;
+;; SWITCHING ONE OFF WITHOUT DELETING IT. Ids are in docs/architecture/hooks.md:
+;; a row from this file is `<point>#<index>`, counting from 0 in the order it
+;; appears under its point. From a running session's `eval`:
+;;
+;;   (harness.kernel.hooks/session-disable! harness.kernel.tools/*thread-id* "pre-tool-use#0")
+;;
+;; POINTS THAT CANNOT FIRE YET. Of the 27 points, 9 have a trigger source today;
+;; the rest are declared and wait for their subsystem (file watching, compaction,
+;; subagents, tasks, worktrees). A declaration on one of those is not an error --
+;; it validates, it appears in the table, and it never runs. The table in
+;; docs/architecture/hooks.md marks which is which.
