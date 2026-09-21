@@ -100,6 +100,7 @@
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.subagents :as subagents]
+            [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
@@ -1005,7 +1006,8 @@
   resolve from, and re-resolving from the default tier would quietly move it to a
   different model than the conversation that delegated to it is holding."
   [{:keys [parent-thread-id thread-id definition task]}]
-  (let [run-id   (str (java.util.UUID/randomUUID))
+  (let [run-id    (str (java.util.UUID/randomUUID))
+        frame-seq (atom 0)
         provider (providers/current-provider parent-thread-id)
         ;; ONE converter per run, like the agent route's: it owns the open-message
         ;; state machine, so building it per event would restart every message id.
@@ -1066,7 +1068,16 @@
                   ;; its frame is the one the run ends on, and it arrives from
                   ;; :run/end -- a converter handed :run/done has no clause for it.
                   (doseq [frame (convert ev)]
-                    (log! thread-id run-id "event" frame))
+                    (log! thread-id run-id "event" frame)
+                    ;; ONE SEQUENCE PER THREAD, stamped at the publish. The
+                    ;; follow route's replay-then-subscribe boundary needs a
+                    ;; total order over this thread's frames so a frame the
+                    ;; replay already delivered does not arrive twice from the
+                    ;; bus (ticket 02's explicit dedupe). The counter lives
+                    ;; with the publisher: this tool thread is the only writer
+                    ;; of this thread's frames, so :seq is a fact about the
+                    ;; thread, not about the run.
+                    (frame-bus/publish! thread-id (assoc frame :seq (swap! frame-seq inc))))
                   (when-let [[kind payload] (lifecycle-record ev)]
                     (log! thread-id run-id kind payload))
                   (recur)))
@@ -1665,7 +1676,7 @@
   terms. The set stays closed and the 405 stays here -- what changed is that the
   sentence 'every verb on this shape is a POST' is no longer true, not where the
   refusal happens."
-  #{"rebuild" "archive" "stats" "trajectory" "delegations"})
+  #{"rebuild" "archive" "stats" "trajectory" "delegations" "follow"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -1857,6 +1868,136 @@
       :else
       (api-response 200 (assoc (:ok folded) :threadId stem)))))
 
+(defn- follow-get
+  "GET /api/threads/<stem>/follow -- an SSE, READ-ONLY channel: the frames of
+  ONE thread as they land, for a panel that watches a delegation work. It is
+  NOT a run and must never be mistaken for one: it is a GET, it answers no
+  RunAgentInput, accepts no input at all -- there is nothing here to run --
+  and POST /api/agent is untouched: the parent's stream is still only its own
+  run's, because frames for a child mixed into that stream would be read as
+  the parent's messages (app.tsx keeps one core per host precisely so streams
+  cannot cross). Follow is the OTHER stream, read-only, and so father and
+  child never share a wire.
+
+  THE SHAPE OF A CONNECTION, in order:
+
+    1. subscribe FIRST (frame-bus), THEN replay. The other order loses the
+       frames that land between replay's read and the subscribe -- replay
+       cannot see a frame that has not been written yet, and the bus drops
+       what nobody has asked for. Subscribing first means the race has only
+       one shape left: the boundary, where a frame may arrive from BOTH the
+       replay and the bus;
+    2. replay what the RECORD already holds -- the stats-style reader, the
+       half-tolerant one, because a child that is running right now is the
+       case this route exists for and its last line may be half-written;
+       every `event` line becomes a frame, and the last :seq read is kept;
+    3. frames from the bus whose :seq is <= that last replayed seq are
+       dropped -- the dedupe is THE EXPLICIT ANSWER the ticket demands, the
+       seq stamped by the publisher (one counter per thread, written by the
+       only thread that writes this thread's frames) being the total order
+       the boundary needs;
+    4. a TERMINAL frame (RUN_FINISHED / RUN_ERROR) closes the stream: the
+       run is over, the panel will fall back to rebuild on its next open.
+    5. a thread that is not running and whose record is already closed
+       answers ONE SSE line saying so and ends -- a stream that never
+       produces and never ends reads as 'still running' to a client, which
+       is the one lie this route must not tell;
+    6. the client going away unsubscribes (the bus's stop!), which is where
+       the publisher-must-never-block guarantee is cashed out on this side.
+
+  READ-ONLY, like stats: the record is read, the bus is read, nothing is
+  written -- not the log, not the store, not ~/.clj-harness."
+  [req stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))]
+    (if (some? (:error located))
+      ;; An unknown stem is the management edge's ordinary JSON 404 -- there
+      ;; is nothing to follow, and a stream that opens just to say so would
+      ;; be a stream pretending a thread exists.
+      (api-response 404 {:error (:error located) :threadId stem})
+      (hk/as-channel req
+        {:on-open (fn [ch]
+                    (let [{sub :ch stop! :stop!} (frame-bus/subscribe! stem)
+                          last-seq (atom nil)
+                          ;; ONE side channel to the on-close below: whether
+                          ;; the stream ended itself (terminal / not-running)
+                          ;; or the client vanished. `on-open` and `on-close`
+                          ;; are two callbacks with nothing else in common,
+                          ;; and the subscription's teardown is the one fact
+                          ;; they must share.
+                          open?    (atom true)
+                          end!     (fn end! []
+                                     (when (compare-and-set! open? true false)
+                                       (stop!)))]
+                      ;; 1. subscribe first (above), 2. replay second.
+                      (let [records (try (stats/read-records (:ok located))
+                                         (catch Throwable _ []))
+                            frames  (->> records
+                                         (filter #(= "event" (:kind %)))
+                                         (mapv (fn [{:keys [payload]}] payload)))
+                            head    (fn [body]
+                                      {:status 200
+                                       :headers (merge (cors-headers (request-origin req))
+                                                       {"Content-Type" "text/event-stream"
+                                                        "Cache-Control" "no-cache"})
+                                       :body body})]
+                        ;; THE HEAD RIDES THE FIRST SEND, like the runner's.
+                        (hk/send! ch (head (str "retry: 2000\n\n"
+                                                (->> frames
+                                                     (map #(str "data: " (json/write-str %) "\n\n"))
+                                                     (apply str)))
+                                           false))
+                        (reset! last-seq (some->> frames (keep :seq) (reduce max)))
+                        (when-not (seq frames)
+                          ;; Nothing on the record YET. Fine: the child may
+                          ;; be between `input` and its first frame -- the
+                          ;; bus will say. Only when the thread is not live
+                          ;; either does 'nothing to follow' become a fact,
+                          ;; and that is the subscriber's job to discover via
+                          ;; the terminal rule below -- the empty record is
+                          ;; NOT by itself the end, because an input line
+                          ;; with no frames is exactly what 'just started'
+                          ;; looks like on disk.
+                          nil)
+                        ;; 3. the bus side, on THIS thread's go loop: the
+                        ;; channel is a sliding buffer, reads never block the
+                        ;; publisher.
+                        (async/go
+                          (loop []
+                            (if-some [frame (async/<! sub)]
+                              (cond
+                                ;; THE END MARKER, or a closed channel: the
+                                ;; subscription was stopped from underneath
+                                ;; us -- the client's own on-close -- so the
+                                ;; stream is over either way.
+                                (= frame-bus/closed-marker frame)
+                                (do (hk/close ch) nil)
+
+                                ;; The dedupe: anything the replay already
+                                ;; delivered is dropped, silently and by
+                                ;; number, not by comparison of shapes.
+                                (and (some? @last-seq)
+                                     (:seq frame)
+                                     (<= (:seq frame) @last-seq))
+                                (recur)
+
+                                :else
+                                (do (when (:seq frame)
+                                      (reset! last-seq (:seq frame)))
+                                    ;; 4. terminal closes.
+                                    (hk/send! ch (str "data: " (json/write-str (dissoc frame :seq)) "\n\n")
+                                              (contains? terminal (:type frame)))
+                                    (if (contains? terminal (:type frame))
+                                      (do (end!) nil)
+                                      (recur))))
+                              (do (hk/close ch) nil)))))))
+         :on-close (fn [_ch _status]
+                     ;; 6. the client went; the subscription must go too --
+                     ;; otherwise the bus would go on filling a channel no
+                     ;; one reads (sliding, so the publisher still would not
+                     ;; block -- but the frames would be lost to nobody,
+                     ;; which is waste, not correctness).
+                     (end!))}))))
 (defn- delegations-get
   "GET /api/threads/<stem>/delegations -- the delegation rows a PARENT session's
   record holds: one {:toolCallId .. :subagent .. :threadId .. :at ..} per
@@ -2689,6 +2830,7 @@
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)
         [:get "delegations"] (delegations-get stem)
+        [:get "follow"]      (follow-get req stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]
