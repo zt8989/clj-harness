@@ -1,0 +1,137 @@
+npm warn Unknown user config "home". This will stop working in the next major version of npm.
+
+> clj-harness-ui@0.0.0 test
+> vitest run
+
+
+ RUN  v5.0.0 C:/Users/zhouteng/Documents/workspace/lisp-harness/.worktrees/baseline-main/ui
+
+stdout | test/ui.test.ts
+harness for this run: http://localhost:8250/
+
+ ✓ test/ui.test.ts > frames > every-frame-passes-the-ag-ui-schema 6438ms
+ ✓ test/ui.test.ts > frames > reasoning-frames-are-shape-legal 1190ms
+ ✓ test/ui.test.ts > frames > tool-frames-name-their-call 2565ms
+ ✓ test/ui.test.ts > frames > parallel-calls-of-one-turn-share-one-assistant-message 2809ms
+ ✓ test/ui.test.ts > frames > no-chunk-frames-reach-the-client 1081ms
+ ✓ test/ui.test.ts > frames > an-error-run-is-well-formed 353ms
+ ✓ test/ui.test.ts > client > reasoning-and-tool-calls-survive-the-wire 2739ms
+ ✓ test/ui.test.ts > client > a-tool-round-costs-two-llm-calls 2103ms
+ ✓ test/ui.test.ts > client > a-second-turn-echoes-its-reasoning-back-to-a-thinking-mode-vendor 3343ms
+ ✓ test/ui.test.ts > client > a-run-carries-the-action-and-not-the-conversation 2226ms
+ ✓ test/ui.test.ts > client > a-server-named-session-is-one-a-run-can-be-sent-to 1215ms
+ ✓ test/ui.test.ts > turn > a-second-turn-continues-the-same-thread 2183ms
+ ✓ test/ui.test.ts > turn > a-reasoning-message-does-not-poison-the-next-turn 3927ms
+ ✓ test/ui.test.ts > approval > a-parked-write-runs-only-after-approval 8174ms
+ ✓ test/ui.test.ts > approval > a-resume-for-an-unknown-interrupt-is-refused 431ms
+ ✓ test/ui.test.ts > skills > the-skill-list-answers-both-layers-from-the-real-roots 296ms
+ ✓ test/ui.test.ts > skills > a-shadowed-name-is-listed-once-in-the-winning-root 189ms
+ × test/ui.test.ts > skills > asking-for-the-list-changes-nothing 717ms
+   → expected { …(18) } to deeply equal { …(17) }
+ ✓ test/ui.test.ts > stats > the-cells-are-what-the-record-answered 8ms
+ ✓ test/ui.test.ts > stats > a-number-the-record-could-not-establish-is-not-drawn 1ms
+ ✓ test/ui.test.ts > stats > the-durations-and-the-timestamps-speak-both-languages 26ms
+ ✓ test/ui.test.ts > stats > the-endpoint-the-strip-reads-folds-the-record 1870ms
+ ✓ test/ui.test.ts > stats > a-session-that-has-never-run-has-no-numbers-yet 9ms
+ ✓ test/ui.test.ts > context > the-share-the-sizes-and-the-three-buckets 2ms
+ ✓ test/ui.test.ts > context > the-magnitudes-the-numbers-are-written-in 0ms
+ ✓ test/ui.test.ts > context > a-fraction-that-is-not-there-is-not-drawn 0ms
+ ✓ test/ui.test.ts > context > buckets-that-are-missing-are-missing-on-their-own 1ms
+ ✓ test/ui.test.ts > context > a-real-run-fills-the-ring-from-its-own-record 2465ms
+ ✓ test/ui.test.ts > elicitation > a-servers-question-parks-the-run-and-the-answer-finishes-it 5013ms
+ ✓ test/ui.test.ts > elicitation > the-four-kinds-get-the-input-they-are 1ms
+ ✓ test/ui.test.ts > elicitation > answers-keep-the-type-the-schema-declared 0ms
+ ✓ test/ui.test.ts > elicitation > a-field-nobody-expected-is-kept-and-named 0ms
+ ✓ test/ui.test.ts > elicitation > an-empty-or-odd-schema-is-an-empty-form-and-not-a-crash 0ms
+ ✓ test/ui.test.ts > attachments > the-model-rule-is-the-servers-rule 1ms
+ ✓ test/ui.test.ts > attachments > a-file-over-the-cap-is-refused-by-its-source-bytes 3ms
+ ✓ test/ui.test.ts > turns > a-turn-is-a-run-of-adjacent-assistant-messages 1ms
+ ✓ test/ui.test.ts > turns > a-turn-is-settled-only-once-its-last-message-is-written 1ms
+ ✓ test/ui.test.ts > turns > the-summary-line-counts-the-turns-own-calls-and-messages 4ms
+ ✓ test/ui.test.ts > injections > a-card-says-which-tag-it-came-with-and-how-many-bytes 1ms
+ ✓ test/ui.test.ts > injections > a-rebuilt-conversation-gets-its-cards-back 1ms
+ ✓ test/ui.test.ts > injections > the-card-is-never-sent-back-to-the-server 2ms
+ ✓ test/ui.test.ts > injections > an-opening-entry-keeps-its-card-and-not-the-text-beside-it 1ms
+ ✓ test/ui.test.ts > injections > an-opening-the-snapshot-brought-is-still-a-card 1ms
+ ✓ test/ui.test.ts > injections > a-card-only-message-is-not-a-bubble 0ms
+ ✓ test/ui.test.ts > picker > a-query-keeps-the-options-it-matches 1ms
+ ✓ test/ui.test.ts > picker > runs-of-one-group-stay-where-they-were 1ms
+ ✓ test/ui.test.ts > i18n > the-language-chain-falls-through-what-it-cannot-use 2ms
+ ✓ test/ui.test.ts > i18n > both-catalogs-say-the-same-things 22ms
+ ✓ test/ui.test.ts > i18n > every-catalog-entry-is-named-by-something 403ms
+ ✓ test/ui.test.ts > restore > the-remembered-session-is-one-key-and-a-refusing-storage-is-not-a-failure 3ms
+ ✓ test/ui.test.ts > restore > the-restore-asks-the-listing-for-one-row-and-gets-its-send-time-with-it 1ms
+ ✓ test/ui.test.ts > concurrent > two-conversations-run-at-once-and-each-keeps-its-own-log 2130ms
+ ✓ test/ui.test.ts > sidebar > a-row-is-one-line-and-it-says-the-name-and-how-long-ago 18ms
+ ✓ test/ui.test.ts > sidebar > the-right-end-counts-back-from-now 18ms
+ ✓ test/ui.test.ts > sidebar > the-indent-slot-is-always-drawn-and-the-spinner-goes-in-it 6ms
+ ✓ test/ui.test.ts > sidebar > a-row-shows-the-title-the-server-kept-not-the-whole-copy-it-kept 7ms
+ ✓ test/ui.test.ts > sidebar > the-page-knows-better-than-the-listing-it-asked-for 2ms
+ ✓ test/ui.test.ts > sidebar > a-row-nothing-was-ever-sent-to-says-which-absence-it-is 5ms
+ ✓ test/ui.test.ts > sidebar > a-row-waiting-on-you-says-so-beside-the-name-and-not-inside-it 4ms
+ ✓ test/ui.test.ts > sidebar > a-row-can-say-which-project-it-came-from 3ms
+ ✓ test/ui.test.ts > sidebar > the-fold-controls-say-what-they-do-in-both-languages 10ms
+ ✓ test/ui.test.ts > sidebar > both-ends-of-the-fold-name-the-same-region 15ms
+ ✓ test/ui.test.ts > sidebar > the-brand-row-says-what-this-is 2ms
+ ✓ test/ui.test.ts > sidebar > a-disabled-row-action-stays-out-of-the-way 2ms
+ ✓ test/ui.test.ts > sidebar > the-rail-is-the-mark-alone-with-nothing-to-read 1ms
+ ✓ test/ui.test.ts > session-title > the-one-rule-both-copies-of-a-title-go-through 0ms
+ ✓ test/ui.test.ts > session-title > the-title-is-the-first-thing-the-user-said 2ms
+ ✓ test/ui.test.ts > session-title > the-tab-title-says-whose-page-it-is 1ms
+ ✓ test/ui.test.ts > relative-time > the-ladder-counts-up-and-then-gives-a-date 1ms
+ ✓ test/ui.test.ts > relative-time > a-clock-that-runs-ahead-is-not-a-time-in-the-future 0ms
+ ✓ test/ui.test.ts > relative-time > the-counts-are-whole-and-floored 0ms
+ ✓ test/ui.test.ts > sidebar-rows > a-block-draws-five-rows-and-says-how-many-it-is-holding-back 2ms
+ ✓ test/ui.test.ts > sidebar-rows > the-row-being-read-is-never-the-one-that-folds-away 1ms
+ ✓ test/ui.test.ts > sidebar-rows > a-block-opened-by-hand-stays-open-and-the-current-row-still-outranks-it 1ms
+ ✓ test/ui.test.ts > sidebar-rows > nothing-is-copied-when-nothing-is-folded 0ms
+ ✓ test/ui.test.ts > record > a-record-with-nothing-to-say-says-nothing 2ms
+ ✓ test/ui.test.ts > record > a-record-that-could-not-be-written-is-on-screen-in-both-languages 3ms
+ ✓ test/ui.test.ts > window > an-append-continues-the-window-and-a-repeat-is-not-a-second-entry 3ms
+ ✓ test/ui.test.ts > window > a-frame-that-does-not-continue-is-a-hole-and-the-tail-repair-keeps-what-the-reader-has 3ms
+ ✓ test/ui.test.ts > window > the-end-of-a-window-and-its-generation-both-mean-reopen 0ms
+ ✓ test/ui.test.ts > window > an-earlier-page-goes-in-front-and-does-not-move-the-newest-end 0ms
+ ✓ test/ui.test.ts > window > only-what-the-answer-covers-can-be-called-gone 0ms
+ ✓ test/ui.test.ts > window > the-top-of-a-window-is-drawn-only-when-there-is-more-in-front 3ms
+ ✓ test/ui.test.ts > window > every-sentence-the-window-owes-is-on-screen-in-both-languages 6ms
+ ✓ test/ui.test.ts > window > a-frame-the-reader-cannot-parse-does-not-close-the-window 1ms
+ ✓ test/ui.test.ts > window > the-reader-stays-where-they-were-when-a-page-is-added-above 1ms
+stderr | test/ui.test.ts
+warning: could not remove the test home C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-test-UvYFNB: EPERM, Permission denied: \\?\C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-test-UvYFNB '\\?\C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-test-UvYFNB'
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/ui.test.ts > skills > asking-for-the-list-changes-nothing
+AssertionError: expected { …(18) } to deeply equal { …(17) }
+
+- Expected
++ Received
+
+@@ -13,7 +13,8 @@
+    ".unbound\\toolframes-00c27453-f3b9-4a30-9030-dbe3add0f16b.jsonl": 56783,
+    ".unbound\\turns-1dff2d32-95d5-4c49-8729-2f87ecf0f40f.jsonl": 53459,
+    ".unbound\\twocalls-c0307408-f8d5-431b-a1b3-82c3755bba57.jsonl": 56817,
+    ".unbound\\unknown-interrupt-b55e1df8-5ab4-4f4f-8ea1-804e7e405ff7.jsonl": 859,
+    "C__Users_zhouteng_AppData_Local_Temp_clj-harness-ui-skills-layers-DiFgaL\\skills-layers-9ebe8ad6-b804-495b-8053-092002f161d4.jsonl": 227,
++   "C__Users_zhouteng_AppData_Local_Temp_clj-harness-ui-skills-readonly-RJ5Z5A\\skills-readonly-31d36234-833a-4fa8-8a6f-3f54f65f0c0d.jsonl": 229,
+    "C__Users_zhouteng_AppData_Local_Temp_clj-harness-ui-skills-shadow-3lnZhv\\skills-shadow-327d46aa-37f0-4f2c-8df7-c488c074ee26.jsonl": 227,
+  }
+
+ ❯ Object.run test/suites/skills.ts:189:35
+    187|         const { groups } = await skillsOf(tid);
+    188|         expect(groups.flatMap((g) => g.skills).some((s) => s.name === …
+    189|         expect(tree(bookkeeping)).toEqual(bound);
+       |                                   ^
+    190|
+    191|         // Only GET: anything else is refused in the shape every other…
+ ❯ test/ui.test.ts:234:9
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 85 passed (86)
+   Start at  22:37:59
+   Duration  102.16s (tests 78%, transform 17%, import 5%)
+

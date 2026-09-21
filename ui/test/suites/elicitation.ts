@@ -182,7 +182,7 @@ const askWireCase: Case = {
     const tid = threadId("elicit-ask");
     builtinAskScript();
 
-    const first = await postRun(tid, "r1", [{ id: "u1", role: "user", content: "go" }]);
+    const first = await postRun(tid, [{ id: "u1", role: "user", content: "go" }]);
     const body = await first.text();
     const frames = framesFromSse(body);
     const ints = interruptsOf(body);
@@ -228,7 +228,6 @@ const askWireCase: Case = {
 
     const resumed = await postRun(
       tid,
-      "r2",
       [{ id: "u1", role: "user", content: "go" }],
       {
         resume: [

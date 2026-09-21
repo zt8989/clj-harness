@@ -124,6 +124,12 @@
 - **HTTP transport 上的 elicitation 没有接线**：MCP over HTTP 的服务器请求会出现在响应的那一条流上，
   而这个客户端为一次 POST 只读一条流。它那边会以这次请求的指名超时收场，不是 park。
 
+**这条链不是 MCP 独占的。** 本仓自己的 `ask` 走的是同一套（`suspend!` → `:elicitation` 的 park →
+`GET /api/elicitation` → `resume`），只是题面多带一个 `:asked-by :model` 而没有 `:server`：管理边按
+**在场与否**答 `server` 或 `askedBy`，两个都不在场就是没人署名，卡片据此说清是谁在问
+（见 [edge](edge.md#管理边) 与 [client](client.md#审批门)）。上面那几条里与服务器绑定的部分——
+重新发起、服务器自己的 `:timeout`、HTTP transport 没接线——只属于 MCP 那一侧。
+
 ## 管理边
 
 | 路由 | 干什么 | 落审计行 |

@@ -28,6 +28,7 @@
             [harness.edge.http :as http]
             [harness.fake :as fake]
             [harness.kernel.tools :as tools]
+            [harness.test-support :as support]
             [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -66,21 +67,30 @@
 
 (defn- with-server
   "A live server on an OS-chosen port, with a scripted provider pinned to THREAD.
-  The port is never written down: see AGENTS.md."
+  The port is never written down: see AGENTS.md.
+
+  THREAD IS MADE A SESSION FIRST, and it is not bookkeeping: the run edge refuses an
+  id the store has never heard of BY NAME (ticket 03 of
+  `.scratch/sessions-live-on-the-server`), so a case that posted a run for a fresh
+  thread would be testing that refusal instead of `ask`. Same two lines as
+  harness.cap.mcp-wired-test's fixture, because it is the same protocol."
   [thread turns f]
   (providers/use-provider! thread (fake/scripted turns))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
          (finally (stop) (providers/use-provider! thread nil)))))
 
 (defn- post-run
+  "POST an ACTION -- not a conversation. `append` is what THIS run adds, the server
+  mints the run id, and `messages` is a named 400 (`http.clj`, ADR 0002): the session
+  already holds the history, and `with-server` has said it exists."
   ([thread-id] (post-run thread-id {}))
   ([thread-id extra]
    (let [body (json/write-str (merge {:threadId thread-id
-                                      :runId (str (java.util.UUID/randomUUID))
-                                      :messages [{:id "u1" :role "user" :content "go"}]
-                                      :tools [] :context []}
+                                      :append [{:id "u1" :role "user" :content "go"}]
+                                      :tools []}
                                      extra))
          req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")

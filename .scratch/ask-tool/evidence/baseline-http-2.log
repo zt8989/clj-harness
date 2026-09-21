@@ -1,0 +1,889 @@
+test config root: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529
+test OS home: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-home-11303712719524174627
+developer home store before this run: present (26267648 bytes, left alone)
+time limits: 300s per namespace, 1800s for the run (CLJ_HARNESS_TEST_NAMESPACE_TIMEOUT_SECS / CLJ_HARNESS_TEST_RUN_TIMEOUT_SECS)
+
+Testing harness.edge.http-test
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by org.sqlite.SQLiteJDBCLoader in an unnamed module (file:/C:/Users/zhouteng/.m2/repository/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13507 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:05.390 INFO  harness.infra.log - listening port=13507 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:05.385977500Z
+22:53:11.424 INFO  harness.infra.log - start model=scripted run-id=99e608c1-b44b-4b42-b389-4ad3791b5cfe thread-id=sofar-a
+
+FAIL in (a-running-session-reads-what-has-arrived-and-nothing-is-written) (http_test.clj:5489)
+the model's turn is on the record and its call is held at the seam
+expected: (until (fn* [] (and (pos? (long ((:entered gate)))) (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "sofar-a")))) 5000)
+  actual: (not (until #object[harness.edge.http_test$fn__22070$fn__22071$fn__22072$fn__22073$fn__22074 0x4d10134a "harness.edge.http_test$fn__22070$fn__22071$fn__22072$fn__22073$fn__22074@4d10134a"] 5000))
+
+FAIL in (a-running-session-reads-what-has-arrived-and-nothing-is-written) (http_test.clj:5509)
+and it returns the half turn as it stands
+the calls the model made a moment ago are readable
+expected: (= ["c1" "c2"] (vec calls))
+  actual: (not (= ["c1" "c2"] []))
+
+FAIL in (a-running-session-reads-what-has-arrived-and-nothing-is-written) (http_test.clj:5546)
+and polling it does not touch the file at all
+expected: (= before [(.length f) (.lastModified f)])
+  actual: (not (= [3971 1790002391695] [28938 1790002392796]))
+22:53:14.490 INFO  harness.infra.log - stream-closed run-id=99e608c1-b44b-4b42-b389-4ad3791b5cfe status=:server-close terminal=RUN_FINISHED thread-id=sofar-a
+22:53:14.490 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=99e608c1-b44b-4b42-b389-4ad3791b5cfe thread-id=sofar-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13554 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:14.657 INFO  harness.infra.log - listening port=13554 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:14.657779800Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13557 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:14.740 INFO  harness.infra.log - listening port=13557 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:14.740966400Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13588 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:15.795 INFO  harness.infra.log - listening port=13588 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:15.795292900Z
+22:53:18.409 INFO  harness.infra.log - start model=scripted run-id=2767b515-4716-4511-9267-2cd65f9cc0ea thread-id=it-system-off
+22:53:19.994 INFO  harness.infra.log - stream-closed run-id=2767b515-4716-4511-9267-2cd65f9cc0ea status=:server-close terminal=RUN_FINISHED thread-id=it-system-off
+22:53:19.994 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2767b515-4716-4511-9267-2cd65f9cc0ea thread-id=it-system-off
+22:53:20.324 INFO  harness.infra.log - start model=scripted run-id=651b8282-4307-4ac0-a64a-8acfc9ec9230 thread-id=it-system-off
+22:53:20.661 INFO  harness.infra.log - stream-closed run-id=651b8282-4307-4ac0-a64a-8acfc9ec9230 status=:server-close terminal=RUN_FINISHED thread-id=it-system-off
+22:53:20.662 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=651b8282-4307-4ac0-a64a-8acfc9ec9230 thread-id=it-system-off
+22:53:22.247 INFO  harness.infra.log - start model=scripted run-id=f37795bc-0155-4641-abd9-e052cadf44c6 thread-id=it-system-off
+22:53:22.655 INFO  harness.infra.log - stream-closed run-id=f37795bc-0155-4641-abd9-e052cadf44c6 status=:server-close terminal=RUN_FINISHED thread-id=it-system-off
+22:53:22.657 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f37795bc-0155-4641-abd9-e052cadf44c6 thread-id=it-system-off
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13630 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:22.686 INFO  harness.infra.log - listening port=13630 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:22.686314600Z
+22:53:22.852 INFO  harness.infra.log - start model=scripted run-id=9c784270-4d12-4c03-9bef-fe91f7732ff5 thread-id=born-with-context
+22:53:23.265 INFO  harness.infra.log - stream-closed run-id=9c784270-4d12-4c03-9bef-fe91f7732ff5 status=:server-close terminal=RUN_FINISHED thread-id=born-with-context
+22:53:23.266 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9c784270-4d12-4c03-9bef-fe91f7732ff5 thread-id=born-with-context
+22:53:23.454 INFO  harness.infra.log - start model=scripted run-id=d2237dc8-1583-4408-90b5-50628fa07b58 thread-id=born-with-context
+22:53:23.902 INFO  harness.infra.log - stream-closed run-id=d2237dc8-1583-4408-90b5-50628fa07b58 status=:server-close terminal=RUN_FINISHED thread-id=born-with-context
+22:53:23.902 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d2237dc8-1583-4408-90b5-50628fa07b58 thread-id=born-with-context
+22:53:24.069 INFO  harness.infra.log - start model=scripted run-id=a9028eef-13e5-40cf-b920-a5d43c0ba99b thread-id=born-with-context
+22:53:24.494 INFO  harness.infra.log - stream-closed run-id=a9028eef-13e5-40cf-b920-a5d43c0ba99b status=:server-close terminal=RUN_FINISHED thread-id=born-with-context
+22:53:24.494 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a9028eef-13e5-40cf-b920-a5d43c0ba99b thread-id=born-with-context
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13637 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:24.599 INFO  harness.infra.log - listening port=13637 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:24.599996200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13645 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:24.800 INFO  harness.infra.log - listening port=13645 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:24.800777500Z
+22:53:24.881 WARN  harness.infra.log - taken-over from-instance=the-previous-owner from-pid=70192 pid=70192 thread-id=stale-claim
+22:53:24.981 INFO  harness.infra.log - start model=scripted run-id=db325a34-e3c2-4202-81f6-0038cd811571 thread-id=stale-claim
+22:53:26.383 INFO  harness.infra.log - stream-closed run-id=db325a34-e3c2-4202-81f6-0038cd811571 status=:server-close terminal=RUN_FINISHED thread-id=stale-claim
+22:53:26.384 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=db325a34-e3c2-4202-81f6-0038cd811571 thread-id=stale-claim
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13654 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:26.490 INFO  harness.infra.log - listening port=13654 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:26.490296300Z
+22:53:27.010 INFO  harness.infra.log - start model=scripted run-id=ce782a05-32b3-4845-959e-c32e73cb3dfd thread-id=rebind-run
+22:53:28.027 INFO  harness.infra.log - stream-closed run-id=ce782a05-32b3-4845-959e-c32e73cb3dfd status=:server-close terminal=RUN_FINISHED thread-id=rebind-run
+22:53:28.027 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ce782a05-32b3-4845-959e-c32e73cb3dfd thread-id=rebind-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13672 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:28.123 INFO  harness.infra.log - listening port=13672 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:28.123537400Z
+22:53:28.350 INFO  harness.infra.log - start model=scripted run-id=0fdb6d9d-ca76-4d74-966f-f31af9d747a5 thread-id=rebuild-66c52d58-e835-4d9b-a0dd-0799ac6cb420
+22:53:29.838 INFO  harness.infra.log - stream-closed run-id=0fdb6d9d-ca76-4d74-966f-f31af9d747a5 status=:server-close terminal=RUN_FINISHED thread-id=rebuild-66c52d58-e835-4d9b-a0dd-0799ac6cb420
+22:53:29.839 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0fdb6d9d-ca76-4d74-966f-f31af9d747a5 thread-id=rebuild-66c52d58-e835-4d9b-a0dd-0799ac6cb420
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13686 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:30.008 INFO  harness.infra.log - listening port=13686 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:30.008978800Z
+22:53:30.067 INFO  harness.infra.log - stream-closed generation=dd186f2f-1055-4307-a4dd-b8dee23aaa66 status=:server-close thread-id=win-feed
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13701 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:35.095 INFO  harness.infra.log - listening port=13701 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:35.095342500Z
+22:53:35.363 INFO  harness.infra.log - start model=scripted run-id=26ee713b-0212-401e-8d42-1347f051f2a4 thread-id=proj-run
+22:53:36.020 INFO  harness.infra.log - stream-closed run-id=26ee713b-0212-401e-8d42-1347f051f2a4 status=:server-close terminal=RUN_FINISHED thread-id=proj-run
+22:53:36.020 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=26ee713b-0212-401e-8d42-1347f051f2a4 thread-id=proj-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13704 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:36.069 INFO  harness.infra.log - listening port=13704 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:36.069335Z
+22:53:36.365 INFO  harness.infra.log - start model=scripted run-id=7c4ae29d-93ce-4a2b-928c-4225f212bdc0 thread-id=named-once
+22:53:36.703 INFO  harness.infra.log - stream-closed run-id=7c4ae29d-93ce-4a2b-928c-4225f212bdc0 status=:server-close terminal=RUN_FINISHED thread-id=named-once
+22:53:36.703 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7c4ae29d-93ce-4a2b-928c-4225f212bdc0 thread-id=named-once
+22:53:36.844 INFO  harness.infra.log - start model=scripted run-id=a3253a26-3973-4c8c-adc3-d3b8a96943ec thread-id=named-once
+22:53:37.169 INFO  harness.infra.log - stream-closed run-id=a3253a26-3973-4c8c-adc3-d3b8a96943ec status=:server-close terminal=RUN_FINISHED thread-id=named-once
+22:53:37.170 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a3253a26-3973-4c8c-adc3-d3b8a96943ec thread-id=named-once
+22:53:37.363 INFO  harness.infra.log - start model=scripted run-id=7ace55d2-9cdb-4f69-ad42-376aa93140ef thread-id=no-words
+22:53:37.756 INFO  harness.infra.log - stream-closed run-id=7ace55d2-9cdb-4f69-ad42-376aa93140ef status=:server-close terminal=RUN_FINISHED thread-id=no-words
+22:53:37.756 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7ace55d2-9cdb-4f69-ad42-376aa93140ef thread-id=no-words
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-5059604537876655998/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13717 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:38.280 INFO  harness.infra.log - listening port=13717 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-5059604537876655998 since=2026-09-21T14:53:38.280530300Z
+22:53:38.513 INFO  harness.infra.log - start model=scripted run-id=1ddd54f5-8388-4978-848d-17517e6b66ad thread-id=it-slash-side
+22:53:38.912 INFO  harness.infra.log - stream-closed run-id=1ddd54f5-8388-4978-848d-17517e6b66ad status=:server-close terminal=RUN_FINISHED thread-id=it-slash-side
+22:53:38.912 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1ddd54f5-8388-4978-848d-17517e6b66ad thread-id=it-slash-side
+22:53:39.323 INFO  harness.infra.log - start model=scripted run-id=946e6354-5bad-4906-9ff2-1b73bf875da8 thread-id=it-slash-side
+22:53:39.784 INFO  harness.infra.log - stream-closed run-id=946e6354-5bad-4906-9ff2-1b73bf875da8 status=:server-close terminal=RUN_FINISHED thread-id=it-slash-side
+22:53:39.784 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=946e6354-5bad-4906-9ff2-1b73bf875da8 thread-id=it-slash-side
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13735 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:39.856 INFO  harness.infra.log - listening port=13735 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:39.856140Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13744 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:39.937 INFO  harness.infra.log - listening port=13744 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:39.936756900Z
+22:53:40.051 ERROR harness.infra.log - run-refused thread-id=http-guard
+clojure.lang.ExceptionInfo: model "beta-plain" does not accept ["image"] input; it declares ["text"] (provider :beta) -- change the model, or send only what it declares
+	at harness.edge.http$guard_input_modalities_BANG_.invokeStatic(http.clj:892)
+	at harness.edge.http$guard_input_modalities_BANG_.invoke(http.clj:866)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1137)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:53:40.070 INFO  harness.infra.log - stream-closed run-id=29bffeb0-d348-4059-b601-bc442e18cb4b status=:server-close terminal=RUN_ERROR thread-id=http-guard
+22:53:40.070 INFO  harness.infra.log - terminal event=RUN_ERROR reason=model "beta-plain" does not accept ["image"] input; it declares ["text"] (provider :beta) -- change the model, or send only what it declares run-id=29bffeb0-d348-4059-b601-bc442e18cb4b thread-id=http-guard
+22:53:40.158 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=4fdc786d-84d8-4b66-bb80-addb1c279bb7 thread-id=http-guard
+22:53:40.428 INFO  harness.infra.log - stream-closed run-id=4fdc786d-84d8-4b66-bb80-addb1c279bb7 status=:server-close terminal=RUN_FINISHED thread-id=http-guard
+22:53:40.430 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4fdc786d-84d8-4b66-bb80-addb1c279bb7 thread-id=http-guard
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13753 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:40.456 INFO  harness.infra.log - listening port=13753 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:40.456395500Z
+22:53:40.570 INFO  harness.infra.log - start model=scripted run-id=a1b68514-3dda-4a8c-b469-7c6dd80e257a thread-id=images
+22:53:41.435 INFO  harness.infra.log - stream-closed run-id=a1b68514-3dda-4a8c-b469-7c6dd80e257a status=:server-close terminal=RUN_FINISHED thread-id=images
+22:53:41.436 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a1b68514-3dda-4a8c-b469-7c6dd80e257a thread-id=images
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13761 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:41.499 INFO  harness.infra.log - listening port=13761 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:41.498208700Z
+22:53:41.622 INFO  harness.infra.log - start model=scripted run-id=9cb8a7fb-99db-4743-ad68-4aa0d524e1a7 thread-id=park-dead
+22:53:41.646 INFO  harness.infra.log - stream-closed run-id=9cb8a7fb-99db-4743-ad68-4aa0d524e1a7 status=:server-close terminal=RUN_ERROR thread-id=park-dead
+22:53:41.646 INFO  harness.infra.log - terminal event=RUN_ERROR reason=this run's history leaves 1 tool call unanswered and no parked approval in this process can answer it (call_dead1): an OpenAI-shaped vendor refuses a request whose assistant message with tool_calls is not followed by a tool message for each 'tool_call_id', so the run was refused before the provider was called. Send a result for that call, or start a new session. run-id=9cb8a7fb-99db-4743-ad68-4aa0d524e1a7 thread-id=park-dead
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13763 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:41.682 INFO  harness.infra.log - listening port=13763 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:41.682480200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13768 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:41.809 INFO  harness.infra.log - listening port=13768 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:41.809482300Z
+22:53:41.920 INFO  harness.infra.log - start model=scripted run-id=292eabf8-fdfc-483d-856d-afe187f171de thread-id=diag-story
+22:53:42.782 INFO  harness.infra.log - stream-closed run-id=292eabf8-fdfc-483d-856d-afe187f171de status=:server-close terminal=RUN_FINISHED thread-id=diag-story
+22:53:42.782 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=292eabf8-fdfc-483d-856d-afe187f171de thread-id=diag-story
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13773 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:42.798 INFO  harness.infra.log - listening port=13773 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:42.797413900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-4726135164870719552/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13777 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:42.887 INFO  harness.infra.log - listening port=13777 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-4726135164870719552 since=2026-09-21T14:53:42.887505800Z
+22:53:43.100 ERROR harness.infra.log - run-refused thread-id=count-in
+clojure.lang.ExceptionInfo: a tier may not carry [:context-window]; those are the catalog's answers about the model a tier selected, and a tier chooses only [":provider" ":model" ":reasoning-effort"] -- declare them on the model entry in config.edn's :providers (or describe the whole provider inline in :default)
+	at harness.cap.providers$fail.invokeStatic(providers.clj:166)
+	at harness.cap.providers$fail.invoke(providers.clj:166)
+	at harness.cap.providers$selection.invokeStatic(providers.clj:685)
+	at harness.cap.providers$selection.invoke(providers.clj:665)
+	at harness.cap.providers$default_selection.invokeStatic(providers.clj:1031)
+	at harness.cap.providers$default_selection.invoke(providers.clj:1016)
+	at harness.cap.providers$resolve_tiers.invokeStatic(providers.clj:1059)
+	at harness.cap.providers$resolve_tiers.invoke(providers.clj:1048)
+	at harness.cap.providers$resolve_provider.invokeStatic(providers.clj:1090)
+	at harness.cap.providers$resolve_provider.invoke(providers.clj:1063)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1172)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1164)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1169)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1164)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1123)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:53:43.136 INFO  harness.infra.log - stream-closed run-id=1d18794e-3a02-49fb-830f-bbd6fcc2bf2d status=:server-close terminal=RUN_ERROR thread-id=count-in
+22:53:43.136 INFO  harness.infra.log - terminal event=RUN_ERROR reason=a tier may not carry [:context-window]; those are the catalog's answers about the model a tier selected, and a tier chooses only [":provider" ":model" ":reasoning-effort"] -- declare them on the model entry in config.edn's :providers (or describe the whole provider inline in :default) run-id=1d18794e-3a02-49fb-830f-bbd6fcc2bf2d thread-id=count-in
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13785 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:43.204 INFO  harness.infra.log - listening port=13785 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:43.204267700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13800 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:43.619 INFO  harness.infra.log - listening port=13800 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:43.618986700Z
+22:53:45.235 ERROR harness.infra.log - run-refused thread-id=it-system-block
+clojure.lang.ExceptionInfo: no system message for you
+	at harness.cap.system_prompt$assemble.invokeStatic(system_prompt.clj:109)
+	at harness.cap.system_prompt$assemble.invoke(system_prompt.clj:82)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1187)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:53:45.262 INFO  harness.infra.log - stream-closed run-id=6f95dece-acc3-484a-a2a3-8fc066f19fda status=:server-close terminal=RUN_ERROR thread-id=it-system-block
+22:53:45.263 INFO  harness.infra.log - terminal event=RUN_ERROR reason=no system message for you run-id=6f95dece-acc3-484a-a2a3-8fc066f19fda thread-id=it-system-block
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13805 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:45.289 INFO  harness.infra.log - listening port=13805 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:45.289617Z
+22:53:45.423 INFO  harness.infra.log - start model=scripted run-id=7f3c0079-2bc2-424e-8249-4c677f4af58e thread-id=minted-run
+22:53:45.635 INFO  harness.infra.log - stream-closed run-id=7f3c0079-2bc2-424e-8249-4c677f4af58e status=:server-close terminal=RUN_FINISHED thread-id=minted-run
+22:53:45.635 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7f3c0079-2bc2-424e-8249-4c677f4af58e thread-id=minted-run
+22:53:45.779 INFO  harness.infra.log - start model=scripted run-id=b3cdffe6-cbdb-4e5c-85a4-0575d56d8f0f thread-id=minted-run
+22:53:46.039 INFO  harness.infra.log - stream-closed run-id=b3cdffe6-cbdb-4e5c-85a4-0575d56d8f0f status=:server-close terminal=RUN_FINISHED thread-id=minted-run
+22:53:46.039 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b3cdffe6-cbdb-4e5c-85a4-0575d56d8f0f thread-id=minted-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13817 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:46.172 INFO  harness.infra.log - listening port=13817 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:46.172802200Z
+22:53:46.330 INFO  harness.infra.log - start model=scripted run-id=d829c51a-a02c-47c0-b0ca-4b8b9f4dcf08 thread-id=diag-refused
+22:53:46.601 INFO  harness.infra.log - tool-not-run outcome=unknown-tool run-id=d829c51a-a02c-47c0-b0ca-4b8b9f4dcf08 thread-id=diag-refused tool=no-such-tool
+22:53:46.826 INFO  harness.infra.log - stream-closed run-id=d829c51a-a02c-47c0-b0ca-4b8b9f4dcf08 status=:server-close terminal=RUN_FINISHED thread-id=diag-refused
+22:53:46.827 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d829c51a-a02c-47c0-b0ca-4b8b9f4dcf08 thread-id=diag-refused
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13823 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:46.889 INFO  harness.infra.log - listening port=13823 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:46.889702700Z
+22:53:47.218 INFO  harness.infra.log - start model=scripted run-id=bd0d3524-3047-414b-83aa-2edf6a4dfa17 thread-id=arch-a
+22:53:48.248 INFO  harness.infra.log - stream-closed run-id=bd0d3524-3047-414b-83aa-2edf6a4dfa17 status=:server-close terminal=RUN_FINISHED thread-id=arch-a
+22:53:48.248 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=bd0d3524-3047-414b-83aa-2edf6a4dfa17 thread-id=arch-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13884 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:49.821 INFO  harness.infra.log - listening port=13884 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:49.821263400Z
+22:53:49.990 INFO  harness.infra.log - start model=scripted run-id=dd10c10b-bf77-4164-8457-c0de54840a73 thread-id=served-elsewhere
+22:53:51.242 INFO  harness.infra.log - stream-closed run-id=dd10c10b-bf77-4164-8457-c0de54840a73 status=:server-close terminal=RUN_FINISHED thread-id=served-elsewhere
+22:53:51.243 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=dd10c10b-bf77-4164-8457-c0de54840a73 thread-id=served-elsewhere
+22:53:51.688 INFO  harness.infra.log - start model=scripted run-id=160147d2-d97a-45ae-a612-837a6708cff1 thread-id=served-elsewhere
+22:53:51.915 INFO  harness.infra.log - stream-closed run-id=160147d2-d97a-45ae-a612-837a6708cff1 status=:server-close terminal=RUN_FINISHED thread-id=served-elsewhere
+22:53:51.915 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=160147d2-d97a-45ae-a612-837a6708cff1 thread-id=served-elsewhere
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13906 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:52.022 INFO  harness.infra.log - listening port=13906 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:52.022219Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13908 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:52.096 INFO  harness.infra.log - listening port=13908 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:52.096505900Z
+22:53:52.230 INFO  harness.infra.log - start model=scripted run-id=b9e6c026-d1e1-4e01-b2ce-e1bfe44dd740 thread-id=lifecycle
+22:53:52.912 INFO  harness.infra.log - stream-closed run-id=b9e6c026-d1e1-4e01-b2ce-e1bfe44dd740 status=:server-close terminal=RUN_FINISHED thread-id=lifecycle
+22:53:52.912 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b9e6c026-d1e1-4e01-b2ce-e1bfe44dd740 thread-id=lifecycle
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13925 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:52.939 INFO  harness.infra.log - listening port=13925 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:52.939599100Z
+22:53:53.050 INFO  harness.infra.log - start model=scripted run-id=bf5f9d06-efe3-4df0-a63c-22f609952aa1 thread-id=two-kinds
+22:53:53.806 INFO  harness.infra.log - stream-closed run-id=bf5f9d06-efe3-4df0-a63c-22f609952aa1 status=:server-close terminal=RUN_FINISHED thread-id=two-kinds
+22:53:53.806 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=bf5f9d06-efe3-4df0-a63c-22f609952aa1 thread-id=two-kinds
+
+FAIL in (the-record-holds-exactly-two-kinds-of-row) (http_test.clj:6102)
+a wire frame is an event whose payload IS the frame
+a run's terminal frame is on the record
+expected: (some? terminal)
+  actual: (not (some? nil))
+
+FAIL in (the-record-holds-exactly-two-kinds-of-row) (http_test.clj:6103)
+a wire frame is an event whose payload IS the frame
+expected: (= "event" (:type terminal))
+  actual: (not (= "event" nil))
+
+FAIL in (the-record-holds-exactly-two-kinds-of-row) (http_test.clj:6104)
+a wire frame is an event whose payload IS the frame
+and it is the frame itself, not a copy of its fields
+expected: (= "two-kinds" (get-in terminal [:payload :threadId]))
+  actual: (not (= "two-kinds" nil))
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13956 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:55.006 INFO  harness.infra.log - listening port=13956 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:55.006825900Z
+22:53:55.110 INFO  harness.infra.log - start model=scripted run-id=ba9774a0-16cf-498f-b53e-d66dcc83b9b1 thread-id=it-jobs
+22:53:55.839 INFO  harness.infra.log - stream-closed run-id=ba9774a0-16cf-498f-b53e-d66dcc83b9b1 status=:server-close terminal=RUN_FINISHED thread-id=it-jobs
+22:53:55.840 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ba9774a0-16cf-498f-b53e-d66dcc83b9b1 thread-id=it-jobs
+22:53:55.925 INFO  harness.infra.log - start model=scripted run-id=d1dfa574-970f-4222-a4a8-5bc1835c7915 thread-id=it-jobs
+22:53:56.754 INFO  harness.infra.log - stream-closed run-id=d1dfa574-970f-4222-a4a8-5bc1835c7915 status=:server-close terminal=RUN_FINISHED thread-id=it-jobs
+22:53:56.754 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d1dfa574-970f-4222-a4a8-5bc1835c7915 thread-id=it-jobs
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13966 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:56.849 INFO  harness.infra.log - listening port=13966 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:56.849051300Z
+22:53:56.973 INFO  harness.infra.log - start model=scripted run-id=8acc256e-5a96-4eef-9cd6-ec6cb85d815d thread-id=park-ask
+22:53:56.999 INFO  harness.infra.log - stream-closed run-id=8acc256e-5a96-4eef-9cd6-ec6cb85d815d status=:server-close terminal=RUN_FINISHED thread-id=park-ask
+22:53:57.000 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8acc256e-5a96-4eef-9cd6-ec6cb85d815d thread-id=park-ask
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13968 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:53:57.028 INFO  harness.infra.log - listening port=13968 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:53:57.028673100Z
+22:53:57.162 INFO  harness.infra.log - start model=scripted run-id=0b31e0d3-3955-4869-b482-d8c385412a32 thread-id=replay-e2e
+22:53:58.101 INFO  harness.infra.log - stream-closed run-id=0b31e0d3-3955-4869-b482-d8c385412a32 status=:server-close terminal=RUN_FINISHED thread-id=replay-e2e
+22:53:58.101 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0b31e0d3-3955-4869-b482-d8c385412a32 thread-id=replay-e2e
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13980 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:01.141 INFO  harness.infra.log - listening port=13980 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:01.140357300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13992 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:01.368 INFO  harness.infra.log - listening port=13992 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:01.368353100Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-1636203418573451263/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13997 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:01.473 INFO  harness.infra.log - listening port=13997 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-1636203418573451263 since=2026-09-21T14:54:01.473352600Z
+22:54:01.590 INFO  harness.infra.log - start model=scripted run-id=9d62e12e-15fb-4706-a464-fce1ede6777f thread-id=it-slash
+22:54:01.789 INFO  harness.infra.log - stream-closed run-id=9d62e12e-15fb-4706-a464-fce1ede6777f status=:server-close terminal=RUN_FINISHED thread-id=it-slash
+22:54:01.789 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9d62e12e-15fb-4706-a464-fce1ede6777f thread-id=it-slash
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:13999 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:01.908 INFO  harness.infra.log - listening port=13999 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:01.908477700Z
+22:54:02.212 INFO  harness.infra.log - start model=scripted run-id=d281495b-494f-479b-ba86-1d6df410890b thread-id=rm-a
+22:54:02.787 INFO  harness.infra.log - stream-closed run-id=d281495b-494f-479b-ba86-1d6df410890b status=:server-close terminal=RUN_FINISHED thread-id=rm-a
+22:54:02.787 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d281495b-494f-479b-ba86-1d6df410890b thread-id=rm-a
+22:54:02.924 INFO  harness.infra.log - start model=scripted run-id=9d443cd0-a521-4c13-b1f5-8503ee54ffe7 thread-id=rm-b
+22:54:03.646 INFO  harness.infra.log - stream-closed run-id=9d443cd0-a521-4c13-b1f5-8503ee54ffe7 status=:server-close terminal=RUN_FINISHED thread-id=rm-b
+22:54:03.646 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9d443cd0-a521-4c13-b1f5-8503ee54ffe7 thread-id=rm-b
+22:54:03.787 INFO  harness.infra.log - start model=scripted run-id=3e27e7f2-9c6d-4f3c-b1b2-6a3ce9731a80 thread-id=rm-other
+22:54:04.427 INFO  harness.infra.log - stream-closed run-id=3e27e7f2-9c6d-4f3c-b1b2-6a3ce9731a80 status=:server-close terminal=RUN_FINISHED thread-id=rm-other
+22:54:04.427 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=3e27e7f2-9c6d-4f3c-b1b2-6a3ce9731a80 thread-id=rm-other
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14064 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:05.084 INFO  harness.infra.log - listening port=14064 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:05.084095300Z
+22:54:06.669 INFO  harness.infra.log - start model=scripted run-id=2a14631e-bf09-45fe-be01-97c5beabeb58 thread-id=it-system
+22:54:07.463 INFO  harness.infra.log - stream-closed run-id=2a14631e-bf09-45fe-be01-97c5beabeb58 status=:server-close terminal=RUN_FINISHED thread-id=it-system
+22:54:07.463 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2a14631e-bf09-45fe-be01-97c5beabeb58 thread-id=it-system
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14069 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:07.532 INFO  harness.infra.log - listening port=14069 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:07.531821500Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14073 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:07.583 INFO  harness.infra.log - listening port=14073 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:07.583388200Z
+22:54:08.330 INFO  harness.infra.log - start model=scripted run-id=11b27602-6aa1-41bf-8b76-099df69cd1d1 thread-id=task-ran
+22:54:09.189 INFO  harness.infra.log - stream-closed run-id=11b27602-6aa1-41bf-8b76-099df69cd1d1 status=:server-close terminal=RUN_FINISHED thread-id=task-ran
+22:54:09.189 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=11b27602-6aa1-41bf-8b76-099df69cd1d1 thread-id=task-ran
+22:54:09.728 INFO  harness.infra.log - start model=seeded run-id=dccceb20-1e6e-44b0-aedc-8da22a6be69d thread-id=task-released
+22:54:09.955 INFO  harness.infra.log - stream-closed run-id=dccceb20-1e6e-44b0-aedc-8da22a6be69d status=:server-close terminal=RUN_FINISHED thread-id=task-released
+22:54:09.955 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=dccceb20-1e6e-44b0-aedc-8da22a6be69d thread-id=task-released
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14146 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:10.519 INFO  harness.infra.log - listening port=14146 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:10.519376900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14159 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:10.708 INFO  harness.infra.log - listening port=14159 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:10.708373100Z
+22:54:10.894 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=e6632442-b96c-4308-ba17-bf9744cf059e thread-id=http-prov
+22:54:11.088 INFO  harness.infra.log - stream-closed run-id=e6632442-b96c-4308-ba17-bf9744cf059e status=:server-close terminal=RUN_FINISHED thread-id=http-prov
+22:54:11.088 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e6632442-b96c-4308-ba17-bf9744cf059e thread-id=http-prov
+22:54:11.184 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=668a9568-1336-43c3-95cf-8a0ed9419bae thread-id=http-prov
+22:54:11.391 INFO  harness.infra.log - stream-closed run-id=668a9568-1336-43c3-95cf-8a0ed9419bae status=:server-close terminal=RUN_FINISHED thread-id=http-prov
+22:54:11.392 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=668a9568-1336-43c3-95cf-8a0ed9419bae thread-id=http-prov
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14209 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:13.443 INFO  harness.infra.log - listening port=14209 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:13.443821800Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14214 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:13.497 INFO  harness.infra.log - listening port=14214 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:13.497822Z
+22:54:13.613 INFO  harness.infra.log - start model=scripted run-id=948ebd11-cbe2-4dbf-8bfd-38c8d6c0550d thread-id=diag-lost-stream
+22:54:13.627 WARN  harness.infra.log - events-closed-without-terminal run-id=948ebd11-cbe2-4dbf-8bfd-38c8d6c0550d thread-id=diag-lost-stream
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14227 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:13.671 INFO  harness.infra.log - listening port=14227 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:13.670822700Z
+22:54:13.840 INFO  harness.infra.log - start model=scripted run-id=443025e7-4be4-42d3-8f96-d2f37727342c thread-id=sofar-b
+22:54:14.689 INFO  harness.infra.log - stream-closed run-id=443025e7-4be4-42d3-8f96-d2f37727342c status=:server-close terminal=RUN_FINISHED thread-id=sofar-b
+22:54:14.689 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=443025e7-4be4-42d3-8f96-d2f37727342c thread-id=sofar-b
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14241 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:14.755 INFO  harness.infra.log - listening port=14241 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:14.755061100Z
+22:54:14.894 INFO  harness.infra.log - start model=scripted run-id=b9d4477d-57a6-4619-935a-7fac7b051961 thread-id=t-think-echo
+22:54:15.432 INFO  harness.infra.log - stream-closed run-id=b9d4477d-57a6-4619-935a-7fac7b051961 status=:server-close terminal=RUN_FINISHED thread-id=t-think-echo
+22:54:15.433 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b9d4477d-57a6-4619-935a-7fac7b051961 thread-id=t-think-echo
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14243 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:15.483 INFO  harness.infra.log - listening port=14243 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:15.483713Z
+22:54:15.655 INFO  harness.infra.log - start model=alpha-big provider=:alpha run-id=ae82870c-86c4-4484-a79b-54014c98a5e6 thread-id=http-change
+22:54:15.857 INFO  harness.infra.log - stream-closed run-id=ae82870c-86c4-4484-a79b-54014c98a5e6 status=:server-close terminal=RUN_FINISHED thread-id=http-change
+22:54:15.857 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ae82870c-86c4-4484-a79b-54014c98a5e6 thread-id=http-change
+22:54:15.958 INFO  harness.infra.log - start model=alpha-big provider=:alpha run-id=c5e26f7c-8096-4648-a78c-33fccf3e822b thread-id=http-change
+22:54:16.141 INFO  harness.infra.log - stream-closed run-id=c5e26f7c-8096-4648-a78c-33fccf3e822b status=:server-close terminal=RUN_FINISHED thread-id=http-change
+22:54:16.141 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c5e26f7c-8096-4648-a78c-33fccf3e822b thread-id=http-change
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14246 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:16.155 INFO  harness.infra.log - listening port=14246 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:16.155923500Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14248 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:16.220 INFO  harness.infra.log - listening port=14248 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:16.220000600Z
+22:54:16.569 INFO  harness.infra.log - start model=scripted run-id=4242c722-29f8-483f-889b-84796a0afee5 thread-id=cors-origin
+22:54:16.808 INFO  harness.infra.log - stream-closed run-id=4242c722-29f8-483f-889b-84796a0afee5 status=:server-close terminal=RUN_FINISHED thread-id=cors-origin
+22:54:16.808 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4242c722-29f8-483f-889b-84796a0afee5 thread-id=cors-origin
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14267 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:16.822 INFO  harness.infra.log - listening port=14267 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:16.822217700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14276 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:17.056 INFO  harness.infra.log - listening port=14276 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:17.056720700Z
+22:54:17.344 INFO  harness.infra.log - start model=scripted run-id=8907610a-f24f-4301-b66c-bab8e59c928f thread-id=t-pad-on
+22:54:17.605 INFO  harness.infra.log - stream-closed run-id=8907610a-f24f-4301-b66c-bab8e59c928f status=:server-close terminal=RUN_FINISHED thread-id=t-pad-on
+22:54:17.605 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8907610a-f24f-4301-b66c-bab8e59c928f thread-id=t-pad-on
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14282 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:17.619 INFO  harness.infra.log - listening port=14282 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:17.619598400Z
+22:54:17.764 INFO  harness.infra.log - start model=scripted run-id=f04c380c-be14-4e0d-a7eb-5f6f750c7909 thread-id=t-pad-off
+22:54:17.979 INFO  harness.infra.log - stream-closed run-id=f04c380c-be14-4e0d-a7eb-5f6f750c7909 status=:server-close terminal=RUN_FINISHED thread-id=t-pad-off
+22:54:17.980 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f04c380c-be14-4e0d-a7eb-5f6f750c7909 thread-id=t-pad-off
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14291 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:17.990 INFO  harness.infra.log - listening port=14291 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:17.989514600Z
+22:54:18.115 INFO  harness.infra.log - start model=scripted run-id=ac858806-b25b-476f-a507-b8e7c2497eb4 thread-id=t-client-field
+22:54:18.310 INFO  harness.infra.log - stream-closed run-id=ac858806-b25b-476f-a507-b8e7c2497eb4 status=:server-close terminal=RUN_FINISHED thread-id=t-client-field
+22:54:18.310 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ac858806-b25b-476f-a507-b8e7c2497eb4 thread-id=t-client-field
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14293 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:18.340 INFO  harness.infra.log - listening port=14293 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:18.340802400Z
+22:54:18.538 WARN  harness.infra.log - close-off-failed reason=line 1 of the log is not valid JSON (JSON error (end-of-file inside string)) -- the log is truncated or corrupt thread-id=corrupt-fce23d48-04da-445e-849b-914c7a54715f
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14301 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:18.653 INFO  harness.infra.log - listening port=14301 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:18.652183Z
+22:54:18.835 INFO  harness.infra.log - start model=scripted run-id=345a13b9-21c3-4af1-b174-7188a77fad0e thread-id=gate-a
+22:54:18.850 INFO  harness.infra.log - start model=scripted run-id=d6654b8e-d2da-4720-988a-48441e8b1617 thread-id=gate-b
+22:54:19.222 INFO  harness.infra.log - stream-closed run-id=345a13b9-21c3-4af1-b174-7188a77fad0e status=:server-close terminal=RUN_FINISHED thread-id=gate-a
+22:54:19.223 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=345a13b9-21c3-4af1-b174-7188a77fad0e thread-id=gate-a
+22:54:19.261 INFO  harness.infra.log - stream-closed run-id=d6654b8e-d2da-4720-988a-48441e8b1617 status=:server-close terminal=RUN_FINISHED thread-id=gate-b
+22:54:19.261 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d6654b8e-d2da-4720-988a-48441e8b1617 thread-id=gate-b
+22:54:19.380 INFO  harness.infra.log - start model=scripted run-id=6a9939b6-7db2-4997-860c-ec05cf732871 thread-id=gate-a
+22:54:19.661 INFO  harness.infra.log - stream-closed run-id=6a9939b6-7db2-4997-860c-ec05cf732871 status=:server-close terminal=RUN_FINISHED thread-id=gate-a
+22:54:19.662 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6a9939b6-7db2-4997-860c-ec05cf732871 thread-id=gate-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14320 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:19.695 INFO  harness.infra.log - listening port=14320 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:19.695003600Z
+22:54:19.730 WARN  harness.infra.log - close-off-failed reason=line 1 of the log is written in the old contract (`kind` at the top level); this build reads only `event` and `message` rows -- start a new conversation, or read it with the build that wrote it thread-id=old-contract-2d0ec645-e491-4163-baa0-96f70f48a8b3
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14326 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:19.759 INFO  harness.infra.log - listening port=14326 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:19.759573Z
+22:54:19.885 INFO  harness.infra.log - start model=scripted run-id=cf941041-8da0-4fdc-b42b-fd9f8a01b62f thread-id=silent
+22:54:20.135 INFO  harness.infra.log - stream-closed run-id=cf941041-8da0-4fdc-b42b-fd9f8a01b62f status=:server-close terminal=RUN_FINISHED thread-id=silent
+22:54:20.135 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=cf941041-8da0-4fdc-b42b-fd9f8a01b62f thread-id=silent
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14332 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:20.203 INFO  harness.infra.log - listening port=14332 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:20.203586800Z
+22:54:20.425 INFO  harness.infra.log - start model=scripted run-id=805db9a9-11f8-44b8-bc92-c549a37b7cb7 thread-id=crash-gate
+22:54:20.452 ERROR harness.infra.log - crashed run-id=805db9a9-11f8-44b8-bc92-c549a37b7cb7 thread-id=crash-gate
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__22000$fn__22001$fn__22002$fn__22003.invoke(http_test.clj:5400)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:971)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:54:20.453 WARN  harness.infra.log - stream-closed-before-terminal run-id=805db9a9-11f8-44b8-bc92-c549a37b7cb7 status=:server-close thread-id=crash-gate
+22:54:20.565 INFO  harness.infra.log - start model=scripted run-id=d98e292b-85d7-4251-b36f-b4e2e35b7ec2 thread-id=crash-gate
+22:54:20.839 INFO  harness.infra.log - stream-closed run-id=d98e292b-85d7-4251-b36f-b4e2e35b7ec2 status=:server-close terminal=RUN_FINISHED thread-id=crash-gate
+22:54:20.839 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d98e292b-85d7-4251-b36f-b4e2e35b7ec2 thread-id=crash-gate
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14345 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:20.867 INFO  harness.infra.log - listening port=14345 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:20.867245800Z
+22:54:20.984 INFO  harness.infra.log - start model=scripted run-id=baf9b9f7-9195-43b8-b0c6-68707542284f thread-id=frames-rebuilt
+22:54:21.727 INFO  harness.infra.log - stream-closed run-id=baf9b9f7-9195-43b8-b0c6-68707542284f status=:server-close terminal=RUN_FINISHED thread-id=frames-rebuilt
+22:54:21.727 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=baf9b9f7-9195-43b8-b0c6-68707542284f thread-id=frames-rebuilt
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14356 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:21.777 INFO  harness.infra.log - listening port=14356 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:21.777407400Z
+22:54:21.913 ERROR harness.infra.log - run-refused thread-id=http-unknown
+clojure.lang.ExceptionInfo: unknown interrupt: never-parked
+	at harness.edge.http$resume_decisions$fn__15850.invoke(http.clj:842)
+	at clojure.core$mapv$fn__8565.invoke(core.clj:7063)
+	at clojure.lang.PersistentVector.reduce(PersistentVector.java:418)
+	at clojure.core$reduce.invokeStatic(core.clj:6968)
+	at clojure.core$mapv.invokeStatic(core.clj:7054)
+	at clojure.core$mapv.invoke(core.clj:7054)
+	at harness.edge.http$resume_decisions.invokeStatic(http.clj:834)
+	at harness.edge.http$resume_decisions.invoke(http.clj:825)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1193)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:54:21.932 INFO  harness.infra.log - stream-closed run-id=b99ac58a-3f9c-479b-9387-47cb2be15841 status=:server-close terminal=RUN_ERROR thread-id=http-unknown
+22:54:21.932 INFO  harness.infra.log - terminal event=RUN_ERROR reason=unknown interrupt: never-parked run-id=b99ac58a-3f9c-479b-9387-47cb2be15841 thread-id=http-unknown
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14363 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:21.973 INFO  harness.infra.log - listening port=14363 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:21.973940600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14371 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:22.147 INFO  harness.infra.log - listening port=14371 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:22.147402300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14381 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:22.359 INFO  harness.infra.log - listening port=14381 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:22.359160600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14388 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:22.530 INFO  harness.infra.log - listening port=14388 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:22.530095100Z
+22:54:22.712 INFO  harness.infra.log - start model=beta-plain provider=:beta run-id=2dbc4838-ab51-443e-9342-b2547f146504 thread-id=http-vendor
+22:54:22.940 INFO  harness.infra.log - stream-closed run-id=2dbc4838-ab51-443e-9342-b2547f146504 status=:server-close terminal=RUN_FINISHED thread-id=http-vendor
+22:54:22.941 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2dbc4838-ab51-443e-9342-b2547f146504 thread-id=http-vendor
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14392 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:22.982 INFO  harness.infra.log - listening port=14392 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:22.982983500Z
+22:54:23.260 INFO  harness.infra.log - start model=scripted run-id=0e3ae330-01f4-40ca-adee-1de2e57a82e9 thread-id=sofar-parked
+22:54:23.514 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=0e3ae330-01f4-40ca-adee-1de2e57a82e9 thread-id=sofar-parked tool=write
+22:54:23.529 INFO  harness.infra.log - stream-closed run-id=0e3ae330-01f4-40ca-adee-1de2e57a82e9 status=:server-close terminal=RUN_FINISHED thread-id=sofar-parked
+22:54:23.529 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0e3ae330-01f4-40ca-adee-1de2e57a82e9 thread-id=sofar-parked
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14404 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:23.709 INFO  harness.infra.log - listening port=14404 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:23.709888400Z
+22:54:23.827 INFO  harness.infra.log - start model=scripted run-id=91a89029-89f9-4bf7-9395-670213a1bbfc thread-id=degraded-9421d622-1f53-4b2b-a306-6d44df9153af
+22:54:24.833 INFO  harness.infra.log - stream-closed run-id=91a89029-89f9-4bf7-9395-670213a1bbfc status=:server-close terminal=RUN_FINISHED thread-id=degraded-9421d622-1f53-4b2b-a306-6d44df9153af
+22:54:24.834 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=91a89029-89f9-4bf7-9395-670213a1bbfc thread-id=degraded-9421d622-1f53-4b2b-a306-6d44df9153af
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14459 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:37.066 INFO  harness.infra.log - listening port=14459 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:37.066580900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14488 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:54:59.641 INFO  harness.infra.log - listening port=14488 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:54:59.641670100Z
+22:54:59.808 INFO  harness.infra.log - start model=scripted run-id=dd6d427b-c950-4525-8a43-49d483ae84f1 thread-id=http-approve
+22:55:00.186 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=dd6d427b-c950-4525-8a43-49d483ae84f1 thread-id=http-approve tool=write
+22:55:00.206 INFO  harness.infra.log - stream-closed run-id=dd6d427b-c950-4525-8a43-49d483ae84f1 status=:server-close terminal=RUN_FINISHED thread-id=http-approve
+22:55:00.206 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=dd6d427b-c950-4525-8a43-49d483ae84f1 thread-id=http-approve
+22:55:00.311 INFO  harness.infra.log - start model=scripted run-id=2e292b3f-0ebb-419b-ab8c-176bff37edce thread-id=http-approve
+22:55:00.369 INFO  harness.infra.log - tool-not-run outcome=approved run-id=2e292b3f-0ebb-419b-ab8c-176bff37edce thread-id=http-approve tool=write
+22:55:00.788 INFO  harness.infra.log - stream-closed run-id=2e292b3f-0ebb-419b-ab8c-176bff37edce status=:server-close terminal=RUN_FINISHED thread-id=http-approve
+22:55:00.788 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2e292b3f-0ebb-419b-ab8c-176bff37edce thread-id=http-approve
+22:55:01.034 INFO  harness.infra.log - start model=scripted run-id=20933bd5-e87c-4ed9-a69c-153e617df475 thread-id=http-veto
+22:55:01.351 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=20933bd5-e87c-4ed9-a69c-153e617df475 thread-id=http-veto tool=write
+22:55:01.374 INFO  harness.infra.log - stream-closed run-id=20933bd5-e87c-4ed9-a69c-153e617df475 status=:server-close terminal=RUN_FINISHED thread-id=http-veto
+22:55:01.374 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=20933bd5-e87c-4ed9-a69c-153e617df475 thread-id=http-veto
+22:55:01.492 INFO  harness.infra.log - start model=scripted run-id=e18f6643-277b-4376-bc33-b82993749567 thread-id=http-veto
+22:55:01.553 INFO  harness.infra.log - tool-not-run outcome=vetoed run-id=e18f6643-277b-4376-bc33-b82993749567 thread-id=http-veto tool=write
+22:55:01.844 INFO  harness.infra.log - stream-closed run-id=e18f6643-277b-4376-bc33-b82993749567 status=:server-close terminal=RUN_FINISHED thread-id=http-veto
+22:55:01.844 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e18f6643-277b-4376-bc33-b82993749567 thread-id=http-veto
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14496 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:01.887 INFO  harness.infra.log - listening port=14496 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:01.887067600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14521 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:04.302 INFO  harness.infra.log - listening port=14521 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:04.301904100Z
+22:55:04.408 INFO  harness.infra.log - start model=scripted run-id=b3c01f5e-b5f7-4864-a1fa-8cf7631266b8 thread-id=plain
+22:55:04.590 INFO  harness.infra.log - stream-closed run-id=b3c01f5e-b5f7-4864-a1fa-8cf7631266b8 status=:server-close terminal=RUN_FINISHED thread-id=plain
+22:55:04.591 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b3c01f5e-b5f7-4864-a1fa-8cf7631266b8 thread-id=plain
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-8928923140613651736/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14524 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:04.675 INFO  harness.infra.log - listening port=14524 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-8928923140613651736 since=2026-09-21T14:55:04.675806200Z
+22:55:04.840 INFO  harness.infra.log - start model=scripted run-id=57d77899-8281-45b3-803c-b671434afdd8 thread-id=it-skills
+22:55:05.313 INFO  harness.infra.log - stream-closed run-id=57d77899-8281-45b3-803c-b671434afdd8 status=:server-close terminal=RUN_FINISHED thread-id=it-skills
+22:55:05.314 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=57d77899-8281-45b3-803c-b671434afdd8 thread-id=it-skills
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14529 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:05.413 INFO  harness.infra.log - listening port=14529 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:05.413892200Z
+22:55:05.524 INFO  harness.infra.log - start model=scripted run-id=1f3b9bd7-794a-4a42-8103-acc5ad6313a1 thread-id=request-tier
+22:55:05.753 INFO  harness.infra.log - stream-closed run-id=1f3b9bd7-794a-4a42-8103-acc5ad6313a1 status=:server-close terminal=RUN_FINISHED thread-id=request-tier
+22:55:05.753 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1f3b9bd7-794a-4a42-8103-acc5ad6313a1 thread-id=request-tier
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14537 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:05.797 INFO  harness.infra.log - listening port=14537 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:05.797423800Z
+22:55:05.921 INFO  harness.infra.log - start model=scripted run-id=4c3df6c4-0be7-49f3-a31b-78642ef613c5 thread-id=it-1
+22:55:06.713 INFO  harness.infra.log - stream-closed run-id=4c3df6c4-0be7-49f3-a31b-78642ef613c5 status=:server-close terminal=RUN_FINISHED thread-id=it-1
+22:55:06.713 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4c3df6c4-0be7-49f3-a31b-78642ef613c5 thread-id=it-1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14546 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:06.762 INFO  harness.infra.log - listening port=14546 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:06.761519100Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14553 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:06.846 INFO  harness.infra.log - listening port=14553 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:06.846430Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14555 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:06.919 INFO  harness.infra.log - listening port=14555 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:06.919338200Z
+22:55:07.139 INFO  harness.infra.log - start model=scripted run-id=4a4a0e9d-a2c1-4357-b644-24c3c4f4111f thread-id=crashed-a
+22:55:07.176 ERROR harness.infra.log - crashed run-id=4a4a0e9d-a2c1-4357-b644-24c3c4f4111f thread-id=crashed-a
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__21887$fn__21888$fn__21889$fn__21890.invoke(http_test.clj:5230)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:971)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at clojure.core.async.impl.ioc_macros$take_BANG_$fn__8575.invoke(ioc_macros.clj:985)
+	at clojure.core.async.impl.channels.ManyToManyChannel$fn__2476.invoke(channels.clj:140)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:55:07.176 WARN  harness.infra.log - stream-closed-before-terminal run-id=4a4a0e9d-a2c1-4357-b644-24c3c4f4111f status=:server-close thread-id=crashed-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14564 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:07.416 INFO  harness.infra.log - listening port=14564 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:07.416984500Z
+22:55:07.523 INFO  harness.infra.log - start model=scripted run-id=d491826a-7813-45ae-bf9b-b7f629958d25 thread-id=it-1
+22:55:08.110 INFO  harness.infra.log - stream-closed run-id=d491826a-7813-45ae-bf9b-b7f629958d25 status=:server-close terminal=RUN_FINISHED thread-id=it-1
+22:55:08.110 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d491826a-7813-45ae-bf9b-b7f629958d25 thread-id=it-1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14568 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:08.185 INFO  harness.infra.log - listening port=14568 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:08.185443900Z
+22:55:08.309 INFO  harness.infra.log - start model=scripted run-id=c932a454-7ad9-44b9-b84f-66990faa8213 thread-id=http-answer
+22:55:08.530 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=c932a454-7ad9-44b9-b84f-66990faa8213 thread-id=http-answer tool=write
+22:55:08.542 INFO  harness.infra.log - stream-closed run-id=c932a454-7ad9-44b9-b84f-66990faa8213 status=:server-close terminal=RUN_FINISHED thread-id=http-answer
+22:55:08.542 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c932a454-7ad9-44b9-b84f-66990faa8213 thread-id=http-answer
+22:55:08.612 INFO  harness.infra.log - start model=scripted run-id=c28b14a1-054c-4cae-8215-91e3bf50f09c thread-id=http-answer
+22:55:08.653 INFO  harness.infra.log - tool-not-run outcome=approved run-id=c28b14a1-054c-4cae-8215-91e3bf50f09c thread-id=http-answer tool=write
+22:55:08.906 INFO  harness.infra.log - stream-closed run-id=c28b14a1-054c-4cae-8215-91e3bf50f09c status=:server-close terminal=RUN_FINISHED thread-id=http-answer
+22:55:08.906 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c28b14a1-054c-4cae-8215-91e3bf50f09c thread-id=http-answer
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14579 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:08.972 INFO  harness.infra.log - listening port=14579 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:08.972979100Z
+22:55:09.092 INFO  harness.infra.log - start model=scripted run-id=c4c45cd5-cf1c-4f68-8c85-86adab4d44b9 thread-id=diag-crashed
+22:55:09.105 ERROR harness.infra.log - crashed run-id=c4c45cd5-cf1c-4f68-8c85-86adab4d44b9 thread-id=diag-crashed
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__21726$fn__21727$fn__21728$fn__21729.invoke(http_test.clj:4996)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:971)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at clojure.core.async.impl.ioc_macros$take_BANG_$fn__8575.invoke(ioc_macros.clj:985)
+	at clojure.core.async.impl.channels.ManyToManyChannel$fn__2476.invoke(channels.clj:140)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:55:09.107 WARN  harness.infra.log - stream-closed-before-terminal run-id=c4c45cd5-cf1c-4f68-8c85-86adab4d44b9 status=:server-close thread-id=diag-crashed
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14581 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:09.207 INFO  harness.infra.log - listening port=14581 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:09.207915600Z
+22:55:09.491 INFO  harness.infra.log - start model=scripted run-id=290f4852-0e40-47b3-9044-384705d8e792 thread-id=listing-a
+22:55:10.109 INFO  harness.infra.log - stream-closed run-id=290f4852-0e40-47b3-9044-384705d8e792 status=:server-close terminal=RUN_FINISHED thread-id=listing-a
+22:55:10.110 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=290f4852-0e40-47b3-9044-384705d8e792 thread-id=listing-a
+22:55:10.476 INFO  harness.infra.log - start model=scripted run-id=9d6297e8-12d0-4aa6-a9d4-c9df358e30f8 thread-id=listing-b
+22:55:11.107 INFO  harness.infra.log - stream-closed run-id=9d6297e8-12d0-4aa6-a9d4-c9df358e30f8 status=:server-close terminal=RUN_FINISHED thread-id=listing-b
+22:55:11.107 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9d6297e8-12d0-4aa6-a9d4-c9df358e30f8 thread-id=listing-b
+22:55:11.308 INFO  harness.infra.log - start model=scripted run-id=613be886-bfad-46aa-9344-7a29fddfa19e thread-id=listing-a
+22:55:11.486 INFO  harness.infra.log - stream-closed run-id=613be886-bfad-46aa-9344-7a29fddfa19e status=:server-close terminal=RUN_FINISHED thread-id=listing-a
+22:55:11.487 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=613be886-bfad-46aa-9344-7a29fddfa19e thread-id=listing-a
+22:55:11.775 INFO  harness.infra.log - start model=scripted run-id=12871b69-feb4-4bd3-9854-356a75fe9f02 thread-id=listing-unbound
+22:55:12.463 INFO  harness.infra.log - stream-closed run-id=12871b69-feb4-4bd3-9854-356a75fe9f02 status=:server-close terminal=RUN_FINISHED thread-id=listing-unbound
+22:55:12.464 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=12871b69-feb4-4bd3-9854-356a75fe9f02 thread-id=listing-unbound
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14635 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:12.565 INFO  harness.infra.log - listening port=14635 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:12.565496600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14638 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:12.628 INFO  harness.infra.log - listening port=14638 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:12.628497900Z
+22:55:12.818 INFO  harness.infra.log - start model=scripted run-id=9404e575-d35b-4dee-ae3d-256eec0a41c2 thread-id=move-run
+22:55:13.325 INFO  harness.infra.log - stream-closed run-id=9404e575-d35b-4dee-ae3d-256eec0a41c2 status=:server-close terminal=RUN_FINISHED thread-id=move-run
+22:55:13.325 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9404e575-d35b-4dee-ae3d-256eec0a41c2 thread-id=move-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-16062288233458992719/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14655 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:13.693 INFO  harness.infra.log - listening port=14655 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-16062288233458992719 since=2026-09-21T14:55:13.693670Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14660 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:13.813 INFO  harness.infra.log - listening port=14660 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:13.813709700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14665 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:13.973 INFO  harness.infra.log - listening port=14665 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:13.973109200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14668 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:14.031 INFO  harness.infra.log - listening port=14668 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:14.031659Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14676 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:14.104 INFO  harness.infra.log - listening port=14676 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:14.104663100Z
+22:55:14.350 INFO  harness.infra.log - start model=scripted run-id=6f57bf9f-b84b-41d3-8dec-9d529f9f3cee thread-id=alive-a
+22:55:15.149 INFO  harness.infra.log - stream-closed run-id=6f57bf9f-b84b-41d3-8dec-9d529f9f3cee status=:server-close terminal=RUN_FINISHED thread-id=alive-a
+22:55:15.149 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6f57bf9f-b84b-41d3-8dec-9d529f9f3cee thread-id=alive-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14702 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:15.198 INFO  harness.infra.log - listening port=14702 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:15.198521200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-http-noconfig-1023374023255824392/logs/harness.infra.log (rotated by date and size)
+no config.edn in C:\Users\zhouteng\AppData\Local\Temp\clj-harness-http-noconfig-1023374023255824392 -- wrote an empty one; the settings panel (or an editor) can fill it in
+harness listening on http://localhost:14705 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:15.305 INFO  harness.infra.log - listening port=14705 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-http-noconfig-1023374023255824392 since=2026-09-21T14:55:15.305522800Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-17237931567426553550/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14709 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:15.388 INFO  harness.infra.log - listening port=14709 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-17237931567426553550 since=2026-09-21T14:55:15.388521900Z
+22:55:15.562 ERROR harness.infra.log - run-refused thread-id=refused-a
+clojure.lang.ExceptionInfo: no provider named :no-such-provider; the registry defines ["deepseek" "ollama" "openrouter"]
+	at harness.cap.providers$fail.invokeStatic(providers.clj:166)
+	at harness.cap.providers$fail.invoke(providers.clj:166)
+	at harness.cap.providers$named.invokeStatic(providers.clj:743)
+	at harness.cap.providers$named.invoke(providers.clj:735)
+	at harness.cap.providers$assemble.invokeStatic(providers.clj:783)
+	at harness.cap.providers$assemble.invoke(providers.clj:750)
+	at harness.cap.providers$fold_and_assemble.invokeStatic(providers.clj:1046)
+	at harness.cap.providers$fold_and_assemble.invoke(providers.clj:1036)
+	at harness.cap.providers$resolve_provider.invokeStatic(providers.clj:1092)
+	at harness.cap.providers$resolve_provider.invoke(providers.clj:1063)
+	at clojure.lang.AFn.applyToHelper(AFn.java:156)
+	at clojure.lang.AFn.applyTo(AFn.java:144)
+	at clojure.core$apply.invokeStatic(core.clj:667)
+	at clojure.core$apply.invoke(core.clj:662)
+	at harness.test_support$window_gate$fn__14783$fn__14784.doInvoke(test_support.clj:534)
+	at clojure.lang.RestFn.invoke(RestFn.java:424)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1172)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1164)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1169)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1164)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1123)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:55:15.575 INFO  harness.infra.log - stream-closed run-id=f9c08f1a-c93f-44b7-94bc-777926ed2403 status=:server-close terminal=RUN_ERROR thread-id=refused-a
+22:55:15.575 INFO  harness.infra.log - terminal event=RUN_ERROR reason=no provider named :no-such-provider; the registry defines ["deepseek" "ollama" "openrouter"] run-id=f9c08f1a-c93f-44b7-94bc-777926ed2403 thread-id=refused-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14721 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:15.645 INFO  harness.infra.log - listening port=14721 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:15.645908200Z
+22:55:15.794 INFO  harness.infra.log - start model=scripted run-id=27aa343e-ed7f-4b07-b91f-f49ff487bbb8 thread-id=task-alive
+22:55:16.760 INFO  harness.infra.log - stream-closed run-id=27aa343e-ed7f-4b07-b91f-f49ff487bbb8 status=:server-close terminal=RUN_FINISHED thread-id=task-alive
+22:55:16.761 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=27aa343e-ed7f-4b07-b91f-f49ff487bbb8 thread-id=task-alive
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14757 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:16.857 INFO  harness.infra.log - listening port=14757 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:16.857650700Z
+22:55:16.944 ERROR harness.infra.log - run-refused thread-id=guarded
+clojure.lang.ExceptionInfo: model "scripted" does not accept ["image"] input; it declares ["text"] -- change the model, or send only what it declares
+	at harness.edge.http$guard_input_modalities_BANG_.invokeStatic(http.clj:892)
+	at harness.edge.http$guard_input_modalities_BANG_.invoke(http.clj:866)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155$fn__16190.invoke(http.clj:1137)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148$fn__16155.invoke(http.clj:1115)
+	at harness.edge.http$run_agent_BANG_$fn__16131$state_machine__8557__auto____16148.invoke(http.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:972)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:971)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:976)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:974)
+	at harness.edge.http$run_agent_BANG_$fn__16131.invoke(http.clj:971)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at clojure.core.async.impl.concurrent$counted_thread_factory$reify__2329$fn__2330.invoke(concurrent.clj:29)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+22:55:16.957 INFO  harness.infra.log - stream-closed run-id=ade687f7-a088-4ab3-a1de-692a90add445 status=:server-close terminal=RUN_ERROR thread-id=guarded
+22:55:16.957 INFO  harness.infra.log - terminal event=RUN_ERROR reason=model "scripted" does not accept ["image"] input; it declares ["text"] -- change the model, or send only what it declares run-id=ade687f7-a088-4ab3-a1de-692a90add445 thread-id=guarded
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14764 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:16.992 INFO  harness.infra.log - listening port=14764 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:16.992653500Z
+22:55:17.200 INFO  harness.infra.log - start model=scripted run-id=2b264cb6-21e9-495a-b2c0-55892e6be1aa thread-id=lost-a
+22:55:17.213 WARN  harness.infra.log - events-closed-without-terminal run-id=2b264cb6-21e9-495a-b2c0-55892e6be1aa thread-id=lost-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14781 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:17.279 INFO  harness.infra.log - listening port=14781 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:17.279306200Z
+22:55:17.397 INFO  harness.infra.log - start model=scripted run-id=2e44bc13-38e8-44a1-874e-357a74dfef75 thread-id=unguarded
+22:55:17.612 INFO  harness.infra.log - stream-closed run-id=2e44bc13-38e8-44a1-874e-357a74dfef75 status=:server-close terminal=RUN_FINISHED thread-id=unguarded
+22:55:17.612 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2e44bc13-38e8-44a1-874e-357a74dfef75 thread-id=unguarded
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14790 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\baseline-main\ui\dist -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+22:55:17.655 INFO  harness.infra.log - listening port=14790 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529 since=2026-09-21T14:55:17.655471200Z
+  [134.7s] harness.edge.http-test
+
+Ran 97 tests containing 1112 assertions.
+6 failures, 0 errors.
+22:55:17.759 INFO  harness.infra.log - shutdown root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-7465215049051869529

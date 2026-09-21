@@ -75,13 +75,22 @@
 
 ## 状态
 
-**2026-09-19 落地。** 分支 `workbuddy/main-e0b4cd9a`，从 `main` @ `a3847ea` 切出、当日 rebase 到
-`main` @ `c5e8940`。三张票按 01 → 02 → 03 走完。
+**2026-09-19 落地，2026-09-21 收口。** 分支 `workbuddy/main-e0b4cd9a`，从 `main` @ `a3847ea` 切出、
+当日 rebase 到 `main` @ `c5e8940`，三张票按 01 → 02 → 03 走完。
+
+**收口那一轮**（`main` 已走到 `3dbbc13`，中间 **64 个提交 / 290 个文件**）把 `main` 并进这条线：
+四处冲突按 main 的新词汇解掉，测试的 wire 形状从退役的 `messages` 迁到**动作**（`append`），
+文档的名册补上 `ask`。落点在**工作区内的 `.worktrees/ask-tool`**（分支 `ask-tool`，从
+`workbuddy/main-e0b4cd9a` 切出）：合并提交 + 逐条账见下面「收口」一节，
+真浏览器重走的证据在 `evidence/README-merge-2026-09-21.md`。
 
 ## 基线
 
+### 2026-09-19（原票那一轮，原样留在这里当历史）
+
 - 定向：`--ns harness.cap.ask-test,harness.cap.editing-mode-tools-test` → 27 tests / 157
-  assertions，0 failures / 0 errors（其中 `ask-test` 7 例 48 断言）。
+  assertions，0 failures / 0 errors。**其中那句「`ask-test` 7 例 48 断言」是错的**：这个文件从
+  `bfb88ad` 起就是 **11 例**，当时的记录没有重跑（正确的数在下面）。
 - 边缘两个被改的命名空间：`--ns harness.edge.ag-ui-test,harness.edge.http-test` → 82 / 787，
   0 failures。
 - 前端：`--build`（tsc + vite）绿；`--ui` 50/50（`EXPECTED_CASES` 44 → 50）。
@@ -91,6 +100,27 @@
   各跑一遍：HEAD 基线 `903 / 11524，169 failures / 22 errors`，改动后 `903 / 11525，
   169 failures / 22 errors`——失败集合的差只有五条计时/IO 抖动，没有一条是本特征加的。
   证据与对照表：`evidence/backend-run.md`。
+
+### 2026-09-21 收口（与 pristine main 逐条比，同一台机器）
+
+比法是仓库那条：**另开一个 worktree 检出 `main` @ `3dbbc13` 的干净树**，两侧跑同一批命名空间，
+比失败集合的**差**，不比绝对绿不绿。
+
+- `harness.cap.ask-test`：**11 例 / 86 断言，0 失败 0 错误**（`merge-ask-test.log`）。
+  迁移之前它是 11 例 / 46 失败 12 错误——原因只有一个：`post-run` 还在发 `:messages`。
+- 四个被改的命名空间（`editing-mode-tools` / `tools` / `ag-ui` / `http`）：两侧都是
+  **181 例 / 1495 断言**；`http-test` 单独跑两侧也都是 **97 例 / 1112 断言**，两侧都红。
+- **`http-test` 在这台机器上是它自己就飘。** 四次单跑（两侧各两次）的失败数是
+  4 / 6 / 4 / 3，**是哪几条每次都不同**，全部落在异步记录与 feed 的时序上
+  （`the-record-holds-exactly-two-kinds-of-row` 在 **pristine main 上也失败过**，
+  `baseline-http-1/-2.log`、`merge-http.log`、`merge-http-2.log`）。同一类、同一量级。
+- 宽度那一批（`mcp-wired` / `session-tools` / `approval` / `evals` / `loop` / `layers`）：
+  **68 例 / 496 断言，0 失败 0 错误**（`merge-breadth.log`）。其中 `mcp-wired-test` 走的是
+  **同一条 elicitation 链**——它证明 `askedBy` 那次改动没有动服务器那一侧。
+- 前端：`tsc --noEmit` 绿；`--ui`（vitest）**92 例 / 1 失败**，而 pristine main 是
+  **86 例 / 同一条失败**（`skills > asking-for-the-list-changes-nothing`，同样在等异步写入的时序）：
+  **+6 例、失败集合的差为零**；`EXPECTED_CASES` 86 → 92（`baseline-ui.log`）。
+- 真浏览器走查：两轮重走，六张截图 + 记录在 `evidence/README-merge-2026-09-21.md`。
 
 ## 落地记录
 
@@ -108,8 +138,9 @@
   `ui/test/suites/elicitation-card.tsx`（渲染断言）；`tools_test` / `editing_mode_tools_test`
   的两份名单各加 `ask`。
 - **顺手补的一个洞**：`harness.test-runner/test-namespaces` 是手写名单，新测试文件不进去就
-  永远不会被跑——`ask-test` 已补进名单（第 14 个）。**"文件都进来了吗"的守卫没加**，
-  留待决定（`ui.test.ts` 的 `EXPECTED_CASES` 是前端那侧的同一格）。
+  永远不会被跑——`ask-test` 已补进名单。**"文件都进来了吗"的守卫至今没有**（`ui.test.ts` 的
+  `EXPECTED_CASES` 是前端那侧的同一格）：`main` 那边这份名单现在是 54 个名字的字面量，旁边
+  写下了这条规矩（`test_runner.clj` 那段注释），但仍然靠人记。
 
 ### 02 — 候选 + 自己填
 
@@ -127,3 +158,25 @@
   `string | readonly string[]`，绝不拼接；空数组是一个被发出去的答案，不是缺席。
 - **渲染那一格只有真浏览器说得清**：四种形状同屏、点选/手填/多选/空答的证据与
   "它没证明什么"的如实清单，见 `evidence/README-02-03.md`。
+
+### 收口 —— 并进 2026-09-21 的 `main`
+
+- **四处文本冲突，全是机械的**：`cap/tools.clj` 的命名空间 docstring（`main` 写死「十七个工具」，
+  这一侧早已改成「名册不数数」——取后者）；`tools_test` 与 `editing_mode_tools_test` 的**五处名册**
+  （`main` 把 `job` 拆成 `job_kill` + `job_output`，按 `main` 的名册加上 `ask`）；`ui.test.ts`
+  （两侧各长了 `SUITES`——取并集，`elicitationCardSuite` 摆在 `elicitationSuite` 旁边）。
+- **真正的移植是测试的 wire 形状。** `ask_test.clj` 的 `post-run` 还在发
+  `{:runId .. :messages .. :context []}`，而票 03 之后 `:messages` 是**具名 400**、`runId` 由服务端铸、
+  没登记过的 thread id 是 **404**。照 `harness.cap.mcp-wired-test` 那两行改：`with-server` 先
+  `support/start-session!`，body 换成 `{:threadId .. :append [{:id "u1" ..}] :tools []}`。
+  前端 `ui/test/suites/elicitation.ts` 的两处 `postRun(tid, "r1", ..)` 同样跟上（`runId` 参数没了）。
+- **缝那一侧一个字没动。** `kernel/tools.clj` 从 `c5e8940` 到 `3dbbc13` 逐字节相同，
+  `approval-gate.tsx` / `lib/elicitation.ts` 也是——所以当初依赖的
+  `suspend!` / `parked-for-call` / `take-decision!` 与三态标题的读法都原样成立。
+- **文档的名册补上 `ask`**：`docs/architecture.md`（十八个内建工具 + 名字表）、`CONTEXT.md`
+  （工具名的写法）、`client.md`（suites 表加 `elicitation-card`；审批门一节补提问那张卡与三态标题）、
+  `edge.md`（`/api/elicitation` 行写清 `server` / `askedBy` 与「缺的键不出现」）、`mcp.md`
+  （那一节不是 MCP 独占）。
+- **没做的**：`TOOL_ICONS` / `subjectOf` 两张表不加 `ask`（认不出的走扳手 + 第一个字符串参数，
+  这是它们留好的口子，加进去是**可读性**不是可用性）；工具行旁边那格仍写「待审批」
+  （`c5e8940` 起就是这样，见证据那篇的「它没有证明什么」）。
