@@ -4390,6 +4390,7 @@
          (is (until #(false? (row-running? crashed-dir "crashed-a")) 5000)
              "the thread still claims to be running after its run died"))))))
 
+
 (deftest a-run-whose-channel-closed-without-a-terminal-still-stops-running
   ;; THE THIRD WAY OUT. A run that registers and then finds its event channel
   ;; already closed never emits a terminal frame and never throws -- the go loop's own
@@ -4455,6 +4456,100 @@
 
 (defn- terminals [tid]
   (filterv frames/terminal? (log-frames tid)))
+
+;; ------------------------ one session, one run at a time
+;;
+;; The door standing in front of the run edge. TWO RUNS OF ONE THREAD INTERLEAVE their
+;; frames into one append-only file, and everything downstream is written for one run at
+;; a time (`replay/ensure-complete!` counts inputs against terminals, `open-run` takes the
+;; LAST of each, `first-input` takes the FIRST as the seed) -- so the second run is refused
+;; BY NAME before it can register, log or start. What must NOT be refused is a second
+;; SESSION: `.scratch/parallel-sessions/` is built on two threads genuinely running at
+;; once, and that feature's docs ticket asks for the case below and says so in one place.
+
+(deftest a-session-answers-one-run-at-a-time-and-two-sessions-still-both-run
+  ;; THE REFUSAL AND THE PERMISSION ARE ONE CASE, deliberately: "two requests for one
+  ;; session are not both answered" and "two requests for two sessions are both answered"
+  ;; are the same assertion about the same server at the same moment. Split into two
+  ;; cases, a GLOBAL lock would pass both.
+  ;;
+  ;; BOTH RUNS ARE HELD AT `loop/run-chan`, which is called AFTER the thread is
+  ;; registered -- so "both are alive right now" is a state this case establishes rather
+  ;; than one it races a fast script for. The gate holds the first two calls and lets
+  ;; every later one through, which is what the re-send at the end needs.
+  (with-server
+   ["gate-a" "gate-b"]
+   [{:content "the first run's answer"} {:content ""}]
+   (fn []
+     (let [gate (support/window-gate #'loop/run-chan 20000 2)
+           a    (fire-run! "gate-a" "run-a")
+           b    (fire-run! "gate-b" "run-b")]
+       (try
+         (testing "two sessions are two runs, both alive at once"
+           (is (until #(and (http/running? "gate-a") (http/running? "gate-b")) 5000)
+               "the second session's run never started -- a gate that refuses THIS is a
+                global lock, and every parallel-session case in the repo is built on it"))
+         (testing "the second run asked for one of them is refused by name"
+           (let [refused (post-run "gate-a")]
+             (is (= 409 (.statusCode refused)) (str "got " (.statusCode refused)))
+             (let [body (read-json refused)]
+               (is (str/includes? (str (:error body)) "gate-a")
+                   (str "the refusal does not name the session: " (pr-str (:error body))))
+               (is (str/includes? (str (:error body)) "one run per session")
+                   "and does not say what the rule is")
+               (is (= "gate-a" (:threadId body))))))
+         (finally
+           (.close a)
+           (.close b)
+           ((:release gate))
+           ((:restore gate)))))
+     (testing "the refused run wrote nothing at all -- not even its input line"
+       ;; ON THE FILE, not on the response: a run that is refused but logs an input is
+       ;; refused in the answer and started anyway, which is the bug this pins.
+       (is (= 1 (count (filter #(= "input" (:kind %)) (log-lines-for "gate-a"))))
+           "the refused run left an input line in gate-a's record"))
+     (testing "both runs that were let through reach their own terminal"
+       (is (until #(and (not (http/running? "gate-a")) (not (http/running? "gate-b"))) 5000))
+       (is (= 1 (count (terminals "gate-a"))) "gate-a has one run's ending")
+       (is (= 1 (count (terminals "gate-b"))) "gate-b has one run's ending")
+       (is (not (str/includes? (slurp (log-file-for "gate-a") :encoding "UTF-8")
+                               "run-b"))
+           "the other session's run leaked into gate-a's record"))
+     (testing "and the session that was refused can run again once its run has ended"
+       (let [again (post-run "gate-a")]
+         (is (= 200 (.statusCode again)) (str "got " (.statusCode again)))
+         (is (str/includes? (.body again) "RUN_FINISHED")
+             "the second run of gate-a did not finish"))))))
+
+(deftest a-crashed-run-does-not-close-its-session-for-good
+  ;; THE DOOR IS ONLY AS GOOD AS ITS UNREGISTRATION. A gate keyed on "this process has a
+  ;; run going" turns a leaked registration into a session nobody can ever run again --
+  ;; the sidebar would spin forever and the only way out would be a restart. This is the
+  ;; same exit `a-crashed-run-stops-claiming-to-be-running` pins from the other side.
+  (with-server
+   "crash-gate"
+   [{:content "after the crash"}]
+   (fn []
+     ;; In place for the whole crash, not just around `fire-run!`: the frame conversion
+     ;; happens on the server's own thread (same seam as the case above).
+     (with-redefs [ag/outbound (fn [& _] (fn [_] (throw (ex-info "no frames today" {}))))]
+       ;; THE RUN IS HELD FIRST, and that is not decoration: the crash lands four
+       ;; milliseconds after the registration, so a case that merely waits for `running?`
+       ;; is racing the death it is about to assert. Holding at `loop/run-chan` -- called
+       ;; after the registration and before the first frame is converted -- makes "it
+       ;; registered" a state rather than a coincidence; the release is what kills it.
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "crash-gate" "run-crash-1")]
+         (try
+           (is (until #(http/running? "crash-gate") 5000)
+               "the run never registered, so this case cannot tell anything")
+           (finally (.close sock) ((:release gate))))))
+     (is (await-log #"crashed .*run-id=run-crash-1") "the death is in the process log")
+     (is (until #(not (http/running? "crash-gate")) 5000)
+         "the thread still claims to be running after its run died")
+     (testing "so the door opens again"
+       (is (= 200 (.statusCode (post-run "crash-gate")))
+           "the session was locked out by a run that crashed")))))
 
 (defn- write-truncated-log!
   "A record that stops mid-run, written by hand: an input, the run's start, and nothing

@@ -529,10 +529,10 @@
 ;;
 ;; ONE KEY PER THREAD, holding the run id rather than a bare true: `unregister-run!`
 ;; compares ids instead of dissoc'ing blind, so a run that ends cannot erase a
-;; registration that is not its own -- two runs of one thread are the ordinary case
-;; (two tabs, any client that is not this UI), and the gate that refuses the second
-;; one is .scratch/session-after-refresh's ticket 05. Until it lands, this must not
-;; become a way for one run to make another invisible.
+;; registration that is not its own. TWO RUNS OF ONE THREAD ARE NOW REFUSED AT THE DOOR
+;; (`refuse-second-run!`), which is why this comment no longer has to defend against
+;; them: a second run cannot start while the first is registered, so this map cannot be
+;; re-pointed out from under a live run.
 
 (defn running?
   "Is a run of THREAD-ID alive in this process right now?
@@ -1080,6 +1080,21 @@
         (try (hk/close ch) (catch Throwable _ nil)))))))
 
 
+(defn- api-response
+  "One JSON answer. NO CORS HEADERS HERE: which origin an answer may name is a
+  fact about the REQUEST, and this function is handed a status and a body -- it
+  has ninety-odd call sites and none of them knows what page is asking. `handler`
+  merges them at the one exit instead, which is also where a reader should look.
+
+  IT SITS ABOVE THE RUN EDGE rather than beside the management routes it mostly serves,
+  because the ONE refusal that is not a management route needs it: a run asked for while
+  the session is already running is answered as JSON too (`refuse-second-run!`), and the
+  alternative -- its own three lines of encoding -- would be a second copy of this shape."
+  [status body]
+  {:status  status
+   :headers {"Content-Type" "application/json; charset=utf-8"}
+   :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
+
 (defn- register-run-session!
   "Make the conversation in INPUT a session of this home, if it is not one already.
 
@@ -1093,9 +1108,42 @@
     (when (and (string? id) (not (str/blank? id)))
       (project/register-session! id))))
 
-(defn- handle-run [req]
-  (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
-        thread-id (str (:threadId input))
+(defn- refuse-second-run!
+  "The answer a client gets when it asks for a run of a session this process is already
+  running. 409, and a sentence naming both the session and the run that was not started.
+
+  A REFUSAL, NOT A QUEUE, and that is a decision rather than an omission: a queue is a
+  mechanism this repo does not have, and inventing one here would mean also inventing
+  what happens to a queued run whose client went away. The client is told what is in the
+  way; it can ask again when that run ends (which is a fact it can watch -- the session's
+  own row says `running`, and the stream's terminal frame is the end of it).
+
+  IT IS ALSO WHAT KEEPS ONE SESSION'S RECORD READABLE. Two runs of one thread interleave
+  their frames into one append-only file, and every reader downstream is written for one
+  run at a time: `replay/ensure-complete!` counts inputs against terminals, `open-run`
+  takes the LAST of each, `first-input` takes the FIRST as the seed and the context. Two
+  runs produce a record that reads like a conversation that never happened -- not a
+  crash, which is worse, because there is nothing to notice."
+  [thread-id run-id]
+  (api-response
+   409
+   {:error    (str "this session already has a run in this process, so run "
+                   (pr-str run-id) " was not started: the harness answers one run per"
+                   " session at a time (threadId " (pr-str thread-id) "). Wait for the"
+                   " current run's terminal frame, or for this session's row to stop"
+                   " saying it is running, and send again.")
+    :threadId thread-id
+    :runId    run-id}))
+
+(defn- stream-run
+  "Answer a run that the door let through: register it, and stream its frames.
+
+  THE PARSE HAS ALREADY HAPPENED (`handle-run`), which is why this takes the decoded
+  INPUT as well as the ring request: the door needs the thread id before anything else
+  can start, and reading the body twice would be two answers to one question."
+
+  [req input]
+  (let [thread-id (str (:threadId input))
         run-id    (str (:runId input))
         ;; WHAT PAGE IS ASKING, read HERE because this is the one route whose
         ;; headers do not come from the ring response: they ride on the first
@@ -1157,6 +1205,33 @@
                                                 :status    status
                                                 :last      last}))))})))
 
+(defn- handle-run
+  "The door to the run edge: read the request, refuse a second run of a session that is
+  already running, and hand the rest over.
+
+  ONE RUN PER SESSION AT A TIME, AND THE CHECK IS HERE -- before anything is registered
+  and before the log is touched. A refused run must leave NO trace: registering it would
+  make a session of this home on behalf of a run that never ran, and the file would take
+  a SECOND `input` line that the reader's arithmetic is not written for (see
+  `refuse-second-run!` for why that record is the thing at stake).
+
+  WHAT THE CHECK CANNOT SEE, said plainly rather than papered over: `running?` is the fact
+  that a run STARTED, and the registration is made where the run actually begins -- after
+  the provider resolves, deliberately, so that a run which never starts cannot leave a
+  thread looking alive forever (see `register-run!`). Two requests arriving inside that
+  setup window therefore both get through. Closing it would mean taking an admission
+  before the setup and releasing it on every way the setup can fail -- one missed release
+  and the session can never run again until the process restarts, which is a worse failure
+  than the millisecond it buys."
+
+  [req]
+  (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+        thread-id (str (:threadId input))
+        run-id    (str (:runId input))]
+    (if (running? thread-id)
+      (refuse-second-run! thread-id run-id)
+      (stream-run req input))))
+
 ;; ----------------------------------------------------- the management edge
 ;;
 ;; Plain request/response JSON, alongside the streaming AG-UI edge. Small on
@@ -1164,15 +1239,6 @@
 ;; Responses are UTF-8 BYTES, like every other body this server writes -- the
 ;; JVM default charset is GBK here.
 
-(defn- api-response
-  "One JSON answer. NO CORS HEADERS HERE: which origin an answer may name is a
-  fact about the REQUEST, and this function is handed a status and a body -- it
-  has ninety-odd call sites and none of them knows what page is asking. `handler`
-  merges them at the one exit instead, which is also where a reader should look."
-  [status body]
-  {:status  status
-   :headers {"Content-Type" "application/json; charset=utf-8"}
-   :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
 
 (defn- query-params
   "A request's raw query string -> a {name value} map. Hand-rolled because the

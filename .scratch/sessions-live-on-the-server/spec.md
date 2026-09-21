@@ -77,7 +77,13 @@
 
 - **`.scratch/session-after-refresh` 票 05（拒绝同一会话的第二条 run）**：本特征的**前置**——不过
   ADR 0003 之后它的分量变了：第二个标签页有了正当的读法，那条门只需要拒**第二条 run**，不必拒第二个
-  **读者**。票 06（parked 刷新回来还能答）与 07–09（停止）**不改**，但它们的「停止」在本特征里是一件
+  **读者**。**已落地（2026-09-21，就落在本分支上）**：`handle-run` 成了门（同会话已有活着的 run 就
+  409、具名拒绝），函数体搬进 `stream-run`；用例是
+  `test/harness/edge/http_test.clj` 的
+  `a-session-answers-one-run-at-a-time-and-two-sessions-still-both-run`（拒绝与放行同一条，票面要求）
+  与 `a-crashed-run-does-not-close-its-session-for-good`。它的票面已删、落地记录写进
+  `.scratch/session-after-refresh/spec.md`；`parallel-sessions` 票 06 里留了指针，别写第二份。
+  票 06（parked 刷新回来还能答）与 07–09（停止）**不改**，但它们的「停止」在本特征里是一件
   **动作**。
 - **`.scratch/context-frames`**：它的卡与帧契约不动。**原以为本特征会让注入不再每轮重画，实现票 01 时
   发现不成立**（见验收 6）：注入之所以每轮重算，是因为指令文件必须每轮现读，不是因为客户端持有着历史。
