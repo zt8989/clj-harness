@@ -834,49 +834,6 @@ const SessionHost: FC<{
     [onStatus],
   );
 
-  /// ASK HOW THE RECORD IS DOING ONCE A RUN THIS PAGE DROVE HAS ENDED.
-  ///
-  /// THE HOLE THIS FILLS IS THE ONE THE BROWSER WALKTHROUGH FOUND (2026-09-21): the
-  /// read that opens a session answers BEFORE the run exists, and the poll below only
-  /// runs for a session this page is WATCHING -- so a write failure during a run
-  /// somebody is driving themselves reached nobody, and the conversation went on
-  /// unsaved in silence. That is the one thing ADR 0002 decision 6 refuses.
-  ///
-  /// THE SAME READ THE MOUNT USES, fallback included, and the fallback is not an
-  /// accident: a degraded record is exactly when the log can end mid-run, and
-  /// `readSofar` follows its refusal into the rebuild that closes the run off -- which
-  /// is what makes the conversation readable again AND what reports the health. There
-  /// is no new endpoint and no new read path; this is one read per run.
-  ///
-  /// IT REPORTS AND NOTHING ELSE -- no `import`. This host is the one streaming that
-  /// run, and the record LAGS it: importing the log back over the live conversation
-  /// would draw the answer backwards. A window may import precisely because it arrives
-  /// as frames, which are the conversation moving forward.
-  ///
-  /// AND IT IS ONLY FOR THE DOORS THAT OPENED NO WINDOW (ticket 06). A host following
-  /// one is told about a write failure by the FEED -- every frame carries the record's
-  /// health -- so asking again here would be one read per run that says what the
-  /// connection already said. The doors without a window (a session this page just
-  /// minted, one handed over from the sidebar, a log that had to be repaired) have no
-  /// connection to be told on, and this is their one read.
-  useEffect(() => {
-    if (ownRun || !ranSomething.current || following.current) return undefined;
-    ranSomething.current = false;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const answer = await readSofar(threadId, tErrors);
-        if (!cancelled) reportRecord(answer.record ?? null);
-      } catch {
-        // The read failed -- a session that is gone, a harness that is not answering.
-        // Nothing to say about the record, and the conversation on screen stays as it
-        // was: the same reasoning the poll below writes down.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [ownRun, threadId, tErrors, reportRecord]);
 
   const history = useMemo(
     () => sessionHistory(threadId, read, tErrors, reportRecord, onWindowRead),
@@ -901,6 +858,64 @@ const SessionHost: FC<{
     },
     onError: (error) => onError(threadId, error.message),
   });
+
+  /// ASK HOW THE RECORD IS DOING ONCE A RUN THIS PAGE DROVE HAS ENDED.
+  ///
+  /// THE HOLE THIS FILLS IS THE ONE THE BROWSER WALKTHROUGH FOUND (2026-09-21): the
+  /// read that opens a session answers BEFORE the run exists, and the poll below only
+  /// runs for a session this page is WATCHING -- so a write failure during a run
+  /// somebody is driving themselves reached nobody, and the conversation went on
+  /// unsaved in silence. That is the one thing ADR 0002 decision 6 refuses.
+  ///
+  /// THE SAME READ THE MOUNT USES, fallback included, and the fallback is not an
+  /// accident: a degraded record is exactly when the log can end mid-run, and
+  /// `readSofar` follows its refusal into the rebuild that closes the run off -- which
+  /// is what makes the conversation readable again AND what reports the health. There
+  /// is no new endpoint and no new read path; this is one read per run.
+  ///
+  /// IT ASKS ONCE THE RUN IS OVER, AND NEVER WHILE ONE IS GOING: this host is the one
+  /// streaming that run, and a record read mid-run LAGS the live conversation -- importing
+  /// it then would draw the answer backwards. A terminal changes that: the record now says
+  /// everything the stream did, so its reading is the conversation, and importing it is
+  /// what puts an INJECTED MESSAGE in its own column (ticket 05 of
+  /// `.scratch/session-opening` -- the adapter lands a `CUSTOM` card on the message being
+  /// streamed, because it drops the frame's `messageId`, and only the record has the
+  /// message the card belongs to).
+  ///
+  /// IT REPORTS, AND NOTHING ELSE -- no `import`, deliberately. The copy of the
+  /// conversation this run wrote reaches the page ON THE RUN ITSELF now: the edge sends a
+  /// `MESSAGES_SNAPSHOT` with it (`harness.edge.ag_ui/conversation-snapshot`), so the
+  /// adapter places an injected message in the column the record puts it in while the run
+  /// is still streaming, instead of this effect re-importing the reading afterwards. The
+  /// owner's rule is the reason: the backend decides what a client is shown, and the
+  /// client draws it -- so a run that writes part of the conversation hands that part
+  /// over as messages, not as cards the caller has to go and fetch.
+  ///
+  /// AND IT IS ONLY FOR THE DOORS THAT OPENED NO WINDOW (ticket 06). A host following
+  /// one is told about a write failure by the FEED -- every frame carries the record's
+  /// health -- so asking again here would be one read per run that says what the
+  /// connection already said. The doors without a window (a session this page just
+  /// minted, one handed over from the sidebar, a log that had to be repaired) have no
+  /// connection to be told on, and this is their one read.
+  useEffect(() => {
+    if (ownRun || !ranSomething.current || following.current) return undefined;
+    ranSomething.current = false;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const answer = await readSofar(threadId, tErrors);
+        if (cancelled) return;
+        reportRecord(answer.record ?? null);
+      } catch {
+        // The read failed -- a session that is gone, a harness that is not answering.
+        // Nothing to say about the record, and the conversation on screen stays as it
+        // was: the same reasoning the poll below writes down.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ownRun, threadId, tErrors, reportRecord, runtime]);
 
   /// THE PAGE'S COPY OF THIS SESSION'S WINDOW (ticket 06), for the three things it
   /// draws and one it says: whether there is more in front, whether a page is in flight,

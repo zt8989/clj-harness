@@ -35,6 +35,11 @@
 ;; harness resolver in this process points at a temp root.
 (runner/isolate!)
 
+;; THIS SCRIPT CANNOT READ THAT LOG ANY MORE, AND THAT IS THE INTENDED ANSWER: the file was
+;; written before `.scratch/jsonl-two-kinds`, and a record of the old contract is refused BY
+;; NAME (`harness.edge.replay/read-row`: "start a new conversation") rather than folded
+;; quietly -- see the spec's 票 05 landing. What is below is kept as the diagnosis it was, to
+;; be pointed at a log written since.
 (def ^:private default-log
   (str (System/getProperty "user.home")
        "/.clj-harness/projects/_Users_zhouteng_Documents_workspace_clj-harness"

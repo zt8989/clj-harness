@@ -16,24 +16,45 @@
 ;; log the test invents could encode a frame shape the server never writes, and then
 ;; the test would pass while replay failed on every real log.
 
-(defn- log-line [m] (json/write-str m))
+(defn- log-line
+  "A record row AS THE WRITER EMITS IT since `.scratch/jsonl-two-kinds`: the file has exactly
+  two kinds of row -- `message` (what a person said or an LLM returned) and `event` (every
+  other fact) -- with `ts`/`runId` OUTSIDE the payload.
 
-(defn- input-line
-  "An input line as a client wrote it BEFORE ticket 03 of
-  `.scratch/sessions-live-on-the-server`: the whole conversation it held, restated on
-  every run. Kept because a log written then is a log somebody has, and reading one still
-  has to work -- see `action-line` for the shape the edge writes now."
+  THE FIXTURES BELOW SAY `{:ts .. :runId .. :kind .. :payload ..}` AS SHORTHAND, and this is
+  the one place per file that turns it into the row the file holds: `kind` is the reader's
+  own vocabulary (`replay/kind` -- `message`, `event`, or a fact's name), so a fixture reads
+  the way an assertion does. The format itself has a test of its own
+  (`the-record-has-two-kinds-of-row`) instead of being re-asserted at every call site."
+  [{:keys [kind payload] :as m}]
+  (json/write-str (merge (dissoc m :kind :payload)
+                         (cond
+                           (= "message" kind) {:type "message" :payload payload}
+                           (= "event" kind)   {:type "event" :payload payload}
+                           :else              {:type "event"
+                                               :payload {:type "CUSTOM" :name kind
+                                                         :value payload}}))))
+
+(defn- client-lines
+  "The lines one ACTION's own messages are written as (`.scratch/jsonl-two-kinds` 票 02):
+  one `message` row per message that ENTERED the conversation, carrying the identity the
+  client knows it by on the ENVELOPE (`:id`) and the verbatim provider message (id stripped,
+  as `ag/inbound` strips it) as the payload. The payload stays the provider's own map --
+  a `message` row IS an element of the array the model was handed."
   [run-id messages]
-  (log-line {:ts 1 :runId run-id :kind "input"
-             :payload {:threadId "t1" :runId run-id :messages messages
-                       :tools [] :context []}}))
+  (mapv (fn [m]
+          (log-line (cond-> {:ts 1 :runId run-id :kind "message" :source "client"
+                             :payload (dissoc m :id)}
+                      (:id m) (assoc :id (:id m)))))
+        messages))
 
-(defn- action-line
-  "An input line as the edge has written it since ticket 03: what the ACTION added
-  (`:added`), not the conversation it added it to -- the server holds that."
-  [run-id added]
-  (log-line {:ts 1 :runId run-id :kind "input"
-             :payload {:threadId "t1" :runId run-id :added added :tools []}}))
+(defn- prompt-line
+  "The system message as the edge writes it (owner, 2026-09-21): a `message` row LIKE ANY
+  OTHER element of the array the model was handed, whose envelope says who put it there
+  (`:source` = `system-prompt`) and names those bytes (`:hash`)."
+  [run-id text]
+  (log-line {:ts 1 :runId run-id :kind "message" :source "system-prompt" :hash "h"
+             :payload {:role "system" :content text}}))
 
 (defn- event-lines [run-id events]
   (let [emit (ag/outbound "t1" run-id)]
@@ -46,14 +67,45 @@
 
 (def ^:private seed {:id "u1" :role "user" :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"})
 
+(defn- action-lines
+  "One action's lines as the edge writes them: the system message the run was handed (the
+  row that opens a run, `replay/system-prompt?`) and then the client's own messages."
+  [run-id messages]
+  (concat [(prompt-line run-id "You are a coding agent.")]
+          (client-lines run-id messages)))
+
 (defn- one-run-lines []
-  (concat [(input-line "r1" [seed])]
+  (concat (action-lines "r1" [seed])
           (event-lines "r1" [(ev/run-start)
                              (ev/reasoning-delta reasoning-text)
                              (ev/tool-call "c1" "read" "{\"path\":\"deps.edn\"}")
                              (ev/tool-result "c1" tool-text false)
                              (ev/text-delta answer-text)
                              (ev/run-end)])))
+
+(deftest the-prompt-is-a-row-and-not-a-speaking-part
+  ;; THE OWNER'S LINE ON `message` (2026-09-21): a `message` row is an ELEMENT of the
+  ;; messages array the model was handed -- the system prompt included, with `:source` =
+  ;; `system-prompt` and the bytes' `:hash` on its envelope -- while the CONVERSATION is the
+  ;; part of that array the SESSION holds. So the reader that rebuilds the conversation
+  ;; (`entries`, and with it `records->messages`, the window, the snapshot and the rebuild)
+  ;; must never hand the prompt back: the client never had it, and a client that got one
+  ;; would be holding a message no transport ever sent it. ONE rule, in the fold.
+  (let [lines    (concat [(prompt-line "r1" "You are a coding agent.")]
+                         (one-run-lines))
+        rows     (replay/lines->records lines)
+        messages (replay/records->messages rows)
+        entries  (replay/entries rows)]
+    (is (= "You are a coding agent." (get-in (first rows) [:payload :content]))
+        "the record HOLDS the prompt -- it is what the model read")
+    (is (= "system-prompt" (:source (first rows))) "and says who put it in the array")
+    (is (not-any? #(= "system" (:role %)) messages)
+        "the rebuilt conversation has no system message in it")
+    (is (= seed (first messages)) "the seed is still the first thing the conversation says")
+    (is (not-any? #(= "system" (:role (:message %))) entries)
+        "and neither have the entries -- what a window, a snapshot or a rebuild hands out")
+    (is (= seed (:message (first entries)))
+        "the conversation still opens with the seed, in the place the prompt would have taken")))
 
 ;; ------------------------------------------------------------------ seam A
 
@@ -80,7 +132,7 @@
   (testing "rebuilding a log produces a message list a real client would accept"
     (let [frames (->> (one-run-lines)
                       (keep #(let [r (json/read-str % :key-fn keyword)]
-                               (when (= "event" (:kind r)) (:payload r))))
+                               (when (= "event" (replay/kind r)) (replay/payload r))))
                       vec)]
       (is (empty? (wire/violations frames))))))
 
@@ -90,18 +142,18 @@
   ;; line and ignored every later one, and a second run's QUESTION was therefore missing
   ;; from every rebuild -- the client's own message is in no frame. Ticket 03 of
   ;; `.scratch/sessions-live-on-the-server` made the line say what the action ADDED
-  ;; (`:added`, `action-line`), which is exactly the thing the fold needed, and the
-  ;; restatement is now handled the way the live conversation handles it: BY ID
-  ;; (`harness.edge.sessions/append!`, and `append-new` here).
+  ;; (its own `message` row), which is exactly the thing the fold needed, and a repeat is
+  ;; handled the way the live conversation handles it: BY ID
+  ;; (`harness.edge.sessions/append!`, and this fold).
   (let [q2      {:id "u2" :role "user" :content "\u7b2c\u4e8c\u4e2a\u95ee\u9898"}
         run-two (fn [line entries]
                   (concat (one-run-lines)
-                          [(line "r2" entries)]
+                          (line "r2" entries)
                           (event-lines "r2" [(ev/run-start)
                                              (ev/text-delta "second turn")
                                              (ev/run-end)])))]
     (testing "the action's own entry lands in file order, behind the run it followed"
-      (let [messages (replay/lines->messages (run-two action-line [q2]))]
+      (let [messages (replay/lines->messages (run-two client-lines [q2]))]
         (is (= ["user" "reasoning" "assistant" "tool" "assistant" "user" "assistant"]
                (mapv :role messages)))
         (is (= "\u7b2c\u4e8c\u4e2a\u95ee\u9898" (:content (nth messages 5)))
@@ -109,19 +161,19 @@
         (is (= "second turn" (:content (last messages))) "and the run's output is appended")))
 
     (testing "an entry the conversation already holds does not enter a second time"
-      ;; The retry (a page re-sending its question after a socket died), and also every
-      ;; line of a log written under the OLD contract, where the whole conversation was
-      ;; restated on every run.
-      (doseq [[shape line] {"the action's own entries" action-line
-                            "the old restatement"       input-line}]
-        (let [messages (replay/lines->messages (run-two line [seed q2]))]
-          (is (= 7 (count messages)) (str shape ": seven entries, not eight"))
-          (is (= 1 (count (filter #(= "u2" (:id %)) messages)))
-              (str shape ": and the new entry entered once")))))))
+      ;; The retry: a page re-sending its question after a socket died sends the same id
+      ;; again, and the fold -- which is what the live session does too
+      ;; (`harness.edge.sessions/append!`) -- drops it by name. THE ID IS THE ONLY WAY TO
+      ;; KNOW: the bytes could differ (a typo fixed and re-sent is a new question), so a
+      ;; content comparison would answer a different question.
+      (let [messages (replay/lines->messages (run-two client-lines [seed q2]))]
+        (is (= 7 (count messages)) "seven entries, not eight")
+        (is (= 1 (count (filter #(= "u2" (:id %)) messages)))
+            "and the new entry entered once")))))
 
 (deftest a-run-that-never-terminated-fails-loudly
   (testing "a log cut off mid-run must not silently yield half a conversation"
-    (let [lines (concat [(input-line "r1" [seed])]
+    (let [lines (concat (action-lines "r1" [seed])
                         (event-lines "r1" [(ev/run-start) (ev/text-delta "\u534a\u53e5\u8bdd")]))
           e     (try (replay/lines->messages lines) nil (catch Exception e e))]
       (is (some? e) "expected a failure, got a half-built conversation")
@@ -132,7 +184,7 @@
   ;; run left unsaid. This is what a continuation appends before handing the
   ;; conversation back, so the two must agree about which run is open.
   (testing "a call that never answered gets a result, then the terminal"
-    (let [lines (concat [(input-line "r1" [seed])]
+    (let [lines (concat (action-lines "r1" [seed])
                         (event-lines "r1" [(ev/run-start)
                                            (ev/tool-call "c1" "read" "{}")]))
           {:keys [run-id last-frame frames]}
@@ -149,12 +201,12 @@
 
   (testing "a run that died before its first frame is closed too"
     (let [{:keys [last-frame frames]}
-          (first (replay/closing-frames (replay/lines->records [(input-line "r1" [seed])])))]
+          (first (replay/closing-frames (replay/lines->records (action-lines "r1" [seed]))))]
       (is (nil? last-frame) "there is no frame to name")
       (is (= ["RUN_ERROR"] (mapv :type frames)))))
 
   (testing "once those frames are appended the conversation READS -- the point of it"
-    (let [base     (concat [(input-line "r1" [seed])]
+    (let [base     (concat (action-lines "r1" [seed])
                            (event-lines "r1" [(ev/run-start)
                                               (ev/tool-call "c1" "read" "{}")
                                               (ev/text-delta "\u534a\u53e5\u8bdd")]))
@@ -189,8 +241,8 @@
   ;; counting inputs against terminals answers no. This log used to be refused FOREVER:
   ;; the refusal counted, the repair asked about the last input and the last terminal,
   ;; found that run closed, and closed nothing at all.
-  (let [lines (concat [(input-line "r1" [seed])
-                       (input-line "r2" [seed])]
+  (let [lines (concat (action-lines "r1" [seed])
+                      (action-lines "r2" [seed])
                       (event-lines "r1" [(ev/run-start)
                                          (ev/reasoning-delta reasoning-text)])
                       (event-lines "r2" [(ev/run-start)
@@ -226,10 +278,10 @@
   ;; A process killed with TWO runs in flight leaves two open ones, and the log is only
   ;; readable once both have ended -- so the repair answers for all of them rather than
   ;; swapping one refusal for the next.
-  (let [lines (concat [(input-line "r1" [seed])]
+  (let [lines (concat (action-lines "r1" [seed])
                       (event-lines "r1" [(ev/run-start)
                                          (ev/tool-call "c1" "read" "{}")])
-                      [(input-line "r2" [seed])]
+                      (action-lines "r2" [seed])
                       (event-lines "r2" [(ev/run-start)
                                          (ev/text-delta answer-text)]))
         records (replay/lines->records lines)]
@@ -263,7 +315,7 @@
   ;; ends the run and the answer arrives on the resume run. Reading 'this call has
   ;; no result' as damage would append a result to a call nobody has answered yet --
   ;; and the approval would arrive to find its call already spoken for.
-  (let [lines (concat [(input-line "r1" [seed])]
+  (let [lines (concat (action-lines "r1" [seed])
                       (event-lines "r1" [(ev/run-start)
                                          (ev/tool-call "c1" "bash" "{}")
                                          (ev/run-interrupt [{:id "i1" :tool-call-id "c1"
@@ -279,16 +331,73 @@
       (is (some? e) "expected a failure, got a silently shortened log")
       (is (re-find #"(?i)line" (str (ex-message e)))))))
 
+(deftest the-record-has-two-kinds-of-row-and-anything-else-is-refused-by-name
+  ;; 拍定 2026-09-21 (`.scratch/jsonl-two-kinds`): a row is `message` -- what a person said or
+  ;; an LLM returned -- or `event`, every other fact. An old-contract row is refused BY NAME
+  ;; rather than read leniently: a record this build cannot fold honestly is worse than a
+  ;; refusal that says which line and why.
+  (testing "a message row: the payload is the provider's own map, verbatim"
+    (let [[r] (replay/lines->records
+               [(json/write-str {:type "message" :ts 7 :runId "r1"
+                                 :payload {:role "user" :content "hi"}})])]
+      (is (= "message" (replay/kind r)))
+      (is (= {:role "user" :content "hi"} (replay/payload r)) "no envelope key leaks into it")
+      (is (= 7 (:ts r)) "and the row still says when")
+      (is (= "r1" (:runId r)) "and for which run")))
+  (testing "a frame row: the payload IS the frame"
+    (let [frame {:type "RUN_STARTED" :threadId "t" :runId "r1"}
+          [r]   (replay/lines->records
+                 [(json/write-str {:type "event" :runId "r1" :payload frame})])]
+      (is (= "event" (replay/kind r)))
+      (is (= frame (replay/payload r)))))
+  (testing "a harness fact: an event whose CUSTOM frame is named after the fact"
+    (let [[r] (replay/lines->records
+               [(json/write-str {:type "event" :runId nil
+                                 :payload {:type "CUSTOM" :name "model/start"
+                                           :value {:model "scripted"}}})])]
+      (is (= "model/start" (replay/kind r)) "the fact's name comes back as the reader's :kind")
+      (is (= {:model "scripted"} (replay/payload r)))))
+  (testing "the WIRE's own CUSTOM name is a frame, not a fact"
+    ;; `injected-context` is the one CUSTOM name the protocol uses; reading it as a fact would
+    ;; hide a card from the conversation.
+    (let [frame {:type "CUSTOM" :name "injected-context" :messageId "session-opening-0"
+                 :value {:role "text"}}
+          [r]   (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
+      (is (= "event" (replay/kind r)))
+      (is (= frame (replay/payload r)))))
+  (testing "and every other row is refused, naming the line and the reason"
+    (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
+                            :old-contract]
+                           ["{\"type\":\"input\",\"payload\":{}}" :unknown-type]
+                           ["{\"type\":\"event\"}" :missing-payload]
+                           ["[1,2,3]" :not-an-object]
+                           ["{\"type\":" :not-json]]]
+      (let [e (try (replay/lines->records ["{\"type\":\"message\",\"payload\":{}}" line])
+                   nil
+                   (catch Exception e e))]
+        (is (some? e) (str line " must be refused, not folded"))
+        (is (= 2 (:line (ex-data e))) "the line that is wrong, not the first one")
+        (is (= reason (:reason (ex-data e))))
+        (is (re-find #"line 2" (ex-message e)) "and the sentence says which line"))))
+  (testing "an old record says what to do about it, in one sentence"
+    (let [e (try (replay/lines->records
+                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"])
+                 nil
+                 (catch Exception e e))]
+      (is (re-find #"old contract" (ex-message e)))
+      (is (re-find #"start a new conversation" (ex-message e))
+          "a refusal a person can act on -- 决定 3 of the spec"))))
+
 (deftest a-log-that-holds-no-run-is-an-empty-conversation
   ;; The state every session passes through: bound, or configured, or archived --
   ;; but never run. Its log holds audit lines and no input, and reading it must
   ;; give an empty conversation rather than a refusal. The refusal would name a
   ;; truncated run that does not exist, and the caller that hit it would be the
   ;; sidebar opening a session a person just created.
-  (let [audit-lines [(json/write-str {:ts 1 :runId nil :kind "project/bound"
-                                      :payload {:before nil :after "/tmp/a" :via "http"}})
-                     (json/write-str {:ts 2 :runId nil :kind "provider/changed"
-                                      :payload {:after {:provider :alpha}}})]]
+  (let [audit-lines [(log-line {:ts 1 :runId nil :kind "project/bound"
+                                :payload {:before nil :after "/tmp/a" :via "http"}})
+                     (log-line {:ts 2 :runId nil :kind "provider/changed"
+                                :payload {:after {:provider :alpha}}})]]
     (testing "no input anywhere means there is nothing to be halfway through"
       (is (= [] (replay/lines->messages audit-lines))))
     (testing "but the SAME log with an input whose run never ended is still refused"
@@ -296,7 +405,7 @@
       ;; it is the record that says a run began.
       (let [e (try (replay/lines->messages
                     (concat audit-lines
-                            [(input-line "r1" [seed])]
+                            (action-lines "r1" [seed])
                             (event-lines "r1" [(ev/run-start) (ev/text-delta "半句话")])))
                    nil
                    (catch Exception e e))]
@@ -471,7 +580,7 @@
              (apply str (map :delta (filter #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))))
 
 (deftest resume-refuses-a-truncated-log-rather-than-half-continuing
-  (write-log! "t-cut" (concat [(input-line "r1" [seed])]
+  (write-log! "t-cut" (concat (action-lines "r1" [seed])
                               (event-lines "r1" [(ev/run-start) (ev/text-delta "\u534a\u53e5")])))
   (let [e (try (replay/resume! (log-file "t-cut") "t-cut" "继续" (recording-provider "x"))
                nil
@@ -490,14 +599,18 @@
   ;; to be REPLAYABLE -- the same record has to give the same numbers twice -- and it has
   ;; to be the number the LIVE session minted, or a refresh would renumber the
   ;; conversation under a client that is holding the old numbers.
-  (let [records (mapv #(json/read-str % :key-fn keyword) (one-run-lines))
+  (let [records (replay/lines->records (one-run-lines))
         run-end (dec (count records))
         entries (replay/entries records)]
     (testing "one entry per message, in order, and each carries the message itself"
       (is (= (mapv :role (replay/lines->messages (one-run-lines)))
              (mapv (comp :role :message) entries))))
     (testing "an action's own entry is numbered by ITS line -- the line it was written on"
-      (is (= 0 (:seq (first entries))) "the first line of the thread is 0, not 1")
+      ;; THE PROMPT IS LINE 0 and is not an entry (it is the run's, not the
+      ;; conversation's, and `conversation-sources` says so): the person's own message is
+      ;; line 1 -- ITS OWN line, which is what `sessions/land-at!` gives the live session
+      ;; for the same row.
+      (is (= 1 (:seq (first entries))) "the second line of the thread, not the first")
       (is (= "u1" (:id (:message (first entries))))))
     (testing "a run's entries are numbered by the run's TERMINAL line, all of them"
       ;; One action, one run, ONE number: everything the run produced arrived in the
@@ -509,21 +622,22 @@
           "an earlier action's number is strictly smaller"))
     (testing "reading the same record again gives the same numbers"
       (is (= (mapv :seq entries)
-             (mapv :seq (replay/entries (mapv #(json/read-str % :key-fn keyword)
+             (mapv :seq (replay/entries (replay/lines->records
                                               (one-run-lines)))))))))
 
 (deftest a-second-run-is-numbered-by-its-own-line-not-by-the-first-runs
   (let [q2  {:id "u2" :role "user" :content "second question"}
         raw (vec (concat (one-run-lines)
-                         [(action-line "r2" [q2])]
+                         (action-lines "r2" [q2])
                          (event-lines "r2" [(ev/run-start)
                                             (ev/text-delta "second turn")
                                             (ev/run-end)])))
-        records (mapv #(json/read-str % :key-fn keyword) raw)
+        records (replay/lines->records raw)
         entries (replay/entries records)
-        ;; The second action's line is where its own entry arrived, and the second run's
-        ;; terminal is the last line of the file.
-        action2 (count (one-run-lines))
+        ;; The second run's ATTACHED lines are its system row and then the entry the person
+        ;; sent -- one line each (票 02) -- and the second run's terminal is the last line of
+        ;; the file.
+        action2 (inc (count (one-run-lines)))
         end2    (dec (count raw))
         by-seq  (group-by :seq entries)]
     (is (= ["second question"] (mapv (comp :content :message) (get by-seq action2)))
@@ -539,9 +653,9 @@
   ;; is the last line the record holds -- where the writing stopped. A window can then
   ;; still show a partial answer, and when the run is closed later its entries move to
   ;; the closing line exactly once.
-  (let [raw     (vec (concat [(action-line "r1" [seed])]
+  (let [raw     (vec (concat (action-lines "r1" [seed])
                              (event-lines "r1" [(ev/run-start)
                                                 (ev/text-delta "half a thought")])))
-        entries (replay/entries (mapv #(json/read-str % :key-fn keyword) raw))]
-    (is (= [0 (dec (count raw))] (mapv :seq entries)))
+        entries (replay/entries (replay/lines->records raw))]
+    (is (= [1 (dec (count raw))] (mapv :seq entries)))
     (is (= "half a thought" (:content (:message (last entries)))))))

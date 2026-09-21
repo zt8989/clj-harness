@@ -45,10 +45,29 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 `CUSTOM` 落成一个 `data` part，而交给下一轮的会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）
 ——于是注入物看得见、又**进不了**模型的向量（见 [client](client.md#注入物在会话栏里的一张卡)）。上面那五种只落审计行的事件照旧一个帧都不发。
 
-**会话的开场不是帧**（2026-09-21 起，`.scratch/session-opening`）：指令文件与技能清单在会话出生时
-写进对话本身，卡片随那条 entry 走（`harness.edge.ag_ui/opening-entries` 给每条 message 同时带
-`data` part 与 `text` part），所以不会每一轮重发同一个 `CUSTOM` 帧。`CUSTOM` 帧发的是**这一轮自己派生
-出来的**注入——技能正文、后台作业的结尾——身份仍是「这一轮加进去的」。
+**出生那一轮把对话本身交给客户端**（`.scratch/session-opening`，2026-09-21 owner 拍定）：指令文件与技能
+清单在会话出生时写进对话本身，**卡片随那条 entry 走**（`harness.edge.ag_ui/opening-entries` 给每条 message
+同时带 `data` part 与 `text` part）。出生那一轮是**唯一**没有窗口、也没人跟 feed 的一轮——自己开出这一页
+的客户端既没有窗口也不跟 feed——所以那一轮随 `RUN_STARTED` 之后发一帧 **`MESSAGES_SNAPSHOT`**
+（`ag_ui/conversation-snapshot`），内容是**这一轮写进对话的那些 entry**，投影成 AG-UI 能收的
+消息形状：`id`、`role`、`content` 是**文本**。不流这一下，那一页就只有提问、没有开场。
+
+**为什么不是「每个条目发一张 CUSTOM 卡」**（先是那么写的，实测被打回）：AG-UI 的 `CUSTOM` 帧是个
+**part**，适配器把它挂到**正在流的那条消息**上，帧自己的 `messageId` 在入口处就被丢了——客户端手里没有
+那条消息时，卡就落到答案底下、而不是记录把它放的那一列。`MESSAGES_SNAPSHOT` 是 AG-UI 为「这就是那段
+对话」准备的帧，消息、id 一起走，落位由消息自己决定。
+
+**投影是必须的**（`ag_ui/wire-message`）：`@ag-ui/client` 对**它解析的每一帧**做 schema 校验，而它的消息
+schema 要 `content` 是文本或输入块——本仓的 entry 带的是 part 向量，一个 `data` part 会当场把这一轮打死
+（实测：界面上一条 Zod 报错）。所以快照只带 `id`/`role`/文本：**卡由读者按 id 和文本自己画**
+（`ui/src/lib/injections.ts`），而文本正是卡里那份字节——服务端两样都是从同一个 block 建的。
+**客户端自己发的消息不用投影**，它本来就是客户端那次转换的产物、也就是校验它的那份 schema 认可的形状。
+
+`CUSTOM` 帧剩下的那一半仍是**这一轮自己派生出来的**注入——技能正文、后台作业的结尾——它们的 id 是
+`<run>-pre<i>`（`pre` = 第一次调用**之前**就折进去的），身份是「这一轮开始时手里就有的」。
+内核自己中途拼进去的那些（`:context/injected`，工具调用的产物）用 **`<run>-ctx<n>`**——**两族的拼写必须不同**：
+两边都从 0 数，而帧的 id 正是记录把卡折成消息时用的名字（`apply-frames`，再经 `replay/append-new` /
+`sessions/append!` 先到先得），撞了就是**两张卡折成一张**、重建后少一条注入。
 
 ### bind 的 hook sink
 
@@ -94,12 +113,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
 | `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上**每一条**没终结的 run（按 run id 认；各补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建。服务端持有这场会话时**从内存答**，而且**不修不合**——合上是对**死掉的**会话的收尾 | `session/rebuilt`，合上过则每一轮先有一行 `session/closed-off` |
 | `/api/threads/<stem>/sofar` | GET | **记录到哪了**：已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。服务端持有这场会话时读**内存**，但**有 run 正在跑时仍读记录**——那一刻「到哪里了」的答案在文件里。它**不是客户端的轮询**：有窗口的页面由 feed 报（见下），只有**没有窗口**的那几扇门在自己驱动的一轮结束后读它一次。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
-| `/api/threads/<stem>/feed` | GET | **窗口那条流**（SSE）：首帧是尾页（带 `since` 连上时是它之后的增量），此后**每落盘一批推一帧**，窗口结束时一帧 `end`。`since` 落在窗口外或 generation 不对 ⇒ **在推任何字节之前** 409，body 带当前值；会话被另一个活进程服务 ⇒ 409 点名（推送意味着持有） | 无（只读） |
-| `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存，不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
+| `/api/threads/<stem>/feed` | GET | **窗口那条流**（SSE）：首帧是尾页（带 `since` 连上时是它之后的增量），此后**每落盘一批推一帧**，窗口结束时一帧 `end`。**有 run 正在跑时条目也从记录读**（见下），所以刷新/新开一个窗口看得到那一轮已经写下的帧。`since` 落在窗口外或 generation 不对 ⇒ **在推任何字节之前** 409，body 带当前值；会话被另一个活进程服务 ⇒ 409 点名（推送意味着持有） | 无（只读） |
+| `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存（**有 run 正在跑时读记录**，见下），不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
 | `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。带 `:behind` | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读） |
-| `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的 input 到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
+| `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的动作到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
 | `/api/projects` | POST | 让一个目录成为项目（find-or-create） | 无 |
 | `/api/sessions` | POST | 让一条会话**存在**（`{threadId}`，find-or-create）：库里没有就插一行未绑定、无记忆的会话；已经有就原样不动（**不会解绑**）。**这是「一条会话什么时候成为这个家的一条会话」唯一的答案**：页面自己铸的那枚 id 在第一句真正发出去之前由它登记一次（任务走这一条，项目会话走 `/api/project`——同样认调用方给的 id、同样幂等），这正是「点击新增不立刻会话，发送才新建」要的那一次；而 run 那条边对陌生 id 是 **404**、不再静默创建（`refuse-unknown-session!`，`.scratch/sessions-live-on-the-server` 票 03），所以登记必须发生在这次 run 之前 | 无（只写库里一行，不开任何文件） |
 | `/api/projects/<canonical-path>/remove` | POST | 移除项目（= 解绑它的会话，不删日志） | 无 |
@@ -164,7 +183,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 机会。路径说动作，body 说方向。**重建与归档的差别也值得知道**：重建必须**找到**日志（它从日志里重建对话），
 归档**不开文件**——那句话是会话的属性不是文件的属性，所以日志被手工挪走或删掉的会话照样能归档。
 
-**`stats` 折的是审计那一半，不是对话那一半**（`harness.edge.stats`）：轮数来自 `input` 里**新的用户消息 id**，
+**`stats` 折的是审计那一半，不是对话那一半**（`harness.edge.stats`）：轮数来自客户端 `message` 行里**新的用户消息 id**，
 步数来自 `model/start` 的行数，用量、缓存命中与输出速度来自那两行 `model/*`（速率的分母是每一对
 `start`→`end` 的 `:ts` 差）。它**不读** `event` / `message` 行，`replay` 也**不读** `model/*`——
 两种读侧各读一半，谁也不冒充另一半。
@@ -190,13 +209,15 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 还没写完**（没有终帧、或返回侧还没落盘）时只缺 `:parts`：厂商的数已经在记录里了，不拿半份消息凑一个三分。
 
 **`trajectory` 折的是另外两半**（`harness.edge.trajectory`，`GET /api/threads/<stem>/trajectory`）：
-它读 `input` + `message` + `tools/*`，回答「**模型每一轮到底看到了什么**」——system 消息的字节、
+它读 `message` + `event`（`tools/*`、`system-prompt` 都在其中），回答「**模型每一轮到底看到了什么**」——system 消息的字节
+（**从 `:source "system-prompt"` 的 `message` 行里取**：全文一场会话只写一次，只有 hash 的那几轮靠往前带，见
+[overview](overview.md#状态放在哪) 那张表）、
 拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果，以及每一轮发出去的工具表。
 它与 `stats` 是同一份文件的两个读者：`stats` 数数（不读一条消息），它看内容（不数一个数）。
-两半的边界是**轮的判据**：两处都调**同一个**「这个 input 带来哪些用户消息 id」的实现
+两半的边界是**轮的判据**：两处都调**同一个**「这段记录带来哪些用户消息 id」的实现
 （`stats/user-ids`），所以数出来的轮与分出来的组不会各说各话。
-**它按次序判轮、不认 `input` 行**：悬置恢复会写第二个 `input`（同一个 runId、没有新用户消息），
-那是同一轮的续，不是新的一轮。
+**它按段判轮，不认某种行**：悬置恢复会在同一个 runId 下再写一条 `system-prompt` 行（没有新的用户消息），
+那是同一轮的续，不是新的一轮（`trajectory/run-segments` 的第三种开段情形）。
 
 ### 窗口：`feed` 与 `page`
 
@@ -210,6 +231,15 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 一个 `:seq`；页因此既不重叠也不漏半批——`before` 严格切在读者手上最老那条之前，读者没拿到的条目必然
 整批在前。一批比一页大就**整批拿走**（一轮不可拆）。`page-size` = **50，是一个判断**（照抄参考实现
 的数）；把它写下来，「开一场会话的成本是一个上界、而不是它的长度」才是一句能兑现的话。
+
+**有 run 正在跑时，窗口读记录，不读内存。** `settle!` 是**一轮结束时**才把这一轮的帧折进会话表的
+（「半截答案不算一轮」，见 kernel.md），所以**没赶上收帧的页面**——刷新、新标签页、另一个进程——在
+跑着的时候问表，只会看到提问和出生那几条，助手那一轮整片空白。而帧在写下那一刻就在记录里了
+（`log!` 一帧一行），未收尾的那一组 `replay/entries` 也会 flush，所以「到此刻为止」的答案是**文件
+答得出来的**。于是三条窗口路在**本进程正跑着这场会话**时改读记录（`read-entries` / `window-page`），
+不新增任何存储：表仍是「这一轮结束了」之后的权威，两边**条目同 id**，读者按 id 去重，所以切换那一刻
+不多一条、不跳一下。读的是 `replay/read-records`——**最后一行可能是半行**（写的人在追加），丢掉它才
+是「已经到达的」的诚实答案；其余行仍严格读。本进程不持有这场会话、或它没有 run 在跑时，照旧读表。
 
 **五种帧，说的是「读者手里是什么」而不是「哪条路答的」**：`window`（feed 的开场：尾页）、
 `append`（读者游标之后的条目——feed 的后续帧，或带 `since` 连上时的开场）、`page`（读者最老那条
@@ -273,13 +303,26 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 
 ## jsonl 审计行
 
-一个线程一个文件，写在**它项目的 workspace** 里。每行 `{ts, runId, kind, payload}`：
+一个线程一个文件，写在**它项目的 workspace** 里。
 
-| kind | 何时 |
+**一行只有两种**（`.scratch/jsonl-two-kinds`，2026-09-21 拍定）：`{type, payload, ts, runId}`，`type` 是
+
+- **`message`** —— **送给大模型的那个 messages 数组里的一个元素**（2026-09-21，主人更正：`message` 就是那个
+  数组的超集）。所以人和 LLM 的话是 `message`，**注入物也是**（开场块、技能正文、作业结尾各是数组里的
+  一条），而 system 消息同样是——它就在那个数组的第一位。payload 就是交给厂商/厂商返回的那个 map，
+  **逐字**（信封上的键一个都不进 payload）；一条条目的**身份永远在信封上**（`id`），不进 payload；
+- **`event`** —— **其余一切事实**。线上发过的帧（`RUN_*` / `TEXT_MESSAGE_*` / `TOOL_CALL_*` /
+  `CUSTOM injected-context`）的 payload **就是那一帧**；harness 自己知道的事实（下面表里的那些）
+  包成一个 **CUSTOM 帧**，`name` 是那种事实的名字，payload 是它当时知道的东西。
+
+判据是这一句：**同一段记录，当时线上发过什么帧，重建就得到什么帧。** 读者**严格**：顶层出现 `kind`
+（旧契约）、缺 `payload`、`type` 不是这两个之一、不是对象、半行 JSON —— 都**按行号抛异常**，
+理由写在 `:reason` 里；旧记录打开时报的是"这份记录是旧契约，请开一场新的会话"，不是"读不出来"。
+
+**事实的名字就是下面这张表的第一列**（它同时是那一行 `payload.name` 的值，也是 `replay/kind` 的答案）：
+
+| 事实（CUSTOM 帧的 `name`） | 何时 |
 |---|---|
-| `input` | 收到的 RunAgentInput，原样 |
-| `event` | 发出的每个 AG-UI 帧 |
-| `message` | LLM 真实看到/返回的 provider 形状消息，**逐字**。**submitted 侧 = 第一次模型调用真正收到的那一份**（开场块、技能清单、`/<名字>` 的技能正文都在里面），returned 侧 = **内核自己说的**那几条（`:run/done` 的 `:added`，见 [kernel](kernel.md)）；两半**不按条数切**——resume 那轮的工具答案插在它回答的那条 assistant 消息正后面（不是列表末尾），按条数切会把客户端自己的一条记成内核的答案、丢掉真的那条；那一步注入仍必须发生在记 submitted 之前，否则 submitted 侧就不是模型真收到的那一份 |
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
@@ -289,7 +332,31 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 | `project/bound` | 绑定变更，before → after（可读成目录时间线） |
 | `session/rebuilt` | 重建动作，落**被重建的那份日志**上 |
 | `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`、`hook/InstructionsLoaded`…） |
+| `provider/session-changed` | 会话档位随会话绑定变化（`:resolved` 落新的一档） |
+| `git/branch` | 一次 git 分支探测的结果 |
 | `mcp/server` | 一个 MCP 服务器的连接结果、失败、重连或启停（**只有变化才落行**，落在 `:run/done`） |
+
+`message` 行的契约（`.scratch/jsonl-two-kinds` 票 02，2026-09-21）：
+
+- **一条 `message` 行 = 数组里的一个元素**，payload 是**厂商读到的那一份**（AG-UI 的 `image` 在记录里就是
+  `image_url`，卡已经去掉，reasoning 折进它后面那条 assistant）——`ag/provider-messages` 就是写侧用的那一翻。
+  翻出来是空的条目（单独一条 `reasoning`）**不写行**。
+- **信封上的 `:source` 说这条是谁放进数组的**：`client` / `injection` / `opening` / `skill` / `job`
+  （以上是数组进来的一侧），`system-prompt` / `model` / `tool` / `skill` / `job`（返回的一侧）。
+  屏幕上的卡因此能直接说出自己是哪一族，不必去猜标签。
+- **`:id` 是条目的身份**（信封，不进 payload），与帧的 `messageId` 同一套命名：开场条目
+  `session-opening-<i>`、出生 context `session-context`、客户端的 `u1`、助手的 `msg-*`。
+- **一次动作写了哪几条 = 那些 `message` 行**，顺序就是它们进数组的顺序；`input` 行不再存在，
+  它原先答的「身份 / 边界 / 出生 context 与绑定」分别由行信封、行序 + `RUN_*` 帧、`event` 行回答。
+- **system 消息是 `message` 行**：每场会话的第一条带全文与 `:hash`，hook 改动后第一条再带一次全文，
+  其余每轮一条只带 `:hash`——`hash` 是这一轮真正交给模型那串字节的 SHA-256，回答「这轮和上轮读的是不是
+  同一句」（prefill / prompt cache 靠那条前缀稳定）。
+- **被主动放弃的一件事实**：`input` 行的 payload 里还带着当时的**请求体**（`:provider` / `:model` /
+  `:tools` / `:context`，即"客户端要的是什么"）。行删掉后这份事实**没有新家**：记录只答"这次跑的是哪一档"
+  （`provider/init` / `provider/changed` 的 `:resolved`）。
+- **两种方言，出口一种**：条目行是厂商形状，帧折出来的消息是 AG-UI 拼法，`replay/history` 要一份厂商
+  向量——`ag/provider-messages` 因此是**幂等**的（`provider-shaped?` 认出已是厂商消息就放过），折出来的
+  消息带的身份 `:id` 由 `ag/strip-identity` 在 `history` 里去掉。
 
 几条支撑性的事实：
 
@@ -305,8 +372,9 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 - **`model/start` 与 `model/end` 按次序配对**：一个 run 里第 n 条 `model/start` 就是第 n 次调用，
   序号**不记**——记一份就是同一件事实的第二份，两份必然会漂。时长由两条行自己的 `:ts` 差出来，
   也不新记时间戳字段。**承载这次调用的参数与用量的是这两行**，不是帧：客户端在对话里一个字都看不到它们。
-- **重建对话的代码只认 `input` / `event` 两种行**；其余是审计轨迹，不是对话的一部分。
-  **审计轨迹有自己的读侧**：`harness.edge.stats` 折 `input` 与 `model/*` 出这条会话的几个数
+- **重建对话的代码只认 `message` / `event` 两种行**（`input` 行在 `.scratch/jsonl-two-kinds` 票 02 里删掉了）；
+  其余是审计轨迹，不是对话的一部分。
+  **审计轨迹有自己的读侧**：`harness.edge.stats` 折 `message` 与 `model/*` 出这条会话的几个数
   （`GET /api/threads/<stem>/stats`，见下）。两种读侧读的是同一条日志的两半，谁也不读对方的那半——
   「只认两种行」是 `harness.edge.replay` / `harness.kernel.frames` 的规矩，不是所有读者的规矩。
 
@@ -316,11 +384,12 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 **翻译发生在 `harness.edge.ag-ui/inbound`**，不是 `llm`——因为 `message` 行的契约是「LLM 真实看到的，逐字」，
 到协议层才翻会让那条日志撒谎。
 
-它也是**开场块进入消息向量的那一处**：4-arity 收下已渲染好的块，拼在**这场对话之后**——注入物的位置是
-**system → 这场对话 → 开场块（指令文件 → 技能清单 → 技能正文）**（见
-[skills-and-instructions](skills-and-instructions.md)）。四元里那个 `context` 是「会话出生的那一条」的口子：
-唯一的调用方今天传 nil（出生的那条已经在对话里了），真传的时候它落在对话之后、这一轮的块之前。
-它收到的 system 文本也是**已经组装好的**（`harness.cap.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
+**开场块不从这里进消息向量**（`.scratch/session-opening` 的修正）：它们在会话出生时由
+`edge/http.clj` 写进对话的 `:added`、位置在那条提问**之后**，所以
+**system → 提问 → 开场块（指令文件 → 技能清单 → 技能正文）**（见
+[skills-and-instructions](skills-and-instructions.md)）。四元里那个 `context` 是「会话出生的那一条」的旧口子：
+生产调用点今天一律传 nil（出生的那条已经在对话里了）；真传的时候它落在对话之后。
+它收到的 system 文本是**已经组装好的**（`harness.cap.system-prompt/assemble` 的结果，见 [hooks](hooks.md)）。
 它自己不读任何文件、不跑任何 hook（两样都是递进来的），所以这个命名空间仍是个转换器；空块时它返回
 **原向量本身**，而不是一个等价的副本——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状。
 见 [skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)。

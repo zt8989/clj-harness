@@ -16,12 +16,36 @@
 ;; a frame shape the server never writes, and then the test would pass while the build
 ;; failed on every real log.
 
-(defn- log-line [m] (json/write-str m))
+(defn- log-line
+  "A record row AS THE WRITER EMITS IT since `.scratch/jsonl-two-kinds`: the file has two
+  kinds of row -- `message` and `event` -- with `ts`/`runId` outside the payload. The
+  fixtures below still say `{:kind .. :payload ..}` because `row-json` here is the one place
+  that knows the file spells a row otherwise."
+  [{:keys [kind payload source id] :as m}]
+  (json/write-str (cond-> (merge (select-keys m [:ts :runId])
+                                 (cond
+                                   (= "message" kind) {:type "message" :payload payload}
+                                   (= "event" kind)   {:type "event" :payload payload}
+                                   :else              {:type "event"
+                                                       :payload {:type "CUSTOM" :name kind
+                                                                 :value payload}}))
+                    source (assoc :source source)
+                    id     (assoc :id id))))
 
-(defn- input-line [run-id messages]
-  (log-line {:ts 1 :runId run-id :kind "input"
-             :payload {:threadId "t" :runId run-id :messages messages
-                       :tools [] :context []}}))
+(defn- input-lines
+  "WHAT ONE ACTION WROTE, as the rows the writer now leaves: the prompt the model was handed
+  first (`:source` = `system-prompt`), then a `message` row per entry the client brought --
+  the entry's own name on the envelope, the payload verbatim as the provider reads it.
+  `.scratch/jsonl-two-kinds` 票 02 took the `input` row away."
+  [run-id messages]
+  (into [(log-line {:ts 0 :runId run-id :kind "message" :source "system-prompt" :hash "h1"
+                    :payload {:role "system" :content "S"}})]
+        (map (fn [m]
+               (log-line (cond-> {:ts 1 :runId run-id :kind "message"
+                                  :source (if (:id m) "client" "injection")
+                                  :payload (dissoc m :id)}
+                           (:id m) (assoc :id (:id m))))))
+        messages))
 
 (defn- event-lines [run-id events]
   (let [emit (ag/outbound "t" run-id)]
@@ -38,7 +62,7 @@
                    (str (home/sanitize thread-id) ".jsonl"))]
     (.mkdirs (.getParentFile f))
     (spit f (str (str/join "\n"
-                           (concat [(input-line "r1" [seed])]
+                           (concat (input-lines "r1" [seed])
                                    (event-lines "r1" (concat [(ev/run-start)]
                                                              extra
                                                              [(ev/text-delta "这是一个 Clojure 项目。")
@@ -305,9 +329,12 @@
         lines   (str/split-lines (slurp f :encoding "UTF-8"))]
     (testing "nothing is unnumbered in a session built from a finished record"
       (is (every? some? (map :seq entries))))
-    (testing "the action's own entry is numbered by the input line it arrived in"
-      (is (= 0 (:seq (first entries))))
-      (is (= seed (:message (first entries)))))
+    (testing "the action's own entry is numbered by the message row it arrived in"
+      ;; THE PROMPT COMES FIRST (`harness.edge.http` writes the action's rows and then the
+      ;; run's own): line 0 is the system prompt, and the client's message is line 1.
+      (is (= 1 (:seq (first entries))))
+      (is (= seed (:message (first entries)))
+          "the entry is the message the client sent, byte for byte"))
     (testing "and a run's entries by the line the run ENDED on -- its terminal frame"
       (is (= (dec (count lines)) (:seq (last entries)))
           "the record's last line is the run's terminal, and the answer is numbered there")

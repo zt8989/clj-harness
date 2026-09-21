@@ -157,7 +157,7 @@ echo '{"hook":"PreToolUse","thread_id":"t","project_dir":null,
 | 点 | 管什么 | 什么时候 |
 |---|---|---|
 | `SystemPrompt` | system 消息（`prompt.md` 的冻结开头 + 各声明追加的文本） | 第一条消息正在被组装，模型看到它之前 |
-| `InstructionsLoaded` | user 侧开场块（指令文件、技能清单） | 一个指令文件被折进 run 的上下文 |
+| `InstructionsLoaded` | user 侧开场块（指令文件、技能清单） | 会话出生那一轮，一个指令文件被折进对话（`.scratch/session-opening`；此后它只是历史） |
 
 `InstructionsLoaded` 是这套说法最近一次被兑现的例子：它自引擎落地起就声明着（`payload #{:path}`），
 触发源是一个指令文件被折进 run 的上下文——见

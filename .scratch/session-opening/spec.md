@@ -76,8 +76,8 @@ prompt cache 的稳定前缀只能"从 system 一路穿过这场对话"，而开
 
 ## 判据
 
-- 一场有 AGENTS.md 的会话：第一轮的开场块在**提问之前**、且只在**那一轮**的 `:added` 里；
-  第二轮提交侧**没有**新的开场块，历史里那一份仍在原位。
+- 一场有 AGENTS.md 的会话：第一轮 **提问在开场块之前**（2026-09-21 修正，见文末），
+  且开场只在**那一轮**的 `:added` 里；第二轮提交侧**没有**新的开场块，历史里那一份仍在原位。
 - 同一条会话折叠回来（重建）后，开场条目**同名同序**，`display` 画出卡片、`messages` 里是文本。
 - 一场有 AGENTS.md 的会话在批准后 resume，**能跑到 provider**（不再第二次停在同一 interrupt 上）。
 
@@ -92,6 +92,7 @@ prompt cache 的稳定前缀只能"从 system 一路穿过这场对话"，而开
    两者不同名，`keepInjectionCards` 按 id 配对，发帧就会把同一张卡画两遍。卡片随条目走：
    feed / `sofar` 把条目交给页面，重建由 `input` 行的 `:added` 折回来。`CUSTOM` 帧从此只发
    **这一轮自己派生**的注入，id 统一成 `-ctx<i>`（`edge/http.clj` 与 `ag_ui/step` 同一拼法）。
+   **⚠ 这一条已被文末的修正推翻**（id 换成条目自己的，帧照发一次）。
 3. **读失败仍按名字停下。** 开场的读取在 run 的 go block 里、`hook/*sink*` 之下，失败存成
    `opening-failure`；等这一轮的提问（`append!` + `input` 行）落地后在同一个 catch 里抛出，
    于是客户端拿到 `RUN_STARTED..RUN_ERROR`，而人的那句话已经留在会话里。
@@ -145,3 +146,87 @@ text part，id 不变），服务端按 id 去重丢掉这份重复（`sessions/
   旧行为红在 `(contains? (last resumed) :outcome)`——**正是现场那个"再停一次"**。
 - 另加一条退路用例 `a-replayed-answer-with-no-call-to-sit-behind-goes-to-the-end-and-says-so`：
   没有那条 assistant 消息时落末尾、`:unplaced` 报出 `c1`、run 照旧 `:run/end`。
+
+## 修正（2026-09-21，票 01–03）
+
+**三件事一起改，都是这一页落地形状的账**。票在 `issues/`（做完即删），这里是留下的那一份；上面「实现」一节的
+第 2 点已被下面第 2 条推翻，其余保留为当时的形状。
+
+1. **开场写进对话的位置：提问之后**（票 03）。落地时写成了「提问之前」——把「只发生一次」和「排在最前面」
+   混成了一件事。`.scratch/context-frames` 决定 7 立下的规矩是材料排在**它要回答的那句话后面**，
+   `CONTEXT.md` 的注入词条也一直这么写。现在 `run-agent!` 的出生支路是
+   `(into (vec (:append input)) …opening)`，出生 context 仍夹在提问与开场块之间。**「一次」没变**：
+   开场仍只在出生那一轮写进会话。
+2. **开场的卡在写它的那一轮上流一次**（票 01）。落地时写的是「开场永不发帧」，理由是「帧 id 与条目 id
+   不同名，会画两张」——**理由对，结论错：换 id 就行**。`added-card-frames` 发的帧用**条目自己的 id**
+   （`session-opening-<i>`），于是记录 fold 出来的卡与条目带的卡是同一条消息
+   （`replay/append-new`、`sessions/append!` 都按 id 去重）。**非流不可的原因**：自己开出这一页的客户端
+   （`read: "none"`）既没有窗口也不跟 feed，出生那一轮是它唯一能收到开场卡的线——不流这一下，
+   那一页就只有提问、没有开场。
+3. **开场条目按卡片的形状画**（票 02）。它们是 `role: "user"`（对 provider 就是 user 消息），所以线程把
+   AGENTS.md 画成了「这个人说过的话」：右对齐、灰气泡、旁边一支 Edit 铅笔。现在 `lib/injections.ts` 的
+   `isCardOnly`（消息内容**只有**一张卡）把它引到左侧的注入行，动作条取消。**UI 套件第四条当时把这条消息
+   写成 `role: "assistant"`**，与真实形状不符——机器门全绿而应用画错，差的就是那一格。
+
+**留下的判据**（`edge.http-test/an-opening-block-reaches-the-model-and-the-client-can-see-it`、
+`edge.http-test/a-slash-load-reaches-the-model-and-is-a-card-in-the-conversation`、
+`ag-ui-test/what-a-birth-added-gets-a-card-under-the-entrys-own-id`、
+`ui/test/suites/injections.ts` 第四条与第五条）：出生那一轮的 `message` 行里提问在开场块之前；那一轮的
+`CUSTOM` 帧里开场三张按条目 id、派生那张按 `<run>-ctx<i>`，四个 id 互不相同；重建后开场条目同名同序且只有一份；
+开场条目在客户端画成左侧的卡而不是气泡。
+
+## 修正（2026-09-21，票 04）
+
+**跑动中刷新看不到正在进行的那一轮**（票 04，做完即删）。根因与上面三条都不同：窗口读的是**会话表**，而
+`settle!` 要到**终帧**才把这一轮折进表（「半截答案不算一轮」），于是**没赶上收帧的页面**——刷新、新标签页
+——在跑着的时候只看到提问和出生那几条。**记录里那一轮的帧一直都在**（`log!` 一帧一行），未收尾的那一组
+`replay/entries` 也会 flush，所以缺的不是读法，是**这条路没走它**。
+
+落地：`read-entries`（page）与 `window-page`（feed 的首帧与后续增量）在**本进程正跑着这场会话**时改读记录，
+**不新增任何存储**；表仍是「这一轮结束了」之后的权威。两条细节，都是判据：
+
+- **读的是 `replay/read-records`**——一个正在被追加的文件，最后一行可能是半行，丢掉它才是「已经到达的」的
+  诚实答案（这条规矩原来只写在 `stats/read-records` 里，现在住进 `replay`，两处调用同一份）。**没有记录**
+  （表被人为喂过、首行还没写下）时退回内存；**记录读不了**（旧契约、中间行坏了）时按名字拒绝，与 `sofar`
+  一致。本进程不持有这场会话、或没有 run 在跑时，照旧读表。
+- **切换那一刻不多一条、不跳一下**：记录与表里是**同一批条目、同一个 id**，读者按 id 去重（`replay/append-new`
+  与 `ui/src/lib/window.ts` 的 `unseen` 各守一半）。
+
+**留下的判据**（`edge.http-test/a-running-session-reads-what-has-arrived-and-nothing-is-written` 里新增两段）：
+跑动中的 `GET …/page` 与 `GET …/feed` 首帧**都**带得上这一轮已经写下的消息，且与同一刻 `sofar` 的
+`:messages` **逐条相同**（记录一个读者，两扇门）；跑完落地后再读一次，条目 id **无重复**，内容与 `sofar`
+一致。`docs/architecture/edge.md` 的窗口一节写下了这条取舍。
+
+## 修正（2026-09-21，票 05 → 拍定：出生那一轮把对话交给页面）
+
+**开场卡在出生那一轮落在助手那一栏**（票 05）。诊断里那份「适配器不看 `messageId`」是对的，但**光改适配器
+不够**：出生那一轮客户端手里**根本没有那条 user 消息**——服务端只发 `CUSTOM` 卡帧，那条消息是记录里的一条
+user entry。
+
+票 05 先落地的补丁是「**这一轮结束时读一次记录、把读数 import 回来**」（`app.tsx` 那条 effect）。**主人当场
+拍掉了这个方向**，原话：
+
+> 你说的发送出去很奇怪 底层都是后端在发发送 前端只需要渲染
+
+**改成：出生那一轮随 run 自己把对话发全。** 服务端在 `RUN_STARTED` 之后发一帧 `MESSAGES_SNAPSHOT`
+（`harness.edge.ag_ui/conversation-snapshot`），内容是**这一轮写进对话的那些 entry**；`app.tsx` 那次
+import 随之删掉（只留健康读数上报）。落地细节：
+
+- **为什么消息列表而不是每块一张 `CUSTOM` 卡**：`CUSTOM` 是**一个 part**，适配器把它挂到**正在流的那条
+  消息**上、帧自己的 `messageId` 在入口就被丢（`run-aggregator.js` 的 CUSTOM 分支不看它），客户端手里没有
+  那条消息时卡就落到答案底下；`MESSAGES_SNAPSHOT` 带的是消息本身，落位由消息自己决定。
+- **投影是必须的**（`ag_ui/wire-message`）：`@ag-ui/client` 对**它解析的每一帧**做 schema 校验，它的消息
+  schema 要 `content` 是文本/输入块——本仓的 entry 带 part 向量，一个 `data` part 会**当场把这一轮打死**
+  （实测：界面上一条 Zod 报错，截图见证据目录第一次跑的那一轮）。所以快照只带 `id` / `role` / 文本；
+  **客户端自己发的消息不用投影**（它本来就是客户端那次转换的产物，也就是校验它的 schema 认可的形状）。
+- **卡由读者按 id 和文本自己画**：适配器的快照转换保留 id 与文本、丢掉 `data` part，所以
+  `thread.aui.tsx` 的 `UserMessage` 认两条——`isCardOnly(parts)`，或 `isOpeningEntryId(id)`
+  （`session-opening-<i>`，纯函数，`ui/test/suites/injections.ts` 有案子）；两条路画的是同一个
+  `InjectionCard`（`components/context-card.tsx` 现在接受一个 value，而不只是一个 part）。
+- **只在这一轮发，且只在这一轮**：`client-never-sent`（`added` 减去客户端自己发的）非空才算，也就是会话
+  出生那一轮——此后每一轮开场都是历史，窗口/feed 会说。
+
+**留下的判据**（真浏览器，`.scratch/session-opening/walkthrough.mjs`，2026-09-21 全绿）：出生那一轮
+**不刷新**就出现两行卡、在 `aui_user-injection-root` 里，人的消息是**唯一**一个气泡，屏幕顺序为
+`message → injection → injection`（与 reload 之后**同一条断言**），并且第二句那轮不再多卡。断言不变，
+变的只是**卡从哪来**：现在是那一轮自己的流，脚本里没有任何一次记录读。

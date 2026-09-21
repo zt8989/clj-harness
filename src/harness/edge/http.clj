@@ -11,15 +11,11 @@
   Also append-only JSONL logging: one file per thread, under the session's
   project's workspace in the home's projects tree -- the path is the one place
   where 'where things are' and 'who this session is' are joined (see
-  log-dir-for). These line kinds.
-
-    \"input\"   -- the client's RunAgentInput as received.
-    \"event\"   -- every AG-UI frame we emitted.
-    \"message\" -- one line per provider-shaped message the LLM saw or produced,
-                   VERBATIM: the ASSEMBLED system message (prompt.md's frozen
-                   opening plus what the SystemPrompt hooks appended), each inbound
-                   message (per-run context rides as a trailing user message), and
-                   every assistant reply / tool result the kernel appended.
+  log-dir-for). THE FILE HAS EXACTLY TWO KINDS OF ROW (`.scratch/jsonl-two-kinds`,
+  拍定 2026-09-21): `message` -- one line per element of the messages array the
+  model was handed, in the provider's own shape, VERBATIM, its identity (`id`) and
+  its `source` on the envelope -- and `event`, every other fact; the `input` row
+  that used to carry the whole RunAgentInput went with 票 02. The facts:
     \"tools/*\" -- the tool execution lifecycle (pre-execute / execute /
                    post-execute), keyed by toolCallId. No wire frame at all.
     \"approval/decided\" -- a human's answer to a parked call, with the interrupt
@@ -318,13 +314,32 @@
                   vec)]
       (when (seq ts) [(reduce min ts) (reduce max ts)]))))
 
+(defn- row-of
+  "THE RECORD HAS TWO KINDS OF ROW (`.scratch/jsonl-two-kinds`, 拍定 2026-09-21): `message` is
+  what a person said or an LLM returned, and `event` is every other fact. An AG-UI frame we
+  put on the wire is an `event` whose payload IS the frame; everything the harness knows on
+  its own -- a provider change, a tool's three moments, the plan an action was given -- is an
+  `event` whose payload is a **CUSTOM frame** named after that fact. Two reasons for the
+  wrapping rather than a third row type: a client already ignores a CUSTOM frame it does not
+  know, and the record then holds exactly the vocabulary it can be rebuilt into.
+
+  `ts` and `runId` sit at the TOP LEVEL, outside the payload, so the payload stays verbatim
+  -- byte for byte what the vendor saw -- while the row still says when and for which run."
+  [kind payload]
+  (cond
+    (= "message" kind) {:type "message" :payload payload}
+    (= "event" kind)   {:type "event"   :payload payload}
+    :else              {:type "event"
+                        :payload {:type "CUSTOM" :name kind :value payload}}))
+
 (defn- carry-audit!
   "One audit line about a leftover unbound segment, appended to F -- the
   conversation's own file. runId is nil: this happens on the way to a record, not
   inside a run. A caller that cannot afford this to throw swallows it."
   [^java.io.File f kind payload]
-  (spit f (str (json/write-str {:ts (System/currentTimeMillis)
-                                :runId nil :kind kind :payload payload}) "\n")
+  (spit f (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil}
+                                      (row-of kind payload)))
+               "\n")
         :append true :encoding "UTF-8"))
 
 (defn- carry-back!
@@ -448,16 +463,26 @@
   then carry the file out from under it -- one conversation, two files. The lock is
   released as soon as the line is handed over; it is never held across the write.
 
+  EXTRA IS ENVELOPE, NOT PAYLOAD: fields that belong to the ROW rather than to the thing it
+  carries -- `:source`, which says who put a message into the array the model read, and the
+  system prompt's `:hash`. They sit beside `ts`/`runId` because the payload must stay
+  verbatim (owner, 2026-09-21: a `message` row is an element of the messages array the model
+  was handed, and the envelope is where the record says whose element it was).
+
   LANDS, WHEN GIVEN, IS CALLED WITH THE RECORD OFFSET THE LINE GOT once it is on disk
   (`harness.edge.record/append!`), which is how a conversation's entries are numbered:
-  the edge attaches it to the lines that CARRY entries -- an action's input line, and
-  the terminal frame of its run -- and hands the number to
+  the edge attaches it to the lines that CARRY entries -- each of an action's own
+  `message` rows, and the terminal frame of its run -- and hands the number to
   `harness.edge.sessions/land!`."
   ([thread-id run-id kind payload]
    (log! thread-id run-id kind payload nil))
   ([thread-id run-id kind payload lands]
-   (let [line (str (json/write-str {:ts (System/currentTimeMillis)
-                                    :runId run-id :kind kind :payload payload}) "\n")]
+   (log! thread-id run-id kind payload lands nil))
+  ([thread-id run-id kind payload lands extra]
+   (let [line (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId run-id}
+                                          extra
+                                          (row-of kind payload)))
+                   "\n")]
      (locking log-lock
        ;; `mkdirs` and the carry-back are the writer's now: the consumer creates the
        ;; parent before every line, and runs the carry-back as its prepare step
@@ -575,9 +600,9 @@
 (defn running?
   "Is a run of THREAD-ID alive in this process right now?
 
-  THE FACT THAT IS NOT IN THE RECORD, and the reason it is asked here: an input line
-  whose run never terminated is either a run still going or a process that died
-  mid-flight. Every reader that has to choose (the sidebar row, the composer's gate,
+  THE FACT THAT IS NOT IN THE RECORD, and the reason it is asked here: a run whose
+  opening `message` row has no terminal frame is either a run still going or a process
+  that died mid-flight. Every reader that has to choose (the sidebar row, the composer's gate,
   the read side's 'may I close this off') asks this instead of inferring from the
   file.
 
@@ -618,12 +643,59 @@
   [thread-id run-id]
   (sessions/run-finished! thread-id run-id))
 
+(defn entry-source
+  "WHO PUT THIS MESSAGE INTO THE ARRAY THE MODEL READ, for a message an ACTION put in --
+  the value the row's envelope carries under `:source` (owner, 2026-09-21: a `message` row
+  IS an element of that array, so the row says whose element it was; the table of names is
+  `.scratch/jsonl-two-kinds` 票 04's).
+
+  THE TWO THE EDGE WROTE ITSELF ARE NAMED BY THE IDS IT MINTED, which is the same reading
+  `ag/injected?` takes: the conversation's opening blocks (`ag/opening-entry?`, ids
+  `session-opening-<i>`) are the `opening`, and the session's own context entry
+  (`ag/context-entry-id`) is the `injection`. EVERYTHING ELSE THAT ENTERED CAME FROM THE
+  CLIENT -- the action's own `:append`, which is the only other thing `sessions/append!`
+  is ever handed by this file."
+  [message]
+  (cond
+    (ag/opening-entry? message)                  "opening"
+    (= ag/context-entry-id (:id message))       "injection"
+    :else                                       "client"))
+
+(defn returned-source
+  "WHO PUT THIS MESSAGE INTO THE ARRAY, for a message a RUN added: what the model returned,
+  what a tool answered, and what the pre-LLM step derived along the way.
+
+  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the tag answers the rest: a skill
+  body and a job's ending are wrapped by the code that writes them (`harness.cap.skills`
+  writes `<skill name=..>`, `harness.cap.jobs` writes `<job-ended ..>`), and the skills
+  namespace reads the first of those tags back out of the conversation
+  (`loaded-skill-names`), so this is the same reading rather than a new convention. Anything
+  else a run injected is an `injection` and says so."
+  [message]
+  (let [content (str (:content message))]
+    (case (:role message)
+      "assistant" "model"
+      "tool"      "tool"
+      (cond
+        (str/starts-with? content "<skill name=")   "skill"
+        (str/starts-with? content "<job-ended ")    "job"
+        ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
+        ;; the instruction files and the skills catalog were folded in at the birth, so a
+        ;; later run's copy is the same kind of fact -- an `opening` -- and the tags are the
+        ;; ones `harness.edge.ag-ui/opening-entries` writes.
+        (str/starts-with? content "<instructions")  "opening"
+        (str/starts-with? content "<skills")        "opening"
+        :else                                       "injection"))))
+
 (defn- log-messages!
-  "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
-  the returned side of the message record both come through here."
+  "One \"message\" line per provider-shaped message, VERBATIM -- the row's payload is the
+  message itself and its envelope carries the `:source` that says who put it in the array
+  (`entry-source` / `returned-source`). The submitted side of a run (what the pre-LLM step
+  derived for it) and the returned side of a run (what the kernel added) both come through
+  here."
   [thread-id run-id msgs]
   (doseq [m msgs]
-    (log! thread-id run-id "message" m)))
+    (log! thread-id run-id "message" m nil {:source (returned-source m)})))
 
 ;; ------------------------------------------------------------------- the edge
 
@@ -874,7 +946,7 @@
                       (dissoc payload :point)))})
 
 (defn- run-agent!
-  "Drive ONE run: log its input, set the conversation up, and stream what comes back.
+  "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
   RUN-ID IS AN ARGUMENT rather than a field of INPUT, and after ticket 03 that is the
   whole point: the id names a run in THIS process and is minted at the door
@@ -889,7 +961,7 @@
         emit    (runner thread-id run-id ch state origin)
         convert (ag/outbound thread-id run-id)]
     ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
-    ;; writing the input line and naming the session -- HAPPENS INSIDE THE GO BLOCK
+    ;; writing their rows and naming the session -- HAPPENS INSIDE THE GO BLOCK
     ;; BELOW, on purpose. Reading the instruction files can fail (an unreadable
     ;; AGENTS.md), and a failure on the way in has to leave the client a TERMINATED RUN
     ;; rather than a stream that never says anything: the go block's `try` is where that
@@ -942,16 +1014,73 @@
                   (try [(ag/opening-entries (opening-blocks! thread-id)) nil]
                        (catch Throwable t [nil t]))
                   [nil nil])
-                entries  (cond-> (into (vec opening) (:append input))
-                           born? (into (when-some [e (ag/context-entry (:context input))] [e])))
+                ;; THE QUESTION COMES FIRST, THE OPENING BEHIND IT. What a model reads
+                ;; on the turn that births a conversation is `system, what the person
+                ;; asked, and the material for it` -- the order `.scratch/context-frames`
+                ;; decision 7 and `CONTEXT.md`'s 注入 entry both state, and the one this
+                ;; ticket restores. Ticket 01 of `.scratch/session-opening` had put the
+                ;; opening in FRONT of the question while making it happen once; the
+                ;; 'once' is the part that mattered, and it is kept: the opening is
+                ;; still written here and nowhere else.
+                ;;
+                ;; THE BIRTH CONTEXT KEEPS ITS PLACE AHEAD OF THE OPENING, because it is
+                ;; what the conversation IS (the project this session is bound to) and
+                ;; the opening is what it must read -- the same reading the retired
+                ;; `tail-blocks` gave the two, and the one `CONTEXT.md` calls 'the
+                ;; birth context is already in the conversation'.
+                entries  (into (cond-> (vec (:append input))
+                                 born? (into (when-some [e (ag/context-entry (:context input))] [e])))
+                               opening)
                 added    (sessions/append! thread-id run-id entries)
-                input    (assoc input :added added)]
-            ;; THE LINE THAT CARRIES THEM IS THE LINE THAT NUMBERS THEM: the landing
-            ;; callback is how these entries get their record offsets (ticket 05), and it
-            ;; is attached HERE rather than at the enqueue because the writer is what
-            ;; knows the file.
-            (log! thread-id run-id "input" input
-                  (fn [offset] (sessions/land! thread-id run-id offset)))
+                ;; THE CONVERSATION ITSELF, for the one run that is the only wire it
+                ;; has: the entries this action wrote on the client's behalf (the birth
+                ;; context and the opening blocks) are in the session and in no client's
+                ;; hands, and a page that MINTED the session holds no window and follows
+                ;; no feed. `ag/conversation-snapshot` says why a message list and not a
+                ;; card frame -- the short of it is that a message survives the trip and
+                ;; a frame does not. NIL ON EVERY OTHER RUN: a run whose entries the
+                ;; client sent is continuing a conversation that client already holds.
+                snapshot (when (seq (ag/client-never-sent added (:append input)))
+                           ;; THE ENTRIES, NOT THE TABLE'S COPY OF THEM: this is the
+                           ;; conversation as it stands after this action, and at birth
+                           ;; that is exactly `entries` -- the client's own messages
+                           ;; (already in the wire's shape) plus what the birth wrote.
+                           (ag/conversation-snapshot entries))]
+            ;; ONE ROW PER ENTRY, AND THE LINE THAT CARRIES IT IS THE LINE THAT NUMBERS
+            ;; IT (`.scratch/jsonl-two-kinds` 票 02): the action's entries are `message`
+            ;; rows now -- each with ITS OWN identity (the envelope's `:id`, the name the
+            ;; session and the fold dedupe by) and its own number (`land-at!` is handed the
+            ;; offset of the very line it wrote, so a window's `beforeSeq` cuts where the
+            ;; record does). The `input` row that used to carry them all is gone; what it
+            ;; also carried (the whole inbound vector on every run) was the second copy
+            ;; this ticket deletes.
+            ;;
+            ;; WHOSE ELEMENT OF THE ARRAY IT WAS IS THE ENVELOPE'S `:source` (owner,
+            ;; 2026-09-21: a `message` row IS an element of the messages array the model
+            ;; was handed, so the row has to say who put it there). The payload stays the
+            ;; VERBATIM provider message -- `model-view` is asked for it here because the
+            ;; record keeps what the MODEL read, and the card part an opening entry carries
+            ;; is the screen's, not the provider's (`ag/provider-part` refuses it by name).
+            ;;
+            ;; THE ROWS ARE WRITTEN IN THE ORDER THE ENTRIES WENT IN, which is the order
+            ;; the array was read in -- the same order `land-at!` matches an unnamed entry
+            ;; by.
+            ;; A ROW'S PAYLOAD IS THE MESSAGE THE PROVIDER READS, which is NOT the client's
+            ;; own bytes when a part has to be translated (`ag/provider-messages`: the cards
+            ;; go, an AG-UI `image` becomes the vendor's `image_url`) -- and the ENTRY'S NAME
+            ;; rides the envelope rather than the payload, because a provider message has no
+            ;; such field and the fold dedupes by the envelope's `:id` (票 02).
+            ;;
+            ;; AN ENTRY THAT TRANSLATES TO NOTHING WRITES NO ROW: a lone `reasoning` message
+            ;; is folded into the assistant it precedes, and a row for it would claim the
+            ;; model was handed something it never saw.
+            (doseq [[i m] (map-indexed vector added)
+                    :let [shown (first (ag/provider-messages (sessions/model-view [m])))]
+                    :when (some? shown)]
+              (log! thread-id run-id "message" shown
+                    (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
+                    (cond-> {:source (entry-source m)}
+                      (:id m) (assoc :id (:id m)))))
             ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place
             ;; and for the same reason the input frame is written here: this is the one
             ;; moment the server holds 'the person pressed send'. It writes once per
@@ -1148,7 +1277,30 @@
               ;; trace: it is server-side, it never becomes a frame, and this line is
               ;; where its weight is on the record. (The hook/SystemPrompt line records
               ;; the same run of it.)
-              (log-messages! thread-id run-id messages)
+              ;; THE SYSTEM MESSAGE IS A `message` ROW, because a `message` row IS an element
+              ;; of the array the model read (owner, 2026-09-21: "所谓 message 就是送给大模型
+              ;; 那些 message 数组的超集"). It goes first, which is where it sat in that array,
+              ;; and the ENVELOPE says who put it there (`:source "system-prompt"`) plus the
+              ;; SHA-256 of those bytes (`:hash`) -- so 'was this the same prompt as last run'
+              ;; is answerable without diffing four kilobytes, which is what the provider's
+              ;; prefill (prompt cache) rests on. The payload stays the verbatim provider
+              ;; message, as every message row's does.
+              ;;
+              ;; WRITTEN PER RUN, NOT ONCE: the assembled text is recomputed every run (the
+              ;; binding moves, a hook is switched), so each run's row is what THAT run was
+              ;; handed -- a reader asks the row, not a carry-forward.
+              (let [prompt (or (some #(when (= "system" (:role %)) (:content %)) messages) "")]
+                (log! thread-id run-id "message" {:role "system" :content prompt} nil
+                      {:source "system-prompt" :hash (system-prompt/digest prompt)}))
+              ;; WHAT THIS RUN DERIVED FOR ITSELF, as message rows (票 02). These are the
+              ;; injections folded in beside the conversation -- a body an earlier turn
+              ;; loaded, a job that ended between two runs: ordinary user messages to the
+              ;; provider, parts of the array this run was handed, and NOT entries of the
+              ;; conversation (the client gets them as cards, and the next run re-derives
+              ;; them rather than reading them back). The rest of the submitted array was
+              ;; written by the runs that produced it -- which is the whole saving of this
+              ;; ticket: a run logs what IT put in, never the conversation again.
+              (log-messages! thread-id run-id injected)
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
               ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
@@ -1237,22 +1389,37 @@
                                                 ;; never sends them back). THE ONE NUMBERING
                                                 ;; IS THE HISTORY'S OWN, so the frames come out
                                                 ;; in the order the model read them -- and the id
-                                                ;; is the run's own name plus that place (`-ctx<i>`,
-                                                ;; the same spelling the kernel's own injection
-                                                ;; frames carry in `ag_ui/step`).
+                                                ;; is the run's own name plus that place.
                                                 ;;
-                                                ;; THE SESSION'S OPENING BLOCKS ARE NOT HERE,
-                                                ;; and that is the change of
-                                                ;; `.scratch/session-opening`: they are written
-                                                ;; into the conversation once, at birth, and
-                                                ;; their card is that entry -- a CUSTOM frame
-                                                ;; per run would be the same card drawn again
-                                                ;; on every run, which is what 'the opening
-                                                ;; happened once' has to look like on screen.
-                                                (map-indexed
-                                                 (fn [i message]
-                                                   (ag/injected-frame (str run-id "-ctx" i) message))
-                                                 injected)))]
+                                                ;; `-pre<i>`, AND NOT THE `-ctx<n>` THE KERNEL'S
+                                                ;; OWN SPLICES CARRY. Both are 'context injected
+                                                ;; into this run', and both count from zero, so one
+                                                ;; spelling for the two made a collision -- and a
+                                                ;; frame's id is what the record folds a card
+                                                ;; under (`harness.kernel.frames/apply-frames`,
+                                                ;; then a first-wins dedupe in `replay/append-new`
+                                                ;; and `sessions/append!`), so the collision would
+                                                ;; have DRAWN ONE CARD FOR TWO: the run's start
+                                                ;; (only the edge reaches this) and a mid-run
+                                                ;; splice (only the kernel does) would fold into
+                                                ;; one message, and one of the two injections
+                                                ;; would be missing from a rebuilt conversation.
+                                                ;; `pre` = folded in BEFORE the first call; the
+                                                ;; kernel's keep `ctx`, which is the name of the
+                                                ;; event they answer (`:context/injected`).
+                                                (cond-> (vec (map-indexed
+                                                              (fn [i message]
+                                                                (ag/injected-frame (str run-id "-pre" i) message))
+                                                              injected))
+                                                  ;; AND THE CONVERSATION THIS RUN WROTE
+                                                  ;; PART OF rides with it, for the same
+                                                  ;; reason and on the same run: the page
+                                                  ;; that minted this session holds no
+                                                  ;; window, so the messages the birth
+                                                  ;; put in the conversation can only
+                                                  ;; reach it here
+                                                  ;; (`ag/conversation-snapshot`).
+                                                  snapshot (into [snapshot]))))]
                             (emit frame))
                           (recur)))))
                 ;; THE CHANNEL CLOSED, AND THIS IS WHERE A RUN SAYS WHETHER IT GOT
@@ -2671,9 +2838,49 @@
              :state      state}
       (some? health) (assoc :record health))))
 
+(defn- record-entries
+  "The entries the RECORD holds for STEM, read right now: `{:ok [..] :state \"..\"}`, or
+  `{:error <sentence> :status 404|400}` -- an unknown stem and a log that cannot be read,
+  told apart the way `rebuild` tells them apart.
+
+  TWO READERS, AND WHICH ONE IS A DECISION ABOUT WHO IS WRITING:
+
+    LENIENT when this process is writing it (`lenient?`, i.e. a run of this session is in
+    flight here): the newest line may be half-flushed, and dropping it is the honest answer
+    to 'what has arrived' (`replay/read-records`). Every other line is still strict.
+
+    STRICT when nobody here is writing it: a torn line is then a log that was CUT OFF, and
+    refusing it by name is what sends the client to the `rebuild` door that closes it off
+    (`replay/lines->records`, and `:state` from `record-state` so a page can say which)."
+  [stem lenient?]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))]
+    (if-some [err (:error located)]
+      {:error err :status 404}
+      (try (let [records (if lenient?
+                           (replay/read-records (:ok located))
+                           (vec (replay/lines->records (replay/read-lines (:ok located)))))]
+             {:ok    (vec (replay/entries records))
+              :state (name (:state (replay/record-state records)))})
+           (catch Throwable t {:error (ex-message t) :status 400})))))
+
 (defn- read-entries
   "The entries a WINDOW route answers with: the live session's when this process holds
-  it, else the record's -- read-only, and never a birth.
+  it -- EXCEPT while a run of it is in flight, when the record is further along -- else
+  the record's. Read-only, and never a birth.
+
+  WHILE A RUN IS GOING, THE RECORD IS THE TRUTH AND MEMORY IS BEHIND. `settle!` folds a
+  run's frames at its END, deliberately ('half an answer is not a turn'), so a page that
+  arrives mid-run and read the table would show the question and none of the work -- the
+  bookkeeping of `.scratch/session-opening` ticket 04, and the reason a refresh during a
+  long turn looked like an empty turn. The frames are on the record the moment they are
+  written (`log!` is a per-frame append), so the record answers 'what has arrived' exactly,
+  and the run's own group is already in `replay/entries` (it flushes the unfinished group).
+
+  `:live` STAYS TRUE while it reads the record: this process IS serving the session, and the
+  client uses that flag for 'somebody here can be asked', not for 'this answer came out of
+  memory'. The STATE comes from the same owner as `sofar`'s (`live-state`), so the two doors
+  name the conversation's state with one voice.
 
   {:ok [..]} or {:error <sentence>}: an unknown stem and a log that cannot be read are
   the two failures, and they are told apart the way `rebuild` tells them apart (404 for
@@ -2689,16 +2896,43 @@
     (if-some [split (ambiguous-stem stem)]
       {:error split :status 404}
       (do (sessions/touch! stem)
-          {:ok (:entries e) :live true :state (live-state stem)}))
-    (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
-                       (catch Throwable t {:error (ex-message t)}))]
-      (if-some [err (:error located)]
-        {:error err :status 404}
-        (try (let [records (vec (replay/lines->records (replay/read-lines (:ok located))))]
-               {:ok (vec (replay/entries records))
-                :live false
-                :state (name (:state (replay/record-state records)))})
-             (catch Throwable t {:error (ex-message t) :status 400}))))))
+          (if (running? stem)
+            (let [r (record-entries stem true)]
+              (cond
+                ;; NOTHING ON DISK YET (a session whose first line has not been written, or a
+                ;; table fed by a caller rather than by a run): memory is all there is, and it
+                ;; is the fuller one. A session that HAS a record and is running always reads
+                ;; the record -- that is the point of this branch.
+                (= 404 (:status r)) {:ok (:entries e) :live true :state (live-state stem)}
+                (some? (:error r))   {:error (:error r) :status (or (:status r) 400)}
+                :else                {:ok (:ok r) :live true :state (live-state stem)}))
+            {:ok (:entries e) :live true :state (live-state stem)})))
+    (record-entries stem false)))
+
+(defn- window-page
+  "A LIVE conversation's window: {:entries [..] :baseSeq N :hasMore bool} for the tail page
+  (`since` nil) or for what arrived after `since`.
+
+  THE SAME CHOICE `read-entries` MAKES, AT THE STREAMING DOOR: the record while a run of it
+  is in flight here, else the session's own entries (`sessions/tail` / `sessions/since`).
+  Re-reading on every ring is the point -- the delta has to be computed against the file as
+  it is NOW, which is what makes a reader's own cursor sufficient (ADR 0003 decision 7).
+
+  A RECORD THAT CANNOT BE READ FALLS BACK TO MEMORY. This is a stream that has already
+  begun, and refusing the whole window mid-flight would leave the reader holding half of it
+  with nothing to say about which half; the PAGE route is where a broken record is reported
+  BY NAME (`read-entries`)."
+  [stem since]
+  (let [from-record (when (running? stem) (:ok (record-entries stem true)))]
+    (cond
+      (nil? from-record)
+      (if (nil? since)
+        (sessions/tail stem)
+        {:entries (sessions/since stem since) :baseSeq since :hasMore false})
+
+      (nil? since) (sessions/tail-of from-record)
+
+      :else {:entries (sessions/since-of from-record since) :baseSeq since :hasMore false})))
 
 (defn- number-param
   "A query parameter that is meant to be a record offset, or nil when it is absent.
@@ -2776,11 +3010,7 @@
                           ;; THE OPENING FRAME COMES FIRST, before any wait: a client
                           ;; that has news waiting for it must not wait for a doorbell
                           ;; that has already rung.
-                          (let [page  (if (nil? since)
-                                        (sessions/tail stem)
-                                        {:entries (sessions/since stem since)
-                                         :baseSeq since
-                                         :hasMore false})
+                          (let [page  (window-page stem since)
                                 frame (window-frame stem
                                                     (if (nil? since) "window" "append")
                                                     (live-state stem)
@@ -2799,7 +3029,7 @@
                                                :reason     (or @why "the session is gone")
                                                :generation generation})
                                           true)
-                                (let [delta (sessions/since stem cursor)
+                                (let [delta (:entries (window-page stem cursor))
                                       ;; THE STATE IS READ BEFORE THE FRAME IS BUILT, and
                                       ;; it is worth a frame of its own: a run that settled
                                       ;; without adding an entry (nothing was said) still

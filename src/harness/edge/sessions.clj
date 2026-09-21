@@ -506,6 +506,47 @@
       (ring! (str thread-id) {:kind :entries}))
     entered))
 
+(defn land-at!
+  "The line that carried ONE of GROUP's entries is on disk, at OFFSET. AT is the entry's
+  own name when it has one (the message's `:id`, which is also what `append!` dedupes by)
+  and its POSITION among the group's yet-unlanded entries otherwise -- the order the writer
+  wrote the lines in.
+
+  WHY A SECOND DOOR: `land!` gives a whole group ONE number, which was right while a run's
+  entries arrived on one line (the `input` line). Every entry has its own line now
+  (`.scratch/jsonl-two-kinds` 票 02), so it has its own number: the entry's `:seq` is the
+  offset of the very line that carries it, which is what a window's `beforeSeq` cuts on and
+  what the replay's fold reproduces (`harness.edge.replay/entries`). Idempotent like
+  `land!`: a landed entry is left alone, and an entry that never lands (a run that died)
+  keeps its nil rather than a number that might be wrong."
+  [thread-id group at offset]
+  (let [id (str thread-id)
+        g  (str group)
+        n  (long offset)]
+    (swap! registry update-in [id :entries]
+           (fn [es]
+             (let [es (or es [])
+                   mine? (fn [e] (and (= g (:group e)) (nil? (:seq e))))
+                   which (if (and (string? at) (some #(= at (:id (:message %))) es))
+                           ;; BY NAME WHEN THE ROW CARRIES ONE, which is what a message
+                           ;; row does: the entry it names is the entry that line carried.
+                           (first (keep-indexed (fn [i e]
+                                                  (when (and (mine? e)
+                                                             (= at (:id (:message e))))
+                                                    i))
+                                                es))
+                           ;; OTHERWISE BY POSITION AMONG THE UNLANDED, which is how an
+                           ;; unnamed entry (a derived injection) is matched: a writer logs
+                           ;; a group's rows in the order the entries went in.
+                           (nth (keep-indexed (fn [i e] (when (mine? e) i)) es)
+                                (long (or at 0))
+                                nil))]
+               (if (some? which)
+                 (assoc-in es [which :seq] n)
+                 es))))
+    (ring! id {:kind :entries})
+    nil))
+
 (defn land!
   "The line that carried GROUP's entries is on disk, at OFFSET -- the record offset the
   writer answered with, counted from the start of the thread's file.

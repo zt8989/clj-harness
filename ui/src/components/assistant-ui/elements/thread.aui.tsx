@@ -41,6 +41,10 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 // LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
 import { WindowTop, type WindowTopProps } from "@/components/window-top";
+// LOCAL (ticket 02): the test that tells an opening entry (a `user` message that is
+// only a card) from something a person typed.
+import { InjectionCard } from "@/components/context-card";
+import { isCardOnly, isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
 import { registerViewport } from "@/lib/window-scroll";
 import {
@@ -720,7 +724,58 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
+// LOCAL (ticket 02 of `.scratch/session-opening`): a message that is ONLY an
+// injected-context card is not a bubble.
+//
+// The opening's entries are `role: "user"` -- user messages to the provider, which is
+// what the record says about them -- so without this branch the thread draws the
+// person's AGENTS.md and skills catalog the way it draws anything they typed:
+// right-aligned, in a grey bubble, with an Edit pencil beside them. Nobody typed them.
+// `isCardOnly` is the test; what the row below renders is the SAME card a run streams
+// for its own injections (the assistant path draws it through `dataRendererUI`, and both
+// paths land on the one renderer registered in `components/context-card.tsx`), left
+// where the model read it. The action bar is gone on purpose: there is nothing here to
+// edit or to copy back, because a card is never sent to the server.
+//
+// LOCAL (2026-09-21): AND SOMETIMES THE CARD PART IS NOT THERE. A message the adapter
+// imported from a `MESSAGES_SNAPSHOT` -- which is how a session's birth reaches the page
+// that minted it -- keeps its id and its text and loses the `data` part, because
+// upstream's snapshot conversion has no case for one. So the card is drawn from the
+// message's own text in that case: the server builds the text and the part's value from
+// the one block (`harness.edge.ag_ui/opening-entries`), so the row and its numbers are
+// the same either way. WHICH CASE IT IS is read off the parts, not off the id: a
+// message that carries the part draws it.
+const UserInjectionCard: FC = () => {
+  const cardOnly = useAuiState((s) => isCardOnly(s.message.parts));
+  const text = useAuiState((s) =>
+    isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
+  );
+  return (
+    <MessagePrimitive.Root
+      data-slot="aui_user-injection-root"
+      className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      data-role="user"
+    >
+      {cardOnly ? (
+        <MessagePrimitive.Parts />
+      ) : (
+        <InjectionCard value={{ role: "user", text }} />
+      )}
+    </MessagePrimitive.Root>
+  );
+};
+
 const UserMessage: FC = () => {
+  // LOCAL: the branch above. The selectors answer a BOOLEAN (and a string) on purpose --
+  // `useAuiState` compares a selector's answer by value, so handing back the parts
+  // themselves would re-render this row on every store update.
+  //
+  // TWO WAYS TO BE A CARD: the message IS only a card (`isCardOnly`), or it is one of the
+  // opening entries the server wrote (whose card part this client may never have had).
+  const card = useAuiState(
+    (s) => isCardOnly(s.message.parts) || isOpeningEntryId(s.message.id),
+  );
+  if (card) return <UserInjectionCard />;
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"

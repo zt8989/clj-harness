@@ -17,9 +17,15 @@
 //
 // THE FOURTH IS THE CONVERSATION'S OPENING (`.scratch/session-opening`), where a card
 // and the text the model read sit in the SAME message: it pins that the card wins on
-// screen, and that the copy the client sends back is the text under the entry's stable
-// id -- which is what lets the server drop the repeat instead of writing the opening
-// into the conversation a second time.
+// screen, and -- because the entry's id is stable -- that a copy still carrying the text
+// crosses the wire under that id, which is what lets the server drop the repeat instead
+// of writing the opening into the conversation a second time.
+//
+// AND THE FIFTH IS THE OTHER HALF OF THE SAME FEATURE, added when the opening started
+// arriving as `role: "user"` entries: the SHAPE the thread draws them in. Before it, the
+// person's AGENTS.md was drawn as a message they had typed -- right-aligned, in a bubble,
+// with an Edit pencil. `isCardOnly` is the test that stops that, and it is pure, so it is
+// pinned over literals here like everything else in this file.
 import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
@@ -27,7 +33,10 @@ import { type Case, type Suite } from "../e2e";
 import {
   INJECTION_PART,
   injectionView,
+  isCardOnly,
+  isOpeningEntryId,
   keepInjectionCards,
+  textOfParts,
 } from "../../src/lib/injections";
 
 /// A rebuilt message list as the server's fold writes one: the seed's user message,
@@ -191,10 +200,17 @@ const cases: readonly Case[] = [
       // case for the part), so without this the rebuilt message would draw the block
       // twice -- as prose and as the card. `keepInjectionCards` replaces the whole
       // content with the card, so the block is read once, in the shape it arrived in.
+      //
+      // THE ROLE IS `user` AND THAT IS THE POINT (ticket 02): these entries are user
+      // messages to the provider -- `harness.edge.ag_ui/opening-entries` keeps the role
+      // the instruction blocks arrived with -- so what a rebuild hands the thread is a
+      // USER message holding a card. The literal here said `assistant` until this
+      // ticket, which is why a machine gate stayed green while the app drew the opening
+      // as something the person had typed.
       const opening = [
         {
           id: "session-opening-0",
-          role: "assistant" as const,
+          role: "user" as const,
           content: [
             {
               type: "data" as const,
@@ -208,23 +224,25 @@ const cases: readonly Case[] = [
       const converted = [
         {
           id: "session-opening-0",
-          role: "assistant" as const,
+          role: "user" as const,
           content: "<instructions>STANDING RULE</instructions>",
         },
       ];
-      expect(keepInjectionCards(opening, converted)[0]?.content).toEqual([
+      const kept = keepInjectionCards(opening, converted);
+      expect(kept[0]?.content).toEqual([
         {
           type: "data",
           name: INJECTION_PART,
           data: { role: "user", text: "<instructions>STANDING RULE</instructions>" },
         },
       ]);
+      // AND IT IS NOW A CARD AND NOTHING ELSE, which is what keeps the bubble away.
+      expect(isCardOnly(kept[0]?.content as readonly unknown[])).toBe(true);
 
-      // AND WHAT CROSSES THE WIRE IS THE TEXT, which is the other half of the same
-      // fact: the client holds the opening like any other message of the conversation
-      // and sends its own copy of it, so the entry needs a STABLE id -- the server
-      // recognises the repeat by id and drops it (`harness.edge.sessions/append!`), and
-      // the opening is read once even though every run carries it.
+      // AND A COPY THAT STILL CARRIES THE TEXT CROSSES THE WIRE AS THE TEXT -- the other
+      // half of the same fact: the entry's id is STABLE, so the server recognises the
+      // repeat and drops it (`harness.edge.sessions/append!`). Note the two spellings
+      // this pins: the card never goes back, and the words do.
       const sent = toAgUiMessages([
         {
           id: "session-opening-0",
@@ -241,6 +259,95 @@ const cases: readonly Case[] = [
       ] as never);
       expect(JSON.stringify(sent)).not.toContain(INJECTION_PART);
       expect(JSON.stringify(sent)).toContain("STANDING RULE");
+
+      // WHAT THE THREAD ACTUALLY HOLDS IS THE CARD ALONE (the `kept` message above), and
+      // an assistant message of that shape is not sent at all -- but a USER one IS, as an
+      // EMPTY message under the entry's id. That is the shape a real client sends, and it
+      // is the sharpest statement of why the id is stable: what crosses is a husk, and the
+      // session recognises it as a message it already holds and drops it
+      // (`harness.edge.sessions/append!`). Without the id this would be a brand-new empty
+      // turn entering the conversation on every run.
+      expect(toAgUiMessages([kept[0]] as never)).toEqual([
+        { id: "session-opening-0", role: "user", content: "" },
+      ]);
+    },
+  },
+  {
+    name: "an-opening-the-snapshot-brought-is-still-a-card",
+    run: async () => {
+      // THE SECOND WAY AN OPENING REACHES A PAGE (2026-09-21). The run that BIRTHS a
+      // conversation hands the messages it wrote to the page that minted it, as an AG-UI
+      // `MESSAGES_SNAPSHOT` (`harness.edge.ag_ui/conversation-snapshot`) -- and upstream's
+      // snapshot conversion keeps a user message's id and TEXT and drops its `data` part.
+      // So the thread holds a user message of words, under the entry's own id, and
+      // drawing it as a bubble would be the bug ticket 02 fixed: the person's AGENTS.md
+      // shown as something they typed.
+      expect(isOpeningEntryId("session-opening-0")).toBe(true);
+      expect(isOpeningEntryId("session-opening-12")).toBe(true);
+      // NOT AN ID THIS MODULE OWNS: a person's message, a run's own derived card
+      // (`<run-id>-ctx1`), the birth context, and anything that merely starts with the
+      // prefix -- a suffix that is not a number is some other id that borrowed it.
+      expect(isOpeningEntryId("u1")).toBe(false);
+      expect(isOpeningEntryId("session-context")).toBe(false);
+      expect(isOpeningEntryId("r1-ctx1")).toBe(false);
+      expect(isOpeningEntryId("session-opening-x")).toBe(false);
+      expect(isOpeningEntryId(undefined)).toBe(false);
+
+      // WHAT THE CARD SAYS IS THE MESSAGE'S OWN TEXT, so the row and its numbers are the
+      // same ones the `data` part carries on the other path (`opening-entries` builds
+      // both from the one block).
+      const parts = [
+        { type: "text", text: "<instructions>\nSTANDING RULE\n</instructions>" },
+      ];
+      expect(injectionView({ role: "user", text: textOfParts(parts) })).toEqual({
+        title: "instructions",
+        preview: "<instructions>",
+        bytes: 44,
+      });
+
+      // SEVERAL TEXT PARTS ARE ONE MESSAGE, in order, one line apart -- the same join the
+      // card's value uses on the server (`injection-value`).
+      expect(textOfParts([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a\nb");
+
+      // AND NOTHING ELSE IS TEXT: an attachment or a data part beside it is not words,
+      // and a message with no text at all is a message this rule has nothing to draw.
+      expect(textOfParts([{ type: "file", name: "f" }])).toBe("");
+      expect(textOfParts([])).toBe("");
+      expect(injectionView({ role: "user", text: textOfParts([]) })).toBeNull();
+    },
+  },
+  {
+    name: "a-card-only-message-is-not-a-bubble",
+    run: async () => {
+      // THE SHAPE THE THREAD DRAWS AN OPENING ENTRY IN (ticket 02). The test is on the
+      // PARTS, not on the role, because the role cannot tell the two apart: an opening
+      // entry is `user`, exactly like the words a person typed.
+      const card = {
+        type: "data",
+        name: INJECTION_PART,
+        data: { role: "user", text: "<instructions>STANDING RULE</instructions>" },
+      };
+
+      expect(isCardOnly([card])).toBe(true);
+
+      // WORDS BESIDE THE CARD ARE WORDS: somebody's message that happens to carry a card
+      // still belongs in a bubble, and `keepInjectionCards` is what turns the opening
+      // into the card-only shape above.
+      expect(isCardOnly([{ type: "text", text: "你好" }, card])).toBe(false);
+      expect(isCardOnly([{ type: "text", text: "你好" }])).toBe(false);
+
+      // AN EMPTY MESSAGE IS NOT A CARD EITHER: the rebuild hands back an empty assistant
+      // message for a card it dropped, and a row drawn for that would claim an injection
+      // nobody can check.
+      expect(isCardOnly([])).toBe(false);
+
+      // AND SOMEONE ELSE'S `data` PART IS NOT OURS: this module owns one name.
+      expect(isCardOnly([{ type: "data", name: "something-else", data: {} }])).toBe(false);
+
+      // A FILE OR AN IMAGE IS THE SAME KIND OF PART AND A DIFFERENT KIND OF THING: both
+      // would be swallowed by a test that only asked "is this a data part".
+      expect(isCardOnly([{ type: "file", name: INJECTION_PART }])).toBe(false);
+      expect(isCardOnly([{ type: "image", name: INJECTION_PART }])).toBe(false);
     },
   },
 ];

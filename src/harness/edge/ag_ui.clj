@@ -91,9 +91,22 @@
 (defn- injection-value
   "One injected message -> the value both readers of `injected-part-name` take: what the
   card says (the role it arrived with and its text). Built here rather than at each
-  emitter because the UI's parser reads this exact shape by name."
+  emitter because the UI's parser reads this exact shape by name.
+
+  TWO SPELLINGS COME THROUGH HERE, and the second one is why this is not one line. A
+  message a run was handed is provider-shaped -- `content` is the string the model read.
+  A RECORD ENTRY THAT ALREADY CARRIES ITS OWN CARD (`.scratch/session-opening`) is a
+  part vector, and `(str content)` on one of those would put the vector's printed form
+  into the card. So a message that carries a card part is read OFF that card: the entry
+  is where the bytes were first said, and any card built from it -- a frame, or the
+  entry's own part -- is the same bytes."
   [message]
-  {:role (:role message) :text (str (:content message))})
+  (let [c (:content message)
+        card (when (sequential? c)
+               (some #(when (= injected-part-name (:name %)) %) c))]
+    (if-some [found card]
+      (:data found)
+      {:role (:role message) :text (str c)})))
 
 (defn injected-frame
   "The CUSTOM frame for one message a run was handed without the client sending it:
@@ -101,10 +114,23 @@
 
   ONE PLACE BUILDS THIS SHAPE, because two do emit it: the kernel's pre-LLM step
   (through `step` below, for whatever it splices) and the edge itself, for the
-  injections it folded in before handing the history over (which is why the edge is
-  the one that knows they happened). The session's OPENING blocks are no longer among
-  them -- they enter the conversation once at birth (`opening-entries`) and their card
-  is written by that entry, not by a frame.
+  injections it folded in before handing the history over (which is why the edge is the
+  one that knows they happened). Every frame this builds is named by the run that
+  emitted it -- and THE TWO EMITTERS MUST NOT SHARE A SPELLING, because both count from
+  zero and a frame's id is what the record folds a card under (`apply-frames` in
+  `harness.kernel.frames`, then a first-wins dedupe in `replay/append-new` and
+  `sessions/append!`): a collision would draw ONE card for TWO injections. So the
+  kernel's splices are `<run-id>-ctx<n>` -- `ctx` for the `:context/injected` event they
+  answer -- and the edge's own are `<run-id>-pre<i>`, the injections a run STARTED
+  with.
+
+  AND THE BIRTH'S OWN OPENING IS *NOT* ONE OF THESE (2026-09-21, the owner's call). It
+  used to be a frame per block, under the ENTRY's id (`session-opening-<i>`), so that
+  the page that MINTED the session could see it at all -- and it could not work: a
+  CUSTOM frame is a PART, the adapter hangs it on the message being streamed, and the
+  frame's own `messageId` is dropped on the way in, so the card landed under the answer
+  instead of in the person's column. The birth now hands the page the CONVERSATION
+  (`conversation-snapshot`), which carries the messages themselves, ids and all.
 
   WHAT MAKES THIS FRAME SPECIAL, and the whole feature rests on it: the client draws
   it and NEVER SENDS IT BACK. `@assistant-ui`'s adapter turns a CUSTOM event into a
@@ -352,9 +378,44 @@
     ;; which a provider reads as a null message body.
     (nil? (:content m)) (assoc :content "")))
 
+(def ^:private ag-ui-only-roles
+  "The roles AG-UI has and a provider does not."
+  #{"reasoning" "activity"})
+
+(def ^:private ag-ui-only-parts
+  "The content part types only AG-UI spells: the provider's dialect is `image_url` where
+  AG-UI says `image`, and the rest of the pair (`text`) the two happen to agree on."
+  #{"image" "data" "audio" "file"})
+
+(defn- ag-ui-only-part? [p]
+  (and (map? p) (contains? ag-ui-only-parts (:type p))))
+
+(defn- provider-shaped?
+  "Is M ALREADY the message a provider reads?
+
+  THE FOLD HAS TO TELL, because it runs over BOTH halves of a record: since
+  `.scratch/jsonl-two-kinds` 票 02 an ENTRY's row holds the message the provider was handed
+  (`provider-messages` is what wrote it), while a message DERIVED FROM A RUN'S FRAMES is
+  AG-UI's own spelling -- and a rebuild feeds the two through one fold
+  (`harness.edge.replay/history`). The tell is exactly where the dialects disagree:
+  AG-UI's camelCase tool fields and its `image`/`data` parts, and the roles AG-UI keeps for
+  itself. A message with none of those is the same message in both -- a plain string body is
+  byte for byte what a provider gets -- so translating it or not comes to the same thing."
+  [m]
+  (and (not (contains? ag-ui-only-roles (:role m)))
+       (not-any? #(contains? m %) ag-ui-only)
+       (not (contains? m :toolCalls))
+       (not (contains? m :toolCallId))
+       (not-any? ag-ui-only-part? (when (vector? (:content m)) (:content m)))))
+
 (defn- absorbed
   "Drop activity, fold reasoning into the assistant message it precedes, and rebuild
   each message in the provider's shape -- content parts translated on the way.
+
+  A MESSAGE THAT IS ALREADY IN THAT SHAPE IS PASSED THROUGH (`provider-shaped?`): the fold
+  is idempotent, which is what lets one reader assemble a rebuild out of a record that speaks
+  both dialects at once -- the ENTRY rows, already the provider's, and the messages folded
+  out of a run's frames, which are AG-UI's own spelling.
 
   Reasoning that trails the whole list would be dropped, and that cannot happen: the
   outbound side always closes a turn with a text message, even an empty one. That
@@ -368,6 +429,13 @@
 
                (= "activity" (:role m))
                acc
+
+               (provider-shaped? m)
+               {:pending (if (= "assistant" (:role m)) nil pending)
+                :out (conj (:out acc)
+                           (if (and (seq pending) (nil? (:reasoning_content m)))
+                             (assoc m :reasoning_content pending)
+                             m))}
 
                (= "assistant" (:role m))
                {:pending nil :out (conj (:out acc) (provider-assistant m pending))}
@@ -470,6 +538,11 @@
   screen needs no new renderer -- the two readings the table already keeps for a
   conversation.
 
+  AND THE ENTRY IS WHAT GOES ON THE WIRE, ONCE, under this id: the run that births the
+  conversation hands the page the whole conversation as messages
+  (`conversation-snapshot`), and a reader that has the id draws the card from the text
+  even when the part itself did not survive the trip (`ui/src/lib/injections.ts`).
+
   THE ORDER IS `cap.preamble/messages`'s DECISION, not this function's: it numbers what
   it is handed and never reorders (instruction files first, the skills catalog last)."
   [blocks]
@@ -481,6 +554,77 @@
                        {:type "text" :text text}]}))
         (range)
         blocks))
+
+(defn card-entry?
+  "Does MESSAGE carry one of the cards this namespace names -- the part a person sees
+  without the model ever being handed it?
+
+  STRUCTURAL, so it answers for both spellings: the session entries a birth writes
+  (`opening-entries`, a part vector) and the messages a run was handed (which never
+  carry one -- `provider-part` refuses a `data` part by name)."
+  [message]
+  (let [c (:content message)]
+    (boolean (and (sequential? c) (some #(= injected-part-name (:name %)) c)))))
+
+(defn client-never-sent
+  "The entries of ADDED whose ids the client did not send in SENT -- the messages this
+  run wrote into the conversation ON THE CLIENT'S BEHALF: the birth context and the
+  opening blocks, at the birth. Empty on every other run, because an action adds what
+  the client sent and nothing else.
+
+  THE ID IS THE IDENTITY, the same rule `harness.edge.sessions/append!` applies: what
+  the client sent is recognised by id, not by position, so a retried action is an
+  action that added what the conversation already held."
+  [added sent]
+  (let [mine (into #{} (keep :id) sent)]
+    (into [] (remove #(contains? mine (:id %))) added)))
+
+(defn- wire-message
+  "One entry -> the message a `MESSAGES_SNAPSHOT` may carry.
+
+  AG-UI VALIDATES EVERY FRAME IT PARSES (`@ag-ui/client` runs its own schema over each
+  event of the run), and its message schema has `content` as TEXT -- or as an input
+  block this home does not use. This home's entries carry PARTS: a card for the screen,
+  the text the model reads, an image the person attached. So the projection keeps the
+  id, the role and the TEXT, and drops the rest.
+
+  WHY DROPPING THE CARD PART IS NOT LOSING IT: the reader draws the card from the id and
+  the text (`ui/src/lib/injections.ts`, `isOpeningEntryId`), and the text is the same
+  bytes the card's value carries -- the server builds both from the one block
+  (`opening-entries`). A message the CLIENT sent needs no projection at all: it is
+  already the shape the client's own conversion produced, which is what the schema it is
+  about to be parsed by accepts."
+  [{:keys [content] :as message}]
+  (assoc message
+         :content (if (sequential? content)
+                    (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) content))
+                    (str content))))
+
+(defn conversation-snapshot
+  "ENTRIES -> the AG-UI `MESSAGES_SNAPSHOT` frame that puts them on the client.
+
+  WHY A MESSAGE LIST AND NOT THE CARD FRAMES THIS REPLACES (2026-09-21, the owner's
+  call). A `CUSTOM` frame is a PART: the adapter hangs it on the message being
+  streamed, and the frame's own `messageId` is dropped on the way in (upstream's parser
+  does not read the field), so a card the client never held a message for lands under
+  the answer instead of in the column the record puts it in. `MESSAGES_SNAPSHOT` is the
+  AG-UI frame for exactly this: the conversation, as messages, ids included -- which is
+  the copy the window and `sofar` already answer with, on the one run that has no window
+  to answer through (the run that BIRTHS a conversation, whose opening and context the
+  client never sent).
+
+  THE MESSAGES ARE PROJECTED (`wire-message`): what the client sent is already in the
+  wire's own shape, and what the birth wrote is not -- and the wire's schema is strict
+  enough to refuse a part vector outright (measured 2026-09-21: a `data` part in a user
+  message fails the client's parser and the run dies with a Zod error on screen).
+
+  WHAT IT COSTS: one frame carrying the conversation, on that run only. The record
+  keeps it like any other frame it sent (`jsonl-two-kinds`: a frame is a row), so a
+  rebuild reproduces it and a reader that has never heard of it ignores it
+  (`harness.kernel.frames/apply-frames` has no case for it -- the conversation is
+  already there, in the entries)."
+  [entries]
+  {:type "MESSAGES_SNAPSHOT" :messages (mapv wire-message entries)})
 
 ;; ------------------------------------------------------------ input modality
 ;;
@@ -608,6 +752,53 @@
     []
     (vec (sort (remove (set declared) (carried-input-types messages))))))
 
+(defn provider-messages
+  "MESSAGES -> what a provider is handed for them: the cards gone, every part translated,
+  reasoning folded into the assistant message it precedes.
+
+  PUBLIC BECAUSE THE RECORD NEEDS EXACTLY THIS VIEW. A `message` row IS an element of the
+  messages array the model was handed (owner, 2026-09-21), so a row's payload is the
+  message as the PROVIDER reads it -- an AG-UI `source` wrapper or a `data` card under a
+  `message` row would be a record lying about the one thing it exists to keep
+  (`harness.edge.http/run-agent!` writes each entry's row through here). `absorbed` is the
+  same fold `inbound` uses, which is what keeps the live run and the record from drifting."
+  [messages]
+  (absorbed messages))
+
+(defn provider-array
+  "MESSAGES THAT ARE ALREADY IN THE PROVIDER'S SHAPE + PROMPT -> the array a provider is
+  handed.
+
+  `inbound` IS FOR AG-UI MESSAGES: it translates the parts and folds the reasoning away.
+  THIS is for the ones that are already what a provider reads -- which is what the RECORD
+  holds, because since `.scratch/jsonl-two-kinds` 票 02 an entry's row carries the message
+  the provider was given (`provider-messages` is what wrote it). Feeding those back through
+  `absorbed` a second time would translate an `image_url` that has no AG-UI spelling left,
+  which `provider-part` refuses -- a rebuild that refuses the very record it is reading.
+
+  THE SYSTEM MESSAGE IS STILL ASSEMBLED HERE, and only here: the prompt REPLACES a leading
+  system message or is prepended, which is the one rule `inbound` and a rebuild both need --
+  the prefix the provider's cache keys on. Written once so a live run and a rebuild cannot
+  disagree about it."
+  [messages prompt]
+  (let [msgs (vec messages)
+        sys  {:role "system" :content prompt}]
+    (if (= "system" (get-in msgs [0 :role]))
+      (assoc msgs 0 sys)
+      (into [sys] msgs))))
+
+(defn strip-identity
+  "A CONVERSATION's messages with the identity the RECORD keeps on the envelope removed.
+
+  A rebuild reads messages a fold built (`harness.edge.replay/entries`), and that fold stamps
+  every message with the id a client draws it by -- an entry's own name for the row it came
+  from, a synthesized one for what a run's frames produced. A provider array has no such
+  field, and `provider-shaped?` reads `:id` as 'this is still AG-UI's message', which is
+  exactly what stops a live run's client message from being translated twice. So the ids come
+  off HERE, at the one place that knows they came from the fold rather than from a client."
+  [messages]
+  (mapv #(apply dissoc % ag-ui-only) messages))
+
 (defn inbound
   "A conversation's AG-UI messages -> the provider's message vector.
   PROMPT is the FROZEN system prompt text. A leading system message is replaced
@@ -635,10 +826,6 @@
   the conversation has a beginning yet -- the rebuild path and the protocol tests pass
   what the record holds."
   [messages prompt context]
-  (let [msgs (absorbed (cond-> (vec messages)
-                         (seq context) (conj (context-entry context))))
-        sys  {:role "system" :content prompt}
-        msgs (if (= "system" (get-in msgs [0 :role]))
-               (assoc msgs 0 sys)
-               (into [sys] msgs))]
-    msgs))
+  (provider-array (absorbed (cond-> (vec messages)
+                              (seq context) (conj (context-entry context))))
+                  prompt))

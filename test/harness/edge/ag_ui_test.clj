@@ -343,12 +343,14 @@
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))
 
-(deftest the-opening-enters-the-conversation-once-in-front-of-the-question
-  ;; `.scratch/session-opening`. The blocks used to arrive as an argument and be spliced
-  ;; in AFTER the conversation; they are now entries the conversation is born with
-  ;; (`opening-entries`), so every run after the birth reads them in front of the
-  ;; question -- and nothing is appended behind the conversation for a run's own answer
-  ;; to land after.
+(deftest the-opening-enters-the-conversation-once-behind-the-question
+  ;; `.scratch/session-opening`, tickets 01 and 03. The blocks used to arrive as an
+  ;; argument and be spliced in AFTER the conversation on every run; they are now entries
+  ;; the conversation is born with (`opening-entries`), written ONCE -- and the caller
+  ;; writes them BEHIND the question that caused them (`harness.edge.http/run-agent!`),
+  ;; which is the same 'system, what the person asked, the material for it' order
+  ;; `.scratch/context-frames` decision 7 states. This test owns the ENTRY's shape and the
+  ;; provider reading; the place the birth puts it is the edge test's.
   (let [blocks  [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
                  {:role "user" :content "<skills>\n- t: t\n</skills>"}]
         entries (ag/opening-entries blocks)]
@@ -375,21 +377,61 @@
                (-> view first :content first :text)))
         (is (not-any? #(some (fn [p] (= "data" (:type p))) (:content %)) view)
             "a data part must never reach a provider -- provider-part refuses one by name")))
-    (testing "so the provider vector reads: system, the opening, then the conversation"
-      (let [sent (ag/inbound (into (sessions/model-view entries)
-                                   [{:id "u1" :role "user" :content "hi"}])
+    (testing "so the provider vector reads: system, the question, then the opening"
+      (let [sent (ag/inbound (into (vec [{:id "u1" :role "user" :content "hi"}])
+                                   (sessions/model-view entries))
                              "S" nil)]
         (is (= ["system" "user" "user" "user"] (mapv :role sent)))
         (is (= "S" (:content (first sent))))
+        (is (= "hi" (:content (second sent)))
+            "the client's own turn comes first -- it is what the opening is FOR")
         (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
-               (-> sent second :content first :text))
-            "the standing rules stand in front of the question")
-        (is (= "hi" (:content (nth sent 3)))
-            "and the client's own turn comes after the whole opening -- nothing of ours
-             is spliced behind it"))
+               (-> sent (nth 2) :content first :text))
+            "and the standing rules stand behind it, where the birth wrote them"))
       (let [sent (ag/inbound (sessions/model-view entries) "S" nil)]
         (is (= 1 (count (filter #(= "system" (:role %)) sent)))
             "and the frozen system prompt is still the only system message")))))
+
+(deftest what-a-birth-writes-for-the-client-rides-to-it-as-the-conversation
+  ;; 2026-09-21, the owner's call: the page that MINTS a session holds no window and
+  ;; follows no feed, so the run that wrote the opening is the only wire its messages can
+  ;; arrive on. IT CARRIES THE CONVERSATION, not a card frame per entry: a `CUSTOM` frame
+  ;; is a PART, and the adapter hangs it on the message being streamed -- the frame's own
+  ;; `messageId` is dropped on the way in (`run-aggregator`'s CUSTOM branch, and the
+  ;; parser above it does not read the field either), so a card whose message the client
+  ;; never held lands under the answer instead of in the column the record puts it in.
+  ;; A MESSAGE LIST lands where the record has it. See `ag/conversation-snapshot`.
+  (let [question {:id "u1" :role "user" :content "看看这个项目"}
+        context  {:id "session-context" :role "user" :content "<project>bound: /p</project>"}
+        opening  (ag/opening-entries
+                  [{:role "user" :content "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"}
+                   {:role "user" :content "<skills>\n- t: t\n</skills>"}])
+        added    (into [question context] opening)]
+    (testing "the entries the client did not send are the ones it has to be told about"
+      (is (= ["session-context" "session-opening-0" "session-opening-1"]
+             (mapv :id (ag/client-never-sent added [question])))
+          "the birth context and the opening blocks -- in the conversation's order")
+      (is (= [] (ag/client-never-sent [question] [question]))
+          "every later run of the same session: the opening is history by then")
+      (is (empty? (ag/client-never-sent [] [question]))
+          "a run that added nothing of its own has nothing to hand over"))
+    (testing "and the snapshot is a message list, PROJECTED into the wire's own shape"
+      ;; AG-UI validates every frame it parses, and its message schema wants TEXT: a part
+      ;; vector is refused outright (measured: a `data` part in a user message kills the
+      ;; run with a Zod error on screen), so the card part does not travel here -- the
+      ;; reader draws the card from the id and the text instead.
+      (let [snapshot (ag/conversation-snapshot added)]
+        (is (= "MESSAGES_SNAPSHOT" (:type snapshot)))
+        (is (= ["u1" "session-context" "session-opening-0" "session-opening-1"]
+               (mapv :id (:messages snapshot)))
+            "the whole conversation, the client's own message included")
+        (is (every? string? (map :content (:messages snapshot)))
+            "every content is a string -- what the wire's schema accepts")
+        (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
+               (:content (nth (:messages snapshot) 2)))
+            "the entry's text, which is the whole of what a snapshot can carry")
+        (is (= "看看这个项目" (:content (first (:messages snapshot))))
+            "and the client's own message passes through as it came")))))
 
 (deftest a-field-the-client-carried-itself-is-not-dropped
   ;; The whitelist rebuild used to keep only the FOLDED reasoning (a preceding

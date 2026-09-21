@@ -8,14 +8,12 @@
   ▼
 harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 status+headers）
   │
-  ├─ log!  "input"        收到的 RunAgentInput 原样
-  │
   ├─ providers/current-provider    三档解析（config → 会话 → 本次请求），挂上 api-key
   ├─ system-prompt/assemble        组装 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本
   │                                （内建两条：工程目录 / 这台机器）
   ├─ preamble/gather               开场块：指令文件（每个折叠一次 InstructionsLoaded）+ 技能清单
   ├─ ag_ui/inbound                 **这场会话的历史（服务端内存）+ 这次动作带的 `append`** → provider 形状；
-  │                                开场块（指令文件 → 技能清单 → 技能正文）拼在**这场对话之后**：
+  │                                出生那一轮，开场块（指令文件 → 技能清单）已经写在 `append` 里：
   │                                提问在前、材料紧跟其后（见 skills-and-instructions）
   ├─ resume-decisions              客户端的 resume → 内核要重放的决定（未知 interrupt ⇒ 直接失败）
   │
@@ -24,7 +22,8 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
   │   ├─ log! "provider/init"      首次 run 落一行
   │   ├─ log! "approval/decided"   本次 resume 带的决定
   │   ├─ log! "provider/changed"   上一轮工具改过的 provider 档（outbox 排空）
-  │   └─ log! "message" × n        组装的 system 全文（冻结开头 + 各 hook 追加）+ 每条入站消息 + 开场块，逐字
+  │   └─ log! "message" × n        每一条进数组的消息各一行：场的 prompt、这次动作带来的每个条目
+  │                                （信封 `source` 说谁放的，`id` 是它的身份），payload 是厂商读到的那一份
   │
   ├─ loop/run-chan                 内核跑起来了；下面全是「事件 → 帧 + 审计行」
   │   │
@@ -107,7 +106,7 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录 |
 | 配置 | **文件**（每轮现读） | 手编、改了不重启 |
 | 开场块（指令文件、技能清单） | **不存**：每轮现读现拼 | 配置与技能根是真相源，缓存一份就会「改了没生效」 |
-| system 消息里 hook 追加的那部分 | **不存**：每次组装现算 | 同上，而且更强：工具集合、绑定、provider 都会在会话中途变，冻结一份就是一句会过期的话 |
+| system 消息（全文） | **不存整份**：每轮现算，但**记一份**（2026-09-21）：每场会话第一条 `message` 行（信封 `source: "system-prompt"`）带**一次全文**、每轮带**那一轮的 hash** | 同上，而且更强：工具集合、绑定、provider 都会在会话中途变，冻结一份就是一句会过期的话。所以真相仍是现算的组装，记录里那一份是**那次 run 到底读到什么**的见证——hash 每轮一条，正是为了「这轮和上轮是不是同一句」能对得出来（prefill / prompt cache 靠的就是那条前缀稳定） |
 | 技能正文 | **不存**：每轮从会话自身重算 | 注入是**每轮现算的派生文本**，不是那场对话说过的话（见 [skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)） |
 | **上下文占用**（这次调用的 prompt 占窗口多少，以及三样各占多少） | **不存**：每次从记录折 | 与下一行同一条：分子是厂商报的数、分母是那次调用自己行上的声明，都不是这个进程能攒下来的东西（见 [client](client.md#上下文占用model-左边那颗圈)） |
 | **会话统计**（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度） | **不存**：每次从记录折 | 它是**记录的读法**，不是状态——记一份就是同一件事实的第二份，两份必然会漂。客户端也不算它：缓存命中它无从知道，用量估出来就是编（见 [edge](edge.md#管理边路由表)） |

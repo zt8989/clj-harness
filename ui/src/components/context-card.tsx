@@ -20,6 +20,8 @@
 // THE CARD IS A VIEW, NOT A MESSAGE. Upstream's outgoing conversion sends text,
 // reasoning and tool calls; a `data` part is not among them, so nothing here reaches
 // the model -- the client shows what the server injected without ever holding it.
+import { type FC } from "react";
+
 import type { DataMessagePartComponent } from "@assistant-ui/react";
 import { makeAssistantDataUI } from "@assistant-ui/react";
 import { ChevronsUpDownIcon } from "lucide-react";
@@ -34,12 +36,18 @@ import { formatBytes } from "@/lib/format";
 import { INJECTION_PART, injectionView, type InjectionValue } from "@/lib/injections";
 
 /// The card itself: one row that opens onto the bytes the model was handed.
-const InjectionCard: DataMessagePartComponent<InjectionValue> = ({ data }) => {
+///
+/// A VALUE RATHER THAN A PART, because two readers draw it now: the `data` part a frame
+/// or an entry carries, and -- for a message the adapter imported from a
+/// `MESSAGES_SNAPSHOT`, which keeps text and ids and drops the part -- the message's own
+/// text as the card's value. Both are the same `{role, text}` the server builds.
+export const InjectionCard: FC<{ value: InjectionValue | undefined }> = ({ value }) => {
   const { t } = useTranslation("thread");
-  const view = injectionView(data);
+  const view = injectionView(value);
   // A frame with nothing to say draws nothing: an empty card would claim an injection
   // nobody can check. See `injectionView`'s own note.
   if (view === null) return null;
+  const text = typeof value?.text === "string" ? value.text : "";
   return (
     <ToolFallbackRoot>
       <CollapsibleTrigger
@@ -76,12 +84,18 @@ const InjectionCard: DataMessagePartComponent<InjectionValue> = ({ data }) => {
           data-slot="injection-content"
           className="aui-injection-content text-foreground/90 max-h-96 overflow-auto text-xs leading-relaxed break-words whitespace-pre-wrap"
         >
-          {data.text}
+          {text}
         </pre>
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );
 };
+
+/// THE PART'S RENDERER, which is what the registration below draws: `data` is the part's
+/// value, and the card above is the whole of it.
+const InjectionCardPart: DataMessagePartComponent<InjectionValue> = ({ data }) => (
+  <InjectionCard value={data} />
+);
 
 /// REGISTERED BY BEING MOUNTED, not by a table somewhere: `makeAssistantDataUI`
 /// answers a component whose rendering is the registration (see its own d.ts), which
@@ -89,5 +103,5 @@ const InjectionCard: DataMessagePartComponent<InjectionValue> = ({ data }) => {
 /// else has to know this card exists.
 export const ContextCards = makeAssistantDataUI({
   name: INJECTION_PART,
-  render: InjectionCard,
+  render: InjectionCardPart,
 });

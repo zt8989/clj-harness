@@ -79,6 +79,54 @@
             line))
         (str/split-lines content)))
 
+(defn- row-json
+  "A record row AS THE WRITER EMITS IT since `.scratch/jsonl-two-kinds`: the file has two
+  kinds of row -- `message` (what a person said or an LLM returned) and `event` (every other
+  fact) -- with `ts`/`runId` OUTSIDE the payload.
+
+  THE FIXTURES HERE SPELL A ROW THE WAY THE READER READS IT -- `{:kind .. :payload ..}` -- and
+  this is the one place that knows the FILE writes it otherwise, so a case can lay down a
+  record the writer would recognize without re-stating an envelope every time."
+  [{:keys [kind payload source id hash] :as m}]
+  (json/write-str (cond-> (merge (select-keys m [:ts :runId])
+                                 (cond
+                                   (= "message" kind) {:type "message" :payload payload}
+                                   (= "event" kind)   {:type "event" :payload payload}
+                                   :else              {:type "event"
+                                                       :payload {:type "CUSTOM" :name kind
+                                                                 :value payload}}))
+                    source (assoc :source source)
+                    id     (assoc :id id)
+                    hash   (assoc :hash hash))))
+
+(defn- action-rows
+  "ONE ACTION'S OWN ROWS, as the writer lays them down since `.scratch/jsonl-two-kinds` 票 02:
+  a `message` row per entry the action brought -- the entry's own name on the envelope, the
+  payload the provider reads. The prompt row is the RUN's and a fixture that wants one says so
+  (a run's own copy: kind `message`, source `system-prompt`, its bytes' `hash`); a fixture that
+  only has to be readable as 'this run was open' needs neither."
+  [ts run-id msgs]
+  (mapv (fn [m]
+          (row-json (cond-> {:ts ts :runId run-id :kind "message"
+                             :source (if (:id m) "client" "injection")
+                             :payload (dissoc m :id)}
+                      (:id m) (assoc :id (:id m)))))
+        msgs))
+
+(defn- client-rows
+  "The rows an action brought into the conversation: the `message` rows the CLIENT sent. 票 02
+  took the `input` row away, so 'the action's line' is the row that carries its entry."
+  [records]
+  (filter #(and (= "message" (replay/kind %)) (= "client" (:source %))) records))
+
+(def ^:private test-probe
+  "A NAME FOR A LINE THAT IS ONLY A LINE, in the cases about where a record is written and
+  how it is moved (`log!` routing, the carry-back, the overlap refusal). Those cases never fold
+  the line -- they count it and look at its payload -- so it carries no meaning; spelling it
+  after a fact the harness really emits would invite a reader to think it does, and spelling it
+  `input` would name the row `.scratch/jsonl-two-kinds` 票 02 deleted."
+  "test/probe")
+
 (def ^:private reasoning "\u9700\u8981\u5148\u770b\u4e00\u773c deps.edn\u3002")
 
 (def ^:private script
@@ -106,7 +154,7 @@
 ;; Declared rather than moved up to it: each is used by a case near the top of the file
 ;; and belongs with its own kind further down (the bare fixture with the fixtures, the
 ;; two log readers with the cases about reading a log).
-(declare with-bare-server process-log log-lines-for)
+(declare with-bare-server process-log log-lines-for feed-open! feed-first-frame)
 
 (defn- start-session!
   "A session of this home with nothing in it -- see `harness.test-support/start-session!`,
@@ -302,7 +350,12 @@
                          (keep-indexed
                           (fn [i line]
                             (try
-                              (json/read-str line :key-fn keyword)
+                              ;; THROUGH THE RECORD'S OWN READER, not `json/read-str`: a row
+                              ;; of the file is `{:type "event"|"message" :payload ..}` and
+                              ;; reading it is what validates it and hands back the row itself
+                              ;; (`.scratch/jsonl-two-kinds` 票 02: there is no derived
+                              ;; `{:kind ..}` shape any more -- `replay/kind` asks the row).
+                              (first (harness.edge.replay/lines->records [line]))
                               (catch Throwable t
                                 ;; The LAST line may be half-written: the file is
                                 ;; still growing. Anywhere else it is corruption,
@@ -335,32 +388,54 @@
                                     ;; writer and sees half a tail.
                                     (fn [ls]
                                       (some (fn [l]
-                                              (and (= "message" (:kind l))
-                                                   (= "assistant" (get-in l [:payload :role]))
+                                              (and (= "message" (replay/kind l))
+                                                   (= "assistant" (get-in (replay/payload l) [:role]))
                                                    (= "\u8fd9\u662f\u4e00\u4e2a Clojure \u9879\u76ee\u3002"
-                                                      (get-in l [:payload :content]))))
+                                                      (get-in (replay/payload l) [:content]))))
                                             ls))
                                     2000)
-           msgs  (mapv :payload (filter #(= "message" (:kind %)) lines))]
-       (testing "both the inbound input and every emitted frame are on disk"
-         (is (contains? (set (map :kind lines)) "input"))
-         (is (contains? (set (map :kind lines)) "event")))
-       (testing "the record holds the raw RunAgentInput, not a summary"
-         (is (some #(= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
-                       (get-in % [:payload :append 0 :content]))
-                   lines)))
-       (testing "the submitted system message is on disk VERBATIM"
-         (let [sys (first (filter #(= "system" (:role %)) msgs))]
-           (is (some? sys))
+           msgs  (mapv replay/payload (filter #(= "message" (replay/kind %)) lines))]
+       (testing "the entries and every emitted frame are on disk"
+         (is (contains? (set (map replay/kind lines)) "message"))
+         (is (contains? (set (map replay/kind lines)) "event")))
+       (testing "the client's own message is a row of its own, in the provider's shape"
+         ;; 票 02: the raw RunAgentInput is NOT a row any more -- that whole inbound vector,
+         ;; written once per run, was the second copy this ticket deletes. What entered the
+         ;; conversation is what is kept, one row per element, named by its own id.
+         (let [mine (first (filter #(and (= "message" (replay/kind %))
+                                         (= "client" (:source %)))
+                                   lines))]
+           (is (= "u1" (:id mine)) "the entry keeps the name the client gave it")
+           (is (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"
+                  (get-in (replay/payload mine) [:content]))
+               "and the bytes it carried")))
+       (testing "the submitted system message is on disk VERBATIM -- as a message row"
+         ;; A MESSAGE ROW AND THE ARRAY'S FIRST ELEMENT (owner, 2026-09-21): what a run reads
+         ;; from prompt.md plus its SystemPrompt hooks IS what it hands the model, so it is
+         ;; stored the way the model got it -- verbatim -- with `:source` saying the prompt
+         ;; put it there and `:hash` naming those bytes, and it is kept EVERY run rather than
+         ;; once per conversation, because a stable prefix is what the provider's cache reads.
+         (let [row (->> lines (filter replay/system-prompt?) first)
+               sys (replay/payload row)]
+           (is (some? row) "the run recorded the prompt it handed the model")
+           (is (= "system" (:role sys)) "as a system message, the array's first element")
+           (is (= 64 (count (:hash row))) "named by its SHA-256, on the row's envelope")
            ;; Context never touches the system message -- it rides as a trailing
-           ;; user message -- so what was submitted is prompt.md's frozen opening
-           ;; with the SystemPrompt hooks' text behind it, in every run. The
-           ;; opening is compared TRIMMED because the assembly normalises its
-           ;; trailing newlines before adding a block.
+           ;; user message -- so what the row carries is prompt.md's frozen opening
+           ;; with the SystemPrompt hooks' text behind it. The opening is compared
+           ;; TRIMMED because the assembly normalises its trailing newlines before
+           ;; adding a block.
            (is (str/starts-with? (:content sys)
                                  (str/trimr (slurp "prompt.md" :encoding "UTF-8"))))
            (is (str/includes? (:content sys) "<env>")
-               "and the kernel's own text is behind it")))
+               "and the kernel's own text is behind it")
+           (is (every? (fn [f] (< (.indexOf lines row) (.indexOf lines f)))
+                       (filter replay/frame? lines))
+               "the prompt is written before the run's first frame: the array's first element --
+                and the action's own row (the client's message) sits in front of the whole run")
+           (is (some #(= "system" (:role %)) msgs)
+               "and it reaches the reader as the message it is -- the CLIENT filter is elsewhere (see
+                the-assembled-system-message-reaches-the-model-and-never-the-client)")))
        (testing "the user's message is recorded in the provider's shape"
          (is (some #(and (= "user" (:role %))
                          (= "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee" (:content %)))
@@ -397,22 +472,28 @@
 ;; ------------------------------------- the assembled system message, at the edge
 
 (defn- system-texts
-  "Every system message a thread's log holds, in order."
+  "Every system message a thread's log holds, in order -- ONE PER RUN.
+
+  READ OFF ITS OWN `message` ROW (owner, 2026-09-21: a `message` row IS an element of the
+  array the model was handed, the prompt is that array's first element, and its envelope
+  says so -- `:source` = `system-prompt`, `:hash` naming those bytes). Every run writes its
+  own copy, so the list is one text per run, in the order the runs froze them."
   [thread-id]
   (->> (wait-for-recorded (log-file thread-id)
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "assistant" (get-in % [:payload :role])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "assistant" (get-in (replay/payload %) [:role])))
                                          ls))
                           2000)
-       (filter #(= "system" (get-in % [:payload :role])))
-       (mapv #(str (get-in % [:payload :content])))))
+       (filter replay/system-prompt?)
+       (mapv #(get-in (replay/payload %) [:content]))
+       (mapv str)))
 
 (deftest the-assembled-system-message-reaches-the-model-and-never-the-client
   ;; The whole shape, through the real edge: prompt.md's opening plus what the
-  ;; hooks appended is in the run's message record (the model reads it) and in NO
-  ;; AG-UI frame (the client never does). "The front end shows nothing" is not a
-  ;; filtering decision anywhere -- it is the absence of a frame, and this is the
-  ;; only layer that can prove it.
+  ;; hooks appended is what the run hands the model and it is recorded as the
+  ;; `system-prompt` event -- and in NO AG-UI frame (the client never sees it).
+  ;; "The front end shows nothing" is not a filtering decision anywhere -- it is the
+  ;; absence of a frame, and this is the only layer that can prove it.
   ;;
   ;; A hooks.edn declaration is in the mix too, so the test covers all three
   ;; sources at once: the kernel's own rows, a file's, and (in the test below) the
@@ -439,12 +520,12 @@
            (is (str/includes? text "A DECLARED BLOCK"))
            (is (< (str/index-of text "<env>") (str/index-of text "A DECLARED BLOCK"))))
          (testing "the trigger is on the record, with what it collected"
-           (let [line (first (filter #(= "hook/SystemPrompt" (:kind %))
+           (let [line (first (filter #(= "hook/SystemPrompt" (replay/kind %))
                                      (wait-for-recorded (log-file "it-system")
-                                                        (fn [ls] (some #(= "hook/SystemPrompt" (:kind %)) ls))
+                                                        (fn [ls] (some #(= "hook/SystemPrompt" (replay/kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 3 (get-in line [:payload :matched]))
+             (is (= 3 (get-in (replay/payload line) [:matched]))
                  "the kernel's two rows and the file's one")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
@@ -482,21 +563,21 @@
                      (io/delete-file (log-file t) true)
                      (let [first-body   (.body (post-run t))
                            first-lines  (wait-for-recorded (log-file t)
-                                                           (fn [ls] (some #(= "message" (:kind %)) ls))
+                                                           (fn [ls] (some #(= "message" (replay/kind %)) ls))
                                                            2000)
                            notices      (fn [lines]
-                                          (filter #(and (= "message" (:kind %))
-                                                        (= "user" (get-in % [:payload :role]))
-                                                        (str/includes? (str (get-in % [:payload :content]))
+                                          (filter #(and (= "message" (replay/kind %))
+                                                        (= "user" (get-in (replay/payload %) [:role]))
+                                                        (str/includes? (str (get-in (replay/payload %) [:content]))
                                                                        "<job-ended"))
                                                   lines))]
                        (testing "the model is sent the ending, without anybody asking"
                          (let [sent (notices first-lines)]
                            (is (= 1 (count sent)) "one job, one notice")
-                           (is (str/includes? (str (get-in (first sent) [:payload :content]))
+                           (is (str/includes? (str (get-in (replay/payload (first sent)) [:content]))
                                               "[exit 0]")
                                "how it went -- and nothing of what it said")
-                           (is (str/includes? (str (get-in (first sent) [:payload :content]))
+                           (is (str/includes? (str (get-in (replay/payload (first sent)) [:content]))
                                               (str "id=\"" id "\"")))))
                        (testing "and the client is never told"
                          ;; The same judgement the system message gets: it is the server's
@@ -515,7 +596,7 @@
                        (io/delete-file (log-file t) true)
                        (.body (post-run t))
                        (let [second-lines (wait-for-recorded (log-file t)
-                                                             (fn [ls] (some #(= "message" (:kind %)) ls))
+                                                             (fn [ls] (some #(= "message" (replay/kind %)) ls))
                                                              2000)]
                          (testing "while the second run is not told again"
                            (is (= [] (vec (notices second-lines)))
@@ -597,8 +678,8 @@
        (post-run "replay-e2e")
        (wait-for-recorded
         log
-        (fn [ls] (and (some #(= "provider/init" (:kind %)) ls)
-                      (>= (count (filter #(= "message" (:kind %)) ls)) 4)))
+        (fn [ls] (and (some #(= "provider/init" (replay/kind %)) ls)
+                      (>= (count (filter #(= "message" (replay/kind %)) ls)) 4)))
         3000)
        (let [history (replay/history (log-file "replay-e2e"))]
          (testing "the reader found the file the writer wrote, and rebuilt a conversation"
@@ -640,11 +721,11 @@
        (post-run "images" {:append [{:id "u1" :role "user" :content parts}]})
        (let [lines (wait-for-recorded
                     log
-                    (fn [ls] (some #(= "message" (:kind %)) ls))
+                    (fn [ls] (some #(= "message" (replay/kind %)) ls))
                     3000)
              sent  (->> lines
-                        (filter #(= "message" (:kind %)))
-                        (map :payload)
+                        (filter #(= "message" (replay/kind %)))
+                        (map replay/payload)
                         (filter #(= "user" (:role %))))]
          (testing "what the LLM saw is the provider's part shape, not the client's"
            (is (= [expect] (mapv :content sent)))
@@ -656,6 +737,47 @@
                  rebuilt (mapv :content (filter #(= "user" (:role %)) history))]
              (is (= [expect] rebuilt)
                  "a resumed conversation sends what the live run sent"))))))))
+
+(defn- sse-frames
+  "The frames an SSE answer carried, in order -- what the CLIENT was handed."
+  [body]
+  (->> (str/split-lines (str body))
+       (keep #(when (str/starts-with? % "data:")
+                (json/read-str (str/trim (subs % 5)) :key-fn keyword)))
+       vec))
+
+(deftest the-frames-a-run-sends-are-the-frames-its-record-rebuilds
+  ;; TICKET 03 OF `.scratch/jsonl-two-kinds` -- THE WHOLE POINT OF THE TWO ROWS. One real
+  ;; run over a real socket, and the answer is two comparisons that say the record lost
+  ;; nothing: the frames the client was handed are, frame for frame, the frames the record
+  ;; holds (the harness's own facts filtered out -- `model/start` and `hook/*` are rows and
+  ;; were never on the wire), and the conversation the fold rebuilds out of the rows alone
+  ;; is the conversation the session was holding when the run ended. The deleted `input` row
+  ;; used to be the second source of truth; if any case in this suite could be satisfied by
+  ;; it, this is the one that would fail without it.
+  (with-server
+   "frames-rebuilt"
+   (fn []
+     (let [log (log-file "frames-rebuilt")]
+       (io/delete-file log true)
+       (let [sent (sse-frames (.body (post-run "frames-rebuilt")))]
+         (is (seq sent) "the run answered with frames at all")
+         (is (some #(= "TOOL_CALL_START" (:type %)) sent)
+             "and with the tool round-trip in them, not just text")
+         (wait-for-recorded
+          log
+          (fn [ls] (>= (count (filter #(= "event" (replay/kind %)) ls)) (count sent)))
+          5000)
+         (testing "what the socket carried is what the record kept, frame for frame"
+           (is (= sent (mapv replay/payload
+                             (filter replay/frame?
+                                     (replay/lines->records (replay/read-lines log)))))))
+         (testing "and the record alone rebuilds the conversation the session held"
+           (let [rebuilt (mapv #(select-keys % [:role :content])
+                               (replay/lines->messages (replay/read-lines log)))
+                 live    (mapv #(select-keys % [:role :content])
+                               (sessions/messages "frames-rebuilt"))]
+             (is (= live rebuilt)))))))))
 
 (defn- with-declaring-server
   "Like with-server, but the scripted pin DECLARES an input modality set -- which
@@ -765,12 +887,12 @@
      (let [f     (log-file "lifecycle")
            lines (wait-for-recorded f
                                     (fn [ls]
-                                      (>= (count (filter #(= "tools/post-execute" (:kind %)) ls)) 2))
+                                      (>= (count (filter #(= "tools/post-execute" (replay/kind %)) ls)) 2))
                                     2000)
-           phases (group-by :kind (filter #(.startsWith ^String (str (:kind %)) "tools/") lines))
-           pre    (mapv :payload (get phases "tools/pre-execute"))
-           ex     (mapv :payload (get phases "tools/execute"))
-           post   (mapv :payload (get phases "tools/post-execute"))]
+           phases (group-by replay/kind (filter #(.startsWith ^String (str (replay/kind %)) "tools/") lines))
+           pre    (mapv replay/payload (get phases "tools/pre-execute"))
+           ex     (mapv replay/payload (get phases "tools/execute"))
+           post   (mapv replay/payload (get phases "tools/post-execute"))]
        (testing "both calls entered, executed and closed the seam, keyed by id"
          (is (= #{"c1" "c2"} (set (map :toolCallId pre))))
          (is (= #{"c1" "c2"} (set (map :toolCallId ex))))
@@ -862,19 +984,19 @@
            (testing "both decisions are on disk: the audit line and the resumed transit"
              (let [lines (wait-for-recorded
                           (log-file "http-approve")
-                          (fn [ls] (some #(= "approval/decided" (:kind %)) ls))
+                          (fn [ls] (some #(= "approval/decided" (replay/kind %)) ls))
                           2000)
-                   decided (filter #(= "approval/decided" (:kind %)) lines)
-                   pre     (filter #(and (= "tools/pre-execute" (:kind %))
-                                          (= "c1" (get-in % [:payload :toolCallId])))
+                   decided (filter #(= "approval/decided" (replay/kind %)) lines)
+                   pre     (filter #(and (= "tools/pre-execute" (replay/kind %))
+                                          (= "c1" (get-in (replay/payload %) [:toolCallId])))
                                    lines)]
                ;; The verdict is a keyword in the event and a string on disk --
                ;; json has no keywords.
-               (is (= "approved" (get-in (first decided) [:payload :verdict])))
-               (is (= "c1" (get-in (first decided) [:payload :tool-call-id])))
-               (is (= "approved" (get-in (first decided) [:payload :payload :decision])))
-               (is (some #(= "needs-approval" (get-in % [:payload :outcome])) pre))
-               (is (some #(= "approved" (get-in % [:payload :outcome])) pre))))))))))
+               (is (= "approved" (get-in (replay/payload (first decided)) [:verdict])))
+               (is (= "c1" (get-in (replay/payload (first decided)) [:tool-call-id])))
+               (is (= "approved" (get-in (replay/payload (first decided)) [:payload :decision])))
+               (is (some #(= "needs-approval" (get-in (replay/payload %) [:outcome])) pre))
+               (is (some #(= "approved" (get-in (replay/payload %) [:outcome])) pre))))))))))
 
 (deftest an-answer-lands-behind-its-call-even-with-a-message-behind-the-call
   ;; TICKET 02 of `.scratch/session-opening`, over a real socket and a real record.
@@ -929,8 +1051,8 @@
              ;; (:added on :run/done) and the edge does not work it out.
              (let [records  (wait-for-recorded
                              (log-file "http-answer")
-                             (fn [ls] (some #(and (= "message" (:kind %))
-                                                  (= "wrote it" (get-in % [:payload :content])))
+                             (fn [ls] (some #(and (= "message" (replay/kind %))
+                                                  (= "wrote it" (get-in (replay/payload %) [:content])))
                                             ls))
                              5000)
                    runs     (trajectory/run-segments records)
@@ -1101,15 +1223,25 @@
        (post-run id)
        (let [after-first (wait-for-recorded
                           (log-file id)
-                          (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                          (fn [ls] (some #(= "provider/init" (replay/kind %)) ls))
                           2000)]
-         (testing "the first run lands exactly one init line, before any message"
-           (let [kinds (mapv :kind after-first)]
+         (testing "the first run lands exactly one init line, before the run's own messages"
+           (let [kinds    (mapv replay/kind after-first)
+                 prompt-i (first (keep-indexed (fn [i r]
+                                                 (when (= "system-prompt" (:source r)) i))
+                                               after-first))]
              (is (= 1 (count (filter #(= "provider/init" %) kinds))))
-             (is (< (.indexOf kinds "input") (.indexOf kinds "provider/init")))
-             (is (< (.indexOf kinds "provider/init") (.indexOf kinds "message")))))
+             ;; THE ACTION'S ROWS COME FIRST -- the person's message enters the conversation
+             ;; before the run that serves it exists -- and the run's OWN rows start with the
+             ;; prompt it assembled (`:source "system-prompt"`). 票 02: both are `message`
+             ;; rows now, which is why the assertion names the SOURCE rather than the kind.
+             (is (< (.indexOf kinds "message") (.indexOf kinds "provider/init")))
+             (is (some? prompt-i) "the run recorded the prompt it assembled")
+             (is (< (.indexOf kinds "provider/init") prompt-i)
+                 "and the init line is in front of it: a reader meets what served the
+                  conversation before it meets the conversation")))
          (testing "it carries the selection, what it resolved to, the source, and NO key value"
-           (let [p (:payload (first (filter #(= "provider/init" (:kind %)) after-first)))]
+           (let [p (replay/payload (first (filter #(= "provider/init" (replay/kind %)) after-first)))]
              (is (= "alpha" (:provider p)) "the provider that was selected")
              (is (= "alpha-small" (:model p)) "the model id that was selected")
              (is (= "fake" (:protocol p)) "and what the catalog resolved it to")
@@ -1128,10 +1260,10 @@
          (post-run id)
          (let [after-second (wait-for-recorded
                              (log-file id)
-                             (fn [ls] (>= (count (filter #(= "input" (:kind %)) ls)) 2))
+                             (fn [ls] (>= (count (filter #(and (= "message" (replay/kind %)) (= "client" (:source %))) ls)) 2))
                              2000)]
            (testing "a later run of the same thread does not repeat the init"
-             (is (= 1 (count (filter #(= "provider/init" (:kind %)) after-second)))))))))))
+             (is (= 1 (count (filter #(= "provider/init" (replay/kind %)) after-second)))))))))))
 
 (deftest a-session-configure-lands-as-a-changed-line
   ;; The write half, end to end: the agent changes its reasoning effort, the
@@ -1165,9 +1297,9 @@
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
                       2000)
-               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
            (testing "the change is on disk, before -> after, marked approved"
              (is (= "approved" (:verdict changed)))
              (is (= "alpha-big" (get-in changed [:before :model]))
@@ -1199,10 +1331,10 @@
              (post-run id)
              (let [lines (wait-for-recorded
                           (log-file id)
-                          (fn [ls] (>= (count (filter #(= "provider/changed" (:kind %)) ls)) 2))
+                          (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
                           2000)
-                   changes (filter #(= "provider/changed" (:kind %)) lines)
-                   [a b]   (mapv :payload changes)]
+                   changes (filter #(= "provider/changed" (replay/kind %)) lines)
+                   [a b]   (mapv replay/payload changes)]
                (is (= "high" (get-in a [:after :reasoning-effort])))
                (is (= "high" (get-in b [:before :reasoning-effort]))
                    "the second change starts where the first ended")
@@ -1241,9 +1373,9 @@
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (:kind %)) ls))
+                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
                       2000)
-               changed (:payload (first (filter #(= "provider/changed" (:kind %)) lines)))]
+               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
            (is (= "beta" (get-in changed [:after :provider]))
                "the change line names the vendor that was selected")
            (is (not= {} (:after changed))
@@ -1395,8 +1527,8 @@
   [tid]
   (->> (str/split-lines
         (slurp (log-file-for tid) :encoding "UTF-8"))
-       (mapv #(json/read-str % :key-fn keyword))
-       (filterv #(= "project/bound" (:kind %)))))
+       (replay/lines->records)
+       (filterv #(= "project/bound" (replay/kind %)))))
 
 (defn- api-call
   "A plain JSON call to the management edge -- the /api/* endpoints, not the
@@ -1732,11 +1864,24 @@
              "the answer in the conversation is not the pinned model's"))
        (testing "and the request's tier is never resolved"
          (is (not (str/includes? (process-log) "no-such-vendor"))))
-       (testing "the body is still recorded as it ARRIVED -- the record is what was asked"
-         (let [input (first (filter #(= "input" (:kind %))
-                                    (log-lines-for "request-tier")))]
-           (is (= {:provider "no-such-vendor" :model "theirs"} (:provider (:payload input)))
-               "the record is what was ASKED, verbatim -- a value the server ignored included")))))))
+       (testing "and the record names the tier that WAS used, never the body's"
+         ;; 票 02 TOOK THE `input` ROW AWAY, and the request's own fields with it: a run no
+         ;; longer logs the whole inbound vector, only the entries it was handed and the facts
+         ;; about itself. What this guard needs is still here -- the provider/init row says
+         ;; which tier ran, and it is not the one the body named.
+         ;; THE RUN'S OWN CALL LINE NAMES WHAT IT WENT TO: `model/start` is written from the
+         ;; provider the SERVER resolved, so the body's tier appearing nowhere on the record is
+         ;; the same statement as 'it was never resolved'.
+         (let [call (first (filter #(= "model/start" (replay/kind %))
+                                   (wait-for-recorded
+                                    (log-file-for "request-tier")
+                                    (fn [ls] (some #(= "model/start" (replay/kind %)) ls))
+                                    2000)))]
+           (is (some? call) "the run recorded the call it made")
+           (is (not (str/includes? (json/write-str (replay/payload call)) "no-such-vendor"))
+               "the body's tier appears nowhere: it was never resolved")
+           (is (not (str/includes? (json/write-str (replay/payload call)) "theirs"))
+               "nor its model")))))))
 
 (deftest the-run-id-is-minted-here-and-the-record-is-what-names-it
   ;; JUDGEMENT 3: a client that can NAME a run can collide with one and replay one, so the
@@ -1752,7 +1897,8 @@
                           :runId    "the-name-the-client-wanted"})]
        (is (= 200 (.statusCode resp))
            "a body carrying runId is not refused -- the field simply has no say")
-       (let [runs (fn [] (mapv :runId (filter #(= "input" (:kind %))
+       (let [runs (fn [] (mapv :runId (filter #(and (= "message" (replay/kind %))
+                                                    (= "client" (:source %)))
                                               (log-lines-for "minted-run"))))
              first-run (first (runs))]
          (testing "the run on the record is named by the server, not by the body"
@@ -1811,11 +1957,18 @@
        ;; `:added` is the fold's field: the birth action brought two entries (its own
        ;; message and the context, which the client never sent), and each later one
        ;; brought exactly its own message.
-       (let [inputs (filter #(= "input" (:kind %)) (log-lines-for "born-with-context"))]
-         (is (= 3 (count inputs)))
-         (is (= ["u1" "session-context"] (mapv :id (get-in (first inputs) [:payload :added]))))
-         (is (= ["u2"] (mapv :id (get-in (second inputs) [:payload :added]))))
-         (is (= ["u3"] (mapv :id (get-in (nth inputs 2) [:payload :added])))))))))
+       ;; THE ROWS THEMSELVES SAY IT (票 02): an entry is a `message` row whose envelope
+       ;; carries its `id`, so 'what did this action bring' is 'which id-bearing rows did it
+       ;; write'. The birth action brought two -- its own message and the context, which the
+       ;; client never sent -- and every later one brought exactly its own.
+       (let [brought (->> (log-lines-for "born-with-context")
+                          (filter #(and (= "message" (replay/kind %)) (:id %)))
+                          (partition-by :runId)
+                          (mapv #(mapv :id %)))]
+         (is (= 3 (count brought)))
+         (is (= ["u1" "session-context"] (first brought)))
+         (is (= ["u2"] (second brought)))
+         (is (= ["u3"] (nth brought 2))))))))
 
 ;; The scripted run that proves a bound thread's relative write lands in the
 ;; project: turn one writes a RELATIVE path, turn two replies.
@@ -1862,18 +2015,18 @@
          (testing "exactly ONE project/bound audit line is on disk"
            (is (= 1 (count bound)))
            (is (nil? (:runId (first bound))) "a binding happens outside any run")
-           (is (nil? (get-in (first bound) [:payload :before]))
+           (is (nil? (get-in (replay/payload (first bound)) [:before]))
                "a FIRST bind has no previous directory")
-           (is (same-dir? (get-in (first bound) [:payload :after]) project-dir))
-           (is (= "http" (get-in (first bound) [:payload :via]))))
+           (is (same-dir? (get-in (replay/payload (first bound)) [:after]) project-dir))
+           (is (= "http" (get-in (replay/payload (first bound)) [:via]))))
          (testing "the two failed binds added no second line"
-           (is (= 1 (count (filter #(= "project/bound" (:kind %)) bound)))))
+           (is (= 1 (count (filter #(= "project/bound" (replay/kind %)) bound)))))
          (testing "and the line landed in the workspace the bind moved the session to"
            ;; The audit line is written AFTER the bind, so it is the first thing
            ;; this session writes in its new home -- which is the whole reason the
            ;; log is moved rather than left behind: a session's timeline is one file.
-           (is (empty? (filter #(= "project/bound" (:kind %))
-                               (try (mapv #(json/read-str % :key-fn keyword)
+           (is (empty? (filter #(= "project/bound" (replay/kind %))
+                               (try (replay/lines->records
                                           (str/split-lines
                                            (slurp (log-file tid) :encoding "UTF-8")))
                                     (catch java.io.FileNotFoundException _ []))))
@@ -2322,7 +2475,7 @@
                    "binding lands the session in that same directory")
                (let [bounds (bound-lines tid)]
                  (is (= 1 (count bounds)) "exactly one audit line, from the POST")
-                 (is (= "http" (get-in (first bounds) [:payload :via])))))))))
+                 (is (= "http" (get-in (replay/payload (first bounds)) [:via])))))))))
       (finally (alter-var-root #'http/*directory-chooser* (constantly real))))))
 
 (deftest the-folder-picker-knows-which-dialog-this-platform-has
@@ -2466,8 +2619,8 @@
                               (json/write-str {:threadId tid :dir project-dir}))]
            (is (= 200 (.statusCode resp))))
          (let [line (first (bound-lines tid))]
-           (is (nil? (get-in line [:payload :before])))
-            (is (same-dir? (get-in line [:payload :after]) project-dir))))
+           (is (nil? (get-in (replay/payload line) [:before])))
+            (is (same-dir? (get-in (replay/payload line) [:after]) project-dir))))
         (testing "rebinding answers and displays the new directory"
           (let [resp (api-call :post "/api/project"
                                (json/write-str {:threadId tid :dir project-dir-2}))]
@@ -2486,8 +2639,8 @@
        (testing "the log reads as a before -> after timeline"
          (let [bounds (bound-lines tid)]
            (is (= 2 (count bounds)))
-            (is (same-dir? (get-in (nth bounds 1) [:payload :before]) project-dir))
-            (is (same-dir? (get-in (nth bounds 1) [:payload :after]) project-dir-2))))))))
+            (is (same-dir? (get-in (replay/payload (nth bounds 1)) [:before]) project-dir))
+            (is (same-dir? (get-in (replay/payload (nth bounds 1)) [:after]) project-dir-2))))))))
 
 (deftest a-bound-thread-writes-into-its-project-over-the-real-edge
   ;; The full vertical: bind through the management edge the way the UI will,
@@ -2643,26 +2796,26 @@
       (try
         (testing "a bound session's records land in the project's workspace"
           (project/bind! tid (str proj-dir))
-          (#'http/log! tid "r1" "input" {:n 1})
-          (#'http/log! tid "r1" "input" {:n 2})
+          (#'http/log! tid "r1" test-probe {:n 1})
+          (#'http/log! tid "r1" test-probe {:n 2})
           (drained!)
           (is (.exists plog))
           (is (not (.exists ulog))))
         (testing "the store answers nil for a while: records land in .unbound"
           (project/bind! tid nil)
-          (#'http/log! tid "r2" "input" {:n 3})
-          (#'http/log! tid "r2" "input" {:n 4})
+          (#'http/log! tid "r2" test-probe {:n 3})
+          (#'http/log! tid "r2" test-probe {:n 4})
           (drained!)
           (is (.exists ulog))
           (is (= 2 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))))
         (testing "the binding comes back and the writer carries the segment home"
           (project/bind! tid (str proj-dir))
-          (#'http/log! tid "r3" "input" {:n 5})
+          (#'http/log! tid "r3" test-probe {:n 5})
           (drained!)
-          (let [lines  (mapv #(json/read-str % :key-fn keyword)
+          (let [lines  (replay/lines->records
                              (str/split-lines (slurp plog :encoding "UTF-8")))
-                inputs (filterv #(= "input" (:kind %)) lines)
-                ns     (mapv #(get-in % [:payload :n]) inputs)]
+                inputs (filterv #(= test-probe (replay/kind %)) lines)
+                ns     (mapv #(get-in (replay/payload %) [:n]) inputs)]
             (testing "ONE file holds the whole conversation, in order"
               (is (= [1 2 3 4 5] ns) "no line lost and none duplicated")
               (is (= 5 (count inputs))))
@@ -2676,13 +2829,13 @@
           (testing "the listing sees exactly ONE log for this session"
             (is (= 1 (count (replay/logs-for (home/projects-dir) tid))))))
         (testing "and the carry is SAID OUT LOUD"
-          (let [lines (mapv #(json/read-str % :key-fn keyword)
+          (let [lines (replay/lines->records
                             (str/split-lines (slurp plog :encoding "UTF-8")))
-                line  (first (filter #(= "log/carried-back" (:kind %)) lines))]
+                line  (first (filter #(= "log/carried-back" (replay/kind %)) lines))]
             (is (some? line) "an audit line says the segment was carried back")
-            (is (= (.getAbsolutePath plog) (get-in line [:payload :to])))
-            (is (= (.getAbsolutePath ulog) (get-in line [:payload :from])))
-            (is (= 2 (get-in line [:payload :lines])) "and how many lines moved")))
+            (is (= (.getAbsolutePath plog) (get-in (replay/payload line) [:to])))
+            (is (= (.getAbsolutePath ulog) (get-in (replay/payload line) [:from])))
+            (is (= 2 (get-in (replay/payload line) [:lines])) "and how many lines moved")))
         (finally
           (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
 
@@ -2715,7 +2868,7 @@
            writer (future
                     (try
                       (dotimes [i 120]
-                        (#'http/log! tid "r1" "input" {:n i})
+                        (#'http/log! tid "r1" test-probe {:n i})
                         (Thread/sleep 1))
                       (catch Throwable _ nil)))]
        ;; THE FILE APPEARS AS THE CONSUMER WRITES IT (ticket 02), and it can be seen the
@@ -2750,7 +2903,7 @@
              other (project-log (nth dirs (mod 12 2)) tid)
              ns   (->> (str/split-lines (slurp plog :encoding "UTF-8"))
                        (keep (fn [line]
-                               (try (:n (:payload (json/read-str line :key-fn keyword)))
+                               (try (:n (replay/payload (first (replay/lines->records [line]))))
                                     (catch Throwable _ nil))))
                        vec)]
          (testing "EVERY line of the conversation is in the last project's file, in order"
@@ -2776,7 +2929,7 @@
           tid      (str "overlap-" (java.util.UUID/randomUUID))
           plog     (project-log proj-dir tid)
           ulog     (unbound-log tid)
-          line     (fn [ts n] (str (json/write-str {:ts ts :runId "r" :kind "input"
+          line     (fn [ts n] (str (row-json {:ts ts :runId "r" :kind test-probe
                                                      :payload {:n n}}) "\n"))]
       (.mkdirs proj-dir)
       (try
@@ -2787,31 +2940,31 @@
         (spit ulog (str (line 2500 3) (line 3500 4)) :encoding "UTF-8")
         (let [before-plog (slurp plog :encoding "UTF-8")
               before-ulog (slurp ulog :encoding "UTF-8")]
-          (#'http/log! tid "r3" "input" {:n 5})
+          (#'http/log! tid "r3" test-probe {:n 5})
           (drained!)
-          (let [lines   (mapv #(json/read-str % :key-fn keyword)
+          (let [lines   (replay/lines->records
                               (str/split-lines (slurp plog :encoding "UTF-8")))
-                refused (first (filter #(= "log/carry-refused" (:kind %)) lines))]
+                refused (first (filter #(= "log/carry-refused" (replay/kind %)) lines))]
             (testing "the refusal is on the record, naming BOTH paths"
               (is (some? refused))
-              (is (= (.getAbsolutePath plog) (get-in refused [:payload :to])))
-              (is (= (.getAbsolutePath ulog) (get-in refused [:payload :from])))
-              (is (str/includes? (str (get-in refused [:payload :reason])) "overlap")))
+              (is (= (.getAbsolutePath plog) (get-in (replay/payload refused) [:to])))
+              (is (= (.getAbsolutePath ulog) (get-in (replay/payload refused) [:from])))
+              (is (str/includes? (str (get-in (replay/payload refused) [:reason])) "overlap")))
             (testing "neither file was merged or moved"
               (is (.exists ulog) "the leftover is still where it was")
               (is (= before-ulog (slurp ulog :encoding "UTF-8"))
                   "byte for byte -- not appended to, not renamed")
-              (is (not-any? #(= 3 (get-in % [:payload :n])) lines)
+              (is (not-any? #(= 3 (get-in (replay/payload %) [:n])) lines)
                   "not one of the segment's lines was folded in")
-              (is (not-any? #(= 4 (get-in % [:payload :n])) lines))
+              (is (not-any? #(= 4 (get-in (replay/payload %) [:n])) lines))
               (is (str/starts-with? (slurp plog :encoding "UTF-8") before-plog)
                   "the conversation's own lines are untouched; only the audit and this write followed"))
             (testing "a refused carry is said once, not beside every record"
-              (#'http/log! tid "r3" "input" {:n 6})
-              (#'http/log! tid "r3" "input" {:n 7})
+              (#'http/log! tid "r3" test-probe {:n 6})
+              (#'http/log! tid "r3" test-probe {:n 7})
               (drained!)
-              (let [n (count (filter #(= "log/carry-refused" (:kind %))
-                                     (mapv #(json/read-str % :key-fn keyword)
+              (let [n (count (filter #(= "log/carry-refused" (replay/kind %))
+                                     (replay/lines->records
                                            (str/split-lines (slurp plog :encoding "UTF-8")))))]
                 (is (= 1 n) "one audit line for one refusal")))))
         (finally
@@ -2857,13 +3010,13 @@
              (testing "and the final assistant answer closes it"
                (is (= "assistant" (:role (last msgs))))))))
        (testing "the rebuild action landed its audit line"
-         (let [lines (mapv #(json/read-str % :key-fn keyword)
+         (let [lines (replay/lines->records
                            (str/split-lines (slurp (log-file tid) :encoding "UTF-8")))
-               rb    (filterv #(= "session/rebuilt" (:kind %)) lines)]
+               rb    (filterv #(= "session/rebuilt" (replay/kind %)) lines)]
            (is (= 1 (count rb)))
            (is (nil? (:runId (first rb))) "a rebuild happens outside any run")
-           (is (pos? (get-in (first rb) [:payload :messages])))
-           (is (= "http" (get-in (first rb) [:payload :via])))))))))
+           (is (pos? (get-in (replay/payload (first rb)) [:messages])))
+           (is (= "http" (get-in (replay/payload (first rb)) [:via])))))))))
 
 (deftest rebuilding-a-session-that-has-never-run-answers-an-empty-conversation
   ;; The sidebar's very first click on a brand-new session. Binding wrote an audit
@@ -2882,8 +3035,8 @@
          (is (= [] (:messages reply)) "nothing has happened in this conversation yet")
          (is (= [] (:context reply))))
        (testing "and the audit line it did write is still on disk, untouched"
-         (is (some #(= "project/bound" (:kind %))
-                   (mapv #(json/read-str % :key-fn keyword)
+         (is (some #(= "project/bound" (replay/kind %))
+                   (replay/lines->records
                          (str/split-lines (slurp (log-file-for "never-run") :encoding "UTF-8"))))))))))
 
 (def ^:private remove-dir-a
@@ -3179,9 +3332,9 @@
            ;; frame, so the size is measured once the writer is done.
            (wait-for-recorded
             f
-            (fn [ls] (and (some #(= "message" (:kind %)) ls)
-                          (some #(and (= "event" (:kind %))
-                                      (frames/terminal? (:payload %)))
+            (fn [ls] (and (some #(= "message" (replay/kind %)) ls)
+                          (some #(and (= "event" (replay/kind %))
+                                      (frames/terminal? (replay/payload %)))
                                 ls)))
             5000)
            (let [row (listed-row "task-ran")]
@@ -3471,11 +3624,9 @@
   (let [tid  "old-logs-thread"
         old  (io/file (home/root) "logs")
         file (io/file old (str tid ".jsonl"))
-        body (str (json/write-str
-                   {:ts 1 :runId "r0" :kind "input"
-                    :payload {:threadId tid :runId "r0"
-                              :append [{:id "u1" :role "user" :content "old"}]
-                              :tools [] :context []}})
+        body (str (row-json
+                   {:ts 1 :runId "r0" :kind "message" :source "client" :id "u1"
+                    :payload {:role "user" :content "old"}})
                   "\n")]
     (.mkdirs old)
     (spit file body :encoding "UTF-8")
@@ -3514,17 +3665,13 @@
              frames  (vec (mapcat (ag/outbound tid "r1")
                                   [(ev/run-start)
                                    (ev/tool-call "c1" "read" "{}")]))
-             records #(mapv (fn [l] (json/read-str l :key-fn keyword))
+             records #(replay/lines->records
                             (str/split-lines (slurp f :encoding "UTF-8")))]
          (.mkdirs (.getParentFile f))          ; the writer creates it; a fixture must not assume
          (spit f (str (str/join "\n"
-                                (concat [(json/write-str
-                                          {:ts 1 :runId "r1" :kind "input"
-                                           :payload {:threadId tid :runId "r1"
-                                                     :append [{:id "u1" :role "user" :content "hi"}]
-                                                     :tools [] :context []}})]
+                                (concat (action-rows 1 "r1" [{:id "u1" :role "user" :content "hi"}])
                                         (map (fn [frame]
-                                               (json/write-str
+                                               (row-json
                                                 {:ts 2 :runId "r1" :kind "event"
                                                  :payload frame}))
                                              frames)))
@@ -3535,31 +3682,27 @@
            (is (= 200 (.statusCode resp)) "a log one frame short of readable is not a refusal")
            (is (seq (:messages reply)))
            (testing "the record says who closed it, and what was appended"
-             (let [kinds   (mapv :kind (records))
-                   closing (first (filter #(= "session/closed-off" (:kind %)) (records)))]
+             (let [kinds   (mapv replay/kind (records))
+                   closing (first (filter #(= "session/closed-off" (replay/kind %)) (records)))]
                (is (= 1 (count (filter #(= "session/closed-off" %) kinds))))
                (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
                        :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
-                      (:payload closing)))
+                      (replay/payload closing)))
                (testing "and the frames follow it, the terminal frame last"
                  (is (= ["session/closed-off" "event" "event" "session/rebuilt"]
-                        (mapv :kind (take-last 4 (records)))))
+                        (mapv replay/kind (take-last 4 (records)))))
                  (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
                         (->> (records)
-                             (filter #(= "event" (:kind %)))
+                             (filter #(= "event" (replay/kind %)))
                              (take-last 2)
-                             (mapv #(get-in % [:payload :type]))))))))
+                             (mapv #(get-in (replay/payload %) [:type]))))))))
            (testing "so the next reader gets a whole conversation"
              (is (seq (replay/lines->messages (str/split-lines (slurp f :encoding "UTF-8"))))))))
        (testing "and a second rebuild appends nothing: the log closed once"
          (let [tid (str "trunc2-" (java.util.UUID/randomUUID))
                f   (log-file tid)]
            (.mkdirs (.getParentFile f))
-           (spit f (str (json/write-str
-                         {:ts 1 :runId "r1" :kind "input"
-                          :payload {:threadId tid :runId "r1"
-                                    :append [{:id "u1" :role "user" :content "hi"}]
-                                    :tools [] :context []}})
+           (spit f (str (str/join "\n" (action-rows 1 "r1" [{:id "u1" :role "user" :content "hi"}]))
                         "\n")
                  :encoding "UTF-8")
            (let [first-lines (count (str/split-lines (slurp f :encoding "UTF-8")))]
@@ -3582,20 +3725,15 @@
        ;; closed and the conversation comes back.
        (let [tid   (str "trunc-earlier-" (java.util.UUID/randomUUID))
              f     (log-file tid)
-             input (fn [ts run-id]
-                     (json/write-str
-                      {:ts ts :runId run-id :kind "input"
-                       :payload {:threadId tid :runId run-id
-                                 :append [{:id "u1" :role "user" :content "hi"}]
-                                 :tools [] :context []}}))
+             input (fn [ts run-id] (action-rows ts run-id [{:id "u1" :role "user" :content "hi"}]))
              frames (fn [ts run-id evs]
                       (map (fn [frame]
-                             (json/write-str {:ts ts :runId run-id :kind "event" :payload frame}))
+                             (row-json {:ts ts :runId run-id :kind "event" :payload frame}))
                            (mapcat (ag/outbound tid run-id) evs)))
-             log-lines (concat [(input 1 "r1")]
+             log-lines (concat (input 1 "r1")
                                (frames 2 "r1" [(ev/run-start)
                                                (ev/tool-call "c1" "read" "{}")])
-                               [(input 3 "r2")]
+                               (input 3 "r2")
                                (frames 4 "r2" [(ev/run-start)
                                                (ev/text-delta "继续")
                                                (ev/run-end)]))]
@@ -3603,22 +3741,22 @@
          (spit f (str (str/join "\n" log-lines) "\n") :encoding "UTF-8")
          (let [resp  (api-call :post (str "/api/threads/" tid "/rebuild") nil)
                reply (json/read-str (.body resp) :key-fn keyword)
-               rs    (mapv #(json/read-str % :key-fn keyword)
+               rs    (replay/lines->records
                            (str/split-lines (slurp f :encoding "UTF-8")))]
            (is (= 200 (.statusCode resp)) "a log the repair can close is not a refusal")
            (is (seq (:messages reply)))
            (testing "the closed line names r1 -- the run that never ended"
-             (let [closing (first (filter #(= "session/closed-off" (:kind %)) rs))]
+             (let [closing (first (filter #(= "session/closed-off" (replay/kind %)) rs))]
                (is (some? closing))
                (is (= {:run-id "r1" :last-frame "TOOL_CALL_END"
                        :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
-                      (:payload closing)))))
+                      (replay/payload closing)))))
            (testing "and the frames appended for it carry ITS run id"
              (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
                     (->> rs
-                         (filter #(and (= "r1" (:runId %)) (= "event" (:kind %))))
+                         (filter #(and (= "r1" (:runId %)) (= "event" (replay/kind %))))
                          (take-last 2)
-                         (mapv #(get-in % [:payload :type]))))
+                         (mapv #(get-in (replay/payload %) [:type]))))
                  "how a reader pairs the appended terminal with the run it ended"))
            (testing "so the next reader gets a whole conversation"
              (is (seq (replay/lines->messages
@@ -3648,11 +3786,9 @@
              two  (home/log-file (io/file (home/projects-dir)
                                           (home/sanitize (.getCanonicalPath (io/file project-dir))))
                                  tid)
-             line (json/write-str
-                   {:ts 1 :runId "r1" :kind "input"
-                    :payload {:threadId tid :runId "r1"
-                              :append [{:id "u1" :role "user" :content "hi"}]
-                              :tools [] :context []}})]
+             line (row-json
+                   {:ts 1 :runId "r1" :kind "message" :source "client" :id "u1"
+                    :payload {:role "user" :content "hi"}})]
          (.mkdirs (.getParentFile ^java.io.File two))
          (spit one (str line "\n") :encoding "UTF-8")
          (spit two (str line "\n") :encoding "UTF-8")
@@ -3710,61 +3846,92 @@
                frames    (wire/frames-from-sse resp)
                lines     (wait-for-recorded
                           (log-file-for "it-skills")
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "followed it" (get-in % [:payload :content])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "followed it" (get-in (replay/payload %) [:content])))
                                          ls))
                           2000)
-               texts     (mapv #(str (get-in % [:payload :content]))
-                               (filter #(= "message" (:kind %)) lines))
+               texts     (mapv #(str (get-in (replay/payload %) [:content]))
+                               (filter #(= "message" (replay/kind %)) lines))
                wire-text (json/write-str frames)]
 
-            (testing "the order the model reads is: the opening, then the question"
-              ;; THE OPENING COMES FIRST (`.scratch/session-opening`): the instruction
-              ;; files and the catalog enter the conversation at its birth, so this run --
-              ;; the one that births it -- reads them in front of the question, and every
-              ;; later run continues from there. Per-run material (the skill body the
-              ;; model asks for) still lands behind the conversation.
+            (testing "the order the model reads is: the question, then the opening"
+              ;; THE QUESTION COMES FIRST (ticket 03 of `.scratch/session-opening`): the
+              ;; opening is written into the conversation at its birth and read by every
+              ;; run after it -- ONE TIME, which is the half that mattered -- but it is
+              ;; written BEHIND the question that caused it, which is the order
+              ;; `.scratch/context-frames` decision 7 and `CONTEXT.md`'s 注入 entry
+              ;; state. Ticket 01 of this feature had it in front of the question; this
+              ;; ticket is the correction. Per-run material (the skill body the model
+              ;; asks for) still lands behind the whole conversation.
               ;; The reading is by TEXT because an opening entry carries parts (a card for
               ;; the screen, this text for the model).
               (let [reading    (fn [content]
                                  (if (sequential? content)
                                    (str/join "\n" (keep :text content))
                                    (str content)))
-                    user-texts (mapv #(reading (get-in % [:payload :content]))
-                                     (filter #(and (= "message" (:kind %))
-                                                   (= "user" (get-in % [:payload :role])))
+                    user-texts (mapv #(reading (get-in (replay/payload %) [:content]))
+                                     (filter #(and (= "message" (replay/kind %))
+                                                   (= "user" (get-in (replay/payload %) [:role])))
                                              lines))]
-                (is (str/includes? (first user-texts) "STANDING RULE")
-                    "the OS home's rules open the conversation")
-                (is (str/includes? (second user-texts) "PROJECT RULE")
+                (is (str/includes? (first user-texts) "看看这个项目")
+                    "the person's own words open the conversation")
+                (is (str/includes? (second user-texts) "STANDING RULE")
+                    "then the OS home's rules")
+                (is (str/includes? (nth user-texts 2) "PROJECT RULE")
                     "then the project's -- the more specific statement is the nearer one")
-                (is (str/starts-with? (nth user-texts 2) "<skills>"))
-                (is (str/includes? (nth user-texts 2) "- alpha: alpha does a thing"))
-                (is (str/includes? (nth user-texts 3) "看看这个项目")
-                    "and the client's own message comes after the whole opening")))
+                (is (str/starts-with? (nth user-texts 3) "<skills>"))
+                (is (str/includes? (nth user-texts 3) "- alpha: alpha does a thing")
+                    "and the catalog is the last thing the opening says")))
 
            (testing "loading it mid-run puts the BODY into the conversation"
              (is (some #(and (str/includes? % "ALPHA BODY")
                              (str/starts-with? % "<skill name=\"alpha\">"))
                        texts)))
 
-            (testing "and the run's OWN injection is a card -- one CUSTOM frame, those bytes"
-              ;; THE OPENING IS NOT A FRAME ANY MORE, and that is the change: it is a
-              ;; message the conversation was born with, so its card travels with that
-              ;; entry (the feed draws it) instead of being re-emitted on every run. What
-              ;; a frame still carries is what THIS run derived for itself -- here, the
-              ;; skill body the model asked for.
-              (let [cards (filter #(and (= "CUSTOM" (:type %))
-                                        (= "injected-context" (:name %)))
-                                  frames)]
-                (is (= 1 (count cards)) "the skill body the model asked for")
-                (is (re-find #"-ctx\d+$" (str (:messageId (first cards))))
-                    "the id is the frame's own (run id + which one), not the adapter's")
-                (is (str/includes? (str (get-in (first cards) [:value :text])) "ALPHA BODY"))))
+           (testing "the opening is on the wire TOO, as the CONVERSATION this run wrote"
+             ;; WHY IT IS HERE AT ALL: the page that MINTED this session holds no window
+             ;; and follows no feed, so the run that wrote the opening is the only wire
+             ;; those messages can arrive on -- without them that page draws the question
+             ;; and nothing else. AND WHY IT IS A MESSAGE LIST: a card frame is a PART,
+             ;; and the adapter hangs a part on the message it is streaming (`CUSTOM`'s
+             ;; `messageId` is dropped on the way in, by the parser and by the aggregator
+             ;; alike), so a card for a message the client never held lands under the
+             ;; answer. A `MESSAGES_SNAPSHOT` carries the messages themselves
+             ;; (`ag-ui/conversation-snapshot`).
+             (let [cards    (filterv #(and (= "CUSTOM" (:type %))
+                                           (= "injected-context" (:name %)))
+                                     frames)
+                   derived  (filterv #(re-find #"-ctx\d+$" (str (:messageId %))) cards)
+                   snapshot (first (filter #(= "MESSAGES_SNAPSHOT" (:type %)) frames))
+                   messages (:messages snapshot)
+                   opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
+                                     messages)
+                   ;; THE SNAPSHOT'S MESSAGES ARE PROJECTED (text, not parts): the wire's
+                   ;; schema takes no `data` part, so this reads the entry's text either way.
+                   text-of  (fn [m] (let [c (:content m)]
+                                      (if (sequential? c)
+                                        (str/join "\n" (keep :text c))
+                                        (str c))))
+                   card-text (fn [card] (str (get-in card [:value :text])))]
+               (is (= 1 (count cards))
+                   "the only CUSTOM card is the body this run derived for itself")
+               (is (str/includes? (card-text (first derived)) "ALPHA BODY"))
+               (is (some? snapshot) "and the birth's opening rides as a snapshot")
+               (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
+                      (mapv :id opening))
+                   "one message per entry, under the entry's OWN id, in the order the model read them")
+               (is (some #(= "看看这个项目" (:content %))
+                         (filter #(= "user" (:role %)) messages))
+                   "and the person's own message is in it, in front of the opening")
+               (is (str/includes? (text-of (first opening)) "STANDING RULE"))
+               (is (str/includes? (text-of (nth opening 1)) "PROJECT RULE"))
+               (is (str/starts-with? (text-of (nth opening 2)) "<skills>"))
+               (is (str/includes? (text-of (nth opening 2)) "- alpha: alpha does a thing")
+                   "the text is the same bytes the model read -- the other reading of one entry")))
 
             (testing "while the opening is the SESSION's own -- one entry per block, card and all"
               ;; WHERE A PERSON SEES IT. The entry carries the same `data` part a frame
-              ;; would (`injected-part-name`), so the page draws the same card; the model
+              ;; does (`injected-part-name`), so the page draws the same card; the model
               ;; view drops that part and keeps the text (`sessions/model-view`). The ids
               ;; are FIXED, so a session born twice owns one opening rather than two.
               (let [messages (:messages (read-json
@@ -3782,7 +3949,7 @@
                        (:content (first (filter #(and (= "user" (:role %))
                                                       (not (ag/opening-entry? %)))
                                                 messages))))
-                    "and the person's own message is an entry of its own, after the opening")))
+                    "and the person's own message is an entry of its own, IN FRONT of the opening")))
 
            (testing "the skill call itself IS on the wire, as an ordinary tool card"
              (is (some #(= "skill" (:toolCallName %))
@@ -3927,12 +4094,12 @@
                frames    (wire/frames-from-sse resp)
                lines     (wait-for-recorded
                           (log-file-for "it-slash")
-                          (fn [ls] (some #(and (= "message" (:kind %))
-                                               (= "done" (get-in % [:payload :content])))
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "done" (get-in (replay/payload %) [:content])))
                                          ls))
                           2000)
-               texts     (mapv #(str (get-in % [:payload :content]))
-                               (filter #(= "message" (:kind %)) lines))]
+               texts     (mapv #(str (get-in (replay/payload %) [:content]))
+                               (filter #(= "message" (replay/kind %)) lines))]
 
            (testing "the person's own words reach the model exactly as typed"
              ;; NOT asserted against the frames: the client sent those words, so
@@ -3951,30 +4118,45 @@
             (testing "and it is a CARD -- one CUSTOM frame, carrying exactly those bytes"
               ;; THE `/name` PATH'S HALF OF THE FEATURE, and the one a person actually sees:
               ;; the trigger is still the message they typed, the body is behind it, and the
-              ;; card is how a reader learns the model was handed it at all. The catalog is
-              ;; NOT here any more: it is the opening entry the conversation was born with
-              ;; (`.scratch/session-opening`), so it reaches the person through the session
-              ;; instead of being re-emitted by every run.
-              (let [cards (filter #(and (= "CUSTOM" (:type %))
-                                        (= "injected-context" (:name %)))
-                                  frames)]
-                (let [texts (mapv #(str (get-in % [:value :text])) cards)
-                      body  (first (filter #(str/starts-with? % "<skill name=\"alpha\">")
-                                           texts))]
-                  (is (= 1 (count cards))
-                      "the body the person asked for -- and nothing else")
-                  (is (some? body))
-                  (is (str/includes? (str body) "ALPHA BODY"))
-                  (is (every? #(re-find #"-ctx\d+$" (str (:messageId %))) cards)
-                      "named by the run and the place among the injections it made"))))
+              ;; card is how a reader learns the model was handed it at all. IT IS THE EDGE'S
+              ;; OWN FRAME here (the ask that pulled the body is in the history the client
+              ;; sent, so the body is folded in before the first call) -- hence `-pre<i>`,
+              ;; where the kernel's mid-run splices are `-ctx<n>`.
+              ;;
+              ;; THE SESSION'S OPENING RIDES AS THE CONVERSATION HERE TOO, and that is
+              ;; the other half of the fix: this run BIRTHS the conversation, and the page
+              ;; that minted it follows no feed -- so the messages the birth wrote travel
+              ;; with this run's start (`ag-ui/conversation-snapshot`). The CATALOG is not
+              ;; a derived card any more (it is the opening entry the conversation was born
+              ;; with), which is what the two assertions below now say separately.
+              (let [cards    (filterv #(and (= "CUSTOM" (:type %))
+                                            (= "injected-context" (:name %)))
+                                      frames)
+                    derived  (filterv #(re-find #"-pre\d+$" (str (:messageId %))) cards)
+                    snapshot (first (filter #(= "MESSAGES_SNAPSHOT" (:type %)) frames))
+                    opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
+                                      (:messages snapshot))
+                    texts    (mapv #(str (get-in % [:value :text])) derived)
+                    body     (first (filter #(str/starts-with? % "<skill name=\"alpha\">")
+                                            texts))]
+                (is (= 1 (count derived))
+                    "the body the person asked for -- and nothing else this run derived")
+                (is (some? body))
+                (is (str/includes? (str body) "ALPHA BODY"))
+                (is (= ["session-opening-0"] (mapv :id opening))
+                    "and the birth's own opening, as the message the entry is")
+                (is (str/starts-with? (if (sequential? (:content (first opening)))
+                                        (str/join "\n" (keep :text (:content (first opening))))
+                                        (str (:content (first opening))))
+                                      "<skills>"))))
 
-           (testing "and no OTHER frame carries it -- the card is the only way out"
-             (let [others  (remove #(and (= "CUSTOM" (:type %))
-                                         (= "injected-context" (:name %)))
-                                   frames)
-                   as-text (json/write-str others)]
-               (is (not (str/includes? as-text "ALPHA BODY")))
-               (is (not (str/includes? as-text "<skill name=")))))
+            (testing "and no OTHER frame carries it -- the card is the only way out"
+              (let [others  (remove #(and (= "CUSTOM" (:type %))
+                                          (= "injected-context" (:name %)))
+                                    frames)
+                    as-text (json/write-str others)]
+                (is (not (str/includes? as-text "ALPHA BODY")))
+                (is (not (str/includes? as-text "<skill name=")))))
 
            (testing "no skill tool call happened -- nothing asked the model for anything"
              (is (not-any? #(= "skill" (:toolCallName %))
@@ -4008,8 +4190,8 @@
          ;; Wait for the FIRST run to be written through its returned side before sending
          ;; the second: the second run's input has to land after that tail in the file.
          (wait-for-recorded (log-file-for "it-slash-side")
-                            (fn [ls] (some #(and (= "message" (:kind %))
-                                                 (= "first" (get-in % [:payload :content])))
+                            (fn [ls] (some #(and (= "message" (replay/kind %))
+                                                 (= "first" (get-in (replay/payload %) [:content])))
                                            ls))
                             2000)
          ;; THE SECOND RUN'S OWN FRAMES: this run loaded nothing -- the ask that pulled the
@@ -4027,16 +4209,16 @@
                                                {:append [{:id "u2" :role "user" :content "and another thing"}]})))
                records (wait-for-recorded
                         (log-file-for "it-slash-side")
-                        (fn [ls] (some #(and (= "message" (:kind %))
-                                             (= "second" (get-in % [:payload :content])))
+                        (fn [ls] (some #(and (= "message" (replay/kind %))
+                                             (= "second" (get-in (replay/payload %) [:content])))
                                        ls))
                         2000)
-               text-of (fn [r] (str (get-in r [:payload :content])))
-               body?   (fn [r] (and (= "message" (:kind r))
-                                    (= "user" (get-in r [:payload :role]))
+               text-of (fn [r] (str (get-in (replay/payload r) [:content])))
+               body?   (fn [r] (and (= "message" (replay/kind r))
+                                    (= "user" (get-in (replay/payload r) [:role]))
                                     (str/starts-with? (text-of r) "<skill name=\"alpha\">")))
-               input?  (fn [r] (= "input" (:kind r)))
-               event?  (fn [r] (= "event" (:kind r)))
+               input?  (fn [r] (and (= "message" (replay/kind r)) (= "client" (:source r))))
+               event?  (fn [r] (= "event" (replay/kind r)))
                i2      (second (keep-indexed (fn [i r] (when (input? r) i)) records))
                e2      (first (keep-indexed (fn [i r] (when (and (event? r) (> i i2)) i))
                                            records))]
@@ -4063,8 +4245,13 @@
                 (is (= 1 (count cards)))
                 (is (str/starts-with? (first card-texts) "<skill name=\"alpha\">"))
                 (is (str/includes? (first card-texts) "ALPHA BODY"))
-                (is (every? #(re-find #"-ctx\d+$" (str (:messageId %))) cards)
-                    "named by the run and the place among the injections it made")
+                (is (every? #(re-find #"-pre\d+$" (str (:messageId %))) cards)
+                    (str "named by the run and the place among the injections it started"
+                         " with -- `-pre`, never the kernel's `-ctx` (two families counting"
+                         " from zero would fold two cards into one)"))
+                (is (= (count (map :messageId cards))
+                       (count (distinct (map :messageId cards))))
+                    "and no two of a run's injection cards share an id")
                 (let [types   (mapv :type frames2)
                       custom  (.indexOf types "CUSTOM")
                       spoken  (.indexOf types "TEXT_MESSAGE_START")]
@@ -4072,16 +4259,18 @@
                       "and they are out with the run's start, before anything the model said")))
 
            (testing "the trajectory then draws the ask's turn carrying it, and nothing else"
-             ;; THE ORDER THE VIEW DRAWS IS THE ORDER THE MODEL READ: the opening
-             ;; (the catalog, `.scratch/session-opening`) in front of the question, and
-             ;; the body the ask pulled in behind it. One `context` kind and no
-             ;; source: WHERE a block sat stopped being a fact when the injections
-             ;; stopped all sitting in one place.
+             ;; THE ORDER THE VIEW DRAWS IS THE ORDER THE MODEL READ: the question first
+             ;; (ticket 03: the opening sits BEHIND it, `.scratch/session-opening`), then
+             ;; the session's opening -- here the catalog -- and the body the ask pulled
+             ;; in, both of them as context. One `context` kind and no source: WHERE a
+             ;; block sat stopped being a fact when the injections stopped all sitting in
+             ;; one place.
              (let [turns (:turns (trajectory/records->trajectory (vec records)))
                    ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
                (is (= 2 (count turns)))
-               (is (= ["system" "context" "user" "context" "assistant"]
-                      (mapv :kind (:items (first turns)))))
+               (is (= ["system" "user" "context" "context" "assistant"]
+                      (mapv :kind (:items (first turns))))
+                   "the ask, then the two blocks the model read behind it")
                (is (some #(str/includes? (str (:text %)) "<skills>") (ctx (first turns)))
                    "the catalog")
                (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx (first turns)))
@@ -4114,7 +4303,7 @@
 (defn- log-lines-for
   "Every line of THREAD-ID's log, in order, read from wherever its log IS."
   [tid]
-  (mapv #(json/read-str % :key-fn keyword)
+  (replay/lines->records
         (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))))
 
 (deftest the-choices-endpoint-offers-the-catalog-and-no-secret
@@ -4265,16 +4454,16 @@
            (is (= "side" (str/trim (:out (shell/run {:command "git rev-parse --abbrev-ref HEAD"
                                                     :dir git-repo})))))))
        (testing "and the audit line records the move, before -> after"
-         (let [lines (filterv #(= "git/branch" (:kind %)) (log-lines-for id))]
+         (let [lines (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))]
            (is (= 1 (count lines)))
-           (is (= "main" (get-in (first lines) [:payload :before])))
-           (is (= "side" (get-in (first lines) [:payload :after])))))
+           (is (= "main" (get-in (replay/payload (first lines)) [:before])))
+           (is (= "side" (get-in (replay/payload (first lines)) [:after])))))
        (testing "a branch the worktree does not have is refused, and writes no line"
          (let [resp (api-call :post "/api/git"
                               (json/write-str {:threadId id :branch "nope"}))]
            (is (= 400 (.statusCode resp)))
            (is (str/includes? (:error (read-json resp)) "nope")))
-         (is (= 1 (count (filterv #(= "git/branch" (:kind %)) (log-lines-for id))))
+         (is (= 1 (count (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))))
              "the refusal left no trace on disk"))))))
 
 ;; ------------------------------------------------ the provider catalog, over HTTP
@@ -4573,9 +4762,9 @@
                       :reasoning-effort "high")
         assistant-messages (fn []
                              (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
-                                  (mapv #(json/read-str % :key-fn keyword))
-                                  (filter #(= "message" (:kind %)))
-                                  (map :payload)
+                                  (replay/lines->records)
+                                  (filter #(= "message" (replay/kind %)))
+                                  (map replay/payload)
                                   (filter #(= "assistant" (:role %)))))]
     (providers/use-provider! thread pin)
     (let [stop (http/start! {:port 0})]
@@ -4596,8 +4785,8 @@
           ;; lands one beat after the terminal frame (see wait-for-recorded), so a
           ;; reader that races the consumer sees half a conversation.
           (wait-for-recorded (log-file thread)
-                             #(<= 2 (count (filter (fn [r] (and (= "message" (:kind r))
-                                                               (= "assistant" (get-in r [:payload :role]))))
+                             #(<= 2 (count (filter (fn [r] (and (= "message" (replay/kind r))
+                                                               (= "assistant" (get-in (replay/payload r) [:role]))))
                                                    %)))
                              5000)
           (let [assistant (assistant-messages)]
@@ -4625,25 +4814,27 @@
                       (finally (stop) (providers/use-provider! thread nil))))
                   (wait-for-recorded
                    (log-file thread)
-                   #(some (fn [r] (and (= "message" (:kind r))
-                                       (= "assistant" (get-in r [:payload :role]))))
+                   #(some (fn [r] (and (= "message" (replay/kind r))
+                                       (= "assistant" (get-in (replay/payload r) [:role]))))
                           %)
                    5000)
                   (->> (str/split-lines (slurp (log-file thread) :encoding "UTF-8"))
-                       (mapv #(json/read-str % :key-fn keyword))
-                       (filter #(= "message" (:kind %)))
-                       (map :payload)
+                       (replay/lines->records)
+                       (filter #(= "message" (replay/kind %)))
+                       (map replay/payload)
                        (filter #(= "assistant" (:role %)))))
         reply (fn [] [{:content "ok"}])]
 
-    (testing "a thinking-mode provider gets the field added, and the log shows it"
+    (testing "a thinking-mode provider gets the field added on the way OUT"
       ;; The strict vendor is in the room: without the pad this run is a 400.
       (let [body (run "t-pad-on" (assoc (fake/scripted (reply) {:thinking true})
                                         :reasoning-effort "high"))]
         (is (not (str/includes? body "must be passed back"))
             "the request the client sent would have been refused as-is")
-        (is (contains? (first body) :reasoning_content)
-            "and the field is on the message the vendor was shown -- before the audit line")))
+        (is (not (contains? (first body) :reasoning_content))
+            "and the RECORD keeps the client's own message: the pad is the vendor's requirement
+             met on the wire (`llm/thinking-mode-history`), not something that entered the
+             conversation -- an empty field nobody sent is not a fact about what was said")))
 
     (testing "a provider with no reasoning effort is untouched"
       (let [logged (run "t-pad-off" (fake/scripted (reply)))]
@@ -4664,14 +4855,14 @@
               (post-run "t-client-field" {:append with-field}))
             (finally (stop) (providers/use-provider! "t-client-field" nil))))
         (wait-for-recorded (log-file "t-client-field")
-                           #(some (fn [r] (and (= "message" (:kind r))
-                                               (= "assistant" (get-in r [:payload :role]))))
+                           #(some (fn [r] (and (= "message" (replay/kind r))
+                                               (= "assistant" (get-in (replay/payload r) [:role]))))
                                   %)
                            5000)
         (let [assistant (->> (str/split-lines (slurp (log-file "t-client-field") :encoding "UTF-8"))
-                             (mapv #(json/read-str % :key-fn keyword))
-                             (filter #(= "message" (:kind %)))
-                             (map :payload)
+                             (replay/lines->records)
+                             (filter #(= "message" (replay/kind %)))
+                             (map replay/payload)
                              (filter #(= "assistant" (:role %))))]
           (is (= "I looked it up" (:reasoning_content (first assistant)))
               "the client's own words reached the vendor"))))))
@@ -5109,12 +5300,16 @@
   dropped rather than failed on: the file may be mid-append, which is a fact about
   reading a live log and not a corrupt log."
   [tid]
+  ;; THROUGH THE RECORD'S OWN READER (`.scratch/jsonl-two-kinds` 票 02): a row is
+  ;; `{:type .. :payload ..}`; reading it is what validates it and hands back the row
+  ;; itself, and the assertions here ask `replay/kind` what that row is. The `try` is for
+  ;; the half-written last line.
   (->> (str/split-lines (slurp (log-file-for tid) :encoding "UTF-8"))
-       (keep (fn [line] (try (json/read-str line :key-fn keyword) (catch Throwable _ nil))))
+       (keep (fn [line] (try (first (replay/lines->records [line])) (catch Throwable _ nil))))
        (vec)))
 
 (defn- log-frames [tid]
-  (mapv :payload (filter #(= "event" (:kind %)) (log-records tid))))
+  (mapv replay/payload (filter #(= "event" (replay/kind %)) (log-records tid))))
 
 (defn- terminals [tid]
   (filterv frames/terminal? (log-frames tid)))
@@ -5168,8 +5363,8 @@
      (testing "the refused run wrote nothing at all -- not even its input line"
        ;; ON THE FILE, not on the response: a run that is refused but logs an input is
        ;; refused in the answer and started anyway, which is the bug this pins.
-       (is (= 1 (count (filter #(= "input" (:kind %)) (log-lines-for "gate-a"))))
-           "the refused run left an input line in gate-a's record"))
+       (is (= 1 (count (client-rows (log-lines-for "gate-a"))))
+           "the refused run left no row of its own in gate-a's record"))
      (testing "both runs that were let through reach their own terminal"
        (is (until #(and (not (http/running? "gate-a")) (not (http/running? "gate-b"))) 5000))
        (is (= 1 (count (terminals "gate-a"))) "gate-a has one run's ending")
@@ -5179,7 +5374,7 @@
        ;; gate-b's run bleed into gate-a's file" is to look up what gate-b's run is
        ;; called. A leaked frame would carry it.
        (let [b-run (->> (log-lines-for "gate-b")
-                        (filter #(= "input" (:kind %)))
+                        client-rows
                         first
                         :runId)]
          (is (string? b-run) "gate-b's run has no name on the record")
@@ -5221,6 +5416,37 @@
        (is (= 200 (.statusCode (post-run "crash-gate")))
            "the session was locked out by a run that crashed")))))
 
+(deftest an-old-record-is-refused-by-name-over-http
+  ;; 拍定 3 OF `.scratch/jsonl-two-kinds`: an old-contract record is NOT migrated, not read
+  ;; leniently, and not quietly made to work -- the sentence a person meets sends them to a
+  ;; new conversation. The READER's refusal is pinned in `replay_test`; what is pinned HERE is
+  ;; that a client meets it as an ANSWER (`400` and a reason) rather than as a 500, an empty
+  ;; conversation, or a repair that rewrites a file this build cannot honestly fold.
+  (let [tid  (str "old-contract-" (java.util.UUID/randomUUID))
+        f    (log-file tid)
+        body (str (json/write-str {:ts 1 :runId "r1" :kind "input"
+                                   :payload {:threadId tid
+                                             :append [{:id "u1" :role "user" :content "hi"}]}})
+                  "\n")]
+    (.mkdirs (.getParentFile f))
+    (spit f body :encoding "UTF-8")
+    (with-server
+     "old-contract-read"
+     (fn []
+       (testing "reading it is a 400 that names the contract and says what to do"
+         (let [resp (api-call :get (str "/api/threads/" tid "/page") nil)
+               reply (read-json resp)]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error reply)) "old contract"))
+           (is (str/includes? (str (:error reply)) "start a new conversation"))))
+       (testing "and the rebuild door refuses the same file for the same reason"
+         (let [resp (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+               reply (read-json resp)]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (str (:error reply)) "old contract"))))
+       (testing "and the file is left EXACTLY as it was: unread, unmoved, unmigrated"
+         (is (= body (slurp f :encoding "UTF-8"))))))))
+
 (defn- write-truncated-log!
   "A record that stops mid-run, written by hand: an input, the run's start, and nothing
   else. HAND-WRITTEN RATHER THAN PRODUCED BY A REAL KILL because the case is about what
@@ -5230,19 +5456,18 @@
   (let [f (log-file tid)]
     (io/delete-file f true)
     (.mkdirs (.getParentFile f))
-    (let [line! (fn [kind payload]
-                  (spit f (str (json/write-str {:ts (System/currentTimeMillis)
-                                                :runId run-id :kind kind :payload payload})
+    (let [line! (fn [kind payload & [extra]]
+                  (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                 :runId run-id :kind kind :payload payload}
+                                                extra))
                                "\n")
                         :append true :encoding "UTF-8"))]
-      ;; THE SHAPE THE EDGE WRITES: the request as it arrived (`:append`) plus what
-      ;; ENTERED the conversation (`:added`), which is the field the fold reads and the
-      ;; one that can differ -- a repeat enters nothing, and the opening context enters
-      ;; without the client having sent it (ticket 03).
-      (line! "input" {:threadId tid
-                      :append [{:id "u1" :role "user" :content "看看这个项目"}]
-                      :tools []
-                      :added  [{:id "u1" :role "user" :content "看看这个项目"}]})
+      ;; THE SHAPE THE EDGE WRITES (票 02): the run's own first message row -- the prompt it
+      ;; assembled -- and then a `message` row per entry the action brought. The `input` row
+      ;; that used to carry the request as it arrived is gone; what ENTERED the conversation
+      ;; is the rows themselves, which is why the fold reads them and not a field.
+      (line! "message" {:role "system" :content "S"} {:source "system-prompt" :hash "h1"})
+      (line! "message" {:role "user" :content "看看这个项目"} {:source "client" :id "u1"})
       (doseq [frame ((ag/outbound tid run-id) (ev/run-start))]
         (line! "event" frame)))))
 
@@ -5274,10 +5499,7 @@
              ;; the name out of the record instead of naming one: what matters is that
              ;; the two doors -- this read and the sidebar row below -- are answering
              ;; about the SAME run, and the record is where the name is written down.
-             (is (= [(->> (log-records "sofar-a")
-                          (filter #(= "input" (:kind %)))
-                          first
-                          :runId)]
+             (is (= [(->> (log-records "sofar-a") client-rows first :runId)]
                     (:openRuns answer))
                  "the read names the run the record says is open")
              (is (true? (:running (session-row-of sofar-dir "sofar-a")))
@@ -5288,9 +5510,32 @@
                    "the calls the model made a moment ago are readable")
                (is (not-any? #(= "tool" (:role %)) (:messages answer))
                    "no result has been written yet, and the read invents none")))
+           (testing "and a window that arrives NOW sees the same half turn"
+             ;; TICKET 04 OF `.scratch/session-opening`. `settle!` folds a run's frames at its
+             ;; END ('half an answer is not a turn'), so a page that read the session table
+             ;; mid-run used to show the question and none of the work -- a refresh that landed
+             ;; on a long turn looked like an empty turn. The frames are on the RECORD the
+             ;; moment they are written (`log!` is a per-frame append), so the window reads the
+             ;; record while a run of this session is in flight, and this is that promise.
+             (let [resp (api-call :get "/api/threads/sofar-a/page" nil)
+                   body (read-json resp)]
+               (is (= 200 (.statusCode resp)) "a window can be read while the run is going")
+               (is (true? (:live body)) "and it says this process is serving the session")
+               (is (= "running" (:state body))
+                   "and that the turn on screen is still being written")
+               (is (= (:messages answer) (mapv :message (:entries body)))
+                   "the page carries every message `sofar` does -- one record, two doors")
+               (testing "and the FEED opens on that same page"
+                 (let [opened (feed-first-frame "sofar-a")]
+                   (is (= "window" (:type opened)))
+                   (is (= "running" (:state opened)))
+                   (is (= (mapv :seq (:entries body)) (mapv :seq (:entries opened)))
+                       "the stream and the one-shot read agree entry for entry")
+                   (is (false? (:hasMore opened))
+                       "and nothing older lies beyond this page: the turn is the start")))))
            (testing "NOTHING WAS WRITTEN for it: no terminal, no close-off"
              (is (empty? (terminals "sofar-a")))
-             (is (not-any? #(= "session/closed-off" (:kind %)) (log-records "sofar-a")))))
+             (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records "sofar-a")))))
          (testing "and polling it does not touch the file at all"
            ;; THE JUDGEMENT A POLLING CLIENT DEPENDS ON: bytes and mtime are the two
            ;; numbers a write cannot avoid moving.
@@ -5310,6 +5555,23 @@
          (is (= (:messages rebuilt) (:messages answer))
              "two readers of one settled conversation must not diverge")
          (is (= (:context rebuilt) (:context answer))))
+       (testing "and the window shows the conversation ONCE -- the half turn was not a copy"
+         ;; THE OTHER HALF OF TICKET 04: mid-run the window answered from the RECORD, and at
+         ;; settle it answers from the session table. Same entries, same ids -- so the switch
+         ;; must not put a second copy of the turn on screen (the reader dedupes by id), and
+         ;; this is the record read back through the window saying so.
+         (let [resp    (api-call :get "/api/threads/sofar-a/page" nil)
+               body    (read-json resp)
+               ;; THE ID IS THE MESSAGE'S OWN (the table's entries are `{:seq .. :message ..}`
+               ;; and the record's carry one too): it is what the reader dedupes by, which is
+               ;; the whole reason the source changing mid-conversation is safe.
+               ids     (mapv (comp :id :message) (:entries body))
+               settled (read-json (sofar "sofar-a"))]
+           (is (= 200 (.statusCode resp)))
+           (is (= (count ids) (count (distinct ids)))
+               "no entry appears twice after the source changed")
+           (is (= (:messages settled) (mapv :message (:entries body)))
+               "and the window says what `sofar` says about the settled conversation")))
        (testing "and the run kept exactly ONE terminal frame"
          (is (= 1 (count (terminals "sofar-a")))))))))
 
@@ -5359,12 +5621,12 @@
            (is (= 400 (.statusCode resp)))
            (is (str/includes? (str (:error answer)) "r1") "the run is named")
            (is (str/includes? (str (:error answer)) "rebuild") "and so is the way out"))
-         (is (not-any? #(= "session/closed-off" (:kind %)) (log-records tid))
+         (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records tid))
              "a refused read writes nothing -- it is not the repairing door"))
        (testing "rebuild still closes it off, exactly as it always did"
          (let [rebuilt (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
            (is (seq (:messages rebuilt)))
-           (is (some #(= "session/closed-off" (:kind %)) (log-records tid))
+           (is (some #(= "session/closed-off" (replay/kind %)) (log-records tid))
                "the repair is unconditional for a log nobody is writing"))
          (testing "and after that the same read returns it, settled"
            (let [resp   (sofar tid)
@@ -5408,7 +5670,7 @@
              (is (= ["user"] (mapv :role (:messages body)))
                  "and it is what has SETTLED: the answer still being written is not a turn"))
            (testing "and NOTHING was appended to it"
-             (is (not-any? #(= "session/closed-off" (:kind %)) (log-records "sofar-b")))
+             (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records "sofar-b")))
              (is (empty? (terminals "sofar-b")))))
          (finally (.close sock) ((:release gate)))))
      (testing "the run finishes on its own, with one terminal and no help from anybody"
@@ -5587,6 +5849,17 @@
                              (json/read-str payload :key-fn keyword)))))))))]
        [sock next-frame]))))
 
+(defn- feed-first-frame
+  "Open THREAD-ID's feed, read its OPENING frame, close the socket, answer the frame.
+
+  The `try`/`finally` lives here rather than in a case because a socket closed on the way
+  out of a deep `testing` nest is exactly where a stray paren hides; a case that wants the
+  FIRST frame (what a page sees the moment it opens the conversation) says so in one line."
+  [tid]
+  (let [[sock next-frame] (feed-open! tid)]
+    (try (next-frame)
+         (finally (.close sock)))))
+
 (deftest a-page-is-cut-at-the-arrivals-the-conversation-was-written-in
   (with-server
    "win-page"
@@ -5632,8 +5905,9 @@
          (is (= 200 (.statusCode resp)))
          (is (false? (:live body)) "read from the record, and it says so")
          (is (= ["u1"] (mapv (comp :id :message) (:entries body))))
-         (is (= [0] (mapv :seq (:entries body)))
-             "numbered by its own line in the record -- the same numbers a live session mints")
+         (is (= [1] (mapv :seq (:entries body)))
+             "numbered by its own line in the record -- line 0 is the run's prompt row, and the
+              entry is the line that carries it, the same numbers a live session mints")
          (is (= "unfinished" (:state body))
              "and the state is the RECORD's own reading: a log that stops mid-run with
               nothing in this process running it says exactly that, and it is the flag
@@ -5762,3 +6036,80 @@
                  "the reader's cursor has not moved -- there was nothing to number")))
          (finally (.close sock)))))))
 
+
+(deftest the-record-holds-exactly-two-kinds-of-row
+  ;; 拍定 2026-09-21 (`.scratch/jsonl-two-kinds`): `message` is what a person said or an LLM
+  ;; returned; EVERY other fact is an `event` whose payload is a frame -- the wire's frames
+  ;; themselves, and the harness's own facts as CUSTOM frames named after them.
+  ;;
+  ;; This reads the FILE raw, on purpose. Every other case in this file asks
+  ;; `replay/kind` / `replay/payload` about a row; a case about the FORMAT has to see the
+  ;; bytes the writer actually put down.
+  (with-server
+   "two-kinds"
+   (fn []
+     (post-run "two-kinds" {:append [{:id "u1" :role "user" :content "hi"}]})
+     (let [rows (until (fn []
+                         (let [rs (->> (str/split-lines (slurp (log-file "two-kinds")
+                                                                :encoding "UTF-8"))
+                                       (keep #(try (json/read-str % :key-fn keyword)
+                                                   (catch Throwable _ nil)))
+                                       vec)]
+                           (when (some #(= "message" (:type %)) rs) rs)))
+                       5000)]
+       (testing "every row is one of the two, and carries a payload"
+         (is (seq rows))
+         (is (every? #(contains? #{"event" "message"} (:type %)) rows)
+             (str "rows seen: " (pr-str (mapv :type rows))))
+         (is (every? #(contains? % :payload) rows)))
+       (testing "and none of them is written in the old contract"
+         (is (not-any? #(contains? % :kind) rows)
+             "`kind` at the top level is the row this build refuses to read")
+         (is (not-any? #(contains? (:payload %) :kind) rows)
+             "nor does the envelope's vocabulary leak into a payload"))
+       (testing "a message row keeps the provider's own map, verbatim"
+         (let [msg (first (filter #(and (= "message" (:type %))
+                                        (= "user" (get-in % [:payload :role])))
+                                  rows))]
+           (is (some? msg) "the person's own message is a `message` row")
+           (is (= "hi" (get-in msg [:payload :content])))
+           (is (empty? (filter #(contains? (:payload msg) %)
+                               [:type :payload :ts :runId :source :hash]))
+               "identity and time live on the envelope, never inside the payload")))
+       (testing "the system prompt is a message row too -- and the array's FIRST one"
+         ;; OWNER, 2026-09-21: a `message` row IS an element of the messages array the model
+         ;; was handed, and the prompt is that array's first element, so it is stored the way
+         ;; the model got it -- verbatim, `:source` saying the prompt put it there and `:hash`
+         ;; naming those bytes. Every run writes its own copy (a stable prefix is what the
+         ;; provider's cache reads), which is why `harness.edge.replay/entries` -- the
+         ;; conversation, and with it everything a client is ever handed -- is the ONE place
+         ;; that has to leave it out.
+         (let [prompt (first (filter #(and (= "message" (:type %))
+                                           (= "system-prompt" (:source %)))
+                                     rows))]
+           (is (some? prompt) "the run recorded the prompt it handed the model")
+           (is (= "system" (get-in prompt [:payload :role])) "as a system message")
+           (is (string? (get-in prompt [:payload :content])))
+           (is (= 64 (count (:hash prompt))) "named by its SHA-256, on the envelope")
+           (let [first-wire (first (filter #(= "RUN_STARTED" (get-in % [:payload :type])) rows))]
+             (is (some? first-wire) "the run's own first frame is on the record")
+             (is (< (.indexOf rows prompt) (.indexOf rows first-wire))
+                 "the run wrote it before its first wire frame; what sits IN FRONT of the
+                  prompt is the action's own rows -- the client's message, which arrived
+                  first (票 02) -- and the hook facts that fire while the run is set up"))))
+       (testing "a wire frame is an event whose payload IS the frame"
+         (let [terminal (first (filter #(= "RUN_FINISHED" (get-in % [:payload :type])) rows))]
+           (is (some? terminal) "a run's terminal frame is on the record")
+           (is (= "event" (:type terminal)))
+           (is (= "two-kinds" (get-in terminal [:payload :threadId]))
+               "and it is the frame itself, not a copy of its fields")))
+       (testing "a fact the harness knows on its own is an event too -- a CUSTOM frame"
+         (let [fact (first (filter #(= "model/start" (get-in % [:payload :name])) rows))]
+           (is (some? fact) "the model call's start is a fact with no wire frame of its own")
+           (is (= "event" (:type fact)))
+           (is (map? (get-in fact [:payload :value])) "carrying what the fact knew")
+           (is (nil? (get-in fact [:payload :messageId]))
+               "and no message id: nothing on screen draws it"))
+         (is (not-any? #(= "input" (get-in % [:payload :name])) rows)
+             "and the `input` row 票 02 deletes is GONE -- what an action brought is its own
+              message rows, not a fact restating them"))))))

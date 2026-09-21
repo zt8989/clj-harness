@@ -12,29 +12,40 @@
 
 ## 一场会话开场拿到什么
 
-一条 run 交给 provider 的消息向量，形状是固定的——**system、这场会话的开场、然后才是对话**：
+一条 run 交给 provider 的消息向量，形状是固定的——**system、提问、它要的材料、然后才是这场对话继续的部分**。
+出生那一轮（会话的第一次 run）长这样：
 
 ```
 [system  组装的 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本]
+[user    提问]
+[user    出生那条 context（绑定了项目时才有，见「出生 context」）]
 [user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
 [user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离提问更近）
 [user    <skills>…清单…</skills>]                                          能力菜单，开场块里的最后一块
-[...这场会话的消息（出生那一条 context 与提问都在里面）...]
 [user    <skill name="…">…正文…</skill>]                                    skill context，缺省没有（见「技能正文是派生的」）
 ```
 
-**开场块在会话出生的那一刻写进对话，一次**（`.scratch/session-opening`，2026-09-21）：
-指令文件与技能清单**不进** system 消息（role 仍是 `user`，标签仍是它们的边界），但**位置**变了——
-出生那一轮把它们写进对话本身（`harness.edge.ag-ui/opening-entries` 成形，
-`harness.edge.sessions/append!` 落进会话），此后每一轮都是历史的一部分。**除出生那一轮外，
-没有哪条 run 会追加开场块。** 代价明写在这里：**「改了 AGENTS.md 立刻生效」不再成立**——
+**开场块写在提问之后，一次**（`.scratch/session-opening`；位置是 2026-09-21 的修正）：材料排在
+**它要回答的那句话后面**，这是 `.scratch/context-frames` 决定 7 起就有的规矩，出生那一轮也不例外。
+指令文件与技能清单**不进** system 消息（role 仍是 `user`，标签仍是它们的边界），而是由出生那一轮写进对话本身
+（`harness.edge.ag-ui/opening-entries` 成形，`harness.edge.sessions/append!` 落进会话），此后每一轮都是历史的一部分。
+**除出生那一轮外，没有哪条 run 会追加开场块。** 代价明写在这里：**「改了 AGENTS.md 立刻生效」不再成立**——
 改动在下一次开场（新会话，或将来的压缩重建）被采纳，会话中途不换。
+
+**开场块也是卡，而且出生那一轮把它们交给页面。** 每条开场 entry 同时带 `data` part（屏幕上的卡）与 `text` part
+（模型读的字），出生那一轮随 `RUN_STARTED` 之后发一帧 `MESSAGES_SNAPSHOT`（`harness.edge.ag_ui/conversation-snapshot`），
+内容就是这一轮写进对话的那几条 entry，`id` 是条目自己的 `session-opening-<i>`。**为什么非发不可**：自己开出这一页的
+客户端既没有窗口也不跟 feed，出生那一轮是它唯一能收到开场卡的线。**为什么是消息列表而不是每块一张 `CUSTOM` 卡**：
+`CUSTOM` 是个 part，适配器把它挂到正在流的那条消息上、帧自己的 `messageId` 在入口就丢了，客户端手里没有那条 user 消息
+时卡会落到答案底下；快照带的是消息本身，落位由消息决定。快照的 `content` 是**文本**（`ag_ui/wire-message` 投影的道理：
+`@ag-ui/client` 校验它解析的每一帧，part 向量会被当场拒掉），**卡由读者按 id 和文本自己画**
+（`ui/src/lib/injections.ts` 的 `isOpeningEntryId`），而文本正是卡里那份字节。
 
 **注入物有两族，规矩因此是两条。** 2026-09-18 那次挪动只讲了其中一条（派生物）：
 
 | | 谁 | 落点 | 为什么 |
 | --- | --- | --- | --- |
-| **开场块**（不变量） | 指令文件、技能清单 | 会话**最前**（出生时写入，之后是历史） | 它们随会话不变，进稳定前缀是划算的；更重要的是**排在末尾会盖住这条 run 自己的答案**——厂商要求 tool 结果紧跟自己那条 assistant 消息，末尾多出来的块会挡在中间 |
+| **开场块**（不变量） | 指令文件、技能清单 | 出生时写进对话：提问之后、这场对话继续的部分之前 | 它们随会话不变，进稳定前缀是划算的；而且它们落在**对话中间**（不是在末尾追加），厂商那条「tool 结果紧跟自己的 assistant 消息」的要求不会被挡 |
 | **派生物**（每轮现算） | 技能正文（`cap.skills/derived-injections`）、后台作业的结尾（`cap.jobs/before-llm`） | 对话**之后** | 它们每轮都可能变（加载一个技能就变），一变就把它后面整段作废——所以留在稳定前缀之外；而且工具往返发生在它们**之前**，不会被打断 |
 
 常驻规则排在能力菜单之前，这条没变：模型先知道「必须先怎样」，然后才拿到「还能拿什么」。
@@ -283,10 +294,12 @@ tool-call，`data` part 一个都不发；适配器升级时第一个要看的�
 
 **立场没被推翻，只是被说准了**：注入物不是这场对话说过的话——改的是「因此人也看不见它」这半句。
 
-**那几块拼在哪**：`ag_ui/inbound` 的 4-arity 把开场块拼在**会话的消息之后**（空块时返回原向量本身，不是
-等价的一个新向量——那是「什么都没配的会话与从前逐字节相同」这条回归保证的形状）。发帧的是**边**：块在它
-手里组装、走的也是它的 sink，内核从没见过它们是「它加的」。这个函数仍是个转换器：块是递进来的，它自己
-不读任何东西。
+**那几块拼在哪**：出生那一轮在 `harness.edge.http/run-agent!` 里拼——`opening-entries` 成形、`append!` 落进会话、
+位置写在那条提问**之后**（`.scratch/session-opening` 的修正：材料排在它要回答的那句话后面），同一个地方把
+这一轮写进对话的 entry 变成那一帧 `MESSAGES_SNAPSHOT`（`conversation-snapshot`），只在这一轮发。**发帧的是边**：块在它手里组装、走的也是它的 sink，
+内核从没见过它们是「它加的」。`harness.edge.ag-ui/inbound` 仍是个转换器：消息递进来，它自己不读任何东西，
+也不再拼开场块（`inbound` 那个 `context` 参数生产调用点今天一律传 `nil`——出生那条 context 现在和开场块一起
+躺在 `:added` 里；只有 `ag-ui` 自己的测试还走那条分支）。
 
 `InstructionsLoaded` 走既有的 `hook/<Point>` 审计行；**不新增 jsonl 行种类、不改 AG-UI 帧形状、不动 CORS**。
 

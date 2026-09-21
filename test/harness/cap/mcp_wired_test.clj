@@ -18,6 +18,7 @@
             [harness.fake :as fake]
             [harness.infra.home :as home]
             [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
             [harness.cap.mcp :as mcp]
             [harness.cap.providers :as providers]
             [harness.test-support :as support]
@@ -112,7 +113,10 @@
   (into []
         (keep (fn [l]
                 (when-not (str/blank? l)
-                  (try (json/read-str l :key-fn keyword) (catch Throwable _ nil)))))
+                  ;; THROUGH THE RECORD'S OWN READER (`.scratch/jsonl-two-kinds`): a row
+                  ;; is `{:type .. :payload ..}`, reading it is what validates it, and
+                  ;; `replay/kind` is how an assertion below asks what it is.
+                  (try (first (replay/lines->records [l])) (catch Throwable _ nil)))))
         (try (str/split-lines (slurp f :encoding "UTF-8")) (catch Throwable _ []))))
 
 (defn- wait-for
@@ -169,13 +173,13 @@
                 (recur size (if (= size last-size) (inc stable) 0)))))))))
 
 (defn- finished? [ls]
-  (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+  (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls))
 
-(defn- of-kind [ls kind] (filterv #(= kind (:kind %)) ls))
+(defn- of-kind [ls kind] (filterv #(= kind (replay/kind %)) ls))
 
 (defn- tool-results [ls]
   (->> (of-kind ls "message")
-       (map :payload)
+       (map replay/payload)
        (filterv #(= "tool" (:role %)))
        (mapv :content)))
 
@@ -197,14 +201,14 @@
                      (testing "and it went through the ONE execution seam, so all
                                three lifecycle lines are there like any built-in's"
                        (doseq [kind ["tools/pre-execute" "tools/execute" "tools/post-execute"]]
-                         (is (= ["c1"] (mapv #(get-in % [:payload :toolCallId])
+                         (is (= ["c1"] (mapv #(get-in (replay/payload %) [:toolCallId])
                                              (of-kind ls kind)))
                              kind)))
                      (testing "the connection is on the record too"
                        (let [lines (of-kind ls "mcp/server")]
                          (is (= 1 (count lines)))
-                         (is (= "fake" (get-in lines [0 :payload :server])))
-                         (is (= "connected" (get-in lines [0 :payload :status]))))))))))
+                         (is (= "fake" (:server (replay/payload (first lines)))))
+                         (is (= "connected" (:status (replay/payload (first lines))))))))))))
 
 (deftest a-server-that-will-not-start-does-not-break-the-run
   (let [thread "wired-broken"]
@@ -215,7 +219,7 @@
                    (io/delete-file (log-file thread) true)
                    (post-run thread)
                    (let [dead? (fn [ls]
-                                 (some #(= "broken" (get-in % [:payload :server]))
+                                 (some #(= "broken" (get-in (replay/payload %) [:server]))
                                        (of-kind ls "mcp/server")))
                          ;; BOTH, because they are written at different moments:
                          ;; the mcp line rides :run/done and the tool MESSAGE is
@@ -230,11 +234,11 @@
                        (is (ran-server-tool? ls)))
                      (testing "and the dead one is NAMED, so its missing tools have an answer"
                        (let [failed (->> (of-kind ls "mcp/server")
-                                         (filter #(= "broken" (get-in % [:payload :server])))
+                                         (filter #(= "broken" (get-in (replay/payload %) [:server])))
                                          first)]
                          (is (some? failed))
-                         (is (= "failed" (get-in failed [:payload :status])))
-                         (is (seq (get-in failed [:payload :error]))))))))))
+                         (is (= "failed" (get-in (replay/payload failed) [:status])))
+                         (is (seq (get-in (replay/payload failed) [:error]))))))))))
 
 ;; ------------------------------------------- the same guards, one table over
 
@@ -270,7 +274,7 @@
                                      (tool-results ls))))
                          (testing "the seam recorded it as a hook block"
                            (is (= ["hook-blocked"]
-                                  (mapv #(get-in % [:payload :outcome])
+                                  (mapv #(get-in (replay/payload %) [:outcome])
                                         (of-kind ls "tools/pre-execute")))))
                          (support/wipe-hooks!))))))))
 
@@ -433,7 +437,7 @@
                              ;; and the missing line below would read as a lost file
                              ;; rather than as a hook that timed out. `exit 0` is the
                              ;; engine's own record that the command ran and allowed.
-                             (is (= [0] (mapv :exit (mapcat (comp :results :payload) fired)))
+                             (is (= [0] (mapv :exit (mapcat (comp :results replay/payload) fired)))
                                  (str "the result hook's own outcome: " (pr-str fired)))))
                          ;; WAITED FOR, NOT READ ONCE -- see `wait-marker`: the block
                          ;; above reads the LOG, which the run's own thread finishes
@@ -521,10 +525,10 @@
                                "still listed: off is not hidden")))
                        (testing "the switch landed an mcp/server line, runId null"
                          (let [lines (of-kind (wait-quiet f 3000) "mcp/server")
-                               last-line (last (filter #(= "fake" (get-in % [:payload :server]))
+                               last-line (last (filter #(= "fake" (get-in (replay/payload %) [:server]))
                                                        lines))]
                            (is (some? last-line))
-                           (is (true? (get-in last-line [:payload :disabled])))
+                           (is (true? (get-in (replay/payload last-line) [:disabled])))
                            (is (nil? (:runId last-line))))))
                      (testing "ON: it connects again and its tools run"
                        (is (= 200 (:status (api-post "api/mcp" {:threadId thread

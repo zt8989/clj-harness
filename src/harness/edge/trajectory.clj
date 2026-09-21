@@ -48,22 +48,55 @@
   it is what this returns."
   (:require [clojure.string :as str]
             [harness.edge.ag-ui :as ag]
-            [harness.edge.stats :as stats]))
+            [harness.edge.stats :as stats]
+            [harness.edge.replay :as replay]))
 
 ;; ------------------------------------------------------------------- the runs
 
+(defn- entry-row?
+  "Is ROW a message the CONVERSATION holds -- one a client sent, or one the conversation's
+  birth wrote for it? The `:source` says who put these bytes in the model's array and the
+  `:id` says they were APPENDED to the conversation: a block a later run re-derived for
+  itself (the same instruction files, the same context, read again) has no id and is not an
+  entry, which is the same reading `harness.edge.replay/entries` takes."
+  [row]
+  (and (contains? #{"client" "injection" "opening"} (:source row))
+       (or (= "client" (:source row)) (some? (:id row)))))
+
+(defn- row-message
+  "A `message` row as the message it carries, WITH THE ROW'S OWN `:id` PUT BACK -- the
+  envelope is where a record keeps the identity a client recognises its own messages by
+  (`.scratch/jsonl-two-kinds` 票 02), and every reader above this one speaks in messages."
+  [row]
+  (cond-> (replay/payload row)
+    (:id row) (assoc :id (:id row))))
+
 (defn run-segments
   "RECORDS split into runs, in order:
-  [{:input <record> :submitted [msg…] :returned [msg…]}].
+  [{:opener <row> :at <ms> :brought [msg…] :submitted [msg…] :returned [msg…]
+    :calls [row…] :streaming bool}].
 
-  A run is OPENED by an `input` record. Its SUBMITTED messages are the `message` lines
-  that come before its first `event`; every `message` line after that is the RETURNED
-  side, because the kernel writes its tail at :run/done, i.e. after the terminal frame
-  (the same fact harness.edge.replay's docstring rests on).
+  A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there,
+  whether that row is the client's own or the system prompt (`harness.edge.http`). A HARNESS
+  FACT does not open one: the fact rows are `event`s, which is the same distinction
+  `harness.edge.replay/runs` draws. What the run BROUGHT into the CONVERSATION is
+  `:brought`, and an entry is a row that carries one (`replay/entries`' reading). Its
+  SUBMITTED messages are the `message` lines that come before its first `event`; every
+  `message` line after that is the RETURNED side, because the kernel writes its tail at
+  :run/done, i.e. after the terminal frame (the same fact harness.edge.replay's docstring
+  rests on).
 
-  A `message` line before any `input` belongs to no run and is dropped: there is no turn
-  it could be shown under, and inventing one would put a message on screen that no model
-  call ever had in front of it.
+  A `message` line before any run's system message belongs to no run and is dropped: there
+  is no turn it could be shown under, and inventing one would put a message on screen that
+  no model call ever had in front of it.
+
+  THE SYSTEM MESSAGE IS ONE OF THE RUN'S MESSAGE ROWS (owner, 2026-09-21: a `message` row
+  IS an element of the array the model was handed, and the prompt is that array's first
+  element -- so it is a message row, with `source` = `system-prompt` and the bytes' `hash`
+  on its envelope). It reaches the submitted side like every other message the model read,
+  and this reader has no special case for it: the CONVERSATION fold skips it
+  (`harness.edge.replay/entries`), and this one SHOWS it, because 'what the model saw' is
+  this reader's question.
 
   PUBLIC, like `stats/incomplete?` and `stats/user-ids`, because a SECOND reader needs
   exactly this split: harness.edge.context counts the messages of the run the last
@@ -78,25 +111,66 @@
       (nil? record)
       (cond-> acc current (conj current))
 
-      (= "input" (:kind record))
-      (recur more {:input record :submitted [] :returned [] :calls [] :streaming false}
+      ;; A RUN OPENS AT ITS FIRST MESSAGE ROW (`.scratch/jsonl-two-kinds` 票 02): the `input`
+      ;; row that used to open one is gone, and the message rows are the array the model was
+      ;; handed -- the client's own on a run that brought one, the system prompt on a run
+      ;; that did not. A HARNESS FACT cannot open a run (the fact rows are `event`s), which
+      ;; is the same distinction `harness.edge.replay/runs` draws. `:at` is that row's clock
+      ;; reading (what a turn's own time is drawn from), `:brought` is what the run put into
+      ;; the CONVERSATION (the rows that carry an entry's id, which is what tells an entry
+      ;; from a block a run re-derived for itself), and `:submitted`/`:returned` split at the
+      ;; run's FIRST FRAME, where the input the model read ends and its own output begins.
+      (and (= "message" (replay/kind record))
+           (or (not= (:runId record) (:run-id current))
+               ;; A NEW RUN'S ENTRIES ARRIVE AFTER THE LAST FRAME OF THE ONE BEFORE: a session
+               ;; runs one action at a time, so an ENTRY row that reaches us with a frame
+               ;; already behind it was appended for an array that had not been handed over
+               ;; yet -- a second run in the same thread, and a second segment. (The rows a
+               ;; finished run leaves behind are its own output: `model` and `tool` messages
+               ;; and the blocks it derived, none of them entries.)
+               (and (entry-row? record) (:streaming current))
+               ;; AND A SECOND ARRAY IN THE SAME RUN IS A SECOND SEGMENT TOO: a park that
+               ;; resumed writes the prompt again (another model call was handed the
+               ;; conversation), and its rows must land on the same turn without re-opening
+               ;; it -- which is what `:brought` empty and `fresh` empty together say.
+               (and (replay/system-prompt? record) (:prompt? current))))
+      (recur more (cond-> {:run-id       (:runId record)
+                           :prompt?      (replay/system-prompt? record)
+                           :opener       record
+                           :at           (:ts record)
+                           :brought      []
+                           :brought-rows []
+                           :submitted    [(row-message record)]
+                           :returned     []
+                           :calls        []
+                           :streaming    false}
+                    ;; THE ROW THAT OPENED THE RUN CAN BE ONE OF ITS ENTRIES TOO -- and on a
+                    ;; run that brought the client's own message it is, because the action's
+                    ;; rows are written before the run's own (`harness.edge.http`).
+                    (entry-row? record)
+                    (assoc :brought      [(row-message record)]
+                           :brought-rows [record]))
              (cond-> acc current (conj current)))
 
-      (= "message" (:kind record))
+      (= "message" (replay/kind record))
       (recur more
              (when current
                (if (:streaming current)
-                 (update current :returned conj (:payload record))
-                 (update current :submitted conj (:payload record))))
+                 (update current :returned conj (row-message record))
+                 (-> current
+                     (update :submitted conj (row-message record))
+                     (cond-> (entry-row? record)
+                       (-> (update :brought conj (row-message record))
+                           (update :brought-rows conj record))))))
              acc)
 
-      (= "event" (:kind record))
+      (= "event" (replay/kind record))
       (recur more (when current (assoc current :streaming true)) acc)
 
-      (= "model/start" (:kind record))
+      (= "model/start" (replay/kind record))
       (recur more (when current (update current :calls conj record)) acc)
 
-      (= "model/end" (:kind record))
+      (= "model/end" (replay/kind record))
       (recur more (when current (update current :calls conj record)) acc)
 
       :else
@@ -153,12 +227,26 @@
       {:before submitted :own [] :between [] :after []}
       (let [idx (loop [i 0 k 0 found []]
                   (cond
+                    ;; EVERY ENTRY DOES NOT HAVE TO BE RESTATED: a client sends only what
+                    ;; is NEW (the session it talks to holds the rest), so the run's own
+                    ;; block holds a SUFFIX of the conversation and the history in front of
+                    ;; it is simply not there to be matched. Running out of submitted
+                    ;; messages is therefore an answer -- the matches so far -- and not a
+                    ;; failed alignment.
+                    (= i (count submitted)) (when (seq found) found)
                     (= k n)                 found
-                    (= i (count submitted)) nil
                     (= (shape (nth submitted i)) (shape (nth ins k)))
                     (recur (inc i) (inc k) (conj found i))
-                    :else                   (recur (inc i) k found)))]
-        (if (nil? idx)
+                    ;; A MISMATCH IS EITHER A BLOCK THE RUN DERIVED (sitting in front of
+                    ;; the message we are looking for, so the submitted side moves on) OR
+                    ;; AN ENTRY THIS RUN DID NOT CARRY (history, so the conversation side
+                    ;; moves on). Asking whether the entry we are looking for appears
+                    ;; anywhere ahead tells the two apart: the derived blocks are not in
+                    ;; the conversation at all, so they never match one.
+                    (some #(= (shape %) (shape (nth ins k))) (subvec submitted (inc i)))
+                    (recur (inc i) k found)
+                    :else                   (recur i (inc k) found)))]
+        (if (or (nil? idx) (empty? idx))
           {:before submitted :own [] :between [] :after []}
           (let [hit     (set idx)
                 first-i (first idx)
@@ -196,10 +284,12 @@
   as 'it ran in zero seconds'. A PARKED ONE has :resumedAt, and the gap between it and
   :arrivedAt is the time a person spent deciding: real time, and NOT the tool's own."
   [records]
-  (reduce (fn [acc {:keys [kind payload ts]}]
-            (let [id    (:toolCallId payload)
-                  seen  (get acc id)]
-              (case kind
+  (reduce (fn [acc record]
+            (let [payload (replay/payload record)
+                  ts      (:ts record)
+                  id      (:toolCallId payload)
+                  seen    (get acc id)]
+              (case (replay/kind record)
                 "tools/pre-execute"
                 (-> acc
                     (update-in [id :arrivedAt] #(or % ts))
@@ -229,12 +319,12 @@
   carries only the result. So the pair is read from the assistant message here, once,
   instead of by every renderer that wants to show 'name {args}' beside a result."
   [records]
-  (reduce (fn [acc {:keys [kind payload]}]
-            (if (= "message" kind)
+  (reduce (fn [acc record]
+            (if (= "message" (replay/kind record))
               (reduce (fn [acc {:keys [id function]}]
                         (assoc acc id {:name (:name function) :argsText (:arguments function)}))
                       acc
-                      (:tool_calls payload))
+                      (:tool_calls (replay/payload record)))
               acc))
           {}
           records))
@@ -341,11 +431,11 @@
   as it spelled it) and the total is derived on top; what the request carried is taken
   from the start's payload. Nothing is renamed and nothing is filled in."
   [start end]
-  (let [payload (:payload end)
+  (let [payload (replay/payload end)
         usage   (:usage payload)]
     (cond-> {}
-      (some? (:model (:payload start))) (:model (:payload start))
-      (seq (:tools (:payload start)))   (assoc :tools (:tools (:payload start)))
+      (some? (:model (replay/payload start))) (:model (replay/payload start))
+      (seq (:tools (replay/payload start)))   (assoc :tools (:tools (replay/payload start)))
       (some? start)                     (assoc :startedAt (:ts start))
       (some? end)                       (assoc :endedAt (:ts end))
       (seq usage)                       (assoc :usage usage)
@@ -379,10 +469,10 @@
       (nil? record)
       (cond-> acc pending (conj (one-call pending nil)))
 
-      (= "model/start" (:kind record))
+      (= "model/start" (replay/kind record))
       (recur more record (cond-> acc pending (conj (one-call pending nil))))
 
-      (= "model/end" (:kind record))
+      (= "model/end" (replay/kind record))
       (recur more nil (conj acc (one-call pending record)))
 
       :else
@@ -510,33 +600,26 @@
   the server, arrived at the same way, from the same lines."
   [state run life-of call-of]
   (let [{:keys [seen shownSystem turns history]} state
-        payload   (get-in run [:input :payload])
-        ;; THE CONVERSATION THIS RUN CONTINUED, plus what it brought, and the sum is what
-        ;; the alignment below needs: WHICH MESSAGES ON THE SUBMITTED SIDE ARE THE
-        ;; CLIENT'S OWN rather than something the run spliced in.
-        ;;
-        ;; AN INPUT LINE NO LONGER RESTATES THE CONVERSATION (ticket 03 of
-        ;; `.scratch/sessions-live-on-the-server`): it says what ENTERED it
-        ;; (`:added`), because the server holds the rest. So the conversation is
-        ;; FOLDED HERE, one run at a time -- what entered plus what the run answered --
-        ;; which is what the old spelling handed over in one field. Without it, every
-        ;; earlier message would look like an injection and be drawn as injected
-        ;; context under the turn that happened to follow it.
-        ;;
-        ;; `:messages` is still read as the input's own entries when a log was written
-        ;; under the old contract, and such a log needs no folding (the input line
-        ;; carries the history itself) -- so this fold is for the field's absence, not
-        ;; its presence.
-        added     (vec (:added payload))
-        raw       (if (contains? payload :messages)
-                    ;; THE OLD SHAPE, AND IT NEEDS NO FOLDING: an input line written
-                    ;; before ticket 03 restates the whole conversation, so that field IS
-                    ;; the alignment's answer and adding the folded history to it would
-                    ;; list every earlier message twice.
-                    (vec (:messages payload))
-                    ;; THE NEW SHAPE: the conversation this run continued (folded from the
-                    ;; runs before it) plus what this one brought.
-                    (vec (concat (or history []) added)))
+        ;; WHAT THIS RUN BROUGHT INTO THE CONVERSATION, and the conversation it continued
+        ;; plus that is what the alignment below needs: WHICH MESSAGES ON THE SUBMITTED SIDE
+        ;; ARE THE CLIENT'S OWN rather than something the run spliced in. THE ROWS SAY SO
+        ;; THEMSELVES now (`:brought` is the rows whose `source` is `client` / `injection` /
+        ;; `opening`, 票 02): the `input` row that used to name them is gone, and with it the
+        ;; question 'did this line restate the whole conversation or only what it added'.
+        added     (vec (:brought run))
+        ;; THE CONVERSATION HOLDS AN ENTRY ONCE, so a row that repeats what the record
+        ;; already gave us cannot make one message appear twice: a client that re-sends its
+        ;; question (a retry after a socket died) is the case -- the session dedupes it by id
+        ;; when it is appended (`harness.edge.sessions/append!`), and the fold here has to
+        ;; agree, because `raw` is what the alignment below matches the submitted side
+        ;; against and a duplicate would move the client's own neighbours into the injected
+        ;; pile.
+        raw       (reduce (fn [out m]
+                            (if (and (:id m) (some #(= (:id %) (:id m)) out))
+                              out
+                              (conj out m)))
+                          []
+                          (concat (or history []) added))
         ins       (vec (remove #(= "reasoning" (:role %)) raw))
         submitted (:submitted run)
         sys       (first (filter #(= "system" (:role %)) submitted))
@@ -544,11 +627,16 @@
         {:keys [before own between after]} (align body ins)
         own-of    (into {} (map-indexed (fn [i m] [i m]) own))
         texts     (str (:content sys))
-        at        (:ts (:input run))
+        at        (:at run)
         fresh     (vec (remove #(contains? seen (:id %))
                                (filter #(= "user" (:role %)) raw)))
         changed?  (not= texts shownSystem)
-        seen'     (into seen (stats/user-ids (:input run)))
+        ;; WHO HAD ALREADY BEEN SEEN: the CLIENT's own user messages (`stats/user-ids` is
+        ;; that rule, and asks a row's own `source` now). The birth's entries are NOT added
+        ;; here on purpose -- they are deduped by their bytes when they are drawn
+        ;; (`add-context`), which is what makes an instruction file appear once and appear
+        ;; AGAIN when it changed.
+        seen'     (into seen (mapcat stats/user-ids (:brought-rows run)))
         ;; THIS RUN'S CALLS, and where they start counting inside the turn: a resumed
         ;; run's calls continue the same turn's numbering, so an item's :call stays a
         ;; pointer into the turn's own :calls vector. NIL when this run recorded no calls

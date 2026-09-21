@@ -8,7 +8,9 @@
   run can only show what that run happened to do, and the interesting cases
   (a vendor that reports nothing, a log that predates the model lines, a session
   still running) are exactly the ones a run will not produce on request."
-  (:require [clojure.data.json :as json]
+  (:require [clojure.string :as str]
+            [harness.edge.replay :as replay]
+            [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
             [harness.edge.http :as http]
@@ -24,16 +26,41 @@
 ;; ------------------------------------------------------------------ the records
 
 (defn- record
-  "One jsonl record: {:ts ms, :runId s, :kind s, :payload v}, exactly as the edge
-  writes it. The arguments run in the record's own order -- ts, kind, payload --
-  with the run id optional in the middle."
+  "One ROW of the record, as the file spells it and as every reader now sees it: `message`
+  and `event` are the two types, `ts`/`runId` ride the envelope, and a harness FACT -- a
+  provider change, a tool's three moments, a model call's start and end -- is an `event`
+  carrying a CUSTOM frame named after it. KIND is the reader's answer (`replay/kind`):
+  `message`, `event`, or that fact's name, which is why a fixture reads the way an
+  assertion does."
   ([ts kind payload] (record ts "r1" kind payload))
-  ([ts run-id kind payload] {:ts ts :runId run-id :kind kind :payload payload}))
+  ([ts run-id kind payload]
+   (if (= "message" kind)
+     {:ts ts :runId run-id :type "message" :payload payload}
+     {:ts ts :runId run-id :type "event"
+      :payload (if (= "event" kind)
+                 payload
+                 {:type "CUSTOM" :name kind :value payload})})))
+
+(defn- row-json
+  "A ROW -> the line the writer would put on disk. ONE SHAPE NOW (`.scratch/jsonl-two-kinds`
+  票 02): the reader holds the file's own row, so a fixture that was already built by `record`
+  needs no translation to be written -- which is the seam this ticket removed."
+  [row]
+  (json/write-str row))
 
 (defn- input
-  "An `input` line carrying a client's message list."
+  "ONE ACTION'S WORDS, as the rows the writer now leaves: a `message` row per message, with
+  the entry's own name on the envelope (`:id`) and the row's `source` saying who put it in
+  the array. `.scratch/jsonl-two-kinds` 票 02 took the `input` line away -- what the model
+  was handed is spelled out as the messages it was handed."
   [ts & msgs]
-  (record ts "input" {:threadId "t" :messages (vec msgs)}))
+  (into []
+        (map (fn [m]
+               (let [id (:id m)]
+                 (cond-> (assoc (record ts "message" (dissoc m :id))
+                                :source (if id "client" "injection"))
+                   id (assoc :id id)))))
+        msgs))
 
 (defn- user [id text] {:id id :role "user" :content text})
 
@@ -67,10 +94,10 @@
   that closes the run."
   [ts user-id usage-map]
   (let [t (+ ts 1000)]
-    [(input ts (user user-id (str "ask " user-id)))
-     (start t)
-     (end (+ t 100) usage-map)
-     (frame (+ t 200) "RUN_FINISHED" {:threadId "t" :runId "r1"})]))
+    (into (input ts (user user-id (str "ask " user-id)))
+          [(start t)
+           (end (+ t 100) usage-map)
+           (frame (+ t 200) "RUN_FINISHED" {:threadId "t" :runId "r1"})])))
 
 ;; ------------------------------------------------------------------- the answer
 
@@ -106,22 +133,22 @@
     ;; The parked turn's continuation: the client restates the whole history under
     ;; the same runId. Counting it would make one turn read as two.
     (let [s (stats-of (concat (conversation 0 "u1" (usage 10 1))
-                                    [(input 5000 (user "u1" "ask u1"))   ;; same id
-                                     (start 5100)
-                                     (end 5200 (usage 10 1))
-                                     finished]))]
+                                    (into (input 5000 (user "u1" "ask u1"))  ;; same id
+                                          [(start 5100)
+                                           (end 5200 (usage 10 1))
+                                           finished])))]
       (is (= 1 (:turns s)) "the same user message is the same turn")
       (is (= 2 (:steps s)) "but it IS a second model call")))
 
   (testing "an input that brings two new user messages brings two turns"
-    (let [s (stats-of [(input 0 (user "u1" "a") (user "u2" "b"))
-                   (start 100) (end 200 (usage 10 1)) finished])]
+    (let [s (stats-of (into (input 0 (user "u1" "a") (user "u2" "b"))
+                            [(start 100) (end 200 (usage 10 1)) finished]))]
       (is (= 2 (:turns s))))))
 
 (deftest absences-are-not-zeroes
   (testing "a call that reported nothing is a step, and contributes NO tokens"
-    (let [s (stats-of [(input 0 (user "u1" "hi"))
-                   (start 100) (end 200 nil) finished])]
+    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+                            [(start 100) (end 200 nil) finished]))]
       (is (= 1 (:steps s)))
       (is (= 0 (:stepsWithUsage s)))
       (is (not (contains? s :usage)) "usage is absent, not {}")
@@ -129,9 +156,9 @@
       (is (not (contains? s :outputTokensPerSecond)) "no output count, no rate")))
 
   (testing "a key no call reported is missing from usage; the ones they did are summed"
-    (let [s (stats-of [(input 0 (user "u1" "hi"))
-                   (start 100) (end 200 {:prompt_tokens 50 :completion_tokens 5})
-                   finished])]
+    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+                            [(start 100) (end 200 {:prompt_tokens 50 :completion_tokens 5})
+                             finished]))]
       (is (= {:totalTokens 55 :promptTokens 50 :completionTokens 5} (:usage s))
           "total falls back to prompt + completion for a call that gave both")
       (is (not (contains? (:usage s) :cachedTokens))
@@ -140,7 +167,7 @@
   (testing "a log from before the model lines: turns yes, everything else ABSENT"
     ;; The distinction the strip depends on: no model/start line means 'this record
     ;; cannot tell', NOT 'no call ever happened'.
-    (let [s (stats-of [(input 0 (user "u1" "hi")) finished])]
+    (let [s (stats-of (into (input 0 (user "u1" "hi")) [finished]))]
       (is (= 1 (:turns s)))
       (is (not (contains? s :steps)))
       (is (not (contains? s :stepsWithUsage)))
@@ -154,16 +181,16 @@
 
 (deftest the-denominators-are-the-calls-that-reported
   (testing "the cache rate and the speed leave out the calls that could not feed them"
-    (let [s (stats-of [(input 0 (user "u1" "hi"))
-                   ;; a call with a full report: 80/100 cached, 20 tokens in 100ms
-                   (start 100) (end 200 (usage 100 20 80))
-                   ;; a call that reported nothing at all: it is a step, and it is in
-                   ;; neither denominator
-                   (start 300) (end 400 nil)
-                   ;; a call with tokens but no cache cell: it feeds the total and the
-                   ;; speed, and it stays out of the cache ratio
-                   (start 500) (end 600 {:prompt_tokens 100 :completion_tokens 10})
-                   finished])]
+    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+                            [;; a call with a full report: 80/100 cached, 20 tokens in 100ms
+                             (start 100) (end 200 (usage 100 20 80))
+                             ;; a call that reported nothing at all: it is a step, and it is
+                             ;; in neither denominator
+                             (start 300) (end 400 nil)
+                             ;; a call with tokens but no cache cell: it feeds the total and
+                             ;; the speed, and it stays out of the cache ratio
+                             (start 500) (end 600 {:prompt_tokens 100 :completion_tokens 10})
+                             finished]))]
       (is (= 3 (:steps s)))
       (is (= 2 (:stepsWithUsage s)))
       (is (= 80 (:cacheHitPercent s)) "cached 80 over prompt 100 -- the third call is not in it")
@@ -176,10 +203,10 @@
   (testing "an unterminated call is a step with no duration and no tokens"
     ;; The session is being read WHILE it runs: the run has started, one call has
     ;; come back, and the next one is still streaming.
-    (let [s (stats-of [(frame 0 "RUN_STARTED" {:threadId "t" :runId "r1"})
-                             (input 0 (user "u1" "hi"))
-                             (start 100) (end 200 (usage 100 20 80))
-                             (start 300)])]        ;; still streaming
+    (let [s (stats-of (into [(frame 0 "RUN_STARTED" {:threadId "t" :runId "r1"})]
+                            (concat (input 0 (user "u1" "hi"))
+                                    [(start 100) (end 200 (usage 100 20 80))
+                                     (start 300)])))]  ;; still streaming
       (is (= 2 (:steps s)))
       (is (= 1 (:stepsWithUsage s)))
       (is (= 200 (:outputTokensPerSecond s)) "one call's tokens over one call's time")
@@ -190,9 +217,9 @@
   ;; mid-flush. replay would refuse the whole file; a statistic is not a rebuild.
   (let [f (java.io.File/createTempFile "stats-lines" ".jsonl")]
     (try
-      (spit f (str (json/write-str (input 0 (user "u1" "hi"))) "\n"
-                   (json/write-str (start 100)) "\n"
-                   "{\"ts\":200,\"runId\":\"r1\",\"kind\":\"model/e")
+      (spit f (str (str/join "\n" (map row-json (input 0 (user "u1" "hi")))) "\n"
+                   (row-json (start 100)) "\n"
+                   "{\"ts\":200,\"runId\":\"r1\",\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"model/e")
             :encoding "UTF-8")
       (is (= {:turns 1 :steps 1 :stepsWithUsage 0 :incomplete false}
              (stats/log-stats f))
@@ -203,7 +230,7 @@
     (let [f (java.io.File/createTempFile "stats-lines" ".jsonl")]
       (try
         (spit f (str "not json at all\n"
-                     (json/write-str (input 0 (user "u1" "hi"))) "\n")
+                     (str/join "\n" (map row-json (input 0 (user "u1" "hi")))) "\n")
               :encoding "UTF-8")
         (is (thrown-with-msg? Exception #"not valid JSON" (stats/log-stats f))
             "a corrupt line before the last one names itself")

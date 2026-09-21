@@ -186,7 +186,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// rather than joining it, and the copy that goes back out is the text under the same
 /// entry id, which is what makes the server drop the repeat instead of writing the opening
 /// into the conversation twice.
-const EXPECTED_CASES = 84;
+/// 84 -> 85: `injections`' fifth -- `isCardOnly`, the shape an opening entry is DRAWN in
+/// (ticket 02 of `.scratch/session-opening`). The fourth case had spelled that entry
+/// `role: "assistant"`, which is not what the server writes, and that is why every gate
+/// stayed green while the app drew the person's AGENTS.md as a bubble they had typed. The
+/// fifth pins the test that stops it, over the PARTS rather than the role, because the role
+/// is the one thing the two kinds of message share.
+const EXPECTED_CASES = 86;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -4,7 +4,7 @@
 // --------------------------------------------------- what it draws, and what it does not
 //
 // IT DRAWS NOTHING IT WAS NOT GIVEN. Every mark comes from a timestamp the record
-// carries, straight out of the fold: a user message's `at` (the input line's own `:ts`),
+// carries, straight out of the fold: a user message's `at` (its own `message` row's `:ts`),
 // a call's `startedAt`/`endedAt` (the `model/*` pair), a tool call's
 // `queuedAt`/`startedAt`/`endedAt` (the `tools/*` trio). A record that predates the
 // model lines has an EMPTY model lane, and it says so in words rather than drawing a

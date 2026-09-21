@@ -29,14 +29,32 @@ import { type Case, type Suite, agentFor, content, homeDir, script, threadId, ur
 import { type HarnessAgent } from "@/lib/agent";
 
 /// One row of a session log, as far as this suite reads it.
+///
+/// THE RECORD HAS TWO KINDS OF ROW (`.scratch/jsonl-two-kinds`): `message` -- what a person
+/// said or an LLM returned -- and `event`, every other fact. A frame the server put on the
+/// wire is an `event` whose payload IS the frame; a fact the harness knows on its own is an
+/// `event` whose payload is a CUSTOM frame NAMED after the fact -- which is where the row's
+/// old `kind` went.
 type LogRow = {
-  kind?: string;
+  type?: "event" | "message";
   runId?: string | null;
-  /// `append` IS THE ACTION'S OWN ENTRIES (ticket 03): what a run added to the
-  /// conversation the server holds. It used to be `messages` -- the whole accumulated
-  /// history the client sent back -- and the field this suite reads is the one that
-  /// changed.
-  payload?: { type?: string; content?: unknown; append?: { role?: string; content?: unknown }[] };
+  /// WHOSE ELEMENT OF THE ARRAY THE ROW WAS, when it is a `message` row: "client",
+  /// "injection", "opening", "system-prompt", "model", "tool", "skill", "job" (票 02). It
+  /// rides the ENVELOPE, so it never reaches the provider.
+  source?: string;
+  payload?: {
+    /// The frame's own type ("RUN_FINISHED", "TEXT_MESSAGE_CONTENT", ...), or "CUSTOM".
+    type?: string;
+    /// A CUSTOM fact's name: "model/start", "tools/execute", ...
+    name?: string;
+    /// A FRAME ROW carries the frame itself, a FACT ROW carries what the fact knew under
+    /// `value`, and a `message` row carries THE MESSAGE THE PROVIDER WAS HANDED -- one
+    /// element of the array, verbatim. There is no `input` row to read since
+    /// `.scratch/jsonl-two-kinds` 票 02: what a person said IS a row.
+    role?: string;
+    content?: unknown;
+    value?: { content?: unknown };
+  };
 };
 
 function logPath(tid: string): string {
@@ -60,15 +78,18 @@ function logRows(tid: string): LogRow[] {
 /// as an `event` row, which is where the terminal one lives.
 function frames(rows: readonly LogRow[]): string[] {
   return rows
-    .filter((row) => row.kind === "event")
+    .filter((row) => row.type === "event")
     .map((row) => row.payload?.type ?? "");
 }
 
 /// The user text this session's log recorded as carried by a request.
+/// The user text a record carries, read off the ROWS THEMSELVES (票 02): a `message` row
+/// whose envelope says the CLIENT put it in the array. The `input` fact row this used to
+/// read was the second copy of exactly these entries, and it is gone.
 function carried(rows: readonly LogRow[]): string[] {
   return rows
-    .filter((row) => row.kind === "input")
-    .flatMap((row) => row.payload?.append ?? [])
+    .filter((row) => row.type === "message" && row.source === "client")
+    .map((row) => row.payload ?? {})
     .filter((message) => message.role === "user")
     .map((message) => (typeof message.content === "string" ? message.content : ""));
 }

@@ -564,14 +564,31 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 的挂载**（`app.tsx` 里挂在 `AssistantRuntimeProvider` 之内），`thread.aui.tsx` 那句
 `case "data": return part.dataRendererUI` 是抄来的，一行未改。文案进 `thread` 命名空间（中英两份）。
 
-**开场块的那张卡随 entry 一起到。** 会话出生时写进对话的那几条 opening entry 自带**同一个**
-`data` part（`harness.edge.ag_ui/injected-part-name`），所以画法一模一样；区别只在它**不走 `CUSTOM` 帧**，
-而是随会话的窗口（feed / `sofar`）来的——一次开场一张卡，而不是每一轮重复一遍。
+**开场块的那张卡有两条路来。** 会话出生时写进对话的那几条 opening entry 自带**同一个**
+`data` part（`harness.edge.ag_ui/injected-part-name`），所以画法一模一样，但它们**属于 user 消息**：
 
-**刷新靠重建带回来。** 重建（seed + 记录里的帧）在 `harness.kernel.frames/apply-frames` 落成一条**只带那个
-data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性的，所以每次刷新是同一张卡）。而适配器的
-`fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，所以 `app.tsx` 的 `toThreadMessages` 让
-`keepInjectionCards`（纯函数，**按 id 配对**，不是按下标——重建会把下标的对应挪走）把它补回来。
+- **出生那一轮把对话本身交给页面**（2026-09-21 拍定；`ag_ui/conversation-snapshot`）：那一轮的
+  `RUN_STARTED` 之后跟着一帧 `MESSAGES_SNAPSHOT`，带的是**这一轮写进对话的 entry**。**服务端发，前端画**
+  ——这条分工是拍定的原话，也是票 05 那次改动的由来：最初写的是「每个条目发一张 `CUSTOM` 卡」，而
+  `CUSTOM` 只是**一个 part**，适配器把它挂到**正在流的那条消息**上（`run-aggregator.js` 的 CUSTOM 分支
+  不看 `messageId`），客户端手里没有那条 user 消息时，卡就落到答案底下、而不是人的那一栏；改成快照之后，
+  消息、id 一起走，落位由消息自己决定。快照的 `content` 是**文本**（`ag_ui/wire-message` 投影）：AG-UI
+  对它解析的每一帧做 schema 校验，`data` part 会当场把这一轮打死（实测：界面上一条 Zod 报错），而**卡
+  由读者按 id 和文本自己画**——`thread.aui.tsx` 的 `UserMessage` 因此认两条：`isCardOnly(parts)`（这一条
+  只带一张卡）或 `isOpeningEntryId(id)`（`session-opening-<i>`：快照把它变成一条带文本的 user 消息，part
+  没了、id 还在）。**这条路上不再有任何「跑完读一次记录」**：`app.tsx` 的那次 import 已随这次拍定去掉，
+  跑完只剩一次健康检查式的读数上报。
+- **此后每一轮它只是历史**：随会话的窗口（feed / `sofar`）来，一次开场一张卡，而不是每一轮重复一遍。
+  窗口里那一条是 user 消息、内容是「只有一张卡」，`UserMessage` 同样交给 `UserInjectionCard`——**不画成
+  那个人的气泡**，这是 ticket 02 的修正。
+
+**刷新靠重建带回来。** 重建（窗口的 entry + 记录里的帧）在 `harness.kernel.frames/apply-frames` 把派生注入
+落成一条**只带那个 data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性的，所以每次刷新是同一张卡）。
+而**开场那一张是 user 消息**：记录里那几条开场 `message` 行（信封 `source: "opening"`）先折出条目（user + 两张 part），帧再按同一个 id
+折一遍时被丢掉（`replay/append-new`、`sessions/append!` 都是先到先得）——所以重建之后开场卡在**人的那一栏**，
+源出派生注入的卡在助手那一栏。适配器的 `fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，
+所以 `app.tsx` 的 `toThreadMessages` 让 `keepInjectionCards`（纯函数，**按 id 配对**，不是按下标——重建会把
+下标的对应挪走）把它补回来。**同一条规则也接住了快照那条路**：part 丢在适配器里，而 id 与文本留着。
 
 **回发时它被丢掉**，这是整件事干净的唯一依据：`toAgUiMessages` 只回 text / reasoning / tool-call，
 `data` part 在那儿没有分支。于是卡片看得见、却进不了下一轮的请求——适配器升级时第一个要看的就是这条
