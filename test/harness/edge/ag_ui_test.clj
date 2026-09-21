@@ -388,3 +388,58 @@
       (is (not (contains? (assistant [{:role "user" :content "hi"}
                                       {:role "assistant" :content "hello"}])
                           :reasoning_content))))))
+
+(deftest the-first-thing-said-is-the-first-user-message-of-the-run
+  ;; `first-user-text`: what a session gets named after. A run carries the WHOLE
+  ;; conversation, which is what makes this answer stable across turns -- and why
+  ;; 'the first user message' has to mean the first one the CLIENT sent rather than
+  ;; the last, since the context block this edge appends is a user message too.
+  (testing "a plain first turn"
+    (is (= "把侧边栏的标题改成会话标题"
+           (ag/first-user-text {:messages [{:role "user" :content "把侧边栏的标题改成会话标题"}]}))))
+  (testing "the FIRST user turn, not the newest one"
+    ;; On the fortieth turn the vector holds the whole conversation, and the name it
+    ;; yields is still the name the session was given on the first.
+    (is (= "第一句"
+           (ag/first-user-text
+            {:messages [{:role "system" :content "you are a harness"}
+                        {:role "user" :content "第一句"}
+                        {:role "assistant" :content "好的"}
+                        {:role "user" :content "第四十句"}]}))))
+  (testing "an empty turn is skipped rather than named"
+    ;; 'The first thing they said' is the first message that SAYS something. The
+    ;; context blocks this edge appends are not a case here -- they are spliced by
+    ;; `inbound` after this point and never reach an input frame.
+    (is (= "真的第一句"
+           (ag/first-user-text
+            {:messages [{:role "user" :content "   "}
+                        {:role "user" :content "真的第一句"}]})))
+    (is (nil? (ag/first-user-text
+               {:messages [{:role "system" :content "you are a harness"}
+                           {:role "user" :content "   "}]}))
+        "nothing was said, so there is no name"))
+  (testing "content parts contribute their text and nothing else"
+    (is (= "看看这张图\n第二行"
+           (ag/first-user-text
+            {:messages [{:role "user"
+                         :content [{:type "text" :text "看看这张图"}
+                                   {:type "image" :data "AAAA"}
+                                   {:type "text" :text "第二行"}]}]})))
+    (is (nil? (ag/first-user-text {:messages [{:role "user" :content [{:type "image" :data "AAAA"}]}]}))
+        "an image is not a name"))
+  (testing "a run with no messages at all, or none from a person"
+    (is (nil? (ag/first-user-text {:messages []})))
+    (is (nil? (ag/first-user-text {})))
+    (is (nil? (ag/first-user-text {:messages [{:role "assistant" :content "我该说什么"}]}))))
+  (testing "whitespace is trimmed away on both ends"
+    (is (= "贴着边的一句" (ag/first-user-text {:messages [{:role "user" :content "\n  贴着边的一句  \n\n"}]}))))
+  (testing "and a first message long past any title is clipped at a length a store may hold"
+    ;; The storage guard, not the display rule (the client clips shorter still). It
+    ;; counts CODEPOINTS: clipping UTF-16 units would cut this emoji in half and put
+    ;; a lone surrogate in the database.
+    (let [long (apply str (repeat 500 "あ"))]
+      (is (= 200 (count (ag/first-user-text {:messages [{:role "user" :content long}]})))) )
+    (let [emoji (str (apply str (repeat 199 "a")) "😀😀")]
+      (is (= (str (apply str (repeat 199 "a")) "😀")
+             (ag/first-user-text {:messages [{:role "user" :content emoji}]}))
+          "200 code points: the 199 a's and ONE emoji, whole"))))

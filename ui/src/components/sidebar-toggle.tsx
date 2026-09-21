@@ -9,18 +9,31 @@
 //
 // ------------------------------------------------------------------ the shape
 //
-// THE OPEN BUTTON IS THE PHONE'S. When the sidebar is folded away, one control
-// stays behind in the top-left corner of the page, floating over the conversation
-// column -- because the thing it opens is not there to hold it, and a control that
-// scrolls away with the conversation is one people have to go looking for. It
-// carries `z-40` so it sits above the column it floats over, a border and a
-// translucent background so it stays legible over whatever is behind it, and it is
-// drawn by the PAGE rather than by the sidebar: a folded sidebar is a hidden
-// subtree, and a hidden subtree cannot draw a control that is meant to be seen.
+// THE OPEN BUTTON HAS TWO PLACES, AND THE WINDOW DECIDES WHICH (`shape`), because a
+// folded sidebar is two different things on either side of `lg`:
 //
-// THE COLLAPSE BUTTON IS THE SIDEBAR'S HEADER'S, next to "New task" and the two
-// icon buttons, because that is where a person looks for the way out of a panel.
-// It is a control and not a drag handle: this product has no width preference to
+//   * `corner` (the default) IS THE PHONE'S: one control stays behind in the top-left
+//     corner of the page, floating over the conversation column, because on a narrow
+//     window the folded column is `display: none` -- there is no sidebar to hold it and
+//     nothing else on screen to unfold it. It carries `z-40` so it sits above the
+//     column it floats over, a border and a translucent background so it stays legible
+//     over whatever is behind it, and it is drawn by the PAGE rather than by the
+//     sidebar: a hidden subtree cannot draw a control that is meant to be seen. It is
+//     `lg:hidden`, because on a wide window the column does not go away -- it becomes
+//     the rail, and a floating button beside a sidebar that is already there would be
+//     a second answer to a question nobody asked.
+//   * `rail` IS THE COLUMN'S OWN: in the rail it lives in the 48px top cell, on top of
+//     the mark, and appears when that cell is hovered or focused from the keyboard. It
+//     is the same verb in a second place, so it is the same component rather than a
+//     second one that could drift -- see `components/sidebar.tsx` for the cell and the
+//     `group/brand` the swap hangs off.
+//
+// THE COLLAPSE BUTTON IS THE SIDEBAR'S BRAND ROW'S, at the trailing end of it, next to
+// the mark and the product name -- because that is where a person looks for the way out
+// of a panel, and because the row that says what the panel IS is the row an exit belongs
+// in. It used to sit at the end of the header (the `New task` / add-project / refresh
+// row); the row is still the sidebar's, and this module still owns the control's place
+// in it. It is a control and not a drag handle: this product has no width preference to
 // remember, so there is nothing for a drag to express that a click does not.
 //
 // ------------------------------------------------------- what is NOT remembered
@@ -85,13 +98,23 @@ export function isWideWindow(): boolean {
   return typeof window === "undefined" ? true : window.matchMedia(WIDE_ENOUGH).matches;
 }
 
-/// The floating corner control: bring the sidebar back.
+/// The control that brings the sidebar back -- in the corner on a narrow window, in the
+/// rail's top cell on a wide one.
 ///
 /// ITS ACCESSIBLE NAME IS ITS `title` AND ITS `sr-only` SPAN, which is the pattern
 /// every icon button in this shell already follows (see `sidebar.tsx`): the tooltip
 /// is for the eye, the span is what a screen reader reads, and the suite reads the
 /// same span because text is the one thing rendering to a string can assert.
-export const SidebarOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
+///
+/// BOTH SHAPES ARE ALWAYS IN THE ACCESSIBILITY TREE WHERE THEY ARE DRAWN, including the
+/// rail's while it is invisible: the button is faded with `opacity`, not hidden, so a
+/// keyboard arriving at it shows it (`focus-visible:opacity-100`) instead of leaving the
+/// tab stop on something nobody can see. On a wide window the corpus of visible controls
+/// is unchanged -- the pointer hovers the cell and the control is there.
+export const SidebarOpenButton: FC<{
+  onOpen: () => void;
+  shape?: "corner" | "rail";
+}> = ({ onOpen, shape = "corner" }) => {
   const { t } = useTranslation();
   return (
     <Button
@@ -107,7 +130,11 @@ export const SidebarOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
       aria-expanded={false}
       onClick={onOpen}
       title={t("sidebar.open")}
-      className="border-border bg-background/80 hover:bg-muted absolute start-2 top-2 z-40 size-8 border p-0 shadow-sm backdrop-blur"
+      className={
+        shape === "corner"
+          ? "border-border bg-background/80 hover:bg-muted absolute start-2 top-2 z-40 size-8 border p-0 shadow-sm backdrop-blur lg:hidden"
+          : "text-muted-foreground hover:text-foreground absolute inset-0 m-auto size-8 p-0 opacity-0 transition-opacity group-hover/brand:opacity-100 focus-visible:opacity-100"
+      }
     >
       <PanelLeftIcon data-slot="sidebar-open-icon" className="size-4" />
       <span className="sr-only">{t("sidebar.open")}</span>
@@ -115,7 +142,17 @@ export const SidebarOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
   );
 };
 
-/// The sidebar's own way out, at the end of its header.
+/// The sidebar's own way out, at the end of the sidebar's BRAND ROW.
+///
+/// IT IS THE TRAILING END OF THAT ROW (`ms-auto`), and the auto margin is here rather
+/// than at the call site for the same reason the open button's corner is here: this
+/// module owns WHERE the pair sits, and the pair is one contract. The row it lands in
+/// holds a mark and a product wordmark and nothing that grows, so without this the
+/// button would sit against the end of the name instead of the end of the row.
+///
+/// IT MOVED OUT OF THE HEADER (the `New task` / add-project / refresh row) -- see
+/// `components/sidebar.tsx` for the arrangement and why, and `components/app-brand.tsx`
+/// for what it now sits beside.
 export const SidebarCollapseButton: FC<{ onCollapse: () => void }> = ({
   onCollapse,
 }) => {
@@ -132,7 +169,7 @@ export const SidebarCollapseButton: FC<{ onCollapse: () => void }> = ({
       aria-expanded={true}
       onClick={onCollapse}
       title={t("sidebar.collapse")}
-      className="text-muted-foreground hover:text-foreground size-8 shrink-0 p-0"
+      className="text-muted-foreground hover:text-foreground ms-auto size-8 shrink-0 p-0"
     >
       <PanelLeftCloseIcon data-slot="sidebar-collapse-icon" className="size-4" />
       <span className="sr-only">{t("sidebar.collapse")}</span>

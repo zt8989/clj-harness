@@ -1,11 +1,16 @@
 // `GET /api/projects`: the sidebar's listing, typed thin.
 //
-// One call answers the whole sidebar, because its two halves come from two
-// different places on the server and only the server can join them: the STORE says
-// which projects and sessions exist, which session belongs where, which are
-// archived and which conversations are TASKS; the TREE says how big each log is and
-// when it last changed. A client that tried to join them itself would need the log
-// directory layout, and that knowledge belongs on the side that writes the files.
+// EVERY ROW HERE IS A STORE FACT, except one. That is the rule this shape exists to
+// keep (the owner's: "左侧所有会话信息都是从 sqlite 加载，除了运行状态"): which projects
+// and sessions exist, which session belongs where, which are archived, what each is
+// called and WHEN IT WAS LAST SENT TO all come out of the sqlite rows; the only other
+// source is the process's live-runs registry, which answers `running` because no file
+// can. Nothing in this payload is a stat().
+//
+// IT USED TO BE A JOIN, and giving that up is the feature: the listing walked the log
+// tree per row (size, mtime) and, for a task, the whole projects directory by stem --
+// so one refresh was a SELECT plus a walk. A refresh is now a SELECT plus a registry
+// lookup, and the disk half of every row is gone (`bytes`, `lastActivity`).
 //
 // THE ANSWER IS TWO LISTS, and they are the sidebar's two blocks: `projects`, each
 // with its sessions, and `tasks` -- conversations with no project at all, flat.
@@ -14,17 +19,13 @@
 // no per-project fetch, no page cursor, no half-drawn list, and no second request
 // that could disagree with the first about which conversations exist.
 //
-// `lastActivity` and `bytes` are NULLABLE, and that nullability is meaningful
-// rather than defensive: a session with no log yet -- one just created, before
-// its first run -- is a row with no disk facts. See the row component for how
-// that is drawn; the one thing it must never become is a zero-byte file, which
-// would be a lie about a broken log.
-//
-// `lastActivity` and `bytes` are NULLABLE, and that nullability is meaningful
-// rather than defensive: a session with no log yet -- one just created, before
-// its first run -- is a row with no disk facts. See the row component for how
-// that is drawn; the one thing it must never become is a zero-byte file, which
-// would be a lie about a broken log.
+// `lastSentAt` IS NULLABLE, and the null is meaningful rather than defensive: no send
+// has ever reached this session, so there is no time to draw. That is the shape of a
+// row somebody registered and never used (an old client's, or one whose log was
+// removed by hand) -- never a zero, which would claim a send at the epoch. The row
+// answers it with a word (`session.neverRun`); the LISTING answers it by sorting it
+// last, because "never used" is not "brand new" any more -- a session is created by
+// its first send, so nothing recent sits at NULL.
 import type { TFunction } from "i18next";
 
 import { API_BASE } from "@/lib/threads";
@@ -41,10 +42,41 @@ type Translate = TFunction<"errors">;
 export type SessionSummary = {
   threadId: string;
   archived: boolean;
-  /// The log's mtime in epoch milliseconds, or null when there is no log yet.
-  lastActivity: number | null;
-  /// The log's size in bytes, or null when there is no log yet.
-  bytes: number | null;
+  /// WHETHER A RUN IS IN FLIGHT FOR THIS SESSION, and the ONE field here that is not a
+  /// store fact: it is read off the server process's live-runs registry, which is the
+  /// only place that knows. It is why the listing can light a spinner on a conversation
+  /// this browser has never opened -- a run belongs to the process, not to the tab that
+  /// started it.
+  ///
+  /// IT IS A SNAPSHOT, like every other field: the row also draws the page's own
+  /// registry (`statuses`), which is fresher for the sessions THIS page is running.
+  /// The two are ORed rather than ranked (see `sidebar.tsx`), because either one being
+  /// true means a run is in flight.
+  running: boolean;
+  /// WHEN SOMEBODY LAST PRESSED SEND IN THIS CONVERSATION, in epoch milliseconds, or
+  /// null when nothing has ever been sent to it (see this file's header).
+  ///
+  /// IT IS THE MOMENT OF THE SEND, NOT THE MOMENT OF THE LAST WRITE. A run that takes
+  /// five minutes stamps this at the start and leaves it there -- which is what "上次发送
+  /// 时间" means, and what makes it different from the file's mtime that used to be
+  /// drawn here. It is written by every run that arrives (the same statement that names
+  /// the session, `cap.project/remember-send!`), and the rows that predate the column
+  /// were backfilled from their logs once, in the migration.
+  ///
+  /// HOW IT IS DRAWN is `lib/relative-time.ts`'s ladder; the exact instant goes into
+  /// the row's tooltip.
+  lastSentAt: number | null;
+  /// WHAT THE PERSON FIRST SAID IN THIS CONVERSATION, as the STORE remembers it
+  /// (`sessions.title`, written once by the first run that arrives), or null when
+  /// the session has not been named yet -- it never ran, or it ran before the
+  /// column existed. RAW AND LONG: the server keeps up to 200 code points as a
+  /// storage guard, and how much of it a row shows is `lib/session-title.ts`'s
+  /// question (`titleOf`), asked by whoever draws it.
+  ///
+  /// IT IS A SENTENCE SOMEBODY TYPED, kept in the store because the sidebar draws forty
+  /// rows and cannot open forty logs -- see the migration's docstring in
+  /// `harness.infra.db` for the whole argument, including what it costs.
+  firstUserText: string | null;
 };
 
 /// One project: a directory this home knows, and the sessions in it.

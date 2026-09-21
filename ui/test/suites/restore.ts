@@ -62,11 +62,16 @@ const refusing: SessionStorage = {
 /// only inside projects would forget a conversation the moment it stopped belonging
 /// anywhere.
 const listing = (
-  sessions: readonly { threadId: string; bytes: number | null }[],
-  tasks: readonly { threadId: string; bytes: number | null }[] = [],
+  sessions: readonly { threadId: string; lastSentAt: number | null }[],
+  tasks: readonly { threadId: string; lastSentAt: number | null }[] = [],
 ): SessionListing => ({
   projects: [
-    { sessions: [{ threadId: "other-1", bytes: 10 }, { threadId: "other-2", bytes: 20 }] },
+    {
+      sessions: [
+        { threadId: "other-1", lastSentAt: 10 },
+        { threadId: "other-2", lastSentAt: 20 },
+      ],
+    },
     { sessions: [...sessions] },
   ],
   tasks: [...tasks],
@@ -114,23 +119,24 @@ const cases: Case[] = [
     },
   },
   {
-    name: "the-restore-asks-the-listing-for-one-row-and-gets-its-log-size-with-it",
+    name: "the-restore-asks-the-listing-for-one-row-and-gets-its-send-time-with-it",
     run: async () => {
       const projects = listing([
-        { threadId: "s-1", bytes: 359 },
-        { threadId: "s-2", bytes: null },
+        { threadId: "s-1", lastSentAt: 359 },
+        { threadId: "s-2", lastSentAt: null },
       ]);
 
       // THE ROW, NOT A BOOLEAN, because the page needs the second field off it: a
-      // listed session with NO LOG is a conversation that is empty by construction (a
-      // session made on the sidebar and never run), and the restore opens it empty
-      // instead of asking the server to read a file that does not exist.
-      expect(listedSession("s-1", projects)).toEqual({ threadId: "s-1", bytes: 359 });
-      expect(listedSession("s-2", projects)).toEqual({ threadId: "s-2", bytes: null });
+      // listed session that was NEVER SENT TO is a conversation that is empty by
+      // construction (a session made on the sidebar and never used), and the restore
+      // opens it empty instead of asking the server to read a file that does not exist.
+      // (The field used to be the log's `bytes` -- the same question asked of the disk.)
+      expect(listedSession("s-1", projects)).toEqual({ threadId: "s-1", lastSentAt: 359 });
+      expect(listedSession("s-2", projects)).toEqual({ threadId: "s-2", lastSentAt: null });
 
       // THE SECOND PROJECT, not just the first: a remembered session is usually not in
       // whichever project the listing happens to start with.
-      expect(listedSession("other-2", projects)).toEqual({ threadId: "other-2", bytes: 20 });
+      expect(listedSession("other-2", projects)).toEqual({ threadId: "other-2", lastSentAt: 20 });
 
       // NOT THERE IS NULL -- deleted, archived, moved by hand, or never bound. The page
       // says nothing about it and starts fresh.
@@ -149,8 +155,8 @@ const cases: Case[] = [
       // A TASK IS A SESSION TOO. It is drawn flat rather than under a project, and the
       // page remembers where it was the same way -- so the flat half is searched, and
       // searched by the same whole-id rule.
-      const withTask = listing([], [{ threadId: "t-1", bytes: null }]);
-      expect(listedSession("t-1", withTask)).toEqual({ threadId: "t-1", bytes: null });
+      const withTask = listing([], [{ threadId: "t-1", lastSentAt: null }]);
+      expect(listedSession("t-1", withTask)).toEqual({ threadId: "t-1", lastSentAt: null });
       expect(listedSession("t-", withTask)).toBe(null);
       expect(listedSession("t-1", listing([]))).toBe(null);
     },

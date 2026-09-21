@@ -57,9 +57,11 @@ export type ProjectSessionListing = {
   readonly sessions: readonly ListedSession[];
 };
 
-/// One session as a listing writes it: its id, and the size of its log -- null until it
-/// has run (see `lib/projects.ts` for why that nullability is meaningful).
-export type ListedSession = { readonly threadId: string; readonly bytes: number | null };
+/// One session as a listing writes it: its id, and WHEN IT WAS LAST SENT TO -- null
+/// until something has been sent to it (see `lib/projects.ts` for why that nullability
+/// is meaningful). It used to ask for the log's `bytes`, and the question it answers is
+/// the same one: has this conversation ever actually run.
+export type ListedSession = { readonly threadId: string; readonly lastSentAt: number | null };
 
 /// The one key. Namespaced like the interface's own storage keys (`clj-harness.*`),
 /// because the origin may be shared with whatever else a deployment serves.
@@ -91,13 +93,15 @@ export function rememberedSession(storage: SessionStorage | null | undefined): s
 /// there in the task list.
 ///
 /// IT ANSWERS THE ROW, NOT A BOOLEAN, because the page needs one more thing off it:
-/// whether the session has a LOG (`bytes`, which is null until it has run). A listed
-/// session with no log is a session whose conversation is empty by construction -- there
-/// is no file to read and asking the server for one is asking it about something that
-/// does not exist -- so the restore opens it empty instead of reading it. A remembered
-/// id that is NOT there at all -- deleted, archived, moved by hand -- is not a situation
-/// anybody can act on: the page says nothing about it and starts a fresh conversation
-/// (see `App`'s `onListed`).
+/// whether this session has ever been SENT TO (`lastSentAt`, which is null until it
+/// has). A listed session with no send is a session whose conversation is empty by
+/// construction -- there is no log to read and asking the server for one is asking it
+/// about something that does not exist -- so the restore opens it empty instead of
+/// reading it. (This used to be asked as "is its log size null" -- the same question
+/// about the same session, from the disk side; the store answers it without a stat.)
+/// A remembered id that is NOT there at all -- deleted, archived, moved by hand -- is
+/// not a situation anybody can act on: the page says nothing about it and starts a
+/// fresh conversation (see `App`'s `onListed`).
 export function listedSession(
   id: string,
   listing: SessionListing | null | undefined,

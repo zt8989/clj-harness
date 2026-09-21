@@ -62,6 +62,31 @@
 两个事实在**写入侧**（`harness.edge.http/log-dir-for`）合起来。读侧（`harness.edge.replay`）只走文件系统、
 由调用方递目录进去——**这是「内核 run 中永不读自己的日志」在代码结构上的样子**。
 
+### 一个会话一份文件
+
+**重放、重建、eval 读法各自都只读一个文件**，所以「一个会话一份文件」不是整洁癖，是这几条路能工作的前提：
+一次会话的记录被劈进两个 workspace，那几条路谁都看不见另一半，而它们都不会报错——它们只是读到一段更短的
+对话。于是**换绑要把文件一起搬**（`harness.edge.http/move-log!`）：搬之前先问整棵树「这个名字还有没有别的
+`.jsonl`」，有就**按名字拒绝**（两份合起来会读成一个顺序错乱的对话，覆盖则毁掉一次 run 的记录），
+由人决定哪一份才是那段对话。落空的来源不止重复绑定：库被隔离重建过、树从备份恢复过、进程死在
+「库已提交、文件还没搬」之间——所以问的是树，不是那两个目录。
+
+**一个 2026-09-18 的事故是这条规矩的来历**：库被移开重建、`project/identity-for` 一时答 nil，
+活的 run 于是把记录写进 `projects/.unbound/`；库恢复后新记录又回到项目 workspace，**一次对话成了两份文件**。
+现在写手自己会收拾：一条记录要写进项目 workspace 时，先看保留区里有没有这个 thread 的残留段，
+**时间区间不重叠且顺序对**就把它 append 进来、再把源文件改名成 `<thread>.jsonl.carried-<stamp>`
+（故意不以 `.jsonl` 结尾——它只是证据，不该被列表当成第二段对话），并留一行 `log/carried-back`。
+重叠或倒序就拒绝（`log/carry-refused`，两边都不动），因为拼起来会读成一段错乱的历史。
+
+**换绑与写手共用 `log-lock`，而且是两种事实共用一把锁**：一个决定「这条记录写哪个文件」
+（`log!` 里连 `log-file-for` 都在锁内），一个决定「这个文件在哪」（`/api/project` 里读旧绑定、写库、
+搬文件都在锁内）。缺了任何一半，一次**落在 run 中途**的 bind 就能和写手抢同一个重命名——
+轻的是一句假的「日志搬不动」，重的是写手按新绑定另开一个文件、而旧段被判定重叠而拒绝归位，
+**一次会话真的被劈成两份**。这不是罕见路径：侧栏现在是**发送才建会话**，所以「绑的时候 run 正在写」
+是常态（见 [client](client.md)）。判据是一条后端用例：
+`a-bind-that-arrives-while-the-writer-is-mid-run-leaves-one-file`——十二次换绑、一个不停的写手，
+两边的次序随便怎么交错，最后必须只有一份文件、每一行都在、且按顺序。
+
 **`~/.clj-harness/logs/` 现在住着另一样东西，别和上面那棵树混起来。** 它是**后端自己的
 运行日志**（`harness.infra.log`，按日期与大小 rotate，见 `harness.infra.logging`），不是会话日志：会话日志是
 `projects/<workspace>/<thread>.jsonl`，是**记录**；`logs/harness.infra.log` 是**诊断**，没有任何会话读它，
@@ -131,7 +156,10 @@
 判别标准**不是「改得勤不勤」，是「能不能被改写」**。推论：
 
 - **库不是日志索引**：jsonl 里的任何内容都不进库——没有消息表、没有全文索引、没有会话摘要。
-- 库也不镜像文件大小与 mtime：那是**记录**的属性，读的时候现问文件。
+- 库也不镜像文件大小与 mtime：那是**记录**的属性，读的时候现问文件。**但「上次发送时间」进库**，
+  因为它不是文件属性：那是**人按了发送**的那一刻（`sessions.last_sent_at`，每一次 run 的 input 到达时
+  重写，与标题同一句 `UPDATE`），跟「日志最后被追加是什么时候」是两回事——一次跑五分钟，
+  这个数停在按下去的时候。侧栏那一列要的正是它（见 `.scratch/store-backed-sidebar/spec.md`）。
 
 ### 三张表
 
@@ -142,7 +170,8 @@
 迁过之后，**另一条再也打不开**。`user_version` 还在写，但只是面包屑，没有任何代码从它做决定。
 
 **合并之后这两条链合成了一条**：`projects-and-sessions`、`sessions-remember-the-project-path`、
-`hashline-store`、`hashline-served`、`hashline-undo-served`、`todos`。每一步还带一个 `:present?` 探针回答
+`hashline-store`、`hashline-served`、`hashline-undo-served`、`todos`、`sessions-remember-their-title`、
+`sessions-remember-their-last-send`。每一步还带一个 `:present?` 探针回答
 「这份 schema 里已经有了吗」，所以被**任一**条旧链迁过的库都打得开：认识的步骤**记为已做**而不是重跑，
 不认识的表是惰性的。本机真 home 那个库就是这么被治好的——它缺的列由探针发现并补上，不再需要手写 ALTER。
 
@@ -159,7 +188,9 @@ CREATE TABLE sessions (
     archived   INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     CHECK ((project_id IS NULL) = (path IS NULL)),
-    last_project_path TEXT);                -- 由 sessions-remember-the-project-path 加
+    last_project_path TEXT,                 -- 由 sessions-remember-the-project-path 加
+    title      TEXT,                        -- 由 sessions-remember-their-title 加
+    last_sent_at INTEGER);                  -- 由 sessions-remember-their-last-send 加
 
 CREATE TABLE schema_steps (
     name       TEXT PRIMARY KEY NOT NULL,   -- 步骤的**名字**即身份，改名字等于重跑
@@ -177,6 +208,23 @@ CREATE TABLE schema_steps (
 - FK `ON DELETE SET NULL` 明说「解除隶属，不删除」；
 - 但光靠它会把行清成「project 空、path 还在」——正是 `CHECK` 要拒的半绑态，级联失败、删除也跟着失败。
   所以 `projects` 上有一个 **BEFORE DELETE 触发器**，一条语句把两列一起清掉，级联随后无事可做。
+
+**`title` 是这个库里唯一一列对话内容**，而它进得来是主人**推翻**过一条守卫的结果（2026-09-21）：
+`harness.infra.db-test/sessions-hold-no-conversation-content` 原先点名的例子正是「给 `sessions` 加一个
+`title` 列」。它能被推翻而守卫本身仍然成立，靠的是**第一句永远不会变**——存下来的是会话**获得**的一个
+名字，不是会长的记录的副本（`summary` 那种才是这条守卫要防的第二份真相）。写它的是**第一次收到消息的
+那次 run**（`harness.edge.http/run-agent!`，与 `input` 帧同一处），`AND title IS NULL` 保证只写一次；
+**不回填**（主人的判决）：这一列之前跑过的会话没有值，侧边栏退回显示 thread-id，直到它下一次再跑
+——那次 run 的 input 带着整段历史，第一条 user 消息仍旧是第一句。代价写在
+`sessions-remember-their-title` 的 docstring 里：手改过的日志会和这一列不一致，日志删了标题还在。
+
+**`last_sent_at`（`sessions-remember-their-last-send`）是侧栏那一列**：每次 run 的 input 到达时重写，
+与标题同一句 `UPDATE`（`cap.project/remember-send!`），所以「人按了发送」与「这个会话叫什么」是一次写入的
+两个事实。**它回填**（与标题相反）：迁移步顺手把老行的值填成那条日志文件的 mtime——正是列表从前显示的那个
+数（语义是「上次活动」，与新值差一次跑的时长，docstring 里写明），不填的话本机几十条老会话会在侧栏上
+一个时间都没有。这是**全仓唯一一次读磁盘的迁移**，它也因此是这一列最后一次看文件：此后再没有
+「没有就去看文件」的兜底分支。stem → 文件的查找补在 `harness.infra.home/log-file-for-stem`
+（infra 里不许 require edge，所以不是 `replay/locate`）。
 
 **`last_project_path`（v2）是「移除项目可撤销」的凭据**：它的值是会话上一个项目的 canonical 路径，
 **不是绑定**（`binding-for` 永不读它，工具路径永不经它解析）。移除项目时触发器只清 `project_id` 与 `path`，

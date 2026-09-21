@@ -588,6 +588,67 @@
                                         WHERE projects.id = sessions.project_id)
             WHERE project_id IS NOT NULL"))
 
+(defn- sessions-remember-their-title
+  "Version n -> n+1: `sessions.title`, the first thing the person said in that
+  conversation, written ONCE when the first run arrives (`harness.cap.project/
+  remember-title!`).
+
+  THE STORE NOW HOLDS ONE PIECE OF CONVERSATION CONTENT, AND THAT IS A DECISION
+  SOMEBODY MADE RATHER THAN AN ACCIDENT -- `harness.infra.db-test/sessions-hold-no-
+  conversation-content` used to list `title` as the example of what may never live
+  here. The owner overruled it (2026-09-21) after being shown both sides: the log
+  answers the same question, and reading the head of every log costs 0.15 MB and
+  39 ms for a 53-session home -- cheap, but paid on EVERY listing, against one
+  SELECT here. What bought the reversal is a property the other candidates do not
+  have: THE FIRST MESSAGE CANNOT CHANGE. A stored copy of it is not a second truth
+  that drifts as the conversation grows (a summary would be; so would a title
+  derived from the LATEST turn) -- it is a name the session acquires once, in the
+  same sense `last_project_path` is a memory this store keeps because the row it
+  named may be gone.
+
+  WHAT THAT COSTS, stated rather than discovered later: a log edited by hand can
+  now disagree with this column, and a session whose log is deleted keeps its
+  title. Both are accepted: the column is what the SIDEBAR shows, and the log
+  remains the only record of what was said.
+
+  NO BACKFILL, on the owner's instruction ('老的不管'). A session that ran before
+  this column existed has NULL here and falls back to its id in the sidebar --
+  until the next time it runs, when the input it sends carries the whole history
+  and the first user message in it is still the session's first."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN title TEXT"))
+
+(defn- sessions-remember-their-last-send
+  "Version n -> n+1: `sessions.last_sent_at`, the moment the person last pressed
+  send in that conversation, in epoch milliseconds -- written on every run that
+  arrives (`harness.cap.project/remember-send!`).
+
+  THIS IS WHAT LETS THE SIDEBAR STOP READING DISKS. Until it existed, the listing
+  took each row's time and size off its log file (`File.lastModified`, `File.length`),
+  which meant the panel that draws forty conversations touched forty files every
+  time it refreshed; the owner's rule is that everything on the left comes from the
+  store except whether a run is in flight right now. The size simply went away (nobody
+  asked for it), and the time became this column.
+
+  AND IT IS BACKFILLED, which is where the one disk read of the whole change lives:
+  a session that ran before this column existed would otherwise be a row with NO
+  time at all, and in a home with fifty of them that is not a quiet absence -- it is
+  the panel losing the fact it was just asked to show. The value is the log's
+  MTIME, which is exactly what the listing used to display, so the old rows keep
+  the number they had; from now on the value is the SEND time instead. The two
+  differ by however long the last run ran, which is the honest difference between
+  'last active' and 'last asked'.
+
+  A row with no log -- registered and never used, or a log deleted by hand -- stays
+  NULL, and the client draws that absence in words (`session.neverRun`) rather than
+  inventing a time."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN last_sent_at INTEGER")
+  (doseq [{:keys [id]} (query c "SELECT id FROM sessions WHERE last_sent_at IS NULL")]
+    (when-let [f (home/log-file-for-stem id)]
+      (execute! c "UPDATE sessions SET last_sent_at = ? WHERE id = ?"
+                (.lastModified ^java.io.File f) id))))
+
 (defn- table?
   "Does this store have a table called NAME? The probe half of a migration step:
   a step that leaves a table behind can be recognised by it."
@@ -801,7 +862,13 @@
     :run      hashline-undo-served}
    {:name     "todos"
     :present? #(table? % "todos")
-    :run      todos-table}])
+    :run      todos-table}
+   {:name     "sessions-remember-their-title"
+    :present? #(column? % "sessions" "title")
+    :run      sessions-remember-their-title}
+   {:name     "sessions-remember-their-last-send"
+    :present? #(column? % "sessions" "last_sent_at")
+    :run      sessions-remember-their-last-send}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

@@ -84,14 +84,14 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数 | 无（只读） |
 | `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传） | `git/branch` |
 | `/api/project` | GET | 绑定目录（未绑定答 `null`） | 无 |
-| `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`） | `project/bound` |
+| `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`，upsert，`{threadId, dir}`）。**它同时把那条会话的日志搬过去**（一个会话一份文件，见 [home-and-storage](home-and-storage.md#一个会话一份文件)），所以这一段与写日志的那条路**同一把锁**：读旧绑定、写库、搬文件都在 `log-lock` 里，而写记录的那条路（`log!`）也在同一把锁里决定「这条记录写哪个文件」。没有这一点，一次落在 run 中途的 bind（**发送才建会话**之后这是常态）会和写手抢同一个重命名：轻则一句假的拒绝，重则一次会话被劈成两份 | `project/bound`（runId null） |
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
 | `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上**每一条**没终结的 run（按 run id 认；各补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建 | `session/rebuilt`，合上过则每一轮先有一行 `session/closed-off` |
 | `/api/threads/<stem>/sofar` | GET | **至今为止的对话**：客户端**轮询**用的只读读法——已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它 | 无（只读） |
-| `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话；任务的体积与 mtime 按 stem 问整棵树（它没有 workspace 可推） | 无 |
+| `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的 input 到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
 | `/api/projects` | POST | 让一个目录成为项目（find-or-create） | 无 |
 | `/api/sessions` | POST | 让一条会话**存在**（`{threadId}`，find-or-create）：库里没有就插一行未绑定、无记忆的会话；已经有就原样不动（**不会解绑**）。「新建任务」与 `POST /api/agent` 第一次收到陌生 thread id 时各调它一次，所以「一条会话什么时候成为这个家的一条会话」只有一个答案 | 无（只写库里一行，不开任何文件） |
 | `/api/projects/<canonical-path>/remove` | POST | 移除项目（= 解绑它的会话，不删日志） | 无 |

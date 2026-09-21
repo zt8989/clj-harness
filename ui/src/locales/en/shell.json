@@ -5,8 +5,13 @@
   },
   "session": {
     "neverRun": "never run",
-    "noLog": "no log yet",
-    "current": "current",
+    "justNow": "just now",
+    "minutesAgo_one": "{{count}} min ago",
+    "minutesAgo_other": "{{count}} min ago",
+    "hoursAgo_one": "{{count}} h ago",
+    "hoursAgo_other": "{{count}} h ago",
+    "daysAgo_one": "{{count}} d ago",
+    "daysAgo_other": "{{count}} d ago",
     "running": "Running",
     "parked": "Waiting on you",
     "archive": "Archive",
@@ -15,7 +20,11 @@
     "unarchiveTitle": "Unarchive — put this session back with the project's other sessions",
     "empty": "No sessions in this project yet.",
     "allArchived": "Every session here is archived.",
-    "archived": "Archived"
+    "showMore_one": "{{count}} more",
+    "showMore_other": "{{count}} more",
+    "showLess": "Show less",
+    "archived": "Archived",
+    "untitled": "New session"
   },
   "project": {
     "newSession": "New session",
@@ -34,7 +43,7 @@
     "addProject": "Add project",
     "addProjectTitle": "Add a project — opens a folder picker, and the directory you choose becomes a project",
     "refresh": "Refresh",
-    "refreshTitle": "Re-read the list from disk and the store",
+    "refreshTitle": "Re-read the list from the store",
     "empty": "Nothing here yet. Add a project, or start a task.",
     "settings": "Settings",
     "settingsTitle": "Settings: what this session is running on, and what this home can be on"

@@ -9,20 +9,40 @@ clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议�
 ## 会话与项目
 
 **会话**（thread-id）—— 一段有日志、可重建、可续跑的对话。它是**归属的单位**：工具表、锚点归属、
-待决审批都按它分。日志落在 `~/.clj-harness/logs/<thread-id>.jsonl`。
+待决审批都按它分。日志落在 `~/.clj-harness/projects/<workspace>/<thread-id>.jsonl`，workspace 由
+项目身份（canonical 路径）算出、未绑定的落在 `projects/.unbound/`——**一个会话一份文件**，
+所以换绑会把文件一起搬（见 [home-and-storage](docs/architecture/home-and-storage.md#一个会话一份文件)）。
 *别叫成* 对话（conversation 是消息序列，不是这个单位）。
 
 **项目绑定** —— 把一个会话接到一个目录上（`/api/project`）。绑定之后相对路径以那里为根，
 `.harness/harness.edn` 也只有绑定之后才有意义。
 
 **任务** —— 一段**没有家**的会话：库里 `project-id` 与 `last-project-path` 一起为 NULL。
-它由「新建任务」造（`POST /api/sessions`，铸一枚 id 然后登记），或者由 AG-UI 那条边在一条会话
-**第一次跑起来**时登记；界面上是侧边栏顶部那块平铺、不分组、不属于任何项目的列表，归档落在底部
+**它是被发送造出来的，不是被点击造出来的**：界面上「新建任务」只铸一枚 id、在页面里打开一场空会话
+（不写库、列表上什么都不出现），登记由 AG-UI 那条边在一条会话**第一次跑起来**时做
+（`POST /api/sessions`）；界面上是侧边栏顶部那块平铺、不分组、不属于任何项目的列表，归档落在底部
 那一块「已归档」里。**当一个会话被移除的项目放走时它不是任务**——它记得那个目录（`last-project-path`），
 所以它等的是那个目录回来，而不是变成一段无主的对话。
 *别叫成* 无项目的会话（「未绑定」是两个原因的合称，任务是其中一个）、未保存的会话、草稿；
 **也别和「任务清单」混**——那是本会话的待办，由 `todo_write` 写，和这条没有关系。
 *别叫成* 工作区（workspace 指进程的当前目录，不一定是绑定的那个）。
+
+**会话标题** —— 一场会话**第一句有文字的用户消息**，画在对话列顶栏、侧边栏那一行、也进浏览器 tab
+（`<标题> · clj-harness`）。**它落盘**：第一次收到消息的那次 run 把它写进库里的 `sessions.title`
+（只写一次、永不改写），`GET /api/projects` 每一行都带。（这一条 2026-09-21 由主人推翻过——
+先前写的是「派生量、不落盘」，代价与反转的理由在 `.scratch/session-titles-in-the-store/spec.md`
+与 `harness.infra.db/sessions-remember-their-title` 里。）
+**老会话没有这一列的值，也不回填**，侧边栏退回显示 thread-id；顶栏没说话时用词表里那句
+`session.untitled`（`New session` / `新会话`）。
+*别叫成* 名字 / 命名（**本产品没有重命名这个动词**，标题是「第一句」而不是谁起的名字）。
+
+**上次发送时间**（`sessions.last_sent_at`）—— **人按下发送**的那一刻，不是「日志最后被追加」的那一刻：
+每次 run 的 input 到达时重写，与标题同一句 `UPDATE`（`cap.project/remember-send!`），续跑也算一次发送。
+侧边栏每一行的右端画它，**是相对时间**（`刚刚 / N 分钟 / N 小时 / N 天`，超过 7 天给日期
+`9/14`；完整绝对时间与 thread-id 一起在 hover 的 tooltip 里）。列表按它降序、没值的沉底；
+老行由 `sessions-remember-their-last-send` 用日志 mtime 回填过一次（与标题相反，**这一列回填**）。
+*别叫成* mtime / 最后活动时间（磁盘那个数退出了界面：侧栏一行现在只有
+`[spinner 槽][标题][相对时间]`，**没有文件大小**，也**只有库能答的字段**加一个进程内的「在跑没有」）。
 
 **配置两级** —— 配置家 `~/.clj-harness/harness.edn`（用户级）与绑定项目里的 `.harness/harness.edn`
 （项目级）。顶层浅合并：项目提到某个键就整个换掉用户的。**唯一的例外是 `:editing`，它逐键合并**——

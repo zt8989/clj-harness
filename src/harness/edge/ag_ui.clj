@@ -382,6 +382,65 @@
                             [:text])))))
         messages))
 
+(def ^:private title-limit
+  "How much of the first message is kept as a session's name: a STORAGE guard, not a
+  display rule. `sessions.title` is carried for every session in the sidebar's one
+  listing, so a first message that was a pasted file must not make that payload
+  megabytes; what the eye is shown is the client's business and is shorter still
+  (`ui/src/lib/session-title.ts`). 200 characters is far past any title and far
+  short of any paste."
+  200)
+
+(defn- clip-codepoints
+  "S at most N CODEPOINTS. `subs` counts UTF-16 units, so clipping at 200 with it
+  can cut an emoji in half and store a lone surrogate -- the client's clip counts
+  code points for the same reason, and this is the storage twin of it."
+  [^String s n]
+  (if (<= (.codePointCount s 0 (.length s)) n)
+    s
+    (subs s 0 (.offsetByCodePoints s 0 n))))
+
+(defn- message-text
+  "One message's text, as a person would read it: a string content as it stands, a
+  part vector with its text parts joined by newlines. Parts of other modalities
+  contribute nothing -- an image is not a name."
+  [message]
+  (let [c (:content message)]
+    (cond
+      (string? c) c
+      (sequential? c) (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) c))
+      :else nil)))
+
+(defn first-user-text
+  "WHAT THE PERSON FIRST SAID IN THIS RUN, or nil: the first `user` message in INPUT's
+  messages, trimmed and clipped to a length a store may hold.
+
+  IT IS THE FIRST USER MESSAGE AND NOT THE LAST, which is what makes it usable as a
+  session's name: a run carries the whole conversation, so this answers the same
+  thing on the first turn and on the fortieth -- the sidebar's title for a session
+  that ran before this harness kept titles is picked up the next time it runs.
+
+  ONLY `user` ROLES COUNT, for the reason `carried-input-types` gives one screen up:
+  everything else in the vector is ours -- the system prompt, the assistant's own
+  turns, tool results. The user messages in here are the CLIENT's, and only the
+  client's: the context message and the instruction-file blocks this edge appends are
+  spliced by `inbound` AFTER this point and never reach an input frame (a log's first
+  `input` record holds exactly what the browser sent -- measured against the real
+  home on 2026-09-21). So 'the first user message' needs no further distinguishing.
+
+  BLANK TURNS ARE SKIPPED RATHER THAN NAMED: the first message that SAYS something is
+  the answer, which is what 'the first thing they said' means when the first thing
+  they sent was an empty line."
+  [input]
+  (let [said (->> (:messages input)
+                  (filter #(= "user" (:role %)))
+                  (keep message-text)
+                  (map str/trim)
+                  (remove str/blank?)
+                  first)]
+    (when said
+      (clip-codepoints said title-limit))))
+
 (defn undeclared-input
   "The modalities in MESSAGES that DECLARED does not cover, sorted. Nil DECLARED
   means nothing was declared, and nothing declared means nothing promised -- so

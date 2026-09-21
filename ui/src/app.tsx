@@ -92,10 +92,12 @@ import {
   isParkedInterrupt,
 } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
+import { SessionTitle } from "@/components/session-title";
+import { firstUserText } from "@/lib/session-title";
 import { SidebarOpenButton, isWideWindow } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { imageAttachments } from "@/lib/attachments";
-import { type SidebarListing } from "@/lib/projects";
+import { type SidebarListing, bindThread } from "@/lib/projects";
 import {
   browserStorage,
   forgetSession,
@@ -239,9 +241,19 @@ function sessionHistory(
 const SessionStatusReporter: FC<{
   threadId: string;
   onStatus: (id: string, status: SessionStatus) => void;
+  onTitle: (id: string, title: string | null) => void;
   onForget: (id: string) => void;
-}> = ({ threadId, onStatus, onForget }) => {
+}> = ({ threadId, onStatus, onTitle, onForget }) => {
   const running = useAuiState((s) => s.thread.isRunning);
+  // AND WHAT THIS CONVERSATION IS CALLED, read off the same runtime, one line up from
+  // the status it is reported with. It is the SECOND source of a title rather than the
+  // only one -- the store keeps a copy, written by the first run that arrived, and the
+  // sidebar reads that for every session this page has never opened. This one exists
+  // for the case the store cannot cover: the message just typed. `firstUserText`
+  // answers a STRING (or null), which is the shape `useAuiState` needs -- a selector
+  // answering an array or an object re-renders on every store change, because two
+  // equal arrays are not the same array.
+  const title = useAuiState((s) => firstUserText(s.thread.messages));
   // The parked reading: this session has stopped to ask a human. It is NOT
   // `running` -- a run that ends on an interrupt has `isRunning` false -- which
   // is exactly why the sidebar has two different things to say.
@@ -257,10 +269,24 @@ const SessionStatusReporter: FC<{
     onStatus(threadId, { running, parked });
   }, [threadId, running, parked, onStatus]);
 
+  // ITS OWN EFFECT, for the reason the status one has its own: re-running the pair
+  // together would report the status again every time a message arrives (the title
+  // changes on the first one and then never), and the page compares the whole status
+  // object before storing it.
+  useEffect(() => {
+    onTitle(threadId, title);
+  }, [threadId, title, onTitle]);
+
   // AND FORGOTTEN ON UNMOUNT, so a host that goes away cannot leave its row lit
   // forever. Its own effect rather than a cleanup on the one above, which re-runs
   // on every status change and would blink the row off each time.
   useEffect(() => () => onForget(threadId), [threadId, onForget]);
+
+  // A HOST THAT GOES AWAY TAKES ITS TITLE WITH IT, in the same cleanup: a title is
+  // only ever as good as the runtime it came from, and leaving it behind would let a
+  // page that dropped the session keep drawing words nobody can see the source of
+  // (the store's copy takes over, which is the honest fallback).
+  useEffect(() => () => onTitle(threadId, null), [threadId, onTitle]);
 
   return null;
 };
@@ -273,10 +299,11 @@ const SessionHost: FC<{
   read: HistoryRead;
   visible: boolean;
   onStatus: (id: string, status: SessionStatus) => void;
+  onTitle: (id: string, title: string | null) => void;
   onForget: (id: string) => void;
   onError: (id: string, message: string) => void;
   children: ReactNode;
-}> = ({ threadId, read, visible, onStatus, onForget, onError, children }) => {
+}> = ({ threadId, read, visible, onStatus, onTitle, onForget, onError, children }) => {
   // The agent is built ONCE for this host and owns this session's id for the
   // host's whole life. Rebuilding it would throw the thread away mid-run -- the
   // same reason the old single-agent memo had an empty dependency list, paid per
@@ -380,6 +407,7 @@ const SessionHost: FC<{
       <SessionStatusReporter
         threadId={threadId}
         onStatus={onStatus}
+        onTitle={onTitle}
         onForget={onForget}
       />
       {/* Per host, and BELOW this host's provider because it reads ITS pending
@@ -424,36 +452,67 @@ const SessionColumn: FC<{
           // same merge the copied shadcn primitives use, so there is no second place for
           // the bar's own style to drift out of step with this one.
           className={cn(
-            "flex shrink-0 items-center gap-1 border-b border-border px-3 py-1.5",
-            // `ps-11` CLEARS THE FLOATING CONTROL: 8px of inset plus its 32px, over the
-            // `px-3` above (which `ps-` replaces on that side). The tabs must not end up
-            // underneath a button the page draws on top of them -- and a stylesheet cannot
-            // see that, so the numbers that produce it are next to the class they clear.
-            folded && "ps-11",
+            // `h-12` IS THE DEMO'S `3rem` ROW, and it is a HEIGHT rather than padding
+            // because the sidebar's brand row is the same height: the two `border-b`
+            // lines then land on ONE y, which is what makes the divider read as a single
+            // line across the app rather than as two lines at two heights.
+            "flex h-12 shrink-0 flex-col justify-center border-b border-border px-3",
+            // `ps-12` CLEARS THE FLOATING CONTROL BY ITS BOX AND NOT BY ITS TEXT: 8px of
+            // inset plus the button's 32px puts the button's trailing edge at 40, and the
+            // tab row below is pulled 8px back (`-ms-2`, to line its first word up with the
+            // title's) -- so the inset that clears the button *for the tabs* is 40 + 8 = 48.
+            // `ps-11` was enough while the bar was one line of text and is not any more:
+            // it left the tab row's box 4px under the button, where a click meant for the
+            // view switch would open the sidebar instead. A stylesheet cannot see any of
+            // this, so the numbers that produce it sit next to the class they clear.
+            //
+            // `lg:ps-3` IS THE OTHER HALF OF THE SAME FACT: there is no floating button on a
+            // wide window (a folded column is the RAIL there, and it takes its own 48px out
+            // of the row), so the inset that exists to clear that button must not survive
+            // into a window that has none -- the bar's own `px-3` is the whole story there.
+            folded && "ps-12 lg:ps-3",
           )}
         >
-          {(
-            [
-              ["conversation", "view.conversation"],
-              ["trajectory", "view.trajectory"],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              data-slot="view-switch-tab"
-              data-view={key}
-              aria-pressed={view === key}
-              onClick={() => onView(key)}
-              className={
-                view === key
-                  ? "rounded-md bg-muted px-2 py-0.5 text-xs text-foreground"
-                  : "rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-              }
-            >
-              {t(label)}
-            </button>
-          ))}
+          {/* TWO LINES IN ONE 48px BLOCK: what this session IS on top, and which view of
+              it you are looking at underneath -- the title is a NAME, the switch is a
+              CONTROL, and putting them on one line made the name compete with two buttons
+              for the same strip of space. The title comes from the conversation itself
+              (`components/session-title.tsx`, which also writes the browser tab). It is
+              rendered INSIDE this host's runtime provider (this component is that
+              provider's child), which is what lets it read the messages with nothing
+              plumbed through App. */}
+          <SessionTitle />
+          {/* `-ms-2` PUTS THE FIRST TAB'S WORD UNDER THE TITLE'S FIRST LETTER: a tab carries
+              `px-2` of its own, so without it the row below would read as indented against
+              the row above. The demo takes the same 8px back off its header's first control
+              (`-ms-1.5`) for the same reason -- there it is the open button, here a tab. */}
+          <div
+            data-slot="view-switch-tabs"
+            className="-ms-2 flex shrink-0 items-center gap-1"
+          >
+            {(
+              [
+                ["conversation", "view.conversation"],
+                ["trajectory", "view.trajectory"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                data-slot="view-switch-tab"
+                data-view={key}
+                aria-pressed={view === key}
+                onClick={() => onView(key)}
+                className={
+                  view === key
+                    ? "rounded-md bg-muted px-2 py-0.5 text-xs text-foreground"
+                    : "rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+                }
+              >
+                {t(label)}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="min-h-0 flex-1">
           {/* THE INJECTION CARD'S REGISTRATION, and it is a rendering: a data part's
@@ -495,6 +554,10 @@ const dropKey = <T,>(record: Record<string, T>, key: string): Record<string, T> 
 };
 
 export function App() {
+  // The failures this page raises itself -- today, one: a bind at first send that the
+  // server refused (see `reportTitle`). The sentence comes from the `errors` catalog,
+  // like every other refusal the interface did not get from the server.
+  const { t: tErrors } = useTranslation("errors");
   // THE ROSTER. The first session is minted here and hosted EMPTY: a brand-new
   // id has no log, and the server refuses to invent a conversation for one.
   const [roster, setRoster] = useState<Roster>(() => {
@@ -503,6 +566,12 @@ export function App() {
   });
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
+  // AND ONE TITLE PER SESSION, from the same reporter and read by the same rows: the
+  // second source of `sessions.title`, for the sessions THIS PAGE is holding. The
+  // first is the store's copy (`SessionSummary.firstUserText`, which is what a row
+  // shows for every session nobody here has opened); this one is fresher by exactly
+  // the message that has not been listed yet, which is the one just typed.
+  const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
   // The sessions whose history would not load, keyed by session, so the refusal
   // lands on the row that was clicked.
   const [openErrors, setOpenErrors] = useState<Record<string, string>>({});
@@ -512,9 +581,11 @@ export function App() {
   // next launch.
   const [view, setView] = useState<"conversation" | "trajectory">("conversation");
   // WHETHER THE SIDEBAR IS FOLDED AWAY, and it is the PAGE's state rather than the
-  // sidebar's for the one reason a component cannot solve: a folded sidebar is a hidden
-  // subtree, so it cannot draw the control that unfolds it -- the floating corner button
-  // does, and that button is this file's. The pair and what they agree on are in
+  // sidebar's for the one reason a component cannot solve: on a NARROW window a folded
+  // sidebar is a hidden subtree, so it cannot draw the control that unfolds it -- the
+  // floating corner button does, and that button is this file's. (On a wide window the
+  // folded column is the rail and holds that control itself, which is why this page draws
+  // the corner one only below `lg`.) The controls and what they agree on are in
   // `components/sidebar-toggle.tsx`.
   //
   // IT STARTS FROM THE WINDOW (`isWideWindow`): there on a wide one, folded away on a
@@ -612,8 +683,70 @@ export function App() {
     setStatuses((prev) => dropKey(prev, id));
   }, []);
 
-  /// Show a session this client has just minted (and, for every path that has a
-  /// project, just bound): nothing to rebuild, so no load.
+  /// THE DIRECTORY A MINTED SESSION IS WAITING TO BELONG TO, keyed by session id.
+  ///
+  /// A REF RATHER THAN STATE, and both halves of that are deliberate: the value is READ
+  /// ONCE, at the moment of the first send, by a callback that must not re-render the page
+  /// to find it (`reportTitle`); and writing it must not re-render anything either,
+  /// because nothing on screen depends on it -- the row it would belong to does not exist
+  /// yet. This is what LAZY CREATION costs: the sidebar used to bind a new session
+  /// immediately (`POST /api/project`), so the store knew where it lived before anybody
+  /// had typed; now the directory waits here until there is a conversation to attach it
+  /// to.
+  ///
+  /// IT IS DELETED THE MOMENT IT IS USED (see `reportTitle`), so a session that is sent to
+  /// twice is bound once, and a failure is not retried behind the person's back.
+  const pendingBinds = useRef<Map<string, string>>(new Map());
+
+  /// WHAT THIS PAGE LEARNS FROM A HOST, and the place LAZY CREATION is cashed in.
+  ///
+  /// A TITLE ARRIVING MEANS SOMEBODY SENT THE FIRST MESSAGE: this callback is fed by
+  /// `firstUserText` over the runtime's own messages (`SessionStatusReporter`), so a
+  /// non-null title is that exact event and there is no other. That is why the bind hangs
+  /// off it rather than off a send handler somewhere in the composer: the run's path is
+  /// what creates the session on the server (`register-run-session!`), and this is the
+  /// page's own view of the same moment.
+  ///
+  /// SO: IF THIS SESSION WAS MINTED FOR A PROJECT, BIND IT NOW -- one POST, exactly once,
+  /// and never for a task (nothing was pending). Binding is an UPSERT that also creates the
+  /// row, so the order against the run's own registration does not matter: if the run got
+  /// there first the session exists as a task and this moves it into the project, and if
+  /// the bind wins the run finds it already there. Either way the row ends up in the right
+  /// group, which is the acceptance for this ticket.
+  ///
+  /// A REFUSED BIND IS A SENTENCE ON THAT ROW, through the same `openErrors` map a history
+  /// that would not load uses: the session still exists (the run created it, as a task), so
+  /// by the time the row is listed the sentence is waiting for it. It is NOT retried: the
+  /// pending entry is gone, and a retry the person did not ask for would be a second write
+  /// racing the first.
+  const reportTitle = useCallback(
+    (id: string, title: string | null) => {
+      if (title !== null) {
+        const dir = pendingBinds.current.get(id);
+        if (dir !== undefined) {
+          pendingBinds.current.delete(id);
+          void bindThread(id, dir, tErrors).catch((failure: unknown) => {
+            setOpenErrors((prev) => ({
+              ...prev,
+              [id]: failure instanceof Error ? failure.message : String(failure),
+            }));
+          });
+        }
+      }
+      setLiveTitles((prev) => {
+        // NULL IS "NOTHING SAID YET", and the registry holds titles rather than
+        // answerless entries: dropping the key hands the row back to the store's copy,
+        // which is the same answer from the other source.
+        if (title === null) return dropKey(prev, id);
+        return prev[id] === title ? prev : { ...prev, [id]: title };
+      });
+    },
+    [tErrors],
+  );
+
+  /// Show a session this client has just minted: nothing to rebuild, so no load. The
+  /// directory it will belong to travels with it (see `onShowFresh` in `sidebar.tsx`) and
+  /// is only REMEMBERED here -- the bind itself happens at the first send.
   ///
   /// THIS AND `showExisting` ARE THE SIDEBAR'S TWO DOORS, and because they are, BOTH CLOSE
   /// THE DRAWER on a narrow window (`foldDrawer`): the panel listed the conversation, and
@@ -623,7 +756,8 @@ export function App() {
   /// is the distinction worth keeping: a page landing on the session it already remembers
   /// has nobody to get out of the way of.
   const showFresh = useCallback(
-    (id: string) => {
+    (id: string, projectDir: string | null) => {
+      if (projectDir !== null) pendingBinds.current.set(id, projectDir);
       foldDrawer();
       show(id, "none");
     },
@@ -684,10 +818,12 @@ export function App() {
       restored.current = true;
       const listed = listedSession(pending, listing);
       if (listed !== null) {
-        // NO LOG YET means the conversation is empty by construction -- a session made
-        // on the sidebar and never run -- so there is nothing to read and nothing to
-        // ask for; a session WITH a log is read through the door that may only look.
-        show(pending, listed.bytes === null ? "none" : "sofar");
+        // NOTHING EVER SENT means the conversation is empty by construction -- a
+        // session made on the sidebar and never used -- so there is nothing to read
+        // and nothing to ask for; a session that HAS been sent to is read through the
+        // door that may only look. (The test used to be the log's size, which is the
+        // same fact read off the disk side; it is a store column now.)
+        show(pending, listed.lastSentAt === null ? "none" : "sofar");
       } else {
         forgetSession(browserStorage(), pending);
       }
@@ -735,8 +871,9 @@ export function App() {
             It used to sit inside the one provider only to reach
             `runtime.threads.switchToThread`, and it no longer has one.
 
-            AND IT IS NEVER UNMOUNTED, folded or not -- `folded` is a `hidden` class
-            inside it, not a missing element. Its `refresh` is the only reader of
+            AND IT IS NEVER UNMOUNTED, folded or not -- `folded` is a class inside it
+            (`hidden` on a narrow window, the rail's own width on a wide one), not a
+            missing element. Its `refresh` is the only reader of
             `GET /api/projects`, and that reading is where the mount restore learns
             whether the remembered session still exists (`onListed`): a phone-sized
             window starts folded, so unmounting it here would leave exactly those
@@ -747,15 +884,20 @@ export function App() {
           currentThreadId={roster.shown}
           onListed={onListed}
           statuses={statuses}
+          liveTitles={liveTitles}
           openErrors={openErrors}
           onShow={showExisting}
           onShowFresh={showFresh}
           folded={folded}
           onCollapse={() => setFolded(true)}
+          onExpand={() => setFolded(false)}
         />
-        {/* THE WAY BACK, and it lives here rather than in the sidebar for the
-            reason the state does: a folded sidebar is hidden, and a hidden subtree
-            cannot draw a control that is meant to be seen. */}
+        {/* THE WAY BACK FOR A NARROW WINDOW, and it lives here rather than in the
+            sidebar for the reason the state does: a folded sidebar is hidden on a narrow
+            window, and a hidden subtree cannot draw a control that is meant to be seen.
+            On a wide one the same control is drawn by the rail's top cell instead -- the
+            component is the same, its `shape` decides, and that one carries `lg:hidden`,
+            so exactly one of the two is ever on screen. */}
         {folded && <SidebarOpenButton onOpen={() => setFolded(false)} />}
         {/* `min-w-0` IS LOAD-BEARING, not tidiness: a flex item's automatic minimum
             width is its content's min-content width, and the trajectory's rows are
@@ -771,6 +913,7 @@ export function App() {
               read={host.read}
               visible={host.id === roster.shown}
               onStatus={reportStatus}
+              onTitle={reportTitle}
               onForget={forgetStatus}
               onError={hostFailed}
             >

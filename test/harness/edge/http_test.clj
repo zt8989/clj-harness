@@ -1451,58 +1451,64 @@
            (is (some? (:projectId project)))
            (is (= "listing-a" (:threadId session)))
            (is (false? (:archived session)))
-           (testing "and the bind itself wrote the session's first line -- its own audit trail"
-             ;; Worth locking, because it is WHY a freshly bound session already has
-             ;; a file: the audit line lands in the workspace the bind just created
-             ;; (see project-post's ordering note). So the disk facts are present.
-             (is (pos? (:bytes session)))
-             (is (= (.length (log-file-for "listing-a")) (:bytes session))))))
-       (testing "after a real run the facts follow the file, read fresh from disk"
-         (let [before (:bytes (row-for listing-dir "listing-a"))]
-           (is (= "RUN_FINISHED"
-                  (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
-           (let [f (log-file-for "listing-a")]
-             ;; THE RUN IS STILL WRITING WHEN THE CLIENT SEES ITS LAST FRAME: the
-             ;; returned side of the message record lands AFTER the terminal frame, so
-             ;; sizes taken now would be compared against a file that grows again a beat
-             ;; later -- which is how these two assertions failed in a full suite (the
-             ;; listing's snapshot said 165736 where the file already said 165916). Wait
-             ;; for the writer's own end of sequence, then measure.
-             (wait-for-recorded
-              f
-              (fn [ls] (and (some #(= "message" (:kind %)) ls)
-                            (some #(and (= "event" (:kind %))
-                                        (frames/terminal? (:payload %)))
-                                  ls)
-                            (= "message" (:kind (last ls)))))
-              5000)
-             (let [session (row-for listing-dir "listing-a")]
-               (is (< before (:bytes session)) "the run appended to the same file")
-               (is (= (.length f) (:bytes session)))
-               (is (= (.lastModified f) (:lastActivity session)))))))
-       (testing "a session whose file is NOT there is still a row, with null facts"
-         ;; The state the sidebar must survive: the store says this session exists,
-         ;; the disk says nothing about it. Null is the honest answer and it is NOT
-         ;; a zero-byte file -- a real 0-byte log would be a broken one.
-         (bind! "listing-b" listing-dir)
-         (let [f (log-file-for "listing-b")]
-           (is (.delete f) "the file is removed by hand, as a person tidying the tree would")
-           (let [session (row-for listing-dir "listing-b")]
-             (is (= "listing-b" (:threadId session)) "the row is still there")
-             (is (nil? (:bytes session)))
-             (is (nil? (:lastActivity session)))
-             (testing "and it sorts FIRST, because 'no log yet' is the newest state there is"
-               (is (= ["listing-b" "listing-a"]
-                      (map :threadId (:sessions (project-named listing-dir)))))))))
-       (testing "a run does NOT outrank a session that has never started"
-         ;; The rule is 'no log sorts first', not 'newest file wins', because a
-         ;; session with no log is one that has not started -- which is newer than
-         ;; any activity, however recent. So a just-created session stays at the
-         ;; top of its project instead of sinking under a busy conversation.
-         (Thread/sleep 20)
-         (post-run "listing-a")
-         (is (= ["listing-b" "listing-a"]
-                (map :threadId (:sessions (project-named listing-dir))))))
+           (testing "and nothing has been said in it yet, so it has no name"
+             ;; `:firstUserText` is the store's answer rather than the log's, and a
+             ;; session that has never run has nothing in the store to answer with.
+             ;; The sidebar falls back to the id for these (the client's business).
+             (is (nil? (:firstUserText session))))
+                      (testing "and the listing says NOTHING about the file the bind just wrote"
+            ;; The bind does write one line -- its own audit trail, in the workspace it just
+            ;; created (see project-post's ordering note). What changed is that the LISTING
+            ;; reports nothing read off a log: the two disk facts it used to carry are gone
+            ;; from the payload entirely, and this is the case that would notice if either
+            ;; came back.
+            (is (.exists (log-file-for "listing-a")) "the audit line is on disk")
+            (is (not (contains? session :bytes)))
+            (is (not (contains? session :lastActivity)))
+            (is (nil? (:lastSentAt session))
+                "and nothing has been SENT to it yet -- a bind is not a send"))
+           (testing "after a real run the row carries the name and the send time, both store facts"
+            (let [before (System/currentTimeMillis)]
+              (is (= "RUN_FINISHED"
+                     (:type (last (wire/frames-from-sse (.body (post-run "listing-a")))))))
+              (testing "and the session has acquired a NAME from the run that carried its first message"
+                ;; `post-run` sends '看看这个项目' as the run's user message, and that is what
+                ;; `remember-send!` writes -- once. Read back through the LISTING rather than
+                ;; through any endpoint of its own, because the listing is the only place a
+                ;; client ever sees this fact.
+                (is (= "看看这个项目" (:firstUserText (row-for listing-dir "listing-a")))))
+              (let [sent (:lastSentAt (row-for listing-dir "listing-a"))]
+                (is (integer? sent) "the send is stamped in the store")
+                (is (<= before sent (System/currentTimeMillis))
+                    "and it is the moment of THIS send, not a file's mtime"))))
+           (testing "a session whose file is NOT there is still a row -- and the store never noticed"
+            ;; The state the sidebar must survive: the store says this session exists, the disk
+            ;; says nothing about it. It used to be visible as two nulls in the listing; now the
+            ;; row's facts are the store's, so the only thing that changed is that the log is gone.
+            (bind! "listing-b" listing-dir)
+            (let [f (log-file-for "listing-b")]
+              (is (.delete f) "the file is removed by hand, as a person tidying the tree would")
+              (let [session (row-for listing-dir "listing-b")]
+                (is (= "listing-b" (:threadId session)) "the row is still there")
+                (is (nil? (:lastSentAt session))
+                    "nothing has been sent to it -- null, which is not a zero-byte file")
+                (testing "and it sorts LAST: 'never sent to' is not 'brand new'"
+                  ;; The old order put a row with no log FIRST, because such a row was one somebody
+                  ;; had just asked for. A session is created by its first send now, so a row with
+                  ;; no time is an abandoned one.
+                  (is (= ["listing-a" "listing-b"]
+                         (map :threadId (:sessions (project-named listing-dir)))))))))
+           (testing "and a run moves a session back to the top -- the order is the store's clock"
+            ;; What replaced 'no log sorts first': two sends, in order, and the row sent to most
+            ;; recently is first. Nothing here reads a file's mtime.
+            (Thread/sleep 20)
+            (post-run "listing-b")
+            (is (= ["listing-b" "listing-a"]
+                   (map :threadId (:sessions (project-named listing-dir)))))
+            (Thread/sleep 20)
+            (post-run "listing-a")
+            (is (= ["listing-a" "listing-b"]
+                   (map :threadId (:sessions (project-named listing-dir))))))))
        (testing "a different directory is a different project"
          (bind! "listing-other" listing-dir-2)
          (is (= (.getCanonicalPath (io/file listing-dir-2)) (:path (project-named listing-dir-2))))
@@ -1599,14 +1605,20 @@
            (is (= before (snap "arch-a"))
                "three writes to the ROW, and not one to the file")))
 
-       (testing "an archived session still lists -- flagged -- with its disk facts"
-         ;; The server does not decide what to DO with the flag: grouping is the
-         ;; screen's business, and a listing that dropped archived rows would make
-         ;; 'where did my session go' a question with no server-side answer.
-         (let [r (row archive-dir "arch-a")]
-           (is (true? (:archived r)))
-           (is (pos? (:bytes r)))
-           (is (= (.length (log-file-for "arch-a")) (:bytes r)))))
+       (testing "an archived session still lists -- flagged -- and its send time did not move"
+           ;; The server does not decide what to DO with the flag: grouping is the
+           ;; screen's business, and a listing that dropped archived rows would make
+           ;; 'where did my session go' a question with no server-side answer. Flipping
+           ;; the flag is a ROW write, and the clock is the row's other fact -- if the
+           ;; archival path had re-derived it from the file, this is where it would show.
+           (let [before (:lastSentAt (row archive-dir "arch-a"))]
+             (is (true? (:archived (row archive-dir "arch-a"))))
+             (archive! "arch-a" false)
+             (is (false? (:archived (row archive-dir "arch-a"))))
+             (is (= before (:lastSentAt (row archive-dir "arch-a"))))
+             (archive! "arch-a" true)
+             (is (true? (:archived (row archive-dir "arch-a"))))
+             (is (= before (:lastSentAt (row archive-dir "arch-a"))))))
 
        (testing "archiving a session with no log at all is legal"
          ;; The flag is a property of the CONVERSATION, not of the file -- and a
@@ -2132,6 +2144,71 @@
         (finally
           (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
 
+(deftest a-bind-that-arrives-while-the-writer-is-mid-run-leaves-one-file
+  ;; THE CASE 'BIND AT FIRST SEND' ADDED. The sidebar no longer binds a new session when
+  ;; the row is minted; it binds when the session's first message arrives -- i.e. WHILE THE
+  ;; RUN IS ALREADY WRITING (`app.tsx`, `reportTitle`). So a bind can now land in the middle
+  ;; of a conversation's records, and it does two things that same writer is looking at: it
+  ;; changes the binding the writer asks where a line goes, and it MOVES the file the writer
+  ;; is appending to. The two are serialized on `log-lock` (see `log!` and the /api/project
+  ;; handler), and this case pins what that buys, in the only form that is checkable: no
+  ;; matter who gets there first, the whole conversation ends in ONE file -- the last
+  ;; project's -- with every line in it, in order, and no fragment left behind anywhere.
+  ;;
+  ;; The writer is a real one (`#'http/log!`, the function every record goes through), on its
+  ;; own thread, because a case that binds first and writes afterwards would only exercise
+  ;; the ordinary first-bind shape. It REBINDS, twelve times, between two directories: the
+  ;; window this is about is a few microseconds wide, and one bind usually misses it -- a
+  ;; dozen of them, against a writer that never stops, is what makes the case able to fail.
+  ;; (It did: the pre-fix code answered 400 "could not move the log" -- the writer's own
+  ;; carrying of the leftover segment and the bind's move raced over one rename.)
+  (wipe-dir! project-dir)
+  (wipe-dir! project-dir-2)
+  (with-server
+   "it-proj"
+   (fn []
+     (let [tid    (str "mid-write-" (java.util.UUID/randomUUID))
+           dirs   [project-dir project-dir-2]
+           ulog   (unbound-log tid)
+           writer (future
+                    (try
+                      (dotimes [i 120]
+                        (#'http/log! tid "r1" "input" {:n i})
+                        (Thread/sleep 1))
+                      (catch Throwable _ nil)))]
+       (let [deadline (+ (System/currentTimeMillis) 5000)]
+         (while (and (not (.exists ulog)) (< (System/currentTimeMillis) deadline))
+           (Thread/sleep 2)))
+       (testing "the run got its first lines down before any bind arrived"
+         (is (.exists ulog) "the session's log is in the reserved workspace")
+         (is (pos? (.length ulog))))
+       (testing "every bind is accepted while the run is still writing"
+         (dotimes [i 12]
+           (let [dir  (nth dirs (mod i 2))
+                 resp (api-call :post "/api/project"
+                                (json/write-str {:threadId tid :dir (str dir)}))]
+             (is (= 200 (.statusCode resp))
+                 (str "bind " i " to " (.getName (io/file dir)) ": " (:error (read-json resp))))
+             (is (same-dir? (:dir (read-json resp)) dir)))))
+       @writer
+       ;; THE LAST BIND IS THE ONE IN FORCE, so the conversation has to be in that
+       ;; directory's workspace -- and only there.
+       (let [plog (project-log (nth dirs (mod 11 2)) tid)
+             other (project-log (nth dirs (mod 12 2)) tid)
+             ns   (->> (str/split-lines (slurp plog :encoding "UTF-8"))
+                       (keep (fn [line]
+                               (try (:n (:payload (json/read-str line :key-fn keyword)))
+                                    (catch Throwable _ nil))))
+                       vec)]
+         (testing "EVERY line of the conversation is in the last project's file, in order"
+           (is (= (vec (range 120)) ns)))
+         (testing "and the directory it left kept nothing"
+           (is (not (.exists other))))
+         (testing "and the reserved workspace kept no fragment of it either"
+           (is (not (.exists ulog))))
+         (testing "so the listing reads this session as ONE conversation"
+           (is (= 1 (count (replay/logs-for (home/projects-dir) tid))))))))))
+
 (deftest a-carry-that-would-interleave-two-histories-is-refused-by-name
   ;; The carry may only run when the conversation's file ENDS at or before the
   ;; leftover segment begins. If the two ranges overlap -- here the segment begins
@@ -2329,20 +2406,22 @@
        (post-run "rm-a")
        (post-run "rm-b")
        (post-run "rm-other")
-       ;; A session with NO log at all. Binding one writes an audit line, so the
-       ;; file would otherwise exist -- it is removed by hand, which is the state
-       ;; the listing calls "null facts" rather than a zero-byte file. The removal
-       ;; must not special-case it: the verb is about a project row, and whether a
-       ;; conversation has a file is not that row's business.
+       ;; A session nothing was ever SENT to. Binding one writes an audit line, so a
+       ;; file would otherwise exist -- it is removed by hand, which is the state the
+       ;; listing used to call "null facts". The listing does not look at the file at
+       ;; all now: the row has no send time because no send ever happened, and the
+       ;; removal must not special-case it (the verb is about a project row, and
+       ;; whether a conversation has a file is not that row's business).
        (is (= 200 (.statusCode (add! remove-dir-b))))
        (is (= 200 (.statusCode (bind! "rm-never-run" remove-dir-b))))
        (is (.delete (log-file-for "rm-never-run")) "the file is removed by hand")
-       (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
-           "the listing calls that null facts, not a zero-byte file")
+       (is (nil? (:lastSentAt (session remove-dir-b "rm-never-run")))
+           "no send, so no time -- null, which is not a zero-byte file")
        (is (= 200 (.statusCode (archive! "rm-b" true))))
        (Thread/sleep 20)                        ; so a file write would move an mtime
 
-       (let [before-a (file-facts ws-a)
+       (let [sent-a   (:lastSentAt (session remove-dir-a "rm-a"))
+             before-a (file-facts ws-a)
              before-b (file-facts ws-b)]
          (is (seq before-a) "the first project has logs on disk to protect")
          (is (seq before-b))
@@ -2423,18 +2502,20 @@
            (testing "INCLUDING the archive flag, which the removal never touched"
              (is (true? (:archived (session remove-dir-a "rm-b"))))
              (is (false? (:archived (session remove-dir-a "rm-a")))))
-           (testing "and with the disk facts read off the very same files"
+           (testing "and the send times came back with them, exactly as they were"
+             ;; Removing and re-adding a project writes ROWS. A time re-derived from the
+             ;; files on the way back would be an mtime here; a store fact survives the
+             ;; trip unchanged.
              (is (= before-a (file-facts ws-a))
                  "re-adding is a row write too: not one byte moved either way")
-             (is (pos? (:bytes (session remove-dir-a "rm-a"))))
-             (is (= (.length (log-file-for "rm-a")) (:bytes (session remove-dir-a "rm-a"))))))
+             (is (= sent-a (:lastSentAt (session remove-dir-a "rm-a"))))))
          (testing "and so does the pair where one of them never ran"
            (is (= 2 (:adopted (read-json (add! remove-dir-b)))))
            (is (= #{"rm-other" "rm-never-run"}
                   (set (map :threadId (:sessions (project remove-dir-b))))))
-           (is (nil? (:bytes (session remove-dir-b "rm-never-run")))
-               "still no log facts -- null, which is not a zero-byte file")
-           (is (pos? (:bytes (session remove-dir-b "rm-other")))))
+           (is (nil? (:lastSentAt (session remove-dir-b "rm-never-run")))
+               "still no time -- nothing was ever sent to it")
+           (is (integer? (:lastSentAt (session remove-dir-b "rm-other")))))
 
          (testing "and the history is intact -- the same file rebuilds the conversation"
            ;; The ticket's last promise, and the one a "tidy up while we are here"
@@ -2532,8 +2613,9 @@
                                 ls)))
             5000)
            (let [row (listed-row "task-ran")]
-             (is (= (.length f) (:bytes row)))
-             (is (= (.lastModified f) (:lastActivity row))))))
+             (is (integer? (:lastSentAt row)) "the run stamped the send")
+             (is (= "看看这个项目" (:firstUserText row))
+                 "and named the session from the first message it carried"))))
 
        (testing "a jsonl nobody owns is NOT a task -- the store decides, not the tree"
          ;; The store's rule, the one the whole sidebar rests on: a file in the tree
@@ -2544,14 +2626,16 @@
          (is (some #(= "nobody-owns-this" (:threadId %))
                    (json/read-str (.body (api-call :get "/api/threads" nil)) :key-fn keyword))))
 
-       (testing "a session released on purpose IS a task, and its facts come from the tree"
+       (testing "a session released on purpose IS a task, and it keeps every fact it had"
          ;; `bind! id nil` is not reachable over HTTP (the route refuses a blank dir),
          ;; so this goes through the verb the route wraps. What it leaves behind is
-         ;; the interesting part: the log does NOT move, so the file stays in the
-         ;; PROJECT's workspace while the session stops having a project -- and a row
-         ;; that only looked in projects/.unbound would say 'no log yet' about a
-         ;; conversation whose log is right there.
+         ;; the interesting part: the log does NOT move, so the file stays in the PROJECT's
+         ;; workspace while the session stops having a project -- and a row that READ THE
+         ;; TREE would have to know where to look (`.unbound` would tell it 'no log yet'
+         ;; about a conversation whose log is right there). A row that reads the STORE
+         ;; has nothing to get wrong, which is the point of this whole change.
          (is (= 200 (.statusCode (bind! "task-released" task-dir))))
+         (post-run "task-released")
          (project/bind! "task-released" nil)
          (let [f (home/log-file (workspace-of (.getCanonicalPath (io/file task-dir)))
                                 "task-released")]
@@ -2559,8 +2643,10 @@
            (is (task? "task-released"))
            (is (= [] (projects-holding "task-released")))
            (let [row (listed-row "task-released")]
-             (is (= (.length f) (:bytes row)))
-             (is (= (.lastModified f) (:lastActivity row))))))
+             (is (= "task-released" (:threadId row)))
+             (is (and (= "看看这个项目" (:firstUserText row))
+                      (integer? (:lastSentAt row)))
+                 "the facts it earned while bound, kept after the release"))))
 
        (testing "a session released by REMOVING ITS PROJECT is not a task"
          ;; It remembers where it was -- that memory is what re-adding the directory
@@ -2575,17 +2661,17 @@
          (is (= [(.getCanonicalPath (io/file task-dir-2))] (projects-holding "task-orphan"))
              "and adding the directory back brings it home"))
 
-       (testing "a task whose stem has TWO logs says nothing about them rather than picking one"
+       (testing "a task whose stem has TWO logs is still ONE row -- the store counts sessions"
          (register-session! "task-two-logs")
          (bind! "task-two-logs" task-dir)
          (project/bind! "task-two-logs" nil)
          (spit (log-file "task-two-logs") "{}")
          (let [row (listed-row "task-two-logs")]
-           (is (nil? (:bytes row)))
-           (is (nil? (:lastActivity row))))
+           (is (= "task-two-logs" (:threadId row)))
+           (is (nil? (:lastSentAt row)) "nothing was ever sent to it"))
          (let [resp (api-call :post "/api/threads/task-two-logs/rebuild" "")]
            (is (= 404 (.statusCode resp))
-               "the same stem, refused by name: the row said nothing because the server will")
+               "the door that must pick one conversation still refuses")
            (is (str/includes? (:error (read-json resp)) "2 logs"))))
        ))))
 (deftest adding-a-project-makes-a-project-with-no-session
@@ -4595,3 +4681,36 @@
      (testing "the run finishes on its own, with one terminal and no help from anybody"
        (is (until #(false? (row-running? sofar-dir-2 "sofar-b")) 5000))
        (is (= 1 (count (terminals "sofar-b"))))))))
+
+(deftest a-run-names-the-session-once-and-only-once
+  ;; The whole path of `sessions.title` over the real edge: the browser's messages
+  ;; arrive at POST /api/agent, the store gets a name from the first user message in
+  ;; them, and the SIDEBAR's listing -- one GET, every session -- carries it back.
+  ;;
+  ;; The second run is the point of the test rather than a repetition of the first: a
+  ;; conversation that has been named must keep that name when it says something else,
+  ;; and the rule lives in the UPDATE (`AND title IS NULL`), where a future edit that
+  ;; 'refreshes' the title would be caught here.
+  (wipe-dir! task-dir)
+  (with-server
+   {"named-once" script}
+   (fn []
+     (is (= 200 (.statusCode (register-session! "named-once"))))
+     (testing "a session that has not run yet is unnamed"
+       (is (nil? (:firstUserText (listed-row "named-once")))))
+     (testing "the first run names it after the first thing said"
+       (is (= "RUN_FINISHED"
+              (:type (last (wire/frames-from-sse (.body (post-run "named-once")))))))
+       (is (= "看看这个项目" (:firstUserText (listed-row "named-once")))))
+     (testing "and a later run that says something else does not rename it"
+       (is (= "RUN_FINISHED"
+              (:type (last (wire/frames-from-sse
+                            (.body (post-run "named-once"
+                                             {:messages [{:id "u1" :role "user"
+                                                          :content "看看这个项目"}
+                                                         {:id "a1" :role "assistant"
+                                                          :content "这是一个 Clojure 项目。"}
+                                                         {:id "u2" :role "user"
+                                                          :content "那它的测试怎么跑？"}]})))))))
+       (is (= "看看这个项目" (:firstUserText (listed-row "named-once")))
+           "the name is the session's first message, not its latest")))))

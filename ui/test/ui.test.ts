@@ -37,11 +37,14 @@ import { restoreSuite } from "./suites/restore";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
+import { sessionTitleSuite } from "./suites/session-title";
+import { relativeTimeSuite } from "./suites/relative-time";
+import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { injectionSuite } from "./suites/injections";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -104,7 +107,34 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// says in both languages, and the two `aria-*` facts that make them one verb (one
 /// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
 /// run cannot reach -- the sidebar's own element -- is read as source in the same case.
-const EXPECTED_CASES = 52;
+/// 52 -> 55: the top of the page (`brand-header`). Two of them are the new
+/// `session-title` suite, which pins a session's title as arithmetic over literal
+/// messages -- the first text the user said, what whitespace becomes, the 60-code-point
+/// clip (an emoji is two UTF-16 units, so the cut is by character), the fallback word in
+/// both languages, and the `· clj-harness` tail -- because a title is derived, not
+/// stored, and a browser tab has no ellipsis. The third is the `sidebar` suite's: the
+/// brand row's own name and mark, and (read as source, like the `id` beside it) that the
+/// collapse control left the header row and now ends the brand row.
+/// 55 -> 56: the rail (`sidebar-rail`) -- the mark alone with no wordmark, and the list
+/// hidden-but-mounted, both read out of the sidebar's source because this run cannot
+/// render that file at all. What the rail LOOKS like is the browser walkthrough's.
+/// 60 -> 62: two of the `sidebar` suite's, for the store-backed row: one case was
+/// REWRITTEN rather than added (the row is one line now, so the case that read its second
+/// line asserts that line's ABSENCE instead), and the two new ones pin the relative age
+/// as the row words it -- both languages -- and the indent slot the spinner goes in.
+/// 62 -> 65: the `relative-time` suite's three -- the ladder's boundaries (where two
+/// branches meet, which is where an off-by-one hides), a clock running ahead (the server
+/// writes the number, this machine reads it), and the counts being whole and floored.
+/// Pure: `lib/relative-time.ts` imports nothing, which is why it answers a bucket and the
+/// row answers the words.
+/// 65 -> 69: the `sidebar-rows` suite's four, for "一个项目（或任务那一块）最多画 5 行":
+/// the fold itself and the count it reports, the row being read never being the one that
+/// folds away, a block opened by hand versus one the current session outranks, and the
+/// list not being copied when nothing is folded. Same reason to be pure: `lib/sidebar-rows.ts`
+/// imports nothing, and the two callers (`components/sidebar.tsx`) cannot be imported here
+/// at all -- so where the control lands and whether clicking it draws the rows are the
+/// browser walkthrough's.
+const EXPECTED_CASES = 69;
 
 let total = 0;
 for (const suite of SUITES) {

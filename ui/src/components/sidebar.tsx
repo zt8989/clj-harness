@@ -195,7 +195,7 @@
 // `lib/session-status.ts` words the sentences from the `shell` catalog -- they are
 // this client's own words, not the server's, which are never translated -- because
 // the row and the project menu both show them and two wordings of one rule drift.
-import { useCallback, useEffect, useState, type FC } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FC } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ArchiveIcon,
@@ -212,6 +212,7 @@ import {
   XIcon,
 } from "lucide-react";
 
+import { AppBrand } from "@/components/app-brand";
 import {
   ThreadListItem,
   ThreadListItemAction,
@@ -219,7 +220,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsPanel } from "@/components/settings-panel";
-import { SIDEBAR_ID, SidebarCollapseButton } from "@/components/sidebar-toggle";
+import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/components/sidebar-toggle";
+import { REVEAL_ON_HOVER } from "@/lib/reveal";
+import { foldRows } from "@/lib/sidebar-rows";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -236,14 +240,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   addProject,
-  bindThread,
   listSidebar,
   pickFolder,
   PickerUnavailableError,
   projectName,
   removeProject,
   setArchived,
-  startTask,
   type ProjectSummary,
   type SessionSummary,
   type SidebarListing,
@@ -265,6 +267,17 @@ type SidebarProps = {
   /// that session has a run in flight and whether it has stopped to ask a human.
   /// A session nothing has reported on reads `IDLE`.
   statuses: Record<string, SessionStatus>;
+  /// WHAT THIS PAGE ITSELF CALLS EACH SESSION, keyed by id -- the titles the sessions
+  /// it is holding have derived from their own runtimes (`app.tsx`'s `liveTitles`).
+  ///
+  /// IT EXISTS BECAUSE THE LISTING IS A SNAPSHOT. `SessionSummary.firstUserText` is
+  /// the store's copy and answers for the forty rows this page has never opened, but
+  /// it is as old as the last `GET /api/projects` -- so a session typed into a moment
+  /// ago is missing exactly the message that named it. The page holds that session's
+  /// runtime, so it knows better, and this is the same shape `statuses` above already
+  /// takes: the page's registry wins over a snapshot from the server, because the
+  /// page is closer to the fact.
+  liveTitles: Record<string, string>;
   /// The refusals that came from SESSIONS rather than from this component -- a
   /// history that would not load, keyed by the session it would not load for.
   /// The page owns them because the load happens in a host, not here; they are
@@ -273,12 +286,18 @@ type SidebarProps = {
   /// SHOW A SESSION THAT HAS A CONVERSATION: host it if it has no host yet and
   /// rebuild its history once, then put it on screen.
   onShow: (threadId: string) => void;
-  /// SHOW A SESSION THIS CLIENT HAS JUST MINTED (and, on every path that has a
-  /// project, just bound): nothing to rebuild, so the host starts empty. Kept
-  /// distinct from `onShow` for that reason -- under a brand-new id there is no
-  /// log, and asking the server to rebuild one is asking it to find a file that
-  /// is not there.
-  onShowFresh: (threadId: string) => void;
+  /// SHOW A SESSION THIS CLIENT HAS JUST MINTED: nothing to rebuild, so the host
+  /// starts empty. Kept distinct from `onShow` for that reason -- under a brand-new id
+  /// there is no log, and asking the server to rebuild one is asking it to find a file
+  /// that is not there.
+  ///
+  /// IT IS NOT IN THE STORE YET, and that is the change this ticket is: a session is
+  /// created by its first SEND, so minting one here writes nothing and the listing has
+  /// no row to show. The second argument is therefore what the page has to remember on
+  /// this session's behalf -- the directory it belongs to, or null for a task -- and it
+  /// is applied at that first send (`app.tsx`, `showFresh`). Nothing is bound here: this
+  /// component is not the thing that sees the message arrive.
+  onShowFresh: (threadId: string, projectDir: string | null) => void;
   /// EVERY LISTING THIS COMPONENT LANDS, handed up as it arrives. The page needs one
   /// of them and only one: the mount restore asks whether the session it remembers is
   /// still a session, and the answer is in exactly this payload (ticket 03). It is a
@@ -300,6 +319,15 @@ type SidebarProps = {
   /// it was scrolled, which projects were folded open) on every fold.
   folded: boolean;
   onCollapse: () => void;
+  /// PUT THE COLUMN BACK. The page owns the bit (see `onCollapse`), and this is the other
+  /// direction of the same request. TWO THINGS ASK FOR IT and both are the rail's:
+  ///
+  ///   * the control in the rail's top cell, which is the way out of a folded column on a
+  ///     window wide enough to keep one (the phone's way out is the page's floating button);
+  ///   * `addProjectNow`, when this machine turns out to have no folder dialog: that answer
+  ///     is a sentence plus a field, and a 48px column can hold neither -- so the column
+  ///     opens first. Without this the button would appear to do nothing at all.
+  onExpand: () => void;
 };
 
 /// The refusal or failure that belongs to ONE row -- a refused switch, a list
@@ -321,12 +349,14 @@ type ProjectError = { path: string; message: string } | null;
 export const Sidebar: FC<SidebarProps> = ({
   currentThreadId,
   statuses,
+  liveTitles,
   openErrors,
   onShow,
   onShowFresh,
   onListed,
   folded,
   onCollapse,
+  onExpand,
 }) => {
   const { t } = useTranslation();
   // The failures this list can raise are THIS side's sentences (a listing that
@@ -343,10 +373,9 @@ export const Sidebar: FC<SidebarProps> = ({
   const [loaded, setLoaded] = useState(false);
   const [rowError, setRowError] = useState<RowError>(null);
   const [projectError, setProjectError] = useState<ProjectError>(null);
-  const [newTaskError, setNewTaskError] = useState<string | null>(null);
-  // The Add project button's own failure -- a picker that will not open, or an
-  // add the server refused. Separate from `newTaskError` because they belong to
-  // two different buttons, and one firing must not answer for the other.
+  // The Add project button's own failure -- a picker that will not open, or an add the
+  // server refused. It is the only sentence this sidebar can still raise on its own: the
+  // New task button's went with the registration it no longer does (see `newTask`).
   const [addError, setAddError] = useState<string | null>(null);
   // The typed path, and whether it is being asked for. It appears for ONE
   // reason -- this machine has no folder dialog -- and never otherwise: it is
@@ -354,6 +383,14 @@ export const Sidebar: FC<SidebarProps> = ({
   const [typingPath, setTypingPath] = useState(false);
   const [typedPath, setTypedPath] = useState("");
   const [busy, setBusy] = useState(false);
+  // WHETHER THE LIST IS BEING RE-READ, which is the ONE thing the refresh button's spinner
+  // may say. It used to be drawn from `busy` -- and `refresh` is the one thing in this
+  // component that does NOT set `busy` (it is a read; there is no second write to race). So
+  // the icon span exactly when refresh was not running and stood still while it was: the
+  // owner pressed "Add project", whose native dialog holds `busy` open until a human
+  // answers, and watched the refresh button report somebody else's work. Reported and
+  // measured 2026-09-21.
+  const [refreshing, setRefreshing] = useState(false);
   // WHICH PROJECT ROW IS LIT. It used to answer "where does the next task land" and
   // no longer answers anything but that -- see `selected` below. Only an explicit
   // click (or opening a session that has a project) sets it.
@@ -364,6 +401,11 @@ export const Sidebar: FC<SidebarProps> = ({
   // another window, from the API, or because you deliberately opened a row from this
   // block. Either way, hiding it would be hiding the answer to "what am I reading".
   const [archivedOpen, setArchivedOpen] = useState(false);
+  // WHETHER THE TASK BLOCK IS DRAWN IN FULL. Its own state, like the archived block's and
+  // like each project's: a block that folds is a block with an opinion about this moment,
+  // and five rows of it are what `lib/sidebar-rows.ts` draws until somebody says otherwise.
+  // It is NOT remembered across a reload -- see that file's header for the two rules.
+  const [tasksAll, setTasksAll] = useState(false);
   // The settings report is a MODAL rather than a fourth region: it is read
   // once and closed, it does not compete with the list for the middle strip, and
   // it is drawn over the page so that reading it cannot be mistaken for
@@ -371,6 +413,7 @@ export const Sidebar: FC<SidebarProps> = ({
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
+    setRefreshing(true);
     try {
       const listed = await listSidebar(tErrors);
       setListing(listed);
@@ -380,6 +423,7 @@ export const Sidebar: FC<SidebarProps> = ({
       setListError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setLoaded(true);
+      setRefreshing(false);
     }
   }, [onListed]);
 
@@ -410,6 +454,18 @@ export const Sidebar: FC<SidebarProps> = ({
     ? projects.find((p) => p.path === pinned)!
     : (currentProject ?? null);
 
+  /// THE TASK BLOCK'S ACTIVE ROWS, AND HOW MANY OF THEM ARE DRAWN. The tasks have no
+  /// project row to fold (that block is not collapsible), so this is the only thing
+  /// keeping thirty of them from pushing the projects off the bottom of the window.
+  /// `isCurrent` is passed in so the task being read is never the one folded away --
+  /// see `lib/sidebar-rows.ts`, which decides both.
+  const activeTasks = tasks.filter((task) => !task.archived);
+  const taskRows = foldRows(
+    activeTasks,
+    (task) => task.threadId === currentThreadId,
+    tasksAll,
+  );
+
   /// EVERY ARCHIVED ROW, from both halves, as ONE list -- which is what makes the
   /// archived block a block rather than a per-project footnote (ticket 03).
   ///
@@ -420,6 +476,8 @@ export const Sidebar: FC<SidebarProps> = ({
   ///
   /// THE ORDER IS THE LISTING'S OWN RULE (`newest-first`), applied across the halves
   /// rather than within one of them, so the block reads the way the lists above it do.
+  /// NULL -- a session nothing was ever sent to -- sorts LAST here for the same reason
+  /// it does on the server: "never used" is not "brand new".
   const archived = [
     ...projects.flatMap((project) =>
       project.sessions.filter((s) => s.archived).map((session) => ({ session, project })),
@@ -427,8 +485,8 @@ export const Sidebar: FC<SidebarProps> = ({
     ...tasks.filter((task) => task.archived).map((task) => ({ session: task, project: null })),
   ].sort(
     (a, b) =>
-      (b.session.lastActivity ?? Number.MAX_VALUE) -
-      (a.session.lastActivity ?? Number.MAX_VALUE),
+      (b.session.lastSentAt ?? Number.MAX_VALUE) -
+      (a.session.lastSentAt ?? Number.MAX_VALUE),
   );
   // Whether the conversation on screen is IN that block -- a boolean, so the effect
   // below has a dependency that does not change identity on every render.
@@ -509,15 +567,13 @@ export const Sidebar: FC<SidebarProps> = ({
           setPinned(project === null ? null : project.path);
           onShow(next.threadId);
         } else {
+          // NOTHING LEFT OF THIS KIND, so the page gets a brand-new one -- and "brand-new"
+          // is now genuinely empty: nothing is written to the store until somebody sends
+          // the first message, so there is no row for the sidebar to draw and no request
+          // to wait for. The pending directory is handed over instead; see `onShowFresh`.
           const id = crypto.randomUUID();
-          if (project === null) {
-            await startTask(id, tErrors);
-            setPinned(null);
-          } else {
-            await bindThread(id, project.path, tErrors);
-            setPinned(project.path);
-          }
-          onShowFresh(id);
+          setPinned(project === null ? null : project.path);
+          onShowFresh(id, project === null ? null : project.path);
         }
       }
       await refresh();
@@ -576,20 +632,19 @@ export const Sidebar: FC<SidebarProps> = ({
           .flatMap((p) => p.sessions.filter((s) => !s.archived).map((s) => ({ p, s })))
           .sort(
             (a, b) =>
-              (b.s.lastActivity ?? Number.MAX_VALUE) -
-              (a.s.lastActivity ?? Number.MAX_VALUE),
+              (b.s.lastSentAt ?? Number.MAX_VALUE) -
+              (a.s.lastSentAt ?? Number.MAX_VALUE),
           )[0];
         if (next !== undefined) {
           setPinned(next.p.path);
           onShow(next.s.threadId);
         } else {
-          // A BRAND-NEW TASK, and registered for the reason every other path
-          // registers: the page must never be parked on a conversation the sidebar
-          // cannot draw (see `newTask`, which is the same three steps).
+          // A BRAND-NEW TASK, and -- like every other "new session" -- it exists only on
+          // this page until somebody sends to it (see `newTask`). There is no project
+          // left to hand over, so nothing is pending: the first send makes it a task.
           const id = crypto.randomUUID();
-          await startTask(id, tErrors);
           setPinned(null);
-          onShowFresh(id);
+          onShowFresh(id, null);
         }
       }
       await refresh();
@@ -615,10 +670,6 @@ export const Sidebar: FC<SidebarProps> = ({
   /// than an empty field's complaint would.
   const addDirectoryAt = async (dir: string): Promise<void> => {
     const added = await addProject(dir, tErrors);
-    // The refusal under the New task button named a state that adding a
-    // project has just ended; leaving it up would have the sidebar
-    // contradicting itself one line above the new project's row.
-    setNewTaskError(null);
     // The server answers the CANONICAL path, and that is what gets pinned --
     // so adding `~/proj` and then re-adding `~/proj/.` end on the same row
     // rather than two selections that look different and are not.
@@ -658,7 +709,14 @@ export const Sidebar: FC<SidebarProps> = ({
       // No dialog to ask, so ASK HERE: the field appears because this machine
       // cannot open one, and at no other time -- it is a way out, not a second
       // front door (see the header on why there is no form by default).
-      if (failure instanceof PickerUnavailableError) setTypingPath(true);
+      if (failure instanceof PickerUnavailableError) {
+        // THE COLUMN OPENS BEFORE THE FIELD DOES, because in the rail the field and the
+        // sentence above it are both `hidden`: a button that answers a press with nothing
+        // visible is the failure this repo keeps writing rules against. On a drawer this is
+        // a no-op when the drawer is already open, which is the only way to press it.
+        onExpand();
+        setTypingPath(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -685,79 +743,98 @@ export const Sidebar: FC<SidebarProps> = ({
     }
   };
 
-  /// The shared core of every "new session": mint, bind, switch. See this file's
-  /// header for why in that order -- and note that an id whose bind FAILED is
-  /// never adopted, because the session does not exist and switching to it would
-  /// leave the page on a thread with no home. Throws what the server threw; which
-  /// slot that lands in is the caller's business, since only the caller knows
-  /// which button was clicked.
-  const startSessionIn = async (project: ProjectSummary): Promise<void> => {
-    const id = crypto.randomUUID();
-    await bindThread(id, project.path, tErrors);
-    onShowFresh(id);
-  };
-
-  /// NEW TASK: a conversation that belongs to NO PROJECT, minted and registered in
-  /// one go. The refusals land under the header, because that button has no row.
+  /// NEW TASK: a conversation that belongs to NO PROJECT. It is MINTED AND SHOWN, and
+  /// that is the whole of it -- nothing is written anywhere.
   ///
-  /// THIS IS THE BUTTON THAT CHANGED MEANING, and it is the point of the feature: it
-  /// used to start a session in whatever project the sidebar had selected, and to
+  /// THIS IS THE BUTTON THAT CHANGED MEANING TWICE, and the second time is this ticket.
+  /// It used to start a session in whatever project the sidebar had selected, and to
   /// refuse outright when this home had no projects at all ("add a project first").
-  /// A task needs neither -- it is registered and then shown, and it appears in the
-  /// flat task list above the projects a moment later.
+  /// Then it registered a task first and showed it, so that a row existed by the time the
+  /// list refreshed -- and that registration is what is gone (owner's: "点击新增不立刻
+  /// 会话，发送才新建"). A session is created by its first SEND now, so a click that
+  /// writes a row would be creating a session nobody has said anything in: an empty row
+  /// at the top of the task list, indistinguishable from one that has a conversation
+  /// behind it. There is nothing to wait for either, which is why this is no longer an
+  /// async function and no longer touches `busy`: it mints an id and puts the page on it.
   ///
-  /// STARTING A SESSION IN A PROJECT IS STILL AVAILABLE, one row down: each project
-  /// row has its own button, and that is the unambiguous version of the same wish.
-  /// The two are different verbs now rather than the same one with a selection.
-  const newTask = async () => {
-    if (busy) return;
-    // NOT gated on a run in flight any more. Starting a session used to be
-    // refused because it would abandon the one on screen; a new session gets its
-    // own host now, and whatever is running keeps running in its own.
+  /// WHAT MAKES IT EXIST is that first message: the run's own path registers the session
+  /// (`register-run-session!`), which is where it always would have been created, and the
+  /// row turns up on the next listing -- the refetch below is what asks for one.
+  ///
+  /// STARTING A SESSION IN A PROJECT IS STILL AVAILABLE, one row down: each project row
+  /// has its own button, and that is the unambiguous version of the same wish. The two
+  /// are different verbs now rather than the same one with a selection.
+  const newTask = () => {
+    // NOT gated on a run in flight, and not gated on `busy` either: nothing here can
+    // race anything (no request, no row). Starting a session used to be refused because
+    // it would abandon the one on screen; a new session gets its own host now, and
+    // whatever is running keeps running in its own.
     const id = crypto.randomUUID();
-    setBusy(true);
-    setNewTaskError(null);
+    // Sentences that belonged to the OLD session go, so a refusal from an earlier click
+    // does not outlive the click that follows it (a minted id cannot fail itself).
     setRowError(null);
     setProjectError(null);
-    try {
-      // REGISTERED BEFORE IT IS SHOWN, and in that order: the row exists on the
-      // server the moment it is asked for, so the refresh below lists it -- and a
-      // task that failed to register is never adopted, because switching to it
-      // would leave the page on a conversation this home does not have.
-      await startTask(id, tErrors);
-      onShowFresh(id);
-      await refresh();
-    } catch (failure: unknown) {
-      setNewTaskError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setBusy(false);
-    }
+    onShowFresh(id, null);
   };
 
-  /// A new session from a PROJECT'S OWN ROW: the same three steps in the project
-  /// that was clicked, and the refusal lands on that row -- which is the whole
-  /// reason this exists next to `newTask` rather than inside it. The project is
-  /// not pinned: the switch makes this session the current one, and the selection
-  /// is derived from that (see the effect above), so a pin would be a second
-  /// opinion about a fact already settled.
-  const newSession = async (project: ProjectSummary): Promise<void> => {
-    if (busy) return;
-    setBusy(true);
+  /// A new session from a PROJECT'S OWN ROW: the same non-steps, with the directory
+  /// remembered so the first message can bind it. It used to bind immediately, which is
+  /// exactly the write this ticket removes -- the session did exist from that moment, and
+  /// a row for a conversation nobody had started was the thing the owner did not want.
+  ///
+  /// THE PROJECT IS NOT PINNED, still: the switch makes this session the current one, and
+  /// the selection is derived from that (see the effect above), so a pin would be a second
+  /// opinion about a fact already settled. The directory travels in the `onShowFresh`
+  /// argument instead, which is where the page needs it.
+  ///
+  /// NOTHING HERE CAN FAIL, so there is no `try` and no sentence to land on the row. What
+  /// CAN fail is the bind at send time, and that failure is the page's to report (it lands
+  /// on the row once the store has one).
+  const newSession = (project: ProjectSummary): void => {
+    const id = crypto.randomUUID();
     setProjectError(null);
     setRowError(null);
-    setNewTaskError(null);
-    try {
-      await startSessionIn(project);
-      await refresh();
-    } catch (failure: unknown) {
-      setProjectError({
-        path: project.path,
-        message: failure instanceof Error ? failure.message : String(failure),
-      });
-    } finally {
-      setBusy(false);
-    }
+    onShowFresh(id, project.path);
   };
+
+  /// A SESSION THIS PAGE IS HOLDING THAT THE STORE HAS NOT LISTED -- ask once more.
+  ///
+  /// THIS IS THE PRICE OF LAZY CREATION, and the ticket's third bullet: a session is
+  /// written by its first send, and the sidebar's listing is a snapshot from before it,
+  /// so the row for the conversation you are in would not appear until something else
+  /// happened to refresh (a switch, a reload, the button). The condition is exactly the
+  /// one that can be true and mean it:
+  ///
+  ///   * THIS PAGE HAS A TITLE FOR IT (`liveTitles`) -- which is only ever set from the
+  ///     runtime's own first user message, so it means a send has already happened;
+  ///   * IT IS NOT IN THE LISTING -- the store's answer is still the old one;
+  ///   * AND IT IS NOT RUNNING -- the run has finished, so the row it wrote is committed
+  ///     and a read that races it is a read that fails.
+  ///
+  /// ONCE PER ID PER PAGE LOAD, which is what makes the loop impossible: the refetch
+  /// changes the listing, which re-runs this effect, and the id is already in `asked`.
+  /// A refresh is cheap now (a SELECT and a registry lookup -- it used to walk the log
+  /// tree), but "cheap" is not a reason to let an effect ask forever.
+  const asked = useRef<Set<string>>(new Set());
+  const listedIds = useMemo(
+    () =>
+      new Set([
+        ...projects.flatMap((p) => p.sessions.map((s) => s.threadId)),
+        ...tasks.map((t) => t.threadId),
+      ]),
+    [projects, tasks],
+  );
+  useEffect(() => {
+    const missing = Object.keys(liveTitles).find(
+      (id) =>
+        !listedIds.has(id) &&
+        !(statuses[id] ?? IDLE).running &&
+        !asked.current.has(id),
+    );
+    if (missing === undefined) return;
+    asked.current.add(missing);
+    void refresh();
+  }, [liveTitles, statuses, listedIds, refresh]);
 
 
   return (
@@ -774,29 +851,116 @@ export const Sidebar: FC<SidebarProps> = ({
       // why the fold is worth having at all there, and why the unfolding control lives
       // outside this component: a hidden subtree cannot draw a control meant to be seen.
       //
-      // FOLDED IS `hidden` AND NOT A MISSING ELEMENT -- `display: none` is what takes it
-      // out of the accessibility tree, and (unlike unmounting it) what keeps the list's own
-      // state: where it was scrolled, which projects were open, what was typed into the
+      // FOLDED IS TWO SHAPES, AND THE WINDOW DECIDES WHICH:
+      //
+      //   * WIDE (`lg` and up): a 48px RAIL -- the column stays, the words and the list go,
+      //     and every control is still where it was (`tickets` in `.scratch/sidebar-rail`).
+      //     There is no floating button on this shape, because there is nothing to bring
+      //     back: the way out of the rail is in the rail's own top cell.
+      //   * NARROW: `display: none`, exactly as before, with the page's floating control in
+      //     the corner. A phone has no 288px to give and no 48px that would be worth its
+      //     share of the screen either.
+      //
+      // BOTH SHAPES COME OUT OF THE `lg:` CLASSES AND NOTHING ELSE -- there is no resize
+      // listener and no second piece of state: `folded` says whether the column is folded,
+      // and CSS says what a folded column looks like in THIS window.
+      //
+      // FOLDED IS STILL `hidden`/`flex` AND NOT A MISSING ELEMENT -- `display` is what takes
+      // it out of the accessibility tree, and (unlike unmounting it) what keeps the list's
+      // own state: where it was scrolled, which projects were open, what was typed into the
       // escape hatch. See the `folded` prop for why the difference is a correctness one.
       className={
         folded
-          ? "hidden"
+          ? "bg-background hidden h-full w-12 shrink-0 flex-col border-e lg:flex"
           : "bg-background absolute inset-y-0 start-0 z-30 flex h-full w-72 shrink-0 flex-col border-e lg:static lg:z-auto"
       }
     >
+      {/* WHAT THIS COLUMN IS, and the way out of it, in ONE ROW -- the arrangement the
+          demo this feature copies uses (its 3rem row: mark and wordmark leading, the
+          collapse button pushed to the trailing edge). Two things are being said here
+          and they are said together on purpose: a panel's exit belongs next to the
+          thing that names the panel, read once, where a close control is expected.
+
+          IT IS THE FIRST ROW AND NOT PART OF THE HEADER BELOW, because the header is
+          the column's VERBS (start a task, add a project, refresh) and this row is what
+          the column IS. Keeping them in one row would put "New task" -- the verb this
+          whole column exists for -- beside a brand mark, competing for the eye.
+
+          IN THE RAIL IT BECOMES ONE 48px SQUARE WITH ONE THING IN IT AT A TIME: the mark,
+          and -- on hover or on keyboard focus -- the control that opens the column back up,
+          which takes the mark's place rather than sitting beside it, because 16 + 32 does
+          not fit in 48. That square is the `group/brand` both halves of the swap hang off,
+          and the swap is CSS (`opacity`), so no state is added for it. See
+          `components/app-brand.tsx` for the mark (and its `compact` form) and
+          `components/sidebar-toggle.tsx` for the three controls that fold or unfold this
+          column and the one `aria-controls` they share. */}
+      <div
+        data-slot="sidebar-brand"
+        // `h-12` AND `border-b` ARE BOTH THE DEMO'S, and they are the two halves of one
+        // thing: the cell is the same 48px as the conversation bar's title row next to it
+        // (the demo's `3rem`), and it draws its own bottom edge, so the horizontal line
+        // runs the full width of the app instead of stopping at the column's edge. The
+        // `border-e` on the `<aside>` is the other line; together they make the cross the
+        // demo has at its top-left. IN THE RAIL THE CELL IS A SQUARE -- `size-12`, the
+        // rail's own width -- and the bottom edge still lands on the same y.
+        className={
+          folded
+            ? "group/brand relative flex size-12 shrink-0 items-center justify-center border-b border-border"
+            : "flex h-12 shrink-0 items-center gap-2 border-b border-border px-2.5"
+        }
+      >
+        {folded ? (
+          <>
+            {/* The mark steps aside for the control on hover: `group-hover/brand` is the
+                square above, and `transition-opacity` is what keeps the swap from reading
+                as a flicker. */}
+            <span className="transition-opacity group-hover/brand:opacity-0">
+              <AppBrand compact />
+            </span>
+            <SidebarOpenButton shape="rail" onOpen={onExpand} />
+          </>
+        ) : (
+          <>
+            <AppBrand />
+            <SidebarCollapseButton onCollapse={onCollapse} />
+          </>
+        )}
+      </div>
+
       <header
         data-slot="sidebar-header"
-        className="flex shrink-0 items-center gap-1 px-2 py-2"
+        // IN THE RAIL THIS ROW TURNS INTO A COLUMN OF 48px CELLS -- one control each, no
+        // labels -- because three 32px buttons side by side need 96px and the rail is 48.
+        // `my-2` on each control is what makes the cell: 8 + 32 + 8, the same rhythm as the
+        // brand square above and every row of the full column.
+        className={
+          folded
+            ? "flex shrink-0 flex-col items-center"
+            : "flex shrink-0 items-center gap-1 px-2 py-2"
+        }
       >
         <Button
           variant="ghost"
           data-slot="sidebar-new-task"
           disabled={busy}
-          onClick={() => void newTask()}
-          className="hover:bg-muted h-8 flex-1 justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
+          onClick={newTask}
+          // THE LABEL IS THE BUTTON'S ACCESSIBLE NAME when it is drawn, so the rail's
+          // form says the same word through an `sr-only` span instead of dropping it:
+          // the tooltip is for the eye and the span is what a screen reader reads -- the
+          // pattern every icon button in this shell already follows.
+          title={folded ? t("sidebar.newTask") : undefined}
+          className={
+            folded
+              ? "text-muted-foreground hover:text-foreground my-2 size-8 shrink-0 p-0"
+              : "hover:bg-muted h-8 flex-1 justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
+          }
         >
           <SquarePenIcon data-slot="sidebar-new-task-icon" className="size-4 shrink-0" />
-          {t("sidebar.newTask")}
+          {folded ? (
+            <span className="sr-only">{t("sidebar.newTask")}</span>
+          ) : (
+            t("sidebar.newTask")
+          )}
         </Button>
         <Button
           variant="ghost"
@@ -805,7 +969,11 @@ export const Sidebar: FC<SidebarProps> = ({
           disabled={busy}
           onClick={() => void addProjectNow()}
           title={t("sidebar.addProjectTitle")}
-          className="text-muted-foreground hover:text-foreground size-8 p-0"
+          className={
+            folded
+              ? "text-muted-foreground hover:text-foreground my-2 size-8 shrink-0 p-0"
+              : "text-muted-foreground hover:text-foreground size-8 p-0"
+          }
         >
           <FolderPlusIcon data-slot="sidebar-add-project-icon" className="size-4" />
           <span className="sr-only">{t("sidebar.addProject")}</span>
@@ -817,39 +985,30 @@ export const Sidebar: FC<SidebarProps> = ({
           disabled={busy}
           onClick={() => void refresh()}
           title={t("sidebar.refreshTitle")}
-          className="text-muted-foreground hover:text-foreground size-8 p-0"
+          className={
+            folded
+              ? "text-muted-foreground hover:text-foreground my-2 size-8 shrink-0 p-0"
+              : "text-muted-foreground hover:text-foreground size-8 p-0"
+          }
         >
           <RefreshCwIcon
             data-slot="sidebar-refresh-icon"
-            className={busy ? "size-4 animate-spin" : "size-4"}
+            className={refreshing ? "size-4 animate-spin" : "size-4"}
           />
           <span className="sr-only">{t("sidebar.refresh")}</span>
         </Button>
-        {/* THE WAY OUT, at the end of the row of icon buttons. It is the last thing in
-            the header rather than the first because the header's leading space belongs
-            to "New task" -- the verb this column exists for -- and an exit is read for
-            once, in the corner where a panel's close control is expected. */}
-        <SidebarCollapseButton onCollapse={onCollapse} />
       </header>
 
-      {/* The refusals about starting a session go under the header, where the
-          button that raised them is -- and so does the Add project button's own
-          failure, for the same reason. */}
-      {newTaskError !== null && (
-        <p
-          role="alert"
-          data-slot="sidebar-new-task-error"
-          className="text-destructive shrink-0 px-2.5 pb-1 text-xs"
-        >
-          {newTaskError}
-        </p>
-      )}
-
+      {/* The Add project button's own failure goes under the header, where the button
+          that raised it is. IN THE RAIL IT IS NOT DRAWN: 48px holds no sentence, and a
+          refusal squeezed into it would be unreadable rather than merely small. The one
+          failure that needs an answer (no folder dialog) opens the column instead -- see
+          `addProjectNow`. */}
       {addError !== null && (
         <p
           role="alert"
           data-slot="sidebar-add-project-error"
-          className="text-destructive shrink-0 px-2.5 pb-1 text-xs"
+          className={cn("text-destructive shrink-0 px-2.5 pb-1 text-xs", folded && "hidden")}
         >
           {addError}
         </p>
@@ -862,7 +1021,7 @@ export const Sidebar: FC<SidebarProps> = ({
       {typingPath && (
         <form
           data-slot="sidebar-add-project-path"
-          className="flex shrink-0 items-center gap-1 px-2.5 pb-1"
+          className={cn("flex shrink-0 items-center gap-1 px-2.5 pb-1", folded && "hidden")}
           onSubmit={(event) => {
             event.preventDefault();
             void addTypedPath();
@@ -912,6 +1071,11 @@ export const Sidebar: FC<SidebarProps> = ({
 
       <div
         data-slot="sidebar-scroll"
+        // IN THE RAIL IT IS HIDDEN AND STILL MOUNTED, which is load-bearing twice over: the
+        // scroll position and the folded-open projects live in these nodes, and hiding is
+        // what keeps them -- the same reason the whole column is `hidden` and not unmounted
+        // (see the `folded` prop).
+        //
         // `contain: paint` states the invariant rather than patching one offender: the
         // list's content may never change the PAGE's size. It makes this element the
         // containing block for every absolutely positioned descendant inside it, so a
@@ -919,7 +1083,7 @@ export const Sidebar: FC<SidebarProps> = ({
         // static wrapper) cannot push the document down again. The Radix menus and
         // tooltips are portaled to `body`, so they are not descendants and are
         // unaffected -- verified by opening the project menu with this in place.
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [contain:paint]"
+        className={cn("min-h-0 flex-1 overflow-y-auto px-2 pb-2 [contain:paint]", folded && "hidden")}
       >
         {listError !== null && (
           <p role="alert" data-slot="sidebar-list-error" className="text-destructive px-1.5 py-1 text-xs">
@@ -937,7 +1101,7 @@ export const Sidebar: FC<SidebarProps> = ({
             states -- because a task is the same kind of thing as a session in a
             project. What differs is only that nothing owns it, and the block
             heading is what says so. */}
-        {tasks.filter((task) => !task.archived).length > 0 && (
+        {activeTasks.length > 0 && (
           <section data-slot="sidebar-tasks-section" className="mb-1">
             <h2
               data-slot="sidebar-tasks-heading"
@@ -946,8 +1110,7 @@ export const Sidebar: FC<SidebarProps> = ({
               {t("task.section")}
             </h2>
             <ul data-slot="sidebar-tasks" className="flex flex-col gap-0.5">
-              {tasks
-                .filter((task) => !task.archived)
+              {taskRows.drawn
                 .map((task) => (
                   <ThreadListItem
                     key={task.threadId}
@@ -956,6 +1119,7 @@ export const Sidebar: FC<SidebarProps> = ({
                     busy={busy}
                     running={(statuses[task.threadId] ?? IDLE).running}
                     parked={(statuses[task.threadId] ?? IDLE).parked}
+                    liveTitle={liveTitles[task.threadId] ?? null}
                     onOpen={() => void openThread(task.threadId, null)}
                     error={
                       rowError?.id === task.threadId
@@ -976,6 +1140,19 @@ export const Sidebar: FC<SidebarProps> = ({
                   />
                 ))}
             </ul>
+            {/* THE ROWS BEHIND THE FOLD, said out loud. NOT DRAWN WHEN THE BLOCK IS OPEN
+                FOR THE SESSION BEING READ (`forced`): that state has no control to offer,
+                because the only thing it could do is hide the row you are on. It IS drawn
+                while the block is open by hand -- otherwise there would be no way back to
+                five rows. */}
+            {taskRows.foldable && !taskRows.forced && (
+              <RowFold
+                slot="sidebar-tasks-more"
+                hidden={taskRows.hidden}
+                open={tasksAll}
+                onToggle={() => setTasksAll((was) => !was)}
+              />
+            )}
           </section>
         )}
 
@@ -988,6 +1165,7 @@ export const Sidebar: FC<SidebarProps> = ({
             onSelect={() => setPinned(project.path)}
             busy={busy}
             statuses={statuses}
+            liveTitles={liveTitles}
             rowError={rowError}
             openErrors={openErrors}
             removeError={projectError?.path === project.path ? projectError.message : null}
@@ -1037,6 +1215,7 @@ export const Sidebar: FC<SidebarProps> = ({
                     busy={busy}
                     running={(statuses[session.threadId] ?? IDLE).running}
                     parked={(statuses[session.threadId] ?? IDLE).parked}
+                    liveTitle={liveTitles[session.threadId] ?? null}
                     onOpen={() => void openThread(session.threadId, project?.path ?? null)}
                     error={
                       rowError?.id === session.threadId
@@ -1076,17 +1255,35 @@ export const Sidebar: FC<SidebarProps> = ({
           in flight and why it never touches the current session. */}
       <footer
         data-slot="sidebar-footer"
-        className="shrink-0 border-t px-2 py-2"
+        // `mt-auto` IS THE RAIL'S, AND IT IS NOT DECORATION: this column's growing item is
+        // the list above (`flex-1`), and in the rail that item is `display: none` -- a
+        // `display: none` child takes no space and grows to nothing, so with the auto
+        // margin the footer would ride up and sit under the refresh button instead of at
+        // the foot of the column. (In the full column the list eats every free pixel, so
+        // there is none left for an auto margin: this class is inert there. That is also
+        // why it is safe to state it in both branches rather than only in the rail's.)
+        className={cn(
+          "mt-auto shrink-0 border-t",
+          folded ? "flex flex-col items-center" : "px-2 py-2",
+        )}
       >
         <Button
           variant="ghost"
           data-slot="sidebar-settings"
           onClick={() => setSettingsOpen(true)}
           title={t("sidebar.settingsTitle")}
-          className="text-muted-foreground hover:text-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
+          className={
+            folded
+              ? "text-muted-foreground hover:text-foreground my-2 size-8 shrink-0 p-0"
+              : "text-muted-foreground hover:text-foreground h-8 w-full justify-start gap-2 rounded-md px-2.5 text-sm font-normal"
+          }
         >
           <SettingsIcon data-slot="sidebar-settings-icon" className="size-4 shrink-0" />
-          {t("sidebar.settings")}
+          {folded ? (
+            <span className="sr-only">{t("sidebar.settings")}</span>
+          ) : (
+            t("sidebar.settings")
+          )}
         </Button>
       </footer>
 
@@ -1096,6 +1293,49 @@ export const Sidebar: FC<SidebarProps> = ({
         threadId={currentThreadId}
       />
     </aside>
+  );
+};
+
+/// ONE BLOCK'S FOLD CONTROL, drawn only when that block is holding rows back.
+///
+/// IT IS ONE COMPONENT BECAUSE THE TWO BLOCKS MUST READ THE SAME: the tasks at the top
+/// and a project's list are the same kind of list (`lib/sidebar-rows.ts` folds both),
+/// and a person who learned the control in one of them should not have to learn a second
+/// one. It sits AFTER the list rather than inside it -- it is not a session, and nothing
+/// that walks the rows should find it.
+///
+/// THE LABEL LANDS WHERE THE TITLES LAND, and that is arithmetic rather than taste: the
+/// row reaches its title as `ps-2` (8px) + the slot (14px) + `gap-1.5` (6px), so this
+/// button reaches its label the same way -- `ps-2` plus a chevron in the slot's own
+/// `size-3.5` box. A control that arrived at some other x would read as a different kind
+/// of thing than the rows it is counting.
+///
+/// THE COUNT IS THE ROWS BEHIND THE FOLD (not the total): `6` rows says `还有 1 个`.
+const RowFold: FC<{
+  /// The `data-slot` the walkthrough and the suites reach it by -- one per block, so a
+  /// test can say WHICH block it opened.
+  slot: string;
+  hidden: number;
+  open: boolean;
+  onToggle: () => void;
+}> = ({ slot, hidden, open, onToggle }) => {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      data-slot={slot}
+      aria-expanded={open}
+      onClick={onToggle}
+      className="text-muted-foreground hover:bg-muted/60 hover:text-foreground mt-0.5 flex w-full items-center gap-1.5 rounded-md pe-2.5 ps-2 py-1 text-start text-xs"
+    >
+      <ChevronRightIcon
+        aria-hidden
+        className={open ? "size-3.5 shrink-0 rotate-90" : "size-3.5 shrink-0"}
+      />
+      <span className="min-w-0 flex-1 truncate">
+        {open ? t("session.showLess") : t("session.showMore", { count: hidden })}
+      </span>
+    </button>
   );
 };
 
@@ -1131,6 +1371,10 @@ const ProjectSection: FC<{
   /// ONE ANSWER PER SESSION, from the page's registry. Read per row: this
   /// project draws many sessions and each reports its own status (ticket 03).
   statuses: Record<string, SessionStatus>;
+  /// WHAT THIS PAGE ITSELF CALLS EACH SESSION, for the ones it is holding -- see
+  /// `liveTitles` on `SidebarProps`. Threaded beside `statuses` because it comes from
+  /// the same reporter and is read the same way: per row, by id.
+  liveTitles: Record<string, string>;
   rowError: RowError;
   openErrors: Record<string, string>;
   removeError: string | null;
@@ -1145,6 +1389,7 @@ const ProjectSection: FC<{
   onSelect,
   busy,
   statuses,
+  liveTitles,
   rowError,
   openErrors,
   removeError,
@@ -1166,6 +1411,10 @@ const ProjectSection: FC<{
   useEffect(() => {
     if (holdsCurrent) setOpen(true);
   }, [holdsCurrent]);
+  // AND, ONE LEVEL IN, WHETHER THIS PROJECT'S LIST IS DRAWN IN FULL: the same question
+  // the tasks block asks, with the same answer (`lib/sidebar-rows.ts`) -- and its own
+  // state, because one project being unfolded says nothing about the next one.
+  const [allShown, setAllShown] = useState(false);
   // Whether the confirmation is up. Held here rather than in the sidebar because
   // the menu item that opens it belongs to this row, and a row that has been
   // removed -- or is being removed -- cannot have a dialog of its own.
@@ -1183,6 +1432,10 @@ const ProjectSection: FC<{
   // to the sidebar's single block; this component draws the active list only.
   const active = sessions.filter((s) => !s.archived);
   const archived = sessions.filter((s) => s.archived);
+  // WHAT THIS PROJECT DRAWS, and how many it holds back. The current session is passed
+  // in rather than assumed: a project whose conversation you are reading must show that
+  // conversation, even after fifty others have been sent to more recently.
+  const rows = foldRows(active, (s) => s.threadId === currentThreadId, allShown);
 
   const row = (session: SessionSummary) => (
     <ThreadListItem
@@ -1196,8 +1449,18 @@ const ProjectSection: FC<{
       // per session the registry answers for the row itself, and that comparison
       // became the WRONG answer (ticket 03: A running while you look at B used to
       // put A's row out).
-      running={(statuses[session.threadId] ?? IDLE).running}
+      //
+      // TWO SOURCES, ORED, because either one being true means a run is in flight and
+      // neither is a superset of the other: `statuses` is THIS page's own registry --
+      // live, and the only thing that knows about a run whose first frame has not been
+      // flushed yet -- while `session.running` comes from the server's registry, which
+      // is the only thing that knows about a run this page is not holding at all
+      // (started from another tab, or from the API). A listing is a snapshot; the
+      // page's registry is not, so the union is what makes a row light up the moment a
+      // run starts AND stay lit for a conversation opened after the fact.
+      running={session.running || (statuses[session.threadId] ?? IDLE).running}
       parked={(statuses[session.threadId] ?? IDLE).parked}
+      liveTitle={liveTitles[session.threadId] ?? null}
       onOpen={() => onOpen(session.threadId)}
       // The row's own refusal, from EITHER source: this component's (`rowError`, a
       // row write that failed) or the page's (`openErrors`, a history that would
@@ -1314,7 +1577,12 @@ const ProjectSection: FC<{
               data-slot="sidebar-project-more"
               disabled={busy}
               title={t("project.moreTitle")}
-              className="text-muted-foreground hover:text-foreground me-1 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100"
+              // The same reveal as the row actions (`lib/reveal.ts`), plus the menu's own
+              // state: an open menu keeps its trigger visible.
+              className={cn(
+                "text-muted-foreground hover:text-foreground me-1 shrink-0 aria-expanded:opacity-100",
+                REVEAL_ON_HOVER,
+              )}
             >
               <MoreHorizontalIcon
                 data-slot="sidebar-project-more-icon"
@@ -1432,7 +1700,7 @@ const ProjectSection: FC<{
       {open && (
         <>
           <ul data-slot="sidebar-sessions" className="flex flex-col gap-0.5">
-            {active.map(row)}
+            {rows.drawn.map(row)}
             {active.length === 0 && (
               <li className="text-muted-foreground px-2.5 py-1 text-xs">
                 {/* TWO ABSENCES, and the reader can tell them apart: nothing here
@@ -1445,6 +1713,16 @@ const ProjectSection: FC<{
               </li>
             )}
           </ul>
+          {/* The same control the tasks block draws, for the same reason -- and again not
+              when the open list is the current session\'s doing. */}
+          {rows.foldable && !rows.forced && (
+            <RowFold
+              slot="sidebar-sessions-more"
+              hidden={rows.hidden}
+              open={allShown}
+              onToggle={() => setAllShown((was) => !was)}
+            />
+          )}
 
           {/* NO ARCHIVED GROUP HERE. It used to be this project's own, collapsed by
               default; it is now the sidebar's single block at the bottom, holding the

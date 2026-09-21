@@ -5,8 +5,10 @@
   },
   "session": {
     "neverRun": "还没跑过",
-    "noLog": "还没有日志",
-    "current": "当前",
+    "justNow": "刚刚",
+    "minutesAgo_other": "{{count}} 分钟前",
+    "hoursAgo_other": "{{count}} 小时前",
+    "daysAgo_other": "{{count}} 天前",
     "running": "运行中",
     "parked": "等你回应",
     "archive": "归档",
@@ -15,7 +17,10 @@
     "unarchiveTitle": "取消归档——把这个会话放回项目里其他会话中间",
     "empty": "这个项目里还没有会话。",
     "allArchived": "这里的会话都归档了。",
-    "archived": "已归档"
+    "showMore_other": "还有 {{count}} 个",
+    "showLess": "收起",
+    "archived": "已归档",
+    "untitled": "新会话"
   },
   "project": {
     "newSession": "新建会话",
@@ -34,7 +39,7 @@
     "addProject": "添加项目",
     "addProjectTitle": "添加项目——打开文件夹选择器，你选的目录会成为项目",
     "refresh": "刷新",
-    "refreshTitle": "从磁盘和库重新读取列表",
+    "refreshTitle": "从库里重新读取列表",
     "empty": "这里还什么都没有。添加一个项目，或者新建一个任务。",
     "settings": "设置",
     "settingsTitle": "设置：这个会话正在用什么跑，这个配置家可以选什么"

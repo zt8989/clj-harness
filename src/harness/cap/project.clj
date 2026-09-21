@@ -312,7 +312,7 @@
 (def ^:private session-columns
   "The columns a session reader asks for, so two queries over one table cannot drift
   into handing out two shapes."
-  "id, project_id, path, archived, created_at")
+  "id, project_id, path, archived, created_at, title, last_sent_at")
 
 (defn sessions
   "Every session this home knows: {:id :project-id :path :archived? :created-at},
@@ -347,6 +347,40 @@
         (db/select (str "SELECT " session-columns " FROM sessions"
                         " WHERE project_id IS NULL AND last_project_path IS NULL"
                         " ORDER BY created_at, id"))))
+
+(defn remember-send!
+  "THE PERSON PRESSED SEND in THREAD-ID's conversation: stamp the time, and let
+  that same arrival name the session if it has no name yet. Answers whether a row
+  was written.
+
+  ONE STATEMENT, TWO COLUMNS, BECAUSE THEY ARE ONE EVENT. `last_sent_at` is what
+  the sidebar sorts and labels rows by, and it moves on EVERY send; `title` is
+  written ONCE, from the first send's own text. Writing them together is not a
+  convenience -- it is the reason a second statement cannot drift from the first
+  (a code path that stamped the time and forgot the name, or the other way round,
+  would be a row whose two facts came from different turns).
+
+  THE NAME'S ONE-WAY RULE IS `COALESCE`: the second, third and fortieth send all
+  take this same statement, and `COALESCE(title, ?)` leaves an existing name EXACTLY
+  as it is. A BLANK OR ABSENT TEXT therefore writes nothing to the name -- a run
+  whose messages carry no user turn (`harness.edge.ag-ui/first-user-text` answers nil
+  for one) still stamps the time, because a run did happen.
+
+  A SESSION THAT RAN BEFORE EITHER COLUMN EXISTED heals itself the next time it
+  runs: a run sends the whole conversation, so the first user message in it is still
+  the session's first. The name is not backfilled (the owner's call -- an old
+  conversation keeps its id until somebody talks to it again) and the TIME is
+  (`sessions-remember-their-last-send` walks the logs once, because a row with no
+  time at all is a row the sidebar cannot draw)."
+  [thread-id said]
+  (let [named (when-not (str/blank? (str said)) said)]
+    (pos?
+     (db/with-transaction
+       (fn [^Connection c]
+         (db/execute! c (str "UPDATE sessions"
+                             "   SET last_sent_at = ?, title = COALESCE(title, ?)"
+                             " WHERE id = ?")
+                      (System/currentTimeMillis) named thread-id))))))
 
 (defn register-session!
   "Make THREAD-ID a session of this home, belonging to no project: a row with no

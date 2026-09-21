@@ -203,6 +203,16 @@
   ;; point is (a tool call's PostToolUse runs on that call's own thread), so two
   ;; lines can now be in flight at once. Serializing the append is what keeps the
   ;; writer's guarantee true without asking every caller to know about it.
+  ;;
+  ;; IT ALSO GUARDS WHERE A LINE GOES, NOT JUST THE APPEND. `log!` chooses the file
+  ;; from the session's binding and a bind (`/api/project`) both changes that binding
+  ;; and MOVES the file it already has -- so those two must not interleave, or a line
+  ;; lands in a workspace the conversation has just left. Both take this lock (see
+  ;; `log!` and `project-post`), which is what makes "one conversation is one file"
+  ;; survive a bind that arrives mid-run -- the ordinary case now that the sidebar
+  ;; binds a session at its first send. The pair cannot deadlock: nothing that holds
+  ;; a store transaction takes this lock (no `log!` call in this namespace runs
+  ;; inside a `with-transaction`), so the order is only ever lock -> store.
   (Object.))
 
 (def unbound-workspace
@@ -386,16 +396,25 @@
           (catch Throwable _ nil))))))
 
 (defn- log! [thread-id run-id kind payload]
-  (let [f (log-file-for thread-id)
-        line (str (json/write-str {:ts (System/currentTimeMillis)
+  (let [line (str (json/write-str {:ts (System/currentTimeMillis)
                                    :runId run-id :kind kind :payload payload}) "\n")]
-    (.mkdirs (.getParentFile f))
     (locking log-lock
-      ;; BEFORE the record: a session whose binding came back after the store was
-      ;; rebuilt gets its unbound segment carried into THIS file first, so the line
-      ;; about to be written follows the segment rather than landing after a hole.
-      (carry-back! thread-id f)
-      (spit f line :append true :encoding "UTF-8"))))
+      ;; WHERE THE LINE GOES IS DECIDED UNDER THE SAME LOCK THAT WRITES IT, and that is
+      ;; not tidiness: the answer comes from the store, a bind can change the store at any
+      ;; moment, and a bind MOVES the file (`move-log!`). A file chosen before the lock
+      ;; would be a decision made against a binding that may already be gone -- the line
+      ;; would be appended to the old workspace after the move, which is the one thing
+      ;; that is not allowed to happen: one conversation, one file. Under the lock the two
+      ;; writers of that fact are serialized, so either the line lands in the old file and
+      ;; the move carries it along, or the binding is already in force and the line lands
+      ;; in the new one.
+      (let [f (log-file-for thread-id)]
+        (.mkdirs (.getParentFile f))
+        ;; BEFORE the record: a session whose binding came back after the store was
+        ;; rebuilt gets its unbound segment carried into THIS file first, so the line
+        ;; about to be written follows the segment rather than landing after a hole.
+        (carry-back! thread-id f)
+        (spit f line :append true :encoding "UTF-8")))))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -789,6 +808,14 @@
         emit    (runner thread-id run-id ch state origin)
         convert (ag/outbound thread-id run-id)]
     (log! thread-id run-id "input" input)
+    ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place and
+    ;; for the same reason the input frame is written here: this is the one moment the
+    ;; server holds 'the person pressed send'. It writes once per session and is a
+    ;; no-op for every later run (`cap.project/remember-title!`), and it is called
+    ;; with the run's own messages rather than by reading the log -- the log is where
+    ;; the same words already are, and a listing that had to derive a title from 50
+    ;; logs would pay for it on every sidebar refresh.
+    (project/remember-send! thread-id (ag/first-user-text input))
     (async/go
       ;; A GO BLOCK'S EXCEPTION GOES NOWHERE: core.async throws it into the block's
       ;; own channel, which nobody reads -- so a consumer that dies takes the run
@@ -1405,7 +1432,18 @@
   leave no line at all -- writing one first would append it to the very file the
   refusal just declared ambiguous, corrupting a record the refusal exists to
   protect. So a refused move is traced by its 400 and by nothing on disk, which
-  is the same 'no trace on failure' the validation above already promises."
+  is the same 'no trace on failure' the validation above already promises.
+
+  ALL OF IT HAPPENS UNDER log-lock, and that is a requirement rather than a
+  detail: a run writing its records reads the very binding this changes, and the
+  bind MOVES the file those records are going into. Serializing the two (the
+  writer takes the same lock -- see `log!`) is what makes the outcome independent
+  of who got there first, and a BIND AT FIRST SEND makes that a routine race
+  rather than a rare one (the sidebar binds when the session's first message
+  arrives, i.e. while the run is writing). It also has to be the WHOLE section:
+  from-dir is where the log is NOW, so it must be read where nothing can move the
+  file out from under it, and the binding must not be visible to the writer until
+  the file has followed it."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
@@ -1423,19 +1461,29 @@
 
       :else
       (let [thread-id (str (:threadId ok))
-            before    (project/binding-for thread-id)
-            from-dir  (log-dir-for thread-id)
-            bound     (try {:ok (project/bind! thread-id (str (:dir ok)))}
-                           (catch Throwable t {:error (ex-message t)}))]
-        (if-some [error (:error bound)]
-          (api-response 400 {:error error})
-          (let [abs   (:ok bound)
-                moved (try {:ok (move-log! thread-id from-dir (log-dir-for thread-id))}
-                           (catch Throwable t {:error (ex-message t)}))]
-            (if-some [move-error (:error moved)]
-              (api-response 400 {:error move-error :threadId thread-id :dir abs})
-              (do (log! thread-id nil "project/bound" {:before before :after abs :via "http"})
-                  (api-response 200 {:threadId thread-id :dir abs})))))))))
+            bound     (locking log-lock
+                        (let [before   (project/binding-for thread-id)
+                              from-dir (log-dir-for thread-id)
+                              b        (try {:ok (project/bind! thread-id (str (:dir ok)))}
+                                            (catch Throwable t {:error (ex-message t)}))]
+                          (if-some [error (:error b)]
+                            {:error error}
+                            (let [abs   (:ok b)
+                                  moved (try {:ok (move-log! thread-id from-dir (log-dir-for thread-id))}
+                                             (catch Throwable t {:error (ex-message t)}))]
+                              (if-some [move-error (:error moved)]
+                                {:move-error move-error :abs abs :before before}
+                                {:abs abs :before before})))))]
+        (cond
+          (contains? bound :error)
+          (api-response 400 {:error (:error bound)})
+
+          (contains? bound :move-error)
+          (api-response 400 {:error (:move-error bound) :threadId thread-id :dir (:abs bound)})
+
+          :else
+          (do (log! thread-id nil "project/bound" {:before (:before bound) :after (:abs bound) :via "http"})
+              (api-response 200 {:threadId thread-id :dir (:abs bound)})))))))
 
 (defn- sessions-post
   "POST /api/sessions {threadId} -- make this conversation a session of this home,
@@ -1499,84 +1547,70 @@
                       (replay/threads (home/projects-dir)))))
 
 (defn- session-row
-  "One session as the SIDEBAR reads it: what the store owns (its id, its archive
-  flag) plus what the tree says about its file.
+  "ONE CONVERSATION AS THE SIDEBAR READS IT -- and every field is a STORE fact plus
+  the one fact a store cannot hold.
 
-  The store decides which sessions are listed -- not the filesystem -- and that
-  is the whole point of the sidebar: a session belongs to a project because
-  something asked for it to, and an unowned jsonl sitting in the tree is not a
-  session this interface will show. It is also why a session with NO file is a
-  row rather than a problem: a session that has never run has no log yet, and one
-  just created on the sidebar has not run by definition. Its two disk facts are
-  null, which is a fact about the disk and not a zero-byte file.
+  WHAT LEFT THIS FUNCTION, and why it is worth saying out loud because it was the
+  shape of the endpoint for its whole life: the two DISK facts. `:lastActivity` was
+  the log's mtime and `:bytes` was its size, both read per row, per request. The
+  owner's rule is that everything the left panel shows comes from the store except
+  whether a run is in flight, so the size went away outright (nobody read it) and the
+  time became `sessions.last_sent_at` -- written on every send, and backfilled for
+  rows that predate the column (`harness.infra.db/sessions-remember-their-last-send`).
+  A refresh of the sidebar is now one SELECT and one registry lookup instead of forty
+  stat calls, which is what the panel's own frame rate was paying for.
 
-  The two DISK facts are read FRESH from the file every time rather than kept in
-  the store, because they are the two things the store deliberately does not hold: a
-  size and an mtime are properties of a record, and the record lives in the file.
+  `:running` IS THE ONE FIELD NOT IN THE STORE, and it is not an oversight: whether a
+  run is alive right now is a question about THIS PROCESS (`live-runs`), and a file
+  cannot answer it -- a log that stops without a terminal frame belongs equally to a
+  run still going and to a process that was killed. It is read per request because
+  the answer moves.
 
-  THE THIRD FACT IS NOT ON DISK AT ALL. `:running` is whether the run this session
-  is in the middle of is alive in THIS PROCESS -- the one question a file cannot
-  answer, since a log that stops without a terminal frame belongs equally to a run
-  still going and to a process that was killed (see `live-runs` below). It is read
-  from the registry, per request, for the same reason the other two are read per
-  request: the answer moves."
-  [workspace {:keys [id archived?]}]
-  (let [f (home/log-file workspace id)
-        exists? (.exists f)]
-    {:threadId     id
-     :archived     (boolean archived?)
-     ;; WHETHER THIS PROCESS IS ANSWERING IT RIGHT NOW -- the third fact, and the one
-     ;; the other two cannot give: a file's size and mtime say nothing about whether
-     ;; the run that is growing it is alive or its process was killed. It comes from
-     ;; the live-runs registry (`running?`) rather than from disk, which is why it is
-     ;; HERE and not on /api/threads/<stem>/stats -- that endpoint folds the RECORD,
-     ;; and this fact is not in the record. The sidebar and the client that restores a
-     ;; session read this one payload, so both learn it in the same load.
-     :running      (running? id)
-     :lastActivity (when exists? (.lastModified f))
-     :bytes        (when exists? (.length f))}))
+  A TASK AND A PROJECT'S SESSION ARE THE SAME ROW, which is why there is no
+  `task-row` any more: the two differed only in where their disk facts were asked
+  from (a project's workspace vs a walk of the whole tree), and with those gone the
+  store answers both the same way. What differs between them is the project, and
+  that is the caller's structure rather than the row's.
+
+  nil `:lastSentAt` is a conversation nothing has been sent to -- registered and never
+  used, or a log deleted by hand. The client draws that in words rather than
+  inventing a time."
+  [{:keys [id archived? title last-sent-at]}]
+  {:threadId     id
+   :archived     (boolean archived?)
+   :running      (running? id)
+   :lastSentAt   last-sent-at
+   ;; THE NAME, from the store, nil for a session that has not been named yet (it
+   ;; never ran, or it ran before the column existed and has not run since).
+   :firstUserText title})
 
 (defn- newest-first
-  "The sidebar's order within a project: most recent activity first, and a session
-  that has never run treated as the most recent of all -- it was created a moment
-  ago, and 'no log' is the state every session begins in, so burying those at the
-  bottom would hide the one a person just asked for.
+  "The sidebar's order, within a project and in the task block alike: LAST SENT
+  FIRST, and a conversation nothing has been sent to sorts LAST.
 
-  `sort` with a reversed comparator, and Clojure's sort is STABLE, so sessions
-  that tie keep the store's order (oldest created first)."
+  THE KEY IS THE STORE'S CLOCK, NOT THE FILE'S. It used to be the log's mtime with
+  'no log' treated as the most recent of all -- because a row with no log was a row
+  somebody had just asked for, and burying it would hide the thing they were about
+  to type into. That reasoning is gone with the lazy `new-task` button: a session is
+  now created BY its first send, so a row with no time is not a new conversation but
+  an ABANDONED one (registered by an older client, or a log deleted by hand), and
+  the bottom of the list is where it belongs.
+
+  NULL LAST IS SPELLED OUT rather than left to a sentinel, because the two things
+  that could stand in for 'never' -- 0 and 'now' -- are both wrong in a way nobody
+  would notice until a row jumped to the top.
+
+  `sort` with a comparator, and Clojure's sort is STABLE, so sessions that tie keep
+  the store's order (oldest created first)."
   [rows]
-  (let [key-of (fn [row] (or (:lastActivity row) Long/MAX_VALUE))]
-    (vec (sort (fn [a b] (compare (key-of b) (key-of a))) rows))))
-
-(defn- task-row
-  "One TASK as the sidebar reads it: the store's id and archive flag, plus what the
-  TREE says about this stem -- anywhere under it.
-
-  THE DISK FACTS OF A TASK ARE ASKED OF THE TREE, NOT OF A WORKSPACE, and that is
-  the one place this differs from `session-row`. A session with a project has a log
-  directory that is a function of that project; a task has no project to derive one
-  from. The `.unbound` workspace is where a task's log USUALLY is, and the exception
-  is ordinary enough to matter: a session released by `bind! id nil` keeps the file
-  it already wrote, in the workspace of the project it used to belong to. Asking the
-  tree by stem is also asking exactly what `rebuild` asks when somebody clicks the
-  row, so a row can never disagree with the conversation clicking it shows.
-
-  NO FILE, OR MORE THAN ONE, both answer with two nulls. No log yet is a fact (it is
-  where every session starts, and it is not the same as a zero-byte file); a stem
-  with two logs is a conversation the server refuses to guess about (`replay/locate`
-  says why), so the row says nothing rather than picking a half.
-
-  `:running` is not on disk at all -- see `session-row` for the whole argument.
-  Both readers ask the same registry, so a task and a project session answer the
-  same question the same way."
-  [by-stem {:keys [id archived?]}]
-  (let [found  (get by-stem id)
-        single (when (= 1 (count found)) (first found))]
-    {:threadId     id
-     :archived     (boolean archived?)
-     :running      (running? id)
-     :lastActivity (when single (:last-activity single))
-     :bytes        (when single (:bytes single))}))
+  (vec (sort (fn [a b]
+               (let [ka (:lastSentAt a) kb (:lastSentAt b)]
+                 (cond
+                   (and (nil? ka) (nil? kb)) 0
+                   (nil? ka)                 1
+                   (nil? kb)                 -1
+                   :else                     (compare kb ka))))
+             rows)))
 
 (defn- projects-get
   "GET /api/projects -- the sidebar's listing: every project this home knows, each
@@ -1608,22 +1642,15 @@
   is the raw tree view for anyone diagnosing)."
   [_req]
   (let [by-project (group-by :project-id (project/sessions))
-        tasks      (project/tasks)
-        ;; The tree is walked ONCE, and only when there is a task to ask it about:
-        ;; a home with no tasks pays nothing for a listing it does not need.
-        by-stem    (if (seq tasks)
-                     (group-by :thread-id (replay/threads (home/projects-dir)))
-                     {})]
+        tasks      (project/tasks)]
     (api-response 200
                   {:projects (mapv (fn [{:keys [id canonical-path]}]
-                                     (let [ws (workspace-for canonical-path)]
-                                       {:projectId id
-                                        :path      canonical-path
-                                        :sessions  (newest-first
-                                                    (mapv #(session-row ws %)
-                                                          (get by-project id)))}))
+                                     {:projectId id
+                                      :path      canonical-path
+                                      :sessions  (newest-first
+                                                  (mapv session-row (get by-project id)))})
                                    (project/projects))
-                   :tasks    (newest-first (mapv #(task-row by-stem %) tasks))})))
+                   :tasks    (newest-first (mapv session-row tasks))})))
 
 (def ^:private thread-verbs
   "The verbs this edge serves under /api/threads/<stem>/. A CLOSED SET, and that
