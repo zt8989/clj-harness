@@ -73,14 +73,22 @@ type Session = {
 /// to it because that is the ordinary row, and the unnamed ones say so themselves.
 const SAID = "把侧边栏的标题改成会话标题";
 
-/// THE INSTANT THE ROW IS RENDERED AT, read once, and every fixture's send time is an
-/// OFFSET from it. That is forced by what the row draws: a relative age is measured
-/// against the clock at render, which this run cannot freeze -- so a case pins the
-/// DISTANCE (56 minutes) and lets the two clocks differ by the milliseconds between
-/// this line and the render, rather than pinning a string that only passes on the day
-/// it was written. The one absolute instant below is the TOOLTIP's, and it is read back
-/// through the same locale for the same reason `stats.ts` does: the timezone is the
-/// machine's.
+/// THE INSTANT THE ORDINARY ROW WAS SENT, read once, and every fixture that uses the
+/// default send time is an OFFSET from it. That is forced by what the row draws: a
+/// relative age is measured against the clock at render, which this run cannot freeze --
+/// so a fixture pins the DISTANCE (56 minutes) and lets the two clocks differ by the
+/// milliseconds between this line and the render, rather than pinning a string that only
+/// passes on the day it was written.
+///
+/// A CASE WHOSE RUNG IS SHORTER THAN THIS SUITE'S RUNTIME READS ITS OWN CLOCK. The
+/// shortest rung here is half a minute ("just now"), and a full suite can take longer
+/// than that between THIS line and the case that uses it -- so that case reads `Date.now()`
+/// where it stands (`the-right-end-counts-back-from-now`). Reading it here and reusing it
+/// below made the case fail on a slow run with "1 min ago", which is a fact about the
+/// suite's runtime rather than about the row.
+///
+/// The one absolute instant below is the TOOLTIP's, and it is read back through the same
+/// locale for the same reason `stats.ts` does: the timezone is the machine's.
 const NOW = Date.now();
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -232,31 +240,31 @@ const cases: Case[] = [
       // the OTHER half -- that the bucket reaches the row as a translated phrase, in
       // both languages, with the count in it. A row that drew the bucket's name, or
       // dropped the count, would be green in that suite and wrong on the page.
-      const at = (ago: number) => textOf(row(session({ lastSentAt: NOW - ago }), "en"), "thread-list-item-time");
+      // THE CLOCK IS READ HERE, not at module load: "just now" is half a minute wide and
+      // this suite is 84 cases long, so an instant read before they ran put the fixture
+      // over the boundary (it read "1 min ago" on a 53 s run). Every instant in this case
+      // is an offset from THIS read, so the whole case is one instant plus the
+      // milliseconds between it and the render.
+      const now = Date.now();
+      const at = (ago: number) => textOf(row(session({ lastSentAt: now - ago }), "en"), "thread-list-item-time");
+      const atZh = (ago: number) =>
+        textOf(row(session({ lastSentAt: now - ago }), "zh"), "thread-list-item-time");
 
       expect(at(MINUTE / 2)).toBe("just now");
       expect(at(56 * MINUTE)).toBe("56 min ago");
       expect(at(3 * HOUR)).toBe("3 h ago");
       expect(at(3 * DAY)).toBe("3 d ago");
       expect(at(200 * DAY)).toBe(
-        new Date(NOW - 200 * DAY).toLocaleDateString("en", { month: "numeric", day: "numeric" }),
+        new Date(now - 200 * DAY).toLocaleDateString("en", { month: "numeric", day: "numeric" }),
       );
 
       // AND THE SAME LADDER IN THE OTHER LANGUAGE, because these are sentences a person
       // reads rather than units: `刚刚` and `56 分钟前` come from the Chinese catalog,
       // and a missing key would render the key itself here.
-      expect(textOf(row(session({ lastSentAt: NOW - MINUTE / 2 }), "zh"), "thread-list-item-time")).toBe(
-        "刚刚",
-      );
-      expect(textOf(row(session({ lastSentAt: NOW - 56 * MINUTE }), "zh"), "thread-list-item-time")).toBe(
-        "56 分钟前",
-      );
-      expect(textOf(row(session({ lastSentAt: NOW - 3 * HOUR }), "zh"), "thread-list-item-time")).toBe(
-        "3 小时前",
-      );
-      expect(textOf(row(session({ lastSentAt: NOW - 3 * DAY }), "zh"), "thread-list-item-time")).toBe(
-        "3 天前",
-      );
+      expect(atZh(MINUTE / 2)).toBe("刚刚");
+      expect(atZh(56 * MINUTE)).toBe("56 分钟前");
+      expect(atZh(3 * HOUR)).toBe("3 小时前");
+      expect(atZh(3 * DAY)).toBe("3 天前");
     },
   },
   {

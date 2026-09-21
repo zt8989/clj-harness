@@ -321,6 +321,28 @@
                     (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
     [(.statusCode resp) (json/read-str (.body resp) :key-fn keyword)]))
 
+(defn- stats-until-complete
+  "GET THREAD-ID's stats until the route reports the SPLIT, or give up after ~3s and
+  answer the last read.
+
+  THE RETURNED SIDE LANDS ONE BEAT AFTER THE TERMINAL FRAME. `harness.edge.context`
+  turns that into a rule -- a run whose tail has not landed has no parts at all, because
+  half a message set would make the conversation look like a small share of a large
+  prompt -- and this case reads the endpoint the instant the SSE body closes, so on a
+  loaded machine it can read the record one line short of complete and see the vendor's
+  numbers with no split beside them. That is what happened once here (the strip's
+  numbers arrived, `:parts` was absent) while another suite ran in the same shell.
+
+  So the case waits for the run to be WHOLE, which is the state it is about: what the
+  route folds once a real run has finished. 'Absent while the run is still going' is
+  pinned on hand-written records above, where it is deterministic."
+  [port thread-id]
+  (loop [tries 0]
+    (let [answer (get-json port (str "/api/threads/" thread-id "/stats"))]
+      (if (or (seq (get-in answer [1 :context :parts])) (>= tries 120))
+        answer
+        (do (Thread/sleep 25) (recur (inc tries)))))))
+
 (deftest the-endpoint-answers-the-context-section-over-real-http
   ;; The whole path once: a real run writes the log, the route folds it, and the
   ;; composer's one GET carries both the strip's numbers and the ring's context.
@@ -332,7 +354,7 @@
         :usage {:prompt_tokens 1200 :completion_tokens 8 :total_tokens 1208}}]
       (fn [port]
         (send-run! port thread-id)
-        (let [[status body] (get-json port (str "/api/threads/" thread-id "/stats"))
+        (let [[status body] (stats-until-complete port thread-id)
               ctx (:context body)]
           (is (= 200 status))
           (is (= 2 (:steps body)) "the strip's numbers are still there beside it")

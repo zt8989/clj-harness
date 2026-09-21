@@ -135,7 +135,12 @@
   ;; size of an answer, and a command that printed five thousand lines is announced in
   ;; exactly the same few bytes as one that printed nothing.
   (let [t "jt-size"
-        big  (jobs/start! t {:command "seq 1 5000; exit 0"})
+        ;; THE NEEDLE IS A WORD THE COMMAND PRINTS, not a number from the record: a notice
+        ;; quotes the RECORD'S PATH, the path ends in the process tag, and that tag is a
+        ;; timestamp plus a pid -- so a needle like "5000" can turn up inside the path
+        ;; itself (a tag shaped `…T150000500-…` holds it), and the assertion below read red
+        ;; on a full run for that reason and no other.
+        big  (jobs/start! t {:command "seq 1 5000; echo notice-proof-marker; exit 0"})
         none (jobs/start! t {:command "exit 0"})]
     (record-until (:path big) #(re-find #"\[exit" %) 20000)
     (record-until (:path none) #(re-find #"\[exit" %) 10000)
@@ -144,7 +149,7 @@
       (is (= 2 (count notices)) "two jobs, two notices")
       (doseq [n notices]
         (is (str/includes? (:content n) "[exit 0]"))
-        (is (not (str/includes? (:content n) "5000"))
+        (is (not (str/includes? (:content n) "notice-proof-marker"))
             "nothing of what the command said -- the record is one call away")
         (is (< (bytes n) 400) (str "a notice is a line, not a report: " (bytes n) " bytes")))
       (is (< (- (bytes (first notices)) (bytes (second notices))) 200)
