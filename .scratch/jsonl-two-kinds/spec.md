@@ -169,6 +169,15 @@
   那些信封键）就原样放过，否则翻译。折出来的消息还带着 `entries` 盖的身份 `:id`，
   `ag/strip-identity` 在 `history` 里把它们去掉——厂商数组没有这个字段。
 
+> **这一条里的两处说法已被 2026-09-21 的现场事故推翻，见 `.scratch/image-url-second-send/spec.md`。**
+> 原文留着，是因为"错在哪"本身有用：
+> **(a) 信封键不是一种拼法。** `entries` 盖的 `:id` 让一条**已经翻好的**条目行看起来"还是 AG-UI 的"，
+> 于是记录里那条 `image_url` 被翻第二次、按名字拒绝——**会话里有过一张图，第二次就再也发不出去**。
+> **(b) 摘掉信封字段的活不该只挂在 `history` 上。** 活着的会话从记录里出生时读的是同一批折出来的条目
+> （`sessions/model-view` → `ag/inbound`），而它不认识 `strip-identity`。今天信封字段在折叠的**入口**
+> （`ag-ui/absorbed` 的第一步）就摘掉，`provider-shaped?` 改从 `provider-parts` 这张表**正面**问
+> "每个部件是不是厂商自己的拼法"，`strip-identity` 随之退休。
+
 ### 用例
 
 - `http_test/the-record-holds-exactly-two-kinds-of-row`（读**原始字节**：两型、prompt 是 `message` 行

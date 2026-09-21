@@ -747,6 +747,12 @@
   rows passing through untouched (`ag/provider-messages` tells them apart). The system
   message is then assembled on top, which is the half a record cannot answer.
 
+  THE FOLD'S INPUT IS A CONVERSATION, whichever way each message got here: `entries`
+  stamps every message with the id a client draws it by, and a provider array has no such
+  field -- which `provider-messages` itself takes care of, so nothing has to be handed to
+  it pre-cleaned (it used to be, here and only here; the LIVE path read the same folded
+  entries and did not know to -- see `ag-ui/absorbed`).
+
   The system message is ASSEMBLED, not read out of the log: prompt.md's frozen
   opening plus whatever the SystemPrompt hooks append for the thread the file
   names. Nothing is appended here, because replay has no hook sink (see
@@ -754,7 +760,7 @@
   for byte, which is exactly what the tests below pin."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))]
-    (ag/provider-array (ag/provider-messages (ag/strip-identity (records->messages records)))
+    (ag/provider-array (ag/provider-messages (records->messages records))
                        (system-prompt/assemble (thread-id-of f)))))
 
 (defn- logs-under

@@ -262,6 +262,41 @@
       (is (some? e))
       (is (str/includes? (ex-message e) "file")))))
 
+(deftest a-record-s-own-row-passes-through-the-fold-unchanged
+  ;; 2026-09-21, the owner's own session (title 你是谁): 第一次可以发送图片，第二次继续报错 --
+  ;; `unsupported content part type "image_url"`. A `message` row IS the message the provider
+  ;; was handed (票 02 of `.scratch/jsonl-two-kinds`), so the conversation a session is born
+  ;; from again holds the VENDOR's parts -- and `harness.edge.replay/entries` stamps the
+  ;; entry's own `:id` back onto each message it folds. The fold therefore has to be
+  ;; IDEMPOTENT: reading a record through it a second time is a no-op, whatever the envelope
+  ;; added. This is the unit-level half of `http_test/a-picture-in-the-record-does-not-stop-
+  ;; the-next-run` -- same bug, the seam where the parts live, no server and no log.
+  (let [fold (fn [msgs] (ag/provider-messages msgs))
+        folded (fold [{:role "system" :content "S"}
+                       {:id "u1" :role "user"
+                        :content [{:type "text" :text "看图"}
+                                  {:type "image_url"
+                                   :image_url {:url "data:image/png;base64,AA"}}]}
+                       ;; an AG-UI message is translated on the way through, either time
+                       {:id "u2" :role "user"
+                        :content [{:type "image" :source {:type "url" :value "https://x/y.png"}}]}
+                       ;; and a frame-derived assistant message keeps its tool calls
+                       {:id "run-1-m0" :role "assistant" :content ""
+                        :toolCalls [{:id "c1" :function {:name "read" :arguments "{}"}}]}])]
+    (testing "the record's parts ride through as they are, and the envelope's id does not"
+      (is (= [{:type "text" :text "看图"}
+              {:type "image_url" :image_url {:url "data:image/png;base64,AA"}}]
+             (:content (second folded))))
+      (is (not-any? #(contains? % :id) folded)
+          "a provider array has no entry identity"))
+    (testing "so the whole vector is what a second pass over it answers"
+      (is (= folded (fold folded))
+          "the fold is idempotent for what it just wrote -- a record read back is a no-op"))
+    (testing "and an AG-UI part is still translated, not passed through as if it were"
+      (is (= [{:type "image_url" :image_url {:url "https://x/y.png"}}]
+             (:content (nth folded 2))))
+      (is (= [{:id "c1" :type "function" :function {:name "read" :arguments "{}"}}]
+             (:tool_calls (nth folded 3)))))))
 (deftest a-string-content-is-untouched
   ;; The common case, and the one every other test depends on: text in, the same
   ;; text out. Parts are the exception, not the shape.

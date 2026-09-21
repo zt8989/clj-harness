@@ -276,7 +276,12 @@
 
 ;; ------------------------------------------------------------------- inbound
 
-(def ^:private ag-ui-only #{:id :encryptedValue :subagentRunId :metadata :activityType})
+(def ^:private ag-ui-only
+  "WHAT ONLY THE WIRE KEEPS: the fields AG-UI's own messages carry that a provider message has
+  not got. `:id` is the one to know about -- it is also the entry's identity, which
+  `harness.edge.replay/entries` stamps back onto a message it folds, and a fold that read it as
+  a way of SPELLING a message translated a record's own row a second time (see `absorbed`)."
+  #{:id :encryptedValue :subagentRunId :metadata :activityType})
 
 (defn- strip-ag-ui-only [m] (apply dissoc m ag-ui-only))
 
@@ -293,6 +298,9 @@
 ;;                {:type "image_url" :image_url {:url "data:image/png;base64,…"}}
 ;;   AG-UI in     {:type "text" :text "…"}
 ;;   provider out {:type "text" :text "…"}          same shape, passed through
+;;   provider in  {:type "image_url" :image_url {:url …}}   ALREADY the provider's
+;;                (a record's own row: `provider-messages` wrote it) -- and reading the record
+;;                back must not translate it a second time, so this shape is an INPUT too.
 ;;
 ;; THE TRANSLATION BELONGS HERE, not in harness.kernel.llm. The "message" line in the
 ;; log is a VERBATIM record of what the LLM was about to see; translating at the
@@ -321,16 +329,44 @@
                                               (count (str v)) " chars)")))
                       {:part part})))))
 
-(defn- provider-part
-  "One AG-UI content part -> the provider's. An unknown part type is a NAMED
-  failure, never a pass-through: a part forwarded untouched reaches the vendor as
-  a shape it does not know, and the 400 that comes back names nothing useful.
-  Refusing here is what turns 'the vendor rejected the request' into 'this harness
-  cannot carry a :document part'."
+(def ^:private provider-parts
+  "WHAT THIS HARNESS CAN HAND A PROVIDER: a part's type -> the type it comes out as, and how to
+  carry it there.
+
+  `:out` EQUAL TO THE KEY MEANS THE PART IS ALREADY THE PROVIDER'S, which is exactly what the
+  message-level tell asks of every part it finds (`provider-shaped-part?`) -- so the vocabulary
+  is written ONCE, and a tell that disagreed with the translator about what this harness can
+  carry is not expressible. It used to be: the tell listed AG-UI's part types and read
+  everything else as 'already the provider's', so a `:document` part -- which AG-UI may spell
+  and this harness refuses BY NAME -- was read as carried (2026-09-21).
+
+  THE KEYS ARE THE INPUT SIDE. They hold AG-UI's spelling of a part this provider spells
+  differently (`image`) AND the provider's own spelling (`image_url`), because a record's row
+  comes back through here -- `provider-messages` wrote it -- and reading the record must not
+  translate it a second time.
+
+  A TYPE OUTSIDE THIS TABLE IS REFUSED WITH ITS NAME by `provider-part`, never forwarded: a part
+  handed over untouched reaches the vendor as a shape it does not know, and the 400 that comes
+  back names nothing useful. Refusing is what turns 'the vendor rejected the request' into 'this
+  harness cannot carry a :document part'."
+  {"text"      {:out "text"      :carry (fn [part] (select-keys part [:type :text]))}
+   "image"     {:out "image_url" :carry provider-image-url}
+   "image_url" {:out "image_url" :carry (fn [part] part)}})
+
+(defn- provider-shaped-part?
+  "Is PART already the provider's spelling? Its type comes out as the type it went in as.
+
+  ASKED POSITIVELY, from the table above rather than from a list of AG-UI's own types: AG-UI
+  may spell parts this harness has no case for, and those are the ones the refusal exists for."
   [part]
-  (case (:type part)
-    "text"      (select-keys part [:type :text])
-    "image"     (provider-image-url part)
+  (let [{:keys [out]} (get provider-parts (:type part))]
+    (boolean (and (some? out) (= (:type part) out)))))
+
+(defn- provider-part
+  "One part -> the provider's, by the table above."
+  [part]
+  (if-some [{:keys [carry]} (get provider-parts (:type part))]
+    (carry part)
     (throw (ex-info (str "unsupported content part type " (pr-str (:type part))
                          "; this harness carries \"text\" and \"image\"")
                     {:part part}))))
@@ -382,14 +418,6 @@
   "The roles AG-UI has and a provider does not."
   #{"reasoning" "activity"})
 
-(def ^:private ag-ui-only-parts
-  "The content part types only AG-UI spells: the provider's dialect is `image_url` where
-  AG-UI says `image`, and the rest of the pair (`text`) the two happen to agree on."
-  #{"image" "data" "audio" "file"})
-
-(defn- ag-ui-only-part? [p]
-  (and (map? p) (contains? ag-ui-only-parts (:type p))))
-
 (defn- provider-shaped?
   "Is M ALREADY the message a provider reads?
 
@@ -398,24 +426,51 @@
   (`provider-messages` is what wrote it), while a message DERIVED FROM A RUN'S FRAMES is
   AG-UI's own spelling -- and a rebuild feeds the two through one fold
   (`harness.edge.replay/history`). The tell is exactly where the dialects disagree:
-  AG-UI's camelCase tool fields and its `image`/`data` parts, and the roles AG-UI keeps for
-  itself. A message with none of those is the same message in both -- a plain string body is
-  byte for byte what a provider gets -- so translating it or not comes to the same thing."
+  AG-UI's camelCase tool fields, the roles AG-UI keeps for itself, and its way of SPELLING
+  a content part -- which is asked as 'is every part one this provider can carry?', the same
+  table `provider-part` translates by (`provider-parts`). A message with none of those is the
+  same message in both -- a plain string body is byte for byte what a provider gets -- so
+  translating it or not comes to the same thing.
+
+  THE PARTS ARE ASKED POSITIVELY, not by a list of AG-UI's own types: AG-UI may spell parts
+  this harness has no case for (`:document`), and a tell that read those as 'already the
+  provider's' would hand the vendor a shape it does not know -- the very 400 the refusal in
+  `provider-part` exists to name. The table is what this harness CARRIES; anything else is
+  translated (and there refused by name).
+
+  THE ENVELOPE'S FIELDS ARE NOT PART OF THE TELL (`ag-ui-only`, and `absorbed` takes them off
+  before this runs). They are what the WIRE keeps rather than a way of spelling a message, and
+  a tell that read them as a dialect would translate a record's own row a second time: the
+  entry's `:id`, which `harness.edge.replay/entries` stamps back onto the message, made an
+  already-translated `image_url` part look like AG-UI's `image` -- and the second translation
+  REFUSED it by name. That is the RUN_ERROR of 2026-09-21 that this shape was found by: a
+  session with a picture in its record could not be run again."
   [m]
   (and (not (contains? ag-ui-only-roles (:role m)))
-       (not-any? #(contains? m %) ag-ui-only)
        (not (contains? m :toolCalls))
        (not (contains? m :toolCallId))
-       (not-any? ag-ui-only-part? (when (vector? (:content m)) (:content m)))))
+       (every? provider-shaped-part?
+               (when (vector? (:content m)) (:content m)))))
 
 (defn- absorbed
   "Drop activity, fold reasoning into the assistant message it precedes, and rebuild
   each message in the provider's shape -- content parts translated on the way.
 
+  THE ENTRANCE TAKES OFF WHAT ONLY THE WIRE KEEPS (`ag-ui-only`: the entry's `:id`, AG-UI's
+  `metadata`, the fields it keeps for its own bookkeeping). One message is one fact, and this
+  fold runs over that fact in EITHER spelling -- so which spelling it is holding must not
+  depend on the envelope. A message read back off the record carries the provider's parts AND
+  the entry's id, and a fold that let the id stand for 'AG-UI spelling left' would translate
+  a message that is already translated -- and the second translation REFUSES an `image_url`
+  part by name. That is how a session with a picture in its record stopped being continueable
+  on 2026-09-21. Nothing below has to know the envelope's fields were ever there, which is why
+  this is one line HERE rather than a duty of every caller.
+
   A MESSAGE THAT IS ALREADY IN THAT SHAPE IS PASSED THROUGH (`provider-shaped?`): the fold
-  is idempotent, which is what lets one reader assemble a rebuild out of a record that speaks
-  both dialects at once -- the ENTRY rows, already the provider's, and the messages folded
-  out of a run's frames, which are AG-UI's own spelling.
+  is IDEMPOTENT -- `provider-messages` is what WROTE a record's entry rows, so reading them
+  back has to be a no-op -- and that is what lets one reader assemble a rebuild out of a
+  record that speaks both dialects at once: the ENTRY rows, already the provider's, and the
+  messages folded out of a run's frames, which are AG-UI's own spelling.
 
   Reasoning that trails the whole list would be dropped, and that cannot happen: the
   outbound side always closes a turn with a text message, even an empty one. That
@@ -449,7 +504,11 @@
                :else
                {:pending pending :out (conj (:out acc) (provider-user m))}))
            {:pending nil :out []}
-           messages)))
+           ;; THE WIRE'S OWN FIELDS COME OFF BEFORE ANYTHING DECIDES WHAT THIS MESSAGE IS.
+           ;; `strip-ag-ui-only` is the same one the translate branches apply, so both halves of
+           ;; the fold answer the same shape: no AG-UI-only field leaves here, whichever way a
+           ;; message was spelled.
+           (map strip-ag-ui-only messages))))
 
 (def context-entry-id
   "The id `context-entry` stamps on the opening context: a NAME rather than a generated
@@ -773,8 +832,10 @@
   THIS is for the ones that are already what a provider reads -- which is what the RECORD
   holds, because since `.scratch/jsonl-two-kinds` 票 02 an entry's row carries the message
   the provider was given (`provider-messages` is what wrote it). Feeding those back through
-  `absorbed` a second time would translate an `image_url` that has no AG-UI spelling left,
-  which `provider-part` refuses -- a rebuild that refuses the very record it is reading.
+  `absorbed` a second time has to be a no-op, and it is: `provider-shaped?` answers by the
+  SPELLING of the parts and fields, so a row that already says `image_url` is passed through
+  rather than translated again (2026-09-21 -- before the envelope's `:id` stopped counting as
+  a spelling, this was the refusal that made a picture-bearing session uncontinueable).
 
   THE SYSTEM MESSAGE IS STILL ASSEMBLED HERE, and only here: the prompt REPLACES a leading
   system message or is prepended, which is the one rule `inbound` and a rebuild both need --
@@ -786,18 +847,6 @@
     (if (= "system" (get-in msgs [0 :role]))
       (assoc msgs 0 sys)
       (into [sys] msgs))))
-
-(defn strip-identity
-  "A CONVERSATION's messages with the identity the RECORD keeps on the envelope removed.
-
-  A rebuild reads messages a fold built (`harness.edge.replay/entries`), and that fold stamps
-  every message with the id a client draws it by -- an entry's own name for the row it came
-  from, a synthesized one for what a run's frames produced. A provider array has no such
-  field, and `provider-shaped?` reads `:id` as 'this is still AG-UI's message', which is
-  exactly what stops a live run's client message from being translated twice. So the ids come
-  off HERE, at the one place that knows they came from the fold rather than from a client."
-  [messages]
-  (mapv #(apply dissoc % ag-ui-only) messages))
 
 (defn inbound
   "A conversation's AG-UI messages -> the provider's message vector.

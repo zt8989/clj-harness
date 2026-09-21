@@ -354,9 +354,13 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 - **被主动放弃的一件事实**：`input` 行的 payload 里还带着当时的**请求体**（`:provider` / `:model` /
   `:tools` / `:context`，即"客户端要的是什么"）。行删掉后这份事实**没有新家**：记录只答"这次跑的是哪一档"
   （`provider/init` / `provider/changed` 的 `:resolved`）。
-- **两种方言，出口一种**：条目行是厂商形状，帧折出来的消息是 AG-UI 拼法，`replay/history` 要一份厂商
-  向量——`ag/provider-messages` 因此是**幂等**的（`provider-shaped?` 认出已是厂商消息就放过），折出来的
-  消息带的身份 `:id` 由 `ag/strip-identity` 在 `history` 里去掉。
+- **两种方言，出口一种**：条目行是厂商形状，帧折出来的消息是 AG-UI 拼法，`replay/history` 与活着的会话
+  （`sessions/model-view` → `ag/inbound`）都要一份厂商向量——`ag/provider-messages` 因此是**幂等**的：
+  折进来的第一步 `ag-ui/absorbed` 先摘掉**只有 wire 才留的字段**（`ag-ui-only`：条目的 `:id`、`metadata`
+  这些），剪掉之后 `provider-shaped?` 只按「拼法」判——部件的类型在厂商自己的表（`provider-parts`）里、
+  没有 camelCase 工具字段——是就原样放过。`:id` 不再算一种拼法，是因为 2026-09-21 的一次事故：
+  `replay/entries` 会把条目的 `:id` 盖回消息上，而 `:id` 被当成「还有 AG-UI 拼法」时，记录里那条已经翻好的
+  `image_url` 会被**再翻一次**，第二次翻译按名字拒绝它——**会话里有过一张图，就再也发不出下一句**。
 
 几条支撑性的事实：
 

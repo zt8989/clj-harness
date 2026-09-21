@@ -154,7 +154,7 @@
 ;; Declared rather than moved up to it: each is used by a case near the top of the file
 ;; and belongs with its own kind further down (the bare fixture with the fixtures, the
 ;; two log readers with the cases about reading a log).
-(declare with-bare-server process-log log-lines-for feed-open! feed-first-frame)
+(declare with-bare-server process-log log-lines-for feed-open! feed-first-frame until)
 
 (defn- start-session!
   "A session of this home with nothing in it -- see `harness.test-support/start-session!`,
@@ -737,6 +737,80 @@
                  rebuilt (mapv :content (filter #(= "user" (:role %)) history))]
              (is (= [expect] rebuilt)
                  "a resumed conversation sends what the live run sent"))))))))
+
+(deftest a-picture-in-the-record-does-not-stop-the-next-run
+  ;; 2026-09-21, the owner's own session (title 你是谁): 第一次可以发送图片，第二次继续报错 --
+  ;; `unsupported content part type "image_url"; this harness carries "text" and "image"`.
+  ;;
+  ;; A `message` row IS the message the provider was handed (票 02 of `.scratch/jsonl-two-kinds`),
+  ;; so a conversation born from the record holds the VENDOR's parts -- and the fold stamps the
+  ;; entry's own `:id` on each message it folds. A session is born from the record whenever
+  ;; nothing has asked for it for thirty seconds (the sweeper puts it away -- a person thinking
+  ;; between two messages is enough) or this process restarted, so it is the SECOND
+  ;; picture-bearing send that meets a rebuilt conversation, and a run that refuses leaves a
+  ;; session that can never be continued again: every later birth reads the same row.
+  ;;
+  ;; THE ROW IS ASSERTED TO BE THERE BEFORE THE SESSION IS PUT AWAY. Without that, a rebuild
+  ;; that raced the record writer would be missing the very row this case is about -- and the
+  ;; test would pass for the wrong reason.
+  (with-server
+   {"images-reborn" [{:content "我看到这张图了。"}
+                     {:content "第二句也答上了。"}]}
+   (fn []
+     (let [log   (log-file "images-reborn")
+           parts [{:type "text" :text "这个布局怎么样"}
+                  {:type "image" :source {:type "url" :value "https://example.test/a.png"}}]]
+       (io/delete-file log true)
+       (testing "the picture enters the conversation and the run answers"
+         (is (= "RUN_FINISHED"
+                (:type (last (wire/frames-from-sse
+                            (.body (post-run "images-reborn"
+                                             {:append [{:id "u1" :role "user" :content parts}]}))))))))
+       (let [rows (wait-for-recorded
+                  log
+                  (fn [ls] (some #(and (= "message" (replay/kind %))
+                                       (= "client" (:source %)))
+                                  ls))
+                  5000)]
+         (is (= ["text" "image_url"]
+                (->> rows
+                     (filter #(and (= "message" (replay/kind %))
+                                   (= "client" (:source %))))
+                     (mapcat #(map :type (:content (replay/payload %))))))
+             "the row a session is born from holds the vendor's part, not AG-UI's"))
+       (testing "and a session put away and asked again still runs"
+         ;; THE RUN HAS TO BE OVER *AND* ITS OWN HALF FOLDED IN before the session is put away.
+         ;; `post-run` returns when the SSE body closes, while the frames are folded in at the
+         ;; terminal (`harness.edge.sessions/settle!`) -- and on a path that throws after the
+         ;; client has been told the run ended, that fold happens even later (the emitter's
+         ;; catch, which settles again). A drop! that beat it would put the session away
+         ;; underneath the fold, and the fold would then build it back out of the run's own
+         ;; frames alone -- the picture arrived with the CLIENT and is not among them -- and
+         ;; this case would read green without ever meeting the conversation it is about.
+         (is (until #(and (not (http/running? "images-reborn"))
+                          (some (fn [m] (= "assistant" (:role m)))
+                                (sessions/messages "images-reborn")))
+                    5000)
+             "the run is over, and what it said is in the conversation")
+         (sessions/drop! "images-reborn")
+         ;; AND WHAT THE SESSION IS BORN FROM AGAIN IS THE ROW'S SHAPE, not the client's bytes:
+         ;; the record keeps the message the PROVIDER was handed (票 02), and the fold stamps the
+         ;; entry's own `:id` back onto it. Vendor parts under an AG-UI identity is the whole of
+         ;; this case, so the premise is asserted rather than assumed -- the run below would
+         ;; otherwise be free to answer the wrong question quietly.
+         (let [reborn (sessions/messages "images-reborn")]
+           (is (some (fn [m] (some #(= "image_url" (:type %))
+                                   (when (sequential? (:content m)) (:content m))))
+                     reborn)
+               (str "the conversation is born from the record again, holding the vendor's part: "
+                    (pr-str (mapv #(select-keys % [:id :role :content]) reborn)))))
+         (let [frames (wire/frames-from-sse
+                       (.body (post-run "images-reborn"
+                                        {:append [{:id "u2" :role "user"
+                                                   :content "还有这一张"}]})))]
+           (is (= "RUN_FINISHED" (:type (last frames)))
+               (str "the rebuilt conversation is handed a provider shape: "
+                    (pr-str (mapv :message (filter #(= "RUN_ERROR" (:type %)) frames)))))))))))
 
 (defn- sse-frames
   "The frames an SSE answer carried, in order -- what the CLIENT was handed."
