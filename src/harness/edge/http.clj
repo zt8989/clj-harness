@@ -246,8 +246,9 @@
   both walk the tree and ask the FILESYSTEM where a log is.
 
   A session the store has never heard of is normal here, not an error: the AG-UI
-  edge accepts an id the client owns and the store has not been told about, and
-  its log goes to the reserved workspace."
+  edge names ids the server minted (and the sidebar's registry may not know one
+  yet -- a task is registered when it is created, but the two stores are not the
+  same table), and its log goes to the reserved workspace."
   [thread-id]
   (workspace-for (project/identity-for thread-id)))
 
@@ -1930,10 +1931,10 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  THREE OF THE FIVE ARE GETS: `stats` and `trajectory` only READ the log (a folded
-  view of a finished conversation, and the per-turn timeline) and `sofar` reads the
-  same file while it is still being written, to hand a client that just landed on a
-  session what has arrived. The set stays closed and the 405 stays here -- what
+  FIVE OF THE SEVEN ARE GETS: `stats` and `trajectory` only READ the log (a folded
+  view of a finished conversation, and the per-turn timeline), `sofar` reads the
+  same file while it is still being written, and the window's two verbs (`feed`,
+  `page`) read it in pieces. The set stays closed and the 405 stays here -- what
   changed is that the sentence 'every verb on this shape is a POST' is no longer
   true, not where the refusal happens.
 

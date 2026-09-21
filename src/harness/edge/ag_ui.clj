@@ -416,9 +416,9 @@
   immediately after, which is where a person would put it.
 
   IT COSTS THE PREFILL NOTHING. The prompt cache keys on a stable PREFIX: that prefix
-  is the system message plus the conversation the client re-states every turn, and the
-  injections were never part of it -- they used to sit between the two and are now
-  behind both, which leaves the prefix exactly as long as the client made it.
+  is the system message plus the conversation as the session has it, and the injections
+  were never part of it -- they used to sit between the two and are now behind both,
+  which leaves the cacheable prefix exactly as long as the conversation made it.
 
   An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path every
   caller takes when a session has no instruction files and no skills, and the shape of

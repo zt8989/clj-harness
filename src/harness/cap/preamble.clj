@@ -160,8 +160,9 @@
     1. the instruction files, in the order they were resolved -- the OS home's
        first, the project's second, so the more specific statement is the nearer
        one;
-    2. the skills catalog, last of the opening blocks and still ahead of the
-       conversation.
+    2. the skills catalog, last of the opening blocks. Where the blocks land is
+       `ag_ui/inbound`'s to decide and it puts them AFTER the conversation (the
+       question first, the material for it right behind) -- see `tail-blocks`.
 
   Standing rules first, then the menu of what else is available: a model that
   reads in order meets the constraints it must always honour before the optional

@@ -169,9 +169,15 @@ if ((await one.$(MODEL_TRIGGER)) !== null) {
   const options = await one.$$eval(MODEL_OPTION, (nodes) =>
     nodes.map((node) => node.innerText.replace(/\s+/g, " ").trim()),
   );
-  const index = options.findIndex((label) => label !== modelBefore);
+  // THE CURRENT MODEL IS NOT AN OPTION IN THIS PICKER: the session is served by the
+  // scripted double, which is not in the model catalog, so the first entry is
+  // "<current> not in the catalog" -- re-selecting it is a no-op, and a walkthrough that
+  // clicked it would report a model change that never happened.
+  const index = options.findIndex(
+    (label) => label !== modelBefore && !label.includes("not in the catalog"),
+  );
   if (index === -1) {
-    note(`the picker offers only ${JSON.stringify(options)} -- nothing to switch to`);
+    fail(`the picker offers nothing but the current model: ${JSON.stringify(options)}`);
   } else {
     await one.locator(MODEL_OPTION).nth(index).click();
     await one.waitForTimeout(200);
@@ -180,6 +186,7 @@ if ((await one.$(MODEL_TRIGGER)) !== null) {
   await one.keyboard.press("Escape");
 }
 say("composer model", { before: modelBefore, after: modelAfter });
+if (modelAfter === modelBefore) fail("the model choice did not take -- the picker changed nothing");
 
 // ---- 2. a refresh comes back to the same conversation, out of memory -----------------
 const pageAnswers = [];
@@ -202,6 +209,34 @@ if (!(await one.$("text=A1（脚本的第 1 条回答。）"))) fail("the reload
 if ((await one.textContent(MODEL_VALUE))?.trim() !== modelAfter) {
   fail("the reloaded page forgot the model this session was set to");
 }
+// AND BACK TO THE SCRIPTED DOUBLE, because the session's model is the session's own state
+// for everything that follows: the later scenes drive runs, and a run on a catalog model
+// would leave for a provider this machine has no key for.
+//
+// THE PICKER CANNOT DO THIS ONE, AND THAT IS WORTH SAYING: the scripted double is not in
+// the model catalog, so the entry that would select it ("<its model> not in the catalog")
+// is only offered while the session is ALREADY on it -- once the session holds a catalog
+// model there is no way back through the list. `POST /api/model {clear: true}` is the road
+// that exists (it drops the session's tier and the resolution falls back to config.edn), so
+// the walkthrough takes the same route the picker's own entries take, and then reads the
+// resolution back to prove the session is served from the double again.
+{
+  const gone = await one.evaluate(async (threadId) => {
+    const answer = await fetch("/api/model", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ threadId, clear: true }),
+    });
+    return { status: answer.status, body: await answer.json() };
+  }, id);
+  if (gone.status !== 200) fail(`could not drop the session's model: ${JSON.stringify(gone)}`);
+  const back = await one.evaluate(async (threadId) => {
+    const answer = await fetch(`/api/model?threadId=${threadId}`);
+    return await answer.json();
+  }, id);
+  say("composer model, put back", { wanted: modelBefore, now: back.model, provider: back.provider });
+  if (back.model !== modelBefore) fail("the session is not back on the scripted double");
+}
 const liveAnswers = pageAnswers.filter((answer) => answer.live === true);
 say("the reload's GET /page answers", pageAnswers.map((a) => ({ live: a.live, baseSeq: a.baseSeq, hasMore: a.hasMore })));
 if (liveAnswers.length === 0) {
@@ -211,12 +246,22 @@ say("the reload's window", { page: oneLog.page.length, feed: oneLog.feed.length 
 if (oneLog.feed.length !== 1) fail(`the reloaded page did not open a feed: ${oneLog.feed.length} connections`);
 
 // ---- 3. a second page watches, and the answer arrives over the feed ------------------
-const two = await browser.newPage();
+// THE SECOND PAGE IS IN A CONTEXT OF ITS OWN, WITH THE SESSION ALREADY IN localStorage
+// BEFORE THE PAGE'S OWN CODE RUNS. `browser.newPage()` gives every page a fresh context, so
+// the alternative is: load once (the app mints a session and remembers it), then set the key
+// by hand and reload -- and THAT IS A RACE. The mint's own write to localStorage can land
+// after the write below, and then the reload comes back to the session the app just made (a
+// session with no record at all) instead of this one: it looks like the feed "did not carry"
+// the other page's run, which is exactly how this walkthrough reported it once. An init
+// script has no such window -- it runs before any script of the page it is installed for.
+const twoContext = await browser.newContext();
+await twoContext.addInitScript((session) => {
+  localStorage.setItem("clj-harness.session", session);
+}, id);
+const two = await twoContext.newPage();
 two.on("pageerror", (e) => console.log(`  page error (two): ${e.message}`));
 const twoLog = watched(two);
 await two.goto(url, { waitUntil: "load" });
-await two.evaluate((session) => localStorage.setItem("clj-harness.session", session), id);
-await two.reload({ waitUntil: "load" });
 for (let i = 0; i < 100; i += 1) {
   if (await two.$("text=A1（脚本的第 1 条回答。）")) break;
   await new Promise((r) => setTimeout(r, 100));

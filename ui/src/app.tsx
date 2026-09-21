@@ -135,11 +135,11 @@ const RECONNECT_MS = 1000;
 /// the finished one. The runtime's own snapshot-import path runs this exact
 /// pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is
 /// upstream's, quoted rather than reinvented.
-/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is read
-/// back off `GET /api/threads/<id>/sofar` (a run being answered in the process, which
-/// this page may only be WATCHING), and null is every other case -- a session this
-/// client has just minted, or one that was rebuilt and is therefore over by
-/// definition.
+/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is the
+/// window's own `state` -- the tail page answers it, and every frame after that carries
+/// it -- which is how this page learns about a run it is only WATCHING. Null is every
+/// other case: a session this client has just minted (no window), or one read through
+/// `rebuild`, which is over by definition.
 ///
 /// THE LAST MESSAGE'S STATUS IS WHERE THAT LANDS, and it is not decoration:
 /// `lib/turns.ts` folds a turn's steps into a one-line summary exactly when its last
@@ -250,7 +250,7 @@ async function readSofar(threadId: string, t: TFunction<"errors">) {
 /// told, and it is the door a session is opened through.
 ///
 /// `onWindow(null)` MEANS "THERE IS NO WINDOW TO FOLLOW", and it is the answer on the
-/// one door here that has none: a log that ends mid-run is repaired by `rebuild`
+/// one door here that has none: a log the window reports as `unfinished` is repaired by `rebuild`
 /// (which closes the run off), the repair hands back the WHOLE conversation, and a
 /// page that already holds all of it has nothing to follow and nothing in front.
 function sessionHistory(
@@ -1279,9 +1279,10 @@ export function App() {
   ///     the conversation -- so "somebody loaded the page and typed" is a session the
   ///     sidebar can list, with the log under the id the server chose.
   ///
-  /// `sofar` rather than `rebuild` is the host's door here, and that is the whole
-  /// ticket: the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and
-  /// which looking at must not disturb.
+  /// THE WINDOW, NOT A REBUILD, is the host's door here, and that is the whole ticket:
+  /// the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and which
+  /// looking at must not disturb -- and the window is what lets the page keep looking
+  /// (`feed`), rather than reading the conversation once and falling behind.
   const restored = useRef(false);
   const onListed = useCallback(
     (listing: SidebarListing) => {
