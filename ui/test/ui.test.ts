@@ -126,7 +126,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// "append" are the reason it exists: a hole, a reopen and a copy that is ahead of the
 /// conversation are all SILENT failures when they go wrong, and silence is not
 /// something a later test can notice.
-const EXPECTED_CASES = 65;
+/// 65 -> 66: the `frames` suite's sixth -- two tool calls in one turn are one
+/// assistant message. The provider refuses the split shape outright, so the wire
+/// contract is worth a real-client case rather than an offline fold alone.
+const EXPECTED_CASES = 66;
 
 let total = 0;
 for (const suite of SUITES) {
