@@ -297,14 +297,24 @@
   (is (= [{:role "system" :content "S"}] (ag/inbound [{:role "system" :content "客户端的"}] "S" nil)))
   (is (= ["S"] (mapv :content (ag/inbound [] "S" nil)))))
 
-(deftest context-rides-as-a-trailing-user-message
+(deftest the-session-s-context-rides-in-the-conversation
   (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
                          "S" [{:description "repo" :value "clj-harness"}])]
     ;; The system prompt is FROZEN -- the provider's prefill (prompt cache) keys
-    ;; on it, so per-run context must never touch it.
+    ;; on it, so the session's opening context must never touch it.
     (is (= "S" (:content (first sent))))
-    (testing "context is the last message, a user message after everything the client sent"
-      (is (= {:role "user" :content "- repo: clj-harness"} (last sent))))
+    (testing "the context is one more message of the conversation, behind what it already held"
+      ;; WHAT MOVED, AND WHY (ticket 03 of .scratch/sessions-live-on-the-server). This
+      ;; used to be rendered as the LAST message of every run: the client sent the
+      ;; context again on every turn, so the prefix the provider caches grew a new tail
+      ;; each time and the cache missed it. It is now a message the SESSION is born with
+      ;; (`context-entry`), which the edge puts in the conversation ONCE -- so the
+      ;; converter here is being handed a conversation that already begins with it.
+      (is (= ["system" "user" "user"] (mapv :role sent)))
+      (is (= {:role "user" :content "- repo: clj-harness"} (last sent)))
+      (is (nil? (:id (last sent)))
+          "and the id it enters the conversation under is the conversation's business:
+           a message's AG-UI id never reaches a vendor"))
     (testing "with no context nothing is appended"
       (is (= ["system" "user"]
              (mapv :role (ag/inbound [{:id "u1" :role "user" :content "hi"}] "S" nil)))))))
@@ -329,11 +339,20 @@
           "then the conversation's instruction files")
       (is (= "S" (:content (first (ag/inbound [] "S" blocks nil))))))
 
-    (testing "and the per-run context lands after them, at the very end"
+    (testing "and the session's opening context moves NOTHING: it is inside the
+              conversation, and this run's material stays behind all of it"
+      ;; THE CONTEXT IS NOT A TRAILING BLOCK ANY MORE (ticket 03), so it can no longer be
+      ;; what 'the end' of the run is: a session born with a context has it in its
+      ;; conversation, and the blocks of the run being served come after everything --
+      ;; context included -- in the order the model should read them.
       (let [sent (ag/inbound [{:id "u1" :role "user" :content "hi"}]
                              "S" blocks [{:description "repo" :value "x"}])]
-        (is (= "<skills>\n- t: t\n</skills>" (:content (nth sent 3))))
-        (is (= "- repo: x" (:content (last sent))))))
+        (is (= ["system" "user" "user" "user" "user"] (mapv :role sent)))
+        (is (= "- repo: x" (:content (nth sent 2))) "the context, where the conversation puts it")
+        (is (= "<instructions path=\"/h/AGENTS.md\">\nrule\n</instructions>"
+               (:content (nth sent 3))))
+        (is (= "<skills>\n- t: t\n</skills>" (:content (last sent)))
+            "and the run's own material is still the tail")))
 
     (testing "a client's own lead system message is still replaced, not displaced"
       (let [sent (ag/inbound [{:role "system" :content "theirs"} {:role "user" :content "hi"}]

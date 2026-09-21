@@ -80,18 +80,22 @@ export async function listSidebar(t: Translate): Promise<SidebarListing> {
 }
 
 /// Make one conversation a session of this home, with no project (POST
-/// /api/sessions). This is what the sidebar's "new task" does before a word has
-/// been typed, and it is FIND-OR-CREATE on the server: an id that already exists
-/// -- belonging to a project even -- is left exactly as it is, so this can never
-/// unbind anything.
+/// /api/sessions), and answer the id to use from here on. This is what the sidebar's
+/// "new task" does before a word has been typed, and it is FIND-OR-CREATE on the
+/// server: an id that already exists -- belonging to a project even -- is left exactly
+/// as it is, so this can never unbind anything.
 ///
-/// ONE CONVERSATION PER CALL, named by the id the CLIENT minted: this product has
-/// never minted ids on the server, and a task is not an exception.
-export async function startTask(threadId: string, t: Translate): Promise<string> {
+/// THE SERVER MINTS THE ID when THREAD-ID is not given (ticket 03 of
+/// `.scratch/sessions-live-on-the-server`), and THE ANSWER IS THE ID either way: a
+/// client that made one up had to be right about a namespace it does not own, and the
+/// run edge refuses an id this home has never heard of. Passing THREAD-ID is the other
+/// use of the same route -- "make sure this conversation exists" -- for a caller that
+/// already holds one (a script, a suite, a page restored onto an id of its own).
+export async function startTask(t: Translate, threadId?: string): Promise<string> {
   const res = await fetch(`${API_BASE}sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ threadId }),
+    body: JSON.stringify(threadId === undefined ? {} : { threadId }),
   });
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { threadId: string };
@@ -192,6 +196,27 @@ export async function bindThread(threadId: string, dir: string, t: Translate): P
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir: string };
   return body.dir;
+}
+
+/// START A CONVERSATION IN DIR (POST /api/project, with no thread id): the server mints
+/// the id AND binds it in one action, and answers the id to use from here on. This is
+/// the project row's "new session" button.
+///
+/// ONE ACTION RATHER THAN "mint a task, then bind it". Two calls would be right most of
+/// the time and would leave an UNBOUND conversation behind every time the bind failed --
+/// which is the empty session the client is no longer allowed to make (ADR 0002
+/// decision 9: the client can no longer open a conversation out of thin air). The route
+/// is the one `bindThread` posts to; what differs is that the body names no thread,
+/// which is the server's cue to name it.
+export async function startSessionIn(dir: string, t: Translate): Promise<string> {
+  const res = await fetch(`${API_BASE}project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// Take a directory out of this home's project list

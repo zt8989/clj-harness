@@ -38,10 +38,12 @@ import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
 import { injectionSuite } from "./suites/injections";
+import { recordSuite } from "./suites/record";
+import { windowSuite } from "./suites/window";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -104,7 +106,27 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// says in both languages, and the two `aria-*` facts that make them one verb (one
 /// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
 /// run cannot reach -- the sidebar's own element -- is read as source in the same case.
-const EXPECTED_CASES = 52;
+/// 52 -> 54: the `record` suite's two -- a record with nothing to say (nothing drawn,
+/// and a state this client does not know is silence rather than the wire value on
+/// screen) and a degraded one RENDERED in both languages, carrying the writer's own
+/// reason and the plural of how much is waiting. It exists for the same reason the
+/// `sidebar` suite does: a sentence that reaches the screen is the one thing a green
+/// tree could not see.
+/// 54 -> 56: the `client` suite's two, and they are ticket 03's UI half. ONE reads the
+/// wire: a run's body carries `append` (this action's own entries) and NOT the
+/// accumulated `messages` nor a client `runId` -- the second run's `append` holds only
+/// the second question, which is the whole change. THE OTHER reads the other end of the
+/// same contract: `startTask` with nothing to name comes back with an id the SERVER
+/// minted, listed as a conversation this home keeps and usable for a run -- where a
+/// page-made id used to be quietly registered by the run edge.
+/// 56 -> 65: the `window` suite's nine, and they are ticket 06's UI half -- the rules
+/// that turn feed frames into a copy, the control that asks for older history, the
+/// sentences owed when the answer is not simply "more messages", and the arithmetic
+/// that keeps a reader's place when a page is prepended. The three answers that are not
+/// "append" are the reason it exists: a hole, a reopen and a copy that is ahead of the
+/// conversation are all SILENT failures when they go wrong, and silence is not
+/// something a later test can notice.
+const EXPECTED_CASES = 65;
 
 let total = 0;
 for (const suite of SUITES) {

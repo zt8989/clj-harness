@@ -327,6 +327,22 @@
   (mapv as-session
         (db/select (str "SELECT " session-columns " FROM sessions ORDER BY created_at, id"))))
 
+(defn session-exists?
+  "Does this home know THREAD-ID as a session?
+
+  THE QUESTION THE RUN EDGE ASKS BEFORE IT WRITES ANYTHING (ticket 03 of
+  `.scratch/sessions-live-on-the-server`), and it is a different question from 'is
+  there a log': a log can be sitting in the tree that this home never agreed to keep,
+  and the record that matters is the ROW. `sessions` and `tasks` answer 'which ones'
+  -- this answers 'this one', which is what a request carries.
+
+  READ FROM THE STORE, not from the sessions table in memory: the row is the durable
+  statement that a conversation exists here, and a process that has just started holds
+  no conversations at all."
+  [thread-id]
+  (when (some? thread-id)
+    (boolean (seq (db/select "SELECT 1 FROM sessions WHERE id = ?" (str thread-id))))))
+
 (defn tasks
   "Every session this home knows that belongs to NO project and remembers none:
   {:id :project-id :path :archived? :created-at} with `:project-id` and `:path` null,

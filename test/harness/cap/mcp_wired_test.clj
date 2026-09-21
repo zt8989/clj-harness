@@ -64,6 +64,7 @@
   The port is never written down: see AGENTS.md."
   [thread turns f]
   (providers/use-provider! thread (fake/scripted turns))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
@@ -73,9 +74,11 @@
   ([thread-id] (post-run thread-id {}))
   ([thread-id extra]
     (let [body (json/write-str (merge {:threadId thread-id
-                                      :runId (str (java.util.UUID/randomUUID))
-                                      :messages [{:id "u1" :role "user" :content "go"}]
-                                      :tools [] :context []}
+                                      ;; THE ACTION'S OWN ENTRIES (ticket 03): the
+                                      ;; server holds the conversation, and `with-server`
+                                      ;; has made sure this thread is a session of it.
+                                      :append [{:id "u1" :role "user" :content "go"}]
+                                      :tools []}
                                      extra))
          req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
                   (.header "Content-Type" "application/json")

@@ -41,7 +41,7 @@ const cases: Case[] = [
         },
         { content: "这是一个 Clojure 项目。" },
       ]);
-      const frames = await fetchFrames(threadId("frames"), "r1", []);
+      const frames = await fetchFrames(threadId("frames"), []);
 
       expect(frames.length, "the run produced frames at all").toBeGreaterThan(0);
 
@@ -62,7 +62,7 @@ const cases: Case[] = [
     // role must be the literal "reasoning".
     run: async () => {
       script([{ reasoning: "先看一下。", content: "ok" }]);
-      const frames = await fetchFrames(threadId("reasoning"), "r1", []);
+      const frames = await fetchFrames(threadId("reasoning"), []);
 
       const starts = frames.filter((f) => f.type === "REASONING_MESSAGE_START");
       expect(starts.length, "the run emitted reasoning frames").toBeGreaterThan(0);
@@ -79,7 +79,7 @@ const cases: Case[] = [
         { content: "", "tool-calls": [{ id: "c9", name: "read", arguments: { path: "deps.edn" } }] },
         { content: "done" },
       ]);
-      const frames = await fetchFrames(threadId("toolframes"), "r1", []);
+      const frames = await fetchFrames(threadId("toolframes"), []);
 
       const idOf = (f: Frame): string | undefined => f.toolCallId ?? f.id;
       const starts = frames.filter((f) => f.type === "TOOL_CALL_START");
@@ -97,7 +97,7 @@ const cases: Case[] = [
     // streaming shape and would arrive as an unknown type.
     run: async () => {
       script([{ reasoning: "r", content: "hello" }]);
-      const frames = await fetchFrames(threadId("chunks"), "r1", []);
+      const frames = await fetchFrames(threadId("chunks"), []);
 
       expect(frames.some((f) => f.type.includes("CHUNK")), "no frame type carries CHUNK").toBe(false);
     },
@@ -111,7 +111,7 @@ const cases: Case[] = [
     // it, and is exactly the sort of client mistake the edge has to survive.
     run: async () => {
       script([{ content: "unused" }]);
-      const resp = await postRun(threadId("errframes"), "r1", [], {
+      const resp = await postRun(threadId("errframes"), [], {
         resume: [{ interruptId: "never-parked", status: "resolved" }],
       });
       const frames = framesFromSse(await resp.text());

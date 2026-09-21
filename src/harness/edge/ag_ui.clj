@@ -339,9 +339,23 @@
            {:pending nil :out []}
            messages)))
 
-(defn- context-message [context]
+(defn context-entry
+  "The AG-UI message a session's opening CONTEXT becomes, or nil when there is none.
+
+  IT IS AN ORDINARY USER MESSAGE WITH A NAME. The session owns this the way it owns
+  everything else it was born with: the message goes into the conversation once
+  (`harness.edge.sessions`), so every later run continues from it instead of being handed
+  it again -- which is what keeps it inside the provider's cached prefix rather than
+  appended at the end of a conversation that has moved on.
+
+  THE ID IS FIXED rather than generated, because the conversation it enters is
+  deduplicated by id (`harness.edge.sessions/append!`): a session that is born twice --
+  a retry of the very first action, an id that was created and asked for again -- must
+  end up with one opening context and not two."
+  [context]
   (when (seq context)
-    {:role "user"
+    {:id      "session-context"
+     :role    "user"
      :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
 
 ;; ------------------------------------------------------------ input modality
@@ -402,9 +416,9 @@
   immediately after, which is where a person would put it.
 
   IT COSTS THE PREFILL NOTHING. The prompt cache keys on a stable PREFIX: that prefix
-  is the system message plus the conversation the client re-states every turn, and the
-  injections were never part of it -- they used to sit between the two and are now
-  behind both, which leaves the prefix exactly as long as the client made it.
+  is the system message plus the conversation as the session has it, and the injections
+  were never part of it -- they used to sit between the two and are now behind both,
+  which leaves the cacheable prefix exactly as long as the conversation made it.
 
   An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path every
   caller takes when a session has no instruction files and no skills, and the shape of
@@ -416,17 +430,25 @@
     (into msgs blocks)))
 
 (defn inbound
-  "A client's AG-UI messages -> the provider's message vector.
+  "A conversation's AG-UI messages -> the provider's message vector.
   PROMPT is the FROZEN system prompt text. A leading system message is replaced
-  by it; otherwise it is prepended. CONTEXT is per-run and must never touch the
-  system message -- the provider's prefill (prompt cache) keys on a stable
-  prefix, so a per-run system prompt would miss it every call -- so it rides as
-  a trailing user message instead, after everything the client sent.
+  by it; otherwise it is prepended. CONTEXT, when given, becomes the message the
+  session was born with (`context-entry`), placed after the messages that are already
+  in the conversation and before this run's blocks. IT MUST NEVER TOUCH THE SYSTEM
+  MESSAGE -- the provider's prefill (prompt cache) keys on a stable prefix, so a
+  per-run system prompt would miss it every call.
+
+  A RUN NO LONGER CARRIES THE CONVERSATION and no longer carries a per-run context
+  either (ticket 03 of `.scratch/sessions-live-on-the-server`): the edge hands over the
+  session's messages, which already hold the opening context, and CONTEXT is what the
+  VERY FIRST of those runs passes so that the message enters the conversation. It stays
+  an argument because this is a converter and the caller is the one that knows whether
+  the conversation has a beginning yet.
 
   BLOCKS are what this run was handed on top of the conversation -- the session's
   instruction files and skills catalog (harness.cap.preamble), already rendered. They
-  go AFTER the client's messages, in the order the model should read them: the
-  question first, then the material for it. They are ordinary user messages: nothing
+  go AFTER the conversation, in the order the model should read them: the question
+  first, then the material for it. They are ordinary user messages: nothing
   in this namespace becomes an AG-UI frame (the edge emits one CUSTOM frame per block
   it spliced, which is how a person sees them -- see `injected-frame`).
 
@@ -436,12 +458,10 @@
   the same thing through it."
   ([messages prompt context] (inbound messages prompt [] context))
   ([messages prompt blocks context]
-   (let [msgs (absorbed messages)
+   (let [msgs (absorbed (cond-> (vec messages)
+                          (seq context) (conj (context-entry context))))
          sys  {:role "system" :content prompt}
          msgs (if (= "system" (get-in msgs [0 :role]))
                 (assoc msgs 0 sys)
-                (into [sys] msgs))
-         msgs (tail-blocks msgs blocks)]
-     (if-let [ctx (context-message context)]
-       (conj msgs ctx)
-       msgs))))
+                (into [sys] msgs))]
+     (tail-blocks msgs blocks))))

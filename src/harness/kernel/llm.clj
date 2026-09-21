@@ -30,8 +30,8 @@
   VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
   mentions `reasoning_content` on every round, empty when the round had no reasoning,
   and it demands the field back -- so an empty mention is kept as an empty value rather
-  than dropped (`consume-sse`). A history that arrives WITHOUT it -- the client sent it
-  back, or a round predates this rule -- is repaired on the way out by
+  than dropped (`consume-sse`). A history that arrives WITHOUT it -- a session rebuilt
+  from a record written before this rule -- is repaired on the way out by
   `thinking-mode-history`, which the edge applies before the `message` audit line is
   written. See .scratch/reasoning-round-trip/spec.md for the verified vendor behaviour.
 

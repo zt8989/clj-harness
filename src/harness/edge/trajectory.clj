@@ -470,11 +470,42 @@
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the
   rest opens a turn of its own -- which is the same counting rule stats uses, applied to
-  items instead of to a number."
+  items instead of to a number.
+
+  STATE CARRIES THE CONVERSATION AS WELL AS THE PICTURE (`:history`), because the input
+  lines no longer restate it: what a run continues from has to be folded here for the
+  alignment to know which submitted messages are the client's own. See the binding
+  below -- and note that this is the same conversation `harness.edge.replay` folds for
+  the server, arrived at the same way, from the same lines."
   [state run life-of call-of]
-  (let [{:keys [seen shownSystem turns]} state
+  (let [{:keys [seen shownSystem turns history]} state
         payload   (get-in run [:input :payload])
-        raw       (vec (:messages payload))
+        ;; THE CONVERSATION THIS RUN CONTINUED, plus what it brought, and the sum is what
+        ;; the alignment below needs: WHICH MESSAGES ON THE SUBMITTED SIDE ARE THE
+        ;; CLIENT'S OWN rather than something the run spliced in.
+        ;;
+        ;; AN INPUT LINE NO LONGER RESTATES THE CONVERSATION (ticket 03 of
+        ;; `.scratch/sessions-live-on-the-server`): it says what ENTERED it
+        ;; (`:added`), because the server holds the rest. So the conversation is
+        ;; FOLDED HERE, one run at a time -- what entered plus what the run answered --
+        ;; which is what the old spelling handed over in one field. Without it, every
+        ;; earlier message would look like an injection and be drawn as injected
+        ;; context under the turn that happened to follow it.
+        ;;
+        ;; `:messages` is still read as the input's own entries when a log was written
+        ;; under the old contract, and such a log needs no folding (the input line
+        ;; carries the history itself) -- so this fold is for the field's absence, not
+        ;; its presence.
+        added     (vec (:added payload))
+        raw       (if (contains? payload :messages)
+                    ;; THE OLD SHAPE, AND IT NEEDS NO FOLDING: an input line written
+                    ;; before ticket 03 restates the whole conversation, so that field IS
+                    ;; the alignment's answer and adding the folded history to it would
+                    ;; list every earlier message twice.
+                    (vec (:messages payload))
+                    ;; THE NEW SHAPE: the conversation this run continued (folded from the
+                    ;; runs before it) plus what this one brought.
+                    (vec (concat (or history []) added)))
         ins       (vec (remove #(= "reasoning" (:role %)) raw))
         submitted (:submitted run)
         sys       (first (filter #(= "system" (:role %)) submitted))
@@ -514,7 +545,8 @@
                       (append-last (returned-items (:returned run) call-of life-of
                                                    (when (seq calls) 0)))
                       (append-calls calls))]
-        {:seen seen' :shownSystem texts :turns turns})
+        {:seen seen' :shownSystem texts :turns turns
+         :history (into raw (:returned run))})
 
       ;; No new user message: the run continues the turn it parked in. Its injections are
       ;; deduped like every other one, and its output lands after them.
@@ -525,7 +557,8 @@
                       (cond-> changed? (append-last [(system-item texts false)]))
                       (append-last (returned-items (:returned run) call-of life-of offset))
                       (append-calls calls))]
-        {:seen seen' :shownSystem texts :turns turns}))))
+        {:seen seen' :shownSystem texts :turns turns
+         :history (into raw (:returned run))}))))
 
 (defn records->trajectory
   "RECORDS -> {:turns [...] :incomplete bool}. See the namespace docstring for the fold's
@@ -579,7 +612,7 @@
                                                                calls)))
                              (empty? calls) (dissoc :calls))))
                        (:turns (reduce (fn [state run] (one-run state run life-of call-of))
-                                       {:seen #{} :shownSystem nil :turns []}
+                                       {:seen #{} :shownSystem nil :turns [] :history []}
                                        (run-segments records))))
      :incomplete (stats/incomplete? records)}))
 

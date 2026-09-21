@@ -9,11 +9,16 @@
   a run. Rebuilding is an explicit management action, outside any run -- which
   is also why every rebuild action leaves its own audit line at the edge.
 
-  The reconstruction rule is one line: seed from the FIRST input's messages, then fold
-  every recorded frame onto it in order. Later inputs are ignored rather than merged --
-  a client's second input already restates everything before it, so folding it in would
-  duplicate the conversation. The frames are the source of truth; the inputs are only a
-  starting point.
+  The reconstruction rule is one line: WALK THE RECORD IN FILE ORDER, and let each input
+  line say what that action brought while the frames that follow it say what came of it
+  (see `fold-frames`). Until ticket 03 of `.scratch/sessions-live-on-the-server` that
+  line read differently: seed from the FIRST input's messages, then fold every frame onto
+  it, ignoring later inputs, because a client's second input restates everything before
+  it. The difference is not a detail: a client's restatement was the only
+  reason to ignore the later lines, and the same restatement is why a rebuild could not
+  show a second run's question at all (no frame ever carries the message the CLIENT
+  wrote). An action's own entries are what enter the conversation, and the id is what
+  keeps a restated one from entering twice.
 
   The DIRECTORY is the caller's -- this namespace stays a pure reader and never
   learns where the process keeps its home. That is why every entry point but the
@@ -248,10 +253,111 @@
                                                " when the session was continued")})}))
          (open-runs records))))
 
+(defn- append-new
+  "BASE with ENTRIES the conversation does not already hold, in order.
+
+  THE ID IS THE IDENTITY, and that is what lets one fold read records written under
+  both contracts. Until ticket 03 of `.scratch/sessions-live-on-the-server` a client
+  sent the WHOLE conversation every run, so each input line repeats everything before
+  it; from that ticket on, an input line carries only what its action added. Deduping by
+  `:id` -- the same rule `harness.edge.sessions/append!` applies live, and the ids are
+  the frames' own, so the assistant messages match too -- reads both the same way: what
+  the line adds, it adds once. An entry with no id cannot be recognised and is kept."
+  [base entries]
+  (let [[out _] (reduce (fn [[out seen] e]
+                          (if (and (:id e) (contains? seen (:id e)))
+                            [out seen]
+                            [(conj out e) (cond-> seen (:id e) (conj (:id e)))]))
+                        [(vec base) (into #{} (keep :id) base)]
+                        entries)]
+    out))
+
+(defn entries
+  "Parsed log records -> the conversation's entries IN ORDER, each numbered:
+  [{:seq N :message M} ..].
+
+  THE NUMBER IS THE RECORD OFFSET OF THE LINE THE ENTRY ARRIVED IN -- 0 for a
+  thread's first line, one more for each line after it. ADR 0003 decision 1 asks for
+  a monotonic number per entry and decision 9 asks that it be REPLAYABLE; the line
+  ordinal is both. It is not a field of the record (the format is frozen) and not an
+  in-memory counter (a counter is only replayable if it is derived from the record --
+  which the ordinal already is).
+
+  WHICH LINE AN ENTRY ARRIVED IN IS THIS FOLD'S READING, and it is the same reading
+  the edge mints live (`harness.edge.sessions/land!` reads the writer's answer), so
+  the numbers a live session hands out and the numbers a replay reproduces agree:
+
+    - an entry an `input` line ADDED is numbered by THAT line -- the action's own
+      line, the first line of its run;
+    - an entry a run's FRAMES produced is numbered by the run's TERMINAL line, which
+      is the line the edge attaches its landing callback to;
+    - a run that never reached a terminal (a log that stops mid-run, read leniently)
+      numbers its entries by the LAST line of the run, which is where the record
+      stops -- a partial answer is allowed to move once the run ends.
+
+  ENTRIES NUMBERED ALIKE ARRIVED TOGETHER: one action's entries, or one run's. That is
+  what makes a page cut at a group boundary unambiguously right, and it is why the
+  window carries numbers rather than a slice of the message list (ticket 05's
+  `tail` / `since` / `before`, and ticket 06's replica).
+
+  THE FOLD ITSELF IS `fold-frames`' AND UNCHANGED -- the messages this returns are
+  exactly the ones the readers below have always answered; numbering them is the only
+  addition. A message still enters once (`append-new` drops a repeat by id, which is
+  how an old input line that carried the whole conversation reads the same as a new
+  one that carried only what it added)."
+  [records]
+  (let [add   (fn [acc seq-n msgs]
+                (update acc :entries into (map (fn [m] {:seq seq-n :message m}) msgs)))
+        folded (fn [acc] (mapv :message (:entries acc)))
+        flush (fn [acc fallback]
+                (let [new (frames/apply-frames (:pending acc))
+                      at  (or (:after acc) fallback)]
+                  (-> (if (seq new) (add acc at new) acc)
+                      (assoc :pending [] :after nil))))]
+    (:entries
+     (flush
+      (reduce (fn [acc [i {:keys [kind payload]}]]
+                (case kind
+                  "input" ;; `append-new` answers BASE AND THE NEW ONES TOGETHER (the
+                          ;; fold replaces its message list with it); what ENTERED is the
+                          ;; tail of that, and a fold that appended the whole answer
+                          ;; would put every entry in twice.
+                          (let [acc  (flush acc (max 0 (dec i)))
+                                base (folded acc)
+                                all  (vec (append-new base (or (:added payload)
+                                                               (:messages payload))))]
+                            (add acc i (subvec all (count base))))
+                  "event" (let [acc (update acc :pending conj payload)]
+                            ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the
+                            ;; frames after a terminal belong to a line this reader
+                            ;; would otherwise number short. (A run has one terminal;
+                            ;; `frames/terminal?` is the same rule `runs` pairs by.)
+                            (if (frames/terminal? payload)
+                              (assoc acc :after i)
+                              acc))
+                  acc))
+              {:entries [] :pending [] :after nil}
+              (map-indexed vector records))
+      (max 0 (dec (count records)))))))
+
 (defn- fold-frames
   "Parsed log records -> the AG-UI message list they describe, WITHOUT judging
-  whether the log is finished: seed (the FIRST input's messages) + every recorded
-  frame, in file order.
+  whether the log is finished. THE MESSAGES OF `entries`, which is where the fold
+  and its numbering live; this is the reader every message-only caller wants.
+
+  THE RECORD IS READ IN FILE ORDER, and the order is the conversation's: an input line
+  says what that action ADDED, and the frames that follow are what came of it, folded in
+  one group per run. A run's frames are folded as a group rather than one by one because
+  they are not independent: the text of a message lives in a START and its CONTENT
+  frames, and a fold that saw only the content would have nothing to patch.
+
+  WHICH FIELD OF THE INPUT LINE SAYS WHAT WAS ADDED DEPENDS ON WHO WROTE IT, and both
+  are read: `:added` is what the edge writes since ticket 03 (the entries that actually
+  entered the conversation -- a retried message enters nothing, and the birth context
+  enters without the client ever having sent it), while `:messages` is what a client sent
+  under the old contract, when that WAS the whole conversation. `append-new` dedupes by
+  id, which is what makes the old shape read correctly: an old input line repeats
+  everything before it, and the repetition is dropped rather than doubled.
 
   THE FOLD AND THE JUDGEMENT ARE TWO STEPS, which is why this is one function and the
   two public readers below are the other two. What a log CONTAINS and whether it is
@@ -259,15 +365,12 @@
   being written, the second is not -- and a reader that had to fold in order to
   refuse would answer the wrong one first."
   [records]
-  (let [seed   (some->> records
-                        (filter #(= "input" (:kind %)))
-                        first
-                        :payload
-                        :messages)
-        frames (->> records
-                    (filter #(= "event" (:kind %)))
-                    (mapv :payload))]
-    (into (vec seed) (frames/apply-frames frames))))
+  ;; THE LAST RUN IS FLUSHED TOO, and that is not a formality: a log ENDS with the
+  ;; frames of its last run, so the pending group is non-empty at the end of every
+  ;; complete record. A fold that only flushed on the next input line would answer
+  ;; every conversation with everything except the answer that was just given --
+  ;; `entries` flushes it (see there).
+  (mapv :message (entries records)))
 
 (defn records->messages
   "Parsed log records -> the AG-UI message list they describe, REFUSING a log whose
@@ -313,8 +416,10 @@
   (records->messages (lines->records lines)))
 
 (defn- first-input
-  "The first input line's payload -- the seed messages and the run context both
-  come from there."
+  "The first input line's payload -- where a log keeps the run CONTEXT from before
+  ticket 03 (see `rebuild`). The seed messages used to come from here too, when the first
+  line was the whole conversation and the frames were everything after it; the fold reads
+  every line now, so nothing needs this but the context."
   [records]
   (some->> records
            (filter #(= "input" (:kind %)))
@@ -322,18 +427,34 @@
            :payload))
 
 (defn rebuild
-  "What a client needs to RE-OWN its conversation: the AG-UI message list
-  (seed + every recorded frame folded in, reasoning and tool calls included)
-  plus the context the conversation was started with. The client takes both
-  into its next ordinary RunAgentInput -- the server holds no rebuilt state,
-  exactly as it holds no conversation state ever."
+  "What a client needs to RE-OWN its conversation: the AG-UI message list (every
+  action's own message, folded in file order with every recorded frame of the run it
+  started, reasoning and tool calls included) plus whatever context the log carries at
+  its start, which since ticket 03 is also an ordinary message in that list. The client
+  takes both into its next ordinary RunAgentInput -- the server holds no rebuilt state,
+  exactly as it holds no conversation state ever.
+
+  IT ALSO ANSWERS THE ENTRIES, NUMBERED (`entries` below): the same conversation with
+  the record offset each entry arrived at. A caller that wants the window -- a client
+  that refreshed, a page being cut -- needs those numbers, and they are the same numbers
+  the live edge mints (`harness.edge.sessions/land!`), so the two readings of one record
+  cannot disagree."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
         input   (first-input records)]
+    ;; THE CONTEXT IS A MESSAGE NOW, NOT A FIELD (ticket 03): the conversation is born
+    ;; with the session's context as its own entry (`ag/context-entry`, id
+    ;; "session-context"), so `:messages` above already carries it and there is nothing
+    ;; separate to hand back. What is still read here is the OLD shape: a log whose
+    ;; first input line names a context -- every log written before this ticket, and the
+    ;; rebuild tool's own fixtures -- keeps answering with it, because a reader that
+    ;; dropped it would silently change what those conversations continue from. An
+    ;; answer of [] is the honest answer for a log that says nothing about context.
     {:messages (records->messages records)
-     :context  (:context input)}))
+     :entries  (entries records)
+     :context  (vec (:context input))}))
 
-(defn- record-state
+(defn record-state
   "What a log's RECORD says about the conversation in it -- one of three, and
   deliberately nothing about whether anyone is still writing it:
 
@@ -351,7 +472,12 @@
   THE NEWEST RUN DECIDES :parked, because a park is the state of the CONVERSATION
   and not of one run in it: the parked run ended on its interrupt, and if a resume
   followed, that resume is the newest run and its terminal is what the conversation
-  is waiting on now."
+  is waiting on now.
+
+  PUBLIC BECAUSE A WINDOW NEEDS IT TOO (ticket 06 of
+  `.scratch/sessions-live-on-the-server`): a page route asked for a conversation this
+  process does not hold answers its entries AND this state, and it has the records in
+  hand already -- asking `sofar` for the same answer would fold the log a second time."
   [records]
   (let [open   (open-runs records)
         newest (last (runs records))
@@ -381,7 +507,12 @@
   NOTHING HERE WRITES, and that is a requirement rather than a happy accident: this is
   what a client POLLS while a run is being written, and a read path that repaired the
   file it was reading would make every poll a write (see the flag: a run this process
-  is answering is not a truncated log)."
+  is answering is not a truncated log).
+
+  `:entries` IS THE SAME CONVERSATION WITH ITS NUMBERS, and it is what lets a session be
+  born already able to answer a window: the session keeps the entries, and the numbers
+  are the record's own line offsets rather than anything this process remembers. The
+  fold is the same one `:messages` comes from (`entries`), so the two cannot drift."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
         input   (first-input records)
@@ -390,6 +521,7 @@
     {:messages   (if open?
                    (messages-so-far records)
                    (records->messages records))
+     :entries    (entries records)
      :context    (:context input)
      :state      (:state state)
      :open-runs  (:open-runs state)

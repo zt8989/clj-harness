@@ -100,12 +100,11 @@
           (is (= [{:canonical-path "/kept" :created-at 7}]
                  (db/select "SELECT canonical_path, created_at FROM projects"))))
         (testing "and the anchor tables arrived beside it"
-          (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
-                 (db/tables)))
-          (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
-                 (db/tables full))))
+          (let [all ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+                     "hashline_undo" "projects" "schema_steps" "session_claims"
+                     "sessions" "todos"]]
+            (is (= all (db/tables)))
+            (is (= all (db/tables full)))))
         (finally
           (alter-var-root #'home/*root-override* (constantly previous))
           (doseq [f (reverse (file-seq dir))] (io/delete-file f true)))))))

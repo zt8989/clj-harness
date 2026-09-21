@@ -84,7 +84,7 @@
   
   NAMED RATHER THAN RELAYED. The vendor's answer to this shape is a 400 whose sentence
   names neither the call nor the reason -- 'insufficient tool messages following
-  tool_calls message' -- and a client that gets it cannot tell a client-side history
+  tool_calls message' -- and a caller that gets it cannot tell an assembled history
   bug from a harness one, nor which call to fix. So the ids are in the sentence, and so
   is the one thing a human can act on: a park lives in the process that made it, so
   after a restart nothing can answer these, and the conversation cannot be continued as

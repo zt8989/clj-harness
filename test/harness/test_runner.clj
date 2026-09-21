@@ -77,6 +77,7 @@
     harness.evals-test
     harness.cap.providers-test
     harness.cap.project-test
+    harness.cap.claims-test
     harness.infra.log-test
     harness.cap.git-test
     harness.cap.editing-test
@@ -105,6 +106,15 @@
     harness.edge.context-test
     harness.edge.ui-test
     harness.edge.http-test
+    ;; THE RECORD WRITER AND THE SESSION TABLE ARE SEPARATE NAMESPACES ON PURPOSE (ticket
+    ;; 02), and BOTH HAD TO BE ADDED HERE BY HAND: this list is a literal, so a namespace
+    ;; that is not in it does not run in a full suite, and a green run says nothing about
+    ;; it. That happened twice in this feature -- sessions-test (ticket 01) and
+    ;; record-test (ticket 02) each ran only when named on the command line, and the
+    ;; "all green" line above them counted neither. A new test namespace belongs in this
+    ;; list in the same commit as the file.
+    harness.edge.sessions-test
+    harness.edge.record-test
     harness.layers-test])
 
 (def ^:private tmp-home
