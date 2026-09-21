@@ -6,7 +6,7 @@
 
 **它曾经是 ClojureScript + helix + CopilotKit。** 那次换语言换库的完整记录在
 `.scratch/assistant-ui/`（历史文档，记的是当时）。协议侧一字未改——
-AG-UI 帧的形状、interrupt/resume 的语义、以及「服务端不持有会话」这条，换客户端都没有碰。
+AG-UI 帧的形状与 interrupt/resume 的语义，换客户端都没有碰。
 
 ## 装配
 
@@ -15,7 +15,9 @@ main.tsx            React root
 app.tsx             **一场会话一份 runtime（一份 `SessionHost`）**，各带自己的 HttpAgent、
                     `useAgUiRuntime`、`ApprovalBatchProvider` 与 <Thread/>。App 持有的是
                     「现在看哪一场」（`shown`）、「哪些会话有活着的 host」（roster）、
-                    以及每场自己的 `{:running? :parked?}` 注册表（侧边栏按 id 查）
+                    每场自己的 `{:running? :parked?}` 注册表（侧边栏按 id 查）、
+                    每场手里那段**窗口**（`windows`）与要画在它顶上的那颗按钮（`controls`）、
+                    记录的降级态（`records`），以及打不开的那几场各自的错（`openErrors`）
                     侧边栏在 provider **之外**（它管全部会话），THREAD_COMPONENTS 仍在此注入
                     （附件适配器也在这里交出：`adapters.attachments` 一行）
 components/
@@ -61,7 +63,9 @@ lib/
   threads.ts        两个地址：`API_BASE`（`${HARNESS}api/`，管理调用挂的地方）与 `AGENT_URL`
                     （`${API_BASE}agent`，`HttpAgent` 用的那一个端点）。`HARNESS` 默认 `/`（本 origin），
                     `VITE_AGENT_URL` 可指绝对地址。外加 rebuild 调用
-  projects.ts       GET /api/projects 的类型化薄封装 + 移除项目
+  projects.ts       GET /api/projects 的类型化薄封装，外加**动作**那几发：`bindThread`（换绑）、
+                    `startTask`（按 id 登记一场任务，或让服务端铸一枚）、`startSessionIn`（在某个
+                    目录里开一场）、`addProject` / `removeProject` / `pickFolder` / `setArchived`
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
@@ -96,6 +100,18 @@ lib/
                     满列表的归档按钮就一起冒出来（量到 `0.5`）。所以常量里必须带 `disabled:opacity-0`，
                     再用更具体的 `group-hover:disabled:opacity-50` 让「已揭示的禁用控制」仍旧发灰。
                     **零 import**（就是一条字符串），被 UI 套件渲染出来读回去
+  session-memory.ts 「刷新回到刚才那一场」记的那个 id（`localStorage`，就是这里）
+  agent.ts          `HttpAgent` 那几行：地址、`threadId` 交给谁、以及 run 结束的回调
+  record-health.ts  记录降级态那一个字段（`:record`）的类型与 `recordNotice`：
+                    把它变成一句话，**没有问题时不出现**
+  window.ts         窗口这个值本身：`{entries, baseSeq, hasMore, cursor, generation, state,
+                    revision}` 与它的全部规则（`windowFrom` / `applied` / `prepended` /
+                    `aligned` / `aheadOf`）。**全是纯函数**，所以 UI 套件直接测它；
+                    `revision` 是「这份窗口变过几次」，与消息号 `seq` 不是一回事
+  feed.ts           那条 SSE 连接：`fetch` + `AbortController`（不是 `EventSource`——它自己
+                    重连、又看不见 409 的 body），加一个纯的 `feedFrames` 切帧
+  window-scroll.ts  补页时的锚：`measure` / `restoredTop` / `correctedTop` 三行算术（用例测）
+                    与 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事
 ```
 
 **dev 里页面直连后端，跨域。** 整个后端在**一个前缀**下——run 端点是 `POST /api/agent`，其余都是
@@ -117,13 +133,42 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   HttpAgent、自己调一次 `useAgUiRuntime`，于是自己有一份 core。`threadList` 适配器里**只传 threadId**，
   `onSwitchToThread` / `onSwitchToNewThread` 两个回调退场——它们的效果是「先清空当前 core、再灌新消息」，
   而那份 core 现在正在流。host 一旦存在就**不再卸载、也不再重建**（core 归 hook 的 ref 所有，不归 DOM 子树），
-  所以「这个会话没在显示」不等于「它的 run 死了」；`agent.threadId` 也不再有回写者（`adoptThread` 已删），
-  服务端照旧零会话状态。
+  所以「这个会话没在显示」不等于「它的 run 死了」；`agent.threadId` 也不再有回写者（`adoptThread` 已删）。
+- **会话归服务端，浏览器是只读副本，它只发动作**（ADR 0002）：发送、换模型、审批回答、停止、归档
+  ——画什么由服务端给的帧与页决定（`append` / `update` 两个适配器因此是空的，见下）。
+- **它手里是一段窗口，不是整场会话**（`lib/window.ts`）：
+  `{entries, baseSeq, hasMore, cursor, generation, state, revision}`。`entries` 是 `{seq, message}`——
+  **`seq` 是这条消息所在那一行在记录里的偏移**（服务端铸、谁都不许预测）；`baseSeq` 与 `cursor` 是
+  这段窗口最老、最新那个号（`cursor` 就是副本对服务端说「我拿到哪儿」的那句话）；`generation` 是这段
+  窗口属于哪一次服务（认领的 token，放掉或易主就换号）；`state` 是对面的 run 停没停；**`revision`
+  是副本自己的**「这段窗口变过几次」——它不是一个位置，与 `seq` 混用是这一份专门防的错。
+- **三扇门，两种读法**（`HistoryRead`）：`rebuild`（**侧栏点开**的那场：交给我，整段历史——它会合上
+  断头日志、也会指名一份坏日志）、`window`（**这一页本来就在**的那场，比如刷新回来：看它，尾页 +
+  一条 feed，一个字都不写）、`none`（本页刚铸、还没有会话的那场：没有可读的）。所以「侧栏点开」
+  与「刷新回来」是两件事：前者接手，后者只看。
+- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走 **feed 一条连接**
+  （`GET …/feed?since=<cursor>&generation=<G>`）。服务端**还持有**这场会话时尾页走**内存**（答案是
+  `live: true`），记录的落后因此不会把人送回更早的一版——「刷新走内存」（ADR 0002 决策 8）就是这一条；
+  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。feed 连上之后帧都来自内存，
+  游标由副本自己带着重连。
+- **两种修理是两件事**（`lib/window.ts` 的 `Effect`）：**断档 / 连接断了** ⇒ 拉尾页**对齐**
+  （接得上就合、接不上就重建并从尾页重来），**读者的位置保住**；**`end` 帧 / generation 作废**
+  （会话被放掉、被接管、换了进程）⇒ **重开**，并把「重开了」这句话画出来。副本手里有服务端没有的
+  条目时**说得出来**（`aheadOf`），不静默丢。
+- **「显示更早」一次一页，而且必须锚定**：补页是 `prepend`，会把它下面的一切往下推，所以问之前量、
+  答之后修（`lib/window-scroll.ts`），一次也只有一个在飞（按钮的禁用态就是这一条）。**锚点是一条
+  消息的文本，不是它的 DOM 节点**：assistant-ui 按位置保留消息节点，用节点当锚会算错——量到过节点
+  的 `top` 从 `83` 走到 `49`、上面多了四千多像素，而算出来的修正是 0。打字、打到一半的字、选中
+  位置都因此不动。
+- **记录的健康由谁来说**：有窗口的页面由 **feed 每帧带的 `:record`** 说；**没有窗口**的那几扇门
+  （本页刚铸的会话、侧栏点开的、修好的断头记录）在自己驱动的那一轮结束之后读一次 `sofar`。
+  从前那条每 1200ms 的 `sofar` 轮询没有了——它正是窗口要替掉的东西。
+- **一次 host 只读一次，判据是「那份 host 在不在」**：读走运行时自己的 `history` 适配器，它每个 core
+  只 `load()` 一次（`__internal_load`）。已经活着的 host 再显示多少次都不重读——它 core 里那份
+  conversation 可能还在长，拿整段重建的结果盖上去就是又一次孤儿（而窗口那条连接还在往同一个 core
+  里送帧）。
 - **「现在看哪一场」是 App 的 state**（`shown`），带两个动作：`onShow`（这场有 conversation，第一次
   host 时重建）与 `onShowFresh`（这场是客户端刚 mint 的，没有日志可重建，host 空着起）。
-- **第一次打开才 rebuild，判据是「那份 host 在不在」**：重建走运行时自己的 `history` 适配器，它每个
-  core 只 `load()` 一次（`__internal_load`）。已经活着的 host 再显示多少次都不重建——它 core 里那份
-  conversation 可能还在长，拿 rebuild 的结果盖上去就是又一次孤儿。
 - **恢复的转换仍与 runtime 自己的快照导入路径逐字相同**（引上游，不另写）：`fromAgUiMessages` +
   `fromThreadMessageLike`，只是交给适配器的形状是 `{messages: [{parentId, message}]}`。
 - **history 适配器的 `append`/`update` 是空实现**：日志归服务端所有，客户端一个字节都不往回写。
@@ -140,12 +185,15 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   所以成不了环）。
 - **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只铸一枚 id、
   在页面里打开一场空会话**：不写库、不刷新、列表上什么都不出现——**会话是第一次发送才诞生的**
-  （主人这一版的原话：「点击新增不立刻会话，发送才新建」）。任务由 run 那条路自己注册
-  （`register-run-session!`，本来就在）；项目会话由页面在**第一句到达那一刻**把「这个 id 属于哪个目录」
-  补上一次 `POST /api/project`（`app.tsx` 的 `pendingBinds` + `reportTitle`：host 上报标题 = 那一句
-  真的发出去了）。`bind!` 是 upsert，所以 run 先到也没关系——它先以任务身份建出来，紧跟着的 bind
-  把它移进项目，最终归属只由这一次 bind 决定。落在项目里的路只剩一条：**项目行自己那颗「新建会话」**。
-  任务的记录落在 `projects/.unbound/`。
+  （主人这一版的原话：「点击新增不立刻会话，发送才新建」）——那条路见
+  `.scratch/store-backed-sidebar/spec.md`。
+  那一刻之前服务端什么都没听见，所以这枚 id 必须在那一场的第一次 run 请求**之前**登记一次：
+  项目会话带着这枚 id 与目录走一次 `POST /api/project`（`bind!` 是 upsert，同时把它移进项目），
+  任务走一次 `POST /api/sessions`（find-or-create，认调用方给的 id、幂等，已经有就原样不动）。
+  **先登记、再发 run**，因为服务端那条规矩是：一轮 run 只继续这个家听说过的那场会话，瞄准陌生 id
+  的一轮是 404（ADR 0002 决策 9；run 那条边从前那次静默创建没有了，页面不再依赖它）。**不登记就
+  没有会话**——这正是懒创建要的：点一下不产生任何东西，有东西可留的时候才留。落在项目里的路只剩
+  一条：**项目行自己那颗「新建会话」**。任务的记录落在 `projects/.unbound/`。
 - **缩进那一条就是 spinner 的槽。** 会话行整体缩进到项目行**名字**的起点（走查量到的是 36px：
   项目行 `px-1.5`(6) + 图标(16) + `gap-1.5`(6)，会话行是 `ps-2`(8) + 槽(14) + `gap-1.5`(6)），
   槽宽就是 spinner 的 `size-3.5`，所以跑起来时 spinner 落在槽里、**标题的 x 一个像素都不动**
@@ -357,7 +405,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 
 **`skill` 也是一次普通工具调用，工具卡那一套前端为它一行未改。** 服务端把技能清单与技能正文当 user 消息
 塞进模型的上下文——**2026-09-18 起它们会以 `CUSTOM` 帧出来**、在会话栏里画成一张注入卡（下一节），
-**但客户端不回发它们**：帧落成一个 `data` part，而回发转换只带 text / reasoning / tool-call。
+**但它们不进那场对话**：帧落成一个 `data` part，而会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）——下一轮交给模型的向量里没有注入物的字节。
 除此之外界面上只有一次普通的 `skill` 调用与它的返回。见
 [skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)。
 
@@ -417,7 +465,8 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 
 理由不只是省事：**工具结果同时是模型的上下文**（它是模型读完才决定下一步的那份记录）。把它翻成随
 界面变化的两种语言，等于让同一份记录不再唯一——同一段 run，在两个不同语言的浏览器里，模型看到的
-东西会不一样。这与「服务端不持有会话」是同一个方向：**记录是记录，界面是界面。**
+东西会不一样。这与「会话归服务端、记录只有一份、浏览器只是画它」是同一个方向：**记录是记录，
+界面是界面。**
 
 界面上另一处不翻的是**模型的词汇**：工具名逐字（`read` / `bash` / `todo_write`，见
 [CONTEXT.md](../../CONTEXT.md) 的「工具名的写法」），参数与结果的正文是模型写的，也不翻。
@@ -586,8 +635,9 @@ data part 的 assistant 消息**，id 就是帧自己的 `messageId`（确定性
 
 **怎么跑**用 `cd ui && npm test`（vitest；三条腿与定向跑的完整入口见 `AGENTS.md`）。整套测试的
 **驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,i18n,restore,concurrent,sidebar,session-title}.ts`
-是被它 import 的普通模块（`sidebar` 那份是 `.tsx`：它 `renderToStaticMarkup` 两个抄来的 / 自建的组件）：
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,i18n,restore,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
+是被它 import 的普通模块（`sidebar` / `record` / `window` 那三份是 `.tsx`：它们
+`renderToStaticMarkup` 组件、把渲染出来的那句话读回来）：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。
 - **驱动里钉着用例总数**（`EXPECTED_CASES`）：它是一份契约，让「某个套件从清单里掉了」

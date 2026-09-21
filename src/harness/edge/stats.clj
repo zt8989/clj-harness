@@ -60,16 +60,27 @@
 ;; ---------------------------------------------------------------------- turns
 
 (defn user-ids
-  "The ids of the user messages an INPUT record brings, in order. Ids, not content: two
+  "The ids of the user messages an INPUT record BRINGS, in order. Ids, not content: two
   identical user messages are two turns, and the system message changes between runs,
   so content comparison would be wrong at both ends.
+
+  WHAT AN INPUT BRINGS IS `:added` -- the entries that entered the conversation -- and
+  that is the field the edge has written since ticket 03 of
+  `.scratch/sessions-live-on-the-server`. The distinction is not pedantry: a client
+  that re-sends a question the conversation already holds brings NO turn, and an input
+  line that named the whole conversation would count every earlier turn again on every
+  run. `:messages` is read as well because it is what a client sent under the old
+  contract, when that WAS what the input brought -- an old log keeps counting the way
+  it always did.
 
   PUBLIC, like `incomplete?`, because BOTH READERS need exactly this answer: this
   namespace counts the turns, harness.edge.trajectory groups the items by them. 'What
   counts as a user message in an input' is one rule, and a second copy of it is a second
   chance to disagree about where one turn ends."
   [record]
-  (->> (get-in record [:payload :messages])
+  (->> (get-in record [:payload (if (contains? (:payload record) :added)
+                                  :added
+                                  :messages)])
        (filter #(= "user" (:role %)))
        (keep :id)))
 
@@ -78,9 +89,10 @@
 
   A TURN IS ONE USER MESSAGE and all the output it caused (CONTEXT.md), so a turn
   is counted per user message that had NOT been seen before -- and a single input
-  that brings two new ones brings two turns. A resume sends a second `input` with
-  the same runId and no new user message (the client restates the whole history),
-  and it opens none: that run is the continuation of the turn that parked."
+  that brings two new ones brings two turns. A RESUME sends a second `input` that
+  brings the decision and no user message at all (what the parked run left in the
+  conversation is already there), so it opens none: that run is the continuation of
+  the turn that parked."
   [records]
   (:n (reduce (fn [{:keys [seen n]} record]
                 (if (= "input" (:kind record))

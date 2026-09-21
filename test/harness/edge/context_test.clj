@@ -17,6 +17,7 @@
             [harness.cap.providers :as providers]
             [harness.edge.context :as context]
             [harness.edge.http :as http]
+            [harness.test-support :as support]
             [harness.fake :as fake])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -291,6 +292,7 @@
 
 (defn- with-server [thread-id turns f]
   (providers/use-provider! thread-id (fake/scripted turns))
+  (support/start-session! thread-id)
   (let [stop (http/start! {:port 0})]
     (try
       (f (:local-port (meta stop)))
@@ -299,9 +301,11 @@
         (providers/use-provider! thread-id nil)))))
 
 (defn- send-run! [port thread-id]
-  (let [body (json/write-str {:threadId thread-id :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "看看这个项目"}]
-                              :tools [] :context []})
+  (let [body (json/write-str {:threadId thread-id
+                              ;; THE ACTION'S OWN ENTRIES (ticket 03), not the
+                              ;; conversation: the server holds that.
+                              :append [{:id "u1" :role "user" :content "看看这个项目"}]
+                              :tools []})
         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/agent")))
                  (.header "Content-Type" "application/json")
                  (.header "Accept" "text/event-stream")

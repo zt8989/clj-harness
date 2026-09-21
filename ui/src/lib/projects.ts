@@ -112,18 +112,27 @@ export async function listSidebar(t: Translate): Promise<SidebarListing> {
 }
 
 /// Make one conversation a session of this home, with no project (POST
-/// /api/sessions). This is what the sidebar's "new task" does before a word has
-/// been typed, and it is FIND-OR-CREATE on the server: an id that already exists
-/// -- belonging to a project even -- is left exactly as it is, so this can never
-/// unbind anything.
+/// /api/sessions), and answer the id to use from here on. It is FIND-OR-CREATE on the
+/// server: an id that already exists -- belonging to a project even -- is left exactly
+/// as it is, so this can never unbind anything, and asking twice is asking once.
 ///
-/// ONE CONVERSATION PER CALL, named by the id the CLIENT minted: this product has
-/// never minted ids on the server, and a task is not an exception.
-export async function startTask(threadId: string, t: Translate): Promise<string> {
+/// THE SERVER MINTS THE ID when THREAD-ID is not given (ticket 03 of
+/// `.scratch/sessions-live-on-the-server`), and THE ANSWER IS THE ID either way: a
+/// client that made one up had to be right about a namespace it does not own, and the
+/// run edge refuses an id this home has never heard of.
+///
+/// THREAD-ID IS THEREFORE THE TWO USES THAT MATTER HERE. The page passes the id it
+/// MINTED, at the one moment the two halves of this product meet: immediately before a
+/// task's first run (`app.tsx`'s `registerPending`, through the agent's `ready` hook) --
+/// lazy creation means nothing was written at the click (点击新增不立刻会话，发送才新建),
+/// and the run edge's refusal is what makes the write required before the send. With
+/// nothing to bring, this is how a caller that has no session yet asks for one (a
+/// script, a suite, `test/e2e.ts`): the id comes back from the server.
+export async function startTask(t: Translate, threadId?: string): Promise<string> {
   const res = await fetch(`${API_BASE}sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ threadId }),
+    body: JSON.stringify(threadId === undefined ? {} : { threadId }),
   });
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { threadId: string };
@@ -215,6 +224,14 @@ export async function pickFolder(t: Translate): Promise<string | null> {
 /// makes a session belong to a project, and for a brand-new session it is also
 /// what makes the session exist at all: the store learns about a conversation
 /// when something asks for it to belong somewhere.
+///
+/// THE MOMENT IS THE FIRST RUN, not the click, since lazy creation
+/// (`.scratch/store-backed-sidebar`): the sidebar mints a project session's id
+/// and hands the directory over (`onShowFresh`), and the page binds the two together
+/// immediately before that session's first run -- through the agent's `ready` hook, so
+/// the bind is ordered against the request that would otherwise be refused for naming
+/// an unknown id. One POST per id; a failure is a sentence on the row and is not
+/// retried behind the person's back.
 export async function bindThread(threadId: string, dir: string, t: Translate): Promise<string> {
   const res = await fetch(`${API_BASE}project`, {
     method: "POST",
@@ -224,6 +241,33 @@ export async function bindThread(threadId: string, dir: string, t: Translate): P
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir: string };
   return body.dir;
+}
+
+/// START A CONVERSATION IN DIR (POST /api/project, with no thread id): the server mints
+/// the id AND binds it in one action, and answers the id to use from here on.
+///
+/// ONE ACTION RATHER THAN "mint a task, then bind it". Two calls would be right most of
+/// the time and would leave an UNBOUND conversation behind every time the bind failed.
+/// The route is the one `bindThread` posts to; what differs is that the body names no
+/// thread, which is the server's cue to name it.
+///
+/// NOTHING IN THE PAGE CALLS THIS ANY MORE, and that is the merge's decision rather than
+/// an oversight: the sidebar's "new session" button mints its id locally and writes
+/// nothing (点击新增不立刻会话，发送才新建), and the first send binds it with `bindThread`
+/// -- an ask for an id would be the write lazy creation removed. It is kept because the
+/// route and its one-action promise are still the server's, and a caller that wants the
+/// server to name the conversation (a script, a suite) has no other way to say so; a
+/// dead export is cheaper than a deleted capability. If nothing ever calls it, that is
+/// the day to delete it, not this one.
+export async function startSessionIn(dir: string, t: Translate): Promise<string> {
+  const res = await fetch(`${API_BASE}project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// Take a directory out of this home's project list

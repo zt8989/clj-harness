@@ -211,7 +211,8 @@
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
+                  "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
+                  "todos"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
@@ -364,7 +365,8 @@
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                      "hashline_undo" "projects" "schema_steps" "sessions" "todos"]
+                      "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
+                      "todos"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
@@ -967,7 +969,15 @@
                ;; element -- which is why it is one column and not a row per item;
                ;; the name is chosen against the guard below, where `content` would
                ;; both trip it and say less.
-               "todos"              #{"thread_id" "items" "updated_at"}}
+               "todos"              #{"thread_id" "items" "updated_at"}
+               ;; WHO IS SERVING A CONVERSATION RIGHT NOW (harness.cap.claims): a
+               ;; row per live claim, DELETED when the claim is handed back, and
+               ;; rewritten in place when one process takes over from a process
+               ;; that is gone. It holds no message, no frame and no path -- the
+               ;; three facts about the OWNER, the claim's own token, and when it
+               ;; was taken -- which is why it is state rather than a record.
+               "session_claims"     #{"thread_id" "instance" "token" "pid"
+                                      "started_at" "since"}}
               ;; `titles?` LEFT THIS LIST with `sessions.title` (see the comment above):
               ;; the exact list below is what keeps a column a decision, and a name
               ;; pattern that has to exempt the one column it was written to forbid
@@ -1000,7 +1010,8 @@
       (fn []
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
-                                      "hashline_sessions" "hashline_undo" "todos"}
+                                      "hashline_sessions" "hashline_undo" "todos"
+                                      "session_claims"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= declared-state-tables (set (db/tables)))))

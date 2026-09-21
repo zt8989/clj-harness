@@ -19,53 +19,64 @@
 //
 // One fetch of `GET /api/projects` answers the whole sidebar, and it answers it as
 // TWO BLOCKS: the projects, each with its sessions, and the tasks -- conversations
-// with no project and no memory of one, flat and ungrouped. The store decides which
-// conversations exist, which belong where and which are archived; the tree supplies
-// each log's size and mtime. The client joins nothing -- see `lib/projects.ts` for
-// why that join is the server's.
+// with no project and no memory of one, flat and ungrouped. THE STORE DECIDES ALMOST
+// ALL OF IT, and that is the rule this list is built on (the owner's: 左侧所有会话信息
+// 都是从 sqlite 加载，除了运行状态): which conversations exist, which belong where,
+// which are archived, what each is called and when it was last sent to are sqlite
+// columns. The one other source is the server process's live-runs registry, which
+// answers `running` -- a question no file can answer. NOTHING HERE IS A STAT(): the
+// log tree used to supply a size and an mtime per row, and that whole half is gone
+// (see `lib/projects.ts`, and `.scratch/store-backed-sidebar/spec.md`).
 //
-// THE LIST IS A SNAPSHOT, AND THE UI SAYS SO. Nothing here subscribes to the log
-// tree or the store, so a run that lands while the page is open does not change
-// the numbers until something refreshes: coming back to the window, switching
-// session, or the refresh button. The button exists because the alternative --
-// a list that silently disagrees with the disk -- is worse than one that is
-// visibly a snapshot.
+// THE LIST IS A SNAPSHOT, AND THE UI SAYS SO. Nothing here subscribes to the store,
+// so a run that lands while the page is open does not move its row until something
+// refreshes: coming back to the window, switching session, or the refresh button. The
+// button exists because the alternative -- a list that silently disagrees with the
+// store -- is worse than one that is visibly a snapshot. (The one thing that does
+// chase a change is the session this page has just been typing into; see `asked`.)
 //
 // ----------------------------------------------------------- a new task's shape
 //
-// Starting a conversation is THREE STEPS IN THIS ORDER, and each one is
-// load-bearing:
+// A CLICK WRITES NOTHING. This is the owner's rule (点击新增不立刻会话，发送才新建) as this
+// file implements it: "New task" and a project row's `+` MINT an id in the browser and
+// hand it to the page (`onShowFresh`), which hosts it EMPTY. No request is made, no row
+// exists on the server, and the listing below does not change -- which is why neither
+// button is async any more and neither takes `busy`.
 //
-//   1. mint an id (the client owns ids -- the server has never minted one),
-//   2. REGISTER that id, which is what makes the conversation exist at all -- for a
-//      project session, BIND it (POST /api/project, which is also what makes it
-//      exist); for a task, `POST /api/sessions`, which records it with no project
-//      and no memory of one. Its log does not exist yet, and that is a state the
-//      listing already handles.
-//   3. SHOW that id -- `onShowFresh`, which is the page putting a host on screen
-//      and NOT rebuilding: the id is this client's, it just made it up, and there
-//      is no conversation under it yet.
+// SO WHAT MAKES THE SESSION EXIST? The first RUN does, and the page arranges it: it
+// remembers the directory a minted session belongs to (or `null` for a task) and, in the
+// agent's `ready` hook, registers the id with the server immediately before the run
+// request goes out -- a bind for a project session, `POST /api/sessions` for a task. That
+// is the other half of this merge: the run edge REFUSES a run aimed at an id this home has
+// never been asked to keep (`refuse-unknown-session!`, ADR 0002 decision 9), so the
+// registration could move from the click to just before the send, but it could not simply
+// disappear.
 //
-// Step 3 is a page action rather than a runtime one, and that was the whole of the
+// WHAT IT COSTS, and it is written here because it is the observable part: a new session
+// has no row until its first send has been through the server, so this listing is a
+// snapshot that cannot contain the conversation on screen. The effect further down
+// (`asked`) asks once more once such a session has a title and has stopped running.
+//
+// ONE STEP IS STILL A PAGE ACTION RATHER THAN A RUNTIME ONE, and that was the whole of the
 // parallel-sessions ticket in this file: `runtime.threads.switchToThread` and its
 // `switchToNewThread` sibling are gone, because their effect was to clear the core
 // before refilling it -- and the core that is now streaming belongs to a host that
 // never gets refilled. `onShowFresh` also keeps the id in this component's hands,
-// which step 2 needs; letting the runtime mint one would put it out of reach.
+// which the registration needs: letting the runtime mint one would put it out of reach.
 //
 // A NEW TASK NEEDS NO PROJECT, and that is the rule this feature turned over. The
 // header's button used to start a session in the sidebar's SELECTED project and to
-// refuse outright when this home had no projects ("add a project first"); now it
-// mints an id, registers it as a conversation of this home with no project, and
-// shows it. It lands in the TASK LIST above the projects a moment later. The old
-// refusal was not a nudge -- it was the shape of the product, and the two sentences
-// that expressed it (`refusal.noProject`, `refusal.noProjectSelected`) are gone from
-// both catalogs rather than left behind as dead keys.
+// refuse outright when this home had no projects ("add a project first"); now it mints
+// an id and shows an empty conversation belonging to no project. It lands in the TASK LIST
+// above the projects once the first send has created it. The old refusal was not a nudge
+// -- it was the shape of the product, and the two sentences that expressed it
+// (`refusal.noProject`, `refusal.noProjectSelected`) are gone from both catalogs
+// rather than left behind as dead keys.
 //
-// THE SAME STEPS STILL RUN FROM A PROJECT'S OWN ROW, and that button is unchanged:
-// it starts a session in THAT project, which is now the ONLY way to say so. The two
-// buttons used to be one verb with a derived destination; they are two verbs now,
-// which is what makes "where did this land" a question nobody has to ask.
+// THE SAME CLICK FROM A PROJECT'S OWN ROW hands that project's path over with the id, so
+// the session belongs to THAT project the moment it exists -- which is now the only way to
+// say so. The two buttons used to be one verb with a derived destination; they are two
+// verbs now, which is what makes "where did this land" a question nobody has to ask.
 //
 // The row's button REPLACES THE SESSION COUNT that used to sit there. The count
 // was a number you could read and do nothing with, drawn where an action belongs,
@@ -122,7 +133,8 @@
 // -- that is the kind of wrong-looking-right state nobody notices until they type
 // into it. So archiving what you are reading switches to the project's most
 // recent UNARCHIVED session, and when the project has none left, it does what
-// "New task" does: mints an id, binds it to this project and switches to it. That
+// "New task" does: mints an id, hands this project's path over so the first send binds
+// it, and switches to it. That
 // is the honest landing place, because it is exactly where pressing New task
 // would have left you -- on an empty conversation in the project you are standing
 // in. It is also why there is no "you archived the last one" special case: the
@@ -246,6 +258,11 @@ import {
   projectName,
   removeProject,
   setArchived,
+  // NEITHER `startTask` NOR `startSessionIn` IS IMPORTED, and that is the whole of the
+  // brand-header half of this merge: every "new session" button below MINTS its id and
+  // hands it to the page (`onShowFresh`), which registers it immediately before the first
+  // run (`app.tsx`'s `registerPending`). Nothing here posts to the server any more, so
+  // nothing here can fail -- see the header's "a new task's shape".
   type ProjectSummary,
   type SessionSummary,
   type SidebarListing,
@@ -268,7 +285,7 @@ type SidebarProps = {
   /// A session nothing has reported on reads `IDLE`.
   statuses: Record<string, SessionStatus>;
   /// WHAT THIS PAGE ITSELF CALLS EACH SESSION, keyed by id -- the titles the sessions
-  /// it is holding have derived from their own runtimes (`app.tsx`'s `liveTitles`).
+  /// it has MINTED have derived from their own runtimes (`app.tsx`'s `liveTitles`).
   ///
   /// IT EXISTS BECAUSE THE LISTING IS A SNAPSHOT. `SessionSummary.firstUserText` is
   /// the store's copy and answers for the forty rows this page has never opened, but
@@ -277,6 +294,12 @@ type SidebarProps = {
   /// runtime, so it knows better, and this is the same shape `statuses` above already
   /// takes: the page's registry wins over a snapshot from the server, because the
   /// page is closer to the fact.
+  ///
+  /// A SESSION THIS PAGE DID NOT MINT IS NEVER IN HERE, and the difference is main's
+  /// window: for a session opened from this very list, the runtime holds a TAIL PAGE,
+  /// whose first user message comes from the middle of the conversation -- a name this
+  /// row must not be given. The page speaks only for a conversation it started itself
+  /// (`app.tsx`'s `minted`), and the store answers for everything else.
   liveTitles: Record<string, string>;
   /// The refusals that came from SESSIONS rather than from this component -- a
   /// history that would not load, keyed by the session it would not load for.
@@ -295,7 +318,8 @@ type SidebarProps = {
   /// created by its first SEND, so minting one here writes nothing and the listing has
   /// no row to show. The second argument is therefore what the page has to remember on
   /// this session's behalf -- the directory it belongs to, or null for a task -- and it
-  /// is applied at that first send (`app.tsx`, `showFresh`). Nothing is bound here: this
+  /// is applied at that first send (`app.tsx`, `showFresh` remembers it and
+  /// `registerPending` applies it). Nothing is bound here: this
   /// component is not the thing that sees the message arrive.
   onShowFresh: (threadId: string, projectDir: string | null) => void;
   /// EVERY LISTING THIS COMPONENT LANDS, handed up as it arrives. The page needs one
@@ -554,7 +578,7 @@ export const Sidebar: FC<SidebarProps> = ({
         //
         //   * a project session -- the same PROJECT's most recent unarchived
         //     session, which is the first one the server listed (the listing is
-        //     newest-first), or, when there is none, the three steps that project
+        //     newest-first), or, when there is none, the two steps that project
         //     row's own button runs;
         //   * a task -- the most recent unarchived TASK, or a brand-new one.
         //
@@ -624,8 +648,8 @@ export const Sidebar: FC<SidebarProps> = ({
         // when this was the last project -- a BRAND-NEW thread with no project
         // at all. That last branch is `onShowFresh` with an id nobody bound --
         // minted here rather than by the runtime, which no longer mints: there is
-        // nothing left to bind to, and the server tolerates a session with no
-        // project by design. What neither branch does is leave the chat on the
+        // nothing left to bind to, and a session with no project is a state this
+        // home keeps by design. What neither branch does is leave the chat on the
         // project just removed, or invent a project to hold the new session.
         const rest = projects.filter((p) => p.path !== project.path);
         const next = rest
@@ -788,8 +812,8 @@ export const Sidebar: FC<SidebarProps> = ({
   /// argument instead, which is where the page needs it.
   ///
   /// NOTHING HERE CAN FAIL, so there is no `try` and no sentence to land on the row. What
-  /// CAN fail is the bind at send time, and that failure is the page's to report (it lands
-  /// on the row once the store has one).
+  /// CAN fail is the bind at send time -- and that failure is the page's to report, before
+  /// the run goes out and on the row the store then has (`app.tsx`'s `registerPending`).
   const newSession = (project: ProjectSummary): void => {
     const id = crypto.randomUUID();
     setProjectError(null);
@@ -805,8 +829,12 @@ export const Sidebar: FC<SidebarProps> = ({
   /// happened to refresh (a switch, a reload, the button). The condition is exactly the
   /// one that can be true and mean it:
   ///
-  ///   * THIS PAGE HAS A TITLE FOR IT (`liveTitles`) -- which is only ever set from the
-  ///     runtime's own first user message, so it means a send has already happened;
+  ///   * THIS PAGE HAS A TITLE FOR IT (`liveTitles`) -- which the page sets only from the
+  ///     runtime's own first user message AND only for a session the page itself minted
+  ///     (`app.tsx`'s `minted`), so it means a send has already happened in a conversation
+  ///     this page started. A session opened from this list never appears here: what its
+  ///     host holds is a WINDOW, whose first user message is from the middle of the
+  ///     conversation, and the page refuses to name a row with that;
   ///   * IT IS NOT IN THE LISTING -- the store's answer is still the old one;
   ///   * AND IT IS NOT RUNNING -- the run has finished, so the row it wrote is committed
   ///     and a read that races it is a read that fails.

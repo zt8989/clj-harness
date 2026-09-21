@@ -339,9 +339,34 @@
            {:pending nil :out []}
            messages)))
 
-(defn- context-message [context]
+(def context-entry-id
+  "The id `context-entry` stamps on the opening context: a NAME rather than a generated
+  id because the conversation deduplicates by id (`harness.edge.sessions/append!`), so a
+  session born twice ends up with one opening block.
+
+  EXPORTED BECAUSE IT IS ALSO A READER'S QUESTION. The block is an ordinary user message
+  by design, so a reader asking 'what did the PERSON first say' has to tell it apart from
+  the client's own turns -- `first-user-text` does, and a literal copied into that reader
+  would be a second place deciding which message is ours."
+  "session-context")
+
+(defn context-entry
+  "The AG-UI message a session's opening CONTEXT becomes, or nil when there is none.
+
+  IT IS AN ORDINARY USER MESSAGE WITH A NAME. The session owns this the way it owns
+  everything else it was born with: the message goes into the conversation once
+  (`harness.edge.sessions`), so every later run continues from it instead of being handed
+  it again -- which is what keeps it inside the provider's cached prefix rather than
+  appended at the end of a conversation that has moved on.
+
+  THE ID IS FIXED rather than generated, because the conversation it enters is
+  deduplicated by id (`harness.edge.sessions/append!`): a session that is born twice --
+  a retry of the very first action, an id that was created and asked for again -- must
+  end up with one opening context and not two."
+  [context]
   (when (seq context)
-    {:role "user"
+    {:id      context-entry-id
+     :role    "user"
      :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
 
 ;; ------------------------------------------------------------ input modality
@@ -412,27 +437,36 @@
       :else nil)))
 
 (defn first-user-text
-  "WHAT THE PERSON FIRST SAID IN THIS RUN, or nil: the first `user` message in INPUT's
-  messages, trimmed and clipped to a length a store may hold.
+  "WHAT THE PERSON FIRST SAID IN MESSAGES, or nil: the first `user` message, trimmed
+  and clipped to a length a store may hold.
+
+  IT IS HANDED THE MESSAGES, NOT A RUN BODY. A run no longer carries the conversation
+  (ADR 0002 decision 9: the body's `messages` retired, and `harness.edge.http` refuses a
+  body that names it), so a run body has nothing for this to read. The caller is the one
+  that holds the conversation -- `harness.edge.http/run-agent!` hands over the session's
+  own messages plus the entries THIS action adds, in that order -- and what it gets back
+  is the first turn of the conversation rather than of the request.
 
   IT IS THE FIRST USER MESSAGE AND NOT THE LAST, which is what makes it usable as a
-  session's name: a run carries the whole conversation, so this answers the same
-  thing on the first turn and on the fortieth -- the sidebar's title for a session
-  that ran before this harness kept titles is picked up the next time it runs.
+  session's name: the sequence the caller hands over begins at the conversation's
+  beginning, so this answers the same thing on the first turn and on the fortieth -- the
+  sidebar's title for a session that ran before this harness kept titles is picked up
+  the next time it runs.
 
   ONLY `user` ROLES COUNT, for the reason `carried-input-types` gives one screen up:
   everything else in the vector is ours -- the system prompt, the assistant's own
-  turns, tool results. The user messages in here are the CLIENT's, and only the
-  client's: the context message and the instruction-file blocks this edge appends are
-  spliced by `inbound` AFTER this point and never reach an input frame (a log's first
-  `input` record holds exactly what the browser sent -- measured against the real
-  home on 2026-09-21). So 'the first user message' needs no further distinguishing.
+  turns, tool results. The user messages in it are the CLIENT's, with ONE exception
+  that is skipped by name: the opening context this edge splices in
+  (`context-entry`) is an ordinary user message by design, and it is not something a
+  person said. Skipped by `context-entry-id` rather than by position, because it enters
+  the conversation at birth and every later run sees it wherever the birth put it.
 
   BLANK TURNS ARE SKIPPED RATHER THAN NAMED: the first message that SAYS something is
   the answer, which is what 'the first thing they said' means when the first thing
   they sent was an empty line."
-  [input]
-  (let [said (->> (:messages input)
+  [messages]
+  (let [said (->> messages
+                  (remove #(= context-entry-id (:id %)))
                   (filter #(= "user" (:role %)))
                   (keep message-text)
                   (map str/trim)
@@ -461,9 +495,9 @@
   immediately after, which is where a person would put it.
 
   IT COSTS THE PREFILL NOTHING. The prompt cache keys on a stable PREFIX: that prefix
-  is the system message plus the conversation the client re-states every turn, and the
-  injections were never part of it -- they used to sit between the two and are now
-  behind both, which leaves the prefix exactly as long as the client made it.
+  is the system message plus the conversation as the session has it, and the injections
+  were never part of it -- they used to sit between the two and are now behind both,
+  which leaves the cacheable prefix exactly as long as the conversation made it.
 
   An EMPTY BLOCKS returns MSGS ITSELF, not an equal vector: this is the path every
   caller takes when a session has no instruction files and no skills, and the shape of
@@ -475,17 +509,25 @@
     (into msgs blocks)))
 
 (defn inbound
-  "A client's AG-UI messages -> the provider's message vector.
+  "A conversation's AG-UI messages -> the provider's message vector.
   PROMPT is the FROZEN system prompt text. A leading system message is replaced
-  by it; otherwise it is prepended. CONTEXT is per-run and must never touch the
-  system message -- the provider's prefill (prompt cache) keys on a stable
-  prefix, so a per-run system prompt would miss it every call -- so it rides as
-  a trailing user message instead, after everything the client sent.
+  by it; otherwise it is prepended. CONTEXT, when given, becomes the message the
+  session was born with (`context-entry`), placed after the messages that are already
+  in the conversation and before this run's blocks. IT MUST NEVER TOUCH THE SYSTEM
+  MESSAGE -- the provider's prefill (prompt cache) keys on a stable prefix, so a
+  per-run system prompt would miss it every call.
+
+  A RUN NO LONGER CARRIES THE CONVERSATION and no longer carries a per-run context
+  either (ticket 03 of `.scratch/sessions-live-on-the-server`): the edge hands over the
+  session's messages, which already hold the opening context, and CONTEXT is what the
+  VERY FIRST of those runs passes so that the message enters the conversation. It stays
+  an argument because this is a converter and the caller is the one that knows whether
+  the conversation has a beginning yet.
 
   BLOCKS are what this run was handed on top of the conversation -- the session's
   instruction files and skills catalog (harness.cap.preamble), already rendered. They
-  go AFTER the client's messages, in the order the model should read them: the
-  question first, then the material for it. They are ordinary user messages: nothing
+  go AFTER the conversation, in the order the model should read them: the question
+  first, then the material for it. They are ordinary user messages: nothing
   in this namespace becomes an AG-UI frame (the edge emits one CUSTOM frame per block
   it spliced, which is how a person sees them -- see `injected-frame`).
 
@@ -495,12 +537,10 @@
   the same thing through it."
   ([messages prompt context] (inbound messages prompt [] context))
   ([messages prompt blocks context]
-   (let [msgs (absorbed messages)
+   (let [msgs (absorbed (cond-> (vec messages)
+                          (seq context) (conj (context-entry context))))
          sys  {:role "system" :content prompt}
          msgs (if (= "system" (get-in msgs [0 :role]))
                 (assoc msgs 0 sys)
-                (into [sys] msgs))
-         msgs (tail-blocks msgs blocks)]
-     (if-let [ctx (context-message context)]
-       (conj msgs ctx)
-       msgs))))
+                (into [sys] msgs))]
+     (tail-blocks msgs blocks))))

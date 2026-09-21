@@ -89,7 +89,7 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在**客户端消息之后**；注入物发的是一条 **`CUSTOM` 帧**（客户端画成一张卡、不回发，见 [client](architecture/client.md#注入物在会话栏里的一张卡)） |
+| `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在**这场对话之后**；注入物发的是一条 **`CUSTOM` 帧**（客户端画成一张卡，而**卡不进对话**——只给屏幕，见 [client](architecture/client.md#注入物在会话栏里的一张卡)） |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
 | `edge.ui` | **根上那一页**：把 `ui/dist`（`npm run build` 的产物）当静态资源发出去（只 `GET`/`HEAD`、只在 `/api` 之外、不回落 `index.html`），以及没有构建时那句指名道姓的 404。`clojure -M:run` 因此不用另外起 vite 也是一个完整应用 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |

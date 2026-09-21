@@ -62,8 +62,10 @@
                    both files are left as they were. Said once per session per
                    process, not beside every record.
 
-  All of it is a RECORD, never a source of truth -- the client owns the conversation,
-  and the server never reads the file back."
+  All of it is a RECORD, never a source of truth. The conversation is the SERVER'S --
+  it lives in `harness.edge.sessions`, is born from this log when a process has none,
+  and is continued from memory after that (ADR 0002). The file is still not read
+  DURING a run: what a run continues from is the session, not the bytes."
   (:require [clojure.core.async :as async]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -78,9 +80,12 @@
             [harness.cap.providers :as providers]
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
+            [harness.cap.claims :as claims]
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
+            [harness.edge.record :as record]
+            [harness.edge.sessions :as sessions]
             [harness.edge.context :as context]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
@@ -197,22 +202,32 @@
 ;; ------------------------------------------------------------------- logging
 
 (defonce ^:private log-lock
-  ;; One line is one JSON object, and a reader parses the file line by line --
-  ;; so a half-written line is not a smaller record, it is a broken file. Most
-  ;; writers are the run's single consumer thread, but a hook fires where its
-  ;; point is (a tool call's PostToolUse runs on that call's own thread), so two
-  ;; lines can now be in flight at once. Serializing the append is what keeps the
-  ;; writer's guarantee true without asking every caller to know about it.
+  ;; IT DOES NOT SERIALIZE APPENDS ANY MORE. One line is one JSON object and a reader
+  ;; parses the file line by line, so a half-written line is not a smaller record, it
+  ;; is a broken file -- but that is the record writer's job now: one consumer thread
+  ;; appends every line (`harness.edge.record`, ticket 02), so there is exactly one
+  ;; writer by construction and nothing to serialize.
   ;;
-  ;; IT ALSO GUARDS WHERE A LINE GOES, NOT JUST THE APPEND. `log!` chooses the file
-  ;; from the session's binding and a bind (`/api/project`) both changes that binding
-  ;; and MOVES the file it already has -- so those two must not interleave, or a line
-  ;; lands in a workspace the conversation has just left. Both take this lock (see
-  ;; `log!` and `project-post`), which is what makes "one conversation is one file"
-  ;; survive a bind that arrives mid-run -- the ordinary case now that the sidebar
-  ;; binds a session at its first send. The pair cannot deadlock: nothing that holds
-  ;; a store transaction takes this lock (no `log!` call in this namespace runs
-  ;; inside a `with-transaction`), so the order is only ever lock -> store.
+  ;; WHAT IT STILL GUARDS IS WHERE A LINE GOES. The writer serializes the bytes, not
+  ;; the PLACEMENT: `log!` resolves a session's File from its binding on a caller's
+  ;; thread, while `project-post` both changes that binding (`project/bind!`) and MOVES
+  ;; the file it already has (`move-log!`). Those two must not interleave, or a line is
+  ;; addressed to a workspace the conversation has just left and the move carries the
+  ;; file out from under it -- one conversation in two files, which replay, rebuild and
+  ;; the eval reader all refuse to reconstruct. That is the ordinary case now, not an
+  ;; exotic one: the sidebar binds a session at its first send, i.e. while a run is
+  ;; writing. Both critical sections take this lock (see `log!` and `project-post`), and
+  ;; it is held around the resolution and the hand-over -- never across the write.
+  ;;
+  ;; THE ORDER IS lock -> store, never the reverse: `log-file-for` reads the store under
+  ;; it, so nothing that holds a store transaction may take it, and no `log!` call in
+  ;; this namespace runs inside a `with-transaction`. NOTHING HERE WAITS ON THE WRITER
+  ;; either -- the consumer takes no lock of ours -- so a bind can never deadlock against
+  ;; the very run whose record it is moving; the drain the bind takes before a moving
+  ;; `move-log!` is what closes the one hole the lock cannot (a line handed over just
+  ;; before it, still queued) and it is bounded for the same reason. What would break
+  ;; without it: the bind-vs-writer case this lock exists for
+  ;; (`a-bind-that-arrives-while-the-writer-is-mid-run-leaves-one-file`).
   (Object.))
 
 (def unbound-workspace
@@ -229,12 +244,12 @@
   "The workspace directory for a project IDENTITY -- a canonical path, or nil for
   a session that belongs to no project.
 
-  THIS IS THE ONE EXPRESSION THAT TURNS A PROJECT INTO A DIRECTORY. Two callers
-  need it and they must not drift: the writer, which asks it about a session's
-  project, and the sidebar's listing, which asks it about every project at once
-  and then looks in the result. It reads from the CANONICAL path -- the project's
-  identity, not the spelling a session was bound with -- so every session of one
-  project lands in one workspace however that directory was spelled."
+  THIS IS THE ONE EXPRESSION THAT TURNS A PROJECT INTO A DIRECTORY, and since the
+  sidebar's listing stopped touching the tree (`projects-get`) the writer is its
+  only caller -- which is worth knowing before a second one is added: the two must
+  not drift. It reads from the CANONICAL path -- the project's identity, not the
+  spelling a session was bound with -- so every session of one project lands in
+  one workspace however that directory was spelled."
   [identity]
   (str (io/file (home/projects-dir)
                 (if (some? identity)
@@ -252,8 +267,9 @@
   both walk the tree and ask the FILESYSTEM where a log is.
 
   A session the store has never heard of is normal here, not an error: the AG-UI
-  edge accepts an id the client owns and the store has not been told about, and
-  its log goes to the reserved workspace."
+  edge names ids the server minted (and the sidebar's registry may not know one
+  yet -- a task is registered when it is created, but the two stores are not the
+  same table), and its log goes to the reserved workspace."
   [thread-id]
   (workspace-for (project/identity-for thread-id)))
 
@@ -336,8 +352,23 @@
   not go -- leaves both files as they were and says so in an audit line. A nil
   parent (nowhere to write) is the only silent exit.
 
-  CALLED FROM log! WITH log-lock HELD, so its appends serialize with every other
-  writer in this process."
+  IT ANSWERS WHETHER IT CHANGED F, because the writer measures a thread's record
+  offset in that file: a carried segment (or an audit line about a refused one)
+  moves every offset after it, so the writer re-bases when this answers true
+  (`harness.edge.record/prepare-with!`). Nothing to do answers nil.
+
+  CALLED BY THE RECORD WRITER'S CONSUMER BEFORE EVERY LINE (`harness.edge.record`),
+  which is this process's only writer -- that single writer is why this needs no lock
+  of its own. (The one thing it does not serialize is where a line is ADDRESSED, and
+  that is decided before the queue, in `log!`; see `log-lock`.) THE CALL IS PER LINE,
+  THE WORK IS AT MOST ONCE:
+  the guard above is what makes it so, and the ordering it exists for is only that a
+  carried segment precedes the line about to be written. Asking every time is not
+  belt-and-braces -- the `when-not` cannot answer for a line that has not been
+  written yet, and a segment that appears while this thread is running (a store
+  rebuilt under it) is carried by the NEXT line, not by the one that has already
+  gone. A thread with no leftover segment pays one `exists` on a file that is not
+  there."
   [thread-id ^java.io.File f]
   (when-not (contains? @carry-back-checked thread-id)
     (try
@@ -359,18 +390,20 @@
                     to         (.getAbsolutePath ^java.io.File f)]
                 (cond
                   (nil? src-range)
-                  (carry-audit! f "log/carry-refused"
-                                {:reason "the leftover segment holds no timestamped lines, so the two ranges cannot be checked"
-                                 :from from :to to})
+                  (do (carry-audit! f "log/carry-refused"
+                                    {:reason "the leftover segment holds no timestamped lines, so the two ranges cannot be checked"
+                                     :from from :to to})
+                      true)
 
                   (and dest-range (not (<= (second dest-range) (first src-range))))
-                  (carry-audit! f "log/carry-refused"
-                                {:reason (str "the two files' timestamps overlap, so appending would read as one conversation out of order"
-                                              " (the conversation's file ends at " (second dest-range)
-                                              ", the leftover segment begins at " (first src-range) ")")
-                                 :from from :to to
-                                 :destination-last (second dest-range)
-                                 :segment-first (first src-range)})
+                  (do (carry-audit! f "log/carry-refused"
+                                    {:reason (str "the two files' timestamps overlap, so appending would read as one conversation out of order"
+                                                  " (the conversation's file ends at " (second dest-range)
+                                                  ", the leftover segment begins at " (first src-range) ")")
+                                     :from from :to to
+                                     :destination-last (second dest-range)
+                                     :segment-first (first src-range)})
+                      true)
 
                   :else
                   (let [body    (slurp source :encoding "UTF-8")
@@ -386,7 +419,8 @@
                                      :kept-as (.getAbsolutePath ^java.io.File renamed)})
                       (carry-audit! f "log/carry-refused"
                                     {:reason "the segment was appended but its file could not be renamed; both copies remain"
-                                     :from from :to to})))))))))
+                                     :from from :to to}))
+                    true)))))))
       (catch Throwable t
         (try
           (carry-audit! f "log/carry-refused"
@@ -395,26 +429,41 @@
                          :to   (.getAbsolutePath ^java.io.File f)})
           (catch Throwable _ nil))))))
 
-(defn- log! [thread-id run-id kind payload]
-  (let [line (str (json/write-str {:ts (System/currentTimeMillis)
-                                   :runId run-id :kind kind :payload payload}) "\n")]
-    (locking log-lock
-      ;; WHERE THE LINE GOES IS DECIDED UNDER THE SAME LOCK THAT WRITES IT, and that is
-      ;; not tidiness: the answer comes from the store, a bind can change the store at any
-      ;; moment, and a bind MOVES the file (`move-log!`). A file chosen before the lock
-      ;; would be a decision made against a binding that may already be gone -- the line
-      ;; would be appended to the old workspace after the move, which is the one thing
-      ;; that is not allowed to happen: one conversation, one file. Under the lock the two
-      ;; writers of that fact are serialized, so either the line lands in the old file and
-      ;; the move carries it along, or the binding is already in force and the line lands
-      ;; in the new one.
-      (let [f (log-file-for thread-id)]
-        (.mkdirs (.getParentFile f))
-        ;; BEFORE the record: a session whose binding came back after the store was
-        ;; rebuilt gets its unbound segment carried into THIS file first, so the line
-        ;; about to be written follows the segment rather than landing after a hole.
-        (carry-back! thread-id f)
-        (spit f line :append true :encoding "UTF-8")))))
+(defn- log!
+  "The line goes to the record writer, which appends it off this thread's own
+  path (`harness.edge.record`). NOTHING HERE TOUCHES THE FILE: the File is
+  resolved here -- where a session's record belongs is a fact about its project,
+  and this is the namespace that joins the two -- and the bytes are the writer's.
+
+  That the file is resolved on THIS thread is deliberate: `home`'s root can be
+  moved by a test's binding, and a binding is per-thread. A consumer thread that
+  resolved it itself would write to whatever root the process had, not the one
+  the caller is running under.
+
+  AND THE RESOLUTION IS THE HALF THE SINGLE WRITER DOES NOT DO, which is why it
+  happens under `log-lock`: the appends cannot interleave, but WHERE a line goes is
+  decided here, on a caller's thread, while a bind (`/api/project`) rewrites the
+  binding and MOVES the file (`move-log!`). Resolved outside the lock, a line could
+  be addressed to a workspace the conversation has just left, and the move would
+  then carry the file out from under it -- one conversation, two files. The lock is
+  released as soon as the line is handed over; it is never held across the write.
+
+  LANDS, WHEN GIVEN, IS CALLED WITH THE RECORD OFFSET THE LINE GOT once it is on disk
+  (`harness.edge.record/append!`), which is how a conversation's entries are numbered:
+  the edge attaches it to the lines that CARRY entries -- an action's input line, and
+  the terminal frame of its run -- and hands the number to
+  `harness.edge.sessions/land!`."
+  ([thread-id run-id kind payload]
+   (log! thread-id run-id kind payload nil))
+  ([thread-id run-id kind payload lands]
+   (let [line (str (json/write-str {:ts (System/currentTimeMillis)
+                                    :runId run-id :kind kind :payload payload}) "\n")]
+     (locking log-lock
+       ;; `mkdirs` and the carry-back are the writer's now: the consumer creates the
+       ;; parent before every line, and runs the carry-back as its prepare step
+       ;; (`record/prepare-with!`, installed in `start!`). Doing either here would be a
+       ;; second place deciding when a file exists and what it already holds.
+       (record/append! thread-id (log-file-for thread-id) line lands)))))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -514,24 +563,14 @@
   (let [[before _] (swap-vals! a conj thread-id)]
     (not (contains? before thread-id))))
 
-(defonce ^:private live-runs
-  (atom {}))
-;; thread-id -> {:run-id ..}: the runs THIS PROCESS has started and not yet finished.
-;;
-;; PROCESS-LOCAL, AND THAT IS THE WHOLE POINT. A run is a go block on this JVM's
-;; threads and nothing about it is on disk, so 'this conversation is being answered
-;; right now' is a fact no reader of the log can state: a jsonl with an input and no
-;; terminal frame is a run still going OR a process that was stopped, and the two are
-;; one file (harness.edge.replay/open-runs can only count lines -- see
-;; docs/architecture/home-and-storage.md). The file cannot tell them apart; this can,
-;; and the readers that have to choose between them ask HERE rather than guessing.
-;;
-;; ONE KEY PER THREAD, holding the run id rather than a bare true: `unregister-run!`
-;; compares ids instead of dissoc'ing blind, so a run that ends cannot erase a
-;; registration that is not its own -- two runs of one thread are the ordinary case
-;; (two tabs, any client that is not this UI), and the gate that refuses the second
-;; one is .scratch/session-after-refresh's ticket 05. Until it lands, this must not
-;; become a way for one run to make another invisible.
+;; A RUN'S LIVENESS IS THE SESSION TABLE'S NOW (ticket 05, merging ticket 01's correction
+;; 3). This namespace used to keep `live-runs`, a second registry of 'this process is
+;; answering thread X', beside the session table's own `:runs` pin -- two homes for one
+;; fact, and two ways for it to be wrong. They were always the same question: a run is
+;; this process's, it pins the session so the sweeper leaves it alone, and it is what the
+;; sidebar row, the composer's gate, the door's second-run refusal and the read side's 'may
+;; I close this off' all ask. `harness.edge.sessions` owns it; the answers below are the
+;; edge's spelling of it, kept because every caller here reads better for them.
 
 (defn running?
   "Is a run of THREAD-ID alive in this process right now?
@@ -545,13 +584,18 @@
   A THREAD ID IS COMPARED AS A STRING: ids arrive from JSON, from a path segment and
   from a map key, and this is a lookup rather than a validation. Nil and the empty
   string are not session ids anyone mints; they answer false."
-
   [thread-id]
-  (contains? @live-runs (str thread-id)))
+  (sessions/running? thread-id))
+
+(defn- running-run-id
+  "The run id THREAD-ID's live run was registered under, or nil. FOR A REFUSAL that has
+  to say what is in the way: the client that got a 409 did not choose its run id (the
+  server mints it), so the only useful name here is the one already going."
+  [thread-id]
+  (sessions/running-run-id thread-id))
 
 (defn- register-run!
-  "Record that THREAD-ID's run RUN-ID is alive in this process, replacing any earlier
-  registration for that thread.
+  "Record that THREAD-ID's run RUN-ID is alive in this process.
 
   CALLED WHERE THE RUN ACTUALLY STARTS -- beside the `run/start` line, once the
   provider resolved -- and not at the top of `run-agent!`. A run that never started
@@ -561,31 +605,18 @@
   its thread claiming to be running for the life of the process, and every reader of
   that answer -- the composer's gate, the read side's decision to close a record off
   -- would be wrong forever rather than briefly."
-
   [thread-id run-id]
-  (swap! live-runs assoc (str thread-id) {:run-id (str run-id)}))
+  (sessions/run-started! thread-id run-id))
 
 (defn- unregister-run!
   "Forget THREAD-ID's run RUN-ID -- if that is the run this thread has registered.
-
-  PRESENCE, THEN DISSOCIATE, and no `update-in` with a default in sight: updating a
-  removed key RESURRECTS it as a map of nils (.scratch/bash-lifetime paid for that
-  lesson), and `running?` would then read a finished run as alive. Comparing the run
-  id is the other half -- a bare `(dissoc m k)` would let the older of two runs on one
-  thread take the newer one's registration down with it.
 
   IDEMPOTENT ON PURPOSE: every ending calls it, and one run can reach two of them on
   the way out (a terminal frame, and then a channel that closes; a throw after the
   terminal was dispatched). The second call is a no-op, so 'exactly once' is a
   property of the shape rather than something each call site has to arrange."
-
   [thread-id run-id]
-  (let [k (str thread-id)]
-    (swap! live-runs
-           (fn [m]
-             (if (= (str run-id) (:run-id (get m k)))
-               (dissoc m k)
-               m)))))
+  (sessions/run-finished! thread-id run-id))
 
 (defn- log-messages!
   "One \"message\" line per provider-shaped message, VERBATIM. The submitted and
@@ -669,7 +700,20 @@
   [thread-id run-id ch state origin]
   (let [first? (atom true)]
     (fn [frame]
-      (log! thread-id run-id "event" frame)
+      ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the
+      ;; run's messages into the conversation at this same moment, and the record's
+      ;; offset of this line is the number they are given (`sessions/land!`). The line is
+      ;; logged before `settle!` runs, so the number is already on its way back when the
+      ;; entries appear -- and `land!` is idempotent and by group, so either order works.
+      (log! thread-id run-id "event" frame
+            (when (contains? terminal (:type frame))
+              (fn [offset] (sessions/land! thread-id run-id offset))))
+      ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the
+      ;; session's history is what this run was handed, and these frames are what came
+      ;; of it. Collected HERE because this is the one place that sees every frame
+      ;; exactly once, and settled at the terminal -- a half-written answer is not a
+      ;; turn, so the conversation changes when the run does.
+      (swap! state update :frames conj frame)
       (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
                              StandardCharsets/UTF_8)
             head  (when @first?
@@ -683,8 +727,14 @@
           ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS, and the emitter is
           ;; the only place that sees it: this is where the registry stops saying the
           ;; thread is running, rather than at whoever happens to drain the channel
-          ;; next (harness.edge.http/live-runs -- the fact the sidebar row reads).
+          ;; next (harness.edge.sessions/running? -- the fact the sidebar row reads).
           (unregister-run! thread-id run-id)
+          ;; AND THE CONVERSATION IS NOW WHAT IT SAYS. Before the frame is sent, so that
+          ;; the client that reads this terminal and immediately sends its next action
+          ;; finds the answer already in the history -- the window between 'the run
+          ;; ended' and 'its words are in the conversation' is one a fast client would
+          ;; otherwise be racing this process through.
+          (sessions/settle! thread-id run-id (:frames @state))
           (swap! state assoc :terminal (:type frame)))
         (hk/send! ch (or head body) last?)
         (when last?
@@ -759,9 +809,13 @@
   word. Same standing as the project fence: this stops a slip, and the failure it
   prevents is a confusing error message, not an exploit.
 
+  IT TAKES THE ENTRIES THEMSELVES, not a run body: what is inspected is what THIS
+  action adds, and since ticket 03 that is not a field of the request but the list the
+  edge built for it (`:append` -> the entries that actually entered the conversation).
+
   Returns nil when the run may proceed, so the caller reads as a guard clause."
-  [input provider]
-  (let [bad (ag/undeclared-input (:messages input) (:input provider))]
+  [entries provider]
+  (let [bad (ag/undeclared-input entries (:input provider))]
     (when (seq bad)
       (throw (ex-info (str "model " (pr-str (or (:model provider) "(unnamed)"))
                            " does not accept " (pr-str (mapv name bad))
@@ -799,23 +853,65 @@
       (hook/emit :instructions-loaded {:path path}))
     (preamble/messages gathered)))
 
-(defn- run-agent! [ch state input origin]
+(defn- run-agent!
+  "Drive ONE run: log its input, set the conversation up, and stream what comes back.
+
+  RUN-ID IS AN ARGUMENT rather than a field of INPUT, and after ticket 03 that is the
+  whole point: the id names a run in THIS process and is minted at the door
+  (`handle-run`), so it is not something the body has and not something a client can
+  say. It goes to the record as the log line's own `:runId`, not inside the payload."
+  [ch state input run-id origin]
   (let [thread-id (str (:threadId input))
-        run-id    (str (:runId input))
+        run-id    (str run-id)
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
         emit    (runner thread-id run-id ch state origin)
-        convert (ag/outbound thread-id run-id)]
-    (log! thread-id run-id "input" input)
+        convert (ag/outbound thread-id run-id)
+        ;; WHAT THIS RUN CONTINUES FROM, read once, here, before anything starts. The
+        ;; session holds the conversation (harness.edge.sessions); the client no longer
+        ;; sends it. What the client DOES send is this action's own entries (`append`),
+        ;; and they go into the session BEFORE the run is set up, so a run that then
+        ;; fails (no provider, a refused modality) still leaves the question in the
+        ;; conversation -- which is where the record's own input line puts it.
+        ;;
+        ;; AND THE OPENING CONTEXT IS ONLY EVER TAKEN ONCE, at the birth of the
+        ;; conversation -- that is what makes it part of the history every later run
+        ;; continues from, instead of a message re-appended (and re-paid for) on every
+        ;; run. A session that already has messages has already been born.
+        ;;
+        ;; `:added` IS WHAT THIS ACTION MEANT, next to the payload the client typed: the
+        ;; two differ when a retry sends a message the conversation already has (nothing
+        ;; enters) and at birth (the context enters, and the client never sent it). The
+        ;; record keeps both because the fold reads `:added` and a reader asking 'why is
+        ;; my message not in here' needs to see what was sent.
+        history  (sessions/messages thread-id)
+        born?    (empty? history)
+        entries  (cond-> (vec (:append input))
+                   born? (into (when-some [e (ag/context-entry (:context input))] [e])))
+        added    (sessions/append! thread-id run-id entries)
+        input    (assoc input :added added)]
+    ;; THE LINE THAT CARRIES THEM IS THE LINE THAT NUMBERS THEM: the landing callback
+    ;; is how these entries get their record offsets (ticket 05), and it is attached
+    ;; HERE rather than at the enqueue because the writer is what knows the file.
+    (log! thread-id run-id "input" input
+          (fn [offset] (sessions/land! thread-id run-id offset)))
     ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place and
     ;; for the same reason the input frame is written here: this is the one moment the
     ;; server holds 'the person pressed send'. It writes once per session and is a
-    ;; no-op for every later run (`cap.project/remember-title!`), and it is called
-    ;; with the run's own messages rather than by reading the log -- the log is where
-    ;; the same words already are, and a listing that had to derive a title from 50
-    ;; logs would pay for it on every sidebar refresh.
-    (project/remember-send! thread-id (ag/first-user-text input))
+    ;; no-op for every later run (`cap.project/remember-send!`'s `COALESCE(title, ?)`),
+    ;; and it is called with the SESSION's first user turn rather than by reading the
+    ;; log -- the log is where the same words already are, and a listing that had to
+    ;; derive a title from 50 logs would pay for it on every sidebar refresh.
+    ;;
+    ;; WHY `history` AND NOT THE ACTION: main retired `:messages` in the run body (ADR
+    ;; 0002 decision 9), so the client's words for THIS action are all an action ever
+    ;; carries -- and on the fortieth send that is the newest message, not the first.
+    ;; The session is the authority, so the first user turn of `history` is the honest
+    ;; name (a session that ran before this column existed is named correctly the next
+    ;; time it runs); this action's own entries cover the birth, when `history` is
+    ;; empty. Reading the log instead would be the second truth ADR 0002 refuses.
+    (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
     (async/go
       ;; A GO BLOCK'S EXCEPTION GOES NOWHERE: core.async throws it into the block's
       ;; own channel, which nobody reads -- so a consumer that dies takes the run
@@ -843,7 +939,15 @@
           ;; says no lands in the catch below as an ordinary refusal, with the
           ;; hook's own words as the RUN_ERROR reason.
           (let [[provider messages decisions resolved blocks injected]
-                (try (let [provider (providers/current-provider thread-id (:provider input))
+                (try (let [;; THE PROVIDER IS THE SESSION'S, NOT THE REQUEST'S. It used to
+                           ;; be layered with whatever `:provider` the run body carried,
+                           ;; which made the selection a thing a CLIENT said per request --
+                           ;; and that is the shape ticket 03 retired: choosing a model is
+                           ;; an action (`POST /api/model`, which is where the session's
+                           ;; override is written and where the change is recorded), and a
+                           ;; run is served by whatever that action left in force. `input`
+                           ;; is not consulted here at all, which is the point.
+                           provider (providers/current-provider thread-id)
                            ;; THE SESSION'S OPENING BLOCKS, read fresh and RENDERED
                            ;; HERE (they fire InstructionsLoaded through the sink the
                            ;; binding above installed, which is why they are read
@@ -852,7 +956,13 @@
                            ;; their frames -- the kernel never sees them as something it
                            ;; added.
                            blocks (opening-blocks! thread-id)]
-                       (guard-input-modalities! input provider)
+                       ;; THE ACTION'S OWN ENTRIES ARE WHAT IS CHECKED, not the
+                       ;; conversation: everything already in the history was accepted
+                       ;; by the model that produced it, and blaming a model for an
+                       ;; image from three turns ago would refuse a run that carries
+                       ;; nothing (see ag/undeclared-input on why only user messages
+                       ;; are inspected at all).
+                       (guard-input-modalities! (:append input) provider)
                        (let [;; THE VENDOR'S THINKING-MODE REQUIREMENT IS MET HERE, on the
                              ;; list this run will log and send -- not inside `stream!`,
                              ;; where it would be easier and would make the `message` audit
@@ -878,15 +988,26 @@
                              ;; cards for those messages can only come from this side -- and
                              ;; 'every injection is a card' is what the feature promises
                              ;; (see ag-ui/injected-frame).
-                             assembled (ag/inbound (:messages input)
+                             ;; THE CONVERSATION IS THE SESSION'S, and it is exactly what
+                             ;; the two bindings above say it is: what the session held
+                             ;; when this run began, plus what this action put in it. It is
+                             ;; handed over in the client's AG-UI shape, which is the shape
+                             ;; this converter takes. The birth context is IN `:added` --
+                             ;; so the `context` argument below is for a caller with a
+                             ;; conversation that has no beginning yet, which after ticket
+                             ;; 03 is nobody: the edge has already put it in.
+                             assembled (ag/inbound (into history added)
                                                    (system-prompt/assemble thread-id)
-                                                   blocks (:context input))
+                                                   blocks nil)
                              applied   (project/before-llm assembled thread-id)
                              injected  (subvec applied (count assembled))]
                          [provider
                           (llm/thinking-mode-history applied provider)
                           (resume-decisions (:resume input))
-                          (providers/resolve-provider thread-id (:provider input))
+                          ;; THE SESSION'S OWN TIER, with no request layered on it -- the
+                          ;; same answer `provider` above resolved, and the map the
+                          ;; provider/init and provider/changed lines are written from.
+                          (providers/resolve-provider thread-id)
                           blocks injected]))
                      (catch Throwable t
                        ;; A run that could not even be set up -- no provider, a
@@ -1079,6 +1200,13 @@
         ;; before the run started (this catch also covers the setup above it) -- the
         ;; run-id it names is simply not the one registered.
         (unregister-run! thread-id run-id)
+        ;; WHAT IT MANAGED TO SAY IS STILL PART OF THE CONVERSATION. A run that died
+        ;; mid-answer leaves frames that were already served, and those frames are what
+        ;; the model said -- dropping them would make the next run continue from a
+        ;; conversation that never had the half-answer the client is looking at. The
+        ;; fold is the emitter's own (`sessions/settle!`), so the session gets exactly
+        ;; the messages its frames describe, and nothing is invented for the ending.
+        (sessions/settle! thread-id run-id (:frames @state))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
         ;; THE STREAM IS ENDED RATHER THAN LEFT OPEN: a client parked on a run
@@ -1087,23 +1215,140 @@
         (try (hk/close ch) (catch Throwable _ nil)))))))
 
 
-(defn- register-run-session!
-  "Make the conversation in INPUT a session of this home, if it is not one already.
+(defn- api-response
+  "One JSON answer. NO CORS HEADERS HERE: which origin an answer may name is a
+  fact about the REQUEST, and this function is handed a status and a body -- it
+  has ninety-odd call sites and none of them knows what page is asking. `handler`
+  merges them at the one exit instead, which is also where a reader should look.
 
-  The id is read the way the run reads it, but only a NON-BLANK STRING is registered:
-  `handle-run` below stringifies whatever it finds, and an input with no thread id at
-  all would otherwise register the empty string as a conversation. Nothing here is
-  registered twice -- `project/register-session!` leaves a known id alone -- and an id
-  that is already bound to a project stays bound."
-  [input]
-  (let [id (:threadId input)]
-    (when (and (string? id) (not (str/blank? id)))
-      (project/register-session! id))))
+  IT SITS ABOVE THE RUN EDGE rather than beside the management routes it mostly serves,
+  because the ONE refusal that is not a management route needs it: a run asked for while
+  the session is already running is answered as JSON too (`refuse-second-run!`), and the
+  alternative -- its own three lines of encoding -- would be a second copy of this shape."
+  [status body]
+  {:status  status
+   :headers {"Content-Type" "application/json; charset=utf-8"}
+   :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
 
-(defn- handle-run [req]
-  (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
-        thread-id (str (:threadId input))
-        run-id    (str (:runId input))
+(defn- refuse-unknown-session!
+  "The answer a client gets when it aims a run at an id this home has never been asked
+  to keep. 404, and a sentence naming the id and the way to make one.
+
+  THIS REPLACES A SILENT CREATE, and the silence was the problem rather than the
+  creation: the edge used to register whatever thread id arrived (`register-session!`),
+  so a typo, a stale bookmark or a hand-written curl produced a NEW conversation that
+  looked exactly like the one that was meant. A run is an action on a conversation, and
+  an action on something that does not exist is an error -- the one that says which.
+
+  NOT A 409: nothing is in conflict. The client is not early or late, it is aimed at
+  something this home does not have."
+  [thread-id]
+  (api-response
+   404
+   {:error    (str "no session " (pr-str thread-id) " exists in this home, so this run"
+                   " was not started: a run continues a conversation, and this one has"
+                   " no beginning here. Create it first -- POST /api/sessions answers a"
+                   " fresh threadId when asked with no id -- and send the run again.")
+    :threadId thread-id}))
+
+(defn- refuse-retired-messages!
+  "The answer a client gets for a run body that still carries the accumulated `messages`.
+
+  THE FIELD RETIRED IN TICKET 03 (ADR 0002 decision 9). It used to be how a client said
+  what the conversation was; the session is that now, and what a run carries is the
+  entries THIS ACTION adds, under `append`. Refusing rather than ignoring is the whole
+  point of retiring it: a body that still sends the history is a client written against
+  the old contract, and treating its `messages` as an append would silently double the
+  conversation -- the failure mode this feature exists to end, dressed as compatibility."
+  []
+  (api-response
+   400
+   {:error (str "this run carries \"messages\", which is not part of the input face any"
+                " more: the server holds the conversation, so a run carries only what"
+                " THIS ACTION adds -- send those as \"append\".")
+    :field "messages"}))
+
+(defn- refuse-served-elsewhere!
+  "The answer a client gets when the conversation it is aiming an action at is being
+  served by ANOTHER PROCESS of this home. 409, and a sentence naming that process.
+
+  THE CROSS-PROCESS HALF OF 'ONE AUTHORITY PER CONVERSATION' (ADR 0002 decision 7).
+  `refuse-second-run!` below is the same rule inside this process; this is the case the
+  in-process registry cannot see at all -- another JVM, its own memory table, its own
+  record writer, appending to the same file. Nothing in a log line says which process
+  put it there, so two writers do not produce a detectable conflict: they produce a
+  record that reads as a conversation that happened.
+
+  READ-ONLY IS THE REST OF IT, and this refusal is deliberately only about ACTIONS: the
+  listing, the conversation (`rebuild`), `sofar`, the statistics and the trajectory all
+  read files, and a second process reading them is exactly what those routes are for.
+  What it may not do is WRITE to the conversation -- which is the run, and the one other
+  action that moves a session's log file.
+
+  IT NAMES THE PID AND WHEN THE CLAIM WAS TAKEN, because a refusal a person cannot act
+  on is not much better than silence: the move is to stop that process (or wait for it
+  to exit) and send again. The instance is in the body for whoever is matching this
+  against a log line."
+  [thread-id held]
+  (api-response
+   409
+   {:error    (str "conversation " (pr-str (str thread-id)) " is being served by another"
+                   " harness process (pid " (:pid held) ", which has held it since "
+                   (str (java.time.Instant/ofEpochMilli (:since held))) "), so this action"
+                   " was refused: two processes serving one conversation write two"
+                   " conversations into one record, and nothing in the record says which"
+                   " is which. This process can still READ it -- the sidebar, the"
+                   " conversation, the statistics -- but not act on it. Stop that process"
+                   " (or wait for it to exit) and send again.")
+    :threadId thread-id
+    :holder   {:pid      (:pid held)
+               :since    (:since held)
+               :instance (:instance held)}}))
+
+(defn- refuse-second-run!
+  "The answer a client gets when it asks for a run of a session this process is already
+  running. 409, and a sentence naming the session and the run that is in the way.
+
+  A REFUSAL, NOT A QUEUE, and that is a decision rather than an omission: a queue is a
+  mechanism this repo does not have, and inventing one here would mean also inventing
+  what happens to a queued run whose client went away. The client is told what is in the
+  way; it can ask again when that run ends (which is a fact it can watch -- the session's
+  own row says `running`, and the stream's terminal frame is the end of it).
+
+  IT NAMES THE RUN THAT IS GOING rather than the one that was refused, because since
+  ticket 03 the client does not choose a run id -- the server mints it -- so a run id
+  read out of the refused body would be a name for nothing at all. What a client can act
+  on is 'this reply came from a request that was not run, while THAT one is'.
+
+  IT IS ALSO WHAT KEEPS ONE SESSION'S RECORD READABLE. Two runs of one thread interleave
+  their frames into one append-only file, and every reader downstream is written for one
+  run at a time: `replay/ensure-complete!` counts inputs against terminals, `open-run`
+  takes the LAST of each, and the fold reads input lines in file order. Two runs produce
+  a record that reads like a conversation that never happened -- not a crash, which is
+  worse, because there is nothing to notice."
+  [thread-id]
+  (api-response
+   409
+   {:error    (str "this session already has a run in this process, so this run was not"
+                   " started: the harness answers one run per session at a time (threadId "
+                   (pr-str thread-id) ", the run going is "
+                   (pr-str (running-run-id thread-id)) "). Wait for the current run's"
+                   " terminal frame, or for this session's row to stop saying it is"
+                   " running, and send again.")
+    :threadId thread-id
+    :running  (running-run-id thread-id)}))
+
+(defn- stream-run
+  "Answer a run that the door let through: register it, and stream its frames.
+
+  THE PARSE HAS ALREADY HAPPENED, and so have the door's decisions (`handle-run`): the
+  thread id, the RUN ID and the id of the session are all settled before this is called.
+  The run id comes from the door rather than the body because it is the SERVER'S now --
+  it names a run in this process and it goes into the record, so a client that repeated
+  one would collide two runs' frames in a rebuilt conversation (see
+  `harness.edge.replay/fold-frames`)."
+  [req input run-id]
+  (let [thread-id (str (:threadId input))
         ;; WHAT PAGE IS ASKING, read HERE because this is the one route whose
         ;; headers do not come from the ring response: they ride on the first
         ;; frame. `handler` reads the same header for every other route.
@@ -1112,19 +1357,13 @@
         ;; handler share. `:on-open` and `:on-close` are two callbacks on
         ;; different threads with nothing else in common, so a fact one of them
         ;; knows and the other must report lives here.
-        state     (atom {:terminal nil :last nil})]
-    ;; A CONVERSATION BECOMES A SESSION OF THIS HOME THE FIRST TIME IT RUNS, and this is
-    ;; the second of the two callers that say so -- the first is POST /api/sessions, which
-    ;; 'new task' calls so that a row exists before a word has been typed. The page mints
-    ;; its own id before anybody has said anything, so a run is the first moment there is
-    ;; a conversation worth keeping; WITHOUT THIS, a page that was loaded and then typed
-    ;; into is the ONE conversation the sidebar cannot list -- its log lands under
-    ;; projects/.unbound/ while the store has never heard of it.
-    ;;
-    ;; IT COMES AFTER THE PARSE, and that ordering is the whole no-trace promise: the
-    ;; read above is what decides this body is a run at all, so a request that is not one
-    ;; leaves no row behind, exactly as it leaves no log.
-    (register-run-session! input)
+        ;;
+        ;; `:frames` IS THIS RUN'S CONVERSATIONAL OUTPUT, collected as it is served so
+        ;; that the session can fold it into the conversation the moment the run ends
+        ;; (`sessions/settle!`). It is held HERE -- per run, in the one place that sees
+        ;; every frame exactly once -- rather than in the session, because a run's frames
+        ;; are not the conversation until the run is over.
+        state     (atom {:terminal nil :last nil :frames []})]
     ;; as-channel wants no status or headers of its own. run-agent! returns immediately
     ;; -- the run is driven by a go loop draining the core.async channel -- so it does
     ;; not block the worker that :on-open runs on.
@@ -1144,7 +1383,7 @@
     ;; mid-tool with no terminal frame, beside a `run/start` and no `:shutdown`,
     ;; is a run still going; beside a `:shutdown`, it is a process that was stopped.
     (hk/as-channel req
-                   {:on-open  (fn [ch] (run-agent! ch state input origin))
+                   {:on-open  (fn [ch] (run-agent! ch state input run-id origin))
                     :on-close (fn [_ch status]
                                 (let [{:keys [terminal last]} @state]
                                   (if terminal
@@ -1164,6 +1403,70 @@
                                                 :status    status
                                                 :last      last}))))})))
 
+(defn- handle-run
+  "The door to the run edge: read the request, decide whether this is a run this home
+  answers, and hand the rest over.
+
+  FIVE DECISIONS, IN THIS ORDER, and the order is the point -- each one is cheaper and
+  more basic than the next, and none of them may leave a trace:
+
+    1. THE BODY MUST NOT CARRY `messages`. That field retired (ADR 0002 decision 9): the
+       session holds the conversation, and a run carries only what the action ADDS
+       (`append`). Refused by name rather than ignored -- see `refuse-retired-messages!`.
+    2. THE SESSION MUST EXIST. A run continues a conversation; if this home has no row
+       for the id, the run is refused by name and NOTHING is created (ticket 03 removed
+       the silent create -- see `refuse-unknown-session!`).
+    3. NO OTHER PROCESS MAY BE SERVING IT. This is the cross-process half of 'one
+       authority per conversation' (ADR 0002 decision 7), asked of the STORE -- the one
+       place two processes of a home agree (`harness.cap.claims`), because the registry
+       the next decision reads cannot see another JVM at all. A stale claim -- a process
+       that is gone -- is nobody's, and the birth below takes it over.
+    4. ONE RUN PER SESSION AT A TIME IN THIS PROCESS. The check is `running?` -- the
+       registry the run registers itself in when it actually starts -- and a refused run
+       must leave NO trace: the file would take a second `input` line that the reader's
+       arithmetic is not written for (see `refuse-second-run!`).
+    5. THE RUN ID IS MINTED HERE, not taken from the body. It names a run in this process
+       and it goes into the record, and two runs sharing one would interleave into a
+       conversation that reads as if it happened once.
+
+  ASKING THE STORE ON EVERY RUN IS THE PRICE OF THE THIRD DECISION, and it is small: one
+  row of a local file, against a run that costs a model call.
+
+  WHAT THE FOURTH DECISION CANNOT SEE, said plainly rather than papered over: `running?`
+  is the fact that a run STARTED, and the registration is made where the run actually
+  begins -- after the provider resolves, deliberately, so that a run which never starts
+  cannot leave a thread looking alive forever (see `register-run!`). Two requests
+  arriving inside that setup window therefore both get through. Closing it would mean
+  taking an admission before the setup and releasing it on every way the setup can fail
+  -- one missed release and the session can never run again until the process restarts,
+  which is a worse failure than the millisecond it buys.
+
+  A BODY THAT IS NOT JSON IS NOT DECIDED HERE: the reader below throws, and the handler
+  turns it into a 400 like it always has (see `handler`)."
+  [req]
+  (let [input     (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+        thread-id (str (:threadId input))
+        run-id    (str (java.util.UUID/randomUUID))
+        ;; A LIVE CLAIM ON THIS CONVERSATION, read once for the third decision. A stale
+        ;; row -- left by a process that is gone -- answers nil here
+        ;; (`harness.cap.claims/holder`); the session's birth takes that over.
+        held      (claims/holder thread-id)]
+    (cond
+      (contains? input :messages)
+      (refuse-retired-messages!)
+
+      (not (project/session-exists? thread-id))
+      (refuse-unknown-session! thread-id)
+
+      (and (some? held) (not (claims/mine? held)))
+      (refuse-served-elsewhere! thread-id held)
+
+      (running? thread-id)
+      (refuse-second-run! thread-id)
+
+      :else
+      (stream-run req input run-id))))
+
 ;; ----------------------------------------------------- the management edge
 ;;
 ;; Plain request/response JSON, alongside the streaming AG-UI edge. Small on
@@ -1171,15 +1474,6 @@
 ;; Responses are UTF-8 BYTES, like every other body this server writes -- the
 ;; JVM default charset is GBK here.
 
-(defn- api-response
-  "One JSON answer. NO CORS HEADERS HERE: which origin an answer may name is a
-  fact about the REQUEST, and this function is handed a status and a body -- it
-  has ninety-odd call sites and none of them knows what page is asking. `handler`
-  merges them at the one exit instead, which is also where a reader should look."
-  [status body]
-  {:status  status
-   :headers {"Content-Type" "application/json; charset=utf-8"}
-   :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
 
 (defn- query-params
   "A request's raw query string -> a {name value} map. Hand-rolled because the
@@ -1404,7 +1698,7 @@
                          :dir      (project/binding-for thread-id)}))))
 
 (defn- project-post
-  "POST /api/project {threadId, dir} -- bind the thread to the directory,
+  "POST /api/project {threadId?, dir} -- bind the thread to the directory,
   validate FIRST (a missing or non-directory path is a named 400 and leaves
   no trace), then land the project/bound audit line as before -> after, the
   provider/changed style: the previous binding (nil for a first bind) and the
@@ -1412,6 +1706,17 @@
   runId is nil on that line because a binding happens OUTSIDE any run. The
   previous binding is read BEFORE binding: bind! overwrites, and the audit
   line is the only place the old value would survive.
+
+  THE ID IS THE SERVER'S TO MINT when the body names none, the same rule
+  /api/sessions follows. 'Start a conversation in this directory' is ONE action
+  here rather than 'mint a task, then bind it', because the two-call version
+  leaves an UNBOUND conversation behind every time the bind fails -- and an empty
+  session is the one thing a client may no longer make (ADR 0002 decision 9).
+  The answer carries the id it minted, and that is the id to use from here on.
+  A body that DOES name one is the rebind direction, unchanged: an id this home
+  already knows moves, and the answer says which one it was -- UNLESS another process of
+  this home is serving that conversation, in which case this is refused by name: the
+  rebind MOVES THE LOG FILE out from under that process's writer (see the cond below).
 
   THE LOG TRAVELS WITH THE BINDING. Which workspace a session's log belongs in
   is decided by its project, so a rebind that did not carry the file would split
@@ -1435,41 +1740,79 @@
   is the same 'no trace on failure' the validation above already promises.
 
   ALL OF IT HAPPENS UNDER log-lock, and that is a requirement rather than a
-  detail: a run writing its records reads the very binding this changes, and the
-  bind MOVES the file those records are going into. Serializing the two (the
-  writer takes the same lock -- see `log!`) is what makes the outcome independent
-  of who got there first, and a BIND AT FIRST SEND makes that a routine race
-  rather than a rare one (the sidebar binds when the session's first message
-  arrives, i.e. while the run is writing). It also has to be the WHOLE section:
-  from-dir is where the log is NOW, so it must be read where nothing can move the
-  file out from under it, and the binding must not be visible to the writer until
-  the file has followed it."
+  detail: a run writing its records resolves where its next line goes from the very
+  binding this changes, and the bind MOVES the file those records are going into.
+  The writer holds the same lock while it resolves a line's File (see `log!`), so
+  serializing the two is what makes the outcome independent of who got there first,
+  and a BIND AT FIRST SEND makes that a routine race rather than a rare one (the
+  sidebar binds when the session's first message arrives, i.e. while the run is
+  writing). It also has to be the WHOLE section: from-dir is where the log is NOW,
+  so it must be read where nothing can move the file out from under it, and the
+  binding must not be visible to the writer until the file has followed it. THE
+  WRITE ITSELF IS NOT UNDER THIS LOCK -- the bytes belong to the record writer's
+  consumer -- so what is serialized here is the placement decision, not the append."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
                      (catch Throwable _ {:bad true}))
-        {:keys [ok bad]} parsed]
+        {:keys [ok bad]} parsed
+        ;; WHO IS SERVING THE NAMED CONVERSATION, if anybody: read once, for the third
+        ;; decision below.
+        named (str (:threadId ok))
+        held  (when-not (str/blank? named) (claims/holder named))]
     (cond
       bad
       (api-response 400 {:error "request body is not valid JSON"})
 
-      (str/blank? (str (:threadId ok)))
-      (api-response 400 {:error "missing threadId"})
-
       (str/blank? (str (:dir ok)))
       (api-response 400 {:error "missing dir"})
 
+      ;; AN ACTION ON A CONVERSATION ANOTHER PROCESS IS SERVING, and this one MOVES THE
+      ;; LOG FILE (`move-log!` below): a writer in that other process holds the path it
+      ;; opened, so a move underneath it splits one conversation across two files. The
+      ;; same read-only rule the run edge answers with (`refuse-served-elsewhere!`),
+      ;; asked here because binding is the other thing that acts on a log. A body that
+      ;; names nobody -- the ordinary 'start a conversation in this directory' -- has
+      ;; nothing to be serving, so this cannot refuse it.
+      (and (some? held) (not (claims/mine? held)))
+      (refuse-served-elsewhere! named held)
+
       :else
-      (let [thread-id (str (:threadId ok))
+      (let [thread-id (if (str/blank? (str (:threadId ok)))
+                        (str (java.util.UUID/randomUUID))
+                        (str (:threadId ok)))
             bound     (locking log-lock
                         (let [before   (project/binding-for thread-id)
                               from-dir (log-dir-for thread-id)
                               b        (try {:ok (project/bind! thread-id (str (:dir ok)))}
                                             (catch Throwable t {:error (ex-message t)}))]
-                          (if-some [error (:error b)]
-                            {:error error}
+                          (cond
+                            (contains? b :error)
+                            {:error (:error b)}
+
+                            :else
                             (let [abs   (:ok b)
-                                  moved (try {:ok (move-log! thread-id from-dir (log-dir-for thread-id))}
+                                  to-dir (log-dir-for thread-id)
+                                  ;; READ YOUR OWN WRITE, the same step `rebuild-post`
+                                  ;; already takes (see its comment). The lines the writer
+                                  ;; is still holding for this session were ADDRESSED to
+                                  ;; the file `move-log!` is about to rename -- the lock
+                                  ;; above stops new ones being addressed there, but a line
+                                  ;; handed over before it is already queued, and the
+                                  ;; consumer would write it to the old path afterwards and
+                                  ;; recreate it: one conversation, two files, and the next
+                                  ;; bind then refuses by name. Draining is what makes the
+                                  ;; move and the queue one act.
+                                  ;;
+                                  ;; INSIDE THE CRITICAL SECTION, and it cannot deadlock:
+                                  ;; the consumer takes no lock of ours (its prepare step is
+                                  ;; `carry-back!`, which appends and renames files, and the
+                                  ;; landing callback is a store write). BOUNDED, because a
+                                  ;; DEGRADED thread -- a full disk -- must not hang a bind
+                                  ;; forever: the wait times out and the move proceeds with
+                                  ;; the residual risk the lock cannot close.
+                                  _     (when (not= from-dir to-dir) (record/flush! 5000))
+                                  moved (try {:ok (move-log! thread-id from-dir to-dir)}
                                              (catch Throwable t {:error (ex-message t)}))]
                               (if-some [move-error (:error moved)]
                                 {:move-error move-error :abs abs :before before}
@@ -1486,45 +1829,49 @@
               (api-response 200 {:threadId thread-id :dir (:abs bound)})))))))
 
 (defn- sessions-post
-  "POST /api/sessions {threadId} -- make this conversation a session of this home,
+  "POST /api/sessions {threadId?} -- make a conversation a session of this home,
   belonging to no project. Answers {:threadId ..}.
+
+  THE ID IS THE SERVER'S TO MINT when the body names none, and that is ticket 03's
+  change: an id is the name a conversation is known by HERE, so the process that keeps
+  the conversation is the one that names it. A client that made up an id and then asked
+  the server to accept it had to be right about a namespace it does not own -- and the
+  old arrangement also meant the page could hold an id the store had never heard of,
+  which is exactly the state the run edge now refuses (`refuse-unknown-session!`).
+
+  A CLIENT MAY STILL NAME ONE. The body's `threadId`, when it is there, is used as-is:
+  the route is idempotent ('make sure this conversation exists'), and a caller that
+  already holds an id -- a restored page, a script, a test -- must be able to say it
+  without being handed a different conversation. What it may not do is assume the answer
+  is the id it sent; the ANSWER is the id to use from here on.
 
   THE VERB IS 'EXIST', NOT 'BE A TASK'. An id this home has never heard of becomes a
   row with no project, no path and no remembered project -- a task, which is what the
   sidebar draws it as. An id this home ALREADY knows is left exactly as it is, and
   that is not a no-op to apologise for: 'make sure this conversation exists' is true
   the moment it does, and a caller must be able to say it about a session that belongs
-  to a project without unbinding it (see `project/register-session!`). The answer is
-  the id because that is what the caller handed over and what it now holds; the rest of
-  the row is the LISTING's business, and the sidebar reads it in the same snapshot it
+  to a project without unbinding it (see `project/register-session!`). The rest of the
+  row is the LISTING's business, and the sidebar reads it in the same snapshot it
   reads everything else.
-
-  THIS IS A ROUTE AND NOT A SIDE EFFECT OF THE RUN ENDPOINT, because 'a conversation
-  exists' is a thing the interface decides when a person asks for one -- 'new task'
-  puts a row in the sidebar before a single word has been typed. The run endpoint
-  registers the same way for an id nobody asked about (a page that was loaded and then
-  typed into), and both go through one verb so there cannot be two answers to 'when
-  does a conversation exist here'.
 
   NO AUDIT LINE: this writes one row in the store and opens no file. Same rule as
   adding a project -- a line is for what happened to a LOG, and nothing here touched
-  one. The 400 is for a body that is not JSON or names no thread id; nothing is
-  written on that path either."
+  one. The 400 is for a body that is not JSON; nothing is written on that path either."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                      :key-fn keyword)}
                      (catch Throwable _ {:bad true}))
         {:keys [ok bad]} parsed
-        thread-id (:threadId ok)]
+        named  (when ok (:threadId ok))
+        thread-id (if (str/blank? (str named))
+                    (str (java.util.UUID/randomUUID))
+                    (str named))]
     (cond
       bad
       (api-response 400 {:error "request body is not valid JSON"})
 
-      (str/blank? (str thread-id))
-      (api-response 400 {:error "missing threadId: this route makes ONE conversation a session of this home, and needs to be told which"})
-
       :else
-      (api-response 200 {:threadId (project/register-session! (str thread-id))}))))
+      (api-response 200 {:threadId (project/register-session! thread-id)}))))
 
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
@@ -1561,10 +1908,11 @@
   stat calls, which is what the panel's own frame rate was paying for.
 
   `:running` IS THE ONE FIELD NOT IN THE STORE, and it is not an oversight: whether a
-  run is alive right now is a question about THIS PROCESS (`live-runs`), and a file
-  cannot answer it -- a log that stops without a terminal frame belongs equally to a
-  run still going and to a process that was killed. It is read per request because
-  the answer moves.
+  run is alive right now is a question about THIS PROCESS, and a file cannot answer it
+  -- a log that stops without a terminal frame belongs equally to a run still going and
+  to a process that was killed. It is asked of the run set the server keeps with the
+  session (`harness.edge.sessions`' `running?`, ADR 0002's authority) rather than of
+  disk, and read per request because the answer moves.
 
   A TASK AND A PROJECT'S SESSION ARE THE SAME ROW, which is why there is no
   `task-row` any more: the two differed only in where their disk facts were asked
@@ -1616,13 +1964,17 @@
   "GET /api/projects -- the sidebar's listing: every project this home knows, each
   with its sessions, PLUS every task this home knows.
 
-  TWO SOURCES, ONE ANSWER, AND THAT IS THE POINT OF THE ENDPOINT. The store says
-  which projects and sessions exist, which session belongs where and which are
-  archived; the tree says how big each log is and when it last changed. Neither
-  question can be answered from the other side alone -- a directory of jsonl files
-  cannot say which project a conversation belongs to (that was the whole reason
-  not to migrate the old logs/), and the store must not mirror file sizes. So the
-  two are joined here, on the reading side, and each field comes from its owner.
+  ONE SOURCE, ONE ANSWER: EVERY FIELD IN A ROW IS THE STORE'S. The store says which
+  projects and sessions exist, which session belongs where, which are archived, what
+  each is named and when it was last sent to -- and this endpoint stats no log, reads
+  no size and walks no tree. It used to do all three: a log's mtime and length were
+  read per row, per request, and the two sources were joined here on the reading side.
+  The owner's rule retired that -- everything the left panel shows comes from the store
+  except whether a run is in flight -- and the one field left outside it (`:running`)
+  is a fact about THIS PROCESS, read from the session's run set (`session-row` says
+  why). The tree was never able to answer the interesting question anyway: a directory
+  of jsonl files cannot say which project a conversation belongs to, which is the whole
+  reason the old logs/ were not migrated.
 
   BOTH HALVES IN ONE ANSWER, because the sidebar is one screen and one snapshot:
   two requests would be two lists that can disagree with each other about which
@@ -1659,10 +2011,10 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  THREE OF THE FIVE ARE GETS: `stats` and `trajectory` only READ the log (a folded
-  view of a finished conversation, and the per-turn timeline) and `sofar` reads the
-  same file while it is still being written, to hand a client that just landed on a
-  session what has arrived. The set stays closed and the 405 stays here -- what
+  FIVE OF THE SEVEN ARE GETS: `stats` and `trajectory` only READ the log (a folded
+  view of a finished conversation, and the per-turn timeline), `sofar` reads the
+  same file while it is still being written, and the window's two verbs (`feed`,
+  `page`) read it in pieces. The set stays closed and the 405 stays here -- what
   changed is that the sentence 'every verb on this shape is a POST' is no longer
   true, not where the refusal happens.
 
@@ -1670,8 +2022,15 @@
   what it answers is not the conversation (a thing a client could take over) but
   how much of it there IS at this moment -- the same log may answer differently a
   second later, and the answer says so (`replay/sofar`'s `:state`). Rebuild remains
-  the door for 'give me the conversation, I will own it'."
-  #{"rebuild" "archive" "stats" "trajectory" "sofar"})
+  the door for 'give me the conversation, I will own it'.
+
+  AND TWO VERBS READS A CONVERSATION IN PAGES rather than whole (`feed` and `page`,
+  ticket 05 of `.scratch/sessions-live-on-the-server`): the window ADR 0003
+  describes, for a conversation too long to send. They are GETs and they are the
+  first pair here that a page uses continuously rather than once -- `page` answers
+  scrolling up, and `feed` stays open -- which is why they are the two routes on
+  this edge that are not request/response (`feed` streams; see `stream-feed!`)."
+  #{"rebuild" "archive" "stats" "trajectory" "sofar" "feed" "page"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -1798,7 +2157,16 @@
   file -- the records are parsed once and both readers fold them -- so the strip
   under the composer and the ring beside the model cannot report two different
   moments of the same log. The composer's own contract (mount / session change /
-  assistant message added / run over) is what asks, and asking once asks both."
+  assistant message added / run over) is what asks, and asking once asks both.
+
+  IT KEEPS READING THE RECORD, and that is ticket 05's decision rather than an
+  oversight: these are facts ABOUT THE RECORD -- which model a call went to, what the
+  vendor reported, where the gaps are -- and a session's memory holds messages, not
+  accounting. What memory CAN say is how far behind the record is, and `:behind` is
+  that: the number of lines the writer has not put on disk yet. ABSENT MEANS NOTHING
+  IS PENDING (`record-health` draws the same line and for the same reason -- a
+  `:behind 0` would be a field nobody reads). A count that is there is a warning that
+  the numbers below it are that many record lines short of the conversation."
   [stem]
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
@@ -1815,7 +2183,9 @@
       (api-response 400 {:error (:error folded) :threadId stem})
 
       :else
-      (api-response 200 (assoc (:ok folded) :threadId stem)))))
+      (let [behind (record/pending-count stem)]
+        (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
+                            (pos? behind) (assoc :behind behind)))))))
 
 (defn- trajectory-get
   "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
@@ -1834,7 +2204,11 @@
   LOCATION AND REFUSALS ARE THE SAME AS `stats`' -- `replay/locate`, 404 for 'not here'
   with the locator's own sentence, 400 for 'here, and unreadable'. A log whose last run
   has not finished is NEITHER: it is read, and the answer says so, because looking at a
-  session while it runs is the ordinary case rather than an error."
+  session while it runs is the ordinary case rather than an error.
+
+  AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
+  RECORD's trajectory, and the record can be behind the conversation being written to
+  it. Absent means nothing is pending."
   [stem]
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
@@ -1849,7 +2223,9 @@
       (api-response 400 {:error (:error folded) :threadId stem})
 
       :else
-      (api-response 200 (assoc (:ok folded) :threadId stem)))))
+      (let [behind (record/pending-count stem)]
+        (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
+                            (pos? behind) (assoc :behind behind)))))))
 
 (defn- close-off-open-run!
   "Close every run a log left open, so the conversation can be CONTINUED instead of
@@ -1910,6 +2286,42 @@
         (log/warn! :session/close-off-failed {:thread-id stem :reason (ex-message t)})
         nil))))
 
+(defn- record-health
+  "What the record writer says about THREAD-ID, or nil when there is nothing to say.
+
+  NIL IS THE ORDINARY ANSWER, and absence is the client's 'fine': a session whose
+  bytes have all reached the record has no story, and a `:record {:state \"ok\"}` on
+  every answer would be a field nobody acts on. What the field exists for is the
+  one case ADR 0002 decision 6 refuses to leave silent -- the writer could not put
+  the bytes on disk, and the browser has to say so (ticket 02).
+
+  IT IS READ FROM MEMORY, not from the file. The whole point of the fact is that
+  the file is BEHIND (or, here, unwritable), so a reader that asked the file could
+  learn nothing; `harness.edge.record` is where the failure lives."
+  [thread-id]
+  (when-some [d (record/degraded thread-id)]
+    {:state   "degraded"
+     :reason  (:reason d)
+     :pending (:pending d)
+     :at      (:at d)}))
+
+(defn- ambiguous-stem
+  "The locator's refusal when a stem names MORE THAN ONE log, or nil when it does not.
+
+  A SESSION'S RECORD CAN BE SPLIT IN TWO -- a rebind that moved the conversation and a
+  file left behind, a restored backup, a hand-edited tree -- and every reader here has to
+  refuse rather than pick a side: memory holds one conversation and the listing shows
+  two rows, so a rebuild that answered from memory would silently hand back the half
+  that happens to be loaded. The other locator failures are NOT this: 'nothing found' is
+  an ordinary state for a session that has never run (`find-log` answers nil for that,
+  and this answers nil with it)."
+  [stem]
+  (try
+    (replay/locate (home/projects-dir) stem)
+    nil
+    (catch Throwable t
+      (when (seq (:paths (ex-data t))) (ex-message t)))))
+
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
   the AG-UI message list (seed + every recorded frame, reasoning and tool
@@ -1922,12 +2334,37 @@
 
   The stem is located BEFORE anything else happens, and that ordering is why a
   rebuild never writes half a trace: a stem that resolves to nothing, or to more
-  than one file, is refused without landing its audit line anywhere."
+  than one file, is refused without landing its audit line anywhere.
+
+  A LIVE SESSION IS ANSWERED FROM MEMORY (ticket 05, judgement 6), and the difference is
+  visible in both what it answers and what it does NOT do: there is no repair, because a
+  conversation this process is holding does not need one (`close-off-open-run!` is for a
+  log whose run is over -- a live session's run is either running or already settled in
+  memory), and the messages come back with the cards the page draws. A conversation
+  nobody here holds is read from the record exactly as it was, repair and all: the
+  process that holds it, if any, is the one that may close its record off."
   [req stem]
-  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+  (if-some [split (when (some? (sessions/live-entry stem)) (ambiguous-stem stem))]
+    (api-response 404 {:error split :threadId stem})
+   (if-some [_live (sessions/live-entry stem)]
+    (let [messages (sessions/drawn stem)
+          health   (record-health stem)]
+      (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"
+                                        :source "memory"})
+      (api-response 200 (cond-> {:threadId stem
+                                 :messages messages
+                                 :context  (or (sessions/context stem) [])}
+                          (some? health) (assoc :record health))))
+   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
         _       (when (nil? (:error located))
-                  (close-off-open-run! stem (:ok located)))
+                  (close-off-open-run! stem (:ok located))
+                  ;; READ YOUR OWN WRITE. The closing frames are the thing that
+                  ;; makes the file whole, and the rebuild below reads the file --
+                  ;; through the queue they would not be there yet, and this route
+                  ;; would refuse a log it had just repaired. Draining is what
+                  ;; makes the repair and the read one act (ticket 02).
+                  (record/flush! 5000))
         result  (when (nil? (:error located))
                   (try {:ok (replay/rebuild (:ok located))}
                        (catch Throwable t {:error (ex-message t)})))]
@@ -1939,11 +2376,14 @@
       (api-response 400 {:error (:error result)})
 
       :else
-      (let [{:keys [messages context]} (:ok result)]
-        (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"})
-        (api-response 200 {:threadId stem
-                           :messages messages
-                           :context  (or context [])})))))
+      (let [{:keys [messages context]} (:ok result)
+            health (record-health stem)]
+        (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"
+                                          :source "record"})
+        (api-response 200 (cond-> {:threadId stem
+                                   :messages messages
+                                   :context  (or context [])}
+                            (some? health) (assoc :record health)))))))))
 
 (defn- sofar-get
   "GET /api/threads/<stem>/sofar -- what has been recorded of this conversation so
@@ -1972,10 +2412,42 @@
 
   THE TWO HALVES OF THE LIVENESS QUESTION ARE ANSWERED BY THEIR OWNERS: the file
   says whether a run has a terminal frame (`replay/sofar`), and the process says
-  whether that run is still being answered (`running?`, the live-runs registry).
-  Neither is inferred from the other -- which is the whole point of having both."
+  whether that run is still being answered (`running?`, the session table's run set).
+  Neither is inferred from the other -- which is the whole point of having both.
+
+  AND A LIVE SESSION IS ANSWERED FROM MEMORY, for the same reason `rebuild` is: what
+  this process is holding is the conversation, and the record may be behind it. The two
+  halves of the liveness question stay two: the STATE is the session's own
+  (`harness.edge.sessions/state`, written by `settle!` from the frame that ended the
+  run), and whether a run is going is `running?` -- neither inferred from the other."
   [req stem]
-  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+  ;; `when-not` RATHER THAN `and`: a running session must fall through to the record
+  ;; path below, and `(and false ...)` answers FALSE -- which `if-some` reads as a
+  ;; value, not as an absence. The record path is the right one while a run is going:
+  ;; what that run has produced is being WRITTEN, and `settle!` is the moment it
+  ;; becomes this table's (see `messages`); reading memory mid-run would show a client
+  ;; a conversation missing the answer it is watching arrive.
+  (if-some [live (when-not (running? stem) (sessions/live-entry stem))]
+    (let [messages (sessions/drawn stem)
+          context  (or (sessions/context stem) [])
+          health   (record-health stem)
+          st       (sessions/state stem)]
+      (cond
+        ;; THE SAME REFUSAL THE RECORD PATH MAKES, and for the same reason: the log ends
+        ;; mid-run, nobody here is running it, and closing it off is a decision made by
+        ;; whoever asks to CONTINUE the conversation.
+        (= :unfinished st)
+        (api-response 400 {:error (str "this conversation's log ends mid-run and this"
+                                       " process is not running it: the run was cut off."
+                                       " POST /api/threads/" stem "/rebuild to close it off"
+                                       " and read it back, or start a new session.")})
+
+        :else
+        (api-response 200 (cond-> {:threadId stem :messages messages :context context
+                                   :state    (name st)}
+                            (seq (:interrupts live)) (assoc :interrupts (:interrupts live))
+                            (some? health)           (assoc :record health)))))
+   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
         read    (when (nil? (:error located))
                   (try {:ok (replay/sofar (:ok located))}
@@ -1988,15 +2460,17 @@
       (api-response 400 {:error (:error read)})
 
       :else
-      (let [{:keys [messages context state open-runs interrupts]} (:ok read)]
+      (let [{:keys [messages context state open-runs interrupts]} (:ok read)
+            health (record-health stem)]
         (cond
           (= :unfinished state)
           (if (running? stem)
-            (api-response 200 {:threadId stem
-                               :messages messages
-                               :context  (or context [])
-                               :state    "running"
-                               :openRuns open-runs})
+            (api-response 200 (cond-> {:threadId stem
+                                       :messages messages
+                                       :context  (or context [])
+                                       :state    "running"
+                                       :openRuns open-runs}
+                                (some? health) (assoc :record health)))
             ;; NOTHING IS WRITTEN HERE, not even the repair: closing a record off is
             ;; `close-off-open-run!`'s job, it belongs to whoever asks to CONTINUE the
             ;; conversation, and a poll must never be the thing that changes the file.
@@ -2011,7 +2485,341 @@
                                      :messages messages
                                      :context  (or context [])
                                      :state    (name state)}
-                              (seq interrupts) (assoc :interrupts interrupts))))))))
+                              (seq interrupts) (assoc :interrupts interrupts)
+                              (some? health)   (assoc :record health)))))))))
+
+;; -------------------------------------------------------------------- the window
+;;
+;; THE WINDOW IS HOW A CLIENT HOLDS A CONVERSATION TOO LONG TO SEND (ADR 0003). It
+;; gets a TAIL page when it opens the session, an APPEND stream while it is connected,
+;; and a PREPEND page when somebody scrolls up -- and every entry in all three carries
+;; the record offset it arrived at, so the client can tell what it has without asking
+;; the server to remember (`harness.edge.sessions`' arrivals, and ticket 05).
+;;
+;; THE TWO ROUTES ARE ONE WINDOW READ TWICE:
+;;
+;;   GET /api/threads/<stem>/page[?beforeSeq=N]   the TAIL page, or the page in front
+;;                                                of N -- plain JSON, ONE answer
+;;   GET /api/threads/<stem>/feed[?since=N&generation=G]
+;;                                                the same window as a STREAM: the
+;;                                                tail (or the delta after N), then
+;;                                                every later entry as it lands
+;;
+;; AND THE PAGE ROUTE READS THE RECORD WHEN THIS PROCESS DOES NOT HOLD THE SESSION.
+;; That is the difference between the two, and it is deliberate: scrolling up is a READ,
+;; and a read does not need to be the process that serves the conversation (ADR 0002
+;; decision 7 is about who may WRITE). The feed cannot be that generous -- pushing
+;; changes means holding them -- so connecting is an act on the session and it rings the
+;; claim the same way an action does.
+
+(defn- feed-bytes
+  "One feed frame, encoded the way the run edge encodes its frames: `data: <json>` and a
+  blank line. The same spelling on purpose -- a client that reads runs already knows how
+  to read this, and there is one SSE dialect on this edge rather than two."
+  [frame]
+  (.getBytes (str "data: " (json/write-str frame) "\n\n") StandardCharsets/UTF_8))
+
+(defn- feed-head
+  "A feed frame as the INITIAL RESPONSE of the stream: the status and headers ride on
+  the first frame, which is http-kit's contract for a streaming answer (the same
+  spelling `runner` uses for a run).
+
+  AND `send!` MUST BE TOLD NOT TO CLOSE. Without the third argument http-kit treats a
+  send as the WHOLE response -- it computes a `content-length`, finishes it, and every
+  later frame is dropped -- which is what a feed did here until it was measured: the
+  window arrived, the socket stayed open, and nothing was ever pushed again. A stream
+  is the pair (head map, `false`), and `stream-feed!`'s later sends are `false` too,
+  with `true` only on the frame that ends it (`runner` has the same three cases)."
+  [origin bytes]
+  {:status  200
+   :headers (merge (cors-headers origin) {"Content-Type"  "text/event-stream"
+                                          "Cache-Control" "no-cache"})
+   :body    bytes})
+
+(defn- live-state
+  "The state of a conversation THIS PROCESS HOLDS, in the same words `sofar` answers
+  with (`harness.edge.http/sofar-get`): `running` when a run of it is alive here, else
+  what the session's own memory last said (`harness.edge.sessions/state`, written by
+  `settle!` from the frame that ended the run).
+
+  WHY A WINDOW CARRIES IT AT ALL (ticket 06 of `.scratch/sessions-live-on-the-server`):
+  a replica that opened a window and then watched somebody ELSE's run needs to know when
+  that run settles -- the difference is whether the turn on screen is still being written
+  -- and the window is the only connection it has. Polling `sofar` for the same fact is
+  what the window exists to replace. `nil` for a session that has never run, which reads
+  as 'not running' on the other side."
+  [stem]
+  (if (running? stem) "running" (some-> (sessions/state stem) name)))
+
+(defn- window-frame
+  "A page as a feed frame: the entries, where the page starts in the record, whether
+  there is more in front of it, where the reader's cursor now is, WHICH WINDOW this is --
+  the session's generation (`harness.edge.sessions/generation`) -- and how far along the
+  conversation is (`state`, see `live-state`).
+
+  THE CURSOR IS THE LAST ENTRY'S `:seq`, and nil when the page's entries have not landed
+  yet: a reader that kept a number the writer has not confirmed would be inventing one,
+  and the next read would then ask for a delta from a number nothing is numbered at.
+  `baseSeq` is the same kind of number for the front of the page.
+
+  THE FIVE TYPES ARE NAMED HERE, ONCE, and they say what the reader is holding rather
+  than which route produced it -- the page route and the feed answer the same window:
+
+    `window`  the feed's opening frame: the tail page, for a client with nothing
+    `append`  entries after the reader's cursor, on the feed or as its opening frame
+              when it connected with `since`
+    `page`    the page in front of the reader's oldest entry (`?beforeSeq`)
+    `tail`    the newest page, for a reader with no cursor at all (`GET .../page`)
+    `end`     the window is over: the session was put away, swept or taken over
+
+  Three of them come off the feed and two off the page route, and a client switches on
+  the type the same way either way.
+
+  THE RECORD'S HEALTH RIDES ALONG, absent when there is nothing to say -- ADR 0002
+  decision 6 asks that a write failure reach whoever is looking, and a window is now one
+  of the reads somebody looks through (`harness.edge.http/record-health`, the same fact
+  `rebuild` and `sofar` carry)."
+  [thread-id type state {:keys [entries baseSeq hasMore]}]
+  (let [entries (vec entries)
+        health  (record-health thread-id)]
+    (cond-> {:type       type
+             :entries    entries
+             :baseSeq    baseSeq
+             :hasMore    (boolean hasMore)
+             :cursor     (or (:seq (peek entries)) baseSeq)
+             :generation (sessions/generation thread-id)
+             :state      state}
+      (some? health) (assoc :record health))))
+
+(defn- read-entries
+  "The entries a WINDOW route answers with: the live session's when this process holds
+  it, else the record's -- read-only, and never a birth.
+
+  {:ok [..]} or {:error <sentence>}: an unknown stem and a log that cannot be read are
+  the two failures, and they are told apart the way `rebuild` tells them apart (404 for
+  'not here', 400 for 'here and broken').
+
+  IT ANSWERS THE STATE AS WELL, because a page that draws a conversation has to know
+  whether its last turn is still being written: memory for a session this process holds
+  (`live-state`), and the RECORD's own reading for one it does not (`replay/record-state`
+  -- `:unfinished` is the honest word for a log that ends mid-run, and it is also the flag
+  that sends a client to the `rebuild` door that closes it off)."
+  [stem]
+  (if-some [e (sessions/live-entry stem)]
+    (if-some [split (ambiguous-stem stem)]
+      {:error split :status 404}
+      (do (sessions/touch! stem)
+          {:ok (:entries e) :live true :state (live-state stem)}))
+    (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                       (catch Throwable t {:error (ex-message t)}))]
+      (if-some [err (:error located)]
+        {:error err :status 404}
+        (try (let [records (vec (replay/lines->records (replay/read-lines (:ok located))))]
+               {:ok (vec (replay/entries records))
+                :live false
+                :state (name (:state (replay/record-state records)))})
+             (catch Throwable t {:error (ex-message t) :status 400}))))))
+
+(defn- number-param
+  "A query parameter that is meant to be a record offset, or nil when it is absent.
+  A value that is not a non-negative integer is refused BY NAME rather than coerced:
+  `since=abc` quietly read as 0 would hand the client a window it did not ask for."
+  [params name]
+  (when-some [v (get params name)]
+    (if (re-matches #"[0-9]+" (str v))
+      (Long/parseLong (str v))
+      (throw (ex-info (str name " must be a non-negative record offset, got " (pr-str v))
+                      {:reason :bad-offset :param name :value v})))))
+
+(defn- page-get
+  "GET /api/threads/<stem>/page[?beforeSeq=N] -- the tail page of a conversation, or the
+  page of entries in front of offset N (the client scrolling up).
+
+  ONE ANSWER, NO STREAM, and that is what makes it usable when the conversation is not
+  being held here: it reads memory if this process serves the session and the record if
+  it does not. NOTHING IS WRITTEN and no claim is taken -- a reader paging through a
+  conversation another process is serving is exactly the case the record is still for.
+
+  `beforeSeq` IS THE OLDEST OFFSET THE CLIENT HOLDS, not the newest: the entries it is
+  missing are all in front of that one, and the page ends where the client's own window
+  begins (`harness.edge.sessions/before` explains why that cannot overlap or skip)."
+  [req stem]
+  (let [params (query-params (:query-string req))
+        before (try {:ok (number-param params "beforeSeq")}
+                    (catch Throwable t {:error (ex-message t)}))]
+    (if-some [err (:error before)]
+      (api-response 400 {:error err :threadId stem})
+      (let [read (read-entries stem)]
+        (if-some [err (:error read)]
+          (api-response (or (:status read) 400) {:error err :threadId stem})
+          (let [es  (:ok read)
+                page (if-some [b (:ok before)]
+                       (sessions/before-of es b)
+                       (sessions/tail-of es))]
+            (api-response 200 (assoc (window-frame stem
+                                                   (if (:ok before) "page" "tail")
+                                                   (:state read)
+                                                   page)
+                                     :live (boolean (:live read))))))))))
+
+(defn- stream-feed!
+  "Serve a feed that has already been let through: the opening frame, then a frame per
+  landing, then one `end` frame when the window is over.
+
+  THE DOORBELL IS A ONE-SLOT CHANNEL (`harness.edge.sessions/watch!`), which is what
+  makes this loop free of both polling and lost wakeups: a ring that arrives while the
+  answer is being written is still in the slot when the loop next waits, and a dozen
+  rings that arrive while it is writing collapse into one wait -- because the loop does
+  not count events, it re-reads the delta from its own cursor. That is the whole reason
+  the watcher carries no cursor of its own (ADR 0003 decision 7).
+
+  THE CURSOR ONLY EVER MOVES FORWARD, and it moves to the last entry's record offset.
+  Entries still in the writer's queue carry no offset, so a frame can be followed by
+  another containing the same entries -- by the time it is written their line has landed
+  and the delta from the old cursor reaches them again. The reader drops the repeat by
+  message id, which is the same identity the session dedupes an action by; the
+  alternative, moving the cursor to a number the writer has not confirmed, is how a
+  reader ends up asking for a delta from an offset nothing is numbered at."
+  [req stem since generation]
+  (let [origin (request-origin req)
+        wake   (async/chan (async/sliding-buffer 1))
+        why    (atom nil)
+        f      (fn [_tid event]
+                 (when (= :gone (:kind event)) (reset! why (:reason event)))
+                 (async/offer! wake :ring))]
+    (sessions/watch! stem f)
+    (hk/as-channel req
+                   {:on-open
+                    (fn [ch]
+                      (async/go
+                        (try
+                          ;; THE OPENING FRAME COMES FIRST, before any wait: a client
+                          ;; that has news waiting for it must not wait for a doorbell
+                          ;; that has already rung.
+                          (let [page  (if (nil? since)
+                                        (sessions/tail stem)
+                                        {:entries (sessions/since stem since)
+                                         :baseSeq since
+                                         :hasMore false})
+                                frame (window-frame stem
+                                                    (if (nil? since) "window" "append")
+                                                    (live-state stem)
+                                                    page)]
+                            (hk/send! ch (feed-head origin (feed-bytes frame)) false)
+                            (loop [cursor (:cursor frame) state-0 (:state frame)]
+                              (async/<! wake)
+                              (if (nil? (sessions/live-entry stem))
+                                ;; THE WINDOW IS OVER, AND IT SAYS SO: the session was put
+                                ;; away, swept, or taken over. A stream that merely stopped
+                                ;; would leave the reader believing it holds everything.
+                                ;; `true`: this frame ends the response, which is the
+                                ;; one thing a feed is ever allowed to do on its own.
+                                (hk/send! ch (feed-bytes
+                                              {:type       "end"
+                                               :reason     (or @why "the session is gone")
+                                               :generation generation})
+                                          true)
+                                (let [delta (sessions/since stem cursor)
+                                      ;; THE STATE IS READ BEFORE THE FRAME IS BUILT, and
+                                      ;; it is worth a frame of its own: a run that settled
+                                      ;; without adding an entry (nothing was said) still
+                                      ;; changes what the reader should draw, and a frame
+                                      ;; sent only for entries would leave the turn on
+                                      ;; screen looking unfinished forever.
+                                      state (live-state stem)
+                                      frame (window-frame stem "append" state
+                                                          {:entries delta
+                                                           :baseSeq cursor
+                                                           :hasMore false})]
+                                  ;; A FRAME HAS TO CARRY NEWS, AND `nil` STATE IS NOT NEWS.
+                                  ;; Ending a run is two steps -- `run-finished!` unpins it,
+                                  ;; `settle!` folds the frames and writes the state -- and
+                                  ;; between them the conversation is neither running nor
+                                  ;; anything else yet, so `live-state` answers nil. Telling a
+                                  ;; reader "never run" for those milliseconds would be a lie,
+                                  ;; and telling it nothing is exactly right: the fold rings on
+                                  ;; its own, and the frame that follows says `unfinished` or
+                                  ;; `settled`, which is the truth. (The suite caught this as a
+                                  ;; flake: the state-only frame was the FIRST of the two, and
+                                  ;; it said nothing.)
+                                  (when (or (seq delta)
+                                            (and (some? state) (not= state state-0)))
+                                    (hk/send! ch (feed-bytes frame) false))
+                                  (recur (or (:cursor frame) cursor) state)))))
+                          (finally
+                            (sessions/unwatch! stem f)))))
+                    ;; ONE LINE PER FEED END, SAYING WHAT http-kit THINKS HAPPENED, for
+                    ;; the same reason the run route says it: a stream that stops is
+                    ;; otherwise indistinguishable from a stream nobody was sending on.
+                    :on-close (fn [_ch status]
+                                (log/info! :feed/stream-closed
+                                           {:thread-id stem :status status
+                                            :generation generation})
+                                (sessions/unwatch! stem f))})))
+
+(defn- feed-get
+  "GET /api/threads/<stem>/feed[?since=N&generation=G] -- the conversation as a LIVE
+  window: the tail page (or the delta after N), then every entry that lands afterwards,
+  until the window is over.
+
+  CONNECTING IS AN ACT ON THE SESSION, so this route births it (a page opening a
+  conversation is the first ask, ADR 0002 decision 5) and rings the claim: pushing
+  changes means holding them. A conversation another live process is serving is refused
+  with the 409 that names it (`refuse-served-elsewhere!`) rather than half-served.
+
+  TWO REFUSALS BEFORE ANY BYTE IS STREAMED, and both are the same mistake: the client is
+  holding numbers from a window that no longer exists.
+
+    a generation that is not this window's   the session was put away, taken over, or
+                                             rebuilt, and every number the client has
+                                             is about a conversation that is gone
+                                             (ADR 0003 decision 6)
+    a `since` older than the tail page       the client is further behind than a page,
+                                             so the 'delta' would be the whole
+                                             conversation -- which is the cost the
+                                             window exists to refuse
+
+  Both answer 409 with the CURRENT generation and baseSeq, so the client's move is the
+  same in both cases and it is a move it can make: drop what it holds and open the tail.
+
+  ONCE STREAMING, THE ONLY ENDING THAT IS NOT THE CLIENT'S is the window ending: the
+  session put away, swept, or the claim changing hands. That sends an `end` frame --
+  SAYING SO -- and closes. A stream that just stops leaves a replica believing it holds
+  everything (`harness.edge.sessions/watch!`)."
+  [req stem]
+  (let [params  (query-params (:query-string req))
+        held    (claims/holder stem)
+        parse   (try {:since (number-param params "since")
+                      :generation (get params "generation")}
+                     (catch Throwable t {:error (ex-message t)}))]
+    (cond
+      (some? (:error parse))
+      (api-response 400 {:error (:error parse) :threadId stem})
+
+      (and (some? held) (not (claims/mine? held)))
+      (refuse-served-elsewhere! stem held)
+
+      :else
+      (let [{:keys [since generation]} parse
+            _      (sessions/touch! stem)
+            mine   (sessions/generation stem)
+            tail   (sessions/tail stem)
+            stale? (or (and (some? generation) (not= (str generation) (str mine)))
+                       (and (some? since) (some? (:baseSeq tail))
+                            (< (long since) (long (:baseSeq tail)))))]
+        (if stale?
+          (api-response 409 {:error (str "this window is over: "
+                                         (if (and (some? generation)
+                                                  (not= (str generation) (str mine)))
+                                           "the conversation is being served under a new generation"
+                                           (str "the client is holding a cursor (since=" since
+                                                ") older than the oldest entry this window still answers from"))
+                                         ". Drop what you hold and open the tail again: GET"
+                                         " /api/threads/" stem "/feed")
+                             :threadId stem
+                             :generation mine
+                             :baseSeq (:baseSeq tail)})
+          (stream-feed! req stem since mine))))))
 
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
@@ -2729,6 +3537,8 @@
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)
         [:get "sofar"]    (sofar-get req stem)
+        [:get "feed"]     (feed-get req stem)
+        [:get "page"]     (page-get req stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]
@@ -2872,6 +3682,24 @@
                    ;; in force, which server is up), so the seam asks this
                    ;; capability per assembly instead of being handed a map.
                    (cap-mcp/install!)]]
+    ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
+    ;; line this process produces goes through it (`harness.edge.record`), and the
+    ;; carry-back that must precede a session's first line is ITS step -- so the
+    ;; edge hands its own carry-back over here, where a capability is told which
+    ;; implementation it runs with. It has no teardown: one writer serves every
+    ;; server this process starts, and a suite that starts a hundred must not
+    ;; leave a hundred writer threads behind (or stop the one it has).
+    (record/prepare-with! carry-back!)
+    (record/start!)
+    ;; THE SESSION TABLE IS LIVE FROM HERE, and it needs both of its outside facts.
+    ;; THE PIN FIRST: a session whose bytes are not all on disk may not be put away, or
+    ;; 'put away' would mean rebuilding from a record that is behind it -- silently,
+    ;; which is the failure ADR 0002 decision 5 exists to refuse. The answer belongs to
+    ;; the writer, so it is handed over rather than guessed (`record/pending?`).
+    (sessions/watch-unflushed! record/pending?)
+    ;; AND THE SWEEPER, because the table holds conversations now: without it, every
+    ;; session this process has ever been asked about would be held until it exits.
+    (sessions/start!)
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
     ;; the same shape as the port below it and for the same reason: both are facts

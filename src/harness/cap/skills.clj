@@ -438,10 +438,11 @@
 ;; history (see derived-injections), and both obey the same one-load-per-name rule. Keeping them
 ;; one derivation is what stops the two paths from drifting apart.
 ;;
-;; The trigger lives in the conversation rather than in a server-side record, for
-;; the reason the whole design is derived rather than accumulated: the client owns
-;; the history, so the "/name" a person typed is still there to be re-read on every
-;; turn -- no bookkeeping, and nothing to lose on a refresh.
+;; The trigger lives in the conversation rather than in a side record, which is the
+;; same line the whole design draws: what a person SAID is part of the conversation
+;; (so the "/name" is still there to be re-read on every turn, and survives a
+;; refresh), while what the harness DERIVED from it -- the body, the catalog -- is
+;; recomputed and never folded in. No bookkeeping, and nothing to lose on a refresh.
 
 (def slash-pattern
   "What a slash-load looks like: the slash, the name, then a space, a newline, or
@@ -571,11 +572,13 @@
 
   IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
   applepi's server holds the session, so its tool can push a message into history
-  and persist it. Here the CLIENT owns the conversation and the server is
-  stateless per run: an injection held server-side dies on refresh, and one sent
-  to the client gets rendered. So the body is recomputed from the conversation
-  itself, every time, and the two properties that makes possible are the ones that
-  matter:
+  and persist it. Here the session is held server-side too (`harness.edge.sessions`),
+  but an injection is NOT part of that conversation: it is a per-call derived text
+  -- the conversation holds what was said, and the instruction files, the skills
+  catalog and these bodies are recomputed for every call (so a file edited a second
+  ago is honoured this second). Folding one in would freeze it. So the body is
+  recomputed from the conversation itself, every time, and the two properties that
+  makes possible are the ones that matter:
 
     - IDEMPOTENT. Applying this to its own output changes nothing, because the
       body is already in place where it belongs. That is what lets the kernel

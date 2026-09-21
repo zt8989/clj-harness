@@ -327,6 +327,22 @@
   (mapv as-session
         (db/select (str "SELECT " session-columns " FROM sessions ORDER BY created_at, id"))))
 
+(defn session-exists?
+  "Does this home know THREAD-ID as a session?
+
+  THE QUESTION THE RUN EDGE ASKS BEFORE IT WRITES ANYTHING (ticket 03 of
+  `.scratch/sessions-live-on-the-server`), and it is a different question from 'is
+  there a log': a log can be sitting in the tree that this home never agreed to keep,
+  and the record that matters is the ROW. `sessions` and `tasks` answer 'which ones'
+  -- this answers 'this one', which is what a request carries.
+
+  READ FROM THE STORE, not from the sessions table in memory: the row is the durable
+  statement that a conversation exists here, and a process that has just started holds
+  no conversations at all."
+  [thread-id]
+  (when (some? thread-id)
+    (boolean (seq (db/select "SELECT 1 FROM sessions WHERE id = ?" (str thread-id))))))
+
 (defn tasks
   "Every session this home knows that belongs to NO project and remembers none:
   {:id :project-id :path :archived? :created-at} with `:project-id` and `:path` null,
@@ -367,10 +383,13 @@
   for one) still stamps the time, because a run did happen.
 
   A SESSION THAT RAN BEFORE EITHER COLUMN EXISTED heals itself the next time it
-  runs: a run sends the whole conversation, so the first user message in it is still
-  the session's first. The name is not backfilled (the owner's call -- an old
-  conversation keeps its id until somebody talks to it again) and the TIME is
-  (`sessions-remember-their-last-send` walks the logs once, because a row with no
+  runs: SAID is the first user turn of the conversation the session holds -- the
+  session is the authority (ADR 0002 decision 1) and the action no longer carries
+  the conversation (`harness.edge.http/run-agent!` hands over the session's own
+  messages first, then this action's entries) -- so it is still the session's FIRST
+  send, whatever the newest one says. The name is not backfilled (the owner's call
+  -- an old conversation keeps its id until somebody talks to it again) and the TIME
+  is (`sessions-remember-their-last-send` walks the logs once, because a row with no
   time at all is a row the sidebar cannot draw)."
   [thread-id said]
   (let [named (when-not (str/blank? (str said)) said)]

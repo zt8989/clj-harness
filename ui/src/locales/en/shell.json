@@ -61,6 +61,10 @@
     "removeProjectRunning": "{{session}} is still running; remove the project once it settles.",
     "removeProjectParked": "{{session}} is waiting on you; remove the project once it settles."
   },
+  "record": {
+    "degraded_one": "This conversation could not be saved to disk: {{reason}}. {{count}} line is waiting to be written.",
+    "degraded_other": "This conversation could not be saved to disk: {{reason}}. {{count}} lines are waiting to be written."
+  },
   "dialog": {
     "removeTitle": "Remove this project?",
     "removeLeaves": "leaves the sidebar. Its sessions are kept on disk — nothing under",
@@ -70,5 +74,14 @@
     "removeSessions_other": "{{count}} sessions will stop being listed here.",
     "keep": "Keep it",
     "removeSubmit": "Remove project"
+  },
+  "window": {
+    "earlier": "Show earlier",
+    "loadingEarlier": "Loading earlier messages",
+    "reopened": "This window was closed on the server and has been reopened at the newest messages.",
+    "rebuilt_one": "The window had a gap that could not be filled, so it was rebuilt from the newest page: {{count}} entry was dropped.",
+    "rebuilt_other": "The window had a gap that could not be filled, so it was rebuilt from the newest page: {{count}} entries were dropped.",
+    "ahead_one": "This page was showing {{count}} entry the conversation no longer has. It is gone.",
+    "ahead_other": "This page was showing {{count}} entries the conversation no longer has. They are gone."
   }
 }

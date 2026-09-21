@@ -69,7 +69,6 @@
 // identity survives re-renders.
 import type { TFunction } from "i18next";
 
-import { HttpAgent } from "@ag-ui/client";
 import { fromThreadMessageLike } from "@assistant-ui/core";
 import { AssistantRuntimeProvider, useAuiState } from "@assistant-ui/react";
 import {
@@ -84,6 +83,7 @@ import { useTranslation } from "react-i18next";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { ContextCards } from "@/components/context-card";
+import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -93,11 +93,16 @@ import {
 } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
 import { SessionTitle } from "@/components/session-title";
-import { firstUserText } from "@/lib/session-title";
+import { firstUserText, titleOf } from "@/lib/session-title";
 import { SidebarOpenButton, isWideWindow } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
+import { HarnessAgent } from "@/lib/agent";
 import { imageAttachments } from "@/lib/attachments";
-import { type SidebarListing, bindThread } from "@/lib/projects";
+// BOTH HALVES OF THIS MERGE'S RECONCILIATION, and the two are not alternatives:
+// `bindThread` is what a minted PROJECT session is registered with just before its first
+// run, and `startTask` is the same for a task (with the id this page minted). Neither is
+// called at click time -- see `pendingBinds` and `registerPending` below.
+import { bindThread, startTask, type SidebarListing } from "@/lib/projects";
 import {
   browserStorage,
   forgetSession,
@@ -106,12 +111,28 @@ import {
   rememberSession,
 } from "@/lib/session-memory";
 import { AGENT_URL, rebuildThread, sofarThread, type SofarState } from "@/lib/threads";
+import { feedThread, pageThread, type WindowFrame } from "@/lib/feed";
+import {
+  aheadOf,
+  aligned,
+  applied,
+  prepended,
+  windowFrom,
+  type Window,
+  type WindowNotice,
+} from "@/lib/window";
+import { withHeldScroll } from "@/lib/window-scroll";
 import { type SessionStatus } from "@/lib/session-status";
+import { type RecordHealth } from "@/lib/record-health";
 
-/// HOW OFTEN A WATCHED CONVERSATION IS READ AGAIN, in milliseconds. Long enough that
-/// a long run is not thousands of requests, short enough that a person watching it
-/// grow does not think it has stopped.
-const WATCH_INTERVAL_MS = 1200;
+/// HOW LONG TO WAIT BEFORE RE-OPENING A WINDOW WHOSE FEED CLOSED ON ITS OWN, in
+/// milliseconds. NOT A POLL: while the connection is up nothing is asked at all, and
+/// this is only the pause after a connection the server (or the network) ended -- a
+/// deployment restarting, a proxy timing a long-lived response out. Opening the tail
+/// page again and reconnecting from the entry this page already holds is the repair for
+/// both a dropped connection and a missed push (`lib/window.ts`'s `aligned`); the delay
+/// is what keeps a server that is DOWN from being asked in a tight loop.
+const RECONNECT_MS = 1000;
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
 /// rebuilds text, reasoning and tool calls -- and reads back
@@ -120,11 +141,11 @@ const WATCH_INTERVAL_MS = 1200;
 /// the finished one. The runtime's own snapshot-import path runs this exact
 /// pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is
 /// upstream's, quoted rather than reinvented.
-/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is read
-/// back off `GET /api/threads/<id>/sofar` (a run being answered in the process, which
-/// this page may only be WATCHING), and null is every other case -- a session this
-/// client has just minted, or one that was rebuilt and is therefore over by
-/// definition.
+/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is the
+/// window's own `state` -- the tail page answers it, and every frame after that carries
+/// it -- which is how this page learns about a run it is only WATCHING. Null is every
+/// other case: a session this client has just minted (no window), or one read through
+/// `rebuild`, which is over by definition.
 ///
 /// THE LAST MESSAGE'S STATUS IS WHERE THAT LANDS, and it is not decoration:
 /// `lib/turns.ts` folds a turn's steps into a one-line summary exactly when its last
@@ -149,6 +170,16 @@ function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
         : { type: "complete" as const, reason: "unknown" as const },
     ),
   );
+}
+
+/// The conversation's state as a READING (`Reads`), for a value that came off the wire
+/// as a string. A server that grows a fifth word reads here as "not running", which is
+/// the safe answer: the one thing a caller does with this is decide whether the last
+/// message on screen is still being written.
+function readsOf(state: string | null | undefined): Reads {
+  return state === "running" || state === "parked" || state === "settled" || state === "unfinished"
+    ? state
+    : null;
 }
 
 /// The rebuilt messages as the repository the history adapter returns: a flat
@@ -181,10 +212,12 @@ function repositoryFrom(agUiMessages: readonly unknown[], reads: Reads = null) {
 ///   "rebuild" -- a session opened from the sidebar: HAND IT OVER. That is the door
 ///                that closes a cut-off log off and names a corrupt one, and the
 ///                refusal belongs on the row that was clicked.
-///   "sofar"   -- the session this page was already in, landed in again (a reload).
+///   "window"  -- the session this page was already in, landed in again (a reload).
 ///                LOOK AT IT, do not take it over: it may be in the middle of a run,
-///                which `rebuild` refuses outright, and looking must not write.
-type HistoryRead = "none" | "rebuild" | "sofar";
+///                which `rebuild` refuses outright, and looking must not write. What
+///                it gets is a WINDOW (ticket 06): the tail page, then every entry as
+///                it lands, with "show earlier" for the rest.
+type HistoryRead = "none" | "rebuild" | "window";
 
 /// READ A CONVERSATION THE WAY A RESTORED PAGE MUST: the read that does not write,
 /// with the one fallback it needs.
@@ -196,6 +229,12 @@ type HistoryRead = "none" | "rebuild" | "sofar";
 /// conversation comes back. Any other failure (a session that is gone, a server that
 /// is not answering) fails here too and is reported as it is -- the same refusal a
 /// `rebuild` door would have shown, because it is the same attempt.
+///
+/// THE WINDOW DOOR USES THIS FOR TWO THINGS AND NOT FOR ITS ENTRIES, which is worth
+/// saying because it looks like the other door: the state it reports after a run
+/// settles (the strip that says the conversation could not be saved -- see the effect
+/// below), and the CUT-OFF LOG, which the window can also see coming (the page route
+/// says `unfinished`) and which only `rebuild` repairs.
 async function readSofar(threadId: string, t: TFunction<"errors">) {
   try {
     return await sofarThread(threadId, t);
@@ -205,25 +244,55 @@ async function readSofar(threadId: string, t: TFunction<"errors">) {
   }
 }
 
-/// The read a host runs on mount, and what it reports back: `onReads` carries the
-/// conversation's own state out of the adapter, because the PAGE needs it -- the poll
-/// below keeps reading while it says `running`, and only the adapter has been told.
+/// The read a host runs on mount, and what it reports back: `onRecord` carries the
+/// record's health out with it (ADR 0002 decision 6), because it arrives on this read
+/// and the column that says so is not the thing that made the request. On the window
+/// door `onWindow` carries the WINDOW itself out, for the same reason and one more: the
+/// host is the only thing that can follow it (a feed is a connection, and a connection
+/// belongs to a component's lifetime).
+///
+/// THE RECORD IS REPORTED ON EVERY DOOR, including `rebuild` -- a conversation handed
+/// over from a record the writer could not add to is exactly the case a reader needs
+/// told, and it is the door a session is opened through.
+///
+/// `onWindow(null)` MEANS "THERE IS NO WINDOW TO FOLLOW", and it is the answer on the
+/// one door here that has none: a log the window reports as `unfinished` is repaired by `rebuild`
+/// (which closes the run off), the repair hands back the WHOLE conversation, and a
+/// page that already holds all of it has nothing to follow and nothing in front.
 function sessionHistory(
   threadId: string,
   read: HistoryRead,
   t: TFunction<"errors">,
-  onReads: (reads: Reads) => void,
+  onRecord: (record: RecordHealth | null) => void,
+  onWindow: (opened: Window | null) => void,
 ) {
   return {
     load: async () => {
       if (read === "none") return { messages: [] };
       if (read === "rebuild") {
         const rebuilt = await rebuildThread(threadId, t);
+        onRecord(rebuilt.record ?? null);
         return repositoryFrom(rebuilt.messages);
       }
-      const answer = await readSofar(threadId, t);
-      onReads(answer.state);
-      return repositoryFrom(answer.messages, answer.state);
+      const page = await pageThread(threadId, t);
+      onRecord(page.record ?? null);
+      if (page.state === "unfinished") {
+        // THE CUT-OFF LOG, WHICH THIS DOOR CAN SEE COMING: the page route says what the
+        // record says, and the record's word for a log that stops mid-run is exactly
+        // this. `rebuild` is the door that repairs it -- and the only one that does --
+        // so the page follows the same sentence it follows from `sofar`'s refusal (see
+        // `readSofar` above): hand the conversation over, and show it.
+        const rebuilt = await rebuildThread(threadId, t);
+        onRecord(rebuilt.record ?? null);
+        onWindow(null);
+        return repositoryFrom(rebuilt.messages, "settled");
+      }
+      const opened = windowFrom(page);
+      onWindow(opened);
+      return repositoryFrom(
+        opened.entries.map((entry) => entry.message),
+        readsOf(page.state),
+      );
     },
     // No-ops: the harness owns the log (see the header).
     append: async () => {},
@@ -291,6 +360,369 @@ const SessionStatusReporter: FC<{
   return null;
 };
 
+/// WHAT THE COLUMN NEEDS TO DRAW A WINDOW'S TOP, reported up to the page the same way
+/// the record's health is (`onRecord`): this host renders the column as its `children`,
+/// so it cannot hand it a prop -- and the page is the component that does.
+export type WindowControls = {
+  hasMore: boolean;
+  loading: boolean;
+  onEarlier: () => void;
+  notice: WindowNotice | null;
+};
+
+/// FOLLOW THE CONVERSATION THIS PAGE IS ONLY WATCHING (ticket 06), which is what
+/// replaced ticket 03's poll of the record.
+///
+/// A POLL AND A FEED ARE NOT TWO SPEEDS OF THE SAME THING. The poll re-read the whole
+/// conversation every 1200ms and imported it wholesale, so it had to guess when to stop
+/// (the answer no longer saying `running`), it could not be used for a conversation whose
+/// record was behind, and every tick was a full read whether anything had happened or
+/// not. A feed is one connection: it is opened with the newest entry this page holds
+/// (`since`) and the window that entry belongs to (`generation`), answered with the
+/// entries that landed after it, and ENDED BY THE SERVER the moment the window is over.
+/// Nothing is asked while nothing happens, and a reader parked on an old conversation
+/// costs one idle connection.
+///
+/// WHAT THIS HOOK OWNS, in the order the rules apply:
+///
+///   the window    -- the tail page the read opened (`start`), then every frame, merged
+///                    by `lib/window.ts`'s rules: append what continues, ALIGN when a
+///                    frame does not continue from what we hold, REOPEN when the window
+///                    is over, and SAY SO in every case that is not an append.
+///   the import    -- every accepted change goes into this host's runtime, so the
+///                    conversation on screen is the window and not the first read --
+///                    EXCEPT while a run THIS PAGE is driving is in flight, for the
+///                    reason the ticket-03 poll wrote down: the host streaming that run
+///                    is ahead of the record and importing over it would draw the answer
+///                    backwards. `readSofar`'s one read per run still reports the record
+///                    afterwards, and the next frame (or the watcher's own read) puts the
+///                    window back in step.
+///   the repairs   -- "show earlier" one page at a time, with ONE page in the air
+///                    (`loading`), anchored so the reader's place does not move.
+///
+/// IT IS A HOOK AND NOT A COMPONENT because it has to read the runtime the host creates
+/// (`useAgUiRuntime`), and hooks cannot be called in a component's children. It runs in
+/// the host's own body, after the runtime exists, and it takes the window the READ
+/// opened through a ref rather than as an argument: the read is an adapter the runtime
+/// calls when it mounts, which is after this body has run.
+function useWindowFeed(args: {
+  threadId: string;
+  read: HistoryRead;
+  t: TFunction<"errors">;
+  runtime: ReturnType<typeof useAgUiRuntime>;
+  /// The window the read opened, or null when it opened none (the repair door, the
+  /// fresh-id door, the sidebar door).
+  start: { current: Window | null };
+  /// Bumped by the read when it has an answer, because a ref does not re-run an effect.
+  started: number;
+  onRecord: (record: RecordHealth | null) => void;
+  /// Whether a run THIS PAGE is driving is in flight (`ownRun`), read through a ref for
+  /// the same reason: this hook must not re-run when it flips.
+  isOwnRun: () => boolean;
+  onControls: (controls: WindowControls) => void;
+}): void {
+  const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onControls } = args;
+
+  /// WHAT THIS PAGE HOLDS, and the mirror of it that re-renders: the ref is what the
+  /// frame handler reads (a frame can arrive while a render is in flight), the state is
+  /// what the top of the column draws.
+  const held = useRef<Window | null>(null);
+  const [view, setView] = useState<Window | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState<WindowNotice | null>(null);
+
+  /// THE CONNECTION, and the guards around it: `close` is the feed's own way to hang up,
+  /// `alive` stops a fetch or a timer from touching a host that is gone, and the two
+  /// in-flight flags keep two DIFFERENT promises.
+  ///
+  ///   `repairing` -- one align-or-reopen at a time. Two repairs racing would each read
+  ///                  the window the other is replacing, and the loser's `commit` would
+  ///                  put back entries the winner had just dropped.
+  ///   `paging`    -- one page in front at a time, which is what the button's disabled
+  ///                  state promises.
+  ///
+  /// THEY ARE NOT ONE FLAG: a reader clicking "show earlier" must not swallow the repair
+  /// for a frame that skipped ahead (that would leave the window behind until something
+  /// else happened to land), and a repair must not be spliced under a page that was
+  /// fetched for the window it is replacing (see the `baseSeq` re-check in `earlier`).
+  /// A page IS refused while a repair is in the air: the answer would be about a window
+  /// that no longer exists.
+  const close = useRef<(() => void) | null>(null);
+  const alive = useRef(true);
+  const repairing = useRef(false);
+  const paging = useRef(false);
+  const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const importWindow = useCallback(
+    (next: Window) => {
+      if (isOwnRun()) return;
+      const messages = next.entries.map((entry) => entry.message);
+      runtime.thread.import(
+        repositoryFrom(messages, readsOf(next.state)) as Parameters<typeof runtime.thread.import>[0],
+      );
+    },
+    [runtime, isOwnRun],
+  );
+
+  /// ACCEPT A CHANGE TO THE WINDOW: the ref, the render, and the runtime, in that order
+  /// (the import reads the window it is given, never the ref -- a second frame arriving
+  /// in the same tick must not be imported twice).
+  const commit = useCallback(
+    (next: Window) => {
+      held.current = next;
+      setView(next);
+      importWindow(next);
+    },
+    [importWindow],
+  );
+
+  const controls = useCallback(
+    (earlier: () => void): WindowControls => ({
+      hasMore: view?.hasMore ?? false,
+      loading,
+      onEarlier: earlier,
+      notice,
+    }),
+    [view, loading, notice],
+  );
+
+  /// REPLACE THE WINDOW WITH A FRESH ANSWER FROM THE SERVER, and say what had to be
+  /// dropped. `frame` is a tail page or the feed's opening window; `aheadOf` is the
+  /// honest check (see `lib/window.ts`): an entry this copy held inside the range the
+  /// answer covers, that the answer does not have.
+  const adopt = useCallback(
+    (frame: WindowFrame) => {
+      const before = held.current;
+      if (before !== null) {
+        const gone = aheadOf(before, frame);
+        if (gone.length > 0) setNotice({ kind: "ahead", count: gone.length });
+      }
+      commit(windowFrom(frame));
+    },
+    [commit],
+  );
+
+  /// THE LOOP'S OWN VERBS, in a ref rather than in each other's dependency lists.
+  ///
+  /// `follow` repairs through `align` and `reopen`, and both of those reopen the feed
+  /// through `follow` -- a cycle. Written as `useCallback`s that name each other, the
+  /// cycle becomes a dependency cycle, and it is not a style problem here: the effect
+  /// that OPENS the connection depends on `follow`, so a `follow` whose identity changed
+  /// on every render would tear the connection down and build it again on every render.
+  /// The ref holds the current verbs and the functions below reach each other through it.
+  const verbs = useRef<{ align: () => void; reopen: () => void; earlier: () => void }>({
+    align: () => {},
+    reopen: () => {},
+    earlier: () => {},
+  });
+
+  /// OPEN THE FEED FROM WHERE THIS PAGE IS. The opening frame carries the conversation's
+  /// state whatever it is now (ticket 06's server half), so a state that changed with no
+  /// entry to show still reaches this host.
+  const follow = useCallback(() => {
+    close.current?.();
+    const window = held.current;
+    if (window === null) return;
+    close.current = feedThread(
+      threadId,
+      { since: window.cursor, generation: window.generation },
+      {
+        onFrame: (frame) => {
+          if (!alive.current) return;
+          // THE RECORD'S HEALTH RIDES ON THESE FRAMES (ADR 0002 decision 6): a write
+          // failure that starts mid-run has to reach whoever is looking, and since
+          // ticket 06 this connection -- not a poll -- is what is running.
+          if (frame.record !== undefined) onRecord(frame.record ?? null);
+          const current = held.current;
+          if (current === null) return;
+          const { window: next, effect } = applied(current, frame);
+          if (effect.kind === "align") {
+            // A FRAME THAT DOES NOT CONTINUE FROM WHAT WE HOLD. Pull the tail and merge
+            // it; the reader's place is kept, which is why this is not a reopen.
+            verbs.current.align();
+            return;
+          }
+          if (effect.kind === "reopen") {
+            // WHY IT CLOSED (`end`'s reason, or the generation changing) is not a
+            // sentence this page can word -- the notice says the honest thing either way:
+            // the window was over and it has been opened again at the newest entries.
+            verbs.current.reopen();
+            return;
+          }
+          // A REBUILD IS SAID BEFORE IT IS DRAWN: the frame did not continue what this
+          // copy held, so entries it was showing are not in the window any more, and the
+          // count is what the sentence is about.
+          if (effect.kind === "rebuilt") setNotice({ kind: "rebuilt", dropped: effect.dropped });
+          // AND A CLEAN FRAME RETIRES WHATEVER WAS SAID. The strip reports a state of
+          // affairs that has just ended -- the window is being followed again, from here
+          // -- and a sentence that stayed for the session's lifetime would be chrome
+          // about an event the reader has long since seen. (A no-op when there is nothing
+          // on screen: React skips a `null` set over a `null`.)
+          else setNotice(null);
+          // BY IDENTITY: a frame that changed nothing hands back the window it was
+          // given, and an import for it would be a re-render per keep-alive.
+          if (next !== current) commit(next);
+        },
+        onRefused: () => {
+          // THE SERVER WOULD NOT OPEN THE WINDOW: the generation this page holds is not
+          // the one being served (a put-away, a takeover, a restart) or the cursor is
+          // older than the window. Either way the window is over, and the answer is the
+          // same one `end` gets.
+          if (!alive.current) return;
+          verbs.current.reopen();
+        },
+        onClosed: () => {
+          // THE CONNECTION WENT AWAY -- a restart, a proxy, a sleeper. Nothing is wrong
+          // with the window; it is BEHIND, and the repair is the tail page plus a
+          // reconnect from the newest entry this page holds.
+          if (!alive.current) return;
+          verbs.current.align();
+        },
+      },
+    );
+  }, [threadId, commit, onRecord]);
+
+  /// THE TAIL PAGE, MERGED INTO WHAT WE HOLD (`aligned`): the repair for a connection
+  /// that dropped, and for a frame that skipped ahead of us. It answers whether the
+  /// conversation moved at all, which is what decides whether the feed needs reopening.
+  const align = useCallback(async () => {
+    if (repairing.current) return;
+    repairing.current = true;
+    try {
+      const tail = await pageThread(threadId, t);
+      if (!alive.current) return;
+      if (tail.record !== undefined) onRecord(tail.record ?? null);
+      const current = held.current;
+      if (current === null) {
+        adopt(tail);
+      } else {
+        const { window: next, effect } = aligned(current, tail);
+        if (effect.kind === "rebuilt") setNotice({ kind: "rebuilt", dropped: effect.dropped });
+        commit(next);
+      }
+      follow();
+    } catch (error) {
+      if (!alive.current) return;
+      // THE READ ITSELF FAILED (the server is not answering). Say nothing yet: the
+      // reconnect below tries again, and a notice that appears and clears on its own is
+      // worse than the state of affairs it describes.
+      retry.current = setTimeout(() => {
+        if (alive.current) void align();
+      }, RECONNECT_MS);
+    } finally {
+      repairing.current = false;
+    }
+  }, [threadId, t, onRecord, adopt, commit, follow]);
+
+  /// OPEN THE WINDOW AGAIN, from the newest entries, and SAY SO. This is what `end` and
+  /// a refusal get: the window this page was holding is over, so there is nothing to
+  /// merge with -- and a copy that quietly swapped in a different conversation would be
+  /// showing something nobody asked for.
+  const reopen = useCallback(async () => {
+    if (repairing.current) return;
+    repairing.current = true;
+    try {
+      const tail = await pageThread(threadId, t);
+      if (!alive.current) return;
+      if (tail.record !== undefined) onRecord(tail.record ?? null);
+      adopt(tail);
+      // THE REOPEN IS SAID LAST, and it wins over the `ahead` count `adopt` may have
+      // raised: both are true, and the one a reader has to know first is that the window
+      // they were looking at is over. The strip has one slot; this is the sentence that
+      // belongs in it.
+      setNotice({ kind: "reopened" });
+      follow();
+    } catch (error) {
+      if (alive.current) {
+        // A REFUSAL WITH THE SERVER'S OWN SENTENCE, rather than a silent stall: if the
+        // tail page cannot be read either, this page cannot show this conversation, and
+        // that is worth saying.
+        setNotice({ kind: "failed", message: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      repairing.current = false;
+    }
+  }, [threadId, t, onRecord, adopt, follow]);
+
+  /// "SHOW EARLIER": ONE PAGE IN FRONT, ANCHORED. The window does not move at its
+  /// newest end, so the feed stays open and nothing is re-read -- and because the page
+  /// arrives before it is drawn, the reader's place is held by the scroll helper
+  /// (`lib/window-scroll.ts`).
+  const earlier = useCallback(async () => {
+    const asked = held.current;
+    if (asked === null || !asked.hasMore || paging.current || repairing.current) return;
+    paging.current = true;
+    setLoading(true);
+    try {
+      const page = await pageThread(threadId, t, asked.baseSeq);
+      if (!alive.current) return;
+      if (page.record !== undefined) onRecord(page.record ?? null);
+      // THE WINDOW MAY HAVE MOVED WHILE THE PAGE WAS IN FLIGHT -- a repair replaced it,
+      // or another frame appended to it. The page is an answer about the OLDEST entry
+      // this copy held, so it is only spliced in when that entry is still the oldest:
+      // otherwise the window would be assembled out of two different moments, which is
+      // exactly the hole every rule in `lib/window.ts` exists to refuse. Nothing is said
+      // and nothing is lost -- the control is still there, and clicking again asks about
+      // the window that exists now.
+      const now = held.current;
+      if (now === null || now.baseSeq !== asked.baseSeq) return;
+      withHeldScroll(() => commit(prepended(now, page)));
+    } catch (error) {
+      if (alive.current) {
+        setNotice({ kind: "failed", message: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      paging.current = false;
+      setLoading(false);
+    }
+  }, [threadId, t, onRecord, commit]);
+
+  // THE VERBS THE LOOP REACHES FOR, kept current. An effect with no dependency list runs
+  // after every render, which is exactly what this needs: the ref is not state, nothing
+  // re-renders on it, and the functions it points at only read refs and stable callbacks.
+  useEffect(() => {
+    verbs.current = {
+      align: () => void align(),
+      reopen: () => void reopen(),
+      earlier: () => void earlier(),
+    };
+  });
+
+  // THE READ'S ANSWER ARRIVES HERE: the page it opened, or null for a door that opened
+  // none (in which case there is no feed and no button, and this host is an ordinary
+  // one-shot reader).
+  useEffect(() => {
+    if (read !== "window") return undefined;
+    const opened = start.current;
+    if (opened === null) return undefined;
+    held.current = opened;
+    setView(opened);
+    follow();
+    return () => {
+      close.current?.();
+      close.current = null;
+    };
+  }, [read, started, start, follow]);
+
+  // THE HOST IS GONE: hang up, and stop any timer that would reconnect for it. Without
+  // this a page that navigated away keeps a request loop alive behind it.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (retry.current !== null) clearTimeout(retry.current);
+      close.current?.();
+      close.current = null;
+    };
+  }, []);
+
+  // THE TOP OF THE COLUMN, out to the page (which draws the column as this host's
+  // `children` and so cannot be handed a prop).
+  useEffect(() => {
+    onControls(controls(() => verbs.current.earlier()));
+  }, [onControls, controls]);
+}
+
 /// One session, alive. It renders the runtime provider and -- when it is the
 /// session on screen -- the column; otherwise it renders nothing and keeps
 /// owning its run.
@@ -302,17 +734,41 @@ const SessionHost: FC<{
   onTitle: (id: string, title: string | null) => void;
   onForget: (id: string) => void;
   onError: (id: string, message: string) => void;
+  /// WHAT THIS SESSION'S RECORD LOOKS LIKE, reported to the page rather than kept
+  /// here: the sentence is drawn by the column, which this host renders as
+  /// `children` and therefore cannot hand a prop to. `null` is the ordinary answer
+  /// and means the record has nothing to say.
+  onRecord: (id: string, record: RecordHealth | null) => void;
+  /// AND THE SAME THING FOR THE WINDOW (ticket 06): whether there is more in front,
+  /// whether a page is in flight, how to ask for one, and what happened to the window.
+  /// A session that is not being followed (`read` is not "window", or its log had to be
+  /// repaired) reports `null`, and the column draws no window top at all.
+  onWindow: (id: string, controls: WindowControls | null) => void;
+  /// AND THE ONE THING A RUN NEEDS SAID BEFORE IT GOES OUT (this merge's
+  /// reconciliation): the id this host speaks for, so the page can register it with the
+  /// server if it was minted here and has never been written. The agent below calls this
+  /// on every run request; the page decides whether this is that id's first
+  /// (`registerPending`, which is a no-op for every session the server already knows).
+  /// A host is therefore the only thing that can hand this over: the id lives here, and
+  /// so does the moment the request is built.
+  onReady: (id: string) => Promise<void>;
   children: ReactNode;
-}> = ({ threadId, read, visible, onStatus, onTitle, onForget, onError, children }) => {
+}> = ({ threadId, read, visible, onStatus, onTitle, onForget, onError, onRecord, onWindow, onReady, children }) => {
   // The agent is built ONCE for this host and owns this session's id for the
   // host's whole life. Rebuilding it would throw the thread away mid-run -- the
   // same reason the old single-agent memo had an empty dependency list, paid per
   // session now instead of once for the page.
+  //
+  // AND IT CARRIES `ready`: the one hook the client library has no seam for, which is
+  // what lets a session this page MINTED exist on the server by the time its first run
+  // request arrives (the run edge refuses an unknown id). It is the page's callback, not
+  // this host's state -- the pending directory lives up there -- so the memo depends on
+  // its identity, and `registerPending` is a `useCallback` with stable dependencies.
   const agent = useMemo(() => {
-    const created = new HttpAgent({ url: AGENT_URL });
+    const created = new HarnessAgent({ url: AGENT_URL, ready: onReady });
     created.threadId = threadId;
     return created;
-  }, [threadId]);
+  }, [threadId, onReady]);
 
   // A TRANSLATION HOOK IS NOT AN ASSISTANT HOOK, and the difference matters here:
   // the runtime-state hooks (`useAuiState` and friends) throw in this body, because
@@ -326,21 +782,105 @@ const SessionHost: FC<{
   // hook -- so the boolean is host state, fed by this host's own gate below.
   const [gateOpen, setGateOpen] = useState(false);
 
-  // WHAT THE CONVERSATION SAID ABOUT ITSELF when it was read, as a REF plus a counter
-  // rather than as state: the poll below has to re-arm while the answer STAYS
-  // `running`, and setting state to the same value is a no-op React happily skips --
-  // which would leave the last read on screen and the run still growing behind it. The
-  // counter is what re-runs the effect; the ref is what it reads.
-  const reads = useRef<Reads>(null);
-  const [readCount, setReadCount] = useState(0);
-  const onReads = useCallback((next: Reads) => {
-    reads.current = next;
-    setReadCount((count) => count + 1);
-  }, []);
+  // THE WINDOW THE READ OPENS, handed from the history adapter to `useWindowFeed` below
+  // through a ref plus a counter: the adapter runs when the RUNTIME mounts (after this
+  // body has run), so an argument cannot carry it -- and a ref alone would not re-run
+  // the effect that follows it.
+  const windowStart = useRef<Window | null>(null);
+  const [windowStarted, setWindowStarted] = useState(0);
+  /// WHETHER THIS HOST HOLDS A WINDOW AT ALL, which is what decides who reports a write
+  /// failure: a window is a connection, and the feed carries the record's health on every
+  /// frame (`harness.edge.http/window-frame`), so the one-read-per-run below is only
+  /// needed on the doors that opened no window -- a session this page just minted, or one
+  /// whose log had to be repaired.
+  const following = useRef(false);
+  const onWindowRead = useCallback((opened: Window | null) => {
+    following.current = opened !== null;
+    if (opened === null) {
+      // NO WINDOW TO FOLLOW: the read took the `rebuild` door (the sidebar's, or the
+      // repair a cut-off log needs), which hands over the whole conversation. The page
+      // is told, so the column draws no window top for this session.
+      onWindow(threadId, null);
+      return;
+    }
+    windowStart.current = opened;
+    setWindowStarted((count) => count + 1);
+  }, [threadId, onWindow]);
+
+  // The record's health, out to the page: nothing in this host's effects re-runs on it,
+  // and the page's own state is what decides whether the sentence is on screen.
+  const reportRecord = useCallback(
+    (record: RecordHealth | null) => onRecord(threadId, record),
+    [threadId, onRecord],
+  );
+
+  // WHETHER A RUN THIS HOST DROVE IS IN FLIGHT, and whether one ever was. Taken from
+  // the same reading the page's registry gets (`SessionStatusReporter` below), for the
+  // one effect that has to know: the record re-read after a run ends.
+  //
+  // A REF ALONGSIDE THE STATE, because "was there ever a run" is not a thing to
+  // re-render for -- it only decides whether the effect below has anything to ask
+  // about -- while `ownRun` IS state, because flipping it is what runs the effect.
+  const ranSomething = useRef(false);
+  const [ownRun, setOwnRun] = useState(false);
+  const ownRunNow = useRef(false);
+  const reportStatus = useCallback(
+    (id: string, status: SessionStatus) => {
+      if (status.running) ranSomething.current = true;
+      ownRunNow.current = status.running;
+      setOwnRun(status.running);
+      onStatus(id, status);
+    },
+    [onStatus],
+  );
+
+  /// ASK HOW THE RECORD IS DOING ONCE A RUN THIS PAGE DROVE HAS ENDED.
+  ///
+  /// THE HOLE THIS FILLS IS THE ONE THE BROWSER WALKTHROUGH FOUND (2026-09-21): the
+  /// read that opens a session answers BEFORE the run exists, and the poll below only
+  /// runs for a session this page is WATCHING -- so a write failure during a run
+  /// somebody is driving themselves reached nobody, and the conversation went on
+  /// unsaved in silence. That is the one thing ADR 0002 decision 6 refuses.
+  ///
+  /// THE SAME READ THE MOUNT USES, fallback included, and the fallback is not an
+  /// accident: a degraded record is exactly when the log can end mid-run, and
+  /// `readSofar` follows its refusal into the rebuild that closes the run off -- which
+  /// is what makes the conversation readable again AND what reports the health. There
+  /// is no new endpoint and no new read path; this is one read per run.
+  ///
+  /// IT REPORTS AND NOTHING ELSE -- no `import`. This host is the one streaming that
+  /// run, and the record LAGS it: importing the log back over the live conversation
+  /// would draw the answer backwards. A window may import precisely because it arrives
+  /// as frames, which are the conversation moving forward.
+  ///
+  /// AND IT IS ONLY FOR THE DOORS THAT OPENED NO WINDOW (ticket 06). A host following
+  /// one is told about a write failure by the FEED -- every frame carries the record's
+  /// health -- so asking again here would be one read per run that says what the
+  /// connection already said. The doors without a window (a session this page just
+  /// minted, one handed over from the sidebar, a log that had to be repaired) have no
+  /// connection to be told on, and this is their one read.
+  useEffect(() => {
+    if (ownRun || !ranSomething.current || following.current) return undefined;
+    ranSomething.current = false;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const answer = await readSofar(threadId, tErrors);
+        if (!cancelled) reportRecord(answer.record ?? null);
+      } catch {
+        // The read failed -- a session that is gone, a harness that is not answering.
+        // Nothing to say about the record, and the conversation on screen stays as it
+        // was: the same reasoning the poll below writes down.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ownRun, threadId, tErrors, reportRecord]);
 
   const history = useMemo(
-    () => sessionHistory(threadId, read, tErrors, onReads),
-    [threadId, read, tErrors, onReads],
+    () => sessionHistory(threadId, read, tErrors, reportRecord, onWindowRead),
+    [threadId, read, tErrors, reportRecord, onWindowRead],
   );
 
   const runtime = useAgUiRuntime({
@@ -362,51 +902,44 @@ const SessionHost: FC<{
     onError: (error) => onError(threadId, error.message),
   });
 
-  // KEEP READING A CONVERSATION THIS PAGE IS ONLY WATCHING (ticket 03, spec decision
-  // one: read the record and poll, never a second streaming path).
-  //
-  // The run belongs to the PROCESS, not to the tab that started it, so a page that
-  // reloaded into a session somebody is still answering has no stream to attach to and
-  // no way to be told. What it has is the record, which is appended frame by frame --
-  // so it asks again, and each answer is imported into this host's own runtime. THAT
-  // IMPORT IS THE POINT of the poll: without it the conversation on screen would be
-  // whatever the first read found, and the turn would look finished because nothing on
-  // this page is running.
-  //
-  // IT STOPS WHEN THE ANSWER STOPS SAYING `running` -- a settled or parked
-  // conversation is not going to grow, and polling one would be a loop with no fact
-  // behind it. The interval is a compromise, not a rule: frames land in the file as
-  // they are written, so a slower poll lags and a faster one asks for the same bytes.
-  useEffect(() => {
-    if (read !== "sofar" || reads.current !== "running") return undefined;
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        const answer = await readSofar(threadId, tErrors);
-        if (cancelled) return;
-        reads.current = answer.state;
-        setReadCount((count) => count + 1);
-        runtime.thread.import(
-          repositoryFrom(answer.messages, answer.state) as Parameters<typeof runtime.thread.import>[0],
-        );
-      } catch {
-        // The read stopped working (the harness went away mid-run). Nothing to say
-        // here: the poll simply stops, and the conversation on screen stays as it was
-        // -- the last thing that was true.
-        if (!cancelled) reads.current = null;
-      }
-    }, WATCH_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [read, readCount, threadId, runtime, tErrors]);
+  /// THE PAGE'S COPY OF THIS SESSION'S WINDOW (ticket 06), for the three things it
+  /// draws and one it says: whether there is more in front, whether a page is in flight,
+  /// how to ask for one, and what happened to the window when the answer was not an
+  /// append. `null` means this host is not following one, and the column draws nothing.
+  const reportControls = useCallback(
+    (next: WindowControls) => onWindow(threadId, next),
+    [threadId, onWindow],
+  );
+
+  // AND FOLLOW IT. This is what replaced the poll that used to live here (ticket 03's
+  // `sofar` every 1200ms): the same problem -- a run belongs to the PROCESS, so a page
+  // that reloaded into a conversation somebody is still answering has no stream to
+  // attach to -- answered with one connection instead of a full read per tick. The hook
+  // above carries the whole argument.
+  const isOwnRun = useCallback(() => ownRunNow.current, []);
+  useWindowFeed({
+    threadId,
+    read,
+    t: tErrors,
+    runtime,
+    start: windowStart,
+    started: windowStarted,
+    onRecord: reportRecord,
+    isOwnRun,
+    onControls: reportControls,
+  });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <SessionStatusReporter
         threadId={threadId}
-        onStatus={onStatus}
+        // THE WRAPPED ONE, not the page's: this host reads its own run state out of the
+        // same report (`reportStatus` above), and the page's registry is the wrong place
+        // to read it back from -- a host that is not on screen still owns its run.
+        onStatus={reportStatus}
+        // AND THE TITLE STRAIGHT THROUGH (the brand-header side): `liveTitles` is what a
+        // row draws for a session the store has not listed yet, and there is no host-side
+        // reading of it to keep.
         onTitle={onTitle}
         onForget={onForget}
       />
@@ -435,7 +968,16 @@ const SessionColumn: FC<{
   /// needed while the control is there. Every host gets it: they all draw the same
   /// bar, and only the one on screen is what a person is looking at.
   folded: boolean;
-}> = ({ threadId, view, onView, folded }) => {
+  /// THE RECORD'S HEALTH FOR THIS SESSION, or null when it has nothing to say. It is
+  /// a prop from the page rather than something this column reads because the fact
+  /// arrives on the HOST's read (see `SessionHost`), which renders this column as
+  /// `children` and so cannot hand it anything.
+  record: RecordHealth | null;
+  /// AND THE WINDOW'S TOP FOR THIS SESSION (ticket 06), from the same place and for the
+  /// same reason: `null` when this host is not following a window at all, which is every
+  /// session that was opened from the sidebar or whose log had to be repaired.
+  window: WindowControls | null;
+}> = ({ threadId, view, onView, folded, record, window }) => {
   const { t } = useTranslation();
   return (
     // The composer's chrome needs to know which session it is configuring -- the
@@ -514,6 +1056,12 @@ const SessionColumn: FC<{
             ))}
           </div>
         </div>
+        {/* THE CONVERSATION THAT COULD NOT BE SAVED (ADR 0002 decision 6, ticket 02).
+            Above the conversation and below the tab strip, so it is read before the
+            text it is about -- and it is a STRIP rather than a floating toast because
+            it stays true until somebody acts on it. The sentence itself lives in
+            `components/record-notice.tsx`, where a test run can render it. */}
+        <RecordNotice record={record} />
         <div className="min-h-0 flex-1">
           {/* THE INJECTION CARD'S REGISTRATION, and it is a rendering: a data part's
               renderer is registered by MOUNTING the component `makeAssistantDataUI`
@@ -523,7 +1071,7 @@ const SessionColumn: FC<{
               registration is scoped to the runtime that resolves the parts. */}
           <ContextCards />
           {view === "conversation" ? (
-            <Thread components={THREAD_COMPONENTS} />
+            <Thread components={THREAD_COMPONENTS} window={window} />
           ) : (
             <TrajectoryView threadId={threadId} />
           )}
@@ -554,24 +1102,91 @@ const dropKey = <T,>(record: Record<string, T>, key: string): Record<string, T> 
 };
 
 export function App() {
-  // The failures this page raises itself -- today, one: a bind at first send that the
-  // server refused (see `reportTitle`). The sentence comes from the `errors` catalog,
-  // like every other refusal the interface did not get from the server.
+  // The failures this page raises itself -- today, one: the registration a minted session
+  // gets immediately before its first run (see `registerPending`), which the server can
+  // refuse. The sentence comes from the `errors` catalog, like every other refusal the
+  // interface did not get from the server.
   const { t: tErrors } = useTranslation("errors");
+  /// THE SESSIONS THIS PAGE MINTED AND THE STORE HAS NOT ANSWERED FOR YET -- the only
+  /// sessions a live title is allowed to name (`reportTitle` below), and the reason is
+  /// main's window: a host's `s.thread.messages` is NOT the conversation. A session
+  /// served as a window holds a TAIL PAGE (ADR 0003, `docs/architecture/client.md`), so
+  /// the first user message in it is a message from the middle of a long conversation --
+  /// and speaking that as the row's name would RENAME a session merely because somebody
+  /// opened it. For a session this page minted the window is EMPTY, so its first user
+  /// message really is the conversation's first, and that is the one case the live title
+  /// exists for: the message just typed, before the listing has caught up.
+  ///
+  /// AN ID LEAVES THIS SET WHEN A LISTING NAMES IT (`forgetListedTitles`, from `onListed`):
+  /// at that moment the store has the row and its own `sessions.title`, which is the
+  /// authority on names for every session -- the same "one source of truth per fact" the
+  /// sidebar's rows are built on.
+  const minted = useRef<Set<string>>(new Set());
+  /// THE SESSION THIS PAGE MINTED THAT THE SERVER HAS NOT BEEN TOLD ABOUT YET, keyed by
+  /// session id, holding the directory it is waiting to belong to -- `null` for a task.
+  ///
+  /// A REF RATHER THAN STATE, and both halves of that are deliberate: the value is read by
+  /// a callback that runs while a request is being built (the agent's `ready`, which must
+  /// not re-render the page to find it), and writing it must not re-render anything either,
+  /// because nothing on screen depends on it -- the row it would belong to does not exist
+  /// yet. This is what LAZY CREATION costs: the sidebar used to bind a new session
+  /// immediately (`POST /api/project`), so the store knew where it lived before anybody
+  /// had typed; now the directory waits here until there is a run to attach it to.
+  ///
+  /// TASKS ARE IN HERE TOO, WITH `null`: the same lazy creation mints a task's id, and the
+  /// same rule makes it need registering -- main's run edge refuses a session this home has
+  /// never been asked to keep, project or not -- through `startTask` rather than a bind.
+  /// An EMPTY MAP is the ordinary state of this page: every session opened from the sidebar,
+  /// and every session the store already lists, is one the server knows.
+  ///
+  /// IT IS DECLARED HERE, WITH THE MINT, rather than next to `registerPending` below, for
+  /// the one entry that is not written by `showFresh`: THE FIRST SESSION, minted by the
+  /// `useState` initializer a few lines down. It is a task, so it is recorded as `null`,
+  /// and leaving it out would refuse the very first message of a first-ever visit -- the
+  /// edge's rule is about what the store has been asked to keep, not about where the id
+  /// came from.
+  const pendingBinds = useRef<Map<string, string | null>>(new Map());
   // THE ROSTER. The first session is minted here and hosted EMPTY: a brand-new
   // id has no log, and the server refuses to invent a conversation for one.
+  //
+  // THE MINT IS THE PAGE'S, which is the brand-header half of this merge and the owner's
+  // rule (点击新增不立刻会话，发送才新建): an id is a name this page gives a conversation
+  // before anybody has typed, and nothing is written to the store until the first SEND --
+  // `registerPending` is what carries the id across at that moment. The other half is
+  // main's: a run aimed at an id this home has never been asked to keep is refused
+  // (`refuse-unknown-session!`), which is exactly why that registration exists rather
+  // than being an idle write. Asking the server for the id here would be the client
+  // giving up its own name to avoid one POST per session -- and it would put the mint
+  // back at page load, which is the write this feature removed from the click.
   const [roster, setRoster] = useState<Roster>(() => {
     const id = crypto.randomUUID();
+    // THE FIRST SESSION IS MINTED HERE TOO, so it is registered (as a task: nothing is
+    // pending but `null`) and live-titled like any other. A first visit sends its first
+    // message into exactly this id, and the row that appears a moment later is the one
+    // the walkthrough reads the name off.
+    pendingBinds.current.set(id, null);
+    minted.current.add(id);
     return { shown: id, live: [{ id, read: "none", attempt: 0 }] };
   });
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
-  // AND ONE TITLE PER SESSION, from the same reporter and read by the same rows: the
-  // second source of `sessions.title`, for the sessions THIS PAGE is holding. The
-  // first is the store's copy (`SessionSummary.firstUserText`, which is what a row
-  // shows for every session nobody here has opened); this one is fresher by exactly
-  // the message that has not been listed yet, which is the one just typed.
+  // AND ONE TITLE PER SESSION, from the same reporter and read by the same rows -- but
+  // ONLY for a session this page minted (`minted` above). The store's copy
+  // (`SessionSummary.firstUserText`) is the authority for every other row, because what a
+  // host holds for one of those is a window and its first user message is not the
+  // conversation's first. For a minted session this is fresher than the store's copy by
+  // exactly the message that has not been listed yet, which is the one just typed.
   const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
+  // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
+  // their host on the read that opens the session and on every poll after it. A
+  // session that is absent from this map is FINE -- that is the ordinary answer, and
+  // the same absence the server sends (`lib/record-health.ts`).
+  const [records, setRecords] = useState<Record<string, RecordHealth>>({});
+  // AND THE WINDOW'S TOP, per session: whether there is more in front, whether a page is
+  // in flight, how to ask for one, and what happened to the window. It lives up here for
+  // the same reason the record's health does -- the column is drawn as the HOST's
+  // `children`, so a host cannot hand it a prop.
+  const [windows, setWindows] = useState<Record<string, WindowControls | null>>({});
   // The sessions whose history would not load, keyed by session, so the refusal
   // lands on the row that was clicked.
   const [openErrors, setOpenErrors] = useState<Record<string, string>>({});
@@ -681,83 +1296,137 @@ export function App() {
 
   const forgetStatus = useCallback((id: string) => {
     setStatuses((prev) => dropKey(prev, id));
+    // AND THE WINDOW GOES WITH IT: a host that went away is not following anything, and
+    // a control left behind for a session that is restored later would draw the last
+    // window's button over a page that has not read one yet.
+    setWindows((prev) => dropKey(prev, id));
   }, []);
 
-  /// THE DIRECTORY A MINTED SESSION IS WAITING TO BELONG TO, keyed by session id.
+  /// MAKE THE SERVER KNOW THIS SESSION, IMMEDIATELY BEFORE ITS FIRST RUN REQUEST.
   ///
-  /// A REF RATHER THAN STATE, and both halves of that are deliberate: the value is READ
-  /// ONCE, at the moment of the first send, by a callback that must not re-render the page
-  /// to find it (`reportTitle`); and writing it must not re-render anything either,
-  /// because nothing on screen depends on it -- the row it would belong to does not exist
-  /// yet. This is what LAZY CREATION costs: the sidebar used to bind a new session
-  /// immediately (`POST /api/project`), so the store knew where it lived before anybody
-  /// had typed; now the directory waits here until there is a conversation to attach it
-  /// to.
+  /// THIS IS WHERE THE TWO HALVES OF THIS MERGE MEET. The page mints a session's id and
+  /// writes nothing (点击新增不立刻会话，发送才新建); the run edge refuses a run aimed at an
+  /// id this home has never been asked to keep (`refuse-unknown-session!`). Both are kept
+  /// by moving the registration from the click to here: a project session is BOUND to the
+  /// directory the sidebar handed over (`bindThread`), a task is registered with no project
+  /// (`startTask` with the id this page minted). Both routes are find-or-create on the
+  /// server, so asking is idempotent -- never wrong, only unnecessary.
   ///
-  /// IT IS DELETED THE MOMENT IT IS USED (see `reportTitle`), so a session that is sent to
-  /// twice is bound once, and a failure is not retried behind the person's back.
-  const pendingBinds = useRef<Map<string, string>>(new Map());
-
-  /// WHAT THIS PAGE LEARNS FROM A HOST, and the place LAZY CREATION is cashed in.
+  /// WHY HERE AND NOT SOMEWHERE ELSE: the agent's fetch wrapper awaits this before the
+  /// request leaves the browser, which is the last moment that is unambiguously BEFORE the
+  /// run. Later -- a send handler, a title arriving -- races the very request it is meant
+  /// to precede, and earlier -- the click -- is the write lazy creation removed. Keeping
+  /// the ordering is what keeps the edge's refusal out of the conversation.
   ///
-  /// A TITLE ARRIVING MEANS SOMEBODY SENT THE FIRST MESSAGE: this callback is fed by
-  /// `firstUserText` over the runtime's own messages (`SessionStatusReporter`), so a
-  /// non-null title is that exact event and there is no other. That is why the bind hangs
-  /// off it rather than off a send handler somewhere in the composer: the run's path is
-  /// what creates the session on the server (`register-run-session!`), and this is the
-  /// page's own view of the same moment.
+  /// ONCE PER ID, AND NOT RETRIED: the entry is deleted BEFORE the await, so two runs
+  /// racing on one id (a send and a resume, a retry after a dropped socket) still write
+  /// once, and a failure is not written again behind the person's back -- the entry is
+  /// gone, and the next run takes the server's own refusal into the conversation, which is
+  /// the honest place for it.
   ///
-  /// SO: IF THIS SESSION WAS MINTED FOR A PROJECT, BIND IT NOW -- one POST, exactly once,
-  /// and never for a task (nothing was pending). Binding is an UPSERT that also creates the
-  /// row, so the order against the run's own registration does not matter: if the run got
-  /// there first the session exists as a task and this moves it into the project, and if
-  /// the bind wins the run finds it already there. Either way the row ends up in the right
-  /// group, which is the acceptance for this ticket.
-  ///
-  /// A REFUSED BIND IS A SENTENCE ON THAT ROW, through the same `openErrors` map a history
-  /// that would not load uses: the session still exists (the run created it, as a task), so
-  /// by the time the row is listed the sentence is waiting for it. It is NOT retried: the
-  /// pending entry is gone, and a retry the person did not ask for would be a second write
-  /// racing the first.
-  const reportTitle = useCallback(
-    (id: string, title: string | null) => {
-      if (title !== null) {
-        const dir = pendingBinds.current.get(id);
-        if (dir !== undefined) {
-          pendingBinds.current.delete(id);
-          void bindThread(id, dir, tErrors).catch((failure: unknown) => {
-            setOpenErrors((prev) => ({
-              ...prev,
-              [id]: failure instanceof Error ? failure.message : String(failure),
-            }));
-          });
-        }
+  /// A REFUSAL IS ALSO A SENTENCE ON THE ROW, through the same `openErrors` map a history
+  /// that would not load uses: a bind the server would not take (a project removed in
+  /// another tab) is a fact about the row the person clicked. It does NOT stop the run --
+  /// the run is what they asked for -- and if the id is still unknown when it arrives, the
+  /// edge's refusal is what the person sees: it reaches this page as a run error
+  /// (`useAgUiRuntime`'s `onError` -> `hostFailed`), which is a sentence on that same row.
+  /// The two failures therefore land in one place, and the run is never silently dropped.
+  const registerPending = useCallback(
+    async (id: string): Promise<void> => {
+      if (!pendingBinds.current.has(id)) return;
+      const dir = pendingBinds.current.get(id) ?? null;
+      pendingBinds.current.delete(id);
+      try {
+        if (dir !== null) await bindThread(id, dir, tErrors);
+        else await startTask(tErrors, id);
+      } catch (failure: unknown) {
+        setOpenErrors((prev) => ({
+          ...prev,
+          [id]: failure instanceof Error ? failure.message : String(failure),
+        }));
       }
-      setLiveTitles((prev) => {
-        // NULL IS "NOTHING SAID YET", and the registry holds titles rather than
-        // answerless entries: dropping the key hands the row back to the store's copy,
-        // which is the same answer from the other source.
-        if (title === null) return dropKey(prev, id);
-        return prev[id] === title ? prev : { ...prev, [id]: title };
-      });
     },
     [tErrors],
   );
 
+  /// WHAT THIS PAGE LEARNS FROM A HOST: what a session it MINTED is CALLED, and nothing
+  /// else.
+  ///
+  /// A TITLE ARRIVING MEANS SOMEBODY SENT THE FIRST MESSAGE: this callback is fed by
+  /// `firstUserText` over the runtime's own messages (`SessionStatusReporter`), so a
+  /// non-null title is that exact event and there is no other.
+  ///
+  /// AND IT IS SPOKEN ONLY FOR A SESSION THIS PAGE MINTED (`minted`). The runtime's
+  /// messages are NOT the conversation for a session served as a window -- they are a
+  /// tail page (`docs/architecture/client.md`: 它手里是一段窗口，不是整场会话) -- so the
+  /// first user message in them is a message from the MIDDLE, and taking it as the row's
+  /// name would relabel an old conversation the moment somebody opened it. The row draws
+  /// `liveTitle` in preference to the store's copy, so a wrong one here is not a stale
+  /// name, it is a wrong one. For a minted session the window is empty and the first
+  /// message is genuinely the first; for every other session the store's
+  /// `sessions.title` -- the authority on names -- answers, and this returns without
+  /// touching anything.
+  ///
+  /// IT ALSO USED TO BE WHERE THE PENDING REGISTRATION WAS CASHED IN, and that moved to
+  /// `registerPending`: main's run edge made the registration something the REQUEST needs
+  /// rather than something that happens after it, and a title is only known once the run's
+  /// first message has been streamed back -- far too late to register the session the run
+  /// is aimed at. The half that stays is the one a title really answers.
+  const reportTitle = useCallback((id: string, title: string | null) => {
+    if (!minted.current.has(id)) return;
+    setLiveTitles((prev) => {
+      // NULL IS "NOTHING SAID YET", and the registry holds titles rather than
+      // answerless entries: dropping the key hands the row back to the store's copy,
+      // which is the same answer from the other source.
+      if (title === null) return dropKey(prev, id);
+      return prev[id] === title ? prev : { ...prev, [id]: title };
+    });
+  }, []);
+
+  /// Take one session's record health, or drop it when the host reports there is
+  /// nothing to say. THE NO-NEWS PATH IS THE COMMON ONE and returns the same object,
+  /// so the page does not re-render every poll with an unchanged (empty) answer.
+  const reportRecord = useCallback((id: string, record: RecordHealth | null) => {
+    setRecords((prev) => {
+      if (record === null) return prev[id] === undefined ? prev : dropKey(prev, id);
+      return { ...prev, [id]: record };
+    });
+  }, []);
+
+  /// TAKE ONE SESSION'S WINDOW TOP -- or drop it when the host reports it is not
+  /// following one (`null`: the sidebar door, the fresh-id door, or a log that had to be
+  /// repaired). The no-window path removes the key for the same reason `reportRecord`
+  /// does: an absent entry and an entry saying "nothing" are the same drawing, and the
+  /// page should not re-render over the difference.
+  const reportWindow = useCallback((id: string, controls: WindowControls | null) => {
+    setWindows((prev) => {
+      if (controls === null) return prev[id] === undefined ? prev : dropKey(prev, id);
+      return { ...prev, [id]: controls };
+    });
+  }, []);
+
   /// Show a session this client has just minted: nothing to rebuild, so no load. The
   /// directory it will belong to travels with it (see `onShowFresh` in `sidebar.tsx`) and
-  /// is only REMEMBERED here -- the bind itself happens at the first send.
+  /// is only REMEMBERED here -- the registration itself happens at the first run.
   ///
   /// THIS AND `showExisting` ARE THE SIDEBAR'S TWO DOORS, and because they are, BOTH CLOSE
   /// THE DRAWER on a narrow window (`foldDrawer`): the panel listed the conversation, and
   /// leaving it over the one just chosen is a pick that looks like it did nothing.
   ///
-  /// THE RESTORE DOES NOT COME THROUGH HERE -- `onListed` calls `show` directly -- and that
-  /// is the distinction worth keeping: a page landing on the session it already remembers
-  /// has nobody to get out of the way of.
+  /// THE PAGE'S OWN PATH DOES NOT COME THROUGH HERE -- `onListed` calls `show` directly --
+  /// and that is the distinction worth keeping: a page landing on the session it already
+  /// remembers has nobody to get out of the way of.
+  ///
+  /// EVERY MINTED SESSION IS REMEMBERED HERE, INCLUDING A TASK: the entry is keyed by id
+  /// and holds `null` for a task, which is what tells `registerPending` that this one is
+  /// registered with `startTask` rather than bound to a directory.
   const showFresh = useCallback(
     (id: string, projectDir: string | null) => {
-      if (projectDir !== null) pendingBinds.current.set(id, projectDir);
+      pendingBinds.current.set(id, projectDir);
+      // AND IT MAY BE NAMED BY ITS OWN RUNTIME until the store answers for it -- see
+      // `minted`. The two do different jobs: this one is about the ROW's name, the map
+      // above is about the session's EXISTENCE.
+      minted.current.add(id);
       foldDrawer();
       show(id, "none");
     },
@@ -792,6 +1461,46 @@ export function App() {
     rememberSession(browserStorage(), roster.shown);
   }, [roster.shown, pending]);
 
+  /// RETIRE THE LIVE TITLES THE STORE CAN NOW ANSWER FOR. This is the second half of the
+  /// rule `reportTitle` states: the page speaks for a session only until the store can
+  /// name it, and from then on the store's copy -- the authority on names -- answers.
+  ///
+  /// A LISTED ROW IS NOT ENOUGH, and that is the whole subtlety. The store's name is
+  /// written by the run's own END, so a listing read a moment too early holds the row with
+  /// nothing in `firstUserText` -- and dropping the page's copy there would hand the row
+  /// its fallback, which is the SESSION ID (a row draws `titleOf(firstUserText) ?? id`). It
+  /// would then read as a uuid until somebody pressed refresh, because the sidebar re-asks
+  /// only for a session that is MISSING from its listing (`asked`). REPRODUCED with thirty
+  /// sends in a row against the real backend, where the row was left as its id while the
+  /// store had the words. So the test here is the ROW'S OWN: the store answers once `titleOf`
+  /// can read a name out of it, and that is the moment the page stops speaking.
+  ///
+  /// IT IS NOT AN OPTIMISATION EITHER. Leaving the entry in place past that point would keep
+  /// the runtime's copy winning over the store's for the rest of the page's life, which is
+  /// exactly how a window's middle-of-the-conversation message would keep a row renamed
+  /// after the store had already answered correctly. Dropping it is also what makes `minted`
+  /// bounded: an id leaves the set here, and the live title leaves with it.
+  ///
+  /// ONLY THE IDS THIS LISTING CAN NAME ARE TOUCHED, so a minted session the store has not
+  /// answered for keeps its name (and its `asked` refetch -- see `sidebar.tsx`, which needs
+  /// the live title to know there is a row missing).
+  const forgetListedTitles = useCallback((listing: SidebarListing) => {
+    const named = new Set<string>();
+    for (const project of listing.projects)
+      for (const session of project.sessions)
+        if (titleOf(session.firstUserText) !== null) named.add(session.threadId);
+    for (const session of listing.tasks)
+      if (titleOf(session.firstUserText) !== null) named.add(session.threadId);
+    for (const id of minted.current) if (named.has(id)) minted.current.delete(id);
+    setLiveTitles((prev) => {
+      const listed = Object.keys(prev).filter((id) => named.has(id));
+      if (listed.length === 0) return prev;
+      const next = { ...prev };
+      for (const id of listed) delete next[id];
+      return next;
+    });
+  }, []);
+
   /// THE MOUNT RESTORE: the session this page was in before it was reloaded (ticket
   /// 03). THREE THINGS ABOUT IT, and each is a decision:
   ///
@@ -804,16 +1513,23 @@ export function App() {
   ///     policy -- an id that disappears from the list later (somebody archived it)
   ///     leaves the page where it is.
   ///   * A REMEMBERED ID THAT IS GONE FALLS BACK TO THE FRESH SESSION THE ROSTER
-  ///     ALREADY HAS, silently. A session that was deleted, archived or moved by hand
-  ///     is not a situation anybody can act on, so it is not a sentence either; the
-  ///     ID IS FORGOTTEN so the next reload does not ask again.
+  ///     ALREADY HAS, silently, and the id is FORGOTTEN so the next reload does not ask
+  ///     again. A session that was deleted, archived or moved by hand is not a situation
+  ///     anybody can act on, so it is not a sentence either. (There is no page with no
+  ///     session on it to say one into: the roster mints one at mount, and this is what
+  ///     that mint is for.)
   ///
-  /// `sofar` rather than `rebuild` is the host's door here, and that is the whole
-  /// ticket: the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and
-  /// which looking at must not disturb.
+  /// THE WINDOW, NOT A REBUILD, is the host's door here, and that is the whole ticket:
+  /// the conversation may be IN THE MIDDLE OF A RUN, which rebuild refuses and which
+  /// looking at must not disturb -- and the window is what lets the page keep looking
+  /// (`feed`), rather than reading the conversation once and falling behind.
   const restored = useRef(false);
   const onListed = useCallback(
     (listing: SidebarListing) => {
+      // EVERY LISTING, not just the first: this is where the page learns that the row it
+      // minted has arrived (see `forgetListedTitles`), and the sidebar hands up each one
+      // it lands. The restore below is the part that happens once.
+      forgetListedTitles(listing);
       if (restored.current || pending === null) return;
       restored.current = true;
       const listed = listedSession(pending, listing);
@@ -823,13 +1539,13 @@ export function App() {
         // and nothing to ask for; a session that HAS been sent to is read through the
         // door that may only look. (The test used to be the log's size, which is the
         // same fact read off the disk side; it is a store column now.)
-        show(pending, listed.lastSentAt === null ? "none" : "sofar");
+        show(pending, listed.lastSentAt === null ? "none" : "window");
       } else {
         forgetSession(browserStorage(), pending);
       }
       setPending(null);
     },
-    [pending, show],
+    [forgetListedTitles, pending, show],
   );
 
   return (
@@ -906,6 +1622,11 @@ export function App() {
             scrolls sideways with every preview running off the edge. The chat never
             needed it because its text wraps. */}
         <div className="min-h-0 min-w-0 flex-1">
+          {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ON ITS ROW, not
+              here: `registerPending`'s failure goes into `openErrors`, which the sidebar
+              draws under the session it belongs to. There is no "no session" box any more
+              (the roster mints one at mount, so the column is never empty), and there is
+              no ask whose refusal could leave one. */}
           {roster.live.map((host) => (
             <SessionHost
               key={`${host.id}:${host.attempt}`}
@@ -916,12 +1637,17 @@ export function App() {
               onTitle={reportTitle}
               onForget={forgetStatus}
               onError={hostFailed}
+              onRecord={reportRecord}
+              onWindow={reportWindow}
+              onReady={registerPending}
             >
               <SessionColumn
                 threadId={host.id}
                 view={view}
                 onView={setView}
                 folded={folded}
+                record={records[host.id] ?? null}
+                window={windows[host.id] ?? null}
               />
             </SessionHost>
           ))}

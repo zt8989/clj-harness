@@ -41,10 +41,18 @@ import { sessionTitleSuite } from "./suites/session-title";
 import { relativeTimeSuite } from "./suites/relative-time";
 import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { injectionSuite } from "./suites/injections";
+import { recordSuite } from "./suites/record";
+import { windowSuite } from "./suites/window";
 
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite];
+///
+/// THIS LIST IS THE MERGED ONE, and both sides of the merge grew it: `brand-header`
+/// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
+/// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
+/// `windowSuite`. Neither side touched the other's additions, which is why the resolved
+/// list is a concatenation rather than a choice.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -107,7 +115,8 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// says in both languages, and the two `aria-*` facts that make them one verb (one
 /// `aria-controls`, and an `aria-expanded` each). The single reference a render in this
 /// run cannot reach -- the sidebar's own element -- is read as source in the same case.
-/// 52 -> 55: the top of the page (`brand-header`). Two of them are the new
+/// 52 -> 69: THE `brand-header` SIDE OF THIS MERGE, counted from the same base as the
+/// other chain below. Two of them are the new
 /// `session-title` suite, which pins a session's title as arithmetic over literal
 /// messages -- the first text the user said, what whitespace becomes, the 60-code-point
 /// clip (an emoji is two UTF-16 units, so the cut is by character), the fallback word in
@@ -134,7 +143,39 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// imports nothing, and the two callers (`components/sidebar.tsx`) cannot be imported here
 /// at all -- so where the control lands and whether clicking it draws the rows are the
 /// browser walkthrough's.
-const EXPECTED_CASES = 69;
+/// 52 -> 65: THE `sessions-live-on-the-server` SIDE, and it starts from the same 52 as the
+/// chain above -- the two sides were counted independently, so these two totals are two
+/// branches of one arithmetic, not a continuation of each other.
+/// 52 -> 54: the `record` suite's two -- a record with nothing to say (nothing drawn,
+/// and a state this client does not know is silence rather than the wire value on
+/// screen) and a degraded one RENDERED in both languages, carrying the writer's own
+/// reason and the plural of how much is waiting. It exists for the same reason the
+/// `sidebar` suite does: a sentence that reaches the screen is the one thing a green
+/// tree could not see.
+/// 54 -> 56: the `client` suite's two, and they are ticket 03's UI half. ONE reads the
+/// wire: a run's body carries `append` (this action's own entries) and NOT the
+/// accumulated `messages` nor a client `runId` -- the second run's `append` holds only
+/// the second question, which is the whole change. THE OTHER reads the other end of the
+/// same contract: `startTask` with nothing to name comes back with an id the SERVER
+/// minted, listed as a conversation this home keeps and usable for a run -- where a
+/// page-made id used to be quietly registered by the run edge.
+/// 56 -> 65: the `window` suite's nine, and they are ticket 06's UI half -- the rules
+/// that turn feed frames into a copy, the control that asks for older history, the
+/// sentences owed when the answer is not simply "more messages", and the arithmetic
+/// that keeps a reader's place when a page is prepended. The three answers that are not
+/// "append" are the reason it exists: a hole, a reopen and a copy that is ahead of the
+/// conversation are all SILENT failures when they go wrong, and silence is not
+/// something a later test can notice.
+/// 69 + 13 = 82: THE RESOLVED TREE. The addition is exact because neither side rewrote a
+/// case the other added: `brand-header`'s seventeen (69 - 52) and `main`'s thirteen
+/// (65 - 52) land in different files -- the sidebar's own suites on one side, the record
+/// and the window on the other -- so the two counts add. What the MERGE itself changed
+/// in these suites is one rule rather than a case count: the page speaks a live title
+/// only for a session it MINTED (`app.tsx`'s `minted`), because a window's first user
+/// message is not the conversation's first -- and this run cannot reach that rule at all
+/// (`components/sidebar.tsx` cannot be imported here, so the `sidebar` suite reads it as
+/// text and the behaviour itself is the browser walkthrough's).
+const EXPECTED_CASES = 82;
 
 let total = 0;
 for (const suite of SUITES) {

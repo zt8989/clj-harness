@@ -175,7 +175,7 @@ const cases: Case[] = [
         },
         { content: "done", usage: usage(1200, 8, 1100) },
       ]);
-      const resp = await postRun(tid, "stats-strip-run-1", [
+      const resp = await postRun(tid, [
         { id: "u1", role: "user", content: "看看这个项目" },
       ]);
       expect(resp.status).toBe(200);

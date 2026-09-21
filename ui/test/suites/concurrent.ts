@@ -13,25 +13,30 @@
 // read when a thread id is first seen. So the two answers are the same sentence
 // and the two USER messages are not -- which is exactly the discrimination this
 // case needs. What has to be true is that each log carries its OWN side of the
-// conversation: the user text rides in the request, is written to the log as the
-// `input` row, and is what crosses a thread boundary if anything does.
+// conversation: the user text rides in the request as the action's `append`, is
+// written to the log as the `input` row, and is what crosses a thread boundary if
+// anything does.
 //
 // The terminal condition is read off the log rather than off the run's promise:
 // a run can resolve while its log is still short, and "the log reached RUN_FINISHED
 // with no RUN_ERROR" is the fact that says the session is complete on disk.
-import { HttpAgent } from "@ag-ui/client";
 import { expect } from "vitest";
 
 import fs from "node:fs";
 import path from "node:path";
 
-import { type Case, type Suite, content, homeDir, runUrl, script, threadId, url } from "../e2e";
+import { type Case, type Suite, agentFor, content, homeDir, script, threadId, url } from "../e2e";
+import { type HarnessAgent } from "@/lib/agent";
 
 /// One row of a session log, as far as this suite reads it.
 type LogRow = {
   kind?: string;
   runId?: string | null;
-  payload?: { type?: string; content?: unknown; messages?: { role?: string; content?: unknown }[] };
+  /// `append` IS THE ACTION'S OWN ENTRIES (ticket 03): what a run added to the
+  /// conversation the server holds. It used to be `messages` -- the whole accumulated
+  /// history the client sent back -- and the field this suite reads is the one that
+  /// changed.
+  payload?: { type?: string; content?: unknown; append?: { role?: string; content?: unknown }[] };
 };
 
 function logPath(tid: string): string {
@@ -63,7 +68,7 @@ function frames(rows: readonly LogRow[]): string[] {
 function carried(rows: readonly LogRow[]): string[] {
   return rows
     .filter((row) => row.kind === "input")
-    .flatMap((row) => row.payload?.messages ?? [])
+    .flatMap((row) => row.payload?.append ?? [])
     .filter((message) => message.role === "user")
     .map((message) => (typeof message.content === "string" ? message.content : ""));
 }
@@ -89,15 +94,15 @@ async function rebuiltTexts(tid: string): Promise<string[]> {
     .filter((text) => text !== "");
 }
 
-/// An agent on its own thread, with a place to keep the error a failed run
-/// reports. A RUN_ERROR arrives as a FRAME, so `onRunErrorEvent` is the hook that
+/// An agent on its own thread, holding the one question this run is about, with a
+/// place to keep the error a failed run reports. A RUN_ERROR arrives as a FRAME, so `onRunErrorEvent` is the hook that
 /// sees it -- `onRunFailedEvent` does not exist on this client, and a typo in a
 /// hook name is silently dropped by its subscriber registry.
-function agentFor(
+async function sendingAgent(
   tid: string,
   saidTheUser: string,
-): { agent: HttpAgent; failed: () => string | null } {
-  const agent = new HttpAgent({ url: runUrl(), threadId: tid });
+): Promise<{ agent: HarnessAgent; failed: () => string | null }> {
+  const agent = await agentFor(tid);
   let failed: string | null = null;
   agent.subscribe({
     onRunErrorEvent: (b) => {
@@ -127,15 +132,15 @@ const cases: Case[] = [
       // rather than about the server.
       script([{ content: answered }]);
 
-      const a = agentFor(tidA, saidA);
-      const b = agentFor(tidB, saidB);
+      const a = await sendingAgent(tidA, saidA);
+      const b = await sendingAgent(tidB, saidB);
 
       // BOTH FLIGHTS, ONE WINDOW: neither is awaited before the other is started,
       // which is the whole point -- the old client refused to send the second while
       // the first was running, and the server never had to be asked.
       await Promise.all([
-        a.agent.runAgent({ runId: `run-a-${tidA}`, tools: [], context: [] }),
-        b.agent.runAgent({ runId: `run-b-${tidB}`, tools: [], context: [] }),
+        a.agent.runAgent({ tools: [], context: [] }),
+        b.agent.runAgent({ tools: [], context: [] }),
       ]);
 
       expect(a.failed(), "conversation A's run reported no error").toBeNull();
