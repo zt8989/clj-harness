@@ -94,7 +94,7 @@
 
 ## 状态
 
-**2026-09-20 立票，尚未开工。** 下面的数字都是在**这台机器**上量的（Windows、4 逻辑核、git 2.23、
+**2026-09-20 立票，当日开工。** 下面的数字都是在**这台机器**上量的（Windows、4 逻辑核、git 2.23、
 Git Bash 走 `bash -lc`）：
 
 - `git-test`：7 用例 / **100 次 spawn** / 107.7s（≈1.08s 一次，与「770ms profile + git 本身」吻合）
@@ -112,3 +112,33 @@ Git Bash 走 `bash -lc`）：
 
 基线（立票当天，`main` @ `19e9d9f`）：
 `clojure -M:test -m harness.test-runner` → 982 用例 / 12080 断言 / 0 失败 / 0 错误。
+
+### 01 — `git/state` 一条命令答三个问题
+
+- **4 → 2 是量出来的，不是算出来的。** `dev/scratch_git_spawns.clj` 给 `shell/run` 装一个临时计数器
+  （`with-redefs`，出一次调用就还原），并把 `HEAD` 上那一版 `git.clj` 用 `git show` 读回来、换个命名
+  空间名加载 —— 于是**同一批仓库**被两个版本各答一次：`state` **4 → 2**、成功 `switch!` **9 → 5**、
+  一次夹具仍是 **8**。计数在 macOS / git 2.52 上量的，与立票那台 Windows / git 2.23 的 4 / 9 / 8
+  一致，因为**次数与平台无关**（6652097 量的是另一样东西：一次 spawn 的 770ms，那个才随平台变）。
+- **答案逐字不变，除了两处故意变的。** 脚本拿 7 个场景（干净的库、一个未跟踪文件、非仓库、`nil`、
+  `""`、不存在的路径、未出生 HEAD）把两版答案对过，全等 —— `:branches` 按集合比，它的顺序是 git
+  自己的（`--sort=-committerdate`），不是本仓承诺的东西。
+- **`(initial)` 与 detached 两格按票面落地**：`:branch` 只在「porcelain 也说有 commit」且「不是
+  detached」时才取值。未出生时 porcelain 热情答出的 `master` 一个字节都不采信 —— 那个名字在
+  `:branches` 里无处可去，而 `:branches` 是空的。
+- **票面没写、落地时撞见的一处既有 bug，顺手修了，因为它是同一句话的另一半**：
+  `branch --format=%(refname:short)` 在 detached 上会把整句 `(HEAD detached at 0082ef1)` **当成一个
+  分支名**交出来 —— 于是选择器里挂着一个谁都不能切过去的名字，而同一时刻 `:branch` 恰好是 nil。
+  改成问 `%(refname)`、只留 `refs/heads/` 前缀的行（`local-branches`）：「本地分支」由**引用的定义**
+  给出，不是猜字符串的形状。detached 那条新用例钉的就是这一格，写它之前这一格是错的。
+- **一处按票面的映射表故意改了口径，记在这里而不是藏起来**：库**索引读不出来**时
+  （`fatal: .git/index: index file smaller than expected`），`status` 与「不是仓库」一样 exit 128，
+  于是现在答 `{:repo? false}`；四个 spawn 那一版答的是 `{:repo? true :branch "main" :dirty 0}` ——
+  对一个读不出来的索引作出的「路上什么都没有」的肯定回答。两害相权，**说不出真话时不再假装说得
+  出**。脚本把两版都打印出来。
+- **0 个 spawn 的那条没变**：`nil` / `""` / 不存在的路径仍在任何 spawn 之前就被答掉；存在但不是仓库
+  的目录花 1 个 —— 「这是不是一个仓库」只有 git 能答。
+
+验收：`harness.cap.git-test` 7 用例 / 28 断言 → **9 / 37**（两条新用例），**既有 7 条一条不改**；
+`harness.edge.http-test` 走 `state` 的那条路径绿；全量 982 / 12080 / 0 失败 / 0 错误 →
+**984 / 12089 / 0 / 0**。`dev/scratch_git_spawns.clj` 15 项全绿（`clojure -M:dev -m scratch-git-spawns`）。

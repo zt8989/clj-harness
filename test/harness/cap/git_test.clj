@@ -32,9 +32,9 @@
   THE DEFAULT BRANCH IS RENAMED RATHER THAN NAMED AT INIT, and that is a real
   constraint rather than tidiness: this machine runs git 2.23, where `git init -b`
   does not exist yet (`--initial-branch` arrived in 2.28). The product code stays
-  inside the same fence deliberately -- it uses `rev-parse`, `branch --format`,
-  `status --porcelain` and `checkout`, all of which are years older than that --
-  and this fixture would be the first thing to notice if it did not."
+  inside the same fence deliberately -- it uses `status --porcelain=v2 --branch`
+  (2.11), `branch --format` and `checkout`, all of which are years older than that
+  -- and this fixture would be the first thing to notice if it did not."
   [dir]
   (.mkdirs (io/file dir))
   (run-in dir "git init -q")
@@ -78,6 +78,49 @@
       (is (= 1 (:dirty (git/state repo)))))
     (testing "and the branch is still readable while it is dirty"
       (is (= "main" (:branch (git/state repo)))))))
+
+(deftest a-detached-head-is-no-branch-and-nothing-to-switch-back-to
+  ;; BOTH HALVES OF THE SAME LIE ARE CHECKED HERE. :branch has to name something
+  ;; that is IN :branches, and a detached head names nothing: the commit is real,
+  ;; but it is not a branch. porcelain answers the literal (detached) where the old
+  ;; probe answered the literal HEAD, and both are refused for one reason.
+  ;;
+  ;; The second half is the listing, and it was wrong until this test was written:
+  ;; git prints a line for the detached head too, whose refname is the whole
+  ;; sentence (HEAD detached at <sha>) -- and asked for :short, it came back
+  ;; looking exactly like a name, so the strip offered a branch nobody could switch
+  ;; to. The set below is the assertion that catches it.
+  (let [repo (scratch-repo (str dir "-detached"))]
+    (run-in repo "git checkout -q --detach HEAD")
+    (let [s (git/state repo)]
+      (is (true? (:repo? s)))
+      (is (nil? (:branch s)) "porcelain answers (detached); that is no branch")
+      (is (= #{"main" "side"} (set (:branches s)))
+          "the branches that exist, and not the (HEAD detached at ..) sentence"))))
+
+(deftest an-unborn-head-is-no-branch-and-not-the-name-git-offers
+  ;; The row of the mapping that is new, and the reason it is a row at all. An
+  ;; unborn head -- a `git init` with no commit yet -- gets exit 0 from porcelain,
+  ;; a `# branch.oid (initial)` AND a cheerful `# branch.head master`, while
+  ;; `branch --format` lists nothing. Copying that name out would draw a branch
+  ;; that is in no picker; the old `rev-parse` exited 128 there and answered nil.
+  (let [repo (support/temp-dir "git-unborn")
+        prefix "# branch.head "]
+    (.mkdirs (io/file repo))
+    (run-in repo "git init -q")
+    (run-in repo "git config user.email test@example.invalid")
+    (run-in repo "git config user.name 'harness test'")
+    (spit (io/file repo "first.txt") "x\n" :encoding "UTF-8")
+    (let [s (git/state repo)
+          offered (some (fn [line]
+                          (when (str/starts-with? line prefix) (subs line (count prefix))))
+                        (str/split-lines (run-in repo "git status --porcelain=v2 --branch")))]
+      (is (some? offered) "porcelain really does offer a name here -- that is the trap")
+      (is (true? (:repo? s)) "a repository with no commit is still a repository")
+      (is (nil? (:branch s)) "and the name it offers is not one")
+      (is (= [] (:branches s)) "because the listing it would have to appear in is empty")
+      (is (not (some #(= % offered) (:branches s))))
+      (is (= 1 (:dirty s)) "the untracked file counts, by --porcelain's own rule"))))
 
 (deftest switching-moves-head-and-says-so
   (let [repo (scratch-repo (str dir "-switch"))]
