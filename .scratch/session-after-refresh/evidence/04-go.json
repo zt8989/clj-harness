@@ -1,0 +1,16 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": { "command": "sleep 45 && echo slept" }
+        }
+      ]
+    },
+    { "content": "第一轮的回答：睡完了。" },
+    { "content": "第二轮的回答：收到了。" }
+  ]
+}

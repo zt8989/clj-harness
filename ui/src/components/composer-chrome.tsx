@@ -1,5 +1,6 @@
 // What sits around and inside the composer: the directory and branch above it,
-// the model and thinking inside it, and the refusal a file can earn.
+// the model and thinking inside it, the refusal a file can earn, and the sentence
+// a conversation the server is still answering owes the reader.
 //
 // ------------------------------------------------ three slots, and why they are here
 //
@@ -100,6 +101,12 @@ import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
 import { Picker } from "./picker";
+// THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING OWES (ticket 04 of
+// `.scratch/session-after-refresh`). It lives in a module of its own -- with the context
+// that carries the server's word -- for one reason: it is rendered in a suite, and THIS
+// file cannot be imported there (`lib/attachments.ts` reaches `lib/i18n.ts`, which touches
+// `document` as it loads). See that module's header.
+import { SessionRunNotice } from "./session-run-notice";
 
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
@@ -712,6 +719,10 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
+        {/* ABOVE THE INPUT, like the context bar, and inside the same box: it is a fact
+            about what this composer can do right now, so it belongs with the composer
+            rather than with the conversation above it. */}
+        <SessionRunNotice />
         {children}
         {refusal !== null && (
           <p

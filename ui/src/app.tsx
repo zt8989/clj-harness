@@ -82,6 +82,7 @@ import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
+import { SessionRunContext } from "@/components/session-run-notice";
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
@@ -122,7 +123,7 @@ import {
   type WindowNotice,
 } from "@/lib/window";
 import { withHeldScroll } from "@/lib/window-scroll";
-import { type SessionStatus } from "@/lib/session-status";
+import { statusOf, type SessionStatus } from "@/lib/session-status";
 import { type RecordHealth } from "@/lib/record-health";
 
 /// HOW LONG TO WAIT BEFORE RE-OPENING A WINDOW WHOSE FEED CLOSED ON ITS OWN, in
@@ -307,12 +308,33 @@ function sessionHistory(
 /// `App` is the component that renders the provider, so a hook reading the
 /// assistant state in `App`'s body throws. The browser said so, for the old
 /// single-runtime shape.
+///
+/// TWO REPORTS COME OUT OF IT, AND THEY ARE NOT THE SAME ANSWER (ticket 04 of
+/// `.scratch/session-after-refresh`):
+///
+///   `onStatus`  -- the PAGE'S answer for this session, which is `lib/session-status`'s
+///                  `statusOf`: this runtime's reading ORed with the server's own word
+///                  (`serverState`, the window's `state`). The sidebar draws it, and a
+///                  row has to light up for a conversation the server is answering even
+///                  when this page is only watching it.
+///   `onOwnRun`  -- the HOST'S own bookkeeping, which is the LOCAL reading ALONE. It is
+///                  what `isOwnRun` answers, and that decides whether the window feed may
+///                  import into this runtime: a run this page is only watching must keep
+///                  importing, or the turn on screen would stop growing (see
+///                  `useWindowFeed`). Folding the server's word in here would freeze the
+///                  very conversation the reload was supposed to restore.
 const SessionStatusReporter: FC<{
   threadId: string;
+  /// THE SERVER'S OWN WORD FOR THIS SESSION (`statusOf`'s second half), straight off the
+  /// window this host follows -- one of `running` / `parked` / `settled` / `unfinished`, or
+  /// null for a host with no window to ask. NOT reduced to a boolean on the way in: which
+  /// word it is, is the question `statusOf` answers.
+  serverState: string | null;
   onStatus: (id: string, status: SessionStatus) => void;
+  onOwnRun: (running: boolean) => void;
   onTitle: (id: string, title: string | null) => void;
   onForget: (id: string) => void;
-}> = ({ threadId, onStatus, onTitle, onForget }) => {
+}> = ({ threadId, serverState, onStatus, onOwnRun, onTitle, onForget }) => {
   const running = useAuiState((s) => s.thread.isRunning);
   // AND WHAT THIS CONVERSATION IS CALLED, read off the same runtime, one line up from
   // the status it is reported with. It is the SECOND source of a title rather than the
@@ -333,10 +355,14 @@ const SessionStatusReporter: FC<{
   // it just reported. The page compares the two booleans, so a second report of
   // the same answer changes nothing and there is no loop to guard.
   useEffect(() => {
-    // [DEBUG-a4f2] the projection the Send/Cancel toggle reads.
-    console.log(`[DEBUG-a4f2] reporter ${threadId} running=${running} parked=${parked}`);
-    onStatus(threadId, { running, parked });
-  }, [threadId, running, parked, onStatus]);
+    onStatus(threadId, statusOf({ running, parked }, serverState));
+  }, [threadId, running, parked, serverState, onStatus]);
+
+  // THE HOST'S OWN READING, its own effect so it cannot be confused with the page's: see
+  // the note above on why the two must not be merged.
+  useEffect(() => {
+    onOwnRun(running);
+  }, [threadId, running, onOwnRun]);
 
   // ITS OWN EFFECT, for the reason the status one has its own: re-running the pair
   // together would report the status again every time a message arrives (the title
@@ -419,9 +445,18 @@ function useWindowFeed(args: {
   /// Whether a run THIS PAGE is driving is in flight (`ownRun`), read through a ref for
   /// the same reason: this hook must not re-run when it flips.
   isOwnRun: () => boolean;
+  /// THE SERVER'S OWN WORD FOR THIS SESSION'S RUN, every time the window it says it about
+  /// changes: one of `running` / `parked` / `settled` / `unfinished`, or null while there
+  /// is no window at all. It is the ONLY reading that can tell this page that a run
+  /// somebody else's process started is going (ticket 04 of
+  /// `.scratch/session-after-refresh`): the host's `thread.isRunning` is false after a
+  /// reload, so without this the composer offered Send for a conversation the server was
+  /// still answering and the answer was the run edge's 409.
+  onState: (state: string | null) => void;
   onControls: (controls: WindowControls) => void;
 }): void {
-  const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onControls } = args;
+  const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onState, onControls } =
+    args;
 
   /// WHAT THIS PAGE HOLDS, and the mirror of it that re-renders: the ref is what the
   /// frame handler reads (a frame can arrive while a render is in flight), the state is
@@ -464,16 +499,20 @@ function useWindowFeed(args: {
     [runtime, isOwnRun],
   );
 
-  /// ACCEPT A CHANGE TO THE WINDOW: the ref, the render, and the runtime, in that order
-  /// (the import reads the window it is given, never the ref -- a second frame arriving
-  /// in the same tick must not be imported twice).
+  /// ACCEPT A CHANGE TO THE WINDOW: the ref, the render, the runtime and the state it
+  /// carries, in that order (the import reads the window it is given, never the ref -- a
+  /// second frame arriving in the same tick must not be imported twice). `onState` is
+  /// reported from HERE rather than from a render: it is the same moment the window moved,
+  /// and a state that changed with no entry to show still has to reach the page (the feed
+  /// sends a frame of its own for exactly that -- `harness.edge.http/stream-feed!`).
   const commit = useCallback(
     (next: Window) => {
       held.current = next;
       setView(next);
+      onState(next.state);
       importWindow(next);
     },
-    [importWindow],
+    [importWindow, onState],
   );
 
   const controls = useCallback(
@@ -690,19 +729,22 @@ function useWindowFeed(args: {
 
   // THE READ'S ANSWER ARRIVES HERE: the page it opened, or null for a door that opened
   // none (in which case there is no feed and no button, and this host is an ordinary
-  // one-shot reader).
+  // one-shot reader). The state the tail page came with is reported with it -- the read is
+  // where a reload FIRST learns that the conversation it landed in is still being answered,
+  // and it must not have to wait for the next frame to say so.
   useEffect(() => {
     if (read !== "window") return undefined;
     const opened = start.current;
     if (opened === null) return undefined;
     held.current = opened;
     setView(opened);
+    onState(opened.state);
     follow();
     return () => {
       close.current?.();
       close.current = null;
     };
-  }, [read, started, start, follow]);
+  }, [read, started, start, follow, onState]);
 
   // THE HOST IS GONE: hang up, and stop any timer that would reconnect for it. Without
   // this a page that navigated away keeps a request loop alive behind it.
@@ -815,8 +857,9 @@ const SessionHost: FC<{
   );
 
   // WHETHER A RUN THIS HOST DROVE IS IN FLIGHT, and whether one ever was. Taken from
-  // the same reading the page's registry gets (`SessionStatusReporter` below), for the
-  // one effect that has to know: the record re-read after a run ends.
+  // the same reading the page's registry gets (`SessionStatusReporter` below) -- THE LOCAL
+  // HALF OF IT, which is the point: this is "a run of MY OWN agent", and it decides whether
+  // the window feed may import into this runtime (ticket 04 of `.scratch/session-after-refresh`).
   //
   // A REF ALONGSIDE THE STATE, because "was there ever a run" is not a thing to
   // re-render for -- it only decides whether the effect below has anything to ask
@@ -824,16 +867,20 @@ const SessionHost: FC<{
   const ranSomething = useRef(false);
   const [ownRun, setOwnRun] = useState(false);
   const ownRunNow = useRef(false);
-  const reportStatus = useCallback(
-    (id: string, status: SessionStatus) => {
-      if (status.running) ranSomething.current = true;
-      ownRunNow.current = status.running;
-      setOwnRun(status.running);
-      onStatus(id, status);
-    },
-    [onStatus],
-  );
+  const reportOwnRun = useCallback((running: boolean) => {
+    if (running) ranSomething.current = true;
+    ownRunNow.current = running;
+    setOwnRun(running);
+  }, []);
 
+  /// WHAT THE SERVER SAYS THIS SESSION IS DOING, as the window last reported it: `running`
+  /// while a run of this conversation is in flight in the harness process -- WHETHER OR NOT
+  /// THIS PAGE STARTED IT. It is state here rather than inside `useWindowFeed` because two
+  /// things outside that hook need it, and neither can read a hook's own state: the
+  /// composer's gate (`isSendDisabled` below, which is a runtime OPTION and so has to be
+  /// known in this body) and the sentence the composer draws (through `SessionRunContext`,
+  /// which reaches it from here).
+  const [runState, setRunState] = useState<string | null>(null);
 
   const history = useMemo(
     () => sessionHistory(threadId, read, tErrors, reportRecord, onWindowRead),
@@ -842,7 +889,24 @@ const SessionHost: FC<{
 
   const runtime = useAgUiRuntime({
     agent,
-    isSendDisabled: gateOpen,
+    // THE COMPOSER'S GATE, and there are two reasons for it to be closed, so it is an OR
+    // (ticket 04 of `.scratch/session-after-refresh`):
+    //
+    //   `gateOpen`  -- this session has stopped to ask a human (this host's own approval
+    //                  batch). A message sent while a gate is open is refused by the runtime
+    //                  SILENTLY (see `components/approval-gate.tsx`), so the door has to be
+    //                  shut rather than the message swallowed.
+    //   `runState`  -- THE SERVER IS STILL ANSWERING THIS CONVERSATION. The other reading
+    //                  (`thread.isRunning`) is false for a run this page did not start, so
+    //                  without this a page that reloaded into a running session offered Send
+    //                  and the only reply was the run edge's 409 ("this session already has a
+    //                  run in this process").
+    //
+    // IT IS `running` AND NOT "NOT SETTLED", deliberately: `parked` and `unfinished` are
+    // conversations NO run is going in (a parked run has ended on its interrupt), and
+    // closing the composer on those would be a door with no way through it until ticket 06
+    // brings their cards back. See `lib/session-status.ts`'s `statusOf`.
+    isSendDisabled: gateOpen || runState === "running",
     adapters: {
       // IMAGES IN THE COMPOSER, and this one line is what enables them -- see
       // lib/attachments.ts: `capabilities.attachments` is `!!adapters.attachments`,
@@ -941,31 +1005,45 @@ const SessionHost: FC<{
     started: windowStarted,
     onRecord: reportRecord,
     isOwnRun,
+    onState: setRunState,
     onControls: reportControls,
   });
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <SessionStatusReporter
-        threadId={threadId}
-        // THE WRAPPED ONE, not the page's: this host reads its own run state out of the
-        // same report (`reportStatus` above), and the page's registry is the wrong place
-        // to read it back from -- a host that is not on screen still owns its run.
-        onStatus={reportStatus}
-        // AND THE TITLE STRAIGHT THROUGH (the brand-header side): `liveTitles` is what a
-        // row draws for a session the store has not listed yet, and there is no host-side
-        // reading of it to keep.
-        onTitle={onTitle}
-        onForget={onForget}
-      />
-      {/* Per host, and BELOW this host's provider because it reads ITS pending
-          interrupts. The reason the composer closes at all is in
-          `components/approval-gate.tsx`: a message sent while a gate is open is
-          refused by the runtime and the refusal is silent. */}
-      <ApprovalBatchProvider onHoldChange={setGateOpen}>
-        {visible ? children : null}
-      </ApprovalBatchProvider>
-    </AssistantRuntimeProvider>
+    // THE SERVER'S WORD, HANDED TO THE COMPOSER. It is a context rather than a prop
+    // because the composer is INSIDE the copied element (`<Thread/>`), which this host
+    // renders as `children` and so cannot hand anything to -- the same reason
+    // `components/composer-chrome.tsx` takes the thread id through one.
+    //
+    // IT WRAPS THE PROVIDER RATHER THAN SITTING INSIDE IT, deliberately: which run this
+    // session has going is not a fact about the runtime (that is exactly what the bug was),
+    // and nothing between these two lines reads it.
+    <SessionRunContext.Provider value={runState}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <SessionStatusReporter
+          threadId={threadId}
+          // THE TWO READINGS, REPORTED SEPARATELY: `onStatus` carries what the PAGE draws --
+          // this runtime's own run ORed with the server's word, by `statusOf` in the
+          // reporter -- while `onOwnRun` keeps the local half here. See the reporter's own
+          // header for why they must not be merged.
+          serverState={runState}
+          onStatus={onStatus}
+          onOwnRun={reportOwnRun}
+          // AND THE TITLE STRAIGHT THROUGH (the brand-header side): `liveTitles` is what a
+          // row draws for a session the store has not listed yet, and there is no host-side
+          // reading of it to keep.
+          onTitle={onTitle}
+          onForget={onForget}
+        />
+        {/* Per host, and BELOW this host's provider because it reads ITS pending
+            interrupts. The reason the composer closes at all is in
+            `components/approval-gate.tsx`: a message sent while a gate is open is
+            refused by the runtime and the refusal is silent. */}
+        <ApprovalBatchProvider onHoldChange={setGateOpen}>
+          {visible ? children : null}
+        </ApprovalBatchProvider>
+      </AssistantRuntimeProvider>
+    </SessionRunContext.Provider>
   );
 };
 

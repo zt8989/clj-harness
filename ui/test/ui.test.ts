@@ -34,6 +34,7 @@ import { statsSuite } from "./suites/stats";
 import { turnSuite } from "./suites/turn";
 import { pickerSuite } from "./suites/picker";
 import { restoreSuite } from "./suites/restore";
+import { runningSuite } from "./suites/running";
 import { turnsSuite } from "./suites/turns";
 import { concurrentSuite } from "./suites/concurrent";
 import { sidebarSuite } from "./suites/sidebar";
@@ -52,7 +53,7 @@ import { windowSuite } from "./suites/window";
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
 /// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -192,7 +193,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// stayed green while the app drew the person's AGENTS.md as a bubble they had typed. The
 /// fifth pins the test that stops it, over the PARTS rather than the role, because the role
 /// is the one thing the two kinds of message share.
-const EXPECTED_CASES = 86;
+/// 86 -> 88: the `running` suite's two, which are ticket 04 of `.scratch/session-after-refresh`
+/// -- a conversation the SERVER is still answering must not offer Send. One is the union as
+/// arithmetic (`statusOf`: this page's own run OR the window's word, and which words do NOT
+/// mean in flight); the other RENDERS the sentence in both languages. Two readings of one
+/// session used to disagree and the only reply was the run edge's 409 -- found in a browser,
+/// because nothing in this run could see either half.
+const EXPECTED_CASES = 88;
 
 let total = 0;
 for (const suite of SUITES) {
