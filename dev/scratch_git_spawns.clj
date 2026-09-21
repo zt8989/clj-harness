@@ -128,9 +128,15 @@
     "git branch side"})
 
 (defn- load-baseline-test!
-  "`git_test.clj` as of `baseline-rev`, under its own namespace name, so a whole run
-  of the file can be counted the way the ticket counted it -- a real repository per
-  case -- against this one, where every case copies a single build."
+  "`git_test.clj` as of `baseline-rev`, under its own namespace name AND asking the
+  old subject, so that a whole run of the file can be counted the way the ticket
+  counted it -- a real repository per case, read with the four-spawn `state`.
+
+  IT ASKS `harness.cap.git-old` RATHER THAN THE NAMESPACE UNDER TEST, and that is
+  the difference between a measurement and a coincidence: the baseline FILE read
+  through the new `git.clj` would have the fold applied to it and would report the
+  savings twice, once as the fixture and once as the subject. `load-old!` has to
+  have run first -- the require is resolved when this form is evaluated."
   []
   (let [{:keys [exit out err]} (real-run {:command (str "git show " baseline-rev
                                                         ":test/harness/cap/git_test.clj")
@@ -138,8 +144,11 @@
                                           :timeout-ms 20000})]
     (when-not (= 0 exit)
       (throw (ex-info "cannot read the baseline git_test.clj" {:err err})))
-    (load-string (str/replace out "(ns harness.cap.git-test\n"
-                                 "(ns harness.cap.git-baseline-test\n"))))
+    (load-string (-> out
+                     (str/replace "(ns harness.cap.git-test\n"
+                                  "(ns harness.cap.git-baseline-test\n")
+                     (str/replace "[harness.cap.git :as git]"
+                                  "[harness.cap.git-old :as git]")))))
 
 (def ^:private build-marker
   "The one command that only a repository BUILD runs, so that counting it counts
@@ -150,20 +159,28 @@
 
 (defn- suite-spawns
   "What one run of TEST-NS costs: every process, how many of them were repository
-  builds, and how many matched the fixture's command shapes at all.
+  builds, how many matched the fixture's command shapes at all, and how long it took.
 
   THE SUITE'S OUTPUT GOES TO A StringWriter. This is a measurement, not a report, and
-  two suites' worth of dots would bury the number being measured."
+  two suites' worth of dots would bury the number being measured.
+
+  THE TIME IS REPORTED BESIDE THE COUNT because the two answer different questions:
+  spawns are what this ticket changed and are the same number on every machine, while
+  milliseconds are a property of the machine (a Windows spawn goes through
+  `bash -lc` and its login profile -- 6652097 measured 770ms; this one is ~10ms).
+  Neither number means anything without the other."
   [test-ns]
   (reset! spawns 0)
   (reset! spawned-commands [])
-  (let [quiet (java.io.StringWriter.)]
+  (let [quiet (java.io.StringWriter.)
+        start (System/nanoTime)]
     (binding [test/*test-out* quiet]
       (with-redefs [shell/run counting-run]
         (test/run-tests test-ns)))
     {:all @spawns
      :builds (count (filter #{build-marker} @spawned-commands))
-     :fixture-shaped (count (filter fixture-commands @spawned-commands))}))
+     :fixture-shaped (count (filter fixture-commands @spawned-commands))
+     :ms (long (/ (- (System/nanoTime) start) 1000000))}))
 
 (def ^:private results (atom {:pass 0 :fail 0}))
 
@@ -181,6 +198,12 @@
     (check (str scenario " -- answers unchanged")
            (= (norm old) (norm new))
            (str "old " (pr-str old) "\n            new " (pr-str new)))))
+
+(defn- case-count
+  "How many cases TEST-NS declares, asked of the namespace rather than written down
+  here: a count spelled twice is a count that goes stale separately."
+  [test-ns]
+  (count (filter #(:test (meta %)) (vals (ns-publics test-ns)))))
 
 (defn -main [& _]
   (runner/isolate!)
@@ -271,21 +294,30 @@
       (println (format "  new switch! %s\n"
                        (pr-str (or (:ok (:answer switch-n)) (:answer switch-n))))))
 
-    (println "\n== FIXTURES: what one run of the namespace spends on repositories ==")
+    (println "\n== THE WHOLE FILE: spawns, and time for scale ==")
     (load-baseline-test!)
     (let [before (suite-spawns 'harness.cap.git-baseline-test)
           after  (suite-spawns 'harness.cap.git-test)
           cost   8]  ;; one build, measured in the section above
-      (println (format "  the baseline file (7 cases, a real repository each): %d builds = %d spawns"
+      (println (format "  baseline file, baseline state: %d spawns / %d ms  (%d cases, %d builds = %d to build)"
+                       (:all before) (:ms before) (case-count 'harness.cap.git-baseline-test)
                        (:builds before) (* cost (:builds before))))
-      (println (format "  this file        (10 cases, ONE build, copied):      %d build  = %d spawns"
+      (println (format "  this file, folded + copied:    %d spawns / %d ms  (%d cases, %d build  = %d to build)"
+                       (:all after) (:ms after) (case-count 'harness.cap.git-test)
                        (:builds after) (* cost (:builds after))))
-      (println (format "  whole runs, for scale: %d spawns before, %d now" (:all before) (:all after)))
-      (println (format "  this file's other %d repository-shaped spawns are the unborn case, which\n  must build a repository with NO commit -- no copy of the template can be one"
+      (println (format "  this file's other %d repository-shaped spawns are the unborn case, which must\n  build a repository with NO commit -- no copy of the template can be one"
                        (- (:fixture-shaped after) (* cost (:builds after)))))
-      (check "repositories built: 5 -> 1, so the fixture costs 40 -> 8 processes"
+      (check "fixture: 5 builds -> 1, so 40 spawns -> 8"
              (and (= 5 (:builds before)) (= 1 (:builds after)))
              (str "before " (:builds before) " after " (:builds after)))
+      ;; The whole file is the number ticket 03 asked for, and it is NOT 40/8 of it:
+      ;; the cases themselves read state, and this feature ADDED three of them.
+      (check "the whole file: 100 spawns -> fewer, while gaining three cases"
+             (and (= 100 (:all before)) (< (:all after) (:all before))
+                  (= 7 (case-count 'harness.cap.git-baseline-test))
+                  (= 10 (case-count 'harness.cap.git-test)))
+             (str "before " (:all before) " over " (case-count 'harness.cap.git-baseline-test)
+                  " cases, after " (:all after) " over " (case-count 'harness.cap.git-test)))
       ;; The template's root, read off the namespace under test rather than guessed:
       ;; what is being checked is that the run put it back.
       (let [troot (io/file (str @#'harness.cap.git-test/template-root))]
