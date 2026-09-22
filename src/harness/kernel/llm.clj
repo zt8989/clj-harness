@@ -174,17 +174,45 @@
   `prompt_tokens_details.cached_tokens`; a fold that wanted a translated key
   would be guessing at a second spelling this repo has no evidence for).
 
-  A KEY IS WRITTEN ONLY WHEN THE CHUNK HAS IT, and finish_reason only when it is
-  non-nil: most chunks carry `\"finish_reason\": null`, and 'null on every chunk'
-  would otherwise overwrite the one chunk that said `tool_calls`. Usage arrives on
-  the LAST chunk of a stream, which is also why this is folded rather than read
-  once at the top."
+  A KEY IS WRITTEN ONLY WHEN THE CHUNK HAS A NON-NIL VALUE FOR IT, and a `null` is
+  never allowed to stand in for a real one. Most chunks carry `\"finish_reason\": null`,
+  and a vendor that reports usage at all usually carries `\"usage\": null` on every chunk
+  BUT the last -- so a fold that wrote every occurrence would erase the one chunk that
+  said `tool_calls`, or the one that carried the numbers. The second loss is the worse
+  one: usage is the number this whole log exists to make readable
+  (`prompt_tokens_details.cached_tokens`), OURS is the only copy of it -- the vendor is
+  not asked twice -- and a wiped usage does not look wiped, it looks like a call that
+  reported nothing."
   [chunk]
   (cond-> {}
-    (contains? chunk :usage) (assoc :usage (:usage chunk))
-    (contains? chunk :model) (assoc :model (:model chunk))
+    (some? (:usage chunk)) (assoc :usage (:usage chunk))
+    (some? (:model chunk)) (assoc :model (:model chunk))
     (some? (get-in chunk [:choices 0 :finish_reason]))
     (assoc :finish-reason (get-in chunk [:choices 0 :finish_reason]))))
+
+(defn tee-lines
+  "LINES -> the same lines, each one (plus a newline) also appended to SB as it is
+  realized. The raw frame text, for the traffic log.
+
+  WHY THE RAW TEXT IS WORTH THE BYTES: a folded `:telemetry` is a READING of the stream,
+  and a reading cannot be checked against its source once the source is gone. 'The
+  vendor never mentioned cached tokens' and 'our fold dropped them' look identical in a
+  folded map, and only the second one is a bug -- so the evidence behind the reading
+  stays on the record.
+
+  THE LINES ARE ALREADY DECODED TEXT, which is what keeps this honest: what lands is the
+  vendor's own frame text (`data: {...}`), NOT a re-serialization of the parsed chunks --
+  the same property the request line has, for the same reason (the prefix cache keys on
+  bytes, so a second spelling is not evidence about the wire). ONE THING IS NORMALIZED,
+  said here rather than left to be discovered: `line-seq` has already dropped the line
+  terminators, so a `\\n` is put back and a CRLF vendor reads as LF. The frame text --
+  which is what any question is actually about -- is untouched.
+
+  LAZY ON PURPOSE, so this cannot make the stream wait for its last line: it is the
+  consumer's realization that fills SB. A stream that dies mid-way therefore leaves a
+  PARTIAL record of what did arrive, which is exactly the case somebody is reading."
+  [^StringBuilder sb lines]
+  (map (fn [line] (.append sb line) (.append sb "\n") line) lines))
 
 (defn consume-sse
   "Fold a seq of SSE lines into the assistant message AND the call's telemetry,
@@ -331,11 +359,16 @@
     ;; line-seq is lazy: it MUST be forced inside with-open, or the body leaks and
     ;; the caller deadlocks waiting on a stream nobody is draining.
     (with-open [r (io/reader (.body resp) :encoding "UTF-8")]
-      (let [out (consume-sse (line-seq r) on-event)]
-        ;; THE RESPONSE IS LOGGED AS WHAT IT MEANT -- the assembled message and the
-        ;; call's telemetry -- not as the raw SSE deltas: the message IS the stream
-        ;; folded up, and the telemetry is the half a cache analysis reads
-        ;; (`usage.prompt_tokens_details.cached_tokens`).
+      (let [raw (StringBuilder.)
+            out (consume-sse (tee-lines raw (line-seq r)) on-event)]
+        ;; THE RESPONSE IS LOGGED AS THE VENDOR SENT IT *AND* AS WHAT IT MEANT, and it
+        ;; takes both to be able to check either. `:body` is the raw frame text, the way
+        ;; the request line's `:body` is the raw request -- the same argument on the
+        ;; other side of the wire. `:message` and `:telemetry` stay because they are what
+        ;; a reader usually wants and what a fold is FOR; the raw text is the evidence
+        ;; behind them rather than a replacement for them. WITHOUT IT there was no way to
+        ;; tell 'the vendor never mentioned cached tokens' from 'our fold dropped them'.
         (llm-debug/record! {:at :response :thread-id thread-id :model model
+                            :body (str raw)
                             :message (:message out) :telemetry (:telemetry out)})
         out))))

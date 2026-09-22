@@ -69,6 +69,43 @@
                 "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}"])]
     (is (= "stop" (:finish-reason telemetry)))))
 
+(deftest a-null-usage-does-not-wipe-a-real-one
+  ;; THE SAME RULE AS finish_reason, AND THE SHARPER CASE. A vendor that reports usage at
+  ;; all usually carries `"usage": null` on every chunk but the last, so a fold writing
+  ;; every occurrence loses the numbers -- and it does not look like a loss: it reads as a
+  ;; call that reported nothing, which is the one mistake harness.edge.stats cannot tell
+  ;; from the truth. Usage is this log's only copy of the vendor's report.
+  (let [{:keys [telemetry]}
+        (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":769,\"prompt_tokens_details\":{\"cached_tokens\":512}}}"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}"])]
+    (is (= 769 (get-in telemetry [:usage :prompt_tokens])))
+    (is (= 512 (get-in telemetry [:usage :prompt_tokens_details :cached_tokens])))))
+
+(deftest the-raw-frame-text-survives-beside-the-fold
+  ;; A FOLDED READING CANNOT BE CHECKED AGAINST ITS SOURCE once the source is gone, and
+  ;; the two ways cached_tokens can be missing from a record are not the same thing:
+  ;; the vendor never sent it, or we dropped it. Only the raw text can tell them apart,
+  ;; so the raw text is what `stream!` hands the traffic log beside the fold.
+  (let [sb    (StringBuilder.)
+        lines ["data: {\"a\": 1}" "data: [DONE]"]
+        seen  (vec (llm/tee-lines sb lines))]
+    (is (= lines seen) "the same lines come out, so nothing downstream changes")
+    (is (= (str (str/join "\n" lines) "\n") (str sb))
+        "and the raw frame text is what was collected on the way past"))
+  (testing "a consumer that stops early leaves a PARTIAL record, not no record"
+    ;; LAZY ON PURPOSE, so logging can never make the stream wait for its last line.
+    ;; THE INPUT IS A LAZY SEQ THAT THROWS WHEN OVER-REALIZED, and a vector would prove
+    ;; nothing here: `map` realizes a whole 32-element CHUNK at a time, so a two-line
+    ;; vector is one chunk and `first` pulls both. (The real input is `line-seq`, which
+    ;; is built one `readLine` at a time and is not chunked.) The nested `lazy-seq` is
+    ;; load-bearing: `(cons "a" (throw ...))` would evaluate the throw while BUILDING the
+    ;; cons, so the test would fail on its first element instead of its second.
+    (let [sb   (StringBuilder.)
+          boom (lazy-seq (cons "data: {\"a\": 1}"
+                               (lazy-seq (throw (ex-info "over-realized" {})))))]
+      (is (= "data: {\"a\": 1}" (first (llm/tee-lines sb boom))))
+      (is (= "data: {\"a\": 1}\n" (str sb))))))
+
 (deftest parses-a-streaming-body
   ;; This fixture is a REAL capture from OpenRouter (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)
   ;; via src/harness/llm.clj:consume-sse. The synthetic 3-chunk split test below
@@ -273,7 +310,16 @@
             (testing "the response line carries what the vendor reported about the call"
               (is (= 769 (get-in (second ls) [:telemetry :usage :prompt_tokens])))
               (is (= 0 (get-in (second ls)
-                               [:telemetry :usage :prompt_tokens_details :cached_tokens])))))))
+                               [:telemetry :usage :prompt_tokens_details :cached_tokens]))))
+            (testing "and the frame text the vendor sent, beside the reading of it"
+              ;; THE EVIDENCE, NOT A SECOND OPINION: a folded map cannot be checked
+              ;; against its source once the source is gone, and 'the vendor never sent
+              ;; cached_tokens' is not 'we dropped it'.
+              (is (string? (:body (second ls)))
+                  "the raw SSE text, not a re-serialization of the parsed chunks")
+              (is (str/starts-with? (:body (second ls)) "data: "))
+              (is (= (str/split-lines fixture) (str/split-lines (:body (second ls))))
+                  "every line of what arrived, in the order it arrived")))))
       (finally (stop)))))
 
 (deftest the-request-is-on-the-log-even-when-the-call-never-leaves

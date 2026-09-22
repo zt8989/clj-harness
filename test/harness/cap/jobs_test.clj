@@ -606,6 +606,25 @@
         (is (< elapsed 10000) (str "it came back at the timeout, not at the command's end: "
                                   elapsed "ms"))))))
 
+(deftest a-wait-with-no-timeout-uses-the-default-instead-of-throwing
+  ;; THE ONE CALL SHAPE NO OTHER TEST MAKES: `wait: true` with NO `timeout`. It used to
+  ;; hand the DEFAULT to `long` UNCALLED -- `(long (or timeout
+  ;; job-output-default-timeout-ms))` -- so this shape threw ClassCastException instead
+  ;; of waiting, and every other test passes an explicit `:timeout` and so never saw it.
+  ;; The job here ends on its own, so the default is never reached: what is pinned is
+  ;; that the default is a NUMBER the wait can use. See
+  ;; .scratch/llm-prefix-cache/issues/01-the-identity-hash-in-the-tool-table.md.
+  (let [t "jt-wait-default"
+        {:keys [id]} (jobs/start! t {:command "echo done"})
+        started (System/currentTimeMillis)
+        {:keys [status lines]} (jobs/output t id {:wait true})
+        elapsed (- (System/currentTimeMillis) started)]
+    (is (= "[exit 0]" status))
+    (is (= ["done"] lines))
+    (testing "and it came back at the job's ending, not at the default running out"
+      (is (< elapsed (quot (long jobs/job-output-default-timeout-ms) 2))
+          (str "elapsed " elapsed "ms, default " jobs/job-output-default-timeout-ms "ms")))))
+
 (deftest a-reading-walks-a-record-with-offset-and-limit
   ;; The window is the TAIL by default -- what a job has just said -- and `offset`
   ;; asks for a stretch that begins somewhere, the way `read` does. The numbers in the

@@ -783,15 +783,24 @@
           (recur (inc i) (+ used b))
           i)))))
 
-(defn job-output-default-timeout-ms
+(def job-output-default-timeout-ms
   "How long `job_output` waits for a job when the call says `wait` and does not say for
   how long.
 
   NOT A LIMIT ON THE JOB -- a job has none, and this changes nothing about it. It is
   the caller saying 'this is how long I am willing to sit here', and when it runs out
   the answer is the state of things as they are (`[running]`), which is an answer
-  and not an error. The tool's description interpolates it, so there is one number."
-  []
+  and not an error. The tool's description interpolates it, so there is one number.
+
+  A VALUE RATHER THAN A FUNCTION, and that is about the wire rather than about taste.
+  The description it is interpolated into sits in the request's HEAD -- ahead of the
+  system prompt and of every message -- and the vendor's prefix cache keys on those
+  bytes, so ONE changed byte there throws away the whole prefix, the conversation
+  included. A function interpolated without being called prints as
+  `harness.cap.jobs$job_output_default_timeout_ms@1a2b3c4d`: an identity hash that
+  differs in every process, so every restart and every namespace reload paid for the
+  entire conversation again. A plain value is a pure function of the source.
+  See .scratch/llm-prefix-cache/."
   120000)
 
 (defn- mark-told!
