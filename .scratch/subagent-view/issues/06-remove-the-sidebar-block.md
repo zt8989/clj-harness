@@ -6,7 +6,19 @@
 
 **Blocked by:** 05（新的入口得先在，不然拆完就没路进子agent 的会话了）
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** 删掉 `ui/src/components/subagent-panel.tsx` 与侧栏的 import/挂载
+（`busy` 留着，别的按钮在用）；`subagent-list.tsx` 只删 `RunRows`（确认过唯一读者是那块面板）与
+它专用的三个键（`runsEmpty` / `running`），`DefinitionRows` 与范围那句话留着；
+`locales/{en,zh}/shell.json` 删掉只被那块用过的 `titleHint` / `definitions` / `runs` /
+`runsEmpty` / `running` / `changeInSettings`（逐键 grep 确认过；`title` / `loading` 设置页还在用）。
+`GET /api/subagents` 与它的 `runs` 留着 —— 前端不再读它这件事写在 `subagent-list.tsx` 的注释与
+提交信息里（原来的 `subagents` 套件仍钉着这个端点，`runs` 那一半也钉着）。
+
+`EXPECTED_CASES` 102 -> 106，并在 `ui.test.ts` 的计数史里写清加减：**减 2** 条委派行渲染用例
+（`RunRows` 没有屏了），**加 6** 条 `subagent-view` 套件用例（读源码，钉 04/05/06 的决定）。
+`.scratch/subagents/evidence/README.md` 顶部加了注记：`t04-*` 四张截图已被取代、保留不删。
 
 要点：
 

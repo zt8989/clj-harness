@@ -29,4 +29,15 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** 按上面两条路里的第一条走的是**受控例外**——理由写在
+`message-parts.tsx` 头注释里（注册一个具名渲染器等于把触发行、参数、结果、两张挂起卡再抄一遍，
+只为挂一个按钮）。形状：`subjectOf` 多一行 `agent` 臂（`<名字> · <任务第一行>`）；`ToolCallTrigger`
+多一个可选 `onOpen`，只有拿得到才画 `<button>`（指针 / 下划线 / 悬停一致），不可点就还是纯文本；
+配对用 part 上的 `toolCallId` + `ThreadIdContext` 的父会话 id，读 `GET /api/threads/<stem>/delegations`
+（`ui/src/lib/delegations.ts`，父会话级共享 + 按调用幂等的重试）。
+
+**走查实测（`.scratch/subagent-view/evidence/`）：** 两次委派两张门，各配各的子会话；门在发消息后
+867ms 出现。落地时发现该读有一个竞态与一个形状错（卡片先画、`delegation` 行后写；答案是信封不是数组），
+两处都在 `evidence/README.md` 里写清了。

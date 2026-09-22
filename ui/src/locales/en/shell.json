@@ -50,20 +50,14 @@
   },
   "subagents": {
     "title": "Subagents",
-    "titleHint": "Subagents — what this session can hand work to, and what it has handed over",
     "loading": "Reading the subagents…",
-    "definitions": "Defined here",
-    "runs": "Delegations",
     "builtin": "built-in",
     "yours": "yours",
-    "running": "running",
     "baselineAll": "everything this session has, except eval and delegating",
     "baselineReadOnly": "only tools that cannot change anything",
     "minus": "minus {{tools}}",
     "nothingElse": "nothing else taken out",
-    "customEmpty": "No subagents of your own yet — add one in Settings.",
-    "runsEmpty": "Nothing has been delegated yet.",
-    "changeInSettings": "These are read here. Edit them in Settings."
+    "customEmpty": "No subagents of your own yet — add one in Settings."
   },
   "addProject": {
     "path": "Absolute path — D:\\work\\lisp-harness",
@@ -100,5 +94,9 @@
     "rebuilt_other": "The window had a gap that could not be filled, so it was rebuilt from the newest page: {{count}} entries were dropped.",
     "ahead_one": "This page was showing {{count}} entry the conversation no longer has. It is gone.",
     "ahead_other": "This page was showing {{count}} entries the conversation no longer has. They are gone."
+  },
+  "subagentView": {
+    "title": "Subagent · {{name}}",
+    "close": "Close"
   }
 }

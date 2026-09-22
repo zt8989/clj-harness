@@ -36,4 +36,15 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** 右栏是页面 flex 行的第三个 `shrink-0` 子元素（主栏 `min-w-0 flex-1`
+让出宽度），一次一个（`{threadId, subagent} | null`），`key` 是子会话 id，换人 = 换挂载。
+`Thread` 多了一个可选 `composer`（`: false` 时 composer **和**新会话欢迎屏一起不画）；
+`lib/follow.ts` 是 `HttpAgent` 的子类，只换 transport（`GET`、无 body、保留 signal）。
+没有 history adapter：补发 + 快照就是水合（与 `rebuild` 一起用会把子agent 的答案画两遍）。
+
+**走查实测：** 主栏 896px + 右栏 416px 并排；右栏里 `textbox/form/发送按钮 = 0`；子agent 在
+`bash sleep 10` 里时右栏显示 `bash · sleep 10 && echo done | 运行中 | ●`，10.5 秒后**没人碰页面**
+它自己长成折叠组 + 结论；关掉右栏时在飞的 `GET .../follow` 是 `net::ERR_ABORTED`，而委派本身继续跑。
+跟随通道第一帧必须是 `RUN_STARTED`（先发快照会被 `@ag-ui/client` 拒），这条是浏览器当场抓到的。

@@ -191,22 +191,32 @@
             (is (= 200 (.statusCode resp)))
             (is (str/starts-with? (.orElse (.firstValue (.headers resp) "content-type") "")
                                   "text/event-stream")))
-          (testing "the task the subagent was handed comes first, as a snapshot"
+          (testing "THE STREAM OPENS WITH THE RUN, not with the snapshot"
+            ;; `@ag-ui/client` REFUSES a stream whose first event is not `RUN_STARTED`
+            ;; ("First event must be 'RUN_STARTED'"), and a snapshot sent ahead of the
+            ;; run is exactly what a real panel was failed by in a browser: the wire
+            ;; looked reasonable and the runtime would not read it. The record's own
+            ;; opening frame is what goes first, and a real child's record opens with
+            ;; the run -- `run-subagent!` writes `RUN_STARTED` before it says anything.
+            (is (= "RUN_STARTED" (:type (first fs))))
+            (is (= (:runId (first (frames-of (child-log child)))) (:runId (first fs)))
+                "the child's own run, not a number this route invented"))
+          (testing "and then the task it was handed, as a snapshot inside the run"
             ;; THE MESSAGE NO FRAME CARRIES. Frames hold what a run RETURNED; the task
             ;; is a `message` row the delegating model sent, so without this frame a
             ;; panel would show answers to a question it never showed.
-            (let [snapshot (first fs)]
+            (let [snapshot (second fs)]
               (is (= "MESSAGES_SNAPSHOT" (:type snapshot)))
               (is (= [task] (mapv :content (:messages snapshot))))
               (is (= ["user"] (mapv :role (:messages snapshot))))
               ;; AND ONLY WHAT THE FRAMES CANNOT REBUILD: every message this snapshot
               ;; names must be one no replayed frame mentions, or the panel would draw
               ;; it twice.
-              (is (empty? (filter (set (keep :messageId (rest fs)))
+              (is (empty? (filter (set (keep :messageId (drop 2 fs)))
                                   (map :id (:messages snapshot)))))))
-          (testing "every wire frame the record holds is replayed, in order, behind it"
+          (testing "every wire frame the record holds is replayed, in order, around it"
             (let [recorded (frames-of (child-log child))
-                  replayed (drop 1 fs)]
+                  replayed (into [(first fs)] (drop 2 fs))]
               (is (seq recorded))
               (is (= (mapv :type recorded) (mapv :type replayed)))
               (is (contains? (set (map :type fs)) "RUN_FINISHED")
@@ -244,7 +254,14 @@
                 fs   (sse-frames resp)]
             (testing "what the record holds comes back, torn row and all"
               (is (= 200 (.statusCode resp)))
-              (is (= [frame] fs)))
+              ;; A RECORD THAT DOES NOT OPEN WITH A RUN GETS ONE ANYWAY, carrying the
+              ;; child's own thread and run: the stream a runtime consumes has to be
+              ;; well-formed whatever the file holds, and this record was written by
+              ;; hand to hold one frame and a torn line.
+              (is (= "RUN_STARTED" (:type (first fs))))
+              (is (= thread (:threadId (first fs))))
+              (is (= "r1" (:runId (first fs))) "the run the record's own rows name")
+              (is (= [frame] (rest fs))))
             (testing "and then it says nobody is running this thread"
               ;; A COMMENT, NOT A FRAME: the client's parser fails a run on a frame it
               ;; does not know, so this channel's non-frame answers are comments -- and

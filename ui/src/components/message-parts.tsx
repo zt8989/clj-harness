@@ -75,6 +75,34 @@
 // (see `ReasoningTrigger` below). The disclosure SHELL is still the copied kit's:
 // the scroll lock, the fades and the animation are not ours to re-derive.
 //
+// ------------------------------------------------- and one call that opens a door
+//
+// `agent` IS THE ONE CALL THAT IS NOT ONLY A ROW. A delegation is a whole other
+// conversation happening because of this line, and the line is the only place in the
+// transcript that knows it: the record's own pairing (`toolCallId` -> the child
+// session, ticket 03 of `.scratch/subagent-view`) is read once per parent session by
+// `lib/delegations.ts`, and a call it names gets a DOOR beside its subject -- the
+// right-hand mirror opens on the child's conversation (ticket 05).
+//
+// WHY THE FALLBACK GREW A CONTROLLED EXCEPTION INSTEAD OF A NAMED RENDERER, which is
+// the shape question ticket 04 left open. This file registers exactly one renderer
+// (see the head of `THREAD_COMPONENTS`), and the property that buys is the one
+// `subjectOf`'s own comment states: a tool nobody has taught this page about still
+// appears, with its name and its first string argument. A registered `agent` renderer
+// would take that call out of the fallback and re-draw the trigger, the arguments, the
+// result and the two parked-call cards -- five things that must look the same as every
+// other call's, duplicated so that one of them can carry a button. So the exception is
+// inside the fallback, it is two lines of it, and it asks the same two questions any
+// renderer would (`is this call a delegation?`, `is there a panel to open?`).
+//
+// THE DOOR IS INSIDE THE ROW RATHER THAN BEING THE ROW. The row's own click belongs to
+// the disclosure -- it opens the arguments and the result, which is how a person checks
+// what a subagent was actually handed -- so a row that also opened a panel would be one
+// click doing two things, or a card whose arguments could no longer be reached. The
+// subject gains the door: a control with the hover, pointer and underline of a control,
+// drawn ONLY when it can be walked through (an old record with no `delegation` row, or a
+// page with no panel, gets the plain subject it has always had).
+//
 // The tool group draws nothing, and that is the whole of it: a run of tool calls
 // is a run of ROWS, one per call. It used to carry a header -- "N tool calls" --
 // and the count was never anything but 1. `groupPartByType` groups tool calls
@@ -112,6 +140,7 @@ import {
   type ElementType,
   type FC,
   type PropsWithChildren,
+  useContext,
   useLayoutEffect,
   useRef,
   useState,
@@ -155,7 +184,8 @@ import {
   isApprovalInterrupt,
   isElicitationInterrupt,
 } from "@/components/approval-gate";
-import { ComposerAttachButton, ComposerFrame, ComposerTools } from "@/components/composer-chrome";
+import { ComposerAttachButton, ComposerFrame, ComposerTools, ThreadIdContext } from "@/components/composer-chrome";
+import { useOpenSubagentView } from "@/components/subagent-view-context";
 import {
   ReasoningContent,
   ReasoningRoot,
@@ -171,6 +201,7 @@ import {
   ToolFallbackRoot,
 } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
+import { useDelegations } from "@/lib/delegations";
 import { formatMillis } from "@/lib/format";
 import { firstLine, previewOf, thoughtAt } from "@/lib/reasoning-preview";
 import { cn } from "@/lib/utils";
@@ -375,6 +406,21 @@ function subjectOf(toolName: string, args: Args, t: Translate): string | null {
       return firstLine(stringArg(args, "command") ?? "") || null;
     case "eval":
       return firstLine(stringArg(args, "code") ?? "") || null;
+    case "agent": {
+      // WHICH SUBAGENT, AND WHAT IT WAS ASKED -- the two things this call is about,
+      // in that order. The name goes first because the row already reads
+      // `agent · <subject>`, so the sentence is `agent · explore · find every ns that
+      // deps.edn needs`, and a reader sees who is working before what it is doing.
+      //
+      // WITHOUT THIS ARM THE ROW WOULD LIE BY OMISSION: the default answers the first
+      // string argument, which for this tool is the TASK -- so the row would read
+      // `agent · find every ns that deps.edn needs`, with nothing saying which
+      // subagent was picked, and the task (often a paragraph) would be the subject.
+      const name = stringArg(args, "name");
+      const task = firstLine(stringArg(args, "prompt") ?? "");
+      if (name === undefined) return task || null;
+      return task === "" ? name : `${name} · ${task}`;
+    }
     case "skill":
       return stringArg(args, "name") ?? null;
     case "session-configure":
@@ -442,7 +488,12 @@ const ToolCallTrigger: FC<{
   toolName: string;
   state: CallState;
   subject: string | null;
-}> = ({ toolName, state, subject }) => {
+  /// WHAT THE SUBJECT'S DOOR DOES, when this call has one (see the head comment: only
+  /// a call the record names as a delegation, on a page that has a panel). Absent --
+  /// the ordinary case for every tool, and for a delegation nobody can follow -- means
+  /// the subject is plain text, and nothing about the row says otherwise.
+  onOpen?: (() => void) | undefined;
+}> = ({ toolName, state, subject, onOpen }) => {
   const elapsedMs = useToolCallElapsed();
   const { t } = useTranslation("thread");
   // The elapsed time's words come from the `format` face, because `formatMillis` is
@@ -478,7 +529,30 @@ const ToolCallTrigger: FC<{
             className="aui-tool-call-trigger-subject"
           >
             {" · "}
-            {subject}
+            {onOpen === undefined ? (
+              subject
+            ) : (
+              // THE DOOR. A `<button>`, so it is reachable by keyboard and named for a
+              // screen reader; `stopPropagation` because the row's own click is the
+              // disclosure's (the head comment argues why the door is inside the row);
+              // and `underline-offset` + `group-hover/door` so "it looks clickable"
+              // and "it is clickable" are the same statement. The underline is always
+              // on for a hovered/focused door and never on for a subject with no
+              // `onOpen`, which is the ticket's rule about not drawing a promise the
+              // card cannot keep.
+              <button
+                type="button"
+                data-slot="tool-call-trigger-door"
+                title={t("subject.openSubagent")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpen();
+                }}
+                className="aui-tool-call-trigger-door hover:text-foreground focus-visible:text-foreground cursor-pointer underline decoration-dotted underline-offset-4"
+              >
+                {subject}
+              </button>
+            )}
           </span>
         )}
       </span>
@@ -674,6 +748,36 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   const parsedArgs = parseArgs(argsText);
   const subject = parsedArgs === null ? null : subjectOf(toolName, parsedArgs, t);
 
+  // THE CARD THAT OPENS A MIRROR (the head comment has the whole argument). The
+  // parent's own id comes from the composer's context -- the same value the composer's
+  // chrome uses to know which session it is configuring -- and the pairing is the
+  // `toolCallId` the wire put on this part, never a position in the transcript: two
+  // delegations can be in flight at once, and "the second one in this conversation"
+  // would pick the wrong child for one of them.
+  //
+  // THE READ IS SHARED (`lib/delegations.ts`: one request per parent, and every card
+  // told) and it does NOT wait for the call's result: a delegation is worth opening
+  // while it runs, which is the moment there is no result yet -- and the row that
+  // pairs this card with a child is written a moment AFTER the card is drawn, which
+  // is why the hook is handed `settled` and retries a few times. That module's header
+  // has the whole of it; what matters here is that the door can appear while the
+  // subagent is still working, which is the only thing this panel is for.
+  const parentThreadId = useContext(ThreadIdContext);
+  // ASKED ONLY FOR A CALL OF THIS TOOL (`null` for every other row): the request is
+  // about delegations, and a conversation that has none should not send it because a
+  // card happened to render.
+  const delegations = useDelegations(
+    parentThreadId,
+    toolName === "agent" ? toolCallId : null,
+    settled,
+  );
+  const openView = useOpenSubagentView();
+  const delegation = toolName === "agent" ? delegations.get(toolCallId) : undefined;
+  const openMirror =
+    delegation !== undefined && openView !== null
+      ? () => openView({ threadId: delegation.threadId, subagent: delegation.subagent })
+      : undefined;
+
   return (
     <>
       {/* Uncontrolled, and `defaultOpen` stays at its default of false: this is
@@ -683,7 +787,12 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
           decision it is waiting for is a block of its own underneath (below),
           drawn at full width so it cannot be missed. */}
       <ToolFallbackRoot>
-        <ToolCallTrigger toolName={toolName} state={state} subject={subject} />
+        <ToolCallTrigger
+          toolName={toolName}
+          state={state}
+          subject={subject}
+          onOpen={openMirror}
+        />
         <ToolFallbackContent>
           <ToolFallbackError status={status} />
           <ToolCallArgs argsText={argsText} />

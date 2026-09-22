@@ -47,6 +47,7 @@ import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
 import { subagentsSuite } from "./suites/subagents";
+import { subagentViewSuite } from "./suites/subagent-view";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -54,7 +55,7 @@ import { subagentsSuite } from "./suites/subagents";
 /// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -251,7 +252,37 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// roster's built-in flag; and the same rows in both languages. Five of the six RENDER
 /// (`react-dom/server`), which is why the rows live in `components/subagent-list.tsx` --
 /// a module that must not reach `lib/i18n.ts`, whose `document` write would break this run.
-const EXPECTED_CASES = 102;
+///
+/// 102 -> 106: `.scratch/subagent-view`'s UI half, and it is a COUNTED CHANGE IN BOTH
+/// DIRECTIONS -- two cases out, six in.
+///
+/// OUT (-2): the `subagents` suite's two delegation-row cases, and the `RunRows` half of
+/// its both-languages case. `RunRows` had exactly one reader (the sidebar's subagent
+/// block), ticket 06 of the feature retires that block, and a rendered-string case for a
+/// component with no screen is a case that tests the test. What the suite keeps is the
+/// ENDPOINT, `runs` still included: the route stays, and "the front end has no reader for
+/// half of this answer" is exactly the kind of asymmetry that should be visible in a file
+/// rather than inferred from a deleted one.
+///
+/// IN (+6): the `subagent-view` suite, whose name is the feature. The `agent` card's
+/// subject (which subagent, and one line of what it was asked -- without the arm the row
+/// answers the task and never names the subagent); the door's two conditions (the
+/// record's answer for this `toolCallId`, and a panel to open) and the fact that the
+/// call's RESULT is not one of them, because a delegation is worth watching while it
+/// runs; one delegations read per parent session rather than per card; the follow
+/// client's transport (`GET`, no body, signal kept -- the abort is how closing the panel
+/// drops the server-side subscription) and the mirror's refusal to hydrate from
+/// `rebuild`; the `composer` switch on `Thread` with the new-chat furniture going with
+/// it; and the retired sidebar block leaving nothing that still compiles behind.
+///
+/// ALL SIX READ SOURCES (`?raw`), the idiom `tool-row` introduced and for its reason:
+/// `message-parts.tsx` and `app.tsx` reach `lib/i18n.ts`, which touches `document` at
+/// module scope, and this run has no jsdom by design. So they pin DECISIONS -- which
+/// vocabulary a row answers, what a door is conditioned on, what a transport sends, where
+/// the column sits in the flex row -- and the DRAWING (the door's hover, the panel's
+/// width, the main column staying readable beside it, the transcript growing live) is the
+/// browser walkthrough's half, as the suite's own header says.
+const EXPECTED_CASES = 106;
 
 let total = 0;
 for (const suite of SUITES) {

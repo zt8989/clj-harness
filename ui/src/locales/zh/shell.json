@@ -46,20 +46,14 @@
   },
   "subagents": {
     "title": "子agent",
-    "titleHint": "子agent——这个会话能把活交给谁，以及已经交出去过哪些",
     "loading": "正在读子agent…",
-    "definitions": "这里定义了什么",
-    "runs": "委派记录",
     "builtin": "内置",
     "yours": "自建",
-    "running": "跑着",
     "baselineAll": "这个会话的全部工具，除了 eval 和委派",
     "baselineReadOnly": "只保留改不了任何东西的工具",
     "minus": "再排除 {{tools}}",
     "nothingElse": "没有其他排除",
-    "customEmpty": "还没有你自己建的子agent——去设置里加一个。",
-    "runsEmpty": "还没有委派过。",
-    "changeInSettings": "这一组只读，要改去设置里。"
+    "customEmpty": "还没有你自己建的子agent——去设置里加一个。"
   },
   "addProject": {
     "path": "绝对路径——D:\\work\\lisp-harness",
@@ -92,5 +86,9 @@
     "reopened": "这一场在服务端已经关掉，窗口在新消息处重新打开了。",
     "rebuilt_other": "窗口中间有一段补不回来，已按最新一页重建：丢了 {{count}} 条。",
     "ahead_other": "这个页面显示过 {{count}} 条这场对话里已经没有的内容，已经去掉。"
+  },
+  "subagentView": {
+    "title": "子agent · {{name}}",
+    "close": "关闭"
   }
 }

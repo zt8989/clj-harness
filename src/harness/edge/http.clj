@@ -2902,14 +2902,28 @@
        it came from: a replayed one means the run is already over, a live one
        means it just ended. NOTHING FOLLOWS IT -- the terminal IS the ending
        the client's vocabulary has;
-    5. WHAT THE FRAMES CANNOT REBUILD IS SENT FIRST, as one AG-UI
-       `MESSAGES_SNAPSHOT`: the conversation of the record MINUS the messages
-       the replayed frames carry under the same id. That is the task the
-       subagent was handed -- a `message` row no frame ever mentions, since
-       frames only carry what a run RETURNED -- and it is the reason a panel
-       needs no second read to show what was asked. Sent only when there is
-       something in it, and it is the same frame the run edge sends for the
-       entries a client never sent (`ag/conversation-snapshot`);
+    5. THE STREAM OPENS WITH THE RUN, AND THE SNAPSHOT RIDES INSIDE IT. The
+       first thing on the wire is a `RUN_STARTED` and the second is one AG-UI
+       `MESSAGES_SNAPSHOT` -- WHAT THE FRAMES CANNOT REBUILD: the conversation
+       of the record MINUS the messages the replayed frames carry under the
+       same id. That is the task the subagent was handed, a `message` row no
+       frame ever mentions (frames only carry what a run RETURNED), and it is
+       the reason a panel needs no second read to show what was asked. The
+       snapshot is the same frame the run edge sends for the entries a client
+       never sent (`ag/conversation-snapshot`), and it is sent only when there
+       is something in it.
+
+       THAT ORDER IS NOT A PREFERENCE, and a browser walkthrough is what
+       settled it: `@ag-ui/client` refuses a stream whose FIRST event is not
+       `RUN_STARTED` (its verifier's own words: \"First event must be
+       'RUN_STARTED'\"), and a snapshot sent ahead of the run failed the panel
+       with that sentence while the wire looked perfectly reasonable. So the
+       record's own opening frame goes out first -- a real record's first
+       frame IS the child's `RUN_STARTED`, because `run-subagent!` writes it
+       before anything else -- and the snapshot follows it. A record that does
+       NOT open with one (a hand-written log, a repair) gets a synthesized
+       `RUN_STARTED` carrying the child's thread and run, because a channel a
+       runtime consumes has to be well-formed whatever the file holds;
     6. A THREAD WITH NOBODY RUNNING AND NO TERMINAL IN ITS RECORD says so in
        ONE SSE COMMENT and closes. A COMMENT, not a frame, and that is the
        one shape this channel has to get right: a frame the client's parser
@@ -2963,8 +2977,11 @@
                                                "Cache-Control" "no-cache"})
                               :body body})
                   bytes    (fn [frame] (str "data: " (json/write-str frame) "\n\n"))
-                  ;; WHAT THE FRAMES CANNOT REBUILD, sent before them (5.): the record's
-                  ;; conversation minus the messages the frames carry under the same id.
+                  ;; THE RUN'S OPENING, AND THEN WHAT THE FRAMES CANNOT REBUILD (5.): the
+                  ;; record's conversation minus the messages the frames carry under the
+                  ;; same id. See the docstring's point 5 for why the snapshot cannot go
+                  ;; first -- `@ag-ui/client` refuses a stream that does not open with
+                  ;; `RUN_STARTED`, which is what a real browser said.
                   ;; The comparison is by MESSAGE ID because the fold that builds these
                   ;; messages names each one after the frame that produced it
                   ;; (`kernel.frames/apply-frames`), which is the same id the wire uses
@@ -2981,8 +2998,23 @@
                   ;; boundary, not a field of any AG-UI frame (票 02 writes it into the
                   ;; record so the two sides count the same thing, and this is the one
                   ;; place that must not pass it on).
-                  replay   (str (when snapshot (bytes snapshot))
-                                (apply str (map #(bytes (dissoc % :seq)) frames)))
+                  ;;
+                  ;; A REAL RECORD'S FIRST FRAME IS THE RUN'S `RUN_STARTED` -- written by
+                  ;; `run-subagent!` before the child has said anything -- so the ordinary
+                  ;; case is that frame going out verbatim. The synthesized one is for a
+                  ;; record that does not open with it (a hand-written log, a repaired
+                  ;; one): the child's own thread and run id are the truth about which run
+                  ;; this is, and a stream a runtime consumes must not start in the middle.
+                  opening  (when (= "RUN_STARTED" (:type (first frames))) (first frames))
+                  started  (or opening
+                               {:type "RUN_STARTED"
+                                :threadId stem
+                                :runId (or (some-> (first records) :runId)
+                                           (str (java.util.UUID/randomUUID)))})
+                  replay   (str (bytes (dissoc started :seq))
+                                (when snapshot (bytes snapshot))
+                                (apply str (map #(bytes (dissoc % :seq))
+                                                (if opening (rest frames) frames))))
                   ;; 6. THE ENDING FOR A THREAD NOBODY IS RUNNING: the replay, one
                   ;; comment, and the close. A comment because the client's parser must
                   ;; never be handed a frame it does not know (see the docstring), and a

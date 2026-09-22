@@ -236,7 +236,6 @@ import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/componen
 import { REVEAL_ON_HOVER } from "@/lib/reveal";
 import { foldRows } from "@/lib/sidebar-rows";
 import { cn } from "@/lib/utils";
-import { SubagentPanel } from "@/components/subagent-panel";
 import {
   Dialog,
   DialogContent,
@@ -1296,33 +1295,23 @@ export const Sidebar: FC<SidebarProps> = ({
           folded ? "flex flex-col items-center" : "px-2 py-2",
         )}
       >
-        {/* THE SUBAGENT BLOCK SITS IN THE FOOTER, not in the scrolling list, and
-            that is a decision about which of the two this column is FOR. The list
-            above is how you find a conversation; this is a reading of two files
-            that changes nothing and is opened on purpose, so it belongs with the
-            things that stay put -- and it must not be the reason the session list
-            scrolls away. It opens UPWARD from the button: the panel is drawn above
-            nothing, i.e. it grows the pinned region and the list gives up the room,
-            which is the same bargain the settings modal makes by covering the page
-            instead of pushing it.
+        {/* THE SUBAGENT BLOCK USED TO LIVE HERE, and its removal is the point of
+            ticket 06 of `.scratch/subagent-view`: it listed what this home had
+            delegated to, and clicking a row replaced the conversation in the main
+            column. That is the behaviour this feature retires -- the door is the
+            `agent` call in the transcript itself (ticket 04), and what it opens is a
+            mirror beside the conversation (ticket 05), not a navigation. Keeping both
+            would be two answers to "where do I watch a subagent", and the older one
+            would be the one that quietly disagreed with the newer.
 
-            OPENING ONE, AND WHERE THE SELECTION ENDS UP. A subagent's conversation
-            is opened through the same `onShow` a session row uses -- it IS a session,
-            with its own id and log -- but the project selection is set FIRST, from
-            the run itself, when this sidebar still lists that project. Without that,
-            opening a subagent would leave the selection derived from a session in no
-            listed project, and "New task" would silently start somewhere else. A
-            project that has been removed since is left alone rather than pinned to
-            nothing: this row is the record of where the delegation ran, not a way
-            back into a project somebody took off the list. */}
-        <SubagentPanel
-          busy={busy}
-          onShow={(run) => {
-            const path = run.project;
-            if (path !== null && projects.some((p) => p.path === path)) setPinned(path);
-            onShow(run.threadId);
-          }}
-        />
+            THE NAMES DID NOT MOVE, they were already elsewhere: the definitions are
+            edited in Settings (`settings-panel.tsx` draws the same
+            `DefinitionRows`), which is where `.scratch/subagents` put them in the
+            first place. What has no door left is the LIST of past delegations --
+            `GET /api/subagents` still answers it and the backend still keeps it, and
+            the panel that reads a live one is the transcript's card. Removing that
+            route is a separate decision, not a piece of this one. */}
+
         <Button
           variant="ghost"
           data-slot="sidebar-settings"
