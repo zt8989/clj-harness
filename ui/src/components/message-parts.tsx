@@ -268,7 +268,7 @@ const TOOL_ICONS: Record<string, ElementType> = {
   replace: ReplaceIcon,
   insert: BetweenHorizontalStartIcon,
   undo_last_replace: Undo2Icon,
-  anchor_grep: SearchIcon,
+  grep: SearchIcon,
   glob: FolderSearchIcon,
   bash: SquareTerminalIcon,
   eval: BracesIcon,
@@ -369,7 +369,7 @@ function subjectOf(toolName: string, args: Args, t: Translate): string | null {
       const direction = stringArg(args, "direction") ?? "after";
       return `${direction} ${anchor} · ${t("subject.lines", { count: lineCount(args, "lines") })}`;
     }
-    case "anchor_grep":
+    case "grep":
       return stringArg(args, "pattern") ?? null;
     case "bash":
       return firstLine(stringArg(args, "command") ?? "") || null;

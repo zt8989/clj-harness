@@ -31,9 +31,12 @@ omp 的模式选择是一个**配置**决定（模型专用变体 → 环境变�
 - **`:describe` 的第二个使用者**：今天只有 `read` 与 `write` 声明它，`edit` 成为第三个
   （或者：`read` / `write` / `edit` 三者的脸都由 `cap.editing` 供给，一处实现）。
 - **`families` 表跟着改**：`edit` 不再属于任何**单一**模式——它两个模式都服务，只是脸不同。
-  于是这张表里剩下的「模式减法」只对 `anchor_grep` / `undo_last_edit` 生效；
+  于是这张表里剩下的「模式减法」只对 `grep` / `undo_last_edit` 生效；
   注释与 `unserved-message` 的话术要跟上（今天它会说「本会话按锚点编辑，用 replace」——那时没有
   `replace` 了，应该说「用 `edit`，它的载荷是锚点补丁」）。
+  > **加注（2026-09-22）**：这一条里那个名字后来改了——`.scratch/omp-parity` 票 01 把 `anchor_grep`
+  > 改成 `grep`（配置键 `:anchor-grep` → `:grep`）。本票引用的仍是「检索不进 `edit`」那一半，
+  > 它在 `edit-merge/spec.md` 决策 7 的复议里照旧成立。
 - **改名 `undo_last_replace` → `undo_last_edit`**：名字把**单位**说清楚，撤销的单位从「一次
   `replace`」变成「一次 `edit` 调用」。这是本仓自己那条规矩（`undo_last_change` → `undo_last_replace`
   就是这么来的）。跟着改：注册、描述、`TOOL_ICONS`、`subjectOf`、`CONTEXT.md` 的工具名清单、
@@ -56,7 +59,7 @@ omp 的模式选择是一个**配置**决定（模型专用变体 → 环境变�
 - [ ] 两个模式的描述**互不提及**对方：断言锚点脸的描述里没有 `old_string`，str-replace 脸里没有 `input`
 - [ ] `edit` 在两种模式的工具表里都在：`specs` 的清单在两种模式下都含 `edit`（两处硬编码向量跟着改）
 - [ ] `unserved-message` 的话术更新并有用例：对一个本会话不服务的名字（如 str-replace 会话里的
-      `anchor_grep`），话里给出**存在的替代**（`edit` + 锚点补丁），不再提 `replace`
+      `grep`），话里给出**存在的替代**（`edit` + 锚点补丁），不再提 `replace`
 - [ ] 全仓没有 `undo_last_replace` 这个工具名：`grep -rn "undo_last_replace" src test ui docs CONTEXT.md README.md`
       只剩历史文档（`.scratch/`）里的
 - [ ] UI：`TOOL_ICONS` / `subjectOf` 的两条 case 改名后 `cd ui && npm test` 过

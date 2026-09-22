@@ -262,3 +262,21 @@
     (is (true? error))
     (is (not (str/includes? content "install ripgrep")))
     (is (str/includes? content "the search failed"))))
+
+;; ----------------------------------------------------------- the cross-reference
+
+(deftest the-description-sends-the-reader-to-the-content-search
+  ;; THE ONE THING IN THIS DESCRIPTION THAT CAN GO STALE WITHOUT A NOISE: the name
+  ;; of the OTHER tool. Nothing type-checks a tool name quoted inside another
+  ;; tool's face, so a renamed search tool leaves this row telling the model to
+  ;; call something that no longer exists -- which is the whole reason the
+  ;; 2026-09-22 rename (`.scratch/omp-parity` ticket 01) had to go looking in
+  ;; every description by hand. Read the name off the tool table, not off a
+  ;; sentence about it.
+  (let [spec (first (filter #(= "glob" (get-in % [:function :name])) (tools/specs)))
+        desc (:description (:function spec))]
+    (is (some? spec))
+    (is (str/includes? desc "`grep` when you are looking for content")
+        "glob sends the reader to `grep`, spelled as the tool table spells it")
+    (is (not (str/includes? desc "anchor_grep"))
+        "and not to the name it had before")))

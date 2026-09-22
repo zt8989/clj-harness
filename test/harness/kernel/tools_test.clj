@@ -215,7 +215,7 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job_kill" "job_output" "read"
+      (is (= ["bash" "eval" "glob" "grep" "insert" "job_kill" "job_output" "read"
               "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
               "web_fetch" "web_search" "write"]
              names))
@@ -543,7 +543,7 @@
         (is (some #(str/includes? % "199999")
                   (read-lines (:content (call "read" {:path path :offset 199990}))))
             "the `read` tool reads the same file")
-        (is (str/includes? (:content (call "anchor_grep" {:pattern "^199999$" :path path}))
+        (is (str/includes? (:content (call "grep" {:pattern "^199999$" :path path}))
                            "199999")
             "and so does `grep`")))))
 
@@ -615,7 +615,7 @@
           (let [read-back (:content (tools/run! {:function {:name "read"
                                                             :arguments (json/write-str {:path path})}}
                                                 "tt-job"))
-                searched  (:content (tools/run! {:function {:name "anchor_grep"
+                searched  (:content (tools/run! {:function {:name "grep"
                                                             :arguments (json/write-str
                                                                         {:pattern "job-here"
                                                                          :path path})}}

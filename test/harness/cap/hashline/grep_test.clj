@@ -1,5 +1,5 @@
 (ns harness.cap.hashline.grep-test
-  "`anchor_grep`: a search whose hits can be edited, and the refusals that keep it
+  "`grep`: a search whose hits can be edited, and the refusals that keep it
   from being a way to hang a session.
 
   The value here is the DISTANCE between finding and changing: a plain grep gives a
@@ -95,7 +95,7 @@
   (tools/run! {:id "c" :type "function"
                :function {:name name :arguments (json/write-str args)}} tid))
 
-(defn- grep! [args] (call "anchor_grep" args))
+(defn- grep! [args] (call "grep" args))
 
 (defn- rows
   "A grep answer's anchored rows as [file line-number anchor content], the headers
@@ -376,22 +376,23 @@
 ;; --------------------------------------------------------- the tool's face
 
 (deftest the-tool-is-switched-off-by-its-own-key
-  ;; `:anchor-grep false` is the session saying 'I want anchor editing without the
+  ;; `:grep false` is the session saying 'I want anchor editing without the
   ;; search tool', and nothing takes its place -- a session with no grep tool uses
   ;; `bash`, which is a tool it already has.
-  (use-mode! {:anchor-grep false})
+  (use-mode! {:grep false})
   (let [names (map (fn [s] (get-in s [:function :name])) (tools/specs tid))]
-    (is (not (contains? (set names) "anchor_grep")))
+    (is (not (contains? (set names) "grep")))
     (is (contains? (set names) "replace") "the rest of the anchor toolset is untouched"))
   (testing "and calling it anyway says which key turned it off"
     (let [{:keys [content error]} (grep! {:pattern "x"})]
       (is (true? error))
-      (is (str/includes? content "anchor-grep"))
+      (is (str/includes? content ":grep false")
+          "the message names the key that turned it off, not just the tool")
       (is (not (str/includes? content "unknown tool"))))))
 
 (deftest the-description-says-how-to-read-a-row
   (use-mode!)
-  (let [spec (first (filter #(= "anchor_grep" (get-in % [:function :name]))
+  (let [spec (first (filter #(= "grep" (get-in % [:function :name]))
                             (tools/specs tid)))
         desc (:description (:function spec))]
     (is (some? spec))

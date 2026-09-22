@@ -1,7 +1,7 @@
 (ns harness.infra.rg
   "The one place that knows how this harness runs ripgrep.
 
-  TWO TOOLS SEARCH WITH IT -- `anchor_grep` for lines, `glob` for paths -- so the
+  TWO TOOLS SEARCH WITH IT -- `grep` for lines, `glob` for paths -- so the
   three facts below live here rather than inside either of them: what the
   executable is called, how long a search may take, and what a missing rg means.
   Written down twice, one of them would eventually be fixed and the other not,
@@ -78,7 +78,7 @@
   A SEARCH IS BUILT AS A POSIX COMMAND LINE (see `quoted`), so on a machine with no
   POSIX shell this refuses by name before spawning anything."
   [args dir]
-  (shell/require-posix! "`anchor_grep` / `glob` search with `rg`, which")
+  (shell/require-posix! "`grep` / `glob` search with `rg`, which")
   (let [res (shell/run {:command (command-line args) :dir dir :timeout-ms timeout-ms})
         {:keys [exit out err]} res]
     (cond

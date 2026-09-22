@@ -1,5 +1,5 @@
 (ns harness.cap.hashline.grep
-  "`anchor_grep`: a search whose results can be EDITED.
+  "`grep`: a search whose results can be EDITED.
 
   WHY THIS EXISTS. A model that searches for something usually wants to change what
   it found, and a line number cannot be edited -- so between a plain grep and the
@@ -237,7 +237,7 @@
                  (inc hits)))))))
 
 (defn perform!
-  "Run one anchor_grep for THREAD-ID.
+  "Run one grep for THREAD-ID.
 
   ARGS is the tool's argument map; returns a STRING, or throws a named error.
   RESOLVE-PATH is the session's path resolution, applied to the search root AND to

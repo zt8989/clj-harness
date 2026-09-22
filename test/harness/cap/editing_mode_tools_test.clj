@@ -58,7 +58,7 @@
   ([thread-id] (mapv #(get-in % [:function :name]) (tools/specs thread-id))))
 
 (def ^:private anchor-tools
-  #{"replace" "insert" "anchor_grep" "undo_last_replace"})
+  #{"replace" "insert" "grep" "undo_last_replace"})
 
 (def ^:private str-replace-tools
   #{"edit"})
@@ -94,7 +94,7 @@
   ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
   ;; anchor editing, and this is the assertion that would move first if somebody
   ;; changed it back by accident -- or changed it to something that is neither.
-  (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job_kill" "job_output" "read"
+  (is (= ["bash" "eval" "glob" "grep" "insert" "job_kill" "job_output" "read"
           "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
           "web_fetch" "web_search" "write"]
          (spec-names nil))
@@ -197,10 +197,10 @@
   ;; mode and withheld in string mode, with no code anywhere that knows about it.
   (let [ran (atom [])]
     (set-mode! "emt-standin" root ":hashline")
-    (tools/session-register! "emt-standin" "anchor_grep" (stub ran))
-    (is (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+    (tools/session-register! "emt-standin" "grep" (stub ran))
+    (is (contains? (set (spec-names "emt-standin")) "grep"))
     (set-mode! "emt-standin" root ":str-replace")
-    (is (not (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+    (is (not (contains? (set (spec-names "emt-standin")) "grep"))
         "the mode subtracts it by name, having no idea what it is")))
 
 (deftest the-mode-sees-every-registered-tool-even-the-ones-it-does-not-serve

@@ -207,7 +207,7 @@
   of hundred bytes -- so measuring the LINE instead would stop the page short for a
   reason the model never sees, and hide the anchors of the lines after it.
 
-  Public because `anchor_grep` needs exactly this: its rows carry a line number
+  Public because `grep` needs exactly this: its rows carry a line number
   column in front, and an oversized line has to become the same short row there as
   it does here, with the same anchor and the same advice."
   [^String path ^String line anchor ^long n]

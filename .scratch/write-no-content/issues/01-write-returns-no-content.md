@@ -76,17 +76,17 @@
    「a successful write RELEASES the file's anchors：要锚点就 `read`」（RELEASES 那半句留着，
    用例 `the-write-description-follows-the-mode` 查的就是它）。
 4. **`cap/editing.clj`**：`defaults` 与 `vocab` 删 `:auto-read`；`:38-43` 的论据例证换成
-   `{:anchor-grep false}`（同为布尔、同样是项目会想覆盖的键）——**机制不动，例子换键**。
+   `{:grep false}`（同为布尔、同样是项目会想覆盖的键）——**机制不动，例子换键**。
 5. **`harness.edn.example`**：删 `:39-42` 那三行注释与 `:auto-read true`。
 6. **用例**：`:109`、`:200`、`:214`、`:233` 四条退场（它们问的行为没有了）；`:222` 升格为**唯一形状**
    （去掉 `{:auto-read false}` 参数，改名成「write 的答案说怎么拿锚点」）；`:92` 的
    `{:auto-read false}` 去掉；`:162-165` 的注释改掉（不再有新锚点被铸）；`editing_test` 三处换
-   `:anchor-grep`，并**新增一条**：`harness.edn` 写 `:auto-read` 得到 `:unknown-editing-key`
+   `:grep`，并**新增一条**：`harness.edn` 写 `:auto-read` 得到 `:unknown-editing-key`
    的指名失败（键名 + 文件路径都在话里）。
 7. **文档**：`kernel.md:283` 那句中补上「答案里不带内容、不带锚点行」；`README.md:256-257`、
    `CONTEXT.md:21`、`skills-and-instructions.md:224` 三处例子换成真键；README 那句「全部七个键」
    **去掉数字**（本票正好让它动一次，而语义说法不必再改——先例是 `cap.tools` 那三处「十五个」）。
-8. **不碰**：`read` / `replace` / `insert` / `undo_last_replace` / `anchor_grep`、`hashline/store.clj`、
+8. **不碰**：`read` / `replace` / `insert` / `undo_last_replace` / `grep`、`hashline/store.clj`、
    `:editing` 的逐键合成机制、`ui/`（答案文本走通用渲染）、`.scratch/immutable-data/`（该文件此刻在别处被改，
    见 spec 的非目标）。
 
