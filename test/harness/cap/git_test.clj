@@ -130,10 +130,17 @@
   to undo anything: 'did the last case leave something behind' has no way to be
   answered wrongly, and the dirty-switch cases below are where a wrong answer would
   go unnoticed, because a repository somebody else dirtied makes 'git refused' true
-  for the wrong reason."
+  for the wrong reason.
+
+  THE COPY IS REGISTERED, because DIR is a COMPOSED name -- `(str (temp-dir \"git\")
+  \"-detached\")`, and six more below -- rather than one `temp-dir` handed out: without
+  that line the sweep at the end of a run never hears about the seven trees these cases
+  make, and those seven are the whole of what a run still left behind once `temp-dir`'s
+  own trees were being taken (measured 2026-09-22). See
+  harness.test-support/track-temp-dir!."
   [dir]
   (copy-tree! (template-repo) dir)
-  dir)
+  (support/track-temp-dir! dir))
 
 (def ^:private dir
   (support/temp-dir "git"))

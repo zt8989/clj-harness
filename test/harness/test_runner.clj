@@ -30,6 +30,12 @@
   exists? check would stop noticing -- passes, because an untouched file is exactly
   what the assertion is about.
 
+  LEAVING THE MACHINE AS IT FOUND IT IS THE SAME CLAIM, and it covers the scratch trees
+  the cases make: `cleanup!` removes the run's own pair and
+  `harness.test-support/wipe-temp-dirs!` removes what the cases left behind -- 19,512
+  `clj-harness-*` directories had accumulated under one day's worth of runs (measured
+  2026-09-22, 409MB, still climbing) when only the first half of this existed.
+
   THE OS HOME IS PINNED TOO, AND TO A SIBLING OF THE ROOT RATHER THAN TO THE ROOT
   ITSELF. The host's convention files live there -- ~/AGENTS.md and the skills in
   ~/.agents/skills -- so a suite that read the developer's real home would depend
@@ -127,27 +133,6 @@
 ;; that makes its OWN root (with-temp-env) needs the same file, and two copies of a
 ;; text two things must agree on is one copy too many.
 
-(defn isolate!
-  "Point the config root AND the OS home at fresh temp directories for this
-  process. Returns the root directory. Idempotent: a second call reuses the
-  first pair.
-
-  The two are siblings, never nested -- see the docstring above for why nesting
-  would tamper with what the fence tests are asking."
-  []
-  (or @tmp-home
-      ;; MKDIR-TEMP, NOT `tmpdir + name`: the pair belongs to THIS process, and a
-      ;; composed name would be the same path for the run happening beside it -- see
-      ;; harness.test-support/temp-dir, which is where the how and the why live.
-      (let [dir   (support/temp-dir "test")
-            home' (support/temp-dir "test-home")]
-        (support/seed-config! dir)
-        (alter-var-root #'home/*root-override* (constantly dir))
-        (alter-var-root #'home/*user-home-override* (constantly home'))
-        (reset! tmp-home dir)
-        (reset! tmp-user-home home')
-        dir)))
-
 (defn- cleanup! []
   (doseq [dir (remove nil? [@tmp-home @tmp-user-home])]
     (try
@@ -157,6 +142,68 @@
         ;; Losing a temp dir is not worth failing a green suite over, but say so.
         (binding [*out* *err*]
           (println "warning: could not remove test dir" dir ":" (ex-message e)))))))
+
+(defn- ensure-cleanup-hook!
+  "Make THIS PROCESS take the run's OWN pair with it when it is stopped from outside --
+  SIGTERM, Ctrl+C -- and not only when the run ends by itself.
+
+  THE `finally` IN `run-suite!` IS NOT ENOUGH, and that is measured rather than assumed:
+  a JVM that is signalled runs its shutdown hooks and halts, and the main thread's
+  `finally` is not one of them (2026-09-22: a two-line program sleeping inside a `try`
+  printed nothing from its `finally` after a SIGTERM). A suite stopped at 14s kept this
+  pair and lost every case tree, because the case trees have a hook of their own
+  (harness.test-support/ensure-cleanup-hook!) and this pair had none.
+
+  INSTALLED WHERE THE PAIR IS MADE, so that no pair ever exists during a moment when
+  this process's exit has nothing to remove it -- the same ordering
+  harness.infra.shell/ensure-exit-hook! keeps for its children. Installed once, because
+  its caller makes the pair once.
+
+  BEST EFFORT, and measured as such: two suites stopped at 14s left nothing at all, and
+  a file written into the root after the listing was taken is the one thing a delete
+  cannot win against -- that is one directory per interrupted run at worst, against the
+  ~274 trees a whole run used to leave."
+  []
+  (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable cleanup! "test-run-cleanup"))
+  nil)
+
+(defn isolate!
+  "Point the config root AND the OS home at fresh temp directories for this
+  process. Returns the root directory. Idempotent: a second call reuses the
+  first pair.
+
+  The two are siblings, never nested -- see the docstring above for why nesting
+  would tamper with what the fence tests are asking.
+
+  THE PAIR IS NOT A CASE'S SCRATCH TREE, and this namespace's `cleanup!` is the only
+  thing that removes it: it has to outlive every case in the run, so it is made with
+  `:track? false`. Left in the registry it would be within reach of
+  harness.test-support/wipe-temp-dirs! -- which the run calls at its end and the case
+  trees' own shutdown hook calls at every exit -- and a wipe that took it would delete
+  the root the run is still writing into. The invariant is asserted in
+  test/harness/test_runner_test.clj, and it is asked of the registry rather than by
+  wiping, because the destructive way to ask it reports the answer as hundreds of
+  failures somewhere else.
+
+  AND IT IS REMOVED BY A HOOK OF ITS OWN, not only by `run-suite!`'s `finally`: see
+  `ensure-cleanup-hook!` -- a run stopped from outside never reaches that `finally`,
+  and the pair would otherwise be the one thing a Ctrl+C left behind."
+  []
+  (or @tmp-home
+      ;; MKDIR-TEMP, NOT `tmpdir + name`: the pair belongs to THIS process, and a
+      ;; composed name would be the same path for the run happening beside it -- see
+      ;; harness.test-support/temp-dir, which is where the how and the why live.
+      (let [dir   (support/temp-dir "test" {:track? false})
+            home' (support/temp-dir "test-home" {:track? false})]
+        (support/seed-config! dir)
+        (alter-var-root #'home/*root-override* (constantly dir))
+        (alter-var-root #'home/*user-home-override* (constantly home'))
+        (reset! tmp-home dir)
+        (reset! tmp-user-home home')
+        ;; BEFORE THE PAIR IS HANDED BACK, so that no run ever exists during a moment
+        ;; when this process's exit has nothing to remove it.
+        (ensure-cleanup-hook!)
+        dir)))
 
 (defn- store-state
   "F as [bytes mtime], or nil when it is not there. Two numbers rather than a bare
@@ -565,7 +612,17 @@
       ;; machine as it found it, green or red. Same for anything else that throws
       ;; between `isolate!` and the end -- the `finally` is what makes the cleanup a
       ;; property of the protocol rather than of the happy path.
-      (finally (cleanup!)))))
+      (finally
+        (cleanup!)
+        ;; THE CASES' TREES GO THE SAME WAY, and from here rather than from each of the
+        ;; hundred-odd call sites that make one: see harness.test-support/wipe-temp-dirs!
+        ;; for the how and the why. It comes AFTER `cleanup!` because the run's own pair
+        ;; is deliberately not in that registry -- `cleanup!` removes the run's
+        ;; environment, the wipe removes what the run's cases left behind, and neither
+        ;; reaches into the other's set.
+        (let [scratch (support/wipe-temp-dirs!)]
+          (when (pos? scratch)
+            (println (str "test scratch directories removed: " scratch))))))))
 
 (defn -main
   "Run the suite -- all of it, or only the namespaces named on the command line.
