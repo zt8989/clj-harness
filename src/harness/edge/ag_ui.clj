@@ -40,15 +40,23 @@
 
 (defn- close-reasoning [s]
   (if-let [id (:reasoning s)]
-    (-> s (assoc :reasoning nil)
-          (update :frames conj {:type "REASONING_MESSAGE_END" :messageId id}
-                              {:type "REASONING_END" :messageId id})
-          ;; An assistant message must always follow the reasoning group. Without this,
-          ;; a turn that produced reasoning and then nothing -- which is precisely what
-          ;; a max_tokens-exhausted think looks like, finish_reason "length" with empty
-          ;; content -- would leave the reasoning with no assistant message to fold
-          ;; back onto, and DeepSeek answers 400 on the next turn.
-          open-text)
+    (let [closed (-> s (assoc :reasoning nil)
+                       (update :frames conj {:type "REASONING_MESSAGE_END" :messageId id}
+                               {:type "REASONING_END" :messageId id}))]
+      ;; An assistant message must always follow the reasoning group. Without this,
+      ;; a turn that produced reasoning and then nothing -- which is precisely what
+      ;; a max_tokens-exhausted think looks like, finish_reason "length" with empty
+      ;; content -- would leave the reasoning with no assistant message to fold
+      ;; back onto, and DeepSeek answers 400 on the next turn.
+      ;;
+      ;; BUT ONLY WHEN THE TURN HAS NONE YET. A turn that reasoned, answered and
+      ;; then called a tool has already opened its assistant message (`:text`) and
+      ;; hung the call off it (`:parent`); opening one more here leaves an EMPTY
+      ;; assistant message between the call and its result, and an OpenAI-shaped
+      ;; vendor refuses that history before the model runs (the 2026-09-22 refusal
+      ;; in harness.infra.log named two such calls). A tool call's parent IS the
+      ;; assistant message its result must follow, so the group needs no second one.
+      (if (or (:text closed) (:parent closed)) closed (open-text closed)))
     s))
 
 (defn- open-reasoning [s]

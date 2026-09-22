@@ -143,6 +143,32 @@
     (testing "so the conversation folds back to a history the vendor's rule accepts"
       (is (= [] (vec (llm/unanswered-tool-calls rebuilt)))))))
 
+(deftest a-thinking-turn-that-calls-a-tool-is-still-one-assistant-message
+  ;; A TURN THAT REASONED, ANSWERED AND THEN CALLED A TOOL is one assistant message
+  ;; carrying the call (`the-frames-follow-the-model-s-own-order` is the same turn
+  ;; without the call). The reasoning group is closed at `:model/end` -- and it
+  ;; must NOT open a second, empty assistant message there: that one lands between
+  ;; the call and its result, and an OpenAI-shaped vendor refuses a history whose
+  ;; tool_calls message is not followed directly by its tool message. The
+  ;; 2026-09-22 RUN_ERROR in harness.infra.log named the two calls a real session
+  ;; split exactly this way (call_9e25951412ef457f9a1f6f83,
+  ;; call_aff73946ae07493cbfc532c6).
+  (let [frames  (wire [(ev/run-start)
+                       (ev/reasoning-delta "先想一下")
+                       (ev/text-delta "我来读这个文件，")
+                       (ev/tool-call "c1" "read" "{}")
+                       (ev/model-end nil)
+                       (ev/tool-result "c1" "file contents" false)
+                       (ev/run-end)])
+        rebuilt (ag/inbound (frames/apply-frames frames) "SYSTEM" [])]
+    (testing "the call and its result are adjacent in the rebuilt history"
+      (is (= [] (vec (llm/unanswered-tool-calls rebuilt)))))
+    (testing "nothing is opened between the call and its result"
+      (let [call   (first (keep-indexed (fn [i f] (when (= "TOOL_CALL_START" (:type f)) i)) frames))
+            result (first (keep-indexed (fn [i f] (when (= "TOOL_CALL_RESULT" (:type f)) i)) frames))]
+        (is (not-any? #(= "TEXT_MESSAGE_START" (:type %))
+                      (subvec frames (inc call) result)))))))
+
 (deftest reasoning-frames-carry-what-the-shipped-schema-demands
   ;; The shipped EventSchemas union is a zod discriminated union, and @ag-ui/client
   ;; parses every event through it BEFORE its applier runs. Two things it insists on

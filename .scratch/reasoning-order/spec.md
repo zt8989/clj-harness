@@ -28,6 +28,16 @@ TEXT_MESSAGE_CONTENT (m1) "跑在你这台机器上…"            答案接着�
 | 思考**真的**结束时才收（这一次模型调用结束） | `:model/end` 分支 → `close-reasoning`（它仍然顺手 `open-text`，那条「reasoning 后面必须有 assistant message 可折」的不变式一字未改） |
 | 晚到的 delta 落进**同一条** reasoning 消息 | 不需要新代码：`open-reasoning` 只在没有开着的时候开，所以同一条一直开着 |
 
+> **2026-09-22 补正：上面「一字未改」那半句不再成立。** `close-reasoning` **不再无条件** `open-text`。
+> 一个「想了、答了、又调了工具」的回合里，`:model/end` 处开的是一条**新的空 assistant 消息**，它正好落在
+> 工具调用和它的结果之间——厂商拒这个形状。`harness.infra.log` 当天那条 RUN_ERROR 一次点名 8 个调用，
+> 全部来自这个形状（真记录里数得出来：每条这样的 assistant 消息后面紧跟一条空 assistant，再才是 tool 消息）。
+> 现在只在这次模型调用**还没有**自己的 assistant 消息时才开（`:text` / `:parent` 都没有）；有工具调用时
+> 它的 parent 就是那条消息。**「reasoning 后面必须有 assistant message 可折」的不变式仍然成立**：
+> 这类回合的 assistant 消息在 reasoning 组**之前**就开了（答案正文先来），`harness.edge.ag-ui/absorbed`
+> 照样把它折回去。回归用例
+> `harness.edge.ag_ui-test/a-thinking-turn-that-calls-a-tool-is-still-one-assistant-message`。
+
 ## 实测
 
 * **线材**（`test/harness/edge/ag_ui_test.clj`，两条）：
