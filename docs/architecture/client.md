@@ -412,10 +412,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 初值 `false`，上游那条 `userOpen ?? (streaming || defaultOpen)` 再没有机会替人点开——窗口、`max-h-64`、
 跟随最新 token 的滚动都还在，只给**点开它的人**。历史会话（不流式的）永远是折的一行首行，
 手动开合过的面板也不再被自动改动。**一个想法一行，而分界是「一步」**：工具调用结束一个想法
-（`想 → 读 → 再想` 仍是三行），**答案的正文不结束**——厂商会把同一段想法的尾巴发在答案开始之后
-（真会话的帧：想法 → 答案 → 想法的尾巴），runtime 给每个 message id 一条消息，按条画就会在答案下面多出
-一行 `思考`；`lib/reasoning-preview.ts` 的 `thoughtAt` 因此跨消息走一趟（往回判「这条是不是续写」，
-往前把这一段的想法收成一行）。两条文字规则在 `lib/reasoning-preview.ts`（UI 套件直接测），
+（`想 → 读 → 再想` 仍是三行），**答案的正文不结束**。两侧各管一半：**新写下的记录里本来就只有一条**
+reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [edge](edge.md#ag-ui-边) 与
+`.scratch/reasoning-order`）；**这次改动之前写下的记录**（以及别的厂商怪次序）里可能是两条，
+`lib/reasoning-preview.ts` 的 `thoughtAt` 于是跨消息走一趟（往回判「这条是不是续写」，往前把这一段的想法
+收成一行）。两条文字规则在 `lib/reasoning-preview.ts`（UI 套件直接测），
 拖动那一手在 `message-parts.tsx` 的 `ReasoningTail` ＋ `styles.css` 的 `.aui-reasoning-trigger-tail`；
 现场与代价见 `.scratch/thinking-row-tail/`。
 **轮那一层另有一行摘要**（`N 次工具调用 · M 条消息`，见上「一轮结束就折起来」）：它不是组头的回归——

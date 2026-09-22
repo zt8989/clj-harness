@@ -5,8 +5,15 @@
   ids to be opened and closed in order while the kernel's events carry no such
   structure. That state lives here and nowhere else -- it never leaks into the kernel.
 
-  The shape it produces, per assistant turn:
-    reasoning group (optional)  ->  text message  ->  tool calls parented to it
+  THE ORDER IS THE MODEL'S OWN (2026-09-22, the owner's call). A turn's frames come out
+  in the order the vendor produced them -- `reasoning group -> text message -> tool calls
+  parented to it` when the model thought first and then answered, which is the common
+  shape -- and a model that goes BACK to thinking after the answer has started keeps the
+  SAME reasoning message open, its later deltas landing there. That is why the reasoning
+  is closed by the end of the MODEL CALL (`:model/end`) and not by the answer's first
+  token: closing it early was this edge deciding that the thinking was over, and a vendor
+  that thought again afterwards got a second reasoning message -- drawn, before this was
+  fixed, as a second 思考 row UNDER the answer.
   A turn with no text still opens an empty TEXT_MESSAGE, so every tool call has a
   parentMessageId and every reasoning message has an assistant message to fold onto.
 
@@ -160,7 +167,13 @@
                               :messageId (:reasoning s) :delta (:text ev)}))
 
     :text/delta
-    (let [s (-> s close-reasoning open-text)]
+    (let [s (open-text s)]
+      ;; THE ANSWER'S FIRST TOKEN DOES NOT END THE THINKING (2026-09-22, the owner's
+      ;; call). What used to be here was `close-reasoning`, and the price was a SECOND
+      ;; reasoning message for the vendor shape `思考 · 答案 · 思考`: the model went back
+      ;; to its reasoning after the answer had begun, the group had already been closed,
+      ;; so a new one was opened -- and a reader saw a stray 思考 row under the answer.
+      ;; The frames follow the MODEL's order now; `:model/end` closes the thinking.
       ;; THE TURN'S ASSISTANT MESSAGE IS THE ONE ITS TOOL CALLS WILL HANG OFF, and
       ;; this is where it is chosen: text arrives before the calls of the same
       ;; message, so the message the text just opened is the message that owns them.
@@ -226,8 +239,16 @@
       (update s :frames conj {:type "TOOL_CALL_RESULT" :messageId id :toolCallId (:id ev)
                               :content (:content ev) :role "tool"}))
 
-    (:tool/pre-execute :tool/execute :tool/post-execute
-     :model/end)
+    :model/end
+    ;; THE THINKING ENDS WITH THE CALL THAT DID THE THINKING, and this is now the only
+    ;; place a reasoning message is closed while a turn is still running (see
+    ;; `:text/delta`). The frames it emits are the reasoning's own END pair; the event
+    ;; itself still carries nothing of its own (audit only), exactly like the rest of
+    ;; the model-call telemetry below -- and `close-reasoning` also opens the assistant
+    ;; message a reasoning-with-no-answer turn needs, which is the rule it always had.
+    (close-reasoning s)
+
+    (:tool/pre-execute :tool/execute :tool/post-execute)
     ;; The audit-only events carry no AG-UI frame at all: the edge records them as
     ;; jsonl lines. Passing the event through unchanged keeps the fold total
     ;; without inventing wire frames for audit data. (The constants share one

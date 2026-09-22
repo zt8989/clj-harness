@@ -42,9 +42,14 @@
            (types frames)))
     (is (empty? (wire/violations frames)))))
 
-(deftest reasoning-group-closes-before-text-opens
+(deftest the-thinking-is-closed-by-the-end-of-the-model-call
+  ;; THE COMMON SHAPE IS UNCHANGED: a model that reasons and then answers gets the wire
+  ;; it always did -- reasoning group, then the assistant message -- except that it is
+  ;; the MODEL CALL's end that closes the group and opens the text, not the answer's
+  ;; first token. The case below is what that changes.
   (let [frames (wire [(ev/run-start)
                       (ev/reasoning-delta "想") (ev/reasoning-delta "一下")
+                      (ev/model-end nil)
                       (ev/text-delta "hi")
                       (ev/run-end)])]
     (is (= ["RUN_STARTED" "REASONING_START" "REASONING_MESSAGE_START"
@@ -53,6 +58,44 @@
             "TEXT_MESSAGE_START" "TEXT_MESSAGE_CONTENT" "TEXT_MESSAGE_END"
             "RUN_FINISHED"]
            (types frames)))
+    (is (empty? (wire/violations frames)))))
+
+(deftest the-frames-follow-the-model-s-own-order
+  ;; WHAT A VENDOR ACTUALLY STREAMS (measured on a real session, 2026-09-22): reasoning,
+  ;; the answer's first token, then the TAIL OF THE SAME THOUGHT, then the answer again.
+  ;; The reasoning message stays OPEN across the answer and the late delta lands in it --
+  ;; closing it at the first answer token, which this edge used to do, made that tail a
+  ;; SECOND reasoning message, and the page drew a stray 思考 row under the answer.
+  ;; The rule: the frames follow the model's order, and the thinking stops when it is
+  ;; really over (the end of the call that did the thinking).
+  (let [frames (wire [(ev/run-start)
+                      (ev/reasoning-delta "想") (ev/reasoning-delta "一下")
+                      (ev/text-delta "hi")
+                      (ev/reasoning-delta " in Chinese.")
+                      (ev/text-delta " there")
+                      (ev/model-end nil)
+                      (ev/run-end)])]
+    (is (= ["RUN_STARTED"
+            "REASONING_START" "REASONING_MESSAGE_START"
+            "REASONING_MESSAGE_CONTENT" "REASONING_MESSAGE_CONTENT"
+            "TEXT_MESSAGE_START" "TEXT_MESSAGE_CONTENT"
+            "REASONING_MESSAGE_CONTENT"
+            "TEXT_MESSAGE_CONTENT"
+            "REASONING_MESSAGE_END" "REASONING_END"
+            "TEXT_MESSAGE_END"
+            "RUN_FINISHED"]
+           (types frames)))
+    (testing "ONE reasoning message, in the place the model began it"
+      (is (= ["REASONING_MESSAGE_START"]
+             (mapv :type (filter #(str/starts-with? (str (:type %)) "REASONING_MESSAGE_START")
+                                 frames))))
+      (is (= #{"run-1-r0"}
+             (into #{} (comp (filter #(str/starts-with? (str (:type %)) "REASONING_MESSAGE"))
+                             (keep :messageId))
+                   frames))))
+    (testing "and the late reasoning is in it, not in a message of its own"
+      (is (= ["想" "一下" " in Chinese."]
+             (mapv :delta (filter #(= "REASONING_MESSAGE_CONTENT" (:type %)) frames)))))
     (is (empty? (wire/violations frames)))))
 
 (deftest tool-call-with-no-text-still-gets-a-parent
@@ -168,6 +211,28 @@
       (is (some #(and (= "TOOL_CALL_RESULT" (:type %))
                       (str/includes? (str (:content %)) "3"))
                 @frames)))))
+
+(deftest a-vendor-that-thinks-again-after-answering-keeps-one-thinking-message
+  ;; END TO END, through the real loop and the scripted vendor: the frames the wire gets
+  ;; for `思考 · 答案 · 思考`, which is the shape one real session streamed and the shape
+  ;; that used to reach the page as two reasoning messages (and two 思考 rows).
+  (let [emit   (ag/outbound "thr-10" "run-10")
+        frames (atom [])]
+    (doseq [event (run-events [{:reasoning "先想一下" :content "答案开始"
+                                :reasoning-after " 还在想"}])]
+      (swap! frames into (emit event)))
+    (let [types   (types @frames)
+          at      (fn [t] (first (keep-indexed (fn [i x] (when (= t x) i)) types)))]
+      (is (empty? (wire/violations @frames)))
+      (testing "one reasoning message, with the late piece inside it"
+        (is (= 1 (count (filter #(= "REASONING_START" (:type %)) @frames))))
+        (is (= ["先想一下" " 还在想"]
+               (mapv :delta (filter #(= "REASONING_MESSAGE_CONTENT" (:type %)) @frames)))))
+      (testing "the late reasoning is drawn where it ARRIVED: after the answer started"
+        (is (< (at "TEXT_MESSAGE_CONTENT") (at "REASONING_MESSAGE_END")))
+        (is (= 2 (count (filter #(= "REASONING_MESSAGE_CONTENT" (:type %)) @frames)))))
+      (testing "and the thinking is closed by the end of the model call, before the answer ends"
+        (is (< (at "REASONING_MESSAGE_END") (at "TEXT_MESSAGE_END")))))))
 
 ;; -------------------------------------------------------------------- inbound
 ;;

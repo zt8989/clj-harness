@@ -212,11 +212,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// They are here because the rules MOVED: they used to be three functions inside
 /// `message-parts.tsx`, where this run cannot reach them at all, and the row they
 /// decide is the one thing a reader watches while the model thinks. What a string
+/// (and the `client` suite's fourth, 92 -> 93, is the other half of the same day: reasoning
+/// that comes back AFTER the answer has started stays ONE reasoning message on the client,
+/// drawn above the answer -- the wire side of it is `harness.edge.ag-ui`, and what a page
+/// gets wrong here is a stray 思考 row under the answer.)
+/// What a string
 /// cannot show -- that the row never unfolds itself, that the live line is dragged
 /// (interpolated, not a jump per token), that it is PAINTED (a masked-away row is
 /// green on geometry and blank on screen), and that the first line comes back when the
 /// thought ends -- is the browser walkthrough's half (`.scratch/thinking-row-tail/`).
-const EXPECTED_CASES = 92;
+const EXPECTED_CASES = 93;
 
 let total = 0;
 for (const suite of SUITES) {

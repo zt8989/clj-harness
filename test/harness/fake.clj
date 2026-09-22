@@ -21,10 +21,18 @@
 
 (defn- script-provider [script on-event]
   (let [turn (first @script)
-        {:keys [reasoning content tool-calls usage]} turn]
+        {:keys [reasoning reasoning-after content tool-calls usage]} turn]
     (swap! script #(vec (rest %)))
     (emit! ev/reasoning-delta reasoning on-event)
     (emit! ev/text-delta content on-event)
+    ;; THE VENDOR SHAPE THAT PUT A SECOND 思考 ROW ON THE PAGE (2026-09-22). A thinking-mode
+    ;; model can go BACK to its reasoning after the answer has started -- measured on a
+    ;; real session, whose stream was `reasoning "…Answer briefly"`, the answer's first
+    ;; token, then `reasoning " in Chinese."`, then the answer again. The edge keeps ONE
+    ;; reasoning message open across that (see harness.edge.ag-ui), and a turn is the only
+    ;; way to play it here. `:reasoning-after` is that late piece; a turn without it
+    ;; behaves exactly as it did.
+    (emit! ev/reasoning-delta reasoning-after on-event)
     (let [calls (mapv (fn [{:keys [id name arguments]}]
                         (let [args (json/write-str arguments)]
                           (on-event (ev/tool-call id name args))
@@ -40,7 +48,8 @@
          ;; with nothing to say about reasoning at all. See
          ;; harness.kernel.llm/consume-sse, which keeps the same distinction on the
          ;; real wire.
-         (contains? turn :reasoning) (assoc :reasoning_content (or reasoning ""))
+         (or (contains? turn :reasoning) (contains? turn :reasoning-after))
+         (assoc :reasoning_content (str (or reasoning "") (or reasoning-after "")))
          (seq calls)                 (assoc :tool_calls calls))
        ;; REPORTED vs SILENT, kept apart the same way `:reasoning` is: a turn that
        ;; writes a :usage is a vendor that reports one, and a turn that omits the key
@@ -50,7 +59,11 @@
 
 (defn scripted
   "Provider over a vector of turns. A turn is
-     {:reasoning s, :content s, :tool-calls [{:id s :name s :arguments map}], :usage map}
+     {:reasoning s, :content s, :reasoning-after s,
+      :tool-calls [{:id s :name s :arguments map}], :usage map}
+  `:reasoning-after` IS REASONING THAT ARRIVES AFTER THE ANSWER STARTED -- the shape a
+  real thinking-mode vendor streamed (see the emitter below). It is emitted after
+  `:content` and joins the SAME reasoning message on the wire (`harness.edge.ag-ui`).
   The assistant message it returns is deliberately OpenAI-shaped, because that is
   what the history holds.
 

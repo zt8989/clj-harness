@@ -197,3 +197,14 @@ message 2: drawn=true  rows=0  ← 原来那一行 ⚠️ 就在这里
 （`a-thought-is-one-row-per-step-and-the-answer-does-not-end-one`）；浏览器那一侧留了 `scratch-continuation.mjs`
 （它需要真记录，不是门）。**没留在门里的一件事**：脚本厂商产不出这个形状（一回合一段想法一段正文），
 所以 `node scripts/dev.mjs --scripted` 那条走查覆盖不到它——这是这次唯一一处「证据靠一段真记录」的地方。
+
+
+## 复议之四（同日，第四眼）：线索也换成「一个想法一行」了
+
+主人看完第三次修正后定了方向：*按 llm 顺序渲染；如果真实情况是 思考、答案、思考，就不要提前关闭思考*。
+于是**后端**也改了（`.scratch/reasoning-order`）：`ag_ui/outbound` 不再在答案的第一个 token 上关闭 reasoning，
+晚到的 delta 落进**同一条** reasoning 消息，直到这次模型调用结束才收。
+
+这座「画」上的桥因此换了角色：`thoughtAt` 跨消息走的那一趟（本文件决策 7）现在管**这次改动之前写下的记录**
+（那种记录里确实是两条 reasoning 消息）以及别的厂商怪次序；新写下的记录里，那条尾巴本来就在同一条消息里。
+**判据一条没删**——它仍然是对的规则，只是触发它的人少了一种。
