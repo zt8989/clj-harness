@@ -1442,7 +1442,8 @@
 
     {:provider \"openrouter\" :model \"…\" :reasoning-effort \"high\"
      :reasoning-efforts [\"low\" \"medium\" \"high\"]
-     :providers [{:name \"deepseek\" :models [\"deepseek-flash\" \"…\"]} …]}
+     :providers [{:name \"deepseek\" :models [\"deepseek-flash\" \"…\"]
+                  :key {:present? true :source :env-file :name \"DEEPSEEK_API_KEY\"}} …]}
 
   THE THREE CURRENT VALUES ARE SCALARS PICKED BY NAME, and the provider list is
   built here rather than passed through `wire`. That is not a shortcut around the
@@ -1457,6 +1458,16 @@
   least one model, sorted by name so the menu has one order. A provider with no
   :models cannot be switched TO (naming it would fail in `assemble`), so offering
   it would be offering a refusal.
+
+  EACH ROW ALSO CARRIES WHETHER THIS HOME HOLDS A KEY FOR THAT VENDOR, and the rule
+  the picker applies to it is the settings page's rule rather than a second one: a
+  vendor is shown when this home has a key pointing at it, because putting a vendor
+  that will certainly refuse in front of a person leads them to a run that cannot
+  work. It arrives WITH the list instead of being fetched beside it, so the two can
+  never be out of step. `api-key-source` is the one place that question is answered
+  -- the same function the settings rows carry -- and it is a FACT, NOT A VALUE: it
+  never reads a key out of the map it reports on, which is why :api-key stays absent
+  here at every depth, exactly as everywhere else in this answer.
 
   :name IS THE ID AND :display-name IS THE LABEL, and the two are deliberately
   different keys rather than one already-decided string: what to SHOW is the
@@ -1475,7 +1486,8 @@
                      (keep (fn [[n entry]]
                              (let [models (keys (:models entry))]
                                (when (seq models)
-                                 (cond-> {:name (name n) :models (sortable models)}
+                                 (cond-> {:name (name n) :models (sortable models)
+                                          :key  (api-key-source n)}
                                    (some? (:display-name entry))
                                    (assoc :display-name (:display-name entry)))))))
                      (sort-by :name)
@@ -1902,8 +1914,52 @@
 
 ;; ------------------------------------------------- asking a vendor what it serves
 
+(defn listed-models
+  "A provider's own 2xx body -> the model ids it lists, in the order it listed them.
+
+  THE LAYER BELOW `*list-models*`, and a function of the body on purpose. The probe's
+  outbound call is stubbed in tests, and while the parse lived inside that same
+  function the stub replaced the parse too -- which is how a body read with STRING
+  keys and looked up with a KEYWORD key shipped: `(:data parsed)` was nil for every
+  provider, so every 2xx answer came back empty, a provider listing thirty models
+  included. A stub cannot be wrong, so the seam could not see it.
+
+  BASE IS CARRIED ONLY SO A REFUSAL CAN NAME THE ADDRESS it came from: a person with
+  a half-filled form holds several endpoints, and 'answered something that is not
+  JSON' without one sends them to all of them. Both arguments are data -- no request
+  is made here, the body is the only thing read, and nothing comes back but ids.
+
+  THE SHAPE IS THE PROVIDER'S, WHICH MEANS STRING KEYS: `json/read-str`'s default
+  `:key-fn` is `identity`, so `{\"data\": …}` arrives as `{\"data\" …}`.
+
+  AND 'IT LISTED NOTHING' IS AN ANSWER, NOT AN ERROR: an absent `data`, one that is
+  not an array, rows that are not maps, ids that are not strings -- each is an empty
+  list, because a provider with nothing to offer is an ordinary provider. Only a body
+  that is not JSON at all is a refusal, and it is a different sentence from the
+  vendor's own 4xx: this one says the answer could not be READ, not that it said no."
+  [base body]
+  (let [parsed (try (json/read-str body)
+                    (catch Throwable _
+                      (fail (str "the vendor at " base " answered something that is not JSON")
+                            {:base-url base})))]
+    ;; `vector?` rather than `coll?`: `data` as a JSON OBJECT decodes to a map, and a
+    ;; map walked as a sequence yields its ENTRIES -- which would answer ["id" "gpt-x"]
+    ;; for a body that listed no array at all.
+    (if (vector? (get parsed "data"))
+      (->> (get parsed "data")
+           (keep (fn [row]
+                   (when (map? row)
+                     (let [id (get row "id")]
+                       (when (string? id) id)))))
+           vec)
+      [])))
+
 (defn- openai-models
   "GET <base-url>/models with the key as a bearer token -> the ids it lists.
+
+  THIS IS THE REQUEST, NOT THE PARSE: the body is handed to `listed-models`, which is
+  a function of the body alone and therefore the thing a test can feed. The two were
+  one function, and a stub at `*list-models*` replaced both -- see `listed-models`.
 
   The OpenAI-compatible listing shape (`{\"data\": [{\"id\": …}, …]}`), which is
   what the one protocol this harness implements speaks. ONE PROTOCOL TODAY, so one
@@ -1936,13 +1992,7 @@
                              (or (ex-message e) "the connection failed"))
                         {:base-url base :unreachable true})))]
     (if (<= 200 (.statusCode resp) 299)
-      (let [body   (.body resp)
-            parsed (try (json/read-str body)
-                        (catch Throwable _ (fail (str "the vendor at " base " answered something that is not JSON")
-                                                 {:base-url base})))]
-        (->> (:data parsed)
-             (keep (fn [row] (let [id (get row "id")] (when (string? id) id))))
-             vec))
+      (listed-models base (.body resp))
       ;; THE VENDOR'S OWN WORDS, trimmed: a 401 that says "invalid api key" is worth
       ;; more to a person than this harness' paraphrase of it, and the status is
       ;; carried so a form can tell 'wrong key' from 'wrong address'.
@@ -1964,7 +2014,12 @@
   ONE SHAPE TODAY: `openai-models` speaks the listing shape of the one protocol
   `implemented-protocols` contains. When a second vendor needs a different shape, this becomes a
   multimethod dispatched on `:protocol` -- the seam stays a seam, the dispatch
-  arrives underneath it."
+  arrives underneath it.
+
+  AND THE PARSE IS NOT BEHIND THIS SEAM ANY MORE: a stub here replaces the REQUEST,
+  while `listed-models` -- the body -> ids half -- stays real and is fed directly.
+  Stubbing this var used to replace both, which is what let a nil `:data` lookup pass
+  for a vendor that lists nothing."
   (fn [provider] (openai-models provider)))
 
 (defn probe-models

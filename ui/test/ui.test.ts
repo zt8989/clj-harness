@@ -199,7 +199,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// mean in flight); the other RENDERS the sentence in both languages. Two readings of one
 /// session used to disagree and the only reply was the run edge's 409 -- found in a browser,
 /// because nothing in this run could see either half.
-const EXPECTED_CASES = 88;
+/// 88 -> 89: the `picker` suite's third, for `.scratch/provider-availability`'s ticket
+/// 03 -- the rule that a vendor is offered only when this home holds a key pointing at
+/// it, which the settings page and the composer's model picker both read
+/// (`lib/provider-key.ts`, zero imports). The two components cannot be imported here,
+/// so this case pins the RULE and the walkthrough checks the drawing.
+const EXPECTED_CASES = 89;
 
 let total = 0;
 for (const suite of SUITES) {

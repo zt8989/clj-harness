@@ -57,7 +57,10 @@
     "keyPresent": "key ✓",
     "keyMissing": "no key",
     "count_one": "{{count}} model · {{credential}}",
-    "count_other": "{{count}} models · {{credential}}"
+    "count_other": "{{count}} models · {{credential}}",
+    "withoutKeys_one": "{{count}} provider has no key — open to add one",
+    "withoutKeys_other": "{{count}} providers have no key — open to add one",
+    "withoutKeysHint": "A provider with no key cannot serve a run, so it is not offered above. Add its key and it moves back into the list."
   },
   "origin": {
     "builtin": "built-in",

@@ -2032,3 +2032,97 @@
         (is (= {:model "alpha-small"} (providers/override-for "p-bad"))
             "and the session keeps exactly what it had")
         (finally (providers/set-override! "p-bad" nil))))))
+
+;; ------------------------------------------- what a provider says it serves
+
+(deftest a-providers-listing-is-read-off-its-own-shape
+  ;; THE LAYER BELOW THE PROBE'S SEAM. `*list-models*` is stubbed in the edge suite,
+  ;; and that stub replaced the PARSING along with the outbound call -- so every case
+  ;; there asked "did the stub's answer come back", and not one of them ever fed a
+  ;; provider-shaped body. The parse is a function of the body now, and this is the test
+  ;; that feeds it: no stub, no network, just the shape a real provider answers with.
+  (testing "the ids the provider lists, in the order it listed them"
+    (is (= ["gpt-x" "gpt-y"]
+           (providers/listed-models "https://gateway.example/v1"
+                                    "{\"data\":[{\"id\":\"gpt-x\"},{\"id\":\"gpt-y\"}]}"))))
+
+  (testing "a row whose id is not a string is skipped rather than failing the lot"
+    (is (= ["gpt-x" "gpt-y"]
+           (providers/listed-models
+            "https://x/v1"
+            (str "{\"data\":[{\"id\":\"gpt-x\"},{\"id\":7},{\"id\":null},"
+                 "{\"no-id\":true},\"junk\",{\"id\":\"gpt-y\"}]}")))))
+
+  (testing "and 'the provider listed nothing' is an ordinary answer, not a failure"
+    ;; Empty, absent, the wrong type -- one answer, and none of them an error: a
+    ;; provider that lists nothing is a provider that lists nothing. The MAP case is the
+    ;; one worth spelling out: `data` as an object iterates its ENTRIES, so a parser
+    ;; that simply walked it would answer ["id" "gpt-x"] for a body with no list in it.
+    (doseq [body ["{\"data\":[]}"
+                  "{}"
+                  "{\"data\":null}"
+                  "{\"data\":\"nope\"}"
+                  "{\"data\":{\"id\":\"gpt-x\"}}"
+                  "{\"data\":[1,2,3]}"]]
+      (is (= [] (providers/listed-models "https://x/v1" body))
+          (str "no ids in " body))))
+
+  (testing "but a body that is not JSON at all is its own refusal, naming the address"
+    (let [e (try (providers/listed-models "https://x/v1" "<html>not json</html>") nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "not JSON"))
+      (is (str/includes? (ex-message e) "https://x/v1")
+          "the address it came from, because a half-filled form holds several"))))
+
+;; ------------------------------------------------------- the picker's key fact
+
+(deftest the-pickers-list-says-which-providers-this-home-holds-a-key-for
+  ;; TICKET 03's SERVER HALF. The picker offers a provider's models only when this home
+  ;; holds a key pointing at it, and that fact has to arrive WITH the list it filters
+  ;; -- the picker reads /api/choices, not /api/providers, and a fact it has to fetch
+  ;; from somewhere else is a fact that can be out of date by the time it draws.
+  ;;
+  ;; IT IS THE SAME `api-key-source` THE SETTINGS ROWS CARRY, deliberately: 'has a
+  ;; key' has ONE answer in this codebase (.env before the environment, the provider's
+  ;; own credential name before the global one), and a second derivation here would be
+  ;; a second answer free to disagree with the page beside it. FACT ONLY -- that
+  ;; function reports where a key would come from and never a value -- so the value is
+  ;; searched for at no depth below.
+  ;;
+  ;; THIS SITS AT THE END OF THE FILE RATHER THAN BESIDE THE OTHER PICKER CASES, and
+  ;; that is not tidiness. `a-display-name-is-a-label-and-never-an-identity` (above)
+  ;; does not close where its indentation says it does, so everything between it and
+  ;; `the-key-comes-from-the-providers-own-name-then-the-global-one` is swallowed into
+  ;; its body -- and a `deftest` in there comes out NESTED: its `def` runs only when the
+  ;; ENCLOSING test body runs, so the var does not exist yet at the moment this
+  ;; namespace's vars are collected for the pass. It is missing from the run and from
+  ;; the count while looking exactly like a case that passed: 98 `(deftest` forms in
+  ;; this file, 97 tests reported. A second pass in the same JVM would pick it up, which
+  ;; is the tell that this is collection order and not a lost var. (Found while adding
+  ;; this one; the defect is pre-existing, so it is reported rather than fixed here.)
+  (with-home (cfg :alpha) reg
+    (fn []
+      (let [rows (fn [] (:providers (providers/choices "t-key")))
+            row  (fn [n] (first (filter #(= n (:name %)) (rows))))]
+        (testing "a provider with no key says so, and still names the line a key would go on"
+          ;; The NAME is the useful half either way: it is what a person has to add.
+          (is (= {:present? false :source nil :name "ALPHA_API_KEY"} (:key (row "alpha")))))
+
+        (testing "a key in this home's .env is the picker's answer too -- no second rule"
+          (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
+            (fn []
+              (is (= true (get-in (row "alpha") [:key :present?])))
+              (is (= :env-file (get-in (row "alpha") [:key :source]))
+                  ".env first, exactly as a run resolves it"))))
+
+        (testing "and the value is in the answer at NO depth"
+          (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
+            (fn []
+              (let [body (json/write-str (providers/choices "t-key"))]
+                (is (not (str/includes? body sentinel)))
+                (is (not (str/includes? body (subs sentinel 0 12))))
+                (is (not (contains? (:providers (providers/choices "t-key")) :api-key)))))))
+
+        (testing "every row carries the fact, so a client never has to guess by omission"
+          (is (every? #(contains? % :key) (rows))))))))

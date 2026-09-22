@@ -11,6 +11,8 @@
 // is one thing to parse and one place a field can be forgotten.
 import type { TFunction } from "i18next";
 
+import type { ProviderKey } from "@/lib/provider-key";
+
 import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
@@ -66,7 +68,10 @@ export type ProviderRow = {
   /// The `.env` name this provider's key is read from -- derived from the id, and
   /// named here so nobody has to derive it in their head.
   credential: string;
-  key: { "present?": boolean; source: "env-file" | "environment" | null; name?: string };
+  /// WHETHER THIS HOME HOLDS A KEY for it, and where from -- the shared `ProviderKey`,
+  /// because the composer's choices row reports the same fact and one type is what keeps
+  /// the two from describing it differently. No value, at any depth.
+  key: ProviderKey;
 };
 
 /// What `GET /api/providers` answers, and what every write answers with too.

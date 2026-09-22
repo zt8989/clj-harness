@@ -97,7 +97,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/agent` | POST | **AG-UI run（流式）** | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
 | `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
-| `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model、可选的思考档 | 无（只读） |
+| `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model（每个厂商带**有没有密钥**这一件事，不带值）、可选的思考档 | 无（只读） |
 | `/api/skills` | GET | **技能列表**：本会话的根分组（每组带层与根路径），每行带名字、描述、能不能用与原因 | 无（只读） |
 | `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有、来源与**凭据名**） | 无（只读） |
 | `/api/providers` | GET | 目录现成一份给设置表单：每条带**来源**（内置 / 你的 / 你的补丁）、endpoint、它声明的 model、凭据名与密钥事实，另带可选协议、思考档与 `:default` 现状 | 无（只读） |

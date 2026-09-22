@@ -56,7 +56,9 @@
     "add": "添加提供方",
     "keyPresent": "有密钥 ✓",
     "keyMissing": "没有密钥",
-    "count_other": "{{count}} 个模型 · {{credential}}"
+    "count_other": "{{count}} 个模型 · {{credential}}",
+    "withoutKeys_other": "还有 {{count}} 家没有密钥——点开就能补上",
+    "withoutKeysHint": "没有密钥的提供方跑不起来，所以默认不列在上面。补上它的密钥，它就会回到那份清单里。"
   },
   "origin": {
     "builtin": "内置",

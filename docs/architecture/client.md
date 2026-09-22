@@ -72,6 +72,9 @@ lib/
                     目录里开一场）、`addProject` / `removeProject` / `pickFolder` / `setArchived`
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
+  provider-key.ts   「厂商被展示 ⟺ 这个家有一把钥匙指向它」这条规则的唯一一份：`hasKey`
+                    与 `splitByKey`，外加服务端那个密钥事实（`ProviderKey`）的类型。
+                    **零 import**，所以设置页、选择器与 UI 套件用的是同一个判据
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
   format.ts         给**人看**的数字：字节、时间、状态条那五格的字符串（`statsCells`），
                     以及那颗圈与它的面板要的一切（`contextCells`：份额、大小、三个篮子的名字，

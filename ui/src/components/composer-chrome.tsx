@@ -95,6 +95,7 @@ import {
   type ModelAnswer,
 } from "@/lib/composer";
 import { bindThread, listSidebar, projectName } from "@/lib/projects";
+import { hasKey } from "@/lib/provider-key";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";
@@ -336,13 +337,23 @@ const ComposerTools: FC = () => {
   // config.edn, a vendor that has since been removed -- still has to be drawable,
   // exactly as the directory picker treats a directory this home does not list: a
   // picker showing nothing at all reads as a session with no model.
-  const listed = data.providers.flatMap((provider) =>
-    provider.models.map((model) => ({
-      value: model,
-      label: model,
-      group: providerLabel(provider),
-    })),
-  );
+  // AND ONLY THE PROVIDERS THIS HOME HOLDS A KEY FOR (see `lib/provider-key.ts`, which
+  // is the one copy of that rule -- the settings page reads it too): offering a provider
+  // that will certainly refuse is leading a person to a run that cannot work.
+  //
+  // THE SESSION'S CURRENT MODEL IS NOT TOUCHED BY THAT FILTER. If it falls out of the
+  // list because its vendor has no key, the branch below puts it back at the top with
+  // the same 'not in the catalog' hint an unlisted model already gets -- erasing what a
+  // session is being SERVED BY is a bigger lie than listing a vendor without a key.
+  const listed = data.providers
+    .filter(hasKey)
+    .flatMap((provider) =>
+      provider.models.map((model) => ({
+        value: model,
+        label: model,
+        group: providerLabel(provider),
+      })),
+    );
   const options =
     data.model === undefined || listed.some((option) => option.value === data.model)
       ? listed

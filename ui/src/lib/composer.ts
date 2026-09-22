@@ -7,6 +7,8 @@
 // a threadId and nothing here is cached across threads.
 import type { TFunction } from "i18next";
 
+import type { ProviderKey } from "@/lib/provider-key";
+
 import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
@@ -44,7 +46,17 @@ export type Choices = {
   model?: string;
   "reasoning-effort"?: string;
   "reasoning-efforts": string[];
-  providers: { name: string; "display-name"?: string; models: string[] }[];
+  providers: {
+    name: string;
+    "display-name"?: string;
+    models: string[];
+    /// Whether this home holds a key pointing at this provider -- the picker offers a
+    /// provider's models only when it does (`lib/provider-key.ts` is the one copy of
+    /// that rule). It arrives WITH the list rather than being fetched beside it, so the
+    /// fact and the models it filters can never be out of step. The same `ProviderKey`
+    /// the settings registry's rows carry, and no key VALUE at any depth.
+    key: ProviderKey;
+  }[];
 };
 
 /// What to call a vendor on screen: its display name when it has one, its id

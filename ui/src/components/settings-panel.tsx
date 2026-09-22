@@ -72,6 +72,7 @@ import {
   type ProviderRow,
   type Registry,
 } from "@/lib/providers";
+import { hasKey, splitByKey } from "@/lib/provider-key";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 
 /// The translator this face is worded through: the settings catalog, because every
@@ -897,6 +898,44 @@ const ProviderForm: FC<{
   );
 };
 
+/// ONE ROW, DRAWN IN BOTH SECTIONS: the providers this home holds a key for, and --
+/// behind a sentence that says how to bring them back -- the ones it does not. The same
+/// row either way, because a provider without a key is not a different thing to edit:
+/// opening it is exactly how a person gives it one.
+const ProviderListRow: FC<{ provider: ProviderRow; onOpen: (provider: ProviderRow) => void }> = ({
+  provider: p,
+  onOpen,
+}) => {
+  const { t } = useTranslation("settings");
+  return (
+    <button
+      type="button"
+      data-slot="settings-provider-row"
+      data-origin={p.origin}
+      className="hover:bg-accent/40 flex flex-col gap-0.5 rounded-md p-2 text-left"
+      onClick={() => onOpen(p)}
+    >
+      <span className="flex items-center gap-2 text-xs">
+        <span className="font-medium">{providerLabel(p)}</span>
+        <span className="text-muted-foreground rounded border px-1 text-[10px]">
+          {ORIGIN_LABELS_PROVIDER[p.origin](t)}
+        </span>
+        {hasKey(p) ? (
+          <span className="text-muted-foreground text-[10px]">{t("models.keyPresent")}</span>
+        ) : (
+          <span className="text-muted-foreground text-[10px]">{t("models.keyMissing")}</span>
+        )}
+      </span>
+      <span className="text-muted-foreground font-mono text-[10px] break-all">
+        {p["base-url"]}
+      </span>
+      <span className="text-muted-foreground text-[10px]">
+        {t("models.count", { count: p.models.length, credential: p.credential })}
+      </span>
+    </button>
+  );
+};
+
 const ModelsPage: FC<{
   registry: Registry | null;
   failure: string | null;
@@ -947,6 +986,11 @@ const ModelsPage: FC<{
     );
   }
 
+  // ONE RULE, TWO SECTIONS (see `lib/provider-key.ts`): what this home holds a key for
+  // is the list, and what it does not is behind a sentence.
+  const { keyed, unkeyed } = splitByKey(registry.providers);
+  const open = (p: ProviderRow) => setDraft(draftOf(p));
+
   return (
     <div data-slot="settings-page-models" className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -960,36 +1004,40 @@ const ModelsPage: FC<{
           <PlusIcon /> {t("models.add")}
         </Button>
       </div>
+      {/* THE PROVIDERS THIS HOME HOLDS A KEY FOR. One that will certainly refuse is
+          not put in front of a person by default -- `lib/provider-key.ts` is the rule,
+          and the composer's model picker reads the same one. */}
       <div data-slot="settings-providers" className="flex flex-col divide-y">
-        {registry.providers.map((p) => (
-          <button
-            key={p.name}
-            type="button"
-            data-slot="settings-provider-row"
-            data-origin={p.origin}
-            className="hover:bg-accent/40 flex flex-col gap-0.5 rounded-md p-2 text-left"
-            onClick={() => setDraft(draftOf(p))}
-          >
-            <span className="flex items-center gap-2 text-xs">
-              <span className="font-medium">{providerLabel(p)}</span>
-              <span className="text-muted-foreground rounded border px-1 text-[10px]">
-                {ORIGIN_LABELS_PROVIDER[p.origin](t)}
-              </span>
-              {p.key["present?"] ? (
-                <span className="text-muted-foreground text-[10px]">{t("models.keyPresent")}</span>
-              ) : (
-                <span className="text-muted-foreground text-[10px]">{t("models.keyMissing")}</span>
-              )}
-            </span>
-            <span className="text-muted-foreground font-mono text-[10px] break-all">
-              {p["base-url"]}
-            </span>
-            <span className="text-muted-foreground text-[10px]">
-              {t("models.count", { count: p.models.length, credential: p.credential })}
-            </span>
-          </button>
+        {keyed.map((p) => (
+          <ProviderListRow key={p.name} provider={p} onOpen={open} />
         ))}
       </div>
+
+      {/* AND THE REST: not offered, but not gone either. One sentence says how many
+          there are and how to bring them back, and opening it gives today's row --
+          clickable, able to take a key, able to save it.
+
+          IT IS A `<details>` AND NOT STATE OF OURS, which is what makes opening and
+          closing it a LAYOUT act rather than a fetch: the rows are already in the DOM,
+          no request goes out to see them, and no state this panel holds -- including a
+          draft mid-edit -- is touched by a disclosure triangle.
+
+          Hiding them outright would take the built-in table's ids off the page, and
+          'add a provider to give openrouter a key' is an action a person takes by
+          reading one. */}
+      {unkeyed.length > 0 && (
+        <details data-slot="settings-providers-unkeyed" className="rounded-md border p-2">
+          <summary className="cursor-pointer text-xs">
+            {t("models.withoutKeys", { count: unkeyed.length })}
+          </summary>
+          <p className="text-muted-foreground mt-1 text-[10px]">{t("models.withoutKeysHint")}</p>
+          <div data-slot="settings-providers-without-keys" className="mt-1 flex flex-col divide-y">
+            {unkeyed.map((p) => (
+              <ProviderListRow key={p.name} provider={p} onOpen={open} />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 };

@@ -19,6 +19,12 @@ import {
   matchesOption,
   type PickerOption,
 } from "../../src/lib/picker";
+import { hasKey, splitByKey, type KeyFact } from "../../src/lib/provider-key";
+
+/// A row carrying the shared key fact, in the shape BOTH faces hand it around: the
+/// settings row and the picker's choices row are different objects that agree on
+/// `key`, and this is the smallest thing that stands for either.
+type KeyedRow = KeyFact & { name: string; models: string[] };
 
 /// The little catalog every case below reads: two vendors with two models each,
 /// one model the catalog does not list, and one project whose label is only its
@@ -116,6 +122,68 @@ const cases: Case[] = [
         "deepseek",
       ]);
       expect(groupOptions(filterOptions(OPTIONS, "zzz"))).toEqual([]);
+    },
+  },
+  {
+    name: "a-provider-is-offered-only-when-this-home-holds-a-key-for-it",
+    run: async () => {
+      // ONE RULE, TWO FACES: the settings page shows a provider when this home holds a
+      // key pointing at it, and the composer's model picker offers that provider's
+      // models. The rule lives in `lib/provider-key.ts`, which imports nothing, so
+      // both faces are pinned here over literal rows -- the two components that apply
+      // it cannot be imported without a DOM, and what they DRAW is the browser
+      // walkthrough's question.
+      //
+      // THE FIXTURES ARE ANNOTATED RATHER THAN INFERRED, and that is the one thing
+      // tying them to the wire: `KeyedRow` is the shared fact intersected with the
+      // fields the two shapes carry it in, so a change to `ProviderKey` stops this file
+      // COMPILING instead of letting the literals drift into agreement with nothing.
+      const keyed: KeyedRow = {
+        name: "deepseek",
+        models: ["deepseek-flash"],
+        key: { "present?": true, source: "env-file", name: "DEEPSEEK_API_KEY" },
+      };
+      const unkeyed: KeyedRow = {
+        name: "ollama",
+        models: ["qwen3"],
+        key: { "present?": false, source: null, name: "OLLAMA_API_KEY" },
+      };
+      const all: KeyedRow[] = [
+        keyed,
+        unkeyed,
+        { name: "gamma", models: ["g"], key: { "present?": true, source: "environment" } },
+      ];
+
+      // PRESENCE IS THE WHOLE FACT, and it is not a source: a key in the home's .env
+      // and one in the real environment answer the same here, because the server has
+      // exactly one rule for which of them wins -- a second rule on this side is how
+      // a home with its key in `.env` would see no providers at all.
+      expect(hasKey(keyed)).toBe(true);
+      expect(hasKey(unkeyed)).toBe(false);
+      expect(all.every((row) => typeof hasKey(row) === "boolean")).toBe(true);
+
+      // BOTH FACES READ THE SAME RULE, each in the shape its own drawing wants: the
+      // settings page needs the two halves APART -- the list, and the rest behind a
+      // sentence -- and calls `splitByKey`, while the picker only ever asks "may this
+      // one be offered" and filters with `hasKey`. One predicate underneath, which is
+      // the point; a partition that SORTED would be a second opinion about a provider's
+      // order, so the order given is the order kept.
+      const { keyed: withKeys, unkeyed: without } = splitByKey(all);
+      expect(withKeys.map((provider) => provider.name)).toEqual(["deepseek", "gamma"]);
+      expect(without.map((provider) => provider.name)).toEqual(["ollama"]);
+      expect(splitByKey([]).keyed).toEqual([]);
+      expect(splitByKey([]).unkeyed).toEqual([]);
+      // ...and the picker's filter is the same cut: what it keeps is exactly the half
+      // the settings page lists.
+      expect(all.filter(hasKey).map((provider) => provider.name)).toEqual(
+        withKeys.map((provider) => provider.name),
+      );
+
+      // AND THE PICKER'S CONSEQUENCE: only the keyed providers' models reach the menu,
+      // in the providers' own order. The session's CURRENT model is not this module's
+      // question -- it is drawn even when its provider has no key, and that drawing is
+      // the walkthrough's.
+      expect(withKeys.flatMap((provider) => provider.models)).toEqual(["deepseek-flash", "g"]);
     },
   },
 ];
