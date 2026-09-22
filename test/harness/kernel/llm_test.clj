@@ -1,8 +1,15 @@
 (ns harness.kernel.llm-test
-  (:require [clojure.java.io :as io]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [harness.kernel.llm :as llm]))
+            [harness.infra.home :as home]
+            [harness.infra.llm-debug :as llm-debug]
+            [harness.kernel.llm :as llm]
+            [harness.test-support :as ts])
+  (:import [com.sun.net.httpserver HttpHandler HttpServer]
+           [java.net InetSocketAddress]
+           [java.nio.charset StandardCharsets]))
 
 (def ^:private fixture
   (slurp (io/resource "harness/fixtures/deepseek_sse.txt") :encoding "UTF-8"))
@@ -209,3 +216,80 @@
     (testing "only the calls that are missing are reported"
       (is (= ["c2"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
                                                  {:role "tool" :tool_call_id "c1" :content "a"}]))))))
+
+
+;; ----------------------------------------- the wire, and the traffic log
+
+(defn- sse-server
+  "A REAL HTTP server on an OS-assigned loopback port, answering every request with
+  STATUS and BODY. The smallest thing that drives the wire path at all -- which had
+  no test before this, and which the traffic log now has a stake in.
+
+  Answers [base-url stop]. The PORT IS THE OS'S TO PICK (`0`), the rule this
+  repository follows wherever a listener is needed: a fixed one makes a test that
+  fails whenever something else on the machine happens to hold it."
+  [status body]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/"
+                    (reify HttpHandler
+                      (handle [_ ex]
+                        (let [bytes (.getBytes body StandardCharsets/UTF_8)]
+                          (.sendResponseHeaders ex status (alength bytes))
+                          (with-open [out (.getResponseBody ex)]
+                            (.write out bytes))))))
+    (.start server)
+    [(str "http://127.0.0.1:" (.getPort (.getAddress server)) "/v1")
+     (fn [] (.stop server 0))]))
+
+(defn- traffic-lines
+  "Every line of the traffic log under ROOT, parsed -- empty when no file was
+  written, which is itself an assertion elsewhere."
+  [root]
+  (let [f (io/file root "logs" llm-debug/file-name)]
+    (if (.exists f)
+      (mapv #(json/read-str % :key-fn keyword)
+            (remove str/blank? (str/split-lines (slurp f :encoding "UTF-8"))))
+      [])))
+
+(deftest the-traffic-log-holds-the-request-then-the-response
+  (let [[base-url stop] (sse-server 200 fixture)]
+    (try
+      (let [root (ts/temp-dir "llm-traffic")]
+        (binding [home/*root-override* root
+                  llm-debug/*override* true]
+          (let [out (llm/stream! {:protocol :openai-completions :base-url base-url :model "m"}
+                                 [{:role "user" :content "hi"}]
+                                 (fn [_]) "t-1")
+                ls  (traffic-lines root)]
+            (is (= "assistant" (:role (:message out))))
+            (is (seq (:tool_calls (:message out)))
+                "the tool call the fixture carries came back through the real wire")
+            (is (= ["request" "response"] (mapv :at ls)) "one line each way, in the order they happened")
+            (testing "the request line holds the body that went out, verbatim"
+              (is (= "m" (:model (json/read-str (:body (first ls)) :key-fn keyword))))
+              (is (= "hi" (get-in (json/read-str (:body (first ls)) :key-fn keyword)
+                                   [:messages 0 :content])))
+              (is (= "t-1" (:thread-id (first ls)))))
+            (testing "the response line carries what the vendor reported about the call"
+              (is (= 769 (get-in (second ls) [:telemetry :usage :prompt_tokens])))
+              (is (= 0 (get-in (second ls)
+                               [:telemetry :usage :prompt_tokens_details :cached_tokens])))))))
+      (finally (stop)))))
+
+(deftest the-request-is-on-the-log-even-when-the-call-never-leaves
+  ;; THE ORDER IS THE POINT: the line is written BEFORE the request is built and sent,
+  ;; so a hang or a refused connection still leaves what was sent on the record -- the
+  ;; one thing somebody debugging a stall wants. An unparseable base-url is the
+  ;; shortest way to a send that throws without a network at all (`URI/create` refuses
+  ;; the spaces).
+  (let [root (ts/temp-dir "llm-traffic-unreachable")]
+    (binding [home/*root-override* root
+              llm-debug/*override* true]
+      (is (thrown? IllegalArgumentException
+                   (llm/stream! {:protocol :openai-completions :base-url "not a url" :model "m"}
+                                [{:role "user" :content "hi"}]
+                                (fn [_]) "t-1")))
+      (let [ls (traffic-lines root)]
+        (is (= 1 (count ls)) "the request, and no response beside it")
+        (is (= "request" (:at (first ls))))
+        (is (str/includes? (:body (first ls)) "\"model\":\"m\""))))))

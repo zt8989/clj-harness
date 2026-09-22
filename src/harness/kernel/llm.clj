@@ -43,6 +43,15 @@
   (harness.cap.providers/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key ..
      :reasoning-effort ..}
+
+  WHAT WENT OUT AND WHAT CAME BACK can also be written down for reading later, and
+  that is a different thing from the telemetry above: the telemetry is a fact the run
+  acts on, while the traffic log (harness.infra.llm-debug) is evidence for a question
+  asked afterwards -- 'why did the vendor's prefix cache miss on this call', say,
+  which only the exact request bytes can answer. It is OPT-IN
+  (CLJ_HARNESS_LLM_DEBUG) and best-effort: the wire path never waits on it and never
+  fails because of it.
+
   :reasoning-effort is present only when some tier chose one. :input/:output and
   the two counts (:context-window / :max-output-tokens) are not read here at all:
   they describe what a model is, which is the edge's business
@@ -53,6 +62,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [harness.infra.llm-debug :as llm-debug]
             [harness.kernel.event :as ev])
   (:import [java.net URI]
            [java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
@@ -305,12 +315,27 @@
                                       :tools tools
                                       :stream true}
                                reasoning-effort (assoc :reasoning_effort reasoning-effort)))
+        ;; THE REQUEST LANDS BEFORE IT GOES OUT, so a call that never comes back is
+        ;; still on the record -- a hang is exactly when somebody wants to read what
+        ;; was sent. Best-effort, and off unless CLJ_HARNESS_LLM_DEBUG is set:
+        ;; harness.infra.llm-debug is the file and the whole argument for it.
+        _    (llm-debug/record! {:at :request :thread-id thread-id :model model
+                                 :base-url (:base-url provider) :body body})
         resp (.send http-client (request provider body) (HttpResponse$BodyHandlers/ofInputStream))]
     (when-not (= 200 (.statusCode resp))
-      (throw (ex-info (str "HTTP " (.statusCode resp) ": "
-                           (slurp (.body resp) :encoding "UTF-8"))
-                      {:status (.statusCode resp)})))
+      (let [refusal (slurp (.body resp) :encoding "UTF-8")]
+        (llm-debug/record! {:at :error :thread-id thread-id :model model
+                            :status (.statusCode resp) :body refusal})
+        (throw (ex-info (str "HTTP " (.statusCode resp) ": " refusal)
+                        {:status (.statusCode resp)}))))
     ;; line-seq is lazy: it MUST be forced inside with-open, or the body leaks and
     ;; the caller deadlocks waiting on a stream nobody is draining.
     (with-open [r (io/reader (.body resp) :encoding "UTF-8")]
-      (consume-sse (line-seq r) on-event))))
+      (let [out (consume-sse (line-seq r) on-event)]
+        ;; THE RESPONSE IS LOGGED AS WHAT IT MEANT -- the assembled message and the
+        ;; call's telemetry -- not as the raw SSE deltas: the message IS the stream
+        ;; folded up, and the telemetry is the half a cache analysis reads
+        ;; (`usage.prompt_tokens_details.cached_tokens`).
+        (llm-debug/record! {:at :response :thread-id thread-id :model model
+                            :message (:message out) :telemetry (:telemetry out)})
+        out))))
