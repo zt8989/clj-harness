@@ -456,6 +456,113 @@
       (is (not-any? #(contains? % :toolCallId) history))
       (is (not-any? #(= "reasoning" (:role %)) history)))))
 
+;;; ---------------------------------------------------------------------------
+;;; THE TOOL CALL'S SHAPE SURVIVES THE RECORD
+
+(def ^:private hostile-args
+  "The vendor's `arguments` TEXT, chosen so that only a round trip which never PARSES it can
+  hand it back: escaped quotes and a backslash, a `\\n` escape, a solidus a writer may or may
+  not escape, non-ASCII, whitespace that matters, keys deliberately NOT in sorted order, and
+  -- the reason this is about BYTES and not only about shape -- MORE THAN EIGHT KEYS inside
+  one object, which is exactly where a Clojure map stops keeping the order it was written in
+  (`PersistentArrayMap` becomes `PersistentHashMap`, and the 9th key lands wherever its hash
+  says). No raw newline: these fixtures are line-delimited JSON."
+  "{\"path\":\"/tmp/a b\",\"note\":\"line\\nbreak \\\"quoted\\\" back\\\\slash\",\"emoji\":\"\u5de5\u4f5c\",\"z\":1,\"a\":2,\"k9\":9,\"k8\":8,\"k7\":7,\"k6\":6,\"k5\":5,\"k4\":4,\"k3\":3}")
+
+(def ^:private live-assistant
+  "THE MESSAGE THE LIVE FOLD PRODUCES, key order and all: `harness.kernel.llm` builds
+  `{:role .. :content ..}` and then assocs `:reasoning_content` BEFORE `:tool_calls`, and that
+  order is part of the bytes a vendor's prefix cache keys on. Spelled out here rather than
+  produced by calling the fold, so that a change to the live construction shows up as a failure
+  in this file: the record has to hand back what the live run sent, not merely something a
+  provider can read. An explicit `array-map` because insertion order is the whole point.
+
+  THE OBSERVED SHAPE, from five real request bodies in `~/.clj-harness/logs/llm-debug.jsonl`:
+  every assistant message with calls carried exactly these four keys in this order (10
+  occurrences), every call `id, type, function` (14), every function `name, arguments` (14),
+  and every `arguments` was a string (14) -- never an object."
+  (array-map
+   :role "assistant" :content answer-text :reasoning_content reasoning-text
+   :tool_calls [{:id "c1" :type "function"
+                 :function {:name "read" :arguments hostile-args}}]))
+
+(def ^:private one-turn-frames
+  "THE FRAMES OF ONE TOOL-CALLING TURN, from the REAL emitter -- the same events
+  `harness.kernel.loop` hands the wire, so a fixture cannot encode a frame shape the server
+  never writes.
+
+  THIS IS THE PATH A TOOL CALL COMES BACK BY, and that is a fact about the record rather than
+  a preference: `replay/entries`' `ours?` makes a `message` row a conversation entry only when
+  its `:source` is one of `conversation-sources` (the client's own, and the birth's), because
+  the model's return and a tool's answer are \"already drawn from the frames\". A model turn's
+  `message` row is in the record and NOT in the conversation."
+  [(ev/run-start)
+   (ev/reasoning-delta reasoning-text)
+   ;; THE TEXT COMES BEFORE THE CALL, which is the order a model speaks in -- and the order
+   ;; that matters: a tool call is patched onto the assistant message by `:parentMessageId`
+   ;; (`frames/apply-frames`), so the words and the call land on ONE message only when the
+   ;; words were already open. This is the fixture's job, not a convenience: getting it
+   ;; backwards models a turn the fold would split in two.
+   (ev/text-delta answer-text)
+   (ev/tool-call "c1" "read" hostile-args)
+   (ev/tool-result "c1" "ok" false)
+   (ev/run-end)])
+
+(defn- log-one-turn [thread-id]
+  (write-log! thread-id
+              (concat [(prompt-line "r1" "You are a coding agent.")]
+                      (event-lines "r1" one-turn-frames)))
+  (log-file thread-id))
+
+(deftest a-tool-call-comes-back-out-of-the-record-byte-for-byte
+  ;; WHY THIS IS A TEST AND NOT A HOPE: the table of tools sits in the request's HEAD and the
+  ;; messages behind it, so ONE byte that changes when a record is read back does not cost one
+  ;; message -- it throws away the whole prefix, the conversation included. A rebuild happens
+  ;; on every refresh and every continuation, so a drift here is not an edge case: it is the
+  ;; difference between a cache that grows and one that is paid for again each time.
+  (let [history (replay/history (log-one-turn "t-toolcall-bytes"))
+        back    (assistant-with-calls history)]
+    (testing "the message we would send is the one the live run sent, BYTE FOR BYTE"
+      (is (= (json/write-str live-assistant) (json/write-str back))
+          (str "the record round trip moved bytes a prefix cache keys on\n"
+               "  live: " (json/write-str live-assistant) "\n"
+               "  back: " (json/write-str back))))
+    (testing "including the key order, because the vendor sees insertion order"
+      (is (= [:role :content :reasoning_content :tool_calls] (vec (keys back))))
+      (is (= [:id :type :function] (vec (keys (first (:tool_calls back))))))
+      (is (= [:name :arguments] (vec (keys (get-in back [:tool_calls 0 :function]))))))
+    (testing "and the arguments are still the vendor's TEXT -- a string, never an object"
+      (let [args (get-in back [:tool_calls 0 :function :arguments])]
+        (is (string? args))
+        (is (= hostile-args args))
+        ;; if anything had parsed and re-serialized them, this ordering is what would go first
+        (is (str/includes? args "\"z\":1,\"a\":2,"))))
+    (testing "a second round trip is the same fixed point, so restores do not compound"
+      (is (= (json/write-str back)
+             (json/write-str (json/read-str (json/write-str back))))))))
+
+(deftest the-recorded-model-row-and-the-frames-describe-the-same-call
+  ;; TWO RECORDINGS OF ONE FACT, AND ONLY ONE OF THEM IS THE CONVERSATION. The writer stores
+  ;; the model's returned message as a `model` row -- for readers that want the message as the
+  ;; PROVIDER read it -- and the frames the client was sent; a rebuild uses the FRAMES alone,
+  ;; because `conversation-sources` says a `message` row is the conversation's own only when it
+  ;; is the client's or the birth's. So this is not a second source of the bytes: it is a check
+  ;; that the two recordings cannot drift, since a reader that trusted the other one would hand
+  ;; a provider a different history than the run did.
+  (let [lines   (concat [(prompt-line "r1" "You are a coding agent.")]
+                        [(log-line {:ts 2 :runId "r1" :kind "message" :source "model" :id "e1"
+                                    :payload live-assistant})]
+                        (event-lines "r1" one-turn-frames))
+        rows    (replay/lines->records lines)
+        stored  (->> rows (filter #(= "model" (:source %))) first)
+        rebuilt (assistant-with-calls (replay/history (log-one-turn "t-toolcall-pair")))]
+    (is (some? stored) "the model's row is in the record")
+    (is (not-any? #(contains? % :tool_calls) (map :message (replay/entries rows)))
+        "and it is NOT a conversation entry -- a model turn comes back from the frames")
+    (testing "the row holds the message the run sent, and the frames rebuild to those bytes"
+      (is (= (json/write-str live-assistant) (json/write-str (replay/payload stored))))
+      (is (= (json/write-str (replay/payload stored)) (json/write-str rebuilt))))))
+
 (deftest history-carries-non-ascii-through-unchanged
   (write-log! "t-utf8" (one-run-lines))
   (let [history (replay/history (log-file "t-utf8"))]

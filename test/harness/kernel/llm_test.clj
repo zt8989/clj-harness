@@ -130,6 +130,51 @@
       (is (= [:reasoning/delta :tool/call]
              (distinct (map :type seen)))))))
 
+(defn- sse-chunk
+  "One vendor chunk, built from data rather than spelled as JSON here: the escaping in a
+  tool call's arguments is the thing under test, and a hand-escaped literal would hide a
+  mistake in the test instead of showing one in the fold."
+  [delta]
+  (str "data: " (json/write-str {:choices [{:index 0 :delta delta}]})))
+
+(deftest parallel-tool-calls-keep-the-vendors-order-and-their-own-arguments
+  ;; ARRIVAL ORDER IS NOT THE VENDOR'S ORDER. Fragments are keyed by `index` and concatenated
+  ;; per index (`absorb!`), so a vendor may interleave two calls and may even send index 1
+  ;; before index 0 -- and the fold still owes us the calls in the VENDOR's order, each with
+  ;; its arguments exactly as they were spelled. Two reasons that is not cosmetic: the tool
+  ;; call is part of the request's bytes on every later turn (a prefix cache keys on them),
+  ;; and `unanswered-tool-calls` reads the ids in this order when it decides what a request
+  ;; leaves unanswered.
+  (let [c0a "{\"path\":"
+        c0b "\"/tmp/a b\",\"z\":1,\"a\":2}"
+        c1a "{\"pattern\":\""
+        c1b "x\"}"
+        {:keys [msg]} (parse [(sse-chunk {:role "assistant" :content ""
+                                          :tool_calls [{:index 0 :id "call_a" :type "function"
+                                                        :function {:name "read"
+                                                                   :arguments c0a}}]})
+                              ;; index 1 OPENS FIRST -- the fold must not take that as order
+                              (sse-chunk {:tool_calls [{:index 1 :id "call_b" :type "function"
+                                                        :function {:name "grep"
+                                                                   :arguments c1a}}]})
+                              ;; and index 0 is continued after index 1 has spoken
+                              (sse-chunk {:tool_calls [{:index 0
+                                                        :function {:arguments c0b}}]})
+                              (sse-chunk {:tool_calls [{:index 1
+                                                        :function {:arguments c1b}}]})
+                              "data: [DONE]"])]
+    (testing "both calls come back, in the vendor's index order"
+      (is (= ["call_a" "call_b"] (mapv :id (:tool_calls msg))))
+      (is (= ["read" "grep"] (mapv #(get-in % [:function :name]) (:tool_calls msg)))))
+    (testing "each argument string is the vendor's TEXT, reassembled exactly"
+      (is (= "{\"path\":\"/tmp/a b\",\"z\":1,\"a\":2}"
+             (get-in (:tool_calls msg) [0 :function :arguments])))
+      (is (= "{\"pattern\":\"x\"}" (get-in (:tool_calls msg) [1 :function :arguments]))))
+    (testing "and the shape is the one the vendor reads back"
+      (is (= [:role :content :tool_calls] (vec (keys msg))))
+      (is (= [:id :type :function] (vec (keys (first (:tool_calls msg))))))
+      (is (= [:name :arguments] (vec (keys (get-in msg [:tool_calls 0 :function]))))))))
+
 (deftest prompt-is-frozen
   ;; What is frozen is the OPENING of the system message -- prompt.md, read once.
   ;; (The message itself is assembled per run from it in harness.cap.system-prompt;

@@ -172,6 +172,41 @@
 只命中 3072 是因为某个字节把可命中的前缀**截断**在了 `job_output` 那里（活体 body 里它在 tools 数组
 起点之后 10609 字节）。修完的正确验收要**连开两个会话**：第一个把新字节写进厂商缓存，第二个才命中。
 
+## 追加：AI 返回的 tool call 的形状，一路到下一次请求
+
+工具表的字节稳了，还差**消息那一半**：assistant 的 `tool_calls` 从厂商流里进来、经我们折叠与落地、
+再作为下一次请求的 `messages` 发出去。同一条道理——**一个字节变了，代价不是一条消息，是整段前缀**。
+
+**观测到的形状（五份真实请求体，`~/.clj-harness/logs/llm-debug.jsonl`）**：带调用的 assistant 消息
+**10 次**全是 `role, content, reasoning_content, tool_calls` 这个键序；每个调用 `id, type, function`
+**14 次**；每个 function `name, arguments` **14 次**；而 `arguments` **14 次全是字符串**——从流到请求，
+**没有任何一步把它 parse 再序列化**（折叠是字符串拼接：`llm.clj:149-150`）。这是「形状稳定」最要紧的
+一条：参数里的键序、空白、转义都是厂商自己写的，我们从头到尾只当它是**文本**。
+
+**回来的是哪条路**：`replay/entries` 的 `ours?`（`:507-509`）只把 `:source` 属于
+`conversation-sources`（client / injection / opening）的 `message` 行当作会话条目，因为「模型的返回与
+工具的答复**已经由帧承载**」。**所以 tool call 的重建只走帧**（`TOOL_CALL_START` 按 `:parentMessageId`
+挂到文本那条消息上 + `TOOL_CALL_ARGS` 拼接），模型那一行的 `message` 行在记录里、**不在会话里**。
+
+**8 键悬崖在这条路上是真的，但踩不到消息**：实测（`clojure.data.json`）≤8 键的对象经「写→读→写」
+**逐字节相同**（读回是 `PersistentArrayMap`，保住插入序）；**10 键的对象不同**（读回变
+`PersistentHashMap`，键序成哈希序）。而在真实请求体里，**唯一 >8 键的对象是
+`tools[86].function.parameters.properties`（25 键）**——正是票 02 的 `wire-json` 已经焊死的那一处；
+消息与调用全是 ≤4 键，所以那一半不需要再上锁，但这条测量是它不需要的**理由**。
+
+**钉住它的用例**（三条，全部走真实发射器）：
+`harness.kernel.llm-test/parallel-tool-calls-keep-the-vendors-order-and-their-own-arguments`
+（两个调用按 `index` 交错到达、index 1 先出现，出来的仍是厂商序、参数逐字节拼接正确、键序钉住）；
+`harness.edge.replay-test/a-tool-call-comes-back-out-of-the-record-byte-for-byte`
+（一整轮带调用的帧 → 重建出的消息与实时折叠的消息**逐字节相同**，含一段故意刁难的参数：转义引号、
+`\/`、非 ASCII、空白、以及一个**超过 8 键的内部对象**；再断言二次往返是不动点）；
+`…/the-recorded-model-row-and-the-frames-describe-the-same-call`（记录里那一行与帧描述同一个调用，
+且那一行**不是**会话条目——这条把上面那个规则也钉住了）。
+
+写用例时踩到的两件事值得留：**帧的顺序有语义**（文本必须在调用之前，否则 `:parentMessageId` 指不到
+它，一条消息会被拆成两条）；以及**我第一版夹具测了一条生产中不存在的路**（把模型消息写成
+`:source "model"` 的 `message` 行当输入）——那正是上面那条规则的证据，只是我当时还没读到它。
+
 ## 交付顺序
 
 1. ~~**票 01** 根因：身份哈希~~
