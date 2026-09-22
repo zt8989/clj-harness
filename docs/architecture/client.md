@@ -320,6 +320,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   `runState`），关的是 `running` **这一个词**：`parked` 与 `unfinished` 都不是「在跑」。
   门关上时**旁边那句话也画出来**（`session-run-notice.tsx`，`data-slot="session-running"`）——
   一个按不动的按钮与一个坏掉的按钮在屏幕上长得一样，而这一页知道原因。
+  **侧边栏那扇门也有同一半**（2026-09-22 修）：从侧边栏打开一场会话走的是 `rebuild`——它交的是一份
+  **快照**、不开 feed，于是页面对「在跑」一无所知，`runState` 一直是 `null`，按钮亮着，按下还是那句 409。
+  所以服务端在 `rebuild` 的回答上带上 `:state`（`harness.edge.http/live-state`，只在**本进程持有**时才有），
+  客户端看见 `running` 就**改看**：读 tail page、跟 feed，和刷新那扇门一模一样的形状（`app.tsx` 的
+  `sessionHistory`）——门关上，而且跑完自己开（feed 说 `settled`）。
 - **门是每场会话一份**：`boolean` 住在那份 host 里，`ApprovalBatchProvider` 也每份 host 一个（它读的正是
   它上面那个 provider 的待决中断）。所以 A 停在等人决定时，只有 A 的输入框关着，B 照常能发。
 - **悬置不是「在跑」**：`isRunning` 在悬置时是 `false`（那一轮 run 已经以 interrupt 结束），

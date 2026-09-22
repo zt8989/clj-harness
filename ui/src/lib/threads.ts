@@ -78,6 +78,17 @@ export type RebuiltThread = {
   /// Same field, same absence, as `ThreadSofar`: a rebuilt conversation whose
   /// record could not be written says so here too.
   record?: RecordHealth;
+  /// THE CONVERSATION'S OWN STATE, when this process is HOLDING it -- `running` /
+  /// `parked` / `settled` / `unfinished`, the same words `ThreadSofar` and a window
+  /// carry (`harness.edge.http/live-state`, which is where the live branch reads it).
+  ///
+  /// IT IS HERE SO A CLIENT CAN TELL A RUN IS IN FLIGHT ON A DOOR THAT OPENS NO FEED.
+  /// A rebuild hands over a SNAPSHOT, so a page that opened a running session from the
+  /// sidebar had no server word to close the composer's gate with and its Send was
+  /// answered 409. `running` is the one word that matters: the client looks through the
+  /// window door instead of holding the snapshot. ABSENT on the record branch, which is
+  /// a conversation nobody here is holding (see `rebuild-post`).
+  state?: SofarState;
 };
 
 /// THE SERVER'S OWN REFUSAL, when the body carries one, and THIS SIDE'S sentence when

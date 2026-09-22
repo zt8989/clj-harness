@@ -2569,6 +2569,10 @@
     (catch Throwable t
       (when (seq (:paths (ex-data t))) (ex-message t)))))
 
+;; `live-state` is defined below with the window (its other caller), and a `defn-` has to
+;; be known before it is read: a plain `declare` rather than moving it up, because the
+;; window section is where its argument lives and nothing here reads it before this point.
+(declare live-state)
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
   the AG-UI message list (seed + every recorded frame, reasoning and tool
@@ -2589,7 +2593,14 @@
   log whose run is over -- a live session's run is either running or already settled in
   memory), and the messages come back with the cards the page draws. A conversation
   nobody here holds is read from the record exactly as it was, repair and all: the
-  process that holds it, if any, is the one that may close its record off."
+  process that holds it, if any, is the one that may close its record off.
+
+  A LIVE SESSION'S ANSWER CARRIES ITS STATE (`:state`), because the door a client came
+  through decides whether it FOLLOWS the run: this door hands over a SNAPSHOT with no
+  feed, so a page that opened a RUNNING session from the sidebar had no server word to
+  close the composer's gate with, and the only reply to its Send was the run edge's 409
+  (`refuse-second-run!`). A client that sees `running` here looks through the window
+  instead -- see `harness.edge.http/window-frame` for the state a window carries."
   [req stem]
   (if-some [split (when (some? (sessions/live-entry stem)) (ambiguous-stem stem))]
     (api-response 404 {:error split :threadId stem})
@@ -2600,7 +2611,8 @@
                                         :source "memory"})
       (api-response 200 (cond-> {:threadId stem
                                  :messages messages
-                                 :context  (or (sessions/context stem) [])}
+                                 :context  (or (sessions/context stem) [])
+                                 :state    (live-state stem)}
                           (some? health) (assoc :record health))))
    (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))

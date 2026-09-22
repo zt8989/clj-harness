@@ -5184,6 +5184,7 @@
 (def ^:private refused-dir (support/temp-dir "http-refused"))
 (def ^:private crashed-dir (support/temp-dir "http-crashed"))
 (def ^:private lost-dir    (support/temp-dir "http-lost"))
+(def ^:private rebuild-dir (support/temp-dir "http-rebuild"))
 
 (defn- session-row-of
   "The row GET /api/projects gives for TID, under the project whose canonical path is
@@ -5229,6 +5230,37 @@
        (is (until #(false? (row-running? alive-dir "alive-a")) 5000)
            "the row still said running after the run had ended")
        (is (await-log #"terminal event=RUN_FINISHED .*thread-id=alive-a"))))))
+
+(deftest a-rebuild-of-a-running-session-says-it-is-running
+  ;; THE DOOR A CLIENT CAME THROUGH DECIDES WHETHER IT FOLLOWS THE RUN. `rebuild` hands
+  ;; over a SNAPSHOT and opens no feed, so a page that opened a RUNNING session from the
+  ;; sidebar had no server word to close the composer's gate with -- and its Send was
+  ;; answered by the run edge's 409 (`refuse-second-run!`). The state on the answer is
+  ;; what lets the client LOOK through the window instead, so it is asserted here, in the
+  ;; same held-open window the row cases use.
+  (wipe-dir! rebuild-dir)
+  (with-server
+   "alive-rebuild"
+   (fn []
+     (bind! "alive-rebuild" rebuild-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "alive-rebuild")]
+       (try
+         (testing "a rebuild of a conversation this process is answering names the live run"
+           (is (until #(row-running? rebuild-dir "alive-rebuild") 5000)
+               "the run was never held open")
+           (is (= "running"
+                  (:state (read-json (api-call :post
+                                             "/api/threads/alive-rebuild/rebuild" nil))))
+               "the rebuild snapshot did not name the run that was going"))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and once the run has ended the same door says the conversation settled"
+       (is (until #(false? (row-running? rebuild-dir "alive-rebuild")) 5000)
+           "the run never ended")
+       (is (= "settled"
+              (:state (read-json (api-call :post
+                                         "/api/threads/alive-rebuild/rebuild" nil))))
+           "a finished conversation was still named running")))))
 
 (deftest a-task-s-row-answers-the-same-registry-question
   ;; The third fact a row carries, for the second kind of row: `:running` comes from

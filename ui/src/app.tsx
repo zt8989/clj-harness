@@ -212,12 +212,16 @@ function repositoryFrom(agUiMessages: readonly unknown[], reads: Reads = null) {
 ///                it, so there is nothing to read and nothing to ask the server for.
 ///   "rebuild" -- a session opened from the sidebar: HAND IT OVER. That is the door
 ///                that closes a cut-off log off and names a corrupt one, and the
-///                refusal belongs on the row that was clicked.
+///                refusal belongs on the row that was clicked. IT FALLS THROUGH TO
+///                "LOOK" WHEN THE SESSION IS RUNNING: a snapshot opens no feed, so a
+///                page that opened a live conversation would have no server word for
+///                the composer's gate and its Send would be refused 409 -- a live one
+///                is watched instead (see `sessionHistory`).
 ///   "window"  -- the session this page was already in, landed in again (a reload).
 ///                LOOK AT IT, do not take it over: it may be in the middle of a run,
-///                which `rebuild` refuses outright, and looking must not write. What
-///                it gets is a WINDOW (ticket 06): the tail page, then every entry as
-///                it lands, with "show earlier" for the rest.
+///                and looking must not write. What it gets is a WINDOW (ticket 06):
+///                the tail page, then every entry as it lands, with "show earlier" for
+///                the rest.
 type HistoryRead = "none" | "rebuild" | "window";
 
 /// READ A CONVERSATION THE WAY A RESTORED PAGE MUST: the read that does not write,
@@ -273,6 +277,28 @@ function sessionHistory(
       if (read === "rebuild") {
         const rebuilt = await rebuildThread(threadId, t);
         onRecord(rebuilt.record ?? null);
+        // A RUNNING CONVERSATION IS LOOKED AT, NOT HELD (ticket 04's other door).
+        //
+        // THIS DOOR HANDS OVER A SNAPSHOT AND OPENS NO FEED, so a page that opened a
+        // RUNNING session from the sidebar -- every sidebar click is this door -- had no
+        // server word to close the composer's gate with: `runState` stayed null, Send
+        // looked available, and the only reply was the run edge's 409 (the bug reported
+        // 2026-09-22). The server puts the state on this answer (`harness.edge.http`
+        // `rebuild-post`) exactly so the client can tell, and the answer is to LOOK
+        // instead: read the tail page and follow its feed, the same shape as the window
+        // door below. The door a host came through is still the reason it was opened
+        // (`HistoryRead`); what changes is that a live conversation is watched, and the
+        // gate reopens on its own when the run settles.
+        if (rebuilt.state === "running") {
+          const page = await pageThread(threadId, t);
+          onRecord(page.record ?? null);
+          const opened = windowFrom(page);
+          onWindow(opened);
+          return repositoryFrom(
+            opened.entries.map((entry) => entry.message),
+            readsOf(page.state),
+          );
+        }
         return repositoryFrom(rebuilt.messages);
       }
       const page = await pageThread(threadId, t);
@@ -733,7 +759,11 @@ function useWindowFeed(args: {
   // where a reload FIRST learns that the conversation it landed in is still being answered,
   // and it must not have to wait for the next frame to say so.
   useEffect(() => {
-    if (read !== "window") return undefined;
+    // A WINDOW WAS OPENED, WHATEVER DOOR OPENED IT: the window door always does, and the
+    // rebuild door does when it finds the session RUNNING (see `sessionHistory`). `none`
+    // never does, and a rebuild that found a settled session does not either -- for those
+    // `start` is null, and the guard below is what decides, not the door's name.
+    if (read === "none") return undefined;
     const opened = start.current;
     if (opened === null) return undefined;
     held.current = opened;
