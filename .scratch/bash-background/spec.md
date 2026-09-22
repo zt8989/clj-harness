@@ -7,6 +7,7 @@
 同时~~**通知收成三样**：`<job-ended id="j1" path="…">[exit 0]</job-ended>` —— id、记录路径、结论行；
 没有尾部、没有截断话术、没有「去读它」的提示~~ **2026-09-22 复议后再收一格**：`<job-ended id="j1">[exit 0]</job-ended>`
 —— id 与结论行，路径退场，「去读它」那一句回来（一行、指名 `job_output`），见决策 3 的日期注。
+**同日再补 `<command>…</command>`**：光有 id 认不出是哪个作业；见决策 3 的日期注。
 工具答案也照这条走：**答案是事实，怎么读在描述里**（通知是那条被点头的例外）。
 
 2026-09-20 立，当日落地。两张票：`01 → 02`。
@@ -43,6 +44,8 @@
    这样去读」。「去读」那半句话**回来**：`<job-ended id="j1">[exit 0]</job-ended>` 加一行
    `Read what it said with job_output {"job": "j1"}.` —— 一个作业存在的理由就是模型走开了，
    所以这条提醒欠它的正是「哪里去读」；**两样事实 + 一句读法**，记录再大，通知都这么大。
+    **同日再补一格**：`<command>…</command>` 也进去（「是哪个作业，光有 id 认不出来」）——
+    通知因此与命令一样大；见 `.scratch/receipts-not-echoes/spec.md` 决策 4 与落地记录。
 4. **工具答案只说事实。** `job_output` / `job_kill` 的答案不再附「read it with …」；`job` 的
    答案是 id + 路径（重定向那条注留着——它是**诊断**，不是用法说明）。
 5. **计数与清单跟着改**：`cap.tools` 的 ns docstring、`docs/architecture.md`、`docs/architecture/layers.md`、

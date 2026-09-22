@@ -40,14 +40,16 @@ write · walkthrough-note.txt
 
 ### 通知：注入在「对话」那一栏是一张卡，「轨迹」那一栏是一格
 
-第二轮的卡片（折叠行写 **`注入的上下文 · job-ended · 88 B`**），点开的字节逐字：
+第二轮的卡片（折叠行写 **`注入的上下文 · job-ended · 133 B`**），点开的字节逐字：
 
 ```
 <job-ended id="j1">[exit 0]</job-ended>
+<command>sleep 1; echo JOB-SAYS-SO</command>
 Read what it said with job_output {"job": "j1"}.
 ```
 
-**88 字节，没有路径、没有正文**（记录里那句 `JOB-SAYS-SO` 不在通知里）。
+**133 字节**（`<command>` 那一行是落地当天补的：`j1` 认不出是哪个作业），**没有路径、没有正文**
+（记录里那句 `JOB-SAYS-SO` 是命令自己打出来的，不在通知里）。
 
 「轨迹」那一栏第 2 轮 3 个条目：`用户` → `上下文 <job-ended id="j1">[exit 0]</job-ended>` → `助手`：
 它落在**提问之后、那次模型调用之前**，客户端从不持有它。
@@ -57,7 +59,7 @@ Read what it said with job_output {"job": "j1"}.
 ```json
 {"source": "job", "type": "message",
  "payload": {"role": "user",
-             "content": "<job-ended id=\"j1\">[exit 0]</job-ended>\nRead what it said with job_output {\"job\": \"j1\"}."}}
+             "content": "<job-ended id=\"j1\">[exit 0]</job-ended>\n<command>sleep 1; echo JOB-SAYS-SO</command>\nRead what it said with job_output {\"job\": \"j1\"}."}}
 ```
 
 紧跟一行 `CUSTOM / injected-context` 的帧——卡片画的就是它。

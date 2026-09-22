@@ -262,13 +262,15 @@
                                                         "{\"command\":\"make\"}")]})
                    (message 21 (tool-msg "c1" "job j1 started; its record is /home/jobs/j1.log"))
                    (message 22 (user "" (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                                             "<command>make</command>\n"
                                              "Read what it said with job_output {\"job\": \"j1\"}.")))
                    (message 23 (assistant "noted"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
       (is (= (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                  "<command>make</command>\n"
                   "Read what it said with job_output {\"job\": \"j1\"}.")
              (:text (item-of turn "context")))
-          "the bytes, verbatim -- two facts and the one line that reads them")))
+          "the bytes, verbatim -- the command, the ending, and the one line that reads it")))
 
   (testing "and two jobs are two blocks, because the ids are part of the bytes"
     (let [[turn] (turns-of
@@ -276,8 +278,10 @@
                    (system-prompt 10 "S")
                    finished
                    (message 20 (user "" (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                                             "<command>make</command>\n"
                                              "Read what it said with job_output {\"job\": \"j1\"}.")))
                    (message 21 (user "" (str "<job-ended id=\"j2\">[stopped]</job-ended>\n"
+                                             "<command>make test</command>\n"
                                              "Read what it said with job_output {\"job\": \"j2\"}.")))])]
       (is (= 2 (count (filter #(= "context" (:kind %)) (:items turn))))
           "the de-duplication is by bytes, and these are different bytes"))))

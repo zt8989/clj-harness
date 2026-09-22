@@ -554,7 +554,7 @@
   ;; the same ending on every turn for the rest of the session, which is the failure this
   ;; case is here to make impossible.
   (let [t "it-jobs"
-        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-$((6*7)); exit 0"})]
     (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
         "the job finished before the run was even asked for")
     (try
@@ -589,11 +589,15 @@
                          ;; reach the wire -- the same trap the system-message case named.
                          ;; What is checked is the notice's own second line -- the read
                          ;; sentence naming THIS job's id, which nothing else in this run
-                         ;; writes -- and the command's own output line.
+                         ;; writes -- and the OUTPUT LINE of the command. The command's
+                         ;; own text rides in the notice now (that is how it says which
+                         ;; job), so the marker has to be what the command PRINTED, not
+                         ;; what it was written as: `$((6*7))` is the shell's answer.
                          (is (not (str/includes? first-body (str "{\"job\": \"" id "\"}")))
                              "not even the read line, which is the notice's own")
                          (is (not (str/includes? first-body path)))
-                         (is (not (str/includes? first-body "JOB-SAYS-SO"))))
+                         (is (not (str/includes? first-body "JOB-SAYS-42"))
+                             "and nothing of what the job said"))
                        ;; A second run of the same session: the client resends its whole
                        ;; conversation, which has no notice in it.
                        (io/delete-file (log-file t) true)

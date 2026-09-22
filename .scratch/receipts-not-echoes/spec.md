@@ -41,11 +41,16 @@
    （模型仍传就**指名拒绝**，话与合并时那句同源）、重定向注跟着它。
    `bash` 只剩前台：`timeout` / `stdin` / `workdir` / `shell` / 答案上界，行为逐字不变。
    工具数 **17 → 18**，三处硬编码清单与文档名单/数目跟着改。
-4. **通知 = id + 状态行 + 一句读法，不带路径。**
-   `<job-ended id="j1">[exit 0]</job-ended>` 加一行指 `job_output`。路径在 `job` 起的答案里，
-   记录内容 `job_output` 给，所以通知不需要它。仍然**说一次、不推送、不带正文**（记录五千行与空记录，
-   通知一样大）。跟着改的谎话：`job_output` 描述里「every answer -- and the notice … — names its path」
-   那句、`docs/architecture.md` 的 `cap.jobs` 一行、`kernel.md` 与 `CONTEXT.md` 的通知形状。
+4. **通知 = id + 状态行 + 命令 + 一句读法，不带路径。**
+   `<job-ended id="j1">[exit 0]</job-ended>`、`<command>make</command>`，再加一行指 `job_output`。
+   路径在 `job` 起的答案里，记录内容 `job_output` 给，所以通知不需要它。命令是**落地当天补上的**
+   （主人的话：「通过上下注入的时候还要带上原始的命令」）：`j1` 光靠 id 认不出是哪个作业，通知又可能
+   在好几轮之后才到，那时调用那条命令的现场早不在模型手里了；它用**自己的元素**装而不是当属性，
+   因为命令是带引号的任意文本，属性会把转义这件事强加上来。**不裁**：认不出来的命令等于没提醒。
+   仍然**说一次、不推送、不带正文**（记录五千行与空记录，通知一样大——现在它与命令一样大）。跟着改的
+   谎话：`job_output` 描述里「every answer -- and the notice … — names its path」那句、
+   `docs/architecture.md` 的 `cap.jobs` 一行、`kernel.md`、`README.md` 与 `CONTEXT.md` 的通知形状；
+   三处「通知里没有命令说了什么」的断言也换了钉子（命令原文进了通知，钉子得是命令**打印**出来的词）。
 5. **描述负责用法，答案负责事实 —— 这条规矩不动**（`bash-background` 决策 4）：`job_output` / `job_kill`
    的答案仍是事实，没有「read it with …」。**通知是唯一的例外**，因为它是**没人要过**的那一次告知。
 
@@ -71,8 +76,8 @@
 4. `bash {command: "echo hi"}` → 与今天**逐字相同**（`hi`）。
 5. `job {command: "sleep 1; echo hi"}` → 立刻返回 id 与记录路径；`job_output {job, wait: true}` 拿得到
    `[exit 0]` 与那行。
-6. 通知：`<job-ended id="j1">[exit 0]</job-ended>` 加一句指 `job_output`；**没有路径、没有正文**，
-   五千行的记录与空记录的通知一样大；说一次、不推送照旧。
+6. 通知：`<job-ended id="j1">[exit 0]</job-ended>` + `<command>…</command>` 加一句指 `job_output`；
+   **命令在里面、路径与正文不在**，五千行的记录与空记录的通知一样大（与命令一样大）；说一次、不推送照旧。
 
 ## 跨特征对照
 
@@ -147,6 +152,9 @@
    `job_output` 描述里「通知会说出路径」那句改掉；`docs/architecture.md` / `kernel.md` / `README.md` /
    `CONTEXT.md` 通知形状跟着改；`.scratch/bash-background/spec.md` 决策 3/验收 5 与
    `.scratch/job-endings/spec.md` 决策 3/验收 4 各划删除线 + 日期注。
+   **落地当天补上命令**（主人的第二句话）：`notice` 多一行 `<command>…</command>`，`jobs/start!` 把命令
+   留在注册表条目上（从前跑完就丢），`jobs_test` / `project_test` / `http_test` / `trajectory_test` /
+   `ui/test/suites/injections.ts` 的字节跟着改，四份文档与证据重跑。
 5. **收口。** `CONTEXT.md` 新增词条**回执（receipt）**（连同「回执可以带一句指路」那条边界），
    `job` 词条与工具名闭清单改到今天的形状；README 的 `todo_write` / `bash` / `job` /
    通知四段改到今天；`.scratch/write-no-content/issues/01-*.md` 删除（它的 `spec.md` 留作理由）。
@@ -162,17 +170,30 @@
   `bash-background` 落地时被改成 `bash {run_in_background: true}`，现在那个形状会被指名拒绝——
   「证据要能重跑」这条被同一个坑反向踩了一次，改的只是能重跑的那一步，那天看见的东西一字未动。
 
+### 落地当天追加的一句：通知带上命令
+
+主人的第二句话：「通过上下注入的时候还要带上原始的命令」。于是 `notice` 多一行
+`<command>…</command>`，`jobs/start!` 把命令留在注册表条目上（从前跑完就丢，`notice` 也就无从说起）。
+用**自己的元素**而不是标签属性：命令是带引号的任意文本，属性会把转义强加上来（`jobs_test` 里那句
+「THE PATH GOES IN UNESCAPED」的同一笔账）。**不裁**——认不出来的命令等于没提醒。
+
+它不推翻回执那条规矩，`CONTEXT.md` 的**回执**词条里新写了一句边界：**通知不是回执**（注入不是答案）。
+跟随改动：`jobs_test`（逐字 + 三行上界）/ `project_test` / `http_test` / `trajectory_test` /
+`ui/test/suites/injections.ts`（112 字节）；三处「通知里没有命令说了什么」的钉子换成命令**打印**出来的
+词（`$((6*7))` → `JOB-SAYS-42`）——命令原文进来之后，写在命令里的字证明不了任何事了；四份文档
+（`README.md` / `docs/architecture.md` / `docs/architecture/kernel.md` / `CONTEXT.md`）与两处旧
+spec 的日期注跟上；证据重跑一遍（88 B → 133 B）。
+
 ### 报数
 
-- 后端全量（落地当天，工作树里）：`Ran 1088 tests containing 12839 assertions. 0 failures,
-  0 errors.`（退出码 0）＋一行 `ISOLATION NOTE`（别的进程在我们没开的开发者真家库上写东西，
-  按 `docs/rules/testing.md` 不是失败）。
-  对基线 1090 / 12833：**用例 −2**（`auto-read` 四条退场、两条新的进场），**断言 +6**。
+- 后端全量（落地当天，工作树里）：`Ran 1088 tests containing 12841 assertions. 0 failures,
+  0 errors.`（退出码 0）。
+  对基线 1090 / 12833：**用例 −2**（`auto-read` 四条退场、两条新的进场），**断言 +8**。
 - 前端：`npm test` → **96 passed**；`npm run typecheck` 过；`npm run build` 过。
 - 真会话走查：`.scratch/receipts-not-echoes/evidence/`（脚本 `receipts.json` + README）。看见的：
   三张工具卡的答案都是回执（`job` → id + 路径；`todo_write` → `2 items stored …`，清单只在参数格；
-  `write` → `wrote 18 chars …` + 去 `read`）；注入卡折叠行是 `注入的上下文 · job-ended · 88 B`，
-  点开逐字两行（id + `[exit 0]`，加一句读法），**没有路径、没有正文**；轨迹那一栏第 2 轮是
+  `write` → `wrote 18 chars …` + 去 `read`）；注入卡折叠行是 `注入的上下文 · job-ended · 133 B`，
+  点开逐字三行（id + `[exit 0]`、命令、一句读法），**命令在里面、路径与正文不在**；轨迹那一栏第 2 轮是
   `用户 → 上下文 <job-ended id="j1">[exit 0]</job-ended> → 助手`。同一份字节在那一场的 jsonl 里
   是一条 `source: "job"` 的 `message` 行。
 

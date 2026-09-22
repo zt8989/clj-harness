@@ -303,10 +303,10 @@
             (is (not (str/includes? (str (first @sent)) "job-ended"))
                 "the job was still running when that call was made"))
           (testing "and the second one had it, without anybody asking"
-            ;; THE NOTICE CARRIES THE JOB'S ID, HOW IT WENT, AND THE LINE THAT READS IT --
-            ;; what the command SAID is not in it (`job_output`, or the file, is a call
-            ;; away), and neither is the record's path (the `job` answer had it), so the
-            ;; output line is deliberately NOT one of the markers here.
+            ;; THE NOTICE CARRIES THE JOB'S ID, THE COMMAND IT RAN, HOW IT WENT, AND THE LINE
+            ;; THAT READS IT -- what the command SAID is not in it (`job_output`, or the
+            ;; file, is a call away), and neither is the record's path (the `job` answer
+            ;; had it), so the output line is deliberately NOT one of the markers here.
             (is (str/includes? (str (second @sent)) "job-ended"))
             (is (str/includes? (str (second @sent)) (str "[exit 0]"))))
           (testing "exactly once in the history the run ends with"
