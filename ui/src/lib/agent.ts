@@ -20,10 +20,12 @@
 
 import {
   HttpAgent,
+  type AgentSubscriber,
   type HttpAgentConfig,
   type HttpAgentFetchFn,
   type Message,
   type RunAgentInput,
+  type RunAgentResult,
 } from "@ag-ui/client";
 
 /// THE ENTRIES AN ACTION ADDS TO A CONVERSATION THE SERVER HOLDS: the trailing run of
@@ -77,6 +79,55 @@ function threadIdOf(init: RequestInit, held: string): string {
   } catch {
     return held;
   }
+}
+
+/// THE ERROR NAME THAT DECIDES WHAT A HUNG-UP RUN IS CALLED on the far side of
+/// this call. `@assistant-ui/react-ag-ui`'s subscriber turns an error whose `name`
+/// is `AbortError` into `RUN_CANCELLED`, and anything else into `RUN_ERROR`
+/// (`isAbortError`, and the dispatch beside it) -- so this name is not decoration:
+/// it is the whole difference between "Cancelled" and "Failed" in the
+/// conversation, and between a card that shows a reason and one that shows a
+/// sentence nobody can act on.
+function asAbort(error: Error): Error {
+  const abort = new Error(error.message);
+  abort.name = "AbortError";
+  return abort;
+}
+
+/// THE SAME RULE WHERE THE TRANSPORT WORDS THE ABORT AS A FRAME, which is the
+/// path this product actually travels: `@ag-ui/client`'s HTTP transport catches the
+/// browser's `AbortError` itself and synthesises a `RUN_ERROR` frame from it
+/// (`code: "abort"`, the browser's sentence as the message) -- because a terminal
+/// is the only thing the wire vocabulary can say. That frame is the transport's, not
+/// the server's, and left alone it overwrites the `RUN_CANCELLED` the runtime has
+/// already dispatched, so the run is drawn `Failed` with the browser's wording under
+/// it. Handing it to the subscriber through the channel the library's own abort rule
+/// reads (`onRunFailed`, with a name of `AbortError`) makes it a cancellation: no
+/// `RUN_ERROR` is dispatched, no `RUN_FINISHED` follows it, and the card says
+/// "Cancelled" -- which is what happened.
+///
+/// IT IS GATED ON THE TRANSPORT'S OWN FACT, not on the frame: `code: "abort"` is
+/// this client's synthesis (a server terminal carries a reason, not this code), and
+/// `aborted` is this run's own request having been killed from here.
+function cancellationAware(
+  subscriber: AgentSubscriber | undefined,
+  aborted: () => boolean,
+): AgentSubscriber | undefined {
+  const onRunErrorEvent = subscriber?.onRunErrorEvent;
+  if (subscriber === undefined || onRunErrorEvent === undefined) return subscriber;
+  return {
+    ...subscriber,
+    onRunErrorEvent: (params) => {
+      if (params.event.code === "abort" && aborted()) {
+        subscriber.onRunFailed?.({
+          ...params,
+          error: asAbort(new Error(params.event.message ?? "the run was aborted")),
+        });
+        return;
+      }
+      return onRunErrorEvent(params);
+    },
+  };
 }
 
 /// WHAT THIS AGENT TAKES ON TOP OF `HttpAgent`'s OPTIONS: the one hook this product
@@ -158,5 +209,62 @@ export class HarnessAgent extends HttpAgent {
     const { messages, runId: _serverOwns, ...rest } = input;
     const body: ActionBody = { ...rest, append: appendOf(messages) };
     return super.requestInit(body as unknown as RunAgentInput);
+  }
+
+  /// WHAT A RUN THIS CLIENT HUNG UP REPORTS -- the third seam, after `ready` and
+  /// `requestInit`, and the same rule `cancellationAware` applies to the frame the
+  /// transport synthesises: a run killed from here is a cancellation, not a failure.
+  ///
+  /// THE FACT IT USES IS THE TRANSPORT'S OWN: `HttpAgent` binds one `AbortController`
+  /// per run and `abortRun` aborts it, so at the moment an error arrives,
+  /// `abortController.signal.aborted` is exactly "the request this error came out of
+  /// was killed from here" -- a stop the person pressed, a session this page closed,
+  /// a teardown. No new state, and nothing matched against a message: the wording is
+  /// the browser's, and a real provider failure that happened to mention aborting
+  /// must still come through as a failure.
+  ///
+  /// THIS IS THE PATH FOR AN ABORT THAT REACHED THE RUN AS AN ERROR -- killed
+  /// before the response headers, so the transport had no frame to synthesise
+  /// (`cancellationAware` handles that one). The AG-UI client reads "aborted" by the
+  /// error's `name` and a short list of messages, and the browser's wording for a
+  /// killed body read is on neither, so what it would otherwise report is an
+  /// ordinary run failure.
+  ///
+  /// THE ERROR IS RE-NAMED, NOT SWALLOWED: the client library's vocabulary is a
+  /// name, and `AbortError` is the one its subscriber turns into `RUN_CANCELLED`
+  /// (see `asAbort`). The interface already draws that state -- its word is
+  /// "Cancelled", and a cancelled call is struck through
+  /// (`components/message-parts.tsx`) -- so this reports one state honestly instead
+  /// of inventing another. Everything else about the error stays the base class's,
+  /// which is why this delegates rather than finishing the run here.
+  protected onError(input: RunAgentInput, error: Error, subscribers: AgentSubscriber[]) {
+    return super.onError(
+      input,
+      this.abortController.signal.aborted ? asAbort(error) : error,
+      subscribers,
+    );
+  }
+
+  /// AND THE SAME RULE ON THE WAY IN: every run goes out through a subscriber that
+  /// can tell the transport's abort frame from a failure (`cancellationAware`). The
+  /// base class's own subscriber plumbing is untouched -- this hands it one more
+  /// callback, and the run, the transport and the frames are all still the base
+  /// class's.
+  runAgent(
+    parameters?: Parameters<HttpAgent["runAgent"]>[0],
+    subscriber?: AgentSubscriber,
+  ): Promise<RunAgentResult> {
+    return super.runAgent(
+      parameters,
+      cancellationAware(subscriber, () => this.abortController.signal.aborted),
+    );
+  }
+
+  /// THE SAME CALLBACK FOR A SUBSCRIBER REGISTERED AHEAD OF TIME (`subscribe`
+  /// rather than handed to one run), because a rule about what a hung-up run reports
+  /// cannot depend on which door a caller came through. The app's runtime passes its
+  /// subscriber to each run; a suite registers one on the agent.
+  subscribe(subscriber: AgentSubscriber) {
+    return super.subscribe(cancellationAware(subscriber, () => this.abortController.signal.aborted) ?? subscriber);
   }
 }

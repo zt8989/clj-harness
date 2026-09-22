@@ -307,6 +307,52 @@ const cases: Case[] = [
       expect(await askForOne(), "the next ask is another conversation").not.toBe(minted);
     },
   },
+  {
+    name: "a-run-this-client-hung-up-is-a-cancellation-not-a-failure",
+    // THE BROWSER WORDS AN ABORT ITS OWN WAY, and only a live client shows what that
+    // costs: the stream this page cut off ends in the transport's own synthetic
+    // `RUN_ERROR` (`code: "abort"`, the browser's sentence as the message), the runtime
+    // has already dispatched `RUN_CANCELLED`, and the later frame wins -- so the call
+    // that was in flight is drawn `Failed` with `BodyStreamBuffer was aborted` under
+    // it, about a stop the person pressed. `lib/agent.ts` reclassifies that frame as
+    // the abort it is, and this reads the result where the interface reads it: no
+    // `RUN_ERROR` reached the wire, and the error the subscriber is handed carries the
+    // name (`AbortError`) that the interface's own rule reads as a cancellation -- see
+    // `isAbortError` in `@assistant-ui/react-ag-ui`, whose `RUN_CANCELLED` is what
+    // `message-parts.tsx` draws as "Cancelled".
+    run: async () => {
+      const agent = await agentFor(threadId("client-cancel"));
+      const frames: string[] = [];
+      const reported: string[] = [];
+      let calling = false;
+      agent.subscribe({
+        onToolCallStartEvent: () => {
+          calling = true;
+        },
+        onRunErrorEvent: (b) => {
+          frames.push(b.event.message ?? "RUN_ERROR");
+        },
+        onRunFailed: ({ error }) => {
+          reported.push(error.name);
+        },
+      });
+      // A turn long enough to be stopped in the middle of, and a second turn the
+      // abort keeps the client from ever reaching.
+      script([
+        { content: "", "tool-calls": [{ id: "c1", name: "bash", arguments: { command: "sleep 5" } }] },
+        { content: "这一轮不该到。" },
+      ]);
+
+      const run = agent.runAgent({ tools: [], context: [] });
+      await waitUntil(() => calling);
+      agent.abortRun();
+      await run;
+
+      expect(frames, "the transport's abort frame is not reported as a run error").toEqual([]);
+      expect(reported, "and the run says what it was: an abort").toEqual(["AbortError"]);
+      expect(agent.messages.some((m) => content(m) === "这一轮不该到。"), "no later turn arrived").toBe(false);
+    },
+  },
 ];
 
 /// The texts of the conversation the SERVER holds for TID, read through
@@ -320,6 +366,18 @@ async function heldTexts(tid: string): Promise<string[]> {
   return (body.messages ?? [])
     .map((message) => (typeof message.content === "string" ? message.content : ""))
     .filter((text) => text !== "");
+}
+
+/// Poll `true` until it is, or give up and throw. The abort case has to stop a run
+/// that is genuinely in flight -- a run stopped before its response headers is a
+/// different path (`HarnessAgent.onError`), and neither is covered by the other -- so
+/// the wait is for the tool call the script asked for to have started arriving.
+async function waitUntil(what: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (what()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("the run never got far enough to be stopped in flight");
 }
 
 export const clientSuite: Suite = { name: "client", cases };

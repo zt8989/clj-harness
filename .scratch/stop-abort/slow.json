@@ -1,0 +1,11 @@
+{
+  "turns": [
+    {
+      "content": "先跑一条会拖一会儿的命令。",
+      "tool-calls": [
+        { "id": "c1", "name": "bash", "arguments": { "command": "sleep 30" } }
+      ]
+    },
+    { "content": "命令跑完了。" }
+  ]
+}

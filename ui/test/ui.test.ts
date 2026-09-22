@@ -234,7 +234,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// answer: a thought that comes BACK after the answer has begun arrives as ONE reasoning
 /// message, drawn ABOVE the answer. What a page gets wrong here is a stray 思考 row under
 /// the answer -- which is what a reader saw before either half was fixed.
-const EXPECTED_CASES = 95;
+/// 95 -> 96: the `client` suite's fifth -- a run this page hung up reports itself as
+/// a cancellation rather than a failure. The transport turns a stream this side cut off
+/// into its own `RUN_ERROR` frame carrying the browser's wording for the abort
+/// (`code: "abort"`), which used to reach the interface as a run failure: pressing
+/// Stop drew the call that was in flight as `Failed` with `BodyStreamBuffer was
+/// aborted` under it. This reads the two facts the fix turns on -- no `RUN_ERROR`
+/// reached the subscriber, and the error it is handed instead carries the `AbortError`
+/// name the interface maps to "Cancelled" -- and it has to be a live client: the abort
+/// has to land on a stream that is genuinely in flight.
+const EXPECTED_CASES = 96;
 
 let total = 0;
 for (const suite of SUITES) {
