@@ -172,7 +172,7 @@ import {
 } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
 import { formatMillis } from "@/lib/format";
-import { firstLine, previewOf } from "@/lib/reasoning-preview";
+import { firstLine, previewOf, thoughtAt } from "@/lib/reasoning-preview";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -929,15 +929,23 @@ const ReasoningTail: FC<{ text: string }> = ({ text }) => {
   );
 };
 
-/// A run of adjacent reasoning parts, behind ONE ROW -- folded unless the reader
-/// opens it, a thought that is still arriving included.
+/// A THOUGHT, behind ONE ROW -- folded unless the reader opens it, a thought that
+/// is still arriving included.
 ///
-/// WHAT IS READ OFF THE GROUP rather than off the message is `running`: the
-/// group's status runs while any part the group covers is running, so the row
-/// follows the THOUGHT and not the run -- a turn that thinks, reads and then
-/// thinks again says its newest window for the first thought, gives back a first
-/// line while the read happens, and starts again for the next one. A restored
-/// conversation is never running, so history arrives as first lines.
+/// ONE ROW PER THOUGHT, AND A TOOL CALL IS WHAT ENDS ONE. A turn that thinks, reads
+/// and then thinks again gives three rows in that order: the first thought, the
+/// call, the second thought -- the row follows the THOUGHT and not the run. TEXT
+/// DOES NOT END ONE, and that is the whole of `thoughtAt`: a vendor interleaves its
+/// thinking with the answer it is writing (measured on a real session: reasoning,
+/// the answer's first token, then ` in Chinese.` -- the tail of the same thought),
+/// the runtime makes each of those blocks a MESSAGE of its own, and drawing them as
+/// they come leaves a second 思考 row AFTER the answer carrying the fragment -- what
+/// a reader reported. So a thought is gathered across the messages of its turn, and
+/// the row that began it is the one that draws it: a continuation returns nothing,
+/// and the row above it stays live for reasoning that arrives later (see `thoughtAt`
+/// in `lib/reasoning-preview.ts` for both walks).
+///
+/// A restored conversation is never running, so history arrives as first lines.
 ///
 /// THE OPEN STATE IS HELD HERE and it starts false, which is the whole of "a live
 /// thought does not unfold itself". Upstream keeps that state internally as
@@ -956,28 +964,38 @@ const ReasoningTail: FC<{ text: string }> = ({ text }) => {
 /// stopped gets `max-h-none` back, so a reader who opens one reads it whole, the
 /// same rule a tool's result gets.
 const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
-  group,
   children,
 }) => {
-  const running = group.status.type === "running";
-  // The tail while it runs, the first line once it stops: the rule and its
-  // reasons are in `lib/reasoning-preview.ts`.
-  const preview = useAuiState((s) =>
-    previewOf(s.message.parts, group.indices, running),
-  );
+  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN, not about
+  // this group: `s.thread.messages` is the conversation and `s.message.index` is
+  // where this message sits in it, which is what `thoughtAt` walks (both rules and
+  // their reasons are in `lib/reasoning-preview.ts`). Two selectors rather than one
+  // object, because the comparison is by reference -- an object literal here would
+  // re-render on every store update (see `useAuiState`'s own note on that).
+  const messages = useAuiState((s) => s.thread.messages);
+  const index = useAuiState((s) => s.message.index);
+  const thought = thoughtAt(messages, index);
+  // The tail while it runs, the first line once it stops.
+  const preview = previewOf(thought.parts, thought.running);
   const [open, setOpen] = useState(false);
+
+  // NOT DRAWN: this run is the model going back to a thought it already started --
+  // see the file comment. The row that began it says the same words a moment later
+  // anyway (it is handed the newest part), so nothing is lost by saying this one
+  // twice.
+  if (!thought.drawn) return null;
 
   return (
     <ReasoningRoot
       variant="ghost"
       className="mb-0"
-      streaming={running}
+      streaming={thought.running}
       open={open}
       onOpenChange={setOpen}
     >
-      <ReasoningTrigger active={running} preview={preview} />
-      <ReasoningContent aria-busy={running}>
-        <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>
+      <ReasoningTrigger active={thought.running} preview={preview} />
+      <ReasoningContent aria-busy={thought.running}>
+        <ReasoningText className={thought.running ? "pt-1" : "max-h-none pt-1"}>
           {children}
         </ReasoningText>
       </ReasoningContent>

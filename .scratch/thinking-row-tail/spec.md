@@ -3,7 +3,7 @@
 **由谁提的**：2026-09-22，主人一句话——*「不要默认展开思考，思考中那一行文字滚动显示，思考完成再回到第一行」*。
 三句话是三条判据，本文件把每一条落到一处实现、一次实测上。
 
-**当天被纠正两次**，两次都是主人先看出来、两次都记在文末复议里：
+**当天被纠正三次**，两次都是主人先看出来、两次都记在文末复议里：
 
 1. 第一版用「裁左边缘」的**布局**做出了滚动的**结果**，可每一批字都是一**跳**——*「不是我想要的效果，
    我要的是，从左边字退出，右边字插入」*：说的是**动词**。现在是拖（`transform`）出来的连续滑动。
@@ -11,6 +11,10 @@
    原因是行上那条「还在想」的微光（`shimmer`）**用文字当蒙版**画字，而流式那行字是**用 `transform` 挪**的，
    蒙版照着**布局**取，于是被挪走的字全被蒙掉了。**这条判据此前不存在**：几何与 DOM 文本全都对，一行像素
    都不对。修法与那条新判据（数像素）见决策 6 与「实测」。
+3. 第三眼：*「渲染错误 底部也出现了 思考」*——答案**下面**又冒出一行 `思考 · in Chinese.`。那是**厂商的次序**：
+   同一段思考的最后一个 token 在答案开始之后才到（真会话的帧：`REASONING "…Answer briefly"` → `TEXT_MESSAGE_START`
+   → `REASONING " in Chinese."` → 接着写答案），runtime 给每个 AG-UI message id 一条自己的消息，于是页面上就是
+   两行「思考」。修法与判据见决策 7。
 
 **推翻的是哪一条**：`.scratch/flat-step-rows/spec.md` 与 `.scratch/assistant-ui/issues/04-message-parts.md`
 第 14 节（2026-09-17）写下的「**正在到达的那段思考自己展开**，用上游那扇跟随最新 token 的窗口滚动显示，
@@ -24,6 +28,7 @@
 | 不要默认展开思考 | 行仍是 disclosure，但 `open` 由行自己持有、初值 `false`；上游那条 `userOpen ?? (streaming \|\| defaultOpen)` 再没有机会替人点开 | `message-parts.tsx` 的 `ReasoningBlock`（`open` / `onOpenChange` 交给 `<ReasoningRoot>`） |
 | 思考中那一行文字滚动显示 | 行上的摘要换成**已经到达的那一段**（压成一行），装在一只 `overflow: hidden` 的窗里；整行被**往左拖**到它的**末尾**停在窗的右边缘——字于是从**左边出去**、新字从**右边进来**，而拖动是 `transform`（能被插值），所以是滑不是跳 | `message-parts.tsx` 的 `ReasoningTail` ＋ `styles.css` 的 `.aui-reasoning-trigger-tail` |
 | （它得**看得见**） | 「还在想」的微光只能戴在**名字**上，不能戴在承载这一行的元素上：那条微光用文字当蒙版画字，凡是它蒙住的、被 `transform` 挪过的字都画不出来 | `message-parts.tsx` 的 `ReasoningTrigger`（`shimmer` 从 label 挪到 `<b>`） |
+| （一行一**想法**） | 一个想法一行；**工具调用**结束一个想法（`想 → 读 → 再想` 仍是三行），**答案的正文不结束**：厂商把同一段思考的尾巴发在答案开始之后，那条尾巴属于**上面那一行**，不再自己起一行 | `lib/reasoning-preview.ts` 的 `thoughtAt`（跨消息走一趟）＋ `ReasoningBlock` 里「不是本行画的那条 ⇒ 什么都不画」 |
 | 思考完成再回到第一行 | 不流式时回到原来那条规矩：第一个有字的 part 的首行、截 120 字、末尾 `…` | `lib/reasoning-preview.ts` 的 `firstLine` / `clip` / `previewOf(…, running=false)` |
 
 ## 决策与代价
@@ -68,6 +73,17 @@
    **代价如实记下**：微光的扫掠范围从「整行」缩到「思考」两个字。这条错**只有像素能看见**——几何、DOM 文本、
    行为全是绿的（详见证 1 与复议 2）。
 
+7. **一个想法一行，而「一步」才是分界。** runtime 给每个 AG-UI message id 一条**自己的消息**，所以厂商
+   「思考 → 答案 → 思考的尾巴」这个次序到了页面上就是**三条助手消息**；按条画就是两行「思考」，第二行还落在
+   答案**下面**。规则因此跨消息走一趟（`thoughtAt`）：**往回**走到第一个工具调用为止——若先遇到「想法」，
+   这条就是上面那条的续写，什么都不画；**往前**走到同一个工具调用为止，把这一段的 reasoning **都算作这一行
+   的想法**（所以「答案开始之后还在想」时，上面那一行仍然是**活的**，仍然跟着最新的字）。用户消息是回合边界，
+   两边都不越过。
+   **代价如实记下**：这一行现在要读整条会话（`s.thread.messages`）与自己在其中的位置（`s.message.index`）——
+   两个都是 assistant-ui 状态里已有的字段（仓里 `thread.aui.tsx` 早在用 `thread.messages.length`），但这确实是
+   这一行第一次往**自己之外**看。**另一个代价**：被隐藏的那条续写，其内容只有「上面那一行」会显示，而那一行
+   在**静止**时只显示首行——所以一段被答案打断的思考，它最后那几个字在静止态是**看不到**的（流式期间看得到）。
+
 ## 实测（2026-09-22，真 Chromium，`--scripted`）
 
 `node .scratch/thinking-row-tail/walkthrough.mjs http://localhost:5393/` → **GREEN，23 条**（全表见
@@ -100,6 +116,7 @@
 | `scratch-ink.mjs` | 诊断：数行上的墨（流式期间 vs 停下来），「空白」是靠它抓到的 |
 | `scratch-ascii.mjs` | 诊断：把那一行按亮度画成 ASCII——**看不见 PNG 的人也能看它**，这是定位蒙版问题的工具 |
 | `scratch-which.mjs` | 诊断：在**静止**的一行上分别加 `shimmer` / 加 `transform`，看哪一个把字抹掉（结论：`shimmer`） |
+| `scratch-continuation.mjs` | 诊断（也是这条规则的浏览器证据）：**把真会话的记录原样种进隔离家**、打开、数「思考」行——修前是那一行 `思考 · in Chinese.`，修后那一格是 0 行 |
 
 ## 没有做的事
 
@@ -145,3 +162,38 @@
 **留了什么下来**：一条**像素判据**（`inkOf`：截行、数墨，流式 ≥ 300）＋ 三个诊断脚本
 （`scratch-ink.mjs` / `scratch-ascii.mjs` / `scratch-which.mjs`）。**几何与文本再全绿，也不代表
 屏幕上有东西**——这条是这次真正的教训，写在 `evidence/README.md` 里。
+
+
+## 复议之三（同日，第三眼）：答案下面又出现一行 `思考`
+
+**主人看到的**：*「渲染错误 底部也出现了 思考」*——截图里答案的下面还有一行 `思考 · in Chinese.`。
+
+**为什么**：这不是我们伪造的次序，是**厂商的**。那场真会话（`~/.clj-harness/projects/…/24b44253….jsonl`）的帧是：
+
+```text
+REASONING_MESSAGE_CONTENT (r0) "…Answer briefly"      ← 一段想法
+TEXT_MESSAGE_START (m1) / "我是"                       ← 答案开始了
+REASONING_MESSAGE_START (r2) / " in Chinese."          ← 同一段想法的最后一个 token，晚到了
+TEXT_MESSAGE_CONTENT (m1) "跑在你这台机器上…"           ← 答案接着写
+```
+
+runtime 给每个 message id 一条消息，于是页面上是**三条助手消息**：`[想法]`、`[答案]`、`[想法·尾巴]`，按条各画
+一行，第二行就落在答案下面。**改动之前也是这样**（那时每行显示的是「首行」，第二行显示 `in Chinese.`），
+只是这次行变成了唯一能看思考的地方，才被看见。
+
+**修法**：`thoughtAt` 跨消息走一趟（见决策 7）——**工具调用**才是分界，**答案的正文不是**。
+
+**证据（这条只能靠浏览器，而且脚本厂商造不出这个形状）**：`scratch-continuation.mjs` 把**那场真会话的记录原样**
+种进隔离家、打开、数行：
+
+```text
+message 0: drawn=false rows=1  "Thinking · The user asks in Chinese: …"   ← 折起来的那条（回合折叠）
+message 1: drawn=true  rows=0  "我是跑在你这台机器上的一个编码 agent…"      ← 答案
+message 2: drawn=true  rows=0  ← 原来那一行 ⚠️ 就在这里
+→ OK: no stray 思考 carrying the thought's tail after the answer
+```
+
+**判据留在了哪**：跨消息那条规则是**纯函数**，`suites/reasoning-row.ts` 用三条消息的字面量直接测
+（`a-thought-is-one-row-per-step-and-the-answer-does-not-end-one`）；浏览器那一侧留了 `scratch-continuation.mjs`
+（它需要真记录，不是门）。**没留在门里的一件事**：脚本厂商产不出这个形状（一回合一段想法一段正文），
+所以 `node scripts/dev.mjs --scripted` 那条走查覆盖不到它——这是这次唯一一处「证据靠一段真记录」的地方。

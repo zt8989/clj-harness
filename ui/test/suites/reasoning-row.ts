@@ -18,15 +18,23 @@
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
-import { PREVIEW_LIMIT, previewOf } from "../../src/lib/reasoning-preview";
+import { PREVIEW_LIMIT, previewOf, thoughtAt } from "../../src/lib/reasoning-preview";
 
 /// A part list, spelled the way the caller's is: every part carries its type tag,
 /// and the ones this rule reads carry text. The others are here because they are
-/// what makes a group's `indices` span more than the reasoning parts.
-type Part = { type: string; text?: string };
+/// what makes a thought span more than the reasoning parts.
+type Part = { type: string; text?: string; status?: { type: string } };
 
-const said = (text: string): Part => ({ type: "reasoning", text });
+/// One message of the thread, as `thoughtAt` reads it.
+type Message = { role: string; parts: Part[] };
+
+const said = (text: string, running = false): Part => ({
+  type: "reasoning",
+  text,
+  status: { type: running ? "running" : "complete" },
+});
 const call: Part = { type: "tool-call" };
+const text = (body: string): Part => ({ type: "text", text: body });
 
 /// A run of characters with nothing in it that whitespace could hide behind: the
 /// flattening is the next case's subject, and a string that mixes the two would
@@ -45,23 +53,23 @@ const cases: Case[] = [
       // A THOUGHT OPENS WITH A NEWLINE, often more than one, and "the first
       // line" would then be blank. The first line WITH something in it is what
       // the row shows, trimmed -- a tool row's subject is trimmed the same way.
-      expect(previewOf([said("\n\n  先读 deps.edn，确认依赖。 \n还有第二句。")], [0], false)).toBe(
+      expect(previewOf([said("\n\n  先读 deps.edn，确认依赖。 \n还有第二句。")], false)).toBe(
         "先读 deps.edn，确认依赖。",
       );
 
       // AT THE BOUND: untouched, and with no `…` -- there is nothing cut to
       // ellipsise. One character past it, the `…` is the only thing that says a
       // reader is looking at part of a line.
-      expect(previewOf([said(runOf(120))], [0], false)).toBe(runOf(120));
-      const cut = previewOf([said(runOf(121))], [0], false);
+      expect(previewOf([said(runOf(120))], false)).toBe(runOf(120));
+      const cut = previewOf([said(runOf(121))], false);
       expect(cut).toBe(`${runOf(120)}…`);
       expect(cut).toHaveLength(121);
 
       // NOTHING TO SAY YET, and nothing in the group at all: the row is drawn
       // with its label alone rather than with a dot and a blank.
-      expect(previewOf([said("\n\n")], [0], false)).toBe("");
-      expect(previewOf([], [], false)).toBe("");
-      expect(previewOf([call], [0], false)).toBe("");
+      expect(previewOf([said("\n\n")], false)).toBe("");
+      expect(previewOf([], false)).toBe("");
+      expect(previewOf([call], false)).toBe("");
     },
   },
   {
@@ -75,63 +83,93 @@ const cases: Case[] = [
       // the motion back into layout -- one dropped character per token, which is
       // a snap, and that is what it looked like in a real session.
       const long = runOf(PREVIEW_LIMIT * 3);
-      const arriving = previewOf([said(long)], [0], true);
+      const arriving = previewOf([said(long, true)], true);
       expect(arriving).toBe(long);
       expect(arriving).toHaveLength(PREVIEW_LIMIT * 3);
       expect(arriving.includes("…")).toBe(false);
 
       // A short thought comes through untouched, and a thought that has only
       // opened with a newline has nothing to hand over yet.
-      expect(previewOf([said("还在想。")], [0], true)).toBe("还在想。");
-      expect(previewOf([said("\n \n")], [0], true)).toBe("");
-      expect(previewOf([], [], true)).toBe("");
+      expect(previewOf([said("还在想。", true)], true)).toBe("还在想。");
+      expect(previewOf([said("\n \n", true)], true)).toBe("");
+      expect(previewOf([], true)).toBe("");
 
       // AND IT IS ONE LINE HERE TOO. A newline would collapse to a space on
       // screen anyway (`nowrap`), but it would do so after the window had spent
       // a character position on it -- so the flattening is this module's, and it
       // is the same shape the stopped half gets from `firstLine`.
-      expect(previewOf([said("第一句。\n\n   第二句，正在写")], [0], true)).toBe("第一句。 第二句，正在写");
+      expect(previewOf([said("第一句。\n\n   第二句，正在写", true)], true)).toBe("第一句。 第二句，正在写");
 
       // THE FIRST LINE IS NOT WHAT IS SHOWN WHILE IT RUNS: a row that said it
       // would be a row that stopped moving a second into the thought.
       expect(arriving.startsWith("先读")).toBe(false);
-      expect(previewOf([said("先读 deps.edn。\n然后再说这个。")], [0], true)).toBe(
+      expect(previewOf([said("先读 deps.edn。\n然后再说这个。", true)], true)).toBe(
         "先读 deps.edn。 然后再说这个。",
       );
     },
   },
   {
-    name: "a-group-is-read-from-its-own-end-in-each-state",
+    name: "a-thought-is-one-row-per-step-and-the-answer-does-not-end-one",
     run: async () => {
-      // A GROUP CAN HOLD SEVERAL PARTS -- a turn that thinks, reads and thinks
-      // again is two of them -- and the two halves of the rule walk the group in
-      // OPPOSITE directions. At rest the FIRST part with a line wins, because
-      // joining parts would put a seam in the middle of a sentence; while the
-      // thought is arriving the LAST one with text wins, because that is the part
-      // the model is writing NOW.
-      const parts: Part[] = [
-        said("第一段：先看看这个项目。"),
-        call,
-        said("第二段：现在改这一行。"),
+      // THE SHAPE A READER REPORTED, from one real session's frames: the thought,
+      // then the answer's first token, then THE SAME THOUGHT's last token as its own
+      // block (`REASONING " in Chinese."`). The runtime makes each block a message of
+      // its own, so this is three messages and the walk has to cross them.
+      const turn: Message[] = [
+        { role: "assistant", parts: [said("The user asks in Chinese. Answer briefly")] },
+        { role: "assistant", parts: [text("我是跑在")] },
+        { role: "assistant", parts: [said(" in Chinese.", true)] },
       ];
-      expect(previewOf(parts, [0, 2], false)).toBe("第一段：先看看这个项目。");
-      expect(previewOf(parts, [0, 2], true)).toBe("第二段：现在改这一行。");
+      const first = thoughtAt(turn, 0);
+      expect(first.drawn, "the row that began the thought draws it").toBe(true);
+      expect(first.parts.map((part) => part.text)).toEqual([
+        "The user asks in Chinese. Answer briefly",
+        " in Chinese.",
+      ]);
+      // AND IT IS STILL LIVE: the thought goes on arriving after the answer started,
+      // and the row that began it is where that is watched.
+      expect(first.running).toBe(true);
+      expect(previewOf(first.parts, first.running)).toBe("in Chinese.");
+      expect(previewOf(first.parts, false)).toBe("The user asks in Chinese. Answer briefly");
 
-      // A PART WITH NOTHING IN IT IS SKIPPED BY BOTH -- the thought that opens
-      // with a newline is one part, and a group where the newest part has not
-      // received its first token yet is the other. Neither should read as a dot
-      // followed by nothing.
-      const blank: Part[] = [said("\n  \n"), said("有话说。")];
-      expect(previewOf(blank, [0, 1], false)).toBe("有话说。");
-      expect(previewOf(blank, [0, 1], true)).toBe("有话说。");
+      // THE LATER MESSAGE IS NOT A ROW OF ITS OWN -- that is the whole fix: it is the
+      // same thought, and the row above already says it.
+      expect(thoughtAt(turn, 2).drawn).toBe(false);
 
-      // THE INDICES ARE THE GROUP'S, so a part it does not cover is not read even
-      // when the list holds one -- and an index with nothing behind it (the end
-      // of the list, a group rebuilt while its parts were still arriving) is a
-      // row with nothing to say rather than a crash.
-      expect(previewOf(parts, [0], true)).toBe("第一段：先看看这个项目。");
-      expect(previewOf(parts, [3], false)).toBe("");
-      expect(previewOf(parts, [3], true)).toBe("");
+      // A TOOL CALL DOES END ONE. The same three messages with a call instead of the
+      // answer is `想 → 读 → 再想`, which is three rows in this repo's design: the
+      // second thought is a new thought about what the model just did.
+      const stepped: Message[] = [
+        { role: "assistant", parts: [said("先读一下。")] },
+        { role: "assistant", parts: [call] },
+        { role: "assistant", parts: [said("再想一次。", true)] },
+      ];
+      expect(thoughtAt(stepped, 0)).toEqual({
+        drawn: true,
+        running: false,
+        parts: [expect.objectContaining({ text: "先读一下。" })],
+      });
+      expect(thoughtAt(stepped, 2).drawn).toBe(true);
+      expect(thoughtAt(stepped, 2).running).toBe(true);
+
+      // AND A USER MESSAGE ENDS THE TURN: a row never reaches back into the
+      // conversation before it, nor forward into the next turn's answer.
+      const twoTurns: Message[] = [
+        { role: "assistant", parts: [said("上一轮的想法。")] },
+        { role: "user", parts: [text("再问一句。")] },
+        { role: "assistant", parts: [said("这一轮的想法。")] },
+      ];
+      expect(thoughtAt(twoTurns, 2).drawn, "the previous turn is not part of this thought").toBe(true);
+
+      // PARTS THAT ARE NOT REASONING ARE PASSED OVER: an injected-context card
+      // between two blocks is not a step either.
+      const carded: Message[] = [
+        { role: "assistant", parts: [said("先看这个。")] },
+        { role: "assistant", parts: [{ type: "data" }, text("于是有了这张卡。")] },
+        { role: "assistant", parts: [said("接着说。", true)] },
+      ];
+      expect(thoughtAt(carded, 0).parts).toHaveLength(2);
+      expect(thoughtAt(carded, 2).drawn).toBe(false);
     },
   },
 ];

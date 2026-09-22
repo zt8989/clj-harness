@@ -123,3 +123,32 @@ GREEN -- screenshots in .../.scratch/thinking-row-tail/evidence
 
 **留在门里的是 `inkOf`**：走查现在会截下那一行的盒子、数墨，要求流式期间 ≥ 300 像素（实测 2208），
 停下来也 ≥ 300（实测 1097）。几何全对而像素全空这一类错，从今天起有判据。
+
+
+## 第三次修正的证据：真记录种进隔离家（2026-09-22 追加）
+
+主人第三次看的是**答案下面又多一行 `思考 · in Chinese.`**。原因在帧里，不在渲染里：同一段想法的最后一个
+token 在答案开始**之后**才到（`REASONING "…Answer briefly"` → `TEXT_MESSAGE_START "我是"` →
+`REASONING " in Chinese."` → 答案接着写）。runtime 给每个 message id 一条消息，所以那里是**三条助手消息**。
+
+脚本厂商（一回合一段想法一段正文）造不出这个形状，所以这条证据用**真的那份记录**：
+
+```bash
+node .scratch/thinking-row-tail/scratch-continuation.mjs \
+  http://localhost:5395/ <temp-home> <project-dir> \
+  ~/.clj-harness/projects/_Users_zhouteng_Documents_workspace_clj-harness/24b44253-8e9e-4409-b705-5254c66d6747.jsonl
+```
+
+它 `POST /api/project` 铸一条会话、把那份 jsonl **原样**抄进去、打开、按**消息**数「思考」行（回合折叠会把
+前面的消息藏起来，所以它数的是每条消息自己的行数与可见性）：
+
+```text
+message 0: drawn=false rows=1  "Thinking · The user asks in Chinese: …"    ← 折起来的步骤
+message 1: drawn=true  rows=0  "我是跑在你这台机器上的一个编码 agent…"       ← 答案
+message 2: drawn=true  rows=0                                            ← 修前这里是那一行 "Thinking · in Chinese."
+visible rows in the drawn transcript: 0
+OK: no stray 思考 carrying the thought's tail after the answer
+```
+
+**手写帧是行不通的**，这一点也记下来：第一次尝试自己合成这个记录，页面画出了**两条助手消息**（记录本身有两种
+行：run 的帧、以及折好的 `message` 行），于是「一行还是两行」根本量不出来。**原样抄真记录**才量得到。

@@ -201,7 +201,8 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// because nothing in this run could see either half.
 /// 88 -> 91: the `reasoning-row` suite's three, which are the words on a thinking
 /// row -- the first line of a thought that has stopped, the whole of one that is
-/// still arriving, and which end of a group each of those reads from.
+/// still arriving, and which PARTS ARE ONE THOUGHT (a thought spans the messages of
+/// its turn: a tool call ends one, the answer's text does not).
 /// They are here because the rules MOVED: they used to be three functions inside
 /// `message-parts.tsx`, where this run cannot reach them at all, and the row they
 /// decide is the one thing a reader watches while the model thinks. What a string

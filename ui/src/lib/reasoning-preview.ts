@@ -59,40 +59,122 @@ export function oneLine(text: string): string {
 }
 
 /// One reasoning part, as far as this file reads it: the type tag the parts list
-/// carries, and the text when there is one. Structural rather than the package's
-/// `PartState`, because the parts list is a union of every kind of part there is
-/// and what a row needs from them is exactly these two fields.
+/// carries, the text when there is one, and whether its own tokens are still
+/// arriving. Structural rather than the package's `PartState`, because a message's
+/// parts are a union of every kind of part there is and what a row needs from them
+/// is exactly these fields.
 export interface ReasoningPart {
   readonly type: string;
   readonly text?: string;
+  readonly status?: { readonly type: string };
 }
 
-/// What the row says for a run of reasoning parts, or `""` when it has nothing
-/// to say yet (a thought whose first token has not landed).
+/// One MESSAGE of the thread, as far as this rule reads it: its role (a `user`
+/// message is where a turn ends) and its parts.
+export interface ReasoningMessage {
+  readonly role?: string;
+  readonly parts?: readonly (ReasoningPart | undefined)[];
+}
+
+/// ONE THOUGHT, as the row draws it.
+export interface Thought {
+  /// The reasoning of this thought, in order, up to the next STEP.
+  readonly parts: readonly ReasoningPart[];
+  /// False when a row ABOVE already draws this thought (see `thoughtAt`).
+  readonly drawn: boolean;
+  /// True while any of its reasoning is still arriving -- including reasoning that
+  /// arrives in a LATER message of the same turn (see below).
+  readonly running: boolean;
+}
+
+/// A STEP: the model did something. A tool call, in one of its two part kinds.
+/// Steps end a thought; text does not.
+function isStep(message: ReasoningMessage | undefined): boolean {
+  return (message?.parts ?? []).some(
+    (part) => part?.type === "tool-call" || part?.type === "standalone-tool-call",
+  );
+}
+
+/// The reasoning parts of a message, in order.
+function reasoningOf(message: ReasoningMessage | undefined): readonly ReasoningPart[] {
+  return (message?.parts ?? []).filter(
+    (part): part is ReasoningPart => part?.type === "reasoning",
+  );
+}
+
+/// WHICH PARTS ARE ONE THOUGHT -- walking the THREAD, not one message, and that is
+/// the whole of this function.
 ///
-/// The group knows which parts it covers (`indices`) and nothing else, so the
-/// parts are read here. A group can hold several parts, and the two halves walk
-/// it in opposite directions: at rest the FIRST part with a line wins, because
-/// joining parts would put a seam in the middle of a sentence; while running the
-/// LAST part with text wins, because that is the one the model is still writing.
-/// A blank part is skipped by both, so a thought that opens with a newline reads
-/// as the part that has something to say.
+/// A vendor interleaves its thinking with the answer it is writing. Measured, on one
+/// real session (`~/.clj-harness/projects/…/24b44253….jsonl`): `REASONING "…Answer
+/// briefly"`, `TEXT_MESSAGE_START`, then the last token of the SAME thought as its
+/// own block -- `REASONING " in Chinese."` -- then the rest of the answer. The
+/// runtime turns each of those blocks into a MESSAGE of its own (one per AG-UI
+/// message id), so the page drew what the wire said: a 思考 row before the answer,
+/// and a second 思考 · in Chinese. at the bottom, which is what a reader reported as
+/// a rendering error.
+///
+/// A TOOL CALL separates thoughts, and that is the shape this repo wants as several
+/// rows: the model thought, did something, and thought again about what it did
+/// (`想 → 读 → 再想`). TEXT does not separate them -- an answer being written is not
+/// a new thought, it is the same one being finished -- so the row that began a
+/// thought keeps it: the later messages join it, they do not get rows of their own.
+///
+/// The walk is in two directions and both are needed: BACK for `drawn` (if a step
+/// comes first, this is a new thought; if reasoning does, this one is already drawn
+/// above) and FORWARD for the parts themselves (`running` included, which is why a
+/// thought that goes on thinking after the answer has started is STILL live in the
+/// row that began it).
+export function thoughtAt(
+  messages: readonly (ReasoningMessage | undefined)[],
+  at: number,
+): Thought {
+  let drawn = true;
+  for (let index = at - 1; index >= 0; index -= 1) {
+    const earlier = messages[index];
+    if (earlier?.role === "user" || isStep(earlier)) break;
+    if (reasoningOf(earlier).length > 0) {
+      drawn = false;
+      break;
+    }
+  }
+
+  const parts: ReasoningPart[] = [];
+  let running = false;
+  for (let index = at; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role === "user" || isStep(message)) break;
+    for (const part of reasoningOf(message)) {
+      parts.push(part);
+      if (part.status?.type === "running") running = true;
+    }
+  }
+  return { parts, drawn, running };
+}
+
+/// What the row says for a thought, or `""` when it has nothing to say yet (a
+/// thought whose first token has not landed).
+///
+/// The two halves walk the parts in OPPOSITE directions: at rest the FIRST part with
+/// a line wins, because joining parts would put a seam in the middle of a sentence;
+/// while the thought is arriving the LAST part with text wins, because that is the
+/// one the model is still writing. A part with nothing in it yet is skipped by both,
+/// so a thought that opens with a newline reads as the part that has something to
+/// say.
 export function previewOf(
   parts: readonly (ReasoningPart | undefined)[],
-  indices: readonly number[],
   running: boolean,
 ): string {
   if (running) {
-    for (let position = indices.length - 1; position >= 0; position -= 1) {
-      const part = parts[indices[position]!];
+    for (let position = parts.length - 1; position >= 0; position -= 1) {
+      const part = parts[position];
       if (part?.type !== "reasoning") continue;
       const arriving = oneLine(part.text ?? "");
       if (arriving !== "") return arriving;
     }
     return "";
   }
-  for (const index of indices) {
-    const part = parts[index];
+  for (const part of parts) {
     if (part?.type !== "reasoning") continue;
     const line = firstLine(part.text ?? "");
     if (line !== "") return clip(line);

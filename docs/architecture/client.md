@@ -84,8 +84,9 @@ lib/
                     `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
   picker.ts         选择器那份清单的**过滤与分组**：查什么（标签 / hint / 组名）、
                     同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
-  reasoning-preview.ts  思考行那一行字说的是什么：想完了说**首行**（截 120 字、末尾 `…`），
-                    还在想就把**已经到达的那一段**整段交出去（压成一行；由行自己拖出滚动）。
+  reasoning-preview.ts  思考行那一行字说的是什么（想完了说**首行**，还在想就把**已经到达的那一段**
+                    整段交出去），以及**哪些部件是同一个想法**（`thoughtAt`：跨消息走一趟，工具调用是
+                    分界、答案的正文不是，所以「答案开始之后还在想」仍画在上面那一行里）。
                     **零 import**，同样被 UI 套件直接测（`.scratch/thinking-row-tail/` 是另一半）
   attachments.ts    附件适配器（这一份就是「composer 有没有附件能力」这个开关本身）+
                     它往里写、界面往外读的那个小 store
@@ -407,7 +408,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 最后一个 token 落下就回到**首行**。**抽屉不再自己展开**（2026-09-22 推翻）：`open` 由行自己持有、
 初值 `false`，上游那条 `userOpen ?? (streaming || defaultOpen)` 再没有机会替人点开——窗口、`max-h-64`、
 跟随最新 token 的滚动都还在，只给**点开它的人**。历史会话（不流式的）永远是折的一行首行，
-手动开合过的面板也不再被自动改动。两条文字规则在 `lib/reasoning-preview.ts`（UI 套件直接测），
+手动开合过的面板也不再被自动改动。**一个想法一行，而分界是「一步」**：工具调用结束一个想法
+（`想 → 读 → 再想` 仍是三行），**答案的正文不结束**——厂商会把同一段想法的尾巴发在答案开始之后
+（真会话的帧：想法 → 答案 → 想法的尾巴），runtime 给每个 message id 一条消息，按条画就会在答案下面多出
+一行 `思考`；`lib/reasoning-preview.ts` 的 `thoughtAt` 因此跨消息走一趟（往回判「这条是不是续写」，
+往前把这一段的想法收成一行）。两条文字规则在 `lib/reasoning-preview.ts`（UI 套件直接测），
 拖动那一手在 `message-parts.tsx` 的 `ReasoningTail` ＋ `styles.css` 的 `.aui-reasoning-trigger-tail`；
 现场与代价见 `.scratch/thinking-row-tail/`。
 **轮那一层另有一行摘要**（`N 次工具调用 · M 条消息`，见上「一轮结束就折起来」）：它不是组头的回归——
