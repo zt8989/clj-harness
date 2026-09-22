@@ -12,6 +12,12 @@
   process that is still there after it has answered, and that a caller talks to
   line by line. A hook is the first kind; an MCP server is the second.
 
+  AND BOTH KINDS ARE TAKEN ALONG WHEN THE PROCESS ITSELF GOES. A caller decides when
+  a command is over; nobody runs a caller when the JVM ends, and the processes
+  running at that moment -- the in-flight ones -- used to be orphaned. `reap!` below
+  is the JVM-exit reaper, and its own note says why it walks the OS's tree instead of
+  a registry of callers.
+
   AND ON WINDOWS THE TWO KINDS DO NOT RUN IN THE SAME SHELL: `start` hands the
   command to Windows' own `cmd /c`, while `run` still goes through bash.
   That is not an inconsistency, it is what each kind of command IS -- see
@@ -465,6 +471,109 @@
     (doseq [^java.lang.ProcessHandle k kids :when (.isAlive k)] (.destroyForcibly k))
     nil))
 
+;; ------------------------------------- what this process started, on the way out
+;;
+;; A CALLER DECIDES WHEN A COMMAND IS OVER -- a time limit, a `:close!` -- and
+;; `kill-tree!` is what happens then. NOTHING RUNS A CALLER WHEN THE PROCESS
+;; ITSELF ENDS, and the processes that are running at that moment are a different
+;; set: the in-flight ones. Measured on 2026-09-22 on this machine -- SIGTERM to a
+;; harness holding one background job and one foreground command took the job's
+;; tree with it (`cap.jobs`' exit hook, as designed) and left the foreground
+;; command's SHELL AND ITS CHILD both running, their stdout in a pipe nobody held
+;; any more. The same hole was open for `rg`, `git`, a declared hook command, an
+;; env probe and the folder dialog: every process spawned by somebody who has no
+;; reaper of its own.
+;;
+;; SO THE REAPER WALKS THE OS'S TREE RATHER THAN A REGISTRY. A registry is a list
+;; every spawn site has to remember to join, and this repo already has proof that
+;; such a list goes stale: the folder dialog in `harness.edge.http` builds its own
+;; ProcessBuilder, so no list here ever held it. Everything this JVM started is a
+;; DESCENDANT of this JVM; the OS will say what that set is at the moment it
+;; matters, and a spawn site added tomorrow is covered by the same line the day it
+;; is written.
+;;
+;; IT IS A JVM EXIT HOOK, AND NOTHING ELSE CALLS IT -- the same arrangement
+;; `cap.jobs` and `cap.mcp` make, for the same reason: it is the only code the JVM
+;; runs on the way out. Hooks run concurrently, so this one may cross theirs on the
+;; same tree; that costs a second SIGTERM to a process that was leaving anyway, and
+;; nothing they hold is lost by it -- their registries and record writers are still
+;; closed by their own hook, and every close on both sides is ask-then-insist.
+
+(def reap-grace-ms
+  "How long the exit reaper waits for everything it asked to stop, ALL OF THEM
+  TOGETHER, before killing outright whatever is still standing.
+
+  ONE SHARED BUDGET, rather than `kill-tree!`'s two seconds per tree: a harness
+  holding twenty background commands must not make Ctrl+C take forty seconds, and
+  a shutdown hook that runs long is a person unable to quit."
+  2000)
+
+(defn reap!
+  "Stop every process this JVM started, and everything under each of them: ask
+  first, insist when the deadline passes.
+
+  THE ROOTS ARE THE JVM'S DESCENDANTS, never the JVM itself -- this is only ever
+  called when this process is already ending, and ending it is not this function's
+  business. AND EVERY ROOT IS ASKED DIRECTLY rather than through its parent: a
+  killed shell does not take its own children with it (that is `kill-tree!`'s whole
+  subject), while `.descendants` is the tree at EVERY depth, so each process gets
+  the signal itself.
+
+  IT SWEEPS UNTIL THE TREE STAYS EMPTY, WITHIN THE ONE BUDGET. A single walk would
+  step past a process spawned while it was killing that process's siblings, and the
+  moment is real rather than theoretical: the server answers requests until the JVM
+  halts, so a tool call can still be starting a command. Walk, ask, wait; walk
+  again; stop when a walk finds nothing or `reap-grace-ms` is spent.
+
+  Answers how many processes it asked, which is the number a test can hold on to."
+  []
+  (let [deadline (+ (System/currentTimeMillis) reap-grace-ms)]
+    (loop [asked 0]
+      (let [roots (vec (.toList (.descendants (java.lang.ProcessHandle/current))))]
+        (if (empty? roots)
+          asked
+          (let [asked (+ asked (count roots))]
+            (doseq [^java.lang.ProcessHandle r roots] (.destroy r))
+            (doseq [^java.lang.ProcessHandle r roots :when (.isAlive r)]
+              (let [left (- deadline (System/currentTimeMillis))]
+                (when (pos? left)
+                  (try (.waitFor r left TimeUnit/MILLISECONDS) (catch Exception _ nil)))))
+            (doseq [^java.lang.ProcessHandle r roots :when (.isAlive r)] (.destroyForcibly r))
+            (if (< (System/currentTimeMillis) deadline)
+              (recur asked)
+              asked)))))))
+
+(defonce ^:private exit-hook-installed
+  (atom false))
+
+(defn install-hook!
+  "Hand R to the JVM to run at exit. The JVM's own call, behind a var so that a test
+  can count the installations without exiting a JVM -- 'installed once' is the
+  property, and a second hook would run the reap twice."
+  [^Runnable r]
+  (.addShutdownHook (Runtime/getRuntime) r))
+
+(defn ensure-exit-hook!
+  "Make THIS PROCESS take its spawned processes with it when it goes: a Ctrl+C, a
+  SIGTERM (how `scripts/dev.mjs` stops it), an orderly end. Installed ONCE, by
+  compare-and-set rather than by checking a count -- two threads spawning at the
+  same moment is the ordinary case, and 'did I install it' has to have one answer.
+
+  CALLED BEFORE THE SPAWN at both spawn sites below, so that no process ever exists
+  during a moment when this process's exit has no reaper."
+  []
+  (when (compare-and-set! exit-hook-installed false true)
+    (install-hook! (Thread. ^Runnable (fn [] (try (reap!) (catch Throwable _ nil)))
+                            "child-reap-shutdown")))
+  nil)
+
+(defn reset-exit-hook!
+  "Forget that the hook was installed, so the next `ensure-exit-hook!` installs one.
+  For tests that drive the installation, exactly as `cap.jobs/reset-exit-hook!` lets
+  a test drive its own; a running process's hook is installed once and stays."
+  []
+  (reset! exit-hook-installed false))
+
 (defn run
   "Run COMMAND the way A: once, with STDIN written to it and then CLOSED, and no
   more than TIMEOUT-MS of waiting. Returns
@@ -503,6 +612,9 @@
                (doto (ProcessBuilder. (vec (concat [(:command r)] (:argv-prefix r) [command])))
                  (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
+        ;; BEFORE THE SPAWN, so that no process exists during a moment when this
+        ;; process's exit has no reaper for it (see `ensure-exit-hook!`).
+        _  (ensure-exit-hook!)
         p  (.start pb)
         w  (future
              (try
@@ -641,6 +753,8 @@
                  (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
         _  (when (seq env) (.putAll (.environment pb) (into {} env)))
+        ;; BEFORE THE SPAWN, for the same reason as in `run`.
+        _  (ensure-exit-hook!)
         p  (.start pb)
         q  (LinkedBlockingQueue.)
         os (.getOutputStream p)
