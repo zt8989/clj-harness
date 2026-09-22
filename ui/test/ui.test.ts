@@ -44,7 +44,7 @@ import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { injectionSuite } from "./suites/injections";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
-
+import { reasoningRowSuite } from "./suites/reasoning-row";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -53,7 +53,7 @@ import { windowSuite } from "./suites/window";
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
 /// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -204,7 +204,19 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// it, which the settings page and the composer's model picker both read
 /// (`lib/provider-key.ts`, zero imports). The two components cannot be imported here,
 /// so this case pins the RULE and the walkthrough checks the drawing.
-const EXPECTED_CASES = 89;
+///
+/// 89 -> 92: THE OTHER SIDE OF THIS MERGE -- the `reasoning-row` suite's three, which
+/// are the words on a thinking row (the first line of a thought that has stopped; the
+/// whole of one that is still arriving) and WHICH PARTS ARE ONE THOUGHT (a thought
+/// spans the messages of its turn: a tool call ends one, the answer's text does not).
+/// They are here because the rules MOVED: they used to be three functions inside
+/// `message-parts.tsx`, where this run cannot reach them at all, and the row they
+/// decide is the one thing a reader watches while the model thinks. What a string
+/// cannot show -- that the row never unfolds itself, that the live line is dragged
+/// (interpolated, not a jump per token), that it is PAINTED (a masked-away row is
+/// green on geometry and blank on screen), and that the first line comes back when the
+/// thought ends -- is the browser walkthrough's half (`.scratch/thinking-row-tail/`).
+const EXPECTED_CASES = 92;
 
 let total = 0;
 for (const suite of SUITES) {

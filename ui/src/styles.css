@@ -196,3 +196,54 @@
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 
 @custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/* THE REASONING ROW'S LIVE WINDOW -- what a thought looks like while it is
+   still being written. The row is ONE line and the thought is longer than it, so
+   something has to give; at rest the give is at the END (the row's own
+   `truncate`, `…` where it was cut) and while the tokens are arriving it is at the
+   START, which is the whole of this rule.
+
+   THE WINDOW IS A FIXED BOX and the line inside it is DRAGGED, and the drag is a
+   `transform` for one reason: a transform is the only kind of movement CSS can
+   INTERPOLATE. The line arrives a token at a time, and a window that instead
+   shifted the text by layout -- which is all a left-edge clip can do -- would
+   jump the whole line one token's width per frame: the reader sees a snap, not a
+   scroll (that is what the first cut of this shipped, and a real session is what
+   showed it). `ReasoningTail` (`message-parts.tsx`) measures the line and sets
+   the transform; the transition below is what turns those steps into a slide.
+
+   THE WINDOW IS AN INLINE-BLOCK, SO IT IS AS WIDE AS ITS CONTENT UP TO `100%`: a
+   thought short enough to fit is not a window at all -- it is text sitting where
+   text goes, right after `思考 · ` -- and only a line that overflows gets dragged
+   (the transform is `0` for one that fits). `max-width` is not enough on its own:
+   without `overflow: hidden` the part off the right edge would be visible instead
+   of clipped, and the row would draw a line wider than the row.
+
+   `will-change: transform` keeps the drag on its own layer, so a line that is
+   being dragged every few milliseconds is not re-painted with the rest of the
+   row. UNDER `prefers-reduced-motion` THE DRAG IS NOT ANIMATED and the line still
+   follows -- the text moves in the same steps, and it is the interpolation that
+   is the motion, so a reader who has asked for no motion gets none. `transition:
+   none` is what does that, and it wins over the duration the component sets
+   inline (that is a duration, not a property list). */
+.aui-reasoning-trigger-tail {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: bottom;
+  }
+.aui-reasoning-trigger-tail > span {
+  display: inline-block;
+  will-change: transform;
+  /* The DURATION is not here: it is computed per step by `ReasoningTail`, so the
+     drag travels at a speed a reader can follow instead of over a fixed time
+     (which would lag further behind the faster the model writes). */
+  transition-property: transform;
+  transition-timing-function: linear;
+  }
+@media (prefers-reduced-motion: reduce) {
+  .aui-reasoning-trigger-tail > span {
+    transition: none;
+    }
+  }

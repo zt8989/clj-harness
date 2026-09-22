@@ -44,7 +44,8 @@ components/
                     任一窗口**同时只有一颗**在屏幕上。外加 `isWideWindow`：窄不窄只此一处 `matchMedia`，当场读
   settings-panel.tsx 「设置」：两页左导航（General / Models），**两页都会写**
   approval-gate.tsx 审批门（自建：上游的 approval seam 认的 reason 与本仓不同）
-  message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）
+  message-parts.tsx 步骤行（工具调用与思考）的注入点（THREAD_COMPONENTS）；
+                    行上那些字的规矩在 `lib/reasoning-preview.ts`
   turn-steps.tsx    一整轮的**折叠**：结束的那一轮把步骤收起来、只留答案，
                     行那条摘要（`N 次工具调用 · M 条消息`）与它背后的 store 都在这儿
   picker.tsx        四个选择器共用的那一份：可搜索的浮层（项目 / 分支 / model / 思考档）
@@ -86,6 +87,10 @@ lib/
                     `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
   picker.ts         选择器那份清单的**过滤与分组**：查什么（标签 / hint / 组名）、
                     同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
+  reasoning-preview.ts  思考行那一行字说的是什么（想完了说**首行**，还在想就把**已经到达的那一段**
+                    整段交出去），以及**哪些部件是同一个想法**（`thoughtAt`：跨消息走一趟，工具调用是
+                    分界、答案的正文不是，所以「答案开始之后还在想」仍画在上面那一行里）。
+                    **零 import**，同样被 UI 套件直接测（`.scratch/thinking-row-tail/` 是另一半）
   attachments.ts    附件适配器（这一份就是「composer 有没有附件能力」这个开关本身）+
                     它往里写、界面往外读的那个小 store
   session-status.ts 一场会话的 `{:running? :parked?}`（host 报上去、侧边栏按 id 查）、
@@ -400,9 +405,19 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 `thread.aui.tsx` 会画它自己那个头），`ReasoningGroup` 是思考。工具行与思考行是**同一形状的一行**：
 `类型图标 · 名字 · 摘要`，状态（转圈 / 对勾 / 叉 / 感叹号）在**行尾**、词进 `sr-only`，
 参数与结果仍在行里点开才见（**默认折叠是有意的差异**，实现与理由见该文件头注释）。
-**唯一的例外是正在流式的那段思考**：token 到达期间它自己展开，用上游那扇「跟随最新 token」的
-窗口（`max-h-64` + 底部渐隐）滚动显示；最后一个 token 落下就折回去，行上留**首行**。
-历史会话（不流式的）永远是折的，手动开合过的面板也不再被自动改动（`userOpen ?? streaming`）。
+**那一处例外现在落在行上，不在抽屉上**：正在流式的那段思考，行上那一行字自己滚——流式期间行上装的是
+**已经到达的那一段**（压成一行），装在一只 `overflow: hidden` 的窗里并**被往左拖**到末尾停在右边缘
+（字从左边出去、新字从右边进来；**拖的是 `transform`**，所以是滑不是跳，见 `styles.css` 里那条注释），
+最后一个 token 落下就回到**首行**。**抽屉不再自己展开**（2026-09-22 推翻）：`open` 由行自己持有、
+初值 `false`，上游那条 `userOpen ?? (streaming || defaultOpen)` 再没有机会替人点开——窗口、`max-h-64`、
+跟随最新 token 的滚动都还在，只给**点开它的人**。历史会话（不流式的）永远是折的一行首行，
+手动开合过的面板也不再被自动改动。**一个想法一行，而分界是「一步」**：工具调用结束一个想法
+（`想 → 读 → 再想` 仍是三行），**答案的正文不结束**——厂商会把同一段想法的尾巴发在答案开始之后
+（真会话的帧：想法 → 答案 → 想法的尾巴），runtime 给每个 message id 一条消息，按条画就会在答案下面多出
+一行 `思考`；`lib/reasoning-preview.ts` 的 `thoughtAt` 因此跨消息走一趟（往回判「这条是不是续写」，
+往前把这一段的想法收成一行）。两条文字规则在 `lib/reasoning-preview.ts`（UI 套件直接测），
+拖动那一手在 `message-parts.tsx` 的 `ReasoningTail` ＋ `styles.css` 的 `.aui-reasoning-trigger-tail`；
+现场与代价见 `.scratch/thinking-row-tail/`。
 **轮那一层另有一行摘要**（`N 次工具调用 · M 条消息`，见上「一轮结束就折起来」）：它不是组头的回归——
 组头在**每个调用**前面、计数恒为 1，那一行在**一整轮**前面、数的是这一轮做了多少。
 「摘要是投影不是截断」这条是硬约束：认不出的工具落到「第一个字符串参数」，所以新增工具
