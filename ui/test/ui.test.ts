@@ -213,10 +213,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// They are here because the rules MOVED: they used to be three functions inside
 /// `message-parts.tsx`, where this run cannot reach them at all, and the row they
 /// decide is the one thing a reader watches while the model thinks. What a string
+/// What a string
 /// cannot show -- that the row never unfolds itself, that the live line is dragged
 /// (interpolated, not a jump per token), that it is PAINTED (a masked-away row is
 /// green on geometry and blank on screen), and that the first line comes back when the
 /// thought ends -- is the browser walkthrough's half (`.scratch/thinking-row-tail/`).
+///
 /// 92 -> 94: the `tool-row` suite's two, for `.scratch/omp-parity`'s ticket 01 -- the rename
 /// of `anchor_grep` to `grep`. The ticket asked for a case to be CHANGED in each of the two
 /// places keyed by tool name (`TOOL_ICONS` and `subjectOf`) and there was none: both fall
@@ -224,7 +226,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// red. Read as source, not rendered -- `message-parts.tsx` reaches `lib/i18n.ts`, which
 /// touches `document` at module scope, so this run cannot import it at all; the drawing is
 /// the browser walkthrough's half.
-const EXPECTED_CASES = 94;
+///
+/// 94 -> 95: THE OTHER SIDE OF THIS MERGE, and it is the same day as the two paragraphs
+/// above -- the `client` suite's fourth. The wire stopped closing a thought when the answer
+/// started (`harness.edge.ag-ui`: the reasoning message stays open across the answer and
+/// closes at the end of the MODEL CALL), and this is the half only a real client can
+/// answer: a thought that comes BACK after the answer has begun arrives as ONE reasoning
+/// message, drawn ABOVE the answer. What a page gets wrong here is a stray 思考 row under
+/// the answer -- which is what a reader saw before either half was fixed.
+const EXPECTED_CASES = 95;
 
 let total = 0;
 for (const suite of SUITES) {

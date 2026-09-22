@@ -9,7 +9,7 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 `go.json` 三轮，正好一次「起一条没人等的作业 → 去干别的 → 收尾」：
 
 1. 模型调 `bash {command: "sleep 1; echo JOB-SAYS-SO", run_in_background: true}` 起一条 1 秒就结束的
-   作业，拿到句柄就继续（**起作业的动词在 2026-09-18 晚些并进了 `bash`**，见
+   作业，拿到句柄就继续（**起作业的动词在 2026-09-20 晚些并进了 `bash`**，见
    `.scratch/bash-background/spec.md`：那天的脚本写的是 `job`，工具合并后这一行跟着改）；
 2. 模型调 `bash {sleep 3}`——这一轮里作业跑完了，而模型在忙；
 3. 模型的第三次调用（就是它下一次开口）之前，前置步骤把 `<job-ended id="j…">` 注入进历史。
@@ -17,7 +17,7 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 看什么：会话界面的「轨迹」那一栏，那一轮里应当有一格 **注入的 context（during run）**，正文是
 记录尾部、末行 `[exit 0]`；「会话」那一栏里**没有**它（注入物不发帧，客户端从不持有）。
 
-## 走查当天看见的（2026-09-18）
+## 走查当天看见的（2026-09-20）
 
 一轮（用户只说了一句「起一条作业，然后去干别的」）：
 
@@ -37,7 +37,7 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 - 后端日志（那一场的 jsonl）里同一条：`message` 行，`role: user`，`content` 就是上面那段，
   位置在两次工具结果之后、收尾那条 assistant 之前。
 
-## 合并之后又跑了一次（2026-09-18，工具并进 `bash` 之后）
+## 合并之后又跑了一次（2026-09-20，工具并进 `bash` 之后）
 
 同一个脚本（`go.json` 已改成 `bash {run_in_background: true}`）重跑，一轮里看见的：
 

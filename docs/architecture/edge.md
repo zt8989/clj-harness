@@ -39,6 +39,14 @@ body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等
 **每次 run 一个 converter、一个 emitter。** converter（`ag_ui/outbound`）持有「哪条消息开着」的状态机，
 逐事件重建它会把每条消息 id 重置、重复发 START 帧——AG-UI 客户端视为致命。
 
+**帧的顺序就是模型自己的顺序**（2026-09-22 owner 拍定：*按 llm 顺序渲染*）。常见形状是
+「思考 → 答案 → 工具调用」，但**厂商可以在答案开始之后又回到思考**（真会话实测：`reasoning_content`
+→ 答案第一个 token → 同一段思考的尾巴 → 答案接着写）。所以 `REASONING_*` 那一组**不由答案的第一个
+token 关闭**：它一直开着，晚到的 delta 落进**同一条** reasoning 消息，直到**这一次模型调用结束**
+（`:model/end`）才收。提前关的代价是晚到的那段变成**第二条** reasoning 消息——页面上就是答案下面多出一行
+`思考`（那条线上修过一次，见 `.scratch/thinking-row-tail` 复议三与 `.scratch/reasoning-order`）。
+跨着答案开着的代价如实记下：那一行在整个回答期间都还是「正在想」（微光 + 实时窗），答案开始不等于思考结束。
+
 **发出去的帧分三族**：`RUN_*`（一次 run 的起与终，含 `RUN_ERROR`）、`TEXT_MESSAGE_*` / `REASONING_*` /
 `TOOL_CALL_*`（对话本身）、以及 **`CUSTOM`**——AG-UI 自己的扩展点，本仓拿它发一种东西：**注入物**
 （`name` 是 `injected-context`，值里是那条消息、id 是确定性的）。**这一族是唯一不进那场对话的**：适配器把

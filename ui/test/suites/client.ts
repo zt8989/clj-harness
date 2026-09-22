@@ -91,6 +91,41 @@ const cases: Case[] = [
     },
   },
   {
+    name: "reasoning-that-comes-back-after-the-answer-stays-one-message",
+    // THE SHAPE ONE REAL SESSION STREAMED (2026-09-22): the thought, the answer's first
+    // token, then the tail of the SAME thought, then the answer again. The edge keeps ONE
+    // reasoning message open across that (`harness.edge.ag-ui`), and this is the half only
+    // a real client can answer: does it arrive as ONE reasoning message, in the place the
+    // model began it -- or as two, which is what a reader saw as a stray 思考 row UNDER the
+    // answer?
+    run: async () => {
+      const { agent, events } = await newAgent(threadId("client-reasoning-order"));
+      script([{ reasoning, content: answer, "reasoning-after": " Answer briefly." }]);
+      await agent.runAgent({ tools: [], context: [] });
+
+      const messages = agent.messages;
+      const thinking = messages.filter((m) => m.role === "reasoning").map(content);
+      expect(thinking, "ONE reasoning message on the client").toHaveLength(1);
+      expect(thinking[0], "carrying both halves of the thought, in the order they arrived").toBe(
+        `${reasoning} Answer briefly.`,
+      );
+
+      // AND IT SITS ABOVE THE ANSWER IT BELONGS TO: a client that ordered its messages by
+      // last update would put the thinking after the answer, which is the layout the whole
+      // change is about.
+      const firstAssistant = messages.findIndex((m) => m.role === "assistant");
+      const onlyReasoning = messages.findIndex((m) => m.role === "reasoning");
+      expect(onlyReasoning, "the thinking is drawn above the answer").toBeLessThan(firstAssistant);
+
+      // THE HOOKS FIRE IN THE MODEL'S ORDER TOO: the late reasoning is delivered after the
+      // answer has started, which is what the page's live row follows.
+      const firstText = events.findIndex((e) => e.startsWith("text:"));
+      const lastReasoning = events.map((e, i) => (e.startsWith("reasoning:") ? i : -1)).filter((i) => i >= 0).pop();
+      expect(firstText, "the answer started").toBeGreaterThanOrEqual(0);
+      expect(lastReasoning, "and the thinking went on after it").toBeGreaterThan(firstText);
+    },
+  },
+  {
     name: "a-tool-round-costs-two-llm-calls",
     // The scripted provider hands out ONE TURN PER CALL, so a tool round has to
     // consume exactly two turns: the call, then the reply to its result. If the

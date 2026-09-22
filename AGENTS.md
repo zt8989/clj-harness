@@ -52,8 +52,8 @@ cd ui && npm run build     # tsc + vite
 ### E2E 走查（脚本）
 
 ```bash
-node scripts/dev.mjs --scripted                  # 真浏览器走查（隔离家、OS 分配端口、跑完收摊）
-node scripts/dev.mjs --scripted my.json --ui-port 5211   # 换脚本、换前端端口
+node scripts/dev.mjs --scripted                  # 真浏览器走查（隔离家、OS 分配端口、默认回放 scripts/example.json、跑完收摊）
+node scripts/dev.mjs --scripted my.json --ui-port 5211   # 换脚本（照 scripts/example.json 的形状改）、钉死前端端口
 ```
 
 **动过 `ui/src/` 的改动，合之前跑一次 `node scripts/dev.mjs --scripted` 走查。** 机器门全绿挡不住

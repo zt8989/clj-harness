@@ -30,4 +30,4 @@
 - [ ] `message` 行的 submitted 侧包含那条 developer 消息（有用例读记录）
 - [ ] `run-segments` 的切分与从前相同（新增一条用例钉住「按 kind 不按数量」）
 - [ ] developer 消息在 `context` 里算进哪一桶**定下来**并有用例
-- [ ] `node scripts/test.mjs --backend` 全绿（失败用例名与基线一致）
+- [ ] `clojure -M:test -m harness.test-runner` 全绿（失败用例名与基线一致）

@@ -21,10 +21,10 @@
 ## 运行命令
 
 ```bash
-node scripts/dev.mjs             # 一条命令起两个：后端（OS 挑端口）+ vite（5173）
-node scripts/dev.mjs --port 8080 # 钉死后端端口；--ui-port 5199 换前端端口
+node scripts/dev.mjs             # 一条命令起两个：后端 + vite（两个端口都问 OS，横幅打印出来）
+node scripts/dev.mjs --port 8080 # 钉死后端端口；--ui-port 5199 钉死前端端口
 node scripts/dev.mjs --tmux      # 两个进程分到左右窗格（要在 tmux 里跑）
-node scripts/dev.mjs --scripted  # 脚本厂商替身：不要 api-key、不要模型、家目录临时、跑完即删
+node scripts/dev.mjs --scripted  # 脚本厂商替身：默认回放 scripts/example.json；不要 api-key、不要模型、家目录临时、跑完即删
 ```
 
 **只起后端，页面发构建产物**（一个进程、一个地址）：

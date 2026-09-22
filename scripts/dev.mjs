@@ -8,8 +8,9 @@
 //   node scripts/dev.mjs --port 8080         the address the client used to hardcode
 //   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
 //                                            model, a temp home, a provider that replays
-//   node scripts/dev.mjs --scripted my.json  ...with your own turns
-//   node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
+//                                            scripts/example.json
+//   node scripts/dev.mjs --scripted my.json  ...with your own turns instead
+//   node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand, as below
 //
 // WHY THIS EXISTS. `npm run dev` on its own expects a harness on 8080, and 8080 is
 // the one port a second checkout, a test run, or yesterday's forgotten session is
@@ -66,6 +67,19 @@
 // ask the backend to trust a port it did not choose. So the wait below is for that
 // line, not for a sleep.
 //
+// THE UI'S PORT IS ASKED OF THE OS THE OTHER WAY ROUND, AND 5173 IS WHY. A dev server
+// that cannot have 5173 is the common case, not the exception: a second checkout, a
+// forgotten `npm run dev`, a walkthrough somebody left running -- so the dev server gets
+// an OS-picked port too, and the number is printed. What it cannot get is the handshake
+// above: the backend can be read back because its stdout comes to this process, and vite's
+// does not -- in --tmux its stdout belongs to the pane, and off it the terminal is vite's
+// (`stdio: "inherit"`, so a keystroke still reaches vite's own shortcuts). So the number
+// is asked for and let go: a socket is bound to port 0, the OS's answer is kept, and that
+// socket is closed before vite is handed the number. THE RELEASE IS THE PART TO KNOW
+// ABOUT -- vite binds it a moment later -- and `strictPort` in ui/vite.config.js is what
+// makes losing that race a failed start with vite's own message rather than a dev server
+// quietly drifting to 5174. A 5173 somebody is still holding is simply stepped around.
+//
 // THE REAL MODE USES YOUR OWN ~/.clj-harness -- that is what it is for: your harness,
 // your config, your provider, your key. THE SCRIPTED MODE MUST NOT: it gets a temp
 // config root AND a temp OS home (the two are siblings, never nested -- see AGENTS.md
@@ -75,7 +89,10 @@
 //              {"content": "", "tool-calls": [{"id": "c1", "name": "read",
 //                                             "arguments": {"path": "deps.edn"}}]}]}
 //
-// consumed one per model call -- one tool round costs two.
+// consumed one per model call -- one tool round costs two. A turn may also carry
+// `"reasoning"` (a thinking row) and `"usage"` (the numbers the context ring divides),
+// both optional. `scripts/example.json` IS that shape: it is what --scripted replays
+// when no file is named, and the thing to copy rather than this comment.
 //
 // LOOKING AT THE UI IS A VERIFICATION STEP IN THIS REPO -- the one layer a suite cannot
 // reach -- so --scripted is that step's entry point, and the three rules the suites keep
@@ -86,18 +103,21 @@
 //     session's jsonl is written under the root and ~/AGENTS.md plus ~/.agents/skills are
 //     read from the home, and neither may be the developer's. Both are removed when this
 //     stops, Ctrl-C included.
-//   * NO PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
-//     announces becomes vite's proxy target, so no source file learns a number and there
-//     is no 8080 to clear first.
+//   * NEITHER PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
+//     announces becomes vite's proxy target, and the UI's port is one the OS hands out as
+//     vite starts -- so no source file learns a number, and neither the 8080 nor the 5173
+//     that a forgotten session is most likely to be holding has to be cleared first.
 //   * THE TEMP PATHS ARE PRINTED. A run's record lands under the root AS IT STREAMS and
 //     the directory is gone once this exits, so the banner is the only window in which a
-//     walkthrough can read the two sessions it just drove.
+//     walkthrough can read the two sessions it just drove. The two ports are on it too --
+//     a port nothing printed is a port nobody can open.
 //
 // The announced port is read from stdout, which is where AGENTS.md's "do not read a
 // child's answer from stdout" does not bite: this is a handshake the e2e server prints
 // on purpose, not an answer it computes, and the match runs over the accumulated stream
 // -- so a JDK warning arriving first delays it by a chunk instead of losing it.
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,6 +131,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const UI_DIR = path.join(ROOT, "ui");
 
+// THE TURNS --SCRIPTED REPLAYS WHEN NONE WAS NAMED, and a file in this repo rather than
+// one composed per run: a walkthrough whose script nobody can read is a walkthrough nobody
+// can adjust, and the shape is easier to copy from a file that exists than from the
+// comment above. Beside this script, so the pair moves together.
+const DEFAULT_SCRIPT = path.join(HERE, "example.json");
+
 // ---------------------------------------------------------------- arguments
 
 const USAGE = `Start the harness on a port nobody is using, and the UI in front of it.
@@ -121,20 +147,22 @@ const USAGE = `Start the harness on a port nobody is using, and the UI in front 
   node scripts/dev.mjs --port 8080         the address the client used to hardcode
   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
                                            model, a temp home, a provider that replays
-  node scripts/dev.mjs --scripted my.json  ...with your own turns
-  node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
+                                           scripts/example.json
+  node scripts/dev.mjs --scripted my.json  ...with your own turns instead
+  node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand
 
-The backend is started on port 0 (the OS picks); the port it announces becomes both the
-address the page is told to call (VITE_AGENT_URL) and vite's proxy target
-(HARNESS_BACKEND_URL). The UI's own port is vite's business alone: the harness answers a
-page served from this machine whatever port it is on, so nothing is reported back to it.
-Ctrl-C stops both, and the two temp homes the scripted mode made are deleted with it --
-their paths are printed when it starts, which is the only time they exist. --tmux splits
-the pane it was run in, so it wants a shell that is inside tmux.`;
+Both ports are the OS's choice unless one is named: the backend is started on port 0 and the
+port it announces becomes both the address the page is told to call (VITE_AGENT_URL) and
+vite's proxy target (HARNESS_BACKEND_URL); the UI's port is picked before vite starts and
+printed with the rest. The UI's port is vite's alone: the harness answers a page served from
+this machine whatever port it is on, so nothing is reported back to it. Ctrl-C stops both,
+and the two temp homes the scripted mode made are deleted with it -- their paths are printed
+when it starts, which is the only time they exist. --tmux splits the pane it was run in, so
+it wants a shell that is inside tmux.`;
 
 const argv = process.argv.slice(2);
 let port = 0;
-let uiPort = 5173;
+let uiPort = 0;
 let scripted = false;
 let scriptFile = "";
 let tmux = false;
@@ -167,6 +195,29 @@ for (const [name, value] of [["--port", port], ["--ui-port", uiPort]]) {
     process.exit(2);
   }
 }
+
+// ------------------------------------------------------------ the UI's port
+
+/// A port the OS says is free, for the dev server: bind port 0, keep the answer, let the
+/// socket go. THE RELEASE IS THE PART TO UNDERSTAND -- vite binds this number a moment
+/// later, and `strictPort` is what keeps a lost race there from turning into a dev server
+/// on some third port. It cannot be the backend's handshake instead: see the header.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on("error", reject);
+    probe.listen(0, () => {
+      const found = probe.address().port;
+      probe.close(() => resolve(found));
+    });
+  });
+}
+
+// ZERO IS "WHOEVER CAN", for both ports. A number has to be in hand before vite starts --
+// --tmux opens the pane with it and the banner prints it -- and the probe is the only way
+// to get one, since vite's own announcement goes to the pane rather than here.
+const uiPicked = uiPort === 0;
+if (uiPicked) uiPort = await freePort();
 
 // --TMUX ASKS THE WINDOW IT IS IN FOR A PANE, so there has to be a window: $TMUX is
 // what a shell inside tmux is handed, and its absence is not a missing binary to go
@@ -342,8 +393,23 @@ if (scripted) {
     '{:default {:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}}\n',
   );
   if (scriptFile === "") {
-    scriptFile = path.join(tmp, "script.json");
-    fs.writeFileSync(scriptFile, '{"turns": [{"content": "（这是脚本厂商的一条回答。）"}]}\n');
+    scriptFile = DEFAULT_SCRIPT;
+  } else {
+    // RESOLVED AGAINST THE CALLER'S CWD, which is where a relative path was written from.
+    // The backend's cwd is ROOT, so passing one straight through would have a file that
+    // exists here read as missing there -- and the check below is what would have said so.
+    scriptFile = path.resolve(scriptFile);
+  }
+  // A MISSING SCRIPT IS NOT A BACKEND THAT HAS NOTHING TO SAY: harness.e2e-server reads an
+  // absent file as `{:turns []}`, which answers every call with an empty turn and looks
+  // like a broken harness rather than a typed path. Said here, once, in the invoker's words.
+  if (!fs.existsSync(scriptFile)) {
+    console.error(
+      `dev.mjs: no script file at ${scriptFile}\n` +
+        `  --scripted replays the turns in one; with none named it uses ${DEFAULT_SCRIPT},\n` +
+        "  and the shape of a turn is in this script's header.",
+    );
+    process.exit(2);
   }
   backendArgv = [
     "clojure", "-M:dev", "-m", "harness.e2e-server",
@@ -424,9 +490,9 @@ console.log(
     (port === 0 ? " (a port the OS picked)" : ""),
 );
 console.log(
-  tmux
-    ? `dev.mjs: UI on http://localhost:${uiPort}, in the pane to the right`
-    : `dev.mjs: UI on http://localhost:${uiPort} (Ctrl-C stops both)`,
+  `dev.mjs: UI on http://localhost:${uiPort}` +
+    (uiPicked ? " (a port the OS picked)" : "") +
+    (tmux ? ", in the pane to the right" : " (Ctrl-C stops both)"),
 );
 if (homes !== null) {
   console.log(
@@ -435,6 +501,9 @@ if (homes !== null) {
   );
   console.log(`dev.mjs: temp OS home   ${homes.userHome}`);
   console.log("dev.mjs: siblings, deleted when this stops -- read the jsonl while it runs");
+  // WHICH TURNS ARE BEING REPLAYED, because the default is a file in the repo: a reader
+  // who wants a different conversation edits that one or names their own with --scripted.
+  console.log(`dev.mjs: replaying ${scriptFile}`);
 }
 console.log(`dev.mjs: the log is ${logPath}`);
 

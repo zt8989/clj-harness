@@ -47,8 +47,11 @@ import { defineConfig } from "vite";
 // the address a person opens. The harness answers a page served from this machine
 // whatever port it is on, so no number in this file has to be agreed with the
 // server's -- they are two processes that need not be told about each other.
-// `strictPort` stays because a second dev server quietly landing on 5174 is a
-// worse surprise than a failed start.
+// `node scripts/dev.mjs` does not even reach this default: it hands vite a port the
+// OS picked (`--ui-port` pins one), so the `port` below is only what a hand-run
+// `npm run dev` takes. `strictPort` stays because a second dev server quietly
+// landing on 5174 is a worse surprise than a failed start -- and it is what makes a
+// port handed over by dev.mjs a loud failure rather than a silent drift.
 const backend = process.env.HARNESS_BACKEND_URL ?? "http://127.0.0.1:8080";
 
 export default defineConfig({
