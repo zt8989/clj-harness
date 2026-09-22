@@ -130,6 +130,33 @@ const isFolded = (row) => row !== null && row.contentState === "closed" && row.c
 /// scroll IS (the alternative, no drag at all, is the snap).
 const lag = (row) => (row.trackRight === null ? null : Math.round(row.trackRight - row.windowRight));
 
+/// HOW MUCH OF THE ROW IS ACTUALLY PAINTED, in pixels. Geometry and text content
+/// cannot tell a legible row from a blank one -- this feature shipped a version
+/// whose row was BLANK while the thought arrived while every other check here was
+/// green, because `shimmer` (the still-going sweep) paints through a mask taken
+/// from the text's LAYOUT and the live line is drawn by a TRANSFORM (see
+/// `message-parts.tsx`). So the row's own box is screenshotted and its dark pixels
+/// counted: a mask that moved the glyphs out from under themselves, a colour that
+/// went transparent, a line dragged off its window -- all of them land here.
+const inkOf = async (box) => {
+  const shot = await page.screenshot({ clip: box });
+  return page.evaluate(async ([base64, threshold]) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${base64}`;
+    await img.decode();
+    const canvas = new OffscreenCanvas(img.width, img.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, img.width, img.height);
+    let ink = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      if (lum < threshold) ink += 1;
+    }
+    return ink;
+  }, [shot.toString("base64"), 200]);
+};
+
 async function until(predicate, timeout = 60000, step = 40) {
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -175,7 +202,31 @@ if (live === null) {
 }
 await page.screenshot({ path: path.join(EVIDENCE, "01-while-thinking.png") });
 
-// --------------------------------------------------------------- 2. it folds
+// ---------------------------------------------------------------- 2. it paints
+// THE ROW IS DRAWN, not merely present. The sample above is taken the moment the
+// window appears, which can be with only a few characters arrived; this one waits
+// until the line is long enough to be dragged (so the window is showing a slice of
+// it) and then asks the PIXELS -- see `inkOf` for what green-but-blank looks like.
+await until(async () => {
+  const row = await readRow();
+  return row !== null && row.trackLeft !== null && row.windowLeft !== null
+    ? row.trackLeft < row.windowLeft - 40
+    : false;
+});
+const drawnBox = await page.evaluate((sel) => {
+  const el = document.querySelector(sel);
+  if (el === null) return null;
+  const b = el.getBoundingClientRect();
+  return { x: Math.round(b.left), y: Math.round(b.top), width: Math.round(b.width), height: Math.round(b.height) };
+}, ROW);
+const inkWhileRunning = drawnBox === null ? 0 : await inkOf(drawnBox);
+check(
+  "the row is PAINTED while the thought arrives (ink, not just geometry)",
+  inkWhileRunning >= 300,
+  `${inkWhileRunning} ink pixels in the row's own ${drawnBox?.width}x${drawnBox?.height} box`,
+);
+
+// --------------------------------------------------------------- 3. it folds
 check(
   "the panel never opens itself while the tokens arrive",
   isFolded(live),
@@ -183,7 +234,7 @@ check(
 );
 check("the row is still ONE line while it runs", live.rowHeight <= 32, `${live.rowHeight}px tall`);
 
-// ---------------------------------------------------------- 3. what it shows
+// ---------------------------------------------------------- 4. what it shows
 // THE LINE IS THE ARRIVED TEXT, WHOLE. It is not a window cut to its last N
 // characters: what has run off the left edge has to stay in the DOM for the drag
 // to be able to move it (see `ReasoningTail`). So every sample's line is a PREFIX
@@ -195,7 +246,7 @@ check(
   `line: ${live.text?.length ?? 0} characters of ${flat.length}, ends ${JSON.stringify((live.text ?? "").slice(-16))}`,
 );
 
-// --------------------------------------------------------------- 4. it moves
+// --------------------------------------------------------------- 5. it moves
 // SAMPLES WHILE IT RUNS, and then the three things that make this a WINDOW rather
 // than a line of text that happens to be long:
 //
@@ -295,7 +346,7 @@ await cdp.send("Network.emulateNetworkConditions", {
   uploadThroughput: -1,
 });
 
-// ------------------------------------------------------- 5. back to line one
+// ------------------------------------------------------- 6. back to line one
 const settled = await until(async () => {
   const row = await readRow();
   return row !== null && !row.live ? row : null;
@@ -307,10 +358,25 @@ check(
   `subject: ${JSON.stringify(settled?.subject ?? "")}`,
 );
 check("and it is still folded", isFolded(settled));
+/// THE SAME ROW, NOW LEGIBLE FOR SURE (a thought that has stopped draws a plain
+/// first line, no mask, no drag). It is the control for the number above: both
+/// should be in the same league, and the blank version was two orders of magnitude
+/// away from it.
+const settledInk = (await page.evaluate((sel) => {
+  const el = document.querySelector(sel);
+  const b = el?.getBoundingClientRect();
+  return b ? { x: Math.round(b.left), y: Math.round(b.top), width: Math.round(b.width), height: Math.round(b.height) } : null;
+}, ROW));
+const inkSettled = settledInk === null ? 0 : await inkOf(settledInk);
+check(
+  "and it is painted then too (the control for the number above)",
+  inkSettled >= 300,
+  `${inkSettled} ink pixels settled vs ${inkWhileRunning} while running`,
+);
 
 await page.screenshot({ path: path.join(EVIDENCE, "02-after-thinking.png") });
 
-// ------------------------------------------------------------ 6. still opens
+// ------------------------------------------------------------ 7. still opens
 // THE READER'S CLICK IS STILL THE ONE THING THAT OPENS IT, and it opens the same
 // disclosure it always did -- the fix removed the automatic half, not the panel.
 await page.click(ROW);
@@ -335,7 +401,7 @@ check(
   (await until(async () => isFolded(await readRow()), 10000, 25)) === true,
 );
 
-// ------------------------------------------------------------ 7. after reload
+// ------------------------------------------------------------ 8. after reload
 // A RESTORED CONVERSATION IS NEVER RUNNING, so it arrives as first lines: the row
 // is folded and says the first line, with no live window in it.
 await page.reload();

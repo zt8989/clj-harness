@@ -20,26 +20,28 @@ node .scratch/thinking-row-tail/walkthrough.mjs http://localhost:5393/
 * 期望值**从 `script.json` 现算**：首行 = 那段思考第一个非空行，流式那一半 = 同一段字压成一行。
   改夹具不会让判据变得空洞。
 
-## 原样输出（GREEN，21 条）
+## 原样输出（GREEN，23 条）
 
 ```text
 ok   the row shows a live window while the model is thinking
+ok   the row is PAINTED while the thought arrives (ink, not just geometry) -- 2208 ink pixels in the row's own 656x28 box
 ok   the panel never opens itself while the tokens arrive -- state "closed", content "closed"/0px
 ok   the row is still ONE line while it runs -- 28px tall
 ok   the line is the arrived text, whole -- not a window cut out of it -- line: 45 characters of 1058, ends "一段只是把窗口往前推一点。第 2"
-ok   the line keeps growing while it runs -- 99 live samples, 18 distinct lines
+ok   the line keeps growing while it runs -- 92 live samples, 18 distinct lines
 ok   the words do NOT change between every pair of samples -- so the position must -- at least one hold
-ok   while the words hold still the line is still TRAVELLING (interpolated, not a jump) -- 67 of 81 holds moved
-ok   the line slides left, so characters leave at the left edge -- track left: 507 -> -10487 (99 samples)
-ok   the window cuts at its LEFT edge: the beginning of the thought is behind it -- line starts -63px left of the window
-ok   the right edge always has text under it -- the newest characters arrive there -- lag: max 1275px, last 0px, 99 samples
-ok   the drag catches up: the newest characters come back into view -- lag: max 1275px, median 190px, last 0px, 32 of 99 samples caught up
+ok   while the words hold still the line is still TRAVELLING (interpolated, not a jump) -- 65 of 74 holds moved
+ok   the line slides left, so characters leave at the left edge -- track left: 507 -> -10487 (92 samples)
+ok   the window cuts at its LEFT edge: the beginning of the thought is behind it -- line starts -206px left of the window
+ok   the right edge always has text under it -- the newest characters arrive there -- lag: max 1275px, last 0px, 92 samples
+ok   the drag catches up: the newest characters come back into view -- lag: max 1275px, median 251px, last 0px, 26 of 92 samples caught up
 ok   every sample is the thought so far, and shorter than the thought -- line 45 -> 1004 of 1058 characters
 ok   the thought ends, and the row stops being live
 ok   the panel is still folded when the thought has stopped -- state "closed"
 ok   the row is still there when the thought has stopped
 ok   it says the FIRST line again -- subject: " · 先读 deps.edn，确认依赖有没有变。"
 ok   and it is still folded
+ok   and it is painted then too (the control for the number above) -- 1097 ink pixels settled vs 2208 while running
 ok   a click opens the thought -- content "open"/111px
 ok   and the opened panel holds the whole thought -- 1058 chars
 ok   a second click closes it again
@@ -72,3 +74,52 @@ GREEN -- screenshots in .../.scratch/thinking-row-tail/evidence
 3. **字是成批到的，不是一 token 一帧**。AG-UI 客户端与 React 把一串 SSE 帧并成一次渲染：四秒里行文只换了
    **18 次**（每批 ~60 字 ≈ 780px）。所以「每个 token 挪一点点」是错觉，真实的一步是 780px —— 这正是
    `TAIL_SETTLE_MAX` 与「按速度算时长」存在的原因，也是第一版看着像跳的原因。
+## 像素那一层：行是**画出来的**吗（2026-09-22 追加）
+
+上面每条判据都在谈**几何**与**DOM 文本**——而主人看到的是一行**空白**：*「现在思考。空白，然后结束，
+瞬间出现思考+一行字」*。那一条所有判据全绿。
+
+**抓到它的顺序**（三个诊断脚本都在这个目录里，都不是门）：
+
+1. `scratch-ink.mjs`——把行自己的盒子截下来、数比页面底色深的像素：流式期间与停下来**数一样**
+   （1097 / 18368），这就是「像素与文本无关」的签名。
+2. `scratch-ascii.mjs`——把那一行按亮度画成 ASCII（2×2 一格）。流式那张**几乎是空的**，只有零星几个浅点；
+   停下来那张是一整行字。**这就是「空白」两个字的样子。**
+3. `scratch-which.mjs`——在一行**静止**的字上分别加一样东西：加 `shimmer` → 墨从 1097 掉到 583；
+   加一个 `transform` → 不至于抹掉。**结论：`shimmer`。**
+
+**根因**：`shimmer`（tw-shimmer）画字的办法是**把文字当蒙版**（`-webkit-mask-clip: text`），而蒙版照**布局**取；
+这一行字是用 `transform` 挪的——蒙版停在原地，被挪走的字就被蒙掉了。停下来之后那一行换回普通文本
+（没有 transform，也没有尾窗），蒙版重新对齐，于是「瞬间出现思考+一行字」。
+
+**修法**：`shimmer` 从 label（它装着名字**和**那一行字）挪到**名字**上。同一行实测：戴在 label 上 583 墨、
+戴在名字上 1032 墨（静止时 1097）。
+
+**两张 ASCII（同一台机器、同一段脚本流，第一张是修之前）**——每格 2×2 像素，`.` 越浅、`#` 越深；
+左边的 `++++` 是那颗大脑图标，其余全是那一行的字：
+
+```text
+修之前（流式期间）：几乎空白——只有零星几个浅点，看不出任何字
+  ++++
+ ++++++          .   =     .  :-                -: -:        .=--=: -====  =--=: :.=++::-==--
+:+====+:    ++++.+   +    .+  :=                 --==-       --:::: -.  :  -::=:.=-:::::--.-:
+=+ ++ +-     :+ .+=+ +-+=+.++=-++++:++++        -=:--. ......--:-.=.:.  :  ---=: ::---::=====
++.-++:.+     :+ .+ + +-+.+.++ -++:=++.-+  +:     : -=..-------===== -++++ -=====:==-::.::---:
+++.==.++     :+ .+ + +-+ +.++=-++.-+++=+      : :-=-:-       +=:--: :- --  -.-:. :.:  :::-=::
+ +.++:+      :+ .+ + +-+ +.+.+-++.-+.:=+      =.++====.      -.:==-.-.  -:::-===.-.===::=====
+ :++++:                             -++
+
+修之后（同一时刻）：整行字
+  ++++
+ ++++++    +=-=- :====  =--=- ::=++-:--=--.       - .-   :.::  - :-          .-..       .=--+=:
+:+====+:    ::-.- .:  -  =::-- ==::.-:--.--.=====:--:-=:.======:=:==-.        .---       -:--:-
+=+ ++ +-     -=:--. ......--:-.=.:.  :  ---=: ::---::===== :   :. -.::  ===:-. -==== ......
++.-++:.+     : -:=..-------===== -++++ -=====:==-::.::---: :   :.-=:-=: ===:-.==:::..------
+++.==.++      :-=-:-       +=:--: :- --  -.-:. :.:  :::-=:: :   :. : ::  -:-:-. -:===  :::..
+ +.++:+      =.++====.      -.:==-.-.  -:::-===.-.===::===== =---=. :=++=.---:=.=-:=--.
+```
+
+（`scratch-ascii.mjs` 每次运行会把两张图写成同目录的 PNG；PNG 不提交，ASCII 才是能读的那份。）
+
+**留在门里的是 `inkOf`**：走查现在会截下那一行的盒子、数墨，要求流式期间 ≥ 300 像素（实测 2208），
+停下来也 ≥ 300（实测 1097）。几何全对而像素全空这一类错，从今天起有判据。

@@ -823,12 +823,27 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
       />
       <span
         data-slot="reasoning-trigger-label"
-        className={cn(
-          "aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none",
-          active && "shimmer motion-reduce:animate-none",
-        )}
+        // THE SHIMMER IS NOT ON THIS SPAN ANY MORE, and that is a bug fix with
+        // pixels behind it. `shimmer` (tw-shimmer) paints text THROUGH A MASK --
+        // `-webkit-mask-clip: text`, the glyphs are the mask -- and that mask is
+        // taken from the text's LAYOUT. The live line is drawn somewhere else (the
+        // drag is a transform), so everything the window moves is masked away.
+        // Measured on one row: the shimmer on this span cuts its ink from 1097
+        // pixels to 583 at rest, and while a thought is arriving the row was
+        // BLANK -- which is what a reader saw (空白 while it thinks, 思考 · 首行 the
+        // instant it stops, i.e. once the tail is gone and the mask lines up
+        // again). On the NAME alone it keeps the whole of its signal and costs the
+        // line nothing (1032 of those 1097 pixels).
+        className="aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none"
       >
-        <b className="aui-reasoning-trigger-name">{t("reasoning.label")}</b>
+        <b
+          className={cn(
+            "aui-reasoning-trigger-name",
+            active && "shimmer motion-reduce:animate-none",
+          )}
+        >
+          {t("reasoning.label")}
+        </b>
         {preview !== "" && (
           <span
             data-slot="reasoning-trigger-subject"
