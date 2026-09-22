@@ -1567,10 +1567,17 @@
   harness.test-support/temp-dir). Deepest-first, because `io/delete-file` does not
   recurse: it calls File.delete, which refuses a non-empty directory and says
   nothing when `silently` is true, so the one-line version leaves the tree exactly
-  where it was."
+  where it was.
+
+  AND WHAT IT MAKES IS REGISTERED, because two of the directories it is handed are
+  COMPOSED beside a temp tree -- `(str listing-dir \"-2\")` and the archive one -- so
+  `temp-dir` never heard about them and the sweep at the end of a run did not either:
+  they were 2 of the 9 trees a full run still left behind once `temp-dir`'s own trees
+  were being taken (measured 2026-09-22). See harness.test-support/track-temp-dir!."
   [d]
   (run! #(io/delete-file % true) (reverse (file-seq (io/file d))))
-  (.mkdirs (io/file d)))
+  (.mkdirs (io/file d))
+  (support/track-temp-dir! d))
 
 (defn- same-dir?
   "Are A and B two spellings of one directory?

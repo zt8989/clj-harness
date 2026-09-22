@@ -20,57 +20,99 @@
   and a set of paths. Nothing here opens a store, writes anything, or waits --
   which is also how a test can assert the failure branch WITHOUT doing the thing
   the failure is about. The one thing here that waits is the deadline test, and it
-  waits 150ms and abandons a daemon thread."
+  waits 150ms and abandons a daemon thread.
+
+  AND NONE OF IT REACHES THE RUN'S OWN STDERR: a case that drives the failure branch
+  makes the verdict print the failure, and a fixture's voice is not the verdict's. See
+  `verdict+` for what that cost in a green run's output before it was captured."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
-            [harness.test-runner :as runner]))
+            [harness.test-runner :as runner]
+            [harness.test-support :as support]))
 
 (def ^:private real-store
   ;; A PATH THAT IS NEVER OPENED, and one of the shapes a real home has. No file is
   ;; created: the verdict reads the fingerprints it is handed, so a path is enough.
   (io/file "/nowhere/the-developer/.clj-harness/harness.db"))
 
-(defn- said
-  "What F printed on the process's stderr, as one string."
+(defn- verdict+
+  "F's answer AND what F printed on stderr, as `[value text]`.
+
+  BOTH HALVES, because a branch that answers correctly and says nothing -- or says the
+  wrong thing -- is not the branch these cases are about.
+
+  THE CAPTURE IS THE POINT RATHER THAN TIDINESS. These cases drive the FAILURE and the
+  NOTE on purpose, and both print in capitals: left on the run's own stderr, which is
+  what a bare `(is (false? (verdict ...)))` leaves them, a GREEN suite prints
+  `ISOLATION FAILURE` twice and `ISOLATION NOTE` three times (measured 2026-09-22: six
+  such lines in a run with nothing wrong with it). The one line that matters -- the one
+  a real violation prints -- is then indistinguishable from the fixture talking, which
+  is the whole value of the signal. A suite's output should contain `ISOLATION FAILURE`
+  exactly when something is isolated badly."
   [f]
-  (with-out-str (binding [*err* *out*] (f))))
+  (let [err   (java.io.StringWriter.)
+        value (binding [*err* err] (f))]
+    [value (str err)]))
 
 (deftest nothing-happened-is-green-and-silent
-  (is (true? (runner/isolation-verdict real-store [100 1] #{} [100 1]))
-      "an untouched store, never opened here, is exactly what this fixture promises")
-  (is (= "" (said #(runner/isolation-verdict real-store [100 1] #{} [100 1])))
-      "and it says nothing: a green run has no note to print"))
+  (let [[verdict message] (verdict+ #(runner/isolation-verdict real-store [100 1] #{} [100 1]))]
+    (is (true? verdict)
+        "an untouched store, never opened here, is exactly what this fixture promises")
+    (is (= "" message) "and it says nothing: a green run has no note to print")))
 
 (deftest a-store-this-process-opened-fails-the-run-by-name
   (testing "the file MOVED -- the plain case, and the one the fixture was built for"
-    (let [path (.getAbsolutePath real-store)]
-      (is (false? (runner/isolation-verdict real-store [100 1] #{path} [200 2])))
-      (let [message (said #(runner/isolation-verdict real-store [100 1] #{path} [200 2]))]
-        (is (str/includes? message "ISOLATION FAILURE"))
-        (is (str/includes? message path) "the store's path, so the offender can be found")
-        (is (str/includes? message "this process opened")
-            "attributed to this process, which is the only thing it can be sure of"))))
+    (let [path (.getAbsolutePath real-store)
+          [verdict message] (verdict+ #(runner/isolation-verdict real-store [100 1] #{path} [200 2]))]
+      (is (false? verdict))
+      (is (str/includes? message "ISOLATION FAILURE"))
+      (is (str/includes? message path) "the store's path, so the offender can be found")
+      (is (str/includes? message "this process opened")
+          "attributed to this process, which is the only thing it can be sure of")))
 
   (testing "opened and NOT moved: a read into the wrong home is already the wrong home"
     ;; A suite that reads the developer's store is not hermetic even when it writes
     ;; nothing -- their rows, their config, their anchors would be part of the answer.
     ;; So this branch fails too, and says which of the two it is seeing.
-    (let [path (.getAbsolutePath real-store)]
-      (is (false? (runner/isolation-verdict real-store [100 1] #{path} [100 1])))
-      (is (str/includes? (said #(runner/isolation-verdict real-store [100 1] #{path} [100 1]))
-                         "unchanged"))))
+    (let [path (.getAbsolutePath real-store)
+          [verdict message] (verdict+ #(runner/isolation-verdict real-store [100 1] #{path} [100 1]))]
+      (is (false? verdict))
+      (is (str/includes? message "unchanged"))))
 
   (testing "a DIFFERENT store than the one being asked about is not a hit"
     ;; The set is compared by absolute path, so the temp store this run actually
     ;; used cannot be mistaken for the developer's -- which is the whole reason the
     ;; set holds paths rather than, say, a count.
-    (is (true? (runner/isolation-verdict real-store [100 1]
-                                         #{(.getAbsolutePath (io/file "/tmp/x/harness.db"))}
-                                         [200 2]))
-        "somebody else's change, with our opening going to another path: a note, not a failure")))
+    (let [[verdict message]
+          (verdict+ #(runner/isolation-verdict real-store [100 1]
+                                               #{(.getAbsolutePath (io/file "/tmp/x/harness.db"))}
+                                               [200 2]))]
+      (is (true? verdict)
+          "somebody else's change, with our opening going to another path: a note, not a failure")
+      (is (str/includes? message "ISOLATION NOTE") "and it says which of the two kinds of news it is")
+      (is (not (str/includes? message "ISOLATION FAILURE"))))))
+
+(deftest the-runs-own-pair-is-not-a-cases-scratch-tree
+  ;; THE INVARIANT `isolate!` DEPENDS ON, and it is the one that keeps the scratch-tree
+  ;; cleanup from eating the run it is part of. The registry is wiped at the end of a
+  ;; run, from a shutdown hook at every exit, AND by a case that chooses to -- the
+  ;; namespace next door does -- so the run's own root and OS home must not be in it.
+  ;; If they were, a case's wipe would delete the root the suite was still writing into
+  ;; and the report would be hundreds of failures somewhere else.
+  ;;
+  ;; ASKED OF THE REGISTRY rather than by wiping and looking, which is what
+  ;; harness.test-support/tracked-temp-dirs exists for: the destructive way to ask this
+  ;; question destroys the evidence when the answer is bad.
+  (let [dir     (runner/isolate!)
+        tracked (set (support/tracked-temp-dirs))]
+    (is (.isDirectory (io/file dir)) "isolate! answers the run's root, and the root is there")
+    (is (not (contains? tracked dir))
+        "the root every namespace shares is out of the wipe's reach")
+    (is (not (contains? tracked (home/user-home)))
+        "and so is the OS home beside it: the same argument, one directory over")))
 
 (deftest somebody-elses-write-is-a-note-and-not-a-failure
   ;; THE CASE THAT MADE THIS VERDICT EXISTS: on 2026-09-20 a full suite run left the
@@ -78,8 +120,8 @@
   ;; the LIVE HARNESS SESSION moved its mtime -- and the verdict, built from the file
   ;; alone, reported the neighbour as a violation. The run was green; the signal was
   ;; wrong. Now the file moving without an opening says so out loud and stays green.
-  (is (true? (runner/isolation-verdict real-store [100 1] #{} [200 2])))
-  (let [message (said #(runner/isolation-verdict real-store [100 1] #{} [200 2]))]
+  (let [[verdict message] (verdict+ #(runner/isolation-verdict real-store [100 1] #{} [200 2]))]
+    (is (true? verdict))
     (is (str/includes? message "ISOLATION NOTE"))
     (is (not (str/includes? message "ISOLATION FAILURE")))
     (is (str/includes? message "NEVER OPENED IT")
@@ -87,8 +129,10 @@
     (is (str/includes? message "NOT a failure")))
 
   (testing "a store that APPEARED during the run is the same kind of news"
-    (is (true? (runner/isolation-verdict real-store nil #{} [100 1]))
-        "nil is absent: a store created by somebody else's session is still not ours")))
+    (let [[verdict message] (verdict+ #(runner/isolation-verdict real-store nil #{} [100 1]))]
+      (is (true? verdict)
+          "nil is absent: a store created by somebody else's session is still not ours")
+      (is (str/includes? message "ISOLATION NOTE")))))
 
 (deftest the-record-of-what-this-process-opened-is-what-decides-it
   ;; The two halves meet here: harness.infra.db REMEMBERS the paths, and the verdict
