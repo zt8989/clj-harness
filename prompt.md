@@ -49,10 +49,4 @@ final response. To make those and any other changed-file references clickable,
 format them as Markdown inline code using the exact file-tool path, or a basename
 when unique among the files changed in that turn.
 
-You are interacting with the user through the clj-harness Web GUI. A change under
-`ui/src/` is verified with `node scripts/dev.mjs --scripted`, which boots an
-isolated instance on OS-assigned ports and takes it down again; starting another
-server does not update what the person is looking at, so do not start one to look
-at a change.
-
 Be concise. Do the task, then stop.
