@@ -221,6 +221,56 @@
       (is (support/gone-within? pid 5000)
           (str "pid " pid " outlived the call that started it")))))
 
+(deftest everything-this-process-started-goes-with-it
+  ;; THE IN-FLIGHT CASE, which is the one no capability-owned reaper covers: a
+  ;; command still being waited on when the process itself ends. Measured before
+  ;; `reap!` existed (2026-09-22): a SIGTERM to a harness holding one background job
+  ;; and one foreground command took the job's tree with it and left this one --
+  ;; shell and child both -- running, its stdout in a pipe nobody held any more.
+  ;;
+  ;; IT KILLS EVERY DESCENDANT OF THIS JVM, and that is the function rather than a
+  ;; side effect: the case is the only thing running at this moment (tests are
+  ;; sequential in one JVM), so what it asserts on is its own, and anything an
+  ;; earlier namespace left standing is a leak being cleaned rather than a victim.
+  (let [dir (support/temp-dir "shell-reap")
+        run-pid (io/file dir "run.pid")
+        start-pid (io/file dir "start.pid")
+        in-flight (future (shell/run {:command (support/child-command run-pid)
+                                      :timeout-ms 60000}))
+        handle (shell/start {:command (support/child-command start-pid) :shape :shell})]
+    (try
+      (let [run-child (support/child-pid run-pid 15000)
+            start-child (support/child-pid start-pid 15000)]
+        (testing "both kinds really are running, each with a child of its own"
+          (is (some? run-child) "the command in flight booted and named itself")
+          (is (some? start-child) "the long-lived command did too")
+          (is (support/alive? run-child))
+          (is (support/alive? start-child)))
+        (testing "one walk of what this process started takes both trees"
+          (is (pos? (shell/reap!)))
+          (is (support/gone-within? run-child 10000)
+              (str "the in-flight command's child (pid " run-child
+                   ") outlived the process that started it"))
+          (is (support/gone-within? start-child 10000)
+              (str "the long-lived command's child (pid " start-child
+                   ") outlived the process that started it"))))
+      (finally
+        (try ((:close! handle)) (catch Throwable _ nil))
+        (try (deref in-flight 15000 nil) (catch Throwable _ nil))))))
+
+(deftest the-exit-hook-is-installed-once-and-only-once
+  (let [installs (atom 0)]
+    (try
+      (with-redefs [shell/install-hook! (fn [_] (swap! installs inc))]
+        (shell/reset-exit-hook!)
+        (dotimes [_ 3] (shell/ensure-exit-hook!))
+        (is (= 1 @installs) "three calls, one hook -- two would reap twice"))
+      (finally
+        ;; AND LEAVE THIS PROCESS WITH THE HOOK IT SHOULD HAVE, installed for real:
+        ;; the compare-and-set above was satisfied by the fake.
+        (shell/reset-exit-hook!)
+        (shell/ensure-exit-hook!)))))
+
 (deftest what-a-command-printed-before-the-limit-comes-back
   ;; The output is not discarded: a command that hangs after saying why it cannot
   ;; finish is exactly the case worth reading.
