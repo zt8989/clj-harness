@@ -71,6 +71,10 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
   harness / hooks / mcp）是带完整注释的参考起点。
 - **技能与指令读的是 OS 家目录**（`~/AGENTS.md`、`~/.agents/skills/`），**不跟随 `CLJ_HARNESS_HOME`**。
 - 首次使用：往 `~/.clj-harness/.env` 填 `HARNESS_API_KEY`（或某家厂商自己的 `<ID>_API_KEY`）。
+- **要给厂商缓存做分析时才打开 LLM 流量日志**：设 `CLJ_HARNESS_LLM_DEBUG=1`（每次调用重读，不必重启），
+  之后每一次模型调用都往 `<配置家>/logs/llm-debug.jsonl` 追加一行 JSON —— 请求是**发出去的原样字节**
+  （前缀缓存认的就是这些字节，重编码过就不是同一个事实了），响应带厂商报的那份 `usage`（含 `cached_tokens`）。
+  不设就一个字节都不写：正文会整段落盘（含文件内容），看完记得关。整棵树封顶 32MB，满了滚一份 `llm-debug.1.jsonl`。
 
 ### provider 与 model
 
