@@ -29,8 +29,10 @@
 
 ## 系统一句话
 
-一个 Clojure 写的 agent 内核，唯一对外协议是 AG-UI；前端是 TypeScript + React + assistant-ui，
-浏览器直连后端（无中间层，无代理）。会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录。
+一个 Clojure 写的 agent 内核：跑一轮的对外协议是 AG-UI（`POST /api/agent`），其余 `/api/*` 是**管理边**；
+前端是 TypeScript + React + assistant-ui，浏览器直连后端（无中间层，无代理）。**会话归服务端**：权威在
+进程内存里，jsonl 记录是它的恢复源（异步写、允许落后，永远是会话的有序前缀）；浏览器手里只有它读过的
+**一段窗口**，它只发动作、不撰写历史。三条铁律见 [overview](architecture/overview.md)。
 
 前端**曾经**是 ClojureScript + helix + CopilotKit，已整体换成 TypeScript + assistant-ui；
 `ui/` 下没有 `.cljs`，也没有 shadow-cljs 与 helix。协议侧（AG-UI 帧、interrupt/resume）**一字未改**。

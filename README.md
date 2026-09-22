@@ -2,8 +2,9 @@
 
 ## 介绍
 
-一个 Clojure 写的 agent 内核，唯一对外接口是 **AG-UI**；前端是 TypeScript + React + assistant-ui，
-经 `@ag-ui/client` 直连后端。会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录。
+一个 Clojure 写的 agent 内核：跑一轮的接口是 **AG-UI**（`POST /api/agent`），其余 `/api/*` 是管理边；
+前端是 TypeScript + React + assistant-ui，经 `@ag-ui/client` 直连后端。**会话归服务端**——进程内存里
+那份是权威，jsonl 记录是它的恢复源（异步写、允许落后）；浏览器是只读副本，只发动作、画帧。
 
 **本文只讲怎么装、怎么配、怎么起。** 它是什么、内部怎么转、接口有哪些见
 [`docs/architecture.md`](docs/architecture.md)。文档分工：README 是入口，`docs/architecture/` 是现状，
@@ -61,7 +62,7 @@ harness.edn   用户级 harness 配置（可选）：编辑模式、围栏、技
 hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）
 mcp.edn       MCP 服务器声明（可选；不存在 = 一个都没声明）
 .env          密钥：一家厂商一把 <ID>_API_KEY，全局 HARNESS_API_KEY 兜底；优先于真实环境变量
-harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点
+harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点 / 任务清单
 projects/<项目>/*.jsonl  会话日志，按项目分目录
 ```
 

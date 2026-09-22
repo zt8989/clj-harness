@@ -165,13 +165,14 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
 `harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
 （它落库，见 [home-and-storage](home-and-storage.md#任务清单的表)）；两个 `web_*` 碰的是**网**。
-**最后一列里与作业有关的那两个同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
+**最后一列里与作业有关的那三个同属这一族**（`job` / `job_output` / `job_kill`——它们碰的是一条
+**正在跑的命令**，不是文件，所以同样不登记在
 `harness.cap.editing/families` 里）。它们都属于「没有编辑家族」那一类——`harness.cap.editing/families`
 **一个字都没改**，因为那张表登记的是
 「与编辑有关的名字」，没登记的名字两种模式都服务。

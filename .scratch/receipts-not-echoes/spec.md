@@ -197,6 +197,23 @@
 （`README.md` / `docs/architecture.md` / `docs/architecture/kernel.md` / `CONTEXT.md`）与两处旧
 spec 的日期注跟上；证据重跑一遍（88 B → 133 B）。
 
+### 落地当天顺带修的两类旧话（主人指出的）
+
+主人翻 README 时看见的两处，都不是本特征写坏的，而是**更早的特征收口时漏下的**：
+
+- **「精简内核 + 一个接口」那套说法**：README 的介绍、`docs/architecture.md` 的「系统一句话」、
+  `CONTEXT.md` 开头三处。会话早归服务端、管理边早就不止一条，所以改成「跑一轮的接口是 AG-UI
+  （`POST /api/agent`），其余 `/api/*` 是管理边；**会话归服务端**（内存是权威、记录是恢复源），
+  浏览器是只读副本」。
+- **「事实存在前端」**：README 那句「会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录」。
+  按意思扫过一遍，同类的还有 `docs/architecture.md`、`home-and-storage.md`（「重建 = 交还，不是接管」
+  正好相反；`todos` 那节、标题那节）、`client.md`（2 MB 那段「每轮重发整段历史」、状态条那行）、
+  `providers.md`（「下一轮的历史来自客户端」），以及两张状态表缺的 `todos` / `session_claims`。
+
+本特征自己漏下的一处也一并补上：`docs/architecture/kernel.md` 的编辑模式表里**最后一列漏了 `job`**
+（票 03 让工具数回到 18，那张表还写着「与作业有关的那两个」）。全部记进
+`.scratch/sessions-live-on-the-server/spec.md` 的「2026-09-22 补记」。
+
 ### 报数
 
 - 后端全量（落地当天，工作树里）：`Ran 1088 tests containing 12839 assertions. 0 failures,

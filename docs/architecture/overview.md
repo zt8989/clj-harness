@@ -100,7 +100,7 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
 |---|---|---|
 | 会话消息 | **服务端内存**（会话表；`jsonl` 是恢复源） | 铁律 3：会话归服务端，一轮 run 的输入是**动作**（`append`），历史由服务端自己交给自己 |
 | **窗口**（`entries` / `baseSeq` / `hasMore` / `cursor`，以及 generation） | **连接与浏览器**（一条 feed 一条连接；服务端不记谁订了什么） | 铁律 3 的另一半：游标随连接走，进程除了活着的连接不持有任何订阅状态 |
-| 项目 / 会话归属 / 归档 | **sqlite**（`harness.infra.db`） | 会被**改写**的状态 |
+| 项目 / 会话归属 / 归档 / 认领（`session_claims`）/ 任务清单（`todos`） | **sqlite**（`harness.infra.db`） | 会被**改写**的状态 |
 | 行锚点、已展示集合、撤销记录 | **sqlite**（`harness.infra.db`，四张 `hashline_*` 表） | 会被**改写**的状态；且会话长命，重启后日志里的锚点还得能用 |
 | 文件编辑模式（`harness.edn` 的 `:editing`） | **文件**（每次调用现读） | 手编、改了不重启；按会话解析，两种模式各有完整用例 |
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录 |

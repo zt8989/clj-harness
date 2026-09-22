@@ -1,6 +1,7 @@
 # CONTEXT.md
 
-clj-harness 是一个极简的 Clojure agent 内核，对外只有 AG-UI 协议一个接口，前端是 TypeScript。
+clj-harness 是一个 Clojure 写的 agent 内核：跑一轮的接口是 AG-UI（`POST /api/agent`），其余 `/api/*` 是
+管理边；**会话归服务端**（内存是权威、记录是恢复源），浏览器是只读副本。前端是 TypeScript。
 
 本文是**领域术语表**：这里定义的词，issue、spec、代码注释、测试名一律照用；同义词是要避免的，不是要
 宽容的。它不是教程也不是需求——需求在 `.scratch/<slug>/spec.md`，架构决策在 `docs/adr/`（还没有条目
