@@ -38,7 +38,7 @@
    (1 in progress, 2 completed)`），**不念清单**；空清单仍答一句「现在是空的」——那不是回声，是事实。
    清单的另外两个读者一个字节不动：库里的行（`todos/items-for`）与 UI 工具卡（读**调用参数**，不读答案）。
 3. **`job` 回来当起动词。** 立刻返回，答案是 **id + 记录路径**；没有时限、没有 `stdin`
-   （模型仍传就**指名拒绝**，话与合并时那句同源）、重定向注跟着它。
+   （**字段删掉，不是拒绝**——见下面「落地当天撤回的一步」）、重定向注跟着它。
    `bash` 只剩前台：`timeout` / `stdin` / `workdir` / `shell` / 答案上界，行为逐字不变。
    工具数 **17 → 18**，三处硬编码清单与文档名单/数目跟着改。
 4. **通知 = id + 状态行 + 命令 + 一句读法，不带路径。**
@@ -107,7 +107,7 @@
 |---|---|---|---|
 | 01 | `write` 的答案不带内容：`auto-read` 退场 | — | 锚点模式 `write` 的答案只剩释放通知；`:auto-read` 键、`auto-read-lines`、`auto-read-note`、`perform!` 的 `config` 参数退场；描述换句；五处文档例子换键；四条用例退场、两条改写 |
 | 02 | `todo_write` 的答案只报状态 | — | `cap.todos/render` 换成状态渲染（条数 + 各自状态；空清单一句「现在是空的」）；不再念清单；库与 UI 不动 |
-| 03 | 后台的「起」回到自己的名字：`job` 回来，`bash` 只剩前台 | — | `job` 重新注册（立刻返回、答 id + 记录路径、无时限、`stdin` 指名拒绝、重定向注）；`bash` 去掉 `run_in_background` 与后台那半段描述；工具数 17 → 18、三处硬编码清单与文档数目/名单跟着改；`.scratch/bash-background` 决策 1 划删除线 + 日期注 |
+| 03 | 后台的「起」回到自己的名字：`job` 回来，`bash` 只剩前台 | — | `job` 重新注册（立刻返回、答 id + 记录路径、无时限、没有 `stdin`、重定向注）；`bash` 去掉 `run_in_background` 与后台那半段描述；工具数 17 → 18、三处硬编码清单与文档数目/名单跟着改；`.scratch/bash-background` 决策 1 划删除线 + 日期注 |
 | 04 | 作业结束的通知：状态一行 + 指名 `job_output` | — | `cap.jobs/notice` 只剩 id + 状态行 + 一句读法（路径退场）；`job_output` 描述里「通知会说出路径」那句改掉；`docs/architecture.md` / `kernel.md` / `CONTEXT.md` 的通知形状跟着改；`.scratch/bash-background` 决策 3 划删除线 + 日期注 |
 | 05 | 收口：词、文档、报数 | 01,02,03,04 | `CONTEXT.md` 的词与闭清单（+ `job`、+ 「回执」）；`docs/architecture*.md` 的工具数/名单/描述、`system-prompt.md`；README 那一节；两套全量 + 一次真会话走查；本特征自己的落地记录 + 删 `write-no-content` 的票面 |
 
@@ -159,16 +159,29 @@
    `job` 词条与工具名闭清单改到今天的形状；README 的 `todo_write` / `bash` / `job` /
    通知四段改到今天；`.scratch/write-no-content/issues/01-*.md` 删除（它的 `spec.md` 留作理由）。
 
-### 与票面不一致的三处（都是「同一个态度多做一步」）
+### 与票面不一致的一处
 
-- **`job` 也指名拒绝 `timeout`**（票面只说「没有时限」）。理由与 `stdin` 同源：一个限制不了任何
-  东西的数字读起来像承诺，而静默丢掉调用方明确送来的东西是本仓到处都拒绝的那种沉默。拒绝话术里
-  顺带指名 `job_output` 的 `wait`。
-- **`bash` 指名拒绝残留的 `run_in_background`**（票面只说「参数表里没有它」）。理由同上：拆开之后
-  最可能出现的正是这个从旧形状带过来的键，静默按前台跑就成了一次没人说出口的分歧。
 - **`.scratch/job-endings/evidence/go.json` 改回 `job`**（外加 README 一段日期注）。那条证据在
-  `bash-background` 落地时被改成 `bash {run_in_background: true}`，现在那个形状会被指名拒绝——
-  「证据要能重跑」这条被同一个坑反向踩了一次，改的只是能重跑的那一步，那天看见的东西一字未动。
+  `bash-background` 落地时被改成 `bash {run_in_background: true}`，那个字段现在不在表里（传了什么也不
+  发生），于是那一步会退化成一次**前台等待**、不再是「起一条作业」——「证据要能重跑」这条被同一个坑
+  反向踩了一次，改的只是能重跑的那一步，那天看见的东西一字未动。
+
+### 落地当天撤回的一步：字段删掉，不是拒绝
+
+票 03 落地时我多做了两件事：`job` **指名拒绝** `stdin` 与 `timeout`，`bash` **指名拒绝**残留的
+`run_in_background`（当时的理由：静默丢掉调用方明确送来的键，是这个仓到处都拒绝的那种沉默）。
+
+**主人当天驳回：「你的 Job 和 Bash 应该是把对应的不需要的字段全都删掉。而不是说拒绝。」** 改法：
+
+- `t-bash` 的入参只留 `command` / `timeout` / `stdin` / `workdir` / `shell`，`t-job` 只留
+  `command` / `workdir` / `shell`：**没有那个键，就没有读它的地方**——拒绝是把别的动词的字段
+  请进自己的实现里再赶出去，而这份 schema 本来就是这个动词的全部语言。
+- 传了会怎样：**什么也不发生**。`bash {run_in_background: true}` 照旧等（答案与普通前台调用逐字相同）；
+  `job {stdin: "…"}` 照旧起、那段文字没有任何读者；`job {timeout: 1}` 限不住任何东西。
+  描述里留一句事实（「没有时限、不喂 `stdin`，两个都不是它的参数」），**不留拒绝的承诺**。
+- 钉子换成 `tools_test` 的 `the fields the OTHER verb needs are not read here at all`：三格分别钉住
+  「不是错误」「答案是前台那句 `hi`」「记录里没有那段 stdin 文本」「没有 `[timed out]` 行」。
+  那句 `(not (str/includes? (spec "bash") "run_in_background"))` 照旧——描述里也不该出现它。
 
 ### 落地当天追加的一句：通知带上命令
 
@@ -186,9 +199,9 @@ spec 的日期注跟上；证据重跑一遍（88 B → 133 B）。
 
 ### 报数
 
-- 后端全量（落地当天，工作树里）：`Ran 1088 tests containing 12841 assertions. 0 failures,
+- 后端全量（落地当天，工作树里）：`Ran 1088 tests containing 12839 assertions. 0 failures,
   0 errors.`（退出码 0）。
-  对基线 1090 / 12833：**用例 −2**（`auto-read` 四条退场、两条新的进场），**断言 +8**。
+  对基线 1090 / 12833：**用例 −2**（`auto-read` 四条退场、两条新的进场），**断言 +6**。
 - 前端：`npm test` → **96 passed**；`npm run typecheck` 过；`npm run build` 过。
 - 真会话走查：`.scratch/receipts-not-echoes/evidence/`（脚本 `receipts.json` + README）。看见的：
   三张工具卡的答案都是回执（`job` → id + 路径；`todo_write` → `2 items stored …`，清单只在参数格；

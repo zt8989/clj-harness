@@ -312,13 +312,13 @@
   the spawn are shared; what is not shared is the question 'does this call wait', and
   a caller made to answer it with a boolean is the caller that got it wrong before
   (`bash-record`'s session: a `job` whose description said 'slow', and a model that
-  built its own `join` out of `sleep`)."
-  [{:keys [command timeout stdin workdir run_in_background] shell-named :shell}]
-  (when (some? run_in_background)
-    (throw (ex-info (str "`run_in_background` is not a `bash` argument: starting a command"
-                         " without waiting for it is `job`, a verb of its own. `bash` always"
-                         " waits.")
-                    {:argument :run_in_background :reason :not-a-bash-argument})))
+  built its own `join` out of `sleep`).
+
+  AND THE FIELD IS NOT HERE. `run_in_background` is not one of this verb's arguments,
+  so nothing below reads one: it is not a key to have an opinion about, it is a key
+  this tool does not have, and a body that lectured about it would be describing the
+  other verb. The schema is what tells a caller the language of a call."
+  [{:keys [command timeout stdin workdir] shell-named :shell}]
   (let [dir   (work-dir kernel-tools/*thread-id* workdir)
         ;; RESOLVED BEFORE ANYTHING IS STARTED, so a kind this machine does not have
         ;; refuses without a job id, a record file or a half-started process to clean up.
@@ -366,26 +366,15 @@
 
   A JOB HAS NO TIMEOUT, so `timeout` is not one of this verb's arguments at all: a
   number that limits nothing is worse than no number, because it reads like a promise.
-  `stdin` is not one either -- nothing feeds a background command.
-
-  EITHER ONE, SENT ANYWAY, IS REFUSED BY NAME: dropping what the caller asked for
-  without a word is the kind of silent disagreement this codebase refuses everywhere
-  else. Each refusal names the verb that DOES do the thing -- `bash` for `stdin`,
-  `job_output` with `wait` for waiting."
-  [{:keys [command stdin timeout workdir] shell-named :shell}]
+  `stdin` is not one either -- nothing feeds a background command, so text sent as one
+  would never be read. Neither is refused, and that is the point of deleting them: a
+  body only reads the keys its own schema declares (`t-bash` says the same about the
+  verb it shares the spawn with), so there is nothing here to drop, and nothing to
+  argue with. To write to a command's stdin, run it with `bash`; to wait for one, call
+  `job_output` with `wait`."
+  [{:keys [command workdir] shell-named :shell}]
   (let [dir  (work-dir kernel-tools/*thread-id* workdir)
         kind (named-shell shell-named)]
-    (when (some? stdin)
-      (throw (ex-info (str "`stdin` is not a `job` argument: nothing feeds a background"
-                           " command's standard input, so the text would be dropped"
-                           " without it ever being read. Run it with `bash` to write to"
-                           " its stdin.")
-                      {:argument :stdin :reason :not-a-background-input})))
-    (when (some? timeout)
-      (throw (ex-info (str "`timeout` is not a `job` argument: a job has NO time limit."
-                           " To wait for one, call `job_output` with `wait` and its own"
-                           " `timeout`.")
-                      {:argument :timeout :reason :not-a-job-argument})))
     (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
                                          {:command command :dir dir :kind kind})]
       ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
@@ -940,8 +929,9 @@
        "`workdir` is the directory to run in, resolved exactly as `bash` resolves it; `shell`"
        " names WHICH SHELL INTERPRETS `command` -- one of " shell-names-text ", or left out for"
        " this machine's own, and `command` has to be a line written for the shell you name. "
-       "A job has NO timeout, and it is never fed `stdin` (`stdin` and `timeout` are refused"
-       " by name): it runs until it ends or until `job_kill` stops it. "
+       "A job has NO timeout, and nothing feeds it `stdin`: it runs until it ends or until"
+       " `job_kill` stops it. (Neither is an argument of this verb, so there is nothing to"
+       " send.) "
        "WHEN IT ENDS YOU ARE TOLD: its ending is put in front of you before your next model"
        " call, so you do not have to remember to ask. Read what it has said, or wait for it,"
        " with `job_output`; stopping it is `job_kill`. "

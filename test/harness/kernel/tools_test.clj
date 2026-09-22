@@ -648,22 +648,29 @@
       (is (not (str/includes? (slurp path :encoding "UTF-8") "[exit"))
           "two seconds in, the command has no ending line -- it is still running")
       (jobs/shutdown!)))
-  (testing "the arguments that belong to the OTHER verb are refused by name"
-    ;; Dropping what the caller sent without a word is the silent disagreement this
-    ;; codebase refuses everywhere else -- and these are the three a model is most likely
-    ;; to carry over from the merged shape or from a `bash` habit.
-    (let [{:keys [content error]} (call "bash" {:command "echo hi" :run_in_background true})]
-      (is (true? error))
-      (is (str/includes? content "`run_in_background`"))
-      (is (str/includes? content "`job`") "and the verb that does start one is named"))
-    (let [{:keys [content error]} (call "job" {:command "cat" :stdin "x"})]
-      (is (true? error))
-      (is (str/includes? content "`stdin`"))
-      (is (str/includes? content "`bash`") "and the verb that does feed it is named"))
-    (let [{:keys [content error]} (call "job" {:command "sleep 1" :timeout 1})]
-      (is (true? error))
-      (is (str/includes? content "`timeout`"))
-      (is (str/includes? content "job_output") "and where waiting lives is named"))))
+  (testing "the fields the OTHER verb needs are not read here at all"
+    ;; THE FIELDS ARE DELETED, NOT ARGUED WITH. Neither schema declares them, and each
+    ;; body destructures its own arguments and stops -- so a key carried over from the
+    ;; merged shape (or from a `bash` habit) is not something this side has an opinion
+    ;; about: it is not an argument of this verb, and there is nothing here that reads it.
+    (let [plain (:content (call "bash" {:command "echo hi"}))
+          {:keys [content error]} (call "bash" {:command "echo hi" :run_in_background true})]
+      (is (not error) "a key the schema does not have is not an error")
+      (is (= plain content) "and it changes nothing: `bash` waited, as this verb always does"))
+    (let [{:keys [content error]} (call "job" {:command "cat" :stdin "never-shown-anywhere"})]
+      (is (not error))
+      (let [path (second (re-find #"its record is (\S+)" content))]
+        (is (some? path) (str "a job started all the same: " content))
+        (Thread/sleep 300)
+        (is (not (str/includes? (slurp path :encoding "UTF-8") "never-shown-anywhere"))
+            "`stdin` has no reader on this side, so the text is not written anywhere")))
+    (let [{:keys [content error]} (call "job" {:command "sleep 2" :timeout 1})]
+      (is (not error))
+      (let [path (second (re-find #"its record is (\S+)" content))]
+        (Thread/sleep 1500)
+        (is (not (str/includes? (slurp path :encoding "UTF-8") "[timed out"))
+            "the number limited nothing: a job has no timeout to send one to")))
+    (jobs/shutdown!)))
 
 (deftest the-answers-state-facts-and-not-instructions
   ;; How to read a record belongs in a DESCRIPTION -- which is in front of the model on

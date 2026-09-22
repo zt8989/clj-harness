@@ -51,6 +51,7 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 ## 再复议之后（2026-09-22，`job` 回到工具表）
 
 `go.json` 第 1 步已改回 `job {command: "sleep 1; echo JOB-SAYS-SO"}`——合并那阵子写成
-`bash {run_in_background: true}`，而那个参数现在会被指名拒绝（见 `.scratch/bash-background/spec.md`
-决策 1 的日期注、`.scratch/receipts-not-echoes/` 票 03）。**上面那两段记录的是各自那天看见的东西，
+`bash {run_in_background: true}`，而那个字段如今不在 `bash` 的表里（传了什么也不发生），留着会让这一步
+退化成一次前台等待（见 `.scratch/bash-background/spec.md` 决策 1 的日期注、
+`.scratch/receipts-not-echoes/` 票 03）。**上面那两段记录的是各自那天看见的东西，
 一个字没改**；改的只是「今天还能重跑」的那一步。
