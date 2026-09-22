@@ -763,9 +763,12 @@
         (is (= "hi" (:content (first once))) "the client's own message is untouched")
         (is (str/starts-with? (:content (second once)) "<job-ended"))
         (is (str/includes? (:content (second once)) "[exit 0]") "how it went")
-        (is (str/includes? (:content (second once)) path) "and where its record is")
+        (is (str/includes? (:content (second once)) "job_output")
+            "and the one line that says where to read it")
+        (is (not (str/includes? (:content (second once)) path))
+            "but not the path: the `job` answer carried that, and it is still in the history")
         (is (not (str/includes? (:content (second once)) "JOB-SAYS-SO"))
-            "nothing of what the command said: a notice is three facts"))
+            "nothing of what the command said: a notice is two facts and a pointer"))
       (testing "and applying the step to its own output changes nothing"
         ;; The loop's promise: a step that grew a second copy each time it ran would
         ;; put the same notice in front of the model on every call of every turn.

@@ -16,7 +16,7 @@
 顺序为什么这么排：**升降的东西排在后段**。冻结开头是前缀缓存的锚，一条随 run 变动的句子混进去，
 每次变动都要付一次冷前缀的价钱；反过来，把事实冻在开头，代价是那句会开始说谎。
 工具纪律只写参考提示词里的那一组（`read` / `write` / `replace` / `insert` / `glob` / `grep` /
-`bash` / `job_output` / `job_kill` / `web_search` / `web_fetch`）；其余工具
+`bash` / `job` / `job_output` / `job_kill` / `web_search` / `web_fetch`）；其余工具
 （`undo_last_replace` / `todo_write` / `skill` / `session-configure` / `eval` 与 MCP 进来的那些）
 不在这里写——它们的信息由工具表里各自的 description 承担。
 

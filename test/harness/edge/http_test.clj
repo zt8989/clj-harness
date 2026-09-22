@@ -584,11 +584,14 @@
                          ;; injection, so it is in the record and in no frame.
                          ;; THE MARKERS HAVE TO BE ONES ONLY THIS RUN'S INJECTION COULD
                          ;; CARRY. The block's TAG is not one of them: this repository's
-                         ;; own README talks about `<job-ended …>` now, the scripted run
-                         ;; reads it, and a tool result is a legitimate way for those
-                         ;; bytes to reach the wire -- the same trap the system-message
-                         ;; case named. The record's path (a temp path nothing else
-                         ;; mentions) and the job's own output line are.
+                         ;; own README talks about `<job-ended …>`, the scripted run reads
+                         ;; it, and a tool result is a legitimate way for those bytes to
+                         ;; reach the wire -- the same trap the system-message case named.
+                         ;; What is checked is the notice's own second line -- the read
+                         ;; sentence naming THIS job's id, which nothing else in this run
+                         ;; writes -- and the command's own output line.
+                         (is (not (str/includes? first-body (str "{\"job\": \"" id "\"}")))
+                             "not even the read line, which is the notice's own")
                          (is (not (str/includes? first-body path)))
                          (is (not (str/includes? first-body "JOB-SAYS-SO"))))
                        ;; A second run of the same session: the client resends its whole

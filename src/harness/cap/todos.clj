@@ -128,13 +128,16 @@
     stored))
 
 (defn render
-  "ITEMS as the lines a model reads back -- the answer to a `todo_write`, and the
-  same shape anything else showing a list should use, so there is one rendering of
-  a task list rather than one per caller.
+  "ITEMS as the RECEIPT a `todo_write` answers with.
 
-  The marker per line is the STATUS in the 3 characters it takes: `[x]` done,
-  `[~]` being done now, `[ ]` not started. The numbering is the list's own order,
-  which is why the order is worth sending."
+  A RECEIPT, NOT AN ECHO. The list was in the call that stored it, so it is already
+  in front of the model: repeating it here would pay for the same tokens twice and
+  tell the model nothing it did not just send. What the answer owes is the fact --
+  how many items there are, and how they stand -- and that is all this returns.
+
+  The marker-per-line rendering this replaced went with it. A screen that wants to
+  draw the list reads the call's own arguments (`ui/src/message-parts.tsx`), and the
+  stored row is read with `items-for`."
   [items]
   (if (empty? items)
     "the task list is empty now -- nothing is planned."
@@ -147,12 +150,4 @@
       (str (count items) " item" (when (not= 1 (count items)) "s")
            " stored for this session"
            (when (seq counts) (str " (" counts ")"))
-           ":\n"
-           (str/join "\n"
-                     (map-indexed (fn [i {:keys [content status]}]
-                                    (str "  " (case status
-                                                "completed"   "[x]"
-                                                "in_progress" "[~]"
-                                                "[ ]")
-                                         " " (inc i) ". " content))
-                                  items))))))
+           "."))))

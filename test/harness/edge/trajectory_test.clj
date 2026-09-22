@@ -258,23 +258,27 @@
                    (system-prompt 10 "S")
                    finished
                    (message 20 {:role "assistant" :content ""
-                                :tool_calls [(tool-call "c1" "bash"
-                                                        "{\"command\":\"make\",\"run_in_background\":true}")]})
+                                :tool_calls [(tool-call "c1" "job"
+                                                        "{\"command\":\"make\"}")]})
                    (message 21 (tool-msg "c1" "job j1 started; its record is /home/jobs/j1.log"))
-                   (message 22 (user "" "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"))
+                   (message 22 (user "" (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                                             "Read what it said with job_output {\"job\": \"j1\"}.")))
                    (message 23 (assistant "noted"))])]
       (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
-      (is (= "<job-ended id=\"j1\" path=\"/home/jobs/j1.log\">[exit 0]</job-ended>"
+      (is (= (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                  "Read what it said with job_output {\"job\": \"j1\"}.")
              (:text (item-of turn "context")))
-          "the bytes, verbatim -- and three facts is all there is to them")))
+          "the bytes, verbatim -- two facts and the one line that reads them")))
 
   (testing "and two jobs are two blocks, because the ids are part of the bytes"
     (let [[turn] (turns-of
                   [(client 0 (user "u1" "\u5f00\u5de5"))
                    (system-prompt 10 "S")
                    finished
-                   (message 20 (user "" "<job-ended id=\"j1\" path=\"/x/j1.log\">[exit 0]</job-ended>"))
-                   (message 21 (user "" "<job-ended id=\"j2\" path=\"/x/j2.log\">[stopped]</job-ended>"))])]
+                   (message 20 (user "" (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
+                                             "Read what it said with job_output {\"job\": \"j1\"}.")))
+                   (message 21 (user "" (str "<job-ended id=\"j2\">[stopped]</job-ended>\n"
+                                             "Read what it said with job_output {\"job\": \"j2\"}.")))])]
       (is (= 2 (count (filter #(= "context" (:kind %)) (:items turn))))
           "the de-duplication is by bytes, and these are different bytes"))))
 

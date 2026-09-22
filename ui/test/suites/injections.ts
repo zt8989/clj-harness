@@ -70,13 +70,15 @@ const cases: readonly Case[] = [
         bytes: 46,
       });
 
-      // A job's ending, which is what a background command's notice looks like.
-      const ending = injectionView({
-        role: "user",
-        text: '<job-ended id="j1" path="/tmp/j1.log">[exit 0]</job-ended>',
-      });
+      // A job's ending, which is what a background command's notice looks like: the
+      // id and the status line, then the one line naming the verb that reads it. The
+      // ROW shows the first line (it is one line); the second is part of the bytes.
+      const endingText =
+        '<job-ended id="j1">[exit 0]</job-ended>\nRead what it said with job_output {"job": "j1"}.';
+      const ending = injectionView({ role: "user", text: endingText });
       expect(ending?.title).toBe("job-ended");
-      expect(ending?.preview).toBe('<job-ended id="j1" path="/tmp/j1.log">[exit 0]</job-ended>');
+      expect(ending?.preview).toBe('<job-ended id="j1">[exit 0]</job-ended>');
+      expect(ending?.bytes).toBe(88);
 
       // BYTES, NOT CHARACTERS: a Chinese instruction block is three bytes a
       // character in UTF-8, and bytes are what the model is paying for. Six

@@ -93,12 +93,15 @@
         {:keys [id path]} (jobs/start! t {:command "echo said-this; exit 3"})]
     (record-until path #(re-find #"\[exit" %) 10000)
     (let [notices (jobs/take-notices! t)]
-      (testing "one job, one notice, and it is THREE facts and nothing else"
+      (testing "one job, one notice, and it is TWO facts plus the one line that reads it"
         (is (= 1 (count notices)))
         (is (= "user" (:role (first notices))) "a message like any other, like a skill body")
-        (is (= (str "<job-ended id=\"" id "\" path=\"" path "\">[exit 3]</job-ended>")
+        (is (= (str "<job-ended id=\"" id "\">[exit 3]</job-ended>\n"
+                    "Read what it said with job_output {\"job\": \"" id "\"}.")
                (:content (first notices)))
-            "which job, where its record is, and how it went -- no tail, no advice"))
+            "which job and how it went -- no tail, no record path, and where to read")
+        (is (not (str/includes? (:content (first notices)) path))
+            "the path is not in the notice: the `job` answer carried it, and the model has that"))
       (testing "and it is not said twice"
         (is (= [] (jobs/take-notices! t)))))))
 

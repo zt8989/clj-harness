@@ -946,29 +946,29 @@
 ;; AND IT IS SAID ONCE. That claim needs a place to live -- see `take-notices!`.
 
 (defn- notice
-  "The message that tells the model JOB is over, and ONLY THAT: which job, where its
-  record is, and the line the record ends on.
+  "The message that tells the model JOB is over, and ONLY THAT: which job it was, how it
+  went, and the verb that reads what it said.
 
-  THREE THINGS AND NOTHING ELSE. A notice is a fact, not an answer: it does not carry a
-  tail of what the command said (a record of five thousand lines is announced in the
-  same few bytes as an empty one), it does not repeat the truncation sentence, and it
-  says nothing about how to read the record -- the tool descriptions are where that
-  belongs, and they are in front of the model on every request.
+  TWO FACTS, ONE TAG, AND ONE SENTENCE. A notice is a reminder, not an answer: it does
+  not carry a tail of what the command said (a record of five thousand lines is
+  announced in the same few bytes as an empty one), it does not repeat the truncation
+  sentence, and it does NOT carry the record's path -- the path was in the answer to
+  `job`, the model still has it in the history above, and `job_output` does not take one.
 
   THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
-  `<skill name=…>` and `<instructions path=…>` are for their own blocks. The path rides
-  on it as an attribute rather than as a sentence: it is metadata about the block, not
-  something the command said.
+  `<skill name=…>` and `<instructions path=…>` are for their own blocks. What rides on
+  it is the id and the line the record ended on -- the two facts, nothing about where
+  anything is.
 
-  THE PATH GOES IN UNESCAPED, and that is a judgement rather than an oversight: it is
-  this harness's own configuration home plus a `home/sanitize`d id, whose rule admits
-  only `[A-Za-z0-9._-]`, so a quote can appear in it only if somebody named their home
-  with one -- and a check for that would be a lot of code for that."
+  THE SENTENCE IS THE ONE EXCEPTION to 'answers carry facts, descriptions carry usage',
+  and it is deliberate: a job exists precisely because the model went off to do
+  something else, so the one thing the reminder owes it is where to look. It names the
+  id a second time so the line is usable as written, and it is one line."
   [job]
   (let [ending (or (ending-of (:path job)) "[exit ?]")]
     {:role "user"
-     :content (str "<job-ended id=\"" (:id job) "\" path=\"" (:path job) "\">"
-                   ending "</job-ended>")}))
+     :content (str "<job-ended id=\"" (:id job) "\">" ending "</job-ended>\n"
+                   "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")}))
 
 (defn take-notices!
   "The messages that tell THREAD-ID's model about jobs that have finished and whose
@@ -991,7 +991,7 @@
   is in this answer or in the next one -- never in both, never in neither.
 
   A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `tail` on a record leaves no trace
-  here, so that job is announced once anyway. The notice is three facts and said once,
+  here, so that job is announced once anyway. The notice is two facts and said once,
   and being told something twice costs less than never being told at all."
   [thread-id]
   (let [pending? (fn [job] (and (terminal? job) (not (:told? job))))
