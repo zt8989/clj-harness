@@ -12,12 +12,21 @@
   up and diffs them, so a line that is nothing but a JSON object is worth more than a
   `kind k=v` line a reader would have to take apart first.
 
-  THE REQUEST IS THE RAW BODY STRING, and that is the point rather than a shortcut.
-  The prefix cache keys on the BYTES THAT WENT OUT: an analysis that re-serialized a
-  parsed map would be comparing a second spelling of the request -- key order, the
-  empty `reasoning_content` pad, the tool table's order all free to differ -- and
-  'the prefix was identical' would stop being a fact about the wire. So the body goes
-  in as a JSON string and a reader may hash it as it stands.
+  BOTH SIDES GO IN AS THE TEXT THAT CROSSED THE WIRE, and that is the point rather than
+  a shortcut. The prefix cache keys on the BYTES THAT WENT OUT: an analysis that
+  re-serialized a parsed map would be comparing a second spelling of the request -- key
+  order, the empty `reasoning_content` pad, the tool table's order all free to differ --
+  and 'the prefix was identical' would stop being a fact about the wire. So the request
+  body goes in as a JSON string and a reader may hash it as it stands.
+
+  THE RESPONSE'S `:body` IS THE RAW SSE FRAME TEXT, for the mirror-image reason: the
+  folded `:message`/`:telemetry` beside it are a READING of the stream, and a reading
+  cannot be checked against its source once the source is gone. 'The vendor never
+  mentioned cached tokens' and 'our fold dropped them' look the same in a folded map and
+  only the second one is a bug -- `usage.prompt_tokens_details.cached_tokens` is the
+  number people come here to read, and this is its only copy. Both are logged, so the
+  reading and the evidence behind it are on one line; scripts/llm-prefix-report.mjs
+  re-reads the raw usage and says so when the two disagree.
 
   IT IS OFF UNTIL ASKED FOR: the switch is the CLJ_HARNESS_LLM_DEBUG environment
   variable (1 / true / yes / on, case and surrounding blanks aside). It is read on

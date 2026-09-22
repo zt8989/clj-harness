@@ -793,7 +793,13 @@
       (is (str/includes? (spec "bash") (str jobs/answer-budget-bytes " bytes"))))
     (testing "`job_output` is the one that can wait, and the one that says how it went"
       (is (str/includes? (spec "job_output") "`wait: true` blocks"))
-      (is (str/includes? (spec "job_output") (str jobs/job-output-default-timeout-ms "ms"))))
+      ;; THE RIGHT-HAND SIDE IS A LITERAL, and that is the whole point of this line.
+      ;; The description is part of the bytes that go out, so an assertion that
+      ;; recomputed the expected text from the very expression under test would pass
+      ;; while the description carried ANYTHING -- which is exactly how
+      ;; `@<identity-hash>` rode along unnoticed. See
+      ;; .scratch/llm-prefix-cache/issues/01-the-identity-hash-in-the-tool-table.md
+      (is (str/includes? (spec "job_output") "120000ms")))
     (testing "and neither face is left holding a stale name"
       (is (nil? (spec "job")) "the merged name is gone from the table"))))
 
@@ -950,3 +956,124 @@
                 "both calls see a turn that holds two todo_writes, so neither is sole"))
           (finally (teardown))))
       (finally (tools/forget-turn!)))))
+
+;; ------------------------------------------------------- the bytes of the tool table
+;;
+;; EVERY CASE BELOW IS ABOUT THE SAME FACT: this table is serialized into the request's
+;; HEAD -- ahead of the system prompt and of every message -- so the vendor's prefix
+;; cache keys on those bytes, and ONE changed byte there throws away the whole prefix,
+;; the conversation included. That is why the order is a definition rather than a sort,
+;; and why a capability's schema is not trusted to write its own key order.
+;; See .scratch/llm-prefix-cache/spec.md.
+
+(defn- objects-out-of-order
+  "Every object inside VALUE whose keys are not in sorted order, each with the PATH that
+  reaches it -- so a failure names the schema rather than only saying 'not sorted'."
+  [value path]
+  (cond
+    (map? value) (concat (when-not (= (vec (keys value)) (sort (keys value)))
+                           [(assoc path :keys (vec (keys value)))])
+                         (mapcat (fn [[k v]] (objects-out-of-order v (conj path k))) value))
+    (sequential? value) (mapcat (fn [i v] (objects-out-of-order v (conj path i)))
+                                (range) value)
+    :else nil))
+
+(defn- specs-names [table] (mapv (comp :name :function) table))
+
+(deftest the-tool-table-is-a-pure-function-of-the-tools
+  (let [once  (json/write-str (tools/specs) :escape-unicode false)
+        twice (json/write-str (tools/specs) :escape-unicode false)]
+    (testing "assembling twice in one process gives the same bytes"
+      ;; THE NECESSARY HALF ONLY, and it is worth saying why: an identity hash is the
+      ;; SAME inside one process, so this assertion alone would have passed on the bug in
+      ;; .scratch/llm-prefix-cache/issues/01. The sentinel below is what catches that
+      ;; class. The cross-process half is EVIDENCE over recorded sessions, read by
+      ;; scripts/llm-prefix-report.mjs (issues/04) -- deliberately not a synthetic child
+      ;; process, which either would not inherit the test runner's isolated home, or
+      ;; would have to install a table of its own and would then be testing the
+      ;; installer.
+      (is (= once twice)))
+    (testing "and no face carries a stringified Clojure object"
+      ;; THE SHAPE IS NOT GUESSWORK: an object's `toString` is either a munged class name
+      ;; with a `$`, an `@` and an identity hash, or `#<...>`. An un-called fn, an
+      ;; underef'd delay and a stray var all print that way, so this catches the SHAPE
+      ;; rather than one instance of it. If a description ever legitimately carries a `$`
+      ;; or an `@`, narrow this to the offending part -- do not delete it.
+      (is (not (re-find #"harness\.[A-Za-z0-9_.\-]+\$" once)))
+      (is (not (re-find #"@[0-9a-f]{6,}" once)))
+      (is (not (str/includes? once "#<"))))))
+
+(deftest every-object-the-table-sends-has-its-keys-in-sorted-order
+  (let [table (tools/specs)]
+    (testing "at every depth of every schema"
+      (is (= [] (objects-out-of-order table []))
+          "a plain map's key order is an accident of its size: an array map keeps
+           insertion order up to eight keys and then silently flips to hash order --
+           deterministic, but not the same promise, because it re-shuffles when the key
+           SET changes. Sorted keys make the order a pure function of the key set."))
+    (testing "and the envelope's own order, both levels, named here so a reader sees it"
+      (let [one (first table)]
+        (is (= [:function :type] (vec (keys one))))
+        (is (= [:description :name :parameters] (vec (keys (:function one)))))))
+    (testing "while an array keeps the order it was written in"
+      ;; `required`, `enum` and `oneOf` are sequences, and their order is part of what
+      ;; they say -- so the door sorts objects and leaves arrays alone, at every depth.
+      (let [todos (first (filter #(= "todo_write" (get-in % [:function :name])) table))
+            items (get-in todos [:function :parameters :properties "todos" :items])]
+        (is (= ["content" "status"] (:required items)))
+        (is (= ["pending" "in_progress" "completed"]
+               (get-in items [:properties "status" :enum])))))))
+
+(deftest a-sessions-own-roster-sorts-after-the-built-ins
+  ;; THE ORDER IS PART OF THE BYTES, so the half whose membership can change while the
+  ;; process runs must not be able to re-position the half that cannot. A global
+  ;; `sort-by` said the opposite: `mcp__*` sorted in between `job_output` and `read`, so
+  ;; one server's roster moving moved BUILT-INS.
+  (let [t "jt-specs-roster"
+        before (tools/specs t)
+        n (count before)]
+    (tools/session-register! t "mcp__fake__aaa"
+                             {:source :mcp
+                              :description "d"
+                              ;; A SCHEMA SHAPED THE WAY ONE ARRIVES FROM A SERVER, because
+                              ;; that path is the one the door cannot see coming: the object
+                              ;; keys get sorted, and the two ARRAYS keep the order the server
+                              ;; gave -- `required` is what the execution seam checks a call
+                              ;; against, and an `enum` is a list somebody wrote down.
+                              :parameters {"type" "object"
+                                           "properties" {"mode" {"type" "string"
+                                                                 "enum" ["slow" "fast"
+                                                                         "auto" "off"]}}
+                                           "required" ["mode" "target" "reason" "retries"]}})
+    (tools/session-register! t "mcp__fake__zzz"
+                             {:source :mcp :description "d" :parameters {}})
+    (let [after (tools/specs t)]
+      (testing "the built-in run is the same BYTES, in the same order, at the front"
+        (is (= (json/write-str before :escape-unicode false)
+               (json/write-str (subvec after 0 n) :escape-unicode false))))
+      (testing "and the roster sits after it, in name order"
+        (is (= 2 (- (count after) n)))
+        (is (= ["mcp__fake__aaa" "mcp__fake__zzz"] (drop n (specs-names after)))))
+      (testing "a server's own schema keeps its arrays in the server's order"
+        (let [params (get-in (first (filter #(= "mcp__fake__aaa" (get-in % [:function :name]))
+                                            after))
+                             [:function :parameters])]
+          (is (= ["mode" "target" "reason" "retries"] (get params "required")))
+          (is (= ["slow" "fast" "auto" "off"]
+                 (get-in params ["properties" "mode" "enum"])))
+          (is (= ["properties" "required" "type"] (vec (keys params)))
+              "while its OBJECT keys are sorted, so the bytes do not depend on how it wrote them"))))))
+
+(deftest a-set-reaching-a-schema-is-refused-by-name
+  ;; A set's iteration order is not a contract, and the symptom of shipping one is the
+  ;; cold prefix nobody can explain -- so the door refuses rather than quietly choosing
+  ;; an order for it, which would make the lie look fixed.
+  (let [t "jt-specs-set"]
+    (tools/session-register! t "bad-tool"
+                             {:source :builtin
+                              :description "d"
+                              :parameters {"thing" {:type "string"
+                                                    :enum #{"before" "after"}}}})
+    (let [thrown (try (tools/specs t) nil (catch Exception e e))]
+      (is (some? thrown) "a set in a schema must not be given an order and shipped")
+      (is (str/includes? (ex-message thrown) "a set may not reach the wire")))))
