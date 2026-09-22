@@ -190,7 +190,7 @@
       (check "{:editing {:mode \"hashline\"}}" :mode ":hashline or :str-replace"))
     (testing "the booleans take booleans"
       (check "{:editing {:auto-read \"yes\"}}" :auto-read "true or false")
-      (check "{:editing {:anchor-grep 1}}" :anchor-grep "true or false")
+      (check "{:editing {:grep 1}}" :grep "true or false")
       (check "{:editing {:require-path nil}}" :require-path "true or false")
       (check "{:editing {:strict-input :on}}" :strict-input "true or false"))
     (testing ":boundary-dedup has its own three values"
@@ -211,12 +211,12 @@
           n [0 1 10]]
     (write-user! (str "{:editing {:mode " mode " :boundary-dedup " dedup
                       " :diff-context-lines " n " :auto-read true"
-                      " :anchor-grep false :require-path true :strict-input false}}"))
+                      " :grep false :require-path true :strict-input false}}"))
     (let [m (editing/editing-mode "ed-legal")]
       (is (= mode (:mode m)))
       (is (= dedup (:boundary-dedup m)))
       (is (= n (:diff-context-lines m)))
-      (is (false? (:anchor-grep m))))))
+      (is (false? (:grep m))))))
 
 (deftest the-edges-of-every-legal-range-are-accepted
   ;; The other end of the message contract: the range a failure names has to be

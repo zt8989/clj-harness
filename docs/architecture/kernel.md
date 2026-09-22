@@ -164,7 +164,7 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `anchor_grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
@@ -323,7 +323,7 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 
 - **已展示**（served）：本会话**真的把这一行连同锚点印出来过**。它与「归谁所有」是两件事——`read`
   分页时给没返回的页也铸了锚点，那些行归你所有但你没见过，**编辑它们会被拒**。防的正是「凭记忆改一行
-  自己没看过的代码」。`read` 与 `anchor_grep` 印出来的算，拒绝里回带的那几行也算。
+  自己没看过的代码」。`read` 与 `grep` 印出来的算，拒绝里回带的那几行也算。
 - **漂移**（drift）：读到某一版之后文件在磁盘上变过了（判据是逐行校验和，不是时间戳）。这时**不静默
   重定位**，而是拒绝并把该区间**当前**的锚点一起交出来。
 - **拒绝即交付**：编辑被拒时回的不只是一句错，而是它当时在说那几行 + 它们**现在**的锚点，并把这些行
@@ -342,14 +342,14 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 并且**拒绝把自己印出来的锚点行回写进文件**。`undo_last_replace` 读的撤销记录只保留最近一次，
 把文件**和锚点**一起退回去（只还原文本会让库里那套锚点描述一个已经不存在的状态）。
 
-`anchor_grep` 走 `rg --json`，命中行直接带锚点（行号仍然印，但它**不是拿来编辑的**）。
+`grep` 走 `rg --json`，命中行直接带锚点（行号仍然印，但它**不是拿来编辑的**）。
 危险正则在跑之前就被拒（反向引用、量词化的组、量词化的选择分支、大 `{n}`、
 嵌套量词），出路是 `literal: true`。
 
 **跑 `rg` 这件事本身在 `harness.infra.rg` 里，因为它现在有两个用户**：二进制名、超时、以及
 「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句
 字符串——后者也是 `rg` 对**不存在的搜索根**说的话，按它判断会把一个拼错的路径报成「没装 ripgrep」）。
-`--json` 的解析留在 `anchor_grep` 自己手里：一次命中是一条**行**，而行是要给它铸锚点的那个东西。
+`--json` 的解析留在 `grep` 自己手里：一次命中是一条**行**，而行是要给它铸锚点的那个东西。
 `glob` 用同一份管道，读的是**文件名**而不是行：它的答案是 **rg 两次列举的交集**——
 `rg --glob` 的优先级**高于** `.gitignore`（它自己的帮助这么写），所以把模型的模式直接交给它，
 `**/*` 会把 `node_modules` 整个列出来；交集说的是「在**这个树里**按模式找」，

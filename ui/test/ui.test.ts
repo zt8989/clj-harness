@@ -45,6 +45,7 @@ import { injectionSuite } from "./suites/injections";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
+import { toolRowSuite } from "./suites/tool-row";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -53,7 +54,7 @@ import { reasoningRowSuite } from "./suites/reasoning-row";
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
 /// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -216,7 +217,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// (interpolated, not a jump per token), that it is PAINTED (a masked-away row is
 /// green on geometry and blank on screen), and that the first line comes back when the
 /// thought ends -- is the browser walkthrough's half (`.scratch/thinking-row-tail/`).
-const EXPECTED_CASES = 92;
+/// 92 -> 94: the `tool-row` suite's two, for `.scratch/omp-parity`'s ticket 01 -- the rename
+/// of `anchor_grep` to `grep`. The ticket asked for a case to be CHANGED in each of the two
+/// places keyed by tool name (`TOOL_ICONS` and `subjectOf`) and there was none: both fall
+/// back rather than fail, so a renamed tool loses its icon and its subject with nothing going
+/// red. Read as source, not rendered -- `message-parts.tsx` reaches `lib/i18n.ts`, which
+/// touches `document` at module scope, so this run cannot import it at all; the drawing is
+/// the browser walkthrough's half.
+const EXPECTED_CASES = 94;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -68,7 +68,7 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `cap.tools` | **十七个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `job_output` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`（起它的是 `bash` 的 `run_in_background`，不是另一个名字）；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.tools` | **十七个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `grep` / `glob` / `bash` / `job_output` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`（起它的是 `bash` 的 `run_in_background`，不是另一个名字）；批的计划器与编辑模式的收窄策略也从这里装上 |
 | `cap.jobs` | **后台作业与命令的记录**：写下一条命令说了什么、读它、停掉它（**起**它的是 `bash` 的 `run_in_background`——一条命令的两个模式，不是两个动词）。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>-<进程戳>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**读它有四条路**：`job_output`（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号）、`bash` / `read` / `grep` 直接读同一份文件、答案里那条路径、以及**它自己会说话**——一条没人等的作业结束时，它的结局会在**下一次模型调用前**作为 `<job-ended id="…" path="…">[exit N]</job-ended>` 注入历史（`before-llm` 的第二半），**三样事实、与记录多大无关**，说一次、不推送（`job_output` / `job_kill` 已经交到模型手里的结局不重复，模型自己 `tail` 过的不算——这条代价照旧）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行——但它**活过写它的那个进程**（文件留下来才是「回头再看昨天那一次」这件事有解的原因；名字里那截进程戳是为了让下一次运行别写到上一次的头上），整棵树按字节封顶，超了从最旧的一份开始删。**进程内存里留下的只有作业本身**：句柄、进程、注册表条目（重启后 `job_output` / `job_kill` 答「未知作业」，而文件还在盘上）。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
@@ -150,8 +150,9 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 - **编辑合并**：计划见 `.scratch/edit-merge/`（spec + 6 张票，2026-09-17 立）。
   照 omp（`can1357/oh-my-pi`，它的 `docs/tools/edit.md`）的策略：**改写并成一个 `edit`**——
   一个字符串载荷是一段补丁语言（段头 `[path]`、动作 `PUT` / `CUT` / paste / `REM` / `MV`），
-  两个编辑模式共用这个名字、脸由 `:describe` 换；**检索与撤销独立**（`anchor_grep` 保名，
-  `undo_last_replace` 改名 `undo_last_edit`）。寻址仍用本仓的按行锚点，
+  两个编辑模式共用这个名字、脸由 `:describe` 换；**检索与撤销独立**（`grep` 不并进去——它原名
+  `anchor_grep`，2026-09-22 改叫 `grep`，见 `.scratch/omp-parity` 票 01；`undo_last_replace` 改名
+  `undo_last_edit`）。寻址仍用本仓的按行锚点，
  所以 omp 的 `[PATH#TAG]` + 行号与 `N*`（整块，要语法树）两条**不搬**。
   代码里**一行都没有**：今天锚点模式是 `replace` / `insert` 两个名字，`edit` 只在 str-replace 模式存在，
   而载荷、多段、寄存器都还不存在。

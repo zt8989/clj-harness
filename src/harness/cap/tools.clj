@@ -771,13 +771,13 @@
        " configuration home parks for human approval first."))
 
 (defn- t-grep
-  "`anchor_grep`'s body. The search root is resolved for the session exactly as the
+  "`grep`'s body. The search root is resolved for the session exactly as the
   file tools' paths are, so a relative root means what it means everywhere else."
   [args]
   (grep/perform! kernel-tools/*thread-id* #(project/resolve-path kernel-tools/*thread-id* %) args
                  (editing/editing-mode kernel-tools/*thread-id*)))
 
-(register! "anchor_grep"
+(register! "grep"
   (assoc (tool grep-description
                {"pattern"     {:type "string"
                                :description (str "Regular expression to search for"
@@ -810,7 +810,7 @@
 
 ;; ---------------------------------------------------------------------- glob
 ;;
-;; THE OTHER SEARCH QUESTION. `anchor_grep` answers "which lines say this"; this
+;; THE OTHER SEARCH QUESTION. `grep` answers "which lines say this"; this
 ;; answers "which files are named this", and its answer is a list of PATHS rather
 ;; than anchored rows -- there is no line here to name. So it carries no anchors,
 ;; belongs to neither editing family, and is served in BOTH modes (see
@@ -819,7 +819,7 @@
 (def ^:private glob-description
   (str "Find files by name, with a glob pattern, and get their paths back -- ready to"
        " hand to `read`. Use this for \"which files are there\" questions; use"
-       " `anchor_grep` when you are looking for content. "
+       " `grep` when you are looking for content. "
        "Results respect .gitignore and never include `.git`; hidden files (dotfiles)"
        " ARE listed. One absolute path per line, sorted by path. "
        "`path` narrows the search to a file or directory, and defaults to this"

@@ -41,10 +41,10 @@
   ;; it a sentence saying to read the file instead.
   :auto-read true
 
-  ;; The `anchor_grep` tool (ripgrep, every hit back as an anchored row). false
+  ;; The `grep` tool (ripgrep, every hit back as an anchored row). false
   ;; takes the tool out of the session's toolset; nothing replaces it, and `bash`
   ;; is there if you need a search.
-  :anchor-grep true
+  :grep true
 
   ;; Require `path` on replace / insert, and check it against the anchor's owner.
   ;; Off by default: an anchor already names exactly one file in one session, so

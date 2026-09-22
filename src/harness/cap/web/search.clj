@@ -42,7 +42,7 @@
   20)
 
 (def snippet-chars
-  "How long one result's snippet may be, in characters. `anchor_grep` bounds its answer
+  "How long one result's snippet may be, in characters. `grep` bounds its answer
   in bytes and this bounds part of one: it exists because Exa's snippet is a slice of
   the PAGE rather than a summary, and a model that wants the page has `web_fetch` for
   it. Brave and Tavily send real snippets and are under this anyway."
