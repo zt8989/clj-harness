@@ -26,14 +26,19 @@
 // Tool cards start CLOSED and open only when clicked -- the content is never on
 // screen until somebody asks for it.
 //
-// A THOUGHT IS THE ONE EXCEPTION, and it is the reader's own request: while its
-// tokens stream, the disclosure opens itself and shows the thinking as it
-// arrives. A row whose label is the thought's first line stops moving a second
-// in, and the thing worth watching is the thought itself. It is upstream's
-// behaviour (`streaming`), kept for upstream's reason -- the live window follows
-// the newest token, and the panel folds itself when the thought ends -- with this
-// repo's row around it. See `ReasoningBlock` for what it costs and what it does
-// not change.
+// NOTHING OPENS ITSELF: the reader's click is the only thing that does. A
+// THOUGHT IS THE ONE PART THAT SHOWS WHILE IT IS STILL BEING WRITTEN, and it
+// shows on its own ROW -- the row says the newest window of the thought and
+// gives back the first line when the thought ends. It used to open the
+// disclosure instead (upstream's `streaming`, whose rule is
+// `userOpen ?? streaming`), and that is what this repo undid: a panel that
+// unfolds itself ONCE PER THOUGHT -- a turn that thinks, reads and thinks again
+// opens it twice -- moves the transcript under a reader who is looking at
+// something else, in a column whose whole point is that its steps are listed
+// rather than unfolded. The live WINDOW stays upstream's (`max-h-64`, the fades,
+// the follow-the-newest-token scroll) and a reader who asks for it mid-run still
+// gets it; what is gone is it opening by itself. See `ReasoningBlock` below and
+// `lib/reasoning-preview.ts` for the row's words.
 //
 // The "still working" signal is on the collapsed ROW as well, not only in the
 // panel: a spinning mark at its end for a tool call, a shimmering label for
@@ -103,7 +108,7 @@
 // reasoning -- the shell only: `ReasoningRoot` / `ReasoningContent` /
 // `ReasoningText`. The group's own pieces are no longer imported at all: the
 // slot draws nothing.
-import { type ElementType, type FC, type PropsWithChildren } from "react";
+import { type ElementType, type FC, type PropsWithChildren, useState } from "react";
 import {
   AlertCircleIcon,
   BetweenHorizontalStartIcon,
@@ -131,7 +136,6 @@ import { useAgUiInterrupts } from "@assistant-ui/react-ag-ui";
 import {
   useAuiState,
   useToolCallElapsed,
-  type PartState,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
@@ -161,6 +165,7 @@ import {
 } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
 import { formatMillis } from "@/lib/format";
+import { firstLine, previewOf } from "@/lib/reasoning-preview";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -310,16 +315,6 @@ function stringArg(args: Args, key: string): string | undefined {
 function lineCount(args: Args, key: string): number {
   const value = args[key];
   return Array.isArray(value) ? value.length : 0;
-}
-
-/// The first line that is not blank, trimmed. Models open a thought -- and often
-/// a command -- with a newline, and "the first line" would then be nothing.
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed !== "") return trimmed;
-  }
-  return "";
 }
 
 /// What this call is about, in one line.
@@ -755,8 +750,8 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 //
 // Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
 // is drawn as: an icon, a bold name, the subject this step is about, `py-1.5
-// text-[13px]`, revealed by a click -- or, while the thought is still arriving,
-// by the thought itself. Upstream's reasoning is a CARD -- `ReasoningRoot`'s
+// text-[13px]`, revealed by a click and by nothing else -- a thought that is
+// still arriving included. Upstream's reasoning is a CARD -- `ReasoningRoot`'s
 // default variant is `outline`, i.e. `rounded-lg border px-3 py-2` -- and this
 // repo does not want a second visual species in one transcript: the things a turn
 // did (thought, read, thought, ran) are a list of steps, and a step that is boxed
@@ -779,53 +774,31 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 // card: the row says "still going" while the work is going, and stops when it
 // stops.
 //
-// The row carries the FIRST LINE of the thought, for the same reason a tool row
-// carries its subject: a step whose content is invisible until clicked makes the
-// reader click to find out whether they needed to. The label is this row's own
+// The row carries the SUBJECT of the thought -- its first line once it has
+// stopped, its newest window while it is still arriving -- for the same reason a
+// tool row carries its subject: a step whose content is invisible until clicked
+// makes the reader click to find out whether they needed to. The label is this
+// row's own
 // word and it lives in the `thread` catalog (`思考` / `Thinking`), so each language
 // has its own -- it was once the one Chinese label in an English transcript, and
 // moving this face's words into the catalog is what stopped that being true. The
 // tool names stay literal (`read`, `bash`): they are the model's vocabulary, and
 // translating them would break the correspondence with the arguments panel.
 
-/// How much of a thought the row shows before the CSS ellipsis takes over.
+// The row's WORDS are `lib/reasoning-preview.ts`: the first line at rest, the
+// newest window of a live thought, and the 120-character bound both halves are
+// held to. They live in that module rather than here because a suite can call
+// them; what the row LOOKS like is the browser walkthrough's half
+// (`.scratch/thinking-row-tail/`).
 ///
-/// The clip is not only cosmetic. The preview is a STRING (see `previewOf`), and
-/// `useAuiState` compares what a selector returns BY VALUE -- so once the first
-/// line has reached this many characters, the row stops re-rendering on every
-/// token of a thought that is still arriving. Handing the row the whole text and
-/// letting CSS do all the cutting would keep that subscription alive for the
-/// length of the stream.
-const PREVIEW_LIMIT = 120;
-
-function clip(text: string): string {
-  return text.length > PREVIEW_LIMIT
-    ? `${text.slice(0, PREVIEW_LIMIT).trimEnd()}…`
-    : text;
-}
-
-/// The first line of a reasoning group's thinking, or "".
-///
-/// The group knows which parts it covers (`indices`) and the row knows nothing
-/// else, so the parts are read from the message state here. A group can hold
-/// several parts; the first one WITH a non-blank line wins, because joining them
-/// would put a seam in the middle of a sentence.
-///
-/// This returns a string rather than the parts for the reason `PREVIEW_LIMIT`
-/// gives: the caller is `useAuiState`, and a string it can compare by value is
-/// what keeps the row from re-rendering per token.
-function previewOf(
-  parts: readonly PartState[],
-  indices: readonly number[],
-): string {
-  for (const index of indices) {
-    const part = parts[index];
-    if (part?.type !== "reasoning") continue;
-    const line = firstLine(part.text);
-    if (line !== "") return clip(line);
-  }
-  return "";
-}
+/// The row's subject is drawn in TWO shapes, and which one is the same question
+/// as whether the thought is still arriving. A thought that has stopped is a plain
+/// string -- the row's own `truncate` cuts it and the `…` is the module's. A live
+/// one goes inside `.aui-reasoning-trigger-tail`, a box that cuts at its LEFT
+/// edge instead: the same text, but the end of it is what stays in view while the
+/// older characters run off behind the left one. Only the BOX is mirrored
+/// (`direction: rtl`); the inner span puts the text itself back the way it was
+/// written. See that rule in `styles.css` for why it is `rtl` and not a marquee.
 
 const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   active,
@@ -857,7 +830,16 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
             className="aui-reasoning-trigger-subject"
           >
             {" · "}
-            {preview}
+            {active ? (
+              <span
+                data-slot="reasoning-trigger-tail"
+                className="aui-reasoning-trigger-tail"
+              >
+                <span>{preview}</span>
+              </span>
+            ) : (
+              preview
+            )}
           </span>
         )}
       </span>
@@ -865,36 +847,52 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   );
 };
 
-/// A run of adjacent reasoning parts, behind one row that is folded unless the
-/// thought is still arriving.
+/// A run of adjacent reasoning parts, behind ONE ROW -- folded unless the reader
+/// opens it, a thought that is still arriving included.
 ///
-/// `streaming` is what does that, and it is read off the GROUP rather than off the
-/// message: `group.status` runs while any part the group covers is running, so the
-/// panel follows the THOUGHT and not the run -- a turn that thinks, reads and then
-/// thinks again opens for the first thought, folds, and opens again for the next
-/// one. When the last token lands the panel folds itself and the row is left
-/// saying the first line, which is what a thought that never streamed says too. A
-/// restored conversation is never streaming, so history arrives folded.
+/// WHAT IS READ OFF THE GROUP rather than off the message is `running`: the
+/// group's status runs while any part the group covers is running, so the row
+/// follows the THOUGHT and not the run -- a turn that thinks, reads and then
+/// thinks again says its newest window for the first thought, gives back a first
+/// line while the read happens, and starts again for the next one. A restored
+/// conversation is never running, so history arrives as first lines.
 ///
-/// The kit's live window is kept for the streaming case and only for it. Without a
-/// height cap (`max-h-64`, the kit's own) the panel would grow for as long as the
-/// model thinks, and the newest tokens -- the ones the window exists to follow --
-/// would be the furthest down the page. A thought that has stopped gets
-/// `max-h-none` back, so a reader who opens one reads it whole, the same rule a
-/// tool's result gets.
+/// THE OPEN STATE IS HELD HERE and it starts false, which is the whole of "a live
+/// thought does not unfold itself". Upstream keeps that state internally as
+/// `userOpen ?? (streaming || defaultOpen)` -- a rule that opens the panel for a
+/// condition nobody clicked on -- so passing `streaming` alone is what used to
+/// unfold every live thought, twice in a turn that thinks around a tool call.
+/// Holding it is what removes that and keeps everything else upstream's:
+/// `streaming` still decides whether an OPEN panel follows the newest token and
+/// grows a bottom fade, so a reader who clicks during a run gets exactly the live
+/// window they got before.
 ///
-/// Nothing is remembered across that transition: the open state is the kit's
-/// (`userOpen ?? streaming`), so a panel opened by hand stays open and one closed
-/// by hand stays closed.
+/// The kit's live window is therefore kept for the streaming case and only for
+/// it. Without a height cap (`max-h-64`, the kit's own) the open panel would grow
+/// for as long as the model thinks, and the newest tokens -- the ones the window
+/// exists to follow -- would be the furthest down the page. A thought that has
+/// stopped gets `max-h-none` back, so a reader who opens one reads it whole, the
+/// same rule a tool's result gets.
 const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   group,
   children,
 }) => {
   const running = group.status.type === "running";
-  const preview = useAuiState((s) => previewOf(s.message.parts, group.indices));
+  // The tail while it runs, the first line once it stops: the rule and its
+  // reasons are in `lib/reasoning-preview.ts`.
+  const preview = useAuiState((s) =>
+    previewOf(s.message.parts, group.indices, running),
+  );
+  const [open, setOpen] = useState(false);
 
   return (
-    <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
+    <ReasoningRoot
+      variant="ghost"
+      className="mb-0"
+      streaming={running}
+      open={open}
+      onOpenChange={setOpen}
+    >
       <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
         <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>

@@ -44,7 +44,7 @@ import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { injectionSuite } from "./suites/injections";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
-
+import { reasoningRowSuite } from "./suites/reasoning-row";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -53,7 +53,7 @@ import { windowSuite } from "./suites/window";
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
 /// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -199,7 +199,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// mean in flight); the other RENDERS the sentence in both languages. Two readings of one
 /// session used to disagree and the only reply was the run edge's 409 -- found in a browser,
 /// because nothing in this run could see either half.
-const EXPECTED_CASES = 88;
+/// 88 -> 91: the `reasoning-row` suite's three, which are the words on a thinking
+/// row -- the first line of a thought that has stopped, the newest window of one
+/// that is still arriving, and which end of a group each of those reads from.
+/// They are here because the rules MOVED: they used to be three functions inside
+/// `message-parts.tsx`, where this run cannot reach them at all, and the row they
+/// decide is the one thing a reader watches while the model thinks. What a string
+/// cannot show -- that the row never unfolds itself, that the live window cuts at
+/// its left edge, and that the first line comes back when the thought ends -- is
+/// the browser walkthrough's half (`.scratch/thinking-row-tail/`).
+const EXPECTED_CASES = 91;
 
 let total = 0;
 for (const suite of SUITES) {

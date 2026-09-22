@@ -196,3 +196,37 @@
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 
 @custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/* THE REASONING ROW'S LIVE WINDOW -- what a thought looks like while it is
+   still being written. The row is ONE line and the thought is longer than it,
+   so something has to give; at rest the give is at the END (the row's own
+   `truncate`, `…` where it was cut) and while the tokens are arriving it is at
+   the START, which is the whole of this rule.
+
+   THE TRICK IS `direction: rtl`, and it is the only way to say this in CSS. An
+   overflowing box clips at its END side, and CSS has no `text-overflow` for the
+   other one: the ellipsis goes where the overflow is. A right-to-left box has
+   its end on the LEFT, so the newest characters are what stays visible and the
+   older ones run off behind them -- and because an inline-block that FITS is
+   as wide as its content, a short tail is untouched and sits exactly where an
+   ordinary left-to-right one would (measured, not reasoned:
+   `.scratch/thinking-row-tail/`).
+
+   THE INNER SPAN UNDOES THE DIRECTION, which it must: `rtl` on the box is
+   layout, and the thought is the model's own text -- English, Chinese, a code
+   identifier, a slash-separated path. An inline-block is a bidi isolate, so the
+   text inside is laid out the way it was written, and only the BOX is mirrored.
+   There is deliberately no `rtl:` variant here: Tailwind's is `[dir=rtl]` (the
+   locale), which is a different question with the same name. */
+.aui-reasoning-trigger-tail {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: bottom;
+  direction: rtl;
+  }
+.aui-reasoning-trigger-tail > span {
+  display: inline-block;
+  direction: ltr;
+  }
