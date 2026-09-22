@@ -200,13 +200,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// session used to disagree and the only reply was the run edge's 409 -- found in a browser,
 /// because nothing in this run could see either half.
 /// 88 -> 91: the `reasoning-row` suite's three, which are the words on a thinking
-/// row -- the first line of a thought that has stopped, the newest window of one
-/// that is still arriving, and which end of a group each of those reads from.
+/// row -- the first line of a thought that has stopped, the whole of one that is
+/// still arriving, and which end of a group each of those reads from.
 /// They are here because the rules MOVED: they used to be three functions inside
 /// `message-parts.tsx`, where this run cannot reach them at all, and the row they
 /// decide is the one thing a reader watches while the model thinks. What a string
-/// cannot show -- that the row never unfolds itself, that the live window cuts at
-/// its left edge, and that the first line comes back when the thought ends -- is
+/// cannot show -- that the row never unfolds itself, that the live line is dragged
+/// (interpolated, not a jump per token), and that the first line comes back when the
+/// thought ends -- is
 /// the browser walkthrough's half (`.scratch/thinking-row-tail/`).
 const EXPECTED_CASES = 91;
 

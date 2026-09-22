@@ -108,7 +108,14 @@
 // reasoning -- the shell only: `ReasoningRoot` / `ReasoningContent` /
 // `ReasoningText`. The group's own pieces are no longer imported at all: the
 // slot draws nothing.
-import { type ElementType, type FC, type PropsWithChildren, useState } from "react";
+import {
+  type ElementType,
+  type FC,
+  type PropsWithChildren,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertCircleIcon,
   BetweenHorizontalStartIcon,
@@ -794,11 +801,9 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 /// The row's subject is drawn in TWO shapes, and which one is the same question
 /// as whether the thought is still arriving. A thought that has stopped is a plain
 /// string -- the row's own `truncate` cuts it and the `…` is the module's. A live
-/// one goes inside `.aui-reasoning-trigger-tail`, a box that cuts at its LEFT
-/// edge instead: the same text, but the end of it is what stays in view while the
-/// older characters run off behind the left one. Only the BOX is mirrored
-/// (`direction: rtl`); the inner span puts the text itself back the way it was
-/// written. See that rule in `styles.css` for why it is `rtl` and not a marquee.
+/// one is `ReasoningTail` below: the same one line, inside a window that keeps its
+/// END in view, so characters leave at the left edge while the new ones arrive at
+/// the right one.
 
 const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   active,
@@ -830,20 +835,82 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
             className="aui-reasoning-trigger-subject"
           >
             {" · "}
-            {active ? (
-              <span
-                data-slot="reasoning-trigger-tail"
-                className="aui-reasoning-trigger-tail"
-              >
-                <span>{preview}</span>
-              </span>
-            ) : (
-              preview
-            )}
+            {active ? <ReasoningTail text={preview} /> : preview}
           </span>
         )}
       </span>
     </CollapsibleTrigger>
+  );
+};
+
+/// The live window: the newest part of a thought, kept in view and sliding left
+/// as it arrives -- characters leave at the LEFT edge while the new ones arrive at
+/// the right one.
+///
+/// WHY THE MOTION IS A TRANSFORM. The window shows a line's worth of a thought and
+/// the thought is longer, so something has to move; the question is WHAT moves it.
+/// Moving the text by LAYOUT -- which is all a left-edge clip does -- happens
+/// inside one frame: the browser draws position A and then position B, and a reader
+/// sees a snap per token (the first cut of this shipped that way, and a real
+/// session is what showed it). So the line is laid out left-aligned and the WHOLE
+/// of it is dragged left by a transform until its END sits at the window's right
+/// edge, and `styles.css` gives that transform a transition: the same motion,
+/// interpolated a frame at a time. The measure is taken after layout and before
+/// paint (`useLayoutEffect`), so the untranslated line is never drawn.
+///
+/// What is dragged is the ARRIVED text (`lib/reasoning-preview.ts`), not a window
+/// cut to its last N characters: dropping what has scrolled off the left edge would
+/// hand the motion back to layout, one dropped character at a time -- the snap
+///
+/// THE DRAG HAS A SPEED RATHER THAN A DURATION. Interpolating over a fixed time
+/// would leave a lag proportional to how fast the model is writing -- the drag is
+/// always that many milliseconds behind the arrival, so a fast stream shows text
+/// that is a second old, and the newest characters (the ones the window exists
+/// for) would be the ones cut off at the right edge. So each step is given the
+/// time it takes to travel at this many PIXELS PER MILLISECOND, capped at
+/// `TAIL_SETTLE_MAX`: a character's worth of text moves in a few milliseconds, and
+/// a whole sentence that lands at once still slides rather than teleports.
+///
+/// 4px/ms is about 300 characters a second at this size, which is as fast as a
+/// vendor streams on a good day -- so a real session sees the drag keep up (the
+/// newest characters a moment from being in view), and only a burst that outruns
+/// it is allowed to fall behind. Measured at a scripted, bandwidth-throttled
+/// ~250 characters a second: the whole of what is still off the right edge is
+/// under a quarter of the window (`.scratch/thinking-row-tail/`).
+const TAIL_SPEED = 4;
+const TAIL_SETTLE_MAX = 400;
+
+const ReasoningTail: FC<{ text: string }> = ({ text }) => {
+  const windowRef = useRef<HTMLSpanElement>(null);
+  const trackRef = useRef<HTMLSpanElement>(null);
+  /// Where the last step left the line, in the same units as the transform.
+  const draggedRef = useRef(0);
+
+  useLayoutEffect(() => {
+    const window = windowRef.current;
+    const track = trackRef.current;
+    if (window === null || track === null) return;
+    // How much of the line is off the window's right side: pull the line left by
+    // exactly that much, so its END is what the window shows. A line that FITS is
+    // not moved at all, which is what keeps a short thought sitting right after
+    // `思考 · ` instead of jumping to the window's right edge.
+    const hidden =
+      track.getBoundingClientRect().width - window.getBoundingClientRect().width;
+    const target = hidden > 0 ? -hidden : 0;
+    const travelled = Math.abs(target - draggedRef.current);
+    track.style.transitionDuration = `${Math.min(TAIL_SETTLE_MAX, travelled / TAIL_SPEED)}ms`;
+    track.style.transform = `translateX(${target}px)`;
+    draggedRef.current = target;
+  });
+
+  return (
+    <span
+      ref={windowRef}
+      data-slot="reasoning-trigger-tail"
+      className="aui-reasoning-trigger-tail"
+    >
+      <span ref={trackRef}>{text}</span>
+    </span>
   );
 };
 

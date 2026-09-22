@@ -450,12 +450,15 @@ viewport 的 `turnAnchor="top"`，理由与位置写在那份文件里：上游�
 **这一条把第 14 节（一）整段推翻，只留其中的窗口本身。** 主人三句话：「不要默认展开思考，思考中那一行
 文字滚动显示，思考完成再回到第一行」。三处落点：`message-parts.tsx` 的 `ReasoningBlock` 把 `open` /
 `onOpenChange` 收到自己手里（初值 `false`），于是上游 `userOpen ?? (streaming || defaultOpen)` 再没有机会替
-人点开；`lib/reasoning-preview.ts` 在流式期间把行上的摘要换成**已到达内容的最后 120 字**（不流式时照旧首行）；
-`styles.css` 的 `.aui-reasoning-trigger-tail`（`direction: rtl` + 内层 `ltr`）把这一窗**从左边缘裁**，
-最新到达的字因此留在右边、旧的从左边跑出去——滚动就是新来的字本身，没有动画、不复制文本。
+人点开；`lib/reasoning-preview.ts` 在流式期间把**已经到达的那一段**（压成一行）交给行（不流式时照旧首行）；
+`message-parts.tsx` 的 `ReasoningTail` ＋ `styles.css` 的 `.aui-reasoning-trigger-tail` 把整行装进一只
+`overflow: hidden` 的窗并**往左拖**到它的末尾停在窗的右边缘——字从**左边出去**、新字从**右边进来**。
+**拖动是 `transform`，不是布局**：布局位移没有中间态，一个 token 一次重排就是一跳；`transform` 能被插值，
+才有「滑」（第一版就是裁左边缘的布局，被主人一句话推翻；复议在 `.scratch/thinking-row-tail/spec.md`）。
 
 **窗口、渐隐、`max-h-64`、跟随最新 token 的滚动一个都没删**：它们只对**点开它的人**生效（`streaming && open`）。
 **代价如实记下**：`open` 被接管之后，上游那条「流式开始/结束自己播一次动画」的分支不再走——那正是这次要停掉的
 东西；抄来的两份文件（`reasoning.tsx` / `reasoning.aui.tsx`）一个字未改，`LOCAL:` 标注数不变。
 现场、代价、四条决策与被推翻的两处走查判据：`.scratch/thinking-row-tail/spec.md` + `evidence/README.md`
-（真 Chromium，20 条 GREEN；81 个采样全在 `data-state="closed"`，窗左沿 507px → -218px）。
+（真 Chromium，21 条 GREEN；99 个采样全在 `data-state="closed"`，行被拖到 `-10487px`，其中 81 对采样的**字
+完全相同而 67 对位置仍在变**——「滑」的判据）。

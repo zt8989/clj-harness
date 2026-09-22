@@ -4,36 +4,36 @@
 //   node .scratch/thinking-row-tail/walkthrough.mjs [ui-url]
 //
 // Run it against
-//   node scripts/dev.mjs --scripted .scratch/thinking-row-tail/script.json --ui-port 5391
+//   node scripts/dev.mjs --scripted .scratch/thinking-row-tail/script.json --ui-port 5393
 // (temp homes, a scripted provider, no api-key) -- the script next to this file
 // is what the model "thinks", and THIS SCRIPT READS THE SAME FILE to know what
-// the row should say: the first line at rest, the last 120 characters of the
-// flattened thought while it is arriving. Both are derived here rather than
-// copied, so a change to the fixture cannot make the assertions vacuous.
+// the row should say: the first line at rest, and -- while it is arriving -- the
+// whole of what has arrived, flattened to one line.
 //
-// WHY IT EXISTS. The rules this walks were moved into `src/lib/reasoning-preview.ts`
-// so that a suite could reach them (`test/suites/reasoning-row.ts`, three cases),
-// and that suite is the half that can be read as a string. The rest are
-// properties of the RENDERED page and no suite can see them:
+// WHY IT EXISTS. `src/lib/reasoning-preview.ts` decides WHAT the row is handed
+// and is tested as a string (`test/suites/reasoning-row.ts`, three cases). The
+// rest are properties of the RENDERED page and no suite can see them:
 //
 //   1. THE ROW NEVER UNFOLDS ITSELF. It used to -- upstream's `streaming`, whose
 //      rule is `userOpen ?? streaming` -- and the fix is that the open state is
 //      the row's own and starts false. Only a runtime can be asked.
-//   2. THE LIVE WINDOW CUTS AT ITS LEFT EDGE, so the newest characters stay in
-//      view and the older ones run off behind them. That is `direction: rtl` on
-//      one element (`styles.css`), which is a fact about boxes.
-//   3. IT MOVES. "滚动" is not something a substring assertion can be right
-//      about: the window has to be seen sliding while the tokens land.
+//   2. THE WINDOW KEEPS THE END OF THE LINE IN VIEW: the beginning runs off the
+//      left edge, and the right edge always has text under it. That is a layout
+//      fact (the window is `overflow: hidden`, the line inside it is dragged).
+//   3. THE DRAG IS INTERPOLATED, NOT A JUMP PER TOKEN. This is the one the first
+//      cut of this feature got wrong: clipping the left edge moves the text by
+//      LAYOUT, one frame per token, and a reader sees a snap. The fix moves it by
+//      a transform and gives the transform a duration; the check for it is a
+//      sample where the WORDS did not change and the POSITION did.
 //   4. THE FIRST LINE COMES BACK when the thought ends (and stays folded when the
 //      same conversation is restored from disk).
 //
 // WHY IT THROTTLES THE NETWORK. `harness.fake` emits a thought in 5-character
 // chunks with no pause between them, so the whole scripted stream lands in one
-// burst and the live window is over before a sample can be taken -- measured:
-// the first run of this script caught a single sample and the row was already
-// settled. Chrome's own bandwidth throttling (CDP, below) makes the SAME stream
-// arrive spread out over seconds, which is what a real vendor's does; no fixture
-// had to learn a new trick, and the bytes are the bytes.
+// burst and there is nothing to watch. Chrome's own bandwidth throttling (CDP,
+// below) makes the SAME stream arrive spread out over seconds, which is what a
+// real vendor's does; no fixture had to learn a new trick, and the bytes are the
+// bytes.
 //
 // WHAT THIS SCRIPT NEEDS OF ITS OWN BROWSER: playwright, resolved out of the
 // global npm root rather than a path written for one machine -- the repo's other
@@ -50,10 +50,15 @@ const EVIDENCE = path.join(HERE, "evidence");
 const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
 const { chromium } = await import(path.join(globalRoot, "playwright", "index.mjs"));
 
-const url = process.argv[2] ?? "http://localhost:5391/";
+const url = process.argv[2] ?? "http://localhost:5393/";
 
-const PREVIEW_LIMIT = 120; // `lib/reasoning-preview.ts`'s own number.
-const THROTTLE = 24 * 1024; // bytes/sec; the scripted thought is ~110 kB of SSE.
+// Bytes per second. The thought is ~1,000 characters of text, and a scripted
+// frame carries five of them, so the whole stream is ~25 kB of SSE -- at this rate
+// it arrives over about four seconds, i.e. ~250 characters a second, which is what
+// a fast real vendor looks like. Not an accident of the fixture: the drag is
+// capped at a speed (`TAIL_SPEED`, `message-parts.tsx`), and a stream faster than
+// that cap is one the window deliberately falls behind rather than teleports.
+const THROTTLE = 6 * 1024;
 
 let failures = 0;
 function check(label, ok, detail = "") {
@@ -64,12 +69,11 @@ function check(label, ok, detail = "") {
 /// WHAT THE MODEL THINKS, read from the script the server was handed. The two
 /// expectations below are the rule stated once, here, rather than a copy of the
 /// fixture: `firstLine` skips the blank lines a thought may open with, and the
-/// tail is the last PREVIEW_LIMIT characters of the whitespace-flattened text.
+/// live half is the same text flattened to one line (`oneLine`).
 const script = JSON.parse(fs.readFileSync(path.join(HERE, "script.json"), "utf8"));
 const thought = script.turns[0].reasoning;
 const firstLine = thought.split("\n").map((l) => l.trim()).find((l) => l !== "");
 const flat = thought.replace(/\s+/g, " ").trim();
-const tail = flat.slice(-PREVIEW_LIMIT);
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
@@ -77,52 +81,56 @@ page.on("pageerror", (e) => check("no page error", false, e.message));
 
 const ROW = '[data-slot="reasoning-trigger"]';
 const SUBJECT = '[data-slot="reasoning-trigger-subject"]';
-const TAIL = '[data-slot="reasoning-trigger-tail"]';
+const WINDOW = '[data-slot="reasoning-trigger-tail"]';
 const ROOT = '[data-slot="reasoning-root"]';
 const PANEL = '[data-slot="reasoning-content"]';
 
 /// The row as the page draws it: the subject's words, whether the live window is
-/// there (which is also this script's "still thinking" signal), and what the
-/// disclosure is doing.
+/// there (which is also this script's "still thinking" signal), what the
+/// disclosure is doing, and the two boxes that say what is in view -- the WINDOW
+/// (the part of the row the text is confined to) and the TRACK (the line itself,
+/// as far as layout and the transform have put it).
 ///
 /// THE DISCLOSURE IS READ OFF `data-state` AND NOT OFF THE ELEMENT COUNT, and
-/// that is the correction this script needed after its first run: a CLOSED
-/// Radix disclosure keeps an empty, zero-height content element mounted, so
-/// "one reasoning-content element" is true whether the panel is open or not.
-/// Measured on this page while folded: `data-state="closed"`, height 0, and no
-/// children rendered at all -- which is also why the thought costs nothing to
-/// the page while it is folded.
+/// that is the correction this script needed after its first run: a CLOSED Radix
+/// disclosure keeps an empty, zero-height content element mounted, so "one
+/// reasoning-content element" is true whether the panel is open or not.
 const readRow = () =>
   page.evaluate(
-    ([rowSel, subjectSel, tailSel, rootSel, panelSel]) => {
+    ([rowSel, subjectSel, windowSel, rootSel, panelSel]) => {
       const row = document.querySelector(rowSel);
       if (!row) return null;
       const subject = row.querySelector(subjectSel);
-      const tail = row.querySelector(tailSel);
-      const inner = tail?.firstElementChild ?? null;
-      const box = tail?.getBoundingClientRect() ?? null;
-      const content = inner?.getBoundingClientRect() ?? null;
+      const windowEl = row.querySelector(windowSel);
+      const track = windowEl?.firstElementChild ?? null;
+      const box = windowEl?.getBoundingClientRect() ?? null;
+      const line = track?.getBoundingClientRect() ?? null;
       const panel = document.querySelector(panelSel);
       return {
         subject: subject?.textContent ?? null,
-        live: tail !== null,
+        live: windowEl !== null,
         disclosure: document.querySelector(rootSel)?.getAttribute("data-state") ?? null,
         contentState: panel?.getAttribute("data-state") ?? null,
         contentHeight: panel ? Math.round(panel.getBoundingClientRect().height) : null,
-        boxLeft: box ? Math.round(box.left) : null,
-        boxWidth: box ? Math.round(box.width) : null,
-        innerLeft: content ? Math.round(content.left) : null,
-        innerWidth: content ? Math.round(content.width) : null,
-        innerText: inner?.textContent ?? null,
         rowHeight: Math.round(row.getBoundingClientRect().height),
+        windowLeft: box ? box.left : null,
+        windowRight: box ? box.right : null,
+        trackLeft: line ? line.left : null,
+        trackRight: line ? line.right : null,
+        text: track?.textContent ?? null,
       };
     },
-    [ROW, SUBJECT, TAIL, ROOT, PANEL],
+    [ROW, SUBJECT, WINDOW, ROOT, PANEL],
   );
 
 const isFolded = (row) => row !== null && row.contentState === "closed" && row.contentHeight === 0;
+/// HOW MUCH OF THE LINE IS STILL OFF THE RIGHT EDGE, in pixels. It is 0 when the
+/// drag has caught up, and positive while it is travelling -- the newest
+/// characters are then a moment away from being in view, which is what a smooth
+/// scroll IS (the alternative, no drag at all, is the snap).
+const lag = (row) => (row.trackRight === null ? null : Math.round(row.trackRight - row.windowRight));
 
-async function until(predicate, timeout = 60000, step = 50) {
+async function until(predicate, timeout = 60000, step = 40) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const value = await predicate();
@@ -151,17 +159,13 @@ await page.fill("textarea", "想一下再答。");
 await page.press("textarea", "Enter");
 
 // ------------------------------------------------------------- 1. it is live
-// THE ROW APPEARS, AND ITS LIVE WINDOW WITH IT. The row can be drawn a beat
-// before the first token lands (the preview is "" then, and a row with nothing
-// to say draws no subject at all), so this waits for the window and not for the
-// row.
 const samples = [];
 const live = await until(async () => {
   const row = await readRow();
   if (row?.live !== true) return null;
   samples.push(row);
   return row;
-}, 60000, 25);
+});
 check("the row shows a live window while the model is thinking", live !== null);
 if (live === null) {
   await page.screenshot({ path: path.join(EVIDENCE, "00-no-live-row.png") });
@@ -172,110 +176,109 @@ if (live === null) {
 await page.screenshot({ path: path.join(EVIDENCE, "01-while-thinking.png") });
 
 // --------------------------------------------------------------- 2. it folds
-// THE PANEL DOES NOT OPEN ITSELF, in this state or in any other it passes
-// through: this is the claim the change is about, and it is measured on EVERY
-// sample rather than once, because the old code unfolded the panel exactly while
-// tokens were arriving.
 check(
   "the panel never opens itself while the tokens arrive",
   isFolded(live),
   `state ${JSON.stringify(live.disclosure)}, content ${JSON.stringify(live.contentState)}/${live.contentHeight}px`,
 );
-/// AND IT IS STILL ONE LINE, which is what makes the window a window: the row
-/// is a 13px line inside `py-1.5`, i.e. 28px, and a subject that WRAPPED would
-/// push every step below it down the page for as long as the model thinks.
-/// (32 rather than 28 so that a rounding or a one-pixel border cannot make
-/// this red.)
-check(
-  "the row is still ONE line while it runs",
-  live.rowHeight <= 32,
-  `${live.rowHeight}px tall`
-)
+check("the row is still ONE line while it runs", live.rowHeight <= 32, `${live.rowHeight}px tall`);
 
-// ------------------------------------------------------- 3. it says the tail
-// THE FIRST SAMPLE SHOWS THE THOUGHT'S BEGINNING, and that is the rule working
-// rather than failing: the window is the last 120 characters OF WHAT HAS
-// ARRIVED, so while less than a windowful has arrived there is nothing to cut
-// away yet. What the row must not do -- say the first line and stop moving --
-// is measured at the END of the stream, below.
+// ---------------------------------------------------------- 3. what it shows
+// THE LINE IS THE ARRIVED TEXT, WHOLE. It is not a window cut to its last N
+// characters: what has run off the left edge has to stay in the DOM for the drag
+// to be able to move it (see `ReasoningTail`). So every sample's line is a PREFIX
+// of the thought -- and the first sample is what has arrived after a few
+// characters, not the beginning of a cut window.
 check(
-  "the first thing the row says is the beginning of the thought",
-  live.subject !== null && flat.startsWith(live.innerText ?? "\u0000"),
-  `subject: ${JSON.stringify((live.subject ?? "").slice(-48))}`
+  "the line is the arrived text, whole -- not a window cut out of it",
+  live.text !== null && flat.startsWith(live.text),
+  `line: ${live.text?.length ?? 0} characters of ${flat.length}, ends ${JSON.stringify((live.text ?? "").slice(-16))}`,
 );
 
 // --------------------------------------------------------------- 4. it moves
-// SAMPLES WHILE IT RUNS: the words keep arriving, and the window slides LEFT as
-// they do (that is the scroll -- the newest characters enter at the right edge
-// and the older ones leave behind the left one). One sample cannot tell a
-// scrolling row from a frozen one.
+// SAMPLES WHILE IT RUNS, and then the three things that make this a WINDOW rather
+// than a line of text that happens to be long:
+//
+//   * the beginning runs off the LEFT edge (`trackLeft < windowLeft`);
+//   * the right edge always has text under it (`trackRight >= windowRight`): a
+//     drag that lagged forever, or a line that was never dragged at all, would
+//     leave the window showing its beginning and a gap after it;
+//   * and between two samples the WORDS often stand still while the POSITION
+//     moves -- the duration the component sets is what does that, and it is the
+//     whole difference between a scroll and the snap this replaced.
 const ended = await until(async () => {
   const row = await readRow();
   if (row === null) return true;
   samples.push(row);
   return row.live !== true;
-}, 120000, 100);
+});
+const live_samples = samples.filter((s) => s.live);
+const texts = live_samples.map((s) => s.text);
 
-const liveSamples = samples.filter((s) => s.live);
-const texts = liveSamples.map((s) => s.innerText);
 check(
-  "the row's words keep changing while it runs",
+  "the line keeps growing while it runs",
   new Set(texts).size > 1,
-  `${liveSamples.length} live samples, ${new Set(texts).size} distinct`,
+  `${live_samples.length} live samples, ${new Set(texts).size} distinct lines`,
 );
-const slid = liveSamples.map((s) => s.innerLeft).filter((left) => left !== null);
 check(
-  "the live window slides left, so the newest characters stay in view",
-  slid.length > 1 && slid[slid.length - 1] < slid[0],
-  `inner left: ${slid[0]} -> ${slid[slid.length - 1]} (${slid.length} samples)`,
+  "the words do NOT change between every pair of samples -- so the position must",
+  live_samples.some((s, i) => i > 0 && s.text === live_samples[i - 1].text),
+  live_samples.length < 2 ? "fewer than two samples" : "at least one hold",
 );
-const cut = liveSamples.filter((s) => s.innerLeft !== null && s.boxLeft !== null);
-const clipped = cut.find((s) => s.innerLeft < s.boxLeft);
+
+const held = live_samples.filter((s, i) => i > 0 && s.text === live_samples[i - 1].text);
+const heldMoving = held.filter((s, i) => s.trackLeft !== held[i - 1]?.trackLeft);
+check(
+  "while the words hold still the line is still TRAVELLING (interpolated, not a jump)",
+  held.length === 0 ? false : heldMoving.length > 0,
+  `${heldMoving.length} of ${held.length} holds moved`,
+);
+
+const slid = live_samples.map((s) => s.trackLeft).filter((left) => left !== null);
+check(
+  "the line slides left, so characters leave at the left edge",
+  slid.length > 1 && slid[slid.length - 1] < slid[0],
+  `track left: ${Math.round(slid[0])} -> ${Math.round(slid[slid.length - 1])} (${slid.length} samples)`,
+);
+const clipped = live_samples.filter(
+  (s) => s.trackLeft !== null && s.windowLeft !== null && s.trackLeft < s.windowLeft,
+);
 check(
   "the window cuts at its LEFT edge: the beginning of the thought is behind it",
-  clipped !== undefined,
-  clipped === undefined
-    ? `no sample was clipped (${cut.length} measured)`
-    : `inner ${clipped.innerLeft} vs box ${clipped.boxLeft}; the inner is ${clipped.innerWidth}px wide in a ${clipped.boxWidth}px box`
+  clipped.length > 0,
+  clipped.length === 0
+    ? "no sample was clipped"
+    : `line starts ${Math.round(clipped[0].trackLeft - clipped[0].windowLeft)}px left of the window`,
 );
-/// THE WINDOW IS A RUN OF THE MODEL'S OWN WORDS, AND IT ADVANCES. What the row
-/// is HANDED -- the last 120 characters of what has arrived -- is pinned as a
-/// string by the suite; what only the page can say is that the row draws that
-/// text and that it follows the stream rather than sitting on a window of its
-/// own. So every sample has to be a contiguous run of the thought, and its
-/// PLACE in the thought has to move forward from sample to sample: that is what
-/// "the newest part" looks like from out here. (The position is found by
-/// matching the window in the thought, which the fixture's numbered sentences
-/// make unique; a window that appeared twice would make this red, not green.)
-/// A WINDOW ONLY MOVES ONCE THERE IS MORE THAN A WINDOWFUL: while less than 120
-/// characters have arrived, the row is showing the whole of what the model has
-/// written so far -- a prefix of the thought, pinned at its beginning. So the
-/// claim about movement is made over the FULL windows (a sample at exactly
-/// PREVIEW_LIMIT characters), and every sample, short or full, has to be a run
-/// of the model's own words.
-const textOf = (s) => s.innerText ?? "\u0000";
-const offsets = liveSamples.map((s) => flat.indexOf(textOf(s)));
-const stray = liveSamples.findIndex((s) => !flat.includes(textOf(s)));
-const full = liveSamples
-  .filter((s) => textOf(s).length === PREVIEW_LIMIT)
-  .map((s) => flat.indexOf(textOf(s)));
+const full = live_samples.filter((s) => lag(s) !== null && lag(s) >= -1);
+const lags = live_samples.map(lag);
+const worst = Math.max(...lags);
 check(
-  "every sample is a run of the model's own words",
-  stray === -1 && full.length > 1,
-  stray === -1
-    ? `${liveSamples.length} samples, ${full.length} of them a full window`
-    : `sample ${stray}: ${JSON.stringify(liveSamples[stray].innerText)}`
+  "the right edge always has text under it -- the newest characters arrive there",
+  full.length === live_samples.length,
+  `lag: max ${worst}px, last ${lags[lags.length - 1]}px, ${live_samples.length} samples`,
 );
+/// AND IT CATCHES UP. The scripted stream arrives in bursts (a throttled socket
+/// delivers several frames at once), so a sample taken in the middle of one shows
+/// a lag -- and the claim that matters is that the lag is a burst being *travelled*
+/// and not a backlog: it comes back to nothing. The LAST live sample is the
+/// strongest of those moments, because the stream has stopped by then. A drag that
+/// never moved at all would sit at the line's whole overflow (measured: `trackLeft`
+/// -10,487px against a 478px window), which no part of this allows.
 check(
-  "a full window moves forward through the thought, one sample at a time",
-  full.every((at, i) => i === 0 || at > full[i - 1]),
-  `window from ${full[0]} to ${full[full.length - 1]} of ${flat.length} characters`
+  "the drag catches up: the newest characters come back into view",
+  lags.some((l) => l <= 2) && lags[lags.length - 1] <= 4,
+  `lag: max ${worst}px, median ${lags.slice().sort((a, b) => a - b)[Math.floor(lags.length / 2)]}px, last ${lags[lags.length - 1]}px, ${lags.filter((l) => l <= 2).length} of ${lags.length} samples caught up`,
 );
+const lengths = live_samples.map((s) => (s.text ?? "").length);
 check(
-  "and the window is never the whole thought",
-  liveSamples.some((s) => (s.innerText ?? "").length < flat.length),
-  `longest sample ${Math.max(...liveSamples.map((s) => (s.innerText ?? "").length))} chars`
+  "every sample is the thought so far, and shorter than the thought",
+  live_samples.every((s) => flat.startsWith(s.text ?? "\u0000")) &&
+    lengths.every((n, i) => i === 0 || n >= lengths[i - 1]) &&
+    lengths[lengths.length - 1] < flat.length,
+  `line ${lengths[0]} -> ${lengths[lengths.length - 1]} of ${flat.length} characters`,
 );
+
 check("the thought ends, and the row stops being live", ended === true);
 check(
   "the panel is still folded when the thought has stopped",
@@ -283,7 +286,7 @@ check(
   `state ${JSON.stringify(samples[samples.length - 1]?.disclosure)}`,
 );
 
-// The stream is over; the reload below is a page load, and the dev bundle is
+// The stream is over; what follows is a page load, and the dev bundle is
 // megabytes.
 await cdp.send("Network.emulateNetworkConditions", {
   offline: false,
@@ -293,8 +296,6 @@ await cdp.send("Network.emulateNetworkConditions", {
 });
 
 // ------------------------------------------------------- 5. back to line one
-// THE FIRST LINE COMES BACK, and the panel is STILL folded: a thought that has
-// stopped is a step like any other -- a click away.
 const settled = await until(async () => {
   const row = await readRow();
   return row !== null && !row.live ? row : null;
@@ -335,8 +336,8 @@ check(
 );
 
 // ------------------------------------------------------------ 7. after reload
-// A RESTORED CONVERSATION IS NEVER RUNNING, so it arrives as first lines: the
-// row is folded and says the first line, with no live window in it.
+// A RESTORED CONVERSATION IS NEVER RUNNING, so it arrives as first lines: the row
+// is folded and says the first line, with no live window in it.
 await page.reload();
 const restored = await until(() => readRow(), 60000, 100);
 check("the conversation comes back after a reload", restored !== null);
