@@ -233,6 +233,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsPanel } from "@/components/settings-panel";
 import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/components/sidebar-toggle";
+import { newId } from "@/lib/id";
 import { REVEAL_ON_HOVER } from "@/lib/reveal";
 import { foldRows } from "@/lib/sidebar-rows";
 import { countAsk, nextAsk, type ListedRow } from "@/lib/sidebar-refetch";
@@ -596,7 +597,7 @@ export const Sidebar: FC<SidebarProps> = ({
           // is now genuinely empty: nothing is written to the store until somebody sends
           // the first message, so there is no row for the sidebar to draw and no request
           // to wait for. The pending directory is handed over instead; see `onShowFresh`.
-          const id = crypto.randomUUID();
+          const id = newId();
           setPinned(project === null ? null : project.path);
           onShowFresh(id, project === null ? null : project.path);
         }
@@ -667,7 +668,7 @@ export const Sidebar: FC<SidebarProps> = ({
           // A BRAND-NEW TASK, and -- like every other "new session" -- it exists only on
           // this page until somebody sends to it (see `newTask`). There is no project
           // left to hand over, so nothing is pending: the first send makes it a task.
-          const id = crypto.randomUUID();
+          const id = newId();
           setPinned(null);
           onShowFresh(id, null);
         }
@@ -794,7 +795,7 @@ export const Sidebar: FC<SidebarProps> = ({
     // race anything (no request, no row). Starting a session used to be refused because
     // it would abandon the one on screen; a new session gets its own host now, and
     // whatever is running keeps running in its own.
-    const id = crypto.randomUUID();
+    const id = newId();
     // Sentences that belonged to the OLD session go, so a refusal from an earlier click
     // does not outlive the click that follows it (a minted id cannot fail itself).
     setRowError(null);
@@ -816,7 +817,7 @@ export const Sidebar: FC<SidebarProps> = ({
   /// CAN fail is the bind at send time -- and that failure is the page's to report, before
   /// the run goes out and on the row the store then has (`app.tsx`'s `registerPending`).
   const newSession = (project: ProjectSummary): void => {
-    const id = crypto.randomUUID();
+    const id = newId();
     setProjectError(null);
     setRowError(null);
     onShowFresh(id, project.path);

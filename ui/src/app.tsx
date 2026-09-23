@@ -92,6 +92,7 @@ import { SubagentViewContext, type SubagentView } from "@/components/subagent-vi
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
+import { newId } from "@/lib/id";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -185,7 +186,7 @@ function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
       index === last && reads === "running"
         ? ({ type: "running" } as const)
         : (message.status ?? { type: "complete", reason: "unknown" });
-    return fromThreadMessageLike(message, message.id ?? crypto.randomUUID(), status);
+    return fromThreadMessageLike(message, message.id ?? newId(), status);
   });
 }
 
@@ -1367,7 +1368,7 @@ export function App() {
   // giving up its own name to avoid one POST per session -- and it would put the mint
   // back at page load, which is the write this feature removed from the click.
   const [roster, setRoster] = useState<Roster>(() => {
-    const id = crypto.randomUUID();
+    const id = newId();
     // THE FIRST SESSION IS MINTED HERE TOO, so it is registered (as a task: nothing is
     // pending but `null`) and live-titled like any other. A first visit sends its first
     // message into exactly this id, and the row that appears a moment later is the one
