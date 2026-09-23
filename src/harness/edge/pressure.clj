@@ -67,16 +67,24 @@
 
 (defn estimate-message
   "One provider message -> an estimated token count. CONTENT is a string or a vector of
-  blocks; either way it is measured the way the record spells it, so a Chinese character
-  counts as one character -- and is therefore underpriced. That is the estimator's known
-  and admitted bias, not a bug to be fixed here."
+  blocks; a Chinese character counts as one character either way -- and is therefore
+  underpriced, the estimator's known and admitted bias, not a bug to be fixed here. The
+  framing overhead is per CONTENT BLOCK, which is why a message of k blocks costs more
+  than the same text in one."
   [message]
   (let [content (:content message)
-        text    (cond (string? content) content
-                      (nil? content)    ""
-                      :else             (json/write-str content :escape-unicode false))]
-    (+ (long (Math/ceil (/ (double (count text)) (double chars-per-token))))
-       block-overhead
+        blocks  (cond (string? content)     [content]
+                      (nil? content)        []
+                      (sequential? content) (mapv #(if (string? %)
+                                                     %
+                                                     (json/write-str % :escape-unicode false))
+                                                  content)
+                      :else                 [(json/write-str content :escape-unicode false)])]
+    (+ (reduce + 0 (map (fn [block]
+                          (long (Math/ceil (/ (double (count block))
+                                            (double chars-per-token)))))
+                        blocks))
+       (* block-overhead (max 1 (count blocks)))
        role-overhead)))
 
 (defn estimate-messages [messages]
@@ -147,18 +155,31 @@
   [start-payload]
   (select-keys start-payload [:model :base-url :reasoning-effort]))
 
+(defn- injected-rows
+  "The rows a run put in front of the model that are NOT conversation entries: the skill
+  bodies, the job endings and the run's own context, which the pre-LLM step derives
+  afresh each run and none of which carries an id (`harness.edge.replay/entries` drops
+  them for exactly that reason). They are still in the array a call was handed -- so the
+  record's own fold has to add the LAST run's back, and the same rows are in the anchor's
+  price, or the injection surface would sit in the delta on every run and never in the
+  baseline."
+  [run]
+  (vec (remove #(or (= "system" (:role %)) (some? (:id %))) (:submitted run))))
+
 (defn- messages-in
-  "RECORDS -> the messages the model was handed, AS FAR AS THE RECORD DESCRIBES THEM:
-  the conversation's own entries (deduped and card-stripped the way a run hands them
-  over) with the newest system message in front.
+  "RECORDS -> the messages the model was handed, AS FAR AS THE RECORD DESCRIBES THEM: the
+  conversation's own entries (deduped and card-stripped the way a run hands them over),
+  the newest system message in front, and the last run's own injections (which carry no id
+  and so are not entries).
 
   THE SYSTEM MESSAGE IS ADDED BY HAND because it is not a conversation entry -- the
   client never holds the prompt (`harness.edge.replay/entries`) -- and it is the single
   largest fixed cost in every request."
   [records]
   (let [conversation (sessions/model-view (mapv :message (replay/entries records)))
-        system       (some-> (system-row records) replay/payload)]
-    (if system (into [system] conversation) conversation)))
+        system       (some-> (system-row records) replay/payload)
+        injections   (injected-rows (last (trajectory/run-segments records)))]
+    (into [] (concat (when system [system]) conversation injections))))
 
 (defn- identity-index
   "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
@@ -173,6 +194,7 @@
   (if-some [i (identity-index records x)]
     (subvec records 0 (inc i))
     records))
+
 
 ;; -------------------------------------------------------------------- the answer
 
@@ -228,8 +250,31 @@
 (defn log-pressure
   "A log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same
   answer. The file supplies the anchor (the previous call is long on disk); MESSAGES
-  supplies the surface, because the lines for the run in flight are still with the
-  writer. A file that does not exist yet is a session with no calls behind it: the answer
-  is the estimate over MESSAGES and nothing else."
-  [f messages]
-  (records->pressure (if (.exists f) (stats/read-records f) []) messages))
+  supplies the surface, because the lines for the run in flight are still with the writer.
+  WINDOW, when given, is the window THIS run will go out under -- the call that declares
+  it has not happened yet, so the record cannot supply it and the edge hands it in.
+
+  A file that does not exist yet (and a window nobody declared) are both normal: the answer
+  is then the estimate over MESSAGES, with no window-derived numbers."
+  ([f messages] (log-pressure f messages nil))
+  ([f messages window]
+   ;; A REPORT-ONLY METER MUST NEVER KILL A RUN. Reading the record can throw -- the file
+   ;; was moved out from under us by a rebind, an old-contract line the strict reader
+   ;; refuses, a permissions change -- and this call sits on the run's own path, inside the
+   ;; try that turns any escape into RUN_ERROR. So a failed read degrades to the estimate.
+   ;;
+   ;; AND THE SNAPSHOT RACES THE WRITER: the previous call's model/end may still be queued
+   ;; (the record writer appends off-thread), in which case there is simply no anchor yet
+   ;; and `:baseline` says "estimated". That is the honest answer for a reading taken while
+   ;; the record is still catching up.
+   (let [answer (try
+                 (records->pressure (if (.exists f) (stats/read-records f) []) messages)
+                 (catch Throwable _ (records->pressure [] messages)))]
+     (if (and (number? window) (pos? window))
+       (assoc answer
+              :windowTokens    window
+              :percent         (long (Math/round (* 100.0 (/ (double (:pressureTokens answer))
+                                                       (double window)))))
+              :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
+              :retainTokens    (long (Math/floor (* (double window) retain-ratio))))
+       answer))))

@@ -120,6 +120,24 @@
            (:pressureTokens grown))
         "the assembled request's new piece is the only thing estimated")))
 
+(deftest a-runs-own-injections-are-priced-on-both-sides
+  ;; The pre-LLM step derives blocks -- a skill body, a job's ending, the run's own
+  ;; context -- as user messages with NO id, so `harness.edge.replay/entries` drops them.
+  ;; They are still in the array the call was handed, so the anchor and the current surface
+  ;; must BOTH include them, or the injection surface is counted as delta on every run.
+  (let [injection (assoc (record 2 "message" {:role "user" :content (apply str (repeat 400 "i"))})
+                         :source "injection")
+        records   [(entry 0 "u1" "hi")
+                   (sys 1 "s")
+                   injection
+                   (start 10 1000 nil)
+                   (end 20 (usage 5000 5))
+                   finished]
+        answer    (pressure-of records)]
+    (is (= "usage" (:baseline answer)))
+    (is (= 5000 (:pressureTokens answer))
+        "the injection is in the anchor's price too, so it is not re-counted as delta")))
+
 ;; --------------------------------------------------------------- the fallbacks
 
 (deftest a-window-nobody-declared-leaves-the-derived-numbers-out
@@ -259,7 +277,7 @@
   [port thread-id]
   (loop [tries 0]
     (let [answer (get-json port (str "/api/threads/" thread-id "/stats"))]
-      (if (or (contains? (get-in answer [1 :pressure]) :windowTokens) (>= tries 120))
+      (if (or (= "usage" (get-in answer [1 :pressure :baseline])) (>= tries 120))
         answer
         (do (Thread/sleep 25) (recur (inc tries)))))))
 
@@ -281,6 +299,12 @@
           (is (= 20480 (:retainTokens p)) "sixteen hundredths of it")
           (is (>= (:pressureTokens p) 50000)
               "the vendor's 50000 anchors it, plus whatever the run added since")
-          (is (some #(= "context/pressure" (replay/kind %))
-                    (stats/read-records (replay/locate (home/projects-dir) thread-id)))
-              "every run leaves a context/pressure line before its first call"))))))
+          (let [line (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
+                          (filter #(= "context/pressure" (replay/kind %)))
+                          last
+                          replay/payload)]
+            (is (some? line) "every run leaves a context/pressure line before its first call")
+            (is (= 89600 (:thresholdTokens line)) "carrying the threshold it decided on")
+            (is (= 20480 (:retainTokens line)) "and the retain budget")
+            (is (= "estimated" (:baseline line))
+                "written BEFORE the call, so there is no vendor sample behind it yet")))))))

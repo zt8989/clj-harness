@@ -1353,7 +1353,8 @@
               ;; lines are still with the writer; the anchor comes from the file, where the
               ;; previous call has long landed.
               (log! thread-id run-id "context/pressure"
-                    (pressure/log-pressure (log-file-for thread-id) messages))
+                    (pressure/log-pressure (log-file-for thread-id) messages
+                                          (:context-window provider)))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
               ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
