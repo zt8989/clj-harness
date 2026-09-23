@@ -162,7 +162,7 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 
 **工具名的写法**：`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` /
 `grep` / `bash` / `job` / `job_kill` / `job_output` / `eval` / `glob` / `todo_write` /
-`web_fetch` / `web_search` —— 就是这些名字，
+`web_fetch` / `web_search` / `ask` —— 就是这些名字，
 不给它们起别名，也不把 `edit` 叫成"旧编辑"、把 `replace` 叫成"锚点编辑"。
 一律小写、多词用下划线（`undo_last_replace` 就是那个先例）：不写 `camelCase`、不写 `PascalCase`
 ——别人家的清单里写 `WebFetch`、`TodoWrite`，那是别人家的写法。

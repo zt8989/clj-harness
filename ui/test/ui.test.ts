@@ -27,6 +27,7 @@ import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
 import { contextSuite } from "./suites/context";
 import { elicitationSuite } from "./suites/elicitation";
+import { elicitationCardSuite } from "./suites/elicitation-card";
 import { framesSuite } from "./suites/frames";
 import { i18nSuite } from "./suites/i18n";
 import { skillsSuite } from "./suites/skills";
@@ -55,7 +56,12 @@ import { subagentViewSuite } from "./suites/subagent-view";
 /// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
+/// list is a concatenation rather than a choice. `ask` is the third side: it added
+/// `elicitationCardSuite` beside the `elicitation` suite it belongs to, and
+/// `session-after-refresh` is the fourth (`runningSuite`, after `restoreSuite`).
+/// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
+/// `subagentsSuite` and `subagentViewSuite` -- each side only ever appended.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -282,7 +288,22 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the column sits in the flex row -- and the DRAWING (the door's hover, the panel's
 /// width, the main column staying readable beside it, the transcript growing live) is the
 /// browser walkthrough's half, as the suite's own header says.
-const EXPECTED_CASES = 106;
+/// 106 -> 108: `ask`, the one tool whose purpose is to stop. One case through the whole
+/// loop on the `elicitation` suite -- a BUILT-IN's question parks the run, the endpoint
+/// answers who is asking, and the answers come back as the call's result -- and one new
+/// suite beside it (`elicitation-card`) whose single case RENDERS the card's title in
+/// both languages: three askers, three distinct lines, and none of them inventing a
+/// server. The second is the sidebar lesson applied to the other card that names
+/// somebody: a title that draws nothing is invisible to every check about keys.
+/// 108 -> 112: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
+/// candidates driven verbatim with no own-words box assumed, the own-words answer that
+/// stands where the pick would have, and a list of answers that is never a joined
+/// string -- and one on `elicitation-card` that RENDERS a field for each kind and counts
+/// the `data-slot`s: one tick box per candidate, a select for a single choice, an
+/// own-words box only where the schema asked for one. The card's count is the claim, not
+/// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
+/// looks perfectly fine doing it.
+const EXPECTED_CASES = 112;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -80,15 +80,21 @@
 
   TWO KINDS OF STOP, ONE SHAPE. A parked call is either waiting for a person to
   approve it (`tool-approval`, the default and every case that existed before) or
-  waiting for a person to answer a server's question (`elicitation`). REASON is
-  what tells a client which card to draw, and MESSAGE is what it puts on the card
-  -- for a question that is the question itself, because 'Approve ask? arguments'
-  would be a sentence about a tool call rather than the thing being asked."
+  waiting for a person to answer a question (`elicitation`). REASON is what tells a
+  client which card to draw, and MESSAGE is what it puts on the card -- for a
+  question that is the question itself, because 'Approve ask? arguments' would be a
+  sentence about a tool call rather than the thing being asked.
+
+  THE FALLBACK NAMES NOBODY, and that is deliberate: WHO asked is on the harness's
+  own endpoint (`GET /api/elicitation`, which answers `server` or `askedBy`), so a
+  sentence here that guessed would be a second, wrong answer to a question a card
+  already asks properly -- 'A server is asking you' is false when the asker is one of
+  this harness's own tools."
   [{:keys [id tool-call-id name args reason question]}]
   (if (= :elicitation reason)
     {:id id
      :reason "elicitation"
-     :message (or (:prompt question) "A server is asking you for input.")
+     :message (or (:prompt question) "You are being asked for input.")
      :toolCallId tool-call-id}
     {:id id
      :reason "tool-approval"
