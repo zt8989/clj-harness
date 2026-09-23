@@ -24,6 +24,15 @@
   (:require [harness.edge.pressure :as pressure]
             [harness.edge.replay :as replay]))
 
+(def summary-instruction
+  "What the summarizer is told. It asks for the facts a continuing model needs and for
+  nothing invented -- exact paths, commands, error strings, identifiers, numbers, and what
+  was already decided (including what was tried and failed)."
+  "Summarize the conversation above so another model can continue the work from it. Keep
+exact file paths, commands, error strings, identifiers, numbers, function signatures and
+decisions already made, including anything that was tried and failed. Do not invent
+anything. Be concise.")
+
 ;; ------------------------------------------------------------------------ the lock
 
 (defn- lifecycle-rows

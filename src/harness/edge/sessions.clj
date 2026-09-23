@@ -429,6 +429,17 @@
     (let [e (get @registry id)]
       (model-view (replay/compacted-messages (:entries e) (:compactions e))))))
 
+(defn set-compactions!
+  "Replace THREAD-ID's compaction facts. The compaction WRITER calls this the moment it wrote
+  a compaction, so `messages` -- which folds them LIVE -- reflects it without waiting for the
+  session to be rebuilt (`build` is the only other read of disk). No-op on a session this
+  process does not hold."
+  [thread-id facts]
+  (let [id (str thread-id)]
+    (when-let [e (get @registry id)]
+      (swap! registry assoc id (assoc e :compactions (vec facts)))))
+  nil)
+
 (defn- as-sent
   "ENTRIES as a reader sees them: the record offset and the message, without the run
   that carried them (`:group` is how this table fills a number in, not something a

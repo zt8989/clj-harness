@@ -6,9 +6,16 @@
   function calls -- no provider, no file, no server. The rows it appends are folded back
   through the READ half (`harness.edge.replay`), which is the one assertion that matters:
   the writer and the reader agree on the record's shape."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [harness.cap.providers :as providers]
             [harness.edge.compaction :as compaction]
-            [harness.edge.replay :as replay]))
+            [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
+            [harness.fake :as fake]
+            [harness.infra.home :as home]))
 
 ;; ------------------------------------------------------------------ the records
 
@@ -101,3 +108,49 @@
           plan2 (compaction/plan all 1000 0.16)]
       (is (= [7] (:shadowed plan2))
           "the second range names the first SUMMARY's fact seq (7), not the four originals it replaced"))))
+
+;; -------------------------------------------------------------------- the route
+
+(defn- plant!
+  "Write THREAD-ID's log under the projects tree `replay/locate` searches, so a route can
+  find it without a run having happened."
+  [thread-id rows]
+  (let [f (home/log-file (#'http/unbound-dir) thread-id)]
+    (.mkdirs (.getParentFile f))
+    (spit f (str (str/join "\n" (map json/write-str rows)) "\n") :encoding "UTF-8")
+    f))
+
+(defn- wait-for-rows
+  "RECORDS of LOG, polled until KIND appears (the writer appends off-thread) or ~2s."
+  [log kind]
+  (loop [n 0]
+    (let [rows (replay/read-records log)
+          ks   (mapv replay/kind rows)]
+      (if (or (some #{kind} ks) (>= n 200))
+        rows
+        (do (Thread/sleep 10) (recur (inc n)))))))
+
+(deftest the-compact-route-summarizes-and-records-one-compaction
+  ;; THE WHOLE WRITE PATH ONCE: a planted record, the route deciding, a scripted provider
+  ;; standing in for the summarizer, and the rows it wrote read back off disk. A SERVER RUNS
+  ;; ONLY TO DRIVE THE RECORD WRITER -- `log!` appends off-thread.
+  (let [thread-id "compact-route"
+        rows      (mapv (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 25))
+        log       (plant! thread-id rows)
+        stop      (http/start! {:port 0})]
+    (providers/use-provider! thread-id (fake/scripted [{:content "THE SUMMARY"}]))
+    (try
+      (let [resp (#'http/compact-post nil thread-id)
+            body (json/read-str (String. ^bytes (:body resp) "UTF-8") :key-fn keyword)]
+        (is (= 200 (:status resp)) (pr-str body))
+        (is (true? (:compacted body)))
+        (is (= 4 (count (:shadowed body))) "25 x 1008 tokens, retain 20480 -> the 4 oldest go")
+        (let [ks (mapv replay/kind (wait-for-rows log "compaction/end"))]
+          (is (some #{"context/compacted"} ks))
+          (is (some #{"model/start"} ks) "the summary is its own bracketed model call")
+          (is (some #{"model/end"} ks))
+          (is (< (.indexOf ks "compaction/start") (.indexOf ks "compaction/end"))
+              "start first, end last")))
+      (finally
+        (stop)
+        (providers/use-provider! thread-id nil)))))

@@ -30,3 +30,17 @@
 - [ ] 压缩写进记录的那一刻，**活动会话的压缩事实跟着刷新**（今天 `sessions` 只在建会话时读一次
       `:compactions`；不刷新的话模型还会拿到没压过的历史）
 - [ ] 离线全量 `harness.test-runner` 全绿
+
+## Comments
+
+2026-09-23 — 写侧核心与入口已落地：
+
+- 已做：`plan`（留出 0.16×窗口的尾部，**按节点边界切**，节点就是最小单元）、`lock-active?`、
+  `perform!`（start → `context/compacted` → end；摘要抛异常也写 end 并带 `:error`）、
+  `POST /api/threads/<stem>/compact`（一次真实模型调用 + 刷新活动会话的压缩事实）。
+  测试 `compaction-run-test` 8 例，含一条跑通整条写路径的路线用例；全量 1164 tests / 13281 assertions。
+- 与票面的偏离：写**三条**记账行不是四条——摘要文本与范围同在一张 `context/compacted` 事实行上，
+  替换消息由投影（`replay/model-nodes`）现折；本仓没有独立的 surface 结构可挂一个 `replace`。
+- **仍缺一条**：头部含**会话开场**时重建开场。今天开场是会话出生时写下的 `opening` 条目，遮蔽它
+  就会把指令块从模型视图里拿掉。正确做法是**开场不参与压缩**（头部从开场之后的节点开始），
+  留给续做。

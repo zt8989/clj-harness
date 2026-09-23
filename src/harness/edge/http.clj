@@ -99,6 +99,7 @@
             [harness.edge.sessions :as sessions]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
+            [harness.edge.compaction :as compaction]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             ;; The built page, when this process has one: `ui/dist`, served at the
@@ -2747,7 +2748,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -4497,6 +4498,79 @@
                          :dir dir :via "http"})
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
+(defn- compact-post
+  "POST /api/threads/<stem>/compact -- one compaction, run by hand (ticket 03).
+
+  IT DECIDES, SUMMARIZES WITH ONE MODEL CALL, AND WRITES THE ROWS; then it tells the live
+  session what changed, so the model view the NEXT request is built from is the compacted
+  one. The lock, the range and the no-op rule live in `harness.edge.compaction` and are
+  tested without any of this.
+
+  NOTHING TO DO IS NOT AN ERROR: a session with no provider, no declared window, or nothing
+  past the retained tail is answered plainly, and a compaction writes no rows at all."
+  [req stem]
+  (let [located  (try {:ok (replay/locate (home/projects-dir) stem)}
+                      (catch Throwable t {:error (ex-message t)}))
+        provider (try (providers/current-provider stem) (catch Throwable _ nil))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+
+      (nil? provider)
+      (api-response 400 {:error "this session has no provider to summarize with"})
+
+      (nil? (:context-window provider))
+      (api-response 400 {:error "this model declares no context window, so there is nothing to measure against"})
+
+      :else
+      (let [read (try {:ok (replay/read-records (:ok located))}
+                      (catch Throwable t {:error (ex-message t)}))
+            written (atom [])]
+        (if (some? (:error read))
+          (api-response 400 {:error (:error read) :threadId stem})
+          (try
+            (let [records   (:ok read)
+                  append    (fn [kind payload]
+                              (swap! written conj [kind payload])
+                              (log! stem nil kind payload))
+                  summarize (fn [messages]
+                              (let [specs []
+                                    p     (assoc provider :tools specs)]
+                                ;; THE SUMMARY IS ITS OWN MODEL CALL: it is bracketed like any
+                                ;; other, so the record says which model wrote it and what it cost.
+                                (log! stem nil "model/start"
+                                      (dissoc (ev/model-start p specs) :type))
+                                (try
+                                  (let [{:keys [message telemetry]}
+                                        (llm/stream! p
+                                                     (conj (vec messages)
+                                                           {:role "user"
+                                                            :content compaction/summary-instruction})
+                                                     (fn [_]) stem)]
+                                    (log! stem nil "model/end" telemetry)
+                                    (let [content (:content message)]
+                                      (if (string? content) content (str content))))
+                                  (catch Throwable t
+                                    (log! stem nil "model/end" {})
+                                    (throw t)))))]
+              (let [result (compaction/perform! records
+                                               {:window       (:context-window provider)
+                                                :retain-ratio pressure/retain-ratio
+                                                :append       append
+                                                :summarize    summarize})]
+                (when (seq @written)
+                  ;; AND THE LIVE SESSION LEARNS: otherwise the next request is built from a
+                  ;; model view that still has the shadowed history in it.
+                  (sessions/set-compactions!
+                   stem
+                   (replay/compaction-facts
+                    (into (vec records) (map (fn [[k p]] (row-of k p)) @written)))))
+                (api-response 200 {:threadId  stem
+                                   :compacted (some? result)
+                                   :shadowed  (:shadowed result)})))
+            (catch Throwable t
+              (api-response 400 {:error (ex-message t) :threadId stem}))))))))
+
 (defn- dispatch
   "The route table, with no safety net -- see `handler` for the one wrapped
   around it. Split out so the net is a single line of indentation around the
@@ -4621,6 +4695,7 @@
       ;; body that was never there.
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
+        [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
