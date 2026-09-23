@@ -147,7 +147,7 @@ park 以 `RUN_FINISHED` 带 `outcome.interrupts` 结束（`ag_ui.clj:144-150`）
 - **07** 服务端：一条 run 停得下来（取消到得了循环，terminal 诚实）（阻塞：01）——**已落地（2026-09-23）**，见文末。
 - **08** 服务端：正在跑的那次工具调用也停得下来（阻塞：07）——**已落地（2026-09-23）**，见文末。
 - **09** 浏览器：刷新之后也能停（阻塞：04、07、08）——**已落地（2026-09-23）**，见文末。
-- **10** 收口：文档、两套全量、走查证据（阻塞：02、03、04、05、06、07、08、09）
+- **10** 收口：文档、两套全量、走查证据（阻塞：02、03、04、05、06、07、08、09）——**已落地（2026-09-23）**，见文末。
 
 ## 落地（2026-09-21）：票 05
 
@@ -330,4 +330,28 @@ fetch），换成一个 `ComposerStop` 缝：`thread.aui.tsx` 在 Send 的位置
   `session-configure` 这个 `:requires-approval` 的工具造一个真 park）：park → 卡片在、composer 关着 → 刷新 →
   **卡片还在**、服务端仍 `parked`、composer 仍关着 → 点批准 → run 恢复、调用拿到结果、答案落进同一场。`ALL GREEN`。
 - `cd ui && npm run build` 过、`npm test` 全绿。
+
+## 落地（2026-09-23）：票 10（收口）
+
+- **文档**：`docs/architecture/home-and-storage.md` 的「读一份断掉的记录」从**四件事**改成**五件事**——第五件
+  「它在本进程里活着吗」问的是 `live-runs` 登记表（`running?`），而且它是前四件的**前提**（没有终帧不等于死了，
+  「还在被回答」是同一个形状）；`client.md` 的刷新 / 切会话一节补上票 06 的 `parked`（两格都是两个读数的并）
+  与票 09 那颗「停」（`session-run-notice.tsx` 删了，模块图换成 `session-run-state.ts` / `session-run-stop.tsx`）；
+  `http.clj` 的 `close-off-open-run!` / `rebuild-post` 与 `replay.clj` 的 `open-run` 都写明它们问过登记表
+  （这半边是票 01/02 落的，本票核对并补一句指针）。`ui/src/lib/run-state.ts` 已不存在（票 04 早先改名
+  `session-status.ts`），无需再动。
+- **机读判据**（票面两条）：
+
+  ```
+  grep -rn "reads back" ui/src/app.tsx | grep interrupts   # 无输出
+  grep -rn "ONE OF THE FOUR IS A GET" src/                 # 无输出
+  ```
+
+  都无输出；`thread-verbs` 的 docstring 与集合一致（`FIVE OF THE EIGHT ARE GETS`，八个动词里 GET 五个、
+  POST 三个：`rebuild` / `archive` / `cancel`）。
+- **证据**：本特征按**每票一份**走查证据收在 `evidence/`，没有按票面那份清单改名——
+  `03-refresh-lands-back-in-the-session.md`、`04-composer-does-not-pretend.md`、`06-parked-comes-back.md`、
+  `09-stop-from-the-restored-page.md`，各自的截图与 `0N-go.json`。每份的「它没证明什么」一节写着没摆的场面。
+- **两套全量**：后端 `1095 tests / 12871 assertions / 0 failures / 0 errors`（含本特征全部新用例）；
+  `ui` 的 `npm run typecheck` / `npm run build` / `npm test`（97 用例）都过。
 

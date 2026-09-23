@@ -310,7 +310,12 @@
   "The oldest run a log opened and never closed, or nil -- {:run-id .. :last-frame
   .. :unanswered [toolCallId ..]}. The walk itself, and which calls count as
   unanswered, are `open-runs`' -- this is its head, for a caller that wants the one
-  run a continuation is about to close."
+  run a continuation is about to close.
+  WHETHER SUCH A RUN IS DEAD IS NOT THIS FUNCTION'S QUESTION -- a log that ends
+  without a terminal is equally what a run somebody is still answering looks like,
+  and the caller that would REPAIR it asks the process registry first
+  (`harness.edge.http/close-off-open-run!`; `ensure-complete!` below is only reached
+  after that has been asked)."
   [records]
   (first (open-runs records)))
 

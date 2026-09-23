@@ -105,9 +105,12 @@
 的异常丢进没人读的 channel，不裹起来就是彻底静默加上客户端干等）。进程退出本身也留一行（`:shutdown`）。
 
 **读一份断掉的记录**：`projects/<workspace>/<thread>.jsonl` 停在半句——典型是 `tools/pre-execute` 之后没有
-`tools/execute`——就把这份日志按 `thread-id` 过滤，四件事一次看清：有没有 `run/terminal`（这句「再见」说没说完）、
-最后一条的 `:last=` 停在哪一步、有没有 `run/crashed`（是服务端自己抛的）、以及后面有没有 `:shutdown`（进程是不是
-被停掉的）。`SIGTERM` 会写 `:shutdown`，`SIGKILL` 与崩溃不会（都实测过），所以**没有这一行不等于没死**，
+`tools/execute`——就把这份日志按 `thread-id` 过滤，**五件事**一次看清：有没有 `run/terminal`（这句「再见」说没说完）、
+最后一条的 `:last=` 停在哪一步、有没有 `run/crashed`（是服务端自己抛的）、后面有没有 `:shutdown`（进程是不是
+被停掉的）、以及第五件——**它在本进程里活着吗**（问登记表 `harness.edge.http/live-runs` 的 `running?`；
+`.scratch/session-after-refresh` 票 01）。第五件是前四件的**前提**：没有终帧不等于死了，「还在被回答」是同一个形状，
+所以**活着的 run 一个字都不动**——读终局、`close-off-open-run!` 收尾之前先问登记表，活着就由 `rebuild` 具名拒绝。
+`SIGTERM` 会写 `:shutdown`，`SIGKILL` 与崩溃不会（都实测过），所以**没有这一行不等于没死**，
 它只在和「run 没有终帧」一起读的时候给答案。
 
 **服务端看不出「浏览器走了」**，这是这套日志的边界而不是它的疏漏：客户端 abort 之后 run **不会**被取消

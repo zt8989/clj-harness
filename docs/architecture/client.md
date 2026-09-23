@@ -52,10 +52,13 @@ components/
   composer-chrome.tsx   composer 上下两条、三个 LOCAL: 插入点
                         （ComposerFrame / ComposerTools / ComposerAddAttachment），
                         以及附件那条判据在界面上的两处（禁用的 `+`、那句拒话）
-  session-run-notice.tsx  「服务端还在回答这一场」那句话，以及驮着那个词从 host 到 composer 的
-                        context。**单开一个文件**只为一个原因：它要在 UI 套件里被渲染出来读回去，
-                        而 `composer-chrome.tsx` 进不了那个运行（它经 `lib/attachments.ts`
-                        摸到 `lib/i18n.ts`，后者在加载时碰 `document`）
+  session-run-state.ts   「服务端说这一场在跑 / 悬置 / 结束了」那个词，以及驮着它从 host 到 composer
+                        的 context（票 04 的 `session-run-notice` 只剩这半——那句「还在回答」已被票 09 的
+                        那颗「停」取代）
+  session-run-stop.tsx   composer 里那颗「停」：寻址当前显示的那一场、发
+                        `POST /api/threads/<id>/cancel`（票 09）。**单开文件**只为一个原因：它要在 UI
+                        套件里被渲染出来读回去，而 `composer-chrome.tsx` 进不了那个运行（它经
+                        `lib/attachments.ts` 摸到 `lib/i18n.ts`，后者在加载时碰 `document`）
   composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
   composer-numbers.tsx  这场会话的数字**取一次**的地方：取数、「什么时候取」的四个触发条件，
                         以及把它们交给 composer 里两个读者（状态条与那颗圈）的那个 scope
@@ -317,9 +320,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   也不许发**。run 属于**进程**，所以刷新落进一场正在被回答的会话时，这一页的 `isRunning` 是 `false`
   ——没有任何东西是它起的——按钮亮着，发出去只换回 run 边那句 409（「this session already has a run in
   this process」）。判据因此是**窗口自己那个 `state`**（`useWindowFeed` 的 `onState` → `App` 的
-  `runState`），关的是 `running` **这一个词**：`parked` 与 `unfinished` 都不是「在跑」。
-  门关上时**旁边那句话也画出来**（`session-run-notice.tsx`，`data-slot="session-running"`）——
-  一个按不动的按钮与一个坏掉的按钮在屏幕上长得一样，而这一页知道原因。
+  `runState`），**票 06 之后 `parked` 也关**（悬置的卡片刷新回来还在，它就是出路）；`unfinished`（进程死在半路）
+  仍然不关——那一轮没有任何卡片可按。
+  门关上时**原地画出来的是服务端的「停」**（`.scratch/session-after-refresh` 票 09）：Send 不再画，换成一个按钮
+  （`components/session-run-stop.tsx`，`data-slot="session-stop"`，发 `POST /api/threads/<id>/cancel`）——那一场可以
+  **真的被停掉**，所以不再用一句话解释为什么按不动（票 04 的 `session-run-notice.tsx` 已删）。
   **侧边栏那扇门也有同一半**（2026-09-22 修）：从侧边栏打开一场会话走的是 `rebuild`——它交的是一份
   **快照**、不开 feed，于是页面对「在跑」一无所知，`runState` 一直是 `null`，按钮亮着，按下还是那句 409。
   所以服务端在 `rebuild` 的回答上带上 `:state`（`harness.edge.http/live-state`，只在**本进程持有**时才有），
@@ -329,8 +334,12 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   它上面那个 provider 的待决中断）。所以 A 停在等人决定时，只有 A 的输入框关着，B 照常能发。
 - **悬置不是「在跑」**：`isRunning` 在悬置时是 `false`（那一轮 run 已经以 interrupt 结束），
   所以注册表里的 `:parked?` 单独一格，侧边栏那一行在悬置时说 `Waiting on you`——在跑说转圈。
-  **而「在跑」那一格是两个读数的并**（`lib/session-status.ts` 的 `statusOf`）：本页自己的 run **或**
-  服务端窗口说的 `running`——谁都不是谁的超集（刚发出去那一瞬间只有前者，刷新回来那一种只有后者）。
+  **而「在跑」「悬置」两格都是两个读数的并**（`lib/session-status.ts` 的 `statusOf`）：本页自己的 run **或**
+  服务端窗口说的 `running` / `parked`——谁都不是谁的超集（刚发出去那一瞬间只有前者，刷新回来那一种只有后者）。
+  **`parked` 从服务端取是票 06 才成立的**：悬置的卡片刷新回来还在（服务端 `apply-frames` 把
+  `RUN_FINISHED.outcome.interrupts` 折成最后一条 assistant 的 `metadata.custom.agui.interrupts`，客户端
+  `fromAgUiMessages` 把它读成 `requires-action`/`interrupt`，`toThreadMessages` 不再把每条消息盖成 `complete`），
+  所以为 `parked` 关的门**有出口**；在那之前 `parked` 只取本页自己的读数。
   合并只发生在**上报给页面的那一份**（`onStatus`，侧边栏那一行据此点灯）；`onOwnRun` 上报的仍是
   **本页自己的**读数，因为 `isOwnRun` 决定 feed 的帧能不能 import 进这个 runtime——正在**看**的那一场
   必须能接着长，把它并进去就等于让刷新回来的那一轮冻住。
