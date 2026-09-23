@@ -85,14 +85,15 @@ export const IDLE: SessionStatus = { running: false, parked: false };
 /// for. Merging here and reusing that value there would suppress the imports that keep a
 /// watched turn growing.
 ///
-/// `parked` IS NOT TAKEN FROM THE SERVER YET, deliberately: a parked run's own card comes
-/// back through ticket 06 (`isParkedInterrupt`), and until it does, closing the composer on
-/// a server-side `parked` would be a door with no way through it. The server's `parked` is
-/// therefore read where it is drawn -- the run has ENDED, so it is not a run in flight --
-/// and the ticket records the half that is still open.
+/// `parked` IS TAKEN FROM THE SERVER NOW (ticket 06 of `.scratch/session-after-refresh`): the
+/// card that answers a parked run comes back on a rebuilt conversation, so a server-side
+/// `parked` no longer closes a door with no way through it -- the way through is the card,
+/// which `toThreadMessages` now lets the runtime find. This is the SIDEBAR's and the archive
+/// gate's answer; the composer's own gate adds the server's `parked` where it is written
+/// (`app.tsx`'s `isSendDisabled`).
 export const statusOf = (local: SessionStatus, server: string | null): SessionStatus => ({
   running: local.running || server === "running",
-  parked: local.parked,
+  parked: local.parked || server === "parked",
 });
 
 /// Whether this session must not be filed away or have its project removed: it

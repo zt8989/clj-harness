@@ -77,12 +77,19 @@ const cases: Case[] = [
       // THE WORDS THAT ARE NOT "IN FLIGHT". A parked run has ENDED on its interrupt, a
       // settled one answered, and a conversation with no window at all has nothing to say --
       // none of them may draw the Stop, or the composer would offer to end a run that is not
-      // going. `parked` IS DELIBERATELY NOT TAKEN FROM THE SERVER YET: the card that answers
-      // a parked run comes back through ticket 06, and until it does, drawing the stop on
-      // the server's `parked` would be a control for something already over. Pinned so that
-      // changing it is a deliberate act with a failing case in front of it.
-      for (const state of ["settled", "unfinished", "parked", null]) {
-        expect(statusOf(IDLE, state), `"${state}" is not a run in flight`).toEqual(IDLE);
+      // going.
+      //
+      // AND `parked` IS A STATE NOW (ticket 06): the server's word counts, because the CARD
+      // that answers a parked run comes back on a rebuilt conversation -- before this, taking
+      // the server's `parked` would have made a door with no way through it. It is still not
+      // `running`, so it draws no Stop; what it draws is the sidebar's `waiting on you` and
+      // the archive refusal.
+      expect(statusOf(IDLE, "parked"), "the server's parked counts as parked").toEqual({
+        running: false,
+        parked: true,
+      });
+      for (const state of ["settled", "unfinished", null]) {
+        expect(statusOf(IDLE, state), `"${state}" is not a run of any kind`).toEqual(IDLE);
       }
       expect(statusOf(IDLE, "something-else")).toEqual(IDLE);
 

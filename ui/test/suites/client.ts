@@ -321,7 +321,8 @@ const cases: Case[] = [
     // `isAbortError` in `@assistant-ui/react-ag-ui`, whose `RUN_CANCELLED` is what
     // `message-parts.tsx` draws as "Cancelled".
     run: async () => {
-      const agent = await agentFor(threadId("client-cancel"));
+      const tid = threadId("client-cancel");
+      const agent = await agentFor(tid);
       const frames: string[] = [];
       const reported: string[] = [];
       let calling = false;
@@ -347,6 +348,25 @@ const cases: Case[] = [
       await waitUntil(() => calling);
       agent.abortRun();
       await run;
+
+      // AND LET THE SERVER'S OWN RUN FINISH before this case returns. The client hung up,
+      // but `handle-run` does NOT cancel a run when its client leaves (the edge never
+      // guesses at who hung up), so this conversation's run is still going -- and leaving
+      // it going makes the NEXT case race a run that has nothing to do with it (the stop
+      // case hung on exactly that, measured). Waiting for its terminal is the same rule
+      // the suites keep about a writer: let it finish, do not walk away from it mid-write.
+      let settled = false;
+      for (let attempt = 0; attempt < 400 && !settled; attempt += 1) {
+        const res = await fetch(`${url()}api/threads/${encodeURIComponent(tid)}/page`);
+        if (!res.ok) {
+          settled = true;
+          break;
+        }
+        const body = (await res.json()) as { state?: string };
+        settled = body.state !== "running";
+        if (!settled) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(settled, "this case's own server run never reached a terminal").toBe(true);
 
       expect(frames, "the transport's abort frame is not reported as a run error").toEqual([]);
       expect(reported, "and the run says what it was: an abort").toEqual(["AbortError"]);

@@ -140,12 +140,16 @@ import { type RecordHealth } from "@/lib/record-health";
 const RECONNECT_MS = 1000;
 
 /// The converted history a restore hands the runtime: `fromAgUiMessages`
-/// rebuilds text, reasoning and tool calls -- and reads back
-/// `metadata.custom.agui.interrupts` when the log carried them -- but its
-/// output is still the loose `ThreadMessageLike` shape; the repository wants
-/// the finished one. The runtime's own snapshot-import path runs this exact
-/// pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is
-/// upstream's, quoted rather than reinvented.
+/// rebuilds text, reasoning and tool calls -- and reads back a parked run's
+/// `metadata.custom.agui.interrupts` -- but its output is still the loose
+/// `ThreadMessageLike` shape; the repository wants the finished one. THE PAIR IS
+/// WHOLE ONLY BECAUSE THE SERVER FOLDS THAT METADATA (`kernel.frames/apply-frames`
+/// writes it from `RUN_FINISHED.outcome.interrupts`; ticket 06 of
+/// `.scratch/session-after-refresh`), and the per-message status below is not
+/// overwritten for anything but the running tail, so `requires-action`/`interrupt`
+/// survives. The runtime's own snapshot-import path runs this exact pair
+/// (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is upstream's,
+/// quoted rather than reinvented.
 /// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is the
 /// window's own `state` -- the tail page answers it, and every frame after that carries
 /// it -- which is how this page learns about a run it is only WATCHING. Null is every
@@ -166,15 +170,21 @@ function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
   // upstream's.
   const converted = keepInjectionCards(agUiMessages, fromAgUiMessages(agUiMessages));
   const last = converted.length - 1;
-  return converted.map((message, index) =>
-    fromThreadMessageLike(
-      message,
-      message.id ?? crypto.randomUUID(),
+  return converted.map((message, index) => {
+    // THE STATUS A REBUILT MESSAGE ARRIVES WITH IS ITS OWN, and only the LAST one's is
+    // overridden -- and only by the window saying it is still being written. Everything
+    // else the converter already decided: `fromAgUiMessages` reads a parked run's
+    // `metadata.custom.agui.interrupts` and hands that message `requires-action`/
+    // `interrupt`, which is exactly the shape `getPendingInterrupts()` looks for. Forcing
+    // `complete` on every message (as this did) threw that away, so a refreshed parked
+    // conversation came back with no card and `assertNoPendingInterrupts()` wrongly
+    // opened (ticket 06 of `.scratch/session-after-refresh`).
+    const status =
       index === last && reads === "running"
-        ? { type: "running" as const }
-        : { type: "complete" as const, reason: "unknown" as const },
-    ),
-  );
+        ? ({ type: "running" } as const)
+        : (message.status ?? { type: "complete", reason: "unknown" });
+    return fromThreadMessageLike(message, message.id ?? crypto.randomUUID(), status);
+  });
 }
 
 /// The conversation's state as a READING (`Reads`), for a value that came off the wire
@@ -937,11 +947,13 @@ const SessionHost: FC<{
     //                  and the only reply was the run edge's 409 ("this session already has a
     //                  run in this process").
     //
-    // IT IS `running` AND NOT "NOT SETTLED", deliberately: `parked` and `unfinished` are
-    // conversations NO run is going in (a parked run has ended on its interrupt), and
-    // closing the composer on those would be a door with no way through it until ticket 06
-    // brings their cards back. See `lib/session-status.ts`'s `statusOf`.
-    isSendDisabled: gateOpen || runState === "running",
+    // IT IS `running` OR `parked` NOW, and ticket 06 is why `parked` is included: a parked
+    // run has ENDED (its interrupt is its terminal), but the CARD that answers it comes back
+    // on a rebuilt conversation (`toThreadMessages` above keeps the status that carries it),
+    // so the composer can be shut without shutting the only door -- the way through is that
+    // card. `unfinished` is still not included: a process that died mid-run has no card to
+    // press. See `lib/session-status.ts`'s `statusOf`.
+    isSendDisabled: gateOpen || runState === "running" || runState === "parked",
     adapters: {
       // IMAGES IN THE COMPOSER, and this one line is what enables them -- see
       // lib/attachments.ts: `capabilities.attachments` is `!!adapters.attachments`,

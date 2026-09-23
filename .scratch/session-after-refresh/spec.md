@@ -143,7 +143,7 @@ park 以 `RUN_FINISHED` 带 `outcome.interrupts` 结束（`ag_ui.clj:144-150`）
 - **04** 那一场没完的时候，输入框不装作能发（阻塞：01、03）——**「还在跑」那一半已落地
   （2026-09-21）**；「悬置」那一半等票 06，见文末。
 - **05** 服务端拒绝同一会话的第二条 run（阻塞：01）——**已落地（2026-09-21）**，见文末。
-- **06** parked 的那一场，刷新回来还能答（阻塞：03）
+- **06** parked 的那一场，刷新回来还能答（阻塞：03）——**已落地（2026-09-23）**，见文末。
 - **07** 服务端：一条 run 停得下来（取消到得了循环，terminal 诚实）（阻塞：01）——**已落地（2026-09-23）**，见文末。
 - **08** 服务端：正在跑的那次工具调用也停得下来（阻塞：07）——**已落地（2026-09-23）**，见文末。
 - **09** 浏览器：刷新之后也能停（阻塞：04、07、08）——**已落地（2026-09-23）**，见文末。
@@ -288,6 +288,8 @@ fetch），换成一个 `ComposerStop` 缝：`thread.aui.tsx` 在 Send 的位置
 库在派发 `RUN_CANCELLED` 之前**也**把同一个错误交给页面的 `onError`，而 runtime 只在**自己的** controller 断了
 时才压住它——这次停是发给服务端的，controller 没断，于是页面会把一条**人按停的 run** 记成 host 失败、**整列会话
 被丢掉**（走查量到的）。所以 `App` 的 `onError` 对 `AbortError` 不作声（`asAbort` 在入口就定了这个名字）。
+**并且那一跳是下一个微任务**（`queueMicrotask(cancel)`）：从 transport 自己的帧循环里**同步** `abortRun()`
+会把这条 run 的 promise 永远悬住（`ui/test/suites/client.ts` 那条用例实测卡了 120s）。
 
 **验证**：真浏览器走查（`evidence/09-stop-from-the-restored-page.md`、六张截图、`ALL GREEN`）：起一条慢 run →
 刷新 → 回到那一场 → 有能按的停 → 按它 → **服务端那条 run 真的停**（命令 pid 从 `true` 变 `false`、`state`
@@ -298,4 +300,34 @@ fetch），换成一个 `ComposerStop` 缝：`thread.aui.tsx` 在 Send 的位置
 结果的服务端调用在 runtime 里是 `requires-action`，工具行画成「待审批」（票 04 记下的同一族），`RUN_CANCELLED`
 只改消息状态、不改工具 part。这次能保证的是**客户端没有被通知调用已返回**（走查断言也不画 `Done`），而刷新回来
 按记录画成完整的一份。那一格的词要等工具行状态的重建（票 04/06 那一族），**不在票 09 里偷偷做**。
+
+## 落地（2026-09-23）：票 06
+
+**悬置的那一场，刷新回来卡片还在、决定还能提交。** 两半：
+
+- **服务端那一半**（`harness.kernel.frames/apply-frames`）：一条 `RUN_FINISHED(outcome.interrupts)`
+  现在折进**最后一条 assistant 消息**的 `metadata.custom.agui.interrupts`（`park-namespace`）。记录里那帧本来就
+  在，这是**投影**的活，不是新状态。为什么是「最后一条」：客户端那条规则反过来定的
+  （`findRequiresActionAssistant("interrupt")` 找的就是最后一条 assistant）。
+- **客户端那一半**（`app.tsx` 的 `toThreadMessages`）：它以前把**每一条**消息都盖成
+  `{type:"complete", reason:"unknown"}`，把上游 `fromAgUiMessages` 已经从 metadata 读出来的
+  `requires-action`/`interrupt` 扔掉了。现在只有**最后一条且窗口说 running** 才覆盖成 `running`，其余保留消息
+  自己的状态（`message.status ?? complete`）。于是 `getPendingInterrupts()` 找得到、`assertNoPendingInterrupts()`
+  该拦就拦、卡片画得出来。
+
+**顺手接上票 04 悬着的那一格**：`lib/session-status.ts` 的 `statusOf` 现在取服务端的 `parked`
+（`parked: local.parked || server === "parked"`），因为卡片回得来，为它关的门就有了出口；`app.tsx` 的
+`isSendDisabled` 也把 `runState === "parked"` 算进去。`ui/test/suites/running.tsx` 里钉住旧决定的那条
+用例改成新事实（`statusOf(IDLE, "parked")` == `{running:false, parked:true}`）。
+
+**验证**：
+
+- 后端 `harness.edge.replay-test` 两条新用例：`a-rebuilt-park-carries-what-the-card-is-drawn-from`
+  （rebuild 一条以 `RUN_FINISHED(outcome.interrupts)` 结束的日志 ⇒ 最后一条 assistant 带
+  `metadata.custom.agui.interrupts`，id/reason/toolCallId 对得上）与 `a-rebuilt-run-that-finished-carries-no-interrupt`
+  （正常跑完的一轮**没有** metadata，别把「最后一条一律标悬置」当实现）。
+- 真浏览器走查 `evidence/06-parked-comes-back.md`（`park-walkthrough.mjs` + `evidence/06-go.json`，用
+  `session-configure` 这个 `:requires-approval` 的工具造一个真 park）：park → 卡片在、composer 关着 → 刷新 →
+  **卡片还在**、服务端仍 `parked`、composer 仍关着 → 点批准 → run 恢复、调用拿到结果、答案落进同一场。`ALL GREEN`。
+- `cd ui && npm run build` 过、`npm test` 全绿。
 

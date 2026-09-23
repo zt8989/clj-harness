@@ -45,6 +45,30 @@
             m))
         messages))
 
+;; THE `metadata.custom.<ns>.interrupts` KEY A REBUILT PARKED RUN IS READ BACK FROM.
+;;
+;; Its value is pinned by `@assistant-ui/react-ag-ui` (`AG_UI_METADATA_NAMESPACE = "agui"`),
+;; which reads `metadata.custom.agui.interrupts` when it converts a rebuilt conversation and
+;; refuses an interrupt whose `id` or `reason` is not a string. THE LIVE PATH NEVER WRITES
+;; THIS FROM THIS SIDE: the client's own aggregator stores what
+;; `RUN_FINISHED.outcome.interrupts` carried. A REBUILT conversation has no aggregator, so
+;; this fold has to produce the same shape or the card cannot come back
+;; (`.scratch/session-after-refresh` ticket 06) -- a second spelling here would be a card
+;; that draws nowhere.
+(def park-namespace "The metadata namespace the client reads a parked run back from -- see above." "agui")
+
+;; Attach INTERRUPTS to the LAST assistant message, the way the client's reader finds them
+;; (`findRequiresActionAssistant("interrupt")` is about the last assistant). A parked run's
+;; parked call belongs to that message -- it is the one the run was building when it stopped
+;; -- so this is placement rather than a guess.
+(defn- park-on-last-assistant
+  "Attach INTERRUPTS to the last assistant message -- see above."
+  [msgs interrupts]
+  (let [last-assistant (last (keep-indexed (fn [i m] (when (= "assistant" (:role m)) i)) msgs))]
+    (if (nil? last-assistant)
+      msgs
+      (assoc-in msgs [last-assistant :metadata :custom park-namespace :interrupts] interrupts))))
+
 (defn apply-frames
   "The bare minimum of what @ag-ui/client's applier does: accumulate text and reasoning
   into separate messages, attach tool calls to the open assistant message, and turn
@@ -98,6 +122,17 @@
          (= t "TOOL_CALL_RESULT")
          (conj msgs {:id (:messageId f) :role "tool"
                      :toolCallId (:toolCallId f) :content (:content f)})
+
+         ;; A PARKED RUN'S ENDING IS PART OF THE CONVERSATION, not just a terminal to stop
+         ;; at: the frame names the calls a human must decide, and the client draws its card
+         ;; from the LAST assistant message's `metadata.custom.agui.interrupts` (ticket 06
+         ;; of `.scratch/session-after-refresh`). The live path gets that metadata from the
+         ;; client's own aggregator; a rebuilt one has only this fold.
+         (and (= t "RUN_FINISHED") (= "interrupt" (get-in f [:outcome :type])))
+         (let [interrupts (vec (get-in f [:outcome :interrupts]))]
+           (if (seq interrupts)
+             (park-on-last-assistant msgs interrupts)
+             msgs))
 
          :else msgs)))
    []

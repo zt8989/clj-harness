@@ -324,6 +324,28 @@
     (is (nil? (replay/closing-frames records)) "a parked call is not a missing result")
     (is (seq (replay/lines->messages lines)) "and the log reads as it always did")))
 
+(deftest a-rebuilt-park-carries-what-the-card-is-drawn-from
+  ;; TICKET 06 of `.scratch/session-after-refresh`: the client's card is drawn from the
+  ;; LAST assistant message's `metadata.custom.agui.interrupts` -- the live aggregator
+  ;; writes it, and a rebuilt conversation has only this fold.
+  (let [lines (concat (action-lines "r1" [seed])
+                      (event-lines "r1" [(ev/run-start)
+                                         (ev/tool-call "c1" "bash" "{}")
+                                         (ev/run-interrupt [{:id "i1" :tool-call-id "c1"
+                                                             :name "bash" :args "{}"}])]))
+        msgs (replay/lines->messages lines)
+        assistant (last (filter #(= "assistant" (:role %)) msgs))
+        interrupts (get-in assistant [:metadata :custom "agui" :interrupts])]
+    (is (= 1 (count interrupts)) "the parked run was rebuilt without its interrupt")
+    (is (= "i1" (:id (first interrupts))))
+    (is (= "tool-approval" (:reason (first interrupts))))
+    (is (= "c1" (:toolCallId (first interrupts))))))
+
+(deftest a-rebuilt-run-that-finished-carries-no-interrupt
+  ;; The other half: 'the last assistant' must not be blanket-marked parked.
+  (is (not-any? #(get-in % [:metadata :custom "agui" :interrupts])
+                (replay/lines->messages (one-run-lines)))))
+
 (deftest a-half-written-line-fails-loudly
   (testing "a line killed mid-write names the line it choked on"
     (let [lines (conj (vec (one-run-lines)) "{\"ts\":3,\"runId\":\"r1\",\"kin")

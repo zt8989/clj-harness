@@ -1,0 +1,16 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "session-configure",
+          "arguments": { "reasoning-effort": "low" }
+        }
+      ]
+    },
+    { "content": "批准之后这一轮的回答。" },
+    { "content": "又一条回答。" }
+  ]
+}

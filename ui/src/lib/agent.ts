@@ -139,7 +139,12 @@ function cancellationAware(
       // matched on prose would draw a stop as a failure the day the wording moved. The
       // `stopped` code is a fact the server states, and this is the only reader.
       if (params.event.code === "stopped") {
-        cancel();
+        // DEFERRED BY A MICROTASK, and that is not a detail: this callback runs INSIDE the
+        // transport's own frame loop, and aborting the fetch from inside it left the run
+        // promise pending forever (measured -- the client suite's stop case hung). Letting
+        // the loop finish the frame it is on and aborting on the next microtask settles the
+        // run the same way while leaving the transport able to unwind itself.
+        queueMicrotask(cancel);
         return;
       }
       if (params.event.code === "abort" && aborted()) {
