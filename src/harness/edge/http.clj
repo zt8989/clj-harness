@@ -98,6 +98,7 @@
             [harness.edge.record :as record]
             [harness.edge.sessions :as sessions]
             [harness.edge.context :as context]
+            [harness.edge.pressure :as pressure]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             ;; The built page, when this process has one: `ui/dist`, served at the
@@ -1346,6 +1347,13 @@
               ;; written by the runs that produced it -- which is the whole saving of this
               ;; ticket: a run logs what IT put in, never the conversation again.
               (log-messages! thread-id run-id injected)
+              ;; HOW FULL THE REQUEST THAT IS ABOUT TO GO OUT IS, ON THE RECORD, BEFORE
+              ;; it goes -- the reading a compaction trigger (harness.edge.pressure) starts
+              ;; from. MESSAGES is handed in rather than read back because this run's own
+              ;; lines are still with the writer; the anchor comes from the file, where the
+              ;; previous call has long landed.
+              (log! thread-id run-id "context/pressure"
+                    (pressure/log-pressure (log-file-for thread-id) messages))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
               ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
@@ -2893,7 +2901,8 @@
         folded  (when (nil? (:error located))
                   (try (let [records (stats/read-records (:ok located))]
                          {:ok (assoc (stats/records->stats records)
-                                     :context (context/records->context records))})
+                                     :context  (context/records->context records)
+                                     :pressure (pressure/records->pressure records))})
                        (catch Throwable t {:error (ex-message t)})))]
     (cond
       (some? (:error located))

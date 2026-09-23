@@ -1,0 +1,235 @@
+(ns harness.edge.pressure
+  "How full the NEXT request will be -- the meter that decides, BEFORE a request goes
+  out, whether the model's window is about to run out. Folded from a session's RECORD.
+
+  THE FIFTH READER OF THE SAME LOG, beside replay (the conversation), stats (the
+  numbers), trajectory (what the model saw) and context (how full the last call was) --
+  and the question only it answers: not 'how full was the call that already went out'
+  (the vendor measured that, and `harness.edge.context` reports it) but 'how full will
+  the request we are about to send be'. A trigger that starts a compaction has to decide
+  before a request goes out, and the vendor's newest number is one call old.
+
+  THE NUMBER IS THE VENDOR'S PLUS AN ESTIMATED DELTA. Counting a whole prompt in
+  characters is wrong: four characters is a word in English and four ideographs in
+  Chinese, and the token-meter this strategy comes from admits (verbatim) that it
+  'systematically underprices CJK text and JSON schemas'. So the meter does not try. It
+  ANCHORS on the vendor's own `prompt_tokens` from the last call that reported one, and
+  asks the estimator only for what has been added since -- `:baseline` says which of the
+  two the answer rested on. The anchor is adopted only while the ENVELOPE is unchanged
+  (the tool table, the route, the system message): a changed envelope is a different
+  prompt, and the old total is no longer about it. It is also adopted only while the
+  vendor's number is not BELOW the estimator's own reading of that same prompt -- an
+  estimator that undercounts CJK is the expected case, and the anchor is adopted exactly
+  then.
+
+  IT IS A PURE FUNCTION OVER RECORDS (records->pressure) for the same reason its four
+  siblings are: what can be asserted is the interesting part. The two-argument arity is
+  the same fold with the request an edge has ALREADY ASSEMBLED handed in -- so a trigger
+  in the middle of a run can ask about the array it is holding rather than about the one
+  the record last describes -- and `log-pressure` is the file entry point.
+
+  THE TWO PROPORTIONS ARE A PAIR. A compaction starts when the pressure crosses
+  `threshold-ratio` of the window and keeps the most recent `retain-ratio` VERBATIM;
+  retain must stay strictly below threshold, or a compaction would keep everything it
+  was asked to shrink. Neither number is enforced here -- this namespace only reports."
+  (:require [clojure.data.json :as json]
+            [harness.edge.context :as context]
+            [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
+            [harness.edge.stats :as stats]
+            [harness.edge.trajectory :as trajectory]))
+
+;; ------------------------------------------------------------------- proportions
+
+(def threshold-ratio
+  "The pressure at which a compaction starts, as a fraction of the window."
+  0.7)
+
+(def retain-ratio
+  "The most recent fraction of the window a compaction keeps VERBATIM."
+  0.16)
+
+;; -------------------------------------------------------------------- the estimate
+
+(def chars-per-token
+  "Four characters to a token -- the estimator's whole idea, and the source of its known
+  bias against CJK and JSON schema. Applied only to the DELTA; see the namespace
+  docstring."
+  4)
+
+(def block-overhead
+  "Tokens of framing per content block (JSON bracketing, type tags)."
+  4)
+
+(def role-overhead
+  "Tokens of framing per message, for its role field."
+  4)
+
+(defn estimate-message
+  "One provider message -> an estimated token count. CONTENT is a string or a vector of
+  blocks; either way it is measured the way the record spells it, so a Chinese character
+  counts as one character -- and is therefore underpriced. That is the estimator's known
+  and admitted bias, not a bug to be fixed here."
+  [message]
+  (let [content (:content message)
+        text    (cond (string? content) content
+                      (nil? content)    ""
+                      :else             (json/write-str content :escape-unicode false))]
+    (+ (long (Math/ceil (/ (double (count text)) (double chars-per-token))))
+       block-overhead
+       role-overhead)))
+
+(defn estimate-messages [messages]
+  (reduce + 0 (map estimate-message messages)))
+
+(defn estimate-tools
+  "The request's tool table -> an estimated token count. Each tool is one block of
+  structured JSON -- short fragments, quotes and field names -- which is the other kind
+  of text the estimator underprices."
+  [tools]
+  (reduce + 0
+          (map (fn [tool]
+                 (+ (long (Math/ceil (/ (double (context/size-of tool))
+                                        (double chars-per-token))))
+                    block-overhead))
+               tools)))
+
+;; ------------------------------------------------------------- reading the record
+
+(defn- call-pairs
+  "The model calls of ONE run, as {:start row :end row} in order. The pairing rule is the
+  record's own (and `harness.edge.context`'s): the nth model/start of a run is that run's
+  nth call."
+  [call-rows]
+  (loop [[row & more] call-rows
+         pending      nil
+         acc          []]
+    (cond
+      (nil? row)
+      (cond-> acc pending (conj {:start pending :end nil}))
+
+      (= "model/start" (replay/kind row))
+      (recur more row (cond-> acc pending (conj {:start pending :end nil})))
+
+      (= "model/end" (replay/kind row))
+      (recur more nil (conj acc {:start pending :end row}))
+
+      :else
+      (recur more pending acc))))
+
+(defn- last-reporting-call
+  "The most recent call whose vendor reported a `prompt_tokens`, as
+  {:run <the run map> :start <its start row> :end <its end row>} -- nil when nobody
+  reported one. A call that reported nothing does not erase an earlier one: the meter
+  keeps the newest MEASUREMENT."
+  [runs]
+  (reduce (fn [acc run]
+            (reduce (fn [acc {:keys [start end] :as pair}]
+                      (if (number? (get-in (replay/payload end) [:usage :prompt_tokens]))
+                        {:run run :start start :end end}
+                        acc))
+                    acc
+                    (call-pairs (:calls run))))
+          nil
+          runs))
+
+(defn- latest-start
+  "The newest model call's start row: what the NEXT call continues from."
+  [runs]
+  (last (filter #(= "model/start" (replay/kind %)) (mapcat :calls runs))))
+
+(defn- system-row [records] (last (filter replay/system-prompt? records)))
+
+(defn- route-of
+  "The half of the provider identity that decides WHICH prompt this is. A change here is
+  an envelope change; the window is deliberately not part of it (it does not change what
+  was sent)."
+  [start-payload]
+  (select-keys start-payload [:model :base-url :reasoning-effort]))
+
+(defn- messages-in
+  "RECORDS -> the messages the model was handed, AS FAR AS THE RECORD DESCRIBES THEM:
+  the conversation's own entries (deduped and card-stripped the way a run hands them
+  over) with the newest system message in front.
+
+  THE SYSTEM MESSAGE IS ADDED BY HAND because it is not a conversation entry -- the
+  client never holds the prompt (`harness.edge.replay/entries`) -- and it is the single
+  largest fixed cost in every request."
+  [records]
+  (let [conversation (sessions/model-view (mapv :message (replay/entries records)))
+        system       (some-> (system-row records) replay/payload)]
+    (if system (into [system] conversation) conversation)))
+
+(defn- identity-index
+  "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
+  rows of the vector they came from, so this finds the call's own line without comparing
+  two maps that may merely be equal."
+  [v x]
+  (first (keep-indexed (fn [i row] (when (identical? row x) i)) v)))
+
+(defn- upto
+  "The prefix of RECORDS that ends at X's own line -- the record as it stood at X."
+  [records x]
+  (if-some [i (identity-index records x)]
+    (subvec records 0 (inc i))
+    records))
+
+;; -------------------------------------------------------------------- the answer
+
+(defn records->pressure
+  "RECORDS (and, in the two-argument arity, the request an edge has assembled) -> how
+  full the next request is:
+
+    {:pressureTokens 812000 :windowTokens 1000000 :percent 81
+     :thresholdTokens 700000 :retainTokens 160000 :baseline \"usage\"}
+
+  `:baseline` is `\"usage\"` when the vendor's own number anchored the answer and
+  `\"estimated\"` when nothing reusable was available and the whole surface was counted
+  in characters. `:windowTokens`, `:percent`, `:thresholdTokens` and `:retainTokens` are
+  ABSENT when the record says nothing about a window -- a percentage needs both halves,
+  and nobody is asked to divide by a number they were not given."
+  ([records]
+   (records->pressure records (messages-in records)))
+  ([records messages]
+   (let [records    (vec records)
+         runs       (trajectory/run-segments records)
+         latest     (latest-start runs)
+         latest-p   (some-> latest replay/payload)
+         tools      (:tools latest-p)
+         anchor     (last-reporting-call runs)
+         start-p    (some-> anchor :start replay/payload)
+         prompt     (get-in (some-> anchor :end replay/payload) [:usage :prompt_tokens])
+         prefix     (when anchor (upto records (:start anchor)))
+         anchor-est (when anchor
+                      (+ (estimate-messages (messages-in prefix))
+                         (estimate-tools (:tools start-p))))
+         window     (or (:context-window latest-p)
+                        (when (seq records)
+                          (context/timeline-window records (last records))))
+         current    (+ (estimate-messages messages) (estimate-tools tools))
+         anchored?  (and anchor
+                         prompt
+                         (= (:tools start-p) tools)
+                         (= (route-of start-p) (route-of (or latest-p start-p)))
+                         (= (some-> (system-row prefix) replay/payload :content)
+                            (some-> (system-row records) replay/payload :content))
+                         (>= prompt anchor-est))
+         total      (if anchored?
+                      (max 0 (- (+ prompt current) anchor-est))
+                      current)]
+     (cond-> {:pressureTokens total
+              :baseline       (if anchored? "usage" "estimated")}
+       (and (number? window) (pos? window))
+       (assoc :windowTokens    window
+              :percent         (long (Math/round (* 100.0 (/ (double total) (double window)))))
+              :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
+              :retainTokens    (long (Math/floor (* (double window) retain-ratio))))))))
+
+(defn log-pressure
+  "A log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same
+  answer. The file supplies the anchor (the previous call is long on disk); MESSAGES
+  supplies the surface, because the lines for the run in flight are still with the
+  writer. A file that does not exist yet is a session with no calls behind it: the answer
+  is the estimate over MESSAGES and nothing else."
+  [f messages]
+  (records->pressure (if (.exists f) (stats/read-records f) []) messages))
