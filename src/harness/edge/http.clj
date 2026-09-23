@@ -98,6 +98,9 @@
             [harness.edge.record :as record]
             [harness.edge.sessions :as sessions]
             [harness.edge.context :as context]
+            [harness.edge.pressure :as pressure]
+            [harness.edge.compaction :as compaction]
+            [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             ;; The built page, when this process has one: `ui/dist`, served at the
@@ -111,6 +114,7 @@
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.mcp :as cap-mcp]
+            [harness.cap.spill :as spill]
             [harness.cap.tools :as cap-tools]
             [harness.kernel.tools :as tools]
             [org.httpkit.server :as hk])
@@ -984,6 +988,9 @@
                       (str "hook/" (:point payload))
                       (dissoc payload :point)))})
 
+;; Defined below with the compaction route; `run-agent!` calls it at the start of every run,
+;; BEFORE it derives the request (ticket 04).
+(declare compact-if-pressured! recover-overflow!)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1049,6 +1056,10 @@
           ;; (nothing enters) and at birth (the opening enters, and the client never sent
           ;; it). The record keeps both because the fold reads `:added` and a reader
           ;; asking 'why is my message not in here' needs to see what was sent.
+          ;; AUTO COMPACTION (ticket 04): before this run derives its request, is the model's
+          ;; window about to run out? At or over the threshold, compact NOW -- so `history`
+          ;; below reads the compacted conversation. Below it, nothing happens.
+          (compact-if-pressured! thread-id)
           (let [history  (sessions/messages thread-id)
                 born?    (empty? history)
                 [opening opening-failure]
@@ -1346,6 +1357,14 @@
               ;; written by the runs that produced it -- which is the whole saving of this
               ;; ticket: a run logs what IT put in, never the conversation again.
               (log-messages! thread-id run-id injected)
+              ;; HOW FULL THE REQUEST THAT IS ABOUT TO GO OUT IS, ON THE RECORD, BEFORE
+              ;; it goes -- the reading a compaction trigger (harness.edge.pressure) starts
+              ;; from. MESSAGES is handed in rather than read back because this run's own
+              ;; lines are still with the writer; the anchor comes from the file, where the
+              ;; previous call has long landed.
+              (log! thread-id run-id "context/pressure"
+                    (pressure/log-pressure (log-file-for thread-id) messages
+                                          (:context-window provider)))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
               ;; :run/interrupt's RUN_FINISHED carrying outcome.interrupts; the
@@ -1365,6 +1384,25 @@
                                                              ;; the SAME function, so a
                                                              ;; rebuilt conversation carries
                                                              ;; what a live one did.
+                                                             ;; A REFUSAL FOR LENGTH RECOVERS IN THE SAME TURN: the
+                                                             ;; loop hands the history to `recover-overflow!`, which
+                                                             ;; compacts aggressively and answers a SHORTER view, or
+                                                             ;; nil (the vendor's refusal then stands).
+                                                             :on-overflow (fn [history t]
+                                                                            (recover-overflow! thread-id provider history t))
+                                                             :overflow-retries (compaction/overflow-retries thread-id)
+                                                             ;; A JUST-PRODUCED TOOL RESULT THAT IS
+                                                             ;; HUGE IS MOVED OUT OF THE CONVERSATION
+                                                             ;; (`harness.cap.spill`): the model reads
+                                                             ;; one pickup slip instead of a giant answer,
+                                                             ;; so the pressure never goes up for it. The
+                                                             ;; `read` tool IS the retrieval path, so its
+                                                             ;; own answers are never spilled again -- that
+                                                             ;; would bury the thing being retrieved.
+                                                             :on-tool-result (fn [name content]
+                                                                               (if (= "read" name)
+                                                                                 content
+                                                                                 (spill/slip thread-id content)))
                                                              :before-llm project/before-llm})]
                 (loop []
                   (when-let [ev (async/<! events)]
@@ -2738,7 +2776,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -2893,7 +2931,8 @@
         folded  (when (nil? (:error located))
                   (try (let [records (stats/read-records (:ok located))]
                          {:ok (assoc (stats/records->stats records)
-                                     :context (context/records->context records))})
+                                     :context  (context/records->context records)
+                                     :pressure (pressure/records->pressure records))})
                        (catch Throwable t {:error (ex-message t)})))]
     (cond
       (some? (:error located))
@@ -4487,6 +4526,206 @@
                          :dir dir :via "http"})
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
+(defonce ^:private compaction-lock
+  ;; ONE LOCK FOR ALL COMPACTIONS IN THIS PROCESS. The DECISION (read the record, is a
+  ;; compaction already open, what is the range) and the WRITE must be one critical section:
+  ;; two requests that each read a lock-free record would both compact. Compactions are rare
+  ;; (a person's `/compact`, or a run crossing the threshold), so one lock is the right size.
+  (Object.))
+
+(defn- run-compaction!
+  "One compaction, against RECORDS with PROVIDER, measuring against WINDOW: summarize (ONE
+  model call, bracketed like any other), write the rows, and tell the live session. Returns
+  the result map, or nil when there was nothing to compact. Shared by the manual route, the
+  automatic trigger and the overflow recovery so the three cannot drift.
+
+  OPTS' `:aggressive?` picks the plan: the ordinary budget-keeping one, or
+  `compaction/overflow-plan` -- the one used after the vendor has ALREADY refused the request
+  for its length, which ignores the budget and keeps only the newest indivisible unit."
+  [stem provider records window ratios opts]
+  (let [written   (atom [])
+        put       (fn [kind payload]
+                    (swap! written conj [kind payload])
+                    (log! stem nil kind payload))
+        summarize (fn [messages]
+                    (let [specs []
+                          p     (assoc provider :tools specs)]
+                      (put "model/start" (dissoc (ev/model-start p specs) :type))
+                      (try
+                        (let [{:keys [message telemetry]}
+                              (llm/stream! p
+                                           (conj (vec messages)
+                                                 {:role "user" :content compaction/summary-instruction})
+                                           (fn [_]) stem)]
+                          (put "model/end" telemetry)
+                          (let [content (:content message)]
+                            (if (string? content) content (str content))))
+                        (catch Throwable t
+                          (put "model/end" {})
+                          (throw t)))))]
+    ;; THE TWO HOOK POINTS THE TABLE ALREADY DECLARED (`harness.kernel.hooks`), fired around every
+    ;; compaction -- automatic or manual. Observers (`:gate? false`), so neither can gate it; with
+    ;; no sink bound (a manual compaction outside a run) they are simply quiet.
+    (hook/emit :pre-compact {:thread-id stem})
+    (let [result (compaction/perform! records
+                                      {:window       window
+                                       :retain-ratio (:retain-ratio ratios)
+                                       :append       put
+                                       :plan-fn      (when (:aggressive? opts) compaction/overflow-plan)
+                                       :summarize    summarize})]
+      (when (seq @written)
+        (sessions/set-compactions!
+         stem
+         (replay/compaction-facts
+          (into (vec records) (map (fn [[k p]] (row-of k p)) @written)))))
+      ;; fired even when `perform!` had nothing to compact -- `:pre-compact` already fired, and a
+      ;; half-open pair would be the worse trace.
+      (hook/emit :post-compact {:thread-id stem})
+      result)))
+
+(defn- prune-results!
+  "Elide the oversized TOOL RESULTS in RECORDS (ticket 06): a local, deterministic cut that
+  spends NOTHING -- no model call, no window, no estimate. One `context/pruned` receipt per
+  replaced result names the event it shadowed and the code points either side of the cut; the
+  live session is told so `messages` folds the elided text at once.
+
+  Answers `{:records <records + the receipts> :reduction {:pruned n :removed n}}`, or nil when no
+  result was long enough to cut. THE LOCK IS THE CALLER'S: this is one step of the same critical
+  section as a compaction, so it cannot race one."
+  [stem records]
+  (let [done (into #{} (map :toolCallId) (replay/prune-facts (vec records)))
+        plan (prune/prune-plan (replay/entries (vec records)) done)]
+    (when (seq plan)
+      ;; THE LIVE SESSION IS TOLD, so `messages` folds the elided text at once rather than
+      ;; waiting for a rebuild. Holding it first is what makes `set-prunes!` land.
+      (sessions/touch! stem)
+      (let [written (atom [])]
+        (doseq [p plan]
+          (let [payload (prune/receipt p)]
+            (swap! written conj ["context/pruned" payload])
+            (log! stem nil "context/pruned" payload)))
+        (let [all (into (vec records) (map (fn [[k p]] (row-of k p)) @written))]
+          (sessions/set-prunes! stem (replay/prune-facts all))
+          {:records   all
+           :reduction (prune/reduction plan)})))))
+
+(defn- recover-overflow!
+  "ONE AGGRESSIVE COMPACTION after the vendor refused the request for its LENGTH (ticket 05).
+
+  Returns the SHORTER model view to retry with, or nil when nothing could be removed -- and the
+  caller then hands the vendor's own refusal out UNTOUCHED. It never throws: a failure in the
+  recovery must not replace the error that explains the run.
+
+  NOTHING ABOUT CAPACITY IS READ. The vendor has already answered, so no window and no estimate
+  is needed to justify the compaction -- `compaction/overflow-plan` ignores both on purpose.
+
+  THE LOCK IS THE SAME ONE the manual route and the automatic trigger take, so a recovery
+  cannot race either.
+
+  THE RETRY KEEPS THE SYSTEM MESSAGE and takes the conversation from the RECORD's view -- pruned
+  and, when it could be, compacted -- so what goes out is a request built the one way this
+  harness builds one. THE FREE STEP GOES FIRST (ticket 06): an oversized tool result is elided
+  without any model call, and that alone can be the progress the retry rests on -- so the
+  aggressive summary is attempted NEXT, and if IT fails the pruned view is still a shorter model
+  view, which is what the retry needs. Anything this run produced that has not reached the record
+  and the derived injections are not re-sent: the run continues from the recorded conversation.
+
+  THE VIEW IS MEASURED BEFORE AND AFTER, over the CONVERSATION alone -- not over what was
+  actually sent, whose derived injections would make any view look shorter. A pass that removed
+  nothing answers nil rather than retrying the same overflowing request."
+  [stem provider history _t]
+  (try
+    (locking compaction-lock
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (let [records (replay/read-records f)
+              before  (sessions/messages stem)
+              ;; 1. THE FREE STEP: elide giant tool results, no model call.
+              pruned  (prune-results! stem records)
+              records (or (:records pruned) records)
+              ratios  (compaction/config stem)
+              ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress.
+              _       (try (run-compaction! stem provider records (:context-window provider) ratios
+                                            {:aggressive? true})
+                           (catch Throwable _ nil))
+              system  (vec (take-while #(= "system" (:role %)) history))
+              after   (sessions/messages stem)]
+          (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
+            (into system (ag/provider-messages after))))))
+    (catch Throwable _ nil)))
+
+(defn- compact-if-pressured!
+  "AUTO COMPACTION (ticket 04): at the start of a run, BEFORE it derives its request, measure
+  the pressure against the window the record describes and compact when it is at or over the
+  threshold. Below the threshold, nothing happens at all -- no rows, no model call.
+  `harness.edge.pressure` owns the threshold and where the window comes from.
+
+  FAILS SOFT: a report-only meter must never become a dead run, so anything wrong here is
+  logged and the run carries on uncompacted.
+
+  PRUNING GOES FIRST AND MAY BE ENOUGH (ticket 06): the oversized TOOL RESULTS are elided for
+  free, the pressure is MEASURED AGAIN over the pruned surface, and a view that came back under
+  the threshold skips the summary entirely -- one model call that does not happen."
+  [stem]
+  (try
+    (locking compaction-lock
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (let [records (replay/read-records f)
+              ratios  (compaction/config stem)
+              ;; 1. THE FREE STEP: elide oversized tool results, no model call.
+              pruned  (prune-results! stem records)
+              records (or (:records pruned) records)
+              ;; 2. RE-MEASURE over what the model would now be handed.
+              answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
+          (when (and (:thresholdTokens answer)
+                     (>= (:pressureTokens answer) (:thresholdTokens answer))
+                     (not (compaction/lock-active? records)))
+            (when-some [provider (providers/current-provider stem)]
+              (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))
+    (catch Throwable t
+      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
+  nil)
+
+(defn- compact-post
+  "POST /api/threads/<stem>/compact -- one compaction, run by hand (ticket 03).
+
+  IT DECIDES, SUMMARIZES WITH ONE MODEL CALL, AND WRITES THE ROWS; then it tells the live
+  session what changed, so the model view the NEXT request is built from is the compacted
+  one. The lock, the range and the no-op rule live in `harness.edge.compaction` and are
+  tested without any of this.
+
+  NOTHING TO DO IS NOT AN ERROR: a session with no provider, no declared window, or nothing
+  past the retained tail is answered plainly, and a compaction writes no rows at all."
+  [req stem]
+  (let [located  (try {:ok (replay/locate (home/projects-dir) stem)}
+                      (catch Throwable t {:error (ex-message t)}))
+        provider (try (providers/current-provider stem) (catch Throwable _ nil))]
+    (cond
+      (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+
+      (nil? provider)
+      (api-response 400 {:error "this session has no provider to summarize with"})
+
+      (nil? (:context-window provider))
+      (api-response 400 {:error "this model declares no context window, so there is nothing to measure against"})
+
+      (running? stem)
+      (api-response 409 {:error "this session has a run in flight; compact between turns"})
+      :else
+      (locking compaction-lock
+      (let [read (try {:ok (replay/read-records (:ok located))}
+                      (catch Throwable t {:error (ex-message t)}))]
+        (if (some? (:error read))
+          (api-response 400 {:error (:error read) :threadId stem})
+          (try
+            (let [result (run-compaction! stem provider (:ok read)
+                                            (:context-window provider) (compaction/config stem) nil)]
+              (api-response 200 {:threadId  stem
+                                 :compacted (some? result)
+                                 :shadowed  (:shadowed result)}))
+            (catch Throwable t
+              (api-response 400 {:error (ex-message t) :threadId stem})))))))))
+
 (defn- dispatch
   "The route table, with no safety net -- see `handler` for the one wrapped
   around it. Split out so the net is a single line of indentation around the
@@ -4611,6 +4850,7 @@
       ;; body that was never there.
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
+        [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)

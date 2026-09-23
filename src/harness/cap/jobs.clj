@@ -641,7 +641,13 @@
   FAILING TO WRITE IS NOT AN ERROR the caller has to handle: the answer it was going
   to point at is already bounded, so the call still returns a tail and a line saying
   the rest could not be kept. It is logged, because a record nobody can write is a
-  leak, not a hiccup."
+  leak, not a hiccup.
+
+  THIS IS NOT THE GENERAL TOOL-RESULT SPILL. `harness.cap.spill` moves ANY oversized tool
+  result out of the conversation at production, replacing it with a pickup slip; THIS is the
+  narrower one a `bash` answer uses against its own byte budget, and it keeps a tail plus a
+  truncation line rather than replacing the answer. Two spills, two trees -- a reader should
+  never have to guess which one wrote a file."
   [thread-id text]
   (try
     (let [p (record-path thread-id (next-record-id! thread-id))

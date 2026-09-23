@@ -34,7 +34,7 @@
 
 ;; ----------------------------------------------------------------- measured size
 
-(defn- size-of
+(defn size-of
   "The size of VALUE as this record spells it: characters of its JSON, unicode NOT
   escaped.
 
@@ -107,7 +107,7 @@
     (or (get-in payload [:resolved :context-window])
         (:context-window payload))))
 
-(defn- timeline-window
+(defn timeline-window
   "The window the provider timeline said was in force at or before RECORD: the last
   `provider/init` / `provider/changed` before it, as the edge wrote it down at the time.
 

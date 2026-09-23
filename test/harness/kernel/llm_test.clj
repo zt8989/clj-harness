@@ -419,3 +419,26 @@
         (is (= 1 (count ls)) "the request, and no response beside it")
         (is (= "request" (:at (first ls))))
         (is (str/includes? (:body (first ls)) "\"model\":\"m\""))))))
+
+(deftest a-length-refusal-is-recognised-and-an-unrelated-400-is-not
+  ;; ONE FAILURE, not every 400. The sentences below are the vendors' own, copied rather than
+  ;; paraphrased -- that is what makes them evidence -- and the near misses are refusals the run
+  ;; must keep reporting as themselves.
+  (let [refusal (fn [status body] (ex-info (str "HTTP " status ": " body) {:status status}))]
+    (testing "the vendors' own overflow refusals"
+      (doseq [body ["This model's maximum context length is 128000 tokens. However, your messages resulted in 200000 tokens."
+                    "{\"error\":{\"message\":\"prompt is too long: 210000 tokens > 200000 maximum\"}}"
+                    "{\"error\":{\"message\":\"This model's maximum context length is 65536 tokens.\",\"code\":\"context_length_exceeded\"}}"
+                    "Please reduce the length of the messages."]]
+        (is (true? (llm/context-overflow? (refusal 400 body))) body)))
+    (testing "a 413 carries it too"
+      (is (true? (llm/context-overflow? (refusal 413 "input is too long")))))
+    (testing "a 400 that is NOT about length stays a plain failure"
+      (is (false? (llm/context-overflow? (refusal 400 "model \"x\" does not accept [\"image\"] input"))))
+      (is (false? (llm/context-overflow? (refusal 400 "unknown parameter: max_tokens")))))
+    (testing "the sentence alone is not enough -- the status must be a client error"
+      (is (false? (llm/context-overflow? (refusal 500 "maximum context length"))))
+      (is (false? (llm/context-overflow? (refusal 429 "maximum context length")))))
+    (testing "nothing, and a throwable with no status, are not refusals"
+      (is (false? (llm/context-overflow? nil)))
+      (is (false? (llm/context-overflow? (ex-info "maximum context length" {})))))))

@@ -79,6 +79,7 @@
     harness.kernel.tools-test
     harness.cap.mcp-test
     harness.cap.jobs-test
+    harness.cap.spill-test
     harness.cap.mcp-wired-test
     harness.cap.ask-test
     harness.session-tools-test
@@ -118,6 +119,10 @@
     harness.edge.stats-test
     harness.edge.trajectory-test
     harness.edge.context-test
+    harness.edge.pressure-test
+    harness.edge.compaction-test
+    harness.edge.compaction-run-test
+    harness.edge.prune-test
     harness.edge.ui-test
     harness.edge.http-test
     ;; THE RECORD WRITER AND THE SESSION TABLE ARE SEPARATE NAMESPACES ON PURPOSE (ticket

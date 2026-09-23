@@ -688,6 +688,110 @@
        :interrupts (vec (get-in tf [:outcome :interrupts]))}
       :else {:state :settled})))
 
+;; -------------------------------------------------------- compaction (model view)
+
+(defn compaction-facts
+  "RECORDS -> the compactions the record declares, in the order they happened, each as
+  {:seq <the fact's own record offset> :shadowed [<record seqs>] :range {..} :tokens n
+   :summary \"...\"}.
+
+  A COMPACTION IS A FACT THE HARNESS WROTE ABOUT ITSELF (`context/compacted`, a CUSTOM
+  frame), not a message: it changes what the MODEL is handed and nothing a person reads.
+  `:shadowed` is the AUTHORITATIVE list of the surface nodes it replaces, IN SURFACE ORDER
+  -- not a numeric interval, because the summary it stands for has a LARGER record seq than
+  the range it replaces and yet sits where that range was."
+  [records]
+  (keep-indexed (fn [i row]
+                  (when (= "context/compacted" (kind row))
+                    (assoc (payload row) :seq i)))
+                (vec records)))
+
+(defn prune-facts
+  "RECORDS -> the tool-result prunings the record declares, in the order they happened, each as
+
+    {:seq <the fact's own record offset> :toolCallId id :shadowed [seqs]
+     :content \"...\" :before n :after n :removed n}
+
+  PRUNING IS A FACT THE HARNESS WROTE ABOUT ITSELF (`context/pruned`, a CUSTOM frame), like a
+  compaction: the tool message stays in the record, and this is what makes the MODEL read the
+  elided version. `:shadowed` names the event whose text it replaced, and `:toolCallId` is the
+  call the two share -- which is also how the fold finds the message to change."
+  [records]
+  (keep-indexed (fn [i row]
+                  (when (= "context/pruned" (kind row))
+                    (assoc (payload row) :seq i)))
+                (vec records)))
+
+(defn- compaction-summary
+  "The message the model reads in a compacted range: one ordinary user message wrapping the
+  summary text, so no consumer has to learn a new message shape."
+  [text]
+  {:role "user" :content (str "<compacted-summary>" text "</compacted-summary>")})
+
+(defn- apply-compaction
+  "Replace one range of SURFACE (a vector of {:id :message}) with its summary. The range is
+  found BY MEMBERSHIP and walked in SURFACE ORDER -- the first node whose id is shadowed
+  marks where the summary goes -- never by comparing ids as numbers."
+  [surface {:keys [seq shadowed summary]}]
+  (let [shadowed (set shadowed)
+        start    (first (keep-indexed (fn [i node] (when (shadowed (:id node)) i)) surface))]
+    (if (nil? start)
+      surface
+      (into (subvec surface 0 start)
+            (cons {:id seq :message (compaction-summary summary)}
+                  (remove #(shadowed (:id %)) (subvec surface start)))))))
+
+(defn prune-messages
+  "MESSAGES + FACTS (prune-facts) -> MESSAGES with each pruned tool result's text replaced.
+
+  KEYED BY CALL ID, IN EITHER SPELLING: a message read back off the record is provider-shaped
+  (`:tool_call_id`) and one folded out of a run's frames is AG-UI's (`:toolCallId`), and a
+  record speaks both dialects at once -- so a fact has to find its message whichever way the
+  message is spelled. NOTHING ELSE ABOUT THE MESSAGE MOVES: its role and its call id are the
+  pairing, and the fold must not touch them. A fact whose call is not here (a compaction
+  already shadowed it) changes nothing."
+  [messages facts]
+  (if (empty? facts)
+    (vec messages)
+    (let [by-id (into {} (map (juxt :toolCallId :content)) facts)]
+      (mapv (fn [m]
+              (if-some [c (get by-id (or (:tool_call_id m) (:toolCallId m)))]
+                (assoc m :content c)
+                m))
+            messages))))
+
+(defn model-nodes
+  "ENTRIES (replay/entries) + FACTS (compaction-facts) -> the MODEL-FACING SURFACE as
+  NODES `{:id <record seq> :message M}`, in order, every compaction's summary standing where
+  its range stood.
+
+  THE IDS ARE THE POINT of this arity: `compacted-messages` is this minus the ids, and a
+  compaction WRITER needs them -- `:shadowed` is a list of node ids, so a caller that only
+  had the messages could not name a range.
+
+  THE ORIGINAL ENTRIES ARE NOT TOUCHED -- `replay/entries` is unchanged, so the client keeps
+  reading the originals (the model reads the summary, a person reads the source), and the
+  record keeps every row. This is the one fold that shows summaries.
+
+  A NODE IS AN ENTRY OR AN EARLIER SUMMARY: a summary is named by its FACT's own record seq,
+  so a later compaction can shadow it -- and then `start` can be GREATER than `end`, which is
+  exactly why the walk is by position and not by comparison.
+
+  PRUNES (prune-facts) ARE APPLIED FIRST, so an elided tool result is what a compaction's
+  RANGE measures over: a pruning moves no node and changes no pairing, and only the MODEL view
+  changes. A caller that has no prunings passes the two-argument arity and pays nothing for it."
+  ([entries facts] (model-nodes entries facts []))
+  ([entries facts prunes]
+   (let [msgs (prune-messages (mapv :message entries) prunes)
+         base (mapv (fn [{:keys [seq]} m] {:id seq :message m}) entries msgs)]
+     (vec (reduce apply-compaction base (sort-by :seq facts))))))
+
+(defn compacted-messages
+  "NODES -> just the messages (`model-nodes` without the ids)."
+  ([entries facts] (compacted-messages entries facts []))
+  ([entries facts prunes]
+   (mapv :message (model-nodes entries facts prunes))))
+
 (defn sofar
   "What has been recorded of a conversation SO FAR: the message list, the context, and
   the state the record is in (`record-state`, plus what the fold could see).
@@ -714,12 +818,15 @@
   fold is the same one `:messages` comes from (`entries`), so the two cannot drift."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
+        es      (entries records)
         state   (record-state records)
         open?   (= :unfinished (:state state))]
     {:messages   (if open?
                    (messages-so-far records)
                    (records->messages records))
-     :entries    (entries records)
+     :entries    es
+     :compactions (compaction-facts records)
+     :prunes      (prune-facts records)
      :context    []
      :state      (:state state)
      :open-runs  (:open-runs state)

@@ -5,8 +5,8 @@
 ;; two compose: the project wins for what it says, the user level answers for
 ;; the rest.
 ;;
-;; EXCEPT FOR :editing, which composes KEY BY KEY -- see below. Every other
-;; top-level key is replaced WHOLE by the project level, so a project that
+;; EXCEPT FOR :editing AND :compaction, which compose KEY BY KEY -- see below. Every
+;; other top-level key is replaced WHOLE by the project level, so a project that
 ;; mentions :approval decides all of it.
 ;;
 ;; Everything here is read FRESH on every call: edit this file and the session
@@ -60,6 +60,19 @@
   ;; How many untouched lines an edit's answer shows either side of the change
   ;; (0-10).
   :diff-context-lines 1}
+
+;; Context compaction. `:threshold-ratio` is the pressure (a fraction of the window) at
+;; which a run compacts BEFORE its request goes out; `:retain-ratio` is the newest slice
+;; kept VERBATIM. Retain must stay STRICTLY below threshold. `:overflow-retries` bounds the
+;; retry after a vendor has refused a request for LENGTH (`0` disables it): the recovery
+;; compacts more aggressively, and retries only when the model view really got shorter.
+;; BEFORE a summary, an oversized TOOL RESULT is elided for free (`harness.edge.prune`): head
+;; and tail kept, no model call, and the pressure is measured again -- under the threshold, the
+;; summary is skipped. Those cut points are constants in that namespace, not knobs here.
+:compaction
+{:threshold-ratio  0.7
+ :retain-ratio     0.16
+ :overflow-retries 1}
 
  ;; The project fence. When a session is bound to a project directory, a file
  ;; tool whose path resolves outside the project directory AND the configuration

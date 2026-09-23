@@ -6393,3 +6393,141 @@
          (is (not-any? #(= "input" (get-in % [:payload :name])) rows)
              "and the `input` row 票 02 deletes is GONE -- what an action brought is its own
               message rows, not a fact restating them"))))))
+
+(deftest an-overflow-refusal-compacts-aggressively-and-retries-in-one-turn
+  ;; ticket 05: the vendor says the request is too LONG -- a failure of a KIND of its own, not
+  ;; just any 400. Before the run ends, the history is compacted with NO capacity consulted,
+  ;; and because it really got shorter the call is retried in the SAME run: the user sees one
+  ;; turn, not an error followed by a second run.
+  (with-server
+    "compact-overflow"
+    [{:refuse {:status 400
+               :body   (str "This model's maximum context length is 128000 tokens."
+                            " However, your messages resulted in 200000 tokens.")}}
+     {:content "THE SUMMARY"}
+     {:content "THE ANSWER"}]
+    (fn []
+      (let [log (log-file "compact-overflow")]
+        (io/delete-file log true)
+        ;; a conversation the aggressive plan has a head to take: several turns on the record
+        (spit log
+              (str (str/join "\n"
+                             (map (fn [i]
+                                    (json/write-str {:ts i :runId nil :type "message"
+                                                     :source "client" :id (str "u" i)
+                                                     :payload {:role "user"
+                                                               :content (apply str (repeat 200 "a"))}}))
+                                  (range 8)))
+                   "\n")
+              :encoding "UTF-8")
+        (let [frames (wire/frames-from-sse
+                      (.body (post-run "compact-overflow"
+                                       {:append [{:id "u-new" :role "user" :content "keep going"}]})))]
+          (testing "the retry answered, in this one run"
+            (is (= "RUN_FINISHED" (:type (last frames))) (pr-str (last frames)))
+            (is (= "THE ANSWER"
+                   (apply str (map :delta (filter #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))
+          (testing "and the record holds one compaction, written before the retry"
+            (is (until (fn [] (some #{"compaction/end"}
+                                    (map replay/kind (replay/read-records log))))
+                       5000))
+            (let [kinds (mapv replay/kind (replay/read-records log))]
+              (is (some #{"context/compacted"} kinds))
+              (is (some #{"compaction/start"} kinds)))))))))
+
+(deftest a-giant-tool-result-is-pruned-for-free-and-the-summary-is-skipped
+  ;; ticket 06: an oversized TOOL RESULT is elided in the middle -- head and tail kept -- with NO
+  ;; model call, and the pressure is MEASURED AGAIN. A view that came back under the threshold
+  ;; does not pay for a summary at all, and the record keeps the whole original beside its receipt.
+  (with-server
+    "prune-e2e"
+    [{:content "DONE"}]
+    (fn []
+      (let [tid   "prune-e2e"
+            f     (log-file tid)
+            giant (apply str (repeat 60000 "x"))   ;; ~15000 tokens, over a 10000-window's 7000
+            line! (fn [run-id kind payload & [extra]]
+                    (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                   :runId run-id :kind kind :payload payload}
+                                                  extra))
+                                 "\n")
+                          :append true :encoding "UTF-8"))]
+        (io/delete-file f true)
+        (.mkdirs (.getParentFile f))
+        (line! "r1" "message" {:role "user" :content "look"} {:source "client" :id "u1"})
+        (line! "r1" "model/start" {:model "scripted" :context-window 10000 :tools []})
+        (doseq [frame (mapcat (ag/outbound tid "r1")
+                              [(ev/run-start)
+                               (ev/tool-call "c1" "read" "{}")
+                               (ev/tool-result "c1" giant nil)
+                               (ev/run-end)])]
+          (line! "r1" "event" frame))
+        (#'http/compact-if-pressured! tid)
+        (#'http/compact-if-pressured! tid)   ;; again: pruning must not repeat itself
+        (let [pruned? (until (fn [] (some #{"context/pruned"}
+                                          (map replay/kind (replay/read-records f))))
+                             3000)
+              kinds   (mapv replay/kind (replay/read-records f))]
+          (testing "a receipt, and NO summary -- pruning alone was enough"
+            (is pruned?)
+            (is (not-any? #{"context/compacted"} kinds))
+            (is (not-any? #{"compaction/start"} kinds))
+            (is (= 1 (count (filter #{"context/pruned"} kinds)))
+                "pruning is idempotent: the second trigger wrote no second receipt"))
+          (testing "the MODEL reads the elided text; the record keeps the whole one"
+            (let [view (sessions/messages tid)]
+              (is (some #(and (= "tool" (:role %))
+                              (str/includes? (str (:content %)) "pruned"))
+                        view))
+              (is (every? (fn [m]
+                            (or (not= "tool" (:role m))
+                                (< (count (str (:content m))) 20000)))
+                          view)))
+            (is (str/includes? (slurp f :encoding "UTF-8") giant)
+                "the original is still on the record")))))))
+
+(deftest a-just-produced-giant-tool-result-is-spilled-and-read-back
+  ;; ticket 09: a SINGLE huge tool result is moved out of the conversation the moment it is
+  ;; produced. The model is handed a pickup slip, the record never holds the giant text (so no
+  ;; request ever carried it), and the `read` tool the slip names gets the original back.
+  (with-server
+    "spill-e2e"
+    [{:content ""
+      :tool-calls [{:id "c1" :name "spew" :arguments {}}]}
+     {:content "got it"}]
+    (fn []
+      (let [tid  "spill-e2e"
+            f    (log-file tid)
+            body (apply str (map (fn [i] (str "row " i " " (apply str (repeat 40 "z")) "\n"))
+                                (range 2000)))]
+        (tools/session-register! tid "spew"
+          {:description "Returns a giant string."
+           :parameters  {:type "object" :properties {} :required []}
+           :required    []
+           :run         (fn [_] body)})
+        (try
+          (io/delete-file f true)
+          (let [frames  (wire/frames-from-sse
+                         (.body (post-run tid {:append [{:id "u1" :role "user" :content "go"}]})))
+                result  (first (filter #(= "TOOL_CALL_RESULT" (:type %)) frames))
+                slip    (str (:content result))
+                locator (second (re-find #"(?m)^Locator: (.+)$" slip))
+                rows    (replay/read-records f)]
+            (testing "the model is handed a slip, not the giant result"
+              (is (some? result))
+              (is (str/includes? slip "spilled"))
+              (is (str/includes? slip "use the read tool"))
+              (is (not (str/includes? slip body)) "the giant text is not in what the model reads"))
+            (testing "and no request ever carried the giant text"
+              (is (not-any? #(str/includes? (str (:content (:payload %))) body) rows)
+                  "no recorded row's content is the whole result")
+              (is (< (count slip) 5000)
+                  "the slip the model reads is tiny next to the result"))
+            (testing "the slip's retrieval path -- the read tool -- returns the original"
+              (let [got (tools/run! {:function {:name "read"
+                                                :arguments (json/write-str {:path locator})}}
+                                    tid)]
+                (is (false? (:error got)))
+                (is (str/includes? (apply str (read-lines (:content got))) "row 0 zzzz")
+                    "the spilled file comes back through the read tool"))))
+          (finally (tools/session-unregister! tid "spew")))))))
