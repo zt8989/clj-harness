@@ -1268,7 +1268,8 @@
   ;; A TIER MAY NOT CARRY A MODEL'S COUNTS, and after ticket 03 that rule is about the
   ;; CONFIGURATION rather than about a request: a run cannot name a provider any more, so
   ;; the mistake is made where a session's selection is made -- config.edn (or the
-  ;; session override, or `session-configure`), all of which meet the same `selection`.
+  ;; session override, which POST /api/model writes), both of which meet the same
+  ;; `selection`.
   ;; The rule is unchanged, and so is what it costs to meet it: the run is TERMINATED
   ;; with the catalog's own sentence, naming the field it could not use and where the
   ;; field belongs instead -- not a run that starts, ignores it, and reports success.
@@ -1355,127 +1356,77 @@
            (testing "a later run of the same thread does not repeat the init"
              (is (= 1 (count (filter #(= "provider/init" (replay/kind %)) after-second)))))))))))
 
-(deftest a-session-configure-lands-as-a-changed-line
-  ;; The write half, end to end: the agent changes its reasoning effort, the
-  ;; change is approved, and the jsonl shows a provider/changed line with
-  ;; before -> after plus what it resolved to. The approval gate is what makes it
-  ;; land only after the human's verdict.
+(deftest a-recorded-change-is-drained-into-the-log
+  ;; THE DRAIN, end to end. The provider outbox has had no producer since the
+  ;; `session-configure` tool was removed, so no production path records a
+  ;; `provider/changed` line today -- but the EDGE still drains the outbox on every
+  ;; run (harness.edge.context reads those lines back), and that is what this
+  ;; drives: record the change the way the tool body did, run, read the line.
   ;;
   ;; A session override holds ONLY the knobs the session owns (not the resolved
-  ;; endpoint -- that is what :resolved and the init line are for). So the
-  ;; change's before and after show the session's slice, and the chain between
-  ;; consecutive changes is exactly the test of "what moved in this session".
+  ;; endpoint -- that is what :resolved and the init line are for). So the change's
+  ;; before and after show the session's tier, and the chain between consecutive
+  ;; changes is exactly the test of "what moved in this session".
   (with-resolved-config
    [{:content "hello"}]
    (fn []
-     (let [id   "http-change"]
+     (let [id "http-change"]
        (try
          (io/delete-file (log-file id) true)
-         ;; Seed the session with a baseline the change can stand on.
+         ;; Seed the session with a baseline the change can stand on. Then record
+         ;; two changes -- one knob, then a vendor switch -- through the same two
+         ;; calls the tool body made: one atom operation, then the fact left in
+         ;; the outbox for the edge to write down.
          (providers/set-override! id {:model "alpha-big"})
-         ;; Drive the change the way a run would: park, approve, resume-transit.
-         (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
-                                        :function {:name "session-configure"
-                                                   :arguments (json/write-str {:reasoning-effort "high"})}}
-                                       id))
-               {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
-           (call))
-         (testing "the session now serves the changed value"
+         (doseq [change [{:reasoning-effort "high"} {:provider "beta" :model "beta-plain"}]]
+           (let [{:keys [before after resolved]} (providers/swap-override! id change)]
+             (providers/record-provider-change! id before after "a-tool" after resolved)))
+         (testing "the session now serves the changed values"
            (is (= "high" (:reasoning-effort (providers/active-provider id)))))
          ;; Run once so the edge drains the outbox to the log.
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
+                      (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
                       2000)
-               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
+               changes (mapv replay/payload (filter #(= "provider/changed" (replay/kind %)) lines))
+               [a b]   changes]
            (testing "the change is on disk, before -> after, marked approved"
-             (is (= "approved" (:verdict changed)))
-             (is (= "alpha-big" (get-in changed [:before :model]))
-                 "the session's pre-change slice is the baseline that stood")
-             (is (= "alpha-big" (get-in changed [:after :model]))
+             (is (= "approved" (:verdict a)))
+             (is (= "alpha-big" (get-in a [:before :model]))
+                 "the session's pre-change tier is the baseline that stood")
+             (is (= "alpha-big" (get-in a [:after :model]))
                  "the model never moved; only the effort did")
-             (is (= "high" (get-in changed [:after :reasoning-effort]))
-                 "and the new knob is the one the change named")
-             (is (= "session-configure" (:trigger changed))
-                 "the change names the path that pressed it")
+             (is (= "high" (get-in a [:after :reasoning-effort])))
+             (is (= "a-tool" (:trigger a))
+                 "the trigger is whatever path the recorder was told -- here, a test")
              (is (= {:model "alpha-big" :reasoning-effort "high"}
-                    (select-keys (:override changed) [:model :reasoning-effort]))
-                 "the override is the full session slice after the change")
-             (testing "and it records what that slice resolved to, so a reader
+                    (select-keys (:override a) [:model :reasoning-effort]))
+                 "the override is the full session tier after the change")
+             (testing "and it records what that tier resolved to, so a reader
                        months later is not reading today's catalog"
-               (is (= "https://x/v1" (get-in changed [:resolved :base-url])))
-               (is (= "alpha-big" (get-in changed [:resolved :model])))
-               (is (= ["image" "text"] (get-in changed [:resolved :input])))))
-           (testing "consecutive changes chain through the same slice"
-             ;; One more approved change: reasoning-effort goes from high to
-             ;; low. before on the new line MUST equal after on the previous.
-             (let [call (fn [] (tools/run! {:id "cfg2" :type "function"
-                                            :function {:name "session-configure"
-                                                       :arguments (json/write-str {:reasoning-effort "low"})}}
-                                           id))
-                   {:keys [parked]} (call)]
-               (tools/decide-approval! (:interrupt-id parked) :approved {})
-               (call))
-             (post-run id)
-             (let [lines (wait-for-recorded
-                          (log-file id)
-                          (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
-                          2000)
-                   changes (filter #(= "provider/changed" (replay/kind %)) lines)
-                   [a b]   (mapv replay/payload changes)]
-               (is (= "high" (get-in a [:after :reasoning-effort])))
-               (is (= "high" (get-in b [:before :reasoning-effort]))
-                   "the second change starts where the first ended")
-               (is (= "low" (get-in b [:after :reasoning-effort])))
-               (is (every? #(= "session-configure" (:trigger %)) [a b])
-                   "every chained change names its trigger")
-               (is (= {:model "alpha-big"} (select-keys (:override a) [:model]))
-                   "the first change's override is the full session slice")
-               (is (= "low" (get-in (:override b) [:reasoning-effort]))
-                   "the second change's override reflects the latest session state"))))
-         (finally (providers/set-override! id nil)))))))
-
-(deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
-  ;; The end-to-end proof of the feature: an agent naming a vendor gets that
-  ;; vendor's ENDPOINT, and the change line says so. Under the old shape this
-  ;; call was accepted, approved, and changed nothing -- the log line even
-  ;; recorded {:before {} :after {}}.
-  (with-resolved-config
-   [{:content "hello"}]
-   (fn []
-     (let [id   "http-vendor"]
-       (try
-         (io/delete-file (log-file id) true)
-         (let [call (fn [] (tools/run! {:id "vsw" :type "function"
-                                        :function {:name "session-configure"
-                                                   :arguments (json/write-str {:provider "beta"})}}
-                                       id))
-               {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
-           (call))
-         (testing "the session's served endpoint moved with the vendor"
-           (let [a (providers/active-provider id)]
-             (is (= :beta (:provider a)))
-             (is (= "https://y/v1" (:base-url a)))
-             (is (= "beta-plain" (:model a)) "and its default model came along")))
-         (post-run id)
-         (let [lines (wait-for-recorded
-                      (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
-                      2000)
-               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
-           (is (= "beta" (get-in changed [:after :provider]))
-               "the change line names the vendor that was selected")
-           (is (not= {} (:after changed))
-               "and is not an empty change -- which is what the old shape wrote")
-           (is (= "https://y/v1" (get-in changed [:resolved :base-url]))
-               "with the endpoint that vendor resolves to")
-           (is (= "beta-plain" (get-in changed [:resolved :model])))
-           (testing "and the counts moved with the model, not left at alpha's"
-             (is (= 128000 (get-in changed [:resolved :context-window])))
-             (is (= 4096 (get-in changed [:resolved :max-output-tokens])))))
+               (is (= "https://x/v1" (get-in a [:resolved :base-url])))
+               (is (= "alpha-big" (get-in a [:resolved :model])))
+               (is (= ["image" "text"] (get-in a [:resolved :input])))))
+           (testing "and a vendor switch lands as a change that moved the endpoint"
+             ;; The change NAMES the new vendor's model: the tier still held alpha's
+             ;; id, and a vendor that does not declare it is refused rather than
+             ;; carried across (see providers/resolve-override). Under the old shape
+             ;; this change was recorded as {:before {} :after {}} -- a line that
+             ;; documents nothing.
+             (is (= "high" (get-in b [:before :reasoning-effort]))
+                 "the second change starts where the first ended")
+             (is (= "beta" (get-in b [:after :provider]))
+                 "the line names the vendor that was selected")
+             (is (not= {} (:after b)) "and is not an empty change")
+             (is (= "https://y/v1" (get-in b [:resolved :base-url]))
+                 "with the endpoint that vendor resolves to")
+             (is (= "beta-plain" (get-in b [:resolved :model])))
+             (testing "and the counts moved with the model, not left at alpha's"
+               (is (= 128000 (get-in b [:resolved :context-window])))
+               (is (= 4096 (get-in b [:resolved :max-output-tokens])))))
+           (testing "and the outbox is empty: draining is once, and it happened"
+             (is (empty? (providers/take-provider-changes! id)))))
          (finally (providers/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight

@@ -1264,11 +1264,14 @@
               ;; that carries the interrupt id and the client's payload.
               (doseq [d decisions]
                 (log! thread-id run-id "approval/decided" d))
-              ;; The provider timeline, part 2: any change a tool made during this
-              ;; run, drained from the outbox. It lands after approval/decided
-              ;; because the change is only written once the human's approval has
-              ;; been consumed -- so the two lines read together as "approved, and
-              ;; here is what it changed".
+              ;; The provider timeline, part 2: any change a TOOL made during this
+              ;; run, drained from the outbox. NOTHING FEEDS IT TODAY -- the tool
+              ;; that did (`session-configure`) has been removed, and POST /api/model
+              ;; writes its own `provider/session-changed` line when it is pressed --
+              ;; but the drain stays wired for the next tool that moves the
+              ;; selection. It lands after approval/decided because such a change is
+              ;; only written once the human's approval has been consumed, so the two
+              ;; lines read together as "approved, and here is what it changed".
               ;;
               ;; A slice is the SELECTION, not the resolved endpoint: :before/:after
               ;; are what the change moved (a session can only move a knob), and
@@ -4063,20 +4066,22 @@
   "POST /api/model {threadId, provider?, model?, reasoning-effort?, clear?} --
   change THIS session's selection, and answer the resolution that is now in force.
 
-  THE HTTP TWIN OF THE `session-configure` TOOL, and deliberately its twin rather
-  than a second implementation of the same idea: the three knobs are the same
-  three, the unknown-key refusal is the same refusal, and the change is validated
-  by RESOLVING IT before anything is written -- a change that cannot be served is
-  not a change, and writing first would leave the session holding a configuration
-  every later run fails on.
+  THE ONLY WAY A SESSION'S SELECTION MOVES, now that the `session-configure`
+  tool is gone: the composer's picker presses this, and nothing else writes the
+  session tier. The three knobs are exactly provider, model and reasoning-effort,
+  an unknown key is refused by name, and the change is validated by RESOLVING IT
+  before anything is written -- a change that cannot be served is not a change,
+  and writing first would leave the session holding a configuration every later
+  run fails on.
 
-  WHAT IT DOES NOT SHARE IS THE ROAD TO THE LOG. The tool cannot write a log line,
-  so it leaves the change in the provider outbox for the run that will drain it;
-  this route IS the edge, so it writes its own line, at the moment of the change,
-  exactly as POST /api/project does. Using the outbox here would be worse than
-  redundant: nothing drains it outside a run, so a change made in the composer of
-  an idle session would surface in the log attached to the NEXT run -- a timeline
-  that says the model changed after it did.
+  WHY IT WRITES ITS OWN LOG LINE INSTEAD OF USING THE PROVIDER OUTBOX. This route
+  IS the edge, so it writes at the moment of the change, exactly as
+  POST /api/project does; the outbox is for code that is NOT the edge and cannot
+  write a line at all. Using it here would be worse than redundant: nothing drains
+  it outside a run, so a change made in the composer of an idle session would
+  surface in the log attached to the NEXT run -- a timeline that says the model
+  changed after it did. The outbox has no producer at all today; see
+  harness.cap.providers for why it stays anyway.
 
   `clear: true` DROPS THE SESSION'S OWN TIER, putting the session back on
   config.edn and the catalog. It is a knob rather than an empty body because
@@ -4123,9 +4128,10 @@
             (if (empty? change)
               (api-response 400 {:error "nothing to change: give at least one of provider, model, reasoning-effort"})
               ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the
-              ;; tier here and writing it back would lose a change the `session-configure`
-              ;; tool made in between -- both write this tier, from different threads --
-              ;; and this line would then record a before->after pair that never happened.
+              ;; tier here and writing it back would lose a change another press made in
+              ;; between -- this route runs on an http-kit thread, so two presses of the
+              ;; picker can overlap -- and this line would then record a before->after
+              ;; pair that never happened.
               (let [answer (try {:ok (providers/swap-override! thread-id change)}
                                 (catch Throwable t {:error (ex-message t)}))]
                 (if-some [error (:error answer)]

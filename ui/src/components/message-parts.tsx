@@ -160,7 +160,6 @@ import {
   PencilIcon,
   ReplaceIcon,
   SearchIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
   SquareTerminalIcon,
   TelescopeIcon,
@@ -304,7 +303,6 @@ const TOOL_ICONS: Record<string, ElementType> = {
   bash: SquareTerminalIcon,
   eval: BracesIcon,
   skill: SparklesIcon,
-  "session-configure": SlidersHorizontalIcon,
   todo_write: ListTodoIcon,
   web_fetch: GlobeIcon,
   web_search: TelescopeIcon,
@@ -423,15 +421,6 @@ function subjectOf(toolName: string, args: Args, t: Translate): string | null {
     }
     case "skill":
       return stringArg(args, "name") ?? null;
-    case "session-configure":
-      return (
-        ["provider", "model", "reasoning-effort"]
-          .flatMap((key) => {
-            const value = stringArg(args, key);
-            return value === undefined ? [] : [`${key}=${value}`];
-          })
-          .join(" ") || null
-      );
     case "glob": {
       const pattern = stringArg(args, "pattern");
       if (pattern === undefined) return null;

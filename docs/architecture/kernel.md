@@ -165,7 +165,7 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `ask` `bash` `eval` `job` `job_output` `job_kill` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
@@ -193,7 +193,9 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 （引号、变量、`$(mktemp)` 都可能漏），拿一个尽力而为的判定去拦一条可能正当的命令（`> report.csv`
 是真正的活）是拿真事换姿态。漏了，只是不提醒。
 
-`session-configure` 带 `:requires-approval`，其余不带。两个 `web_*` **刻意也不带**：
+内建工具**没有一个**带 `:requires-approval`——带审批的那个 `session-configure` 已经删了，而这道缝本身
+还在（`session-require-approval!` 或一条 hook 都能 park 一次调用，见 `harness.kernel.tools`）。
+两个 `web_*` **刻意也不带**：
 `bash` 今天就能 `curl` 任何地址且不带审批，给它们挂个 park 是**装样子**（`tool-toggles` 自己写过那句
 「关闭不是禁止」），要这道坎的会话自己装规则（`session-require-approval!`，或一条 hook）。
 `read` 与 `write` 在两种模式下**同名**，
@@ -203,7 +205,6 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 文件工具的相对路径经 `project/resolve-path` 重根到会话的项目目录，**回报的是已解析路径**。
 `bash` 的 cwd 是绑定的目录；**命令内容永不判定**（这是明示接受的逃逸面）。
 `eval` 在常驻的 `harness.user` 命名空间里执行，`def` 跨调用保留。
-`session-configure` 改本会话的 provider/model/reasoning-effort，**先解析后写**——改不动的配置不会被写进会话。
 `skill` 只按名字查表（表由目录列举产生，所以名字永远变不成路径），**不标审批**：读一份指令不是副作用，
 而正文里让人做的事各自过各自那道缝。它唯一的效果是把那份正文带进对话，施加点在循环里那一步
 （见 [skills-and-instructions](skills-and-instructions.md#skill-工具)）。

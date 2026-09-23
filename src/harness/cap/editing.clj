@@ -32,7 +32,7 @@
   say so without the user's home agreeing. config.edn is deliberately NOT the
   place: its documented shape is exactly three knobs (provider, model,
   reasoning-effort), and a fourth knob there is a NAMED failure rather than a
-  value somebody quietly drops (see the session-configure tool body). Editing
+  value somebody quietly drops (see harness.edge.http/model-post). Editing
   policy is policy; it belongs with the rest of harness.edn.
 
   THE ONE DEPARTURE FROM harness.edn's SHALLOW MERGE, and it is paid for here.
