@@ -164,9 +164,3 @@ export async function probeModels(
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   return (await res.json()) as { models: string[]; asked: string };
 }
-
-/// What to call a provider on screen: the label its entry declares, the id
-/// otherwise. The fallback is a rendering decision, so it lives here rather than on
-/// the server -- the id is always the truth, and a vendor nobody named has no label.
-export const providerLabel = (provider: ProviderRow): string =>
-  provider["display-name"] ?? provider.name;
