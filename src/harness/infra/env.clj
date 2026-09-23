@@ -21,7 +21,8 @@
   than the bound, leaves the enhancer half saying it could not ask rather than
   disappearing: a block that vanishes when a machine is unusual is worse than one
   that admits it does not know."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [harness.infra.shell :as shell]))
 
 (def enhancers
@@ -44,6 +45,49 @@
           (str/includes? n "mac")   "macos"
           (str/includes? n "linux") "linux"
           :else n)))
+
+;; ------------------------------------------------------- the machine's temp dirs
+;;
+;; NOT PART OF THE <env> BLOCK, and the reason it lives here anyway: 'which directories
+;; is scratch meant to live in' is a fact about the MACHINE, decided from the platform's
+;; own property rather than derived at each reader. The one reader is
+;; harness.cap.project/fence, which frees them; the block that states the fence reads the
+;; fence, not this.
+
+(def ^:dynamic *temp-dir-override*
+  "Test-only stand-in for this machine's temporary directories -- the same rule and the
+  same reason as harness.infra.home/*root-override*: a test run has to be able to point
+  the fence's temp entry somewhere its own fixtures do NOT live, or freeing temp would
+  free the suite's project and config-home fixtures too (isolate! puts every one of them
+  under java.io.tmpdir) and the fence tests would prove nothing. Nil in production, where
+  the property stands; bound by the test runner, never touched by production code."
+  nil)
+
+(defn temp-dirs
+  "This machine's temporary directories, canonical and de-duplicated, in order:
+  java.io.tmpdir, then POSIX /tmp when it is a real absolute directory of its own.
+
+  BOTH SPELLINGS A PERSON ACTUALLY WRITES, which is the point: on macOS java.io.tmpdir is
+  the per-user /var/folders/.../T while /tmp is a different directory, and on Linux the
+  two collapse to one entry. Windows has no /tmp -- a leading / there is drive-relative
+  rather than absolute -- so it is not offered as one.
+
+  CANONICALIZING IS WHAT MAKES /var/... AND /private/var/... ONE ANSWER rather than two,
+  and it is the same collapse harness.cap.project/under? performs on the path it tests,
+  so this answer and the gate cannot disagree about which directory a path is in.
+
+  THE OVERRIDE REPLACES the list rather than adding to it: an isolated run wants one
+  stand-in, not the machine's real temp beside it."
+  []                              ; *temp-dir-override* replaces the machine's answer
+  (or *temp-dir-override*
+      (->> [(System/getProperty "java.io.tmpdir") "/tmp"]
+           (remove nil?)
+           (map io/file)
+           (filter #(.isAbsolute ^java.io.File %))
+           (filter #(.isDirectory ^java.io.File %))
+           (map #(.getCanonicalPath ^java.io.File %))
+           distinct
+           vec)))
 
 (defn- platform-line
   "PLATFORM with the version and architecture the OS reports. One line rather than
