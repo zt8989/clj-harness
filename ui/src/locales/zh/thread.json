@@ -22,7 +22,8 @@
     "delete": "删除",
     "clear": "清空",
     "lines_other": "{{count}} 行",
-    "todoDone": "完成"
+    "todoDone": "完成",
+    "openSubagent": "打开这个子agent 的对话"
   },
   "summary": {
     "calls_other": "{{count}} 次工具调用",

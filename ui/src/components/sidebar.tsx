@@ -1295,6 +1295,23 @@ export const Sidebar: FC<SidebarProps> = ({
           folded ? "flex flex-col items-center" : "px-2 py-2",
         )}
       >
+        {/* THE SUBAGENT BLOCK USED TO LIVE HERE, and its removal is the point of
+            ticket 06 of `.scratch/subagent-view`: it listed what this home had
+            delegated to, and clicking a row replaced the conversation in the main
+            column. That is the behaviour this feature retires -- the door is the
+            `agent` call in the transcript itself (ticket 04), and what it opens is a
+            mirror beside the conversation (ticket 05), not a navigation. Keeping both
+            would be two answers to "where do I watch a subagent", and the older one
+            would be the one that quietly disagreed with the newer.
+
+            THE NAMES DID NOT MOVE, they were already elsewhere: the definitions are
+            edited in Settings (`settings-panel.tsx` draws the same
+            `DefinitionRows`), which is where `.scratch/subagents` put them in the
+            first place. What has no door left is the LIST of past delegations --
+            `GET /api/subagents` still answers it and the backend still keeps it, and
+            the panel that reads a live one is the transcript's card. Removing that
+            route is a separate decision, not a piece of this one. */}
+
         <Button
           variant="ghost"
           data-slot="sidebar-settings"

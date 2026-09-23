@@ -36,11 +36,6 @@
   ;; have complete test coverage.
   :mode :hashline
 
-  ;; A successful `write` is followed by an anchored read of the file's head, so
-  ;; the model can edit what it just wrote without reading it back. false leaves
-  ;; it a sentence saying to read the file instead.
-  :auto-read true
-
   ;; The `grep` tool (ripgrep, every hit back as an anchored row). false
   ;; takes the tool out of the session's toolset; nothing replaces it, and `bash`
   ;; is there if you need a search.

@@ -945,8 +945,15 @@
       (fn []
         (let [declared-state-columns
               {"projects"           #{"id" "canonical_path" "created_at"}
+               ;; `parent_id`/`subagent` are IDENTITY, not content, and they are the
+               ;; two columns that say a session is somebody's delegation rather than
+               ;; a conversation a person started: which session asked for it, and
+               ;; which subagent it was asked for. Nothing a subagent SAYS is here --
+               ;; its messages, its frames and its trajectory are its own jsonl, the
+               ;; same as any other session's (see harness.cap.project/begin-subagent!
+               ;; and .scratch/subagents issue 03).
                "sessions"           #{"id" "project_id" "path" "archived" "created_at"
-                                      "last_project_path" "title" "last_sent_at"}
+                                      "last_project_path" "title" "last_sent_at" "parent_id" "subagent"}
                ;; The anchor store (harness.cap.hashline.store).
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
                                       "anchors" "line_checksums" "served" "updated_at"}

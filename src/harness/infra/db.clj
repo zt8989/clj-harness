@@ -649,6 +649,36 @@
       (execute! c "UPDATE sessions SET last_sent_at = ? WHERE id = ?"
                 (.lastModified ^java.io.File f) id))))
 
+(defn- sessions-know-their-subagent
+  "Version 2 -> 3: `sessions.parent_id` and `sessions.subagent`.
+
+  A SUBAGENT'S CONVERSATION IS A SESSION, and the two columns are what say so.
+  `parent_id` is the thread that delegated to it; `subagent` is which subagent it
+  ran as. Both NULL for every ordinary conversation -- and for every row that
+  exists when this step runs, which is why there is nothing to backfill.
+
+  WHY THE STORE AND NOT THE RECORD. `harness.infra.db-test`'s meta-assertion is
+  that no table in the store mirrors a log, and this pair keeps it: neither column
+  can be read off the jsonl. Which conversation delegated is not in the subagent's
+  own file (the file holds what that conversation DID, not who asked for it), and
+  'is this row a subagent's' is a question the sidebar has to answer WITHOUT
+  opening a file.
+
+  WHY NOT A RUN STATUS TOO. Whether a delegation has finished is a fact about the
+  record -- the terminal frame -- or about this process (harness.cap.subagents'
+  live table), and a column that tried to hold it would be a third answer that can
+  disagree with both. The store holds IDENTITY here, exactly as it does for a
+  project: who belongs to whom, and what a thing is called.
+
+  `parent_id` IS NOT A FOREIGN KEY, deliberately. A session row's id is the
+  CLIENT's to invent (see the AG-UI edge, which accepts an id the store has never
+  heard of), so a reference the store enforced would refuse a delegation whose
+  parent has not written a row yet -- which is not an error, it is most of them.
+  The column records what the delegation was told; nothing joins on it."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN parent_id TEXT")
+  (ddl! c "ALTER TABLE sessions ADD COLUMN subagent TEXT"))
+
 (defn- table?
   "Does this store have a table called NAME? The probe half of a migration step:
   a step that leaves a table behind can be recognised by it."
@@ -881,6 +911,9 @@
    {:name     "sessions-remember-the-project-path"
     :present? #(column? % "sessions" "last_project_path")
     :run      sessions-remember-the-project-path}
+   {:name     "sessions-know-their-subagent"
+    :present? #(column? % "sessions" "subagent")
+    :run      sessions-know-their-subagent}
    {:name     "hashline-store"
     :present? #(table? % "hashline_snapshots")
     :run      hashline-store}

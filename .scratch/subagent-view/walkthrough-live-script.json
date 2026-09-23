@@ -1,0 +1,36 @@
+{
+  "turns": [
+    {
+      "content": "这一段交给 general 子agent：让它先跑一条命令，再回来说结论。",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "agent",
+          "arguments": {
+            "name": "general",
+            "prompt": "先跑 sleep 10，然后一句话说清 src/harness/cap 是干什么的。"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（子agent：先跑那条命令。）",
+      "reasoning": "先等一下这条命令。",
+      "tool-calls": [
+        {
+          "id": "b1",
+          "name": "bash",
+          "arguments": {
+            "command": "sleep 10 && echo done"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（子agent：cap 是能力目录，一个文件装一种工具。）"
+    },
+    {
+      "content": "（主 agent 收尾。右栏这时候应该已经看过它在跑了。）"
+    }
+  ]
+}

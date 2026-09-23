@@ -2,8 +2,9 @@
 
 ## 介绍
 
-一个 Clojure 写的 agent 内核，唯一对外接口是 **AG-UI**；前端是 TypeScript + React + assistant-ui，
-经 `@ag-ui/client` 直连后端。会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录。
+一个 Clojure 写的 agent 内核：跑一轮的接口是 **AG-UI**（`POST /api/agent`），其余 `/api/*` 是管理边；
+前端是 TypeScript + React + assistant-ui，经 `@ag-ui/client` 直连后端。**会话归服务端**——进程内存里
+那份是权威，jsonl 记录是它的恢复源（异步写、允许落后）；浏览器是只读副本，只发动作、画帧。
 
 **本文只讲怎么装、怎么配、怎么起。** 它是什么、内部怎么转、接口有哪些见
 [`docs/architecture.md`](docs/architecture.md)。文档分工：README 是入口，`docs/architecture/` 是现状，
@@ -61,7 +62,7 @@ harness.edn   用户级 harness 配置（可选）：编辑模式、围栏、技
 hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）
 mcp.edn       MCP 服务器声明（可选；不存在 = 一个都没声明）
 .env          密钥：一家厂商一把 <ID>_API_KEY，全局 HARNESS_API_KEY 兜底；优先于真实环境变量
-harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点
+harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点 / 任务清单
 projects/<项目>/*.jsonl  会话日志，按项目分目录
 ```
 
@@ -103,7 +104,7 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
  :skills       {:roots ["/abs/skills" ".agents/skills"]}}
 ```
 
-`:editing` 是**唯一逐键**合成的块，七个键与默认值都在 `harness.edn.example`。
+`:editing` 是**唯一逐键**合成的块，全部键与默认值都在 `harness.edn.example`。
 
 - **hook**（`hooks.edn`）：一个 hook 点上一行声明，`:command`（经 shell）或 `:run`（进程内函数，
   只有配置家与本会话能写）。payload 走 stdin JSON，退出码 **0 放行 / 2 阻断**（stderr 回喂模型），
@@ -114,7 +115,9 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 
 ### 工具
 
-- `glob` 按**名字**找文件；`todo_write` 记本会话的任务清单（一次送**完整**清单，空数组即清空）。
+- `glob` 按**名字**找文件；`todo_write` 记本会话的任务清单（一次送**完整**清单，空数组即清空），
+  **答案只报存了几项、各自什么状态**——清单就是刚送进去的那一份，不念回来。同理，`write` 的答案是
+  `wrote N chars to PATH` 加一句「锚点已释放，去 `read`」：**写不是读**，刚写进去的内容不必回放第二遍。
 - `web_fetch` 取 URL 正文（**有损的文本抽取器**，不是渲染器）；`web_search` 的键按
   **Brave → Exa → Tavily**（`BRAVE_API_KEY` / `EXA_API_KEY` / `TAVILY_API_KEY`）顺序取，全都没有就指名拒绝。
   两个出网工具**不带审批**——这是决定（`bash` 今天就能 `curl`），要这道坎的会话自己装规则。
@@ -122,8 +125,8 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
   EOF）与 `workdir`（不给就是本会话的项目目录）。**答案有上界**：默认带命令输出的最后 8000 字节
   （stdout 与 stderr **各算各的**），超出时整份落成一份记录，答案里写着**省略了多少字节、那份记录在哪**——
   再大的输出也读得回来（`bash` / `read` / `grep` 读同一个路径）。
-  **`run_in_background: true` 就是同一条命令的另一半**：调用立刻返回，答案是 job id 与记录路径
-  （那里的 `timeout` 不适用——后台命令没有时限；`stdin` 会被指名拒绝）。
+  **不等的另一半是 `job`**：调用立刻返回，答案是 job id 与记录路径，命令在后台跑到自己结束
+  （它没有时限，也不吃 `stdin`——两个键**不在它的参数表里**，传了也没有地方读）。
 - 读它用 `job_output`（头一行是状态，正文是它说过的最后一段；`offset` 从头翻，`wait: true` 挂到它结束，
   超时答 `[running]` 而不是报错）；停它用 `job_kill`（不等到进程死透，停过之后**再问一次照样答**）。
   记录在 `<配置家>/jobs/<会话>/句柄-进程戳.log`，末行 `[exit N]` / `[stopped]`，**没有末行 = 还在跑**；
@@ -131,7 +134,8 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
   写它的那个进程**：JVM 退出只收走作业与句柄，文件留在配置家，`read` / `grep` 照样读得到（昨天下班前那次
   长跑，今天还查得回来）；整棵树按字节封顶，超了从最旧的一份开始删。
 - **它结束了会告诉你**：没人等的作业跑完之后，它的结局会在**你下一次开口之前**摆在上下文里——
-  一条 `<job-ended id="…" path="…">[exit N]</job-ended>` 的注入，**三样事实，与记录多大无关**，
+  一条 `<job-ended id="…">[exit N]</job-ended>`、一行 `<command>…</command>`（**是哪个作业，光有 id
+  认不出来**）、再加一行「用 `job_output` 读它」的注入，**与记录多大无关**（命令多大它就多大），
   说一次；不是推送（不唤醒、不新起一轮）。自己 `job_output` / `job_kill` 看过的结局不再重复说。
   「轨迹」那一栏（会话界面里）看得见这条注入。
 - **注入物在「会话」那一栏里也看得见**：每一条注入在会话里画成一张**可折叠的卡**（与工具卡同一套壳，

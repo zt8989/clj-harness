@@ -7,7 +7,8 @@
   "page": {
     "general": "General",
     "models": "Models",
-    "mcp": "MCP servers"
+    "mcp": "MCP servers",
+    "subagents": "Subagents"
   },
   "panel": {
     "title": "Settings",
@@ -130,5 +131,32 @@
       "disabled": "switched off",
       "idle": "not used yet"
     }
+  },
+  "subagents": {
+    "loading": "Reading the subagents…",
+    "title": "Subagents",
+    "add": "Add subagent",
+    "back": "Subagents",
+    "builtinNote": "A built-in comes from the code, so it cannot be removed. Saving here writes an override with its name to {{file}}.",
+    "customNote": "Written to {{file}}.",
+    "fileNote": "That file is rewritten whole when this form saves, and what it held before is kept beside it.",
+    "name": "Name",
+    "nameHint": "How the main agent asks for it. Letters, digits and dashes.",
+    "editingNameHint": "The name is what the main agent asks for, so renaming means adding another and removing this one.",
+    "description": "What it is for",
+    "descriptionHint": "The main agent reads this when it decides who to hand work to: say what it is good at, and when it is the right one.",
+    "baseline": "Its tools",
+    "baselineHint": "A range is a baseline plus exclusions. There is no field that puts a tool back: eval and the delegating tool are never served to any subagent.",
+    "exclude": "Take out",
+    "excludePlaceholder": "read, web_search",
+    "excludeHint": "Comma-separated tool names. In force on the next delegation — nothing restarts.",
+    "save": "Save subagent",
+    "create": "Create subagent",
+    "cancel": "Cancel",
+    "remove": "Remove",
+    "removeTitle": "Takes this entry out of harness.edn. What the file held before is kept beside it.",
+    "errorNote": "Nothing was written — harness.edn is exactly as it was.",
+    "problemLead": "harness.edn's :subagents block says something that could not be honoured: ",
+    "problemTail": " The built-ins are still what this session uses."
   }
 }

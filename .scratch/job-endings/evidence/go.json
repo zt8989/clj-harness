@@ -5,10 +5,9 @@
    "tool-calls": [
     {
      "id": "c1",
-     "name": "bash",
+     "name": "job",
      "arguments": {
-      "command": "sleep 1; echo JOB-SAYS-SO",
-      "run_in_background": true
+      "command": "sleep 1; echo JOB-SAYS-SO"
      }
     }
    ]

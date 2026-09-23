@@ -24,15 +24,13 @@
   (tools/run! {:function {:name name :arguments (json/write-str args)}}))
 
 (defn- background
-  "`bash` in its background mode -- the ONE way to start a job now that the two modes
-  are one tool. The answer is the same id-and-path pair the cases below parse, and
-  `bash-as` is the same call under a session of its own."
-  ([command] (call "bash" {:command command :run_in_background true}))
-  ([thread-id command] (tools/run! {:function {:name "bash"
-                                                :arguments (json/write-str
-                                                            {:command command
-                                                             :run_in_background true})}}
-                                    thread-id)))
+  "`job` -- the verb that starts a job, and the ONE way to start one now that starting
+  is its own name again. The answer is the id-and-path pair the cases below parse, and
+  the second arity is the same call under a session of its own."
+  ([command] (call "job" {:command command}))
+  ([thread-id command] (tools/run! {:function {:name "job"
+                                               :arguments (json/write-str {:command command})}}
+                                   thread-id)))
 
 ;; ...and the ONE session that is deliberately the other editing mode. Everything
 ;; else here runs unbound, which since ticket 12 means anchor editing.
@@ -215,7 +213,7 @@
   ;; marked for approval, which is a property of the tool, not of the list.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["bash" "eval" "glob" "grep" "insert" "job_kill" "job_output" "read"
+      (is (= ["bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_output" "read"
               "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
               "web_fetch" "web_search" "write"]
              names))
@@ -223,7 +221,7 @@
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["bash" "edit" "eval" "glob" "job_kill" "job_output" "read"
+      (is (= ["bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
               "session-configure" "skill" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
@@ -458,7 +456,7 @@
           "re-reading the list fixes nothing here, so it says what the machine DOES have"))
     (is true "this machine has every kind the harness knows -- nothing to refuse")))
 
-(deftest the-background-mode-takes-the-same-shell
+(deftest a-job-takes-the-same-shell
   ;; THE SAME PROOF AS THE FOREGROUND CASE: `%CD%` is not something bash expands, so a
   ;; Windows path in the RECORD means cmd really read the line -- and the record is the
   ;; only place a job's output ever appears.
@@ -468,13 +466,12 @@
   ;; call that named a shell answers in exactly the shape a call that did not, and both
   ;; are held to it here rather than only the new one.
   (let [two-facts #"job \S+ started; its record is \S+"
-        default-answer (call "bash" {:command "echo hi" :run_in_background true})]
+        default-answer (call "job" {:command "echo hi"})]
     (is (re-matches two-facts (str/trim (:content default-answer)))
-        "the default background answer is still two facts, one line")
+        "the default job answer is still two facts, one line")
     (when (shell/resolution :cmd)
-      (let [answer (:content (call "bash" {:command "echo %CD%"
-                                           :run_in_background true
-                                           :shell "cmd"}))
+      (let [answer (:content (call "job" {:command "echo %CD%"
+                                          :shell "cmd"}))
             path   (second (re-find #"its record is (\S+)" answer))]
         (is (re-matches two-facts (str/trim answer))
             "and naming a shell does not add a third: two facts, one line")
@@ -484,14 +481,13 @@
             "the record holds what cmd printed, which bash could not have expanded")
         (jobs/shutdown!)))))
 
-(deftest a-background-call-naming-a-missing-shell-registers-nothing
+(deftest a-job-naming-a-missing-shell-registers-nothing
   ;; THE REFUSAL HAPPENS BEFORE THE ID IS TAKEN, so a call that named a kind this machine
   ;; does not have leaves no id, no record file and no process behind -- the same promise
   ;; `start!` makes about a command that cannot be spawned at all.
   (if-let [absent (a-shell-this-machine-lacks)]
-    (let [{:keys [content error]} (call "bash" {:command "echo hi"
-                                                :run_in_background true
-                                                :shell absent})]
+    (let [{:keys [content error]} (call "job" {:command "echo hi"
+                                               :shell absent})]
       (is (true? error))
       (is (str/includes? content (str "no `" absent "` shell on this machine")))
       (is (not (str/starts-with? content "job ")) "and nothing was registered for it"))
@@ -635,33 +631,46 @@
     (is (< elapsed 5000) (str "it returned while the command was still running (" elapsed "ms)"))
     (jobs/shutdown!)))
 
-(deftest the-two-modes-of-one-tool-differ-in-exactly-one-thing
-  ;; THE MERGE, as behaviour rather than as a parameter list. Waiting or not waiting is
-  ;; the difference; everything else about the command -- where it runs, what it writes
-  ;; its record into, what tool answers for it -- is the same.
-  (testing "`timeout` is not a limit on a background command"
+(deftest starting-a-job-is-a-verb-of-its-own
+  ;; THE SPLIT, as behaviour rather than as a parameter list: `bash` waits, `job` does
+  ;; not, and the command itself -- where it runs, what it writes its record into, what
+  ;; tool answers for it -- is the same either way. `.scratch/bash-background` merged
+  ;; these two into one tool; this is the reversal, because 'does this call wait' as a
+  ;; boolean is the judgement that got made wrong in the first place.
+  (testing "`job` answers at once, and nothing limits the command"
     (let [t0     (System/currentTimeMillis)
-          answer (:content (call "bash" {:command "sleep 2; echo late"
-                                         :run_in_background true
-                                         :timeout 1}))
+          answer (:content (call "job" {:command "sleep 2; echo late"}))
           elapsed (- (System/currentTimeMillis) t0)
           path   (second (re-find #"its record is (\S+)" answer))]
       (is (some? path) (str "the answer names the record: " answer))
       (is (< elapsed 1000) (str "the call came back at once: " elapsed "ms"))
-      (testing "and the command really is still running"
-        ;; A limit of 1ms that was applied would have stopped it long before this.
-        (Thread/sleep 1200)
-        (is (not (str/includes? (slurp path :encoding "UTF-8") "[exit"))))
+      (Thread/sleep 1200)
+      (is (not (str/includes? (slurp path :encoding "UTF-8") "[exit"))
+          "two seconds in, the command has no ending line -- it is still running")
       (jobs/shutdown!)))
-  (testing "and `stdin` is refused by name instead of being dropped"
-    ;; Nothing feeds a background command, so accepting the text would be a silent
-    ;; disagreement about what the call asked for.
-    (let [{:keys [content error]} (call "bash" {:command "cat"
-                                                :run_in_background true
-                                                :stdin "x"})]
-      (is (true? error))
-      (is (str/includes? content "`stdin` cannot be used with `run_in_background`"))
-      (is (str/includes? content "foreground")))))
+  (testing "the fields the OTHER verb needs are not read here at all"
+    ;; THE FIELDS ARE DELETED, NOT ARGUED WITH. Neither schema declares them, and each
+    ;; body destructures its own arguments and stops -- so a key carried over from the
+    ;; merged shape (or from a `bash` habit) is not something this side has an opinion
+    ;; about: it is not an argument of this verb, and there is nothing here that reads it.
+    (let [plain (:content (call "bash" {:command "echo hi"}))
+          {:keys [content error]} (call "bash" {:command "echo hi" :run_in_background true})]
+      (is (not error) "a key the schema does not have is not an error")
+      (is (= plain content) "and it changes nothing: `bash` waited, as this verb always does"))
+    (let [{:keys [content error]} (call "job" {:command "cat" :stdin "never-shown-anywhere"})]
+      (is (not error))
+      (let [path (second (re-find #"its record is (\S+)" content))]
+        (is (some? path) (str "a job started all the same: " content))
+        (Thread/sleep 300)
+        (is (not (str/includes? (slurp path :encoding "UTF-8") "never-shown-anywhere"))
+            "`stdin` has no reader on this side, so the text is not written anywhere")))
+    (let [{:keys [content error]} (call "job" {:command "sleep 2" :timeout 1})]
+      (is (not error))
+      (let [path (second (re-find #"its record is (\S+)" content))]
+        (Thread/sleep 1500)
+        (is (not (str/includes? (slurp path :encoding "UTF-8") "[timed out"))
+            "the number limited nothing: a job has no timeout to send one to")))
+    (jobs/shutdown!)))
 
 (deftest the-answers-state-facts-and-not-instructions
   ;; How to read a record belongs in a DESCRIPTION -- which is in front of the model on
@@ -777,20 +786,23 @@
 
 (deftest the-three-faces-say-what-they-are-for
   ;; THE AXIS, asserted rather than assumed: how long a command takes is not the
-  ;; question -- 'am I going to wait for it' is -- and since the two modes are ONE tool
-  ;; the axis is a parameter rather than a choice between two names. That is the whole
-  ;; reason for the merge: a model reading two descriptions in which one said 'slow'
-  ;; picked that one and then built its own `join` out of `sleep`
-  ;; (`.scratch/bash-record/spec.md` has that session).
+  ;; question -- 'am I going to wait for it' is -- and since the split it is a choice
+  ;; between two VERBS rather than a boolean inside one. A model that had to read two
+  ;; descriptions in which one said 'slow' picked that one and then built its own `join`
+  ;; out of `sleep` (`.scratch/bash-record/spec.md` has that session).
   (let [spec (fn [name] (get-in (first (filter #(= name (get-in % [:function :name]))
                                                (tools/specs)))
                                 [:function :description]))]
-    (testing "`bash` carries both modes, and says what the background one costs"
-      (is (str/includes? (spec "bash") "run_in_background"))
-      (is (str/includes? (spec "bash") "A job has NO timeout")
-          "a `timeout` handed to the background mode limits nothing, and it is not implied")
-      (is (str/includes? (spec "bash") "WHEN IT ENDS YOU ARE TOLD"))
+    (testing "`bash` waits, says so, and points at the verb that does not"
+      (is (str/includes? (spec "bash") "WAIT for"))
+      (is (str/includes? (spec "bash") "use `job`"))
+      (is (not (str/includes? (spec "bash") "run_in_background"))
+          "the merged parameter is advertised nowhere")
       (is (str/includes? (spec "bash") (str jobs/answer-budget-bytes " bytes"))))
+    (testing "`job` starts one, and says what that costs"
+      (is (str/includes? (spec "job") "NO timeout"))
+      (is (str/includes? (spec "job") "WHEN IT ENDS YOU ARE TOLD"))
+      (is (str/includes? (spec "job") "`job_output`") "and names the verb that reads it"))
     (testing "`job_output` is the one that can wait, and the one that says how it went"
       (is (str/includes? (spec "job_output") "`wait: true` blocks"))
       ;; THE RIGHT-HAND SIDE IS A LITERAL, and that is the whole point of this line.
@@ -800,8 +812,8 @@
       ;; `@<identity-hash>` rode along unnoticed. See
       ;; .scratch/llm-prefix-cache/issues/01-the-identity-hash-in-the-tool-table.md
       (is (str/includes? (spec "job_output") "120000ms")))
-    (testing "and neither face is left holding a stale name"
-      (is (nil? (spec "job")) "the merged name is gone from the table"))))
+    (testing "and every face is in the table under its own name"
+      (is (some? (spec "job")) "starting is a name again, not a flag on `bash`"))))
 
 (deftest a-job-output-call-can-wait-for-the-command-to-finish
   (let [started (:content (background "echo one; sleep 1; echo two"))

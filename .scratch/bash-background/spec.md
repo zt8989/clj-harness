@@ -1,9 +1,14 @@
 # spec: `bash` 自己会后台跑 —— 动词收成两个，通知收成三样
 
-**一句话**：`job` 与 `bash` 是**同一条命令的两个模式**（同一处解析 cwd、同一份记录、同一套 spawn），
-差别只有「这次调用等不等」——所以动词收成一个：`bash` 多一个参数 `run_in_background`（**工具数 18 → 17**）。
-同时**通知收成三样**：`<job-ended id="j1" path="…">[exit 0]</job-ended>` —— id、记录路径、结论行；
-没有尾部、没有截断话术、没有「去读它」的提示。工具答案也照这条走：**答案是事实，怎么读在描述里**。
+~~**一句话**：`job` 与 `bash` 是**同一条命令的两个模式**（同一处解析 cwd、同一份记录、同一套 spawn），
+差别只有「这次调用等不等」——所以动词收成一个：`bash` 多一个参数 `run_in_background`（**工具数 18 → 17**）。~~
+**2026-09-22 复议**：这一条被推翻——`job` 回到工具表（17 → 18），见下面决策 1 的日期注与
+`.scratch/receipts-not-echoes/`。
+同时~~**通知收成三样**：`<job-ended id="j1" path="…">[exit 0]</job-ended>` —— id、记录路径、结论行；
+没有尾部、没有截断话术、没有「去读它」的提示~~ **2026-09-22 复议后再收一格**：`<job-ended id="j1">[exit 0]</job-ended>`
+—— id 与结论行，路径退场，「去读它」那一句回来（一行、指名 `job_output`），见决策 3 的日期注。
+**同日再补 `<command>…</command>`**：光有 id 认不出是哪个作业；见决策 3 的日期注。
+工具答案也照这条走：**答案是事实，怎么读在描述里**（通知是那条被点头的例外）。
 
 2026-09-20 立，当日落地。两张票：`01 → 02`。
 
@@ -20,14 +25,31 @@
 
 ## 决策
 
-1. **合并成一个动词。** `bash` ← `job`：参数 `run_in_background`（布尔，缺省 false）。为真时立刻返回，
+1. ~~**合并成一个动词。** `bash` ← `job`：参数 `run_in_background`（布尔，缺省 false）。为真时立刻返回，
    答案是 **job id + 记录路径**；`timeout` **忽略**（后台没有时限，描述里写明）；`stdin` **指名拒绝**
-   （本仓不给后台喂 stdin；静默吞掉一个模型明确要求的东西是撒谎）。`job` 从工具表退场，**18 → 17**。
+   （本仓不给后台喂 stdin；静默吞掉一个模型明确要求的东西是撒谎）。`job` 从工具表退场，**18 → 17**。~~
+   **2026-09-22 复议（`.scratch/receipts-not-echoes/` 票 03）：这一条被推翻。** 合并之后那张脸得讲两种
+   模式，还得用一个布尔把「这次调用等不等」这个判断推给模型——而 `bash-record` 的现场正是这个判断被
+   做错（模型把 `job` 读成「慢的那个」，再拿 `sleep` 拼一个 `join`）。`job` 回到工具表当自己的动词
+   （**17 → 18**）：起它的是 `job`、读它的是 `job_output`、停它的是 `job_kill`，「谁在等」由**选哪个
+   动词**回答，不由参数回答。`timeout` 与 `stdin` 在 `job` 那儿**没有位置**（比「忽略」诚实：一个限制
+   不了任何东西的数字读起来像承诺）；`bash` 收到残留的 `run_in_background` 也一样——**字段删掉**。
+   **同日再改一次（主人驳回「拒绝」那一步）**：两处原本都**指名拒绝**，现在只剩删除——没有那个键，
+   就没有读它的地方；`tools_test` 那边由 `the fields the OTHER verb needs are not read here at all`
+   钉住「传了什么也不发生」。见 `.scratch/receipts-not-echoes/spec.md` 落地记录。
+   `redirect-note` 跟着回到 `t-job`。共享的没变：`work-dir` 一处解析、`cap.jobs` 一份记录、一套 spawn。
 2. **`job_output` / `job_kill` 留名。** 它们读与停的仍然是**一条作业**——`run_in_background` 是一条
    命令的模式，不是「作业」这个概念的名字。
-3. **通知只有三样。** `<job-ended id="j1" path="…">[exit 0]</job-ended>`：id、路径、记录的结论行。
-   没有尾部、没有截断话术、没有「用 `job_output` 读」这类提示。**记录再大，通知都这么大。**
-4. **工具答案只说事实。** `job_output` / `job_kill` 的答案不再附「read it with …」；`bash` 后台模式的
+3. ~~**通知只有三样。** `<job-ended id="j1" path="…">[exit 0]</job-ended>`：id、路径、记录的结论行。
+   没有尾部、没有截断话术、没有「用 `job_output` 读」这类提示。**记录再大，通知都这么大。**~~
+   **2026-09-22 复议（`.scratch/receipts-not-echoes/` 票 04）：这一条再收一格。** 收掉尾部是对的，
+   但**路径也该收掉**——`job` 的答案已经把路径交到模型手里一次，而这条提醒的全部价值是「结束了、
+   这样去读」。「去读」那半句话**回来**：`<job-ended id="j1">[exit 0]</job-ended>` 加一行
+   `Read what it said with job_output {"job": "j1"}.` —— 一个作业存在的理由就是模型走开了，
+   所以这条提醒欠它的正是「哪里去读」；**两样事实 + 一句读法**，记录再大，通知都这么大。
+    **同日再补一格**：`<command>…</command>` 也进去（「是哪个作业，光有 id 认不出来」）——
+    通知因此与命令一样大；见 `.scratch/receipts-not-echoes/spec.md` 决策 4 与落地记录。
+4. **工具答案只说事实。** `job_output` / `job_kill` 的答案不再附「read it with …」；`job` 的
    答案是 id + 路径（重定向那条注留着——它是**诊断**，不是用法说明）。
 5. **计数与清单跟着改**：`cap.tools` 的 ns docstring、`docs/architecture.md`、`docs/architecture/layers.md`、
    `CONTEXT.md` 的闭清单（三处硬编码清单在**票 01 里就改**，不留给收口）。
@@ -44,15 +66,26 @@
 
 ## 验收主线
 
-1. `bash {command: "sleep 1; echo hi", run_in_background: true}` → **立刻**返回（墙钟远小于命令），
-   答案是 id + 路径；同一会话 `job_output {job: <id>, wait: true}` 拿得到 `[exit 0]` 与那行输出。
+1. ~~`bash {command: "sleep 1; echo hi", run_in_background: true}` → **立刻**返回（墙钟远小于命令），
+   答案是 id + 路径；同一会话 `job_output {job: <id>, wait: true}` 拿得到 `[exit 0]` 与那行输出。~~
+   **2026-09-22 复议**：起点改成 `job {command: …}`——同一句应验，`bash` 那边残留的
+   `run_in_background` 字段已经不在表里（**传了什么也不发生**，见决策 1 的日期注）。
 2. `bash {command: "echo hi"}` 与今天**逐字相同**（前台是缺省，一个字不改）。
-3. `bash {command: "sleep 2; echo late", run_in_background: true, timeout: 1}` → 照旧返回，
-   **命令没有被杀**（时限在后台模式里不适用）。
-4. `bash {command: "cat", run_in_background: true, stdin: "x"}` → **指名拒绝**，说清后台不喂 stdin。
-5. **通知只有一行**：一条 5000 行的记录、一条空记录，通知都是
-   `<job-ended id="…" path="…">[exit 0]</job-ended>` 这个大小（`cap.jobs-test` 量字节）。
-6. 工具面：`job` 不在表里、总数 **17**（两处清单用例 + `CONTEXT.md` 闭清单是证据）。
+3. ~~`bash {command: "sleep 2; echo late", run_in_background: true, timeout: 1}` → 照旧返回，
+   **命令没有被杀**（时限在后台模式里不适用）。~~
+   **2026-09-22 复议**：改成 `job {command: "sleep 2; echo late"}` —— 仍立刻返回、命令仍不被杀，
+   只是现在没有 `timeout` 这个参数可传（字段不在表里，传了限不住任何东西）。
+4. ~~`bash {command: "cat", run_in_background: true, stdin: "x"}` → **指名拒绝**，说清后台不喂 stdin。~~
+   **2026-09-22 复议**：`job {command: "cat", stdin: "x"}` → 照样起得来，那段文字**没有任何读者**
+   （`stdin` 不是 `job` 的参数；`bash` 那边则是 `run_in_background` 不在表里）。
+5. ~~**通知只有一行**：一条 5000 行的记录、一条空记录，通知都是
+   `<job-ended id="…" path="…">[exit 0]</job-ended>` 这个大小（`cap.jobs-test` 量字节）。~~
+   **2026-09-22 复议（`.scratch/receipts-not-echoes/` 票 04）：这一条再收一格。** 通知仍与记录多大
+   无关，但**不再带记录路径**——改成 `<job-ended id="…">[exit N]</job-ended>` 加**一行**「用
+   `job_output` 读它」。理由：路径在 `job` 的答案里已经交过一次，而这条提醒的全部价值是「结束了、
+   这样去读」；`job_output` 也不收路径（看 id 就够）。见决策 3 的日期注。
+6. ~~工具面：`job` 不在表里、总数 **17**（两处清单用例 + `CONTEXT.md` 闭清单是证据）。~~
+   **2026-09-22 复议**：`job` 回到表里、总数 **18**。
 
 ## 跨特征对照
 
@@ -111,6 +144,9 @@
   里那一步写的是 `job`，合并之后它已经是「unknown tool」——脚本重跑会当场打脸。已改成
   `bash {run_in_background: true}`，并在那份 README 里记了一行（这属于「证据要能重跑」的一部分，
   不是改历史：那天**看见了什么**的话一个字没动）。
+  **2026-09-22 复议**：同一个坑**反向**踩了一次——`job` 回来之后 `bash {run_in_background: true}`
+  里的那个字段已经不在表里（传了什么也不发生），那一步会退化成一次**前台等待**、不再是「起一条作业」；
+  `go.json` 已改回 `job`（那次合并后的走查记录照旧留在 README 里，改的只是能重跑的那一步）。
 - **`notice` 仍然要读一次记录**（拿末行），但它不再读整份用于拼正文：5000 行的记录与空记录的通知
   一样大（用例量过：两条都在 400 字节以内，彼此差不过 200 字节）。
 

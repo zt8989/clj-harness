@@ -525,8 +525,17 @@
                                                         (fn [ls] (some #(= "hook/SystemPrompt" (replay/kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 3 (get-in (replay/payload line) [:matched]))
-                 "the kernel's two rows and the file's one")))
+             ;; FOUR DECLARATIONS NOW, and the fourth is the interesting one: the
+             ;; subagents capability contributes a row at this point (the <subagent>
+             ;; block), so a real composition root has one more than the kernel's
+             ;; two and the file's one. It MATCHES on an ordinary thread -- this one
+             ;; -- and says NOTHING there: `join-blocks` drops a block whose stdout
+             ;; is empty, which is why the assertions above about the message's
+             ;; exact text still hold with the row installed. Counting it here is
+             ;; what keeps this number a fact about the wiring rather than a number
+             ;; that quietly followed the code.
+             (is (= 4 (get-in (replay/payload line) [:matched]))
+                 "the kernel's two rows, the file's one, and the subagent block's")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
            ;; written. The blocks' own tags are deliberately not among them: the
@@ -554,7 +563,7 @@
   ;; the same ending on every turn for the rest of the session, which is the failure this
   ;; case is here to make impossible.
   (let [t "it-jobs"
-        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-$((6*7)); exit 0"})]
     (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
         "the job finished before the run was even asked for")
     (try
@@ -584,13 +593,20 @@
                          ;; injection, so it is in the record and in no frame.
                          ;; THE MARKERS HAVE TO BE ONES ONLY THIS RUN'S INJECTION COULD
                          ;; CARRY. The block's TAG is not one of them: this repository's
-                         ;; own README talks about `<job-ended …>` now, the scripted run
-                         ;; reads it, and a tool result is a legitimate way for those
-                         ;; bytes to reach the wire -- the same trap the system-message
-                         ;; case named. The record's path (a temp path nothing else
-                         ;; mentions) and the job's own output line are.
+                         ;; own README talks about `<job-ended …>`, the scripted run reads
+                         ;; it, and a tool result is a legitimate way for those bytes to
+                         ;; reach the wire -- the same trap the system-message case named.
+                         ;; What is checked is the notice's own second line -- the read
+                         ;; sentence naming THIS job's id, which nothing else in this run
+                         ;; writes -- and the OUTPUT LINE of the command. The command's
+                         ;; own text rides in the notice now (that is how it says which
+                         ;; job), so the marker has to be what the command PRINTED, not
+                         ;; what it was written as: `$((6*7))` is the shell's answer.
+                         (is (not (str/includes? first-body (str "{\"job\": \"" id "\"}")))
+                             "not even the read line, which is the notice's own")
                          (is (not (str/includes? first-body path)))
-                         (is (not (str/includes? first-body "JOB-SAYS-SO"))))
+                         (is (not (str/includes? first-body "JOB-SAYS-42"))
+                             "and nothing of what the job said"))
                        ;; A second run of the same session: the client resends its whole
                        ;; conversation, which has no notice in it.
                        (io/delete-file (log-file t) true)

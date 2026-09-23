@@ -31,7 +31,8 @@
 
   ```edn
   {:editing {:mode :hashline        ;; :hashline | :str-replace
-             :auto-read true         ;; write 之后附一段锚点读
+             ;; ~~:auto-read true~~ 2026-09-22 复议：键已删除（write 的答案不带内容，
+             ;; 见 .scratch/write-no-content/ 与 .scratch/receipts-not-echoes/ 票 01）
              :anchor-grep true       ;; 用 anchor_grep 顶替内置 grep
              :require-path false     ;; replace/insert 必须带 path
              :strict-input false     ;; 拒绝可自动修正的输入而不是修完给 warning
@@ -446,11 +447,17 @@ are-immediately-usable`）。
 锚点会一直被算作「已拥有」，对一个再也用不上它们的会话来说那是净损失，而且旧的视图还在的话，下一笔
 编辑会拿一个已经不存在的文件去校验。
 
-**`:auto-read` 才是这一票的重点。** 刚写完一个文件，模型的下一手多半是改它——而 write 恰好把锚点收走
+~~**`:auto-read` 才是这一票的重点。** 刚写完一个文件，模型的下一手多半是改它——而 write 恰好把锚点收走
 了。让它为此再 read 一次，是为一个这通调用**当下就能给**的事实付一次往返。所以成功的 write 附上该文件
 开头的带锚点行，并把这些行登记为「已展示」（与 read 同一套登记）。默认 20 行（`auto-read-lines`），
 尾部照旧给 `offset=`。`read` 出来的这套锚点是**新铸的**——因为释放发生在读之前：顺序反过来就会把
-write 刚刚作废的那一套又读回来。
+write 刚刚作废的那一套又读回来。~~
+**2026-09-22 复议（`.scratch/receipts-not-echoes/` 票 01）：这一条被推翻。** `write` 的答案**不带内容、
+不带锚点行**：只报写了多少、写到哪，加一句「锚点已释放，去 `read`」。`:auto-read` 键、`auto-read-lines`、
+`auto-read-note` 与 `perform!` 的 `config` 参数一并退场——写不是读，刚写进去的内容就在这次调用的参数里，
+回放它是同一份 token 付两次，而头二十行会被读成「整份都能编辑」。次序那条规矩仍成立，只是改成对
+**模型自己接下来那次 `read`** 成立：释放必须先于读，否则读回来的是刚作废的那一套。复议全文与理由见
+`.scratch/write-no-content/spec.md`；连带后果是 `write` 只拿 path 锁，`immutable-data/03` 的现场少一半。
 
 **回显守卫是 write 自己的形态约束，不是一条策略。** 模型从 read 输出里复制内容，把 `锚点│` 前缀一起抄
 进去是**很自然**的动作。真写进去，文件被污染还不是最糟的——之后每一次 read 都会把 `Hasu│` 当成正文再
@@ -475,10 +482,12 @@ write 刚刚作废的那一套又读回来。
 没有锚点的会话不该被读一段「写完之后锚点会怎样」。`tool-face` 的 docstring 从「只有 read」改成「read 与
 write」，这就是那条逃生口的第二条用例。
 
-**测试**：`hashline_write_test`（15 / 53）。覆盖释放（旧锚点失效且编辑它们得到「先 read」）、`auto-read`
-补发新锚点、清撤销、写到新文件、回显拒绝（含四条非回显的控制）、被拒的 write 三者皆不变（文件 / 归属 /
-撤销）、`auto-read` 的输出体积与 footer、`:auto-read false` 的措辞、自动读失败时 write 仍报成功、两条
+**测试**：`hashline_write_test`（15 / 53）。覆盖释放（旧锚点失效且编辑它们得到「先 read」）、~~`auto-read`
+补发新锚点~~、清撤销、写到新文件、回显拒绝（含四条非回显的控制）、被拒的 write 三者皆不变（文件 / 归属 /
+撤销）、~~`auto-read` 的输出体积与 footer、`:auto-read false` 的措辞、自动读失败时 write 仍报成功~~、两条
 路径写法共享一套锚点、越界照旧 park、str-replace 模式一字未变、以及两套模式下描述各自正确。
+**2026-09-22 复议后**：四条 `auto-read` 用例退场，`auto-read-off` 那条升格为唯一形状（「答案报两个事实、
+指 `read`」），另加一条「答案不随文件长大」与一条「`write` 不等 session 锁」。
 
 ### 08 落地记录
 

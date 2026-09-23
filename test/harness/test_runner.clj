@@ -87,6 +87,8 @@
     harness.infra.log-test
     harness.cap.git-test
     harness.cap.editing-test
+    harness.cap.subagents-test
+    harness.cap.frame-bus-test
     harness.cap.editing-mode-tools-test
     harness.cap.hashline.anchors-test
     harness.cap.hashline.store-test
@@ -121,6 +123,9 @@
     ;; list in the same commit as the file.
     harness.edge.sessions-test
     harness.edge.record-test
+    harness.edge.delegation-test
+    harness.edge.delegation-line-test
+    harness.edge.follow-route-test
     harness.layers-test])
 
 (def ^:private tmp-home
