@@ -81,7 +81,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactN
 import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
-import { ThreadIdContext } from "@/components/composer-chrome";
+import { HeldSessionContext, ThreadIdContext, type HeldSession } from "@/components/composer-chrome";
 import { SessionRunContext } from "@/components/session-run-state";
 // THE STOP THE COMPOSER DRAWS WHEN THE SERVER SAYS THIS CONVERSATION IS RUNNING (ticket
 // 09): this host has the thread id the request has to name, which is the whole reason the
@@ -1136,7 +1136,12 @@ const SessionColumn: FC<{
   /// same reason: `null` when this host is not following a window at all, which is every
   /// session that was opened from the sidebar or whose log had to be repaired.
   window: WindowControls | null;
-}> = ({ threadId, view, onView, folded, record, window }) => {
+  /// THE PAGE'S OWN PENDING BINDINGS, BY SESSION ID -- the map the first run registers
+  /// from (`registerPending`), which is where a minted session's directory lives until
+  /// somebody sends. Handed down so the composer can tell the two kinds of session
+  /// apart; see `heldSession`.
+  binds: Map<string, string | null>;
+}> = ({ threadId, view, onView, folded, record, window, binds }) => {
   const { t } = useTranslation();
   /// THE COMPOSER'S STOP, AS A COMPONENT THE ELEMENT CAN DRAW (ticket 09 of
   /// `.scratch/session-after-refresh`): it carries THIS session's id, which is what the
@@ -1152,6 +1157,12 @@ const SessionColumn: FC<{
     // The composer's chrome needs to know which session it is configuring -- the
     // model override and the branch are both per-session.
     <ThreadIdContext.Provider value={threadId}>
+      {/* WHAT THE PAGE IS HOLDING FOR THIS SESSION, if it is holding anything at all:
+          the composer's directory picker has to tell a session that exists in this home
+          from one this page minted a moment ago, because only the first of the two may
+          be written to. NESTED INSIDE the id, because it is the same fact -- this
+          session's -- and the same bar reads both. See `heldSession`. */}
+      <HeldSessionContext.Provider value={heldSession(threadId, binds)}>
       <div className="flex h-full min-h-0 min-w-0 flex-col">
         {/* The switch sits ABOVE the column. The trajectory reads the run's own
             state for its refetch trigger, and it does that INSIDE the runtime
@@ -1249,9 +1260,34 @@ const SessionColumn: FC<{
           )}
         </div>
       </div>
+      </HeldSessionContext.Provider>
     </ThreadIdContext.Provider>
   );
 };
+
+/// WHAT THE PAGE IS HOLDING FOR ONE SESSION, in the shape the composer reads
+/// (`HeldSessionContext`), or null for a session this home can answer for.
+///
+/// THE TEST IS AN ENTRY IN `binds`, the very map the first run registers from: it holds
+/// the sessions this page MINTED and has not registered -- the ones nothing in this home
+/// has been asked to keep yet, and the ones a directory pick may therefore only remember.
+///
+/// BUILT PER RENDER rather than kept, deliberately: `dir` is read out of a map the pick
+/// MUTATES (a `remember` writes the directory the first send will bind, and the run reads
+/// it from that same map), so a value held across renders would be the
+/// snapshot-versus-fact mistake this repo keeps out of its caches. It costs one lookup.
+function heldSession(threadId: string, binds: Map<string, string | null>): HeldSession | null {
+  if (!binds.has(threadId)) return null;
+  return {
+    dir: binds.get(threadId) ?? null,
+    // NOTHING IS POSTED, NOTHING IS WRITTEN, AND NOTHING CAN FAIL: the first send is
+    // what binds a session (`registerPending`), and this is only the directory it will
+    // bind with.
+    remember: (dir: string) => {
+      binds.set(threadId, dir);
+    },
+  };
+}
 
 /// One live host, and how many times it has been mounted. `attempt` is bumped
 /// when a session whose history would not load is opened again, and it is part of
@@ -1832,6 +1868,10 @@ export function App() {
                 folded={folded}
                 record={records[host.id] ?? null}
                 window={windows[host.id] ?? null}
+                // THE LIVE MAP, and not a copy of it: a `remember` from the composer's
+                // directory picker writes the directory the first send will bind with, and
+                // `registerPending` reads it out of this same object.
+                binds={pendingBinds.current}
               />
             </SessionHost>
           ))}
