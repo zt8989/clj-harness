@@ -22,6 +22,7 @@
   the range it replaces live on ONE `context/compacted` fact, and the projection
   (`harness.edge.replay/model-nodes`) synthesizes the message at the range's position."
   (:require [harness.edge.pressure :as pressure]
+            [harness.cap.project :as project]
             [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]))
 
@@ -33,6 +34,39 @@
 exact file paths, commands, error strings, identifiers, numbers, function signatures and
 decisions already made, including anything that was tried and failed. Do not invent
 anything. Be concise.")
+
+(defn check-ratios!
+  "Validate a merged compaction pair, or throw naming what is wrong. Split out so the
+  refusal can be asserted without a file."
+  [merged]
+  (doseq [[k v] merged]
+    (when-not (and (number? v) (pos? v) (<= v 1))
+      (throw (ex-info (str "harness.edn :compaction " (name k) " must be a fraction in (0, 1], but it is "
+                           (pr-str v))
+                      {:key k :value v :reason :bad-compaction-value}))))
+  (when (>= (:retain-ratio merged) (:threshold-ratio merged))
+    (throw (ex-info (str "harness.edn :compaction retain-ratio " (:retain-ratio merged)
+                         " must be strictly below threshold-ratio " (:threshold-ratio merged))
+                    {:reason :retain-not-below-threshold})))
+  merged)
+
+(defn config
+  "The compaction proportions THIS SESSION is configured with, from harness.edn's
+  `:compaction` (`{:threshold-ratio 0.7 :retain-ratio 0.16}`), the project level over the
+  user level, and `harness.edge.pressure`'s defaults when neither says anything.
+
+  REFUSES A PAIR THAT CANNOT WORK, naming what is wrong: a retain that is not STRICTLY
+  below the threshold would keep everything a compaction was asked to shrink, and a value
+  that is not a fraction is not a proportion at all. Reading is on demand (harness.edn is
+  re-read, not cached), so a bad value is refused the moment a compaction is asked for."
+  [thread-id]
+  (let [{:keys [user project]} (project/harness-edn-levels thread-id)
+        merged (reduce (fn [m level]
+                         (let [block (:compaction (get {:user user :project project} level))]
+                           (if (map? block) (merge m block) m)))
+                       pressure/default-ratios
+                       [:user :project])]
+    (check-ratios! merged)))
 
 ;; ------------------------------------------------------------------------ the lock
 

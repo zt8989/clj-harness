@@ -33,3 +33,9 @@
   1. **配置**：两个比例今天还是 `harness.edge.pressure` 里的 `def`，不是可配置项；「保留 ≥ 阈值
      加载即指名报错」也没有。
   2. 记账事件带**当前轮的号**：现在只有行上的 `:runId`，没有数字 turn。
+
+**收尾（同一天）**：比例现在住在 `harness.edn` 的 `:compaction`
+（`{:threshold-ratio 0.7 :retain-ratio 0.16}`，项目级盖用户级，没人说就用默认），读的时候校验：
+不是 (0,1] 的分数、或保留 ≥ 阈值，都**指名拒绝**（`harness.edge.compaction/check-ratios!`）。
+触发与手动 `/compact` 都走这份配置。**「数字 turn」不做**：本仓的轮没有编号，一条记账行归属哪一轮
+由它行上的 `:runId` 说——再编一个数字是同一件事写两遍。

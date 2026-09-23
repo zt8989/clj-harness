@@ -41,13 +41,15 @@
 
 ;; ------------------------------------------------------------------- proportions
 
-(def threshold-ratio
-  "The pressure at which a compaction starts, as a fraction of the window."
-  0.7)
+(def default-ratios
+  "The proportions a compaction uses when harness.edn says nothing: start at seven tenths
+  of the window and keep the most recent sixteen hundredths VERBATIM. Retain must stay
+  strictly below threshold, or a compaction would keep everything it was asked to shrink --
+  `harness.edge.compaction/config` refuses a pair that is not."
+  {:threshold-ratio 0.7 :retain-ratio 0.16})
 
-(def retain-ratio
-  "The most recent fraction of the window a compaction keeps VERBATIM."
-  0.16)
+(def threshold-ratio (:threshold-ratio default-ratios))
+(def retain-ratio    (:retain-ratio default-ratios))
 
 ;; -------------------------------------------------------------------- the estimate
 
@@ -211,8 +213,10 @@
   ABSENT when the record says nothing about a window -- a percentage needs both halves,
   and nobody is asked to divide by a number they were not given."
   ([records]
-   (records->pressure records (messages-in records)))
+   (records->pressure records (messages-in records) default-ratios))
   ([records messages]
+   (records->pressure records messages default-ratios))
+  ([records messages ratios]
    (let [records    (vec records)
          runs       (trajectory/run-segments records)
          latest     (latest-start runs)
@@ -244,8 +248,8 @@
        (and (number? window) (pos? window))
        (assoc :windowTokens    window
               :percent         (long (Math/round (* 100.0 (/ (double total) (double window)))))
-              :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
-              :retainTokens    (long (Math/floor (* (double window) retain-ratio))))))))
+              :thresholdTokens (long (Math/floor (* (double window) (:threshold-ratio ratios))))
+              :retainTokens    (long (Math/floor (* (double window) (:retain-ratio ratios)))))))))
 
 (defn log-pressure
   "A log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same

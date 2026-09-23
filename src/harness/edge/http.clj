@@ -4510,7 +4510,7 @@
   model call, bracketed like any other), write the rows, and tell the live session. Returns
   the result map, or nil when there was nothing to compact. Shared by the manual route and
   the automatic trigger so the two cannot drift."
-  [stem provider records window]
+  [stem provider records window ratios]
   (let [written   (atom [])
         put       (fn [kind payload]
                     (swap! written conj [kind payload])
@@ -4533,7 +4533,7 @@
                           (throw t)))))]
     (let [result (compaction/perform! records
                                       {:window       window
-                                       :retain-ratio pressure/retain-ratio
+                                       :retain-ratio (:retain-ratio ratios)
                                        :append       put
                                        :summarize    summarize})]
       (when (seq @written)
@@ -4555,12 +4555,13 @@
   (try
     (when-some [f (replay/find-log (home/projects-dir) stem)]
       (let [records (replay/read-records f)
-            answer  (pressure/records->pressure records (sessions/messages stem))]
+            ratios  (compaction/config stem)
+            answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
         (when (and (:thresholdTokens answer)
                    (>= (:pressureTokens answer) (:thresholdTokens answer))
                    (not (compaction/lock-active? records)))
           (when-some [provider (providers/current-provider stem)]
-            (run-compaction! stem provider records (:windowTokens answer))))))
+            (run-compaction! stem provider records (:windowTokens answer) ratios)))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
   nil)
@@ -4597,7 +4598,8 @@
         (if (some? (:error read))
           (api-response 400 {:error (:error read) :threadId stem})
           (try
-            (let [result (run-compaction! stem provider (:ok read) (:context-window provider))]
+            (let [result (run-compaction! stem provider (:ok read)
+                                            (:context-window provider) (compaction/config stem))]
               (api-response 200 {:threadId  stem
                                  :compacted (some? result)
                                  :shadowed  (:shadowed result)}))

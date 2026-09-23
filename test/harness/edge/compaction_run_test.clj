@@ -12,6 +12,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
             [harness.edge.compaction :as compaction]
+            [harness.edge.pressure :as pressure]
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
             [harness.fake :as fake]
@@ -213,3 +214,16 @@
               (providers/use-provider! thread-id nil)
               (io/delete-file log true)))))
       (finally (stop)))))
+
+(deftest the-compaction-proportions-default-and-refuse-a-broken-pair
+  (testing "nobody said anything: the endorsed defaults"
+    (is (= pressure/default-ratios (compaction/config "cfg-default"))))
+  (testing "a retain that is not strictly below the threshold cannot work"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (compaction/check-ratios! {:threshold-ratio 0.5 :retain-ratio 0.6}))))
+  (testing "a value that is not a fraction is not a proportion"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (compaction/check-ratios! {:threshold-ratio 2 :retain-ratio 0.1}))))
+  (testing "a legal pair passes through"
+    (is (= {:threshold-ratio 0.8 :retain-ratio 0.2}
+           (compaction/check-ratios! {:threshold-ratio 0.8 :retain-ratio 0.2})))))
