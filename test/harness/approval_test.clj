@@ -11,6 +11,7 @@
             [harness.edge.ag-ui :as ag]
             [harness.fake :as fake]
             [harness.infra.home :as home]
+            [harness.infra.env :as env]
             [harness.kernel.loop :as loop]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
@@ -544,3 +545,29 @@
        (finally
          (project/bind! "thr-skill-fence" nil)
          (doseq [d [proj elsewhere]] (support/wipe-tree! d)))))))
+
+(deftest a-write-into-the-machines-temp-directory-runs-instead-of-parking
+  ;; The fence frees the machine's temp directories (ticket 02), and the seam that
+  ;; decides whether to park reads that same list -- so a write into the run's temp
+  ;; stand-in runs, lands on disk, and the run ends normally: no interrupt, no park.
+  (support/with-temp-env
+   [_root _home]
+   (let [target (str (io/file (first (env/temp-dirs)) "scratch.txt"))
+         proj   (support/temp-dir "approval-temp-proj")]
+     (project/bind! "thr-temp-fence" proj)
+     (try
+       (let [{:keys [history seen]}
+             (run (fake/scripted [{:content ""
+                                   :tool-calls [(call "c1" "write"
+                                                      {:path target :content "scratch\n"})]}
+                                  {:content "ok"}])
+                  [] "thr-temp-fence")
+             results (filter #(= "tool" (:role %)) history)]
+         (is (not= :run/interrupt (:type (last seen)))
+             "the run finished normally rather than parking the write")
+         (is (= 1 (count results)) "the write ran and answered the model")
+         (is (= "scratch\n" (slurp target :encoding "UTF-8")) "and it landed on disk"))
+       (finally
+         (project/bind! "thr-temp-fence" nil)
+         (io/delete-file target true)
+         (support/wipe-tree! proj))))))

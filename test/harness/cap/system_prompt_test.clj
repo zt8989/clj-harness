@@ -301,6 +301,9 @@
       (is (str/includes? proj (str dir " -- this project")))
       (is (str/includes? proj (str (home/root) " -- this harness's configuration home")))
       (is (str/includes? proj "reading your own configuration there is allowed")))
+      (is (str/includes? proj (str (first (env/temp-dirs)) " -- "))
+          "the machine's temp directory, stated with its reason like every other free path")
+      (is (str/includes? proj "scratch that is meant to be thrown away"))
     (testing "and no strict sentence, because this project is not strict"
       (is (not (str/includes? proj ":strict true"))))))
 
