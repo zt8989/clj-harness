@@ -87,7 +87,7 @@ export const SubagentViewPanel: FC<{
   /// simply runs the agent, which is what the panel wants: a run that is a read.
   ///
   /// A REFUSAL IS DRAWN RATHER THAN THROWN. The one that reaches here is a thread
-  /// whose follow channel answered 404 (a delegation deleted by hand) or a server
+  /// whose frames read answered 404 (a delegation deleted by hand) or a server
   /// that is not answering; in both cases the panel has a header, a name and a
   /// sentence, which is more use than an unmounted panel.
   useEffect(() => {
@@ -106,8 +106,9 @@ export const SubagentViewPanel: FC<{
       // the server for a conversation nobody is looking at. The abort is what the
       // server's `on-close` sees, and it is the ONLY way this panel ever ends a
       // live stream -- a finished delegation has already been closed by the route's
-      // terminal frame. Measured in a browser: closing on a subagent that was still
-      // working failed the in-flight `GET .../follow` with `net::ERR_ABORTED`, and
+      // terminal frame (in the replay, or live off the downlink). Measured in a browser: closing
+      // on a subagent that was still working aborted the in-flight replay read / downlink
+      // subscription with `net::ERR_ABORTED`, and
       // the delegation itself kept running (it belongs to the parent's tool call,
       // not to this panel). In a dev build React's StrictMode mounts the effect
       // twice, so two connections can be open for a moment; both go through here.

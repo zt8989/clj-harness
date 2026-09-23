@@ -154,7 +154,7 @@
 ;; Declared rather than moved up to it: each is used by a case near the top of the file
 ;; and belongs with its own kind further down (the bare fixture with the fixtures, the
 ;; two log readers with the cases about reading a log).
-(declare with-bare-server process-log log-lines-for feed-open! feed-first-frame until)
+(declare with-bare-server process-log log-lines-for until)
 
 (defn- start-session!
   "A session of this home with nothing in it -- see `harness.test-support/start-session!`,
@@ -5773,14 +5773,10 @@
                    "and that the turn on screen is still being written")
                (is (= (:messages answer) (mapv :message (:entries body)))
                    "the page carries every message `sofar` does -- one record, two doors")
-               (testing "and the FEED opens on that same page"
-                 (let [opened (feed-first-frame "sofar-a")]
-                   (is (= "window" (:type opened)))
-                   (is (= "running" (:state opened)))
-                   (is (= (mapv :seq (:entries body)) (mapv :seq (:entries opened)))
-                       "the stream and the one-shot read agree entry for entry")
-                   (is (false? (:hasMore opened))
-                       "and nothing older lies beyond this page: the turn is the start")))))
+               ;; THE FEED'S OPENING FRAME WENT WITH THE FEED (ticket 05): the streaming half
+               ;; is the downlink now, and `harness.edge.mux-test` is where a window frame's
+               ;; arrival is asserted. The one-shot page above is what this route still owes.
+             ))
            (testing "NOTHING WAS WRITTEN for it: no terminal, no close-off"
              (is (empty? (terminals "sofar-a")))
              (is (not-any? #(= "session/closed-off" (replay/kind %)) (log-records "sofar-a")))))
@@ -6099,66 +6095,6 @@
                                       (range 10)))
       (sessions/land! tid run (* 10 g)))))
 
-(defn- feed-open!
-  "Open THREAD-ID's feed on a socket of our own and answer [sock next-frame]:
-  `next-frame` reads the next `data:` frame, or nil at end of stream.
-
-  A RAW SOCKET RATHER THAN `api-call`, because this route does not end: what matters is
-  what arrives AFTER the response, and `ofString` would wait for a body that only closes
-  when the window does. The read timeout is the deadline -- a frame that never comes is a
-  stack rather than a hung suite."
-  ([tid] (feed-open! tid ""))
-  ([tid query]
-   (let [sock (java.net.Socket. "127.0.0.1" (int *port*))
-         _    (.setSoTimeout sock 5000)
-         out  (.getOutputStream sock)
-         in   (.getInputStream sock)
-         text (atom "")
-         head (atom true)
-         buf  (byte-array 4096)]
-     (.write out (.getBytes (str "GET /api/threads/" tid "/feed" query
-                                 " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                                 "Accept: text/event-stream\r\n\r\n")
-                            StandardCharsets/UTF_8))
-     (.flush out)
-     (letfn [(more! []
-               (let [n (try (.read in buf)
-                            (catch java.net.SocketTimeoutException _ -1))]
-                 (when (pos? n)
-                   (swap! text str (String. buf 0 n StandardCharsets/UTF_8))
-                   true)))
-             (next-frame []
-               (loop []
-                 (let [t @text]
-                   (if @head
-                     ;; THE RESPONSE HEAD, ONCE: split on the CRLFCRLF that ends it, so
-                     ;; no header value can be mistaken for a frame.
-                     (let [i (.indexOf t "\r\n\r\n")]
-                       (if (neg? i)
-                         (when (more!) (recur))
-                         (do (reset! head false)
-                             (reset! text (subs t (+ i 4)))
-                             (recur))))
-                     (let [i (.indexOf t "\n\n")]
-                       (if (neg? i)
-                         (when (more!) (recur))
-                         (let [block (subs t 0 i)]
-                           (reset! text (subs t (+ i 2)))
-                           (when-some [[_ payload] (re-find #"(?m)^data: (.*)$" block)]
-                             (json/read-str payload :key-fn keyword)))))))))]
-       [sock next-frame]))))
-
-(defn- feed-first-frame
-  "Open THREAD-ID's feed, read its OPENING frame, close the socket, answer the frame.
-
-  The `try`/`finally` lives here rather than in a case because a socket closed on the way
-  out of a deep `testing` nest is exactly where a stray paren hides; a case that wants the
-  FIRST frame (what a page sees the moment it opens the conversation) says so in one line."
-  [tid]
-  (let [[sock next-frame] (feed-open! tid)]
-    (try (next-frame)
-         (finally (.close sock)))))
-
 (deftest a-page-is-cut-at-the-arrivals-the-conversation-was-written-in
   (with-server
    "win-page"
@@ -6214,126 +6150,6 @@
      (testing "a stem with neither a session nor a log is a 404"
        (is (= 404 (.statusCode (api-call :get "/api/threads/win-nothing/page" nil))))))))
 
-(deftest a-feed-whose-window-is-over-is-refused-before-it-streams
-  (with-server
-   "win-stale"
-   (fn []
-     (fill-live-window! "win-stale" 30)
-     (let [generation (sessions/generation "win-stale")]
-       (testing "a cursor behind the tail page would make the delta the whole conversation"
-         (let [resp (api-call :get "/api/threads/win-stale/feed?since=3" nil)
-               body (read-json resp)]
-           (is (= 409 (.statusCode resp)))
-           (is (str/includes? (str (:error body)) "window"))
-           (is (= 250 (:baseSeq body)) "and it carries where the window starts now")
-           (is (= generation (:generation body)))))
-       (testing "a generation that is not this window's is the same refusal, from the other side"
-         (let [resp (api-call :get "/api/threads/win-stale/feed?since=290&generation=gone" nil)
-               body (read-json resp)]
-           (is (= 409 (.statusCode resp)))
-           (is (= generation (:generation body)))
-           (is (= 250 (:baseSeq body)))))
-       (testing "and a cursor the window still covers is let through to the stream"
-         ;; Proved by the stream itself in the case below; here what matters is that the
-         ;; door did NOT answer JSON -- the response is an event stream that stays open.
-         (let [[sock next-frame] (feed-open! "win-stale"
-                                             (str "?since=290&generation=" generation))]
-           (try
-             (let [frame (next-frame)]
-               (is (= "append" (:type frame))
-                   "the answer is a stream frame, not a 409 body")
-               (is (empty? (:entries frame)) "with nothing in it: the reader is current")
-               (is (= 290 (:cursor frame))))
-             (finally (.close sock)))))))))
-
-(deftest the-feed-opens-with-the-window-pushes-what-lands-and-ends-when-it-must
-  (with-server
-   "win-feed"
-   (fn []
-     ;; FOUR arrivals -- 40 entries, under `page-size` -- so the tail page is the WHOLE
-     ;; conversation and every number in the test is one it can predict. A conversation
-     ;; longer than a page is the case the page route above is about.
-     (fill-live-window! "win-feed" 4)
-     (let [generation (sessions/generation "win-feed")
-           [sock next-frame] (feed-open! "win-feed")]
-       (try
-         (let [window (next-frame)]
-           (testing "the first frame is the window"
-             (is (= "window" (:type window)))
-             (is (= 40 (count (:entries window))))
-             (is (= 0 (:baseSeq window)) "the first arrival's number")
-             (is (= 30 (:cursor window)) "the newest number the reader now holds")
-             (is (false? (:hasMore window)) "and there is nothing in front of it")
-             (is (= generation (:generation window))
-                 "under the generation the session is being served with")))
-         (testing "an entry that lands is pushed -- without anybody asking again"
-           (sessions/append! "win-feed" "win-r99" [{:id "win-r99-0" :role "user"
-                                                    :content "新的一条"}])
-           (sessions/land! "win-feed" "win-r99" 40)
-           ;; TWO TELLINGS ARE POSSIBLE AND BOTH ARE RIGHT: the append rings before the
-           ;; line lands (the entry has no number yet) and the landing rings again. A
-           ;; reader sees the entry once or twice, and the LAST telling carries its
-           ;; number -- which is exactly the re-delivery the entries' ids are for.
-           (let [told (loop [seen []]
-                        (let [frame (next-frame)
-                              entries (:entries frame)]
-                          (if (and (seq entries) (some? (:seq (first entries))))
-                            (conj seen frame)
-                            (if (nil? frame)
-                              seen
-                              (recur (conj seen frame))))))
-                 last-telling (last told)]
-             (is (seq told) "the landing was pushed")
-             (is (= "append" (:type last-telling)))
-             (is (= ["win-r99-0"] (mapv (comp :id :message) (:entries last-telling))))
-             (is (= [40] (mapv :seq (:entries last-telling))) "with its record number")
-             (is (= 40 (:cursor last-telling)) "and the reader's cursor has moved")))
-         (testing "putting the session away ends the stream, SAYING WHY"
-           (sessions/drop! "win-feed")
-           (let [frame (loop [f (next-frame)]
-                         (if (or (nil? f) (not= "append" (:type f)))
-                           f
-                           (recur (next-frame))))]
-             (is (= "end" (:type frame)))
-             (is (= "put-away" (:reason frame))
-                 "a stream that just stopped would leave a reader believing it holds everything")
-             (is (= generation (:generation frame))
-                 "...and it names the window that just ended, so a reader can tell it
-                  apart from whatever holds the conversation next")))
-         (testing "and then it is closed"
-           (is (nil? (next-frame))))
-         (finally (.close sock)))))))
-
-(deftest a-feed-says-when-the-conversation-moves-without-new-entries
-  ;; THE STATE IS PART OF THE WINDOW, and this is the case that proves why: a run that
-  ;; SETTLES without saying anything still changes what the reader should draw (the turn
-  ;; on screen stops being unfinished), and a frame sent only when entries land would
-  ;; leave that turn looking live forever. So the feed pushes when EITHER moved.
-  (with-server
-   "win-state"
-   (fn []
-     (fill-live-window! "win-state" 2)
-     (sessions/run-started! "win-state" "win-r-current")
-     (let [[sock next-frame] (feed-open! "win-state")
-           opened (next-frame)]
-       (try
-         (testing "the opening frame says a run of this conversation is alive"
-           (is (= "window" (:type opened)))
-           (is (= "running" (:state opened))))
-         (sessions/run-finished! "win-state" "win-r-current")
-         ;; A RUN THAT SAID NOTHING: the frames are the run's own start and nothing else,
-         ;; so `apply-frames` folds no messages -- what changed is the state.
-         (sessions/settle! "win-state" "win-r-current" [(ev/run-start)])
-         (testing "and a frame arrives for the state alone"
-           (let [frame (next-frame)]
-             (is (= "append" (:type frame)) "a frame arrives for the state alone")
-             (is (empty? (:entries frame)) "carrying no entries")
-             (is (= "unfinished" (:state frame))
-                 "and saying what this process now knows: a run of it ended without a
-                  terminal frame, which is a fact the record agrees with")
-             (is (= (:cursor opened) (:cursor frame))
-                 "the reader's cursor has not moved -- there was nothing to number")))
-         (finally (.close sock)))))))
 
 
 (deftest the-record-holds-exactly-two-kinds-of-row

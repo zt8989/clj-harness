@@ -128,11 +128,13 @@ lib/
                     revision}` 与它的全部规则（`windowFrom` / `applied` / `prepended` /
                     `aligned` / `aheadOf`）。**全是纯函数**，所以 UI 套件直接测它；
                     `revision` 是「这份窗口变过几次」，与消息号 `seq` 不是一回事
-  feed.ts           那条 SSE 连接：`fetch` + `AbortController`（不是 `EventSource`——它自己
-                    重连、又看不见 409 的 body），加一个纯的 `feedFrames` 切帧
+  feed.ts           一页一页的读：`pageThread`（尾页，或读者手上最老那条之前的一页）与帧的形状
+                    （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
   mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
                      分发窗口帧；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
                      重连时重新声明整份集合。`app.tsx` 的窗口跟随走它，不再每条会话一条 SSE
+  follow.ts          子 agent 面板的 AG-UI 载具：读记录的**重放**（`GET …/frames`），再从 `mux.ts`
+                     收实时尾巴，按帧自己的 `:seq` 去重、拼成 SSE 交给 `@ag-ui/client`（ticket 04）
   window-scroll.ts  补页时的锚：`measure` / `restoredTop` / `correctedTop` 三行算术（用例测）
                     与 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事
 ```
@@ -169,11 +171,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   断头日志、也会指名一份坏日志）、`window`（**这一页本来就在**的那场，比如刷新回来：看它，尾页 +
   一条 feed，一个字都不写）、`none`（本页刚铸、还没有会话的那场：没有可读的）。所以「侧栏点开」
   与「刷新回来」是两件事：前者接手，后者只看。
-- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走 **feed 一条连接**
-  （`GET …/feed?since=<cursor>&generation=<G>`）。服务端**还持有**这场会话时尾页走**内存**（答案是
+- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走**页面级的下行**
+  （`events.mux`，握手带上游标 `since`/`generation`）。服务端**还持有**这场会话时尾页走**内存**（答案是
   `live: true`），记录的落后因此不会把人送回更早的一版——「刷新走内存」（ADR 0002 决策 8）就是这一条；
-  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。feed 连上之后帧都来自内存，
-  游标由副本自己带着重连。
+  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。连上之后帧都来自内存，
+  游标由副本自己在重连时重新声明。
 - **两种修理是两件事**（`lib/window.ts` 的 `Effect`）：**断档 / 连接断了** ⇒ 拉尾页**对齐**
   （接得上就合、接不上就重建并从尾页重来），**读者的位置保住**；**`end` 帧 / generation 作废**
   （会话被放掉、被接管、换了进程）⇒ **重开**，并把「重开了」这句话画出来。副本手里有服务端没有的

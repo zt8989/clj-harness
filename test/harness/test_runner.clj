@@ -139,7 +139,7 @@
     harness.edge.record-test
     harness.edge.delegation-test
     harness.edge.delegation-line-test
-    harness.edge.follow-route-test
+    harness.edge.frames-route-test
     harness.layers-test])
 
 (def ^:private tmp-home

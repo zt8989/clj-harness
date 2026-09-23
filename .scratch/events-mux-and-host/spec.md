@@ -173,3 +173,19 @@ run 帧，socket 一断，断开那一段的 AG-UI 帧就没了；重连后只�
 重放 JSON 的形状与 `:seq` 保留、未知 stem 的 404）；真浏览器
 `.scratch/events-mux-and-host/walkthrough-follow.mjs` **ALL GREEN**——面板打开、并显示子 agent
 被交办的任务（**只有记录重放能重建的那一帧**），且无错误。
+
+## 落地（2026-09-23）：票 05（一半）
+
+**两条没人再调用的 SSE 载体删了。** `GET /api/threads/<stem>/feed` 与
+`GET /api/threads/<stem>/follow` 连同服务端的 `stream-feed!` / `feed-get` / `feed-bytes` /
+`feed-head` / `follow-get`、客户端的 `feedThread` / `feedFrames` / `followUrl`，以及它们的用例
+（http_test 的三条 feed 用例与两个 socket 助手、follow-route-test 整支并成 `frames-route-test`）
+一起删掉；`thread-verbs` 从 11 收成 10（`follow` 出去、`frames` 进来），`docs/architecture/edge.md`
+与 `client.md` 按现实收口。
+
+**还差的一半（票 05 因此留在 `issues/` 里）**：`POST /api/agent` 的 **SSE 响应体**（`stream-run` 与
+`runner` 的 SSE 编码）没删——驱动的页面已经走 ack，但 **e2e 套件（`ui/test`）与 `http_test` 仍直接
+解析那条 SSE**，它们就是「调用者」。删它的前提是那些套件改走 `runAck`（Node 22 已有全局 WebSocket）
+或另配一个测试用的读法；那是一次测试面迁移，不在这半个里做。
+
+验证：后端全量 **1147 tests / 13184 assertions / 0 failures**；ui **126**、typecheck、build 过。

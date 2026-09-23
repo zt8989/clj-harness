@@ -2854,7 +2854,7 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  EIGHT OF THE ELEVEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
+  SEVEN OF THE TEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
   same file while it is still being written, and the window's two verbs (`feed`,
   `page`) read it in pieces. The set stays closed and the 405 stays here -- what
@@ -2867,12 +2867,10 @@
   second later, and the answer says so (`replay/sofar`'s `:state`). Rebuild remains
   the door for 'give me the conversation, I will own it'.
 
-  AND TWO VERBS READS A CONVERSATION IN PAGES rather than whole (`feed` and `page`,
-  ticket 05 of `.scratch/sessions-live-on-the-server`): the window ADR 0003
-  describes, for a conversation too long to send. They are GETs and they are the
-  first pair here that a page uses continuously rather than once -- `page` answers
-  scrolling up, and `feed` stays open -- which is why they are the two routes on
-  this edge that are not request/response (`feed` streams; see `stream-feed!`).
+  AND `page` READS A CONVERSATION IN PAGES rather than whole (ticket 05 of
+  `.scratch/sessions-live-on-the-server`): the window ADR 0003 describes, for a conversation
+  too long to send, and the route a reader scrolling up uses. It is a GET, and it is the one
+  verb here that answers a piece of a conversation rather than all of it.
 
   AND `cancel` IS THE ONE THAT STOPS SOMETHING rather than reading it as it is: a POST
   aimed at one conversation, whose run -- if this process has one going -- is told to
@@ -2881,7 +2879,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "frames" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3093,226 +3091,6 @@
             (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
                                 (pos? behind) (assoc :behind behind)))))))))
 
-(defn- follow-get
-  "GET /api/threads/<stem>/follow -- an SSE, READ-ONLY channel: the frames of
-  ONE thread as they land, for a panel that watches a delegation work. It is
-  NOT a run and must never be mistaken for one: it is a GET, it answers no
-  RunAgentInput, accepts no input at all -- there is nothing here to run --
-  and POST /api/agent is untouched: the parent's stream is still only its own
-  run's, because frames for a child mixed into that stream would be read as
-  the parent's messages (app.tsx keeps one core per host precisely so streams
-  cannot cross). Follow is the OTHER stream, read-only, and so father and
-  child never share a wire.
-
-  WHAT IT CAN FOLLOW IS A DELEGATION, which is not a narrowing of the route's
-  name but the truth about the bus: a subagent's run is what publishes (see
-  `run-subagent!`), because anybody else's frames already have a reader -- the
-  client that started that run, on its own stream. A thread with no delegation
-  in flight is answered from its record and ENDED rather than left open: a
-  stream that never produces and never ends reads as 'still running' to a
-  client, which is the one lie a follow channel must not tell.
-
-  THE SHAPE OF A CONNECTION, in order:
-
-    1. subscribe FIRST (frame-bus), THEN replay. The other order loses the
-       frames that land between replay's read and the subscribe -- replay
-       cannot see a frame that has not been written yet, and the bus drops
-       what nobody has asked for. Subscribing first leaves the race exactly
-       one shape: the boundary, where a frame arrives from BOTH sources;
-    2. replay what the RECORD already holds -- the stats-style reader, the
-       half-tolerant one, because a child that is running right now is the
-       case this route exists for and its last row may be half-written;
-       every wire frame becomes a frame on the channel, and the highest
-       `:seq` among them is remembered;
-    3. frames from the bus whose `:seq` is <= that number are dropped -- THE
-       EXPLICIT ANSWER to the boundary, which is why the publisher stamps the
-       number into the record as well as onto the bus (`run-subagent!`): the
-       comparison only means anything if both sides count the same thing;
-    4. a TERMINAL frame (RUN_FINISHED / RUN_ERROR) ends the stream, wherever
-       it came from: a replayed one means the run is already over, a live one
-       means it just ended. NOTHING FOLLOWS IT -- the terminal IS the ending
-       the client's vocabulary has;
-    5. THE STREAM OPENS WITH THE RUN, AND THE SNAPSHOT RIDES INSIDE IT. The
-       first thing on the wire is a `RUN_STARTED` and the second is one AG-UI
-       `MESSAGES_SNAPSHOT` -- WHAT THE FRAMES CANNOT REBUILD: the conversation
-       of the record MINUS the messages the replayed frames carry under the
-       same id. That is the task the subagent was handed, a `message` row no
-       frame ever mentions (frames only carry what a run RETURNED), and it is
-       the reason a panel needs no second read to show what was asked. The
-       snapshot is the same frame the run edge sends for the entries a client
-       never sent (`ag/conversation-snapshot`), and it is sent only when there
-       is something in it.
-
-       THAT ORDER IS NOT A PREFERENCE, and a browser walkthrough is what
-       settled it: `@ag-ui/client` refuses a stream whose FIRST event is not
-       `RUN_STARTED` (its verifier's own words: \"First event must be
-       'RUN_STARTED'\"), and a snapshot sent ahead of the run failed the panel
-       with that sentence while the wire looked perfectly reasonable. So the
-       record's own opening frame goes out first -- a real record's first
-       frame IS the child's `RUN_STARTED`, because `run-subagent!` writes it
-       before anything else -- and the snapshot follows it. A record that does
-       NOT open with one (a hand-written log, a repair) gets a synthesized
-       `RUN_STARTED` carrying the child's thread and run, because a channel a
-       runtime consumes has to be well-formed whatever the file holds;
-    6. A THREAD WITH NOBODY RUNNING AND NO TERMINAL IN ITS RECORD says so in
-       ONE SSE COMMENT and closes. A COMMENT, not a frame, and that is the
-       one shape this channel has to get right: a frame the client's parser
-       does not know is an ERROR there (`@ag-ui/client` validates every event
-       and fails the run on an unknown type), so a channel consumed by a
-       runtime can only ever carry frames that runtime's vocabulary has. The
-       sentence is for whoever is reading the wire (a person with `curl`, a
-       log), and the CLOSE is what the client acts on;
-    7. the client going away unsubscribes (the bus's stop!), which is where
-       the publisher-must-never-block guarantee is cashed out on this side.
-
-  READ-ONLY, like stats: the record is read, the bus is read, nothing is
-  written -- not the log, not the store, not ~/.clj-harness."
-  [req stem]
-  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
-                     (catch Throwable t {:error (ex-message t)}))]
-    (if (some? (:error located))
-      ;; An unknown stem is the management edge's ordinary JSON 404 -- there is
-      ;; nothing to follow, and a stream that opens just to say so would be a
-      ;; stream pretending a thread exists.
-      (api-response 404 {:error (:error located) :threadId stem})
-      (let [;; THE TEARDOWN LIVES OUT HERE, and that is a fact about `as-channel`
-            ;; rather than about the bus: `on-open` and `on-close` are two callbacks
-            ;; with nothing in scope between them, and only the first one can TAKE the
-            ;; subscription while only the second one must END it. `open?` makes the
-            ;; ending idempotent, which both the terminal frame and the client's
-            ;; departure reach.
-            open?    (atom true)
-            teardown (atom nil)
-            end!     (fn end! []
-                       (when (compare-and-set! open? true false)
-                         (when-some [stop! @teardown] (stop!))))]
-        (hk/as-channel req
-         {:on-open
-          (fn [ch]
-            ;; 1. SUBSCRIBE FIRST, 2. REPLAY SECOND.
-            (let [{sub :ch stop! :stop!} (frame-bus/subscribe! stem)
-                  last-seq (atom nil)
-                  ;; The record, read the TOLERANT way (`stats/read-records`): a child
-                  ;; whose last row is being written right now is the case this route
-                  ;; is FOR, and a half row is 'we read this far', not damage.
-                  records  (try (stats/read-records (:ok located)) (catch Throwable _ []))
-                  frames   (->> records (filter replay/frame?) (mapv replay/payload))
-                  over?    (boolean (some #(contains? terminal (:type %)) frames))
-                  live?    (some? (subagents/live-subagent stem))
-                  ;; The HEAD rides the first send, like the runner's.
-                  head     (fn [body]
-                             {:status 200
-                              :headers (merge (cors-headers (request-origin req))
-                                              {"Content-Type" "text/event-stream"
-                                               "Cache-Control" "no-cache"})
-                              :body body})
-                  bytes    (fn [frame] (str "data: " (json/write-str frame) "\n\n"))
-                  ;; THE RUN'S OPENING, AND THEN WHAT THE FRAMES CANNOT REBUILD (5.): the
-                  ;; record's conversation minus the messages the frames carry under the
-                  ;; same id. See the docstring's point 5 for why the snapshot cannot go
-                  ;; first -- `@ag-ui/client` refuses a stream that does not open with
-                  ;; `RUN_STARTED`, which is what a real browser said.
-                  ;; The comparison is by MESSAGE ID because the fold that builds these
-                  ;; messages names each one after the frame that produced it
-                  ;; (`kernel.frames/apply-frames`), which is the same id the wire uses
-                  ;; -- so 'which messages would be drawn twice' is a question with an
-                  ;; exact answer rather than a guess about ordering.
-                  snapshot (let [streamed (into #{} (keep :messageId) frames)
-                                 opening  (remove #(contains? streamed (:id %))
-                                                  (try (replay/messages-so-far records)
-                                                       (catch Throwable _ [])))]
-                             (when (seq opening)
-                               (ag/conversation-snapshot opening)))
-                  ;; THE REPLAY IS WHAT THE RECORD ALREADY SAYS, and the `:seq` comes
-                  ;; off it on the way out: the number is the bus's bookkeeping for the
-                  ;; boundary, not a field of any AG-UI frame (票 02 writes it into the
-                  ;; record so the two sides count the same thing, and this is the one
-                  ;; place that must not pass it on).
-                  ;;
-                  ;; A REAL RECORD'S FIRST FRAME IS THE RUN'S `RUN_STARTED` -- written by
-                  ;; `run-subagent!` before the child has said anything -- so the ordinary
-                  ;; case is that frame going out verbatim. The synthesized one is for a
-                  ;; record that does not open with it (a hand-written log, a repaired
-                  ;; one): the child's own thread and run id are the truth about which run
-                  ;; this is, and a stream a runtime consumes must not start in the middle.
-                  opening  (when (= "RUN_STARTED" (:type (first frames))) (first frames))
-                  started  (or opening
-                               {:type "RUN_STARTED"
-                                :threadId stem
-                                :runId (or (some-> (first records) :runId)
-                                           (str (java.util.UUID/randomUUID)))})
-                  replay   (str (bytes (dissoc started :seq))
-                                (when snapshot (bytes snapshot))
-                                (apply str (map #(bytes (dissoc % :seq))
-                                                (if opening (rest frames) frames))))
-                  ;; 6. THE ENDING FOR A THREAD NOBODY IS RUNNING: the replay, one
-                  ;; comment, and the close. A comment because the client's parser must
-                  ;; never be handed a frame it does not know (see the docstring), and a
-                  ;; SENTENCE because 'why is this stream over' is what a reader of the
-                  ;; wire is about to ask. This is only ever reached BEFORE the head has
-                  ;; gone out -- the live path opens its own send below.
-                  ended!   (fn [why]
-                             (end!)
-                             (hk/send! ch (head (str "retry: 2000\n\n" replay
-                                                     ": " why "\n\n"))
-                                       true))]
-              (reset! teardown stop!)
-              (reset! last-seq (when-let [ss (seq (keep :seq frames))] (reduce max ss)))
-              (if (or over? (not live?))
-                ;; NOTHING IS RUNNING THIS, AND THE RECORD IS WHAT THERE IS: a run that
-                ;; already reached its terminal frame (the replay carries the terminal,
-                ;; which is the client's ending), or a thread no delegation is in
-                ;; flight for. THE REASON IS SAID RATHER THAN IMPLIED -- a reader can
-                ;; tell 'the run finished' from 'nothing here was ever live' without
-                ;; guessing -- and the channel ENDS, because a stream that never
-                ;; produces and never ends reads as 'still running' to a client, which
-                ;; is the one lie this route must not tell.
-                (if over?
-                  ;; THE REPLAY CARRIES THE TERMINAL, and that is the client's ending:
-                  ;; nothing is said behind it but the close.
-                  (do (end!) (hk/send! ch (head (str "retry: 2000\n\n" replay)) true))
-                  (ended! (str stem " is not running, and its record has no terminal frame")))
-                (do
-                  (hk/send! ch (head (str "retry: 2000\n\n" replay)) false)
-                  ;; 3. THE BUS SIDE, on this thread's go loop: the channel is a
-                  ;; sliding buffer, so reads never block the publisher.
-                  (async/go
-                    (loop []
-                      (if-some [frame (async/<! sub)]
-                        (cond
-                          ;; THE END MARKER: the subscription was stopped from
-                          ;; underneath us -- by the client's own on-close -- so this
-                          ;; loop is over either way.
-                          (= frame-bus/closed-marker frame)
-                          (do (hk/close ch) nil)
-
-                          ;; THE DEDUPE: anything the replay already delivered is
-                          ;; dropped, silently and BY NUMBER rather than by comparing
-                          ;; shapes -- a stream of text deltas has no identity to
-                          ;; compare. This is the boundary the ticket demands an
-                          ;; answer for, and the answer is the publisher's number.
-                          (and (some? @last-seq)
-                               (:seq frame)
-                               (<= (:seq frame) @last-seq))
-                          (recur)
-
-                          :else
-                          (do (when (:seq frame) (reset! last-seq (:seq frame)))
-                              (hk/send! ch (bytes (dissoc frame :seq)) false)
-                              ;; 4. THE TERMINAL ENDS IT: the client has its ending
-                              ;; (RUN_FINISHED / RUN_ERROR is the whole of it), so the
-                              ;; channel is unsubscribed and closed behind it.
-                              (if (contains? terminal (:type frame))
-                                (do (end!) (hk/close ch) nil)
-                                (recur))))
-                        (do (hk/close ch) nil))))))))
-          :on-close
-          (fn [_ch _status]
-            ;; 6. THE CLIENT WENT; THE SUBSCRIPTION GOES TOO -- otherwise the bus
-            ;; would go on filling a channel nobody reads (sliding, so the publisher
-            ;; still would not block -- but the frames would be lost to nobody, which
-            ;; is waste, not correctness).
-            (end!))})))))
 
 (defn- frames-get
   "GET /api/threads/<stem>/frames -- the REPLAY half of the `follow` channel as JSON: this
@@ -3695,29 +3473,6 @@
 ;; changes means holding them -- so connecting is an act on the session and it rings the
 ;; claim the same way an action does.
 
-(defn- feed-bytes
-  "One feed frame, encoded the way the run edge encodes its frames: `data: <json>` and a
-  blank line. The same spelling on purpose -- a client that reads runs already knows how
-  to read this, and there is one SSE dialect on this edge rather than two."
-  [frame]
-  (.getBytes (str "data: " (json/write-str frame) "\n\n") StandardCharsets/UTF_8))
-
-(defn- feed-head
-  "A feed frame as the INITIAL RESPONSE of the stream: the status and headers ride on
-  the first frame, which is http-kit's contract for a streaming answer (the same
-  spelling `runner` uses for a run).
-
-  AND `send!` MUST BE TOLD NOT TO CLOSE. Without the third argument http-kit treats a
-  send as the WHOLE response -- it computes a `content-length`, finishes it, and every
-  later frame is dropped -- which is what a feed did here until it was measured: the
-  window arrived, the socket stayed open, and nothing was ever pushed again. A stream
-  is the pair (head map, `false`), and `stream-feed!`'s later sends are `false` too,
-  with `true` only on the frame that ends it (`runner` has the same three cases)."
-  [origin bytes]
-  {:status  200
-   :headers (merge (cors-headers origin) {"Content-Type"  "text/event-stream"
-                                          "Cache-Control" "no-cache"})
-   :body    bytes})
 
 (defn- live-state
   "The state of a conversation THIS PROCESS HOLDS, in the same words `sofar` answers
@@ -3912,160 +3667,6 @@
                                                    page)
                                      :live (boolean (:live read))))))))))
 
-(defn- stream-feed!
-  "Serve a feed that has already been let through: the opening frame, then a frame per
-  landing, then one `end` frame when the window is over.
-
-  THE DOORBELL IS A ONE-SLOT CHANNEL (`harness.edge.sessions/watch!`), which is what
-  makes this loop free of both polling and lost wakeups: a ring that arrives while the
-  answer is being written is still in the slot when the loop next waits, and a dozen
-  rings that arrive while it is writing collapse into one wait -- because the loop does
-  not count events, it re-reads the delta from its own cursor. That is the whole reason
-  the watcher carries no cursor of its own (ADR 0003 decision 7).
-
-  THE CURSOR ONLY EVER MOVES FORWARD, and it moves to the last entry's record offset.
-  Entries still in the writer's queue carry no offset, so a frame can be followed by
-  another containing the same entries -- by the time it is written their line has landed
-  and the delta from the old cursor reaches them again. The reader drops the repeat by
-  message id, which is the same identity the session dedupes an action by; the
-  alternative, moving the cursor to a number the writer has not confirmed, is how a
-  reader ends up asking for a delta from an offset nothing is numbered at."
-  [req stem since generation]
-  (let [origin (request-origin req)
-        wake   (async/chan (async/sliding-buffer 1))
-        why    (atom nil)
-        f      (fn [_tid event]
-                 (when (= :gone (:kind event)) (reset! why (:reason event)))
-                 (async/offer! wake :ring))]
-    (sessions/watch! stem f)
-    (hk/as-channel req
-                   {:on-open
-                    (fn [ch]
-                      (async/go
-                        (try
-                          ;; THE OPENING FRAME COMES FIRST, before any wait: a client
-                          ;; that has news waiting for it must not wait for a doorbell
-                          ;; that has already rung.
-                          (let [page  (window-page stem since)
-                                frame (window-frame stem
-                                                    (if (nil? since) "window" "append")
-                                                    (live-state stem)
-                                                    page)]
-                            (hk/send! ch (feed-head origin (feed-bytes frame)) false)
-                            (loop [cursor (:cursor frame) state-0 (:state frame)]
-                              (async/<! wake)
-                              (if (nil? (sessions/live-entry stem))
-                                ;; THE WINDOW IS OVER, AND IT SAYS SO: the session was put
-                                ;; away, swept, or taken over. A stream that merely stopped
-                                ;; would leave the reader believing it holds everything.
-                                ;; `true`: this frame ends the response, which is the
-                                ;; one thing a feed is ever allowed to do on its own.
-                                (hk/send! ch (feed-bytes
-                                              {:type       "end"
-                                               :reason     (or @why "the session is gone")
-                                               :generation generation})
-                                          true)
-                                (let [delta (:entries (window-page stem cursor))
-                                      ;; THE STATE IS READ BEFORE THE FRAME IS BUILT, and
-                                      ;; it is worth a frame of its own: a run that settled
-                                      ;; without adding an entry (nothing was said) still
-                                      ;; changes what the reader should draw, and a frame
-                                      ;; sent only for entries would leave the turn on
-                                      ;; screen looking unfinished forever.
-                                      state (live-state stem)
-                                      frame (window-frame stem "append" state
-                                                          {:entries delta
-                                                           :baseSeq cursor
-                                                           :hasMore false})]
-                                  ;; A FRAME HAS TO CARRY NEWS, AND `nil` STATE IS NOT NEWS.
-                                  ;; Ending a run is two steps -- `run-finished!` unpins it,
-                                  ;; `settle!` folds the frames and writes the state -- and
-                                  ;; between them the conversation is neither running nor
-                                  ;; anything else yet, so `live-state` answers nil. Telling a
-                                  ;; reader "never run" for those milliseconds would be a lie,
-                                  ;; and telling it nothing is exactly right: the fold rings on
-                                  ;; its own, and the frame that follows says `unfinished` or
-                                  ;; `settled`, which is the truth. (The suite caught this as a
-                                  ;; flake: the state-only frame was the FIRST of the two, and
-                                  ;; it said nothing.)
-                                  (when (or (seq delta)
-                                            (and (some? state) (not= state state-0)))
-                                    (hk/send! ch (feed-bytes frame) false))
-                                  (recur (or (:cursor frame) cursor) state)))))
-                          (finally
-                            (sessions/unwatch! stem f)))))
-                    ;; ONE LINE PER FEED END, SAYING WHAT http-kit THINKS HAPPENED, for
-                    ;; the same reason the run route says it: a stream that stops is
-                    ;; otherwise indistinguishable from a stream nobody was sending on.
-                    :on-close (fn [_ch status]
-                                (log/info! :feed/stream-closed
-                                           {:thread-id stem :status status
-                                            :generation generation})
-                                (sessions/unwatch! stem f))})))
-
-(defn- feed-get
-  "GET /api/threads/<stem>/feed[?since=N&generation=G] -- the conversation as a LIVE
-  window: the tail page (or the delta after N), then every entry that lands afterwards,
-  until the window is over.
-
-  CONNECTING IS AN ACT ON THE SESSION, so this route births it (a page opening a
-  conversation is the first ask, ADR 0002 decision 5) and rings the claim: pushing
-  changes means holding them. A conversation another live process is serving is refused
-  with the 409 that names it (`refuse-served-elsewhere!`) rather than half-served.
-
-  TWO REFUSALS BEFORE ANY BYTE IS STREAMED, and both are the same mistake: the client is
-  holding numbers from a window that no longer exists.
-
-    a generation that is not this window's   the session was put away, taken over, or
-                                             rebuilt, and every number the client has
-                                             is about a conversation that is gone
-                                             (ADR 0003 decision 6)
-    a `since` older than the tail page       the client is further behind than a page,
-                                             so the 'delta' would be the whole
-                                             conversation -- which is the cost the
-                                             window exists to refuse
-
-  Both answer 409 with the CURRENT generation and baseSeq, so the client's move is the
-  same in both cases and it is a move it can make: drop what it holds and open the tail.
-
-  ONCE STREAMING, THE ONLY ENDING THAT IS NOT THE CLIENT'S is the window ending: the
-  session put away, swept, or the claim changing hands. That sends an `end` frame --
-  SAYING SO -- and closes. A stream that just stops leaves a replica believing it holds
-  everything (`harness.edge.sessions/watch!`)."
-  [req stem]
-  (let [params  (query-params (:query-string req))
-        held    (claims/holder stem)
-        parse   (try {:since (number-param params "since")
-                      :generation (get params "generation")}
-                     (catch Throwable t {:error (ex-message t)}))]
-    (cond
-      (some? (:error parse))
-      (api-response 400 {:error (:error parse) :threadId stem})
-
-      (and (some? held) (not (claims/mine? held)))
-      (refuse-served-elsewhere! stem held)
-
-      :else
-      (let [{:keys [since generation]} parse
-            _      (sessions/touch! stem)
-            mine   (sessions/generation stem)
-            tail   (sessions/tail stem)
-            stale? (or (and (some? generation) (not= (str generation) (str mine)))
-                       (and (some? since) (some? (:baseSeq tail))
-                            (< (long since) (long (:baseSeq tail)))))]
-        (if stale?
-          (api-response 409 {:error (str "this window is over: "
-                                         (if (and (some? generation)
-                                                  (not= (str generation) (str mine)))
-                                           "the conversation is being served under a new generation"
-                                           (str "the client is holding a cursor (since=" since
-                                                ") older than the oldest entry this window still answers from"))
-                                         ". Drop what you hold and open the tail again: GET"
-                                         " /api/threads/" stem "/feed")
-                             :threadId stem
-                             :generation mine
-                             :baseSeq (:baseSeq tail)})
-          (stream-feed! req stem since mine))))))
 
 ;; ---------------------------------------------------------------- the downlink
 ;;
@@ -5293,10 +4894,8 @@
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)
         [:get "sofar"]    (sofar-get req stem)
-        [:get "feed"]     (feed-get req stem)
         [:get "page"]     (page-get req stem)
         [:get "delegations"] (delegations-get stem)
-        [:get "follow"]      (follow-get req stem)
         [:get "frames"]    (frames-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]

@@ -1,22 +1,14 @@
-// THE WINDOW'S WIRE: the two routes a replica reads a conversation through, and the SSE
-// reader that keeps one following. Ticket 06 of `.scratch/sessions-live-on-the-server`.
+// THE WINDOW'S WIRE, WHAT IS LEFT OF IT (ticket 05 of `.scratch/events-mux-and-host`):
+// the PAGE route a reader scrolls up with, and the frame types both the page and the
+// downlink speak.
 //
 //   GET /api/threads/<stem>/page[?beforeSeq=N]      one page, one answer
-//   GET /api/threads/<stem>/feed[?since=N&generation=G]
-//                                                   the window, then every entry as it
-//                                                   lands -- until the window is over
 //
-// THE RULES ABOUT WHAT TO DO WITH THE FRAMES ARE NOT HERE (`lib/window.ts`): this module
-// answers "what did the server say", and that one answers "what does it mean for what I
-// hold". The split is what makes the second half testable without a server and this half
-// testable without a replica.
-//
-// THE FEED IS READ WITH `fetch`, NOT WITH `EventSource`. `EventSource` reconnects by
-// itself, and its reconnect is the one thing this side must not delegate: a reconnect
-// has to say `since=<the newest entry I hold>` or it re-reads the window (or, worse,
-// gets the 409 that means the window is gone), and it has to be able to STOP -- a page
-// that navigated away must not leave a retry loop behind it. `fetch` plus a reader is
-// the same twenty lines and none of that ambiguity.
+// THE STREAMING HALF IS GONE. The feed this module used to read -- one SSE per watched
+// conversation -- was replaced by the page-wide downlink (`lib/mux.ts`, ADR 0004), which
+// carries the same `WindowFrame`s tagged by conversation. The RULES about what to do with
+// those frames were never here (`lib/window.ts`): this module answers "what did the server
+// say" for the one-shot page, and the downlink answers it for the tail.
 import type { TFunction } from "i18next";
 
 import type { RecordHealth } from "./record-health";
@@ -72,90 +64,4 @@ export async function pageThread(
   const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/page${query}`);
   if (!res.ok) throw new Error(await refusalFrom(res, t));
   return (await res.json()) as PageAnswer;
-}
-
-/// What the feed does to whoever opened it. `onRefused` is the WINDOW being over as far
-/// as the server is concerned -- a 409 with the current generation and baseSeq in it (the
-/// client is holding numbers from a conversation that is no longer being served), or any
-/// other refusal -- and `onClosed` is the stream ending without an `end` frame: the
-/// connection dropped, and the reader's move is to reconnect with its cursor.
-export type FeedHandlers = {
-  onFrame: (frame: WindowFrame) => void;
-  onRefused: (status: number, body: unknown) => void;
-  onClosed: () => void;
-};
-
-/// SPLIT A CHUNK OF SSE INTO FRAMES. Pure, and separate, because this is the one piece of
-/// the reader that has to be right about boundaries: a frame is `data: <json>`, frames
-/// end at a blank line, and a chunk can stop in the middle of either.
-export function feedFrames(text: string): { frames: WindowFrame[]; rest: string } {
-  const frames: WindowFrame[] = [];
-  let buffer = text;
-  for (;;) {
-    const at = buffer.indexOf("\n\n");
-    if (at < 0) break;
-    const block = buffer.slice(0, at);
-    buffer = buffer.slice(at + 2);
-    const line = block.split("\n").find((candidate) => candidate.startsWith("data:"));
-    if (line === undefined) continue;
-    try {
-      frames.push(JSON.parse(line.slice(5).trim()) as WindowFrame);
-    } catch {
-      // A frame this client cannot read is DROPPED, and the stream stays open: a
-      // malformed frame is one entry nobody can show, and tearing the window down over
-      // it would take the rest of the conversation with it. The next frame's numbers
-      // still say where the conversation is, so the copy is not lost.
-    }
-  }
-  return { frames, rest: buffer };
-}
-
-/// FOLLOW A CONVERSATION. Answers the way to stop -- call it when the host goes away, or
-/// the loop outlives the page that opened it.
-///
-/// `since` IS THIS COPY'S CURSOR and `generation` is the window it belongs to: together
-/// they are "here is what I hold, and which window I am holding it from", which is the
-/// whole of what this side tells the server. Nothing about the reader -- no identity, no
-/// session, no subscription -- crosses this line (ADR 0003 decision 7).
-export function feedThread(
-  threadId: string,
-  window: { since: number | null; generation: string | null },
-  handlers: FeedHandlers,
-): () => void {
-  const controller = new AbortController();
-  const params = new URLSearchParams();
-  if (window.since !== null) params.set("since", String(window.since));
-  if (window.generation !== null) params.set("generation", window.generation);
-  const query = params.toString();
-  const url = `${API_BASE}threads/${encodeURIComponent(threadId)}/feed${query === "" ? "" : `?${query}`}`;
-
-  void (async () => {
-    try {
-      const res = await fetch(url, {
-        signal: controller.signal,
-        headers: { Accept: "text/event-stream" },
-      });
-      if (!res.ok || res.body === null) {
-        handlers.onRefused(res.status, await res.json().catch(() => undefined));
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const split = feedFrames(buffer);
-        buffer = split.rest;
-        for (const frame of split.frames) handlers.onFrame(frame);
-      }
-      handlers.onClosed();
-    } catch {
-      // An aborted fetch is this side hanging up, and it is not news.
-      if (!controller.signal.aborted) handlers.onClosed();
-    }
-  })();
-
-  return () => controller.abort();
 }

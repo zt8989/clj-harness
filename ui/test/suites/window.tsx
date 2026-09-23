@@ -36,7 +36,7 @@ import { type Case, type Suite } from "../e2e";
 import { renderI18n, translator } from "../support/locale";
 import { WindowTop, type WindowTopProps } from "../../src/components/window-top";
 import type { Language } from "../../src/lib/language";
-import { feedFrames, type WindowEntry, type WindowFrame } from "../../src/lib/feed";
+import { type WindowEntry, type WindowFrame } from "../../src/lib/feed";
 import { correctedTop, measure, restoredTop } from "../../src/lib/window-scroll";
 import {
   aheadOf,
@@ -383,30 +383,6 @@ const cases: Case[] = [
       // NOTHING TO SAY IS NOT AN EMPTY SENTENCE: the strip is not drawn at all.
       expect(windowNotice(translator("en", "shell"), null)).toBeNull();
       expect(drawn({ notice: null }, "en").html).not.toContain('data-slot="window-notice"');
-    },
-  },
-  {
-    name: "a-frame-the-reader-cannot-parse-does-not-close-the-window",
-    run: async () => {
-      // FRAMES END AT A BLANK LINE, AND A CHUNK CAN STOP IN THE MIDDLE OF ONE. What is
-      // left over is handed back rather than thrown away -- that is the whole of the
-      // reader's boundary handling, and getting it wrong shows up as a message that
-      // never appears.
-      const split = feedFrames('data: {"type":"append","cursor":1}\n\ndata: {"type":"appen');
-      expect(split.frames).toEqual([{ type: "append", cursor: 1 }]);
-      expect(split.rest).toBe('data: {"type":"appen');
-
-      // A FRAME THIS CLIENT CANNOT READ IS DROPPED AND THE STREAM STAYS OPEN: a
-      // malformed frame is one entry nobody can show, and tearing the window down over
-      // it would take the rest of the conversation with it. The next frame's numbers
-      // still say where the conversation is.
-      const odd = feedFrames('data: {"type":"append"}\n\ndata: not json\n\ndata: {"type":"end"}\n\n');
-      expect(odd.frames).toEqual([{ type: "append" }, { type: "end" }]);
-      expect(odd.rest).toBe("");
-
-      // A BLOCK WITH NO `data:` LINE IS NOT A FRAME (a comment or a keep-alive), and it
-      // must not stop the frames after it from being read.
-      expect(feedFrames(": keep-alive\n\ndata: {\"type\":\"tail\"}\n\n").frames).toEqual([{ type: "tail" }]);
     },
   },
   {
