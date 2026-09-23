@@ -235,6 +235,7 @@ import { SettingsPanel } from "@/components/settings-panel";
 import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/components/sidebar-toggle";
 import { REVEAL_ON_HOVER } from "@/lib/reveal";
 import { foldRows } from "@/lib/sidebar-rows";
+import { countAsk, nextAsk, type ListedRow } from "@/lib/sidebar-refetch";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -821,7 +822,8 @@ export const Sidebar: FC<SidebarProps> = ({
     onShowFresh(id, project.path);
   };
 
-  /// A SESSION THIS PAGE IS HOLDING THAT THE STORE HAS NOT LISTED -- ask once more.
+  /// A SESSION THIS PAGE IS HOLDING THAT THE STORE HAS NOT LISTED -- ask the listing again
+  /// until it names the row, or until this id has been asked about as often as it is worth.
   ///
   /// THIS IS THE PRICE OF LAZY CREATION, and the ticket's third bullet: a session is
   /// written by its first send, and the sidebar's listing is a snapshot from before it,
@@ -835,34 +837,74 @@ export const Sidebar: FC<SidebarProps> = ({
   ///     this page started. A session opened from this list never appears here: what its
   ///     host holds is a WINDOW, whose first user message is from the middle of the
   ///     conversation, and the page refuses to name a row with that;
-  ///   * IT IS NOT IN THE LISTING -- the store's answer is still the old one;
-  ///   * AND IT IS NOT RUNNING -- the run has finished, so the row it wrote is committed
-  ///     and a read that races it is a read that fails.
+  ///   * AND THE LISTING DOES NOT HAVE IT SETTLED -- which is THREE answers rather than one,
+  ///     and all three are the same answer here (ask again): an id the listing does not name
+  ///     at all (the store has not caught up with the registration); an id it names with NO
+  ///     SEND TIME yet, which is a row that exists and is still empty (its name and time are
+  ///     the run's own write, and they land a moment after the row does); and an id whose
+  ///     row still says a run is in flight while THIS page's registry says one is not -- a
+  ///     snapshot taken mid-run, which would leave the row wearing a spinner for ever.
+  ///     See `lib/sidebar-refetch.ts`, where the three are stated.
   ///
-  /// ONCE PER ID PER PAGE LOAD, which is what makes the loop impossible: the refetch
-  /// changes the listing, which re-runs this effect, and the id is already in `asked`.
-  /// A refresh is cheap now (a SELECT and a registry lookup -- it used to walk the log
-  /// tree), but "cheap" is not a reason to let an effect ask forever.
-  const asked = useRef<Set<string>>(new Set());
-  const listedIds = useMemo(
+  /// THE WHOLE RULE, and the two mistakes it is written around, live in
+  /// `lib/sidebar-refetch.ts`: ask MORE THAN ONCE (a single read can be served before the
+  /// registration that writes the row commits, and an id spent on that read is a row that
+  /// never comes), and do NOT wait for the run to end (the row is the registration's, not
+  /// the run's -- holding the ask until `running` goes false withholds it for as long as
+  /// the model takes, which is the same complaint an order of magnitude faster).
+  ///
+  /// AND THE PATIENCE IS STILL BOUNDED, per id and per page load, so an answer that never
+  /// comes cannot put this effect in a loop. A refresh is cheap (a SELECT and a registry
+  /// lookup -- it used to walk the log tree), and that is what makes five of them
+  /// something a row may spend; it is not a reason to ask forever.
+  const asked = useRef<Map<string, number>>(new Map());
+  /// WHAT THE LISTING SAYS ABOUT THE SESSIONS IT NAMES, by id -- and it can be BEHIND in
+  /// both of the ways `lib/sidebar-refetch.ts` describes: a row with no send time yet (the
+  /// name and the time are the run's own write, and they land a moment after the row does)
+  /// and a row whose `running` outlived the run (that field is the server's registry as of
+  /// the read, not as of now).
+  const listedRows = useMemo(
     () =>
-      new Set([
-        ...projects.flatMap((p) => p.sessions.map((s) => s.threadId)),
-        ...tasks.map((t) => t.threadId),
+      new Map<string, ListedRow>([
+        ...projects.flatMap((p) =>
+          p.sessions.map((s): [string, ListedRow] => [
+            s.threadId,
+            { lastSentAt: s.lastSentAt, running: s.running },
+          ]),
+        ),
+        ...tasks.map((t): [string, ListedRow] => [
+          t.threadId,
+          { lastSentAt: t.lastSentAt, running: t.running },
+        ]),
       ]),
     [projects, tasks],
   );
+  /// AND WHICH SESSIONS THIS PAGE IS DRIVING A RUN IN RIGHT NOW, which is the live half:
+  /// the listing's `running` is a snapshot, and the end of a run is what puts a row that
+  /// is still wearing a spinner back in front of this effect (see the rule's third reason).
+  const liveRunning = useMemo(
+    () =>
+      new Set(
+        Object.keys(statuses).filter((id) => (statuses[id] ?? IDLE).running),
+      ),
+    [statuses],
+  );
   useEffect(() => {
-    const missing = Object.keys(liveTitles).find(
-      (id) =>
-        !listedIds.has(id) &&
-        !(statuses[id] ?? IDLE).running &&
-        !asked.current.has(id),
-    );
-    if (missing === undefined) return;
-    asked.current.add(missing);
-    void refresh();
-  }, [liveTitles, statuses, listedIds, refresh]);
+    const ask = nextAsk(Object.keys(liveTitles), listedRows, liveRunning, asked.current);
+    if (ask === undefined) return;
+    asked.current = countAsk(asked.current, ask);
+    // THE FIRST ONE GOES AT ONCE: the row is usually committed by the time a title is on
+    // screen, and somebody who has just pressed send should not wait a beat to see it.
+    if (ask.after === 0) {
+      void refresh();
+      return;
+    }
+    // AND THE RETRIES ARE SPACED OUT, because reads made in one instant land in the same
+    // window and miss together. The timer is cleared by the next listing -- or by the
+    // sidebar going away -- so a retry nobody wants any more never goes out.
+    const timer = setTimeout(() => void refresh(), ask.after);
+    return () => clearTimeout(timer);
+  }, [liveTitles, listedRows, liveRunning, refresh]);
 
 
   return (

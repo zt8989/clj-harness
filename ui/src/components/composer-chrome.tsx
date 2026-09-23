@@ -143,6 +143,40 @@ function useRemote<T>(load: () => Promise<T>): {
   return { data, error, reload: useCallback(() => setNonce((n) => n + 1), []) };
 }
 
+/// WHAT THIS PAGE IS HOLDING FOR A SESSION THAT DOES NOT EXIST YET -- supplied by `App`
+/// for exactly the sessions it minted and nobody has sent in, and NULL for every other
+/// session (an id the store knows is a session whose directory is a fact the server
+/// already holds, and this is not that).
+///
+/// WHY THE COMPOSER HAS TO KNOW. `rebind` below used to POST `/api/project` for whatever
+/// id it was given, and for a session this page had just minted that POST is what CREATED
+/// it: `project/bind!` is a find-or-create (`touch-session!`), so one pick of a directory
+/// wrote a session row and a 160-byte log whose only line is the `project/bound` audit --
+/// a thread id with no conversation behind it, listed by every later refresh as a session
+/// nobody has sent to. That is the one thing lazy creation removed from every OTHER door
+/// (点击新增不立刻会话，发送才新建), and the picker was the door it was left in.
+///
+/// SO A HELD SESSION'S PICK REMEMBERS AND WRITES NOTHING, and the first send binds it --
+/// the same registration every other minted session goes through (`app.tsx`'s
+/// `pendingBinds`, which `onShowFresh` already fills from the sidebar). The directory is
+/// held there rather than here because the page, not this bar, is the thing that sees the
+/// message arrive.
+export type HeldSession = {
+  /// THE DIRECTORY ITS FIRST SEND WILL BIND IT TO, or null for a task. Read at render
+  /// from the page's own pending map, so a bar that has just been remounted still shows
+  /// what was picked.
+  readonly dir: string | null;
+  /// REMEMBER A DIFFERENT ONE. Writes nothing: the first send is what binds, and this is
+  /// the only thing a pick can do to a session that does not exist yet.
+  remember: (dir: string) => void;
+};
+///
+/// NULL IS THE ORDINARY ANSWER -- every session the store can answer for, and every
+/// session this page did not mint.
+export const HeldSessionContext = createContext<HeldSession | null>(null);
+
+const useHeldSession = (): HeldSession | null => useContext(HeldSessionContext);
+
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("composer");
@@ -158,6 +192,15 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // WHETHER THIS SESSION EXISTS IN THIS HOME AT ALL -- null for every session it does,
+  // and the page's own memory of the directory for the ones it minted and nothing has
+  // been sent in. See `HeldSessionContext`.
+  const held = useHeldSession();
+  // AND WHAT THIS BAR SHOWS AFTER A PICK, because `remember` writes to a ref the page
+  // holds (the run reads it at the first send) and a ref does not re-render: this is the
+  // render a pick owes the person who made it, and it is dropped the moment the session
+  // stops being held -- the server's answer takes over at the first send.
+  const [picked, setPicked] = useState<string | null>(null);
 
   // The label is the last path segment -- a row has to be scannable -- and the
   // whole path rides along as the hint: it is what the row is searched by (a
@@ -167,9 +210,29 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
     label: projectName(p.path),
     hint: p.path,
   }));
-  const current = git.data?.dir ?? "";
+  /// THE DIRECTORY THIS BAR NAMES. THREE SOURCES, in this order, and the order is the
+  /// whole of it: a session the page is HOLDING has no binding to read -- `/api/git`
+  /// answers `{dir: nil}` for an id this home has never heard of, which is the honest
+  /// answer and the wrong one to draw -- so the page's pending directory comes first,
+  /// then the pick that was just made, and only then the server's binding.
+  const current = held === null ? (git.data?.dir ?? "") : (held.dir ?? picked ?? "");
 
+  /// PUT THIS SESSION IN DIR. Two verbs, in one function, because the picker asks one
+  /// question and which verb answers it is a fact about the SESSION rather than about the
+  /// pick:
+  ///
+  ///   * a session the page is HOLDING does not exist anywhere yet, so a pick can only
+  ///     REMEMBER the directory -- this bar cannot be the thing that creates a session
+  ///     (see `HeldSessionContext`). No request, nothing to fail, no sentence;
+  ///   * every other session is bound here and now, which for one the store already holds
+  ///     is a REBIND: `POST /api/project` moves the log with it (`move-log!`).
   const rebind = async (path: string) => {
+    if (held !== null) {
+      held.remember(path);
+      setPicked(path);
+      setError(null);
+      return;
+    }
     if (busy) return;
     setBusy(true);
     setError(null);

@@ -42,6 +42,7 @@ import { sidebarSuite } from "./suites/sidebar";
 import { sessionTitleSuite } from "./suites/session-title";
 import { relativeTimeSuite } from "./suites/relative-time";
 import { sidebarRowsSuite } from "./suites/sidebar-rows";
+import { sidebarRefetchSuite } from "./suites/sidebar-refetch";
 import { injectionSuite } from "./suites/injections";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
@@ -60,8 +61,9 @@ import { subagentViewSuite } from "./suites/subagent-view";
 /// `elicitationCardSuite` beside the `elicitation` suite it belongs to, and
 /// `session-after-refresh` is the fourth (`runningSuite`, after `restoreSuite`).
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
-/// `subagentsSuite` and `subagentViewSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
+/// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
+/// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -307,7 +309,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// `client` suite's stop: the page asks the SERVER to end a running conversation and the
 /// terminal that comes back is a cancellation, not a failure. It is a live client case for
 /// the same reason as the one above it: the stop has to land on a stream in flight.
-const EXPECTED_CASES = 114;
+/// 114 -> 124: `new-session-appears`'s ten, the rule a NEW SESSION'S ROW appears by --
+/// `sidebar-refetch` (`.scratch/new-session-appears`). One read is not enough, because it
+/// can be served before the registration that writes the row commits and an id spent on it
+/// is a row that never comes; and waiting for the run to end is not the answer either,
+/// because the row is the registration's rather than the run's -- NEITHER IS STOPPING AT
+/// THE ROW, since the name and the send time are the run's own write and a row can be there
+/// and still say 还没跑过. AND THE ROW THAT HAS ARRIVED IS A CANDIDATE IN ITS OWN RIGHT: the
+/// id leaves the page's minted titles the moment the listing names it, so the last case is
+/// the one that catches a spinner the stale snapshot put on a row nothing would ask about
+/// again. The rule is pure (`lib/sidebar-refetch.ts`), so what these cases pin is how many
+/// asks one id is worth, when they go out, and which id gets the next one.
+const EXPECTED_CASES = 124;
 
 let total = 0;
 for (const suite of SUITES) {
