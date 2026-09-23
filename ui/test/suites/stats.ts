@@ -32,6 +32,21 @@ async function statsOf(tid: string): Promise<{ status: number; body: StatsPayloa
   return { status: res.status, body };
 }
 
+/// THE ENDPOINT'S ANSWER ONCE THE RUN'S RECORD IS WHOLE, or whatever it last said when MS ran
+/// out. A run is over when its body is drained, but the record's LAST LINE is written by the
+/// harness on a schedule of its own -- so a fold read once, a moment too early, reports
+/// `incomplete` with every other number already right. That was this case's one red on
+/// 2026-09-23 (a full run on a loaded machine), and it is what this waits for: the record,
+/// not the response.
+async function wholeRecord(tid: string, ms = 10_000): Promise<{ status: number; body: StatsPayload }> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const answer = await statsOf(tid);
+    if (answer.body.incomplete === false || Date.now() > deadline) return answer;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 /// A vendor's usage, spelled the way the wire spells it.
 function usage(prompt: number, completion: number, cached: number): Record<string, number> {
   return {
@@ -181,7 +196,9 @@ const cases: Case[] = [
       expect(resp.status).toBe(200);
       await resp.text(); // drain: the run is over when the body is
 
-      const { status, body } = await statsOf(tid);
+      // WAITED FOR, NOT READ ONCE (see `wholeRecord`): the numbers below are a fold of the
+      // whole record, and the record's last line lands after the response did.
+      const { status, body } = await wholeRecord(tid);
       expect(status).toBe(200);
       expect(body.turns).toBe(1);
       expect(body.steps).toBe(2);

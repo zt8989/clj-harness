@@ -77,7 +77,12 @@ const cases: Case[] = [
       expect(messagePartsSource).toContain("useContext(ThreadIdContext)");
       // ...and the card's state is never consulted: `settled`, `result` and `status`
       // take no part in `openMirror`.
-      const resolver = /const openMirror =([\s\S]*?);\n/.exec(messagePartsSource);
+      // THE LINE BREAK IS `\r?\n`, NOT `\n`. This run reads a SOURCE, and a Windows
+      // checkout (git's `core.autocrlf`) hands a `?raw` import CRLF -- so a regex that wants
+      // a `;` immediately before a `\n` finds nothing, and the red run is about the
+      // checkout rather than about the card. What the case means is 'the statement ends at
+      // the end of a line', which both endings say.
+      const resolver = /const openMirror =([\s\S]*?);\r?\n/.exec(messagePartsSource);
       expect(resolver, "no openMirror in the card").not.toBeNull();
       expect(resolver![1]!).not.toContain("settled");
       expect(resolver![1]!).not.toContain("status");
