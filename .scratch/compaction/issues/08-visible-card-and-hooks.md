@@ -22,3 +22,10 @@
 - [ ] 按 AGENTS.md 跑一次真浏览器走查（`node scripts/dev.mjs --scripted`）——机器门挡不住「渲染看不到
       布局」的那一格
 - [ ] 离线全量 `harness.test-runner` 全绿
+
+## Comments
+
+2026-09-23 — **两个 hook 已落地**：`run-compaction!` 在每次压缩（自动与手动）前后各 `hook/emit`
+一次 `:pre-compact` / `:post-compact`。两个点仍是观察者（不阻断）；没有 sink 绑定时（run 之外的手动
+压缩）自然静默。**仍缺**：会话里那枚可折叠的压缩标记、圈上的阈值/保留两条界线、以及对应的词表文案
+——这些是这张票剩下的 UI 半边。

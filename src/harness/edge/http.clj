@@ -4531,6 +4531,10 @@
                         (catch Throwable t
                           (put "model/end" {})
                           (throw t)))))]
+    ;; THE TWO HOOK POINTS THE TABLE ALREADY DECLARED (`harness.kernel.hooks`), fired around every
+    ;; compaction -- automatic or manual. Observers (`:gate? false`), so neither can gate it; with
+    ;; no sink bound (a manual compaction outside a run) they are simply quiet.
+    (hook/emit :pre-compact {:thread-id stem})
     (let [result (compaction/perform! records
                                       {:window       window
                                        :retain-ratio (:retain-ratio ratios)
@@ -4541,6 +4545,9 @@
          stem
          (replay/compaction-facts
           (into (vec records) (map (fn [[k p]] (row-of k p)) @written)))))
+      ;; fired even when `perform!` had nothing to compact -- `:pre-compact` already fired, and a
+      ;; half-open pair would be the worse trace.
+      (hook/emit :post-compact {:thread-id stem})
       result)))
 
 (defn- compact-if-pressured!
