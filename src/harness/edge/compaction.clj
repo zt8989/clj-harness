@@ -22,6 +22,7 @@
   the range it replaces live on ONE `context/compacted` fact, and the projection
   (`harness.edge.replay/model-nodes`) synthesizes the message at the range's position."
   (:require [harness.edge.pressure :as pressure]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]))
 
 (def summary-instruction
@@ -73,19 +74,27 @@ anything. Be concise.")
   THE NODES ARE THE MODEL-FACING SURFACE (`harness.edge.replay/model-nodes`): earlier
   compactions' summaries included, and carrying the ids `:shadowed` is made of."
   [records window retain-ratio]
-  (let [records (vec records)
-        nodes   (replay/model-nodes (replay/entries records)
-                                    (replay/compaction-facts records))
-        budget  (long (Math/floor (* (double window) (double retain-ratio))))
-        size    (fn [j] (pressure/estimate-message (:message (nth nodes j))))]
+  (let [records    (vec records)
+        nodes      (replay/model-nodes (replay/entries records)
+                                     (replay/compaction-facts records))
+        budget     (long (Math/floor (* (double window) (double retain-ratio))))
+        size       (fn [j] (pressure/estimate-message (:message (nth nodes j))))
+        ;; THE SESSION'S OPENING IS NOT COMPACTABLE. Its instruction files, skills catalog and
+        ;; birth context are what every later request is read against, and a summary is not a
+        ;; substitute for them (`.scratch/session-opening`), so the head starts AFTER them.
+        protected? (fn [node]
+                     (let [m (:message node)]
+                       (or (ag/opening-entry? m)
+                           (= ag/context-entry-id (:id m)))))
+        k          (count (take-while protected? nodes))]
     (loop [j (dec (count nodes)) acc 0]
       (cond
         (and (pos? budget) (>= acc budget))
-        (when (pos? (inc j))
-          (let [head (subvec nodes 0 (inc j))]
+        (when (>= j k)
+          (let [head (subvec nodes k (inc j))]
             {:shadowed    (mapv :id head)
              :messages    (mapv :message head)
-             :head-tokens (reduce + 0 (map size (range 0 (inc j))))}))
+             :head-tokens (reduce + 0 (map size (range k (inc j))))}))
 
         (neg? j) nil
         :else    (recur (dec j) (+ acc (size j)))))))

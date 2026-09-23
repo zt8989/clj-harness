@@ -155,3 +155,24 @@
         (stop)
         (io/delete-file log true)
         (providers/use-provider! thread-id nil)))))
+
+(deftest the-session-opening-is-never-compacted-away
+  ;; The opening's instruction files, skills catalog and birth context are what every later
+  ;; request is read against; a summary is not a substitute. The head starts after them.
+  (let [opening  (assoc (entry 0 "session-opening-0" (apply str (repeat 400 "o")))
+                        :source "opening")
+        records  (into [opening]
+                       (map (fn [i] (entry (inc i) (str "u" i) (apply str (repeat 4000 "a"))))
+                            (range 25)))
+        written  (atom [])
+        result   (compaction/perform! records {:window 128000 :retain-ratio 0.16
+                                               :append    (fn [k p] (swap! written conj [k p]))
+                                               :summarize (fn [_] "S")})
+        all      (into records (write-rows @written))
+        view     (replay/compacted-messages (replay/entries all) (replay/compaction-facts all))
+        opening-content (apply str (repeat 400 "o"))]
+    (is (some? result))
+    (is (= 4 (count (:shadowed result))) "25 big nodes, 21 retained -> 4 shadowed")
+    (is (not (some #{0} (:shadowed result))) "the opening's seq is NOT among them")
+    (is (some #(= opening-content (:content %)) view)
+        "the opening is still in the model view, verbatim")))
