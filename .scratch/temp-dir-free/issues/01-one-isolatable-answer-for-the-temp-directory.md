@@ -11,7 +11,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 「本机临时目录」只有一个出处，不散落在多处。生产答案 = `java.io.tmpdir` 的 canonical 形式，
       **加上** POSIX `/tmp` 的 canonical 形式；两者 canonical 后相同则合并成一条（Linux 上常见）。
@@ -25,3 +25,14 @@
       不设 ⇒ 答 `java.io.tmpdir` 的 canonical 形式与 `/tmp`（去重后逐条相符）。
 - [ ] 全量 `clojure -M:test -m harness.test-runner` 全绿，且 `git diff` 可见
       **围栏的自由集一个字没动**——本票只把事实摆好，不放行任何路径。
+
+## 落地（2026-09-23，提交 a3bd32b）
+
+- `harness.infra.env/temp-dirs`：`java.io.tmpdir` + POSIX `/tmp`，`getCanonicalPath` 后 `distinct`
+  （macOS 上两条，Linux 上合一，Windows 上没有 `/tmp`；`/tmp` 非绝对真实目录时不出现）。
+- `env/*temp-dir-override*`：照 `*root-override*` / `*user-home-override*` 的规矩，替换整张表。
+- `harness.test-runner/isolate!` 多造一个兄弟目录 `test-tmp`（`:track? false`）并 `alter-var-root` 设 override，
+  `cleanup!` 收它；`test-runner-test` 断言它（连同 `temp-dir` 树与 `outside-path`）不在任何 fixture 之下、也不在
+  wipe 的登记表里。
+- 判据：全量 1137 tests / 13187 assertions，0 failures 0 errors（基线 1134/13177）。
+  `git diff -- src/harness/cap/project.clj` 为空——本票围栏的自由集一个字没动。

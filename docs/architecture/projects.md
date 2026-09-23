@@ -61,9 +61,11 @@
 1. **项目目录本身**——除非项目的 `harness.edn` 写了 `:approval {:strict true}`（项目内也要审批）；
 2. **配置家**（读自己的 `config.edn` / `.env` 是围栏刻意留的自留地，
    **strict 不收紧它**——配置家是 harness 自己的地盘，不是项目的）；
-3. **本会话的技能根**（`skill-roots`，默认 `<user-home>/.agents/skills` 与 `<项目>/.agents/skills`），
+3. **本机的临时目录**（`java.io.tmpdir` 与 POSIX `/tmp`，canonical 后去重），与配置家**同级、
+   同一条理由**：scratch 不是项目的地盘，`:approval {:strict true}` 同样收不走；
+4. **本会话的技能根**（`skill-roots`，默认 `<user-home>/.agents/skills` 与 `<项目>/.agents/skills`），
    与配置家**同级、同一条理由**，`:approval {:strict true}` 同样收不走；
-4. `:approval {:allow [..]}` 声明的额外路径，各自按工具路径的规矩解析（相对项目根）。
+5. `:approval {:allow [..]}` 声明的额外路径，各自按工具路径的规矩解析（相对项目根）。
 
 **技能根为什么在里面，而指令内容为什么不在。** 技能正文常写「读 `references/x.md`」，那个路径就落在
 技能目录里、项目目录之外——不放行的话每读一份参考文件都要人点一次批准，技能等于白装。
