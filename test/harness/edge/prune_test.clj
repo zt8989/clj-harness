@@ -8,6 +8,7 @@
   inside a surrogate pair. The read half (`replay/prune-messages`, `replay/prune-facts`) is
   asserted here too, because the writer and the reader must agree on the fact's shape."
   (:require [clojure.string :as str]
+            [harness.infra.text :as text]
             [clojure.test :refer [deftest is testing]]
             [harness.edge.prune :as prune]
             [harness.edge.replay :as replay]))
@@ -23,19 +24,19 @@
 ;; --------------------------------------------------------------- code points, not code units
 
 (deftest code-points-not-code-units
-  (is (= 1 (prune/code-point-count "😀")))
-  (is (= 2 (prune/code-point-count "a😀")))
-  (is (= 3 (prune/code-point-count "abc")))
-  (is (= 0 (prune/code-point-count nil)) "a non-string counts as nothing"))
+  (is (= 1 (text/code-point-count "😀")))
+  (is (= 2 (text/code-point-count "a😀")))
+  (is (= 3 (text/code-point-count "abc")))
+  (is (= 0 (text/code-point-count nil)) "a non-string counts as nothing"))
 
 (deftest a-cut-never-splits-a-surrogate-pair
   ;; "😀" is ONE code point and TWO UTF-16 units; a cut made by char index could land between
   ;; the halves and produce two lone halves.
   (let [s (str "a" "😀" "b")]
-    (is (= "a😀" (prune/slice s 0 2)))
-    (is (= "😀b" (prune/slice s 1 3)))
-    (is (= s (prune/slice s 0 99)) "to is clamped to the string")
-    (is (= "" (prune/slice s 5 9)) "a from past the end clamps to empty")))
+    (is (= "a😀" (text/slice s 0 2)))
+    (is (= "😀b" (text/slice s 1 3)))
+    (is (= s (text/slice s 0 99)) "to is clamped to the string")
+    (is (= "" (text/slice s 5 9)) "a from past the end clamps to empty")))
 
 (deftest elide-keeps-a-fixed-head-and-tail-and-counts-code-points
   (let [{:keys [content before after removed]} (prune/elide (big 20000))]
@@ -43,7 +44,7 @@
     (is (= (- 20000 (* 2 prune/keep-chars)) removed))
     (is (str/includes? content (str "pruned " removed " characters")))
     (is (= (+ (* 2 prune/keep-chars)
-              (prune/code-point-count "\n…[pruned 16000 characters]…\n"))
+              (text/code-point-count "\n…[pruned 16000 characters]…\n"))
            after)
         "after counts the marker too")))
 

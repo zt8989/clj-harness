@@ -21,8 +21,9 @@
 
   THE COUNTS ARE CODE POINTS, not UTF-16 code units (ticket 06). `(count \"😀\")` is 2 in Java
   and 1 to everyone else, and a cut made at a code-unit boundary can split a surrogate pair
-  into two lone halves -- mojibake that is worse than the bytes it saved. `code-point-count`
-  and `slice` are the only two places that know this, and `elide` goes through both.")
+  into two lone halves -- mojibake that is worse than the bytes it saved. `harness.infra.text`
+  is the one place that knows this, and `elide` goes through it."
+  (:require [harness.infra.text :as text]))
 
 (def keep-chars
   "How many code points of a pruned result are kept at EACH end. The head is what the command
@@ -35,26 +36,6 @@
   benefit. Only a body LONGER than this is elided."
   6000)
 
-(defn code-point-count
-  "STRING -> its length in Unicode CODE POINTS (Java's `String.length` counts UTF-16 units, and
-  a character outside the BMP is two of those)."
-  [s]
-  (if (string? s) (.codePointCount ^String s 0 (.length ^String s)) 0))
-
-(defn- at
-  "The CHAR index of code point CP -- `.offsetByCodePoints` never lands inside a surrogate pair,
-  which is the one property a cut needs."
-  [^String s cp]
-  (.offsetByCodePoints s 0 (int cp)))
-
-(defn slice
-  "S -> the substring from code point FROM (inclusive) to TO (exclusive), CUT ON CODE-POINT
-  BOUNDARIES. FROM/TO are clamped to the string, so a caller cannot ask for a pair to be split."
-  [s from to]
-  (let [n  (code-point-count s)
-        lo (max 0 (min (long from) n))
-        hi (max lo (min (long to) n))]
-    (subs s (at s lo) (at s hi))))
 
 (defn elide
   "STRING -> `{:content :before :after :removed}`, or nil when there is nothing worth cutting.
@@ -64,16 +45,16 @@
   whole body, so the receipt's arithmetic is the caller's and this is the only thing that
   knows what a code point is here."
   [s]
-  (let [n (code-point-count s)]
+  (let [n (text/code-point-count s)]
     (when (> n threshold-chars)
       (let [removed (- n (* 2 keep-chars))
             middle  (str "\n…[pruned " removed " characters]…\n")
-            content (str (slice s 0 keep-chars)
+            content (str (text/slice s 0 keep-chars)
                          middle
-                         (slice s (- n keep-chars) n))]
+                         (text/slice s (- n keep-chars) n))]
         {:content content
          :before  n
-         :after   (code-point-count content)
+         :after   (text/code-point-count content)
          :removed removed}))))
 
 (defn prune-plan

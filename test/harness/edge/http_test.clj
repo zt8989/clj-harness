@@ -6485,3 +6485,49 @@
                           view)))
             (is (str/includes? (slurp f :encoding "UTF-8") giant)
                 "the original is still on the record")))))))
+
+(deftest a-just-produced-giant-tool-result-is-spilled-and-read-back
+  ;; ticket 09: a SINGLE huge tool result is moved out of the conversation the moment it is
+  ;; produced. The model is handed a pickup slip, the record never holds the giant text (so no
+  ;; request ever carried it), and the `read` tool the slip names gets the original back.
+  (with-server
+    "spill-e2e"
+    [{:content ""
+      :tool-calls [{:id "c1" :name "spew" :arguments {}}]}
+     {:content "got it"}]
+    (fn []
+      (let [tid  "spill-e2e"
+            f    (log-file tid)
+            body (apply str (map (fn [i] (str "row " i " " (apply str (repeat 40 "z")) "\n"))
+                                (range 2000)))]
+        (tools/session-register! tid "spew"
+          {:description "Returns a giant string."
+           :parameters  {:type "object" :properties {} :required []}
+           :required    []
+           :run         (fn [_] body)})
+        (try
+          (io/delete-file f true)
+          (let [frames  (wire/frames-from-sse
+                         (.body (post-run tid {:append [{:id "u1" :role "user" :content "go"}]})))
+                result  (first (filter #(= "TOOL_CALL_RESULT" (:type %)) frames))
+                slip    (str (:content result))
+                locator (second (re-find #"(?m)^Locator: (.+)$" slip))
+                rows    (replay/read-records f)]
+            (testing "the model is handed a slip, not the giant result"
+              (is (some? result))
+              (is (str/includes? slip "spilled"))
+              (is (str/includes? slip "use the read tool"))
+              (is (not (str/includes? slip body)) "the giant text is not in what the model reads"))
+            (testing "and no request ever carried the giant text"
+              (is (not-any? #(str/includes? (str (:content (:payload %))) body) rows)
+                  "no recorded row's content is the whole result")
+              (is (< (count slip) 5000)
+                  "the slip the model reads is tiny next to the result"))
+            (testing "the slip's retrieval path -- the read tool -- returns the original"
+              (let [got (tools/run! {:function {:name "read"
+                                                :arguments (json/write-str {:path locator})}}
+                                    tid)]
+                (is (false? (:error got)))
+                (is (str/includes? (apply str (read-lines (:content got))) "row 0 zzzz")
+                    "the spilled file comes back through the read tool"))))
+          (finally (tools/session-unregister! tid "spew")))))))

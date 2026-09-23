@@ -114,6 +114,7 @@
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.mcp :as cap-mcp]
+            [harness.cap.spill :as spill]
             [harness.cap.tools :as cap-tools]
             [harness.kernel.tools :as tools]
             [org.httpkit.server :as hk])
@@ -1390,6 +1391,18 @@
                                                              :on-overflow (fn [history t]
                                                                             (recover-overflow! thread-id provider history t))
                                                              :overflow-retries (compaction/overflow-retries thread-id)
+                                                             ;; A JUST-PRODUCED TOOL RESULT THAT IS
+                                                             ;; HUGE IS MOVED OUT OF THE CONVERSATION
+                                                             ;; (`harness.cap.spill`): the model reads
+                                                             ;; one pickup slip instead of a giant answer,
+                                                             ;; so the pressure never goes up for it. The
+                                                             ;; `read` tool IS the retrieval path, so its
+                                                             ;; own answers are never spilled again -- that
+                                                             ;; would bury the thing being retrieved.
+                                                             :on-tool-result (fn [name content]
+                                                                               (if (= "read" name)
+                                                                                 content
+                                                                                 (spill/slip thread-id content)))
                                                              :before-llm project/before-llm})]
                 (loop []
                   (when-let [ev (async/<! events)]

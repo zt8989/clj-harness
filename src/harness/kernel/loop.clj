@@ -326,7 +326,8 @@
   the one that really was. So the run keeps its own account: {:history <the final
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
-  [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow overflow-retries]
+  [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow
+                                  overflow-retries on-tool-result]
                             :as _opts}]
   (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
@@ -475,7 +476,18 @@
                                            ;; the edge.
                                            (binding [tools/*stop* slot]
                                              (let [{:keys [content error parked]}
-                                                   (tools/run! call thread-id call-emit)]
+                                                   (tools/run! call thread-id call-emit)
+                                                   ;; A JUST-PRODUCED RESULT MAY BE SPILLED BEFORE IT
+                                                   ;; ENTERS THE HISTORY (`harness.cap.spill`): the
+                                                   ;; replacement then rides BOTH the emitted frame and
+                                                   ;; the tool message, so the model view never holds the
+                                                   ;; giant text. An error or a parked call is not spilled
+                                                   ;; -- there is nothing to retrieve -- and the hook is
+                                                   ;; never handed one.
+                                                   content (if (or error parked)
+                                                             content
+                                                             ((or on-tool-result (fn [_ c] c))
+                                                              (get-in call [:function :name]) content))]
                                                (async/>!! ch {:id id :content content
                                                               :error error :parked parked}))))
                                          ch))

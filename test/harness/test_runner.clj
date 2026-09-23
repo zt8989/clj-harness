@@ -79,6 +79,7 @@
     harness.kernel.tools-test
     harness.cap.mcp-test
     harness.cap.jobs-test
+    harness.cap.spill-test
     harness.cap.mcp-wired-test
     harness.cap.ask-test
     harness.session-tools-test
