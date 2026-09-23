@@ -391,8 +391,10 @@
                              {:type      "TOOL_CALL_RESULT"
                               :messageId (str run-id "-cut-" (inc i))
                               :toolCallId id
-                              :content   (str "the run was cut off before this call"
-                                              " returned; no result was recorded")})
+                              ;; THE SENTENCE IS THE KERNEL'S (`harness.kernel.frames`),
+                              ;; because the run loop writes it too for the calls it
+                              ;; abandons when somebody presses stop.
+                              :content   (frames/cut-off-result)})
                            unanswered))]
              {:run-id     run-id
               :last-frame last-frame

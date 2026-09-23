@@ -121,6 +121,28 @@ export async function rebuildThread(threadId: string, t: Translate): Promise<Reb
   return (await res.json()) as RebuiltThread;
 }
 
+/// STOP THE RUN THIS PROCESS IS ANSWERING FOR THREAD-ID -- `POST /api/threads/<id>/cancel`.
+///
+/// THE ONE ACTION IN THIS MODULE THAT IS NOT A READ, and the one the composer's Stop is:
+/// a run belongs to the PROCESS, so a page that opened somebody else's running conversation
+/// has no way to end it locally -- `abortRun` closes THIS page's fetch, and there is no
+/// fetch. The server rings the running run's own stop switch
+/// (`harness.edge.sessions/cancel!`), and what comes back is the id of the run it rang.
+///
+/// A REFUSAL (409) IS THE OTHER REAL ANSWER: a conversation no run is going in has
+/// nothing to stop -- it may have ended between this page's last state frame and the
+/// press -- and the server's sentence says so (see `harness.edge.http/cancel-post`).
+/// What this does NOT wait for is the run's terminal: the stop is a signal, and the state
+/// the page needs next arrives on the window's feed like any other change.
+export async function stopRun(threadId: string, t: Translate): Promise<{ runId: string }> {
+  const res = await fetch(
+    `${API_BASE}threads/${encodeURIComponent(threadId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await refusalFrom(res, t));
+  return (await res.json()) as { runId: string };
+}
+
 /// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it -- and as
 /// a window states it too (`lib/window.ts`), because it is the same fact about the same
 /// conversation and both reads carry it.

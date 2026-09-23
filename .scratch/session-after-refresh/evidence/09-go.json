@@ -1,0 +1,41 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": {
+            "command": "mkdir -p /tmp/clj-harness-stop-09; echo $$ > /tmp/clj-harness-stop-09/$$.pid; sleep 45"
+          }
+        }
+      ]
+    },
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": {
+            "command": "mkdir -p /tmp/clj-harness-stop-09; echo $$ > /tmp/clj-harness-stop-09/$$.pid; sleep 45"
+          }
+        }
+      ]
+    },
+    { "content": "停完之后这一轮的回答。" },
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": {
+            "command": "mkdir -p /tmp/clj-harness-stop-09; echo $$ > /tmp/clj-harness-stop-09/$$.pid; sleep 45"
+          }
+        }
+      ]
+    }
+  ]
+}

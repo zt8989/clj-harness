@@ -112,12 +112,36 @@ function asAbort(error: Error): Error {
 function cancellationAware(
   subscriber: AgentSubscriber | undefined,
   aborted: () => boolean,
+  cancel: () => void,
 ): AgentSubscriber | undefined {
   const onRunErrorEvent = subscriber?.onRunErrorEvent;
   if (subscriber === undefined || onRunErrorEvent === undefined) return subscriber;
   return {
     ...subscriber,
     onRunErrorEvent: (params) => {
+      // THE SECOND WAY A RUN ENDS WITHOUT FINISHING, and it is the SERVER's: a Stop
+      // pressed on a conversation THIS page is driving arrives here as the terminal the
+      // run loop emitted (`code: "stopped"`, `harness.edge.ag-ui`).
+      //
+      // IT IS SWALLOWED AND THIS RUN IS CANCELLED LOCALLY, rather than handed to
+      // `onRunFailed`: the runtime treats that channel as a FAILURE unless its own
+      // controller was aborted (measured in a browser, 2026-09-22 -- the session's whole
+      // column disappeared, because `onRunFailed` reaches the page's `onError` and a host
+      // that cannot load its history is dropped), while `cancel` is the disposition the
+      // runtime already has for 'a run that ended because somebody stopped it': it aborts
+      // this run's controller, dispatches `RUN_CANCELLED`, and the turn is drawn
+      // \"Cancelled\". The server has ALREADY stopped the run, so aborting the fetch here
+      // is not a second stop -- it is this page letting go of a stream that is ending
+      // anyway.
+      //
+      // IT IS GATED ON THE SERVER'S OWN CODE and not on the sentence: the message is
+      // written for a person (`harness.kernel.loop/stop-sentence`), and a client that
+      // matched on prose would draw a stop as a failure the day the wording moved. The
+      // `stopped` code is a fact the server states, and this is the only reader.
+      if (params.event.code === "stopped") {
+        cancel();
+        return;
+      }
       if (params.event.code === "abort" && aborted()) {
         subscriber.onRunFailed?.({
           ...params,
@@ -246,7 +270,8 @@ export class HarnessAgent extends HttpAgent {
   }
 
   /// AND THE SAME RULE ON THE WAY IN: every run goes out through a subscriber that
-  /// can tell the transport's abort frame from a failure (`cancellationAware`). The
+  /// can tell a run which ENDED WITHOUT FINISHING from a failure -- an abort this page
+  /// asked for, or the server's own `stopped` terminal (`cancellationAware`). The
   /// base class's own subscriber plumbing is untouched -- this hands it one more
   /// callback, and the run, the transport and the frames are all still the base
   /// class's.
@@ -256,7 +281,11 @@ export class HarnessAgent extends HttpAgent {
   ): Promise<RunAgentResult> {
     return super.runAgent(
       parameters,
-      cancellationAware(subscriber, () => this.abortController.signal.aborted),
+      cancellationAware(
+        subscriber,
+        () => this.abortController.signal.aborted,
+        () => this.abortRun(),
+      ),
     );
   }
 
@@ -265,6 +294,12 @@ export class HarnessAgent extends HttpAgent {
   /// cannot depend on which door a caller came through. The app's runtime passes its
   /// subscriber to each run; a suite registers one on the agent.
   subscribe(subscriber: AgentSubscriber) {
-    return super.subscribe(cancellationAware(subscriber, () => this.abortController.signal.aborted) ?? subscriber);
+    return super.subscribe(
+      cancellationAware(
+        subscriber,
+        () => this.abortController.signal.aborted,
+        () => this.abortRun(),
+      ) ?? subscriber,
+    );
   }
 }

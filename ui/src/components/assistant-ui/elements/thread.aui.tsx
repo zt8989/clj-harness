@@ -46,6 +46,9 @@ import { WindowTop, type WindowTopProps } from "@/components/window-top";
 import { InjectionCard } from "@/components/context-card";
 import { isCardOnly, isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
+// LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
+// action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
+import { SessionRunContext } from "@/components/session-run-state";
 import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
@@ -110,6 +113,13 @@ export type ThreadComponents = {
   ComposerFrame?: ComponentType<PropsWithChildren> | undefined;
   ComposerTools?: ComponentType | undefined;
   ComposerAddAttachment?: ComponentType | undefined;
+  // LOCAL (ticket 09 of `.scratch/session-after-refresh`): what stands in the send
+  // button's place while the SERVER says this conversation's run is going. The page
+  // supplies it (`App`, which holds the thread id), because stopping a run this page is
+  // not driving is a request to the server -- and this element has no address to aim one
+  // at. Absent means nothing is drawn, which is what a page with no way to stop should
+  // look like: no button, rather than a button that does nothing.
+  ComposerStop?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -441,8 +451,19 @@ const ComposerAction: FC = () => {
   // LOCAL: whatever the caller wants on the right of the composer's action row,
   // before the dictate and send buttons -- and, on the left, the attach button
   // itself when the caller has a reason to draw it differently.
-  const { ComposerTools, ComposerAddAttachment: Attach = ComposerAddAttachment } =
+  const { ComposerTools, ComposerStop, ComposerAddAttachment: Attach = ComposerAddAttachment } =
     useContext(ThreadComponentsContext);
+  // LOCAL (ticket 09 of `.scratch/session-after-refresh`): WHICH RUN THE SEND BUTTON IS
+  // ABOUT. Upstream only knows whether THIS PAGE is running a turn (`s.thread.isRunning`);
+  // a run belongs to the PROCESS, so a page that opened somebody else's running
+  // conversation has to close the same door on the SERVER's word -- which is what the
+  // context carries (`App`'s `runState`, off the window's feed). The row then draws, in
+  // the send button's place, the Stop the CALLER supplies: this file does not know what
+  // stopping costs (a request, a signal, a wait), and the one thing every case shares is
+  // that Send is not it.
+  const runState = useContext(SessionRunContext);
+  const ownRunning = useAuiState((s) => s.thread.isRunning);
+  const serverRunning = runState === "running";
   // LOCAL: upstream's literal tooltips and `aria-label`s for the dictation and send
   // buttons -- "Voice input", "Start voice input", "Stop dictation", "Stop voice
   // input", "Send message" (twice: `tooltip` and the send button's `aria-label`) and
@@ -489,7 +510,11 @@ const ComposerAction: FC = () => {
             </ComposerPrimitive.StopDictation>
           </AuiIf>
         </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
+        {/* LOCAL (ticket 09): SEND IS DRAWN ONLY WHEN NOBODY IS ANSWERING THIS
+            CONVERSATION -- not this page, and not the process. While the server says
+            `running`, the send button's place is the caller's STOP: Send against the
+            server's own word is a button whose only answer is the run edge's 409. */}
+        {!ownRunning && !serverRunning && (
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
               tooltip={t("composer.send")}
@@ -503,20 +528,17 @@ const ComposerAction: FC = () => {
               <ArrowUpIcon className="aui-composer-send-icon size-4" />
             </TooltipIconButton>
           </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label={t("composer.stopGenerating")}
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
+        )}
+        {/* LOCAL (ticket 09): THE STOP IS THE SERVER'S, in BOTH the cases above -- this
+            page's own run and a run the process is answering for somebody else. What used
+            to stand here is upstream's `ComposerPrimitive.Cancel`, which ABORTS THIS
+            PAGE'S FETCH and does nothing at all on the other side (the run keeps going
+            and the record keeps growing); the caller's stop asks the server instead, and
+            a page driving the run gets the terminal it produces on this same stream. */}
+        {/* THE CALLER'S STOP, IN BOTH OF THOSE CASES. The component is the page's because
+            stopping is a request to the server, and this element has no address of its own
+            to aim one at (`App` holds the thread id). */}
+        {(ownRunning || serverRunning) && ComposerStop !== undefined && <ComposerStop />}
       </div>
     </div>
   );

@@ -65,6 +65,13 @@
   still had to be correct about the one fact it owns -- that the session may not be put
   away while ANY of them is going.
 
+  AND THE RUN'S STOP SWITCH LIVES IN THE SAME ROW (ticket 07 of
+  `.scratch/session-after-refresh`). It is minted by `run-started!` in the same atomic
+  step that pins the run id, and dropped by `run-finished!` when the last run goes, so
+  'here is how to stop it' are one row rather than two tables that can disagree -- and
+  `cancel!` reads both out of ONE deref. What the switch IS (`harness.kernel.stop`)
+  is defined beside the loop that has to notice it being rung.
+
   ONE ROW OUTSIDE THIS TABLE, AND IT IS THE CLAIM. A session's lifetime here IS a
   claim on the conversation (`harness.cap.claims`): it is taken as the entry is built
   and handed back as the entry is put away, so no other process serves a conversation
@@ -86,7 +93,8 @@
   (:require [harness.cap.claims :as claims]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
-            [harness.kernel.frames :as frames])
+            [harness.kernel.frames :as frames]
+            [harness.kernel.stop :as stop])
   (:import (java.util.concurrent Executors ScheduledExecutorService ThreadFactory
                          TimeUnit)))
 
@@ -357,6 +365,50 @@
   [thread-id]
   (first (:runs (live-entry thread-id))))
 
+;; THE STOP SWITCH ITSELF IS `harness.kernel.stop`'s, not this table's: what a stop has
+;; to be (a sticky flag AND a doorbell) is a fact about driving a run, and the loop
+;; that has to notice the stop is the one that consumes it. What belongs HERE is the
+;; ADDRESS -- which run of which conversation the switch belongs to -- and `cancel!`
+;; below is that address being used.
+
+(defn cancel!
+  "Stop the run THREAD-ID has HERE, if any: ring its switch. Answers the id of the
+  Answers the id of the run that was signalled, or nil when this process has no run
+  of THREAD-ID going.
+
+  NIL IS THE ANSWER TO BOTH HALVES OF THE BOUNDARY, and they are one boundary: a
+  conversation nobody here holds, and a conversation whose run has already reached
+  its terminal. Whoever asked has to say WHICH in its refusal (the run edge does --
+  see `harness.edge.http/cancel-post`); all this table can know is that there is
+  nothing of its own to stop, which is why the answer is the id rather than a
+  boolean.
+
+  ONE DEREF, ONE SIGNAL. The run and its switch are read in the same snapshot, so
+  a run that ends between the look and the signal cannot be signalled by a handle
+  that is on its way out -- the worst a race can do here is mark a switch nobody
+  will read again."
+  [thread-id]
+  (let [entry  (live-entry thread-id)
+        run-id (first (:runs entry))
+        switch (:cancel entry)]
+    (when (and run-id (some? switch))
+      (stop/ring! switch)
+      run-id)))
+
+(defn run-switch
+  "THE STOP SWITCH OF THE RUN THREAD-ID HAS HERE, or nil when this process has none of
+  it going -- the same nil `cancel!` refuses on, read by the caller that has to HOLD the
+  switch rather than ring it.
+
+  WHO HOLDS IT: the run edge, which is where a run is started and where the loop that
+  drives it is handed its options. The edge mints the switch here (through
+  `run-started!`) and hands the same one to both sides -- the route that rings it
+  (`harness.edge.http/cancel-post`) and the loop that listens (`:cancel`).
+
+  SAME ROW, ONE LOOK: 'there is a run here' and 'here is how to stop it' are read out
+  of one deref, so a caller cannot hold a switch for a run that is already over."
+  [thread-id]
+  (:cancel (live-entry thread-id)))
 ;; -------------------------------------------------------------- the conversation
 
 (defn messages
@@ -617,7 +669,13 @@
                                  (fn [m]
                                    (if (<= max-running (count-running m))
                                      m
-                                     (update-in m [id :runs] (fnil conj #{}) (str run-id)))))
+                                     (-> m
+                                         (update-in [id :runs] (fnil conj #{}) (str run-id))
+                                         ;; THE SWITCH IS MINTED WITH THE RUN, in the same
+                                         ;; atomic step, so 'this thread has a run' and 'here is
+                                         ;; how to stop it' cannot come apart -- see
+                                         ;; `harness.kernel.stop` for why a stop needs both halves.
+                                         (assoc-in [id :cancel] (stop/handle))))))
           held?     (contains? (get-in before [id :runs] #{}) (str run-id))]
       (when (and (<= max-running (count-running before)) (not held?))
         (refuse! id run-id))
@@ -636,9 +694,15 @@
     (swap! registry
            (fn [m]
              (if (contains? m id)
-               (-> m
-                   (update-in [id :runs] disj (str run-id))
-                   (assoc-in [id :touched-at] (System/currentTimeMillis)))
+               (let [runs (disj (get-in m [id :runs] #{}) (str run-id))]
+                 (cond-> (-> m
+                             (assoc-in [id :runs] runs)
+                             (assoc-in [id :touched-at] (System/currentTimeMillis)))
+                   ;; THE SWITCH GOES WITH THE RUN THAT OWNED IT, and only when
+                   ;; the LAST run of this thread is gone: a switch left behind would
+                   ;; be a stop for a run that is over, and one dropped too early
+                   ;; would leave a live run nobody could stop.
+                   (empty? runs) (update id dissoc :cancel)))
                m)))
     (ring! id {:kind :entries})
     nil))

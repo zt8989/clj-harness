@@ -353,6 +353,75 @@ const cases: Case[] = [
       expect(agent.messages.some((m) => content(m) === "这一轮不该到。"), "no later turn arrived").toBe(false);
     },
   },
+  {
+    name: "a-stop-the-page-asks-for-ends-the-run-and-is-not-a-failure",
+    // THE OTHER WAY A RUN ENDS WITHOUT FINISHING, and this one is the SERVER's: the page
+    // asks it to stop (`lib/threads.ts`'s `stopRun`, the request the composer's Stop
+    // sends -- ticket 09 of `.scratch/session-after-refresh`). What has to hold is the
+    // same thing the abort case below holds for a hung-up fetch: the terminal is not a
+    // FAILURE. The server says so with the frame's own code (`code: \"stopped\"`,
+    // `harness.edge.ag-ui`), and `lib/agent.ts` delivers it through the abort channel,
+    // so the runtime draws `RUN_CANCELLED` -- what `message-parts.tsx` renders as
+    // \"Cancelled\".
+    //
+    // WHAT THIS CASE IS NOT: the BUTTON. That lives in the composer's action row, which
+    // needs a browser (the scripted walkthrough proves that end); what a live client can
+    // answer for is the request, the server's answer, and what the run reports afterwards.
+    run: async () => {
+      const tid = threadId("client-stop");
+      const agent = await agentFor(tid);
+      const frames: string[] = [];
+      const reported: string[] = [];
+      let calling = false;
+      agent.subscribe({
+        onToolCallStartEvent: () => {
+          calling = true;
+        },
+        onRunErrorEvent: (b) => {
+          frames.push(b.event.message ?? "RUN_ERROR");
+        },
+        onRunFailed: ({ error }) => {
+          reported.push(error.name);
+        },
+      });
+      // A turn long enough to be stopped in the middle of, and a second turn the stop
+      // keeps the client from ever reaching.
+      script([
+        { content: "", "tool-calls": [{ id: "c1", name: "bash", arguments: { command: "sleep 30" } }] },
+        { content: "这一轮不该到。" },
+      ]);
+
+      const run = agent.runAgent({ tools: [], context: [] });
+      await waitUntil(() => calling);
+
+      // THE PAGE'S OWN CALL, WITH THE PAGE'S OWN ADDRESS. `lib/threads.ts`'s `stopRun` is
+      // written against `API_BASE`, which is a relative path in a browser and nothing at
+      // all here -- the same reason `heldTexts` below builds its own URL for `rebuild`
+      // instead of calling the page's reader. The route and the body are the page's; the
+      // base is this run's.
+      const cancel = () =>
+        fetch(`${url()}api/threads/${encodeURIComponent(tid)}/cancel`, { method: "POST" });
+      const answer = await cancel();
+      expect(answer.status, "the stop was accepted").toBe(200);
+      const accepted = (await answer.json()) as { runId?: string };
+      expect(accepted.runId, "the answer names the run it stopped").not.toBe("");
+
+      await run;
+      expect(frames, "a stop is not reported as a run error").toEqual([]);
+      expect(reported, "and the run says what it was: a cancellation").toEqual(["AbortError"]);
+      expect(agent.messages.some((m) => content(m) === "这一轮不该到。"), "no later turn arrived").toBe(
+        false,
+      );
+
+      // AND NOTHING IS LEFT TO STOP: the second press is refused BY NAME, which is the
+      // same answer a page gets when the run ended between its last state frame and the
+      // press (`harness.edge.http/cancel-post`).
+      const refused = await cancel();
+      expect(refused.status, "the second press is refused by name").toBe(409);
+      const refusal = (await refused.json()) as { error?: string };
+      expect(refusal.error, "and the refusal says why").toContain("nothing to cancel");
+    },
+  },
 ];
 
 /// The texts of the conversation the SERVER holds for TID, read through

@@ -19,6 +19,22 @@
   [frame]
   (contains? #{"RUN_FINISHED" "RUN_ERROR"} (:type frame)))
 
+(defn cut-off-result
+  "THE RESULT A CALL IS GIVEN WHEN ITS RUN WAS CUT OFF BEFORE IT RETURNED.
+
+  A CALL THAT NEVER CAME BACK STILL NEEDS AN ANSWER, and the reason is not tidiness:
+  an assistant message whose `toolCalls` has no answering tool message is a shape the
+  vendors refuse, so leaving one open trades a hole in the record for a 400 on the
+  next call. The sentence is the TRUE one -- the call was cut off and nothing was
+  recorded -- rather than an invented result.
+
+  ONE SENTENCE, TWO WRITERS, and that is why it lives here rather than beside either
+  of them: `harness.edge.replay/closing-frames` writes it when a log ends mid-run and
+  is repaired, and the run loop writes it for the calls still in flight when somebody
+  presses stop (`.scratch/session-after-refresh` tickets 07/08). Two copies of it
+  would be two ways for the record to describe one thing."
+  [] "the run was cut off before this call returned; no result was recorded")
+
 (defn- patch-by-id [messages id f]
   (mapv (fn [m] (if (= id (:id m)) (f m) m)) messages))
 

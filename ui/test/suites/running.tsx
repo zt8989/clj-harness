@@ -1,5 +1,5 @@
-// Ticket 04 of `.scratch/session-after-refresh`: a conversation the SERVER is still
-// answering must not offer Send, and must SAY why.
+// Ticket 04/09 of `.scratch/session-after-refresh`: a conversation the SERVER is still
+// answering must not offer Send -- and, since ticket 09, must offer the STOP instead.
 //
 // ================================================================ why this file
 //
@@ -12,18 +12,23 @@
 // where the 409 is on the record); this file holds the two rules that fix rests on, both of
 // them things no suite could see before.
 //
-// WHAT THIS FILE CANNOT SEE: `app.tsx`, which is where the server's word is read off the
-// window (`useWindowFeed`'s `onState`), where the composer's gate is closed
-// (`isSendDisabled`) and where the sentence is reachable at all (it is a context supplied
-// there). That file reaches the assistant runtime and cannot be rendered in this run. The
-// wiring is the walkthrough's; the RULES are here.
+// WHAT CHANGED IN TICKET 09: the shut door used to carry a SENTENCE ("this conversation is
+// still being answered; wait for it to settle"). It carries a STOP now -- the server has a
+// cancel verb, so a conversation somebody else is answering is a conversation a person can
+// end -- and the sentence is gone with the state it explained.
+//
+// WHAT THIS FILE CANNOT SEE: `app.tsx` and `thread.aui.tsx`, which is where the server's
+// word is read off the window (`useWindowFeed`'s `onState`), where the action row chooses
+// between Send, Cancel and the Stop (on the server's word) and where the sentence and the
+// stop are reachable at all. Both files reach the assistant runtime and cannot be rendered
+// in this run. The wiring is the walkthrough's; the RULES are here.
 //
 // ================================================================ the two cases
 //
 // 1. `statusOf` -- the arithmetic, pure, both ways round: this page's own reading ORed with
 //    the server's word, and which words do NOT mean "in flight".
-// 2. the sentence, RENDERED in both languages and read back -- for the reason
-//    `suites/record.tsx` gives about its own: a sentence that reaches the screen is the one
+// 2. the STOP, RENDERED in both languages and read back -- for the reason
+//    `suites/record.tsx` gives about its own: a control that reaches the screen is the one
 //    thing a green tree cannot see, and `session-title-blank` is what that costs.
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nextProvider } from "react-i18next";
@@ -31,35 +36,33 @@ import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
-import { SessionRunContext, SessionRunNotice } from "../../src/components/session-run-notice";
+import { SessionRunStop } from "../../src/components/session-run-stop";
 import { IDLE, statusOf, type SessionStatus } from "../../src/lib/session-status";
 import type { Language } from "../../src/lib/language";
 
-/// THE SENTENCE AS A PERSON READS IT: the notice inside a real i18n instance and a context
-/// saying what the server said, rendered to a string. Both wrappers are what the page
-/// supplies -- the instance is the page's, and the context is `SessionHost`'s.
-function shown(state: string | null, language: Language): string {
+/// THE BUTTON AS A PERSON MEETS IT: the stop inside a real i18n instance, rendered to a
+/// string. The provider is what the page supplies (`App`), and the thread id is what the
+/// page hands down (`ComposerStop`), so this is the button's own rendering and nothing of
+/// the composer's furniture.
+function drawn(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <SessionRunContext.Provider value={state}>
-        <SessionRunNotice />
-      </SessionRunContext.Provider>
+      <SessionRunStop threadId="t-1" />
     </I18nextProvider>,
   );
 }
 
-/// Whether the notice drew an element at all. A sentence with no element would be a
-/// sentence nothing renders -- the failure this half of the suite exists for.
-const drew = (state: string | null): boolean =>
-  shown(state, "en").includes('data-slot="session-running"');
+/// Whether the stop drew an element at all. A label with no element would be a word
+/// nothing renders -- the failure this half of the suite exists for.
+const drew = (language: Language): boolean => drawn(language).includes('data-slot="session-stop"');
 
 const cases: Case[] = [
   {
     name: "a-run-the-server-is-answering-counts-as-in-flight",
     run: async () => {
       // THE BUG, AS ARITHMETIC: nothing in this page is running, and the server says the
-      // conversation is. The answer has to be `running`, because that is what closes the
-      // composer and lights the sidebar row.
+      // conversation is. The answer has to be `running`, because that is what draws the
+      // Stop in the composer and lights the sidebar row.
       expect(statusOf(IDLE, "running")).toEqual({ running: true, parked: false });
 
       // AND THE OTHER WAY ROUND, which is why it is an OR and not a replacement: a run this
@@ -73,10 +76,10 @@ const cases: Case[] = [
 
       // THE WORDS THAT ARE NOT "IN FLIGHT". A parked run has ENDED on its interrupt, a
       // settled one answered, and a conversation with no window at all has nothing to say --
-      // none of them may shut the composer, or the gate would be one a person cannot get out
-      // of. `parked` IS DELIBERATELY NOT TAKEN FROM THE SERVER YET: the card that answers a
-      // parked run comes back through ticket 06, and until it does, closing the composer on
-      // the server's `parked` would be a door with no way through it. Pinned so that
+      // none of them may draw the Stop, or the composer would offer to end a run that is not
+      // going. `parked` IS DELIBERATELY NOT TAKEN FROM THE SERVER YET: the card that answers
+      // a parked run comes back through ticket 06, and until it does, drawing the stop on
+      // the server's `parked` would be a control for something already over. Pinned so that
       // changing it is a deliberate act with a failing case in front of it.
       for (const state of ["settled", "unfinished", "parked", null]) {
         expect(statusOf(IDLE, state), `"${state}" is not a run in flight`).toEqual(IDLE);
@@ -90,34 +93,23 @@ const cases: Case[] = [
     },
   },
   {
-    name: "a-conversation-the-server-is-answering-is-said-in-both-languages",
+    name: "the-stop-is-drawn-and-said-in-both-languages",
     run: async () => {
-      // THE SENTENCE, RENDERED. What it has to carry is why the button will not press:
-      // that THIS conversation is still being answered, and that sending is for later. A
-      // shut door with no sentence beside it is indistinguishable from a broken one.
-      const english = shown("running", "en");
-      expect(drew("running")).toBe(true);
-      expect(english).toContain("still being answered");
-      expect(english).toContain("send again");
+      // THE CONTROL THAT REPLACED THE SENTENCE. What it has to carry is what a person acts
+      // on: that this press STOPS the conversation, said as copy (the `aria-label` and the
+      // tooltip are the same word -- a control's name is copy, and this page follows the
+      // language).
+      const english = drawn("en");
+      expect(drew("en")).toBe(true);
+      expect(english).toContain("Stop");
 
       // AND THE OTHER LANGUAGE SAYS IT TOO. Chinese has no fallback that would make this
       // fail -- a missing entry renders English on an otherwise Chinese page, which is the
       // failure a paraphrase would hide. The two are compared so that a catalog edited into
-      // the same sentence twice is a failure as well (the Chinese side IS a translation).
-      const chinese = shown("running", "zh");
-      expect(chinese).toContain("还在跑");
+      // the same word twice is a failure as well (the Chinese side IS a translation).
+      const chinese = drawn("zh");
+      expect(chinese).toContain("停止");
       expect(chinese).not.toBe(english);
-
-      // AND THE STATES WHERE THERE IS NOTHING TO SAY DRAW NOTHING -- not an empty element,
-      // which is a border around no words. The window says one of four words, and only one
-      // of them is a run that is going.
-      for (const state of ["settled", "unfinished", "parked", null]) {
-        expect(drew(state), `nothing is drawn for "${state}"`).toBe(false);
-      }
-      // A WORD THIS CLIENT DOES NOT KNOW IS ALSO SILENCE rather than the wire value on
-      // screen -- the same judgement `recordNotice` makes about a state it has no sentence
-      // for.
-      expect(drew("something-else")).toBe(false);
     },
   },
 ];

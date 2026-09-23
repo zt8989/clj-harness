@@ -102,12 +102,13 @@ import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
 import { Picker } from "./picker";
-// THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING OWES (ticket 04 of
-// `.scratch/session-after-refresh`). It lives in a module of its own -- with the context
-// that carries the server's word -- for one reason: it is rendered in a suite, and THIS
-// file cannot be imported there (`lib/attachments.ts` reaches `lib/i18n.ts`, which touches
-// `document` as it loads). See that module's header.
-import { SessionRunNotice } from "./session-run-notice";
+// THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING USED TO OWE IS GONE (ticket 09
+// of `.scratch/session-after-refresh`): what stands there now is a STOP button, drawn in
+// the composer's own action row by the element itself (`thread.aui.tsx`'s `ComposerStop`
+// seam, supplied by `App`, which is where the thread id is), because the thing it
+// replaces is Send. The CONTEXT it reads still lives in a module of its own --
+// `./session-run-state` -- for the same reason as before: a suite renders what stands on
+// the server's word, and THIS file cannot be imported there.
 
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
@@ -730,10 +731,10 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
-        {/* ABOVE THE INPUT, like the context bar, and inside the same box: it is a fact
-            about what this composer can do right now, so it belongs with the composer
-            rather than with the conversation above it. */}
-        <SessionRunNotice />
+        {/* NOTHING IS SAID ABOVE THE INPUT ABOUT A RUN THE SERVER IS ANSWERING anymore
+            (ticket 09): the composer's own action row draws a STOP there instead
+            (`thread.aui.tsx`'s `ComposerStop`), because the thing that was shut is a
+            thing a person can now act on. */}
         {children}
         {refusal !== null && (
           <p

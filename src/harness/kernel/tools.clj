@@ -293,6 +293,20 @@
 
   Unbound outside a run, like its sibling."
   nil)
+(def ^:dynamic *stop*
+  "Where a running call puts HOW TO STOP ITSELF, bound by the seam per call.
+
+  A CALL THAT SPAWNS SOMETHING has a handle nobody outside it can reach -- the
+  process the command is, and the tree under it. Stopping a run somebody pressed stop
+  on must reach THAT process (`.scratch/session-after-refresh` ticket 08), and the
+  only party that knows it is the call itself, so this is the slot it leaves it in:
+  an atom, which the call fills with a thunk that stops what it started.
+
+  IT IS AN ATOM AND NOT A CHANNEL: the loop hands one down per call, and reading it
+  is not a wait -- the stop is decided by the loop when it wants to stop something.
+  Unbound outside a run, like its siblings above; a call that finds nil simply has
+  nobody asking to stop it."
+  nil)
 
 (defn suspend!
   "Stop the call that is executing, from INSIDE its own body, and ask a human.

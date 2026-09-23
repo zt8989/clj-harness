@@ -243,7 +243,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// reached the subscriber, and the error it is handed instead carries the `AbortError`
 /// name the interface maps to "Cancelled" -- and it has to be a live client: the abort
 /// has to land on a stream that is genuinely in flight.
-const EXPECTED_CASES = 96;
+const EXPECTED_CASES = 97;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -822,6 +822,27 @@
                                     :event     (:type frame)
                                     :reason    (:message frame)}))))))
 
+;; Keep a frame for the RECORD AND THE SESSION, and send it to NOBODY.
+;;
+;; THE ONE CALLER IS A STOP'S CUT-OFF ANSWERS (`harness.kernel.loop`'s stop branch,
+;; `:run/cut-off-result`). They are the mirror of the wire's normal rule -- every frame goes to
+;; the record and the client -- and the two halves part here on purpose: the record needs the
+;; answer (an open tool call is a shape the vendors refuse, and the session folds these frames
+;; so the next run continues from a complete conversation), while the client must NOT be told a
+;; call returned when it did not. A client that received one would draw the call `Done`; the
+;; truthful thing on screen is the cancellation it just asked for.
+;;
+;; NOT THE EMITTER WITH A FLAG: that function also owns the terminal -- unregistering the run,
+;; settling the conversation, closing the stream -- and none of that can apply to a frame no
+;; stream will ever see. What it owes the session is `:frames`, which is the same list
+;; `settle!` folds at the terminal, so it goes in there and nowhere else.
+(defn- recorder
+  "Keep a frame for the record and the session, and send it to nobody -- see above."
+  [thread-id run-id state]
+  (fn [frame]
+    (log! thread-id run-id "event" frame)
+    (swap! state update :frames conj frame)))
+
 (defn- resume-decisions
   "A client's resume entries -> the decisions the kernel replays, in order:
   {:interrupt-id .. :verdict :approved|:vetoed :payload ..}, each also naming the
@@ -959,6 +980,9 @@
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
         emit    (runner thread-id run-id ch state origin)
+        ;; AND ONE WRITER THAT DOES NOT SEND: the frames of a stop's cut-off answers are the
+        ;; record's and the session's, never the client's (see `recorder`).
+        record! (recorder thread-id run-id state)
         convert (ag/outbound thread-id run-id)]
     ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
     ;; writing their rows and naming the session -- HAPPENS INSIDE THE GO BLOCK
@@ -1307,6 +1331,12 @@
               ;; :run/done history itself is never converted -- it is the returned
               ;; side of the message record instead.
               (let [events (loop/run-chan provider messages {:thread-id thread-id
+                                                             ;; THE RUN'S OWN STOP SWITCH, minted by
+                                                             ;; `register-run!` above. The route that
+                                                             ;; rings it (`cancel-post`) and the loop
+                                                             ;; that listens both read THIS row, so a stop
+                                                             ;; cannot be aimed at a run that is over.
+                                                             :cancel (sessions/run-switch thread-id)
                                                              :resume decisions
                                                              ;; The session's skill bodies
                                                              ;; go back in before every
@@ -1420,7 +1450,13 @@
                                                   ;; reach it here
                                                   ;; (`ag/conversation-snapshot`).
                                                   snapshot (into [snapshot]))))]
-                            (emit frame))
+                            ;; THE RECORD'S FRAME OR THE CLIENT'S, and a stop's cut-off answers are
+                            ;; the record's alone: a client told the call returned would draw it `Done`
+                            ;; instead of the cancellation it asked for (see `recorder` and
+                            ;; `harness.kernel.event/cut-off-result`).
+                            (if (= :run/cut-off-result (:type ev))
+                              (record! frame)
+                              (emit frame)))
                           (recur)))))
                 ;; THE CHANNEL CLOSED, AND THIS IS WHERE A RUN SAYS WHETHER IT GOT
                 ;; TO SAY GOODBYE. The kernel closes it after :run/done, so every
@@ -1585,6 +1621,43 @@
     :threadId thread-id
     :running  (running-run-id thread-id)}))
 
+(defn- cancel-post
+  "POST /api/threads/<stem>/cancel -- stop the run THIS PROCESS has going for STEM.
+
+  THE SERVER'S HALF OF THE COMPOSER'S STOP (ticket 07 of `.scratch/session-after-refresh`).
+  It RINGS the switch of the run registered for this conversation, and the loop that
+  drives that run does the rest: the calls still in flight are stopped (a command's
+  process tree with them), every unanswered call is given `frames/cut-off-result` so the
+  record keeps no open call, and the run reaches a terminal that says a person stopped
+  it. None of that happens HERE -- see the next paragraph.
+
+  IT ANSWERS WITHOUT WAITING FOR ANY OF IT, and that is a decision rather than
+  convenience. A stop is a SIGNAL, not a join: this route cannot know how long a command
+  takes to die, and the fact a client needs next -- is a run still going here -- is
+  already readable (`sofar`'s `:state`, and the state frame the window's feed sends when
+  it changes). Waiting would also make the stop's own answer depend on the thing it is
+  stopping, which is the shape that made the browser's abort useless: it closed a stream
+  and reported success while the run went on.
+
+  A CONVERSATION WITH NO RUN GOING IS REFUSED BY NAME (409), and both halves of that
+  boundary land on this one answer: an id this home has never been asked to keep, and one
+  whose run has already reached its terminal. The sentence says what this process can
+  actually see -- nothing of OURS is running -- which is the honest half: a run in
+  ANOTHER process is not ours to stop, and nothing here is entitled to guess that it is
+  (`harness.edge.sessions/live-entry` is about THIS process, deliberately)."
+  [stem]
+  (let [thread-id (str stem)]
+    (if-some [run-id (sessions/cancel! thread-id)]
+      (api-response 200 {:threadId thread-id :runId run-id :state "stopping"})
+      (api-response
+       409
+       {:error    (str "nothing to cancel for " (pr-str thread-id) ": this process has no run"
+                       " of that conversation going, so there is no stop switch to ring --"
+                       " the conversation has never run here, or the run it had already"
+                       " reached its terminal frame, or another process is serving it. Send a"
+                       " message and stop the run that comes back, or read the conversation"
+                       " and continue it.")
+        :threadId thread-id}))))
 (defn- stream-run
   "Answer a run that the door let through: register it, and stream its frames.
 
@@ -2258,7 +2331,7 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  FIVE OF THE SEVEN ARE GETS: `stats` and `trajectory` only READ the log (a folded
+  FIVE OF THE EIGHT ARE GETS: `stats` and `trajectory` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
   same file while it is still being written, and the window's two verbs (`feed`,
   `page`) read it in pieces. The set stays closed and the 405 stays here -- what
@@ -2276,8 +2349,16 @@
   describes, for a conversation too long to send. They are GETs and they are the
   first pair here that a page uses continuously rather than once -- `page` answers
   scrolling up, and `feed` stays open -- which is why they are the two routes on
-  this edge that are not request/response (`feed` streams; see `stream-feed!`)."
-  #{"rebuild" "archive" "stats" "trajectory" "sofar" "feed" "page"})
+  this edge that are not request/response (`feed` streams; see `stream-feed!`).
+
+  AND `cancel` IS THE ONE THAT STOPS SOMETHING rather than reading it as it is: a POST
+  aimed at one conversation, whose run -- if this process has one going -- is told to
+  stop (`.scratch/session-after-refresh` tickets 07/08). It is the server's half of
+  the composer's Stop, and the half the browser's own abort never had: pressing that
+  one only closed the stream, while the run kept going and the record kept growing.
+  A conversation with NO run going here is refused BY NAME rather than answered
+  quietly -- 'it is already over' and 'it was stopped' are different things to know."
+  #{"rebuild" "archive" "stats" "trajectory" "sofar" "feed" "page" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3846,7 +3927,7 @@
 
     :else
     (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
-      ;; The verb-carrying routes: one shape, three verbs. TWO OF THEM ARE POSTS
+      ;; The verb-carrying routes: one shape, many verbs. THREE OF THEM ARE POSTS
       ;; because they have an effect, and `stats` is a GET because it only reads --
       ;; so the rule is 'the method says whether there is an effect', not 'this
       ;; shape is POST-only'. A method this shape does not serve is still answered
@@ -3855,6 +3936,7 @@
       ;; body that was never there.
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
+        [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
         [:get "trajectory"] (trajectory-get stem)

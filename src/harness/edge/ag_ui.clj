@@ -241,7 +241,11 @@
           (update :frames conj (injected-frame (str (:run-id s) "-ctx" (:n s))
                                                {:role (:role ev) :content (:text ev)})))
 
-    :tool/result
+    ;; A `:run/cut-off-result` IS THE SAME FRAME (`harness.kernel.event`), because the
+    ;; RECORD does not distinguish an answer that arrived from one written at a stop -- it
+    ;; is the WIRE that must not carry the cut-off one, and that is the edge's dispatch,
+    ;; not this converter's (see `harness.edge.http`'s drain).
+    (:tool/result :run/cut-off-result)
     (let [id (str (:run-id s) "-t" (:n s))
           s  (-> s (update :n inc) close-text)]
       (update s :frames conj {:type "TOOL_CALL_RESULT" :messageId id :toolCallId (:id ev)
@@ -291,7 +295,19 @@
 
     :run/error
     (-> s close-reasoning close-text
-          (update :frames conj {:type "RUN_ERROR" :message (:message ev)}))))
+          (update :frames conj {:type "RUN_ERROR" :message (:message ev)}))
+
+    ;; A STOP IS AN ERROR WITH A CODE (`harness.kernel.event/run-stopped`), and the code is
+    ;; the whole difference on the other side: `code: "stopped"` says a PERSON ended this
+    ;; run, so a client can draw it as a stop rather than a failure without reading the
+    ;; sentence -- which is written for a reader, not for a matcher. The frame type is
+    ;; unchanged on purpose: the wire's terminal vocabulary is two frames, a stopped run
+    ;; did not finish, and a client that knows nothing about this code draws it as what it
+    ;; is (a run that ended in an error) rather than as something that never happened.
+    :run/stopped
+    (-> s close-reasoning close-text
+          (update :frames conj {:type "RUN_ERROR" :message (:message ev)
+                                :code "stopped"}))))
 
 (defn outbound
   "Stateful converter. Returns (fn [kernel-event] -> vector of AG-UI wire frames)."

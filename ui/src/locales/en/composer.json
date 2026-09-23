@@ -34,6 +34,6 @@
     "label": "Add Attachment"
   },
   "run": {
-    "stillAnswered": "This conversation is still being answered; send again once the run settles."
+    "stop": "Stop answering"
   }
 }

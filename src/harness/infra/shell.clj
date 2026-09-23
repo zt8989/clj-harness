@@ -470,7 +470,22 @@
     (doseq [^java.lang.ProcessHandle k kids] (.destroy k))
     (doseq [^java.lang.ProcessHandle k kids :when (.isAlive k)] (.destroyForcibly k))
     nil))
+(defn stop-tree!
+  "Stop P and everything it started, from OUTSIDE the call that spawned it.
 
+  THIS IS `kill-tree!` AS A HANDLE. The private one is reached by the two things that
+  decide a command is over inside this namespace (a time limit, a `:close!`); a
+  caller that has to stop a command somebody ELSE is waiting on needs the same act,
+  and re-implementing it there would be a second copy of a kill that has already been
+  argued about (see `kill-tree!`: the child is not the command).
+
+  WHO ASKS, TODAY: a run whose stop switch was rung stops the command IT started
+  (`.scratch/session-after-refresh` ticket 08). The Process itself is only ever held
+  by the spawn site, so `run`'s `:on-spawn` is how it reaches that caller -- never a
+  registry of every command this process has running, which would be a switch that
+  stops another session's work as well."
+  [^Process p]
+  (kill-tree! p))
 ;; ------------------------------------- what this process started, on the way out
 ;;
 ;; A CALLER DECIDES WHEN A COMMAND IS OVER -- a time limit, a `:close!` -- and
@@ -602,7 +617,12 @@
   machine does not have is a refusal by name (`require-shell!`), NEVER a quiet fallback
   to the machine's own -- running under a shell nobody asked for is the one outcome
   worse than not running."
-  [{:keys [command stdin dir timeout-ms kind]}]
+  [{:keys [command stdin dir timeout-ms kind on-spawn]}]
+  ;; `:on-spawn` IS HOW A CALLER HOLDS THE PROCESS: `(on-spawn p)` is called once the
+  ;; process exists, with the same Process the wait below is parked on. It exists for
+  ;; the one caller that has to stop a command while somebody else is waiting on it --
+  ;; a run whose stop switch was rung -- and `stop-tree!` is what such a caller does
+  ;; with it. Passing none is the ordinary case and costs nothing.
   (let [r  (require-shell! kind)
         ;; THE PIN WRAPS THE PB CONSTRUCTION, AND NOTHING ELSE: the child's
         ;; environment is copied and adjusted in that one moment, and neither the
@@ -615,7 +635,12 @@
         ;; BEFORE THE SPAWN, so that no process exists during a moment when this
         ;; process's exit has no reaper for it (see `ensure-exit-hook!`).
         _  (ensure-exit-hook!)
+        ;; THE HANDLE IS OFFERED BEFORE ANYBODY WAITS ON IT: `:on-spawn` is called
+        ;; with the Process the moment it exists, so a caller that has to stop this
+        ;; command later (a run whose stop switch gets rung) is never racing the wait
+        ;; to hold it -- and a caller that passes no `:on-spawn` pays one `nil` check.
         p  (.start pb)
+        _  (when on-spawn (on-spawn p))
         w  (future
              (try
                (with-open [os (.getOutputStream p)]

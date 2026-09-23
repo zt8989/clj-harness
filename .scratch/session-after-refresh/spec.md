@@ -144,9 +144,9 @@ park 以 `RUN_FINISHED` 带 `outcome.interrupts` 结束（`ag_ui.clj:144-150`）
   （2026-09-21）**；「悬置」那一半等票 06，见文末。
 - **05** 服务端拒绝同一会话的第二条 run（阻塞：01）——**已落地（2026-09-21）**，见文末。
 - **06** parked 的那一场，刷新回来还能答（阻塞：03）
-- **07** 服务端：一条 run 停得下来（取消到得了循环，terminal 诚实）（阻塞：01）
-- **08** 服务端：正在跑的那次工具调用也停得下来（阻塞：07）
-- **09** 浏览器：刷新之后也能停（阻塞：04、07、08）
+- **07** 服务端：一条 run 停得下来（取消到得了循环，terminal 诚实）（阻塞：01）——**已落地（2026-09-23）**，见文末。
+- **08** 服务端：正在跑的那次工具调用也停得下来（阻塞：07）——**已落地（2026-09-23）**，见文末。
+- **09** 浏览器：刷新之后也能停（阻塞：04、07、08）——**已落地（2026-09-23）**，见文末。
 - **10** 收口：文档、两套全量、走查证据（阻塞：02、03、04、05、06、07、08、09）
 
 ## 落地（2026-09-21）：票 05
@@ -229,4 +229,73 @@ run、说出规矩（一次一条）、并告诉调用者怎么回来。`api-res
 **没做的事，说清楚**：走查里那句 `bash · sleep 45 && echo slept待审批`——一条**正在跑**的工具调用在
 记录折回来之后被画成「待审批」。那不是本票的范围（它与票 06 的卡片、以及工具行状态的重建是一族），
 本票没有碰它，也没有假装它不存在。
+
+## 落地（2026-09-23）：票 07、08
+
+**一条按会话寻址的取消，真的到得了循环。** 形状分三处：
+
+- **开关**（新文件 `harness.kernel.stop`）：一条 run 要停，得同时有一个**粘性的 flag**（任何边界都问得出来）
+  和一只**门铃**（`core.async` 的 channel，只在自己被 close 时送出门铃；等在慢调用上的循环靠它不要等一个
+  不再想要的结果）。**为什么不能只有一样**：channel 问不出来「你关了吗」——关了的 channel 和开着没东西的
+  channel 都读 nil；而 flag 叫不醒任何人，卡在 bash 上的那条正是人按停时看的那条。
+- **地址**（`harness.edge.sessions`）：开关是**跟 run 一起在同一原子步里铸出来**的
+  （`run-started!` 里 `assoc-in :runs` 与 `assoc-in :cancel` 同一个 `swap!`），`run-finished!` 在**最后一条
+  run 走掉时**才收回去。于是「这场有 run」与「怎么停它」永远读自**同一次 deref**，够不着一条已经终了的 run。
+  `cancel!` 读的就是这一行；对一个没 run 在跑、或已经终了的 conversation，它回 nil（**同一条边界的两半**），
+  由路由具名拒绝。
+- **路由**（`harness.edge.http/cancel-post`，`POST /api/threads/<stem>/cancel`）：进 `thread-verbs` 那个闭集
+  （现在是八个动词），拒绝是 409 并说清这个进程看不到任何自己的 run 在跑。**它不等人**：停是信号不是 join，
+  服务的状态走 `sofar`/窗口的 `state` 那条既有的读。
+
+**取消到得了循环的边界**（票面明写，别拿卡在 bash 上的 run 验这张票）：循环在**步骤之间**观测取消，
+`alts!!` 上等模型调用/工具调用时也被门铃叫醒；**一次已经发出去的工具调用**怎么停是票 08。
+
+**正在飞的那次调用也停得下来**（票 08）：每次调用一个 `:stop` 槽（`tools/*stop*`，seam 按调用绑），
+`cap.tools` 的 `bash` 在进程起来那一刻把 `shell/stop-tree!`（`kill-tree!` 的把手）放进槽里。停的时候循环
+把每个非空的槽叫一遍——**只杀这一次 run 那次调用的树**，不是全局开关。不可打断的厂商 HTTP 调用没有进程可杀，
+循环**放弃等待**（结果到了也丢掉），terminal 照票 07 按时到达。
+
+**terminal 不许说谎**：被人停掉的 run **没有跑完**，所以线上是 `RUN_ERROR`，但带 `code: "stopped"`
+（`event/run-stopped` → `ag-ui` 的 `:run/stopped`；`loop/stopped!` 是抛，走同一个 `catch`）。reason 顺着
+`run/terminal` 落进进程日志（`a person pressed stop …`）。一条 run **只有一个** terminal（`frames/terminal?`）。
+
+**记录里不留 open call，而答案只进记录、不上线**（`event/cut-off-result` → `http/recorder`）：被停掉的调用
+缺结果会让下一条消息是厂商拒绝的形状，所以记录必须补一条 `frames/cut-off-result` 的真话；**但按停的页面不该
+被通知「它返回了」**——那会把卡片画成完成，而它要的是中止。所以这几帧走「只进记录与会话的 `:frames`、不 send」
+的路。**这是一个决定，不是优化**：`ag_ui` 把这两种事件折成同一个 `TOOL_CALL_RESULT` 帧（记录不区分），
+分叉在 run 边 drain 的那一处。
+
+**验证**：`harness.edge.http-test` 两条用例——
+三条用例。`a-stop-reaches-the-run-this-process-has-going`（run 被按在 `loop/run-chan` 上，cancel 说得出 runId、
+terminal 是 `RUN_ERROR` 且 reason 说人停的、进程日志一致、记录只有一个 terminal、cancel 之后同一会话能再跑、
+没在跑/已终了的 cancel 具名 409）；`a-stop-does-not-wait-for-a-vendor-that-is-still-talking`（**模型调用被按在
+`llm/stream!` 里**——厂商没有进程可杀，停是**放弃等待**，terminal 不等它就到，之后同一会话还能跑）；
+`a-stop-kills-the-command-the-run-was-waiting-on`（两条会话并行、停 A 只杀 A 的命令、B 的命令照活；记录里
+`TOOL_CALL_START` 与 `TOOL_CALL_RESULT` 集合相等且结果是 cut-off 句；**那条结果不在响应流里**）。
+命令的 pid 从**文件**读、进程是否还在**问 OS**（`ProcessHandle`）。**后端全量**：
+`1093 tests / 12866 assertions / 0 failures / 0 errors`（含新用例）。
+
+## 落地（2026-09-23）：票 09
+
+**刷新的那一页现在有一个真的能按的停。** 上游的 `ComposerPrimitive.Cancel` 退役（它只 abort 这一页的
+fetch），换成一个 `ComposerStop` 缝：`thread.aui.tsx` 在 Send 的位置画**页面提供**的那个组件
+（`components/session-run-stop.tsx`，`data-slot="session-stop"`，`POST /api/threads/<id>/cancel`）。
+判据是服务端的话：`runState === "running"`（`SessionRunContext`，票 04 那个读数）——**刷新回来、这一页没在
+驱动的 run 也画**。服务端没有 run 在跑时那一下回 409，组件把服务端那句话说出来。
+
+**两条路都从同一个按钮走，而驱动那一页拿到的是中止不是失败**：服务端那道 `code: "stopped"` 的 terminal 到达
+`lib/agent.ts`，它走库自己的取消通道（`onRunFailed` + `AbortError`）⇒ `RUN_CANCELLED`。**顺带一处必须补的**：
+库在派发 `RUN_CANCELLED` 之前**也**把同一个错误交给页面的 `onError`，而 runtime 只在**自己的** controller 断了
+时才压住它——这次停是发给服务端的，controller 没断，于是页面会把一条**人按停的 run** 记成 host 失败、**整列会话
+被丢掉**（走查量到的）。所以 `App` 的 `onError` 对 `AbortError` 不作声（`asAbort` 在入口就定了这个名字）。
+
+**验证**：真浏览器走查（`evidence/09-stop-from-the-restored-page.md`、六张截图、`ALL GREEN`）：起一条慢 run →
+刷新 → 回到那一场 → 有能按的停 → 按它 → **服务端那条 run 真的停**（命令 pid 从 `true` 变 `false`、`state`
+离开 `running`）→ 没起替代 run（`POST /api/agent` 条数不变）→ composer 回到能发、发进同一场 → 刷新读回完整
+记录；两场同时跑时停只停看的那一场。`cd ui && npm test` 97 通过、`npm run build` 过。
+
+**一处缺口，说清楚**：票面那句「那一轮按 `message-parts.tsx` 的 `cancelled` 画」**今天没做到**——一条还没有
+结果的服务端调用在 runtime 里是 `requires-action`，工具行画成「待审批」（票 04 记下的同一族），`RUN_CANCELLED`
+只改消息状态、不改工具 part。这次能保证的是**客户端没有被通知调用已返回**（走查断言也不画 `Done`），而刷新回来
+按记录画成完整的一份。那一格的词要等工具行状态的重建（票 04/06 那一族），**不在票 09 里偷偷做**。
 

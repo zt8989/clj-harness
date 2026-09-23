@@ -34,6 +34,24 @@
 (defn tool-result [id content error?]
   {:type :tool/result :id id :content content :error error?})
 
+;; A CALL'S CUT-OFF ANSWER: the record gets it, the wire does not (`harness.kernel.loop`'s stop
+;; branch emits this, `harness.edge.http`'s drain logs it and refuses to send it).
+;;
+;; TWO READERS, TWO DIFFERENT TRUTHS ABOUT ONE CALL, and both are true: the RECORD needs an
+;; answer, because an assistant message whose tool_calls has no answering tool message is a shape
+;; the vendors refuse on the next request; the CLIENT that pressed stop must NOT be told the call
+;; returned, because it did not -- and a client that received a result would draw the call as
+;; completed (`Done`) when the truthful thing on screen is a cancellation (`message-parts.tsx`
+;; draws `cancelled` from an incomplete part). The record is what a reload and the next run read,
+;; so it is the record that has to be complete; the live page is owed the ending it just asked for.
+;;
+;; SO THIS IS ITS OWN EVENT rather than a flag on `tool-result`: the two differ in WHICH READER
+;; gets them, which is a difference the edge has to dispatch on.
+(defn cut-off-result
+  "The answer a stopped call is given in the RECORD -- never sent to the client -- see above."
+  [id content]
+  {:type :run/cut-off-result :id id :content content})
+
 (defn tool-pre-execute
   "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool,
   :unserved, :disabled, :missing-args, :hook-blocked, :needs-approval, :approved,
@@ -126,3 +144,16 @@
   [ints] {:type :run/interrupt :interrupts (vec ints)})
 
 (defn run-error [message] {:type :run/error :message message})
+
+(defn run-stopped
+  "The run was stopped by A PERSON, before it finished. TERMINAL, and it reaches the wire
+  as a `RUN_ERROR` -- the vocabulary has two terminals, and `RUN_FINISHED` would be the
+  one line in the record that lies about a run that was cut off.
+
+  WHY IT IS NOT JUST `run-error` WITH A SENTENCE: the CODE the frame carries
+  (`code: \"stopped\"`, `harness.edge.ag-ui`) is how a CLIENT tells an ending somebody
+  asked for from a fault, without reading prose -- the message is for a person, and a
+  client that pattern-matched it would be one wording change away from drawing a stop as
+  a failure. See `harness.kernel.stop` for the switch and `harness.edge.sessions/cancel!`
+  for the request that rings it."
+  [message] {:type :run/stopped :message message})

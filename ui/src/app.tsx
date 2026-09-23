@@ -82,7 +82,11 @@ import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
-import { SessionRunContext } from "@/components/session-run-notice";
+import { SessionRunContext } from "@/components/session-run-state";
+// THE STOP THE COMPOSER DRAWS WHEN THE SERVER SAYS THIS CONVERSATION IS RUNNING (ticket
+// 09): this host has the thread id the request has to name, which is the whole reason the
+// element asks for it rather than drawing one of its own.
+import { SessionRunStop } from "@/components/session-run-stop";
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
@@ -908,8 +912,9 @@ const SessionHost: FC<{
   /// THIS PAGE STARTED IT. It is state here rather than inside `useWindowFeed` because two
   /// things outside that hook need it, and neither can read a hook's own state: the
   /// composer's gate (`isSendDisabled` below, which is a runtime OPTION and so has to be
-  /// known in this body) and the sentence the composer draws (through `SessionRunContext`,
-  /// which reaches it from here).
+  /// known in this body) and the STOP the composer draws when a run of this conversation
+  /// is going (through `SessionRunContext` and the `ComposerStop` component below, both of
+  /// which reach it from here).
   const [runState, setRunState] = useState<string | null>(null);
 
   const history = useMemo(
@@ -950,7 +955,24 @@ const SessionHost: FC<{
       // "show this session" on the page instead.
       threadList: { threadId },
     },
-    onError: (error) => onError(threadId, error.message),
+    onError: (error) => {
+      // A CANCELLATION IS NOT A HOST FAILURE (ticket 09 of `.scratch/session-after-refresh`).
+      //
+      // WHEN THIS PAGE PRESSES STOP, the server ends the run and its `code: "stopped"` terminal
+      // reaches `lib/agent.ts`, which turns it into the library's cancellation channel
+      // (`onRunFailed` with an `AbortError`). The library then dispatches `RUN_CANCELLED` -- the
+      // turn is drawn "Cancelled" -- BUT it also hands the same error to this callback first,
+      // and the runtime only suppresses that when its OWN controller was aborted (which it was
+      // not: the stop was a request to the server, not a local abort). Left alone, this page
+      // would set `openErrors[threadId]` for a run that ended exactly as somebody asked, and
+      // the whole session column would be dropped for it.
+      //
+      // SO THE NAME IS THE TEST, exactly as it is on the way in (`asAbort`): an error the
+      // client renamed to `AbortError` is a run that ended because somebody stopped it, and
+      // there is no host failure to report.
+      if (error.name === "AbortError") return;
+      onError(threadId, error.message);
+    },
   });
 
   /// ASK HOW THE RECORD IS DOING ONCE A RUN THIS PAGE DROVE HAS ENDED.
@@ -1102,6 +1124,16 @@ const SessionColumn: FC<{
   window: WindowControls | null;
 }> = ({ threadId, view, onView, folded, record, window }) => {
   const { t } = useTranslation();
+  /// THE COMPOSER'S STOP, AS A COMPONENT THE ELEMENT CAN DRAW (ticket 09 of
+  /// `.scratch/session-after-refresh`): it carries THIS session's id, which is what the
+  /// request that stops a run has to name, and it holds its own press-state
+  /// (`components/session-run-stop.tsx`). Memoized on the id so this column's other
+  /// re-renders do not remount the button -- a state frame arrives on every change, and a
+  /// fresh component type each time would lose the "pressing" state mid-request.
+  const composerStop = useMemo(
+    () => () => <SessionRunStop threadId={threadId} />,
+    [threadId],
+  );
   return (
     // The composer's chrome needs to know which session it is configuring -- the
     // model override and the branch are both per-session.
@@ -1194,7 +1226,10 @@ const SessionColumn: FC<{
               registration is scoped to the runtime that resolves the parts. */}
           <ContextCards />
           {view === "conversation" ? (
-            <Thread components={THREAD_COMPONENTS} window={window} />
+            <Thread
+              components={{ ...THREAD_COMPONENTS, ComposerStop: composerStop }}
+              window={window}
+            />
           ) : (
             <TrajectoryView threadId={threadId} />
           )}

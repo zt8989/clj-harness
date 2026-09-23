@@ -348,7 +348,18 @@
                                                                 :stdin stdin
                                                                 :dir (when dir dir)
                                                                 :timeout-ms limit
-                                                                :kind kind})
+                                                                :kind kind
+                                                                ;; THE HANDLE A STOP NEEDS: if the run
+                                                                ;; this call serves is stopped, the command
+                                                                ;; must die with it, tree and all (ticket 08
+                                                                ;; of `.scratch/session-after-refresh`).
+                                                                ;; `*stop*` is the slot the execution seam
+                                                                ;; bound for THIS call -- nil outside a run,
+                                                                ;; and then nobody is asking to stop it.
+                                                                :on-spawn
+                                                                (fn [p]
+                                                                  (when-let [stop kernel-tools/*stop*]
+                                                                    (reset! stop #(shell/stop-tree! p))))})
             ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
             ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
             ;; the output did not fit, the record ends on this line and so does the

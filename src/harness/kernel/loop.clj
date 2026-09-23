@@ -5,8 +5,10 @@
   (:require [clojure.core.async :as async]
             [clojure.string :as str]
             [harness.kernel.event :as ev]
+            [harness.kernel.frames :as frames]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.kernel.llm :as llm]
+            [harness.kernel.stop :as stop]
             [harness.kernel.tools :as tools]))
 
 (defn- added!
@@ -173,7 +175,64 @@
        " is not followed by a tool message for each 'tool_call_id', so the run was"
        " refused before the provider was called. Send a result for "
        (if (< 1 (count ids)) "those calls" "that call") ", or start a new session."))
+;; ------------------------------------------ stopping a run somebody asked to stop
 
+(defn- stop-sentence
+  "WHAT A RUN THAT WAS STOPPED BY A PERSON SAYS IN ITS TERMINAL FRAME.
+
+  IT NAMES THE PERSON, because the record's reader has to be able to tell an ending
+  somebody asked for from one that went wrong -- that difference is the whole reason
+  the stop is a server-side request rather than a browser that hung up (ticket 09 of
+  `.scratch/session-after-refresh`)."
+  [] (str "this run was stopped: a person pressed stop on this conversation while the run"
+       " was going, so it was cut off without finishing"))
+
+(defn- stopped!
+  "End this run because its stop switch was rung -- BY THROWING, so the one `catch`
+  that already turns a dying run into a terminal frame does this too.
+
+  A STOPPED RUN DID NOT FINISH, and that is why it ends like a failure on the wire: the
+  vocabulary has two terminals and RUN_FINISHED would be the one line in the record
+  that lies. The reason (`stop-sentence`) is what makes it readable as a stop rather
+  than a fault, and the process log's `run/terminal` line carries it verbatim."
+  [] (throw (ex-info (stop-sentence) {:stopped true})))
+
+(defn- await-call
+  "Wait for one of PORTS (channels each carrying a call's answer) or for this run's
+  STOP SWITCH to be rung. Answers {:port .. :value .. :stopped? ..}.
+
+  THE PORT IS THE ANSWER, not the value: a rung switch delivers nil, and so does a
+  channel whose call reported nothing -- the port is the only thing that tells the two
+  apart. `:wake` is nil for a run that was handed no switch (an offline replay, a
+  test), and then this is `alts!!` over the call channels and nothing else."
+  [ports cancel]
+  (let [wake (:wake cancel)
+        [value port] (async/alts!! (cond-> (vec ports) (some? wake) (conj wake)))]
+    {:value value
+     :port port
+     :stopped? (and (some? wake) (identical? port wake))}))
+
+(defn- model-call-stoppable
+  "Start one model call and answer the channel it will report on, so a run that gets
+  stopped does not have to WAIT for a vendor that is still streaming.
+
+  THE CALL RUNS ON ITS OWN THREAD and the loop listens to both it and the stop
+  switch. A call that is ABANDONED (the switch was rung) keeps its HTTP request until
+  the vendor finishes -- there is no process to kill for a vendor, which ticket 08
+  states as the boundary -- but WHAT IT SAYS IS DROPPED: every frame it emits goes
+  through a wrapper that stops forwarding once the switch is rung, so an abandoned
+  call cannot write frames into a run whose terminal has already been sent.
+
+  A THROW IS CARRIED AS A VALUE (`t`) rather than escaping the thread: a go/thread's
+  exception goes nowhere, and the loop is what has to turn it into `:run/error` on the
+  one path that already does."
+  [provider history emit thread-id cancel]
+  (let [ch (async/chan 1)
+        call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))]
+    (async/thread
+      (async/>!! ch (try (model-call! provider history call-emit thread-id)
+                         (catch Throwable t t))))
+    ch))
 (defn- drive!
   "Run one run, calling EMIT with each harness.kernel.event value as it is produced.
   Returns the final history. The producer side of run-chan; all run behaviour
@@ -198,6 +257,16 @@
   without resuming it, which a refresh that lost the parked card does -- cannot be sent
   to any OpenAI-shaped vendor. The run asks the question again when this process still
   holds the park, and refuses by name when nobody does. See `stalled` in drive!.
+
+  OPTS may carry :cancel -- ONE RUN'S STOP SWITCH, a `harness.kernel.stop/handle`. With
+  one, a person can stop this run from outside it: the switch is read at every step
+  boundary, the model call and the turn's tool calls are each WAITED ON BESIDE it, and
+  a run that finds it rung stops where it is. The calls still in flight are stopped
+  (a command's process tree dies), each of them is answered with `frames/cut-off-result`
+  so the record keeps no open call, and the run ends on `:run/error` with a reason that
+  says a person stopped it -- a stopped run DID NOT FINISH, and the wire's other
+  terminal would be a line that lies. Without a switch (an offline replay, a test)
+  there is no cancellation path at all and the loop behaves exactly as it did before.
 
   OPTS may carry :resume, the decisions a human handed back for this thread's
   parked calls; they are replayed at the top of the run, before the first LLM
@@ -232,7 +301,7 @@
   the one that really was. So the run keeps its own account: {:history <the final
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
-  [provider messages emit {:keys [thread-id resume before-llm] :as _opts}]
+  [provider messages emit {:keys [thread-id resume before-llm cancel] :as _opts}]
   (let [history (atom (vec messages))
         ;; WHAT THIS RUN ADDED, said by the run itself (see the docstring above): every
         ;; site that puts a message into `history` notes it here. `with-skills` counts
@@ -305,7 +374,21 @@
               (seq still)    still
               :else          (loop []
                 (let [_         (with-skills)
-                      assistant (model-call! provider @history emit thread-id)
+                      ;; A STOP THAT ARRIVED BETWEEN STEPS IS HONOURED HERE, before anything
+                      ;; new is asked of a provider.
+                      _         (when (stop/rung? cancel) (stopped!))
+                      ;; THE MODEL CALL IS THE LONG ONE, so it runs on a thread of its own
+                      ;; and this waits on BOTH it and the switch: a stop does not have to
+                      ;; wait for a vendor that is still talking.
+                      reply     (model-call-stoppable provider @history emit thread-id cancel)
+                      answer    (await-call [reply] cancel)
+                      _         (when (:stopped? answer) (stopped!))
+                      assistant (let [v (:value answer)]
+                                  ;; A DEAD CALL IS AN ERROR, not a value: it is
+                                  ;; rethrown here so the run ends on `:run/error`
+                                  ;; through the one path that already does that.
+                                  (when (instance? Throwable v) (throw v))
+                                  v)
                       calls     (:tool_calls assistant)]
                   (added! history added assistant)
                   (if (seq calls)
@@ -331,31 +414,76 @@
                           ;; one turn finishing cannot drop a later turn's plan for the
                           ;; same thread-id (see register-turn!).
                           token (tools/register-turn! thread-id calls)
+                          ;; ONE SLOT PER CALL is where a call puts HOW TO STOP WHAT IT
+                          ;; STARTED (a command's process tree, today -- see
+                          ;; `harness.kernel.tools/*stop*` and `cap.tools`'s bash). The loop
+                          ;; hands one down and reads them all when it has to stop.
+                          stops (atom {})
+                          ;; WHAT A CALL SAYS ONCE THE SWITCH IS RUNG IS DROPPED. An
+                          ;; abandoned call can finish later on its own thread, and frames
+                          ;; arriving after this run's terminal would be frames after the
+                          ;; end of the run. The ENDING the record needs for such a call is
+                          ;; written by the loop below (the cut-off result), not by it.
+                          call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))
                           chs  (mapv (fn [{:keys [id] :as call}]
-                                       (let [ch (async/chan 1)]
+                                       (let [ch (async/chan 1)
+                                             slot (atom nil)]
+                                         (swap! stops assoc id slot)
                                          (async/thread
                                            ;; EMIT doubles as the lifecycle
                                            ;; on-phase: the seam's pre/execute/post
                                            ;; events ride the same channel out to
                                            ;; the edge.
-                                           (let [{:keys [content error parked]}
-                                                 (tools/run! call thread-id emit)]
-                                             (async/>!! ch {:id id :content content
-                                                            :error error :parked parked})))
+                                           (binding [tools/*stop* slot]
+                                             (let [{:keys [content error parked]}
+                                                   (tools/run! call thread-id call-emit)]
+                                               (async/>!! ch {:id id :content content
+                                                              :error error :parked parked}))))
                                          ch))
                                      calls)
-                          done (atom {})]
-                      (dotimes [_ (count chs)]
-                        ;; alts!! returns [value port]; the value carries its own
-                        ;; id, so completion order needs no bookkeeping. A parked
-                        ;; call reports no result -- it has not been answered.
-                        (let [[result _] (async/alts!! chs)]
-                          (when (nil? (:parked result))
-                            (emit (ev/tool-result (:id result) (:content result) (:error result))))
-                          (swap! done assoc (:id result) result)))
+                          done (atom {})
+                          ;; DRAIN THE TURN, AND BE WILLING TO WALK AWAY FROM IT: a stop
+                          ;; does not have to wait for a command that is still running --
+                          ;; the call is killed below instead, and its answer is the
+                          ;; cut-off sentence rather than a result nobody wants.
+                          outcome (loop [left (count chs)]
+                                    (if (zero? left)
+                                      :answered
+                                      (let [{:keys [value stopped?]} (await-call chs cancel)]
+                                        (if stopped?
+                                          :stopped
+                                          (do (when (nil? (:parked value))
+                                                ;; THE RESULT IS EMITTED PLAINLY: it
+                                                ;; really arrived before the stop, and
+                                                ;; a result the record does not carry
+                                                ;; is an open call.
+                                                (emit (ev/tool-result (:id value)
+                                                                      (:content value)
+                                                                      (:error value))))
+                                              (swap! done assoc (:id value) value)
+                                              (recur (dec left)))))))]
                       ;; ...and forgotten once every call has answered, so the plan
-                      ;; does not accumulate for the life of the process.
+                      ;; does not accumulate for the life of the process. A STOP GOES
+                      ;; THROUGH HERE TOO: the plan is this turn's, and this turn is over.
                       (tools/forget-turn! thread-id token)
+                      (when (= :stopped outcome)
+                        ;; STOP WHAT IS STILL RUNNING. A command's tree is what has to
+                        ;; die -- killing the shell we hold leaves the command itself
+                        ;; running with nobody attached (`harness.infra.shell`'s own note).
+                        (doseq [[_ slot] @stops :when (some? @slot)]
+                          (try (@slot) (catch Throwable _ nil)))
+                        ;; AND ANSWER EVERY CALL THAT HAS NO RESULT. An assistant message
+                        ;; whose tool_calls has no answering tool message is a shape the
+                        ;; vendors refuse, so a stop must not leave one behind -- the words
+                        ;; are `frames/cut-off-result`, the same sentence a repaired log
+                        ;; gives a call that never returned. THE ANSWER GOES TO THE RECORD AND
+                        ;; NOT TO THE CLIENT (`ev/cut-off-result`, and the edge's dispatch):
+                        ;; the record must be complete for the next run, and the page that
+                        ;; pressed stop must see the call it asked to stop as CANCELLED rather
+                        ;; than as a call that quietly finished.
+                        (doseq [{:keys [id]} calls :when (not (contains? @done id))]
+                          (emit (ev/cut-off-result id (frames/cut-off-result))))
+                        (stopped!))
                       (let [results (mapv #(get @done (:id %)) calls)
                             parked  (vec (keep :parked results))]
                         ;; Answer every call that actually ran; a parked call
@@ -389,7 +517,12 @@
                        parked))
                 (ev/run-end))))
       (catch Throwable t
-        (emit (ev/run-error (ex-message t)))))
+        ;; A STOP IS A TERMINAL OF ITS OWN NAME (`stopped!`), and it stays a RUN_ERROR on
+        ;; the wire -- what the separate event buys is the code the frame carries, which
+        ;; is how a CLIENT draws a stop as a stop instead of a failure.
+        (if (:stopped (ex-data t))
+          (emit (ev/run-stopped (ex-message t)))
+          (emit (ev/run-error (ex-message t))))))
     {:history  @history
      :added    @added
      :unplaced @unplaced}))

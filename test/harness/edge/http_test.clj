@@ -5427,6 +5427,155 @@
 (defn- terminals [tid]
   (filterv frames/terminal? (log-frames tid)))
 
+;; ------------------------ stopping a run somebody asked to stop
+;;
+;; Tickets 07 and 08 of `.scratch/session-after-refresh`. The Stop in the composer used to
+;; be the browser closing its OWN fetch: the interface looked stopped and the server ran
+;; on -- the run kept writing frames into the record. These cases are the server's half,
+;; which is where the stop had to be built: the route, the terminal that does not lie
+;; about it, and the command that dies with the run it belonged to.
+;;
+;; EACH CASE WAITS FOR THE FACT IT NEEDS TO BE TRUE FIRST, never for a clock: the first
+;; holds its run at `loop/run-chan` (which the edge calls AFTER the thread is
+;; registered), and the command cases wait for the command to have written its own pid
+;; down -- the record's own rule, one level down: a command's answer is read from a FILE.
+
+(def ^:private stopped-dir   (support/temp-dir "http-stopped"))
+(def ^:private stopped-dir-2 (support/temp-dir "http-stopped-2"))
+
+(defn- cancel!
+  "POST /api/threads/<tid>/cancel -- what the composer's Stop sends."
+  [tid]
+  (api-call :post (str "/api/threads/" tid "/cancel") nil))
+
+(deftest a-stop-reaches-the-run-this-process-has-going
+  (wipe-dir! stopped-dir)
+  (with-server
+   "stop-1"
+   (fn []
+     (bind! "stop-1" stopped-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "stop-1")]
+       (try
+         (is (until #(row-running? stopped-dir "stop-1") 5000)
+             "the run was never held open")
+         (testing "the route rings the switch and names the run it rang"
+           (let [resp (cancel! "stop-1")]
+             (is (= 200 (.statusCode resp))
+                 (str "the stop was refused: " (.body resp)))
+             (let [body (read-json resp)]
+               (is (= "stop-1" (:threadId body)))
+               (is (string? (:runId body)) "the answer does not name the run it stopped"))))
+         (finally (.close sock) ((:release gate))))
+     (testing "and the run ends on a terminal that says a person stopped it"
+       (is (until #(false? (row-running? stopped-dir "stop-1")) 5000)
+           "the row still said running after the stop")
+       (is (await-log #"terminal event=RUN_ERROR .*thread-id=stop-1"))
+       (is (str/includes? (process-log) "a person pressed stop")
+           "the process log's terminal reason does not say who stopped it")
+       (is (str/includes? (str (:message (peek (terminals "stop-1"))))
+                          "a person pressed stop")
+           "the record's own terminal does not say it either"))
+     (testing "and the conversation is usable again -- a stop is not a lock"
+       (is (str/includes? (.body (post-run "stop-1")) "RUN_FINISHED")))
+     (testing "a conversation no run is going in is refused BY NAME"
+       (let [resp (cancel! "stop-1")]
+         (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp)))
+         (is (str/includes? (str (:error (read-json resp))) "nothing to cancel"))))))))
+
+
+(deftest a-stop-does-not-wait-for-a-vendor-that-is-still-talking
+  (wipe-dir! stopped-dir)
+  (with-server
+   "stop-vendor"
+   (fn []
+     (bind! "stop-vendor" stopped-dir)
+     ;; THE VENDOR IS HELD MID-CALL. A model call has NO PROCESS TO KILL (`harness.kernel.loop`'s
+     ;; own note), so the only correct stop is to ABANDON the wait -- and the terminal must
+     ;; arrive anyway, not wait for a request that is no longer wanted.
+     (let [gate (support/window-gate #'llm/stream! 20000)
+           sock (fire-run! "stop-vendor")]
+       (try
+         (is (until #(pos? ((:entered gate))) 5000) "the run never reached the vendor")
+         (is (until #(row-running? stopped-dir "stop-vendor") 5000)
+             "the run was never held open on the vendor")
+         (is (= 200 (.statusCode (cancel! "stop-vendor"))))
+         ;; WHILE THE VENDOR IS STILL HELD: the run ends without waiting for it.
+         (is (until #(false? (row-running? stopped-dir "stop-vendor")) 5000)
+             "the stop waited for a vendor that was still talking")
+         (is (await-log #"terminal event=RUN_ERROR reason=this run was stopped: a person pressed stop .*thread-id=stop-vendor"))
+         (finally ((:release gate)) ((:restore gate)) (.close sock)))
+       (testing "and the conversation is usable again"
+         (is (str/includes? (.body (post-run "stop-vendor")) "RUN_FINISHED")))))))
+(defn- command-turn
+  "One scripted turn whose single call runs a command that writes ITS OWN PID to FILE
+  and then hangs -- the shape somebody presses Stop in front of."
+  [file]
+  [{:content ""
+    :tool-calls [{:id "c1" :name "bash"
+                  :arguments {:command (str "echo $$ > " file "; sleep 30")}}]}
+   {:content "done"}])
+
+(defn- pid-in
+  "The pid the command wrote down, or nil while the file is not there yet."
+  [file]
+  (when (.exists (io/file file))
+    (let [s (str/trim (slurp file :encoding "UTF-8"))]
+      (when (re-matches #"\d+" s) (Long/parseLong s)))))
+
+(defn- alive?
+  "Is the process PID still there? Asked of the OS, which is the whole point of the
+  assertion: 'the call returned' and 'the command's tree is gone' are different facts."
+  [pid]
+  (and (some? pid)
+       (boolean (some-> (java.lang.ProcessHandle/of pid) (.orElse nil) (.isAlive)))))
+
+(deftest a-stop-kills-the-command-the-run-was-waiting-on
+  (wipe-dir! stopped-dir-2)
+  (let [pid-a (str (io/file stopped-dir-2 "command-a.pid"))
+        pid-b (str (io/file stopped-dir-2 "command-b.pid"))]
+    (with-server
+     {"kill-a" (command-turn pid-a) "kill-b" (command-turn pid-b)}
+     (fn []
+       (bind! "kill-a" stopped-dir-2)
+       (bind! "kill-b" stopped-dir-2)
+       (let [a (future (post-run "kill-a"))
+             b (future (post-run "kill-b"))]
+         (try
+           (testing "both commands are really running"
+             (is (until #(and (alive? (pid-in pid-a)) (alive? (pid-in pid-b))) 15000)
+                 "the scripted commands never started"))
+           (testing "the stop kills ITS command and leaves the other session's alone"
+             (is (= 200 (.statusCode (cancel! "kill-a"))))
+             (is (until #(not (alive? (pid-in pid-a))) 15000)
+                 "the stopped run's command is still alive")
+             (is (alive? (pid-in pid-b))
+                 "stopping one session killed another session's command"))
+           (testing "and the record keeps no open call for it"
+             (let [answer (deref a 20000 nil)]
+               (is (some? answer) "the stopped run's stream never ended")
+               (is (str/includes? (str (.body answer)) "a person pressed stop"))
+               ;; AND THE CUT-OFF ANSWER IS THE RECORD'S ALONE: the live client must see the call
+               ;; as cancelled, not as one that returned (see
+               ;; `harness.kernel.event/cut-off-result`).
+               (is (not (str/includes? (str (.body answer)) "no result was recorded"))
+                   "the cut-off result was sent on the wire, so the live page would draw it Done"))
+             (drained!)
+             (let [frames   (log-frames "kill-a")
+                   starts   (filter #(= "TOOL_CALL_START" (:type %)) frames)
+                   results  (filter #(= "TOOL_CALL_RESULT" (:type %)) frames)]
+               (is (= (count starts) (count results))
+                   "a tool call was left without a result")
+               (is (str/includes? (str (:content (first results))) "cut off")
+                   "the abandoned call's result is not the cut-off sentence")))
+           (finally
+             ;; THE OTHER SESSION IS STOPPED TOO, so nothing is left running: the case
+             ;; above is about ONE run's command, not about being able to walk away.
+             (cancel! "kill-b")
+             (is (until #(not (alive? (pid-in pid-b))) 15000)
+                 "the second command outlived its own stop")
+             (deref b 20000 nil))))))))
+
 ;; ------------------------ one session, one run at a time
 ;;
 ;; The door standing in front of the run edge. TWO RUNS OF ONE THREAD INTERLEAVE their
