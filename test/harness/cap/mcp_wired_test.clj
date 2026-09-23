@@ -378,8 +378,18 @@
         marker (str (home/root) "/elicitation-hooks.txt")]
     (write-servers! {"fake" (decl)})
     (io/delete-file marker true)
-    (support/write-hooks! {:elicitation        [{:command (record-script marker "elicitation")}]
-                           :elicitation-result [{:command (record-script marker "elicitation-result")}]})
+    ;; THE ENGINE'S DEFAULT BUDGET FOR A HOOK IS 10s (`dispatch/default-timeout-ms`), AND THAT
+    ;; IS TOO TIGHT HERE. A hook's :command is spawned through the login shell like every
+    ;; other command, which costs 2.2s before it even starts on the machine this was measured
+    ;; on (2026-09-23; the same measurement `harness.infra.shell-test` carries), and under the
+    ;; load of a full run this case was seen timing out -- `:timeout true` and no exit code --
+    ;; while it passes on its own. The generous budget is THIS CASE's, not the engine's: what a
+    ;; default lets a hung hook hold up is a product decision, and this is only a test that
+    ;; wants its own record before it reads it.
+    (support/write-hooks! {:elicitation        [{:command (record-script marker "elicitation")
+                                                 :timeout 30000}]
+                           :elicitation-result [{:command (record-script marker "elicitation-result")
+                                                 :timeout 30000}]})
     (with-server thread (ask-script "What is your name?")
                  (fn []
                    (io/delete-file (log-file thread) true)

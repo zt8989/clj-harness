@@ -208,7 +208,13 @@
         ;; test really is two processes.
         command (support/child-command pid-file)
         started (System/currentTimeMillis)
-        res (shell/run {:command command :timeout-ms 4000})
+        ;; THE BUDGET HAS TO CLEAR THE LOGIN PROFILE. `bash -lc` runs /etc/profile and the
+        ;; person's own profile before it runs the command at all, and on the machine this was
+        ;; measured on that costs 2.2s (`bash -lc true` 1.7s against `bash -c true` 0.22s, and
+        ;; 2.2s through `run`, timed 2026-09-23). A 4s limit therefore kills the shell BEFORE
+        ;; `node` has been started, and the case reports 'the shell never named a child' about
+        ;; a machine that was merely slow -- not about the tree-kill it means to be testing.
+        res (shell/run {:command command :timeout-ms 12000})
         elapsed (- (System/currentTimeMillis) started)
         pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
     (testing "the call gives up at the limit rather than waiting for the command"
@@ -281,7 +287,12 @@
   ;; and the output is thrown away. Found exactly that way on 2026-09-20, when `-c`
   ;; looked like a free 700ms off every spawn.
   (let [{:keys [out timeout]} (shell/run {:command "echo said-before-hanging; sleep 30"
-                                          :timeout-ms 2000})]
+                                          ;; THE LIMIT HAS TO CLEAR THE LOGIN PROFILE (see the
+                                          ;; case above for the 2.2s measurement): at 2s the
+                                          ;; echo has not run yet, and an empty `out` reads as
+                                          ;; 'the output was thrown away' rather than 'the
+                                          ;; command never started'.
+                                          :timeout-ms 8000})]
     (is (true? timeout))
     (is (str/includes? (str out) "said-before-hanging"))))
 

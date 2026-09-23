@@ -21,6 +21,7 @@
             [harness.cap.claims :as claims]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
+            [harness.infra.shell :as shell]
             [harness.test-support :as support])
   (:import (java.io File)
            (java.util.concurrent TimeUnit)))
@@ -352,7 +353,14 @@
                 pid2    (until #(some-> (child-answer answer2) parse-long) 120000)]
             (try
               (is (= pid2 (:pid (claims/holder thread))) "the second child holds it too")
-              (.destroyForcibly killed)
+              ;; A KILL THAT TAKES THE CHILD WITH IT. `.destroyForcibly` on the launcher is the
+              ;; whole act on POSIX, where `clojure` execs the JVM and the process IS the claim's
+              ;; holder; on Windows the launcher stays and the JVM it started lives on -- so the
+              ;; holder was still alive, the row was not stale and the takeover never happened.
+              ;; `stop-tree!` is what the harness itself does at a time limit (`harness.infra.shell`
+              ;; `kill-tree!`: descendants first, then the parent), which is the same act on both
+              ;; platforms -- and a hard kill cannot run a shutdown hook either way.
+              (shell/stop-tree! killed)
               (.waitFor killed 60 TimeUnit/SECONDS)
               (is (false? (support/alive? pid2)) "it is gone, with the hook never run")
               (testing "the row is stale rather than authoritative"

@@ -583,9 +583,17 @@
 (deftest a-command-stopped-at-the-limit-leaves-what-it-had-said
   ;; The record's last line and the answer's last line are the SAME line, so the two
   ;; can never disagree about how the command ended.
-  (let [{:keys [content]} (call "bash" {:command "seq 1 5000; sleep 300" :timeout 1500})
+  ;;
+  ;; ITS LIMIT HAS TO CLEAR THE LOGIN PROFILE. `bash -lc` pays for /etc/profile and the
+  ;; person's own profile BEFORE it runs the command at all: 2.2s on the machine this was
+  ;; measured on (2026-09-23; `bash -lc true` 1.7s against `bash -c true` 0.22s -- the same
+  ;; measurement harness.infra.shell-test's two limit cases carry). At 1500ms the command
+  ;; never started, so there was no output, no "truncated" line and no file to read, which
+  ;; reads as a lost record rather than as a slow machine.
+  (let [limit 8000
+        {:keys [content]} (call "bash" {:command "seq 1 5000; sleep 300" :timeout limit})
         path (second (re-find #"the whole output is (\S+)\]" content))
-        ending (str "[timed out after 1500ms — the command was stopped]")]
+        ending (str "[timed out after " limit "ms — the command was stopped]")]
     (is (str/includes? content ending))
     (let [whole (slurp path :encoding "UTF-8")]
       (is (= ending (last (str/split-lines whole))))
