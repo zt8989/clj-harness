@@ -88,7 +88,6 @@ import {
   choicesFor,
   gitStateFor,
   modelFor,
-  providerLabel,
   setModel,
   switchBranch,
   type Choices,
@@ -96,6 +95,7 @@ import {
 } from "@/lib/composer";
 import { bindThread, listSidebar, projectName } from "@/lib/projects";
 import { hasKey } from "@/lib/provider-key";
+import { providerLabel } from "@/lib/provider-label";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";

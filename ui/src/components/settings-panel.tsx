@@ -63,7 +63,6 @@ import { setLanguage } from "@/lib/i18n";
 import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
   probeModels,
-  providerLabel,
   putDefaults,
   putProvider,
   registryFor,
@@ -75,6 +74,7 @@ import {
   type Registry,
 } from "@/lib/providers";
 import { hasKey, splitByKey } from "@/lib/provider-key";
+import { providerLabel } from "@/lib/provider-label";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 import {
   listSubagents,
