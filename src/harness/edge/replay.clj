@@ -688,6 +688,59 @@
        :interrupts (vec (get-in tf [:outcome :interrupts]))}
       :else {:state :settled})))
 
+;; -------------------------------------------------------- compaction (model view)
+
+(defn compaction-facts
+  "RECORDS -> the compactions the record declares, in the order they happened, each as
+  {:seq <the fact's own record offset> :shadowed [<record seqs>] :range {..} :tokens n
+   :summary \"...\"}.
+
+  A COMPACTION IS A FACT THE HARNESS WROTE ABOUT ITSELF (`context/compacted`, a CUSTOM
+  frame), not a message: it changes what the MODEL is handed and nothing a person reads.
+  `:shadowed` is the AUTHORITATIVE list of the surface nodes it replaces, IN SURFACE ORDER
+  -- not a numeric interval, because the summary it stands for has a LARGER record seq than
+  the range it replaces and yet sits where that range was."
+  [records]
+  (keep-indexed (fn [i row]
+                  (when (= "context/compacted" (kind row))
+                    (assoc (payload row) :seq i)))
+                (vec records)))
+
+(defn- compaction-summary
+  "The message the model reads in a compacted range: one ordinary user message wrapping the
+  summary text, so no consumer has to learn a new message shape."
+  [text]
+  {:role "user" :content (str "<compacted-summary>" text "</compacted-summary>")})
+
+(defn- apply-compaction
+  "Replace one range of SURFACE (a vector of {:id :message}) with its summary. The range is
+  found BY MEMBERSHIP and walked in SURFACE ORDER -- the first node whose id is shadowed
+  marks where the summary goes -- never by comparing ids as numbers."
+  [surface {:keys [seq shadowed summary]}]
+  (let [shadowed (set shadowed)
+        start    (first (keep-indexed (fn [i node] (when (shadowed (:id node)) i)) surface))]
+    (if (nil? start)
+      surface
+      (into (subvec surface 0 start)
+            (cons {:id seq :message (compaction-summary summary)}
+                  (remove #(shadowed (:id %)) (subvec surface start)))))))
+
+(defn compacted-messages
+  "ENTRIES (replay/entries) + FACTS (compaction-facts) -> the messages the MODEL is handed:
+  every compaction replaces its range with one summary message, at the position that range
+  stood.
+
+  THE ORIGINAL ENTRIES ARE NOT TOUCHED -- `replay/entries` is unchanged, so the client
+  keeps reading the originals (the whole point: the model reads the summary, a person reads
+  the source), and the record keeps every row. This is the one fold that shows summaries.
+
+  A NODE IS AN ENTRY OR AN EARLIER SUMMARY: a summary is named by its FACT's own record
+  seq, so a later compaction can shadow it -- and then `start` can be GREATER than `end`,
+  which is exactly why the walk is by position and not by comparison."
+  [entries facts]
+  (let [base (mapv (fn [{:keys [seq message]}] {:id seq :message message}) entries)]
+    (mapv :message (reduce apply-compaction base (sort-by :seq facts)))))
+
 (defn sofar
   "What has been recorded of a conversation SO FAR: the message list, the context, and
   the state the record is in (`record-state`, plus what the fold could see).
@@ -714,12 +767,14 @@
   fold is the same one `:messages` comes from (`entries`), so the two cannot drift."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))
+        es      (entries records)
         state   (record-state records)
         open?   (= :unfinished (:state state))]
     {:messages   (if open?
                    (messages-so-far records)
                    (records->messages records))
-     :entries    (entries records)
+     :entries    es
+     :compactions (compaction-facts records)
      :context    []
      :state      (:state state)
      :open-runs  (:open-runs state)

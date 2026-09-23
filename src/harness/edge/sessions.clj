@@ -266,9 +266,15 @@
   keep them."
   [thread-id]
   (if-some [f (replay/find-log (home/projects-dir) thread-id)]
-    (let [{:keys [entries context state]} (replay/sofar f)]
-      {:entries (vec entries) :context (vec context) :state state})
-    {:entries [] :context [] :state nil}))
+    (let [{:keys [entries context state compactions]} (replay/sofar f)]
+      {:entries  (vec entries)
+       ;; THE MODEL'S VIEW OF THE SAME RECORD, which is the ONLY reader compaction
+       ;; changes: the shadowed entries are replaced by their summary, while `:entries`
+       ;; stays whole for the client. See `harness.edge.replay/compacted-messages`.
+       :compactions (vec compactions)
+       :context  (vec context)
+       :state    state})
+    {:entries [] :compactions [] :context [] :state nil}))
 
 (defn- count-running [m]
   (count (filter #(seq (:runs %)) (vals m))))
@@ -420,7 +426,8 @@
   [thread-id]
   (let [id (str thread-id)]
     (touch! id)
-    (model-view (mapv :message (:entries (get @registry id))))))
+    (let [e (get @registry id)]
+      (model-view (replay/compacted-messages (:entries e) (:compactions e))))))
 
 (defn- as-sent
   "ENTRIES as a reader sees them: the record offset and the message, without the run
@@ -916,7 +923,8 @@
   (into {}
         (map (fn [[tid e]]
                [tid {:entries    (count (:entries e))
-                     :messages   (count (model-view (mapv :message (:entries e))))
+                     :messages   (count (model-view (replay/compacted-messages (:entries e)
+                                                                      (:compactions e))))
                      :runs       (:runs e)
                      :state      (:state e)
                      :touched-at (:touched-at e)
