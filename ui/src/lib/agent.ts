@@ -27,6 +27,7 @@ import {
   type RunAgentInput,
   type RunAgentResult,
 } from "@ag-ui/client";
+import { subscribeRun, type RunFrame } from "./mux";
 
 /// THE ENTRIES AN ACTION ADDS TO A CONVERSATION THE SERVER HOLDS: the trailing run of
 /// user messages -- everything after the last message that is not one of the person's
@@ -179,7 +180,85 @@ export type HarnessAgentConfig = HttpAgentConfig & {
   /// it awaits), because only the page knows what a minted session was waiting to
   /// belong to. This class holds no state about what has been registered.
   ready?: (threadId: string) => Promise<void>;
+  /// READ THE RUN'S FRAMES FROM THE DOWNLINK (`events.mux`, ADR 0004) INSTEAD OF THE POST'S
+  /// RESPONSE. The POST then answers an ACK and the socket carries the frames; a caller
+  /// that leaves this out keeps the SSE response it always had (the door is in
+  /// `harness.edge.http`, chosen by a request header this class sets).
+  runAck?: boolean;
 };
+
+/// THE REQUEST THE ACK DOOR IS ASKED THROUGH: the SSE door for every caller that does not set
+/// this, and `{threadId, runId}` from the one that does.
+function withAckHeader(init: RequestInit): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set("X-Clj-Harness-Run-Ack", "1");
+  return { ...init, headers };
+}
+
+/// A RUN'S FRAMES AS THE SSE `@ag-ui/client` PARSES: every event the socket delivers for
+/// this conversation, encoded as a `data:` frame, closed at the terminal. THIS IS THE WHOLE
+/// TRANSPORT TRICK of ticket 03 -- the base class's reader, frame loop and abort handling
+/// are untouched; only where the bytes come from changed.
+///
+/// THE BUFFER IS NOT OPTIONAL. The subscription is made BEFORE the run starts (or its first
+/// frames could be filtered out as undeclared), so events can arrive while the start request
+/// is still in flight; they queue here and are flushed the moment a reader attaches.
+function runStream(
+  subscription: { unsubscribe: () => void },
+  buffer: readonly RunFrame[],
+  attach: (deliver: (frame: RunFrame) => void) => void,
+  signal: AbortSignal | null | undefined,
+): Response {
+  const encoder = new TextEncoder();
+  let closed = false;
+  const end = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    if (closed) return;
+    closed = true;
+    subscription.unsubscribe();
+    try {
+      controller.close();
+    } catch {
+      // The reader already went away; closing twice is not a failure.
+    }
+  };
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const push = (frame: RunFrame) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
+        } catch {
+          return;
+        }
+        if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") end(controller);
+      };
+      attach(push);
+      for (const frame of buffer) push(frame);
+      const onAbort = () => {
+        if (closed) return;
+        closed = true;
+        subscription.unsubscribe();
+        // THE NAME IS THE CONTRACT: the client library reads a killed body as an abort by
+        // that name, and `HarnessAgent.onError` turns an aborted run into `RUN_CANCELLED`.
+        try {
+          controller.error(new DOMException("the run was aborted", "AbortError"));
+        } catch {
+          // Already closed; nothing to signal.
+        }
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    },
+    cancel() {
+      closed = true;
+      subscription.unsubscribe();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
 
 export class HarnessAgent extends HttpAgent {
   /// THE OTHER SEAM: the fetch a run goes out through, wrapped so that `ready` has
@@ -203,18 +282,47 @@ export class HarnessAgent extends HttpAgent {
   /// STILL unknown when the request arrives, the edge's own refusal is the honest answer
   /// to give the person.
   constructor(config: HarnessAgentConfig) {
-    const { ready, ...rest } = config;
+    const { ready, runAck, ...rest } = config;
     super(rest);
     const send: HttpAgentFetchFn = this.fetch;
     this.fetch = async (url, init) => {
+      const threadId = threadIdOf(init, this.threadId);
       try {
-        await ready?.(threadIdOf(init, this.threadId));
+        await ready?.(threadId);
       } catch {
         // See `ready`: a registration the page could not make is the page's to word,
         // and it must not cost the run. Nothing is logged -- the row carries the
         // sentence, and a second copy in the console would be a fact nobody reads.
       }
-      return send(url, init);
+      // THE SSE DOOR IS STILL OPEN for every caller that did not ask for the ack.
+      if (runAck !== true) return send(url, init);
+
+      // THE DOWNLINK DOOR (ticket 03). SUBSCRIBE BEFORE STARTING: the server filters a run's
+      // frames by what this connection declared, so a run begun before the declaration lands
+      // would lose its first frames. Then start it -- the answer is an ACK -- and hand back
+      // the socket's frames as the SSE the base class parses.
+      const buffer: RunFrame[] = [];
+      let deliver: ((frame: RunFrame) => void) | null = null;
+      const subscription = subscribeRun(threadId, (frame) => {
+        if (deliver === null) buffer.push(frame);
+        else deliver(frame);
+      });
+      try {
+        await subscription.declared;
+        const started = await send(url, withAckHeader(init));
+        if (!started.ok || !(started.headers.get("content-type") ?? "").includes("application/json")) {
+          // A REFUSAL IS HANDED BACK WHOLE so the base class's error path words it (it reads
+          // the body), and a caller that somehow still got a stream keeps reading that.
+          subscription.unsubscribe();
+          return started;
+        }
+        return runStream(subscription, buffer, (next) => {
+          deliver = next;
+        }, init.signal);
+      } catch (error) {
+        subscription.unsubscribe();
+        throw error;
+      }
     };
   }
 

@@ -1,12 +1,11 @@
-// THE DOWNLINK: one WebSocket per page carrying every conversation this page holds
-// (`events.mux`, ADR 0004).
+// THE DOWNLINK: one WebSocket per page carrying every conversation this page holds and
+// every run this page is driving (`events.mux`, ADR 0004).
 //
 // WHY ONE SOCKET AND NOT ONE PER CONVERSATION. The SSE feed this replaces opened a
 // connection per watched conversation, and those connections never went away -- a host is
 // never evicted and a hidden host kept its feed -- so a page that had opened a handful of
-// sessions held a handful of sockets, and the browser's per-origin pool is a handful. The
-// next request (a run, a read, an asset) waited behind them. One socket for the whole page
-// makes the count constant.
+// sessions held a handful of sockets, and the browser's per-origin pool is a handful. One
+// socket for the whole page makes the count constant.
 //
 // THE SOCKET IS DOWNLINK-ONLY. Nothing is sent over it. The subscription is an HTTP fact,
 // declared in this connection's own handshake URL and updated by `POST
@@ -14,8 +13,10 @@
 // the socket, and a reconnect re-states it (the same property the SSE feed's `since=N` had,
 // ADR 0003 decision 7).
 //
-// ONE SOCKET PER PAGE, NOT PER COMPONENT. This module owns it at module scope, and every
-// host that follows a window registers with it. The count is the point.
+// ONE SOCKET, TWO KINDS OF FRAME, routed by `WINDOW_TYPES`: a window frame is this page's
+// COPY of a conversation, and a run event is a run being written NOW. Both are keyed by
+// `threadId`; the server filters to the threads this connection declared (so a page hears
+// nothing about a conversation it is not holding).
 import type { WindowFrame } from "./feed";
 import { API_BASE, downlinkUrl } from "./threads";
 
@@ -25,10 +26,15 @@ import { API_BASE, downlinkUrl } from "./threads";
 /// tight loop.
 const RECONNECT_MS = 1000;
 
-/// A frame on the downlink: the same window frame the SSE feed sent, plus the conversation
-/// it is about. THE TAG IS THE WHOLE REASON ONE SOCKET CAN CARRY MANY WINDOWS -- the client
-/// routes by it, and `applied` (lib/window.ts) ignores it.
+/// A frame on the downlink: a window frame (or a run's AG-UI event), plus the conversation
+/// it is about. THE TAG IS THE WHOLE REASON ONE SOCKET CAN CARRY MANY CONVERSATIONS -- the
+/// client routes by it, and `applied` (lib/window.ts) ignores it.
 export type MuxFrame = WindowFrame & { threadId: string };
+
+/// A RUN'S OWN FRAME on the same socket: an AG-UI event (upper-case `type`), tagged like a
+/// window frame. Its shape is the client library's, not ours -- this side reads `type` to
+/// route it and hands the rest through to the SSE the agent parses.
+export type RunFrame = { threadId: string; type: string; [key: string]: unknown };
 
 export type MuxHandlers = {
   onFrame: (frame: MuxFrame) => void;
@@ -43,9 +49,19 @@ type Subscription = {
   handlers: MuxHandlers;
 };
 
-/// WHAT THIS PAGE IS FOLLOWING, by conversation. A `Map` rather than an object because a
-/// thread id is not a property name (a stem can be anything).
+/// THE WINDOW'S OWN FRAME TYPES (`lib/feed`'s `WindowFrame`). Everything else on the socket
+/// is a RUN event (AG-UI's vocabulary is upper-case: `RUN_STARTED`, `TEXT_MESSAGE_CONTENT`,
+/// ...). The two are routed by this set -- the same socket carries both, which is what makes
+/// the sender and a watcher read one stream.
+const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
+
+/// WHAT THIS PAGE FOLLOWS, by conversation. A `Map` rather than an object because a thread
+/// id is not a property name (a stem can be anything).
 const subscriptions = new Map<string, Subscription>();
+
+/// WHAT THIS PAGE IS DRIVING, by conversation: a run's own events, delivered to whoever is
+/// running it. A `Map` of SETS because a page may drive runs on more than one conversation.
+const runSubscriptions = new Map<string, Set<(event: RunFrame) => void>>();
 
 let socket: WebSocket | null = null;
 /// THE NAME OF THE CURRENT SOCKET, minted when it opens. It exists so the HTTP route that
@@ -53,16 +69,24 @@ let socket: WebSocket | null = null;
 /// reconnect mints a new one. It is not an identity and nothing outlives the connection.
 let token = "";
 let reconnect: ReturnType<typeof setTimeout> | null = null;
-/// Whether the page WANTS a downlink at all. A page with no window to follow keeps none.
+/// Whether the page WANTS a downlink at all. A page with nothing to follow keeps none.
 let wanted = false;
 
-/// THE SET, as the handshake URL and every re-declare spell it.
+/// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows OR a run it
+/// drives. The server filters run frames by this same set, so a run's thread has to be in it
+/// even when the page holds no window for it (a session this page just minted).
+function wantedThreads(): string[] {
+  return [...new Set<string>([...subscriptions.keys(), ...runSubscriptions.keys()])];
+}
+
+/// THE SET, as the handshake URL and every re-declare spell it. A thread with no window
+/// follower still appears, with a null cursor: the declaration is about WHICH conversations,
+/// and a cursor only matters to the window half.
 export function declaredSet(): Array<{ threadId: string; since: number | null; generation: string | null }> {
-  return [...subscriptions].map(([threadId, sub]) => ({
-    threadId,
-    since: sub.since,
-    generation: sub.generation,
-  }));
+  return wantedThreads().map((threadId) => {
+    const sub = subscriptions.get(threadId);
+    return { threadId, since: sub?.since ?? null, generation: sub?.generation ?? null };
+  });
 }
 
 function open(): void {
@@ -80,15 +104,23 @@ function open(): void {
     declare({ subscribe: declaredSet() });
   };
   ws.onmessage = (event) => {
-    let frame: MuxFrame;
+    let frame: MuxFrame & RunFrame;
     try {
-      frame = JSON.parse(String(event.data)) as MuxFrame;
+      frame = JSON.parse(String(event.data)) as MuxFrame & RunFrame;
     } catch {
-      // A frame this client cannot read is one window nobody can show. Dropping it keeps
-      // the socket and every other conversation on it alive.
+      // A frame this client cannot read is one nobody can show. Dropping it keeps the socket
+      // and every other conversation on it alive.
       return;
     }
-    subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    // ONE SOCKET, TWO KINDS OF FRAME. A window frame is about the conversation's copy
+    // (routed to the window's own follower); anything else is a run event and goes to
+    // whoever is driving that run. A frame for a conversation we are not holding reaches
+    // nobody, which is right.
+    if (WINDOW_TYPES.has(frame.type)) {
+      subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    } else {
+      for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
+    }
   };
   ws.onclose = () => {
     if (socket !== ws) return; // a newer socket replaced this one; its close is not ours
@@ -108,15 +140,29 @@ function schedule(): void {
   }, RECONNECT_MS);
 }
 
-function declare(body: { subscribe?: unknown[]; unsubscribe?: string[] }): void {
-  if (socket === null || socket.readyState !== WebSocket.OPEN) return;
-  void fetch(`${API_BASE}events.mux/subscribe`, {
+function declare(body: { subscribe?: unknown[]; unsubscribe?: string[] }): Promise<void> | null {
+  if (socket === null || socket.readyState !== WebSocket.OPEN) return null;
+  return fetch(`${API_BASE}events.mux/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ subscriber: token, ...body }),
-  }).catch(() => {
-    // The declaration did not arrive. The socket still carries the set its handshake named,
-    // and the next reconnect re-declares all of it; there is nothing to report here.
+  })
+    .then(() => undefined)
+    .catch(() => {
+      // The declaration did not arrive. The socket still carries the set its handshake named,
+      // and the next reconnect re-declares all of it; there is nothing to report here.
+    });
+}
+
+function ensure(): void {
+  wanted = true;
+  if (socket === null) open();
+}
+
+function declareThread(threadId: string): Promise<void> | null {
+  const sub = subscriptions.get(threadId);
+  return declare({
+    subscribe: [{ threadId, since: sub?.since ?? null, generation: sub?.generation ?? null }],
   });
 }
 
@@ -130,19 +176,62 @@ export function subscribeMux(
   window: { since: number | null; generation: string | null },
   handlers: MuxHandlers,
 ): () => void {
-  const already = subscriptions.has(threadId);
   subscriptions.set(threadId, { since: window.since, generation: window.generation, handlers });
-  wanted = true;
-  if (!already && socket === null) open();
-  else declare({ subscribe: [{ threadId, since: window.since, generation: window.generation }] });
+  ensure();
+  void declareThread(threadId);
   return () => {
     // A REPLACED SUBSCRIPTION MUST NOT BE TORN DOWN BY THE OLD SUBSCRIPTION'S CLOSER: only
     // the closer that still owns the entry may remove it.
     if (subscriptions.get(threadId)?.handlers !== handlers) return;
     subscriptions.delete(threadId);
-    declare({ unsubscribe: [threadId] });
+    if (!runSubscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
     // THE SOCKET STAYS OPEN with nothing subscribed. One idle connection per page is the
     // budget this module exists to keep; closing and reopening it on every switch would be
     // the churn the single socket is meant to remove.
   };
+}
+
+/// DRIVE ONE RUN over the shared downlink, and answer the way to stop: every AG-UI event the
+/// run emits for THREAD-ID is handed to ON_EVENT. This is the carrier `lib/agent.ts` turns
+/// back into an SSE for `@ag-ui/client` to parse.
+///
+/// IT ANSWERS A PROMISE alongside the unsubscribe, and the caller MUST await it before
+/// starting the run: the server filters run frames by what this connection declared, so a run
+/// started before the declaration lands would lose its first frames.
+export function subscribeRun(
+  threadId: string,
+  onEvent: (event: RunFrame) => void,
+): { unsubscribe: () => void; declared: Promise<void> } {
+  const set = runSubscriptions.get(threadId) ?? new Set<(event: RunFrame) => void>();
+  set.add(onEvent);
+  runSubscriptions.set(threadId, set);
+  ensure();
+  // WHEN THE SOCKET IS NOT OPEN YET, `declareThread` cannot post; `onopen` declares the whole
+  // set, so waiting for that is the declaration. `ready` resolves either way.
+  const declared = socket !== null && socket.readyState === WebSocket.OPEN
+    ? declareThread(threadId) ?? Promise.resolve()
+    : whenOpen().then(() => declareThread(threadId) ?? undefined).then(() => undefined);
+  return {
+    unsubscribe: () => {
+      const current = runSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onEvent)) return;
+      if (current.size === 0) runSubscriptions.delete(threadId);
+      if (!subscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
+    },
+    declared,
+  };
+}
+
+/// The socket's next OPEN, resolved if it is open already. Used by `subscribeRun`, which must
+/// not miss a run's first frames.
+function whenOpen(): Promise<void> {
+  const ws = socket;
+  if (ws === null || ws.readyState === WebSocket.OPEN) return Promise.resolve();
+  return new Promise((resolve) => {
+    const listener = () => {
+      ws.removeEventListener("open", listener);
+      resolve();
+    };
+    ws.addEventListener("open", listener);
+  });
 }

@@ -96,6 +96,16 @@
         (sessions/unwatch! thread-id (:watch sub)))
       nil)))
 
+(defn channels-for
+  "Every connection's channel watching THREAD-ID, for a broadcaster that has a frame of
+  its own to send (`harness.edge.http`'s run emitter). `mux-send!` on a closed channel is
+  caught there, so a channel that goes away between this and the send costs nothing."
+  [thread-id]
+  (let [tid (str thread-id)]
+    (into []
+          (keep (fn [[_ conn]] (when (contains? (:subs conn) tid) (:ch conn))))
+                @connections)))
+
 (defn subscriptions
   "The conversations TOKEN's connection is watching, in no particular order."
   [token]

@@ -145,3 +145,23 @@
 (deftest a-downlink-without-a-token-is-refused-before-any-handshake
   (let [resp (#'http/mux-get {:query-string ""})]
     (is (= 400 (:status resp)))))
+
+(deftest a-runs-frames-go-to-the-connections-watching-that-conversation
+  ;; A RUN'S FRAMES ARE NOT A WINDOW CHANGE, so they do not ride the pump: the emitter
+  ;; broadcasts them (http's `mux-broadcast!`), and only to the connections that subscribed
+  ;; to THAT conversation -- the same filtering, one door over.
+  (sessions/touch! "mux-run-a")
+  (sessions/touch! "mux-run-b")
+  (let [sent-a (atom []) sent-b (atom [])
+        ch-a   (fake-channel sent-a) ch-b (fake-channel sent-b)]
+    (#'http/mux-attend! "tok-run-a" ch-a [{:threadId "mux-run-a"}])
+    (#'http/mux-attend! "tok-run-b" ch-b [{:threadId "mux-run-b"}])
+    (let [a-before (count @sent-a)
+          b-before (count @sent-b)]
+      (#'http/mux-broadcast! "mux-run-a" {:type "TEXT_MESSAGE_CONTENT" :delta "hi" :runId "r1"})
+      (is (= (inc a-before) (count @sent-a)) "exactly one frame arrived")
+      (let [frame (last (frames sent-a))]
+        (is (= "TEXT_MESSAGE_CONTENT" (:type frame)))
+        (is (= "mux-run-a" (:threadId frame)))
+        (is (= "r1" (:runId frame))))
+      (is (= b-before (count @sent-b)) "the other conversation's connection hears nothing"))))

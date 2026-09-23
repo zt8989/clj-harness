@@ -41,7 +41,10 @@
     (host/watch! (fn [] (swap! seen conj :b)))
     (is (host/watching?))
     (host/ring!)
-    (is (= [:a :b] @seen) "the watcher registered after the thrower still hears the ring")))
+    ;; ORDER-AGNOSTIC ON PURPOSE: the watchers are a SET, so which one is called first is
+    ;; not a fact this contract promises (the ring's own order is the set's). What matters
+    ;; is that BOTH heard it -- the thrower did not stop the one registered after it.
+    (is (= #{:a :b} (set @seen)) "every watcher heard it, including the one after the thrower")))
 
 (deftest the-host-downlink-gets-the-listing-at-once-and-on-every-change
   (let [sent (atom []) closed (atom nil)

@@ -113,3 +113,45 @@ socket 只下行，所以**订阅在 HTTP 层完成**：
 | 后端全量 | `clojure -M:test -m harness.test-runner` | 见本轮全量行 |
 | 前端 | `npm test` / `npm run typecheck` / `npm run build` | 127 用例（新增 host 地址一条）、tsc、vite |
 | 真浏览器 | `node scripts/dev.mjs --scripted .scratch/events-mux-and-host/slow.json --ui-port 5319` + `walkthrough-host.mjs` | **ALL GREEN**：两个窗口都先开着，A 发送 ⇒ B 的侧栏**不刷新**就出现那一行、带「运行中」、跑完自己摘；另一个写者 POST 一个项目 ⇒ B 的侧栏自己出现该项目（截图 `evidence/host-01-two-windows.png`） |
+
+## 进行中（2026-09-23）：票 03 的 expand 半边
+
+**run 的帧已经上了下行，POST 的 SSE 还在流。** 票 03 是一次载体迁移，不是窗口代数的改动，所以
+按展开-收口做——先让两半都在：
+
+- **服务端**：`harness.edge.mux/channels-for` 答出订阅了某场会话的每一条连接；`http/mux-broadcast!`
+  把一帧发给它们；run 的 emitter（`runner`）在收下每一帧的**同时**广播（带 `threadId` 与 `runId`）。
+  `POST /api/agent` 的 SSE 响应**一个字没动**，驱动页照旧从响应里读——这一步是纯加。
+- **客户端**：`lib/mux.ts` 把 socket 上的帧分两类路由（窗口类型 → 窗口跟随者；其余 = run 事件 →
+  `subscribeRun` 的订阅者），订阅集合 = 跟随的窗口 ∪ 驱动的 run；`subscribeRun` 答一个「服务端已经
+  知道这场了吗」的 Promise（run 帧按集合过滤，声明没落地就起跑会丢头几帧）。
+
+**还差的一半（票 03 的主体）**：`POST /api/agent` 只起跑并回 ack，客户端把这个 run 的帧从 socket
+收回来、重新拼成 `@ag-ui/client` 能解析的 SSE（`HarnessAgent` 的 transport 与 abort/取消那几条缝要
+跟着搬；e2e 里直接解析 POST SSE 的用例也要搬）。**半做会让人发不出消息**，所以停在这里：两半都在，
+只是新的这一半还没有调用者。票 04、05 都排在这一半之后。
+
+### 迁移也落了（同日）
+
+**客户端现在真的从 socket 收 run 帧了。** `HarnessAgent` 多了一个 `runAck` 选项（`app.tsx` 打开）：
+置真时，它的 fetch 先 `subscribeRun` 并向服务端**等到声明落地**（run 帧按连接集合过滤，早跑会丢头几帧），
+再带 `X-Clj-Harness-Run-Ack: 1` 发这一轮；服务端 `start-run` 只回 `{threadId, runId}`（`silent-channel`
+吞掉 SSE 的写），帧由 emitter 广播下行走 socket，客户端把它们**重新拼成 SSE** 交给
+`@ag-ui/client` 原来的解析器——base class 的 reader、abort、取消那几条缝一个字没动。不置 `runAck`
+的调用者（e2e 套件、任何别的前端）照旧拿 POST 的 SSE 响应（expand/contract）。
+
+**顺带修的**：`Access-Control-Allow-Headers` 要认这颗自定义头——开发环是跨源的，不认就是浏览器
+在预检就拒了，run edge 一条 `run/start` 都不会记（实测：debug 脚本里 `POST /api/agent` 被 CORS 拦下，
+后端日志空空）。
+
+**验证**：
+
+- `session-after-refresh` 的 reload-mid-run 走查（09-go.json，两个会话、停、刷新、记录）：**ALL GREEN**——
+  发送、刷新后按停、跑完能发、两条会话并行，全在新的 ack+socket 载体上。
+- `walkthrough-host.mjs`（本特征的两窗口走查）：**ALL GREEN**。
+- 后端全量 **1152 tests / 13242 assertions / 0 failures**；ui 127、typecheck、build 过。
+
+**一处没做到的，说清楚**：票面「断线重连后这一轮接着到达，不漏不重」**没有做到**。服务端不缓存
+run 帧，socket 一断，断开那一段的 AG-UI 帧就没了；重连后只续上新的帧（窗口那半有拉页对齐，run 这半
+没有）。要按票面做成，得给每条 run 一个可回放的帧缓冲（像窗口的 `seq` 那样给个游标），或让重连走
+一次「重放 + 续传」。**票 03 因此没有按「完成即删除」处理，留在 `issues/` 里。**

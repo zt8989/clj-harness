@@ -218,7 +218,11 @@
   (when-some [allowed (cors-origin origin)]
     {"Access-Control-Allow-Origin"  allowed
      "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-     "Access-Control-Allow-Headers" "Content-Type"}))
+     ;; `x-clj-harness-run-ack` IS THE ACK DOOR'S OWN HEADER (ticket 03), and a non-safelisted
+     ;; request header means a PREFLIGHT in the dev loop's cross-origin shape -- without this
+     ;; the run never leaves the browser (measured: the fetch was refused, and the run edge
+     ;; logged no `run/start` at all).
+     "Access-Control-Allow-Headers" "Content-Type, X-Clj-Harness-Run-Ack"}))
 
 ;; ------------------------------------------------------------------- logging
 
@@ -777,6 +781,10 @@
 
     nil))
 
+;; THE RUN'S FRAMES ALSO GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004). Declared here
+;; because the emitter is built near the top of this file and the mux section is far below
+;; it -- the Var is what a runtime call resolves either way.
+(declare mux-broadcast!)
 (defn- runner
   "Build the frame emitter for one run. Two http-kit rules have to hold at once:
 
@@ -823,6 +831,11 @@
       ;; exactly once, and settled at the terminal -- a half-written answer is not a
       ;; turn, so the conversation changes when the run does.
       (swap! state update :frames conj frame)
+      ;; AND TO EVERY PAGE FOLLOWING THIS CONVERSATION ON THE DOWNLINK, tagged with the
+      ;; thread and the run: the SSE response below is the DRIVING page's carrier for now
+      ;; (ticket 03 migrates it), and this is what lets any OTHER page draw the live run
+      ;; instead of only what the record has caught up to.
+      (mux-broadcast! thread-id (assoc frame :runId run-id))
       (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
                              StandardCharsets/UTF_8)
             head  (when @first?
@@ -1827,6 +1840,33 @@
                                                 :status    status
                                                 :last      last}))))})))
 
+(def ^:private silent-channel
+  "A CHANNEL THAT SWALLOWS FRAMES, for the ack door: a run started there still logs,
+  collects its frames, BROADCASTS them to the downlink and settles the conversation, and
+  there is no SSE response for it to write to."
+  (reify hk/Channel
+    (open? [_] true)
+    (websocket? [_] false)
+    (close [_] nil)
+    (send! [_ _] true)
+    (send! [_ _ _] true)
+    (on-receive [_ _] nil)
+    (on-close [_ _] nil)
+    (on-ping [_ _] nil)))
+
+(defn- start-run
+  "Start a run the door let through and answer an ACK instead of a stream.
+
+  THE FRAMES GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004) to every page that declared
+  this conversation -- the sender included, which is why it subscribes BEFORE it asks here.
+  The record, the state and `settle!` are the emitter's, unchanged; only the client's
+  carrier moved. THE SSE DOOR STAYS (ticket 03 is expand-then-contract), so a caller that
+  asks for a stream still gets one."
+  [req input run-id]
+  (let [state (atom {:terminal nil :last nil :frames []})]
+    (run-agent! silent-channel state input run-id (request-origin req))
+    (api-response 200 {:threadId (str (:threadId input)) :runId (str run-id)})))
+
 (defn- answer-of
   "The last thing a subagent SAID, out of the history its run produced. Walks back
   past the rounds that only called tools -- an assistant message whose content is
@@ -2112,7 +2152,9 @@
       (refuse-second-run! thread-id)
 
       :else
-      (stream-run req input run-id))))
+      (if (= "1" (get (:headers req) "x-clj-harness-run-ack"))
+        (start-run req input run-id)
+        (stream-run req input run-id)))))
 
 ;; ----------------------------------------------------- the management edge
 ;;
@@ -4011,6 +4053,15 @@
   raising: the close handler is already releasing the subscription."
   [ch frame]
   (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
+
+(defn- mux-broadcast!
+  "Send ONE frame to every downlink watching THREAD-ID -- a run's own frames, which are not
+  a window change and so have no pump to ride on. A page that is not watching the
+  conversation hears nothing, which is the subscription doing its job."
+  [thread-id frame]
+  (let [payload (mux-frame thread-id frame)]
+    (doseq [ch (mux/channels-for thread-id)]
+      (mux-send! ch payload))))
 
 (defn- mux-end!
   "Tell one conversation's reader on this downlink that its window is over, naming why.
