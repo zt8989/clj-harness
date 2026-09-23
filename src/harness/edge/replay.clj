@@ -725,21 +725,30 @@
             (cons {:id seq :message (compaction-summary summary)}
                   (remove #(shadowed (:id %)) (subvec surface start)))))))
 
-(defn compacted-messages
-  "ENTRIES (replay/entries) + FACTS (compaction-facts) -> the messages the MODEL is handed:
-  every compaction replaces its range with one summary message, at the position that range
-  stood.
+(defn model-nodes
+  "ENTRIES (replay/entries) + FACTS (compaction-facts) -> the MODEL-FACING SURFACE as
+  NODES `{:id <record seq> :message M}`, in order, every compaction's summary standing where
+  its range stood.
 
-  THE ORIGINAL ENTRIES ARE NOT TOUCHED -- `replay/entries` is unchanged, so the client
-  keeps reading the originals (the whole point: the model reads the summary, a person reads
-  the source), and the record keeps every row. This is the one fold that shows summaries.
+  THE IDS ARE THE POINT of this arity: `compacted-messages` is this minus the ids, and a
+  compaction WRITER needs them -- `:shadowed` is a list of node ids, so a caller that only
+  had the messages could not name a range.
 
-  A NODE IS AN ENTRY OR AN EARLIER SUMMARY: a summary is named by its FACT's own record
-  seq, so a later compaction can shadow it -- and then `start` can be GREATER than `end`,
-  which is exactly why the walk is by position and not by comparison."
+  THE ORIGINAL ENTRIES ARE NOT TOUCHED -- `replay/entries` is unchanged, so the client keeps
+  reading the originals (the model reads the summary, a person reads the source), and the
+  record keeps every row. This is the one fold that shows summaries.
+
+  A NODE IS AN ENTRY OR AN EARLIER SUMMARY: a summary is named by its FACT's own record seq,
+  so a later compaction can shadow it -- and then `start` can be GREATER than `end`, which is
+  exactly why the walk is by position and not by comparison."
   [entries facts]
   (let [base (mapv (fn [{:keys [seq message]}] {:id seq :message message}) entries)]
-    (mapv :message (reduce apply-compaction base (sort-by :seq facts)))))
+    (vec (reduce apply-compaction base (sort-by :seq facts)))))
+
+(defn compacted-messages
+  "NODES -> just the messages (`model-nodes` without the ids)."
+  [entries facts]
+  (mapv :message (model-nodes entries facts)))
 
 (defn sofar
   "What has been recorded of a conversation SO FAR: the message list, the context, and

@@ -120,6 +120,7 @@
     harness.edge.context-test
     harness.edge.pressure-test
     harness.edge.compaction-test
+    harness.edge.compaction-run-test
     harness.edge.ui-test
     harness.edge.http-test
     ;; THE RECORD WRITER AND THE SESSION TABLE ARE SEPARATE NAMESPACES ON PURPOSE (ticket
