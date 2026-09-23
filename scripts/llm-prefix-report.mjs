@@ -24,9 +24,18 @@
 // IT IS READ-ONLY. It never writes anywhere, and it never opens harness.db. Pointing it
 // at the real home is a READ of it. See .scratch/llm-prefix-cache/issues/04.
 //
+// IT READS THE WHOLE GENERATION SET, NOT JUST THE LIVE FILE. llm-debug rotates one
+// generation deep (32 MB -> llm-debug.1.jsonl), so a session that was still running when
+// the file turned over has its calls split across two files. Reading the live file alone
+// put a HOLE in exactly the middle of such a session: the last call of the rotated file
+// found no response after it (no usage -> `prompt=-`) and the first call of the live file
+// reported as `call 1` with no prefix to compare against -- a mid-session call wearing the
+// cold-start costume. Both files are read, oldest generation first, and the calls come back
+// out as the one continuous session they were.
+//
 // USAGE
-//   node scripts/llm-prefix-report.mjs                       # the live log + this project's records
-//   node scripts/llm-prefix-report.mjs --log <path>
+//   node scripts/llm-prefix-report.mjs                       # the whole traffic log + this project's records
+//   node scripts/llm-prefix-report.mjs --log <path>          # repeatable; oldest file first
 //   node scripts/llm-prefix-report.mjs --records <dir>       # session records (projects/<slug>/)
 //   node scripts/llm-prefix-report.mjs --no-records          # the traffic log only
 //   node scripts/llm-prefix-report.mjs --assert-stable       # exit 1 if a session's table drifted mid-session
@@ -216,9 +225,28 @@ function firstTableDifference(a, b) {
 // -------------------------------------------------------------------------- the log
 
 function readLog(path) {
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
-  return lines.map((l) => JSON.parse(l));
+  // The live file is being appended to AS THIS RUNS, so its last line can be half a line:
+  // a torn record is DROPPED, not thrown over. A diagnostic that refuses to report on a
+  // session it can see most of, because the writer was one append ahead of the reader, is
+  // the diagnostic failing at the only moment it is pointed at live traffic.
+  const out = [];
+  let torn = 0;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      torn++;
+    }
+  }
+  if (torn) console.log(`  (${torn} unreadable line(s) skipped in ${path} -- a torn tail or a corrupt record)`);
+  return out;
 }
+
+// One session's entries, in the order the calls actually happened. The log is append-ordered
+// already; the sort is what makes the two GENERATIONS of one file stitch (and it is numeric,
+// because `ts` is a millisecond count held as a STRING, where `>` and `-` disagree).
+const byTs = (a, b) => Number(a.ts) - Number(b.ts);
 
 function reportLog(entries) {
   const threads = new Map();
@@ -227,11 +255,11 @@ function reportLog(entries) {
     if (!threads.has(id)) threads.set(id, []);
     threads.get(id).push(e);
   }
-  let worst = 0;
   for (const [id, es] of threads) {
-    const requests = es.filter((e) => e.at === "request");
+    const requests = es.filter((e) => e.at === "request").sort(byTs);
+    es.sort(byTs);
     const byCall = requests.map((r) => {
-      const response = es.find((e) => e.at === "response" && e.ts > r.ts) ?? null;
+      const response = es.find((e) => e.at === "response" && Number(e.ts) > Number(r.ts)) ?? null;
       return {
         body: r.body,
         model: r.model,
@@ -245,6 +273,12 @@ function reportLog(entries) {
     let sumPrompt = 0;
     let prevMessages = null;
     let prevPrompt = null;
+    // The per-session answer to 'did this session keep its prefix', gathered while the calls
+    // go by: a session is only cacheable if EVERY call re-sends the previous one untouched,
+    // so one break is the verdict for the whole session and the console lines above are
+    // where you go to see WHICH call broke it.
+    let compared = 0;
+    const broke = [];
     byCall.forEach((c, i) => {
       const u = c.telemetry?.usage ?? {};
       const prompt = u.prompt_tokens;
@@ -259,6 +293,8 @@ function reportLog(entries) {
         const stem = prevMessages.slice(0, -1);
         const shared = sharedPrefix(stem, messages);
         const ok = shared === stem.length;
+        compared++;
+        if (!ok) broke.push(i + 1);
         share = `${shared}/${stem.length} bytes${ok ? " (byte-identical prefix)" : ""}`;
         if (!ok) {
           const ctx = context(messages, shared);
@@ -292,7 +328,12 @@ function reportLog(entries) {
           )}%)`
       );
     }
-    worst = Math.max(worst, sumPrompt ? 0 : 0);
+    // The one-line verdict to read first, so 'is this session prefix-stable' is not a
+    // question you answer by eyeballing N call blocks. `compared` is calls-1: the first
+    // call has no previous request in the window and is not evidence either way.
+    console.log(
+      `  session prefix: ${broke.length === 0 ? `${compared}/${compared} call(s) re-sent the previous request byte-for-byte` : `${compared - broke.length}/${compared} call(s) matched; BROKEN at call(s) ${broke.join(", ")}`}`
+    );
   }
   return threads.size;
 }
@@ -373,10 +414,10 @@ function reportRecords(records) {
 
 function main() {
   const args = process.argv.slice(2);
-  const opt = { assertStable: false, requireIdentical: false };
+  const opt = { assertStable: false, requireIdentical: false, logs: [] };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case "--log": opt.log = args[++i]; break;
+      case "--log": opt.logs.push(args[++i]); break;
       case "--records": opt.records = args[++i]; break;
       case "--no-records": opt.noRecords = true; break;
       case "--assert-stable": opt.assertStable = true; break;
@@ -391,7 +432,13 @@ function main() {
     }
   }
   const home = join(homedir(), ".clj-harness");
-  const logPath = opt.log ?? join(home, "logs", "llm-debug.jsonl");
+  // OLDEST GENERATION FIRST, live file last: the writer rotates FORWARD, so reading the
+  // set in this order reconstructs the traffic stream a session actually produced. A hand-
+  // passed --log keeps the order it was given -- it is the caller's list, not ours.
+  const logsDir = join(home, "logs");
+  const logPaths = opt.logs.length
+    ? opt.logs
+    : [join(logsDir, "llm-debug.1.jsonl"), join(logsDir, "llm-debug.jsonl")].filter(existsSync);
   const ownDir = join(home, "projects", slugOf(process.cwd()));
   const mainSlug = mainRepoSlug(process.cwd());
   const mainDir = mainSlug ? join(home, "projects", mainSlug) : null;
@@ -404,12 +451,17 @@ function main() {
     console.log(`records    : ${recordsDir}`);
   }
 
-  console.log(`traffic log: ${logPath}`);
-  if (!existsSync(logPath)) {
-    console.error(`no such file. Set CLJ_HARNESS_LLM_DEBUG=1 and run a session first.`);
+  // A missing file is NAMED rather than fatal: a fresh install has no rotated generation
+// yet, and turning that into an error would make the default invocation fail on day one.
+  for (const p of logPaths) {
+    console.log(`traffic log: ${p}${existsSync(p) ? "" : "  (not written yet -- skipped)"}`);
+  }
+  const readable = logPaths.filter(existsSync);
+  if (!readable.length) {
+    console.error(`none of the above exist. Set CLJ_HARNESS_LLM_DEBUG=1 and run a session first.`);
     return 2;
   }
-  reportLog(readLog(logPath));
+  reportLog(readable.flatMap(readLog));
 
   let res = { drifted: 0, distinct: 0 };
   if (!opt.noRecords) {
