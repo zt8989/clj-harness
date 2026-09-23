@@ -100,6 +100,7 @@
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.compaction :as compaction]
+            [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             ;; The built page, when this process has one: `ui/dist`, served at the
@@ -4569,6 +4570,32 @@
       (hook/emit :post-compact {:thread-id stem})
       result)))
 
+(defn- prune-results!
+  "Elide the oversized TOOL RESULTS in RECORDS (ticket 06): a local, deterministic cut that
+  spends NOTHING -- no model call, no window, no estimate. One `context/pruned` receipt per
+  replaced result names the event it shadowed and the code points either side of the cut; the
+  live session is told so `messages` folds the elided text at once.
+
+  Answers `{:records <records + the receipts> :reduction {:pruned n :removed n}}`, or nil when no
+  result was long enough to cut. THE LOCK IS THE CALLER'S: this is one step of the same critical
+  section as a compaction, so it cannot race one."
+  [stem records]
+  (let [done (into #{} (map :toolCallId) (replay/prune-facts (vec records)))
+        plan (prune/prune-plan (replay/entries (vec records)) done)]
+    (when (seq plan)
+      ;; THE LIVE SESSION IS TOLD, so `messages` folds the elided text at once rather than
+      ;; waiting for a rebuild. Holding it first is what makes `set-prunes!` land.
+      (sessions/touch! stem)
+      (let [written (atom [])]
+        (doseq [p plan]
+          (let [payload (prune/receipt p)]
+            (swap! written conj ["context/pruned" payload])
+            (log! stem nil "context/pruned" payload)))
+        (let [all (into (vec records) (map (fn [[k p]] (row-of k p)) @written))]
+          (sessions/set-prunes! stem (replay/prune-facts all))
+          {:records   all
+           :reduction (prune/reduction plan)})))))
+
 (defn- recover-overflow!
   "ONE AGGRESSIVE COMPACTION after the vendor refused the request for its LENGTH (ticket 05).
 
@@ -4582,25 +4609,35 @@
   THE LOCK IS THE SAME ONE the manual route and the automatic trigger take, so a recovery
   cannot race either.
 
-  THE RETRY KEEPS THE SYSTEM MESSAGE and takes the conversation from the RECORD's compacted
-  view, so what goes out is a request built the one way this harness builds one. Anything this
-  run produced that has not reached the record -- an earlier tool round of the SAME run -- and
-  the derived injections are not re-sent: the run continues from the compacted conversation.
-  THE VIEW IS MEASURED against what was actually sent, so a pass that removed nothing answers
-  nil rather than retrying the same overflowing request."
+  THE RETRY KEEPS THE SYSTEM MESSAGE and takes the conversation from the RECORD's view -- pruned
+  and, when it could be, compacted -- so what goes out is a request built the one way this
+  harness builds one. THE FREE STEP GOES FIRST (ticket 06): an oversized tool result is elided
+  without any model call, and that alone can be the progress the retry rests on -- so the
+  aggressive summary is attempted NEXT, and if IT fails the pruned view is still a shorter model
+  view, which is what the retry needs. Anything this run produced that has not reached the record
+  and the derived injections are not re-sent: the run continues from the recorded conversation.
+
+  THE VIEW IS MEASURED BEFORE AND AFTER, over the CONVERSATION alone -- not over what was
+  actually sent, whose derived injections would make any view look shorter. A pass that removed
+  nothing answers nil rather than retrying the same overflowing request."
   [stem provider history _t]
   (try
     (locking compaction-lock
       (when-some [f (replay/find-log (home/projects-dir) stem)]
         (let [records (replay/read-records f)
+              before  (sessions/messages stem)
+              ;; 1. THE FREE STEP: elide giant tool results, no model call.
+              pruned  (prune-results! stem records)
+              records (or (:records pruned) records)
               ratios  (compaction/config stem)
-              result  (run-compaction! stem provider records (:context-window provider) ratios
-                                       {:aggressive? true})
+              ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress.
+              _       (try (run-compaction! stem provider records (:context-window provider) ratios
+                                            {:aggressive? true})
+                           (catch Throwable _ nil))
               system  (vec (take-while #(= "system" (:role %)) history))
-              retry   (into system (sessions/messages stem))]
-          (when (and (some? result)
-                     (< (pressure/estimate-messages retry) (pressure/estimate-messages history)))
-            retry))))
+              after   (sessions/messages stem)]
+          (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
+            (into system (ag/provider-messages after))))))
     (catch Throwable _ nil)))
 
 (defn- compact-if-pressured!
@@ -4610,19 +4647,27 @@
   `harness.edge.pressure` owns the threshold and where the window comes from.
 
   FAILS SOFT: a report-only meter must never become a dead run, so anything wrong here is
-  logged and the run carries on uncompacted."
+  logged and the run carries on uncompacted.
+
+  PRUNING GOES FIRST AND MAY BE ENOUGH (ticket 06): the oversized TOOL RESULTS are elided for
+  free, the pressure is MEASURED AGAIN over the pruned surface, and a view that came back under
+  the threshold skips the summary entirely -- one model call that does not happen."
   [stem]
   (try
     (locking compaction-lock
-    (when-some [f (replay/find-log (home/projects-dir) stem)]
-      (let [records (replay/read-records f)
-            ratios  (compaction/config stem)
-            answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
-        (when (and (:thresholdTokens answer)
-                   (>= (:pressureTokens answer) (:thresholdTokens answer))
-                   (not (compaction/lock-active? records)))
-          (when-some [provider (providers/current-provider stem)]
-            (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (let [records (replay/read-records f)
+              ratios  (compaction/config stem)
+              ;; 1. THE FREE STEP: elide oversized tool results, no model call.
+              pruned  (prune-results! stem records)
+              records (or (:records pruned) records)
+              ;; 2. RE-MEASURE over what the model would now be handed.
+              answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
+          (when (and (:thresholdTokens answer)
+                     (>= (:pressureTokens answer) (:thresholdTokens answer))
+                     (not (compaction/lock-active? records)))
+            (when-some [provider (providers/current-provider stem)]
+              (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
   nil)

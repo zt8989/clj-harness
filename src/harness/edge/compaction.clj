@@ -150,7 +150,8 @@ anything. Be concise.")
   [records window retain-ratio]
   (let [records    (vec records)
         nodes      (replay/model-nodes (replay/entries records)
-                                     (replay/compaction-facts records))
+                                     (replay/compaction-facts records)
+                                     (replay/prune-facts records))
         budget     (long (Math/floor (* (double window) (double retain-ratio))))
         size       (fn [j] (pressure/estimate-message (:message (nth nodes j))))
         k          (count (take-while protected-node? nodes))]
@@ -200,7 +201,8 @@ anything. Be concise.")
   ([records _window _retain-ratio]
    (let [records (vec records)
          nodes   (replay/model-nodes (replay/entries records)
-                                     (replay/compaction-facts records))
+                                     (replay/compaction-facts records)
+                                     (replay/prune-facts records))
          k       (count (take-while protected-node? nodes))
          start   (unit-start nodes)]
      (when (> start k)

@@ -6434,3 +6434,54 @@
             (let [kinds (mapv replay/kind (replay/read-records log))]
               (is (some #{"context/compacted"} kinds))
               (is (some #{"compaction/start"} kinds)))))))))
+
+(deftest a-giant-tool-result-is-pruned-for-free-and-the-summary-is-skipped
+  ;; ticket 06: an oversized TOOL RESULT is elided in the middle -- head and tail kept -- with NO
+  ;; model call, and the pressure is MEASURED AGAIN. A view that came back under the threshold
+  ;; does not pay for a summary at all, and the record keeps the whole original beside its receipt.
+  (with-server
+    "prune-e2e"
+    [{:content "DONE"}]
+    (fn []
+      (let [tid   "prune-e2e"
+            f     (log-file tid)
+            giant (apply str (repeat 60000 "x"))   ;; ~15000 tokens, over a 10000-window's 7000
+            line! (fn [run-id kind payload & [extra]]
+                    (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                   :runId run-id :kind kind :payload payload}
+                                                  extra))
+                                 "\n")
+                          :append true :encoding "UTF-8"))]
+        (io/delete-file f true)
+        (.mkdirs (.getParentFile f))
+        (line! "r1" "message" {:role "user" :content "look"} {:source "client" :id "u1"})
+        (line! "r1" "model/start" {:model "scripted" :context-window 10000 :tools []})
+        (doseq [frame (mapcat (ag/outbound tid "r1")
+                              [(ev/run-start)
+                               (ev/tool-call "c1" "read" "{}")
+                               (ev/tool-result "c1" giant nil)
+                               (ev/run-end)])]
+          (line! "r1" "event" frame))
+        (#'http/compact-if-pressured! tid)
+        (#'http/compact-if-pressured! tid)   ;; again: pruning must not repeat itself
+        (let [pruned? (until (fn [] (some #{"context/pruned"}
+                                          (map replay/kind (replay/read-records f))))
+                             3000)
+              kinds   (mapv replay/kind (replay/read-records f))]
+          (testing "a receipt, and NO summary -- pruning alone was enough"
+            (is pruned?)
+            (is (not-any? #{"context/compacted"} kinds))
+            (is (not-any? #{"compaction/start"} kinds))
+            (is (= 1 (count (filter #{"context/pruned"} kinds)))
+                "pruning is idempotent: the second trigger wrote no second receipt"))
+          (testing "the MODEL reads the elided text; the record keeps the whole one"
+            (let [view (sessions/messages tid)]
+              (is (some #(and (= "tool" (:role %))
+                              (str/includes? (str (:content %)) "pruned"))
+                        view))
+              (is (every? (fn [m]
+                            (or (not= "tool" (:role m))
+                                (< (count (str (:content m))) 20000)))
+                          view)))
+            (is (str/includes? (slurp f :encoding "UTF-8") giant)
+                "the original is still on the record")))))))

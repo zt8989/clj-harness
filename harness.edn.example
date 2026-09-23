@@ -66,6 +66,9 @@
 ;; kept VERBATIM. Retain must stay STRICTLY below threshold. `:overflow-retries` bounds the
 ;; retry after a vendor has refused a request for LENGTH (`0` disables it): the recovery
 ;; compacts more aggressively, and retries only when the model view really got shorter.
+;; BEFORE a summary, an oversized TOOL RESULT is elided for free (`harness.edge.prune`): head
+;; and tail kept, no model call, and the pressure is measured again -- under the threshold, the
+;; summary is skipped. Those cut points are constants in that namespace, not knobs here.
 :compaction
 {:threshold-ratio  0.7
  :retain-ratio     0.16

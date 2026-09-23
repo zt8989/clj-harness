@@ -266,15 +266,16 @@
   keep them."
   [thread-id]
   (if-some [f (replay/find-log (home/projects-dir) thread-id)]
-    (let [{:keys [entries context state compactions]} (replay/sofar f)]
+    (let [{:keys [entries context state compactions prunes]} (replay/sofar f)]
       {:entries  (vec entries)
        ;; THE MODEL'S VIEW OF THE SAME RECORD, which is the ONLY reader compaction
        ;; changes: the shadowed entries are replaced by their summary, while `:entries`
        ;; stays whole for the client. See `harness.edge.replay/compacted-messages`.
        :compactions (vec compactions)
+       :prunes      (vec prunes)
        :context  (vec context)
        :state    state})
-    {:entries [] :compactions [] :context [] :state nil}))
+    {:entries [] :compactions [] :prunes [] :context [] :state nil}))
 
 (defn- count-running [m]
   (count (filter #(seq (:runs %)) (vals m))))
@@ -427,7 +428,7 @@
   (let [id (str thread-id)]
     (touch! id)
     (let [e (get @registry id)]
-      (model-view (replay/compacted-messages (:entries e) (:compactions e))))))
+      (model-view (replay/compacted-messages (:entries e) (:compactions e) (:prunes e))))))
 
 (defn set-compactions!
   "Replace THREAD-ID's compaction facts. The compaction WRITER calls this the moment it wrote
@@ -443,6 +444,20 @@
            (fn [m]
              (if-let [e (get m id)]
                (assoc m id (assoc e :compactions (vec facts)))
+               m))))
+  nil)
+
+(defn set-prunes!
+  "Replace THREAD-ID's tool-result PRUNING facts. The pruning WRITER calls this the moment it
+  wrote a receipt, so `messages` -- which folds them LIVE -- reflects the elided text without a
+  rebuild. Same one-`swap!` discipline as `set-compactions!`, and the same no-op on a session
+  this process does not hold."
+  [thread-id facts]
+  (let [id (str thread-id)]
+    (swap! registry
+           (fn [m]
+             (if-let [e (get m id)]
+               (assoc m id (assoc e :prunes (vec facts)))
                m))))
   nil)
 
