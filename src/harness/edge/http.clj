@@ -4505,6 +4505,13 @@
                          :dir dir :via "http"})
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
+(defonce ^:private compaction-lock
+  ;; ONE LOCK FOR ALL COMPACTIONS IN THIS PROCESS. The DECISION (read the record, is a
+  ;; compaction already open, what is the range) and the WRITE must be one critical section:
+  ;; two requests that each read a lock-free record would both compact. Compactions are rare
+  ;; (a person's `/compact`, or a run crossing the threshold), so one lock is the right size.
+  (Object.))
+
 (defn- run-compaction!
   "One compaction, against RECORDS with PROVIDER, measuring against WINDOW: summarize (ONE
   model call, bracketed like any other), write the rows, and tell the live session. Returns
@@ -4560,6 +4567,7 @@
   logged and the run carries on uncompacted."
   [stem]
   (try
+    (locking compaction-lock
     (when-some [f (replay/find-log (home/projects-dir) stem)]
       (let [records (replay/read-records f)
             ratios  (compaction/config stem)
@@ -4568,7 +4576,7 @@
                    (>= (:pressureTokens answer) (:thresholdTokens answer))
                    (not (compaction/lock-active? records)))
           (when-some [provider (providers/current-provider stem)]
-            (run-compaction! stem provider records (:windowTokens answer) ratios)))))
+            (run-compaction! stem provider records (:windowTokens answer) ratios))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
   nil)
@@ -4600,6 +4608,7 @@
       (running? stem)
       (api-response 409 {:error "this session has a run in flight; compact between turns"})
       :else
+      (locking compaction-lock
       (let [read (try {:ok (replay/read-records (:ok located))}
                       (catch Throwable t {:error (ex-message t)}))]
         (if (some? (:error read))
@@ -4611,7 +4620,7 @@
                                  :compacted (some? result)
                                  :shadowed  (:shadowed result)}))
             (catch Throwable t
-              (api-response 400 {:error (ex-message t) :threadId stem}))))))))
+              (api-response 400 {:error (ex-message t) :threadId stem})))))))))
 
 (defn- dispatch
   "The route table, with no safety net -- see `handler` for the one wrapped
