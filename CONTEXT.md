@@ -336,8 +336,8 @@ prompt 只中立地点出自省入口。
 *别叫成* system prompt（那是整条消息，头只是它）、冻结的 prompt。
 
 **围栏**（fence）—— 绑定了项目的会话里，文件工具可以直接碰、不必 park 的那些目录：项目目录自己
-（除非 `:approval {:strict true}` 把它拿掉）、配置家、技能根（即「技能层」那两档所在的目录）、
-`:approval {:allow [..]}` 声明的路径。
+（除非 `:approval {:strict true}` 把它拿掉）、配置家、本机临时目录（`java.io.tmpdir` 与 POSIX `/tmp`）、
+技能根（即「技能层」那两档所在的目录）、`:approval {:allow [..]}` 声明的路径。
 它**只有一个来源** `harness.cap.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
 `<project>` 块拿它对模型说规则——两处若是各写一份，模型就会以为某个路径自由而实际被拦。
 

@@ -40,10 +40,14 @@
   ITSELF. The host's convention files live there -- ~/AGENTS.md and the skills in
   ~/.agents/skills -- so a suite that read the developer's real home would depend
   on one person's dotfiles, and every existing assertion would gain messages it
-  never asked for. The two temp directories are siblings on purpose: making the
-  user home a subdirectory of the root would put it inside the fence's allowed
-  set (the configuration home), which is exactly the question the fence tests
-  ask, so the arrangement would quietly answer one of them for itself.
+  never asked for. The temp directories are siblings on purpose: making the user home
+  a subdirectory of the root would put it inside the fence's allowed set (the
+  configuration home), which is exactly the question the fence tests ask, so the
+  arrangement would quietly answer one of them for itself. THE THIRD SIBLING is the
+  fence's temp answer (harness.infra.env/*temp-dir-override*), pinned away from the
+  fixtures for the same reason: java.io.tmpdir is where every one of them lives, so the
+  run answers 'this machine's temp directory' with a directory none of them is under --
+  and the fence tests can still hand the gate a path it must call out of bounds.
 
   A RUN ALSO HAS A TIME LIMIT, and it is a hard one -- see `run-with-deadline` and
   `limit-report` below. A suite that stops returning used to be invisible: on
@@ -55,6 +59,7 @@
             [clojure.string :as str]
             [clojure.test :as t]
             [harness.infra.db :as db]
+            [harness.infra.env :as env]
             [harness.infra.home :as home]
             [harness.test-support :as support]))
 
@@ -135,12 +140,15 @@
 (def ^:private tmp-user-home
   (atom nil))
 
+(def ^:private tmp-temp-dir
+  (atom nil))
+
 ;; The seed config lives in harness.test-support, with the reason it exists: a test
 ;; that makes its OWN root (with-temp-env) needs the same file, and two copies of a
 ;; text two things must agree on is one copy too many.
 
 (defn- cleanup! []
-  (doseq [dir (remove nil? [@tmp-home @tmp-user-home])]
+  (doseq [dir (remove nil? [@tmp-home @tmp-user-home @tmp-temp-dir])]
     (try
       (doseq [f (reverse (file-seq (io/file dir)))]
         (io/delete-file f true))
@@ -174,11 +182,11 @@
   nil)
 
 (defn isolate!
-  "Point the config root AND the OS home at fresh temp directories for this
-  process. Returns the root directory. Idempotent: a second call reuses the
-  first pair.
+  "Point the config root, the OS home AND the fence's temp answer at fresh temp
+  directories for this process. Returns the root directory. Idempotent: a second
+  call reuses the first set.
 
-  The two are siblings, never nested -- see the docstring above for why nesting
+  All of them are siblings, never nested -- see the docstring above for why nesting
   would tamper with what the fence tests are asking.
 
   THE PAIR IS NOT A CASE'S SCRATCH TREE, and this namespace's `cleanup!` is the only
@@ -200,12 +208,15 @@
       ;; composed name would be the same path for the run happening beside it -- see
       ;; harness.test-support/temp-dir, which is where the how and the why live.
       (let [dir   (support/temp-dir "test" {:track? false})
-            home' (support/temp-dir "test-home" {:track? false})]
+            home' (support/temp-dir "test-home" {:track? false})
+            tmp'  (support/temp-dir "test-tmp" {:track? false})]
         (support/seed-config! dir)
         (alter-var-root #'home/*root-override* (constantly dir))
         (alter-var-root #'home/*user-home-override* (constantly home'))
         (reset! tmp-home dir)
         (reset! tmp-user-home home')
+        (alter-var-root #'env/*temp-dir-override* (constantly [tmp']))
+        (reset! tmp-temp-dir tmp')
         ;; BEFORE THE PAIR IS HANDED BACK, so that no run ever exists during a moment
         ;; when this process's exit has nothing to remove it.
         (ensure-cleanup-hook!)

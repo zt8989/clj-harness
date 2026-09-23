@@ -8,7 +8,8 @@
   a tool call goes through) instead of comparing two answers that could be wrong in
   the same way. And both halves of the machine are handed in, so a Windows shell and
   a missing program are assertable here, on a machine that has neither."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.infra.env :as env]
             [harness.infra.shell :as shell]
@@ -93,3 +94,26 @@
 
 (deftest this-machines-platform-is-one-of-the-three
   (is (contains? #{"windows" "macos" "linux"} (env/platform))))
+
+(deftest the-temp-dirs-are-this-machines-canonical-and-deduplicated
+  ;; DRIVEN WITH THE OVERRIDE OFF, because the test runner stands its own in (see
+  ;; harness.test-runner/isolate!) and this is the case that would otherwise never see
+  ;; the machine's real answer.
+  (binding [env/*temp-dir-override* nil]
+    (let [dirs (env/temp-dirs)
+          tmp  (.getCanonicalPath (io/file (System/getProperty "java.io.tmpdir")))
+          slash-tmp (io/file "/tmp")]
+      (is (contains? (set dirs) tmp)
+          "java.io.tmpdir is there, canonical -- /var/... and /private/var/... are one answer")
+      (is (= (seq dirs) (distinct (seq dirs))) "no directory is listed twice")
+      (testing "POSIX /tmp is offered where it is a real absolute directory of its own"
+        (if (and (.isAbsolute slash-tmp) (.isDirectory slash-tmp))
+          (is (contains? (set dirs) (.getCanonicalPath slash-tmp))
+              "both spellings a person actually writes are here")
+          (is (= 1 (count dirs))
+              "no /tmp on this platform, so java.io.tmpdir is the whole list"))))))
+
+(deftest a-test-can-stand-its-own-temp-dirs-in
+  (binding [env/*temp-dir-override* ["/nowhere/but-here"]]
+    (is (= ["/nowhere/but-here"] (env/temp-dirs))
+        "the override REPLACES the machine's answer rather than adding to it")))

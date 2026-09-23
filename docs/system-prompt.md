@@ -38,6 +38,8 @@ Relative paths in the file tools resolve against it, and bash runs with it as it
 A read/write/edit path that resolves outside every free path below parks for human approval before it runs:
   - /Users/zhouteng/Documents/workspace/clj-harness -- this project
   - /Users/zhouteng/.clj-harness -- this harness's configuration home; reading your own configuration there is allowed
+  - /private/var/folders/9_/vz1tw99s6bn2cd7gpsxc97nc0000gn/T -- the machine's temporary directory; scratch that is meant to be thrown away
+  - /private/tmp -- the machine's temporary directory; scratch that is meant to be thrown away
   - /Users/zhouteng/.agents/skills -- where this session's skills live
   - /Users/zhouteng/Documents/workspace/clj-harness/.agents/skills -- where this session's skills live
 </project>
@@ -50,8 +52,8 @@ not found: (nothing from the list)
 </env>
 
 上面三块是**样例**：`<project>` 的围栏清单是 gate 自己的 `harness.cap.project/fence`，项目开
-`:approval {:strict true}` 时项目目录会从里面退场，未绑定时整块换成一句「没有绑定」。样例里的路径
-只对写这份文件时的那场会话成立。
+`:approval {:strict true}` 时项目目录会从里面退场（配置家、技能根与本机临时目录不退场），未绑定时
+整块换成一句「没有绑定」。样例里的路径只对写这份文件时的那场会话成立。
 
 ## 开场段（会话出生那一轮）
 

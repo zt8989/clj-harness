@@ -50,6 +50,7 @@
             [clojure.string :as str]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
+            [harness.infra.env :as env]
             [harness.cap.preamble :as preamble]
             [harness.cap.jobs :as jobs]
             [harness.cap.skills :as skills])
@@ -775,6 +776,10 @@
       one's own configuration is the fence's explicit allowance, and strict
       does not tighten it away: the config home is harness's own ground, not
       the project's);
+    - the machine's TEMPORARY DIRECTORIES (harness.infra.env/temp-dirs --
+      java.io.tmpdir and, where it exists, POSIX /tmp), for the same reason the
+      configuration home is here and with the same status: scratch is not the
+      project's ground, and strict does not tighten it away either;
     - :approval {:allow [..]} -- extra paths the project declares free of
       the fence, each resolved for the session like any tool path (relative
       to the project root, absolute passes through);
@@ -804,6 +809,9 @@
                  [[(home/root)
                    (str "this harness's configuration home; reading your own"
                         " configuration there is allowed")]]
+                 (for [t (env/temp-dirs)]
+                   [t (str "the machine's temporary directory; scratch that is"
+                           " meant to be thrown away")])
                  (for [r (skill-roots thread-id)]
                    [r "where this session's skills live"])
                  (for [p (or allow [])]

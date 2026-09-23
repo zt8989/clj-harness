@@ -29,6 +29,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.infra.db :as db]
+            [harness.infra.env :as env]
             [harness.infra.home :as home]
             [harness.test-runner :as runner]
             [harness.test-support :as support]))
@@ -113,6 +114,29 @@
         "the root every namespace shares is out of the wipe's reach")
     (is (not (contains? tracked (home/user-home)))
         "and so is the OS home beside it: the same argument, one directory over")))
+
+(deftest the-temp-stand-in-holds-none-of-the-suites-own-fixtures
+  ;; Ticket 01's invariant: the fence's answer for "this machine's temp directory" in an
+  ;; isolated run is a directory the run's own fixtures are NOT under, so a fence test
+  ;; can still hand the gate a path it must call out of bounds. Without it, freeing temp
+  ;; would free the project and config-home fixtures too (isolate! puts every one of them
+  ;; under java.io.tmpdir) and the fence tests would prove nothing.
+  (runner/isolate!)
+  (let [stand-in (first (env/temp-dirs))
+        under?   (fn [p root]
+                   (let [cp (.getCanonicalPath (io/file p))
+                         cr (.getCanonicalPath (io/file root))]
+                     (or (= cp cr)
+                         (str/starts-with? cp (str cr java.io.File/separator)))))]
+    (is (.isDirectory (io/file stand-in)) "the stand-in is a real directory")
+    (is (not (under? (support/temp-dir "probe") stand-in))
+        "a case's scratch tree is not under it")
+    (is (not (under? (support/outside-path) stand-in))
+        "nor is the fixture that has to stay out of bounds")
+    (is (not (under? (home/root) stand-in)) "nor is the run's root")
+    (is (not (under? (home/user-home) stand-in)) "nor the OS home beside it")
+    (is (not (contains? (set (support/tracked-temp-dirs)) stand-in))
+        "and it is out of the wipe's reach, like the run's pair")))
 
 (deftest somebody-elses-write-is-a-note-and-not-a-failure
   ;; THE CASE THAT MADE THIS VERDICT EXISTS: on 2026-09-20 a full suite run left the

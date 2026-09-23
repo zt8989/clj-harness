@@ -12,6 +12,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.infra.env :as env]
             [harness.test-support :as support]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project])
@@ -237,6 +238,37 @@
       (write-project-harness! "{}")
       (is (false? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))))))
 
+
+(deftest the-fence-frees-the-machines-temp-directories
+  ;; This case points the machine's temp answer at a REAL tree (the runner's stand-in is
+  ;; fixture-free by design), so the fence's freedom is exercised the way production
+  ;; reads it rather than as an accident of the arrangement.
+  (let [tree (support/temp-dir "temp-free")]
+    (binding [env/*temp-dir-override* [tree]]
+      (project/bind! "pt-temp" root)
+      (try
+        (testing "a path under the machine's temp directory is free"
+          (is (false? (project/out-of-bounds? "pt-temp" (str (io/file tree "scratch.txt")))))
+          (is (false? (project/out-of-bounds? "pt-temp" tree))))
+        (testing "but one level up is outside it"
+          (is (true? (project/out-of-bounds? "pt-temp"
+                                             (str (io/file tree ".." "escape.txt"))))))
+        (testing ":strict does not take it away, exactly like the config home"
+          (write-project-harness! "{:approval {:strict true}}")
+          (is (false? (project/out-of-bounds? "pt-temp" (str (io/file tree "x.txt")))))
+          (is (true? (project/out-of-bounds? "pt-temp" "in.txt"))))
+        (finally
+          (project/bind! "pt-temp" nil))))))
+
+(deftest the-suites-own-temp-stand-in-is-what-the-fence-frees
+  ;; No binding here: the isolated answer (harness.test-runner/isolate!) is the real
+  ;; directory the fence frees for every case in this JVM.
+  (let [stand-in (first (env/temp-dirs))]
+    (project/bind! "pt-temp-stand-in" root)
+    (try
+      (is (false? (project/out-of-bounds? "pt-temp-stand-in"
+                                         (str (io/file stand-in "x.txt")))))
+      (finally (project/bind! "pt-temp-stand-in" nil)))))
 (deftest cwd-changed-is-the-hook-payload-shape
   ;; The CwdChanged event source (ticket 04): the facts a P2 hook engine will
   ;; consume verbatim at the binding-change point. Locked here so the shape
