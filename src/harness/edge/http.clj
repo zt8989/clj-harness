@@ -99,6 +99,7 @@
             [harness.edge.record :as record]
             [harness.edge.sessions :as sessions]
             [harness.edge.mux :as mux]
+            [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.compaction :as compaction]
@@ -660,7 +661,11 @@
   that answer -- the composer's gate, the read side's decision to close a record off
   -- would be wrong forever rather than briefly."
   [thread-id run-id]
-  (sessions/run-started! thread-id run-id))
+  (sessions/run-started! thread-id run-id)
+  ;; AND THE HOST HEARS: a run starting is one of the facts a sidebar draws, and it
+  ;; does not ride on any one conversation's window (that is what `events.host` is for).
+  (host/ring!)
+  nil)
 
 (defn- unregister-run!
   "Forget THREAD-ID's run RUN-ID -- if that is the run this thread has registered.
@@ -670,7 +675,10 @@
   terminal was dispatched). The second call is a no-op, so 'exactly once' is a
   property of the shape rather than something each call site has to arrange."
   [thread-id run-id]
-  (sessions/run-finished! thread-id run-id))
+  (sessions/run-finished! thread-id run-id)
+  ;; AND THE HOST HEARS for the same reason: the row's "running" dot is this registry's.
+  (host/ring!)
+  nil)
 
 (defn entry-source
   "WHO PUT THIS MESSAGE INTO THE ARRAY THE MODEL READ, for a message an ACTION put in --
@@ -1124,6 +1132,7 @@
             ;; own entries cover the birth, when `history` is empty. Reading the log
             ;; instead would be the second truth ADR 0002 refuses.
             (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+            (host/ring!)
             ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
             ;; a text-only model -- or a resume naming an interrupt this process never
             ;; parked -- blows up before the run starts. Catch it here and push a
@@ -1598,6 +1607,15 @@
   {:status  status
    :headers {"Content-Type" "application/json; charset=utf-8"}
    :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
+
+(defn- rung
+  "Answer RESP after saying a HOST-LEVEL fact changed -- a row in the sidebar's listing, a
+  project, an archive flag. The mutation has already happened by the time a route builds
+  its answer, and the host stream (`events.host`) is how every OTHER page hears about it;
+  a route that answers a host-level write wraps its answer in this."
+  [resp]
+  (host/ring!)
+  resp)
 
 (defn- refuse-unknown-session!
   "The answer a client gets when it aims a run at an id this home has never been asked
@@ -2455,6 +2473,7 @@
 
           :else
           (do (log! thread-id nil "project/bound" {:before (:before bound) :after (:abs bound) :via "http"})
+              (host/ring!)
               (api-response 200 {:threadId thread-id :dir (:abs bound)})))))))
 
 (defn- sessions-post
@@ -2500,7 +2519,7 @@
       (api-response 400 {:error "request body is not valid JSON"})
 
       :else
-      (api-response 200 {:threadId (project/register-session! thread-id)}))))
+      (rung (api-response 200 {:threadId (project/register-session! thread-id)})))))
 
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
@@ -2589,7 +2608,7 @@
                    :else                     (compare kb ka))))
              rows)))
 
-(defn- projects-get
+(defn- projects-body
   "GET /api/projects -- the sidebar's listing: every project this home knows, each
   with its sessions, PLUS every task this home knows.
 
@@ -2627,17 +2646,20 @@
   row offering to open it would be inviting somebody to talk to something that
   cannot answer. It still HAS a store row and still appears in the tree, which is
   what lets rebuild, trajectory and the subagent panel find it by id."
-  [_req]
-  (let [by-project (group-by :project-id (remove :subagent (project/sessions)))
+  [] (let [by-project (group-by :project-id (remove :subagent (project/sessions)))
         tasks      (project/tasks)]
-    (api-response 200
-                  {:projects (mapv (fn [{:keys [id canonical-path]}]
-                                     {:projectId id
-                                      :path      canonical-path
-                                      :sessions  (newest-first
-                                                  (mapv session-row (get by-project id)))})
-                                   (project/projects))
-                   :tasks    (newest-first (mapv session-row tasks))})))
+    {:projects (mapv (fn [{:keys [id canonical-path]}]
+                       {:projectId id
+                        :path      canonical-path
+                        :sessions  (newest-first
+                                    (mapv session-row (get by-project id)))})
+                     (project/projects))
+     :tasks    (newest-first (mapv session-row tasks))}))
+
+(defn- projects-get
+  "GET /api/projects -- `projects-body` as one JSON answer."
+  [_req]
+  (api-response 200 (projects-body)))
 
 (defn- subagent-run-row
   "One delegation, as a panel reads it: which subagent ran, whose session
@@ -2923,7 +2945,7 @@
                          (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error written)]
           (api-response 404 {:error error :threadId stem})
-          (api-response 200 {:threadId stem :archived (:ok written)}))))))
+          (rung (api-response 200 {:threadId stem :archived (:ok written)})))))))
 
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
@@ -4141,6 +4163,44 @@
         (api-response 200 {:subscriber token
                            :threads    (vec (mux/subscriptions token))})))))
 
+;; ------------------------------------------------------------- the host stream
+;;
+;; THE OTHER DOWNLINK CATEGORY (ADR 0004): facts about the HOME rather than one
+;; conversation -- which sessions and projects exist, what they are called and when last
+;; sent to, which are archived, and which have a run going in this process. A sidebar draws
+;; all of it from `GET /api/projects`' one payload, and this is that same payload PUSHED
+;; whenever one of those facts changes, so two windows agree without a refresh button.
+;;
+;; NO SUBSCRIPTION HERE, unlike `events.mux`: every connection wants the same listing, so
+;; a ring writes to all of them (`harness.edge.host`).
+
+(defn- host-frame
+  "The host-level facts as one downlink frame: the SAME payload `GET /api/projects` answers
+  with, plus the type tag that tells this category from a window frame."
+  [] (assoc (projects-body) :type "projects"))
+
+(defn- host-get
+  "GET /api/events.host -- the host-level downlink. A WebSocket that is handed the listing
+  at once and then once per host-level change; nothing is sent over it and there is no set
+  to subscribe (see `host-frame`)."
+  [req]
+  (let [registered (atom nil)]
+    (hk/as-channel req
+                   {:on-open  (fn [ch]
+                               (try
+                                 (let [push (fn [] (mux-send! ch (host-frame)))]
+                                   (reset! registered push)
+                                   (host/watch! push)
+                                   ;; THE FIRST LISTING AT ONCE: a page that opens this
+                                   ;; stream must not wait for the next change to draw a
+                                   ;; sidebar.
+                                   (push))
+                                 (catch Throwable t
+                                   (log/error! :host/watch-failed t))))
+                    :on-close (fn [_ch _status]
+                                (when-some [push @registered]
+                                  (host/unwatch! push)))})))
+
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
   session in it yet. Answers {:projectId .. :path <canonical>}.
@@ -4180,13 +4240,13 @@
                        (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error added)]
           (api-response 400 {:error error})
-          (api-response 200 {:projectId (:project-id (:ok added))
-                             :path      (:path (:ok added))
-                             ;; Sessions that remembered this directory, coming
-                             ;; back with it -- see `remove-project!`. On a
-                             ;; fresh add it is 0, which is the truthful answer
-                             ;; rather than a field nobody sets.
-                             :adopted   (:adopted (:ok added))}))))))
+          (rung (api-response 200 {:projectId (:project-id (:ok added))
+                                      :path      (:path (:ok added))
+                                      ;; Sessions that remembered this directory, coming
+                                      ;; back with it -- see `remove-project!`. On a
+                                      ;; fresh add it is 0, which is the truthful answer
+                                      ;; rather than a field nobody sets.
+                                      :adopted   (:adopted (:ok added))})))))))
 
 (defn- remove-project-post
   "POST /api/projects/<canonical path>/remove -- take that directory out of this
@@ -4221,8 +4281,8 @@
                      (catch Throwable t {:error (ex-message t)}))]
     (if-some [error (:error removed)]
       (api-response 404 {:error error :path stem})
-      (api-response 200 {:path    (:path (:ok removed))
-                         :unbound (:unbound (:ok removed))}))))
+      (rung (api-response 200 {:path    (:path (:ok removed))
+                                  :unbound (:unbound (:ok removed))})))))
 
 (defn- mcp-get
   "GET /api/mcp?threadId=.. -- this session's MCP ledger: which servers it
@@ -5014,6 +5074,12 @@
     (= "/api/events.mux/subscribe" (:uri req))
     (case (:request-method req)
       :post (mux-subscribe-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    ;; THE HOST DOWNLINK: the sidebar's listing, pushed. One per page, no subscription.
+    (= "/api/events.host" (:uri req))
+    (case (:request-method req)
+      :get  (host-get req)
       (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)

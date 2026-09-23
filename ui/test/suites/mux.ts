@@ -19,7 +19,7 @@ const cases: Case[] = [
       params.set("subscriber", "tok-1");
       params.set("sessions", JSON.stringify([{ threadId: "t-1", since: 7, generation: "g" }]));
 
-      const url = downlinkUrl(params);
+      const url = downlinkUrl("events.mux", params);
 
       // THE PATH IS THE ONE PREFIX EVERY OTHER CALL USES, and the whole declaration rides
       // on it -- the socket carries no client message, so the URL is where a subscription
@@ -40,6 +40,16 @@ const cases: Case[] = [
       // THE SET IS EMPTY UNTIL SOMEBODY FOLLOWS A WINDOW, and at module load nobody has:
       // the first host that opens a window is what opens the socket.
       expect(declaredSet()).toEqual([]);
+    },
+  },
+  {
+    name: "the-host-downlink-is-a-second-address-under-the-same-prefix",
+    run: async () => {
+      // TWO CATEGORIES, TWO SOCKETS (ADR 0004): `events.host` carries no subscription, so
+      // its address is the bare path -- no token and no set.
+      const url = downlinkUrl("events.host", new URLSearchParams());
+      expect(url).toContain("/api/events.host");
+      expect(url).not.toContain("?");
     },
   },
 ];

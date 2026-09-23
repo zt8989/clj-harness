@@ -88,3 +88,28 @@ socket 只下行，所以**订阅在 HTTP 层完成**：
 更新集合」里的「切走」在实现里**没有**退订——因为侧栏每行的 `running` 这一格仍来自那个 host 的窗口
 状态（`onStatus`），退订会让它在别的窗口开跑时变旧。连接数不受影响（一页仍只有一条 socket），
 被订阅场的**内存 pin** 与「只订阅屏幕上的那一场」这一格属于 `events.host`（票 02）的收口。
+
+## 落地（2026-09-23）：票 02
+
+**第二条 socket：`events.host`，侧栏的列表是推的。** 形状：
+
+- **服务端**：`harness.edge.host` 是家级门铃（`watch!`/`unwatch!`/`ring!`，一个 watcher 抛了不影响
+  别人）；`GET /api/events.host` 一开就发整份列表（`projects-body`，与 `GET /api/projects` 同一份，
+  加 `:type "projects"`），此后每次家级事实变化再发一份。**没有订阅**——每个连接要的是同一份清单。
+  门铃从**变更点**响，不从定时器、也不从每条条目：`run-started!`/`run-finished!`（进程内 run 注册表）、
+  `remember-send!`（标题与发送时间）、`sessions-post`、`project-post`、`add-project-post`、
+  `remove-project-post`、`archive-post`（后六处走 `rung` 包住成功答复）。
+- **客户端**：`ui/src/lib/host.ts` 是页面级单例 socket（第二类、第二个地址，`downlinkUrl(path, params)`）；
+  `sidebar.tsx` 挂上它，收到列表就 `setListing` + `onListed`——刷新键原样留着做手动兜底。
+- **顺带补的一格**：侧栏的项目会话行与任务行原来只读 `statuses`（本页自己的 host），**不读列表里的
+  `running`**，所以别的窗口跑起来的行不会点灯。现在两处都按「本页注册表 OR 列表的 `running`」取或，
+  与收起的归档块那行（`session.running || …`）同一判据——列表里的 `running` 仍来自服务端的 run 注册表。
+
+**验证**：
+
+| 层 | 做了什么 | 结果 |
+|---|---|---|
+| 后端 | `clojure -M:test -m harness.test.runner harness.edge.host-test` | 4 tests / 11 assertions / 0 failures（ring 达每个 watcher、抛出的不挡别人；开流即发列表、变化再发、关闭收回；`sessions-post` 真的响门铃） |
+| 后端全量 | `clojure -M:test -m harness.test-runner` | 见本轮全量行 |
+| 前端 | `npm test` / `npm run typecheck` / `npm run build` | 127 用例（新增 host 地址一条）、tsc、vite |
+| 真浏览器 | `node scripts/dev.mjs --scripted .scratch/events-mux-and-host/slow.json --ui-port 5319` + `walkthrough-host.mjs` | **ALL GREEN**：两个窗口都先开着，A 发送 ⇒ B 的侧栏**不刷新**就出现那一行、带「运行中」、跑完自己摘；另一个写者 POST 一个项目 ⇒ B 的侧栏自己出现该项目（截图 `evidence/host-01-two-windows.png`） |

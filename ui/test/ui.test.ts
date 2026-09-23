@@ -349,7 +349,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// subscriber token and the followed set on it, and a page that follows nothing declares
 /// nothing. That a socket really carries a window is the browser walkthrough's half, as
 /// `lib/mux.ts` says.
-const EXPECTED_CASES = 130;
+const EXPECTED_CASES = 131;
 
 let total = 0;
 for (const suite of SUITES) {

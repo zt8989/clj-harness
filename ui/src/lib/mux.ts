@@ -70,7 +70,7 @@ function open(): void {
   const params = new URLSearchParams();
   params.set("subscriber", token);
   params.set("sessions", JSON.stringify(declaredSet()));
-  const ws = new WebSocket(downlinkUrl(params));
+  const ws = new WebSocket(downlinkUrl("events.mux", params));
   socket = ws;
   ws.onopen = () => {
     if (socket !== ws) return;

@@ -1,0 +1,15 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": { "command": "sleep 8" }
+        }
+      ]
+    },
+    { "content": "跨窗口跑完了。" }
+  ]
+}

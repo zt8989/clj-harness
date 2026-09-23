@@ -160,17 +160,25 @@
   For an assertion about something being ABSENT, waiting for a line that will
   never come is waiting for the timeout -- so the question has to be 'is the
   writer done', and the honest test of that is a file whose size has stopped
-  moving."
+  moving.
+  
+  A FILE THAT IS NOT THERE HAS NOT STOPPED GROWING -- it has not started. `File.length`
+  on a missing file is 0 and STABLE, so the old reading declared the writer done before
+  its first line landed and the caller's own `slurp` threw FileNotFoundException. It
+  flaked exactly there (measured 2026-09-23: the same suite green on one run and red on
+  the next, nothing but timing between them), so absence is now waited out."
   [f ms]
   (let [deadline (+ (System/currentTimeMillis) ms)]
     (loop [last-size -1 stable 0]
-      (let [size (.length f)]
-        (if (and (= size last-size) (>= stable 2))
-          (log-lines f)
-          (if (> (System/currentTimeMillis) deadline)
-            (log-lines f)
-            (do (Thread/sleep 50)
-                (recur size (if (= size last-size) (inc stable) 0)))))))))
+      (let [size (if (.exists f) (.length f) -2)]
+        (cond
+          (= size -2) (if (> (System/currentTimeMillis) deadline)
+                        (log-lines f)
+                        (do (Thread/sleep 50) (recur size 0)))
+          (and (= size last-size) (>= stable 2)) (log-lines f)
+          (> (System/currentTimeMillis) deadline) (log-lines f)
+          :else (do (Thread/sleep 50)
+                    (recur size (if (= size last-size) (inc stable) 0))))))))
 
 (defn- finished? [ls]
   (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls))
