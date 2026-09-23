@@ -75,18 +75,18 @@
 | 序 | 档 | 来源 |
 |---|---|---|
 | 1 | 默认档 | `config.edn` 的 `:default` 一节：三个旋钮，或一个 **inline** 描述的 provider（逃生门） |
-| 2 | 会话档 | `session-configure` 工具调用（**经人工审批**后写入） |
+| 2 | 会话档 | `POST /api/model`——composer 的选档器写进来（`clear: true` 丢回下层） |
 | 3 | 本次请求 | AG-UI 入参顶层的 `provider` / `model` / `reasoning-effort`，只影响这次 run |
 
 **换 provider 不指定 model，就落在新厂商的默认 model 上**——endpoint 随厂商走，所以「只换厂商」是一个旋钮
 就能表达的动作。
 
-**写进档位的目录属性必须指名失败**：`:context-window` 这类字段写进 `:default`、写进
-`session-configure` 调用、写进一次 run 的入参，三处都是**指名报错**（并说明该写在 `:providers` 里那个
-model 的条目下）。`selection` 只取三个旋钮，从前静默丢弃正是要杀掉的那种失败形态。
+**写进档位的目录属性必须指名失败**：`:context-window` 这类字段写进 `:default` 是**指名报错**（并说明该写在
+`:providers` 里那个 model 的条目下）；会话档更早一步就挡下了——`POST /api/model` 只认三个旋钮加 `clear`，
+多一个键当场指名拒绝。`selection` 只取三个旋钮，从前静默丢弃正是要杀掉的那种失败形态。
 
-`session-configure` 的 body **先解析后写**：provider 名不在目录里、或 model id 不是该 provider 声明的，
-当场指名失败、session 保持原样、`provider/changed` 一行不落。先写后败会把一个每轮都跑不起来的配置
+`POST /api/model` **先解析后写**：provider 名不在目录里、或 model id 不是该 provider 声明的，当场指名失败、
+session 保持原样、日志里一行不落。先写后败会把一个每轮都跑不起来的配置
 钉在会话上，而报错要等到**下一次** run 才出现。
 
 ## api-key
@@ -147,7 +147,7 @@ model 的条目下）。`selection` 只取三个旋钮，从前静默丢弃正�
   `providers/*list-models*` 这个缝把它换掉，**测试不出网**。
 - `POST /api/defaults` 设默认档：**缺席 = 不动那一项，`null` = 清掉那个键**（前者是「别管我的 model」，
   后者是「别再选 model」，两件不同的事）。**命名一个 provider 是替换整档**，这也是 inline 描述唯一的出路。
-  先解析后写，与 `session-configure` 同一条规矩。
+  先解析后写，与 `POST /api/model` 同一条规矩。
 
 ## 思考模式：`reasoning_content` 的往返
 

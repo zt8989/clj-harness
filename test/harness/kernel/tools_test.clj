@@ -209,22 +209,22 @@
 (deftest specs-expose-every-base-tool
   ;; TWO lists, because there are two toolsets and the default is now the anchor
   ;; one (ticket 12). Sorted, so this doubles as a check that every tool is
-  ;; registered like any other -- `session-configure` is only special in being
-  ;; marked for approval, which is a property of the tool, not of the list -- and
-  ;; `ask` is in BOTH, because it belongs to no editing family: a session can ask a
-  ;; person a question whichever way it edits files.
+  ;; registered like any other -- a tool's own properties (an approval mark, a
+  ;; read-only flag) belong to the TOOL, not to the list -- and `ask` is in BOTH,
+  ;; because it belongs to no editing family: a session can ask a person a
+  ;; question whichever way it edits files.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
       (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_output"
-              "read" "replace" "session-configure" "skill" "todo_write"
-              "undo_last_replace" "web_fetch" "web_search" "write"]
+              "read" "replace" "skill" "todo_write" "undo_last_replace" "web_fetch"
+              "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
       (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
-              "session-configure" "skill" "todo_write" "web_fetch" "web_search" "write"]
+              "skill" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project

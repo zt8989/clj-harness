@@ -34,7 +34,6 @@
             [harness.cap.hashline.write :as hashline-write]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
-            [harness.cap.providers :as providers]
             [harness.cap.skills :as skills]
             [harness.cap.todos :as todos]
             [harness.cap.web :as web]
@@ -464,62 +463,6 @@
           (throw (ex-info missing {:name name :path (:path entry)}))
           (str (skills/loaded-summary name (count body))
                "\n" (:dir entry) " is the skill's directory; read files under it by absolute path."))))))
-
-(defn- t-configure
-  "Change THIS session's provider / model / reasoning-effort. Each of the three
-  is independent: pass only what you mean to change, and the rest keep the value
-  the tier below gave them.
-
-  A model id means 'an id this provider serves'. Naming a new :provider with no
-  :model moves to that vendor's default model -- the old id belonged to the old
-  vendor and is not carried across. A :model the provider does not declare fails
-  HERE, by name, and nothing is written: that check is done by resolving the
-  proposed tier before committing it, because a change that cannot be served is
-  not a change. Writing first and failing later would leave the session's
-  override holding a configuration every later run fails on, and the failure
-  would surface on the NEXT run, nowhere near the call that caused it.
-
-  Marks :requires-approval, so the call parks and a human decides before any of
-  it takes effect -- the body only runs on an approved resume, and a veto means
-  it never runs at all. The gate is a WORKFLOW convention, not a security
-  boundary: eval can still reach harness.cap.providers/use-provider! directly, and bash
-  can still read .env. It is here to stop a slip, and it is labelled as such."
-  [args]
-  ;; The three knobs are the only thing this tool may move, and the check below
-  ;; cannot be left to the catalog's own tier guard: the change map is rebuilt
-  ;; from these three names, so a stray :context-window would be dropped by that
-  ;; rebuild and the resolution would never see it -- the tool would answer
-  ;; 'reconfigured' having changed nothing, which is a lie told to whoever called.
-  ;; A call naming a model's counts is refused by name, and told where they live.
-  (let [known  #{:provider :model :reasoning-effort}
-        extras (sort (map name (remove known (keys args))))]
-    (when (seq extras)
-      (throw (ex-info (str "session-configure does not understand "
-                           (pr-str (vec extras))
-                           "; it takes provider, model and reasoning-effort --"
-                           " a model's endpoint, modalities and token counts are"
-                           " declared in config.edn's :providers, not chosen per session")
-                      {:unknown (vec extras)}))))
-  (let [{:keys [provider model reasoning-effort]} args
-        thread-id kernel-tools/*thread-id*
-        change    (cond-> {}
-                    (some? provider)         (assoc :provider provider)
-                    (some? model)            (assoc :model model)
-                    (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
-    (when (empty? change)
-      (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the tier here
-    ;; and writing it back would lose the change another thread made in between -- the
-    ;; model endpoint writes this same tier -- and the change line below would then
-    ;; record a before->after pair that never happened.
-    (let [{:keys [before after resolved]} (providers/swap-override! thread-id change)]
-      (providers/record-provider-change! thread-id before after "session-configure"
-                                   after resolved)
-      (str "session reconfigured: " (pr-str change)
-           " -- effective now for this thread only."
-           (when-let [m (:model resolved)] (str " Serving " m "."))
-           (when (nil? thread-id)
-             " (warning: no session in scope; the change landed on the process-wide slot)")))))
 
 ;; -------------------------------------------------------------- the built-ins
 
@@ -1144,28 +1087,6 @@
                           :required ["content" "status"]}
                   :description (str "The COMPLETE list, in order. [] clears it.")}}
         [:todos] t-todo-write))
-
-;; Configure this session's provider. Marked :requires-approval so a model
-;; cannot repoint its own session at another endpoint without a human saying so
-;; -- the marked call parks, and only an approved resume runs the body. Every
-;; knob is optional and independent; give only what you mean to change.
-;;
-;; "provider" names a VENDOR and "model" an id THAT VENDOR serves. A name the
-;; catalog does not know, or an id the named provider does not declare, is
-;; refused inside the body -- before anything is written, so a proposed change
-;; that cannot be served never becomes the session's configuration.
-(register! "session-configure"
-  (assoc (tool (str "Change this session's provider, model, or reasoning effort. "
-                    "Parks for human approval; only an approved change takes effect. "
-                    "Each argument is independent -- pass only what you mean to change. "
-                    "Naming a provider alone switches to that vendor AND its default model.")
-               {"provider"         {:type "string"
-                                    :description "A provider (vendor) name, e.g. \"openrouter\" or \"ollama\"."}
-                "model"            {:type "string"
-                                    :description "A model id the current provider serves, e.g. \"anthropic/claude-sonnet-4.5\"."}
-                "reasoning-effort" {:type "string" :description "Reasoning effort (e.g. \"low\", \"high\")."}}
-               [] t-configure)
-         :requires-approval true))
 
 ;; ------------------------------------------------------------------ web_fetch
 ;;

@@ -127,4 +127,4 @@
 ;; protocol module decides whether to use it. Nothing to configure for localhost.
 ;;
 ;; reasoning-effort is NOT a provider field. It is one of the three knobs, so it
-;; belongs in :default (or in a session-configure tool call), not here.
+;; belongs in :default (or in a POST /api/model call -- what the picker presses).

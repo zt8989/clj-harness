@@ -811,26 +811,39 @@
 
 ;; ------------------------------------------------------- provider outbox
 ;;
-;; A PENDING-OUTBOX, not a copy of state: the tool body records that the session
-;; changed and what it changed from and to, and the http edge drains it to the
-;; jsonl. It exists for exactly the reason parked-registry does -- to carry a
-;; fact across the seam from the code that knows it (the tool) to the code that
-;; writes it down (the edge -- the only writer). Once drained it is gone, and
-;; nothing reads it back.
+;; A PENDING-OUTBOX, not a copy of state: whoever knows the session changed
+;; records what it changed from and to, and the http edge drains it to the jsonl.
+;; It exists for exactly the reason parked-registry does -- to carry a fact
+;; across the seam from the code that knows it to the code that writes it down
+;; (the edge -- the only writer). Once drained it is gone, and nothing reads it
+;; back.
+;;
+;; NOTHING FEEDS IT TODAY, and that is the honest state rather than an oversight:
+;; its only producer was the `session-configure` tool, and that tool is gone. The
+;; KIND stays -- `provider/changed` is read back by the prompt context
+;; (harness.edge.context) and by the trajectory, and a kind is vocabulary rather
+;; than a producer -- so the drain stays too: should a tool ever move the
+;; selection again, the line, its `:verdict` and its `:resolved` are already wired
+;; end to end. `POST /api/model` deliberately does NOT come through here -- it IS
+;; the edge, so it writes its own line at the moment of the change.
 
 (defonce ^:private provider-changes
   (atom []))
 ;; [{:thread-id .. :before <knob slice> :after <knob slice>
-;;   :trigger "session-configure" :override <session tier afterwards>
+;;   :trigger <the path that pressed it> :override <session tier afterwards>
 ;;   :resolved <what the catalog assembled from that tier>}]
 
 (defn record-provider-change!
   "Note that THREAD-ID's provider moved from BEFORE to AFTER, by an APPROVED
-  change of TRIGGER (a string identifying the path that pressed the change --
-  currently always \"session-configure\"). The body only runs on an approval --
-  a vetoed call never reaches it -- so landing here means the human said yes;
-  a veto leaves no change line at all, and the reader tells the two apart by
-  the presence of this line (paired with its approval/decided row).
+  change of TRIGGER (a string identifying the path that pressed the change).
+  The body only runs on an approval -- a vetoed call never reaches it -- so
+  landing here means the human said yes; a veto leaves no change line at all,
+  and the reader tells the two apart by the presence of this line (paired with
+  its approval/decided row).
+
+  NO CALLER TODAY: the `session-configure` tool was the only one, and it has been
+  removed -- this and the drain are kept as the shape a tool-made change travels
+  in, and the tests drive them directly (see the outbox note above).
 
   OVERRIDE is the session's OWN tier after the change -- the partial the next
   resolve-provider would consult. :before / :after are slices (only the knobs
@@ -1066,7 +1079,7 @@
   Three tiers, each overriding the one before it KNOB BY KNOB:
 
     1. config.edn's default tier       (or a provider described inline)
-    2. this session's override         (the session-configure tool)
+    2. this session's override         (written by POST /api/model -- the picker)
     3. this run's request              (REQUEST, from the input map)
 
   The fold produces a SELECTION, and the catalog assembles it: the selected
@@ -1100,7 +1113,7 @@
 
 (defn resolve-override
   "What THREAD-ID's session would be served by if its own tier WERE OV -- the
-  question session-configure asks before it writes anything.
+  question `POST /api/model` asks before it writes anything.
 
   A change that cannot be served is not a change: a provider name that is not in
   the catalog, or a model id the selected provider does not declare, has to fail
@@ -1127,9 +1140,11 @@
   ONE ATOM OPERATION, and that is the whole of it. Reading the override, folding the
   change in and writing it back is three steps, so two callers who do that LOSE one of
   the two changes -- and, worse, both then record a before->after pair that never
-  happened. Two callers is the ordinary case, not a rare one: `session-configure` (on a
-  tool thread) and the model endpoint (on an http-kit thread) write to this same tier,
-  and the endpoint can be pressed while a run is deciding to reconfigure itself. Here the
+  happened. THE TWO CALLERS ARE ONE CALLER TWICE, which is the ordinary case rather
+  than a rare one: this route runs on an http-kit thread, so two presses of the picker
+  -- or a press while the previous one is still resolving -- land here at once. Before
+  `session-configure` was removed the second caller was the tool, on a tool thread; the
+  discipline is unchanged, and the test that pins it drives two swaps at once. Here the
   write is a compare-and-set on the map itself, retried until it lands, and the pair it
   answers with is the pair it made.
 
@@ -1433,7 +1448,7 @@
   here would refuse one a vendor accepts. The list is therefore not a guard, it is
   an OFFER: the three OpenAI-compatible values, which is what the providers in the
   built-in table speak. A session that wants something else can still be given it
-  by `session-configure` or by config.edn; the picker just does not put it on the
+  by `POST /api/model` or by config.edn; the picker just does not put it on the
   menu."
   ["low" "medium" "high"])
 
