@@ -103,6 +103,12 @@ drive! :
   后面**可能已经坐了别的东西**（边在交出去之前施加的派生注入、这次动作带的 `append`）。插在末尾等于没回答：
   这场 run 会把同一个问题再问一遍，人再批一次就会把工具再跑一次。找不到那条 assistant 消息时不猜一个相邻，
   退回末尾并在 `:unplaced` 里说一声（边为它写一行 WARN）。
+- **交给 run 的历史先被摆成厂商合法的形状**：纪录可以把一条调用的答案**晚到**地送来——一次被切断的 run 由
+  `harness.edge.replay/closing-frames` 补一条 `TOOL_CALL_RESULT`，而它是**追加在文件末尾**的，落在客户端之后
+  写的消息后面。按文件顺序折回来的历史里，这条答案就坐不到它回答的那条调用后面，`unanswered-tool-calls` 看不见它，
+  厂商拒绝整个请求，整条会话就这么锁死。`drive!` 起手用 `harness.kernel.llm/adjacent-answers` 把**已经记在案**的答案
+  挪到调用正后面（和 `answer!` 给一次 replay 的落点同一条规则）——这不是发明结果，那条消息本来就在历史里；
+  找不到 assistant 消息的孤答案原地不动，因为没有调用可漏。
 - **`:run/done` 不是 wire 帧**，它是「本 run 追加了哪些消息」的返回面（`{:history … :added … :unplaced …}`），
   边把 `:added` 落成 `message` 行。
 - **没有迭代上限**，这是设计。
