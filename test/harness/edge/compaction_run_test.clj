@@ -227,3 +227,40 @@
   (testing "a legal pair passes through"
     (is (= {:threshold-ratio 0.8 :retain-ratio 0.2}
            (compaction/check-ratios! {:threshold-ratio 0.8 :retain-ratio 0.2})))))
+
+;; ------------------------------------------------------- the overflow plan (ticket 05)
+
+(deftest the-overflow-plan-keeps-only-the-newest-unit
+  ;; After the vendor has refused the request for LENGTH, the budget is ignored: everything
+  ;; before the newest `user` message goes, and only that turn is kept verbatim.
+  (let [plan (compaction/overflow-plan (six))]     ;; six 108-token user entries u0..u5
+    (is (= [0 1 2 3 4] (:shadowed plan)) "the newest unit (u5) is the only thing kept")
+    (is (= 5 (count (:messages plan))))
+    (is (= 540 (:head-tokens plan)) "5 x 108")))
+
+(deftest the-overflow-plan-has-nothing-to-remove-when-only-the-unit-is-left
+  (is (nil? (compaction/overflow-plan [(entry 0 "u1" "hi")]))))
+
+(deftest the-overflow-plan-never-takes-the-session-opening
+  (let [opening (assoc (entry 0 "session-opening-0" (apply str (repeat 400 "o")))
+                       :source "opening")
+        records (into [opening]
+                      (map (fn [i] (entry (inc i) (str "u" i) (apply str (repeat 400 "a"))))
+                           (range 6)))
+        plan    (compaction/overflow-plan records)]
+    (is (some? plan))
+    (is (not (some #{0} (:shadowed plan))) "the opening's seq is not among them")))
+
+(deftest the-overflow-plan-keeps-a-tool-group-whole
+  ;; A suffix may not BEGIN with a `tool` result -- an OpenAI-shaped vendor refuses a tool
+  ;; message whose assistant `tool_calls` are not in the request -- so when the surface holds no
+  ;; user message the unit is the smallest LEGAL suffix.
+  (let [row (fn [ts id payload]
+              {:ts ts :runId "r1" :type "message" :source "client" :id id :payload payload})
+        call (fn [i] {:id i :type "function" :function {:name "read" :arguments "{}"}})
+        records [(row 0 "a0" {:role "assistant" :content "" :tool_calls [(call "c1")]})
+                 (row 1 "t1" {:role "tool" :tool_call_id "c1" :content "ok"})
+                 (row 2 "a2" {:role "assistant" :content "" :tool_calls [(call "c2")]})
+                 (row 3 "t2" {:role "tool" :tool_call_id "c2" :content "ok"})]
+        plan    (compaction/overflow-plan records)]
+    (is (= [0 1] (:shadowed plan)) "the last legal group is kept, the older tool round goes")))

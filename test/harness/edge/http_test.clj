@@ -6393,3 +6393,44 @@
          (is (not-any? #(= "input" (get-in % [:payload :name])) rows)
              "and the `input` row 票 02 deletes is GONE -- what an action brought is its own
               message rows, not a fact restating them"))))))
+
+(deftest an-overflow-refusal-compacts-aggressively-and-retries-in-one-turn
+  ;; ticket 05: the vendor says the request is too LONG -- a failure of a KIND of its own, not
+  ;; just any 400. Before the run ends, the history is compacted with NO capacity consulted,
+  ;; and because it really got shorter the call is retried in the SAME run: the user sees one
+  ;; turn, not an error followed by a second run.
+  (with-server
+    "compact-overflow"
+    [{:refuse {:status 400
+               :body   (str "This model's maximum context length is 128000 tokens."
+                            " However, your messages resulted in 200000 tokens.")}}
+     {:content "THE SUMMARY"}
+     {:content "THE ANSWER"}]
+    (fn []
+      (let [log (log-file "compact-overflow")]
+        (io/delete-file log true)
+        ;; a conversation the aggressive plan has a head to take: several turns on the record
+        (spit log
+              (str (str/join "\n"
+                             (map (fn [i]
+                                    (json/write-str {:ts i :runId nil :type "message"
+                                                     :source "client" :id (str "u" i)
+                                                     :payload {:role "user"
+                                                               :content (apply str (repeat 200 "a"))}}))
+                                  (range 8)))
+                   "\n")
+              :encoding "UTF-8")
+        (let [frames (wire/frames-from-sse
+                      (.body (post-run "compact-overflow"
+                                       {:append [{:id "u-new" :role "user" :content "keep going"}]})))]
+          (testing "the retry answered, in this one run"
+            (is (= "RUN_FINISHED" (:type (last frames))) (pr-str (last frames)))
+            (is (= "THE ANSWER"
+                   (apply str (map :delta (filter #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames))))))
+          (testing "and the record holds one compaction, written before the retry"
+            (is (until (fn [] (some #{"compaction/end"}
+                                    (map replay/kind (replay/read-records log))))
+                       5000))
+            (let [kinds (mapv replay/kind (replay/read-records log))]
+              (is (some #{"context/compacted"} kinds))
+              (is (some #{"compaction/start"} kinds)))))))))

@@ -988,7 +988,7 @@
 
 ;; Defined below with the compaction route; `run-agent!` calls it at the start of every run,
 ;; BEFORE it derives the request (ticket 04).
-(declare compact-if-pressured!)
+(declare compact-if-pressured! recover-overflow!)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1382,6 +1382,13 @@
                                                              ;; the SAME function, so a
                                                              ;; rebuilt conversation carries
                                                              ;; what a live one did.
+                                                             ;; A REFUSAL FOR LENGTH RECOVERS IN THE SAME TURN: the
+                                                             ;; loop hands the history to `recover-overflow!`, which
+                                                             ;; compacts aggressively and answers a SHORTER view, or
+                                                             ;; nil (the vendor's refusal then stands).
+                                                             :on-overflow (fn [history t]
+                                                                            (recover-overflow! thread-id provider history t))
+                                                             :overflow-retries (compaction/overflow-retries thread-id)
                                                              :before-llm project/before-llm})]
                 (loop []
                   (when-let [ev (async/<! events)]
@@ -4515,9 +4522,13 @@
 (defn- run-compaction!
   "One compaction, against RECORDS with PROVIDER, measuring against WINDOW: summarize (ONE
   model call, bracketed like any other), write the rows, and tell the live session. Returns
-  the result map, or nil when there was nothing to compact. Shared by the manual route and
-  the automatic trigger so the two cannot drift."
-  [stem provider records window ratios]
+  the result map, or nil when there was nothing to compact. Shared by the manual route, the
+  automatic trigger and the overflow recovery so the three cannot drift.
+
+  OPTS' `:aggressive?` picks the plan: the ordinary budget-keeping one, or
+  `compaction/overflow-plan` -- the one used after the vendor has ALREADY refused the request
+  for its length, which ignores the budget and keeps only the newest indivisible unit."
+  [stem provider records window ratios opts]
   (let [written   (atom [])
         put       (fn [kind payload]
                     (swap! written conj [kind payload])
@@ -4546,6 +4557,7 @@
                                       {:window       window
                                        :retain-ratio (:retain-ratio ratios)
                                        :append       put
+                                       :plan-fn      (when (:aggressive? opts) compaction/overflow-plan)
                                        :summarize    summarize})]
       (when (seq @written)
         (sessions/set-compactions!
@@ -4556,6 +4568,40 @@
       ;; half-open pair would be the worse trace.
       (hook/emit :post-compact {:thread-id stem})
       result)))
+
+(defn- recover-overflow!
+  "ONE AGGRESSIVE COMPACTION after the vendor refused the request for its LENGTH (ticket 05).
+
+  Returns the SHORTER model view to retry with, or nil when nothing could be removed -- and the
+  caller then hands the vendor's own refusal out UNTOUCHED. It never throws: a failure in the
+  recovery must not replace the error that explains the run.
+
+  NOTHING ABOUT CAPACITY IS READ. The vendor has already answered, so no window and no estimate
+  is needed to justify the compaction -- `compaction/overflow-plan` ignores both on purpose.
+
+  THE LOCK IS THE SAME ONE the manual route and the automatic trigger take, so a recovery
+  cannot race either.
+
+  THE RETRY KEEPS THE SYSTEM MESSAGE and takes the conversation from the RECORD's compacted
+  view, so what goes out is a request built the one way this harness builds one. Anything this
+  run produced that has not reached the record -- an earlier tool round of the SAME run -- and
+  the derived injections are not re-sent: the run continues from the compacted conversation.
+  THE VIEW IS MEASURED against what was actually sent, so a pass that removed nothing answers
+  nil rather than retrying the same overflowing request."
+  [stem provider history _t]
+  (try
+    (locking compaction-lock
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (let [records (replay/read-records f)
+              ratios  (compaction/config stem)
+              result  (run-compaction! stem provider records (:context-window provider) ratios
+                                       {:aggressive? true})
+              system  (vec (take-while #(= "system" (:role %)) history))
+              retry   (into system (sessions/messages stem))]
+          (when (and (some? result)
+                     (< (pressure/estimate-messages retry) (pressure/estimate-messages history)))
+            retry))))
+    (catch Throwable _ nil)))
 
 (defn- compact-if-pressured!
   "AUTO COMPACTION (ticket 04): at the start of a run, BEFORE it derives its request, measure
@@ -4576,7 +4622,7 @@
                    (>= (:pressureTokens answer) (:thresholdTokens answer))
                    (not (compaction/lock-active? records)))
           (when-some [provider (providers/current-provider stem)]
-            (run-compaction! stem provider records (:windowTokens answer) ratios))))))
+            (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
   nil)
@@ -4615,7 +4661,7 @@
           (api-response 400 {:error (:error read) :threadId stem})
           (try
             (let [result (run-compaction! stem provider (:ok read)
-                                            (:context-window provider) (compaction/config stem))]
+                                            (:context-window provider) (compaction/config stem) nil)]
               (api-response 200 {:threadId  stem
                                  :compacted (some? result)
                                  :shadowed  (:shadowed result)}))

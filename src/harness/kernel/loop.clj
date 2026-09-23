@@ -138,18 +138,38 @@
   puts it in the request body and the start event records it. That is what makes
   `model/start`'s :tools the table that WENT OUT rather than a second resolution
   that happens to agree -- and it is why the resolve lives in this function rather
-  than in the provider layer."
-  [provider history emit thread-id]
-  (let [specs (tools/specs thread-id)]
-    (emit (ev/model-start provider specs))
-    (try
-      (let [{:keys [message telemetry]}
-            (llm/stream! (assoc provider :tools specs) history emit thread-id)]
-        (emit (ev/model-end telemetry))
-        message)
-      (catch Throwable t
-        (emit (ev/model-end nil))
-        (throw t)))))
+  than in the provider layer.
+
+  A REFUSAL FOR LENGTH IS RECOVERABLE, and this is the only place that can act on one. The
+  vendor refused the WHOLE request, so before the run ends the history is handed to
+  `:on-overflow` for an AGGRESSIVE compaction, and -- when it comes back SHORTER -- the call
+  is made again, in the same turn, before any terminal frame. `:overflow-retries` caps the
+  attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
+  prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
+  nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
+  [provider history emit thread-id {:keys [on-overflow recoveries halted?] :or {recoveries 1}}]
+  (loop [attempt 0]
+    (let [specs   (tools/specs thread-id)
+          _       (emit (ev/model-start provider specs))
+          outcome (try
+                    (let [{:keys [message telemetry]}
+                          (llm/stream! (assoc provider :tools specs) @history emit thread-id)]
+                      (emit (ev/model-end telemetry))
+                      {:message message})
+                    (catch Throwable t
+                      (emit (ev/model-end nil))
+                      {:error t}))]
+      (if-some [t (:error outcome)]
+        (if (and (llm/context-overflow? t)
+                 on-overflow
+                 (not (halted?))
+                 (< attempt recoveries))
+          (if-some [shorter (try (on-overflow @history t) (catch Throwable _ nil))]
+            (do (reset! history (vec shorter))
+                (recur (inc attempt)))
+            (throw t))
+          (throw t))
+        (:message outcome)))))
 
 (defn- unanswerable-call-message
   "What the run is refused WITH when its history leaves a tool call unanswered that no
@@ -225,12 +245,17 @@
 
   A THROW IS CARRIED AS A VALUE (`t`) rather than escaping the thread: a go/thread's
   exception goes nowhere, and the loop is what has to turn it into `:run/error` on the
-  one path that already does."
-  [provider history emit thread-id cancel]
-  (let [ch (async/chan 1)
-        call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))]
+  one path that already does.
+
+  OPTS carries the overflow recovery through to the call -- `:on-overflow` and the retry
+  ceiling -- while the run's own stop switch supplies `:halted?`, so a run a person stopped
+  is not prolonged by a retry that arrives after the press."
+  [provider history emit thread-id cancel opts]
+  (let [ch        (async/chan 1)
+        call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))
+        opts      (assoc opts :halted? #(stop/rung? cancel))]
     (async/thread
-      (async/>!! ch (try (model-call! provider history call-emit thread-id)
+      (async/>!! ch (try (model-call! provider history call-emit thread-id opts)
                          (catch Throwable t t))))
     ch))
 (defn- drive!
@@ -301,7 +326,8 @@
   the one that really was. So the run keeps its own account: {:history <the final
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
-  [provider messages emit {:keys [thread-id resume before-llm cancel] :as _opts}]
+  [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow overflow-retries]
+                            :as _opts}]
   (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
         ;; after whatever the client recorded meanwhile -- and folded in file order that
@@ -324,6 +350,10 @@
         ;; same either way -- exactly how the unbound hook sink keeps its callers
         ;; free of a second branch.
         prepare (or before-llm (fn [h _thread-id] h))
+        ;; HOW MANY TIMES A CALL THE VENDOR REFUSED FOR LENGTH MAY BE RETRIED (see
+        ;; `model-call!`). Read from the edge's config; an offline run hands in nothing and
+        ;; gets the default, and 0 turns the recovery off entirely.
+        retries (long (or overflow-retries 1))
         ;; WHAT THE STEP JUST ADDED, SAID OUT LOUD. Applying the step is one atomic
         ;; step (swap-vals! answers both sides of it), so the messages it appended are
         ;; exactly the tail past the old count -- and each one is emitted as
@@ -387,7 +417,9 @@
                       ;; THE MODEL CALL IS THE LONG ONE, so it runs on a thread of its own
                       ;; and this waits on BOTH it and the switch: a stop does not have to
                       ;; wait for a vendor that is still talking.
-                      reply     (model-call-stoppable provider @history emit thread-id cancel)
+                      reply     (model-call-stoppable provider history emit thread-id cancel
+                                                                     {:on-overflow on-overflow
+                                                                      :recoveries  retries})
                       answer    (await-call [reply] cancel)
                       _         (when (:stopped? answer) (stopped!))
                       assistant (let [v (:value answer)]

@@ -389,6 +389,46 @@
                    [m])))
              (range (count msgs))))))
 
+(def ^:private overflow-refusals
+  "The phrases a vendor's own CONTEXT-OVERFLOW refusal carries, as substrings of its
+  verbatim sentence. They are copied from real refusals rather than invented, because the
+  sentence IS the evidence: OpenAI says 'This model's maximum context length is N tokens.',
+  Anthropic says 'prompt is too long', and a gateway may send the machine code
+  'context_length_exceeded'. A vendor whose wording is absent here is simply not recognised
+  and the run fails as it did before -- the honest failure, not a wrong recovery."
+  ["maximum context length"
+   "context length exceeded"
+   "context_length_exceeded"
+   "context window"
+   "prompt is too long"
+   "reduce the length of the messages"
+   "too many tokens"
+   "maximum number of tokens"
+   "input is too long"
+   "message is too long"])
+
+(defn context-overflow?
+  "T -> true when T is a vendor's refusal for LENGTH -- 'this request is too big for my
+  context window' -- and false for every other failure.
+
+  IT IS ONE FAILURE, NOT ALL OF THEM. A 400 is a vendor's answer to many mistakes (a malformed
+  tool call, an undeclared modality, a bad parameter), and treating every 400 as 'too long'
+  would make a caller throw away history over an unrelated bug -- losing the very context that
+  explains it. So two things must agree: the status is a CLIENT error the length refusals
+  actually use (400/413/422), AND the vendor's own sentence carries one of `overflow-refusals`.
+  The sentence is the evidence, and it is the part that cannot be paraphrased away.
+
+  NO CAPACITY IS CONSULTED. The vendor has already answered, so a caller needs no window and no
+  estimate to act -- which is the point: the estimate `harness.edge.pressure` makes is known to
+  be wrong, and this is the path that does not rest on it."
+  [t]
+  (boolean
+   (when (instance? Throwable t)
+     (let [{:keys [status]} (ex-data t)
+           message          (str/lower-case (str (ex-message t)))]
+       (and (contains? #{400 413 422} status)
+            (some #(str/includes? message %) overflow-refusals))))))
+
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model

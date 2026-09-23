@@ -21,8 +21,13 @@
 
 (defn- script-provider [script on-event]
   (let [turn (first @script)
-        {:keys [reasoning reasoning-after content tool-calls usage]} turn]
+        {:keys [reasoning reasoning-after content tool-calls usage refuse]} turn]
     (swap! script #(vec (rest %)))
+    (when refuse
+      (let [[status body] (if (map? refuse)
+                            [(:status refuse 400) (:body refuse)]
+                            [400 refuse])]
+        (throw (ex-info (str "HTTP " status ": " body) {:status status}))))
     (emit! ev/reasoning-delta reasoning on-event)
     (emit! ev/text-delta content on-event)
     ;; THE VENDOR SHAPE THAT PUT A SECOND 思考 ROW ON THE PAGE (2026-09-22). A thinking-mode
@@ -60,7 +65,12 @@
 (defn scripted
   "Provider over a vector of turns. A turn is
      {:reasoning s, :content s, :reasoning-after s,
-      :tool-calls [{:id s :name s :arguments map}], :usage map}
+      :tool-calls [{:id s :name s :arguments map}], :usage map,
+      :refuse {:status n :body s}}
+  `:refuse` IS A VENDOR SAYING NO BEFORE THE STREAM OPENS -- the turn's whole content is the
+  HTTP status and body `harness.kernel.llm` would have thrown, so a test can meet an overflow
+  refusal (or any other) without a network. A bare string is a 400; a map names the status.
+  The turn is CONSUMED like any other, so the script that follows it is what the next call sees.
   `:reasoning-after` IS REASONING THAT ARRIVES AFTER THE ANSWER STARTED -- the shape a
   real thinking-mode vendor streamed (see the emitter below). It is emitted after
   `:content` and joins the SAME reasoning message on the wire (`harness.edge.ag-ui`).

@@ -434,3 +434,58 @@
 
     (testing "the run still finishes -- nothing about it is unanswered"
       (is (= :run/end (:type (last seen)))))))
+
+;; ------------------------------------------------ overflow recovery (ticket 05)
+
+(defn- refusing
+  "A scripted provider whose FIRST call the vendor refuses for LENGTH, then TURNS."
+  [turns]
+  (fake/scripted (into [{:refuse {:status 400
+                                  :body "This model's maximum context length is 128000 tokens."}}]
+                       turns)))
+
+(deftest an-overflow-refusal-recovers-in-the-same-turn-and-retries
+  (let [sent      (atom [])
+        on-overflow (fn [history _t]
+                      (swap! sent conj history)
+                      [{:role "user" :content "compacted"}])
+        {:keys [history seen]} (drive (refusing [{:content "answered after recovery"}])
+                                      [{:role "user" :content "u1"} {:role "user" :content "u2"}]
+                                      {:on-overflow on-overflow :overflow-retries 1})]
+    (testing "the run finishes, in ONE run, on the retry's answer"
+      (is (= :run/end (:type (last seen))))
+      (is (= "answered after recovery" (:content (last history)))))
+    (testing "the recovery saw the history that was actually sent"
+      (is (= [{:role "user" :content "u1"} {:role "user" :content "u2"}] (first @sent))))
+    (testing "and the history the run ended with is the SHORTER one"
+      (is (= [{:role "user" :content "compacted"}
+              {:role "assistant" :content "answered after recovery"}]
+             history)))))
+
+(deftest a-recovery-that-shrinks-nothing-hands-the-refusal-out-untouched
+  (let [{:keys [seen]} (drive (refusing [])
+                              [{:role "user" :content "u1"}]
+                              {:on-overflow (fn [_ _] nil) :overflow-retries 1})
+        terminal (last seen)]
+    (is (= :run/error (:type terminal)))
+    (is (str/includes? (:message terminal) "maximum context length")
+        "the vendor's own words, not a recovery's")))
+
+(deftest the-retry-ceiling-of-zero-disables-the-recovery
+  (let [called (atom 0)
+        {:keys [seen]} (drive (refusing [])
+                              [{:role "user" :content "u1"}]
+                              {:on-overflow (fn [_ _] (swap! called inc) [{:role "user" :content "x"}])
+                               :overflow-retries 0})]
+    (is (= 0 @called) "0 means no recovered call at all")
+    (is (= :run/error (:type (last seen))))))
+
+(deftest a-400-that-is-not-about-length-is-not-recovered
+  (let [called (atom 0)
+        provider (fake/scripted [{:refuse {:status 400 :body "unknown parameter: max_tokens"}}])
+        {:keys [seen]} (drive provider
+                              [{:role "user" :content "u1"}]
+                              {:on-overflow (fn [_ _] (swap! called inc) [{:role "user" :content "x"}])
+                               :overflow-retries 1})]
+    (is (= 0 @called) "an unrelated refusal is not the one recovery is for")
+    (is (= :run/error (:type (last seen))))))
