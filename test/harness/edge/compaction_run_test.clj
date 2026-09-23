@@ -153,4 +153,5 @@
               "start first, end last")))
       (finally
         (stop)
+        (io/delete-file log true)
         (providers/use-provider! thread-id nil)))))

@@ -4522,6 +4522,8 @@
       (nil? (:context-window provider))
       (api-response 400 {:error "this model declares no context window, so there is nothing to measure against"})
 
+      (running? stem)
+      (api-response 409 {:error "this session has a run in flight; compact between turns"})
       :else
       (let [read (try {:ok (replay/read-records (:ok located))}
                       (catch Throwable t {:error (ex-message t)}))
@@ -4530,16 +4532,17 @@
           (api-response 400 {:error (:error read) :threadId stem})
           (try
             (let [records   (:ok read)
-                  append    (fn [kind payload]
+                  put       (fn [kind payload]
                               (swap! written conj [kind payload])
                               (log! stem nil kind payload))
+                  append    put
                   summarize (fn [messages]
                               (let [specs []
                                     p     (assoc provider :tools specs)]
                                 ;; THE SUMMARY IS ITS OWN MODEL CALL: it is bracketed like any
                                 ;; other, so the record says which model wrote it and what it cost.
-                                (log! stem nil "model/start"
-                                      (dissoc (ev/model-start p specs) :type))
+                                (put "model/start"
+                                     (dissoc (ev/model-start p specs) :type))
                                 (try
                                   (let [{:keys [message telemetry]}
                                         (llm/stream! p
@@ -4547,11 +4550,11 @@
                                                            {:role "user"
                                                             :content compaction/summary-instruction})
                                                      (fn [_]) stem)]
-                                    (log! stem nil "model/end" telemetry)
+                                    (put "model/end" telemetry)
                                     (let [content (:content message)]
                                       (if (string? content) content (str content))))
                                   (catch Throwable t
-                                    (log! stem nil "model/end" {})
+                                    (put "model/end" {})
                                     (throw t)))))]
               (let [result (compaction/perform! records
                                                {:window       (:context-window provider)

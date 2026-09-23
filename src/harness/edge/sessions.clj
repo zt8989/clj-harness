@@ -436,8 +436,14 @@
   process does not hold."
   [thread-id facts]
   (let [id (str thread-id)]
-    (when-let [e (get @registry id)]
-      (swap! registry assoc id (assoc e :compactions (vec facts)))))
+    ;; READ-MODIFY-WRITE IN ONE `swap!` (docs/rules/concurrency.md): a run mutates the same
+    ;; entry concurrently, and taking the entry out to `assoc` a constant map would drop
+    ;; whatever landed in between.
+    (swap! registry
+           (fn [m]
+             (if-let [e (get m id)]
+               (assoc m id (assoc e :compactions (vec facts)))
+               m))))
   nil)
 
 (defn- as-sent
