@@ -336,6 +336,59 @@
               (distinct))
         (range (count messages))))
 
+(defn adjacent-answers
+  "MESSAGES -> the same messages, with every recorded tool answer sitting DIRECTLY BEHIND
+  the assistant message that named its call, in call order.
+  
+  THE OTHER HALF OF `unanswered-tool-calls`, and it exists because a RECORD CAN DELIVER AN
+  ANSWER LATE. A run cut off mid-call is repaired by
+  `harness.edge.replay/closing-frames`, whose TOOL_CALL_RESULT is APPENDED to the log --
+  after whatever else the client recorded in the meantime, its next messages included.
+  Folded back in file order, that answer lands BEHIND those messages, so the call reads as
+  unanswered and the vendor refuses the whole conversation before the model runs: the
+  session is bricked even though a result for the call is sitting right there.
+  
+  MOVING IT IS NOT INVENTING A RESULT: the message is already in the history, and this is
+  the same placement `harness.kernel.loop/answer!` makes for a replayed call, one layer up.
+  What it never does is invent one: an answer with no assistant message in the list to sit
+  behind is LEFT WHERE IT IS, exactly as `answer!` leaves an unplaced replay -- nothing
+  here reports it, because there is no call for the vendor to miss either.
+  
+  A WELL-SHAPED HISTORY COMES BACK UNCHANGED, message for message: an answer already
+  directly behind its call is emitted where it was, and the rest of the list does not move."
+  [messages]
+  (let [msgs    (vec messages)
+        ;; THE ASSISTANT MESSAGE THAT NAMED EACH CALL, by call id -- the same reading
+        ;; `unanswered-tool-calls` walks, so the two cannot disagree about what a call is.
+        owner   (into {}
+                      (for [[i m] (map-indexed vector msgs)
+                            :when (= "assistant" (:role m))
+                            tc    (:tool_calls m)]
+                        [(:id tc) i]))
+        ;; CALL ID -> THE INDICES OF THE TOOL MESSAGES THAT ANSWER IT *and have a call here
+        ;; to sit behind*. An answer with no owner is not movable (see the docstring).
+        answers (reduce (fn [acc [i m]]
+                          (let [cid (when (= "tool" (:role m)) (:tool_call_id m))]
+                            (if (and cid (contains? owner cid))
+                              (update acc cid (fnil conj []) i)
+                              acc)))
+                        {} (map-indexed vector msgs))
+        moved?  (into #{} (mapcat val answers))]
+    (vec
+     (mapcat (fn [i]
+               (let [m (nth msgs i)]
+                 (cond
+                   ;; THIS ONE IS EMITTED BEHIND ITS CALL, not here.
+                   (contains? moved? i)
+                   nil
+                   ;; THE CALL: itself, then its answers in call order.
+                   (= "assistant" (:role m))
+                   (cons m (mapcat (fn [tc] (map #(nth msgs %) (get answers (:id tc))))
+                                   (:tool_calls m)))
+                   :else
+                   [m])))
+             (range (count msgs))))))
+
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model

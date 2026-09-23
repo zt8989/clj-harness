@@ -5766,6 +5766,57 @@
                                                     "{}")))
                     (:messages answer))))))))))
 
+(deftest a-repair-that-arrived-behind-later-messages-still-answers-its-call
+  ;; THE 2026-09-23 BRICKING (thread 412afbd3). A run was cut off with a tool call in
+  ;; flight; the person kept typing before anything closed that run off; and so the
+  ;; CLOSING REPAIR -- `close-off-open-run!`'s TOOL_CALL_RESULT -- lands at the END of the
+  ;; file, behind those later messages. Folded in file order the call reads as UNANSWERED,
+  ;; and the vendor refuses the rebuilt conversation: every later run of that session dies
+  ;; with `unanswered .. call_..`, and there is nothing a human can press to get out.
+  ;;
+  ;; THE ANSWER IS ALREADY ON THE RECORD, so the run must USE it (moved behind the call it
+  ;; answers), not invent one and not refuse. The provider pinned below IS the vendor's
+  ;; validator (`with-vendor-shaped`), so a history the vendor would refuse cannot reach the
+  ;; model at all -- a green here cannot be a fake that answers anything.
+  (with-vendor-shaped
+   "late-answer"
+   (fn []
+     (let [tid   "late-answer"
+           f     (log-file tid)
+           line! (fn [run-id kind payload & [extra]]
+                   (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                  :runId run-id :kind kind :payload payload}
+                                                 extra))
+                                "\n")
+                         :append true :encoding "UTF-8"))]
+       (io/delete-file f true)
+       (.mkdirs (.getParentFile f))
+       ;; r1: the person's turn, and a call the run never returned from.
+       (line! "r1" "message" {:role "user" :content "看看这个项目"} {:source "client" :id "u1"})
+       (doseq [frame (mapcat (ag/outbound tid "r1")
+                             [(ev/run-start) (ev/tool-call "c1" "read" "{}")])]
+         (line! "r1" "event" frame))
+       ;; r2: what the person typed NEXT, recorded while r1 was still open.
+       (line! "r2" "message" {:role "user" :content "先别管那个"} {:source "client" :id "u2"})
+       (line! "r2" "event" (ev/run-error "the next run was refused"))
+       ;; AND NOW the repair, written the way the edge writes it: a rebuild closes the run
+       ;; off, and its TOOL_CALL_RESULT is APPENDED -- behind u2.
+       (is (= 200 (.statusCode (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))))
+       (testing "the record, folded as it lies, still leaves the dead call unanswered"
+         (let [folded (replay/lines->messages
+                       (str/split-lines (slurp f :encoding "UTF-8")))]
+           (is (= ["c1"] (vec (llm/unanswered-tool-calls
+                               (ag/inbound (sessions/model-view folded) "S" [])))))
+           "the fold is in FILE order, and that order is what the run must not be refused for"))
+       (let [resp   (post-run tid {:append [{:id "u3" :role "user" :content "继续"}]})
+             frames (wire/frames-from-sse (.body resp))]
+         (testing "yet the next run IS answered -- the recorded result is moved behind its call"
+           (is (= 200 (.statusCode resp)))
+           (is (not-any? #(= "RUN_ERROR" (:type %)) frames)
+               (str "saw " (pr-str (mapv :type frames))))
+           (is (some #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames)
+               "the model got its turn: the vendor accepted the history")))))))
+
 (deftest a-rebuild-during-a-live-run-leaves-the-record-alone
   ;; THE CASE THAT MOTIVATED THE REGISTRY. A client that refreshed into a running
   ;; session has a fresh runtime, so its own `isRunning` is false and it may well aim
