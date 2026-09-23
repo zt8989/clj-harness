@@ -176,3 +176,40 @@
     (is (not (some #{0} (:shadowed result))) "the opening's seq is NOT among them")
     (is (some #(= opening-content (:content %)) view)
         "the opening is still in the model view, verbatim")))
+
+(defn- auto-rows
+  ;; Six 4000-character entries (each ~1008 tokens) and a call whose own line declares WINDOW,
+  ;; so the meter has a window to divide by and a history that may or may not cross 0.7 of it.
+  [window]
+  (conj (vec (map (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 6)))
+        (row "model/start" {:model "scripted" :context-window window})
+        (row "model/end" {:usage {:prompt_tokens 100 :completion_tokens 5 :total_tokens 105}})))
+
+(deftest the-pressure-trigger-compacts-at-the-threshold-and-not-below
+  (let [stop (http/start! {:port 0})]
+    (try
+      (testing "over the threshold: it compacts by itself"
+        (let [thread-id "auto-over"
+              log       (plant! thread-id (auto-rows 8000))]
+          (providers/use-provider! thread-id (fake/scripted [{:content "AUTO SUMMARY"}]))
+          (try
+            (#'http/compact-if-pressured! thread-id)
+            (let [ks (mapv replay/kind (wait-for-rows log "compaction/end"))]
+              (is (some #{"compaction/start"} ks))
+              (is (some #{"context/compacted"} ks))
+              (is (some #{"compaction/end"} ks)))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (testing "below it: nothing at all"
+        (let [thread-id "auto-under"
+              log       (plant! thread-id (auto-rows 100000))]
+          (providers/use-provider! thread-id (fake/scripted [{:content "SHOULD NOT BE USED"}]))
+          (try
+            (#'http/compact-if-pressured! thread-id)
+            (let [ks (mapv replay/kind (wait-for-rows log "compaction/start"))]
+              (is (not (some #{"context/compacted"} ks)) "no rows, no model call"))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (finally (stop)))))

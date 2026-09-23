@@ -986,6 +986,9 @@
                       (str "hook/" (:point payload))
                       (dissoc payload :point)))})
 
+;; Defined below with the compaction route; `run-agent!` calls it at the start of every run,
+;; BEFORE it derives the request (ticket 04).
+(declare compact-if-pressured!)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1051,6 +1054,10 @@
           ;; (nothing enters) and at birth (the opening enters, and the client never sent
           ;; it). The record keeps both because the fold reads `:added` and a reader
           ;; asking 'why is my message not in here' needs to see what was sent.
+          ;; AUTO COMPACTION (ticket 04): before this run derives its request, is the model's
+          ;; window about to run out? At or over the threshold, compact NOW -- so `history`
+          ;; below reads the compacted conversation. Below it, nothing happens.
+          (compact-if-pressured! thread-id)
           (let [history  (sessions/messages thread-id)
                 born?    (empty? history)
                 [opening opening-failure]
@@ -4498,6 +4505,66 @@
                          :dir dir :via "http"})
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
+(defn- run-compaction!
+  "One compaction, against RECORDS with PROVIDER, measuring against WINDOW: summarize (ONE
+  model call, bracketed like any other), write the rows, and tell the live session. Returns
+  the result map, or nil when there was nothing to compact. Shared by the manual route and
+  the automatic trigger so the two cannot drift."
+  [stem provider records window]
+  (let [written   (atom [])
+        put       (fn [kind payload]
+                    (swap! written conj [kind payload])
+                    (log! stem nil kind payload))
+        summarize (fn [messages]
+                    (let [specs []
+                          p     (assoc provider :tools specs)]
+                      (put "model/start" (dissoc (ev/model-start p specs) :type))
+                      (try
+                        (let [{:keys [message telemetry]}
+                              (llm/stream! p
+                                           (conj (vec messages)
+                                                 {:role "user" :content compaction/summary-instruction})
+                                           (fn [_]) stem)]
+                          (put "model/end" telemetry)
+                          (let [content (:content message)]
+                            (if (string? content) content (str content))))
+                        (catch Throwable t
+                          (put "model/end" {})
+                          (throw t)))))]
+    (let [result (compaction/perform! records
+                                      {:window       window
+                                       :retain-ratio pressure/retain-ratio
+                                       :append       put
+                                       :summarize    summarize})]
+      (when (seq @written)
+        (sessions/set-compactions!
+         stem
+         (replay/compaction-facts
+          (into (vec records) (map (fn [[k p]] (row-of k p)) @written)))))
+      result)))
+
+(defn- compact-if-pressured!
+  "AUTO COMPACTION (ticket 04): at the start of a run, BEFORE it derives its request, measure
+  the pressure against the window the record describes and compact when it is at or over the
+  threshold. Below the threshold, nothing happens at all -- no rows, no model call.
+  `harness.edge.pressure` owns the threshold and where the window comes from.
+
+  FAILS SOFT: a report-only meter must never become a dead run, so anything wrong here is
+  logged and the run carries on uncompacted."
+  [stem]
+  (try
+    (when-some [f (replay/find-log (home/projects-dir) stem)]
+      (let [records (replay/read-records f)
+            answer  (pressure/records->pressure records (sessions/messages stem))]
+        (when (and (:thresholdTokens answer)
+                   (>= (:pressureTokens answer) (:thresholdTokens answer))
+                   (not (compaction/lock-active? records)))
+          (when-some [provider (providers/current-provider stem)]
+            (run-compaction! stem provider records (:windowTokens answer))))))
+    (catch Throwable t
+      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
+  nil)
+
 (defn- compact-post
   "POST /api/threads/<stem>/compact -- one compaction, run by hand (ticket 03).
 
@@ -4526,51 +4593,14 @@
       (api-response 409 {:error "this session has a run in flight; compact between turns"})
       :else
       (let [read (try {:ok (replay/read-records (:ok located))}
-                      (catch Throwable t {:error (ex-message t)}))
-            written (atom [])]
+                      (catch Throwable t {:error (ex-message t)}))]
         (if (some? (:error read))
           (api-response 400 {:error (:error read) :threadId stem})
           (try
-            (let [records   (:ok read)
-                  put       (fn [kind payload]
-                              (swap! written conj [kind payload])
-                              (log! stem nil kind payload))
-                  append    put
-                  summarize (fn [messages]
-                              (let [specs []
-                                    p     (assoc provider :tools specs)]
-                                ;; THE SUMMARY IS ITS OWN MODEL CALL: it is bracketed like any
-                                ;; other, so the record says which model wrote it and what it cost.
-                                (put "model/start"
-                                     (dissoc (ev/model-start p specs) :type))
-                                (try
-                                  (let [{:keys [message telemetry]}
-                                        (llm/stream! p
-                                                     (conj (vec messages)
-                                                           {:role "user"
-                                                            :content compaction/summary-instruction})
-                                                     (fn [_]) stem)]
-                                    (put "model/end" telemetry)
-                                    (let [content (:content message)]
-                                      (if (string? content) content (str content))))
-                                  (catch Throwable t
-                                    (put "model/end" {})
-                                    (throw t)))))]
-              (let [result (compaction/perform! records
-                                               {:window       (:context-window provider)
-                                                :retain-ratio pressure/retain-ratio
-                                                :append       append
-                                                :summarize    summarize})]
-                (when (seq @written)
-                  ;; AND THE LIVE SESSION LEARNS: otherwise the next request is built from a
-                  ;; model view that still has the shadowed history in it.
-                  (sessions/set-compactions!
-                   stem
-                   (replay/compaction-facts
-                    (into (vec records) (map (fn [[k p]] (row-of k p)) @written)))))
-                (api-response 200 {:threadId  stem
-                                   :compacted (some? result)
-                                   :shadowed  (:shadowed result)})))
+            (let [result (run-compaction! stem provider (:ok read) (:context-window provider))]
+              (api-response 200 {:threadId  stem
+                                 :compacted (some? result)
+                                 :shadowed  (:shadowed result)}))
             (catch Throwable t
               (api-response 400 {:error (ex-message t) :threadId stem}))))))))
 
