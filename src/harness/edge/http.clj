@@ -2069,6 +2069,12 @@
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)
+                          ;; AND THE SAME NUMBERED FRAME GOES DOWN THE DOWNLINK (`events.mux`),
+                          ;; so a panel can read the child's live frames from the one page-wide
+                          ;; socket (ticket 04) instead of holding a channel of its own. The `:seq`
+                          ;; is the same counter the record carries, which is what makes the
+                          ;; boundary between the replay and the live tail exact.
+                          (mux-broadcast! thread-id f)
                           (swap! frames conj f)))
                       (recur)))
                   ;; THE CHANNEL CLOSED. The kernel closes it after :run/done, so an
@@ -2848,7 +2854,7 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  SEVEN OF THE TEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
+  EIGHT OF THE ELEVEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
   same file while it is still being written, and the window's two verbs (`feed`,
   `page`) read it in pieces. The set stays closed and the 405 stays here -- what
@@ -2875,7 +2881,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "frames" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3307,6 +3313,46 @@
             ;; still would not block -- but the frames would be lost to nobody, which
             ;; is waste, not correctness).
             (end!))})))))
+
+(defn- frames-get
+  "GET /api/threads/<stem>/frames -- the REPLAY half of the `follow` channel as JSON: this
+  conversation's frames as the record holds them, ordered the way a runtime must read them
+  (a `RUN_STARTED` first, then the conversation snapshot the frames cannot rebuild, then the
+  frames), and whether this process is still running it.
+
+  WHY THIS IS APART FROM `follow`: the LIVE tail moves to the page-wide downlink
+  (`events.mux`, ADR 0004, ticket 04) -- one socket for every panel instead of a channel
+  each -- and the record is still where a panel CATCHES UP. The two are joined by the
+  frame's own `:seq` (the bus's counter, which the record carries too): a frame the live
+  tail hands over that is not past the replay's last number is one the replay already gave.
+
+  READ-ONLY, like `stats` and `follow`: nothing here writes."
+  [stem]
+  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
+                     (catch Throwable t {:error (ex-message t)}))]
+    (if (some? (:error located))
+      (api-response 404 {:error (:error located) :threadId stem})
+      (let [records  (try (stats/read-records (:ok located)) (catch Throwable _ []))
+            frames   (->> records (filter replay/frame?) (mapv replay/payload))
+            streamed (into #{} (keep :messageId) frames)
+            opening  (remove #(contains? streamed (:id %))
+                             (try (replay/messages-so-far records) (catch Throwable _ [])))
+            snapshot (when (seq opening) (ag/conversation-snapshot opening))
+            first-frame (first frames)
+            started? (= "RUN_STARTED" (:type first-frame))
+            started  (if started?
+                       first-frame
+                       {:type "RUN_STARTED"
+                        :threadId stem
+                        :runId (or (some-> (first records) :runId)
+                                   (str (java.util.UUID/randomUUID)))})
+            tail     (if started? (rest frames) frames)]
+        (api-response 200
+                      {:threadId stem
+                       :running  (some? (subagents/live-subagent stem))
+                       :frames   (vec (concat [(dissoc started :seq)]
+                                              (when snapshot [snapshot])
+                                              tail))})))))
 
 
 (defn- delegations-get
@@ -5251,6 +5297,7 @@
         [:get "page"]     (page-get req stem)
         [:get "delegations"] (delegations-get stem)
         [:get "follow"]      (follow-get req stem)
+        [:get "frames"]    (frames-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

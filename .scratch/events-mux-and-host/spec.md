@@ -155,3 +155,21 @@ socket 只下行，所以**订阅在 HTTP 层完成**：
 run 帧，socket 一断，断开那一段的 AG-UI 帧就没了；重连后只续上新的帧（窗口那半有拉页对齐，run 这半
 没有）。要按票面做成，得给每条 run 一个可回放的帧缓冲（像窗口的 `seq` 那样给个游标），或让重连走
 一次「重放 + 续传」。**票 03 因此没有按「完成即删除」处理，留在 `issues/` 里。**
+
+## 落地（2026-09-23）：票 04
+
+**子 agent 的对话改从页面那一条下行读，面板不再攥着自己的一条 SSE。**
+
+- **服务端**：新增 `GET /api/threads/<stem>/frames`——`follow` 的**重放半边**作为 JSON
+  （`RUN_STARTED` 起头、快照随后、记录里的帧按序，而且**保留 `:seq`**），另给一个 `:running`。
+  `run-subagent!` 在把每帧交给 record 与 frame-bus 的**同一处**也 `mux-broadcast!` 下行——同一颗
+  `:seq`，所以「重放 + 实时尾巴」的边界是精确的，重复的那段按号丢掉。`thread-verbs` 收进 `frames`
+  （闭集，计数改成 EIGHT OF THE ELEVEN）。
+- **客户端**：`lib/follow.ts` 的 `FollowAgent` 的 transport 换成「**先订阅下行、再读重放、按 `:seq`
+  去重**、拼成 SSE 交给 `@ag-ui/client` 的解析器」；面板构造时同时给出 frames URL 与 threadId
+  （一个是读、一个是实时尾巴的声明）。
+
+**验证**：`harness.edge.follow-route-test` **6 tests / 41 assertions / 0 failures**（新增两条：
+重放 JSON 的形状与 `:seq` 保留、未知 stem 的 404）；真浏览器
+`.scratch/events-mux-and-host/walkthrough-follow.mjs` **ALL GREEN**——面板打开、并显示子 agent
+被交办的任务（**只有记录重放能重建的那一帧**），且无错误。

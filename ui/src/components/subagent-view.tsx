@@ -52,7 +52,7 @@ import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
 import { type SubagentView } from "@/components/subagent-view-context";
-import { FollowAgent, followUrl } from "@/lib/follow";
+import { FollowAgent, framesUrl } from "@/lib/follow";
 
 /// The panel, one delegation at a time. `view` is the single value the page holds
 /// (ticket 05: opening another one REPLACES it), so this component has no state of
@@ -68,7 +68,13 @@ export const SubagentViewPanel: FC<{
   /// this memo has one id for its whole life: two subagents must never share a
   /// transport, and a host that outlived its delegation would keep a subscription
   /// nobody is reading (the spec refuses exactly that).
-  const agent = useMemo(() => new FollowAgent({ url: followUrl(view.threadId) }), [view.threadId]);
+  // THE THREAD IS NAMED TWICE ON PURPOSE: the URL is where the record replay is read, and
+  // `threadId` is what the downlink subscription is declared for -- one is a read, the
+  // other is the live tail, and the agent is the thing that joins them.
+  const agent = useMemo(
+    () => new FollowAgent({ url: framesUrl(view.threadId), threadId: view.threadId }),
+    [view.threadId],
+  );
 
   const runtime = useAgUiRuntime({
     agent,

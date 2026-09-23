@@ -365,3 +365,37 @@
           ;; stream pretending it does; the management edge's own 404 is the answer.
           (is (= 404 status))
           (is (str/includes? (str (:error body)) "never-was")))))))
+(deftest the-frames-route-answers-the-replay-as-json-and-keeps-the-number
+  ;; TICKET 04: the replay half a panel reads BEFORE the downlink carries the live tail.
+  ;; The same frames the follow channel replays, as JSON -- and unlike the follow wire each
+  ;; frame KEEPS its `:seq`, because that number is what lets the client drop a live frame
+  ;; the replay already handed over (the two sources overlap by construction).
+  (let [thread "fr-json"]
+    (with-server thread script
+      (fn []
+        (post-run thread)
+        (let [child (child-of thread)
+              _     (child-log child)
+              {:keys [status body]} (api-get (str "/api/threads/" child "/frames"))
+              ;; `api-get` parses already; the body is the map.
+              parsed   body
+              fs       (:frames parsed)
+              recorded (frames-of (child-log child))]
+          (testing "the replay opens with the run, then the snapshot inside it"
+            (is (= 200 status))
+            (is (= "RUN_STARTED" (:type (first fs))))
+            (is (= "MESSAGES_SNAPSHOT" (:type (second fs)))))
+          (testing "every recorded frame is there, in order, terminal last"
+            (is (seq recorded))
+            (is (= (mapv :type recorded) (mapv :type (into [(first fs)] (drop 2 fs)))))
+            (is (= "RUN_FINISHED" (:type (last fs)))))
+          (testing "a finished child is not claimed to be running"
+            (is (false? (:running parsed))))
+          (testing "AND THE NUMBER IS KEPT -- the boundary the client dedupes by"
+            (is (some #(contains? % :seq) fs))))))))
+
+(deftest the-frames-route-refuses-a-stem-that-is-nowhere
+  (with-server "fr-404" script
+    (fn []
+      (let [{:keys [status]} (api-get "/api/threads/never-was-here/frames")]
+        (is (= 404 status))))))

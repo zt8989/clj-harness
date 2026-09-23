@@ -143,14 +143,15 @@ const cases: Case[] = [
     },
   },
   {
-    name: "the-mirror-follows-the-read-only-channel-and-never-posts",
+    name: "the-mirror-reads-the-record-and-takes-its-live-tail-from-the-downlink",
     run: async () => {
-      // THE PANEL'S CLIENT IS A GET. The follow route answers no `RunAgentInput` and
-      // accepts no input, so the transport is replaced wholesale -- and the base class's
-      // POST body is not merged into it but dropped.
-      expect(followSource).toContain('method: "GET"');
+      // THE PANEL NEVER POSTS AND NO LONGER HOLDS A CHANNEL OF ITS OWN (ticket 04): it reads
+      // the record's replay over HTTP and takes the child's LIVE frames from the page-wide
+      // downlink (`events.mux`), joined by the frame's own `:seq`. The base class's POST body
+      // is not merged into the request but dropped -- there is no run to carry one.
       expect(followSource).not.toContain('"POST"');
-      expect(followSource).toMatch(/threads\/\$\{encodeURIComponent\(threadId\)\}\/follow/);
+      expect(followSource).toMatch(/threads\/\$\{encodeURIComponent\(threadId\)\}\/frames/);
+      expect(followSource).toContain("subscribeRun(");
       // THE SIGNAL IS KEPT, because it is the abort path: closing the panel is what
       // drops the server-side subscription.
       expect(followSource).toContain("signal: init?.signal ?? null");
