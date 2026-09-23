@@ -5476,11 +5476,19 @@
          (is (str/includes? (.body (post-run "stop-vendor")) "RUN_FINISHED")))))))
 (defn- command-turn
   "One scripted turn whose single call runs a command that writes ITS OWN PID to FILE
-  and then hangs -- the shape somebody presses Stop in front of."
+  and then hangs -- the shape somebody presses Stop in front of.
+
+  THE COMMAND IS `harness.test-support/child-command`'S, and that is the whole point rather
+  than a detail: it is the one spelling of 'a shell with a live child, and that child's OS
+  pid on disk' that holds on Windows. `echo $$ > <a Windows path>` failed there twice over --
+  `$$` is MSYS's OWN number, which `ProcessHandle/of` cannot resolve (so `alive?` answers
+  false about a command that is running: see `child-command`'s note), and the backslashes in
+  the path are eaten on the way through bash, so the file was never written at all. The case
+  read both as 'the scripted commands never started'."
   [file]
   [{:content ""
     :tool-calls [{:id "c1" :name "bash"
-                  :arguments {:command (str "echo $$ > " file "; sleep 30")}}]}
+                  :arguments {:command (support/child-command (io/file file))}}]}
    {:content "done"}])
 
 (defn- pid-in
@@ -6335,8 +6343,16 @@
                                        (keep #(try (json/read-str % :key-fn keyword)
                                                    (catch Throwable _ nil)))
                                        vec)]
-                           (when (some #(= "message" (:type %)) rs) rs)))
-                       5000)]
+                           ;; THE WHOLE RECORD, NOT THE FIRST THING IN IT. The rows below are
+                           ;; the FORMAT's own bytes, and a run's terminal frame is written after
+                           ;; its body ends -- waiting only for the first `message` row read a
+                           ;; record whose ending had not landed yet, and the three assertions
+                           ;; below then found no terminal frame at all. The budget is the
+                           ;; machine's: a scripted run plus the writer's flush, not 5s.
+                           (when (and (some #(= "message" (:type %)) rs)
+                                      (some #(= "RUN_FINISHED" (get-in % [:payload :type])) rs))
+                             rs)))
+                       15000)]
        (testing "every row is one of the two, and carries a payload"
          (is (seq rows))
          (is (every? #(contains? #{"event" "message"} (:type %)) rows)

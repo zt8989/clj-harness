@@ -107,6 +107,23 @@
           ls
           (do (Thread/sleep 50) (recur)))))))
 
+
+(defn- wait-for-text
+  "A FILE'S TEXT once PRED holds of it, or its last reading when MS runs out."
+  ;;
+  ;; THE MARKER IS WRITTEN BY THE HOOK'S OWN CHILD, and `marker-script` appends the payload
+  ;; and then a label line -- so the LABEL's presence is 'that command ran to the end', and
+  ;; it is the moment the record's hook line and the file agree. Reading the file as soon as
+  ;; the record shows the hook fired is a race, and it lost one on 2026-09-23: a
+  ;; FileNotFoundException about a point that had, as far as the record went, fired.
+  [path pred ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (let [f (io/file path)
+            text (if (.exists f) (slurp f :encoding "UTF-8") "")]
+        (if (or (pred text) (> (System/currentTimeMillis) deadline))
+          text
+          (do (Thread/sleep 50) (recur)))))))
 (defn- hook-lines [ls]
   (filter #(str/starts-with? (str (replay/kind %)) "hook/") ls))
 
@@ -524,7 +541,13 @@
     (spit (str proj "/AGENTS.md") "project rules\n" :encoding "UTF-8")
     (project/bind! "hw-instructions" proj)
     (support/write-hooks!
-     {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
+     ;; THE ENGINE'S DEFAULT BUDGET FOR A HOOK IS 10s, AND THAT IS TIGHT FOR THIS ONE: the
+     ;; command has to open a login shell first (2.2s on the machine this was measured on) and
+     ;; then read its payload to EOF before it writes its label. This case was seen with the
+     ;; point fired and allowed and its marker file never written -- killed at the limit before
+     ;; `cat` had seen the end of its stdin. The budget is the CASE's, not the engine's.
+     {:instructions-loaded [{:command (marker-script marker "instructions-loaded")
+                             :timeout 30000}]})
     (with-server
      "hw-instructions"
      (fn []
@@ -544,7 +567,9 @@
            ;; The marker script cats its stdin, so the payload lines are in the
            ;; file -- parsed rather than substring-matched, because JSON escapes
            ;; the path separators.
-           (let [fired (slurp marker)
+           ;; WAITED FOR, NOT READ ONCE: the label's presence is 'the command ran to the end'
+           ;; (see `wait-for-text`), and the record's hook line arrives BEFORE that.
+           (let [fired (wait-for-text marker #(str/includes? % "instructions-loaded") 30000)
                  payloads (into []
                                 (keep (fn [l]
                                         (when (str/starts-with? l "{")
