@@ -73,6 +73,31 @@
            (mapv :content (model-view records)))
         "the first summary is gone, the second stands at the range's head, the tail survives")))
 
+(deftest a-single-node-range-still-lands-its-summary-in-place
+  ;; WITH ONE NODE `start` AND `end` ARE THE SAME NUMBER, so a numeric comparison would
+  ;; happen to work here -- which is exactly why the fold must not rely on it. This is the
+  ;; case that passes for the wrong reason.
+  (let [records [(entry 0 "u1" "one")
+                 (entry 1 "u2" "two")
+                 (entry 2 "u3" "three")
+                 (compacted 3 [1] "S")]]
+    (is (= ["one" "<compacted-summary>S</compacted-summary>" "three"]
+           (mapv :content (model-view records))))))
+
+(deftest two-non-overlapping-compactions-both-stand-in-order
+  (let [records [(entry 0 "u1" "one")
+                 (entry 1 "u2" "two")
+                 (entry 2 "u3" "three")
+                 (entry 3 "u4" "four")
+                 (entry 4 "u5" "five")
+                 (entry 5 "u6" "six")
+                 (compacted 6 [0] "HEAD")
+                 (compacted 7 [4 5] "TAIL")]]
+    (is (= ["<compacted-summary>HEAD</compacted-summary>" "two" "three" "four"
+            "<compacted-summary>TAIL</compacted-summary>"]
+           (mapv :content (model-view records)))
+        "each summary stands where its own range stood, and the untouched middle survives")))
+
 (deftest a-compaction-that-shadows-nothing-changes-nothing
   (testing "a seq that is not on the surface"
     (let [records [(entry 0 "u1" "one") (entry 1 "u2" "two") (compacted 2 [99] "S")]]
