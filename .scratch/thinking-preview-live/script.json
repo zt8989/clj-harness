@@ -1,0 +1,22 @@
+{
+  "turns": [
+    {
+      "reasoning": "第一个想法：先读 deps.edn，看看依赖有没有变。",
+      "content": "",
+      "tool-calls": [
+        { "id": "c1", "name": "read", "arguments": { "path": "deps.edn" } }
+      ]
+    },
+    {
+      "reasoning": "第二个想法：再看一眼工作区是不是干净的。",
+      "content": "",
+      "tool-calls": [
+        { "id": "c2", "name": "bash", "arguments": { "command": "git status" } }
+      ]
+    },
+    {
+      "reasoning": "第三个想法：都确认过了，可以答了。",
+      "content": "好了，依赖没变，工作区是干净的。"
+    }
+  ]
+}

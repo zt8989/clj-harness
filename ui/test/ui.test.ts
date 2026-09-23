@@ -303,7 +303,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// own-words box only where the schema asked for one. The card's count is the claim, not
 /// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
 /// looks perfectly fine doing it.
-const EXPECTED_CASES = 112;
+const EXPECTED_CASES = 113;
 
 let total = 0;
 for (const suite of SUITES) {

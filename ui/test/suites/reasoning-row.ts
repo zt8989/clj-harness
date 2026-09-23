@@ -172,6 +172,53 @@ const cases: Case[] = [
       expect(thoughtAt(carded, 2).drawn).toBe(false);
     },
   },
+  {
+    name: "a-live-run-keeps-a-whole-turn-in-one-message",
+    run: async () => {
+      // THE SHAPE THE ADAPTER ACTUALLY STREAMS: one assistant message per TURN, its
+      // parts carrying every round -- here two thoughts and the call between them.
+      // There is no message boundary to walk, which is what used to empty every
+      // row: the message contained a call, so the whole of it read as a step. The
+      // row is told WHICH part it is (`group.indices[0]`) and the message is read
+      // from there.
+      const live: Message[] = [
+        {
+          role: "assistant",
+          parts: [
+            said("先想一下。"),
+            text("那我开始了。"),
+            call,
+            said("再看一眼。", true),
+          ],
+        },
+      ];
+
+      // THE FIRST THOUGHT IS THE MESSAGE'S FIRST PART and it stops at the call --
+      // not at the message.
+      const first = thoughtAt(live, 0, 0);
+      expect(first.drawn).toBe(true);
+      expect(first.parts.map((part) => part.text)).toEqual(["先想一下。"]);
+      expect(previewOf(first.parts, first.running)).toBe("先想一下。");
+
+      // THE SECOND IS A NEW THOUGHT AFTER THE CALL, read from its own part.
+      const second = thoughtAt(live, 0, 3);
+      expect(second.drawn).toBe(true);
+      expect(second.parts.map((part) => part.text)).toEqual(["再看一眼。"]);
+      expect(second.running).toBe(true);
+      expect(previewOf(second.parts, second.running)).toBe("再看一眼。");
+
+      // TEXT BETWEEN TWO REASONING PARTS IS STILL ONE THOUGHT: the later part
+      // joins the row above and does not draw a row of its own.
+      const split: Message[] = [
+        {
+          role: "assistant",
+          parts: [said("开头。"), text("先答一句。"), said("接着想。")],
+        },
+      ];
+      expect(thoughtAt(split, 0, 0).parts).toHaveLength(2);
+      expect(thoughtAt(split, 0, 2).drawn).toBe(false);
+    },
+  },
 ];
 
 export const reasoningRowSuite: Suite = { name: "reasoning-row", cases };

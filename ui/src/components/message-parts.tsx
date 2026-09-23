@@ -1063,16 +1063,23 @@ const ReasoningTail: FC<{ text: string }> = ({ text }) => {
 /// same rule a tool's result gets.
 const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   children,
+  group,
 }) => {
-  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN, not about
-  // this group: `s.thread.messages` is the conversation and `s.message.index` is
-  // where this message sits in it, which is what `thoughtAt` walks (both rules and
-  // their reasons are in `lib/reasoning-preview.ts`). Two selectors rather than one
-  // object, because the comparison is by reference -- an object literal here would
-  // re-render on every store update (see `useAuiState`'s own note on that).
+  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought
+  // is gathered across the turn's messages (and, for a live run, across the parts of
+  // one message), and the rules for that walk are in `lib/reasoning-preview.ts`.
+  // `s.thread.messages` is the conversation, `s.message.index` is where this message
+  // sits in it, and this row's own group names the part it starts at. Two selectors
+  // rather than one object, because the comparison is by reference -- an object
+  // literal here would re-render on every store update (see `useAuiState`'s note).
   const messages = useAuiState((s) => s.thread.messages);
   const index = useAuiState((s) => s.message.index);
-  const thought = thoughtAt(messages, index);
+  // WHICH PART THIS ROW IS. A live run keeps one assistant message open for a whole
+  // turn -- several thoughts and the calls between them share its `parts` -- so the
+  // message alone cannot say which thought this row is. The group's first part index
+  // can, and `thoughtAt` reads the message part by part from there.
+  const from = group.indices[0] ?? 0;
+  const thought = thoughtAt(messages, index, from);
   // The tail while it runs, the first line once it stops.
   const preview = previewOf(thought.parts, thought.running);
   const [open, setOpen] = useState(false);
