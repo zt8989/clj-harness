@@ -93,9 +93,8 @@ import {
   type Choices,
   type ModelAnswer,
 } from "@/lib/composer";
+import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
 import { bindThread, listSidebar, projectName } from "@/lib/projects";
-import { hasKey } from "@/lib/provider-key";
-import { providerLabel } from "@/lib/provider-label";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";
@@ -387,42 +386,33 @@ const ComposerTools: FC = () => {
     );
   }
 
-  // GROUPED BY VENDOR, ONE FLAT LIST, and that is the whole shape of this menu: a
-  // heading per provider with its models under it, so a long catalog reads as a
-  // short list of vendors -- but one pick rather than vendor-then-model, because
-  // two menus for one decision is one menu too many. The row's VALUE is the model
-  // id alone, because the vendor is implied by which heading it was under (`hint`
-  // carries nothing: the heading above the row already says it, and searching
-  // matches the heading too -- see `lib/picker.ts`). The heading's TEXT is the
-  // vendor's display name when it has one and its id otherwise (see
-  // `providerLabel`): the id stays the truth either way, which is what the server
-  // is sent and what a log line will say.
-  // A session served by a model the catalog does not list -- an inline provider in
-  // config.edn, a vendor that has since been removed -- still has to be drawable,
-  // exactly as the directory picker treats a directory this home does not list: a
-  // picker showing nothing at all reads as a session with no model.
-  // AND ONLY THE PROVIDERS THIS HOME HOLDS A KEY FOR (see `lib/provider-key.ts`, which
-  // is the one copy of that rule -- the settings page reads it too): offering a provider
-  // that will certainly refuse is leading a person to a run that cannot work.
+  // GROUPED BY VENDOR, ONE FLAT LIST, and that is the whole shape of this menu: a heading
+  // per provider with its models under it, so a long catalog reads as a short list of
+  // vendors -- but one pick rather than vendor-then-model, because two menus for one
+  // decision is one menu too many. The heading's TEXT is the vendor's display name when it
+  // has one and its id otherwise (`lib/provider-label.ts`); the id stays the truth either
+  // way, which is what the server is sent and what a log line will say.
   //
-  // THE SESSION'S CURRENT MODEL IS NOT TOUCHED BY THAT FILTER. If it falls out of the
-  // list because its vendor has no key, the branch below puts it back at the top with
-  // the same 'not in the catalog' hint an unlisted model already gets -- erasing what a
-  // session is being SERVED BY is a bigger lie than listing a vendor without a key.
-  const listed = data.providers
-    .filter(hasKey)
-    .flatMap((provider) =>
-      provider.models.map((model) => ({
-        value: model,
-        label: model,
-        group: providerLabel(provider),
-      })),
-    );
-  const options =
-    data.model === undefined || listed.some((option) => option.value === data.model)
-      ? listed
-      : [{ value: data.model, label: data.model, hint: t("model.notInCatalog") }, ...listed];
-  const currentModel = data.model ?? options[0]?.value ?? "";
+  // A ROW IS NAMED BY ITS VENDOR AND ITS ID, and that is a rule rather than a detail: a
+  // model id does NOT name a row, because two vendors may declare the same one -- and then
+  // the id alone marks both rows as the current one and sends whichever vendor the catalog
+  // lists first. `lib/model-rows.ts` owns that identity, and the two facts below; this
+  // component draws what it answers.
+  //
+  // BOTH FACTS ARE IN THAT ONE ANSWER. Only the vendors this home holds a key for are
+  // offered (`lib/provider-key.ts` is the one copy of that rule -- the settings page reads
+  // it too), because offering a vendor that will certainly refuse leads a person to a run
+  // that cannot work. THE SESSION'S OWN ROW IS NOT TOUCHED BY THAT FILTER: if it falls out
+  // of the list -- its vendor has no key, it is an inline provider, that vendor is gone --
+  // it comes back at the top as ITS OWN row (the same pair) carrying the existing 'not in
+  // the catalog' hint, exactly as the directory picker treats a directory this home does
+  // not list. A picker showing nothing at all reads as a session with no model, and erasing
+  // what a session is being SERVED BY is a bigger lie than listing a vendor without a key.
+  const { current, options } = modelMenu(
+    data.providers,
+    { provider: data.provider, model: data.model },
+    t("model.notInCatalog"),
+  );
 
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
@@ -434,18 +424,20 @@ const ComposerTools: FC = () => {
         <Picker
         slot="composer-model"
         label={t("model.label")}
-        value={currentModel}
+        value={current}
         disabled={busy}
         title={data.provider === undefined ? data.model : `${data.provider} / ${data.model}`}
         options={options}
         onPick={(option) => {
-          // The provider comes from the vendor that declares this model, because an
-          // id is only meaningful against the one that does.
-          const owner = data.providers.find((p) => p.models.includes(option.value));
+          // THE ROW NAMES ITS OWN VENDOR: what the heading above it said is what gets
+          // sent, not whichever vendor the catalog happens to list first for this id.
+          // A row with no vendor -- an inline provider has no id -- has none to send, so
+          // only the model travels, which is what a change of model alone looks like.
+          const row = modelRowFromKey(option.value);
           void change(
-            owner === undefined
-              ? { model: option.value }
-              : { provider: owner.name, model: option.value },
+            row.provider === undefined
+              ? { model: row.model }
+              : { provider: row.provider, model: row.model },
           );
         }}
         />

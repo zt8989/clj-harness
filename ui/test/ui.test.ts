@@ -332,7 +332,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// used verbatim when it IS a function, and a no-WebCrypto floor that is still a name
 /// rather than a throw. That a page actually starts over a LAN address is the browser
 /// walkthrough's half, as the suite's own header says.
-const EXPECTED_CASES = 128;
+/// 128 -> 130: the `picker` suite's two, for the model picker's ROW IDENTITY. A model id
+/// does not name a row -- two vendors may declare the same one -- and the row used to be
+/// carried by the id alone, so a pick under either vendor's heading resolved to whichever
+/// vendor the catalog listed first. `lib/model-rows.ts` is the pure rule (the pair as one
+/// key, the rows the menu offers, and the session's own row when the menu cannot offer it),
+/// which is why these two are literals in and options out; that a click actually SENDS the
+/// vendor under whose heading it sat is the browser walkthrough's half.
+const EXPECTED_CASES = 130;
 
 let total = 0;
 for (const suite of SUITES) {
