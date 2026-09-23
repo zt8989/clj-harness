@@ -98,6 +98,7 @@
             [harness.edge.replay :as replay]
             [harness.edge.record :as record]
             [harness.edge.sessions :as sessions]
+            [harness.edge.mux :as mux]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.compaction :as compaction]
@@ -3956,6 +3957,190 @@
                              :baseSeq (:baseSeq tail)})
           (stream-feed! req stem since mine))))))
 
+;; ---------------------------------------------------------------- the downlink
+;;
+;; ONE SOCKET FOR EVERY CONVERSATION A PAGE HOLDS (`events.mux`), because the SSE feed
+;; it replaces took a connection slot PER CONVERSATION: a page that had opened six
+;; sessions held six sockets, the browser's per-origin pool is six, and the next request
+;; -- a run, a read, an asset -- waited behind them (ADR 0004).
+;;
+;; THE SOCKET IS DOWNLINK-ONLY. A frame goes out; nothing comes in. The subscription is
+;; therefore an HTTP fact, in two halves:
+;;
+;;   the handshake URL     `GET /api/events.mux?subscriber=<token>&sessions=<json>`
+;;                         names the conversations this connection holds and the cursor
+;;                         each starts from -- the same `since`/`generation` the SSE feed
+;;                         carried, so a reconnect re-declares what the client holds
+;;                         rather than the server remembering it.
+;;   POST .../subscribe    the set changing while the socket is up.
+;;
+;; AND THE SERVER FILTERS: only a conversation this connection subscribed to has a watch,
+;; so a ring for any other one reaches nobody here. The cost of N conversations running at
+;; once no longer lands on every page -- the DSH broadcast bug this shape avoids.
+
+(defn- mux-frame
+  "One frame on the downlink, tagged with the conversation it is about: every `window`
+  frame's fields, plus `:threadId`. The tag is what lets one socket carry many windows."
+  [thread-id frame]
+  (assoc frame :threadId (str thread-id)))
+
+(defn- mux-send!
+  "Write one JSON frame to a downlink. A channel that closed under us is not worth
+  raising: the close handler is already releasing the subscription."
+  [ch frame]
+  (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
+
+(defn- mux-end!
+  "Tell one conversation's reader on this downlink that its window is over, naming why.
+  THE SAME ENDING THE FEED SENDS, for the same reason: a stream that just stops leaves a
+  replica believing it holds everything. The client's repair is its own -- reopen the tail
+  page, then re-subscribe with the new cursor."
+  [ch thread-id reason]
+  (mux-send! ch (mux-frame thread-id
+                           {:type       "end"
+                            :reason     reason
+                            :entries    []
+                            :baseSeq    (:baseSeq (sessions/tail thread-id))
+                            :hasMore    false
+                            :cursor     nil
+                            :generation (sessions/generation thread-id)
+                            :state      (live-state thread-id)})))
+
+(defn- mux-sessions
+  "The `sessions` query parameter (a JSON array) as the subscriptions it names:
+  [{:threadId .. :since .. :generation ..} ..]. A parameter this server cannot read is NO
+  subscriptions rather than a failed handshake -- the client's move is a `page` read and a
+  re-declare either way."
+  [raw]
+  (try
+    (let [parsed (json/read-str (or raw "[]") :key-fn keyword)]
+      (if (vector? parsed)
+        (vec (keep (fn [s]
+                     (when (map? s)
+                       (when-some [tid (:threadId s)]
+                         {:threadId   (str tid)
+                          :since      (when (number? (:since s)) (long (:since s)))
+                          :generation (:generation s)})))
+                   parsed))
+        []))
+    (catch Throwable _ [])))
+
+(defn- mux-watch!
+  "Subscribe TOKEN's downlink to ONE conversation, starting from SINCE, and send the
+  opening frame. The doorbell re-reads the delta from the cursor this closure holds and
+  sends what is new -- nothing at all when the frame would carry no news, so a page parked
+  on a quiet conversation costs one idle socket. The FIRST frame is always sent, even
+  empty, so a reader never wonders whether the socket is working."
+  [token thread-id since]
+  (let [state (atom {:cursor since :state nil :sent false})]
+    (letfn [(push []
+              (when-some [ch (mux/channel token)]
+                (let [cursor (:cursor @state)
+                      page   (window-page thread-id cursor)
+                      frame  (window-frame thread-id
+                                           (if (nil? cursor) "window" "append")
+                                           (live-state thread-id)
+                                           page)]
+                  (when (or (not (:sent @state))
+                            (seq (:entries frame))
+                            (not= (:state frame) (:state @state)))
+                    (reset! state {:cursor (:cursor frame) :state (:state frame) :sent true})
+                    (mux-send! ch (mux-frame thread-id frame))))))]
+      (mux/subscribe! token thread-id push)
+      (push))))
+
+(defn- mux-add!
+  "Subscribe TOKEN's downlink to THREAD-ID under the window rules the feed already
+  enforces: a conversation another live process is serving, or a `generation`/`since` that
+  names a window that is over, is TOLD so with an `end` frame rather than half served
+  (ADR 0003 decision 6)."
+  [token thread-id since generation]
+  (let [held (claims/holder thread-id)]
+    (cond
+      (and (some? held) (not (claims/mine? held)))
+      (when-some [ch (mux/channel token)]
+        (mux-end! ch thread-id (str "conversation " (pr-str (str thread-id))
+                                    " is being served by another harness process (pid "
+                                    (:pid held) ")")))
+
+      :else
+      (do
+        (sessions/touch! thread-id)
+        (let [mine   (sessions/generation thread-id)
+              tail   (sessions/tail thread-id)
+              stale? (or (and (some? generation) (not= (str generation) (str mine)))
+                         (and (some? since) (some? (:baseSeq tail))
+                              (< (long since) (long (:baseSeq tail)))))]
+          (if stale?
+            (when-some [ch (mux/channel token)]
+              (mux-end! ch thread-id
+                        (if (and (some? generation) (not= (str generation) (str mine)))
+                          "this conversation is being served under a new generation"
+                          (str "the cursor (since=" since ") is older than the oldest"
+                               " entry this window still answers from"))))
+            (mux-watch! token thread-id since)))))))
+
+(defn- mux-attend!
+  "A downlink just connected: remember it, and subscribe it to everything the handshake
+  URL declared."
+  [token ch wanted]
+  (mux/attach! token ch)
+  (doseq [{:keys [threadId since generation]} wanted]
+    (mux-add! token threadId since generation)))
+
+(defn- mux-get
+  "GET /api/events.mux?subscriber=<token>&sessions=<json> -- the downlink. A WebSocket, or
+  a 400 when there is no subscriber token to address the set with: the socket carries no
+  subscription message, so a connection that names no token could never change its set."
+  [req]
+  (let [params (query-params (:query-string req))
+        token  (get params "subscriber")
+        wanted (mux-sessions (get params "sessions"))]
+    (if (str/blank? token)
+      (api-response 400 {:error "events.mux needs a subscriber token: ?subscriber=<token>"
+                         :hint  (str "the socket is downlink-only, so the set is updated"
+                                     " by POST /api/events.mux/subscribe")})
+      (hk/as-channel req
+                     {:on-open  (fn [ch]
+                                  ;; ON-OPEN RUNS AFTER THIS RING MAP IS RETURNED, on http-kit's
+                                  ;; thread -- so `handler`'s net is not around it, and a throw
+                                  ;; here would be a silently dropped connection.
+                                  (try (mux-attend! token ch wanted)
+                                       (catch Throwable t
+                                         (log/error! :mux/attend-failed t {:subscriber token}))))
+                      :on-close (fn [ch _status]
+                                  (try (mux/detach! (mux/token-of ch))
+                                       (catch Throwable _ nil)))}))))
+
+(defn- mux-subscribe-post
+  "POST /api/events.mux/subscribe {subscriber, subscribe: [..], unsubscribe: [..]} --
+  UPDATE THE SET of a live downlink. This is the half of the subscription the socket
+  itself cannot carry; the handshake URL is the other half."
+  [req]
+  (let [parsed (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+                    (catch Throwable _ nil))]
+    (cond
+      (not (map? parsed))
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (:subscriber parsed))
+      (api-response 400 {:error "missing subscriber"})
+
+      (nil? (mux/channel (:subscriber parsed)))
+      (api-response 404 {:error (str "no such downlink connection "
+                                     (pr-str (str (:subscriber parsed)))
+                                     ": it has closed or was never opened")
+                         :subscriber (:subscriber parsed)})
+
+      :else
+      (let [token (str (:subscriber parsed))]
+        (doseq [thread-id (:unsubscribe parsed)]
+          (mux/unsubscribe! token thread-id))
+        (doseq [sub (:subscribe parsed)]
+          (mux-add! token (:threadId sub) (:since sub) (:generation sub)))
+        (api-response 200 {:subscriber token
+                           :threads    (vec (mux/subscriptions token))})))))
+
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
   session in it yet. Answers {:projectId .. :path <canonical>}.
@@ -4817,6 +5002,18 @@
     (= "/api/agent" (:uri req))
     (case (:request-method req)
       :post (handle-run req)
+      (api-response 405 {:error "method not allowed"}))
+
+    ;; THE DOWNLINK (ADR 0004): one WebSocket per page carrying every conversation it
+    ;; holds, and the HTTP route that updates which ones those are.
+    (= "/api/events.mux" (:uri req))
+    (case (:request-method req)
+      :get  (mux-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/events.mux/subscribe" (:uri req))
+    (case (:request-method req)
+      :post (mux-subscribe-post req)
       (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)

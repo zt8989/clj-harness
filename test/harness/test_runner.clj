@@ -126,6 +126,7 @@
     harness.edge.prune-test
     harness.edge.ui-test
     harness.edge.http-test
+    harness.edge.mux-test
     ;; THE RECORD WRITER AND THE SESSION TABLE ARE SEPARATE NAMESPACES ON PURPOSE (ticket
     ;; 02), and BOTH HAD TO BE ADDED HERE BY HAND: this list is a literal, so a namespace
     ;; that is not in it does not run in a full suite, and a green run says nothing about

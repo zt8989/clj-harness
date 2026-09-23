@@ -52,6 +52,20 @@ export const API_BASE = `${HARNESS}api/`;
 /// with SSE; nothing else in the app posts a run.
 export const AGENT_URL = `${API_BASE}agent`;
 
+/// THE DOWNLINK'S ADDRESS (`events.mux`, ADR 0004): the same origin as the management
+/// calls, spoken as a WebSocket. `VITE_AGENT_URL` unset leaves `HARNESS` relative, and a
+/// relative URL resolves against the document -- so the built page and the dev loop both
+/// work with no port written down, exactly as `API_BASE` does.
+///
+/// THE `http` -> `ws` SWAP IS THE WHOLE TRANSLATION: one prefix, one address, and the
+/// handshake URL is where the subscription is declared (the socket carries no client
+/// message -- see `lib/mux.ts`).
+export function downlinkUrl(params: URLSearchParams): string {
+  const base = HARNESS.replace(/^http/, "ws").replace(/\/+$/, "");
+  const query = params.toString();
+  return `${base}/api/events.mux${query === "" ? "" : `?${query}`}`;
+}
+
 /// One row of `GET /api/threads`. `threadId` is the log file's stem -- the id a
 /// rebuild names -- and `lastActivity` is the file's mtime, epoch milliseconds.
 export type ThreadSummary = {

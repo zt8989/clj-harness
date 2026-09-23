@@ -51,6 +51,7 @@ import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
 import { subagentsSuite } from "./suites/subagents";
 import { subagentViewSuite } from "./suites/subagent-view";
+import { muxSuite } from "./suites/mux";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -64,7 +65,7 @@ import { subagentViewSuite } from "./suites/subagent-view";
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
 /// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
 /// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -343,7 +344,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// key, the rows the menu offers, and the session's own row when the menu cannot offer it),
 /// which is why these two are literals in and options out; that a click actually SENDS the
 /// vendor under whose heading it sat is the browser walkthrough's half.
-const EXPECTED_CASES = 128;
+/// 128 -> 130: the `mux` suite's two (`.scratch/events-mux-and-host`), for the downlink's
+/// ADDRESS and the declaration it carries: the handshake rides the one `/api` prefix with a
+/// subscriber token and the followed set on it, and a page that follows nothing declares
+/// nothing. That a socket really carries a window is the browser walkthrough's half, as
+/// `lib/mux.ts` says.
+const EXPECTED_CASES = 130;
 
 let total = 0;
 for (const suite of SUITES) {
