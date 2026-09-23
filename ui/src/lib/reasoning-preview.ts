@@ -87,12 +87,20 @@ export interface Thought {
   readonly running: boolean;
 }
 
-/// A STEP: the model did something. A tool call, in one of its two part kinds.
-/// Steps end a thought; text does not.
+/// A STEP PART: the model did something. A tool call, in one of its two part
+/// kinds. Steps end a thought; text does not.
+function isStepPart(part: ReasoningPart | undefined): boolean {
+  return part?.type === "tool-call" || part?.type === "standalone-tool-call";
+}
+
+/// Whether ANY part of a message is a step. Used to cross MESSAGES, where the
+/// runtime has already split a turn's rounds: a message that carries a call is a
+/// thing the model did, and a thought never reads past one for a continuation.
+/// THE CURRENT MESSAGE IS READ PART BY PART INSTEAD -- see `thoughtAt` -- because
+/// a live run keeps a whole turn's parts (several thoughts and the calls between
+/// them) in ONE message.
 function isStep(message: ReasoningMessage | undefined): boolean {
-  return (message?.parts ?? []).some(
-    (part) => part?.type === "tool-call" || part?.type === "standalone-tool-call",
-  );
+  return (message?.parts ?? []).some(isStepPart);
 }
 
 /// The reasoning parts of a message, in order.
@@ -125,30 +133,66 @@ function reasoningOf(message: ReasoningMessage | undefined): readonly ReasoningP
 /// above) and FORWARD for the parts themselves (`running` included, which is why a
 /// thought that goes on thinking after the answer has started is STILL live in the
 /// row that began it).
+///
+/// A LIVE RUN'S MESSAGE IS A TURN, NOT A THOUGHT. The adapter's own aggregation keeps
+/// one assistant message open for a whole turn and appends every round to it -- the
+/// thoughts AND the tool calls between them share one `parts` list. So "this message
+/// is a thought" is false while a run streams, and `at` alone cannot say which of the
+/// message's several thoughts this row is. `from` is the first part index of THIS
+/// row's reasoning group (`GroupPart.indices[0]`), and the current message is read
+/// part by part from there: a tool-call part ends the thought, text does not. Later
+/// messages are read whole, because the runtime has already split those by round.
 export function thoughtAt(
   messages: readonly (ReasoningMessage | undefined)[],
   at: number,
+  from = 0,
 ): Thought {
+  const current = messages[at]?.parts ?? [];
+
+  // BACK: an earlier reasoning part makes this row a continuation -- unless a
+  // step comes first, which is what makes it a new thought.
   let drawn = true;
-  for (let index = at - 1; index >= 0; index -= 1) {
-    const earlier = messages[index];
-    if (earlier?.role === "user" || isStep(earlier)) break;
-    if (reasoningOf(earlier).length > 0) {
-      drawn = false;
-      break;
+  backward: {
+    for (let index = from - 1; index >= 0; index -= 1) {
+      const part = current[index];
+      if (isStepPart(part)) break backward;
+      if (part?.type === "reasoning") {
+        drawn = false;
+        break backward;
+      }
+    }
+    for (let index = at - 1; index >= 0; index -= 1) {
+      const earlier = messages[index];
+      if (earlier?.role === "user" || isStep(earlier)) break backward;
+      if (reasoningOf(earlier).length > 0) {
+        drawn = false;
+        break backward;
+      }
     }
   }
 
+  // FORWARD: this thought's reasoning, up to the next step or turn boundary.
   const parts: ReasoningPart[] = [];
   let running = false;
-  for (let index = at; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message?.role === "user" || isStep(message)) break;
-    for (const part of reasoningOf(message)) {
-      parts.push(part);
-      if (part.status?.type === "running") running = true;
+  forward: {
+    for (let index = from; index < current.length; index += 1) {
+      const part = current[index];
+      if (isStepPart(part)) break forward;
+      if (part?.type === "reasoning") {
+        parts.push(part);
+        if (part.status?.type === "running") running = true;
+      }
+    }
+    for (let index = at + 1; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (message?.role === "user" || isStep(message)) break forward;
+      for (const part of reasoningOf(message)) {
+        parts.push(part);
+        if (part.status?.type === "running") running = true;
+      }
     }
   }
+
   return { parts, drawn, running };
 }
 

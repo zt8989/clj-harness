@@ -299,6 +299,41 @@
       (is (= ["c2"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
                                                  {:role "tool" :tool_call_id "c1" :content "a"}]))))))
 
+(deftest adjacent-answers-moves-a-late-answer-behind-its-call
+  ;; THE RECORD CAN DELIVER AN ANSWER LATE. A run cut off mid-call is closed off by an
+  ;; APPENDED TOOL_CALL_RESULT (`harness.edge.replay/closing-frames`), so a conversation
+  ;; folded in file order can hold the answer BEHIND whatever the client recorded next --
+  ;; the shape the vendor refuses (the case above). Moving the recorded answer behind the
+  ;; call that named it is not inventing a result: the message is already there.
+  (let [call   (fn [id] {:id id :type "function" :function {:name "bash" :arguments "{}"}})
+        answer (fn [id] {:role "tool" :tool_call_id id :content "the run was cut off"})]
+    (testing "a well-shaped history comes back unchanged, message for message"
+      (let [well [{:role "user" :content "hi"}
+                  {:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                  (answer "c1") (answer "c2")
+                  {:role "user" :content "and this"}]]
+        (is (= well (llm/adjacent-answers well)))))
+    (testing "an answer that landed behind a later message is moved behind its call"
+      (let [late [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                  {:role "user" :content "and this"}
+                  (answer "c1")]]
+        (is (= [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                (answer "c1")
+                {:role "user" :content "and this"}]
+               (llm/adjacent-answers late)))
+        (is (empty? (llm/unanswered-tool-calls (llm/adjacent-answers late))))))
+    (testing "answers are put back in CALL order, whatever order they arrived in"
+      (let [late [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                  {:role "user" :content "and this"}
+                  (answer "c2") (answer "c1")]]
+        (is (= ["c1" "c2"]
+               (mapv :tool_call_id (filter :tool_call_id (llm/adjacent-answers late))))
+            "call order, not arrival order")))
+    (testing "an answer with no call to sit behind is left where it is"
+      (let [orphan [{:role "user" :content "hi"} (answer "c9")]]
+        (is (= orphan (llm/adjacent-answers orphan)))
+        (is (empty? (llm/unanswered-tool-calls (llm/adjacent-answers orphan)))
+            "a stray answer is not a call, so the vendor's rule has nothing to say")))))
 
 ;; ----------------------------------------- the wire, and the traffic log
 

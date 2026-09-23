@@ -27,6 +27,7 @@ import { attachmentsSuite } from "./suites/attachments";
 import { clientSuite } from "./suites/client";
 import { contextSuite } from "./suites/context";
 import { elicitationSuite } from "./suites/elicitation";
+import { elicitationCardSuite } from "./suites/elicitation-card";
 import { framesSuite } from "./suites/frames";
 import { i18nSuite } from "./suites/i18n";
 import { skillsSuite } from "./suites/skills";
@@ -46,6 +47,8 @@ import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
+import { subagentsSuite } from "./suites/subagents";
+import { subagentViewSuite } from "./suites/subagent-view";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -53,8 +56,12 @@ import { toolRowSuite } from "./suites/tool-row";
 /// appended `sessionTitleSuite`, `relativeTimeSuite` and `sidebarRowsSuite` after the
 /// `sidebar` suite, and `sessions-live-on-the-server` appended `recordSuite` and
 /// `windowSuite`. Neither side touched the other's additions, which is why the resolved
-/// list is a concatenation rather than a choice.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite];
+/// list is a concatenation rather than a choice. `ask` is the third side: it added
+/// `elicitationCardSuite` beside the `elicitation` suite it belongs to, and
+/// `session-after-refresh` is the fourth (`runningSuite`, after `restoreSuite`).
+/// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
+/// `subagentsSuite` and `subagentViewSuite` -- each side only ever appended.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -243,7 +250,64 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// reached the subscriber, and the error it is handed instead carries the `AbortError`
 /// name the interface maps to "Cancelled" -- and it has to be a live client: the abort
 /// has to land on a stream that is genuinely in flight.
-const EXPECTED_CASES = 97;
+/// 96 -> 102: THE OTHER SIDE OF THIS MERGE -- the `subagents` suite's six, which are
+/// `.scratch/subagents`' UI half. The endpoint's wire shape (the two built-ins, their
+/// baselines, the `builtin` flag, the file a save would write, the problem that is part
+/// of a 200); a delegation row's three facts; one run in flight marked and the other
+/// not, in one list; the definitions group with and without a custom entry; the settings
+/// roster's built-in flag; and the same rows in both languages. Five of the six RENDER
+/// (`react-dom/server`), which is why the rows live in `components/subagent-list.tsx` --
+/// a module that must not reach `lib/i18n.ts`, whose `document` write would break this run.
+///
+/// 102 -> 106: `.scratch/subagent-view`'s UI half, and it is a COUNTED CHANGE IN BOTH
+/// DIRECTIONS -- two cases out, six in.
+///
+/// OUT (-2): the `subagents` suite's two delegation-row cases, and the `RunRows` half of
+/// its both-languages case. `RunRows` had exactly one reader (the sidebar's subagent
+/// block), ticket 06 of the feature retires that block, and a rendered-string case for a
+/// component with no screen is a case that tests the test. What the suite keeps is the
+/// ENDPOINT, `runs` still included: the route stays, and "the front end has no reader for
+/// half of this answer" is exactly the kind of asymmetry that should be visible in a file
+/// rather than inferred from a deleted one.
+///
+/// IN (+6): the `subagent-view` suite, whose name is the feature. The `agent` card's
+/// subject (which subagent, and one line of what it was asked -- without the arm the row
+/// answers the task and never names the subagent); the door's two conditions (the
+/// record's answer for this `toolCallId`, and a panel to open) and the fact that the
+/// call's RESULT is not one of them, because a delegation is worth watching while it
+/// runs; one delegations read per parent session rather than per card; the follow
+/// client's transport (`GET`, no body, signal kept -- the abort is how closing the panel
+/// drops the server-side subscription) and the mirror's refusal to hydrate from
+/// `rebuild`; the `composer` switch on `Thread` with the new-chat furniture going with
+/// it; and the retired sidebar block leaving nothing that still compiles behind.
+///
+/// ALL SIX READ SOURCES (`?raw`), the idiom `tool-row` introduced and for its reason:
+/// `message-parts.tsx` and `app.tsx` reach `lib/i18n.ts`, which touches `document` at
+/// module scope, and this run has no jsdom by design. So they pin DECISIONS -- which
+/// vocabulary a row answers, what a door is conditioned on, what a transport sends, where
+/// the column sits in the flex row -- and the DRAWING (the door's hover, the panel's
+/// width, the main column staying readable beside it, the transcript growing live) is the
+/// browser walkthrough's half, as the suite's own header says.
+/// 106 -> 108: `ask`, the one tool whose purpose is to stop. One case through the whole
+/// loop on the `elicitation` suite -- a BUILT-IN's question parks the run, the endpoint
+/// answers who is asking, and the answers come back as the call's result -- and one new
+/// suite beside it (`elicitation-card`) whose single case RENDERS the card's title in
+/// both languages: three askers, three distinct lines, and none of them inventing a
+/// server. The second is the sidebar lesson applied to the other card that names
+/// somebody: a title that draws nothing is invisible to every check about keys.
+/// 108 -> 112: the rest of what `ask` can ask. Three on the `elicitation` suite's RULES --
+/// candidates driven verbatim with no own-words box assumed, the own-words answer that
+/// stands where the pick would have, and a list of answers that is never a joined
+/// string -- and one on `elicitation-card` that RENDERS a field for each kind and counts
+/// the `data-slot`s: one tick box per candidate, a select for a single choice, an
+/// own-words box only where the schema asked for one. The card's count is the claim, not
+/// bookkeeping -- a select drawn over a multiple choice loses every answer but one and
+/// looks perfectly fine doing it.
+/// 113 -> 114: THIS BRANCH'S OWN CASE (`.scratch/session-after-refresh` ticket 09) -- the
+/// `client` suite's stop: the page asks the SERVER to end a running conversation and the
+/// terminal that comes back is a cancellation, not a failure. It is a live client case for
+/// the same reason as the one above it: the stop has to land on a stream in flight.
+const EXPECTED_CASES = 114;
 
 let total = 0;
 for (const suite of SUITES) {

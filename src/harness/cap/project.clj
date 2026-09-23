@@ -250,6 +250,49 @@
            (touch-session! c thread-id (upsert-project! c canon) abs canon)))
        abs))))
 
+(defn begin-subagent!
+  "THREAD-ID becomes a session of this home: the subagent SUBAGENT that PARENT
+  delegated to, bound the way its parent is bound. Answers the directory it landed
+  on, or nil.
+
+  ONE WRITE, BECAUSE IT IS ONE FACT. A subagent's conversation has an identity --
+  who asked for it, what it ran as, where its record goes -- and all three come
+  from the delegation that is starting, so they are written together or not at all.
+  The alternative (bind it like any session, then patch the two columns) would
+  leave a row that answers 'an ordinary conversation with no parent' to anything
+  reading it in between.
+
+  THE BINDING IS COPIED, NOT RE-DERIVED. The subagent resolves relative paths and
+  reads its fence against exactly the directory its parent is bound to, spelled the
+  same way -- see harness.cap.subagents/run-one, which is where that matters and
+  where the alternative (resolving an already-canonical path again) would silently
+  move a session's files. A parent that is bound to nothing hands its subagent
+  nothing, and the row is written anyway: the record still has a home in the tree's
+  reserved workspace, and 'who delegated this' is a fact worth keeping either way.
+
+  A PARENT THE STORE HAS NEVER HEARD OF IS ORDINARY, not an error. Session ids are
+  the CLIENT's to invent, so a delegation from a conversation with no row yet
+  inherits the empty binding and lands here as an unbound subagent.
+
+  MOVING THE PARENT LATER DOES NOT MOVE THIS ROW, and that is the deliberate half
+  of 'together or not at all': the pairing is about the DELEGATION's life, not the
+  parent's. What a project removal does to the two is the same thing it does to any
+  session -- it unbinds them both in one statement, through the schema's own
+  trigger -- because that statement is about the DIRECTORY.
+
+  NOT PUBLIC FOR THE PAIR'S SAKE: see `sessions`, which now reports the two columns
+  so a reader can tell a subagent from a conversation."
+  [thread-id {:keys [parent subagent]}]
+  (db/with-transaction
+    (fn [^Connection c]
+      (let [{:keys [project-id path last-project-path]}
+            (first (db/query c "SELECT project_id, path, last_project_path
+                                  FROM sessions WHERE id = ?" parent))]
+        (touch-session! c thread-id project-id path last-project-path)
+        (db/execute! c "UPDATE sessions SET parent_id = ?, subagent = ? WHERE id = ?"
+                     parent subagent thread-id)
+        path))))
+
 (defn binding-for
   "The project directory THREAD-ID's session is bound to, as an absolute path
   string -- or nil. Nil is the explicit, everyday answer for NO binding, never
@@ -297,7 +340,7 @@
 
 (defn- as-session
   "One `sessions` row as this namespace hands it out: {:id :project-id :path
-  :archived? :created-at}.
+  :archived? :created-at :parent-id :subagent}.
 
   `:archived?` is a BOOLEAN, converted here rather than left as the column's 0/1 --
   Clojure's `boolean` says 0 is true and a flag that means the opposite of what it
@@ -312,11 +355,19 @@
 (def ^:private session-columns
   "The columns a session reader asks for, so two queries over one table cannot drift
   into handing out two shapes."
-  "id, project_id, path, archived, created_at, title, last_sent_at")
+  "id, project_id, path, archived, created_at, title, last_sent_at, parent_id, subagent")
 
 (defn sessions
-  "Every session this home knows: {:id :project-id :path :archived? :created-at},
-  oldest first.
+  "Every session this home knows: {:id :project-id :path :archived? :created-at
+  :parent-id :subagent}, oldest first.
+
+  `:subagent` AND `:parent-id` RIDE ALONG RATHER THAN BEING FILTERED OUT HERE.
+  'Every session this home knows' is what this function says, and a subagent's
+  conversation IS one -- it has a row, a project and a log for exactly that reason
+  (see begin-subagent!). Who does not want to see it says so at the read: the
+  sidebar's listing is conversations a person can open, and a filter here would take
+  the row away from every other reader too -- including the one that exists to SHOW
+  them.
 
   This is the WHOLE table, so it includes the sessions that belong to no project;
   which of those is a TASK is `tasks`' question, not this one's. Reading AND setting

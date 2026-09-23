@@ -221,7 +221,8 @@
   (tools/register-turn! tid (a-turn 1))
   (let [{:keys [content error]} (call "todo_write" {:todos [{:content "do the thing" :status "pending"}]})]
     (is (false? error) content)
-    (is (str/includes? content "do the thing"))
+    (is (str/includes? content "1 item stored") "the receipt")
+    (is (not (str/includes? content "do the thing")) "with no echo of the item")
     (is (= ["do the thing"] (mapv :content (todos/items-for tid))))))
 
 (deftest a-turn-that-was-never-registered-is-not-treated-as-two-calls
@@ -233,14 +234,23 @@
 
 ;; ------------------------------------------------------------- what it answers
 
-(deftest the-answer-says-what-is-done-and-what-is-next
-  (let [answer (todos/render (todos/write! tid [{:content "read the code" :status "completed"}
-                                               {:content "write the test" :status "in_progress"}
-                                               {:content "run it" :status "pending"}]))]
+(deftest the-answer-is-a-receipt-not-the-list-again
+  ;; The list was in the call that stored it, so the answer owes the FACT: how many
+  ;; items there are, and how they stand. Repeating the items would pay twice for
+  ;; tokens the model just sent -- and tell it nothing it did not already know.
+  (let [items  [{:content "read the code" :status "completed"}
+                {:content "write the test" :status "in_progress"}
+                {:content "run it" :status "pending"}]
+        answer (todos/render (todos/write! tid items))]
     (is (str/includes? answer "3 items"))
     (is (str/includes? answer "1 in progress"))
     (is (str/includes? answer "1 completed"))
-    (testing "and each line carries its state and its place in the list"
-      (is (str/includes? answer "[x] 1. read the code"))
-      (is (str/includes? answer "[~] 2. write the test"))
-      (is (str/includes? answer "[ ] 3. run it")))))
+    (testing "and none of the list came back"
+      (doseq [item items]
+        (is (not (str/includes? answer (:content item)))
+            (str "the answer echoed " (pr-str (:content item)) ": " answer)))
+      (is (not (str/includes? answer "[x]")) "no status markers either")
+      (is (not (str/includes? answer "[~]")))
+      (is (not (str/includes? answer "[ ]"))))
+    (testing "while the list itself is stored exactly as it was sent"
+      (is (= items (todos/items-for tid))))))

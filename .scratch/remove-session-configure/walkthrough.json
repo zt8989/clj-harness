@@ -1,0 +1,23 @@
+{
+  "turns": [
+    {
+      "reasoning": "删掉 session-configure 之后，先确认工具卡这条路还画得出来。",
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "read",
+          "arguments": { "path": "deps.edn" }
+        }
+      ]
+    },
+    {
+      "content": "工具卡画出来了，读的是 deps.edn。这一轮只用来看转写里的工具行有没有因为删掉一个工具而变形。",
+      "usage": {
+        "prompt_tokens": 1200,
+        "completion_tokens": 40,
+        "total_tokens": 1240
+      }
+    }
+  ]
+}

@@ -264,7 +264,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   抽屉另带两条礼貌：**选中会话就收**（否则刚选的那一场还盖在面板底下，点了像没反应；恢复不走这里，
   页面落到自己记住的那一场没有谁需要让路）与 **Esc 收**（Radix 的浮层先 `preventDefault`，
   所以它关自己的对话框时不会顺带把抽屉折了）。
-- **状态条那五格读的是记录，不是客户端手里的对话。** 客户端确实持有 conversation，所以它数得出轮与步、
+- **状态条那五格读的是记录，不是客户端手里那段窗口。** 那段窗口确实让它数得出轮与步、
   也估算得出 tok/s（运行时的 `chars ÷ 4`），但**它不这么做**：缓存命中它根本不知道，而估算出来的用量
   冒充厂商报的量就是编。那五个数由 `GET /api/threads/<stem>/stats` 从会话的 jsonl 折出来
   （服务端见 [edge](edge.md#管理边路由表)），**缺的数就是缺的**，页面把它留空而不是写 0。
@@ -330,6 +330,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   所以服务端在 `rebuild` 的回答上带上 `:state`（`harness.edge.http/live-state`，只在**本进程持有**时才有），
   客户端看见 `running` 就**改看**：读 tail page、跟 feed，和刷新那扇门一模一样的形状（`app.tsx` 的
   `sessionHistory`）——门关上，而且跑完自己开（feed 说 `settled`）。
+
+- **同一个文件里还有第二张卡：提问。** `ElicitationCard` 读 `GET /api/elicitation` 的题面与 schema；
+  **标题按谁在问分三种**——`server` 在场说「`{{server}}` 在向你提问」，只有 `askedBy` 说「模型在向你
+  提问」，两个都不在场才是中立的那句。端点**不写 null 占位**：缺的键不出现，卡片靠**在场与否**分辨，
+  `null` 会被读成「有个名字叫 null 的服务器」。拒绝不是失败，是一句模型能接着干的答案。
 - **门是每场会话一份**：`boolean` 住在那份 host 里，`ApprovalBatchProvider` 也每份 host 一个（它读的正是
   它上面那个 provider 的待决中断）。所以 A 停在等人决定时，只有 A 的输入框关着，B 照常能发。
 - **悬置不是「在跑」**：`isRunning` 在悬置时是 `false`（那一轮 run 已经以 interrupt 结束），
@@ -449,7 +454,7 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 
 | 表 | 答什么 | 认得的名字 |
 |---|---|---|
-| `TOOL_ICONS` | **这是哪一只手**（kind，不是状态） | `read` `write` `edit` `replace` `insert` `undo_last_replace` `grep` `glob` `bash` `eval` `skill` `session-configure` `todo_write` `web_fetch` `web_search`；认不出的给 `WrenchIcon`，刻意不长得像其中任何一个 |
+| `TOOL_ICONS` | **这是哪一只手**（kind，不是状态） | `read` `write` `edit` `replace` `insert` `undo_last_replace` `grep` `glob` `bash` `eval` `skill` `todo_write` `web_fetch` `web_search`；认不出的给 `WrenchIcon`，刻意不长得像其中任何一个 |
 | `subjectOf` | **这一步在干什么**（只读参数，不做解析） | 同上一列。各自的形状：`glob` 是模式（给了根就带上根）、`todo_write` 是进度（`2/3 完成`，空清单是「清空」）、`web_fetch` 是 URL、`web_search` 是查询串；认不出的是「第一个字符串参数」 |
 
 新增一个工具**不动**这两张表也能用（默认分支与扳手图标就是留好的口子）；动它们是**可读性**，
@@ -576,9 +581,9 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
   **「缺字段」与「空集」是两个答案**：服务端对 nil 不拦、对 `#{}` 拦（`undeclared-input` 实测
   `nil → []`、`#{} → [:image]`），线上也分得开（没声明就不写这个键，声明了空集写 `[]`），
   所以界面照同一个分法读。
-- **2 MB 的上限量的是源文件字节。** 客户端每一轮都把整段历史重发，所以一张图会跟着每一轮的 `input`
-  行被重记一遍（2 MB 的截图约 2.7 MB base64，二十轮就是五十多兆的记录）。量源文件而不是 base64 长度或
-  解码后的像素，是因为**人手里那张图的体积是人唯一看得见、也唯一能自己动手改的数**。
+- **2 MB 的上限量的是源文件字节。** 一张图进了会话就留在历史里：**每一次模型调用都会把它再送一遍**
+  （2 MB 的截图约 2.7 MB base64，一场二十轮的会话就是五十多兆的请求量），所以量的是**人手里那张源文件**
+  的字节，而不是 base64 长度或解码后的像素——人看得见、也唯一能自己动手改的数就是它。
   **不许偷偷改字节**：不做客户端压缩、不做缩放、不做重编码——改掉别人给的字节再发出去，等于在记录与
   「模型到底看到了什么」之间多一层没人能复盘的东西。超限就是拒，并说清拒的是什么。
   判据只有一处（`overByteLimit`），所以不会出现一处量 `file.size`、另一处量 base64 长度。
@@ -710,8 +715,8 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 
 **怎么跑**用 `cd ui && npm test`（vitest；三条腿与定向跑的完整入口见 `AGENTS.md`）。整套测试的
 **驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,attachments,turns,injections,picker,i18n,restore,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
-是被它 import 的普通模块（`sidebar` / `record` / `window` 那三份是 `.tsx`：它们
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,elicitation-card,attachments,turns,injections,picker,i18n,restore,running,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
+是被它 import 的普通模块（`sidebar` / `record` / `window` / `elicitation-card` / `running` 那五份是 `.tsx`：它们
 `renderToStaticMarkup` 组件、把渲染出来的那句话读回来）：
 
 - **一次运行一个后端。** vitest 给每个测试**文件**一份独立模块图，所以多一个测试文件就是多一个 JVM。

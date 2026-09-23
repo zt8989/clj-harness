@@ -80,12 +80,24 @@
 ;; routes what it says and knows nothing about how it decided. Last contributor
 ;; wins, like a definition does.
 
-(defonce ^:private installed-narrowing
-  (atom nil))
-;; The narrowing policy some layer contributed, or nil. It answers two things and
+(defonce ^:private installed-narrowings
+  (atom []))
+;; The narrowing policies installed, in ARRIVAL ORDER. Each answers two things and
 ;; the seam relays both without understanding either: WHETHER this session serves a
 ;; name, and WHAT to tell the model when it does not. With none installed every name
 ;; is served -- see served? for why that default is a promise rather than a guess.
+;;
+;; MORE THAN ONE, BECAUSE A TABLE CAN BE NARROWED BY MORE THAN ONE BOUNDARY. The
+;; editing mode is one ("this session edits by anchor, so `edit` is not in its
+;; table"); a subagent's declared capability is another. They are separate
+;; statements about the same session and neither subsumes the other, so the seam
+;; keeps them apart instead of demanding that one layer know about both. With ONE
+;; installed -- which is every process until something installs a second -- the
+;; behaviour is byte-for-byte what it was when the slot held a single policy.
+;;
+;; THEY ARE ASKED IN ARRIVAL ORDER and the FIRST one that says "not served" owns
+;; the refusal: it is the one with the more specific thing to say, because the
+;; layer that narrowed this name is the layer that knows what replaced it.
 
 (defonce ^:private base-disabled
   (atom {}))
@@ -101,7 +113,8 @@
                 (update :tools merge (:tools layer))
                 (update :disabled into (map (fn [n] [n (:name layer)])) (:disable layer))
                 (update :planner #(or (:planner layer) %))
-                (update :narrow #(or (:narrow layer) %))
+                (update :narrows conj (:narrow layer))
+                (update :unattended #(or (:unattended layer) %))
                 ;; ...AND THE TWO CONTRIBUTIONS THAT ANSWER FOR ONE SESSION AT A
                 ;; TIME. A layer whose tools depend on the SESSION (an external
                 ;; server's roster) or whose switch-off is per-session cannot say
@@ -111,9 +124,25 @@
                 ;; the rest of this door follows.
                 (update :tools-for conj (:tools-for layer))
                 (update :disabled-for conj (:disabled-for layer))))
-          {:tools {} :disabled {} :planner nil :narrow nil
+          {:tools {} :disabled {} :planner nil :narrows [] :unattended nil
            :tools-for [] :disabled-for []}
           layers))
+
+(defonce ^:private installed-unattended
+  (atom nil))
+;; The unattended policy some layer contributed, or nil. It answers ONE question
+;; about a thread: can this thread STOP AND WAIT FOR A HUMAN? Nil -- the default,
+;; and every process until a layer says otherwise -- means every thread can, which
+;; is what a run whose client holds an approval card does. A layer answers a
+;; sentence when it cannot, and the seam answers the call with that sentence
+;; instead of parking it. Last contributor wins, like a definition does.
+;;
+;; IT IS THE SEAM'S BUSINESS BECAUSE PARKING IS. "This call stops here and a person
+;; decides" is an outcome this namespace owns; whether the thread has a person to
+;; stop for is a fact about the thread, which the seam cannot know and a capability
+;; can. Keeping the two apart is what lets a subagent be told, in its own tool
+;; result, that the call needed an approval it cannot wait for -- instead of its run
+;; ending on an interrupt nobody is watching.
 
 (defonce ^:private session-sources
   ;; The installed :tools-for contributions, in install order. Called on the way
@@ -129,11 +158,12 @@
 
 (defn- recompute!
   []
-  (let [{:keys [tools disabled planner narrow tools-for disabled-for]} (fold-layers @layers)]
+  (let [{:keys [tools disabled planner narrows unattended tools-for disabled-for]} (fold-layers @layers)]
     (reset! registry tools)
     (reset! base-disabled disabled)
     (reset! installed-planner planner)
-    (reset! installed-narrowing narrow)
+    (reset! installed-narrowings (vec (remove nil? narrows)))
+    (reset! installed-unattended unattended)
     (reset! session-sources (vec (remove nil? tools-for)))
     (reset! session-switches (vec (remove nil? disabled-for)))))
 
@@ -157,6 +187,16 @@
                                  ;   of them runs on its own.
      :narrow  {:served? (fn [thread-id name])   ; which names this session is served
                :refuse  (fn [thread-id name])}   ; ...and what to say when it is not
+                                                 ;   ONE policy per layer, and a layer
+                                                 ;   may install a second one beside
+                                                 ;   another's: they are asked in
+                                                 ;   arrival order and the first that
+                                                 ;   says it is not served is the one
+                                                 ;   whose refusal the model reads.
+     :unattended  (fn [thread-id name reason])   ; nil, or what to tell a call that
+                                                 ;   needs a human this thread cannot
+                                                 ;   wait for. Nil -- the default --
+                                                 ;   means every thread can wait.
      :tools-for    (fn [thread-id] {name tool})  ; tools whose EXISTENCE is a
                                                  ;   question about the session
      :disabled-for (fn [thread-id name])}        ; nil, or {:by .. :message ..}
@@ -173,10 +213,12 @@
   :disable leaves the definition in place and refuses its calls. Disabling on the
   way in and deleting on the way out are different statements, and a caller that
   wants the second has to mean it."
-  [{:keys [name tools disable planner narrow tools-for disabled-for] :as _contribution}]
+  [{:keys [name tools disable planner narrow unattended tools-for disabled-for]
+    :as _contribution}]
   (let [id    (str (java.util.UUID/randomUUID))
         layer {:id id :name (or name id) :tools (or tools {})
                :disable (vec disable) :planner planner :narrow narrow
+               :unattended unattended
                :tools-for tools-for :disabled-for disabled-for}]
     (swap! layers conj layer)
     (recompute!)
@@ -264,6 +306,21 @@
   "Undo session-disable! for NAME. A name that was never disabled is a no-op."
   [thread-id name]
   (swap! overlays update-in [thread-id :disabled] (fnil disj #{}) name))
+
+(defn session-added?
+  "Did THIS SESSION put NAME in its own table -- was it session-register!'d rather
+  than inherited from the base?
+
+  ASKED BY WHOEVER HAS TO JUDGE A DEFINITION'S PROVENANCE, and it has to be asked
+  separately from what the definition SAYS: `session-register!` keeps the map it was
+  handed, tags and all, so a name that arrived this way can carry `:source :builtin`
+  and `:read-only true` and be neither. Reading the map is not reading its papers.
+
+  The base registry is never consulted here -- a name that is BOTH a base tool and
+  a session's own reads as the session's, because that is the copy the session's
+  calls will actually run."
+  [thread-id name]
+  (contains? (get-in @overlays [thread-id :added] {}) name))
 
 (defn session-disabled?
   "Is NAME switched off in THREAD-ID's session? The seam's lookup, per call.
@@ -447,10 +504,13 @@
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
   effective toolset (base overlaid with its session additions/removals).
 
-  THE EDITING MODE SUBTRACTS FROM THIS LIST, and it is the only thing that does.
-  A session is served ONE editing toolset -- the mode's -- so the other mode's
-  tools never reach the model. Everything else stays in, including tools this
-  session has switched OFF: availability is enforced per call at the execution
+  A SESSION IS SERVED A SUBSET, not the whole table: every installed narrowing
+  policy gets its say and a name any of them withholds is left out. The editing
+  mode's subtraction came first (a session is served ONE editing toolset), and a
+  subagent's declared range is the same kind of statement, asked through the same
+  door -- so 'which names does this session serve' has one answer here rather than
+  one per mechanism. Everything else stays in, including tools this session has
+  switched OFF: availability is enforced per call at the execution
   seam, not by omission, and a model that cannot see a switched-off tool would
   read its absence as 'this does not exist'.
 
@@ -617,25 +677,59 @@
 (defn- missing-args [{:keys [required]} args]
   (vec (remove #(contains? args %) required)))
 
-(defn- served?
+(defn- narrowing-serves?
+  "Does ONE installed policy serve NAME for THREAD-ID? A policy that THROWS serves:
+  the same promise served? makes below, asked one layer down -- a broken policy must
+  not be able to take a working tool away."
+  [thread-id name {:keys [served?]}]
+  (if served?
+    (try (boolean (served? thread-id name)) (catch Throwable _ true))
+    true))
+
+(defn served?
   "Does this session serve NAME? NOTHING INSTALLED MEANS EVERYTHING IS SERVED, and
   that is a promise rather than a guess: a policy that fails to load, or an offline
   caller that never installed one, must not turn a working tool into an
   unservable one. The failure would be silent and total, so the default fails open
-  and the policy's own answers are the only thing that narrows a table."
+  and the policy's own answers are the only thing that narrows a table.
+
+  EVERY INSTALLED POLICY MUST SERVE IT, so two boundaries compose as an
+  intersection -- the editing mode's subtraction and a subagent's declared range are
+  each a statement about the same session, and a name either of them withholds is
+  not served. With one policy installed (every process until something installs a
+  second) this is exactly the single question it always was.
+
+  PUBLIC BECAUSE A TABLE'S DERIVATION HAS TO ASK IT. 'Which names does this session
+  serve' is the question a capability answering for a DIFFERENT session -- a
+  subagent's declared range, derived from its parent's -- has to put, and asking it
+  per name here is what keeps that derivation from being a second implementation of
+  the narrowing rules."
   [thread-id name]
-  (if-let [{:keys [served?]} @installed-narrowing]
-    (try (boolean (served? thread-id name)) (catch Throwable _ true))
-    true))
+  (every? (fn [policy] (narrowing-serves? thread-id name policy))
+          @installed-narrowings))
 
 (defn- unserved-message
-  "What the model is told when the policy does not serve NAME. The sentence is the
-  policy's -- it is the one that knows what takes the name's place and which
-  configuration key switches back -- and this namespace only relays it."
+  "What the model is told when the policies do not serve NAME. The sentence is the
+  FIRST policy's that says so -- it is the one that knows what takes the name's
+  place and which configuration key switches back -- and this namespace only relays
+  it. With more than one policy installed, the first to refuse owns the wording:
+  the layer that narrowed this name is the layer with the specific thing to say,
+  and a boundary that has nothing to add about a name it also does not serve should
+  not be the one talking."
   [thread-id name]
-  (if-let [{:keys [refuse]} @installed-narrowing]
-    (refuse thread-id name)
+  (if-let [policy (first (filter :refuse
+                                 (remove #(narrowing-serves? thread-id name %)
+                                         @installed-narrowings)))]
+    ((:refuse policy) thread-id name)
     (str name " is not served in this session.")))
+
+(defn- unattended-reason
+  "Whether THREAD-ID can stop and wait for a human: nil it can, or the sentence to
+  answer the call with when it cannot. See the installed-unattended atom for why
+  this belongs to the seam."
+  [thread-id name reason]
+  (when-let [policy @installed-unattended]
+    (try (policy thread-id name reason) (catch Throwable _ nil))))
 
 (defn- approval-reason
   "WHY this call parks -- nil meaning it does not. Three sources, in the order they
@@ -865,8 +959,8 @@
   (a fn of kernel events, may be nil) as it passes through:
     :tool/pre-execute   -- entered the seam; outcome :pass, :unknown-tool,
                            :unserved, :disabled, :missing-args (with the missing
-                           names), :hook-blocked, :needs-approval, :approved, or
-                           :vetoed
+                           names), :hook-blocked, :needs-approval, :unattended,
+                           :approved, or :vetoed
     :tool/execute       -- left execution; the error message, or nil
     :tool/post-execute  -- closes the lifecycle, whatever the phases decided
   A call that never passes pre-execute (unknown tool, unserved tool, disabled
@@ -887,6 +981,10 @@
     SUSPEND   it does not run YET: the run ends on an interrupt and the call is
               the human's until they answer. Nothing executes, no :tool/result
               is emitted, and the tool message lands on the resume run.
+              ...UNLESS NOBODY IS WATCHING: a thread an installed unattended
+              policy answers for cannot stop for a person, so the call comes back
+              as a BLOCK whose reason is that sentence -- parked is not the same
+              as forgotten, and a call that silently waited forever would be.
 
   The decisions are taken in ONE order, first match wins (the cond below):
     disabled -> mode -> missing args -> approval rule -> PreToolUse gate
@@ -996,19 +1094,31 @@
                              :else
                              {:content (str result) :error false})))
                park (fn [reason interrupt-id]
-                      (let [interrupt-id (or interrupt-id
-                                             (:interrupt-id (parked-for-call thread-id id))
-                                             (str (java.util.UUID/randomUUID)))]
-                        (park-approval! interrupt-id (cond-> {:thread-id thread-id
-                                                              :tool-call-id id
-                                                              :name name :args arguments}
-                                                       reason (assoc :reason reason)))
-                        (report (ev/tool-pre-execute id name :needs-approval []))
-                        (report (ev/tool-post-execute id name))
-                        {:content "" :error false
-                         :parked (cond-> {:interrupt-id interrupt-id :id id
-                                          :name name :args arguments}
-                                   reason (assoc :reason reason))}))]
+                      ;; A THREAD THAT CANNOT WAIT FOR A HUMAN IS TOLD SO INSTEAD OF
+                      ;; BEING PARKED. Everything above decided that this call needs a
+                      ;; person; whether there is a person to stop for is a fact about
+                      ;; the THREAD, and the installed policy is what knows it. When
+                      ;; there is not, the call does not run and does not hang: it
+                      ;; comes back as information -- the same shape every other
+                      ;; refusal has -- so the model can find another way. Nothing is
+                      ;; recorded as parked, because nothing is waiting.
+                      (if-let [why (unattended-reason thread-id name reason)]
+                        (do (report (ev/tool-pre-execute id name :unattended []))
+                            (report (ev/tool-post-execute id name))
+                            {:content why :error true})
+                        (let [interrupt-id (or interrupt-id
+                                               (:interrupt-id (parked-for-call thread-id id))
+                                               (str (java.util.UUID/randomUUID)))]
+                          (park-approval! interrupt-id (cond-> {:thread-id thread-id
+                                                                :tool-call-id id
+                                                                :name name :args arguments}
+                                                         reason (assoc :reason reason)))
+                          (report (ev/tool-pre-execute id name :needs-approval []))
+                          (report (ev/tool-post-execute id name))
+                          {:content "" :error false
+                           :parked (cond-> {:interrupt-id interrupt-id :id id
+                                            :name name :args arguments}
+                                     reason (assoc :reason reason))})))]
            (cond
              ;; Disabled is checked FIRST: it is a hard refusal, and there is no
              ;; point parking a call that is never going to execute.

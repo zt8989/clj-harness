@@ -525,8 +525,17 @@
                                                         (fn [ls] (some #(= "hook/SystemPrompt" (replay/kind %)) ls))
                                                         2000)))]
              (is (some? line))
-             (is (= 3 (get-in (replay/payload line) [:matched]))
-                 "the kernel's two rows and the file's one")))
+             ;; FOUR DECLARATIONS NOW, and the fourth is the interesting one: the
+             ;; subagents capability contributes a row at this point (the <subagent>
+             ;; block), so a real composition root has one more than the kernel's
+             ;; two and the file's one. It MATCHES on an ordinary thread -- this one
+             ;; -- and says NOTHING there: `join-blocks` drops a block whose stdout
+             ;; is empty, which is why the assertions above about the message's
+             ;; exact text still hold with the row installed. Counting it here is
+             ;; what keeps this number a fact about the wiring rather than a number
+             ;; that quietly followed the code.
+             (is (= 4 (get-in (replay/payload line) [:matched]))
+                 "the kernel's two rows, the file's one, and the subagent block's")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
            ;; written. The blocks' own tags are deliberately not among them: the
@@ -554,7 +563,7 @@
   ;; the same ending on every turn for the rest of the session, which is the failure this
   ;; case is here to make impossible.
   (let [t "it-jobs"
-        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+        {:keys [id path]} (jobs/start! t {:command "echo JOB-SAYS-$((6*7)); exit 0"})]
     (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
         "the job finished before the run was even asked for")
     (try
@@ -584,13 +593,20 @@
                          ;; injection, so it is in the record and in no frame.
                          ;; THE MARKERS HAVE TO BE ONES ONLY THIS RUN'S INJECTION COULD
                          ;; CARRY. The block's TAG is not one of them: this repository's
-                         ;; own README talks about `<job-ended …>` now, the scripted run
-                         ;; reads it, and a tool result is a legitimate way for those
-                         ;; bytes to reach the wire -- the same trap the system-message
-                         ;; case named. The record's path (a temp path nothing else
-                         ;; mentions) and the job's own output line are.
+                         ;; own README talks about `<job-ended …>`, the scripted run reads
+                         ;; it, and a tool result is a legitimate way for those bytes to
+                         ;; reach the wire -- the same trap the system-message case named.
+                         ;; What is checked is the notice's own second line -- the read
+                         ;; sentence naming THIS job's id, which nothing else in this run
+                         ;; writes -- and the OUTPUT LINE of the command. The command's
+                         ;; own text rides in the notice now (that is how it says which
+                         ;; job), so the marker has to be what the command PRINTED, not
+                         ;; what it was written as: `$((6*7))` is the shell's answer.
+                         (is (not (str/includes? first-body (str "{\"job\": \"" id "\"}")))
+                             "not even the read line, which is the notice's own")
                          (is (not (str/includes? first-body path)))
-                         (is (not (str/includes? first-body "JOB-SAYS-SO"))))
+                         (is (not (str/includes? first-body "JOB-SAYS-42"))
+                             "and nothing of what the job said"))
                        ;; A second run of the same session: the client resends its whole
                        ;; conversation, which has no notice in it.
                        (io/delete-file (log-file t) true)
@@ -1252,7 +1268,8 @@
   ;; A TIER MAY NOT CARRY A MODEL'S COUNTS, and after ticket 03 that rule is about the
   ;; CONFIGURATION rather than about a request: a run cannot name a provider any more, so
   ;; the mistake is made where a session's selection is made -- config.edn (or the
-  ;; session override, or `session-configure`), all of which meet the same `selection`.
+  ;; session override, which POST /api/model writes), both of which meet the same
+  ;; `selection`.
   ;; The rule is unchanged, and so is what it costs to meet it: the run is TERMINATED
   ;; with the catalog's own sentence, naming the field it could not use and where the
   ;; field belongs instead -- not a run that starts, ignores it, and reports success.
@@ -1339,127 +1356,77 @@
            (testing "a later run of the same thread does not repeat the init"
              (is (= 1 (count (filter #(= "provider/init" (replay/kind %)) after-second)))))))))))
 
-(deftest a-session-configure-lands-as-a-changed-line
-  ;; The write half, end to end: the agent changes its reasoning effort, the
-  ;; change is approved, and the jsonl shows a provider/changed line with
-  ;; before -> after plus what it resolved to. The approval gate is what makes it
-  ;; land only after the human's verdict.
+(deftest a-recorded-change-is-drained-into-the-log
+  ;; THE DRAIN, end to end. The provider outbox has had no producer since the
+  ;; `session-configure` tool was removed, so no production path records a
+  ;; `provider/changed` line today -- but the EDGE still drains the outbox on every
+  ;; run (harness.edge.context reads those lines back), and that is what this
+  ;; drives: record the change the way the tool body did, run, read the line.
   ;;
   ;; A session override holds ONLY the knobs the session owns (not the resolved
-  ;; endpoint -- that is what :resolved and the init line are for). So the
-  ;; change's before and after show the session's slice, and the chain between
-  ;; consecutive changes is exactly the test of "what moved in this session".
+  ;; endpoint -- that is what :resolved and the init line are for). So the change's
+  ;; before and after show the session's tier, and the chain between consecutive
+  ;; changes is exactly the test of "what moved in this session".
   (with-resolved-config
    [{:content "hello"}]
    (fn []
-     (let [id   "http-change"]
+     (let [id "http-change"]
        (try
          (io/delete-file (log-file id) true)
-         ;; Seed the session with a baseline the change can stand on.
+         ;; Seed the session with a baseline the change can stand on. Then record
+         ;; two changes -- one knob, then a vendor switch -- through the same two
+         ;; calls the tool body made: one atom operation, then the fact left in
+         ;; the outbox for the edge to write down.
          (providers/set-override! id {:model "alpha-big"})
-         ;; Drive the change the way a run would: park, approve, resume-transit.
-         (let [call (fn [] (tools/run! {:id "cfg1" :type "function"
-                                        :function {:name "session-configure"
-                                                   :arguments (json/write-str {:reasoning-effort "high"})}}
-                                       id))
-               {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
-           (call))
-         (testing "the session now serves the changed value"
+         (doseq [change [{:reasoning-effort "high"} {:provider "beta" :model "beta-plain"}]]
+           (let [{:keys [before after resolved]} (providers/swap-override! id change)]
+             (providers/record-provider-change! id before after "a-tool" after resolved)))
+         (testing "the session now serves the changed values"
            (is (= "high" (:reasoning-effort (providers/active-provider id)))))
          ;; Run once so the edge drains the outbox to the log.
          (post-run id)
          (let [lines (wait-for-recorded
                       (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
+                      (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
                       2000)
-               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
+               changes (mapv replay/payload (filter #(= "provider/changed" (replay/kind %)) lines))
+               [a b]   changes]
            (testing "the change is on disk, before -> after, marked approved"
-             (is (= "approved" (:verdict changed)))
-             (is (= "alpha-big" (get-in changed [:before :model]))
-                 "the session's pre-change slice is the baseline that stood")
-             (is (= "alpha-big" (get-in changed [:after :model]))
+             (is (= "approved" (:verdict a)))
+             (is (= "alpha-big" (get-in a [:before :model]))
+                 "the session's pre-change tier is the baseline that stood")
+             (is (= "alpha-big" (get-in a [:after :model]))
                  "the model never moved; only the effort did")
-             (is (= "high" (get-in changed [:after :reasoning-effort]))
-                 "and the new knob is the one the change named")
-             (is (= "session-configure" (:trigger changed))
-                 "the change names the path that pressed it")
+             (is (= "high" (get-in a [:after :reasoning-effort])))
+             (is (= "a-tool" (:trigger a))
+                 "the trigger is whatever path the recorder was told -- here, a test")
              (is (= {:model "alpha-big" :reasoning-effort "high"}
-                    (select-keys (:override changed) [:model :reasoning-effort]))
-                 "the override is the full session slice after the change")
-             (testing "and it records what that slice resolved to, so a reader
+                    (select-keys (:override a) [:model :reasoning-effort]))
+                 "the override is the full session tier after the change")
+             (testing "and it records what that tier resolved to, so a reader
                        months later is not reading today's catalog"
-               (is (= "https://x/v1" (get-in changed [:resolved :base-url])))
-               (is (= "alpha-big" (get-in changed [:resolved :model])))
-               (is (= ["image" "text"] (get-in changed [:resolved :input])))))
-           (testing "consecutive changes chain through the same slice"
-             ;; One more approved change: reasoning-effort goes from high to
-             ;; low. before on the new line MUST equal after on the previous.
-             (let [call (fn [] (tools/run! {:id "cfg2" :type "function"
-                                            :function {:name "session-configure"
-                                                       :arguments (json/write-str {:reasoning-effort "low"})}}
-                                           id))
-                   {:keys [parked]} (call)]
-               (tools/decide-approval! (:interrupt-id parked) :approved {})
-               (call))
-             (post-run id)
-             (let [lines (wait-for-recorded
-                          (log-file id)
-                          (fn [ls] (>= (count (filter #(= "provider/changed" (replay/kind %)) ls)) 2))
-                          2000)
-                   changes (filter #(= "provider/changed" (replay/kind %)) lines)
-                   [a b]   (mapv replay/payload changes)]
-               (is (= "high" (get-in a [:after :reasoning-effort])))
-               (is (= "high" (get-in b [:before :reasoning-effort]))
-                   "the second change starts where the first ended")
-               (is (= "low" (get-in b [:after :reasoning-effort])))
-               (is (every? #(= "session-configure" (:trigger %)) [a b])
-                   "every chained change names its trigger")
-               (is (= {:model "alpha-big"} (select-keys (:override a) [:model]))
-                   "the first change's override is the full session slice")
-               (is (= "low" (get-in (:override b) [:reasoning-effort]))
-                   "the second change's override reflects the latest session state"))))
-         (finally (providers/set-override! id nil)))))))
-
-(deftest a-vendor-switch-land-as-a-changed-line-that-moved-the-endpoint
-  ;; The end-to-end proof of the feature: an agent naming a vendor gets that
-  ;; vendor's ENDPOINT, and the change line says so. Under the old shape this
-  ;; call was accepted, approved, and changed nothing -- the log line even
-  ;; recorded {:before {} :after {}}.
-  (with-resolved-config
-   [{:content "hello"}]
-   (fn []
-     (let [id   "http-vendor"]
-       (try
-         (io/delete-file (log-file id) true)
-         (let [call (fn [] (tools/run! {:id "vsw" :type "function"
-                                        :function {:name "session-configure"
-                                                   :arguments (json/write-str {:provider "beta"})}}
-                                       id))
-               {:keys [parked]} (call)]
-           (tools/decide-approval! (:interrupt-id parked) :approved {})
-           (call))
-         (testing "the session's served endpoint moved with the vendor"
-           (let [a (providers/active-provider id)]
-             (is (= :beta (:provider a)))
-             (is (= "https://y/v1" (:base-url a)))
-             (is (= "beta-plain" (:model a)) "and its default model came along")))
-         (post-run id)
-         (let [lines (wait-for-recorded
-                      (log-file id)
-                      (fn [ls] (some #(= "provider/changed" (replay/kind %)) ls))
-                      2000)
-               changed (replay/payload (first (filter #(= "provider/changed" (replay/kind %)) lines)))]
-           (is (= "beta" (get-in changed [:after :provider]))
-               "the change line names the vendor that was selected")
-           (is (not= {} (:after changed))
-               "and is not an empty change -- which is what the old shape wrote")
-           (is (= "https://y/v1" (get-in changed [:resolved :base-url]))
-               "with the endpoint that vendor resolves to")
-           (is (= "beta-plain" (get-in changed [:resolved :model])))
-           (testing "and the counts moved with the model, not left at alpha's"
-             (is (= 128000 (get-in changed [:resolved :context-window])))
-             (is (= 4096 (get-in changed [:resolved :max-output-tokens])))))
+               (is (= "https://x/v1" (get-in a [:resolved :base-url])))
+               (is (= "alpha-big" (get-in a [:resolved :model])))
+               (is (= ["image" "text"] (get-in a [:resolved :input])))))
+           (testing "and a vendor switch lands as a change that moved the endpoint"
+             ;; The change NAMES the new vendor's model: the tier still held alpha's
+             ;; id, and a vendor that does not declare it is refused rather than
+             ;; carried across (see providers/resolve-override). Under the old shape
+             ;; this change was recorded as {:before {} :after {}} -- a line that
+             ;; documents nothing.
+             (is (= "high" (get-in b [:before :reasoning-effort]))
+                 "the second change starts where the first ended")
+             (is (= "beta" (get-in b [:after :provider]))
+                 "the line names the vendor that was selected")
+             (is (not= {} (:after b)) "and is not an empty change")
+             (is (= "https://y/v1" (get-in b [:resolved :base-url]))
+                 "with the endpoint that vendor resolves to")
+             (is (= "beta-plain" (get-in b [:resolved :model])))
+             (testing "and the counts moved with the model, not left at alpha's"
+               (is (= 128000 (get-in b [:resolved :context-window])))
+               (is (= 4096 (get-in b [:resolved :max-output-tokens])))))
+           (testing "and the outbox is empty: draining is once, and it happened"
+             (is (empty? (providers/take-provider-changes! id)))))
          (finally (providers/set-override! id nil)))))))
 
 (deftest answers-the-cors-preflight
@@ -5898,6 +5865,57 @@
              (is (= (:messages (read-json (api-call :post (str "/api/threads/" tid "/rebuild")
                                                     "{}")))
                     (:messages answer))))))))))
+
+(deftest a-repair-that-arrived-behind-later-messages-still-answers-its-call
+  ;; THE 2026-09-23 BRICKING (thread 412afbd3). A run was cut off with a tool call in
+  ;; flight; the person kept typing before anything closed that run off; and so the
+  ;; CLOSING REPAIR -- `close-off-open-run!`'s TOOL_CALL_RESULT -- lands at the END of the
+  ;; file, behind those later messages. Folded in file order the call reads as UNANSWERED,
+  ;; and the vendor refuses the rebuilt conversation: every later run of that session dies
+  ;; with `unanswered .. call_..`, and there is nothing a human can press to get out.
+  ;;
+  ;; THE ANSWER IS ALREADY ON THE RECORD, so the run must USE it (moved behind the call it
+  ;; answers), not invent one and not refuse. The provider pinned below IS the vendor's
+  ;; validator (`with-vendor-shaped`), so a history the vendor would refuse cannot reach the
+  ;; model at all -- a green here cannot be a fake that answers anything.
+  (with-vendor-shaped
+   "late-answer"
+   (fn []
+     (let [tid   "late-answer"
+           f     (log-file tid)
+           line! (fn [run-id kind payload & [extra]]
+                   (spit f (str (row-json (merge {:ts (System/currentTimeMillis)
+                                                  :runId run-id :kind kind :payload payload}
+                                                 extra))
+                                "\n")
+                         :append true :encoding "UTF-8"))]
+       (io/delete-file f true)
+       (.mkdirs (.getParentFile f))
+       ;; r1: the person's turn, and a call the run never returned from.
+       (line! "r1" "message" {:role "user" :content "看看这个项目"} {:source "client" :id "u1"})
+       (doseq [frame (mapcat (ag/outbound tid "r1")
+                             [(ev/run-start) (ev/tool-call "c1" "read" "{}")])]
+         (line! "r1" "event" frame))
+       ;; r2: what the person typed NEXT, recorded while r1 was still open.
+       (line! "r2" "message" {:role "user" :content "先别管那个"} {:source "client" :id "u2"})
+       (line! "r2" "event" (ev/run-error "the next run was refused"))
+       ;; AND NOW the repair, written the way the edge writes it: a rebuild closes the run
+       ;; off, and its TOOL_CALL_RESULT is APPENDED -- behind u2.
+       (is (= 200 (.statusCode (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))))
+       (testing "the record, folded as it lies, still leaves the dead call unanswered"
+         (let [folded (replay/lines->messages
+                       (str/split-lines (slurp f :encoding "UTF-8")))]
+           (is (= ["c1"] (vec (llm/unanswered-tool-calls
+                               (ag/inbound (sessions/model-view folded) "S" [])))))
+           "the fold is in FILE order, and that order is what the run must not be refused for"))
+       (let [resp   (post-run tid {:append [{:id "u3" :role "user" :content "继续"}]})
+             frames (wire/frames-from-sse (.body resp))]
+         (testing "yet the next run IS answered -- the recorded result is moved behind its call"
+           (is (= 200 (.statusCode resp)))
+           (is (not-any? #(= "RUN_ERROR" (:type %)) frames)
+               (str "saw " (pr-str (mapv :type frames))))
+           (is (some #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames)
+               "the model got its turn: the vendor accepted the history")))))))
 
 (deftest a-rebuild-during-a-live-run-leaves-the-record-alone
   ;; THE CASE THAT MOTIVATED THE REGISTRY. A client that refreshed into a running

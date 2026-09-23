@@ -1,0 +1,70 @@
+
+=== backend (harness.cap.ask-test) :: clojure -M:test -e (require 'harness.test-runner) (System/exit (harness.test-runner/run-suite! '(harness.cap.ask-test)))
+test config root: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477
+test OS home: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-home-1789799788477
+developer home store before this run: present (9605120 bytes, left alone)
+
+Testing harness.cap.ask-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10905 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:37.043 INFO  harness.infra.log - listening port=10905 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:37.039433800Z
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by org.sqlite.SQLiteJDBCLoader in an unnamed module (file:/C:/Users/zhouteng/.m2/repository/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+14:36:44.879 INFO  harness.infra.log - start model=scripted run-id=7228ba71-49ff-4c03-a823-2ab5adbb8807 thread-id=ask-declined
+14:36:45.414 INFO  harness.infra.log - stream-closed run-id=7228ba71-49ff-4c03-a823-2ab5adbb8807 status=:server-close terminal=RUN_FINISHED thread-id=ask-declined
+14:36:45.415 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7228ba71-49ff-4c03-a823-2ab5adbb8807 thread-id=ask-declined
+14:36:45.531 INFO  harness.infra.log - start model=scripted run-id=4dec9cdc-3afc-4f4c-a789-7c851d1b9b03 thread-id=ask-declined
+14:36:45.874 INFO  harness.infra.log - stream-closed run-id=4dec9cdc-3afc-4f4c-a789-7c851d1b9b03 status=:server-close terminal=RUN_FINISHED thread-id=ask-declined
+14:36:45.875 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4dec9cdc-3afc-4f4c-a789-7c851d1b9b03 thread-id=ask-declined
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10968 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:45.908 INFO  harness.infra.log - listening port=10968 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:45.908667200Z
+14:36:45.995 INFO  harness.infra.log - start model=scripted run-id=4d245976-6480-4ffd-8dd9-f532d0d045cf thread-id=ask-empty
+14:36:46.796 INFO  harness.infra.log - stream-closed run-id=4d245976-6480-4ffd-8dd9-f532d0d045cf status=:server-close terminal=RUN_FINISHED thread-id=ask-empty
+14:36:46.797 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4d245976-6480-4ffd-8dd9-f532d0d045cf thread-id=ask-empty
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10970 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:46.822 INFO  harness.infra.log - listening port=10970 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:46.822551500Z
+14:36:46.920 INFO  harness.infra.log - start model=scripted run-id=31235ea1-9783-4ba3-9a40-a4a7a17fe95c thread-id=ask-dupes
+14:36:47.587 INFO  harness.infra.log - stream-closed run-id=31235ea1-9783-4ba3-9a40-a4a7a17fe95c status=:server-close terminal=RUN_FINISHED thread-id=ask-dupes
+14:36:47.588 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=31235ea1-9783-4ba3-9a40-a4a7a17fe95c thread-id=ask-dupes
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10974 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:47.606 INFO  harness.infra.log - listening port=10974 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:47.606533100Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10975 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:47.671 INFO  harness.infra.log - listening port=10975 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:47.671905300Z
+14:36:47.794 INFO  harness.infra.log - start model=scripted run-id=452cc8b5-a3ae-43fe-8e8b-45c6b8894d88 thread-id=ask-spent-once
+14:36:48.390 INFO  harness.infra.log - stream-closed run-id=452cc8b5-a3ae-43fe-8e8b-45c6b8894d88 status=:server-close terminal=RUN_FINISHED thread-id=ask-spent-once
+14:36:48.393 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=452cc8b5-a3ae-43fe-8e8b-45c6b8894d88 thread-id=ask-spent-once
+14:36:48.511 INFO  harness.infra.log - start model=scripted run-id=c5970833-e697-46fd-bc68-809b56c4fe54 thread-id=ask-spent-once
+14:36:48.868 INFO  harness.infra.log - stream-closed run-id=c5970833-e697-46fd-bc68-809b56c4fe54 status=:server-close terminal=RUN_FINISHED thread-id=ask-spent-once
+14:36:48.868 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c5970833-e697-46fd-bc68-809b56c4fe54 thread-id=ask-spent-once
+14:36:49.039 INFO  harness.infra.log - start model=scripted run-id=4c8e9a17-fa98-466a-83af-77dbd1eff563 thread-id=ask-spent-once
+14:36:49.355 INFO  harness.infra.log - stream-closed run-id=4c8e9a17-fa98-466a-83af-77dbd1eff563 status=:server-close terminal=RUN_FINISHED thread-id=ask-spent-once
+14:36:49.355 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4c8e9a17-fa98-466a-83af-77dbd1eff563 thread-id=ask-spent-once
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10985 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:49.370 INFO  harness.infra.log - listening port=10985 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:49.369918800Z
+14:36:49.615 INFO  harness.infra.log - start model=scripted run-id=39e266e3-273d-4cd6-a015-d0edfae1c57e thread-id=ask-resume
+14:36:51.625 INFO  harness.infra.log - stream-closed run-id=39e266e3-273d-4cd6-a015-d0edfae1c57e status=:server-close terminal=RUN_FINISHED thread-id=ask-resume
+14:36:51.625 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=39e266e3-273d-4cd6-a015-d0edfae1c57e thread-id=ask-resume
+14:36:52.772 INFO  harness.infra.log - start model=scripted run-id=07cbc490-3181-404a-9ce6-7267c284d115 thread-id=ask-resume
+14:36:56.650 INFO  harness.infra.log - stream-closed run-id=07cbc490-3181-404a-9ce6-7267c284d115 status=:server-close terminal=RUN_FINISHED thread-id=ask-resume
+14:36:56.650 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=07cbc490-3181-404a-9ce6-7267c284d115 thread-id=ask-resume
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10999 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+14:36:56.665 INFO  harness.infra.log - listening port=10999 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477 since=2026-09-19T06:36:56.665894Z
+14:36:57.042 INFO  harness.infra.log - start model=scripted run-id=77bb2f50-e204-4a4d-b2cc-43fa52b08ef4 thread-id=ask-park
+14:36:58.221 INFO  harness.infra.log - stream-closed run-id=77bb2f50-e204-4a4d-b2cc-43fa52b08ef4 status=:server-close terminal=RUN_FINISHED thread-id=ask-park
+14:36:58.222 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=77bb2f50-e204-4a4d-b2cc-43fa52b08ef4 thread-id=ask-park
+
+Ran 7 tests containing 48 assertions.
+0 failures, 0 errors.
+14:36:58.306 INFO  harness.infra.log - shutdown root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-1789799788477
+=== backend (harness.cap.ask-test) :: ok
+
+test.mjs: ok

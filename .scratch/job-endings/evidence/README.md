@@ -8,9 +8,10 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 
 `go.json` 三轮，正好一次「起一条没人等的作业 → 去干别的 → 收尾」：
 
-1. 模型调 `bash {command: "sleep 1; echo JOB-SAYS-SO", run_in_background: true}` 起一条 1 秒就结束的
+1. 模型调 `job {command: "sleep 1; echo JOB-SAYS-SO"}` 起一条 1 秒就结束的
    作业，拿到句柄就继续（**起作业的动词在 2026-09-20 晚些并进了 `bash`**，见
-   `.scratch/bash-background/spec.md`：那天的脚本写的是 `job`，工具合并后这一行跟着改）；
+   `.scratch/bash-background/spec.md`：那天的脚本写的是 `job`，工具合并后那一行跟着改；
+   **2026-09-22 又复议回来**，`go.json` 已改回 `job`——见本文末尾那一段）；
 2. 模型调 `bash {sleep 3}`——这一轮里作业跑完了，而模型在忙；
 3. 模型的第三次调用（就是它下一次开口）之前，前置步骤把 `<job-ended id="j…">` 注入进历史。
 
@@ -46,3 +47,11 @@ node scripts/dev.mjs --scripted .scratch/job-endings/evidence/go.json --ui-port 
 - 轨道上比之前少一张脸：`job` 这个名字整个不在了。
 - 注入那一格还在：`上下文` / `<job-ended id="j1" path="…">[exit 0]</job-ended>` —— 一行、三样事实，
   **没有尾部**（记录里那句 `JOB-SAYS-SO` 不在通知里）。
+
+## 再复议之后（2026-09-22，`job` 回到工具表）
+
+`go.json` 第 1 步已改回 `job {command: "sleep 1; echo JOB-SAYS-SO"}`——合并那阵子写成
+`bash {run_in_background: true}`，而那个字段如今不在 `bash` 的表里（传了什么也不发生），留着会让这一步
+退化成一次前台等待（见 `.scratch/bash-background/spec.md` 决策 1 的日期注、
+`.scratch/receipts-not-echoes/` 票 03）。**上面那两段记录的是各自那天看见的东西，
+一个字没改**；改的只是「今天还能重跑」的那一步。

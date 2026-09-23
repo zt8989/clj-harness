@@ -87,6 +87,8 @@ import { SessionRunContext } from "@/components/session-run-state";
 // 09): this host has the thread id the request has to name, which is the whole reason the
 // element asks for it rather than drawing one of its own.
 import { SessionRunStop } from "@/components/session-run-stop";
+import { SubagentViewPanel } from "@/components/subagent-view";
+import { SubagentViewContext, type SubagentView } from "@/components/subagent-view-context";
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
@@ -1338,6 +1340,17 @@ export function App() {
     minted.current.add(id);
     return { shown: id, live: [{ id, read: "none", attempt: 0 }] };
   });
+  // WHAT THE RIGHT-HAND MIRROR IS SHOWING, or null (ticket 05). A SINGLE VALUE, and
+  // that is the decision rather than a simplification: opening another subagent
+  // REPLACES this one, so there is no list to manage, no arrangement to remember and
+  // no way for two panels to hold two subscriptions at once. The panel itself is
+  // mounted by the render below, beside the conversation.
+  //
+  // IT LIVES HERE, ON THE PAGE, because the two things that have to reach each other
+  // are the transcript's `agent` card (which opens it) and the column (which draws it)
+  // -- and the card is rendered by a `SessionHost` that the column is `children` of,
+  // so neither can hand the other a prop.
+  const [subagentView, setSubagentView] = useState<SubagentView | null>(null);
   // One answer per session, reported by its host and read by the sidebar.
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({});
   // AND ONE TITLE PER SESSION, from the same reporter and read by the same rows -- but
@@ -1735,6 +1748,7 @@ export function App() {
           that brings it back are `absolute` (see `components/sidebar.tsx` and
           `components/sidebar-toggle.tsx`), so this row is the box they are placed
           against -- and it is the one element that knows the viewport's height. */}
+      <SubagentViewContext.Provider value={setSubagentView}>
       <div className="relative flex h-dvh">
         {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
             over the conversation: a panel covering what you were reading needs a
@@ -1822,7 +1836,27 @@ export function App() {
             </SessionHost>
           ))}
         </div>
+        {/* THE THIRD COLUMN (ticket 05): the mirror, beside the conversation rather
+            than over it. It is a `shrink-0` sibling AFTER the chat column, so the
+            middle column's `min-w-0 flex-1` is what gives up the room -- and the
+            panel keeps its own fixed width, which is why the main conversation can
+            never be squeezed to nothing by it.
+
+            `key` IS THE CHILD'S ID, and it is load-bearing: switching subagents must
+            mount a NEW panel, not reuse the open one. The runtime, the agent and the
+            follow connection all belong to one child, and a reused host would keep
+            the first child's run (and its subscription) alive behind the second's
+            name. Remounting is what makes "one at a time" true at the connection
+            level rather than only on screen. */}
+        {subagentView !== null && (
+          <SubagentViewPanel
+            key={subagentView.threadId}
+            view={subagentView}
+            onClose={() => setSubagentView(null)}
+          />
+        )}
       </div>
+      </SubagentViewContext.Provider>
     </TooltipProvider>
   );
 }

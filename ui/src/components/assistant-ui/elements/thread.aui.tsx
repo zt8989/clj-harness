@@ -132,6 +132,18 @@ export type ThreadComponents = {
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  /// LOCAL (subagent-view ticket 05): WHETHER THIS THREAD HAS A COMPOSER AT ALL.
+  /// `false` is the MIRROR -- the right-hand panel, which watches a subagent work
+  /// and cannot talk to it -- and it is a switch here rather than a forked element
+  /// for the reason the other optional props exist (`Welcome`, `ComposerFrame`,
+  /// `ComposerTools`, `ComposerAddAttachment`): a second copy of this file would
+  /// start drifting from this one the day either changed, and the message
+  /// rendering is exactly what the two sides must agree about.
+  ///
+  /// NO COMPOSER, NOT A DISABLED ONE. `false` does not render the footer's
+  /// composer, its chrome, or any of the states that say "this conversation could
+  /// be spoken to but is shut" -- those belong to a composer that exists.
+  composer?: boolean | undefined;
   // LOCAL (ticket 06): the window's top, drawn inside the viewport above the messages.
   // The page hands it down because the window belongs to the SESSION and this file is
   // the conversation's own furniture; `null` -- every session read through the sidebar,
@@ -244,12 +256,13 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
   window = null,
+  composer = true,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} window={window} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} window={window} composer={composer} />
     </ThreadComponentsContext.Provider>
   );
 };
@@ -258,7 +271,8 @@ const ThreadRoot: FC<{
   isEmpty: boolean;
   autoFocus: boolean;
   window: WindowTopProps | null;
-}> = ({ isEmpty, autoFocus, window }) => {
+  composer: boolean;
+}> = ({ isEmpty, autoFocus, window, composer }) => {
   const { Welcome = ThreadWelcome, ComposerFrame = PassthroughFrame } =
     useContext(ThreadComponentsContext);
 
@@ -302,9 +316,16 @@ const ThreadRoot: FC<{
             isEmpty && "justify-center",
           )}
         >
-          <AuiIf condition={isNewChatView}>
-            <Welcome />
-          </AuiIf>
+          {/* LOCAL (subagent-view ticket 05): A MIRROR HAS NOTHING TO WELCOME
+              ANYBODY TO. The panel's thread is empty for the moment between mounting
+              and the follow channel's first frame, and the new-chat screen would
+              flash a greeting over a conversation that already exists -- so the
+              opening furniture goes with the composer, under the same switch. */}
+          {composer ? (
+            <AuiIf condition={isNewChatView}>
+              <Welcome />
+            </AuiIf>
+          ) : null}
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
@@ -334,13 +355,21 @@ const ThreadRoot: FC<{
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             {/* LOCAL: the frame wraps the composer rather than replacing it, so
-                the default above still renders exactly what upstream renders. */}
-            <ComposerFrame>
-              <Composer autoFocus={autoFocus} />
-            </ComposerFrame>
-            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
-              <ThreadSuggestions />
-            </AuiIf>
+                the default above still renders exactly what upstream renders.
+                LOCAL (subagent-view ticket 05): and `composer={false}` renders
+                NEITHER -- see `ThreadProps`. It is the whole of the mirror: what is
+                gone is the composer, its frame and its chrome, not a disabled
+                version of any of them. */}
+            {composer ? (
+              <ComposerFrame>
+                <Composer autoFocus={autoFocus} />
+              </ComposerFrame>
+            ) : null}
+            {composer ? (
+              <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
+                <ThreadSuggestions />
+              </AuiIf>
+            ) : null}
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>

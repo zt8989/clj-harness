@@ -679,6 +679,10 @@
   The command goes to the shell a foreground `bash` call would use (`:shape :shell`)
   rather than to `cmd /c` on Windows -- the promise here is the same as `bash`'s.
 
+  THE COMMAND IS KEPT ON THE JOB, not only run: the notice that announces this job's
+  ending says which command it was (`notice`), and that is the only place it can come
+  from -- the registry entry is what outlives the call.
+
   `:kind` NAMES WHICH SHELL, exactly as it does for a foreground call; without it this
   machine's own is used. `shell/start` resolves it BEFORE the job id is taken, so a kind
   this machine does not have throws with nothing registered -- the same promise the
@@ -693,6 +697,10 @@
       ;; `prune-records!`).
       (sweep-once!)
       (let [job {:id job-id :handle handle :path p
+                 ;; THE COMMAND IS KEPT, not just run: `notice` hands the model back
+                 ;; "which job" when it announces an ending, and an id alone (`j1`) says
+                 ;; nothing about what the job was.
+                 :command command
                  :writer (AtomicReference. (open-record! thread-id job-id))
                  ;; DELIVERED WHEN THE RECORD GETS ITS LAST LINE, whoever writes it.
                  ;; A `job_output {wait: true}` blocks on this rather than polling the
@@ -946,29 +954,39 @@
 ;; AND IT IS SAID ONCE. That claim needs a place to live -- see `take-notices!`.
 
 (defn- notice
-  "The message that tells the model JOB is over, and ONLY THAT: which job, where its
-  record is, and the line the record ends on.
+  "The message that tells the model JOB is over, and ONLY THAT: which command it was, how
+  it went, and the verb that reads what it said.
 
-  THREE THINGS AND NOTHING ELSE. A notice is a fact, not an answer: it does not carry a
-  tail of what the command said (a record of five thousand lines is announced in the
-  same few bytes as an empty one), it does not repeat the truncation sentence, and it
-  says nothing about how to read the record -- the tool descriptions are where that
-  belongs, and they are in front of the model on every request.
+  TWO FACTS, THE COMMAND, AND ONE SENTENCE. A notice is a reminder, not an answer: it does
+  not carry a tail of what the command said (a record of five thousand lines is
+  announced in the same few bytes as an empty one), it does not repeat the truncation
+  sentence, and it does NOT carry the record's path -- the path was in the answer to
+  `job`, the model still has it in the history above, and `job_output` does not take one.
 
   THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
-  `<skill name=…>` and `<instructions path=…>` are for their own blocks. The path rides
-  on it as an attribute rather than as a sentence: it is metadata about the block, not
-  something the command said.
+  `<skill name=…>` and `<instructions path=…>` are for their own blocks. What rides on
+  it is the id and the line the record ended on -- two facts, nothing about where
+  anything is.
 
-  THE PATH GOES IN UNESCAPED, and that is a judgement rather than an oversight: it is
-  this harness's own configuration home plus a `home/sanitize`d id, whose rule admits
-  only `[A-Za-z0-9._-]`, so a quote can appear in it only if somebody named their home
-  with one -- and a check for that would be a lot of code for that."
+  THE COMMAND IS THE ONLY THING THAT SAYS WHICH JOB THIS IS, and that is why it is here
+  although it is also in the history above: a notice can arrive many turns after the
+  call, past whatever the model still holds, and `j1` on its own identifies nothing --
+  the model would have to ask `job_output` (or guess) before it could even tell whether
+  this is the build or the test suite. It rides inside its own element rather than as an
+  attribute, because a command is arbitrary text with quotes in it and escaping is the
+  one thing a tag attribute would force on us. It is NOT clipped: a command the model
+  cannot recognise is a reminder that failed, and these are the model's own bytes.
+
+  THE SENTENCE IS THE ONE EXCEPTION to 'answers carry facts, descriptions carry usage',
+  and it is deliberate: a job exists precisely because the model went off to do
+  something else, so the one thing the reminder owes it is where to look. It names the
+  id a second time so the line is usable as written, and it is one line."
   [job]
   (let [ending (or (ending-of (:path job)) "[exit ?]")]
     {:role "user"
-     :content (str "<job-ended id=\"" (:id job) "\" path=\"" (:path job) "\">"
-                   ending "</job-ended>")}))
+     :content (str "<job-ended id=\"" (:id job) "\">" ending "</job-ended>\n"
+                   "<command>" (:command job) "</command>\n"
+                   "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")}))
 
 (defn take-notices!
   "The messages that tell THREAD-ID's model about jobs that have finished and whose
@@ -991,7 +1009,7 @@
   is in this answer or in the next one -- never in both, never in neither.
 
   A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `tail` on a record leaves no trace
-  here, so that job is announced once anyway. The notice is three facts and said once,
+  here, so that job is announced once anyway. The notice is two facts and said once,
   and being told something twice costs less than never being told at all."
   [thread-id]
   (let [pending? (fn [job] (and (terminal? job) (not (:told? job))))

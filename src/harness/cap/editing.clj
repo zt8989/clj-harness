@@ -32,14 +32,14 @@
   say so without the user's home agreeing. config.edn is deliberately NOT the
   place: its documented shape is exactly three knobs (provider, model,
   reasoning-effort), and a fourth knob there is a NAMED failure rather than a
-  value somebody quietly drops (see the session-configure tool body). Editing
+  value somebody quietly drops (see harness.edge.http/model-post). Editing
   policy is policy; it belongs with the rest of harness.edn.
 
   THE ONE DEPARTURE FROM harness.edn's SHALLOW MERGE, and it is paid for here.
   harness-config replaces a top-level key WHOLE, project wins -- right for
   :approval, where 'what will the fence do' should be legible in one file, and
   wrong for this one. :editing composes KEY BY KEY, so a project that wants to
-  turn :auto-read off does not have to restate the block and re-decide every
+  turn :grep off does not have to restate the block and re-decide every
   default the user chose. harness-config's own behavior is untouched.
 
   Read fresh on every call, like every other config in this harness: editing
@@ -75,7 +75,6 @@
   anchor editing, or the exact-string editor it had before. See the namespace
   docstring for why it moved and what moves it back."
   {:mode               :hashline
-   :auto-read          true
    :grep        true
    :require-path       false
    :strict-input       false
@@ -90,7 +89,6 @@
   the error tell the reader to do something that then fails again."
   {:mode               {:ok    #(contains? #{:hashline :str-replace} %)
                         :legal ":hashline or :str-replace"}
-   :auto-read          {:ok    boolean? :legal "true or false"}
    :grep        {:ok    boolean? :legal "true or false"}
    :require-path       {:ok    boolean? :legal "true or false"}
    :strict-input       {:ok    boolean? :legal "true or false"}

@@ -132,7 +132,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/projects/<canonical-path>/remove` | POST | 移除项目（= 解绑它的会话，不删日志） | 无 |
 | `/api/mcp` | GET | MCP 账本：服务器、状态、工具清单 | 无（只读） |
 | `/api/mcp` | POST | 本会话启停一个 MCP 服务器 | `mcp/server`（带 `disabled`，runId null） |
-| `/api/elicitation` | GET | 某个悬置的问题问的是什么、要填什么 | 无（只读） |
+| `/api/elicitation` | GET | 某个悬置的问题问的是什么、要填什么，**以及谁在问**：`server` 是外部服务器（`cap.mcp` 转的），`askedBy` 是本仓工具自己问的（`ask`）。**两个键都不在场就是没人署名**——缺的键不出现，不是 null | 无（只读） |
 
 规矩三条：
 

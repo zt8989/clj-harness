@@ -302,7 +302,14 @@
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm cancel] :as _opts}]
-  (let [history (atom (vec messages))
+  (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
+        ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
+        ;; after whatever the client recorded meanwhile -- and folded in file order that
+        ;; answer sits behind later messages, where it answers nothing and a vendor refuses
+        ;; the whole request. `llm/adjacent-answers` moves a RECORDED answer behind the call
+        ;; it answers (the placement `answer!` makes for a replay); a well-shaped history
+        ;; comes back unchanged, and a call with no result anywhere is still refused below.
+        history (atom (vec (llm/adjacent-answers messages)))
         ;; WHAT THIS RUN ADDED, said by the run itself (see the docstring above): every
         ;; site that puts a message into `history` notes it here. `with-skills` counts
         ;; too -- a derived injection is a message this run put in the conversation,

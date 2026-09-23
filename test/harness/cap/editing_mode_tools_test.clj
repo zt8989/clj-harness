@@ -94,9 +94,9 @@
   ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
   ;; anchor editing, and this is the assertion that would move first if somebody
   ;; changed it back by accident -- or changed it to something that is neither.
-  (is (= ["bash" "eval" "glob" "grep" "insert" "job_kill" "job_output" "read"
-          "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
-          "web_fetch" "web_search" "write"]
+  (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_output"
+          "read" "replace" "skill" "todo_write" "undo_last_replace" "web_fetch"
+          "web_search" "write"]
          (spec-names nil))
       "an unconfigured process is served the anchor toolset")
   (testing "and a thread with no project file is served the same"
@@ -171,8 +171,8 @@
   (let [names (spec-names "emt-anchor")]
     (is (not (contains? (set names) "edit")))
     (testing "and everything that is not an editing tool is untouched"
-      (is (= ["bash" "eval" "glob" "job_kill" "job_output" "read" "session-configure"
-             "skill" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "job_output" "read" "skill"
+              "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-anchor"))))))
 
 (deftest str-replace-mode-does-not-serve-the-anchor-tools
@@ -186,8 +186,8 @@
     (testing "and `edit` does"
       (is (contains? (set names) "edit")))
     (testing "with everything else untouched"
-      (is (= ["bash" "eval" "glob" "job_kill" "job_output" "read" "session-configure"
-             "skill" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "job_output" "read" "skill"
+              "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-strrep"))))))
 
 (deftest a-session-added-tool-is-served-by-the-filter-not-by-the-mode

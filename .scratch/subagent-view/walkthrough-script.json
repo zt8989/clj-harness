@@ -1,0 +1,40 @@
+{
+  "turns": [
+    {
+      "content": "这一段交给探索子agent：它能读，不能写。",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "agent",
+          "arguments": {
+            "name": "explore",
+            "prompt": "列出 src/harness/cap 下面有哪些文件，一句话说清这个目录是干什么的。"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（脚本厂商：第一个委派回来了。cap 下面每个文件装一种能力。）",
+      "reasoning": "委派回来了，我把它的话收成一句。"
+    },
+    {
+      "content": "再问一个：这次用 general，把结论写成一句话。",
+      "tool-calls": [
+        {
+          "id": "c2",
+          "name": "agent",
+          "arguments": {
+            "name": "general",
+            "prompt": "把刚才那句结论压成不超过二十个字的版本。"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（脚本厂商：第二个委派回来了。cap 是能力目录。）"
+    },
+    {
+      "content": "（脚本厂商：主 agent 收尾。现在两张卡都应该是门。）"
+    }
+  ]
+}

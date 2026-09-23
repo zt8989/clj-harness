@@ -73,8 +73,9 @@ drive! :
   [skills-and-instructions](skills-and-instructions.md#技能正文是派生的不是累积的)），
   所以每轮施加不需要任何簿记。
 - **后台作业的结束**（`harness.cap.jobs/before-llm`）：一条没人等的命令结束了，它的结局就作为一条
-  `<job-ended id="…" path="…">[exit N]</job-ended>` 的尾随 user 消息摆在下一次调用面前——**三样事实
-  （哪条作业、记录在哪、怎么结束的），与记录多大无关**；**这不是推送**（不唤醒、不新起 run），
+  `<job-ended id="…">[exit N]</job-ended>` + `<command>…</command>` + 一行「用 `job_output` 读它」
+  的尾随 user 消息摆在下一次调用面前——**两样事实（哪条作业、怎么结束的）与它跑的那条命令，
+  与记录多大无关**；命令在那儿是因为**光有 `j1` 认不出是哪个作业**；**这不是推送**（不唤醒、不新起 run），
   而且**只说一次**。它与技能正文的唯一不同是幂等的来源：技能正文靠**会话里的那对 `skill` tool call
   与它的加载确认**（模型自己说的那句话就在这场对话里，服务端一直持有它），通知**没有那个锚**——它就是
   那条每轮现算的派生消息，而模型看到的历史里没有它（卡片只给屏幕看，见
@@ -102,6 +103,12 @@ drive! :
   后面**可能已经坐了别的东西**（边在交出去之前施加的派生注入、这次动作带的 `append`）。插在末尾等于没回答：
   这场 run 会把同一个问题再问一遍，人再批一次就会把工具再跑一次。找不到那条 assistant 消息时不猜一个相邻，
   退回末尾并在 `:unplaced` 里说一声（边为它写一行 WARN）。
+- **交给 run 的历史先被摆成厂商合法的形状**：纪录可以把一条调用的答案**晚到**地送来——一次被切断的 run 由
+  `harness.edge.replay/closing-frames` 补一条 `TOOL_CALL_RESULT`，而它是**追加在文件末尾**的，落在客户端之后
+  写的消息后面。按文件顺序折回来的历史里，这条答案就坐不到它回答的那条调用后面，`unanswered-tool-calls` 看不见它，
+  厂商拒绝整个请求，整条会话就这么锁死。`drive!` 起手用 `harness.kernel.llm/adjacent-answers` 把**已经记在案**的答案
+  挪到调用正后面（和 `answer!` 给一次 replay 的落点同一条规则）——这不是发明结果，那条消息本来就在历史里；
+  找不到 assistant 消息的孤答案原地不动，因为没有调用可漏。
 - **`:run/done` 不是 wire 帧**，它是「本 run 追加了哪些消息」的返回面（`{:history … :added … :unplaced …}`），
   边把 `:added` 落成 `message` 行。
 - **没有迭代上限**，这是设计。
@@ -164,13 +171,14 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `bash` `job_output` `job_kill` `eval` `session-configure` `skill` `write` |
+| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `web_fetch` `web_search` | `ask` `bash` `eval` `job` `job_output` `job_kill` `skill` `write` |
 | `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上 |
 
 **中间一列是「与编辑无关」的四个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
 `harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
 （它落库，见 [home-and-storage](home-and-storage.md#任务清单的表)）；两个 `web_*` 碰的是**网**。
-**最后一列里与作业有关的那两个同属这一族**（它们碰的是一条**正在跑的命令**，不是文件，所以同样不登记在
+**最后一列里与作业有关的那三个同属这一族**（`job` / `job_output` / `job_kill`——它们碰的是一条
+**正在跑的命令**，不是文件，所以同样不登记在
 `harness.cap.editing/families` 里）。它们都属于「没有编辑家族」那一类——`harness.cap.editing/families`
 **一个字都没改**，因为那张表登记的是
 「与编辑有关的名字」，没登记的名字两种模式都服务。
@@ -187,11 +195,13 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 **记录写完末行**那一刻（`write-last-line!` 里 `deliver`，不轮询文件）。`timeout` 到了就答 `[running]`——
 **那是「我这次等多久」，不是作业的时限**；作业照样没有时限。
 
-**命令自己把输出重定向走时（`… > 文件`），后台模式的答案里只指名说一声，绝不拒绝**：判据是尽力而为的
+**命令自己把输出重定向走时（`… > 文件`），`job` 的答案里只指名说一声，绝不拒绝**：判据是尽力而为的
 （引号、变量、`$(mktemp)` 都可能漏），拿一个尽力而为的判定去拦一条可能正当的命令（`> report.csv`
 是真正的活）是拿真事换姿态。漏了，只是不提醒。
 
-`session-configure` 带 `:requires-approval`，其余不带。两个 `web_*` **刻意也不带**：
+内建工具**没有一个**带 `:requires-approval`——带审批的那个 `session-configure` 已经删了，而这道缝本身
+还在（`session-require-approval!` 或一条 hook 都能 park 一次调用，见 `harness.kernel.tools`）。
+两个 `web_*` **刻意也不带**：
 `bash` 今天就能 `curl` 任何地址且不带审批，给它们挂个 park 是**装样子**（`tool-toggles` 自己写过那句
 「关闭不是禁止」），要这道坎的会话自己装规则（`session-require-approval!`，或一条 hook）。
 `read` 与 `write` 在两种模式下**同名**，
@@ -201,7 +211,6 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 文件工具的相对路径经 `project/resolve-path` 重根到会话的项目目录，**回报的是已解析路径**。
 `bash` 的 cwd 是绑定的目录；**命令内容永不判定**（这是明示接受的逃逸面）。
 `eval` 在常驻的 `harness.user` 命名空间里执行，`def` 跨调用保留。
-`session-configure` 改本会话的 provider/model/reasoning-effort，**先解析后写**——改不动的配置不会被写进会话。
 `skill` 只按名字查表（表由目录列举产生，所以名字永远变不成路径），**不标审批**：读一份指令不是副作用，
 而正文里让人做的事各自过各自那道缝。它唯一的效果是把那份正文带进对话，施加点在循环里那一步
 （见 [skills-and-instructions](skills-and-instructions.md#skill-工具)）。
@@ -339,7 +348,10 @@ interrupt 的键是**严格校验**的（AG-UI 的 zod 多一个键就失败）�
 不成立就整批拒绝（其余调用得到的答复是「已并入」）。不这么做的失败模式是**静默数据丢失**。
 
 **`write` 是锚点的边界**：写完之后该文件所有锚点释放、撤销记录清空（内容已经与模型看到的不是一回事），
-并且**拒绝把自己印出来的锚点行回写进文件**。`undo_last_replace` 读的撤销记录只保留最近一次，
+并且**拒绝把自己印出来的锚点行回写进文件**。它的答案**不带内容、不带锚点行**——只报写了多少、写到哪，
+以及「锚点已释放，去 `read`」：写不是读，刚写进去的东西就在这次调用的参数里，回放它是同一份 token
+付两次，而头二十行会被读成「整份都能编辑」。**因此它只拿 path 锁**——从前经 auto-read 再进 `read`
+时要多拿一把 session 锁，那半条环形等待随答案一起消失。`undo_last_replace` 读的撤销记录只保留最近一次，
 把文件**和锚点**一起退回去（只还原文本会让库里那套锚点描述一个已经不存在的状态）。
 
 `grep` 走 `rg --json`，命中行直接带锚点（行号仍然印，但它**不是拿来编辑的**）。

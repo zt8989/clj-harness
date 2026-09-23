@@ -93,12 +93,18 @@
         {:keys [id path]} (jobs/start! t {:command "echo said-this; exit 3"})]
     (record-until path #(re-find #"\[exit" %) 10000)
     (let [notices (jobs/take-notices! t)]
-      (testing "one job, one notice, and it is THREE facts and nothing else"
+      (testing "one job, one notice: two facts, the command, and the line that reads it"
         (is (= 1 (count notices)))
         (is (= "user" (:role (first notices))) "a message like any other, like a skill body")
-        (is (= (str "<job-ended id=\"" id "\" path=\"" path "\">[exit 3]</job-ended>")
+        (is (= (str "<job-ended id=\"" id "\">[exit 3]</job-ended>\n"
+                    "<command>echo said-this; exit 3</command>\n"
+                    "Read what it said with job_output {\"job\": \"" id "\"}.")
                (:content (first notices)))
-            "which job, where its record is, and how it went -- no tail, no advice"))
+            "which job, what it ran, how it went -- no tail, no record path, and where to read")
+        (is (not (str/includes? (:content (first notices)) path))
+            "the path is not in the notice: the `job` answer carried it, and the model has that")
+        (is (= 3 (count (str/split-lines (:content (first notices)))))
+            "three lines and no tail: the tag, the command, the read sentence"))
       (testing "and it is not said twice"
         (is (= [] (jobs/take-notices! t)))))))
 
@@ -135,12 +141,12 @@
   ;; size of an answer, and a command that printed five thousand lines is announced in
   ;; exactly the same few bytes as one that printed nothing.
   (let [t "jt-size"
-        ;; THE NEEDLE IS A WORD THE COMMAND PRINTS, not a number from the record: a notice
-        ;; quotes the RECORD'S PATH, the path ends in the process tag, and that tag is a
-        ;; timestamp plus a pid -- so a needle like "5000" can turn up inside the path
-        ;; itself (a tag shaped `…T150000500-…` holds it), and the assertion below read red
-        ;; on a full run for that reason and no other.
-        big  (jobs/start! t {:command "seq 1 5000; echo notice-proof-marker; exit 0"})
+        ;; THE NEEDLE IS A WORD THE COMMAND PRINTS AND THE COMMAND DOES NOT CONTAIN. A
+        ;; notice quotes the command now (that is how it says WHICH job), so a needle
+        ;; written into the command as text -- `echo notice-proof-marker` -- is in the
+        ;; notice by design and proves nothing; this one is assembled by the shell, so
+        ;; only the RECORD holds it.
+        big  (jobs/start! t {:command "seq 1 5000; echo notice-proof-$((3*5+2)); exit 0"})
         none (jobs/start! t {:command "exit 0"})]
     (record-until (:path big) #(re-find #"\[exit" %) 20000)
     (record-until (:path none) #(re-find #"\[exit" %) 10000)
@@ -149,7 +155,7 @@
       (is (= 2 (count notices)) "two jobs, two notices")
       (doseq [n notices]
         (is (str/includes? (:content n) "[exit 0]"))
-        (is (not (str/includes? (:content n) "notice-proof-marker"))
+        (is (not (str/includes? (:content n) "notice-proof-17"))
             "nothing of what the command said -- the record is one call away")
         (is (< (bytes n) 400) (str "a notice is a line, not a report: " (bytes n) " bytes")))
       (is (< (- (bytes (first notices)) (bytes (second notices))) 200)

@@ -1,6 +1,6 @@
 (ns harness.cap.providers-test
   "The provider catalog, the tier fold, the session-state introspection surface,
-  and the authorised session-configure tool.
+  and the outbox the edge drains into the provider timeline.
 
   Everything here runs under the runner's isolated config root, so the fixtures
   write their own config.edn -- the one file, with its :default and :providers
@@ -1072,288 +1072,47 @@
         (is (not-any? #(str/includes? (str %) "api-key")
                       (tree-seq coll? seq (providers/active-provider "t-act"))))))))
 
-;; ------------------------------------------------------- the configure tool
+;; ------------------------------------------------- the outbox the edge drains
+;;
+;; The `session-configure` tool that used to feed this is gone, so nothing records a
+;; change in production today. The mechanism stays -- `provider/changed` is a line the
+;; prompt context reads back (harness.edge.context), and the edge's drain is live code --
+;; so its contract is pinned here, driving the recorder directly instead of through a
+;; tool that no longer exists.
 
-(defn- configure!
-  "Run the session-configure tool through the real seam, as the agent would,
-  with THREAD-ID's session in scope. Returns the seam's result map."
-  [thread-id args]
-  (tools/run! {:id "sc1" :type "function"
-               :function {:name "session-configure"
-                          :arguments (json/write-str args)}}
-              thread-id))
-
-(defn- approve!
-  "Drive a parked session-configure to APPROVED the way a resume does: park it,
-  hand the human's verdict to the seam's memory, then call again -- the second
-  call consumes the decision and runs the body. Returns the second call's map."
-  [thread-id id args]
-  (let [call (fn [] (tools/run! {:id id :type "function"
-                                 :function {:name "session-configure"
-                                            :arguments (json/write-str args)}}
-                                thread-id))
-        {:keys [parked]} (call)
-        _ (tools/decide-approval! (:interrupt-id parked) :approved {})]
-    (call)))
-
-(defn- veto!
-  "Drive a parked session-configure to VETOED. The body never runs."
-  [thread-id id args]
-  (let [call (fn [] (tools/run! {:id id :type "function"
-                                 :function {:name "session-configure"
-                                            :arguments (json/write-str args)}}
-                                thread-id))
-        {:keys [parked]} (call)]
-    (tools/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
-    (call)))
-
-(deftest session-configure-parks-rather-than-writing
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [parked]} (configure! "t-conf" {:model "alpha-small"})]
-        (testing "with no decision yet, the call parks and nothing is written"
-          (is (some? parked) "the seam reports the call as parked")
-          (is (nil? (providers/override-for "t-conf")) "the session override is untouched"))))))
-
-(deftest an-approved-configure-writes-only-what-it-names
+(deftest a-recorded-change-is-drained-once-and-carries-what-it-was-given
+  ;; The recorder is a plain function now: what the caller hands it is what the edge
+  ;; writes down, once. :before/:after are the session's tier before and after (the whole
+  ;; tier, not just the patch), :override is that same tier afterwards so a reader can
+  ;; reconstruct the session from the line alone, and :resolved is that tier ASSEMBLED --
+  ;; the catalog moves under an old log, so a reader must not re-resolve.
   (with-home (cfg :alpha) reg
     (fn []
       (try
-        (providers/set-override! "t-ok" {:reasoning-effort "low"})
-        (approve! "t-ok" "sc-ok" {:model "alpha-small"})
-        (let [ov (providers/override-for "t-ok")]
-          (is (= "alpha-small" (:model ov)))
-          (is (= "low" (:reasoning-effort ov))
-              "the knob it did not name is left exactly as it was")
-          (is (not (contains? ov :base-url))
-              "and nothing it could not know about was invented"))
-        (finally (providers/set-override! "t-ok" nil))))))
-
-(deftest an-approved-vendor-switch-moves-the-endpoint
-  ;; The session-configure half of the feature: an agent naming a provider gets
-  ;; that vendor, and the change is real rather than recorded-but-inert.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-vendor" "sc-vend" {:provider "beta"})
-        (is (= :beta (:provider (providers/override-for "t-vendor"))))
-        (let [p (providers/effective-provider "t-vendor")]
-          (is (= "https://beta/v1" (:base-url p)))
-          (is (= "beta-plain" (:model p))))
-        (finally (providers/set-override! "t-vendor" nil))))))
-
-(deftest a-vendor-switch-with-no-model-lands-on-the-new-vendors-default
-  (with-home (cfg :alpha :model "alpha-small") reg
-    (fn []
-      (try
-        (is (= "alpha-small" (:model (providers/effective-provider "t-dflt"))))
-        (approve! "t-dflt" "sc-dflt" {:provider "beta"})
-        (is (= "beta-plain" (:model (providers/effective-provider "t-dflt")))
-            "the old model id was alpha's, so it is gone -- not carried into beta")
-        (finally (providers/set-override! "t-dflt" nil))))))
-
-(deftest a-configure-with-nothing-to-change-is-refused
-  (with-home (cfg :alpha) reg
-    (fn []
-      ;; The refusal lives in the body, so it only surfaces on the approved
-      ;; transit -- which is also the only transit that could ever write.
-      (let [{:keys [content error]} (approve! "t-empty" "sc-empty" {})]
-        (is (true? error))
-        (is (str/includes? content "nothing to change"))
-        (is (nil? (providers/override-for "t-empty")) "and nothing was written")))))
-
-(deftest a-configure-naming-a-model-the-provider-cannot-serve-is-refused
-  ;; Validated BEFORE the write. A change that cannot be served must not become
-  ;; the session's configuration: the next run would fail, far from this call.
-  (with-home (cfg :beta) reg
-    (fn []
-      (testing "a model id belonging to another vendor"
-        (let [{:keys [content error]} (approve! "t-badmodel" "sc-bm" {:model "alpha-large"})]
-          (is (true? error))
-          (is (str/includes? content "alpha-large"))
-          (is (nil? (providers/override-for "t-badmodel")) "nothing was written")))
-      (testing "and no change was queued for the writer"
-        (is (empty? (providers/take-provider-changes! "t-badmodel")))))))
-
-(deftest a-configure-naming-a-count-is-refused-before-anything-is-written
-  ;; The tool takes three knobs; a count is not one of them and cannot become one.
-  ;; Two things are asserted, and the second is the important one: the refusal is
-  ;; NAMED (not 'reconfigured' while nothing happened), and nothing was written --
-  ;; no override, no queued change line. A configuration that cannot be served
-  ;; must never become the session's, which is the same discipline that makes a
-  ;; bad model id fail here rather than on the next run.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [content error]} (approve! "t-count" "sc-cnt" {:context-window 200000})]
-        (is (true? error) "a count is not something this tool can change")
-        (is (str/includes? content "context-window") "the field is named")
-        (is (str/includes? content ":providers") "and it says where it belongs")
-        (is (nil? (providers/override-for "t-count")) "nothing was written")
-        (is (empty? (providers/take-provider-changes! "t-count"))
-            "and no change line was queued for the writer")))))
-
-(deftest a-configure-naming-a-provider-that-does-not-exist-is-refused
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [content error]} (approve! "t-badprov" "sc-bp" {:provider "ghost"})]
-        (is (true? error))
-        (is (str/includes? content "ghost"))
-        (is (nil? (providers/override-for "t-badprov")))
-        (is (empty? (providers/take-provider-changes! "t-badprov")))))))
-
-(deftest the-configure-tool-describes-the-selection-it-makes
-  ;; A tool's description is what a model reads before deciding to call it, so it
-  ;; has to say what its arguments MEAN under the catalog shape: a provider is a
-  ;; vendor and a model is one of that vendor's ids. The old wording ("A provider
-  ;; name from providers.edn (e.g. \"cheap\")") described a scheme where those
-  ;; were the same thing -- precisely the confusion this shape removed. A model
-  ;; reading it would try to pass a model id as a provider name.
-  (let [t     (get @tools/registry "session-configure")
-        props (-> t :parameters :properties)]
-    (is (str/includes? (get-in props ["provider" :description]) "vendor")
-        "the provider argument says it names a VENDOR")
-    (is (str/includes? (get-in props ["model" :description]) "serves")
-        "while the model argument says the id belongs to the current provider")
-    (is (str/includes? (:description t) "provider")
-        "and the tool description names the knobs at all")
-    (testing "and the tool still parks for approval"
-      (is (true? (:requires-approval t))))))
-
-(deftest the-configure-result-says-what-it-is-now-serving
-  ;; The model that made the call gets told what changed AND what that resolved
-  ;; to. Without the second half, a provider-only switch reads as 'reconfigured'
-  ;; with no sign that the model id moved too -- and the next thing the model does
-  ;; is guess.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (let [{:keys [content error]} (approve! "t-say" "sc-say" {:provider "beta"})]
-          (is (not= true error))
-          (is (str/includes? content "beta-plain")
-              "the reply names the model the session now serves"))
-        (finally (providers/set-override! "t-say" nil))))))
-
-(deftest a-vetoed-configure-never-writes
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (veto! "t-veto" "sc-veto" {:model "alpha-small"})
-        (is (nil? (providers/override-for "t-veto")))
-        (testing "and no change was queued for the writer"
-          (is (empty? (providers/take-provider-changes! "t-veto"))))
-        (finally (providers/set-override! "t-veto" nil))))))
-
-(deftest an-approved-configure-queues-one-change-for-the-writer
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-queue" "sc-q" {:reasoning-effort "high"})
-        (let [[c & more] (providers/take-provider-changes! "t-queue")]
-          (is (some? c))
-          (is (empty? more) "exactly one change was queued")
-          (is (= "high" (:reasoning-effort (:after c)))
-              "the after side shows the new value")
-          (testing "and the change carries what it resolved to, not just what was asked"
+        (providers/set-override! "t-outbox" {:reasoning-effort "low"})
+        (let [{:keys [before after resolved]}
+              (providers/swap-override! "t-outbox" {:model "alpha-small"})]
+          (providers/record-provider-change! "t-outbox" before after "a-path" after resolved)
+          (let [[c & more] (providers/take-provider-changes! "t-outbox")]
+            (is (some? c))
+            (is (empty? more) "exactly one change was queued")
+            (is (= "a-path" (:trigger c))
+                "the trigger is the caller's string, verbatim -- a path, not a tool")
+            (is (= {:reasoning-effort "low"} (:before c))
+                "the before side is the tier that stood")
+            (is (= {:model "alpha-small" :reasoning-effort "low"} (:after c))
+                "and the after side is the whole tier, not just what moved")
+            (is (= (:after c) (:override c))
+                "the override is the whole tier, so the line stands on its own")
             (is (= "https://alpha/v1" (get-in c [:resolved :base-url])))
-            (is (= "alpha-large" (get-in c [:resolved :model])))))
-        (testing "and draining clears it -- the outbox is not read twice"
-          (is (empty? (providers/take-provider-changes! "t-queue"))))
-        (finally (providers/set-override! "t-queue" nil))))))
-
-(deftest consecutive-changes-chain-before-and-after
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-chain" "sc-c1" {:model "alpha-small"})
-        (approve! "t-chain" "sc-c2" {:model "alpha-vision-free"})
-        (let [[a b] (providers/take-provider-changes! "t-chain")]
-          (is (= "alpha-small" (:model (:after a))))
-          (is (= "alpha-small" (:model (:before b)))
-              "the second change starts where the first ended")
-          (is (= "alpha-vision-free" (:model (:after b)))))
-        (finally (providers/set-override! "t-chain" nil))))))
-
-(deftest a-chained-vendor-switch-resolves-each-step-against-its-own-vendor
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-vchain" "sc-v1" {:provider "beta" :model "beta-big"})
-        (approve! "t-vchain" "sc-v2" {:provider "alpha" :model "alpha-small"})
-        (let [[a b] (providers/take-provider-changes! "t-vchain")]
-          (is (= "https://beta/v1" (get-in a [:resolved :base-url]))
-              "each step resolves against the vendor it names, not the one before it")
-          (is (= "beta-big" (get-in a [:resolved :model])))
-          (is (= "https://alpha/v1" (get-in b [:resolved :base-url])))
-          (is (= "alpha-small" (get-in b [:resolved :model])))
-          (is (= :beta (:provider (:before b))))
-          (is (= :alpha (:provider (:after b)))))
-        (finally (providers/set-override! "t-vchain" nil))))))
-
-(deftest the-change-is-scoped-to-its-own-thread
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-a" "sc-a" {:model "alpha-small"})
-        (is (= "alpha-small" (:model (providers/effective-provider "t-a"))))
-        (is (= "alpha-large" (:model (providers/effective-provider "t-b")))
-            "another session serves from the untouched default")
-        (finally (providers/set-override! "t-a" nil))))))
-
-;; -- provider/changed line shape: :trigger, :override, :resolved ----------
-
-(deftest an-approved-configure-tags-the-change-with-trigger-and-override
-  "Every approved change carries :trigger (the path that pressed it -- currently
-  always session-configure) and :override (the FULL session tier after this
-  change, so a reader can reconstruct post-change session state without asking
-  the resolution)."
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (providers/set-override! "t-tag" {:reasoning-effort "low"})
-        (approve! "t-tag" "sc-tag" {:model "alpha-small"})
-        (let [[c] (providers/take-provider-changes! "t-tag")]
-          (is (some? c))
-          (is (= "session-configure" (:trigger c))
-              "the trigger names the path that pressed the change")
-          (is (= {:model "alpha-small" :reasoning-effort "low"} (:override c))
-              "the override is the full session slice after the change -- every
-              knob the session owns, not just what this call touched"))
-        (finally (providers/set-override! "t-tag" nil))))))
-
-(deftest a-vendor-switch-is-not-recorded-as-an-empty-change
-  ;; The specific way the old shape failed as a RECORD: :provider was not in the
-  ;; audit slice, so switching vendors wrote {:before {} :after {}} -- a change
-  ;; line that documents nothing. The slice is the three knobs now.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-notempty" "sc-ne" {:provider "beta"})
-        (let [[c] (providers/take-provider-changes! "t-notempty")]
-          (is (= :beta (:provider (:after c)))
-              "the change line names the vendor that was selected")
-          (is (not= {} (:after c)))
-          (is (not= {} (:before c)) "and the one it moved away from"))
-        (finally (providers/set-override! "t-notempty" nil))))))
-
-(deftest consecutive-changes-pin-trigger-and-override-throughout
-  "Chained changes all carry the same trigger, and each :override is the previous
-  :override plus the new patch -- so a reader stepping through the timeline sees
-  the session evolving without consulting the resolution."
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-ch2" "sc-1" {:model "alpha-small"})
-        (approve! "t-ch2" "sc-2" {:model "alpha-vision-free" :reasoning-effort "high"})
-        (let [[a b] (providers/take-provider-changes! "t-ch2")]
-          (is (every? #(= "session-configure" (:trigger %)) [a b])
-              "every change names its trigger")
-          (is (= {:model "alpha-small"} (:override a))
-              "the first change's override is just what it set")
-          (is (= (:override b)
-                 (merge (:override a)
-                        {:model "alpha-vision-free" :reasoning-effort "high"}))
-              "the second change's override is the first one plus the new patch"))
-        (finally (providers/set-override! "t-ch2" nil))))))
+            (is (= "alpha-small" (get-in c [:resolved :model])))
+            (testing "and it is drained for one thread at a time, exactly once"
+              (providers/record-provider-change! "t-other" before after "a-path" after resolved)
+              (is (empty? (providers/take-provider-changes! "t-outbox"))
+                  "the outbox is not read twice")
+              (is (= 1 (count (providers/take-provider-changes! "t-other")))
+                  "and another session's change was not swept up by it"))))
+        (finally (providers/set-override! "t-outbox" nil))))))
 
 ;; ------------------------------------------------------------------ settings
 
@@ -1959,17 +1718,18 @@
             (is (not (str/includes? (slurp (home/config-file)) "https://inline/v1"))
                 "the description is replaced, not merged with")))))))
 
-;; ------------------------------------------------- the tier, written from two places
+;; ------------------------------------------- the tier, written from an http-kit thread
 ;;
-;; `session-configure` (a tool thread) and the model endpoint (an http-kit thread) write
-;; the SAME session tier, so read-then-write loses one of the two changes -- and both
-;; audit lines then claim a transition that never happened.
+;; The model endpoint is the ONLY writer now, and it runs on an http-kit thread: two
+;; presses of the picker -- or a press while the previous one is still resolving -- can
+;; write the SAME session tier at once, so read-then-write loses one of the two changes
+;; -- and both audit lines then claim a transition that never happened.
 
 (deftest a-change-that-lands-while-another-is-in-flight-is-not-lost
   ;; THE WINDOW IS BETWEEN READING THE TIER AND WRITING IT BACK. Two callers land in it
-  ;; in ordinary use -- the `session-configure` tool on a tool thread, the model endpoint
-  ;; on an http-kit thread -- and the one that writes second erases the other's change,
-  ;; while both audit lines go on to claim a transition that never happened.
+  ;; in ordinary use -- both of them the model endpoint, on two http-kit threads -- and
+  ;; the one that writes second erases the other's change, while both audit lines go on
+  ;; to claim a transition that never happened.
   ;;
   ;; THE GATE HOLDS THE FIRST CALLER INSIDE THAT WINDOW: `:selection` is called on the way
   ;; from the read to the write, and gating it (for the first call only, or the second

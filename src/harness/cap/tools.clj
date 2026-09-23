@@ -1,7 +1,12 @@
 (ns harness.cap.tools
-  "The seventeen tools this harness ships: their bodies, their faces, and nothing
-  else. It is a CAPABILITY, so it lives here and not in harness.kernel.tools --
-  which holds the seam that runs a tool, not any particular tool.
+  "The tools this harness ships: their bodies, their faces, and nothing else. It is
+  a CAPABILITY, so it lives here and not in harness.kernel.tools -- which holds the
+  seam that runs a tool, not any particular tool.
+
+  NOBODY COUNTS THEM HERE. The roster is what this file's `register!` calls add up
+  to, and a number written into a sentence is a number that goes stale in silence
+  the next time a tool is added -- ask the table (`harness.kernel.tools/specs`)
+  rather than this paragraph.
 
   THE SEAM DOES NOT KNOW THESE EXIST. `harness.kernel.tools` has a registry, an
   install door and a spec vocabulary; none of the names below appear in it. They
@@ -29,7 +34,6 @@
             [harness.cap.hashline.write :as hashline-write]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
-            [harness.cap.providers :as providers]
             [harness.cap.skills :as skills]
             [harness.cap.todos :as todos]
             [harness.cap.web :as web]
@@ -52,7 +56,17 @@
   "Put NAME->TOOL into THIS LAYER's table. The `:source` is stamped here, once,
   rather than at every call site: this map IS the built-in half of the table,
   so a row in it knows where it came from by construction. Rows from other
-  origins carry their own (an external server's say :mcp)."
+  origins carry their own (an external server's say :mcp).
+
+  `:read-only true` is the OTHER thing a row may declare about itself, and it is a
+  TOOL's statement rather than a switch: 'running me cannot change anything'. Only
+  five rows carry it, and every one of them is a tool whose body does nothing but
+  read -- a file, a tree, two web endpoints. It is not a hint and not a default: a
+  tool that does not say it is treated as one that can write, which is the whole
+  reason a `:read-only` subagent range can be derived without a list of names
+  somebody has to remember to update. Whether a DECLARATION is believable is the
+  derivation's question, not this one's -- see harness.cap.subagents, which trusts
+  it only from a source whose provenance it can prove."
   [name tool] (swap! built-ins assoc name (assoc tool :source :builtin)))
 
 ;; ------------------------------------------------------------------- helpers
@@ -158,13 +172,13 @@
   "`write`'s body, dispatched on this session's editing mode.
 
   In anchor mode the file's anchors are not merely stale -- they address lines
-  that are gone -- so the write RELEASES them, clears the file's undo record, and
-  hands back anchored rows for what it wrote (harness.cap.hashline.write). In
-  str-replace mode none of that exists and this is the write it always was."
+  that are gone -- so the write RELEASES them and clears the file's undo record;
+  the answer states that, and where to get anchors again, rather than handing
+  lines back (harness.cap.hashline.write). In str-replace mode none of that
+  exists and this is the write it always was."
   [{:keys [path content] :as args}]
   (if (= :hashline (:mode (editing/editing-mode kernel-tools/*thread-id*)))
-    (hashline-write/perform! kernel-tools/*thread-id* #(project/resolve-path kernel-tools/*thread-id* %) args
-                             (editing/editing-mode kernel-tools/*thread-id*))
+    (hashline-write/perform! kernel-tools/*thread-id* #(project/resolve-path kernel-tools/*thread-id* %) args)
     (let [p (project/resolve-path kernel-tools/*thread-id* path)]
       (write-file! p content)
       (str "wrote " (count content) " chars to " p))))
@@ -289,9 +303,9 @@
          " stay empty -- that file is where its output is.")))
 
 (defn- t-bash
-  "`bash`'s body: one command, and the two ways of running it.
+  "`bash`'s body: one command, and the call waits for it.
 
-  FOREGROUND IS THE DEFAULT, and the wait is the point. This used to go through
+  THE WAIT IS THE POINT. This used to go through
   `infra.shell/shell` (`clojure.java.shell/sh`), which has no timeout at all -- so a
   hung command hung the whole run, forever. `infra.shell/run` is the timeout-shaped
   one, and it stops the command TOGETHER WITH EVERYTHING IT STARTED, which is the
@@ -308,83 +322,90 @@
   to type. `workdir` is where it runs -- see `work-dir` for what is, and is not,
   checked about it.
 
-  `run_in_background` IS THE SAME COMMAND RUN THE OTHER WAY: hand it to
-  harness.cap.jobs and answer AT ONCE with the job's id and where its record is. Two
-  modes of ONE tool rather than two tools, and that is the whole argument for this
-  function having a branch: the directory is resolved in one place, the record is
-  written by one module, and the model no longer has to decide which of two names
-  means `npm test`. The session in .scratch/bash-record/spec.md chose `job` because
-  its description said 'slow', and then built its own `join` out of `sleep`.
+  NOT WAITING IS `t-job`, A VERB OF ITS OWN. The directory resolution, the record and
+  the spawn are shared; what is not shared is the question 'does this call wait', and
+  a caller made to answer it with a boolean is the caller that got it wrong before
+  (`bash-record`'s session: a `job` whose description said 'slow', and a model that
+  built its own `join` out of `sleep`).
 
-  TWO PARAMETERS MEAN SOMETHING DIFFERENT IN THE BACKGROUND, and neither is quietly
-  dropped:
-
-    - `timeout` DOES NOT APPLY. A job has no limit -- that is what 'nobody is waiting
-      for it' means -- so a limit handed in with this flag is a limit on nothing, and
-      the description says so rather than letting the number imply a promise.
-    - `stdin` IS REFUSED BY NAME, because nothing here feeds a background command:
-      dropping what the caller asked for without a word is the kind of silent
-      disagreement this codebase refuses everywhere else."
-  [{:keys [command timeout stdin workdir run_in_background] shell-named :shell}]
-  (let [dir  (work-dir kernel-tools/*thread-id* workdir)
+  AND THE FIELD IS NOT HERE. `run_in_background` is not one of this verb's arguments,
+  so nothing below reads one: it is not a key to have an opinion about, it is a key
+  this tool does not have, and a body that lectured about it would be describing the
+  other verb. The schema is what tells a caller the language of a call."
+  [{:keys [command timeout stdin workdir] shell-named :shell}]
+  (let [dir   (work-dir kernel-tools/*thread-id* workdir)
         ;; RESOLVED BEFORE ANYTHING IS STARTED, so a kind this machine does not have
         ;; refuses without a job id, a record file or a half-started process to clean up.
+        kind  (named-shell shell-named)
+        limit (or (positive-int :timeout timeout) bash-default-timeout-ms)
+        {:keys [exit out err] stopped :timeout} (shell/run {:command command
+                                                            :stdin stdin
+                                                            :dir (when dir dir)
+                                                            :timeout-ms limit
+                                                            :kind kind
+                                                            ;; THE HANDLE A STOP NEEDS: if the run
+                                                            ;; this call serves is stopped, the command
+                                                            ;; must die with it, tree and all (ticket 08 of
+                                                            ;; `.scratch/session-after-refresh`). `*stop*`
+                                                            ;; is the slot the execution seam bound for THIS
+                                                            ;; call -- nil outside a run, and then nobody is
+                                                            ;; asking to stop it.
+                                                            :on-spawn
+                                                            (fn [p]
+                                                              (when-let [stop kernel-tools/*stop*]
+                                                                (reset! stop #(shell/stop-tree! p))))})
+        ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
+        ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
+        ;; the output did not fit, the record ends on this line and so does the
+        ;; answer, so the two can never disagree about how the command ended.
+        ending (cond stopped (str "[timed out after " limit "ms — the command was stopped]")
+                     (not (zero? exit)) (str "[exit " exit "]"))
+        out*  (jobs/tail-within-budget out jobs/answer-budget-bytes)
+        err*  (jobs/tail-within-budget err jobs/answer-budget-bytes)
+        body  (str (:text out*) (:text err*))]
+    (if (and (zero? (:omitted out*)) (zero? (:omitted err*)))
+      (str (if (str/blank? body) "(no output)" body)
+           (when ending (str "\n" ending)))
+      ;; Over budget: the whole of it goes to a record, the answer keeps the tail of
+      ;; each stream -- they are counted separately, so a single line of stderr is
+      ;; never squeezed out by a loud stdout -- and the bytes left out are said out
+      ;; loud, per stream, next to where the rest can be read.
+      (let [ending (or ending "[exit 0]")
+            path   (jobs/spill! kernel-tools/*thread-id*
+                                (record-text out err ending))]
+        (str body
+             (when (pos? (:omitted out*))
+               (str "\n" (jobs/truncation-line (:omitted out*) path "stdout")))
+             (when (pos? (:omitted err*))
+               (str "\n" (jobs/truncation-line (:omitted err*) path "stderr")))
+             "\n" ending)))))
+
+(defn- t-job
+  "`job`'s body: hand the command to harness.cap.jobs and answer AT ONCE with the
+  job's id and where its record is.
+
+  THE SAME COMMAND `bash` RUNS, RUN THE OTHER WAY. `work-dir` resolves the directory
+  in one place for both, the record is written by one module, and the shell kind is
+  resolved BEFORE anything starts -- so a kind this machine does not have refuses
+  without a job id, a record file or a half-started process to clean up.
+
+  A JOB HAS NO TIMEOUT, so `timeout` is not one of this verb's arguments at all: a
+  number that limits nothing is worse than no number, because it reads like a promise.
+  `stdin` is not one either -- nothing feeds a background command, so text sent as one
+  would never be read. Neither is refused, and that is the point of deleting them: a
+  body only reads the keys its own schema declares (`t-bash` says the same about the
+  verb it shares the spawn with), so there is nothing here to drop, and nothing to
+  argue with. To write to a command's stdin, run it with `bash`; to wait for one, call
+  `job_output` with `wait`."
+  [{:keys [command workdir] shell-named :shell}]
+  (let [dir  (work-dir kernel-tools/*thread-id* workdir)
         kind (named-shell shell-named)]
-    (when (and run_in_background (some? stdin))
-      (throw (ex-info (str "`stdin` cannot be used with `run_in_background`: nothing feeds a"
-                           " background command's standard input, so the text would be"
-                           " dropped without it ever being read. Run it in the foreground"
-                           " to write to its stdin.")
-                      {:argument :stdin :reason :not-a-background-input})))
-    (if run_in_background
-      (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
-                                           {:command command :dir dir :kind kind})]
-        ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
-        ;; started), and advice about reading the record belongs in the description
-        ;; rather than in every answer.
-        (str "job " id " started; its record is " path (redirect-note command)))
-      (let [limit (or (positive-int :timeout timeout) bash-default-timeout-ms)
-            {:keys [exit out err] stopped :timeout} (shell/run {:command command
-                                                                :stdin stdin
-                                                                :dir (when dir dir)
-                                                                :timeout-ms limit
-                                                                :kind kind
-                                                                ;; THE HANDLE A STOP NEEDS: if the run
-                                                                ;; this call serves is stopped, the command
-                                                                ;; must die with it, tree and all (ticket 08
-                                                                ;; of `.scratch/session-after-refresh`).
-                                                                ;; `*stop*` is the slot the execution seam
-                                                                ;; bound for THIS call -- nil outside a run,
-                                                                ;; and then nobody is asking to stop it.
-                                                                :on-spawn
-                                                                (fn [p]
-                                                                  (when-let [stop kernel-tools/*stop*]
-                                                                    (reset! stop #(shell/stop-tree! p))))})
-            ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
-            ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
-            ;; the output did not fit, the record ends on this line and so does the
-            ;; answer, so the two can never disagree about how the command ended.
-            ending (cond stopped (str "[timed out after " limit "ms — the command was stopped]")
-                         (not (zero? exit)) (str "[exit " exit "]"))
-            out*  (jobs/tail-within-budget out jobs/answer-budget-bytes)
-            err*  (jobs/tail-within-budget err jobs/answer-budget-bytes)
-            body  (str (:text out*) (:text err*))]
-        (if (and (zero? (:omitted out*)) (zero? (:omitted err*)))
-          (str (if (str/blank? body) "(no output)" body)
-               (when ending (str "\n" ending)))
-          ;; Over budget: the whole of it goes to a record, the answer keeps the tail of
-          ;; each stream -- they are counted separately, so a single line of stderr is
-          ;; never squeezed out by a loud stdout -- and the bytes left out are said out
-          ;; loud, per stream, next to where the rest can be read.
-          (let [ending (or ending "[exit 0]")
-                path   (jobs/spill! kernel-tools/*thread-id*
-                                    (record-text out err ending))]
-            (str body
-                 (when (pos? (:omitted out*))
-                   (str "\n" (jobs/truncation-line (:omitted out*) path "stdout")))
-                 (when (pos? (:omitted err*))
-                   (str "\n" (jobs/truncation-line (:omitted err*) path "stderr")))
-                 "\n" ending)))))))
+    (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
+                                         {:command command :dir dir :kind kind})]
+      ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
+      ;; started), and advice about reading the record belongs in the description
+      ;; rather than in every answer.
+      (str "job " id " started; its record is " path (redirect-note command)))))
 
 
 (defn- t-eval [{:keys [code]}]
@@ -454,62 +475,6 @@
           (str (skills/loaded-summary name (count body))
                "\n" (:dir entry) " is the skill's directory; read files under it by absolute path."))))))
 
-(defn- t-configure
-  "Change THIS session's provider / model / reasoning-effort. Each of the three
-  is independent: pass only what you mean to change, and the rest keep the value
-  the tier below gave them.
-
-  A model id means 'an id this provider serves'. Naming a new :provider with no
-  :model moves to that vendor's default model -- the old id belonged to the old
-  vendor and is not carried across. A :model the provider does not declare fails
-  HERE, by name, and nothing is written: that check is done by resolving the
-  proposed tier before committing it, because a change that cannot be served is
-  not a change. Writing first and failing later would leave the session's
-  override holding a configuration every later run fails on, and the failure
-  would surface on the NEXT run, nowhere near the call that caused it.
-
-  Marks :requires-approval, so the call parks and a human decides before any of
-  it takes effect -- the body only runs on an approved resume, and a veto means
-  it never runs at all. The gate is a WORKFLOW convention, not a security
-  boundary: eval can still reach harness.cap.providers/use-provider! directly, and bash
-  can still read .env. It is here to stop a slip, and it is labelled as such."
-  [args]
-  ;; The three knobs are the only thing this tool may move, and the check below
-  ;; cannot be left to the catalog's own tier guard: the change map is rebuilt
-  ;; from these three names, so a stray :context-window would be dropped by that
-  ;; rebuild and the resolution would never see it -- the tool would answer
-  ;; 'reconfigured' having changed nothing, which is a lie told to whoever called.
-  ;; A call naming a model's counts is refused by name, and told where they live.
-  (let [known  #{:provider :model :reasoning-effort}
-        extras (sort (map name (remove known (keys args))))]
-    (when (seq extras)
-      (throw (ex-info (str "session-configure does not understand "
-                           (pr-str (vec extras))
-                           "; it takes provider, model and reasoning-effort --"
-                           " a model's endpoint, modalities and token counts are"
-                           " declared in config.edn's :providers, not chosen per session")
-                      {:unknown (vec extras)}))))
-  (let [{:keys [provider model reasoning-effort]} args
-        thread-id kernel-tools/*thread-id*
-        change    (cond-> {}
-                    (some? provider)         (assoc :provider provider)
-                    (some? model)            (assoc :model model)
-                    (some? reasoning-effort) (assoc :reasoning-effort reasoning-effort))]
-    (when (empty? change)
-      (throw (ex-info "nothing to change: give at least one of provider, model, reasoning-effort" {})))
-    ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the tier here
-    ;; and writing it back would lose the change another thread made in between -- the
-    ;; model endpoint writes this same tier -- and the change line below would then
-    ;; record a before->after pair that never happened.
-    (let [{:keys [before after resolved]} (providers/swap-override! thread-id change)]
-      (providers/record-provider-change! thread-id before after "session-configure"
-                                   after resolved)
-      (str "session reconfigured: " (pr-str change)
-           " -- effective now for this thread only."
-           (when-let [m (:model resolved)] (str " Serving " m "."))
-           (when (nil? thread-id)
-             " (warning: no session in scope; the change landed on the process-wide slot)")))))
-
 ;; -------------------------------------------------------------- the built-ins
 
 ;; ---------------------------------------------------------------- the fence
@@ -568,6 +533,7 @@
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
          :park-reason (fence nil)
+         :read-only true
          ;; `read` and `write` are the two tools whose face follows the editing
          ;; mode: both keep their NAME (the user asked for one `read`, one `write`)
          ;; while what they do differs, so the description has to say which of the
@@ -583,8 +549,9 @@
   (str "Write a file, overwriting it. "
        "This session edits by anchor, so a successful write RELEASES the file's"
        " anchors: the content is no longer what they were minted against. The"
-       " answer shows the top of the file it just wrote with the anchors that name"
-       " those lines now, so you can edit what you wrote without reading it back. "
+       " answer says how much was written and where, and that the anchors are gone"
+       " -- read the file to get the anchors for what is there now. Writing content"
+       " is not knowing its line numbers, so no lines are handed back. "
        "Content that begins a line with an anchor of this file followed by `│` is"
        " refused -- that is read's markup copied back in, not text. "
        "A relative path resolves against this session's project directory when one"
@@ -817,7 +784,8 @@
                [:pattern] t-grep)
          ;; A search reads files, so the fence applies: when a project is bound, a
          ;; root outside it parks for a human exactly as a read does.
-         :park-reason (fence nil)))
+         :park-reason (fence nil)
+         :read-only true))
 
 ;; ---------------------------------------------------------------------- glob
 ;;
@@ -859,10 +827,12 @@
                [:pattern] t-glob)
          ;; A listing reads the tree, so the fence applies exactly as it does to a
          ;; search: a root outside the project parks for a human.
-         :park-reason (fence nil)))
+         :park-reason (fence nil)
+         :read-only true))
 
 (register! "bash"
-  (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere). "
+  (tool (str "Run a shell command (Git Bash on Windows, the host's shell elsewhere) and WAIT for"
+             " it. To start one and go do something else, use `job`. "
              "`stdin` is written to the command and then closed, so a command that reads its"
              " input sees EOF rather than waiting for a parent that never types; `workdir` is the"
              " directory to run in (relative paths resolve against this session's project"
@@ -874,73 +844,89 @@
              " `Write-Output $env:TEMP` for the two PowerShells, `echo $PWD` for the bash ones."
              " A name this machine does not have is refused by name, and so is a word that is"
              " not one of the above; neither falls back to another shell. "
-             "IT WAITS FOR THE COMMAND, or it does not -- that is the whole difference between"
-             " this tool's two modes, and how long the command takes is not the question: if you"
-             " are only going to wait for it, run it here and give it a big `timeout`; if you are"
-             " going off to do something else, set `run_in_background`. "
-             "FOREGROUND (the default): the command gets " bash-default-timeout-ms "ms to finish;"
-             " `timeout` overrides that, in milliseconds. When the limit is reached the command is"
-             " stopped -- together with everything it started -- and whatever it printed by then"
-             " comes back, with a line saying it was stopped. A very large `timeout` means this"
-             " run really does wait that long. "
+             "THE COMMAND GETS " bash-default-timeout-ms "ms TO FINISH; `timeout` overrides that,"
+             " in milliseconds. When the limit is reached the command is stopped -- together with"
+             " everything it started -- and whatever it printed by then comes back, with a line"
+             " saying it was stopped. A very large `timeout` means this call really does wait that"
+             " long: waiting for a slow command is what this tool is FOR, and how long the command"
+             " takes is not the question. "
              "The answer carries at most " jobs/answer-budget-bytes " bytes of what the command"
              " printed -- the tail of it, each stream counted on its own. When there is more, the"
              " whole output is written to a file and the answer says how many bytes are missing"
-             " and where that file is. "
-             "BACKGROUND (`run_in_background: true`): the call returns as soon as the command has"
-             " started, and the answer is a job id (like `j1`) and where that job's record is --"
-             " the command's output is not in it. A job has NO timeout (so `timeout` does not"
-             " apply here and `stdin` is refused); it runs until it ends or until `job_kill` stops"
-             " it, and WHEN IT ENDS YOU ARE TOLD:"
-             " its ending is put in front of you before your next model call, so you do not have"
-             " to remember to ask. Read what it has said, or wait for it, with `job_output`;"
-             " stopping it is `job_kill`. "
-             "The JOB lives only as long as this harness process; its RECORD does not -- it"
-             " stays in the configuration home, where `read` and `grep` reach it later, in this"
-             " session or in a later one.")
+             " and where that file is.")
         {"command" {:type "string" :description "Command line."}
          "shell"   {:type "string" :enum shell-names
                     :description (str "Which shell interprets `command` -- one of "
                                       shell-names-text ", or left out for this machine's own"
                                       " (Git Bash on Windows, the host's shell elsewhere)."
                                       " `command` has to be written for the shell you name."
-                                      " A background command runs in it too."
                                       " A name this machine does not have, or a word that is"
                                       " not one of the above, is refused rather than falling"
                                       " back to another shell.")}
          "stdin"   {:type "string"
                     :description (str "Text to write to the command's standard input, then close"
-                                      " it. Nothing means an empty stream, closed. Foreground"
-                                      " only: a background command is never fed.")}
+                                      " it. Nothing means an empty stream, closed.")}
          "workdir" {:type "string"
                     :description (str "Directory to run in; relative paths resolve against this"
                                       " session's project directory, as they do for `read`. It"
                                       " must be a directory.")}
          "timeout" {:type "integer" :minimum 1
                     :description (str "How long to wait, in milliseconds. Default "
-                                      bash-default-timeout-ms ". Foreground only: a background"
-                                      " command has no limit.")}
-         "run_in_background" {:type "boolean"
-                              :description (str "Start the command and return at once with a job"
-                                                " id and its record's path, instead of waiting for"
-                                                " it. Default false.")}}
+                                      bash-default-timeout-ms ".")}}
         [:command] t-bash))
 
 ;; ---------------------------------------------------------------- 后台执行
 ;;
-;; TWO NAMES RATHER THAN ONE TOOL WITH AN `action`, following the editing toolset's
-;; precedent (`replace` / `insert` / `undo_last_replace` are three names, not one
-;; `edit {action}`): each schema then carries exactly its own arguments, so the seam's
-;; missing-argument check answers for every verb, and a refusal belongs to one verb
-;; instead of to a branch.
+;; THREE NAMES, ONE ACT EACH: `job` starts, `job_output` reads, `job_kill` stops.
+;; Following the editing toolset's precedent (`replace` / `insert` / `undo_last_replace`
+;; are three names, not one `edit {action}`): each schema then carries exactly its own
+;; arguments, so the seam's missing-argument check answers for every verb, and a refusal
+;; belongs to one verb instead of to a branch.
 ;;
-;; STARTING IS NOT ONE OF THEM. A background command is `bash` run another way
-;; (`run_in_background`), not a second name for the same act: the two modes share the
-;; working directory, the record and the spawn, and the only difference is whether the
-;; call waits. What is left here is what a background command needs and a foreground
-;; one has no use for -- reading it (`job_output`) and stopping it (`job_kill`).
+;; THE STARTING VERB IS ITS OWN, and that reverses `.scratch/bash-background` decision 1
+;; (which merged it into `bash` as `run_in_background`). One description that has to
+;; explain two modes, plus a boolean asking the model 'does this call wait', puts the
+;; judgement in the wrong place -- `bash-record`'s session read a `job`/`bash` boundary as
+;; 'slow versus fast' and built a `join` out of `sleep`. What the two modes genuinely
+;; share -- the working directory, the record, the spawn -- is shared in the BODIES
+;; (`work-dir`, `cap.jobs`), not by one face having two halves.
 ;;
 ;; THE WORK IS IN harness.cap.jobs. What is here is the faces.
+
+(def ^:private job-description
+  (str "Start a shell command in the background and return at once: the answer is a job id"
+       " (like `j1`) and where that job's record is -- the command's output is not in it. Use"
+       " this when you are going off to do something else; use `bash` when you are going to"
+       " wait. "
+       "`workdir` is the directory to run in, resolved exactly as `bash` resolves it; `shell`"
+       " names WHICH SHELL INTERPRETS `command` -- one of " shell-names-text ", or left out for"
+       " this machine's own, and `command` has to be a line written for the shell you name. "
+       "A job has NO timeout, and nothing feeds it `stdin`: it runs until it ends or until"
+       " `job_kill` stops it. (Neither is an argument of this verb, so there is nothing to"
+       " send.) "
+       "WHEN IT ENDS YOU ARE TOLD: its ending is put in front of you before your next model"
+       " call, so you do not have to remember to ask. Read what it has said, or wait for it,"
+       " with `job_output`; stopping it is `job_kill`. "
+       "The JOB lives only as long as this harness process; its RECORD does not -- it stays in"
+       " the configuration home, where `read` and `grep` reach it later, in this session or in"
+       " a later one."))
+
+(register! "job"
+  (tool job-description
+        {"command" {:type "string" :description "Command line."}
+         "shell"   {:type "string" :enum shell-names
+                    :description (str "Which shell interprets `command` -- one of "
+                                      shell-names-text ", or left out for this machine's own"
+                                      " (Git Bash on Windows, the host's shell elsewhere)."
+                                      " `command` has to be written for the shell you name."
+                                      " A name this machine does not have, or a word that is"
+                                      " not one of the above, is refused rather than falling"
+                                      " back to another shell.")}
+         "workdir" {:type "string"
+                    :description (str "Directory to run in; relative paths resolve against this"
+                                      " session's project directory, as they do for `read`. It"
+                                      " must be a directory.")}}
+        [:command] t-job))
 
 (def ^:private job-kill-description
   (str "Stop a background job -- the command and everything it started. Use it when a job has"
@@ -975,13 +961,14 @@
        "`offset` (1-based, a line number of the record) reads from a given line instead, and"
        " `limit` caps how many lines come back; the answer names which lines it showed and how"
        " many there are in all, so a long record can be walked in order. Nothing is ever lost:"
-       " the job's record is a plain file, and every answer -- and the notice that arrives when"
-       " it ends -- names its path. "
+       " the job's record is a plain file, the answer to `job` names its path, and `read` /"
+       " `grep` open it too. "
        "`wait: true` blocks until the command is over -- or until `timeout` (default "
        jobs/job-output-default-timeout-ms "ms) runs out, and that is not an error: the answer"
        " is `[running]` with whatever the command has said so far. A job that ends while you"
-       " are busy is announced to you before your next model call (see `bash`), so `wait` is for"
-       " when you want to stand still and wait for it now. "
+       " are busy is announced to you before your next model call (see `job`), and that"
+       " announcement is what names this verb -- so `wait` is for standing still and waiting"
+       " for it now. "
        "A job that is over still answers -- but only inside the process that started it: an"
        " id does not survive a restart, and the record it left is a file `read` and `grep` still"
        " open. A record this call cannot reach is therefore not a record that is gone."))
@@ -1072,7 +1059,9 @@
        " whole list every time. At most one item may be \"in_progress\": the list has"
        " to say what you are doing NOW. "
        "The list belongs to this session and is stored with it, so it outlives this"
-       " run. Call this at most ONCE per message: a list is replaced whole, so two"
+       " run. The answer says how many items are stored and how they stand -- the"
+       " list itself is what you just sent, so it is not repeated back. "
+       "Call this at most ONCE per message: a list is replaced whole, so two"
        " calls in one message have nothing to merge and NEITHER is applied."))
 
 (declare sole-call-of-its-name?)
@@ -1110,28 +1099,6 @@
                   :description (str "The COMPLETE list, in order. [] clears it.")}}
         [:todos] t-todo-write))
 
-;; Configure this session's provider. Marked :requires-approval so a model
-;; cannot repoint its own session at another endpoint without a human saying so
-;; -- the marked call parks, and only an approved resume runs the body. Every
-;; knob is optional and independent; give only what you mean to change.
-;;
-;; "provider" names a VENDOR and "model" an id THAT VENDOR serves. A name the
-;; catalog does not know, or an id the named provider does not declare, is
-;; refused inside the body -- before anything is written, so a proposed change
-;; that cannot be served never becomes the session's configuration.
-(register! "session-configure"
-  (assoc (tool (str "Change this session's provider, model, or reasoning effort. "
-                    "Parks for human approval; only an approved change takes effect. "
-                    "Each argument is independent -- pass only what you mean to change. "
-                    "Naming a provider alone switches to that vendor AND its default model.")
-               {"provider"         {:type "string"
-                                    :description "A provider (vendor) name, e.g. \"openrouter\" or \"ollama\"."}
-                "model"            {:type "string"
-                                    :description "A model id the current provider serves, e.g. \"anthropic/claude-sonnet-4.5\"."}
-                "reasoning-effort" {:type "string" :description "Reasoning effort (e.g. \"low\", \"high\")."}}
-               [] t-configure)
-         :requires-approval true))
-
 ;; ------------------------------------------------------------------ web_fetch
 ;;
 ;; The only tool here whose subject is neither the tree nor the run: it leaves the
@@ -1160,11 +1127,16 @@
   (web/fetch-text url))
 
 (register! "web_fetch"
-  (tool web-fetch-description
-        {"url" {:type "string"
-                :description (str "The full address to fetch, including the https://"
-                                  " prefix.")}}
-        [:url] t-web-fetch))
+  (assoc (tool web-fetch-description
+               {"url" {:type "string"
+                       :description (str "The full address to fetch, including the https://"
+                                         " prefix.")}}
+               [:url] t-web-fetch)
+         ;; It leaves the machine, which is why it carries no approval gate (see
+         ;; above) -- but it changes nothing anywhere, which is why a read-only
+         ;; range includes it: an exploring subagent that cannot look up a
+         ;; document is a subagent doing half the job.
+         :read-only true))
 
 ;; ----------------------------------------------------------------- web_search
 ;;
@@ -1191,13 +1163,367 @@
   (search/perform args))
 
 (register! "web_search"
-  (tool web-search-description
-        {"query" {:type "string" :description "What to search for."}
-         "count" {:type "integer" :minimum 1
-                  :description (str "How many results to ask for (default "
-                                    search/default-count ", at most "
-                                    search/max-count ").")}}
-        [:query] t-web-search))
+  (assoc (tool web-search-description
+               {"query" {:type "string" :description "What to search for."}
+                "count" {:type "integer" :minimum 1
+                         :description (str "How many results to ask for (default "
+                                           search/default-count ", at most "
+                                           search/max-count ").")}}
+               [:query] t-web-search)
+         :read-only true))
+
+;; ----------------------------------------------------------------------- ask
+;;
+;; THE ONE TOOL WHOSE PURPOSE IS TO STOP. Every other tool here does something and
+;; then answers; this one answers by NOT running -- it parks the call on a question
+;; and the person's answer arrives as this call's result on the way back in. The
+;; machinery is the elicitation chain that harness.cap.mcp already drives for a
+;; server's `elicitation/create`, which is why none of it is new: `suspend!` parks
+;; under :reason :elicitation, `GET /api/elicitation` hands the client the question
+;; and its shape, and `resume` carries the answers.
+;;
+;; NOT MARKED :requires-approval, AND THAT IS THE DECISION RATHER THAN AN
+;; OVERSIGHT. Approving is something a person does TO a call that was going to run
+;; anyway; here the person is the one being asked, and the park IS the feature --
+;; a fence in front of it would ask somebody to approve asking them. It follows
+;; that this tool never reaches the seam's :approved/:vetoed arm, and so it takes
+;; its own decision exactly the way cap.mcp does (see t-ask).
+;;
+;; ONE CALL, A LIST OF QUESTIONS. The run stops once and the person answers
+;; everything in front of them; a tool that asked one question per call would make
+;; a conversation out of a form.
+;;
+;; A QUESTION MAY OFFER CANDIDATES. `options` becomes an `enum` on the property, so
+;; the card draws a choice with the client's EXISTING enum rule -- this tool does not
+;; invent a second way to draw one, and a question with no candidates is a text box
+;; exactly as before. `multiple` makes it a multi-select (an `array` of that enum);
+;; `allow_other` adds "or type your own" as a way out of a list that does not happen
+;; to contain their answer.
+;;
+;; THE "OR TYPE YOUR OWN" SWITCH IS EXPLICIT RATHER THAN ASSUMED, and that is the
+;; one place the same field rules serve two masters. The card draws a server's form
+;; from the server's schema too (harness.cap.mcp), and growing an extra input under
+;; every enum somebody else declared would be this client editing their question. So
+;; the permission rides on the schema as `x-allow-other` -- a key no server writes --
+;; and a schema without it renders exactly what it renders today.
+
+(def ^:private ask-description
+  (str "Ask the person one or more questions, and get their answers back as this "
+       "call's result. "
+       "The call PARKS the run until they answer, so put everything you need into "
+       "ONE call rather than asking in a series of single-question calls. "
+       "Use it for something only they can tell you -- a fact, a preference, a "
+       "choice between approaches -- and not for anything you can find out "
+       "yourself. "
+       "One entry per question: `question` is the sentence they read, and `key` "
+       "names that answer. Keep the key stable, so the same question asked later "
+       "carries the same one. "
+       "`options` offers a closed list to pick from; add `allow_other` when they may "
+       "need an answer that is not on it, and `multiple` when the answer may be "
+       "several of them. "
+       "What comes back is one line per question. A question they left blank comes "
+       "back as \"(no answer)\", a multiple-choice question they ticked nothing on "
+       "comes back as \"(nothing chosen)\", and a person who declines the form "
+       "altogether comes back as a refusal. None of them is an error, and none "
+       "means the run failed."))
+
+(defn- ask-options
+  "ENTRY's `options`, as the candidates in the order the model wrote them -- or nil
+  when the question offers none.
+
+  VERBATIM, because a candidate is the model's own word for a thing and the answer
+  is compared against it: a space in \"Hong Kong branch\" or a comma in \"a, b\" is
+  part of the word, and trimming or reordering here would put a DIFFERENT string on
+  the card than the one an answer will be matched to. Only the element's TYPE is
+  normalised (`str`), because a model may write `1` where it means the string \"1\".
+
+  A LIST NOBODY COULD PICK FROM IS REFUSED HERE rather than drawn: an empty one, or
+  one carrying a blank candidate, is a form with a line on it that cannot be
+  answered -- and the person is who would find that out."
+  [i m]
+  (when (some? (:options m))
+    (let [raw (:options m)]
+      (when-not (sequential? raw)
+        (throw (ex-info (str "ask's question " (inc i) " writes `options` as something"
+                             " other than a list. Give the candidates as a list of"
+                             " strings.")
+                        {:reason :options-not-a-list :index i})))
+      (let [os (mapv str raw)]
+        (when (empty? os)
+          (throw (ex-info (str "ask's question " (inc i) " offers an empty list of"
+                               " options, which is nothing to pick from. Leave"
+                               " `options` out to ask it as a written answer.")
+                          {:reason :empty-options :index i})))
+        (when-let [blank (first (filter str/blank? os))]
+          (throw (ex-info (str "ask's question " (inc i) " offers a blank candidate,"
+                               " which nobody could pick. Every entry of `options`"
+                               " has to say what it is.")
+                          {:reason :blank-option :index i :option blank})))
+        os))))
+
+(defn- ask-question
+  "One entry of `questions`, as {:key .. :question .. :options .. :multiple ..}.
+
+  A BARE STRING IS ACCEPTED as the question with no key, because a model reaches
+  for that shape when there is only one thing to ask, and the key it would have
+  written is `q1` anyway. A MISSING KEY IS DERIVED from the entry's position, for
+  the same reason: refusing a call whose meaning was never in doubt would cost a
+  person nothing and the model a round trip. A MISSING SENTENCE IS REFUSED -- there
+  would be nothing to put on the card, and a key is not a question.
+
+  `multiple` WITHOUT `options` IS REFUSED, and the reason is that the question would
+  have no shape: a multi-select is \"which of these\", and with nothing to choose
+  between, what the model meant is not recoverable from what it wrote -- \"list the
+  hosts\" is a written answer whose answer happens to have newlines in it, not a row
+  of tick boxes. `allow_other` without `options` is NOT refused: a written answer
+  already takes anything, so the form that comes out is the one that was asked for
+  and the switch is merely redundant.
+
+  BOTH SWITCHES ARE READ AS THE OBVIOUS BOOLEAN rather than refused for a non-boolean
+  truthy: a model that wrote `\"multiple\": \"true\"` meant one thing by it, and
+  costing a person the difference over the spelling would be pedantry with a price."
+  [i q]
+  (let [m           (if (map? q) q {:question q})
+        question    (some-> (:question m) str str/trim)
+        key         (some-> (:key m) str str/trim)
+        options     (ask-options i m)
+        multiple    (boolean (:multiple m))]
+    (when (str/blank? question)
+      (throw (ex-info (str "ask's question " (inc i) " carries no sentence to put on"
+                           " the card. Each entry needs a `question`.")
+                      {:reason :question-without-a-sentence :index i})))
+    (when (and multiple (nil? options))
+      (throw (ex-info (str "ask's question " (inc i) " asks for several answers but"
+                           " offers no `options` to choose them from. Selecting"
+                           " several needs a list to select from; leave `multiple`"
+                           " out to ask for a written answer.")
+                      {:reason :multiple-without-options :index i})))
+    {:key         (if (str/blank? key) (str "q" (inc i)) key)
+     :question    question
+     :options     options
+     :multiple    multiple
+     :allow-other (and (some? options) (boolean (:allow_other m)))}))
+
+(defn- ask-questions
+  "ARGS' question list, as [{:key .. :question ..} ..], in the order asked.
+
+  IT REFUSES BEFORE ANYBODY IS ASKED. A form nobody can answer correctly -- nothing
+  in it, or two questions that would come back under one key -- is a wasted
+  interruption, so it is refused here while the cost is still the model's, not a
+  person's."
+  [args]
+  (let [raw (or (:questions args) [])]
+    (when-not (sequential? raw)
+      (throw (ex-info "ask takes `questions` as a LIST of {key, question} entries."
+                      {:reason :questions-not-a-list})))
+    (let [qs (vec (map-indexed ask-question raw))]
+      (when (empty? qs)
+        (throw (ex-info "ask needs at least one question." {:reason :ask-with-no-questions})))
+      (let [dupes (->> qs (map :key) frequencies
+                       (keep (fn [[k n]] (when (> n 1) k))) sort)]
+        (when (seq dupes)
+          (throw (ex-info (str "ask needs one key per question, and these repeat: "
+                               (str/join ", " dupes)
+                               ". The key is what an answer comes back under, so two"
+                               " questions sharing one would lose an answer.")
+                          {:reason :duplicate-ask-keys :keys dupes}))))
+      qs)))
+
+(defn- ask-property
+  "ONE question as the schema property that draws it.
+
+  THREE SHAPES, and every one of them is a shape the client's field rules already
+  know -- this tool does not invent a way to draw a choice. A written answer is
+  `{\"type\" \"string\"}`, byte for byte what this tool has always sent and what a
+  server's own free-text field is. A choice is that same string carrying an `enum`
+  of the candidates, which those rules draw as a select. Several choices are an
+  `array` of that enum, which they draw as a row of tick boxes.
+
+  `x-allow-other` IS AN EXTENSION RATHER THAN JSON SCHEMA, and it is there because
+  the permission is a property of the FORM and the standard has no word for it. It
+  rides on the property (where the client reads it) and only on a property that HAS
+  candidates: a written answer needs nobody's permission to be written, so a schema
+  for one never carries the key -- which is what keeps a server's own elicitation
+  rendering exactly what it rendered before this existed."
+  [{:keys [question options multiple allow-other]}]
+  (let [typed (if multiple
+                {:type "array" :items {:type "string" :enum options}}
+                (cond-> {:type "string"} options (assoc :enum options)))]
+    (cond-> (assoc typed :description question)
+      allow-other (assoc :x-allow-other true))))
+
+(defn- ask-schema
+  "The questions as the JSON Schema the client draws.
+
+  THE KEY IS THE PROPERTY NAME, because an answer comes back as one map keyed by
+  property name -- that is the whole of what the client's form rules do -- and this
+  tool is the side that matches an answer to the question that asked for it. The
+  sentence rides as the description, which is where a card puts it.
+
+  An ARRAY MAP so the fields follow the order they were asked in, up to the size at
+  which Clojure promotes a small map to a hash map. Past that the order is the
+  client's; nothing here depends on it."
+  [questions]
+  {:type "object"
+   :properties (into (array-map) (map (juxt :key ask-property)) questions)})
+
+(defn- ask-prompt
+  "The question face as the one line an interrupt carries: every question, joined.
+
+  THE LINE IS THE INTERRUPT'S OWN, so a client that never fetches the schema still
+  has the questions in front of it -- and for the ordinary one-question call it is
+  that question verbatim. Joined rather than stacked because a card renders this as
+  one line, and a newline in it would be a break nobody sees."
+  [questions]
+  (str/join " / " (map :question questions)))
+
+(defn- answer-for
+  "The value this question came back with, or nil.
+
+  TOLERANT IN TWO DIRECTIONS, and the second one is the difference between a wrong
+  answer and no answer at all. The payload's keys are the CLIENT's -- this harness
+  parses the request with keyword keys, so a keyword is what is usually there, and a
+  client that did it differently is still answering. And a key no keyword can be
+  made from is looked up as the string it is rather than thrown on: the person has
+  already filled the form in by the time this runs, and losing their answer to a
+  lookup's opinion of a legal name would be the worst failure here."
+  [answers key]
+  (let [kw (try (keyword key) (catch Throwable _ nil))]
+    (or (get answers kw) (get answers key))))
+
+(def ^:private no-answer-label "(no answer)")
+
+(def ^:private nothing-chosen-label "(nothing chosen)")
+
+(defn- chosen-words
+  "One picked item as words, or nil when there is nothing worth saying."
+  [item]
+  (let [t (str/trim (str item))]
+    (when-not (str/blank? t) t)))
+
+(defn- answer-body
+  "ONE answer as the words the model reads.
+
+  THREE STATES, AND THEY ARE THREE DIFFERENT FACTS: an answer; an EMPTY collection,
+  which says \"none of these\" and is a real answer to a question that offered
+  choices; and nothing at all, which is the person leaving the line alone. The last
+  two are the pair a model cannot reconstruct by itself, so they are told apart
+  rather than collapsed into one silence -- each is something to act on that the
+  other is not.
+
+  A COLLECTION COMES BACK AS ITS ITEMS, comma-separated: the question was \"which
+  ones\" and what the model should get is the ones. Nothing here ever BUILDS a
+  joined string for the wire, though -- the picks crossed as a list because an
+  option may itself contain a comma (see the schema), and joining is only how the
+  answer is said out loud at the end."
+  [answer]
+  (cond
+    (sequential? answer) (if-let [items (seq (keep chosen-words answer))]
+                           (str/join ", " items)
+                           nothing-chosen-label)
+
+    (string? answer)     (or (chosen-words answer) no-answer-label)
+
+    (nil? answer)        no-answer-label
+
+    :else                (str answer)))
+
+(defn- answer-lines
+  "The answers as what the model reads: one line per question, in the order asked.
+
+  NO JSON DUMP. The model wrote the questions and is about to act on the answers, so
+  the matching is done here rather than handed over as a map for it to redo. A
+  question nobody answered SAYS SO rather than going missing, so 'they skipped it'
+  and 'the answer was empty' are the same fact stated once instead of inferred from
+  an absence."
+  [questions answers]
+  (str/join "\n"
+            (map (fn [{:keys [key question]}]
+                   (str "- " question " -> " (answer-body (answer-for answers key))))
+                 questions)))
+
+(defn- t-ask
+  "`ask`'s body: park the call on its questions, or -- on the way back in -- hand
+  the person's answers to the model.
+
+  THE DECISION IS TAKEN HERE, the way harness.cap.mcp takes an MCP server's. The
+  seam's own :approved/:vetoed arm belongs to calls that were PARKED FOR APPROVAL,
+  and this tool is never one of them -- it carries no :requires-approval and no
+  :park-reason, so `approval-reason` answers nil for it and that arm is unreachable.
+  Asking the parked record directly is therefore not a shortcut past the seam; it is
+  the only path this call has.
+
+  TAKEN, NOT READ. `take-decision!` hands a decision over exactly once, so a replay
+  of the same interrupt cannot answer the same call twice: the second transit finds
+  nothing, parks again, and the run stops on the same question rather than carrying
+  on with an answer nobody gave twice.
+
+  A REFUSAL IS AN ANSWER. `:vetoed` is a person declining the form, which is a thing
+  a model can act on -- it does not fail the call, and it does not read as a broken
+  tool. That is the same judgment cap.mcp makes when it folds a human's no into the
+  `decline` it sends a server."
+  [args]
+  (let [questions (ask-questions args)
+        rec       (kernel-tools/parked-for-call kernel-tools/*thread-id*
+                                                kernel-tools/*tool-call-id*)
+        decision  (when rec (kernel-tools/take-decision! (:interrupt-id rec)))]
+    (case (:verdict decision)
+      :approved (answer-lines questions (:payload decision))
+      :vetoed   "The person declined to answer."
+      (kernel-tools/suspend! kernel-tools/*thread-id* kernel-tools/*tool-call-id*
+                             {:asked-by :model
+                              :prompt   (ask-prompt questions)
+                              :schema   (ask-schema questions)}))))
+
+(register! "ask"
+  (tool ask-description
+        {"questions" {:type "array" :minItems 1
+                      :description (str "The questions to put to the person, in the order"
+                                        " they should read them.")
+                      :items {:type "object"
+                              :properties {"key" {:type "string"
+                                                  :description (str "A short, stable name"
+                                                                    " for this answer. The"
+                                                                    " same question asked"
+                                                                    " again carries the"
+                                                                    " same key.")}
+                                           "question" {:type "string"
+                                                       :description (str "The sentence the"
+                                                                         " person reads: one"
+                                                                         " question, asked"
+                                                                         " plainly.")}
+                                           "options" {:type "array"
+                                                      :items {:type "string"}
+                                                      :description (str "The answers to choose"
+                                                                        " from, when the answer"
+                                                                        " is one of a known set."
+                                                                        " Without it the question"
+                                                                        " is a box they type"
+                                                                        " into. Leave the list"
+                                                                        " out rather than"
+                                                                        " guessing at it, and"
+                                                                        " give each candidate"
+                                                                        " exactly as the answer"
+                                                                        " should come back.")}
+                                           "multiple" {:type "boolean"
+                                                       :description (str "True when they may pick"
+                                                                         " more than one of"
+                                                                         " `options`. Needs"
+                                                                         " `options`.")}
+                                           "allow_other" {:type "boolean"
+                                                          :description (str "True when they may"
+                                                                            " answer in their own"
+                                                                            " words instead of"
+                                                                            " picking, for a"
+                                                                            " candidate the list"
+                                                                            " does not have. Needs"
+                                                                            " `options` -- an"
+                                                                            " answer they type is"
+                                                                            " already what a"
+                                                                            " question without"
+                                                                            " them is.")}}
+                              :required ["key" "question"]}}}
+        [:questions] t-ask))
 
 ;; ------------------------------------------------------------------ installing
 

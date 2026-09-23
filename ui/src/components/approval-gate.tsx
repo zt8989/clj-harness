@@ -69,6 +69,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { API_BASE } from "@/lib/threads";
 import { answersFor, fieldSpecs, inputKindFor } from "@/lib/elicitation";
+import type { FieldSpec, FieldValue } from "@/lib/elicitation";
 
 /// The interrupt reason this card owns. Every other reason on this seam --
 /// including the protocol's own `tool_call`, `input_required` and `confirmation`
@@ -384,7 +385,7 @@ export const ApprovalGate: FC<{
 
 /// ---------------------------------------------------------------- the question
 ///
-/// A server asked the user something and the call is waiting. The card is a
+/// Something asked the user a question and the call is waiting. The card is a
 /// FORM. WHAT it renders comes from `lib/elicitation.ts`, which owns the
 /// schema-to-fields rules and their tests; WHERE the question comes from is the
 /// harness's own edge rather than the interrupt:
@@ -393,9 +394,9 @@ export const ApprovalGate: FC<{
 ///     shape belongs to AG-UI and a client's validator refuses extra fields, so
 ///     stuffing a form into it would be a protocol change this repo has no
 ///     business making.
-///   - `GET /api/elicitation?interruptId=` answers with what was asked, by whom,
-///     and the JSON Schema to fill in. The server's name is on the card because
-///     the person answering deserves to know which outside program is asking.
+///   - `GET /api/elicitation?interruptId=` answers with what was asked, WHO asked,
+///     and the JSON Schema to fill in. The asker is on the card because the person
+///     answering deserves to know who wants to know.
 ///
 /// NOTHING IS ASSUMED ABOUT THE SCHEMA. `requestedSchema` is a JSON Schema object
 /// with primitive properties; this renders the kinds it knows as the inputs they
@@ -403,24 +404,225 @@ export const ApprovalGate: FC<{
 /// dropped for being unfamiliar -- dropping one would send the server a form that
 /// looked answered and was missing half the answers.
 
+/// WHO IS ASKING -- three titles, because two of them would be a lie.
+///
+/// `server` is the outside program's name, and the endpoint answers it for the
+/// questions harness.cap.mcp brings in. `askedBy` is who asked when it is NOT a
+/// server: `"model"` for the questions this harness's own `ask` tool puts up, where
+/// the card's old words ("a server is asking you") were false about the one thing a
+/// person answering wants to know. With NEITHER, the card says the only thing left
+/// that is true -- somebody is asking and it will not name itself -- rather than
+/// guessing a server, which is what a question with no name used to look like.
+///
+/// It is its own component rather than a paragraph inside the card so that it can be
+/// RENDERED to a string and read back: the failure this guards against is a title
+/// that renders nothing at all, which no assertion about a translation key would
+/// catch (see suites/sidebar.tsx for the same seam and the bug that paid for it).
+export const ElicitationCardTitle: FC<{ server?: string; askedBy?: string }> = ({
+  server,
+  askedBy,
+}) => {
+  const { t } = useTranslation("approval");
+  return (
+    <p
+      data-slot="elicitation-card-title"
+      className="aui-elicitation-card-title flex items-center gap-2 text-sm font-semibold"
+    >
+      <MessageCircleQuestionIcon
+        data-slot="elicitation-card-icon"
+        className="aui-elicitation-card-icon size-4 shrink-0"
+      />
+      {server !== undefined
+        ? t("elicitation.named", { server })
+        : askedBy === "model"
+          ? t("elicitation.model")
+          : t("elicitation.title")}
+    </p>
+  );
+};
+
+/// ONE FIELD, as the control its kind calls for.
+///
+/// IT DRAWS ITS OWN WRAPPER, because the wrapper is not the same element for every
+/// kind and that is a fact about labels rather than a preference. A label wraps ONE
+/// control, so a scalar field keeps the `<label>` it has always had -- the words and
+/// the box are one target, and clicking the sentence focuses the box, which is what
+/// every field of a server's form already is. A row of tick boxes cannot be a label:
+/// wrapping four of them in one would make the FIRST the target of a click on the
+/// question. Neither can a choice that also offers "write your own", for the same
+/// reason -- two controls, one label. Those two get a plain `<div>`, and the shapes
+/// that existed before this are untouched.
+///
+/// WHAT IT TRANSLATES IS ONLY ITS OWN WORDS. The field's name, kind, description and
+/// candidates are the asking side's, drawn verbatim (spec decision 3); the only
+/// sentence this file owns is the placeholder for the person's own words.
+///
+/// EXPORTED FOR THE SAME REASON `ElicitationCardTitle` IS: which control a field gets
+/// is a claim about what a person can click, and the only way to hold it is to render
+/// the field and read the `data-slot`s back (`suites/elicitation-card.tsx`).
+export const ElicitationField: FC<{
+  field: FieldSpec;
+  value: FieldValue | undefined;
+  own: string;
+  onValue: (value: FieldValue) => void;
+  onOwn: (own: string) => void;
+}> = ({ field, value, own, onValue, onOwn }) => {
+  const { t } = useTranslation("approval");
+  const kind = inputKindFor(field);
+  const ticks = Array.isArray(value) ? value : [];
+  const scalar = typeof value === "string" ? value : "";
+
+  const words = (
+    <>
+      <span className="font-medium">
+        {field.name}
+        {/* A kind with no input of its own is still SHOWN, with its name
+            spelled out -- the alternative is a form that quietly drops a
+            field the server asked for. */}
+        {field.kind !== "string" && (
+          <span className="text-muted-foreground ml-1 font-normal">
+            ({field.kind})
+          </span>
+        )}
+      </span>
+      {field.description !== undefined && (
+        <span className="text-muted-foreground">{field.description}</span>
+      )}
+    </>
+  );
+
+  /// The way out of a list that does not hold their answer. Offered only where
+  /// there IS a list and only when the schema asked for it: `ask` never sends the
+  /// key otherwise, and a server's own enum must not grow one.
+  const other =
+    field.allowOther === true && (kind === "select" || kind === "checkboxes") ? (
+      <input
+        data-slot="elicitation-other"
+        className="aui-elicitation-other border-input bg-background rounded-md border px-2 py-1"
+        type="text"
+        value={own}
+        placeholder={t("elicitation.other")}
+        aria-label={t("elicitation.other")}
+        onChange={(e) => {
+          // A PICK AND THEIR OWN WORDS ARE ONE ANSWER, so typing clears the pick --
+          // and picking below clears the typing. Leaving both standing would put two
+          // answers to one question in the payload and give the person no way to see
+          // which of them they had sent.
+          if (kind === "select" && e.target.value !== "") onValue("");
+          onOwn(e.target.value);
+        }}
+      />
+    ) : null;
+
+  const wrapper = { "data-slot": "elicitation-field", "data-field-kind": field.kind };
+
+  /// A CONTROL THAT LOST ITS `<label>` STILL NEEDS A NAME. The wrapper is what names a
+  /// bare field to anything that cannot see the screen, and a field with an own-words
+  /// box has two controls and so gets a `<div>` instead (see above). The question goes
+  /// on the control itself in that case -- and ONLY in that case, because inside a
+  /// label an `aria-label` would REPLACE the words already sitting next to the box.
+  /// The own-words box names itself differently: it is not the answer to the question,
+  /// it is the way out of the list.
+  const named = other !== null ? { "aria-label": field.description ?? field.name } : {};
+
+  if (kind === "checkboxes") {
+    return (
+      <div {...wrapper} className="aui-elicitation-field flex flex-col gap-1 text-xs">
+        {words}
+        <div className="aui-elicitation-choices flex flex-wrap gap-x-3 gap-y-1">
+          {(field.itemValues ?? []).map((option) => (
+            <label
+              key={option}
+              className="aui-elicitation-choice flex items-center gap-1"
+            >
+              <input
+                data-slot="elicitation-checkbox"
+                type="checkbox"
+                value={option}
+                checked={ticks.includes(option)}
+                onChange={(e) =>
+                  onValue(
+                    e.target.checked
+                      ? [...ticks, option]
+                      : ticks.filter((tick) => tick !== option),
+                  )
+                }
+              />
+              <span>{option}</span>
+            </label>
+          ))}
+        </div>
+        {other}
+      </div>
+    );
+  }
+
+  const control =
+    kind === "select" ? (
+      <select
+        {...named}
+        data-slot="elicitation-select"
+        className="aui-elicitation-select border-input bg-background rounded-md border px-2 py-1"
+        value={scalar}
+        onChange={(e) => {
+          if (e.target.value !== "") onOwn("");
+          onValue(e.target.value);
+        }}
+      >
+        <option value="">—</option>
+        {(field.enumValues ?? ["true", "false"]).map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    ) : (
+      <input
+        {...named}
+        data-slot="elicitation-input"
+        className="aui-elicitation-input border-input bg-background rounded-md border px-2 py-1"
+        type={kind === "number" ? "number" : "text"}
+        value={scalar}
+        onChange={(e) => onValue(e.target.value)}
+      />
+    );
+
+  return other === null ? (
+    <label {...wrapper} className="aui-elicitation-field flex flex-col gap-1 text-xs">
+      {words}
+      {control}
+    </label>
+  ) : (
+    <div {...wrapper} className="aui-elicitation-field flex flex-col gap-1 text-xs">
+      {words}
+      {control}
+      {other}
+    </div>
+  );
+};
+
 /// The question, and the form that answers it.
 ///
-/// THE QUESTION IS THE SERVER'S, AND SO IS THE FORM. `asked.prompt` is the
-/// server's own sentence, and the field names, kinds, descriptions and enum
-/// values come out of the MCP server's schema; all of them are drawn verbatim
-/// (spec decision 3), which is why only the card's frame and buttons read from a
-/// catalog here.
+/// THE QUESTION IS THE ASKER'S, AND SO IS THE FORM. `asked.prompt` is the asker's
+/// own sentence, and the field names, kinds, descriptions and enum values come out
+/// of the schema; all of them are drawn verbatim (spec decision 3), which is why
+/// only the card's frame and buttons read from a catalog here.
 const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
   const { t } = useTranslation("approval");
   const { t: tErrors } = useTranslation("errors");
   const { decisions, decide, submitting, error } = useContext(GateContext);
   const [asked, setAsked] = useState<{
     server?: string;
+    askedBy?: string;
     prompt?: string;
     schema?: unknown;
   } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, FieldValue>>({});
+  // THE PERSON'S OWN WORDS, kept apart from `values` because they mean two different
+  // things to `answersFor`: for a single choice they stand where the pick would have,
+  // and for a multiple choice they are one more item beside the ticks.
+  const [own, setOwn] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let live = true;
@@ -436,7 +638,12 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
             tErrors("http.askingQuestion", { status: res.status }),
           );
         }
-        return (await res.json()) as { server?: string; prompt?: string; schema?: unknown };
+        return (await res.json()) as {
+          server?: string;
+          askedBy?: string;
+          prompt?: string;
+          schema?: unknown;
+        };
       })
       .then((body) => {
         if (live) setAsked(body);
@@ -456,7 +663,7 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
 
   const settle = (decision: Decision) => {
     if (decision === "resolved") {
-      decide(interrupt.id, "resolved", answersFor(fields, values));
+      decide(interrupt.id, "resolved", answersFor(fields, values, own));
     } else {
       decide(interrupt.id, "cancelled", { action: "decline" });
     }
@@ -467,15 +674,7 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
       data-slot="elicitation-card"
       className="aui-elicitation-card border-border/60 bg-card text-card-foreground mb-1 flex flex-col gap-2 rounded-lg border p-3"
     >
-      <p className="aui-elicitation-card-title flex items-center gap-2 text-sm font-semibold">
-        <MessageCircleQuestionIcon
-          data-slot="elicitation-card-icon"
-          className="aui-elicitation-card-icon size-4 shrink-0"
-        />
-        {asked?.server !== undefined
-          ? t("elicitation.named", { server: asked.server })
-          : t("elicitation.title")}
-      </p>
+      <ElicitationCardTitle server={asked?.server} askedBy={asked?.askedBy} />
 
       <p className="aui-elicitation-card-prompt text-xs">
         {asked?.prompt ?? interrupt.message ?? ""}
@@ -489,54 +688,16 @@ const ElicitationCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
 
       {asked !== null &&
         fields.map((field) => (
-          <label
+          <ElicitationField
             key={field.name}
-            data-slot="elicitation-field"
-            data-field-kind={field.kind}
-            className="aui-elicitation-field flex flex-col gap-1 text-xs"
-          >
-            <span className="font-medium">
-              {field.name}
-              {/* A kind with no input of its own is still SHOWN, with its name
-                  spelled out -- the alternative is a form that quietly drops a
-                  field the server asked for. */}
-              {field.kind !== "string" && (
-                <span className="text-muted-foreground ml-1 font-normal">
-                  ({field.kind})
-                </span>
-              )}
-            </span>
-            {field.description !== undefined && (
-              <span className="text-muted-foreground">{field.description}</span>
-            )}
-            {inputKindFor(field) === "select" ? (
-              <select
-                data-slot="elicitation-select"
-                className="aui-elicitation-select border-input bg-background rounded-md border px-2 py-1"
-                value={values[field.name] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({ ...prev, [field.name]: e.target.value }))
-                }
-              >
-                <option value="">—</option>
-                {(field.enumValues ?? ["true", "false"]).map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                data-slot="elicitation-input"
-                className="aui-elicitation-input border-input bg-background rounded-md border px-2 py-1"
-                type={inputKindFor(field) === "number" ? "number" : "text"}
-                value={values[field.name] ?? ""}
-                onChange={(e) =>
-                  setValues((prev) => ({ ...prev, [field.name]: e.target.value }))
-                }
-              />
-            )}
-          </label>
+            field={field}
+            value={values[field.name]}
+            own={own[field.name] ?? ""}
+            onValue={(value) =>
+              setValues((prev) => ({ ...prev, [field.name]: value }))
+            }
+            onOwn={(text) => setOwn((prev) => ({ ...prev, [field.name]: text }))}
+          />
         ))}
 
       <div className="aui-elicitation-card-actions flex items-center gap-2">

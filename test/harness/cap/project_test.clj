@@ -751,7 +751,7 @@
 
 (deftest the-session-step-carries-the-endings-of-jobs-nobody-waited-for
   (let [t "pt-notice"
-        {:keys [path]} (jobs/start! t {:command "echo JOB-SAYS-SO; exit 0"})]
+        {:keys [path]} (jobs/start! t {:command "echo JOB-SAYS-$((6*7)); exit 0"})]
     ;; WAIT BY READING THE RECORD, not through a verb: `job_output` would count as
     ;; telling the model, which is exactly the thing being tested here.
     (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
@@ -763,9 +763,15 @@
         (is (= "hi" (:content (first once))) "the client's own message is untouched")
         (is (str/starts-with? (:content (second once)) "<job-ended"))
         (is (str/includes? (:content (second once)) "[exit 0]") "how it went")
-        (is (str/includes? (:content (second once)) path) "and where its record is")
-        (is (not (str/includes? (:content (second once)) "JOB-SAYS-SO"))
-            "nothing of what the command said: a notice is three facts"))
+        (is (str/includes? (:content (second once))
+                           "<command>echo JOB-SAYS-$((6*7)); exit 0</command>")
+            "which command it was -- the id alone identifies nothing")
+        (is (str/includes? (:content (second once)) "job_output")
+            "and the one line that says where to read it")
+        (is (not (str/includes? (:content (second once)) path))
+            "but not the path: the `job` answer carried that, and it is still in the history")
+        (is (not (str/includes? (:content (second once)) "JOB-SAYS-42"))
+            "nothing of what the command SAID: the notice quotes the command, not the record"))
       (testing "and applying the step to its own output changes nothing"
         ;; The loop's promise: a step that grew a second copy each time it ran would
         ;; put the same notice in front of the model on every call of every turn.

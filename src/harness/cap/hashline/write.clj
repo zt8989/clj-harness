@@ -1,6 +1,5 @@
 (ns harness.cap.hashline.write
-  "`write` in anchor mode: the boundary where anchors stop meaning anything, and
-  the place the model is handed a fresh set without asking.
+  "`write` in anchor mode: the boundary where anchors stop meaning anything.
 
   A WRITE INVALIDATES EVERY ANCESTOR IT HAS. The file's content is no longer the
   content those anchors were minted against -- not mostly, not approximately: the
@@ -24,21 +23,17 @@
   hook point is there (`{:tool_name :tool_input}`, exit 2 to refuse and hand stderr
   back) if it ever needs to become configurable; this is where it starts.
 
-  `:auto-read` IS THE POINT OF THE WHOLE TICKET. Having just written a file, the
-  model's next move is to adjust something in it -- and it has no anchors, because
-  the write released them. Making it read again is a round trip for a fact this
-  call can supply: the file it just wrote, at the head where a session's first
-  edit usually lands. So a successful write hands back anchored rows, and those
-  rows are registered as shown, exactly as a read's are."
+  WRITING IS NOT READING, so the answer does not pretend otherwise. A write
+  releases the file's anchors; it does not hand back a fresh set. What was written
+  is already in the call that wrote it, so echoing a head of the file back would
+  pay for the same tokens twice -- and worse, it would read as a grant to edit the
+  whole file when what it showed was the first twenty lines. The answer therefore
+  states two facts (how much was written, and that the anchors are gone) and names
+  the one action that brings them back: `read`. The two halves agree: an echo of a
+  line is refused above, and a freshly written line is not an anchor until a read
+  has shown it."
   (:require [clojure.string :as str]
-            [harness.cap.hashline.serve :as serve]
             [harness.cap.hashline.store :as store]))
-
-(def auto-read-lines
-  "How much of a freshly written file the auto-read shows. Enough to cover the
-  head of a file and the lines a follow-up edit usually lands on; the rest is a
-  `read` away, and the footer says which offset continues."
-  20)
 
 (defn- stored-anchors
   "The anchors this session holds for PATH -- every one it was served, not only
@@ -79,50 +74,32 @@
                          " as if they were text. Send the line without them.")
                     {:path path :line (inc i) :anchor anchor :reason :anchor-echo}))))
 
-(defn- auto-read-note
-  "What a successful write is followed by: rows from the head of the file it just
-  wrote, so the model can edit what it wrote without a read."
-  [thread-id path]
-  (try
-    (let [{:keys [text]} (serve/read! thread-id path {:limit auto-read-lines})]
-      (str "\n\nThe anchors for the file as it is now, from the top -- edit those"
-           " lines directly, no read needed:\n\n" text))
-    (catch Throwable t
-      ;; The write SUCCEEDED, and it stays succeeded: a note that could not be
-      ;; produced is not a failure of the thing it is a note about. What went
-      ;; wrong is still said, so the model knows why it has no anchors.
-      (str "\n\n(An anchored read of the file could not be produced, so no anchors"
-           " are shown: " (ex-message t) ")"))))
-
 (defn perform!
   "Run one `write` for THREAD-ID in anchor mode.
 
-  ARGS is the tool's argument map and CONFIG the session's resolved :editing map.
-  Returns a STRING.
+  ARGS is the tool's argument map. Returns a STRING.
 
   THE ORDER IS THE CONTRACT. Check the echo (nothing written, nothing released);
-  write the file; release the anchors and clear the undo; and only then read the
-  head back. A refusal therefore costs the file, the ownership table and the undo
-  record nothing -- and the auto-read happens AFTER the release, because it is the
-  release that makes the read mint a fresh set rather than hand back the ones the
-  write just invalidated."
-  [thread-id resolve-path args config]
+  write the file; release the anchors and clear the undo; and answer with the two
+  facts. A refusal therefore costs the file, the ownership table and the undo
+  record nothing.
+
+  ONE LOCK, THE PATH'S. The answer does not read the file back (see the namespace
+  docstring), so nothing in here wants the session's anchors: `forget-file!` and
+  `clear-undo!` are database transactions. Reading the head back is what used to
+  make a second, session-wide lock necessary here."
+  [thread-id resolve-path args]
   (let [path (store/canonical (resolve-path (:path args)))
         content (:content args)]
-    (store/with-session-lock
-     thread-id
+    (store/with-path-lock
+     path
      (fn []
-       (store/with-path-lock
-        path
-        (fn []
-          (check-no-echo! thread-id path content)
-          (let [f (java.io.File. ^String path)]
-            (when-let [p (.getParentFile f)] (.mkdirs p))
-            (spit f content :encoding "UTF-8"))
-          (store/forget-file! thread-id path)
-          (store/clear-undo! path)
-          (str "wrote " (count content) " chars to " path
-               (if (:auto-read config)
-                 (auto-read-note thread-id path)
-                 (str "\n\nThe file's anchors have been released: read it to get the"
-                      " anchors for what is there now.")))))))))
+       (check-no-echo! thread-id path content)
+       (let [f (java.io.File. ^String path)]
+         (when-let [p (.getParentFile f)] (.mkdirs p))
+         (spit f content :encoding "UTF-8"))
+       (store/forget-file! thread-id path)
+       (store/clear-undo! path)
+       (str "wrote " (count content) " chars to " path
+            "\n\nThe file's anchors have been released: read it to get the"
+            " anchors for what is there now.")))))
