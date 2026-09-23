@@ -23,10 +23,12 @@
   tail, no dropped-line count, no cursor recording how much of it this session has
   already seen.
 
-  READING IS STILL A FILE, AND NOW ALSO A VERB. The tools the model already has --
-  `bash` (`tail` / `grep` / `cat`), `read`, `grep` -- read a record directly, which is
-  enough for 'what did it say'. What they cannot answer is 'is it over yet': the
-  caller's own loop is synchronous, so `output` (the face of `job_output`) answers
+  READING IS STILL A FILE, AND NOW ALSO A VERB. The record is a plain file under the
+  configuration home, where `read`, `grep` and `bash` (`tail` / `grep` / `cat`) reach it
+  without parking a human. THE RECEIPTS DO NOT HAND THE PATH OUT -- `job` and `job_kill`
+  name `job_output` instead, because a caller holding a receipt can do nothing with a path --
+  and THE READER DOES: when the window `output` answers with is not the whole record, the
+  answer says which file holds the rest. `output` is the model's reader, and it answers
   the record's last line plus a window of what it said, and `wait: true` blocks on
   the job's own `:ended` promise until that line is written. The position in the
   record is the CALLER'S (`offset`, a line number) -- there is no cursor here, and
@@ -55,8 +57,8 @@
   but it IS a file somebody can come back to: 'what did yesterday's `npm test` say?' is
   the question a record answers, and a file deleted on the way out answered only the
   easier one. What a process's exit takes with it is the JOBS -- the registry, the ids,
-  the processes -- never the records: a file that outlives the id that named it is
-  still readable by the path an answer gave. The tree is capped by TOTAL BYTES rather
+  the processes -- never the records: the file outlives the id that named it, and the
+  next run writes beside it rather than over it. The tree is capped by TOTAL BYTES rather
   than by age (`prune-records!`): a record's worth is not a function of its age, and
   bytes are what the home actually pays.
 
@@ -165,10 +167,13 @@
   "Where THREAD-ID's ID keeps its record, under the configuration home:
   `<root>/jobs/<session>/<id>-<process tag>.log`.
 
-  ONE PLACE BUILDS THIS STRING. The answers the tools give quote it back, and a path
-  assembled twice is a path that will eventually be assembled differently -- the same
-  reason the default timeout is interpolated into `bash`'s description rather than
-  repeated there. THE TAG IS PART OF IT for the reason `process-tag` gives: a record
+  ONE PLACE BUILDS THIS STRING. A path assembled twice is a path that will eventually be
+  assembled differently -- the same reason the default timeout is interpolated into
+  `bash`'s description rather than repeated there. THE RECEIPTS DO NOT QUOTE IT (`job` and
+  `job_kill` name `job_output` instead); THE READER DOES, through `output`'s `:path`, at the
+  one moment it is worth anything -- when the window the answer carries is not the whole
+  record (`.scratch/job-receipt-no-path`). THE TAG IS PART OF IT for the reason
+  `process-tag` gives: a record
   that outlives its process must not be writable-over by the next one."
   [thread-id id]
   (str (io/file (home/root) "jobs" (home/sanitize thread-id)
@@ -190,7 +195,7 @@
                     (str "This session's jobs are " (str/join ", " ids) ".")
                     "This session has no background jobs.")
                   " A job lives only as long as this harness process; its RECORD does not -- the"
-                  " file is still on disk, and `read`, `grep` or `bash` opens it.")
+                  " file is still on disk.")
              {:reason :unknown-job :job job-id :known ids})))
 
 (defn- next-id!
@@ -671,6 +676,10 @@
   "Start COMMAND as a background job for THREAD-ID, in DIR. Answers the new job's id
   and where its record is: `{:id \"j1\" :path \"…\"}`.
 
+  THE PATH IS THIS MODULE'S HANDLE ON THE RECORD, and it stops here: the RECEIPTS name
+  `job_output` instead of quoting it, and the reader hands the path out at the moment it
+  is worth anything (see `record-path` and `output`).
+
   THROWS when the command cannot be spawned at all (this machine has no shell, the
   process limit), and registers NOTHING in that case -- a job record for a process
   that never started would be a path pointing at nothing, and the file it left behind
@@ -826,13 +835,17 @@
 
 (defn output
   "What JOB-ID has said, and how it went, as
-  `{:status .. :lines [..] :from .. :to .. :total ..}`:
+  `{:status .. :lines [..] :from .. :to .. :total .. :path ..}`:
 
   - `:status` -- the record's last line when the job is over (`[exit N]` / `[stopped]`),
     else `[running]`. ONE LINE, because that is what the record itself says.
   - `:lines`  -- the window of the command's own lines this answer carries. `:from`
     and `:to` are its 1-based line numbers IN THE RECORD, so they can be checked
     against `grep -n` on the same file, and `:total` is how many lines there are.
+  - `:path`   -- where the record is. The tool face hands it out exactly when the window it
+    is about to send is NOT the whole record (`cap.tools/t-job-output`): that is the moment
+    a reader can do something with it -- `read` / `grep` / `bash` the rest of the file
+    instead of paging through the window.
 
   WHERE THE WINDOW IS, when the caller did not say: THE TAIL. 'What has it said
   lately' is what a glance at a job asks, and a job that has printed ten thousand
@@ -855,7 +868,7 @@
   THE JOB MUST BELONG TO THIS SESSION, and a job that is over still answers -- for as
   long as this process lives. Its RECORD outlives the process and this verb does not,
   which is a distinction a reader can be caught by: after a restart the file is still
-  on disk and waiting to be read, and `job_output` answers `unknown job` about it."
+  on disk, and `job_output` answers `unknown job` about it."
   [thread-id job-id {:keys [offset limit wait timeout]}]
   (let [job (with-job thread-id job-id (fn [reg _] reg))]
     (when (and wait (not (terminal? job)))
@@ -884,7 +897,8 @@
                          (max 0 (- total limit))
                          (tail-window content answer-budget-bytes))
                        total])]
-      {:status status
+      {:path   (:path job)
+       :status status
        :lines  (subvec content from to)
        :from   (inc from)
        :to     to
@@ -896,10 +910,12 @@
   call is what stopped it, and the record's last line (which is how it went, whether
   or not this call had anything to do with it).
 
-  THE RECORD SURVIVES THE STOP, and that is the point of answering with its path:
+  THE RECORD SURVIVES THE STOP, and that is why `:path` is still in this answer:
   'stop it, then read what it said' is the ordinary order, and the alternative -- a
-  stop that took the output with it -- would make the model decide whether to read
-  before knowing whether it needed to.
+  stop that took the output with it -- would make the caller decide whether to read
+  before knowing whether it needed to. NO RECEIPT QUOTES THE PATH: `job_kill`'s answer names
+  `job_output`, and that verb hands the path out itself when the window is short of the
+  whole record (`.scratch/job-receipt-no-path`).
 
   `[stopped]` IS CLAIMED BEFORE ANYTHING IS KILLED, so the pump that wakes to a dead
   process cannot write `[exit N]` after we have said `[stopped]`. A command that had
@@ -960,8 +976,9 @@
   TWO FACTS, THE COMMAND, AND ONE SENTENCE. A notice is a reminder, not an answer: it does
   not carry a tail of what the command said (a record of five thousand lines is
   announced in the same few bytes as an empty one), it does not repeat the truncation
-  sentence, and it does NOT carry the record's path -- the path was in the answer to
-  `job`, the model still has it in the history above, and `job_output` does not take one.
+  sentence, and it does NOT carry the record's path -- a receipt names no path (`job` and
+  `job_kill` hand the reader over instead, and `job_output` is where a path comes from), so
+  the line below names the reader instead.
 
   THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
   `<skill name=…>` and `<instructions path=…>` are for their own blocks. What rides on
@@ -977,9 +994,11 @@
   one thing a tag attribute would force on us. It is NOT clipped: a command the model
   cannot recognise is a reminder that failed, and these are the model's own bytes.
 
-  THE SENTENCE IS THE ONE EXCEPTION to 'answers carry facts, descriptions carry usage',
-  and it is deliberate: a job exists precisely because the model went off to do
-  something else, so the one thing the reminder owes it is where to look. It names the
+  THE SENTENCE IS NO LONGER AN EXCEPTION to 'answers carry facts, descriptions carry
+  usage': the two receipts say it too now (`.scratch/job-receipt-no-path`), because in
+  all three places the caller's next move is the same. It is deliberate all the same: a
+  job exists precisely because the model went off to do something else, so the one thing
+  the reminder owes it is where to look. It names the
   id a second time so the line is usable as written, and it is one line."
   [job]
   (let [ending (or (ending-of (:path job)) "[exit ?]")]

@@ -260,7 +260,8 @@
                    (message 20 {:role "assistant" :content ""
                                 :tool_calls [(tool-call "c1" "job"
                                                         "{\"command\":\"make\"}")]})
-                   (message 21 (tool-msg "c1" "job j1 started; its record is /home/jobs/j1.log"))
+                   (message 21 (tool-msg "c1" (str "job j1 started; read it with `job_output "
+                                                  "{\"job\": \"j1\"}`.")))
                    (message 22 (user "" (str "<job-ended id=\"j1\">[exit 0]</job-ended>\n"
                                              "<command>make</command>\n"
                                              "Read what it said with job_output {\"job\": \"j1\"}.")))

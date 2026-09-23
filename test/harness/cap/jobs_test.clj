@@ -102,7 +102,7 @@
                (:content (first notices)))
             "which job, what it ran, how it went -- no tail, no record path, and where to read")
         (is (not (str/includes? (:content (first notices)) path))
-            "the path is not in the notice: the `job` answer carried it, and the model has that")
+            "the path is in no answer at all: `job_output` is the reader, and it asks by id")
         (is (= 3 (count (str/split-lines (:content (first notices)))))
             "three lines and no tail: the tag, the command, the read sentence"))
       (testing "and it is not said twice"
@@ -560,8 +560,8 @@
         (is (= 2 to))
         (is (= 2 total))))
     (testing "a job that has said nothing yet is running and empty, not an error"
-      (let [{:keys [id]} (jobs/start! t {:command "sleep 30"})]
-        (is (= {:status "[running]" :lines [] :from 1 :to 0 :total 0}
+      (let [{:keys [id path]} (jobs/start! t {:command "sleep 30"})]
+        (is (= {:path path :status "[running]" :lines [] :from 1 :to 0 :total 0}
                (jobs/output t id {})))))
     (testing "and an id this session never had is refused by name"
       (let [e (try (jobs/output t "j-not-mine" {}) nil (catch Exception e e))]

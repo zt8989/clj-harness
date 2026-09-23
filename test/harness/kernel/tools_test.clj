@@ -32,6 +32,23 @@
                                                :arguments (json/write-str {:command command})}}
                                    thread-id)))
 
+(defn- record-file
+  "The record JOB-ID left on disk, found by the id at the front of its name.
+
+  NO ANSWER NAMES THIS PATH ANY MORE -- `job` and `job_kill` say `job_output` instead, and
+  that verb asks by id (`.scratch/job-receipt-no-path`). A case whose subject is the FILE
+  itself (what is in it, who may read it) therefore finds it the way the harness does:
+  the session's directory under the configuration home, then the id.
+
+  THREAD-ID may be nil -- that is the unbound session the one-arity `call` runs as, and
+  its records land straight in `<home>/jobs`."
+  [thread-id job-id]
+  (let [d (io/file (home/root) "jobs" (home/sanitize thread-id))
+        f (->> (or (.listFiles d) (make-array java.io.File 0))
+               (filter #(str/starts-with? (.getName ^java.io.File %) (str job-id "-")))
+               (first))]
+    (when f (.getAbsolutePath ^java.io.File f))))
+
 ;; ...and the ONE session that is deliberately the other editing mode. Everything
 ;; else here runs unbound, which since ticket 12 means anchor editing.
 (use-fixtures :each
@@ -467,19 +484,19 @@
   ;; choice, not part of the job's identity, and `job_output` never needs to know -- so a
   ;; call that named a shell answers in exactly the shape a call that did not, and both
   ;; are held to it here rather than only the new one.
-  (let [two-facts #"job \S+ started; its record is \S+"
+  (let [two-facts #"job \S+ started; read it with `job_output \{\"job\": \"\S+\"\}`\."
         default-answer (call "job" {:command "echo hi"})]
     (is (re-matches two-facts (str/trim (:content default-answer)))
         "the default job answer is still two facts, one line")
     (when (shell/resolution :cmd)
       (let [answer (:content (call "job" {:command "echo %CD%"
                                           :shell "cmd"}))
-            path   (second (re-find #"its record is (\S+)" answer))]
+            job-id (second (re-find #"job (j\d+) started" answer))]
         (is (re-matches two-facts (str/trim answer))
             "and naming a shell does not add a third: two facts, one line")
-        (is (some? path) (str "the answer names the record: " answer))
-        (is (support/holds-within?
-             #(re-find #"[A-Za-z]:[\\/]" (slurp path :encoding "UTF-8")) 15000)
+        (is (some? job-id) (str "the answer carries the id `job_output` takes: " answer))
+        (is (re-find #"[A-Za-z]:[\\/]"
+                     (:content (call "job_output" {:job job-id :wait true :timeout 20000})))
             "the record holds what cmd printed, which bash could not have expanded")
         (jobs/shutdown!)))))
 
@@ -592,9 +609,11 @@
     (try
       (let [answer (:content (background "tt-job" "cat marker.txt"))
             job-id (second (re-find #"job (j\d+) started" answer))
-            path   (second (re-find #"its record is (\S+)" answer))]
+            path   (record-file "tt-job" job-id)]
         (is (some? job-id) (str "the tool answered with a job id: " answer))
-        (is (some? path) (str "and with where its record is: " answer))
+        (is (str/includes? answer (str "job_output {\"job\": \"" job-id "\"}"))
+            (str "and with the verb that reads it: " answer))
+        (is (some? path) (str "and the file is where the harness keeps it: " answer))
         (testing "the record holds what the command printed, from where it ran"
           ;; The command's exit line is the record's end marker, so waiting for it is
           ;; waiting for the job -- and `cat` of a file only the project directory has
@@ -643,8 +662,9 @@
     (let [t0     (System/currentTimeMillis)
           answer (:content (call "job" {:command "sleep 2; echo late"}))
           elapsed (- (System/currentTimeMillis) t0)
-          path   (second (re-find #"its record is (\S+)" answer))]
-      (is (some? path) (str "the answer names the record: " answer))
+          job-id (second (re-find #"job (j\d+) started" answer))
+          path   (record-file nil job-id)]
+      (is (some? path) (str "the job left a record on disk: " answer))
       (is (< elapsed 1000) (str "the call came back at once: " elapsed "ms"))
       (Thread/sleep 1200)
       (is (not (str/includes? (slurp path :encoding "UTF-8") "[exit"))
@@ -661,30 +681,38 @@
       (is (= plain content) "and it changes nothing: `bash` waited, as this verb always does"))
     (let [{:keys [content error]} (call "job" {:command "cat" :stdin "never-shown-anywhere"})]
       (is (not error))
-      (let [path (second (re-find #"its record is (\S+)" content))]
+      (let [job-id (second (re-find #"job (j\d+) started" content))
+            path   (record-file nil job-id)]
         (is (some? path) (str "a job started all the same: " content))
         (Thread/sleep 300)
         (is (not (str/includes? (slurp path :encoding "UTF-8") "never-shown-anywhere"))
             "`stdin` has no reader on this side, so the text is not written anywhere")))
     (let [{:keys [content error]} (call "job" {:command "sleep 2" :timeout 1})]
       (is (not error))
-      (let [path (second (re-find #"its record is (\S+)" content))]
+      (let [job-id (second (re-find #"job (j\d+) started" content))
+            path   (record-file nil job-id)]
         (Thread/sleep 1500)
         (is (not (str/includes? (slurp path :encoding "UTF-8") "[timed out"))
             "the number limited nothing: a job has no timeout to send one to")))
     (jobs/shutdown!)))
 
-(deftest the-answers-state-facts-and-not-instructions
-  ;; How to read a record belongs in a DESCRIPTION -- which is in front of the model on
-  ;; every request -- and not repeated in every answer. What an answer says is what
-  ;; happened: which job, how it went, where its record is.
+(deftest the-answers-name-what-happened-and-the-verb-that-reads-it
+  ;; A RECEIPT MAY CARRY ONE SENTENCE OF POINTER: `write` says 'read it to get the
+  ;; anchors', and the two background answers say 'read it with `job_output`' (CONTEXT.md's
+  ;; 回执 entry). What none of them carries is where the record sits -- the caller can do
+  ;; nothing with that, and `job_output` asks by id (`.scratch/job-receipt-no-path`).
   (let [started (:content (background "sleep 30"))
-        job-id  (second (re-find #"job (j\d+) started" started))]
-    (is (not (str/includes? started "read it with")))
-    (is (not (str/includes? (:content (call "job_output" {:job job-id})) "read it with")))
+        job-id  (second (re-find #"job (j\d+) started" started))
+        pointer (str "`job_output {\"job\": \"" job-id "\"}`")]
+    (is (str/includes? started pointer) "the starting answer says how to read it")
+    (is (not (str/includes? started (home/root)))
+        "and names no path under the configuration home")
+    (is (not (str/includes? (:content (call "job_output" {:job job-id})) "read it with"))
+        "the reader's own answer does not point at itself")
     (let [killed (:content (call "job_kill" {:job job-id}))]
-      (is (not (str/includes? killed "read it with")))
-      (is (str/includes? killed "its record is") "the fact is still there"))
+      (is (str/includes? killed "stopped") "the stopping answer says how it went")
+      (is (str/includes? killed pointer) "and how to read what it said")
+      (is (not (str/includes? killed (home/root))) "and, like the starting one, no path"))
     (jobs/shutdown!)))
 
 (deftest an-unknown-job-reaches-the-model-as-an-error
@@ -700,13 +728,14 @@
   (is (str/includes? (:content (call "job_kill" {})) "missing required argument"))
   (is (str/includes? (:content (call "job_output" {})) "missing required argument")))
 
-(deftest the-record-a-job-names-is-readable-with-bash
-  ;; The answer hands the model a path and says how to read it; this is that path
-  ;; being readable, with the tool the answer names -- which is the whole reason the
-  ;; job module does not keep a read verb of its own any more.
+(deftest the-record-a-job-leaves-is-readable-with-bash
+  ;; NO ANSWER HANDS OUT THE PATH ANY MORE -- `job_output` is the model's reader -- but the
+  ;; record is still a plain file in the configuration home, which `cap.project/fence` lists
+  ;; as free, so the tools the harness already has reach it with no human in the loop.
   (let [answer (:content (background "echo one; echo two; sleep 30"))
-        path   (second (re-find #"its record is (\S+)" answer))]
-    (is (some? path) (str "the answer names the record: " answer))
+        job-id (second (re-find #"job (j\d+) started" answer))
+        path   (record-file nil job-id)]
+    (is (some? path) (str "the job left a record on disk: " answer))
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"two" (:answer %)) 10000)
     (let [found  (:content (call "bash" {:command (str "grep two " (support/shell-path path))}))
           tailed (:content (call "bash" {:command (str "tail -1 " (support/shell-path path))}))]
@@ -741,14 +770,14 @@
 (deftest a-background-job-can-be-stopped-and-is-then-readable
   (let [started (:content (background "sleep 30"))
         job-id  (second (re-find #"job (j\d+) started" started))
-        path    (second (re-find #"its record is (\S+)" started))
+        path    (record-file nil job-id)
         started-at (System/currentTimeMillis)
         answer  (:content (call "job_kill" {:job job-id}))
         elapsed (- (System/currentTimeMillis) started-at)]
     (is (some? job-id))
-    (testing "the answer says it was stopped, and where the record is"
+    (testing "the answer says it was stopped, and how to read what it said"
       (is (str/includes? answer "stopped"))
-      (is (str/includes? answer path)))
+      (is (str/includes? answer (str "`job_output {\"job\": \"" job-id "\"}`"))))
     (testing "and it does NOT wait for the process to die before answering"
       ;; Killing a tree is `destroy`, a bounded wait, then `destroyForcibly`; that
       ;; wait belongs to the killing, not to the tool call that asked for it.
@@ -769,7 +798,7 @@
   (testing "a job that ended on its own is reported with its own exit line"
     (let [started (:content (background "exit 3"))
           job-id  (second (re-find #"job (j\d+) started" started))
-          path    (second (re-find #"its record is (\S+)" started))]
+          path    (record-file nil job-id)]
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
       (is (some? path) (str "the job call answered: " started))
       ;; Wait for it to end before stopping it: `[stopped]` and `[exit 3]` are two
@@ -847,20 +876,43 @@
 (deftest a-job-output-call-reads-a-window-of-the-record
   (let [started (:content (background "echo one; echo two; echo three; sleep 30"))
         job-id  (second (re-find #"job (j\d+) started" started))
-        path    (second (re-find #"its record is (\S+)" started))]
+        path    (record-file nil job-id)]
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"three" (:answer %)) 10000)
     (testing "an offset in the record, exactly as `grep -n` would number the same lines"
       (let [answer (:content (call "job_output" {:job job-id :offset 2 :limit 1}))]
-        (is (= ["[running]" "two" "[3 lines in all; this answer shows lines 2-2]"]
-               (str/split-lines answer)))))
+        (is (= ["[running]" "two"
+                (str "[3 lines in all; this answer shows lines 2-2; the whole record is " path "]")]
+               (str/split-lines answer)))
+        (is (str/includes? answer path)
+            "and the part it did not carry is not lost: the answer names the file")))
     (testing "and no offset means the tail -- what it has just said"
       (let [answer (:content (call "job_output" {:job job-id}))]
         (is (str/starts-with? answer "[running]"))
-        (is (str/includes? answer "three"))))
+        (is (str/includes? answer "three"))
+        (is (not (str/includes? answer path))
+            "the window IS the record here, so there is nothing beyond it to point at")))
     (testing "an unknown job is refused, naming what this session does have"
       (let [{:keys [content error]} (call "job_output" {:job "j-not-a-job"})]
         (is (true? error))
         (is (str/includes? content "unknown job: j-not-a-job"))))
+    (jobs/shutdown!)))
+
+(deftest a-window-that-is-not-the-whole-record-names-the-file
+  ;; THE PATH COMES BACK WITH THE WINDOW, and only then. `bash` says where the rest of an
+  ;; over-budget output is (`jobs/truncation-line`); this is the same fact for a record -- a
+  ;; window that leaves something out is exactly when `read` / `grep` / `bash` can be put to
+  ;; use on the file. A window that IS the record names nothing
+  ;; (`.scratch/job-receipt-no-path`).
+  (let [answer (:content (background "seq 1 5000"))
+        job-id (second (re-find #"job (j\d+) started" answer))
+        path   (record-file nil job-id)]
+    (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"\[exit" (:answer %)) 20000)
+    (let [{:keys [content error]} (call "job_output" {:job job-id})]
+      (is (false? error))
+      (is (str/includes? content "[5000 lines in all;")
+          "the answer says the window is a part of it")
+      (is (str/includes? content (str "; the whole record is " path "]"))
+          "and names the file the rest is in"))
     (jobs/shutdown!)))
 
 ;; ------------------------------------------------- the turn plan, per session

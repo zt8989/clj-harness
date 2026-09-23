@@ -41,6 +41,8 @@
    （**字段删掉，不是拒绝**——见下面「落地当天撤回的一步」）、重定向注跟着它。
    `bash` 只剩前台：`timeout` / `stdin` / `workdir` / `shell` / 答案上界，行为逐字不变。
    工具数 **17 → 18**，三处硬编码清单与文档名单/数目跟着改。
+   **2026-09-23 补（`.scratch/job-receipt-no-path/`）**：这一条里的「id + **记录路径**」只剩「id」——
+   路径换成一句读法，见决策 4 与决策 5 的日期注。
 4. **通知 = id + 状态行 + 命令 + 一句读法，不带路径。**
    `<job-ended id="j1">[exit 0]</job-ended>`、`<command>make</command>`，再加一行指 `job_output`。
    路径在 `job` 起的答案里，记录内容 `job_output` 给，所以通知不需要它。命令是**落地当天补上的**
@@ -51,8 +53,19 @@
    谎话：`job_output` 描述里「every answer -- and the notice … — names its path」那句、
    `docs/architecture.md` 的 `cap.jobs` 一行、`kernel.md`、`README.md` 与 `CONTEXT.md` 的通知形状；
    三处「通知里没有命令说了什么」的断言也换了钉子（命令原文进了通知，钉子得是命令**打印**出来的词）。
-5. **描述负责用法，答案负责事实 —— 这条规矩不动**（`bash-background` 决策 4）：`job_output` / `job_kill`
-   的答案仍是事实，没有「read it with …」。**通知是唯一的例外**，因为它是**没人要过**的那一次告知。
+   **2026-09-23 补（`.scratch/job-receipt-no-path/`）**：上面那句「路径在 `job` 起的答案里」不再成立——
+   回执这一半也交出去了，「路径退场」的原因从「答案里已经有了」变成「`job` / `job_kill` 报的是读法，
+   路径由读的那一处报」（见下面的再补）。通知
+   本身**一个字没改**，它本来就只带 id、结论行、命令与那一句读法。
+   **同日再补（主人第二轮）**：不报路径的是**回执**；读的那一处报——`job_output` 在答案装不下整份记录时把
+   记录的路径说出来，`bash` 溢出那条也照旧（见 `.scratch/job-receipt-no-path/` 文末的复议）。
+5. ~~**描述负责用法，答案负责事实 —— 这条规矩不动**（`bash-background` 决策 4）：`job_output` / `job_kill`
+   的答案仍是事实，没有「read it with …」。**通知是唯一的例外**，因为它是**没人要过**的那一次告知。~~
+   **2026-09-23 复议（`.scratch/job-receipt-no-path/`）**：例外不再是通知一个——`job` 与 `job_kill`
+   的回执也带那一句读法（``read it with `job_output {"job": "j1"}`.``）。规矩本身仍在：
+   **答案不带路径、不带正文**，带的是模型**还没走过**的那一步（`CONTEXT.md` 的回执词条）；
+   `job_output` 自己的答案不带那句读法（它带的是记录的路径——见上面的再补，以及
+   `.scratch/job-receipt-no-path/` 的复议）。
 
 ## 非目标
 

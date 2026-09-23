@@ -75,10 +75,17 @@
    **工具数 18 → 17**：三处硬编码清单、`CONTEXT.md` 的闭清单、`docs/architecture.md` 的「十八个」
    跟着改。
 
-4. **两个答案都说出记录在哪。** `job` 的答案是一句话带路径；`job_kill` 的答案也一样（它停的或发现
+4. ~~**两个答案都说出记录在哪。** `job` 的答案是一句话带路径；`job_kill` 的答案也一样（它停的或发现
    已经结束的那条作业，记录在哪）。路径**只在一处拼**（`cap.jobs` 的 `start!` 答出 `:id` 与 `:path`），
    工具面**不许**重算一遍 —— 两处拼路径就是留一次「改了一处、另一处没跟上」，
-   先例是 `bash-default-timeout-ms` 在描述里插值。
+   先例是 `bash-default-timeout-ms` 在描述里插值。~~
+   **2026-09-23 复议（`.scratch/job-receipt-no-path/`）：两个答案都不再说路径。** 说的是**读法**——
+   ``read it with `job_output {"job": "j1"}`.``，与通知那第三行同形：`job_output` 与 `job_kill` 都按
+   id 说话，路径是本仓在自己配置家里的形状，模型拿它做不了任何事。记录仍是一份文件、仍活过写它的
+   进程，退场的是「按答案里那条路径去读」这条路。**路径只在一处拼**那条规矩不变（`cap.jobs` 的
+   `:path` 仍是 `output` 读记录时的把手）。
+   **同日再复议（主人第二轮）**：不报路径的是**回执**；**读的那个动词报**——`job_output` 的答案在「窗口不是
+   整份记录」时带上记录的路径（`cap.jobs/output` 的 `:path`），`bash` 溢出那条路径照旧。
 
 5. ~~**记录能读多久 = 这个进程活多久，只有一条规矩。** 收尾钩子（`shutdown!`，进程退出那一刻）
    把本进程所有作业的记录删掉；**`job_kill` 不删**。理由：答案里那个路径是叫模型去读的，
@@ -234,8 +241,9 @@
 - 退场：`tail-lines`、`add-line!` 的丢最旧分支、`mark-ended!`、`status-line`、`unread`、`answer`、
   `read-output`、`update-job!`，以及工具面的 `bash_output` 与它的描述。工具数 18 → 17。
 - 寿命：`shutdown!` 先 `reset!` 注册表、再关进程、再放掉 writer、**最后**删文件（Windows 删不掉还开着
-  的文件，顺序就是这么来的）；删不掉只 `log/warn!` 一行，不抛。`job_kill` **不删**（答案里的路径是叫
-  模型去读的）。`start!` 起不来时不留文件——文件是在 spawn 成功之后才建的。
+  的文件，顺序就是这么来的）；删不掉只 `log/warn!` 一行，不抛。`job_kill` **不删**（~~答案里的路径是叫
+  模型去读的~~ **2026-09-23 补（`.scratch/job-receipt-no-path/`）：现在是叫模型去用 `job_output` 读**）。
+  `start!` 起不来时不留文件——文件是在 spawn 成功之后才建的。
 - 跟着改的谎话：`tools.clj` 里 `job` / `job_kill` 两个描述与 `bash` 那句指路、`README.md`、`CONTEXT.md`、
   `docs/architecture.md`、`docs/architecture/kernel.md`、`docs/architecture/projects.md`、三处硬编码清单；
   `.scratch/bash-lifetime/spec.md` 的决策 6 与 9 划掉并各加一行日期注。

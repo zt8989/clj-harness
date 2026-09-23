@@ -302,6 +302,21 @@
     (str " note: this command sends its own output to " target ", so the job's record will"
          " stay empty -- that file is where its output is.")))
 
+(defn- read-with
+  "The one sentence both background receipts end on: how to read what the job said.
+
+  THE SAME SHAPE THE NOTICE USES, on purpose. `cap.jobs/notice` puts
+  `Read what it said with job_output {\"job\": \"j…\"}.` in the history when a job ends, and a
+  model that has seen one of these has seen the other -- the next move is the same in both
+  cases.
+
+  AN ID, NOT A PATH. `job_output` asks by id, and so does `job_kill`; where the record sits
+  under the configuration home is this repo's own shape, and a RECEIPT quoting it is an
+  echo -- the reader hands it out itself, once the window it carries is short of the whole
+  record (`.scratch/job-receipt-no-path`)."
+  [job-id]
+  (str "read it with `job_output {\"job\": \"" job-id "\"}`."))
+
 (defn- t-bash
   "`bash`'s body: one command, and the call waits for it.
 
@@ -382,7 +397,7 @@
 
 (defn- t-job
   "`job`'s body: hand the command to harness.cap.jobs and answer AT ONCE with the
-  job's id and where its record is.
+  job's id and how to read what it says.
 
   THE SAME COMMAND `bash` RUNS, RUN THE OTHER WAY. `work-dir` resolves the directory
   in one place for both, the record is written by one module, and the shell kind is
@@ -400,12 +415,13 @@
   [{:keys [command workdir] shell-named :shell}]
   (let [dir  (work-dir kernel-tools/*thread-id* workdir)
         kind (named-shell shell-named)]
-    (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*
-                                         {:command command :dir dir :kind kind})]
-      ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just
-      ;; started), and advice about reading the record belongs in the description
-      ;; rather than in every answer.
-      (str "job " id " started; its record is " path (redirect-note command)))))
+    (let [{:keys [id]} (jobs/start! kernel-tools/*thread-id*
+                                     {:command command :dir dir :kind kind})]
+      ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just started),
+      ;; and the sentence that says how to read it is the same one the notice carries -- the
+      ;; model's next move is the same in both cases. NO PATH: where the record sits under the
+      ;; configuration home is this repo's business, and `job_output` asks by id.
+      (str "job " id " started; " (read-with id) (redirect-note command)))))
 
 
 (defn- t-eval [{:keys [code]}]
@@ -895,7 +911,7 @@
 
 (def ^:private job-description
   (str "Start a shell command in the background and return at once: the answer is a job id"
-       " (like `j1`) and where that job's record is -- the command's output is not in it. Use"
+       " (like `j1`) and how to read what it says -- the command's output is not in it. Use"
        " this when you are going off to do something else; use `bash` when you are going to"
        " wait. "
        "`workdir` is the directory to run in, resolved exactly as `bash` resolves it; `shell`"
@@ -907,9 +923,8 @@
        "WHEN IT ENDS YOU ARE TOLD: its ending is put in front of you before your next model"
        " call, so you do not have to remember to ask. Read what it has said, or wait for it,"
        " with `job_output`; stopping it is `job_kill`. "
-       "The JOB lives only as long as this harness process; its RECORD does not -- it stays in"
-       " the configuration home, where `read` and `grep` reach it later, in this session or in"
-       " a later one."))
+       "The JOB lives only as long as this harness process; its RECORD does not -- the file stays"
+       " in the configuration home, outliving the id that named it."))
 
 (register! "job"
   (tool job-description
@@ -932,24 +947,24 @@
   (str "Stop a background job -- the command and everything it started. Use it when a job has"
        " done what you needed, has gone wrong, or is holding something you want back (a port, a"
        " file). "
-       "The answer says where the job's record is, and how it went -- `[stopped]` if this call"
-       " stopped it, or the last line it had already written. THE RECORD STAYS: its last line is"
+       "The answer says how it went -- `[stopped]` if this call stopped it, or the last line it"
+       " had already written -- and how to read what it said. THE RECORD STAYS: its last line is"
        " `[stopped]` or `[exit N]`, and `job_output` reads it before or after stopping. "
        "Stopping does not wait for the process to go -- the answer comes back as soon as the"
        " kill is requested. Asking again is fine and answers the same thing, because a job that"
-       " is over is kept until this process ends (the RECORD it left stays after that -- a file"
-       " `read` or `grep` can open); only an id this session never had is refused."))
+       " is over is kept until this process ends (the RECORD it left stays after that); only an id"
+       " this session never had is refused."))
 
 (defn- t-job-kill
-  "`job_kill`'s body: stop it, and answer with where its record is -- and how it went,
-  which is the record's own last line (the same line `job_output` would print)."
+  "`job_kill`'s body: stop it, and answer with how it went -- the record's own last line
+  (the same line `job_output` would print) -- and how to read what it said."
   [{:keys [job]}]
-  (let [{:keys [id path stopped? ending]} (jobs/stop! kernel-tools/*thread-id* job)]
-    ;; THREE FACTS: which job, how it went, where its record is. No advice -- that lives
-    ;; in this tool's own description, which the model has already read.
+  (let [{:keys [id stopped? ending]} (jobs/stop! kernel-tools/*thread-id* job)]
+    ;; THREE FACTS: which job, how it went, and how to read what it said. No advice beyond
+    ;; that -- the rest lives in this tool's own description, which the model has already read.
     (str "job " id (if stopped? " stopped"
                        (str " was already over" (when ending (str " (" ending ")"))))
-         "; its record is " path)))
+         "; " (read-with id))))
 
 (def ^:private job-output-description
   (str "Read what a background job has said, and how it went. "
@@ -961,8 +976,8 @@
        "`offset` (1-based, a line number of the record) reads from a given line instead, and"
        " `limit` caps how many lines come back; the answer names which lines it showed and how"
        " many there are in all, so a long record can be walked in order. Nothing is ever lost:"
-       " the job's record is a plain file, the answer to `job` names its path, and `read` /"
-       " `grep` open it too. "
+       " when that window is not the whole record, the answer also names the record's path, so"
+       " the rest can be `read` / `grep` / `bash`ed instead of paged through. "
        "`wait: true` blocks until the command is over -- or until `timeout` (default "
        jobs/job-output-default-timeout-ms "ms) runs out, and that is not an error: the answer"
        " is `[running]` with whatever the command has said so far. A job that ends while you"
@@ -970,15 +985,21 @@
        " announcement is what names this verb -- so `wait` is for standing still and waiting"
        " for it now. "
        "A job that is over still answers -- but only inside the process that started it: an"
-       " id does not survive a restart, and the record it left is a file `read` and `grep` still"
-       " open. A record this call cannot reach is therefore not a record that is gone."))
+       " id does not survive a restart, though the record it left is still a file on disk. A"
+       " record this call cannot reach is therefore not a record that is gone."))
 
 (defn- t-job-output
   "`job_output`'s body: the facts harness.cap.jobs reads off the record, as the answer a
   model reads. The arithmetic -- which lines, what status -- is the module's; what is here
-  is the shape."
+  is the shape.
+
+  THE PATH COMES BACK WHEN THE WINDOW IS NOT THE WHOLE RECORD. A `bash` answer says where
+  the rest of an over-budget output is (`jobs/truncation-line`); this is the same fact for a
+  record, and the same moment: a window that leaves something out is exactly when the reader
+  can use the file (`read` / `grep` / `bash`). When the window IS the record, there is
+  nothing beyond it to name, and the answer stays as short as it was."
   [{:keys [job offset limit wait timeout]}]
-  (let [{:keys [status lines from to total]}
+  (let [{:keys [status lines from to total path]}
         (jobs/output kernel-tools/*thread-id* job
                      {:offset  (positive-int :offset offset)
                       :limit   (positive-int :limit limit)
@@ -995,7 +1016,8 @@
            (zero? total)   "(no output)\n"
            :else           "(no lines in that range)\n")
          (when (and (seq lines) (or (> from 1) (< to total)))
-           (str "[" total " lines in all; this answer shows lines " from "-" to "]")))))
+           (str "[" total " lines in all; this answer shows lines " from "-" to
+                "; the whole record is " path "]")))))
 
 (register! "job_kill"
   (tool job-kill-description
