@@ -835,3 +835,20 @@
   (let [f (log-file "t-fold-entries")]
     (is (= (replay/entries (replay/read-records f))
            (replay/fold-entries f)))))
+
+(deftest sofar-is-one-walk-and-the-same-answer
+  ;; TICKET 01 of `.scratch/session-as-kernel`: a session's build used to fold the record
+  ;; five or six times and materialize it; `sofar` is one streaming walk now. THE WALK
+  ;; CHANGED AND THE ANSWER DID NOT, so the answer is pinned here against the folds the one
+  ;; walk replaced -- each public fold, one call, and every field of the born session.
+  (write-log! "t-sofar-walk" (one-run-lines))
+  (let [f       (log-file "t-sofar-walk")
+        answer  (replay/sofar f)
+        records (replay/read-records f)
+        state   (replay/record-state records)]
+    (is (= (replay/entries records) (:entries answer)))
+    (is (= (mapv :message (replay/entries records)) (:messages answer)))
+    (is (= (:state state) (:state answer)))
+    (is (= (replay/compaction-facts records) (:compactions answer)))
+    (is (= (replay/prune-facts records) (:prunes answer)))
+    (is (= [] (:context answer)))))

@@ -415,3 +415,23 @@ prompt 只中立地点出自省入口。
 `.harness/hooks.edn` 上）、`:session`（本会话自己的 overlay）。退出码决定放行还是阻断；`SystemPrompt`
 那一点例外——它的 stdout 是**内容**（追加进 system 消息的文本）。本会话可以给自己加、撤、关、开 hook
 （走 `eval`），进程重启即失。
+
+**会话机制 / 折子 / 表针** —— 「会话是记录流的所有者」那句话里的三个词（ADR
+[0005](docs/adr/0005-sessions-own-the-record-stream.md)）。
+
+**会话机制**（`harness.kernel.session`）—— 会话的**机制**：按 thread 的状态、两道订阅缝（读流的
+折子、写流的实时 step）、窗口算术、run / stop 的钉子。它**不 require 能力与适配**；「记录是什么」
+从缝里进（`install!`），`harness.edge.sessions` 只装缝与再导出、不含状态。**铁律**：run 进行中
+内核不读自己的记录——会话一生只读一次，就是出生那次走查。
+*别叫成* 会话表（那是它持有的 registry，一个内部结构）、缓存。
+
+**折子**（fold）—— 一个消费者挂在会话**读流**上的那半步：`{:init (fn [] v)
+:step (fn [acc ctx [line-index row]] acc)}`。装会话时按文件顺序逐行喂，最终值落在会话行上
+（`fold-value`）；`ctx` 是走查到那一刻的对话。**登记一个折子**就是加一个消费者，不动写入口。
+*别叫成* 订阅（那是两条缝的合称）。
+
+**表针**（band）—— 压力表（`harness.edge.pressure`）的状态：最新一次真 run 的 `model/start`、最新
+一次系统消息的签名，以及**锚点**（最后一次厂商报了 `prompt_tokens` 的调用，连同它当时那份 prompt、
+system 消息与这一轮自己的注入）。它是**折子**（`band-step`）：同一份实现在「出生那次走查 / 每行
+落下 / 离线折」三处跑，所以 run 开头那次测量**零读**。
+*别叫成* 压力（那是算出来的数）、锚点（那是表针里的一个字段）。

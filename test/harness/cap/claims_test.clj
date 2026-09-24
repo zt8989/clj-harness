@@ -232,6 +232,11 @@
   documents for a shell and its child. Asking the process itself is the one spelling
   that is right on both platforms."
   (str "(require '[harness.edge.sessions :as sessions])"
+       ;; THE ADAPTER IS INSTALLED BY THE COMPOSITION ROOT, and this process never starts
+       ;; one: the mechanism's outside facts are its caller's to install (`harness.kernel.session`'s
+       ;; `install!`), so a test that drives the table says so here -- the same one line
+       ;; `harness.test-support/with-capabilities` is for the tool table.
+       " (sessions/install!)"
        " (let [thread (System/getenv \"CLJ_HARNESS_TEST_THREAD\")"
        "       answer (System/getenv \"CLJ_HARNESS_TEST_OUT\")"
        "       go     (System/getenv \"CLJ_HARNESS_TEST_GO\")]"

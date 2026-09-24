@@ -502,21 +502,21 @@
   ([thread-id run-id kind payload lands]
    (log! thread-id run-id kind payload lands nil))
   ([thread-id run-id kind payload lands extra]
-   (let [line (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId run-id}
-                                          extra
-                                          (row-of kind payload)))
-                   "\n")]
+   (let [row  (merge {:ts (System/currentTimeMillis) :runId run-id}
+                     extra
+                     (row-of kind payload))
+         line (str (json/write-str row) "\n")]
      (locking log-lock
        ;; `mkdirs` and the carry-back are the writer's now: the consumer creates the
        ;; parent before every line, and runs the carry-back as its prepare step
        ;; (`record/prepare-with!`, installed in `start!`). Doing either here would be a
        ;; second place deciding when a file exists and what it already holds.
        (record/append! thread-id (log-file-for thread-id) line lands))
-     ;; THE METER'S BAND IS KEPT HERE (ticket 03): every row goes through this one path, so
-     ;; the run-start pressure reading (`pressure/log-pressure`) never has to read the record
-     ;; again -- it answers from the band this line just updated. Cheap by construction: it
-     ;; looks at four kinds and a thread it has never seen is not touched at all.
-     (pressure/meter-row! thread-id run-id kind payload extra))))
+     ;; THE SESSION IS TOLD, NOT A CONSUMER (ticket 04): this is the one write path, and
+     ;; every registered live step advances from the row here. Adding a consumer is
+     ;; registering a step (`harness.edge.sessions/register-step!`), never editing this
+     ;; function -- it no longer knows the meter, or any other consumer, by name.
+     (sessions/row-written! thread-id [nil row]))))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -1380,10 +1380,11 @@
               ;; HOW FULL THE REQUEST THAT IS ABOUT TO GO OUT IS, ON THE RECORD, BEFORE
               ;; it goes -- the reading a compaction trigger (harness.edge.pressure) starts
               ;; from. MESSAGES is handed in rather than read back because this run's own
-              ;; lines are still with the writer; the anchor comes from the file, where the
-              ;; previous call has long landed.
+              ;; lines are still with the writer; the anchor comes from the session's band,
+              ;; which the writer kept current row by row and which the build folded from
+              ;; the record -- so this reading opens no file.
               (log! thread-id run-id "context/pressure"
-                    (pressure/log-pressure thread-id (log-file-for thread-id) messages
+                    (pressure/log-pressure thread-id messages
                                           (:context-window provider)))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
@@ -2950,34 +2951,36 @@
   moments of the same log. The composer's own contract (mount / session change /
   assistant message added / run over) is what asks, and asking once asks both.
 
-  IT KEEPS READING THE RECORD, and that is ticket 05's decision rather than an
-  oversight: these are facts ABOUT THE RECORD -- which model a call went to, what the
-  vendor reported, where the gaps are -- and a session's memory holds messages, not
-  accounting. What memory CAN say is how far behind the record is, and `:behind` is
-  that: the number of lines the writer has not put on disk yet. ABSENT MEANS NOTHING
-  IS PENDING (`record-health` draws the same line and for the same reason -- a
-  `:behind 0` would be a field nobody reads). A count that is there is a warning that
-  the numbers below it are that many record lines short of the conversation."
+  IT ASKS THE SESSION FOR THE RECORD (ticket 05): the READ half of a session's two streams
+  locates the log, walks the tree and drops a torn tail, so this route no longer opens the
+  file itself. What it then folds are facts ABOUT THE RECORD -- which model a call went to,
+  what the vendor reported, where the gaps are -- and the rows are the session's to give.
+  `:behind` is the other half, and it is the session's too: the number of lines the writer
+  has not put on disk yet. ABSENT MEANS NOTHING IS PENDING (`record-health` draws the same
+  line and for the same reason -- a `:behind 0` would be a field nobody reads). A count that
+  is there is a warning that the numbers below it are that many record lines short of the
+  conversation."
   [stem]
-  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
-                     (catch Throwable t {:error (ex-message t)}))
-        folded  (when (nil? (:error located))
-                  (try (let [records (stats/read-records (:ok located))]
-                         {:ok (assoc (stats/records->stats records)
-                                     :context  (context/records->context records)
-                                     :pressure (pressure/records->pressure records))})
-                       (catch Throwable t {:error (ex-message t)})))]
+  (let [read (sessions/read-records stem)]
     (cond
-      (some? (:error located))
-      (api-response 404 {:error (:error located) :threadId stem})
+      (some? (:missing read))
+      (api-response 404 {:error (:missing read) :threadId stem})
 
-      (some? (:error folded))
-      (api-response 400 {:error (:error folded) :threadId stem})
+      (some? (:error read))
+      (api-response 400 {:error (:error read) :threadId stem})
 
       :else
-      (let [behind (record/pending-count stem)]
-        (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                            (pos? behind) (assoc :behind behind)))))))
+      (let [records (:ok read)
+            folded  (try (let [records (vec records)]
+                           {:ok (assoc (stats/records->stats records)
+                                       :context  (context/records->context records)
+                                       :pressure (pressure/records->pressure records))})
+                         (catch Throwable t {:error (ex-message t)}))]
+        (if (some? (:error folded))
+          (api-response 400 {:error (:error folded) :threadId stem})
+          (let [behind (record/pending-count stem)]
+            (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
+                                (pos? behind) (assoc :behind behind)))))))))
 
 (defn- trajectory-get
   "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
@@ -2993,31 +2996,31 @@
   looks at a message, while this folds the `message` lines and never adds anything up.
   Two questions, two readers, one file.
 
-  LOCATION AND REFUSALS ARE THE SAME AS `stats`' -- `replay/locate`, 404 for 'not here'
-  with the locator's own sentence, 400 for 'here, and unreadable'. A log whose last run
-  has not finished is NEITHER: it is read, and the answer says so, because looking at a
-  session while it runs is the ordinary case rather than an error.
+  LOCATION AND REFUSALS ARE THE SAME AS `stats`' -- the SESSION locates the log (ticket 06),
+  404 for 'not here' with the locator's own sentence, 400 for 'here, and unreadable'. A log
+  whose last run has not finished is NEITHER: it is read, and the answer says so, because
+  looking at a session while it runs is the ordinary case rather than an error.
 
   AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
   RECORD's trajectory, and the record can be behind the conversation being written to
   it. Absent means nothing is pending."
   [stem]
-  (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
-                     (catch Throwable t {:error (ex-message t)}))
-        folded  (when (nil? (:error located))
-                  (try {:ok (trajectory/log-trajectory (:ok located))}
-                       (catch Throwable t {:error (ex-message t)})))]
+  (let [read (sessions/read-records stem)]
     (cond
-      (some? (:error located))
-      (api-response 404 {:error (:error located) :threadId stem})
+      (some? (:missing read))
+      (api-response 404 {:error (:missing read) :threadId stem})
 
-      (some? (:error folded))
-      (api-response 400 {:error (:error folded) :threadId stem})
+      (some? (:error read))
+      (api-response 400 {:error (:error read) :threadId stem})
 
       :else
-      (let [behind (record/pending-count stem)]
-        (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                            (pos? behind) (assoc :behind behind)))))))
+      (let [folded (try {:ok (trajectory/records->trajectory (:ok read))}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if (some? (:error folded))
+          (api-response 400 {:error (:error folded) :threadId stem})
+          (let [behind (record/pending-count stem)]
+            (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
+                                (pos? behind) (assoc :behind behind)))))))))
 
 (defn- follow-get
   "GET /api/threads/<stem>/follow -- an SSE, READ-ONLY channel: the frames of
@@ -4733,7 +4736,7 @@
               ;; 1. THE CHEAP CHECK (ticket 03): the meter band answers 'how full is the next
               ;;    request' WITHOUT reading the record, so a session nowhere near the
               ;;    threshold never touches the file -- which is almost every run.
-              quick  (pressure/band-pressure stem f (sessions/messages stem) ratios)]
+              quick  (pressure/band-pressure stem (sessions/messages stem) ratios)]
           (when (and (:thresholdTokens quick)
                      (>= (:pressureTokens quick) (:thresholdTokens quick)))
             ;; 2. AT OR OVER THE THRESHOLD, and only now is the record worth reading: the
@@ -5107,6 +5110,12 @@
     ;; AND THE SWEEPER, because the table holds conversations now: without it, every
     ;; session this process has ever been asked about would be held until it exits.
     (sessions/start!)
+    ;; THE SESSION'S OUTSIDE FACTS ARE INSTALLED HERE, not at some namespace's load: what a
+    ;; record is and what a provider may be handed are the adapter's (`harness.edge.sessions`),
+    ;; and the meter's band is a consumer's fold and step (`harness.edge.pressure`). A process
+    ;; that never starts a server registers neither.
+    (sessions/install!)
+    (pressure/install!)
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
     ;; the same shape as the port below it and for the same reason: both are facts

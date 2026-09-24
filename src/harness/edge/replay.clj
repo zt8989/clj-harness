@@ -276,6 +276,7 @@
   [^java.io.File f]
   (fold-records f [] (fn [acc [_ row]] (conj acc row))))
 
+(declare runs-init runs-step)
 (defn- runs
   "Every run a log holds, in the order its first MESSAGE row opened it: {:run-id .. :frames
   [payload ..] :terminal <frame type or nil>}.
@@ -299,8 +300,8 @@
 
   A frame that arrives after its run's terminal does not replace it: the first
   terminal ends the run (`frames/terminal?`'s rule, 'nothing may follow it'), and
-  `:frames` keeps everything recorded for the run, so a reader can still name what
-  it left unsaid.
+  `:calls` / `:answered` keep the calls it started and what answered them, which is what
+  `open-runs` reports as unaccounted for.
 
   THE TERMINAL IS KEPT TWICE, as its `:type` and as the FRAME ITSELF
   (`:terminal-frame`), because which frame ended a run matters as much as that one
@@ -308,35 +309,54 @@
   on a human, and a reader that only had the type could not tell that from an
   ordinary finish. First terminal wins for both, together."
   [records]
-  (reduce
-   (fn [found row]
-     (let [runId (:runId row)
-           frame (payload row)]
-       (if (message? row)
-         (if (some #(= runId (:run-id %)) found)
-           found
-           (conj found {:run-id runId :frames [] :terminal nil :terminal-frame nil}))
-         (case (kind row)
-           "event" (mapv (fn [run]
-                           (if (= runId (:run-id run))
-                             (if (frames/terminal? frame)
-                            ;; THE FIRST TERMINAL ENDS THE RUN, and the FRAME goes with
-                            ;; the type: `:terminal` says a run ended, `:terminal-frame`
-                            ;; says what it ended SAYING -- which is where a parked run's
-                            ;; interrupts live (RUN_FINISHED carrying
-                            ;; outcome.interrupts), and what a reader needs to tell
-                            ;; 'waiting on a human' from 'finished'. A later frame --
-                            ;; another terminal included -- changes nothing (see this
-                            ;; function's docstring).
-                               (if (nil? (:terminal run))
-                                 (assoc run :terminal (:type frame)
-                                        :terminal-frame frame)
-                                 run)
-                               (update run :frames conj frame))
-                             run))
-                         found)
-           found))))
-   [] records))
+  (reduce runs-step (runs-init) records))
+
+(defn- runs-init
+  "No run seen yet."
+  [])
+
+(defn- runs-step
+  "ONE ROW -> the runs so far, LEANLY: what the questions below ask of a run is its
+  terminal (kept with the frame that said it), the tool calls it started and the results
+  it got, and the last frame's type. THE FRAMES THEMSELVES ARE NOT KEPT -- a run's frames
+  are O(record) and the conversation is not, and this lean fold is what lets a session's
+  whole walk stream (ticket 01 of `.scratch/session-as-kernel`).
+
+  A RUN BEGINS AT THE FIRST MESSAGE ROW THAT NAMES IT and is updated by every EVENT row
+  that names it; a row naming no run, or a run nobody opened, changes nothing."
+  [found row]
+  (let [run-id (:runId row)
+        frame  (payload row)]
+    (if (message? row)
+      (if (some #(= run-id (:run-id %)) found)
+        found
+        (conj found {:run-id run-id :terminal nil :terminal-frame nil
+                     :calls [] :answered #{} :last-frame nil}))
+      (if (and (= "event" (kind row)) (some #(= run-id (:run-id %)) found))
+        (mapv (fn [run]
+                (if (not= run-id (:run-id run))
+                  run
+                  (cond-> (assoc run :last-frame (:type frame))
+                    (= "TOOL_CALL_START" (:type frame))  (update :calls conj (:toolCallId frame))
+                    (= "TOOL_CALL_RESULT" (:type frame)) (update :answered conj (:toolCallId frame))
+                    (and (frames/terminal? frame) (nil? (:terminal run)))
+                    (assoc :terminal (:type frame) :terminal-frame frame))))
+              found)
+        found))))
+
+(defn- runs->state
+  "RUNS (`runs-step`'s vector) -> what the RECORD says the conversation's state is -- the
+  same answer `record-state` gives, from a fold a session's own walk already ran."
+  [runs]
+  (let [open   (remove :terminal runs)
+        newest (last runs)
+        tf     (:terminal-frame newest)]
+    (cond
+      (seq open) {:state :unfinished :open-runs (mapv :run-id open)}
+      (= "interrupt" (get-in tf [:outcome :type]))
+      {:state      :parked
+       :interrupts (vec (get-in tf [:outcome :interrupts]))}
+      :else {:state :settled})))
 
 (defn- open-runs
   "The runs a log opened and never closed, OLDEST FIRST, as {:run-id .. :last-frame
@@ -359,17 +379,10 @@
   [records]
   (->> (runs records)
        (remove :terminal)
-       (mapv (fn [{:keys [run-id frames]}]
-               (let [answered (into #{} (keep #(when (= "TOOL_CALL_RESULT" (:type %))
-                                                  (:toolCallId %)))
-                                    frames)
-                     calls    (distinct (keep #(when (= "TOOL_CALL_START" (:type %))
-                                                 (:toolCallId %))
-                                              frames))]
-                 {:run-id     run-id
-                  :last-frame (:type (peek frames))
-                  :unanswered (vec (remove answered calls))})))))
-
+       (mapv (fn [{:keys [run-id last-frame calls answered]}]
+               {:run-id     run-id
+                :last-frame last-frame
+                :unanswered (vec (remove answered (distinct calls)))}))))
 (defn open-run
   "The oldest run a log opened and never closed, or nil -- {:run-id .. :last-frame
   .. :unanswered [toolCallId ..]}. The walk itself, and which calls count as
@@ -536,7 +549,9 @@
   (and (some? (:id row)) (contains? (:seen acc) (:id row))))
 
 (defn- add-entries [acc seq-n msgs]
-  (update acc :entries into (map (fn [m] {:seq seq-n :message m}) msgs)))
+  (-> acc
+      (update :entries into (map (fn [m] {:seq seq-n :message m}) msgs))
+      (update :messages into msgs)))
 
 (defn- flush-group
   "Close ACC's open FRAME GROUP at FALLBACK's line (or `:after`'s, when a terminal gave
@@ -547,7 +562,11 @@
     (-> (if (seq new) (add-entries acc at new) acc)
         (assoc :pending [] :after nil))))
 
-(defn- entries-init [] {:entries [] :pending [] :after nil :seen #{} :last -1})
+(defn- entries-init []
+  "The conversation's own fold. `:messages` IS THE SAME MESSAGES WITHOUT THEIR NUMBERS -- kept so
+  handed the conversation AS IT STANDS at each row (see `fold-consumers`). It is a second
+  vector of the SAME message objects, so it costs refs, not bytes."
+  {:entries [] :messages [] :pending [] :after nil :seen #{} :last -1})
 
 (defn- entries-step
   "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. `:last` is the line
@@ -760,15 +779,7 @@
   process does not hold answers its entries AND this state, and it has the records in
   hand already -- asking `sofar` for the same answer would fold the log a second time."
   [records]
-  (let [open   (open-runs records)
-        newest (last (runs records))
-        tf     (:terminal-frame newest)]
-    (cond
-      (seq open) {:state :unfinished :open-runs (mapv :run-id open)}
-      (= "interrupt" (get-in tf [:outcome :type]))
-      {:state      :parked
-       :interrupts (vec (get-in tf [:outcome :interrupts]))}
-      :else {:state :settled})))
+  (runs->state (runs records)))
 
 ;; -------------------------------------------------------- compaction (model view)
 
@@ -944,6 +955,114 @@
   ([entries facts prunes]
    (mapv :message (model-nodes entries facts prunes))))
 
+;; ------------------------------------------------------------ the whole session, one walk
+;;
+;; TICKET 01 of `.scratch/session-as-kernel`: a session used to fold its record FIVE OR SIX
+;; TIMES -- `entries` once, the run/state walk once, `compactions` once, `prunes` once, and
+;; `messages` (which called `entries` again) once more -- and `read-records` materialized the
+;; whole file to do it. This is THE SAME ANSWER from ONE walk: the conversation's own fold
+;; (`entries-step`), the runs the state is read from (`runs-step`), and the two fact families,
+;; accumulated together over a STREAM (`fold-records`), so the peak heap is the conversation
+;; rather than the file.
+
+(defn- sofar-init []
+  {:own         (entries-init)
+   :runs        (runs-init)
+   :compactions []
+   :prunes      []})
+
+(defn- sofar-step
+  "ONE ROW -> the session's fold, advanced. Everything a born session needs is accumulated
+  here, in the one pass, including the two fact families (`compaction-facts` /
+  `prune-facts`) whose `:seq` is this row's own line."
+  [acc [i row]]
+  (let [k     (kind row)
+        value (payload row)]
+    (cond-> (-> acc
+                (update :own entries-step [i row])
+                (update :runs runs-step row))
+      (= "context/compacted" k) (update :compactions conj (assoc value :seq i))
+      (= "context/pruned" k)    (update :prunes conj (assoc value :seq i)))))
+
+(defn- sofar-answer
+  "The walk's answer: the conversation's entries (the trailing group flushed at the last line
+  read), the same conversation as the model's message list, the run-derived state, and the
+  facts. `:messages` is `entries`' own messages, so the two readings cannot drift."
+  [acc]
+  (let [es    (entries-answer (:own acc))
+        state (runs->state (:runs acc))]
+    (cond-> {:messages    (mapv :message es)
+             :entries     es
+             :compactions (:compactions acc)
+             :prunes      (:prunes acc)
+             :context     []
+             :state       (:state state)}
+      (contains? state :open-runs)  (assoc :open-runs (:open-runs state))
+      (contains? state :interrupts) (assoc :interrupts (:interrupts state)))))
+
+(defn- folds-init
+  "The initial value of every extra fold, from its `:init` (a thunk, so two sessions never
+  share one accumulator)."
+  [folds]
+  (into {} (map (fn [[name {:keys [init]}]] [name (init)])) folds))
+
+(defn- folds-step
+  "Feed ONE row to every extra fold, in registration order, with CTX (the conversation so
+  far). A fold is handed `(fn [acc ctx [line-index row]] acc)`."
+  [state folds ctx [i row]]
+  (reduce-kv (fn [state name {:keys [step]}] (update state name step ctx [i row])) state folds))
+
+(defn- session-reducer
+  "The reducer of a session's ONE walk: the conversation's own fold (`:sofar`), and every
+  consumer fold fed the same row with `{:messages (fn [] ..)}` -- the conversation as it
+  stands -- as ctx."
+  [folds]
+  (fn [acc item]
+    (let [sofar (sofar-step (:sofar acc) item)]
+      (-> acc
+          (assoc :sofar sofar)
+          (update :folds folds-step folds
+                  {:messages (fn [] (:messages (:own sofar)))}
+                  item)))))
+
+(defn- session-init [folds]
+  {:sofar (sofar-init) :folds (folds-init folds)})
+
+(defn fold-consumers
+  "RECORDS + FOLDS -> each fold's final value, from ONE walk over RECORDS in memory. A fold
+  is `{:init (fn [] v) :step (fn [acc ctx [line-index row]] acc)}`, and CTX is
+  `{:messages (fn [] ..)}`: the conversation the walk has so far.
+
+  THIS IS THE OFFLINE TWIN of a session's build: the same walk, the same step, without a
+  file or a session (`harness.edge.pressure` uses it so its live band and its offline
+  reading are one implementation)."
+  [records folds]
+  (:folds (reduce (session-reducer folds)
+                  (session-init folds)
+                  (map-indexed vector records))))
+
+(defn fold-session
+  "RECORDS + FOLDS -> `sofar`'s answer from records already in hand, plus the folds' values
+  under `:folds`. The in-memory twin of `fold-sofar`."
+  [records folds]
+  (let [final (reduce (session-reducer folds)
+                      (session-init folds)
+                      (map-indexed vector records))]
+    (assoc (sofar-answer (:sofar final)) :folds (:folds final))))
+
+(defn fold-sofar
+  "FILE -> `sofar`'s answer, folded from a STREAM: one walk over the record, peak heap ~
+  the conversation rather than the file.
+
+  FOLDS, when given, are extra consumers on the SAME walk (ticket 02): each is
+  `{:init (fn [] v) :step (fn [acc ctx [line-index row]] acc)}`, run once per row in file
+  order, and its final value comes back under `:folds {name v}`. With no folds the answer is
+  `sofar`'s alone, byte for byte."
+  ([^java.io.File f] (fold-sofar f {}))
+  ([^java.io.File f folds]
+   (let [final (fold-records f (session-init folds) (session-reducer folds))]
+     (assoc (sofar-answer (:sofar final)) :folds (:folds final)))))
+
 (defn sofar
   "What has been recorded of a conversation SO FAR: the message list, the context, and
   the state the record is in (`record-state`, plus what the fold could see).
@@ -969,20 +1088,7 @@
   are the record's own line offsets rather than anything this process remembers. The
   fold is the same one `:messages` comes from (`entries`), so the two cannot drift."
   [^java.io.File f]
-  (let [records (lines->records (read-lines f))
-        es      (entries records)
-        state   (record-state records)
-        open?   (= :unfinished (:state state))]
-    {:messages   (if open?
-                   (messages-so-far records)
-                   (records->messages records))
-     :entries    es
-     :compactions (compaction-facts records)
-     :prunes      (prune-facts records)
-     :context    []
-     :state      (:state state)
-     :open-runs  (:open-runs state)
-     :interrupts (:interrupts state)}))
+  (fold-sofar f))
 
 (defn- thread-id-of
   "The session a log FILE belongs to: its stem. The writer names the file through

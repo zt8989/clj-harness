@@ -36,7 +36,9 @@
             [harness.edge.context :as context]
             [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
-            [harness.edge.stats :as stats]
+            ;; NOTE: this namespace no longer reads a record at all -- tickets 03 / 04 moved
+            ;; the band onto the session, so `harness.edge.stats` (the file reader) is not
+            ;; required here any more.
             [harness.edge.trajectory :as trajectory]
             [harness.kernel.tools :as tools]))
 
@@ -255,46 +257,64 @@
 
 ;; -------------------------------------------------------------------- the answer
 
+(defn- empty-band []
+  {:latest-start nil :latest-sig nil :system nil :run nil :injections []
+   :anchor nil :timeline-window nil})
+
+(defn- band-step
+  "ONE ROW of a session's walk -> the meter's band, advanced. CTX is `{:messages (fn [] ..)}`:
+  the conversation AS THE WALK HAS IT SO FAR, as entry messages -- which is what an anchor
+  snapshots, because an anchor is a claim about the PREFIX a call rested on.
+
+  THE ONE RULE, run on both of a session's seams (ticket 03's read stream and ticket 04's
+  write stream) and by `meter-of-records` offline, so the live band and the record cannot
+  disagree. Kinds it cares about, and nothing else:
+
+    `model/start` with a run id -> `:latest-start` (the newest TRUE run call). A compaction's
+        own start carries NO run id and is left alone.
+    `model/end` with a run id and a `prompt_tokens` -> the ANCHOR, with the conversation, the
+        system message and this run's injections snapshotted as they stood at that call.
+    `message` whose source is `system-prompt` -> `:system` and `:latest-sig`.
+    a run's own injection (`skill` / `job` / `injection`, no id) -> `:injections`.
+    `provider/init` / `provider/changed` -> the window in force."
+  [band ctx [i row]]
+  (let [run-id  (:runId row)
+        k       (replay/kind row)
+        payload (replay/payload row)
+        extra   (dissoc row :type :payload :ts)
+        own?    (some? run-id)
+        band    (if (and own? (not= (str run-id) (:run band)))
+                  (assoc band :run (str run-id) :injections [])
+                  band)]
+    (case k
+      "model/start" (if own? (assoc band :latest-start payload) band)
+      "model/end"   (if (and own? (number? (get-in payload [:usage :prompt_tokens])))
+                      (assoc band :anchor
+                             {:start      (:latest-start band)
+                              :prompt     (get-in payload [:usage :prompt_tokens])
+                              :messages   ((:messages ctx))
+                              :system     (:system band)
+                              :sig        (:latest-sig band)
+                              :injections (vec (:injections band))})
+                      band)
+      "message"     (if (= "system-prompt" (:source extra))
+                      (assoc band :system payload :latest-sig (hooks-signature row))
+                      (if (and own? (nil? (:id extra))
+                               (contains? #{"skill" "job" "injection"} (:source extra)))
+                        (update band :injections conj payload)
+                        band))
+      ("provider/init" "provider/changed")
+      (assoc band :timeline-window (context/timeline-window [row] row))
+      band)))
+
 (defn meter-of-records
-  "RECORDS -> the METER BAND `state->pressure` eats, and nothing else (ticket 03): the newest
-  TRUE run call's `model/start` payload, the newest system row's signature, and the ANCHOR --
-  the last call whose vendor reported a `prompt_tokens` -- together with the conversation AS IT
-  STOOD at that call (its `:messages`, the system message in force, and that run's own
-  injections).
- 
-  IT IS THE SAME FOLD `records->pressure` HAS ALWAYS RUN, stopping at the facts a later
-  reading needs instead of finishing the arithmetic: `records->pressure` is `meter-of-records`
-  + `state->pressure`, so the offline reading and the cached one CANNOT disagree. The live
-  side keeps an equivalent band as rows are written (`meter-step`), which is what lets a run
-  start answer without reading the record at all.
- 
-  THE EXTRA KEYS (`:system` / `:run` / `:injections`) are what a LIVE band needs to carry on
-  from here; `state->pressure` ignores them."
+  "RECORDS -> the METER BAND `state->pressure` eats, folded with `band-step` -- THE SAME STEP
+  the live band is kept with (`harness.edge.sessions`' two seams), so the offline reading and
+  the live one cannot drift: `records->pressure` is `meter-of-records` + `state->pressure`."
   [records]
-  (let [records  (vec records)
-        runs     (trajectory/run-segments records)
-        latest   (latest-start runs)
-        last-run (last runs)
-        anchor   (last-reporting-call runs)
-        start-p  (some-> anchor :start replay/payload)
-        prefix   (when anchor (upto records (:start anchor)))
-        system   (system-row records)
-        a-system (when anchor (system-row prefix))
-        a-run    (:run anchor)]
-    {:latest-start    (some-> latest replay/payload)
-     :latest-sig      (hooks-signature system)
-     :system          (some-> system replay/payload)
-     :run             (:run-id last-run)
-     :injections      (vec (injected-rows last-run))
-     :anchor          (when (and anchor start-p)
-                        {:start      start-p
-                         :prompt     (get-in (some-> anchor :end replay/payload) [:usage :prompt_tokens])
-                         :messages   (mapv :message (replay/entries prefix))
-                         :system     (some-> a-system replay/payload)
-                         :sig        (hooks-signature a-system)
-                         :injections (vec (when a-run (injected-rows a-run)))})
-     :timeline-window (when (seq records)
-                        (context/timeline-window records (last records)))}))
+  (:pressure
+   (replay/fold-consumers (vec records)
+                           {:pressure {:init empty-band :step band-step}})))
 
 (defn state->pressure
   "METER + the request an edge has assembled + RATIOS -> how full the next request is: the
@@ -356,125 +376,45 @@
   ([records messages ratios]
    (state->pressure (meter-of-records records) messages ratios)))
 
-;; ----------------------------------------------------------- the live meter band (ticket 03)
+;; ------------------------------------------ the band on the session (tickets 03 & 04)
 ;;
-;; `records->pressure` folds a WHOLE RECORD, and a run start used to pay that fold two or
-;; three times over (the auto-compaction check, the `context/pressure` row, the window). The
-;; band below is the SAME FACTS KEPT INCREMENTALLY: `harness.edge.http/log!` -- the one writer
-;; path -- hands every row here as it is written, and the band is updated IN PLACE. A run start
-;; then answers from the band (O(1)) instead of reading the file.
+;; THE BAND IS NOT KEPT IN THIS NAMESPACE. `harness.edge.sessions` owns the ONE walk over a
+;; record, and this namespace registers `band-step` on BOTH of that session's seams:
 ;;
-;; A THREAD'S BAND IS SEEDED ONCE PER PROCESS (`seed-band!`), by folding the record exactly
-;; the way `meter-of-records` does -- and `meter-row!` leaves a thread it has never seen
-;; alone, so rows written before that seed are not lost: the seed's fold has them.
-
-(defonce ^:private bands
-  ;; thread-id -> the band `state->pressure` eats, kept current by `meter-row!`.
-  (atom {}))
-
-(defn- empty-band []
-  {:latest-start nil :latest-sig nil :system nil :run nil :injections []
-   :anchor nil :timeline-window nil})
-
-(defn meter-row!
-  "ONE jsonl ROW, AS IT IS WRITTEN -> THREAD-ID's band, updated in place (ticket 03). Called
-  from `harness.edge.http/log!`, the one writer path, so the band never re-reads the record.
- 
-  KINDS IT CARES ABOUT, and nothing else:
-    `model/start` with a run id      -> `:latest-start` (the newest TRUE run call). A
-                                        compaction's own start carries NO run id and is left
-                                        alone -- that is the bug ticket 02 fixed, and it is
-                                        the same rule `own-calls` applies to a record.
-    `model/end` with a run id and a `prompt_tokens` -> the ANCHOR, with the conversation, the
-                                        system message and this run's injections snapshotted
-                                        as they stood at that call.
-    `message` whose source is `system-prompt` -> `:system` and `:latest-sig`.
-    `message` with no id, not a system message, in a run -> this run's injections.
- 
-  A THREAD WITH NO BAND IS LEFT ALONE: the fold that installs one (`seed-band!`) reads the
-  whole record, so it has every row written so far."
-  [thread-id run-id kind payload extra]
-  (let [id (str thread-id)]
-    (when (contains? @bands id)
-      (swap! bands update id
-             (fn [b]
-               (let [;; a new run clears the injection list; a run's injections are written at
-                     ;; its birth, before its first call.
-                     b   (if (and (some? run-id) (not= (str run-id) (:run b)))
-                           (assoc b :run (str run-id) :injections [])
-                           b)
-                     own? (some? run-id)]
-                 (case kind
-                   "model/start" (if own? (assoc b :latest-start payload) b)
-                   "model/end"   (if (and own? (number? (get-in payload [:usage :prompt_tokens])))
-                                   (assoc b :anchor {:start      (:latest-start b)
-                                                     :prompt     (get-in payload [:usage :prompt_tokens])
-                                                     :messages   (sessions/raw-messages thread-id)
-                                                     :system     (:system b)
-                                                     :sig        (:latest-sig b)
-                                                     :injections (vec (:injections b))})
-                                   b)
-                   "message"     (if (= "system-prompt" (:source extra))
-                                   (assoc b :system payload
-                                            :latest-sig (or (:hooks-names-hash extra)
-                                                            (:content payload)))
-                                   ;; A RUN'S OWN INJECTION, and only that: `returned-source`
-                                   ;; names what the pre-LLM step derived `skill` / `job` /
-                                   ;; `injection`, while what the model RETURNED is `model` /
-                                   ;; `tool` -- so this is `injected-rows`' rule (no id, not the
-                                   ;; system message) spelled by source, and a returned
-                                   ;; assistant message can never be mistaken for one.
-                                   (if (and own?
-                                            (nil? (:id extra))
-                                            (contains? #{"skill" "job" "injection"}
-                                                        (:source extra)))
-                                     (update b :injections conj payload)
-                                     b))
-                   b)))))))
-
-(defn seed-band!
-  "FOLD RECORDS INTO THREAD-ID's band and install it: the ONE read a process pays per thread,
-  after which `meter-row!` keeps it current."
-  [thread-id records]
-  (let [b (meter-of-records records)]
-    (swap! bands assoc (str thread-id) b)
-    b))
-
-(defn- band-for
-  "THREAD-ID's band: the live one, or one seeded from FILE (the first time this process is
-  asked about the thread)."
-  [thread-id ^java.io.File f]
-  (or (get @bands (str thread-id))
-      (seed-band! thread-id (if (and f (.exists f)) (stats/read-records f) []))))
+;;   - `register-fold!` (ticket 03, the READ stream): a session is built by folding the
+;;     record once, and the band is folded on that same walk -- so a run start answers from
+;;     the band WITHOUT reading the file, including the first time this process sees the
+;;     thread (there is no seed read left to pay).
+;;   - `register-step!` (ticket 04, the WRITE stream): the one writer path --
+;;     `harness.edge.http/log!` -- hands every row it writes to the session, and the band is
+;;     advanced IN PLACE, so a later run start still reads nothing.
+;;
+;; ONE STEP, TWO SEAMS, ONE OFFLINE CALLER (`meter-of-records`): three callers of one rule.
 
 (defn band-pressure
   "THREAD-ID's band + MESSAGES + RATIOS -> the same answer `records->pressure` gives, WITHOUT
-  reading the record (beyond the one seed a process pays per thread). The cheap check a
-  compaction trigger starts from."
-  [thread-id f messages ratios]
-  (state->pressure (band-for thread-id f) messages ratios))
+  reading the record: the band was folded when the session was built and is advanced as rows
+  are written. A session this process does not hold has no band, and the answer is then the
+  estimate over MESSAGES -- the honest reading of 'nothing is held here'."
+  [thread-id messages ratios]
+  (state->pressure (or (sessions/fold-value thread-id :pressure) (empty-band)) messages ratios))
 
 (defn log-pressure
-  "THREAD-ID's log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same
+  "THREAD-ID + the request an edge has ASSEMBLED BUT NOT YET WRITTEN + WINDOW -> the same
   answer. MESSAGES supplies the surface, because the lines for the run in flight are still
   with the writer. WINDOW, when given, is the window THIS run will go out under -- the call
-  that declares it has not happened yet, so the record cannot supply it and the edge hands it
-  in.
- 
-  IT NO LONGER READS THE RECORD (ticket 03): the band is kept as rows are written, and only a
-  thread this process has never seen is seeded with one read. WINDOW is the only thing the
-  cached answer cannot know.
- 
-  A file that does not exist yet (and a window nobody declared) are both normal: the answer
-  is then the estimate over MESSAGES, with no window-derived numbers."
-  ([thread-id f messages] (log-pressure thread-id f messages nil))
-  ([thread-id f messages window]
-   ;; A REPORT-ONLY METER MUST NEVER KILL A RUN. The band can be wrong or stale -- the file
-   ;; was moved out from under us by a rebind, the writer is behind, a band was never seeded
-   ;; -- and this call sits on the run's own path, inside the try that turns any escape into
-   ;; RUN_ERROR. So anything at all degrades to the estimate over MESSAGES.
+  that declares it has not happened yet, so the band cannot supply it and the edge hands it in.
+
+  IT READS NO RECORD (tickets 03 / 04): the band lives on the session and is kept current by
+  the writer's own row notifications. WINDOW is the only thing the band cannot know."
+  ([thread-id messages] (log-pressure thread-id messages nil))
+  ([thread-id messages window]
+   ;; A REPORT-ONLY METER MUST NEVER KILL A RUN. The band can be missing or stale -- the
+   ;; writer is behind, a session is not held, a registration never happened -- and this call
+   ;; sits on the run's own path, inside the try that turns any escape into RUN_ERROR. So
+   ;; anything at all degrades to the estimate over MESSAGES.
    (let [answer (try
-                  (band-pressure thread-id f messages default-ratios)
+                  (band-pressure thread-id messages default-ratios)
                   (catch Throwable _ (state->pressure (empty-band) messages default-ratios)))]
      (if (and (number? window) (pos? window))
        (assoc answer
@@ -484,3 +424,22 @@
               :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
               :retainTokens    (long (Math/floor (* (double window) retain-ratio))))
        answer))))
+
+;; --------------------------------------------------- registering the consumer (tickets 03 / 04)
+;;
+;; AT NAMESPACE LOAD: a session's walk must already have this fold when it is built, and
+;; `harness.edge.http` requires this namespace on the run path, so the registration is in
+;; place before the first session is born.
+(defn install!
+  "Register the meter on the session's two seams (tickets 03 / 04): the band's fold on the
+  READ stream and the same step on the WRITE stream. THE COMPOSITION ROOT CALLS THIS
+  (`harness.edge.http/start!`), so a process that never starts a server never registers a
+  consumer -- and a test that wants a band says so in one line.
+
+  Idempotent; returns the teardown."
+  [ ] ; no arguments
+  (sessions/register-fold! :pressure {:init empty-band :step band-step})
+  (sessions/register-step! :pressure band-step)
+  (fn teardown []
+    (sessions/unregister-fold! :pressure)
+    (sessions/unregister-step! :pressure)))

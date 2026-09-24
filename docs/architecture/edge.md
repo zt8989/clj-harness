@@ -275,9 +275,33 @@ generation 不是这条窗口的（会话被放掉 / 被接管 / 换了进程）
 
 **活着的会话从内存读，死掉的从记录读。** `rebuild` 与窗口那两条在服务端持有这场会话时读**内存**
 （内存是权威，记录允许落后）；`sofar` 有一个例外——**有 run 正在跑时它读记录**，因为那一刻内存里
-可能还缺正在写的那些帧，而它答的是「记录到哪里了」。`stats` 与 `trajectory` 始终读记录（它们折的
-是记录的聚合与内容），所以它们带 `:behind`：落后几批由这个数说出来，读的人自己决定要不要等
-（今天没有人因此等：状态条画的就是记录折出来的那几个数）。
+可能还缺正在写的那些帧，而它答的是「记录到哪里了」。`stats` / `trajectory` / 上下文圈这三条折的是
+记录的聚合与内容，它们向**会话**要记录的字（票 05–07），不再自己开文件，所以它们带 `:behind`：
+落后几批由这个数说出来，读的人自己决定要不要等（今天没有人因此等：状态条画的就是记录折出来的
+那几个数）。
+
+
+## 会话：机制在核心里，适配在这里
+
+**`harness.edge.sessions` 是本文件里唯一不含机制的边命名空间**：会话的状态、两道订阅缝、窗口
+算术、run / stop 的钉子全在 `harness.kernel.session`（ADR
+[0005](../adr/0005-sessions-own-the-record-stream.md)、[layers](layers.md#一个机制在核心里适配在边上会话)），
+这里只剩「记录是什么」这一层适配——**装缝 + 再导出**，没有一个自己的 atom。
+
+**它装五道缝**（`sessions/install!`，组合根 `start!` 调）：`:build` 是会话出生那**一次走查**
+（`replay/fold-sofar`：对话、状态、压缩/剪枝事实，加上每个登记过的折子，一条流折完）；
+`:model-messages` 是能交给 provider 的那份对话（`replay/model-view` 脱卡 + `compacted-messages` 折
+压缩与剪枝）；`:read` / `:fold` 是记录的字怎么定位、怎么读、怎么折（`replay/locate` /
+`read-records` / `fold-records`）；`:claim` 是 `harness.cap.claims`。
+
+**两道订阅缝由机制定义、消费者只登记**：读流 `register-fold!`（`(fn [acc ctx [line-index row]] acc)`，
+装会话时按行喂，结果落在会话行上，`fold-value` 取）；写流 `register-step!`（唯一写入口
+`http/log!` 每写一行叫一次 `row-written!`，订阅者原地推进）。**`log!` 不认识任何一个具体消费者**
+——它只把行交给会话。压力表（`harness.edge.pressure`）是第一个订阅者，它的 `install!` 登记表针的
+折子与 step。
+
+**铁律：run 进行中内核不读自己的记录。** 会话一生只读一次（出生那次 `:build`），run 里只有订阅者
+的实时 step；所以 `log-pressure` 只要一个 thread-id，它连文件都没有可读的。
 
 ## 根上那一页：`harness.edge.ui`
 

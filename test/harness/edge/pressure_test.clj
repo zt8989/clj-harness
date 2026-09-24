@@ -273,9 +273,11 @@
     (is (= (+ 300 (pressure/estimate-message {:role "user" :content "a brand new question"}))
            (:pressureTokens answer)))))
 
-(deftest a-log-that-does-not-exist-yet-is-a-session-with-no-calls-behind-it
+(deftest a-session-with-no-calls-behind-it-is-all-estimate
+  ;; The band is a session's fold now (tickets 03 / 04), so a thread this process does not
+  ;; hold -- a log that does not exist yet is the extreme case -- has no band at all and the
+  ;; answer is the estimate over the surface the edge assembled.
   (let [answer (pressure/log-pressure "pressure-nonexistent"
-                                      (java.io.File. "/no/such/log.jsonl")
                                       [{:role "system" :content "s"}
                                        {:role "user" :content "hi"}])]
     (is (= "estimated" (:baseline answer)))
@@ -365,9 +367,11 @@
               messages    (sessions/messages thread-id)
               ratios      pressure/default-ratios
               from-record (pressure/records->pressure (stats/read-records f) messages ratios)
-              from-band   (pressure/band-pressure thread-id f messages ratios)]
+              from-band   (pressure/band-pressure thread-id messages ratios)]
           (is (= from-record from-band)
               "the band the rows maintained IS what the record folds to")
+          (is (map? (sessions/fold-value thread-id :pressure))
+              "TICKET 03: the band is the session's own fold, so a run start opens no record")
           (is (= "usage" (:baseline from-band))
               "and it anchored on the vendor's own number"))))))
 
