@@ -13,7 +13,6 @@
 // flight after either ends), and ticket 03's read joined the SAME tick rather than starting
 // a second timer. What is left here is the shell: which section is which, and the sentence a
 // section says when it has no rows.
-// the shell: which section is which, and the sentence a section says when it has no rows.
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 

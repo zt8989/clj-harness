@@ -11,7 +11,6 @@
 // THE COLLAPSE CONTROL IS THE COLUMN'S OWN HEADER'S, at its LEADING edge -- the same rule the
 // sidebar's brand row follows (the row that says what the panel IS is the row an exit belongs
 // in), and the leading edge rather than the trailing one because that end of this header is
-// spoken for: it is where the mirror's way back to the list will sit (ticket 03 of this
 // spoken for: it is where the mirror's way back to the list sits (ticket 03), the control
 // below. The row's name stays between the two, so it reads `way out · what this is ·
 // way back`, and the same verb never stands in it twice.

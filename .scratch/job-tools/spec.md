@@ -275,3 +275,9 @@ stdin、换不了工作目录**，它的答案**没有上界**（`(str out err)`
 - 前端：`node scripts/test.mjs --ui` → 47 passed，退出码 0（本特征没动 `ui/`，那两次跑只是确认这一点）。
 - 定向：`--ns harness.cap.jobs-test,harness.kernel.tools-test,harness.cap.editing-mode-tools-test`
   → 76 tests / 351 assertions，0 failures / 0 errors。
+
+**2026-09-24（`.scratch/right-pane-tasks` 收口时核过）：** `stop!` 多了一个**发起人**入参（`:by`），
+默认 `:model` 逐字保持这里记的旧行为（无条件认领 `:told?`）；`:by :user`（人从任务视图按的那颗 ■，
+`POST /api/threads/<stem>/jobs`）**不认领**，改记 `:stopped-by`，于是结局由下一通调用前的通知说出来。
+「停」的三个动词、`[stopped]` 先认领再杀、条目活过终点、答句形状这些字一个没动。
+（`job-endings` 决策 4 的「三条路都算告知」也照旧——人停的那条走通知这条路。）

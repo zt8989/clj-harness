@@ -279,6 +279,39 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   隔一拍再问一次，因为记录的写者比它自己的终帧晚一拍——run 的返回侧（`message` 行）落在 `:run/done`；
   打开面板时再问一次，因为那一下正是有人在问）。两次都不是轮询：一次 run 只多一次，不开面板不问。
 
+## 右栏：任务视图与镜像
+
+**一列两态。** 页面右侧那一列是 flex 行里第三个 `shrink-0` 的孩子（`components/task-pane.tsx` 与
+`components/subagent-view.tsx` 的 `aside` 是逐字相同的类串，套件比对这两条字符串），共用一个
+`RIGHT_PANE_ID`（`app-right-pane`）——`aria-controls` 指的是**这一列**，不是列里那一态。状态住在 `App`：
+`rightPane` 是**一个值三种形状**（`components/subagent-view-context.ts` 的 `RightPane`）——`null`（关着）、
+`{kind:"tasks"}`（**任务视图**）、`{kind:"mirror", threadId, subagent}`（**镜像**，一次一个）。一个值而不是
+`open` 加 `which`：开着就是选了任务视图，没有「开着却没东西可看」的那一刻。栏**不记**「上次看的是哪个」
+（短暂看法，与左栏折叠同一条理由）；`md`（768px）以下整列不画——宁可看不到镜子，也不许把主对话压到不能用。
+
+**两扇门。** 开关那一对是 `components/right-pane-toggle.tsx`：`components/sidebar-toggle.tsx` 那条契约的
+右侧版本（一件契约两个地方、共用一个 id、`aria-expanded` 报**区域**的状态、**不持久化**——理由在那边，不重写）。
+**收起**在栏自己头部的**前缘**（`RightPaneCollapseButton`）；**打开**是页面**右上角**的浮标
+（`RightPaneOpenButton`，只在栏关着时画，因为关着的列没有子树可挂它）。两颗都 `hidden md:flex`，与列同生共死。
+第二扇门在对话里：主对话那张 `agent` 工具卡（`message-parts.tsx` 读 `SubagentViewContext`），以及任务视图里
+子代理的一行（`components/task-pane-subagents.tsx`，点的是**那一行自己的 `threadId`**）——两者写的是 `App` 那同一个
+`openMirror`，不按位置配。镜像头部那颗 X 因此退场：它和收起是同一个动词，同一个头部不放两遍。
+
+**任务视图两段，各读什么。** 上面一段是**子代理**：`GET /api/subagents` 的 `runs` 按 `:parent` 收窄到本会话，
+说明按名字 join 同一份答案里的定义（定义被删了就只画名字与状态；`running` 是服务端进程内那张表，重启之后一律
+false——照实说）；点一行进那一面的镜像。下面一段是**后台作业**：`GET /api/threads/<stem>/jobs`，读的是服务端
+**进程内的作业注册表**而不是记录，所以任何 stem 都可能答 `[]`（不是 404）；状态就是记录末行
+（`[running]` / `[exit N]` / `[stopped]`，`cap.jobs/status-of` 一处出处），行上的「跑了多久」用服务端的 `startedAt`
+算，只有还在跑的行有秒数、也只有它画那颗 ■。**这一栏只列作业**，不列前台溢出那几份 `c*` 记录（那条记录不是
+作业，没有进程可停）。■ 的按下是 `POST /api/threads/<stem>/jobs {job}`——`stop!` 的第二个发起人：**不认领**
+「告知」，只记下是人停的，于是下一通模型调用前多一条 `by="user"` 的注入（见 [CONTEXT.md](../../CONTEXT.md) 的「后台作业」）。
+
+**一个 tick。** `hooks/use-task-pane.ts` 是**唯一**的钟：1 秒一问、**两段一起问**（两条读共用一个 `AbortController`，
+abort 一次两段都停，所以始终只有一个在飞的东西），只在栏**挂着**且文档 `visible` 时跑；栏一关（任务视图卸载）
+或页面不可见就 `clearInterval` **并中止在飞的读**。这与「关掉镜像就挂断跟随通道」同一条纪律：一条没人看的
+订阅是漏。镜像那一态不轮询——它自己那条跟随通道（`GET …/follow`）就是它的实时性。为什么是轮询而不是订阅、
+以及关栏之后真的没有在飞的请求（走查量的），见 `.scratch/right-pane-tasks/spec.md`。
+
 ## 上下文占用：model 左边那颗圈
 
 **它画的是一个分数，所以没有分数就不画**（`components/context-ring.tsx`）。分子是厂商在那一次调用报的
