@@ -183,8 +183,13 @@
   ;; so the meter has a window to divide by and a history that may or may not cross 0.7 of it.
   [window]
   (conj (vec (map (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 6)))
-        (row "model/start" {:model "scripted" :context-window window})
-        (row "model/end" {:usage {:prompt_tokens 100 :completion_tokens 5 :total_tokens 105}})))
+        ;; THE CALL CARRIES THE RUN'S OWN ID: that is what a real `model/start` row does, and
+        ;; the meter tells a run's own call from one the harness wrote for itself (a compaction's
+        ;; summarizer, logged with no run id) by exactly this. A fixture that left it nil was
+        ;; describing a row the harness never writes.
+        (assoc (row "model/start" {:model "scripted" :context-window window}) :runId "r1")
+        (assoc (row "model/end" {:usage {:prompt_tokens 100 :completion_tokens 5 :total_tokens 105}})
+               :runId "r1")))
 
 (deftest the-pressure-trigger-compacts-at-the-threshold-and-not-below
   (let [stop (http/start! {:port 0})]

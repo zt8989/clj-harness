@@ -12,7 +12,8 @@
     - a SECOND compaction that shadows the first summary works, and its range inverts
       (`start` greater than `end`) -- the case a numeric interval comparison gets wrong."
   (:require [clojure.test :refer [deftest is testing]]
-            [harness.edge.replay :as replay]))
+            [harness.edge.replay :as replay]
+            [harness.edge.compaction :as compaction]))
 
 ;; ------------------------------------------------------------------ the records
 
@@ -115,3 +116,45 @@
     (is (= [0 1] (mapv :seq entries)))
     (is (= [2] (mapv :seq facts)))
     (is (= 3 (count records)) "and the records vector is unchanged")))
+
+;; --------------------------------------------------- the card never reaches the model
+
+(defn- injected
+  "A run's own injection: the `injected-context` CUSTOM frame `frames/apply-frames` folds
+  into one CARD-ONLY message, whose `:data` carries the role and text it views."
+  [ts run-id message-id role text]
+  {:ts ts :runId run-id :type "event"
+   :payload {:type "CUSTOM" :name "injected-context" :messageId message-id
+             :value {:role role :text text}}})
+
+(defn- big [i] (entry i (str "u" i) (apply str (repeat 400 "a"))))
+
+(deftest a-data-card-never-reaches-a-compaction-plan
+  ;; THE BUG THIS PINS (2026-09-24, thread `bbcd4ae4-…`): the plan handed the summarizer the
+  ;; record's own CARD (a `data` part) and the vendor refused the whole request --
+  ;; HTTP 422 `unknown variant \`data\``. The model view REALISES the card into the message
+  ;; it views, and the node is KEPT, so the range `:shadowed` names does not move.
+  (let [records [(big 0)
+                 (injected 1 "r1" "r1-pre0" "user" "SKILL BODY")
+                 (big 2) (big 3) (big 4) (big 5)]
+        entries (replay/entries (vec records))
+        nodes   (replay/model-nodes entries (replay/compaction-facts (vec records)))
+        plan    (compaction/plan records 1000 0.16)]
+    (is (= (count entries) (count nodes))
+        "an injected card realises to its text; the node it was is not lost")
+    (is (not-any? (fn [n] (some #(= "data" (:type %)) (:content (:message n)))) nodes)
+        "no node's message carries a `data` part")
+    (is (some? plan) "six nodes, a retained tail of two: there is a head to compact")
+    (is (not-any? (fn [m] (some #(= "data" (:type %)) (:content m))) (:messages plan))
+        "what the summarizer is handed carries no `data` card -- the 422's own shape")
+    (is (some #(= "SKILL BODY" (:content %)) (:messages plan))
+        "the card's own text is what the model reads in its place")
+    (is (= 4 (count (:shadowed plan))) "four oldest nodes, ids unchanged")))
+
+(deftest the-card-is-still-in-the-conversation-the-client-reads
+  (let [records [(entry 0 "u1" "one")
+                 (injected 1 "r1" "r1-pre0" "user" "SKILL BODY")
+                 (entry 2 "u2" "two")]]
+    (is (some (fn [e] (some #(= "data" (:type %)) (:content (:message e))))
+             (replay/entries (vec records)))
+        "the client's view keeps the card -- only the model's view realises it")))

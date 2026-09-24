@@ -298,4 +298,10 @@
                  :reason (:reason (or blocked failed))
                  :answer (:answer answered)
                  :matched (count decls)}
-          content? (assoc :blocks blocks))))))
+          content? (assoc :blocks blocks
+                           ;; THE IDENTITY OF WHAT ASSEMBLED IT, in written order,
+                           ;; so a content point's caller can sign the hook set the
+                           ;; way it signs the tool table (`harness.cap.system-prompt/
+                           ;; assemble*`). Only a content point gets it, so every
+                           ;; other point's return stays byte-identical.
+                           :hooks (mapv :id decls)))))))

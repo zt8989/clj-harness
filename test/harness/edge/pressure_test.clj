@@ -17,6 +17,7 @@
             [harness.edge.http :as http]
             [harness.edge.pressure :as pressure]
             [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
             [harness.edge.stats :as stats]
             [harness.fake :as fake]
             [harness.infra.home :as home]
@@ -69,11 +70,13 @@
 
 (def ^:private finished (record 900 "event" {:type "RUN_FINISHED" :threadId "t" :runId "r1"}))
 
-(defn- tool-table [n]
-  [{:type "function"
-    :function {:name "read"
-               :description (apply str (repeat n "d"))
-               :parameters {:type "object" :properties {}}}}])
+(defn- tool-table
+  ([n] (tool-table "read" n))
+  ([name n]
+   [{:type "function"
+     :function {:name name
+                :description (apply str (repeat n "d"))
+                :parameters {:type "object" :properties {}}}}]))
 
 (defn- pressure-of [records] (pressure/records->pressure (vec records)))
 
@@ -138,6 +141,29 @@
     (is (= 5000 (:pressureTokens answer))
         "the injection is in the anchor's price too, so it is not re-counted as delta")))
 
+(deftest a-compactions-own-call-does-not-move-the-anchor
+  ;; THE BUG THIS PINS (2026-09-24, thread `bbcd4ae4-…`): a compaction's summarizer call is
+  ;; logged with NO run id, and `run-segments` attaches an event to whichever run was still
+  ;; open -- so its EMPTY tool table became the meter's envelope and flipped `:baseline` from
+  ;; "usage" to "estimated", dropping the vendor's own number (and the auto trigger with it).
+  (let [records [(entry 0 "u1" "hi")
+                 (sys 1 "s")
+                 (start 10 1000 (tool-table 40))
+                 (end 20 (usage 825000 5))
+                 finished
+                 ;; the failed compaction's own call: no run id, no tools
+                 (record 30 nil "model/start" {:model "scripted"})
+                 (record 31 nil "model/end" {})
+                 ;; the turn that follows; the run's own call is still the newest one
+                 (entry 101 "u2" "more")]
+        answer  (pressure-of records)]
+    (is (= "usage" (:baseline answer))
+        "the run's own call is what the meter anchors on, not the harness's")
+    (is (>= (:pressureTokens answer) 825000)
+        "the vendor's number still anchors the answer")
+    (is (= 1000 (:windowTokens answer))
+        "the window comes from the run's call, not the tool-less summarizer")))
+
 ;; --------------------------------------------------------------- the fallbacks
 
 (deftest a-window-nobody-declared-leaves-the-derived-numbers-out
@@ -165,15 +191,30 @@
       (is (= "estimated" (:baseline (pressure-of records)))
           "a different envelope is a different prompt; the old total is not about it")))
 
-  (testing "the tool table changed"
+  (testing "a tool was added or removed"
+    ;; THE NAME SET IS THE JUDGE (ticket 04). A different NAME moves the request's tool
+    ;; array, so the prefix is broken and the anchor is dropped.
     (let [records [(entry 0 "u1" "hi")
                    (sys 1 "s")
-                   (start 10 1000 (tool-table 10))
+                   (start 10 1000 (tool-table "read" 10))
                    (end 20 (usage 900 5))
                    finished
                    (entry 101 "u2" "more")
-                   (start 110 1000 (tool-table 40))]]
+                   (start 110 1000 (tool-table "grep" 10))]]
       (is (= "estimated" (:baseline (pressure-of records))))))
+
+  (testing "only a tool's DESCRIPTION changed"
+    ;; A re-description does not move the NAME set, and the name set is what the request's
+    ;; cold prefix rests on -- the tool array's membership and order, not the prose.
+    (let [records [(entry 0 "u1" "hi")
+                   (sys 1 "s")
+                   (start 10 1000 (tool-table "read" 10))
+                   (end 20 (usage 900 5))
+                   finished
+                   (entry 101 "u2" "more")
+                   (start 110 1000 (tool-table "read" 40))]]
+      (is (= "usage" (:baseline (pressure-of records)))
+          "the same tools, re-described: the envelope is the same one")))
 
   (testing "the route changed"
     (let [records [(entry 0 "u1" "hi")
@@ -233,7 +274,8 @@
            (:pressureTokens answer)))))
 
 (deftest a-log-that-does-not-exist-yet-is-a-session-with-no-calls-behind-it
-  (let [answer (pressure/log-pressure (java.io.File. "/no/such/log.jsonl")
+  (let [answer (pressure/log-pressure "pressure-nonexistent"
+                                      (java.io.File. "/no/such/log.jsonl")
                                       [{:role "system" :content "s"}
                                        {:role "user" :content "hi"}])]
     (is (= "estimated" (:baseline answer)))
@@ -308,3 +350,41 @@
             (is (= 20480 (:retainTokens line)) "and the retain budget")
             (is (= "estimated" (:baseline line))
                 "written BEFORE the call, so there is no vendor sample behind it yet")))))))
+
+(deftest the-live-band-and-the-record-fold-answer-the-same-thing
+  ;; TICKET 03's contract, on a REAL live session: the run-start meter answers from the band
+  ;; kept as rows are written (`meter-row!`), and it must equal `records->pressure` over the
+  ;; same record, field for field -- `state->pressure` is the one arithmetic behind both.
+  (let [thread-id "pressure-band"]
+    (with-server thread-id
+      [{:content "done" :usage {:prompt_tokens 50000 :completion_tokens 8 :total_tokens 50008}}]
+      (fn [port]
+        (send-run! port thread-id)
+        (stats-until-pressure port thread-id)
+        (let [f           (replay/locate (home/projects-dir) thread-id)
+              messages    (sessions/messages thread-id)
+              ratios      pressure/default-ratios
+              from-record (pressure/records->pressure (stats/read-records f) messages ratios)
+              from-band   (pressure/band-pressure thread-id f messages ratios)]
+          (is (= from-record from-band)
+              "the band the rows maintained IS what the record folds to")
+          (is (= "usage" (:baseline from-band))
+              "and it anchored on the vendor's own number"))))))
+
+(deftest the-band-ignores-a-call-the-harness-wrote-for-itself
+  ;; The band-level half of ticket 02: a compaction's own `model/start` carries no run id,
+  ;; and it must not become the newest true call -- its empty tool table would flip the
+  ;; baseline off the vendor's number.
+  (let [records [(entry 0 "u1" "hi")
+                 (sys 1 "s")
+                 (start 10 1000 (tool-table 40))
+                 (end 20 (usage 825000 5))
+                 finished
+                 (record 30 nil "model/start" {:model "scripted"})
+                 (record 31 nil "model/end" {})
+                 (entry 101 "u2" "more")]
+        band    (pressure/meter-of-records (vec records))
+        messages [{:role "system" :content "s"} {:role "user" :content "hi"}]]
+    (is (= 1000 (:context-window (:latest-start band)))
+        "the run's own call is what the band took, not the harness's")
+    (is (= "usage" (:baseline (pressure/state->pressure band messages pressure/default-ratios))))))

@@ -554,6 +554,45 @@
            (into order tools)))))
 
 
+;; ------------------------------------------------------- the table's signature
+;;
+;; WHAT A `model/start` LINE KEEPS INSTEAD OF THE TABLE (`harness.kernel.event`). The
+;; table is runtime configuration repeated byte-for-byte on every call of a run, and
+;; 'did it change' is a question about the NAME SET -- a changed description is not a
+;; change, an added or removed tool is. The signature is computed here, at the one
+;; place that RESOLVES the table, and handed to the event; a reader that wanted the
+;; table back could not get it, and does not need to.
+
+(defn- sha256-hex
+  "TEXT's SHA-256, as lowercase hex."
+  [^String text]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (.getBytes text java.nio.charset.StandardCharsets/UTF_8))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn names-hash
+  "The NAME SET of a resolved tool table as one hash. The names are SORTED first, so
+  the order the table happens to be in cannot move the answer; the descriptions never
+  enter it. A session that adds or removes a tool gets a new hash; one that only
+  re-describes a tool keeps the old one (owner's rule, 2026-09-24)."
+  [specs]
+  (sha256-hex (str/join "\n" (sort (keep #(get-in % [:function :name]) specs)))))
+
+(defn default-signature
+  "The signature a caller can answer WITHOUT A BYTE MEASURE: the name set and the count,
+  or nil for an empty table (which writes no `:tools-*` key at all).
+
+  THE SIZE IN CHARACTERS is deliberately not here. It is `harness.edge.context/size-of`'s
+  number -- the edge owns the wire's character rule -- and the edge merges it in through
+  `harness.kernel.loop`'s :tool-signature. A caller with no measure (an offline test,
+  `harness.edge.replay/resume!`) gets these two and the context ring falls back to the
+  table for the size, which such a caller does not keep either."
+  [specs]
+  (when (seq specs)
+    {:tools-names-hash (names-hash specs)
+     :tools-count      (count specs)}))
+
+
 ;; --------------------------------------------------------------- approvals
 ;;
 ;; Two things a call can be made to wait on, and the record of who is waiting:

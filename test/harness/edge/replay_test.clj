@@ -394,7 +394,9 @@
                            ["{\"type\":\"event\"}" :missing-payload]
                            ["[1,2,3]" :not-an-object]
                            ["{\"type\":" :not-json]]]
-      (let [e (try (replay/lines->records ["{\"type\":\"message\",\"payload\":{}}" line])
+      ;; `doall` FORCES THE LAZY PARSE: `lines->records` reads nothing until something is
+      ;; asked for it (ticket 06), and the refusal happens DURING the parse.
+      (let [e (try (doall (replay/lines->records ["{\"type\":\"message\",\"payload\":{}}" line]))
                    nil
                    (catch Exception e e))]
         (is (some? e) (str line " must be refused, not folded"))
@@ -402,8 +404,8 @@
         (is (= reason (:reason (ex-data e))))
         (is (re-find #"line 2" (ex-message e)) "and the sentence says which line"))))
   (testing "an old record says what to do about it, in one sentence"
-    (let [e (try (replay/lines->records
-                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"])
+    (let [e (try (doall (replay/lines->records
+                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"]))
                  nil
                  (catch Exception e e))]
       (is (re-find #"old contract" (ex-message e)))
@@ -788,3 +790,48 @@
         entries (replay/entries (replay/lines->records raw))]
     (is (= [1 (dec (count raw))] (mapv :seq entries)))
     (is (= "half a thought" (:content (:message (last entries)))))))
+
+;; --------------------------------------------------- seam C: the streaming read (票 06)
+
+(deftest read-records-drops-only-a-half-written-LAST-line
+  ;; THE CONTRACT THE STREAMED READER MUST KEEP, spelled with a file on disk because that
+  ;; is where the lag-one trick lives (`rows-tolerating-a-torn-last-line`).
+  (testing "a torn last line is dropped, not refused"
+    (write-log! "t-torn-last" (concat (one-run-lines) ["{\"ts\":9,\"runId\":\"r1\",\"ki"]))
+    (let [rows (replay/read-records (log-file "t-torn-last"))]
+      (is (vector? rows) "the vector reader still answers a vector")
+      (is (= (count (one-run-lines)) (count rows)) "the half line is simply not there")))
+  (testing "a torn line in the MIDDLE is corruption, refused by name"
+    (let [lines (one-run-lines)
+          broken (concat (take 1 lines) ["{\"ts\":9,\"ki"] (drop 1 lines))]
+      (write-log! "t-torn-mid" broken)
+      (let [e (try (replay/read-records (log-file "t-torn-mid")) nil (catch Exception e e))]
+        (is (some? e) "a reader that swallowed it would hand back a shorter conversation")
+        (is (= 2 (:line (ex-data e))) "and it names the line it choked on"))))
+  (testing "a file that is not there is a named failure, not an empty conversation"
+    (let [e (try (replay/read-records (log-file "t-absent")) nil (catch Exception e e))]
+      (is (some? e))
+      (is (some? (:path (ex-data e))) "the error carries the path nobody could read")))
+  (testing "an empty file reads as no records at all"
+    (write-log! "t-empty" [])
+    (is (= [] (replay/read-records (log-file "t-empty"))))))
+
+(deftest fold-records-streams-the-same-records-read-records-answers
+  ;; TICKET 06: `fold-records` is the fold path -- the reader lives inside it and the rows
+  ;; are never held together -- and it must answer exactly what the vector reader does.
+  (write-log! "t-stream" (one-run-lines))
+  (let [f     (log-file "t-stream")
+        rows  (replay/read-records f)
+        again (replay/fold-records f [] (fn [acc [_ row]] (conj acc row)))]
+    (is (= rows again) "the same records, in the same order, line index ignored here")
+    (is (= (map vector (range) rows)
+           (replay/fold-records f [] (fn [acc [i row]] (conj acc [i row]))))
+        "and the fold hands each record its OWN line index")))
+
+(deftest fold-entries-is-entries-on-a-stream
+  ;; The entries fold, driven from the file rather than from an array: the numbers and the
+  ;; messages must come out identical (`entries` is the same `entries-step`).
+  (write-log! "t-fold-entries" (one-run-lines))
+  (let [f (log-file "t-fold-entries")]
+    (is (= (replay/entries (replay/read-records f))
+           (replay/fold-entries f)))))

@@ -334,7 +334,7 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 | 事实（CUSTOM 帧的 `name`） | 何时 |
 |---|---|
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
-| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同）与 `:tools`（**照发出的那张工具表**，没有表就不写这个键），**不上 wire** |
+| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同），加工具表的**签名**：`:tools-names-hash`（工具**名字**集合的 SHA-256——改描述不动它，加删工具才动）/ `:tools-count` / `:tools-bytes`（`context/size-of` 的字符数，给上下文圈画数）。**整张工具表不在这一行**（票 04：runtime 配置，一轮里一字不差重复几百遍，曾占整份日志四成）——它落在 system 那条 `message` 行的**信封**上（`:tools`，整张表，见下）。表为空时不写这三个键，**不上 wire** |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
@@ -358,9 +358,15 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
   `session-opening-<i>`、出生 context `session-context`、客户端的 `u1`、助手的 `msg-*`。
 - **一次动作写了哪几条 = 那些 `message` 行**，顺序就是它们进数组的顺序；`input` 行不再存在，
   它原先答的「身份 / 边界 / 出生 context 与绑定」分别由行信封、行序 + `RUN_*` 帧、`event` 行回答。
-- **system 消息是 `message` 行**：每场会话的第一条带全文与 `:hash`，hook 改动后第一条再带一次全文，
-  其余每轮一条只带 `:hash`——`hash` 是这一轮真正交给模型那串字节的 SHA-256，回答「这轮和上轮读的是不是
-  同一句」（prefill / prompt cache 靠那条前缀稳定）。
+- **`message` 行按数组顺序写**：一次 run 的第一条 `message` 行**一定是** `role=system`（它就是数组的第
+  一个元素），然后是这个人自己的话（`client` / `injection` / `opening`），再是这个 run 的产物（`model` /
+  `tool`）。`provider/init` 是 `event` 行，写在前面，所以读者仍然先遇到「这场会话由谁服务」。
+- **system 消息是 `message` 行**：每场会话的第一条带全文与 `:hash`，之后每条 run 都写自己那条（组装每
+  run 现算）——`hash` 是这一轮真正交给模型那串字节的 SHA-256，回答「这轮和上轮读的是不是同一句」
+  （prefill / prompt cache 靠那条前缀稳定）。信封上另有 `:hooks-names-hash`（这一轮参与组装的 hook
+  **身份**集合的 SHA-256，票 04，压力表判「前缀断没断」的那半格；`prompt.md` 不参与签名）与 `:tools`
+  （**整张工具表**，名字 + 描述 + parameters）——表**不进正文**（放了模型就读第二遍、白付 token），在
+  信封上：`replay/payload` 把信封挡在消息外，所以**记录里回读得到、模型读不到**。
 - **被主动放弃的一件事实**：`input` 行的 payload 里还带着当时的**请求体**（`:provider` / `:model` /
   `:tools` / `:context`，即"客户端要的是什么"）。行删掉后这份事实**没有新家**：记录只答"这次跑的是哪一档"
   （`provider/init` / `provider/changed` 的 `:resolved`）。
@@ -391,6 +397,27 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
   **审计轨迹有自己的读侧**：`harness.edge.stats` 折 `message` 与 `model/*` 出这条会话的几个数
   （`GET /api/threads/<stem>/stats`，见下）。两种读侧读的是同一条日志的两半，谁也不读对方的那半——
   「只认两种行」是 `harness.edge.replay` / `harness.kernel.frames` 的规矩，不是所有读者的规矩。
+
+**模型面只有一份，锚点比的是签名。** 「模型看的」（能直接交给 provider 的那个数组）是记录的一个**纯投影**：
+`harness.edge.replay/model-message` / `model-view` 一处实现（客户端面 `entries` 上的卡在这里脱掉），
+**压缩**（`harness.edge.compaction`）与**压力表**（`harness.edge.pressure`）都消费它，谁都不另写一份——
+2026-09-24 那次压缩 422 就是把客户端面当模型面交了出去（见 [ADR 0004](../adr/0004-a-call-keeps-the-tables-signature-not-the-table.md)）。
+压力表的**锚点**（拿厂商上次报的 `prompt_tokens` 当基准、只估增量）也只在**信封没变**时采用，而「变没变」由**签名**
+回答：工具表的**名字集合**（`model/start` 上的 `:tools-names-hash`）+ 路由 + hook 的**身份集合**（system 行信封上的
+`:hooks-names-hash`）。system 是每轮现装的，所以比的是签名，不是那段文本。
+
+**读记录是流式的（票 06）。** `harness.edge.replay/read-lines` 一行一行读（UTF-8 显式，读完即关文件），
+`lines->records` 是懒的，`fold-records` 把 reader 关在自己里面——**折的人不物化整份**。`read-records` 仍返回
+vector，但也是建在流上：一行坏在中间照样按行号硬失败，最后那一行写了一半就丢掉（旧契约见上）。
+
+**压力表不再每轮读整份（票 03）。** run 开头那次测量（`context/pressure` 那行，以及 check 阈值要不要压缩）读的
+是**表针**（`harness.edge.pressure` 的 band），不是记录：`harness.edge.http/log!`——每行都走的那条路——
+把每一行顺手喂给 `pressure/meter-row!`，band 就地更新（只认四种行：真 run 的 `model/start`、报 usage 的
+`model/end`、system 行、run 自己的注入）。**一个进程里第一次问某个会话**才会折一次记录来装 band
+（`seed-band!`），此后都是 O(1)。读数与离线折出来的答案**同答案**：`records->pressure` 自己就是
+`meter-of-records` + `state->pressure`，两条路跑的是**同一套算术**（ADR 0002 决定 2 那条「历史初次从记录重建、
+之后在内存里操作」在这里兑现）。压缩那一步仍然要读记录（免费的 prune 与 lock 检查都要它），但它**只在
+band 已经报过阈值之后**才读——没过阈值的 run 一次盘都不碰。
 
 ## 入站翻译：parts 与图片
 

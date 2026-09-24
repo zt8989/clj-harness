@@ -45,6 +45,7 @@
   clean: what the hooks append can be switched off, what prompt.md states cannot --
   prompt.md is not in a hook's hands."
   (:require [clojure.string :as str]
+            [clojure.string :as str]
             [harness.kernel.hooks :as hooks]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.kernel.llm :as llm]
@@ -81,27 +82,42 @@
     opening
     (str (str/replace opening #"(?:\r?\n)+$" "") "\n\n" (str/join "\n\n" blocks))))
 
-(defn assemble
-  "The text of THREAD-ID's system message on this run: prompt.md's frozen opening,
-  then each SystemPrompt hook's text, in order, one blank line apart. Every block
-  has been trimmed already, and one that trimmed to nothing is simply not here.
+(declare digest)
 
-  THE EDGE'S HOOK SINK MUST BE BOUND AROUND THIS CALL. `hook/emit` fires nothing
-  when no sink is bound, deliberately -- an offline tool, replay and a test driving
-  the kernel directly all behave exactly as they did before hooks existed -- and
-  the consequence here is that this returns prompt.md's bytes verbatim in those
-  callers. A caller that wants the appended text has to be the edge, or has to bind
-  a sink itself.
-
-  A declaration at this point that exits 2, times out, or cannot be run means THE
-  RUN DOES NOT START: this throws with the hook's own words as the message, and
-  harness.edge.http's set-up catch turns that into the RUN_ERROR a client sees. A
-  hard failure rather than fail-open, because what these hooks write is what the
-  system message is supposed to have said -- the same family as an AGENTS.md that
-  exists but cannot be read, and for the same reason: an instruction that was
-  meant to constrain the run must not be dropped in silence."
+(defn assemble*
+  "THREAD-ID's system message on this run AND the identity of what assembled it:
+ 
+    {:text \"<prompt.md's opening>\\n\\n<block>\\n\\n<block>\"
+     :hooks-names-hash \"<sha-256 of the identities that ran>\"}
+ 
+  :text is prompt.md's frozen opening, then each SystemPrompt hook's text, in order,
+  one blank line apart. Every block has been trimmed already, and one that trimmed to
+  nothing is simply not here.
+ 
+  :hooks-names-hash IS THE HALF THAT ANSWERS 'DID THE SET OF HOOKS MOVE'. The text
+  itself is assembled afresh every run, so comparing it answers a different question
+  than the meter asks: the meter asks whether the PREFIX a replayed call rests on still
+  stands, and the identity of the hooks in force at this point is the half of that
+  answer the hooks own -- the tool table's name set is the other half
+  (`harness.kernel.tools/names-hash`). A hook added, removed or switched moves it;
+  nothing else does. See `.scratch/instruction-updates` decision 1.
+ 
+  THE EDGE'S HOOK SINK MUST BE BOUND AROUND THIS CALL. `hook/emit` fires nothing when
+  no sink is bound, deliberately -- an offline tool, replay and a test driving the
+  kernel directly all behave exactly as they did before hooks existed -- and the
+  consequence here is prompt.md's bytes verbatim and the hash OF NOTHING (the same
+  answer every empty hook set gives). A caller that wants the appended text, or the
+  identity of the hooks, has to be the edge, or has to bind a sink itself.
+ 
+  A declaration at this point that exits 2, times out, or cannot be run means THE RUN
+  DOES NOT START: this throws with the hook's own words as the message, and
+  harness.edge.http's set-up catch turns that into the RUN_ERROR a client sees. A hard
+  failure rather than fail-open, because what these hooks write is what the system
+  message is supposed to have said -- the same family as an AGENTS.md that exists but
+  cannot be read, and for the same reason: an instruction that was meant to constrain
+  the run must not be dropped in silence."
   [thread-id]
-  (let [{:keys [verdict reason blocks]} (hook/emit :system-prompt {})]
+  (let [{:keys [verdict reason blocks hooks]} (hook/emit :system-prompt {})]
     (when (= :block verdict)
       ;; A BLOCK WITH NOTHING ON IT still says something. `verdict-of` gives a
       ;; block the declaration's own stderr, so a blank reason means the
@@ -112,7 +128,14 @@
                         "a SystemPrompt hook refused this run and said nothing"
                         (str reason))
                       {:reason :system-prompt-blocked :thread-id thread-id})))
-    (join-blocks (llm/prompt) blocks)))
+    {:text             (join-blocks (llm/prompt) blocks)
+     :hooks-names-hash (digest (str/join "\n" (or hooks [])))}))
+
+(defn assemble
+  "The TEXT of THREAD-ID's system message on this run -- `assemble*`'s :text, for a
+  caller that wants the bytes and not the identity of the hooks behind them."
+  [thread-id]
+  (:text (assemble* thread-id)))
 
 (defn digest
   "TEXT's SHA-256, as lowercase hex.
@@ -133,7 +156,7 @@
 ;;
 ;; TWO rows at the SystemPrompt point, registered from here because building one
 ;; needs the session's binding and the machine's own shell -- see this namespace's
-;; docstring for the require cycle that decides it. harness.kernel.hooks
+;; namespace's docstring for the require cycle that decides it. harness.kernel.hooks
 ;; owns the registry as a SEAM; this is its only writer.
 ;;
 ;; THEY ARE ROWS, NOT A MECHANISM. Source :built-in, visible in effective-hooks,
@@ -235,4 +258,4 @@
   []
   (hooks/install! {:name "system-prompt rows"
                    :builtins {:system-prompt [["project" {:run project-block}]
-                                              ["env"     {:run env-block}]]}}))
+                                               ["env"     {:run env-block}]]}}))

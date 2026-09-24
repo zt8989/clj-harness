@@ -133,12 +133,14 @@
   the history. It belongs to the call, not to the conversation: showing it to the
   provider on a later request would be inventing a field the vendor never asked
   for.
-
   THE TOOL TABLE IS RESOLVED ONCE, HERE, and handed to both sides: the provider
-  puts it in the request body and the start event records it. That is what makes
-  `model/start`'s :tools the table that WENT OUT rather than a second resolution
-  that happens to agree -- and it is why the resolve lives in this function rather
-  than in the provider layer.
+  puts it in the request body and the START EVENT records its SIGNATURE -- the name
+  set, the count, and (when the edge's :tool-signature is in OPTS) the byte size.
+  That is what makes the signature 'the table that WENT OUT' rather than a second
+  resolution that happens to agree -- and it is why the resolve lives in this function
+  rather than in the provider layer. The TABLE itself is not recorded: it is runtime
+  configuration, repeated byte-for-byte on every call, and the signature is what a
+  reader deciding 'is this the same envelope' actually needs (`harness.kernel.tools`).
 
   A REFUSAL FOR LENGTH IS RECOVERABLE, and this is the only place that can act on one. The
   vendor refused the WHOLE request, so before the run ends the history is handed to
@@ -147,10 +149,17 @@
   attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
   prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
   nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
-  [provider history emit thread-id {:keys [on-overflow recoveries halted?] :or {recoveries 1}}]
+  [provider history emit thread-id {:keys [on-overflow recoveries halted? tool-signature]
+                                    :or {recoveries 1}
+                                    :as _opts}]
   (loop [attempt 0]
     (let [specs   (tools/specs thread-id)
-          _       (emit (ev/model-start provider specs))
+          ;; THE SIGNATURE, NOT THE TABLE (`harness.kernel.event/model-start`). It is
+          ;; computed HERE, once, from the very array that goes into the request body,
+          ;; so a reader can never be shown a signature of a table other than the one
+          ;; that went out. The caller may hand in its own (:tool-signature) to add the
+          ;; byte measure the kernel does not own -- the edge does, and does.
+          _       (emit (ev/model-start provider ((or tool-signature tools/default-signature) specs)))
           outcome (try
                     (let [{:keys [message telemetry]}
                           (llm/stream! (assoc provider :tools specs) @history emit thread-id)]
@@ -327,7 +336,7 @@
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow
-                                  overflow-retries on-tool-result]
+                                  overflow-retries on-tool-result tool-signature]
                             :as _opts}]
   (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
@@ -419,8 +428,9 @@
                       ;; and this waits on BOTH it and the switch: a stop does not have to
                       ;; wait for a vendor that is still talking.
                       reply     (model-call-stoppable provider history emit thread-id cancel
-                                                                     {:on-overflow on-overflow
-                                                                      :recoveries  retries})
+                                                                     {:on-overflow   on-overflow
+                                                                      :recoveries    retries
+                                                                      :tool-signature tool-signature})
                       answer    (await-call [reply] cancel)
                       _         (when (:stopped? answer) (stopped!))
                       assistant (let [v (:value answer)]

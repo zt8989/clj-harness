@@ -215,61 +215,16 @@
 
 ;; ------------------------------------------------------------------- the views
 
-(defn- injected-card-of
-  "The injected-context card among M's parts, or nil. Its `:data` carries the role and
-  text of the message it views (`harness.edge.ag-ui/injection-value`)."
-  [m]
-  (let [c (:content m)]
-    (when (sequential? c)
-      (some (fn [p]
-              (when (and (= "data" (:type p)) (= ag/injected-part-name (:name p)))
-                p))
-            c))))
-
 (defn model-view
   "MESSAGES -> the conversation AS A PROVIDER MAY BE HANDED IT: the cards taken out.
 
-  A card is a message (or part) the record carries so the screen can draw it again. It is
-  USUALLY not something the model ever read -- but a run's own injection is the exception,
-  and the paragraph below is about it. `harness.edge.ag-ui/provider-part` refuses a
-  `data` part BY NAME, and it should keep refusing: this is the function that makes sure
-  one is never offered.
-
-  A CARD-ONLY MESSAGE IS REALISED, NOT DROPPED, when it is one of a run's own
-  injections (`harness.edge.ag-ui/injected-part-name`): a skill body or a job's ending
-  is a message the model READ, and the card is only its screen half. Handing it back in
-  the provider's shape is what makes the pre-LLM step idempotent ACROSS RUNS -- the body
-  is now part of the conversation, so `cap.project/before-llm` finds it already loaded
-  instead of deriving it again and re-showing its card on every turn. The bytes are the
-  card's own `:text` and the role is the role it arrived with; a card with no text to
-  realise (an older record, an empty injection) is still dropped rather than sent as an
-  empty turn.
-
-  AN OPENING ENTRY IS THE ONE MESSAGE THAT CARRIES BOTH (`harness.edge.ag-ui/opening-entries`):
-  the `data` half is the card the page draws, the `text` half is what the model reads. So
-  removing the `data` part leaves exactly what the model is owed -- which is why the
-  session's opening needs no case of its own and no second reader anywhere else.
-
-  PUBLIC BECAUSE A RUN NEEDS IT FOR WHAT IT IS ABOUT TO ADD, not only for what the
-  session already holds: `append!` answers with the entries as the RECORD keeps them --
-  cards and all, they are what the log needs -- so the edge asks for this view of the
-  list it is about to hand over (`harness.edge.http/run-agent!`). One decision, asked
-  twice."
+  THE RULE IS `harness.edge.replay/model-view` -- the ONE owner of the model-facing surface,
+  living beside `model-nodes` (the same fold, with the ids). This name stays because a
+  session's callers already ask for it, not as a second implementation: a second copy of the
+  card rule is exactly how a `data` card reached a compaction's summarizer once
+  (2026-09-24, thread `bbcd4ae4-…`)."
   [messages]
-  (into []
-        (keep (fn [m]
-                (let [c (:content m)]
-                  (if (and (sequential? c) (some #(= "data" (:type %)) c))
-                    (let [kept (into [] (remove #(= "data" (:type %))) c)]
-                      (if (seq kept)
-                        (assoc m :content kept)
-                        ;; THE WHOLE MESSAGE WAS A CARD: realise the injection it views.
-                        (let [data (:data (injected-card-of m))
-                              text (:text data)]
-                          (when (and (map? data) (string? text) (not (str/blank? text)))
-                            (assoc m :role (or (:role data) (:role m)) :content text)))))
-                    m))))
-        messages))
+  (replay/model-view messages))
 
 (defn- build
   "THREAD-ID's conversation as the record has it: {:entries .. :context .. :state ..}.
@@ -457,6 +412,19 @@
     (let [e (get @registry id)]
       (model-view (replay/compacted-messages (:entries e) (:compactions e) (:prunes e))))))
 
+(defn raw-messages
+  "THREAD-ID's conversation as RAW provider messages -- the entries' own payloads, cards and
+  all, with NO compaction and NO `model-view` folded in yet.
+ 
+  IT EXISTS FOR THE METER (ticket 03): `harness.edge.pressure/messages-of` is what the
+  anchor estimate is defined against, and it takes the RAW messages and does those folds
+  itself. `messages` above is the LIVE surface (compacted, card-stripped) and is deliberately
+  a different reading -- one is what the model would be handed now, this one is what a record's
+  prefix folds to."
+  [thread-id]
+  (let [id (str thread-id)]
+    (touch! id)
+    (mapv :message (get-in @registry [id :entries]))))
 (defn set-compactions!
   "Replace THREAD-ID's compaction facts. The compaction WRITER calls this the moment it wrote
   a compaction, so `messages` -- which folds them LIVE -- reflects it without waiting for the

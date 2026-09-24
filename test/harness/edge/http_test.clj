@@ -536,6 +536,27 @@
              ;; that quietly followed the code.
              (is (= 4 (get-in (replay/payload line) [:matched]))
                  "the kernel's two rows, the file's one, and the subagent block's")))
+
+         (testing "and the TOOL TABLE rides the row's ENVELOPE, out of the message"
+           ;; OWNER'S RULING (2026-09-24): the tools go into the system ROW -- but NOT into
+           ;; the message's content, where the model would read them a second time and pay
+           ;; for them. The envelope is where `log!` puts a row's own fields (`:source`,
+           ;; `:hash`), and `replay/payload` keeps them out of the message.
+           (let [row   (first (filter replay/system-prompt?
+                                      (replay/read-records (log-file "it-system"))))
+                 table (:tools row)]
+             (is (vector? table) "the table is on the row")
+             ;; NAME FOR NAME, not map-for-map: the row went through JSON on the way to
+             ;; disk, so comparing the whole nested shape would be asserting the round trip.
+             (is (= (map (comp :name :function) (tools/specs "it-system"))
+                    (map (comp :name :function) table))
+                 "the same table this session serves, name for name")
+             (is (every? #(string? (get-in % [:function :description])) table)
+                 "and the descriptions rode along -- the whole table, not just the names)")
+             (is (not (contains? (replay/payload row) :tools))
+                 "and the message the model read does not carry it")
+             (is (not (str/includes? (str (:content (replay/payload row))) "<tools>"))
+                 "nor a <tools> block in the text")))
          (testing "and not one frame carries any of it"
            ;; The markers are the ones only THIS run's assembly could have
            ;; written. The blocks' own tags are deliberately not among them: the
@@ -1322,12 +1343,14 @@
                                                  (when (= "system-prompt" (:source r)) i))
                                                after-first))]
              (is (= 1 (count (filter #(= "provider/init" %) kinds))))
-             ;; THE ACTION'S ROWS COME FIRST -- the person's message enters the conversation
-             ;; before the run that serves it exists -- and the run's OWN rows start with the
-             ;; prompt it assembled (`:source "system-prompt"`). 票 02: both are `message`
-             ;; rows now, which is why the assertion names the SOURCE rather than the kind.
-             (is (< (.indexOf kinds "message") (.indexOf kinds "provider/init")))
+             ;; THE RECORD'S FIRST `message` ROW IS THE PROMPT (`:source "system-prompt"`),
+             ;; because a `message` row IS an element of the array the model read and the
+             ;; prompt is that array's first element. The action's own rows follow it. The
+             ;; init line is an EVENT row above both, so it still comes first for a reader
+             ;; of the timeline.
              (is (some? prompt-i) "the run recorded the prompt it assembled")
+             (is (= prompt-i (.indexOf kinds "message"))
+                 "the first message row in the record is the prompt")
              (is (< (.indexOf kinds "provider/init") prompt-i)
                  "and the init line is in front of it: a reader meets what served the
                   conversation before it meets the conversation")))

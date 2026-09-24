@@ -20,6 +20,7 @@
             [harness.fake :as fake]
             [harness.test-support :as support]
             [harness.infra.home :as home]
+            [harness.kernel.tools :as tools]
             [harness.kernel.frames :as frames])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -168,7 +169,7 @@
   "Every key the inventory allows on an item. The check is a SUBSET, not an equality:
   a turn with no injected context has no `:source` anywhere, and 'the vendor reported
   no reasoning' is a missing key rather than an empty string."
-  #{:kind :text :initial :id :reasoning :toolCallId :name :argsText
+  #{:kind :text :initial :tools :id :reasoning :toolCallId :name :argsText
     :result :error :executed :outcome :call
     :arrivedAt :resumedAt :executedAt :closedAt :at})
 
@@ -501,22 +502,42 @@
         "the run's output belongs to the turn its last user message opened")))
 
 (deftest the-tool-table-a-call-went-out-with
-  ;; Tickets 04's read half: the table on the line is the table the request carried,
-  ;; and it is shown as it was -- not resolved again from today's session.
+  ;; Ticket 04's read half: a call leaves the table's SIGNATURE -- the name set as a
+  ;; hash and the count -- not the table, and the shape a reader gets is the same
+  ;; whichever spelling the record used. Two tables that differ only in a DESCRIPTION
+  ;; share a hash.
   (let [specs [{:type "function" :function {:name "read" :description "Read a file"}}]
-        [turn] (turns-of
-                [(client 0 (user "u1" "hi"))
-                 (system-prompt 10 "S")
-                 (record 15 "model/start" {:model "deepseek-chat" :base-url "http://x/v1" :tools specs})
-                 (record 16 "model/end" {})
-                 (record 17 "model/start" {:model "deepseek-chat" :base-url "http://x/v1"})
-                 (record 18 "model/end" {})
-                 finished
-                 (message 20 (assistant "ok"))])]
-    (is (= [{:index 0 :model "deepseek-chat" :tools specs}
-            {:index 1 :model "deepseek-chat"}]
-           (mapv #(select-keys % [:index :model :tools]) (:calls turn)))
-        "one entry per call, in order; the second call sent no table and says so by omission"))
+        read-back (fn [[turn]]
+                    (mapv #(select-keys % [:index :model :toolsNamesHash :toolsCount])
+                          (:calls turn)))]
+    (testing "an OLD record still carries the table, and its signature is derived here"
+      (let [[turn] (turns-of
+                   [(client 0 (user "u1" "hi"))
+                    (system-prompt 10 "S")
+                    (record 15 "model/start" {:model "deepseek-chat" :base-url "http://x/v1" :tools specs})
+                    (record 16 "model/end" {})
+                    (record 17 "model/start" {:model "deepseek-chat" :base-url "http://x/v1"})
+                    (record 18 "model/end" {})
+                    finished
+                    (message 20 (assistant "ok"))])]
+        (is (= [{:index 0 :model "deepseek-chat"
+                 :toolsNamesHash (tools/names-hash specs) :toolsCount 1}
+                {:index 1 :model "deepseek-chat"}]
+               (read-back [turn]))
+            "one entry per call, in order; the second call sent no table and says so by omission")))
+    (testing "a NEW record carries the signature itself, and reads the same way"
+      (let [[turn] (turns-of
+                   [(client 0 (user "u1" "hi"))
+                    (system-prompt 10 "S")
+                    (record 15 "model/start" {:model "deepseek-chat" :base-url "http://x/v1"
+                                              :tools-names-hash (tools/names-hash specs)
+                                              :tools-count 1})
+                    (record 16 "model/end" {})
+                    finished
+                    (message 20 (assistant "ok"))])]
+        (is (= [{:index 0 :model "deepseek-chat"
+                 :toolsNamesHash (tools/names-hash specs) :toolsCount 1}]
+               (read-back [turn]))))))
 
   (testing "a record from before the model lines has no :calls at all"
     (let [[turn] (turns-of [(client 0 (user "u1" "hi"))
@@ -794,6 +815,13 @@
           (is (= "system" (:kind (first items))) "the turn opens with the system message")
           (is (= written (:text (by "system")))
               "the system item IS the line the edge wrote, byte for byte")
+          (is (seq (:tools (by "system")))
+              "and the TOOL TABLE rides the item -- an item is self-contained, so a reader
+               never has to pull a second record to find out what tools the run served")
+          ;; NAME FOR NAME, not map-for-map: the item crossed JSON on the way out.
+          (is (= (map (comp :name :function) (tools/specs thread-id))
+                 (map (comp :name :function) (:tools (by "system"))))
+              "it is the very table this session served, name for name")
           (is (= "看看这个项目" (:text (by "user"))))
           (is (= "no-such-tool" (:name (by "tool")))
               "the tool call the model asked for, name and arguments and all")

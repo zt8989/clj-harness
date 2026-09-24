@@ -511,7 +511,12 @@
        ;; parent before every line, and runs the carry-back as its prepare step
        ;; (`record/prepare-with!`, installed in `start!`). Doing either here would be a
        ;; second place deciding when a file exists and what it already holds.
-       (record/append! thread-id (log-file-for thread-id) line lands)))))
+       (record/append! thread-id (log-file-for thread-id) line lands))
+     ;; THE METER'S BAND IS KEPT HERE (ticket 03): every row goes through this one path, so
+     ;; the run-start pressure reading (`pressure/log-pressure`) never has to read the record
+     ;; again -- it answers from the band this line just updated. Cheap by construction: it
+     ;; looks at four kinds and a thread it has never seen is not touched at all.
+     (pressure/meter-row! thread-id run-id kind payload extra))))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -1100,41 +1105,6 @@
                            ;; that is exactly `entries` -- the client's own messages
                            ;; (already in the wire's shape) plus what the birth wrote.
                            (ag/conversation-snapshot entries))]
-            ;; ONE ROW PER ENTRY, AND THE LINE THAT CARRIES IT IS THE LINE THAT NUMBERS
-            ;; IT (`.scratch/jsonl-two-kinds` 票 02): the action's entries are `message`
-            ;; rows now -- each with ITS OWN identity (the envelope's `:id`, the name the
-            ;; session and the fold dedupe by) and its own number (`land-at!` is handed the
-            ;; offset of the very line it wrote, so a window's `beforeSeq` cuts where the
-            ;; record does). The `input` row that used to carry them all is gone; what it
-            ;; also carried (the whole inbound vector on every run) was the second copy
-            ;; this ticket deletes.
-            ;;
-            ;; WHOSE ELEMENT OF THE ARRAY IT WAS IS THE ENVELOPE'S `:source` (owner,
-            ;; 2026-09-21: a `message` row IS an element of the messages array the model
-            ;; was handed, so the row has to say who put it there). The payload stays the
-            ;; VERBATIM provider message -- `model-view` is asked for it here because the
-            ;; record keeps what the MODEL read, and the card part an opening entry carries
-            ;; is the screen's, not the provider's (`ag/provider-part` refuses it by name).
-            ;;
-            ;; THE ROWS ARE WRITTEN IN THE ORDER THE ENTRIES WENT IN, which is the order
-            ;; the array was read in -- the same order `land-at!` matches an unnamed entry
-            ;; by.
-            ;; A ROW'S PAYLOAD IS THE MESSAGE THE PROVIDER READS, which is NOT the client's
-            ;; own bytes when a part has to be translated (`ag/provider-messages`: the cards
-            ;; go, an AG-UI `image` becomes the vendor's `image_url`) -- and the ENTRY'S NAME
-            ;; rides the envelope rather than the payload, because a provider message has no
-            ;; such field and the fold dedupes by the envelope's `:id` (票 02).
-            ;;
-            ;; AN ENTRY THAT TRANSLATES TO NOTHING WRITES NO ROW: a lone `reasoning` message
-            ;; is folded into the assistant it precedes, and a row for it would claim the
-            ;; model was handed something it never saw.
-            (doseq [[i m] (map-indexed vector added)
-                    :let [shown (first (ag/provider-messages (sessions/model-view [m])))]
-                    :when (some? shown)]
-              (log! thread-id run-id "message" shown
-                    (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
-                    (cond-> {:source (entry-source m)}
-                      (:id m) (assoc :id (:id m)))))
             ;; AND THE SESSION ACQUIRES ITS NAME FROM THE SAME ARRIVAL, in the same place
             ;; and for the same reason the input frame is written here: this is the one
             ;; moment the server holds 'the person pressed send'. It writes once per
@@ -1165,7 +1135,7 @@
             ;; the point does not dispatch at all. A declaration at that point that
             ;; says no lands in the catch below as an ordinary refusal, with the
             ;; hook's own words as the RUN_ERROR reason.
-            (let [[provider messages decisions resolved injected]
+            (let [[provider messages decisions resolved injected sys]
                 (try (let [;; THE PROVIDER IS THE SESSION'S, NOT THE REQUEST'S. It used to
                            ;; be layered with whatever `:provider` the run body carried,
                            ;; which made the selection a thing a CLIENT said per request --
@@ -1174,7 +1144,12 @@
                            ;; override is written and where the change is recorded), and a
                            ;; run is served by whatever that action left in force. `input`
                            ;; is not consulted here at all, which is the point.
-                           provider (providers/current-provider thread-id)]
+                           provider (providers/current-provider thread-id)
+                           ;; THE ASSEMBLY AND ITS SIGNATURE, ASKED FOR ONCE. `sys` is
+                           ;; assembled* -- the text AND the hash of the hooks that wrote
+                           ;; it -- because the system row below has to carry both, and a
+                           ;; second assembly would be a second answer (`cap.system-prompt`).
+                           sys (system-prompt/assemble* thread-id)]
                        ;; THE OPENING THAT COULD NOT BE READ, raised here -- now that the
                        ;; conversation holds what the person sent -- so it lands in this
                        ;; try's own catch, beside every other could-not-start failure, and
@@ -1238,7 +1213,7 @@
                              ;; one thing `ag/provider-part` refuses by name, so the two
                              ;; halves go through `sessions/model-view` together.
                              assembled (ag/inbound (sessions/model-view (into history added))
-                                                   (system-prompt/assemble thread-id)
+                                                   (:text sys)
                                                    nil)
                              applied   (project/before-llm assembled thread-id)
                              injected  (subvec applied (count assembled))]
@@ -1249,7 +1224,8 @@
                           ;; same answer `provider` above resolved, and the map the
                           ;; provider/init and provider/changed lines are written from.
                           (providers/resolve-provider thread-id)
-                          injected]))
+                          injected
+                          sys]))
                      (catch Throwable t
                        ;; A run that could not even be set up -- no provider, a
                        ;; refused model -- is reported to the client as a
@@ -1262,6 +1238,74 @@
                                            (convert (ev/run-error (ex-message t))))]
                          (emit frame))
                        nil))]
+            ;; The provider timeline, part 1: ONE init line per session, on its first run.
+            ;; IT COMES BEFORE THE PROMPT, and that is a decision: the init is an EVENT row
+            ;; (the timeline), the prompt is the array's first MESSAGE row -- so putting the
+            ;; init first costs nothing and keeps "a reader meets what served the
+            ;; conversation before it meets the conversation" true even though the prompt is
+            ;; now the record's first message row. Later runs of the same thread do not
+            ;; repeat it -- the timeline is init plus changes, not a snapshot per run.
+            (when (and (some? provider)
+                       (nil? (providers/pinned-provider thread-id))
+                       (claim-once! init-logged thread-id))
+              (log! thread-id run-id "provider/init"
+                    (provider-line provider (:source resolved))))
+            ;; ------------------------------------------------------- the prompt comes first
+            ;; THE SYSTEM ROW IS WRITTEN FIRST, BEFORE THE ACTION'S OWN ENTRIES, because a
+            ;; `message` row IS an element of the array the model read and the prompt is that
+            ;; array's FIRST element: written this way the record's `message` rows come out
+            ;; in the array's own order -- `role=system`, then what the person said, then
+            ;; what the run returned. That is also what lets `harness.edge.trajectory`
+            ;; open every run at its prompt rather than at whichever entry landed first.
+            ;;
+            ;; WRITTEN WHENEVER THE ASSEMBLY SUCCEEDED, PROVIDER OR NOT: the content is the
+            ;; assembled text (prompt.md's frozen opening with each SystemPrompt hook's text
+            ;; behind it), and the ENVELOPE says who put it there (`:source`) plus the
+            ;; bytes' SHA-256 (`:hash`) -- so 'was this the same prompt as last run' is
+            ;; answerable without diffing four kilobytes, which is what the provider's
+            ;; prefill rests on. A run whose ASSEMBLY failed writes no row (there is no
+            ;; prompt to describe) and this `when` is what says so; its entries' rows below
+            ;; are still written.
+            ;;
+            ;; THE TABLE RIDES THE ENVELOPE (`:tools`), NOT THE CONTENT: a `<tools>` block in
+            ;; the message would be read by the model a second time, and paid for -- while the
+            ;; envelope is exactly where `log!` keeps a field that belongs to the ROW
+            ;; (`:source`, `:hash`) and `harness.edge.replay/payload` keeps it out of the
+            ;; message. So the record carries the whole table and the model never sees it.
+            ;; See ADR 0004.
+            (when (some? sys)
+              (let [prompt (:text sys)]
+                (log! thread-id run-id "message" {:role "system" :content prompt} nil
+                      {:source "system-prompt" :hash (system-prompt/digest prompt)
+                       :hooks-names-hash (:hooks-names-hash sys)
+                       :tools (tools/specs thread-id)})))
+            ;; ONE ROW PER ENTRY, AND THE LINE THAT CARRIES IT IS THE LINE THAT NUMBERS IT
+            ;; (`.scratch/jsonl-two-kinds` 票 02): the action's entries are `message` rows
+            ;; now -- each with ITS OWN identity (the envelope's `:id`, the name the session
+            ;; and the fold dedupe by) and its own number (`land-at!` is handed the offset of
+            ;; the very line it wrote, so a window's `beforeSeq` cuts where the record does).
+            ;;
+            ;; WRITTEN EVEN WHEN THE RUN DOES NOT START, which is why this sits OUTSIDE
+            ;; `(when provider ...)`: the person's own message must enter the CONVERSATION
+            ;; even when the run it was sent for never starts, or a reload (which reads the
+            ;; LOG) would show a question the session has no record of.
+            ;;
+            ;; WHOSE ELEMENT OF THE ARRAY IT WAS IS THE ENVELOPE'S `:source` (owner,
+            ;; 2026-09-21: a `message` row IS an element of the messages array the model was
+            ;; handed, so the row has to say who put it there). The payload stays the
+            ;; VERBATIM provider message -- `model-view` is asked for it here because the
+            ;; record keeps what the MODEL read. THE ROWS ARE WRITTEN IN THE ORDER THE
+            ;; ENTRIES WENT IN, which is the order the array was read in -- the same order
+            ;; `land-at!` matches an unnamed entry by. AN ENTRY THAT TRANSLATES TO NOTHING
+            ;; WRITES NO ROW: a lone `reasoning` is folded into the assistant it precedes, and
+            ;; a row for it would claim the model was handed something it never saw.
+            (doseq [[i m] (map-indexed vector added)
+                    :let [shown (first (ag/provider-messages (sessions/model-view [m])))]
+                    :when (some? shown)]
+              (log! thread-id run-id "message" shown
+                    (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
+                    (cond-> {:source (entry-source m)}
+                      (:id m) (assoc :id (:id m)))))
             (when provider
               ;; THE RUN'S FIRST LINE IN THE PROCESS LOG, and the anchor every later
               ;; line about this run is read against: a run whose start has no
@@ -1284,16 +1328,6 @@
               ;; ticket's.
               (when (claim-once! session-started thread-id)
                 (hook/emit :session-start {:source "new"}))
-              ;; The provider timeline, part 1: ONE init line per session, on its
-              ;; first run. It lands after the input line and before the first
-              ;; message line, so a reader meets "here is what this conversation is
-              ;; served by" before it meets the conversation. Later runs of the same
-              ;; thread do not repeat it -- the timeline is init plus changes, not a
-              ;; snapshot per run.
-              (when (and (nil? (providers/pinned-provider thread-id))
-                         (claim-once! init-logged thread-id))
-                (log! thread-id run-id "provider/init"
-                      (provider-line provider (:source resolved))))
               ;; The decision record: what the human answered, next to the input that
               ;; carried it. The same verdict also lands on the resumed call's
               ;; tools/pre-execute line, keyed by toolCallId -- this row is the one
@@ -1334,21 +1368,6 @@
               ;; trace: it is server-side, it never becomes a frame, and this line is
               ;; where its weight is on the record. (The hook/SystemPrompt line records
               ;; the same run of it.)
-              ;; THE SYSTEM MESSAGE IS A `message` ROW, because a `message` row IS an element
-              ;; of the array the model read (owner, 2026-09-21: "所谓 message 就是送给大模型
-              ;; 那些 message 数组的超集"). It goes first, which is where it sat in that array,
-              ;; and the ENVELOPE says who put it there (`:source "system-prompt"`) plus the
-              ;; SHA-256 of those bytes (`:hash`) -- so 'was this the same prompt as last run'
-              ;; is answerable without diffing four kilobytes, which is what the provider's
-              ;; prefill (prompt cache) rests on. The payload stays the verbatim provider
-              ;; message, as every message row's does.
-              ;;
-              ;; WRITTEN PER RUN, NOT ONCE: the assembled text is recomputed every run (the
-              ;; binding moves, a hook is switched), so each run's row is what THAT run was
-              ;; handed -- a reader asks the row, not a carry-forward.
-              (let [prompt (or (some #(when (= "system" (:role %)) (:content %)) messages) "")]
-                (log! thread-id run-id "message" {:role "system" :content prompt} nil
-                      {:source "system-prompt" :hash (system-prompt/digest prompt)}))
               ;; WHAT THIS RUN DERIVED FOR ITSELF, as message rows (票 02). These are the
               ;; injections folded in beside the conversation -- a body an earlier turn
               ;; loaded, a job that ended between two runs: ordinary user messages to the
@@ -1364,7 +1383,7 @@
               ;; lines are still with the writer; the anchor comes from the file, where the
               ;; previous call has long landed.
               (log! thread-id run-id "context/pressure"
-                    (pressure/log-pressure (log-file-for thread-id) messages
+                    (pressure/log-pressure thread-id (log-file-for thread-id) messages
                                           (:context-window provider)))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
               ;; stream closes via :run/end's RUN_FINISHED (or RUN_ERROR), or via
@@ -1404,7 +1423,12 @@
                                                                                (if (= "read" name)
                                                                                  content
                                                                                  (spill/slip thread-id content)))
-                                                             :before-llm project/before-llm})]
+                                                             :before-llm project/before-llm
+                                                             ;; THE EDGE'S HALF OF THE model/start
+                                                             ;; SIGNATURE: the byte measure the
+                                                             ;; kernel does not own (see
+                                                             ;; `harness.edge.context/tool-signature`).
+                                                             :tool-signature context/tool-signature})]
                 (loop []
                   (when-let [ev (async/<! events)]
                     (if (= :run/done (:type ev))
@@ -1916,8 +1940,12 @@
                 ;; task above. The opening blocks are NOT spliced in here: they enter a
                 ;; conversation at its birth (`.scratch/session-opening`), and this
                 ;; conversation has exactly one birth -- the entry just written.
+                ;; THE SAME ASSEMBLY + SIGNATURE THE AGENT ROUTE ASKS FOR: the
+                ;; subagent's `<subagent>` block comes from this capability's own
+                ;; SystemPrompt row, and the hash is what the row below keeps.
+                sys       (system-prompt/assemble* thread-id)
                 assembled (ag/inbound (sessions/model-view (sessions/messages thread-id))
-                                      (system-prompt/assemble thread-id)
+                                      (:text sys)
                                       nil)
                 ;; WHAT THE PRE-LLM STEP DERIVED FOR THIS RUN (a skill body, a job's
                 ;; ending) rides beside the conversation. The agent route's lines are
@@ -1934,12 +1962,16 @@
             ;; is told which subagent it is and what it cannot do.
             (let [prompt (or (some #(when (= "system" (:role %)) (:content %)) messages) "")]
               (log! thread-id run-id "message" {:role "system" :content prompt} nil
-                    {:source "system-prompt" :hash (system-prompt/digest prompt)}))
+                    {:source "system-prompt" :hash (system-prompt/digest prompt)
+                     :hooks-names-hash (:hooks-names-hash sys)
+                     ;; the same envelope `:tools` the agent route writes -- see there.
+                     :tools (tools/specs thread-id)}))
             (log-messages! thread-id run-id injected)
             (log! thread-id run-id "provider/init" (provider-line provider :inherited))
             (let [events (loop/run-chan provider messages {:thread-id  thread-id
                                                            :resume     []
-                                                           :before-llm project/before-llm})]
+                                                           :before-llm project/before-llm
+                                                           :tool-signature context/tool-signature})]
               (loop []
                 (if-let [ev (async/<!! events)]
                   (if (= :run/done (:type ev))
@@ -4697,18 +4729,26 @@
   (try
     (locking compaction-lock
       (when-some [f (replay/find-log (home/projects-dir) stem)]
-        (let [records (replay/read-records f)
-              ratios  (compaction/config stem)
-              ;; 1. THE FREE STEP: elide oversized tool results, no model call.
-              pruned  (prune-results! stem records)
-              records (or (:records pruned) records)
-              ;; 2. RE-MEASURE over what the model would now be handed.
-              answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
-          (when (and (:thresholdTokens answer)
-                     (>= (:pressureTokens answer) (:thresholdTokens answer))
-                     (not (compaction/lock-active? records)))
-            (when-some [provider (providers/current-provider stem)]
-              (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))
+        (let [ratios (compaction/config stem)
+              ;; 1. THE CHEAP CHECK (ticket 03): the meter band answers 'how full is the next
+              ;;    request' WITHOUT reading the record, so a session nowhere near the
+              ;;    threshold never touches the file -- which is almost every run.
+              quick  (pressure/band-pressure stem f (sessions/messages stem) ratios)]
+          (when (and (:thresholdTokens quick)
+                     (>= (:pressureTokens quick) (:thresholdTokens quick)))
+            ;; 2. AT OR OVER THE THRESHOLD, and only now is the record worth reading: the
+            ;;    free pruning step and the lock check both need it, and pruning can bring a
+            ;;    view back under the threshold on its own.
+            (let [records (replay/read-records f)
+                  pruned  (prune-results! stem records)
+                  records (or (:records pruned) records)
+                  ;; 3. RE-MEASURE over what the model would now be handed.
+                  answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
+              (when (and (:thresholdTokens answer)
+                         (>= (:pressureTokens answer) (:thresholdTokens answer))
+                         (not (compaction/lock-active? records)))
+                (when-some [provider (providers/current-provider stem)]
+                  (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
   nil)

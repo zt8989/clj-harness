@@ -30,7 +30,8 @@
   (:require [clojure.data.json :as json]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
-            [harness.edge.replay :as replay]))
+            [harness.edge.replay :as replay]
+            [harness.kernel.tools :as tools]))
 
 ;; ----------------------------------------------------------------- measured size
 
@@ -45,6 +46,21 @@
   against a tool table written in ASCII."
   [value]
   (count (json/write-str value :escape-unicode false)))
+
+(defn tool-signature
+  "SPECS -> the small statement of a request's tool table that a `model/start` line
+  keeps (harness.kernel.event): the NAME set as a hash, the count, and the size in
+  characters as this record spells it (`size-of`). nil for an empty table, which
+  writes no `:tools-*` key at all.
+
+  THE EDGE IS WHERE THIS LIVES because `size-of` is the wire's character rule and the
+  kernel does not own it. The kernel owns the MECHANISM -- `harness.kernel.loop`
+  hands the signature through, `harness.kernel.tools` owns the name hash -- and this
+  is the capability half, the one number that has to be measured rather than hashed.",
+  [specs]
+  (when (seq specs)
+    (assoc (tools/default-signature specs)
+           :tools-bytes (size-of specs))))
 
 ;; --------------------------------------------------------------------- the call
 
@@ -149,7 +165,10 @@
         system   (filter #(= "system" (:role %)) messages)
         rest     (remove #(= "system" (:role %)) messages)]
     [["system"       (reduce + 0 (map size-of system))]
-     ["tools"        (size-of (or (:tools start-payload) []))]
+     ["tools"        (if-some [b (:tools-bytes start-payload)]
+                       b
+                       ;; AN OLD RECORD KEEPS THE TABLE, and its size is still the answer.
+                       (size-of (or (:tools start-payload) [])))]
      ["conversation" (reduce + 0 (map size-of rest))]]))
 
 (defn- apportion
