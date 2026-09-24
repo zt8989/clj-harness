@@ -96,6 +96,15 @@
 
 (defn- read-json [resp] (json/read-str (.body resp) :key-fn keyword))
 
+(defn- trajectory-of
+  "The trajectory route as the CLIENT reads it: NDJSON (ticket 06 of
+  `.scratch/events-mux-and-host`). The first line is the header, every line after it is
+  one turn -- folded back into the payload the route used to answer with."
+  [resp]
+  (let [lines  (remove str/blank? (str/split-lines (.body ^HttpResponse resp)))
+        parsed (mapv #(json/read-str % :key-fn keyword) lines)]
+    (assoc (first parsed) :turns (vec (rest parsed)))))
+
 (defn- frames
   "The SSE body as maps. The wire shape is `data: {json}` lines, which is what the
   runner writes. `.body`, not `(:body ..)`: a java.net.http response is not a map,
@@ -520,7 +529,7 @@
            (post-run thread)
            (let [child (:thread-id (subagent-log thread))
                  _     (wait-for thread (fn [ls] (seq (messages-of ls "tool"))) 4000)
-                 mine  (read-json (api-call :get (str "/api/threads/" child "/trajectory") nil))
+                 mine  (trajectory-of (api-call :get (str "/api/threads/" child "/trajectory") nil))
                  its   (read-json (api-call :post (str "/api/threads/" child "/rebuild") "{}"))
                  stem  (read-json (api-call :post (str "/api/threads/" thread "/rebuild") "{}"))]
              (testing "the trajectory is its own"

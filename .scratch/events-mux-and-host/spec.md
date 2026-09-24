@@ -223,3 +223,32 @@ close 原本替读者收尾，而下行的读者只认终帧。
 
 验证：后端全量 **1148 / 13189 / 0**；ui **126**、typecheck、build 过；三份真浏览器走查
 （reload-mid-run、两窗口侧栏、子 agent 面板）**ALL GREEN**。
+
+## 落地（2026-09-24）：票 06
+
+**一轮停下来只留答案，轨迹点开才按需流式取。** 票面那几句落成的形状：
+
+- **折叠的判据多了一条「有没有答案」。** `lib/turns.ts` 长出 `turnConclusion`（纯算术、零 import）：
+  一轮里**最后一条带非空正文**的消息是结论，`undefined` 才是「没有回答」。`turn-steps.tsx` 的
+  `useStepFold` 因此多一个 `"answer"`（折着的结论消息），并新增 `useFoldedAnswer`；`thread.aui.tsx`
+  据此：折起来的答案**只画正文**（它自己的 `reasoning` / `tool-call` 一并藏起），一轮**没有结论**
+  时最后一条也按 `"step"` 收起来——不再把最后一次思考或工具调用留在外面冒充答案。运行中的那一轮照旧永远展开。
+- **轨迹是流式的、只有被问到才取。** `harness.edge.trajectory/fold-trajectory` 把折法拆出一个 emit：
+  一轮**只要后面又开了一轮**（或记录到底）就是最终的，折完就吐；`records->trajectory` 现在就是
+  `fold-trajectory` 的空 emit 版。路由（`http/trajectory-get`）改成 **NDJSON**：首行是头
+  （`:threadId` / `:incomplete` / `:behind`），其后一轮一行。客户端 `lib/trajectory.ts` 边读边回调，
+  `trajectory-view.tsx` 每落一个 turn 画一次。**`TrajectoryView` 只为 `Trajectory` 这一栏挂载**
+  （`app.tsx`），所以 `对话` 一栏一个轨迹请求都不发——下行只承载会话内容，这条没有给它加字段。
+
+**一处没做到的，说清楚**：服务端的**三次整份扫描**（`run-segments` / `tool-lifecycles` / `call-index`）
+仍然先跑完才吐第一轮，所以「边折边吐」目前是**逐轮折、逐轮吐**，不是「边读边折」。把这三趟也流式化是
+`.scratch/session-as-kernel/issues/12-trajectory-streams-its-fold.md`（票 12）的事——票 06 把**浏览器这一半**
+（点开才取、边到边画）落到位，票 12 落地后服务端那半接上即可，不需要再动客户端。
+
+验证：`harness.edge.trajectory-test` **22 / 97 / 0**（新增 `the-fold-hands-over-each-turn-once-and-in-order`、
+端点的 NDJSON 读取）；`harness.edge.delegation-test` 10 / 64 / 0（子 agent 的轨迹读取器改走 NDJSON）；
+后端全量 **1233 / 13515 / 1**（唯一那条红是既有的 fork 子进程 `cap.claims-test`，与本次无关）；
+ui **131**（新增 `turns` 那条结论判据）、typecheck、build 过；真浏览器走查
+`walkthrough-fold.mjs` **ALL GREEN**（折着只剩答案、没有最后一次思考、点开步骤回来、轨迹栏按需加载），
+**并且做了负控**：把 `useFoldedAnswer` 退回 `false` 重跑，`the last thought is NOT on screen` 变 **RED**
+（答案那条消息自己的 `reasoning` 会露出来），装回去再跑回 ALL GREEN。

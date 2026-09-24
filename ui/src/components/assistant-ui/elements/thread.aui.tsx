@@ -36,7 +36,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
-import { TurnStepsTrigger, useStepFold, useTurnFolded } from "@/components/turn-steps";
+import { TurnStepsTrigger, useFoldedAnswer, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 // LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
@@ -614,8 +614,12 @@ const AssistantMessage: FC = () => {
   // which is ours: the boundary of a turn and the arithmetic behind the summary
   // line are in `lib/turns.ts`. `fold === "none"` means "draw this message exactly
   // as this file always did".
+  // `fold === "answer"` and `foldedAnswer` are the folded turn's CONCLUSION: the one
+  // message a folded turn still shows, and only what it SAID -- its reasoning and tool
+  // calls are steps like the rest, and the fold puts those away (see `useStepFold`).
   const fold = useStepFold();
   const folded = useTurnFolded();
+  const foldedAnswer = useFoldedAnswer();
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -640,7 +644,7 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-content"
         className={cn(
           "text-foreground px-2 leading-relaxed wrap-break-word",
-          fold === "head" && folded && "hidden",
+          fold === "head" && folded && !foldedAnswer && "hidden",
         )}
       >
         <MessagePrimitive.GroupedParts
@@ -651,6 +655,21 @@ const AssistantMessage: FC = () => {
           })}
         >
           {({ part, children }) => {
+            // A FOLDED ANSWER KEEPS ONLY WHAT WAS SAID. Reasoning and tool calls are
+            // the steps that produced the answer, and a folded turn puts the steps away
+            // -- the answer message's own included. `foldedAnswer` is true for exactly
+            // that message while the turn is folded, and for nothing else.
+            if (
+              foldedAnswer &&
+              (part.type === "group-chainOfThought" ||
+                part.type === "group-reasoning" ||
+                part.type === "group-tool" ||
+                part.type === "reasoning" ||
+                part.type === "tool-call" ||
+                part.type === "indicator")
+            ) {
+              return null;
+            }
             switch (part.type) {
               case "group-chainOfThought":
                 return <div data-slot="aui_chain-of-thought">{children}</div>;

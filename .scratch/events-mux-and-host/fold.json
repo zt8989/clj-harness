@@ -1,0 +1,20 @@
+{
+  "turns": [
+    {
+      "reasoning": "第一次思考：先读一眼 deps.edn，确认依赖有没有变。",
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "read",
+          "arguments": { "path": "deps.edn" }
+        }
+      ]
+    },
+    {
+      "reasoning": "第二次思考：读完了，依赖没变，可以答了。",
+      "reasoning-after": "（补一句：deps.edn 里没有新增依赖。）",
+      "content": "deps.edn 读完了，依赖没变。这是一轮有结论的回答。"
+    }
+  ]
+}

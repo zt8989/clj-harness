@@ -393,6 +393,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   轮的**边界是数出来的**（相邻的助手消息，两端的邻居说话），算术全在 `lib/turns.ts`（零 import，
   UI 套件直接当数测），UI 在 `components/turn-steps.tsx`。**那一行不是当年删掉的「N tool call」组头回来**：
   那个头在**每个工具调用**前面、计数恒为 1，这一行是**一整轮**一行。
+- **折起来只留答案，且「有没有答案」是一条判据**（`lib/turns.ts` 的 `turnConclusion`）：折着的那一轮，
+  除答案那一条正文，思考行与工具行一条都不留；答案那条消息自己的 `reasoning` / `tool-call` 也一并藏起
+  （`thread.aui.tsx` 的 `foldedAnswer`）——「说了什么」留下，「怎么到的」收走。一轮**没有结论**
+  （最后一条没有非空正文：崩了、中途停、只调了工具）时连最后一条也收起来，只留摘要行；
+  正在跑的那一轮永远不折（`turnIsSettled` 已经挡住它）。
 - **composer 的四个选择器是一个可搜索的浮层，不是原生 `<select>`**（`components/picker.tsx`）：
   项目、分支、model、思考档都是「点一下 → 弹出一个带搜索框的列表」。列表**可以按组，但只有一层**——
   model 按**供应商**一行一组、底下是它自己的 model，一条平铺的清单，不是「先选厂商、再选 model」；
@@ -693,6 +698,11 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
   绝不拿「这个会话今天有什么」去填。
+- **它是流式的，而且只有被问到才取。** 路由答的是 **NDJSON**（首行是头、其后一轮一行，
+  `harness.edge.trajectory/fold-trajectory` 折完一轮就吐一轮），`lib/trajectory.ts` 边收边画，
+  `trajectory-view.tsx` 每落一个 turn 就 `setPayload` 一次——长记录不再等整份折完才画第一轮。
+  组件**只在 `Trajectory` 这一栏被打开时挂载**（`app.tsx` 的视图切换），所以 `对话` 一栏不发这个
+  请求：下行只承载对话本身，轨迹是按需取的那一半。
 - **注入物整场只画一次。** 服务端没有会话，所以每个 run 都会把开场块重新拼一遍、把历史里还留着的
   `/<名字>` 重新派生一遍——照搬「这个 run 扛了什么」，同一段字节就会画在每个 turn 底下，5 轮的会话看起来像
   开场发生了 5 次，**那是自造**。所以判据是**整段文本的字节**：没变就不再画（开场块只在第一轮），变了的那一轮再画一次

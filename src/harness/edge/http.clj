@@ -2959,7 +2959,7 @@
   AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
   RECORD's trajectory, and the record can be behind the conversation being written to
   it. Absent means nothing is pending."
-  [stem]
+  [req stem]
   (let [read (sessions/read-records stem)]
     (cond
       (some? (:missing read))
@@ -2969,13 +2969,31 @@
       (api-response 400 {:error (:error read) :threadId stem})
 
       :else
-      (let [folded (try {:ok (trajectory/records->trajectory (:ok read))}
-                        (catch Throwable t {:error (ex-message t)}))]
-        (if (some? (:error folded))
-          (api-response 400 {:error (:error folded) :threadId stem})
-          (let [behind (record/pending-count stem)]
-            (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                                (pos? behind) (assoc :behind behind)))))))))
+      (let [records (:ok read)
+            behind  (record/pending-count stem)
+            header  (cond-> {:threadId stem :incomplete (stats/incomplete? records)}
+                      (pos? behind) (assoc :behind behind))
+            headers (merge {"Content-Type" "application/x-ndjson; charset=utf-8"}
+                           (cors-headers (request-origin req)))]
+        (hk/as-channel
+         req
+         {:on-open  (fn [ch]
+                      ;; ON-OPEN RUNS ON http-kit'S OWN THREAD, after this ring map was
+                      ;; returned -- so a throw here is a silently dropped connection
+                      ;; rather than a 500. The fold is netted and the stream simply ends.
+                      (try
+                        ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
+                        (hk/send! ch {:headers headers
+                                      :body    (str (json/write-str header) "\n")}
+                                  false)
+                        ;; THEN EACH TURN THE MOMENT THE FOLD CAN NO LONGER CHANGE IT.
+                        (trajectory/fold-trajectory
+                         records
+                         (fn [turn] (hk/send! ch (str (json/write-str turn) "\n") false)))
+                        (hk/close ch)
+                        (catch Throwable t
+                          (log/error! :trajectory/stream-failed t {:threadId stem}))))
+          :on-close (fn [_ch _status] nil)})))))
 
 
 (defn- frames-get
@@ -4802,7 +4820,7 @@
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
-        [:get "trajectory"] (trajectory-get stem)
+        [:get "trajectory"] (trajectory-get req stem)
         [:get "sofar"]    (sofar-get req stem)
         [:get "page"]     (page-get req stem)
         [:get "delegations"] (delegations-get stem)
