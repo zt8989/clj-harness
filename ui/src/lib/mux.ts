@@ -63,6 +63,16 @@ const subscriptions = new Map<string, Subscription>();
 /// running it. A `Map` of SETS because a page may drive runs on more than one conversation.
 const runSubscriptions = new Map<string, Set<(event: RunFrame) => void>>();
 
+/// HOW FAR EACH RUN'S FRAME STREAM HAS BEEN READ, by conversation -- the `:seq` of the last
+/// run frame this page saw. It is what a reconnecting socket re-declares (`runSince`) so the
+/// server hands back the frames that happened while the socket was down: a run is a PUSH,
+/// and a push nobody heard is gone unless the sender remembered it.
+///
+/// IT RESETS ON `RUN_STARTED`, because the sender's numbering does too (`record-run!` starts a
+/// fresh buffer per run): carrying a finished run's high-water mark into the next one would
+/// ask for frames numbered above anything the new run will ever send.
+const runCursors = new Map<string, number>();
+
 let socket: WebSocket | null = null;
 /// THE NAME OF THE CURRENT SOCKET, minted when it opens. It exists so the HTTP route that
 /// updates the set can address THIS connection; it is thrown away with the socket, and a
@@ -82,10 +92,20 @@ function wantedThreads(): string[] {
 /// THE SET, as the handshake URL and every re-declare spell it. A thread with no window
 /// follower still appears, with a null cursor: the declaration is about WHICH conversations,
 /// and a cursor only matters to the window half.
-export function declaredSet(): Array<{ threadId: string; since: number | null; generation: string | null }> {
+export function declaredSet(): Array<{
+  threadId: string;
+  since: number | null;
+  generation: string | null;
+  runSince: number | null;
+}> {
   return wantedThreads().map((threadId) => {
     const sub = subscriptions.get(threadId);
-    return { threadId, since: sub?.since ?? null, generation: sub?.generation ?? null };
+    return {
+      threadId,
+      since: sub?.since ?? null,
+      generation: sub?.generation ?? null,
+      runSince: runCursors.get(threadId) ?? null,
+    };
   });
 }
 
@@ -120,6 +140,18 @@ function open(): void {
       subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
     } else {
       for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
+      // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the
+      // rest. `RUN_STARTED` RESETS the mark rather than raising it: the sender starts a fresh
+      // numbering per run, and a stale high-water mark would suppress the new run's frames.
+      const seq = frame.seq;
+      // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
+      // so its `type` reads as the window union alone until it is asked for as a string.
+      const type: string = frame.type;
+      if (typeof seq === "number") {
+        if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
+          runCursors.set(frame.threadId, seq);
+        }
+      }
     }
   };
   ws.onclose = () => {
@@ -162,7 +194,14 @@ function ensure(): void {
 function declareThread(threadId: string): Promise<void> | null {
   const sub = subscriptions.get(threadId);
   return declare({
-    subscribe: [{ threadId, since: sub?.since ?? null, generation: sub?.generation ?? null }],
+    subscribe: [
+      {
+        threadId,
+        since: sub?.since ?? null,
+        generation: sub?.generation ?? null,
+        runSince: runCursors.get(threadId) ?? null,
+      },
+    ],
   });
 }
 

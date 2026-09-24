@@ -189,3 +189,17 @@ run 帧，socket 一断，断开那一段的 AG-UI 帧就没了；重连后只�
 或另配一个测试用的读法；那是一次测试面迁移，不在这半个里做。
 
 验证：后端全量 **1147 tests / 13184 assertions / 0 failures**；ui **126**、typecheck、build 过。
+
+### 票 03 收口（同日）：重连补帧
+
+**run 的帧现在被记一段，重连的 socket 把缺口要回去。** `harness.edge.mux` 为每场会话记一份
+**当前 run** 的帧（有界环形，4096 条），`mux-broadcast!` 给每帧编号再发出——父 run 由这里编，
+子 agent 的帧**保留 `run-subagent!` 自己的号**（那是记录与 bus 同一套数，重编会把票 04 的边界弄坏）。
+连接可以在声明里带 `runSince`（自己读到的最后一个号）：服务端把该号之后的帧**重放**给它，再接着推。
+
+客户端 `lib/mux.ts` 记住每场对话的 run 游标，**在 `RUN_STARTED` 上重置**（发送端每条 run 从头编号，
+带着上一条 run 的水位线会去要一个永远不会有编号的区间），重连时在握手 URL 与
+`POST …/subscribe` 的声明里带上它。于是 socket 断在 run 中途、重连之后那一截被补上，AG-UI 的帧流不漏。
+
+验证：`harness.edge.mux-test` 新增 `a-reconnecting-reader-is-handed-the-run-frames-it-missed`
+（9 tests / 32 assertions / 0 failures）；后端全量与 ui 见下。**票 03 到此收口，从 `issues/` 删除。**

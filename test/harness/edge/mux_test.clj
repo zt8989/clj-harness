@@ -22,7 +22,10 @@
   a case that left a connection behind would be the next case's phantom."
   []
   (doseq [tid (keys (sessions/live))] (sessions/drop! tid))
-  (reset! (var-get #'mux/connections) {}))
+  (reset! (var-get #'mux/connections) {})
+  ;; AND THE RUN BUFFERS, which outlive a connection on purpose (that is the point of them) --
+  ;; a case must not inherit another case's remembered frames under the same thread id.
+  (reset! (var-get #'mux/runs) {}))
 
 (use-fixtures :each (fn [f]
                       (forget-everything!)
@@ -165,3 +168,32 @@
         (is (= "mux-run-a" (:threadId frame)))
         (is (= "r1" (:runId frame))))
       (is (= b-before (count @sent-b)) "the other conversation's connection hears nothing"))))
+
+(deftest a-reconnecting-reader-is-handed-the-run-frames-it-missed
+  ;; TICKET 03's remaining criterion: a run is a PUSH, so a socket that drops mid-run loses
+  ;; the gap unless the sender REMEMBERED it. `mux-broadcast!` numbers and remembers; a second
+  ;; connection that declares `runSince` gets the frames after that number.
+  (sessions/touch! "mux-gap")
+  (let [first-sent (atom []) first-ch (fake-channel first-sent)]
+    (#'http/mux-attend! "tok-gap-1" first-ch [{:threadId "mux-gap"}])
+    (#'http/mux-broadcast! "mux-gap" {:type "RUN_STARTED"})
+    (#'http/mux-broadcast! "mux-gap" {:type "TEXT_MESSAGE_CONTENT" :delta "a"})
+    (#'http/mux-broadcast! "mux-gap" {:type "TEXT_MESSAGE_CONTENT" :delta "b"})
+    (let [run-frames (fn [sent]
+                       (->> (frames sent)
+                            (filterv #(contains? #{"RUN_STARTED" "TEXT_MESSAGE_CONTENT"} (:type %)))))]
+      (is (= [1 2 3] (mapv :seq (run-frames first-sent)))
+          "the broadcast numbers its frames from the run's start, and tags each with the thread")
+      (is (= "mux-gap" (:threadId (second (run-frames first-sent)))))
+
+      (testing "a connection that comes back saying how far it got is handed only the rest"
+        (let [second-sent (atom []) second-ch (fake-channel second-sent)]
+          (#'http/mux-attend! "tok-gap-2" second-ch [{:threadId "mux-gap" :runSince 2}])
+          (let [replayed (run-frames second-sent)]
+            (is (= [3] (mapv :seq replayed)))
+            (is (= "b" (:delta (first replayed)))))))
+
+      (testing "a connection that never saw a frame gets the whole run"
+        (let [third-sent (atom []) third-ch (fake-channel third-sent)]
+          (#'http/mux-attend! "tok-gap-3" third-ch [{:threadId "mux-gap"}])
+          (is (= [1 2 3] (mapv :seq (run-frames third-sent)))))))))

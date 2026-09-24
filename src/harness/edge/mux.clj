@@ -96,6 +96,60 @@
         (sessions/unwatch! thread-id (:watch sub)))
       nil)))
 
+(def ^:private run-buffer-size
+  "How many of a conversation's most recent RUN frames are kept for a reader that
+  reconnects. A GAP IS SHORT BY NATURE -- the client re-declares a cursor it held a moment
+  ago -- so this is a bound on memory, not a promise to a reader that was away for a whole
+  turn. `harness.edge.http/mux-broadcast!` is the one writer."
+  4096)
+
+(defonce ^:private runs
+  ;; thread-id -> {:next n :frames [[n frame] ..]} -- the CURRENT run's frames, numbered.
+  ;;
+  ;; WHY THIS EXISTS AT ALL: a run's frames are pushed, and a push that nobody hears is
+  ;; gone (the record has the words, but the AG-UI frame stream a runtime reads does not). A
+  ;; socket that drops mid-run therefore loses the gap unless the sender remembers it. This
+  ;; is that memory, and a client re-declares how far it got (`runSince`) to get the rest.
+  (atom {}))
+
+(defn record-run!
+  "Number FRAME for THREAD-ID's live run, remember it, and answer it WITH its `:seq`.
+ 
+  A FRAME THAT ALREADY CARRIES A NUMBER KEEPS IT: a subagent's frames are numbered by
+  `run-subagent!`'s own counter (the same one the record carries), and renumbering them
+  here would break the boundary the replay and the live tail are joined by. A frame with
+  no number -- a run a page is DRIVING -- gets one from this thread's counter.
+  
+  A RUN_STARTED STARTS A FRESH BUFFER: a new run is not a continuation of the old one's
+  numbering, and a reader that reconnects mid-run must not be handed the previous run's
+  tail."
+  [thread-id frame]
+  (let [tid (str thread-id)
+        reset? (= "RUN_STARTED" (:type frame))
+        [_ after] (swap-vals!
+                   runs
+                   (fn [m]
+                     (let [{:keys [next frames]} (get m tid)
+                           base (if reset? 0 (long (or next 0)))
+                           n    (long (or (:seq frame) (inc base)))
+                           kept (if reset? [] (or frames []))]
+                       (assoc m tid {:next   (max n base)
+                                     :frames (vec (take-last run-buffer-size
+                                                          (conj kept [n (assoc frame :seq n)])))}))))
+        n (first (peek (get-in after [tid :frames])))]
+    (assoc frame :seq n)))
+
+(defn run-frames-after
+  "THREAD-ID's remembered run frames whose number is greater than SINCE, oldest first.
+  SINCE nil means 'I hold nothing', which is what a reader that never saw a frame
+  declares."
+  [thread-id since]
+  (let [{:keys [frames]} (get @runs (str thread-id))
+        since (long (or since 0))]
+    (->> (or frames [])
+         (filter (fn [[n _]] (> (long n) since)))
+         (mapv second))))
+
 (defn channels-for
   "Every connection's channel watching THREAD-ID, for a broadcaster that has a frame of
   its own to send (`harness.edge.http`'s run emitter). `mux-send!` on a closed channel is

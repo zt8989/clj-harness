@@ -3702,13 +3702,26 @@
   (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
 
 (defn- mux-broadcast!
-  "Send ONE frame to every downlink watching THREAD-ID -- a run's own frames, which are not
-  a window change and so have no pump to ride on. A page that is not watching the
-  conversation hears nothing, which is the subscription doing its job."
+  "Number ONE run frame for THREAD-ID, REMEMBER it (so a reader that reconnects can be
+  handed the gap -- `harness.edge.mux/record-run!` keeps a bounded ring, and a frame that
+  already carries a number, a subagent's, keeps it), and send it to every downlink watching
+  the conversation. A page that is not watching hears nothing, which is the subscription
+  doing its job."
   [thread-id frame]
-  (let [payload (mux-frame thread-id frame)]
+  (let [numbered (mux/record-run! thread-id frame)
+        payload  (mux-frame thread-id numbered)]
     (doseq [ch (mux/channels-for thread-id)]
       (mux-send! ch payload))))
+
+(defn- mux-replay-run!
+  "Hand TOKEN's downlink the run frames of THREAD-ID it is missing: everything remembered
+  after RUN-SINCE, oldest first. `nil` is 'I hold nothing' -- a connection that has just
+  subscribed to a run already in flight, and (with a cursor) a socket that dropped mid-run
+  and came back saying how far it got."
+  [token thread-id run-since]
+  (when-some [ch (mux/channel token)]
+    (doseq [frame (mux/run-frames-after thread-id run-since)]
+      (mux-send! ch (mux-frame thread-id frame)))))
 
 (defn- mux-end!
   "Tell one conversation's reader on this downlink that its window is over, naming why.
@@ -3740,7 +3753,8 @@
                        (when-some [tid (:threadId s)]
                          {:threadId   (str tid)
                           :since      (when (number? (:since s)) (long (:since s)))
-                          :generation (:generation s)})))
+                          :generation (:generation s)
+                          :runSince   (when (number? (:runSince s)) (long (:runSince s)))})))
                    parsed))
         []))
     (catch Throwable _ [])))
@@ -3774,7 +3788,7 @@
   enforces: a conversation another live process is serving, or a `generation`/`since` that
   names a window that is over, is TOLD so with an `end` frame rather than half served
   (ADR 0003 decision 6)."
-  [token thread-id since generation]
+  [token thread-id since generation run-since]
   (let [held (claims/holder thread-id)]
     (cond
       (and (some? held) (not (claims/mine? held)))
@@ -3798,15 +3812,19 @@
                           "this conversation is being served under a new generation"
                           (str "the cursor (since=" since ") is older than the oldest"
                                " entry this window still answers from"))))
-            (mux-watch! token thread-id since)))))))
+            (do (mux-watch! token thread-id since)
+                ;; AND THE RUN FRAMES THIS CONNECTION IS MISSING. A window read is a PULL, so
+                ;; a cursor re-reads it; a run is a PUSH, so the frames that happened while a
+                ;; socket was down are only here because `mux-broadcast!` remembered them.
+                (mux-replay-run! token thread-id run-since))))))))
 
 (defn- mux-attend!
   "A downlink just connected: remember it, and subscribe it to everything the handshake
   URL declared."
   [token ch wanted]
   (mux/attach! token ch)
-  (doseq [{:keys [threadId since generation]} wanted]
-    (mux-add! token threadId since generation)))
+  (doseq [{:keys [threadId since generation runSince]} wanted]
+    (mux-add! token threadId since generation runSince)))
 
 (defn- mux-get
   "GET /api/events.mux?subscriber=<token>&sessions=<json> -- the downlink. A WebSocket, or
@@ -3857,7 +3875,7 @@
         (doseq [thread-id (:unsubscribe parsed)]
           (mux/unsubscribe! token thread-id))
         (doseq [sub (:subscribe parsed)]
-          (mux-add! token (:threadId sub) (:since sub) (:generation sub)))
+          (mux-add! token (:threadId sub) (:since sub) (:generation sub) (:runSince sub)))
         (api-response 200 {:subscriber token
                            :threads    (vec (mux/subscriptions token))})))))
 
