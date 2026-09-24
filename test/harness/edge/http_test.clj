@@ -3447,43 +3447,6 @@
                "the door that must pick one conversation still refuses")
            (is (str/includes? (:error (read-json resp)) "2 logs"))))
        ))))
-
-(deftest a-name-can-be-had-without-a-conversation
-  ;; THE MINTING HALF OF `/api/sessions`, and the reason it is a route of its own: the
-  ;; page must be able to hold a name it has not spent, because 「点击新增不立刻会话，
-  ;; 发送才新建」 -- the click opens an empty conversation and writes NOTHING, while the
-  ;; name it shows comes from here (`crypto.randomUUID` is absent on a phone reading a
-  ;; dev server over http://192.168.x.x: 2026-09-23, `.scratch/server-named-sessions`).
-  ;;
-  ;; SO THE TWO HALVES ARE ASSERTED AGAINST EACH OTHER: the GET names something and
-  ;; leaves no trace, and the POST takes that name and makes it a conversation. A route
-  ;; that registered as a side effect would pass the first half and fail the second.
-  (with-server
-   {"name-ran" script}
-   (fn []
-     (testing "a fresh name comes back, in the shape the registering doors mint"
-       (let [resp (api-call :get "/api/ids/new" nil)
-             {:keys [threadId]} (read-json resp)]
-         (is (= 200 (.statusCode resp)))
-         (is (string? threadId))
-         (is (not= "" threadId))
-         (is (re-matches #"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}" threadId)
-             "a v4 uuid, which is what `sessions-post` would have minted itself")))
-     (testing "and asking twice is two names"
-       (let [a (:threadId (read-json (api-call :get "/api/ids/new" nil)))
-             b (:threadId (read-json (api-call :get "/api/ids/new" nil)))]
-         (is (not= a b))))
-     (testing "NOTHING IS WRITTEN -- a name is not a conversation until it is registered"
-       (let [minted (:threadId (read-json (api-call :get "/api/ids/new" nil)))]
-         (is (not (task? minted)) "no row in the flat task list")
-         (is (= [] (projects-holding minted)) "and none in a project")
-         (is (not-any? #(= minted (:threadId %)) (all-listed-rows)))
-         (is (not (.exists (io/file (log-file minted)))) "and no log: nothing said a word")))
-     (testing "and it is a name the registering door takes, unchanged"
-       (let [minted (:threadId (read-json (api-call :get "/api/ids/new" nil)))]
-         (is (= 200 (.statusCode
-                    (api-call :post "/api/sessions" (json/write-str {:threadId minted})))))
-         (is (task? minted) "the same id, now a conversation this home knows"))))))
 (deftest adding-a-project-makes-a-project-with-no-session
   ;; Ticket 05's other half. Without this verb the ONLY way to get a project was
   ;; to bind a session to a directory -- backwards for a product whose sessions

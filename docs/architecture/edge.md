@@ -127,9 +127,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读） |
 | `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的动作到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
-| `/api/ids/new` | GET | **铸一枚会话名，什么都不写**。它是 `/api/sessions` 的铸名那一半，而必须另开一条：`POST` 会落一行，而「新建」的那一刻不该写库。方法说的是有没有 effect，所以没有 effect 的就是 GET。没人花掉的名字不是泄漏（128 位空间里的一枚 uuid，没有任何东西持有它）；命名空间与 `sessions-post` / `project-post` 自铸时同一个，所以这枚 id 交给哪扇门都行（`.scratch/server-named-sessions`） | 无 |
 | `/api/projects` | POST | 让一个目录成为项目（find-or-create） | 无 |
-| `/api/sessions` | POST | 让一条会话**存在**（`{threadId}`，find-or-create）：库里没有就插一行未绑定、无记忆的会话；已经有就原样不动（**不会解绑**）。**这是「一条会话什么时候成为这个家的一条会话」唯一的答案**：页面从 `/api/ids/new` 要来的那枚名字，在第一句真正发出去之前由它登记一次（任务走这一条，项目会话走 `/api/project`——同样认调用方给的 id、同样幂等），这正是「点击新增不立刻会话，发送才新建」要的那一次；而 run 那条边对陌生 id 是 **404**、不再静默创建（`refuse-unknown-session!`，`.scratch/sessions-live-on-the-server` 票 03），所以登记必须发生在这次 run 之前 | 无（只写库里一行，不开任何文件） |
+| `/api/sessions` | POST | 让一条会话**存在**（`{threadId}`，find-or-create）：库里没有就插一行未绑定、无记忆的会话；已经有就原样不动（**不会解绑**）。**这是「一条会话什么时候成为这个家的一条会话」唯一的答案**：页面自己铸的那枚 id 在第一句真正发出去之前由它登记一次（任务走这一条，项目会话走 `/api/project`——同样认调用方给的 id、同样幂等），这正是「点击新增不立刻会话，发送才新建」要的那一次；而 run 那条边对陌生 id 是 **404**、不再静默创建（`refuse-unknown-session!`，`.scratch/sessions-live-on-the-server` 票 03），所以登记必须发生在这次 run 之前 | 无（只写库里一行，不开任何文件） |
 | `/api/projects/<canonical-path>/remove` | POST | 移除项目（= 解绑它的会话，不删日志） | 无 |
 | `/api/mcp` | GET | MCP 账本：服务器、状态、工具清单 | 无（只读） |
 | `/api/mcp` | POST | 本会话启停一个 MCP 服务器 | `mcp/server`（带 `disabled`，runId null） |
