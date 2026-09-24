@@ -517,6 +517,22 @@
     (is (= (trajectory/records->trajectory records) answer)
         "the streaming fold and the one-shot fold are the same fold")))
 
+(deftest the-fold-consumers-twin-is-the-same-fold
+  ;; Ticket 12: `records->trajectory` is the step over the records in memory, and
+  ;; `replay/fold-consumers` drives the SAME step -- so a session that registers the fold (the
+  ;; build walk, ticket 02) or advances it row by row (the write stream, ticket 04) gets this
+  ;; very value back. One fold, three drivers.
+  (let [records (rows [(client 0 (user "u1" "a"))
+                       (client 0 (user "u2" "b"))
+                       (system-prompt 10 "S")
+                       finished
+                       (message 20 (assistant "answered"))])]
+    (is (= (trajectory/records->trajectory records)
+           (trajectory/trajectory-answer
+            (:trajectory (replay/fold-consumers records
+                                                {:trajectory {:init trajectory/trajectory-init
+                                                              :step trajectory/trajectory-step}})))))))
+
 (deftest the-tool-table-a-call-went-out-with
   ;; Ticket 04's read half: a call leaves the table's SIGNATURE -- the name set as a
   ;; hash and the count -- not the table, and the shape a reader gets is the same

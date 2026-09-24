@@ -2958,20 +2958,32 @@
 
   AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
   RECORD's trajectory, and the record can be behind the conversation being written to
-  it. Absent means nothing is pending."
-  [req stem]
-  (let [read (sessions/read-records stem)]
-    (cond
-      (some? (:missing read))
-      (api-response 404 {:error (:missing read) :threadId stem})
+  it. Absent means nothing is pending.
 
-      (some? (:error read))
-      (api-response 400 {:error (:error read) :threadId stem})
+  IT IS ANSWERED FROM THE SESSION'S HELD VIEW WHEN THERE IS ONE (ticket 13): the fold happens
+  once and is kept on the session, so a later ask reads a value rather than opening the file.
+  Otherwise it is ONE STREAMING WALK (`sessions/fold-record`, ticket 12) whose rows go
+  straight into the fold -- a record vector is never built (`sessions/read-records` is not
+  called here any more)."
+  [req stem]
+  (let [;; THE SESSION'S HELD VIEW FIRST (ticket 13): once it exists the fold already happened,
+        ;; and this route reads a value rather than opening the file.
+        held    (sessions/fold-value stem :trajectory)
+        ;; ELSE ONE STREAMING WALK (ticket 12): the record's rows go straight into the fold,
+        ;; never into a vector -- `sessions/read-records` is not called.
+        folded  (when (nil? held)
+                  (sessions/fold-record stem (trajectory/trajectory-init) trajectory/trajectory-step))]
+    (cond
+      (some? (:missing folded))
+      (api-response 404 {:error (:missing folded) :threadId stem})
+
+      (some? (:error folded))
+      (api-response 400 {:error (:error folded) :threadId stem})
 
       :else
-      (let [records (:ok read)
+      (let [payload (if (some? held) held (trajectory/trajectory-answer (:ok folded)))
             behind  (record/pending-count stem)
-            header  (cond-> {:threadId stem :incomplete (stats/incomplete? records)}
+            header  (cond-> {:threadId stem :incomplete (:incomplete payload)}
                       (pos? behind) (assoc :behind behind))
             headers (merge {"Content-Type" "application/x-ndjson; charset=utf-8"}
                            (cors-headers (request-origin req)))]
@@ -2986,10 +2998,9 @@
                         (hk/send! ch {:headers headers
                                       :body    (str (json/write-str header) "\n")}
                                   false)
-                        ;; THEN EACH TURN THE MOMENT THE FOLD CAN NO LONGER CHANGE IT.
-                        (trajectory/fold-trajectory
-                         records
-                         (fn [turn] (hk/send! ch (str (json/write-str turn) "\n") false)))
+                        ;; THEN EVERY TURN (ticket 13 pushes the ones that finalize later).
+                        (doseq [turn (:turns payload)]
+                          (hk/send! ch (str (json/write-str turn) "\n") false))
                         (hk/close ch)
                         (catch Throwable t
                           (log/error! :trajectory/stream-failed t {:threadId stem}))))
