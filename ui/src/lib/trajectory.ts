@@ -92,8 +92,12 @@ export type TrajectoryPayload = {
 export async function trajectoryFor(
   threadId: string,
   onProgress?: (payload: TrajectoryPayload) => void,
+  signal?: AbortSignal,
 ): Promise<TrajectoryPayload | null> {
-  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/trajectory`);
+  /// THE STREAM IS LONG-LIVED (ticket 13 of `.scratch/session-as-kernel`): the route keeps
+  /// the connection open for a held session and PUSHES later turns, so this promise settles
+  /// only when the stream ends -- and the caller aborts it when the view goes away.
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/trajectory`, { signal });
   if (!res.ok || res.body === null) return null;
 
   const reader = res.body.getReader();
@@ -125,7 +129,13 @@ export async function trajectoryFor(
     if (header === null) {
       header = parsed as { threadId: string; incomplete: boolean };
     } else {
-      turns.push(parsed as TrajectoryTurn);
+      /// THE OPEN TURN IS RE-SENT AS IT GROWS: a turn whose `:index` is the one already in
+      /// hand REPLACES it in place, the same rule the window's frames use -- appending it
+      /// would draw the same turn twice.
+      const turn = parsed as TrajectoryTurn;
+      const last = turns[turns.length - 1];
+      if (last !== undefined && last.index === turn.index) turns[turns.length - 1] = turn;
+      else turns.push(turn);
     }
     publish();
   };

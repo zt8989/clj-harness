@@ -29,8 +29,10 @@
   between runs. `harness.edge.stats` counts turns on exactly this rule; this namespace
   groups the actual items by it.
 
-  THE FOLD IS A PURE FUNCTION OVER RECORDS (records->trajectory), for the same reason
-  stats' is: what can be asserted is the interesting part. The file walk (log-trajectory)
+  THE FOLD IS A PURE FUNCTION OVER RECORDS (records->trajectory), and it is ALSO A STEP:
+  the same `trajectory-step` drives `fold-consumers` in memory, the session's build walk
+  (`register-fold!`) and the write stream (`register-step!`) -- ONE fold, three drivers,
+  so the live reading and the offline one cannot drift. The file walk (`log-trajectory`)
   does nothing but the I/O, and THE DIRECTORY IS THE CALLER'S -- this namespace never
   learns where a process keeps its home.
 
@@ -51,6 +53,8 @@
             [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]
             [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
+            [harness.kernel.frames :as frames]
             [harness.kernel.tools :as tools]))
 
 ;; ------------------------------------------------------------------- the runs
@@ -72,6 +76,68 @@
   [row]
   (cond-> (replay/payload row)
     (:id row) (assoc :id (:id row))))
+
+(defn segments-init
+  "The segment machine's opening state: nothing open, nothing closed."
+  [] {:open nil :closed []})
+
+(defn- opens-segment?
+  "The three ways a new segment opens -- see `run-segments` for why each one is."
+  [record current]
+  (and (= "message" (replay/kind record))
+       (or (not= (:runId record) (:run-id current))
+           (and (entry-row? record) (:streaming current))
+           (and (replay/system-prompt? record) (:prompt? current)))))
+
+(defn segments-step
+  "One record into the segment machine: `{:open … :closed […]}`. A segment is CLOSED the
+  moment the NEXT one opens -- a session runs one action at a time, so by then every row of
+  it is written -- and the last one stays open until `segments-answer`, because the record
+  may still be growing."
+  [state [_i record]]
+  (cond
+    (opens-segment? record (:open state))
+    {:open   (cond-> {:run-id       (:runId record)
+                      :prompt?      (replay/system-prompt? record)
+                      :prompt-row   (when (replay/system-prompt? record) record)
+                      :opener       record
+                      :at           (:ts record)
+                      :brought      []
+                      :brought-rows []
+                      :submitted    [(row-message record)]
+                      :returned     []
+                      :calls        []
+                      :streaming    false}
+               (entry-row? record)
+               (assoc :brought      [(row-message record)]
+                      :brought-rows [record]))
+     :closed (cond-> (:closed state) (:open state) (conj (:open state)))}
+
+    (= "message" (replay/kind record))
+    (update state :open
+            (fn [current]
+              (when current
+                (if (:streaming current)
+                  (update current :returned conj (row-message record))
+                  (-> current
+                      (update :submitted conj (row-message record))
+                      (cond-> (replay/system-prompt? record) (assoc :prompt-row record))
+                      (cond-> (entry-row? record)
+                        (-> (update :brought conj (row-message record))
+                            (update :brought-rows conj record))))))))
+
+    (= "event" (replay/kind record))
+    (update state :open (fn [current] (when current (assoc current :streaming true))))
+
+    (or (= "model/start" (replay/kind record)) (= "model/end" (replay/kind record)))
+    (update state :open (fn [current] (when current (update current :calls conj record))))
+
+    :else state))
+
+(defn segments-answer
+  "The closed segments plus the still-open last one, in order."
+  [state]
+  (cond-> (:closed state) (:open state) (conj (:open state))))
 
 (defn run-segments
   "RECORDS split into runs, in order:
@@ -108,83 +174,7 @@
   records are one run, and which side of it is a message on' is one rule -- a second
   implementation of it would be a second chance to disagree about where a run starts."
   [records]
-  (loop [[record & more] records
-         current         nil
-         acc             []]
-    (cond
-      (nil? record)
-      (cond-> acc current (conj current))
-
-      ;; A RUN OPENS AT ITS FIRST MESSAGE ROW (`.scratch/jsonl-two-kinds` 票 02): the `input`
-      ;; row that used to open one is gone, and the message rows are the array the model was
-      ;; handed -- the client's own on a run that brought one, the system prompt on a run
-      ;; that did not. A HARNESS FACT cannot open a run (the fact rows are `event`s), which
-      ;; is the same distinction `harness.edge.replay/runs` draws. `:at` is that row's clock
-      ;; reading (what a turn's own time is drawn from), `:brought` is what the run put into
-      ;; the CONVERSATION (the rows that carry an entry's id, which is what tells an entry
-      ;; from a block a run re-derived for itself), and `:submitted`/`:returned` split at the
-      ;; run's FIRST FRAME, where the input the model read ends and its own output begins.
-      (and (= "message" (replay/kind record))
-           (or (not= (:runId record) (:run-id current))
-               ;; A NEW RUN'S ENTRIES ARRIVE AFTER THE LAST FRAME OF THE ONE BEFORE: a session
-               ;; runs one action at a time, so an ENTRY row that reaches us with a frame
-               ;; already behind it was appended for an array that had not been handed over
-               ;; yet -- a second run in the same thread, and a second segment. (The rows a
-               ;; finished run leaves behind are its own output: `model` and `tool` messages
-               ;; and the blocks it derived, none of them entries.)
-               (and (entry-row? record) (:streaming current))
-               ;; AND A SECOND ARRAY IN THE SAME RUN IS A SECOND SEGMENT TOO: a park that
-               ;; resumed writes the prompt again (another model call was handed the
-               ;; conversation), and its rows must land on the same turn without re-opening
-               ;; it -- which is what `:brought` empty and `fresh` empty together say.
-               (and (replay/system-prompt? record) (:prompt? current))))
-      (recur more (cond-> {:run-id       (:runId record)
-                           :prompt?      (replay/system-prompt? record)
-                           ;; THE RUN'S SYSTEM ROW, kept whole (envelope and all) so its
-                           ;; `:tools` can ride the system ITEM -- an item is self-contained.
-                           :prompt-row   (when (replay/system-prompt? record) record)
-                           :opener       record
-                           :at           (:ts record)
-                           :brought      []
-                           :brought-rows []
-                           :submitted    [(row-message record)]
-                           :returned     []
-                           :calls        []
-                           :streaming    false}
-                    ;; THE ROW THAT OPENED THE RUN CAN BE ONE OF ITS ENTRIES TOO -- and on a
-                    ;; run that brought the client's own message it is, because the action's
-                    ;; rows are written before the run's own (`harness.edge.http`).
-                    (entry-row? record)
-                    (assoc :brought      [(row-message record)]
-                           :brought-rows [record]))
-             (cond-> acc current (conj current)))
-
-      (= "message" (replay/kind record))
-      (recur more
-             (when current
-               (if (:streaming current)
-                 (update current :returned conj (row-message record))
-                 (-> current
-                     (update :submitted conj (row-message record))
-                     ;; an OLDER record's run can open at an entry and reach its system row
-                     ;; later; keep whichever system row this run has.
-                     (cond-> (replay/system-prompt? record) (assoc :prompt-row record))
-                     (cond-> (entry-row? record)
-                       (-> (update :brought conj (row-message record))
-                           (update :brought-rows conj record))))))
-             acc)
-
-      (= "event" (replay/kind record))
-      (recur more (when current (assoc current :streaming true)) acc)
-
-      (= "model/start" (replay/kind record))
-      (recur more (when current (update current :calls conj record)) acc)
-
-      (= "model/end" (replay/kind record))
-      (recur more (when current (update current :calls conj record)) acc)
-
-      :else
-      (recur more current acc))))
+  (segments-answer (reduce segments-step (segments-init) (map-indexed vector records))))
 
 ;; -------------------------------------------------------------------- aligning
 
@@ -272,6 +262,33 @@
 
 ;; ------------------------------------------------------------------ what ran
 
+(defn- life-step
+  "ONE record into the tool-life map. See `tool-lifecycles` for the four moments and why
+  their names in the record do not say which is which."
+  [acc record]
+  (let [payload (replay/payload record)
+        ts      (:ts record)
+        id      (:toolCallId payload)
+        seen    (get acc id)]
+    (case (replay/kind record)
+      "tools/pre-execute"
+      (-> acc
+          (update-in [id :arrivedAt] #(or % ts))
+          (assoc-in [id :outcome] (or (:outcome payload) "pass"))
+          ;; A second arrival for the same id is the resume, which marks the park's end.
+          ;; Later ones overwrite: the last word is the one that stuck.
+          (cond-> (some? (:arrivedAt seen)) (assoc-in [id :resumedAt] ts)))
+
+      "tools/execute"
+      (-> acc
+          (assoc-in [id :executedAt] ts)
+          (assoc-in [id :error] (:error payload)))
+
+      "tools/post-execute"
+      (assoc-in acc [id :closedAt] ts)
+
+      acc)))
+
 (defn- tool-lifecycles
   "toolCallId -> {:arrivedAt :resumedAt :executedAt :closedAt :outcome :error}, from the
   audit lines the seam and the kernel leave behind.
@@ -294,32 +311,17 @@
   as 'it ran in zero seconds'. A PARKED ONE has :resumedAt, and the gap between it and
   :arrivedAt is the time a person spent deciding: real time, and NOT the tool's own."
   [records]
-  (reduce (fn [acc record]
-            (let [payload (replay/payload record)
-                  ts      (:ts record)
-                  id      (:toolCallId payload)
-                  seen    (get acc id)]
-              (case (replay/kind record)
-                "tools/pre-execute"
-                (-> acc
-                    (update-in [id :arrivedAt] #(or % ts))
-                    (assoc-in [id :outcome] (or (:outcome payload) "pass"))
-                    ;; A second arrival for the same id is the resume, which is what marks
-                    ;; the park's end. Later ones overwrite: the last word is the one that
-                    ;; stuck.
-                    (cond-> (some? (:arrivedAt seen)) (assoc-in [id :resumedAt] ts)))
+  (reduce life-step {} records))
 
-                "tools/execute"
-                (-> acc
-                    (assoc-in [id :executedAt] ts)
-                    (assoc-in [id :error] (:error payload)))
-
-                "tools/post-execute"
-                (assoc-in acc [id :closedAt] ts)
-
-                acc)))
-          {}
-          records))
+(defn- calls-step
+  "ONE record into the call index. See `call-index` for why the pair is on the call side."
+  [acc record]
+  (if (= "message" (replay/kind record))
+    (reduce (fn [acc {:keys [id function]}]
+              (assoc acc id {:name (:name function) :argsText (:arguments function)}))
+            acc
+            (:tool_calls (replay/payload record)))
+    acc))
 
 (defn- call-index
   "toolCallId -> {:name … :argsText …}, from every assistant message in the record.
@@ -329,15 +331,7 @@
   carries only the result. So the pair is read from the assistant message here, once,
   instead of by every renderer that wants to show 'name {args}' beside a result."
   [records]
-  (reduce (fn [acc record]
-            (if (= "message" (replay/kind record))
-              (reduce (fn [acc {:keys [id function]}]
-                        (assoc acc id {:name (:name function) :argsText (:arguments function)}))
-                      acc
-                      (:tool_calls (replay/payload record)))
-              acc))
-          {}
-          records))
+  (reduce calls-step {} records))
 
 ;; ---------------------------------------------------------------- the messages
 
@@ -727,37 +721,86 @@
       (seq calls)    (assoc :calls (vec (map-indexed (fn [i call] (assoc call :index i)) calls)))
       (empty? calls) (dissoc :calls))))
 
+(defn trajectory-init
+  "The fold's opening state: the segment machine, the two lookup maps, the turn fold, and the
+  last frame seen (which is what `:incomplete` is read off at the end)."
+  [] {:segments   (segments-init)
+      :life       {}
+      :calls      {}
+      :folding    {:seen #{} :shownSystem nil :turns [] :history []}
+      :last-event nil})
+
+(defn trajectory-step
+  "ONE record into the trajectory's fold -- the step the offline twin (`records->trajectory`),
+  the session's build walk and the write stream all drive (see the namespace docstring).
+
+  A SEGMENT IS FOLDED THE MOMENT IT CLOSES, and it closes the moment the NEXT one opens:
+  `tool-lifecycles` / `call-index` are lookups this segment's rows have already populated by
+  then (a session runs one action at a time), so nothing here waits for the whole record.
+  The still-open last segment is folded by `trajectory-answer`, because the record may still
+  be growing."
+  ;; TWO SHAPES, ONE STEP: the session's seams hand `[value ctx [i row]]` (tickets 02 / 04),
+  ;; while `sessions/fold-record` and an in-memory reduce hand `[value [i row]]`.
+  ([state pair] (trajectory-step state nil pair))
+  ([state _ctx [i record]]
+  (let [kind  (replay/kind record)
+        state (-> state
+                  (update :life life-step record)
+                  (update :calls calls-step record))
+        ;; AT MOST ONE SEGMENT CLOSES PER ROW (a row can open at most one), so folding
+        ;; `:closed` and CLEARING it keeps this state the size of the PAYLOAD rather than the
+        ;; size of the run count. `run-segments` keeps its own accumulating machine.
+        next  (segments-step (:segments state) [i record])
+        folding (reduce (fn [f seg] (one-run f seg (:life state) (:calls state)))
+                        (:folding state)
+                        (:closed next))]
+    (as-> state s
+      (assoc s :segments (assoc next :closed []) :folding folding)
+      (cond-> s (= "event" kind) (assoc :last-event record))))))
+
+(defn trajectory-answer
+  "The fold's state -> {:turns [...] :incomplete bool}: the last (still-open) segment folded
+  in, every turn finished, and `:incomplete` read off the last frame the record ended on -- the
+  same rule `stats/incomplete?` uses, kept here so no reader has to walk the record again."
+  [state]
+  (let [{:keys [segments folding life calls last-event]} state
+        folding (if-some [open (:open segments)] (one-run folding open life calls) folding)]
+    {:turns      (mapv finish-turn (:turns folding))
+     :incomplete (boolean (and last-event (not (frames/terminal? (replay/payload last-event)))))}))
+
+(defn trajectory-emit-step
+  "The step `fold-record` wants, with EMIT! handed each turn as it becomes final. EMITTED is
+  an atom the CALLER keeps, so the fold state stays the payload's and the same step serves the
+  non-emitting seam."
+  [emit! emitted]
+  (fn [state pair]
+    (let [next  (trajectory-step state pair)
+          final (max 0 (dec (count (:turns (:folding next)))))]
+      (doseq [j (range @emitted final)]
+        (emit! (finish-turn (nth (:turns (:folding next)) j))))
+      (reset! emitted final)
+      next)))
+
 (defn fold-trajectory
-  "RECORDS -> the same answer `records->trajectory` gives, but with EMIT! handed each
-  turn the moment the fold can no longer change it.
+  "RECORDS -> the same answer `records->trajectory` gives, but with EMIT! handed each turn
+  the moment the fold can no longer change it.
 
-  WHY A TURN IS NOT FINAL WHEN IT APPEARS: `one-run` appends to the turn it is in -- a
-  parked run resumed writes into the SAME turn (see `run-segments`), and that run's
-  injected context lands after the turn already exists. So a turn is final only once a
-  LATER turn has opened (or the record has ended): everything but the last turn is
-  handed over after each run, and the last one at the end.
+  WHY A TURN IS NOT FINAL WHEN IT APPEARS: `one-run` appends to the turn it is in -- a parked
+  run resumed writes into the SAME turn, and that run's injected context lands after the turn
+  already exists. So a turn is final only once a LATER turn has opened (or the record has
+  ended): everything but the last turn is handed over as it stops being last, and the last
+  one at the end.
 
-  WHAT IS NOT STREAMED HERE: the three passes that must see the whole record before the
-  first turn can be built -- `run-segments`, `tool-lifecycles` and `call-index` -- still
-  run first. Streaming THOSE is `.scratch/session-as-kernel` ticket 12's; what this buys
-  is that the turn-building walk no longer has to finish before a reader sees turn one."
+  THE ROUTE DOES NOT COME THROUGH HERE ANY MORE (ticket 12): it drives the same step over the
+  session's READ STREAM (`sessions/fold-record`), so the record's rows are never all in hand.
+  This is the in-memory twin of that stream, kept for the shape's assertions."
   [records emit!]
-  (let [life-of (tool-lifecycles records)
-        call-of (call-index records)
-        state   (reduce (fn [state run]
-                          (let [next  (one-run state run life-of call-of)
-                                turns (:turns next)
-                                ;; EVERY TURN BUT THE LAST IS FINAL NOW.
-                                final (max 0 (dec (count turns)))]
-                            (doseq [i (range (:emitted state) final)]
-                              (emit! (finish-turn (nth turns i))))
-                            (assoc next :emitted final)))
-                        {:seen #{} :shownSystem nil :turns [] :history [] :emitted 0}
-                        (run-segments records))
-        turns   (mapv finish-turn (:turns state))]
-    (doseq [i (range (:emitted state) (count turns))]
-      (emit! (nth turns i)))
-    {:turns turns :incomplete (stats/incomplete? records)}))
+  (let [emitted (atom 0)
+        state   (reduce (trajectory-emit-step emit! emitted) (trajectory-init) (map-indexed vector records))
+        answer  (trajectory-answer state)]
+    (doseq [turn (subvec (:turns answer) @emitted)]
+      (emit! turn))
+    answer))
 
 (defn records->trajectory
   "RECORDS -> {:turns [...] :incomplete bool}. See the namespace docstring for the fold's
@@ -800,7 +843,7 @@
   rows and must not hide one, because 'the model read these bytes again' is a fact a reader
   is here to see."
   [records]
-  (fold-trajectory records (fn [_turn] nil)))
+  (trajectory-answer (reduce trajectory-step (trajectory-init) (map-indexed vector records))))
 
 (defn log-trajectory
   "A log FILE -> records->trajectory of it. The file entry point, the counterpart of
@@ -808,3 +851,41 @@
   learns where the log came from."
   [f]
   (records->trajectory (stats/read-records f)))
+
+;; ------------------------------------------------- the session's view (ticket 13)
+
+(defn view-value
+  "STEM's trajectory STATE: the view kept on the session when there is one, else ONE streaming
+  walk that INSTALLS it (the 'first load', ticket 13). Answers nil when this process does not
+  hold STEM -- a read-only door does not build a session.
+
+  THE VALUE IS THE STATE, NOT THE PAYLOAD: the write stream's step (`trajectory-step`)
+  advances the state a row at a time, and `trajectory-answer` turns the state into the
+  payload. Installing the state means the payload is computed on read, never appended to.
+
+  THE RACE, SAID OUT LOUD: a row handed to the writer between the walk's end and the install
+  is not in the walk and lands before the view exists, so this process would miss it until the
+  session is rebuilt. The window is one writer hand-off wide, and a rebuild (or an eviction +
+  the next ask) reads the record again -- which the ticket allows."
+  [stem]
+  (when (some? (sessions/live-entry stem))
+    (or (sessions/fold-value stem :trajectory)
+        (let [folded (sessions/fold-record stem (trajectory-init) trajectory-step)]
+          (when (nil? (:missing folded))
+            (when (nil? (:error folded))
+              (let [state (:ok folded)]
+                (sessions/set-fold-value! stem :trajectory state)
+                state)))))))
+
+(defn install!
+  "Register the trajectory's LIVE step on the session's write stream (ticket 13), so the view
+  `view-value` builds goes on advancing with every row the writer lands. A session with no
+  view is left alone -- a missing value is a no-op, not an empty trajectory.
+
+  THE COMPOSITION ROOT CALLS THIS (`harness.edge.http/start!`); idempotent, returns the
+  teardown."
+  [ ] ; no arguments
+  (sessions/register-step! :trajectory
+                           (fn [value ctx pair]
+                             (if (some? value) (trajectory-step value ctx pair) nil)))
+  (fn teardown [] (sessions/unregister-step! :trajectory)))

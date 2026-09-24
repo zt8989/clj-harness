@@ -3019,42 +3019,87 @@
 
   AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
   RECORD's trajectory, and the record can be behind the conversation being written to
-  it. Absent means nothing is pending."
-  [req stem]
-  (let [read (sessions/read-records stem)]
-    (cond
-      (some? (:missing read))
-      (api-response 404 {:error (:missing read) :threadId stem})
+  it. Absent means nothing is pending.
 
-      (some? (:error read))
-      (api-response 400 {:error (:error read) :threadId stem})
+  IT IS ANSWERED FROM THE SESSION'S HELD VIEW WHEN THERE IS ONE (ticket 13): the fold happens
+  once and is kept on the session, so a later ask reads a value rather than opening the file.
+  Otherwise it is ONE STREAMING WALK (`sessions/fold-record`, ticket 12) whose rows go
+  straight into the fold -- a record vector is never built (`sessions/read-records` is not
+  called here any more)."
+  [req stem]
+  (let [;; THE SESSION'S HELD VIEW, built once on the first ask (ticket 13): `view-value` runs
+        ;; ONE streaming walk and keeps the STATE on the session, and the write stream's step
+        ;; advances it after that. nil means this process does not hold STEM at all.
+        held   (trajectory/view-value stem)
+        ;; ELSE ONE STREAMING WALK (ticket 12), with no session to keep it on.
+        folded (when (nil? held)
+                 (sessions/fold-record stem (trajectory/trajectory-init) trajectory/trajectory-step))]
+    (cond
+      (some? (:missing folded))
+      (api-response 404 {:error (:missing folded) :threadId stem})
+
+      (some? (:error folded))
+      (api-response 400 {:error (:error folded) :threadId stem})
 
       :else
-      (let [records (:ok read)
+      (let [initial (if (some? held) (trajectory/trajectory-answer held)
+                                  (trajectory/trajectory-answer (:ok folded)))
             behind  (record/pending-count stem)
-            header  (cond-> {:threadId stem :incomplete (stats/incomplete? records)}
+            header  (cond-> {:threadId stem :incomplete (:incomplete initial)}
                       (pos? behind) (assoc :behind behind))
             headers (merge {"Content-Type" "application/x-ndjson; charset=utf-8"}
-                           (cors-headers (request-origin req)))]
+                           (cors-headers (request-origin req)))
+            watching (atom nil)]
         (hk/as-channel
          req
          {:on-open  (fn [ch]
                       ;; ON-OPEN RUNS ON http-kit'S OWN THREAD, after this ring map was
                       ;; returned -- so a throw here is a silently dropped connection
-                      ;; rather than a 500. The fold is netted and the stream simply ends.
+                      ;; rather than a 500. The stream is netted and simply ends.
                       (try
                         ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
                         (hk/send! ch {:headers headers
                                       :body    (str (json/write-str header) "\n")}
                                   false)
-                        ;; THEN EACH TURN THE MOMENT THE FOLD CAN NO LONGER CHANGE IT.
-                        (trajectory/fold-trajectory
-                         records
-                         (fn [turn] (hk/send! ch (str (json/write-str turn) "\n") false)))
-                        (hk/close ch)
+                        (let [sent  (atom 0)
+                              ;; THE TURNS THIS VIEW HAS NOW, then whatever finalizes later.
+                              ;; Reading the view costs no file: it is a value on the session.
+                              push! (fn []
+                                      (let [payload (if (some? held)
+                                                      (some-> (sessions/fold-value stem :trajectory)
+                                                              trajectory/trajectory-answer)
+                                                      initial)]
+                                        (when (some? payload)
+                                          (let [turns (:turns payload)
+                                                ;; THE NEW FINALIZED TURNS, then THE OPEN ONE
+                                                ;; again: a turn still growing is re-sent, and the
+                                                ;; client replaces it by `:index` -- the same
+                                                ;; in-place rule the window's frames use.
+                                                finalized (max 0 (dec (count turns)))
+                                                from      (min @sent finalized)]
+                                            (doseq [turn (subvec turns from finalized)]
+                                              (hk/send! ch (str (json/write-str turn) "\n") false))
+                                            (reset! sent finalized)
+                                            (when (pos? (count turns))
+                                              (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
+                          (push!)
+                          (when (some? held)
+                            ;; THE SESSION IS HELD HERE, so every change to it can be a push --
+                            ;; and the session's own doorbell is the notification.
+                            (let [watcher (fn [_thread-id event]
+                                            (case (:kind event)
+                                              :entries (try (push!) (catch Throwable _ nil))
+                                              :gone    (hk/close ch)
+                                              nil))]
+                              (reset! watching watcher)
+                              (sessions/watch! stem watcher)))
+                          ;; NOT HELD: there is nothing here to push from, so the stream ends
+                          ;; after the first load and the client is free to come back.
+                          (when (nil? held) (hk/close ch)))
                         (catch Throwable t
                           (log/error! :trajectory/stream-failed t {:threadId stem}))))
-          :on-close (fn [_ch _status] nil)})))))
+          :on-close (fn [_ch _status]
+                      (when-some [watcher @watching] (sessions/unwatch! stem watcher)))})))))
 
 
 (defn- frames-get
@@ -5067,6 +5112,9 @@
     ;; that never starts a server registers neither.
     (sessions/install!)
     (pressure/install!)
+    ;; AND THE TRAJECTORY'S LIVE STEP, the same shape as the meter's: the view is built ON
+    ;; DEMAND (`harness.edge.trajectory/view-value`) and this step advances it (ticket 13).
+    (trajectory/install!)
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
     ;; the same shape as the port below it and for the same reason: both are facts

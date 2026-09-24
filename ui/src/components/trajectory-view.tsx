@@ -518,14 +518,10 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
 
 export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("trajectory");
-  /// THE REFETCH TRIGGER, read off the runtime here rather than handed in: one ReAct
-  /// round is one assistant message on this side, so a rise in that count is a call that
-  /// just finished, and `isRunning` catches the run that ends without one (an error).
-  /// It has to be read from INSIDE the provider, which is why this component -- not the
-  /// app shell above it -- owns it. Same reading, same reason, as `ComposerStats`.
-  const assistantCount = useAuiState(
-    (s) => s.thread.messages.filter((m) => m.role === "assistant").length,
-  );
+  /// WHETHER A RUN IS IN FLIGHT is read off the runtime here, because the header the stream
+  /// opens with carries `:incomplete`, and a run that just settled changes it -- so the effect
+  /// below reopens the stream on a flip. It has to be read from INSIDE the provider, which is
+  /// why this component -- not the app shell above it -- owns it.
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const [payload, setPayload] = useState<TrajectoryPayload | null>(null);
   /// WHICH ROW IS OPEN, as (turn, position in that turn). NOTHING IS OPEN BY DEFAULT:
@@ -536,17 +532,29 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
 
   useEffect(() => {
     let live = true;
-    void trajectoryFor(threadId, (soFar) => {
-      // A late turn from a previous session must not land on this one, and the same
-      // guard covers the finished payload below.
-      if (live) setPayload(soFar);
-    }).then((next) => {
-      if (live && next !== null) setPayload(next);
-    });
+    const controller = new AbortController();
+    void trajectoryFor(
+      threadId,
+      (soFar) => {
+        // A late turn from a previous session must not land on this one.
+        if (live) setPayload(soFar);
+      },
+      controller.signal,
+    )
+      .then((next) => {
+        if (live && next !== null) setPayload(next);
+      })
+      .catch(() => {
+        // AN ABORT IS THE CLEANUP (a session change, a run settling, an unmount), not a
+        // failure: whatever arrived is already on screen.
+      });
     return () => {
       live = false;
+      // CLOSING THE CONNECTION IS THE CLEANUP TOO: the route keeps it open for pushes, so a
+      // view that went away would otherwise leave a watcher on the session.
+      controller.abort();
     };
-  }, [threadId, isRunning, assistantCount]);
+  }, [threadId, isRunning]);
 
   /// A CLICK ON THE STRIP OPENS THE SAME THING A CLICK ON THE ROW DOES -- so when one
   /// comes from up there, the row it names must be brought into view: otherwise the pane
