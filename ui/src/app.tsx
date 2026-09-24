@@ -92,7 +92,6 @@ import { SubagentViewContext, type SubagentView } from "@/components/subagent-vi
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
 import { keepInjectionCards } from "@/lib/injections";
-import { newId } from "@/lib/id";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -110,7 +109,7 @@ import { imageAttachments } from "@/lib/attachments";
 // `bindThread` is what a minted PROJECT session is registered with just before its first
 // run, and `startTask` is the same for a task (with the id this page minted). Neither is
 // called at click time -- see `pendingBinds` and `registerPending` below.
-import { bindThread, startTask, type SidebarListing } from "@/lib/projects";
+import { bindThread, mintThreadId, startTask, type SidebarListing } from "@/lib/projects";
 import {
   browserStorage,
   forgetSession,
@@ -186,7 +185,13 @@ function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
       index === last && reads === "running"
         ? ({ type: "running" } as const)
         : (message.status ?? { type: "complete", reason: "unknown" });
-    return fromThreadMessageLike(message, message.id ?? newId(), status);
+    // A MESSAGE THE WIRE DID NOT NAME GETS ITS POSITION, and that is not a name either
+    // -- it is the RENDERER's handle on one message in this list (what a rebuilt
+    // conversation is redrawn by), and it never leaves the page. Nothing here is sent
+    // anywhere, so it needs no namespace and no uuid: the position is stable for as
+    // long as the list is (see `lib/projects.ts`'s `mintThreadId` for the ids that ARE
+    // names, which the server gives).
+    return fromThreadMessageLike(message, message.id ?? `m${index}`, status);
   });
 }
 
@@ -1310,7 +1315,11 @@ const dropKey = <T,>(record: Record<string, T>, key: string): Record<string, T> 
   return next;
 };
 
-export function App() {
+/// THE PAGE, handed the name of its first conversation by the entry (`main.tsx` asks the
+/// server for one before the first paint). `initialThreadId` is a real id, given by the
+/// process that keeps conversations -- the page has no name to invent (see
+/// `lib/projects.ts`'s `mintThreadId`).
+export function App({ initialThreadId }: { initialThreadId: string }) {
   // The failures this page raises itself -- today, one: the registration a minted session
   // gets immediately before its first run (see `registerPending`), which the server can
   // refuse. The sentence comes from the `errors` catalog, like every other refusal the
@@ -1348,9 +1357,10 @@ export function App() {
   /// An EMPTY MAP is the ordinary state of this page: every session opened from the sidebar,
   /// and every session the store already lists, is one the server knows.
   ///
-  /// IT IS DECLARED HERE, WITH THE MINT, rather than next to `registerPending` below, for
-  /// the one entry that is not written by `showFresh`: THE FIRST SESSION, minted by the
-  /// `useState` initializer a few lines down. It is a task, so it is recorded as `null`,
+  /// IT IS DECLARED HERE, WITH THE ROSTER, rather than next to `registerPending` below, for
+  /// the one entry that is not written by `showFresh`: THE FIRST SESSION, opened by the
+  /// `useState` initializer a few lines down under the name the entry was given. It is a
+  /// task, so it is recorded as `null`,
   /// and leaving it out would refuse the very first message of a first-ever visit -- the
   /// edge's rule is about what the store has been asked to keep, not about where the id
   /// came from.
@@ -1358,25 +1368,73 @@ export function App() {
   // THE ROSTER. The first session is minted here and hosted EMPTY: a brand-new
   // id has no log, and the server refuses to invent a conversation for one.
   //
-  // THE MINT IS THE PAGE'S, which is the brand-header half of this merge and the owner's
-  // rule (点击新增不立刻会话，发送才新建): an id is a name this page gives a conversation
-  // before anybody has typed, and nothing is written to the store until the first SEND --
-  // `registerPending` is what carries the id across at that moment. The other half is
-  // main's: a run aimed at an id this home has never been asked to keep is refused
-  // (`refuse-unknown-session!`), which is exactly why that registration exists rather
-  // than being an idle write. Asking the server for the id here would be the client
-  // giving up its own name to avoid one POST per session -- and it would put the mint
-  // back at page load, which is the write this feature removed from the click.
+  // THE ROSTER. The first session is OPENED here and hosted EMPTY: a brand-new
+  // conversation has no log, and the server refuses to invent one for an id.
+  //
+  // AND IT IS NAMED BY THE SERVER, which is the change of 2026-09-23
+  // (`.scratch/server-named-sessions`). It used to be a name this page gave itself
+  // (`crypto.randomUUID`), registered at the first SEND rather than at the click. Two
+  // things were wrong with that: an id is this home's name for a conversation, and the
+  // process that keeps conversations is the one that names them (`sessions-post`'s rule
+  // from ticket 03) -- and the browser API that minted one is a SECURE-CONTEXT function,
+  // absent on a phone reading the dev server over `http://192.168.x.x`, where the page
+  // threw `TypeError: crypto.randomUUID is not a function` before it drew anything (and
+  // every machine gate stayed green on localhost, which is why it shipped).
+  //
+  // SO THE NAME COMES IN AS A PROP, asked by `main.tsx` before the first paint: the page
+  // is never without a conversation to be in (there is no "no session" box -- see the
+  // render below), and it never invents a name. THE CLICK WRITES NOTHING EITHER, which is
+  // what `spareName` below buys: the next name is asked for in the background and kept
+  // unspent, so 新建 costs no round trip (点击新增不立刻会话，发送才新建), and the
+  // registration is still the first SEND's (`registerPending`) -- a run aimed at an id
+  // this home has never been asked to keep is refused.
   const [roster, setRoster] = useState<Roster>(() => {
-    const id = newId();
-    // THE FIRST SESSION IS MINTED HERE TOO, so it is registered (as a task: nothing is
+    // THE FIRST SESSION IS NAMED HERE TOO, so it is registered (as a task: nothing is
     // pending but `null`) and live-titled like any other. A first visit sends its first
     // message into exactly this id, and the row that appears a moment later is the one
     // the walkthrough reads the name off.
-    pendingBinds.current.set(id, null);
-    minted.current.add(id);
-    return { shown: id, live: [{ id, read: "none", attempt: 0 }] };
+    pendingBinds.current.set(initialThreadId, null);
+    minted.current.add(initialThreadId);
+    return { shown: initialThreadId, live: [{ id: initialThreadId, read: "none", attempt: 0 }] };
   });
+  /// THE NEXT NAME, ASKED FOR AND KEPT UNSPENT.
+  ///
+  /// WHY A SPARE AT ALL: `showFresh` needs an id the moment a click lands, and a name the
+  /// server gives arrives one request later -- so the name for the NEXT click is asked for
+  /// in the background and held here. A click then spends what is already in hand: no round
+  /// trip, no spinner, nothing that can fail. AN EMPTY REF IS NOT AN ERROR -- it means the
+  /// ask has not landed (or the last one failed), and the click that needs a name waits for
+  /// it, which is the one moment a fresh session can fail (see `sidebar.tsx`'s sentence).
+  ///
+  /// A NAME NOBODY SPENDS IS NOT A LEAK: `GET /api/ids/new` mints one and holds nothing, so
+  /// a page that sits on a spare forever has asked for a string nobody will see again.
+  const spareName = useRef<Promise<string> | null>(null);
+
+  /// The name in hand, or a fresh ask. IDEMPOTENT ON PURPOSE: the arming effect below and
+  /// a click can both call it, and one session must not take two names.
+  const askForName = useCallback((): Promise<string> => {
+    // THE SLOT IS READ ONCE, into a local, because a callback below writes it: a second
+    // read would be `Promise<string> | null` to the compiler and a lie to whoever read it.
+    const held = spareName.current;
+    if (held !== null) return held;
+    const asked = mintThreadId(tErrors);
+    spareName.current = asked;
+    // A NAME THAT DID NOT ARRIVE MUST NOT BE THE ANSWER FOREVER: the slot is cleared, so
+    // the next ask is a fresh request instead of the same rejection. THE GUARD keeps a
+    // LATER promise (one a click has already put in the slot) from being cleared by this
+    // one's failure.
+    asked.catch(() => {
+      if (spareName.current === asked) spareName.current = null;
+    });
+    return asked;
+  }, [tErrors]);
+
+  /// ARM THE SPARE at mount, so the first 新建 does not wait for a request. SILENT ON
+  /// FAILURE: nothing on screen belongs to this name yet, so there is nothing to say -- the
+  /// click that needs a name asks again, and that is where a failure gets a sentence.
+  useEffect(() => {
+    askForName().catch(() => {});
+  }, [askForName]);
   // WHAT THE RIGHT-HAND MIRROR IS SHOWING, or null (ticket 05). A SINGLE VALUE, and
   // that is the decision rather than a simplification: opening another subagent
   // REPLACES this one, so there is no list to manage, no arrangement to remember and
@@ -1641,7 +1699,16 @@ export function App() {
   /// and holds `null` for a task, which is what tells `registerPending` that this one is
   /// registered with `startTask` rather than bound to a directory.
   const showFresh = useCallback(
-    (id: string, projectDir: string | null) => {
+    async (projectDir: string | null) => {
+      // THE NAME FIRST, and it is usually ALREADY IN HAND (`spareName` above): the click
+      // spends one and is done, with no request and nothing on screen that can fail.
+      // IT WAITS only when the background ask has not landed -- and if that ask failed,
+      // THIS await is where the click finds out: the rejection travels back to the sidebar
+      // that asked (`onShowFresh`), which words it.
+      const asked = askForName();
+      spareName.current = null; // spent: `askForName` below arms the one after this
+      const id = await asked;
+      void askForName(); // arm the spare again, so the NEXT 新建 is instant too
       pendingBinds.current.set(id, projectDir);
       // AND IT MAY BE NAMED BY ITS OWN RUNTIME until the store answers for it -- see
       // `minted`. The two do different jobs: this one is about the ROW's name, the map
@@ -1650,7 +1717,7 @@ export function App() {
       foldDrawer();
       show(id, "none");
     },
-    [foldDrawer, show],
+    [askForName, foldDrawer, show],
   );
   /// The same door for a session that HAS a conversation: rebuild it once, through the
   /// read that refuses to invent one for an id with no log (`HistoryRead`).

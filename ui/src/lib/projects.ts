@@ -109,6 +109,29 @@ export async function listSidebar(t: Translate): Promise<SidebarListing> {
   const res = await fetch(`${API_BASE}projects`);
   if (!res.ok) throw new Error(t("http.listingProjects", { status: res.status }));
   return res.json();
+
+}
+
+/// A NAME FOR A CONVERSATION THAT DOES NOT EXIST YET: one id, minted by the server and
+/// written NOWHERE (GET /api/ids/new).
+///
+/// THE PAGE DOES NOT NAME CONVERSATIONS ANY MORE. An id is this home's name for a
+/// conversation -- a name in a namespace the page does not own (`startTask` above says
+/// the same thing from the registering side) -- and the browser API that used to mint one
+/// is a SECURE-CONTEXT function: `crypto.randomUUID` is absent on a phone reading this
+/// dev server over `http://192.168.x.x`, so the page threw
+/// `TypeError: crypto.randomUUID is not a function` BEFORE IT DREW ANYTHING -- while every
+/// machine gate stayed green on 127.0.0.1 (2026-09-23, `.scratch/server-named-sessions`).
+///
+/// IT WRITES NOTHING, which is what keeps the click lazy: the name is spent when the
+/// first send REGISTERS it (`startTask` for a task, `bindThread` for a project session),
+/// so 「点击新增不立刻会话，发送才新建」 still holds -- clicking 新建 opens an empty
+/// conversation and leaves the store exactly as it was.
+export async function mintThreadId(t: Translate): Promise<string> {
+  const res = await fetch(`${API_BASE}ids/new`);
+  if (!res.ok) throw new Error(t("http.mintingSession", { status: res.status }));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// Make one conversation a session of this home, with no project (POST

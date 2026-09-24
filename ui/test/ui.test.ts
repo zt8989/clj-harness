@@ -29,7 +29,6 @@ import { contextSuite } from "./suites/context";
 import { elicitationSuite } from "./suites/elicitation";
 import { elicitationCardSuite } from "./suites/elicitation-card";
 import { framesSuite } from "./suites/frames";
-import { idSuite } from "./suites/id";
 import { i18nSuite } from "./suites/i18n";
 import { skillsSuite } from "./suites/skills";
 import { statsSuite } from "./suites/stats";
@@ -64,7 +63,7 @@ import { subagentViewSuite } from "./suites/subagent-view";
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
 /// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
 /// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -321,17 +320,17 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the one that catches a spinner the stale snapshot put on a row nothing would ask about
 /// again. The rule is pure (`lib/sidebar-refetch.ts`), so what these cases pin is how many
 /// asks one id is worth, when they go out, and which id gets the next one.
-/// 124 -> 128: the `id` suite's four, and it is the one suite here that exists because a
-/// GREEN TREE SHIPPED A BROKEN PAGE. The phone threw `TypeError: crypto.randomUUID is
-/// not a function` on a dev server reached over `http://192.168.x.x`: `randomUUID` is
-/// secure-context-only, so it is there on 127.0.0.1 -- where every gate ran -- and
-/// absent on the LAN address, where the owner was reading. `lib/id.ts` now takes the
-/// source of its randomness as a PARAMETER, which is what lets this run pin the phone's
-/// branch (`getRandomValues` and no `randomUUID`) with literals instead of a browser:
-/// the version-4 shape the fallback spells, sixteen bytes asked for once, `randomUUID`
-/// used verbatim when it IS a function, and a no-WebCrypto floor that is still a name
-/// rather than a throw. That a page actually starts over a LAN address is the browser
-/// walkthrough's half, as the suite's own header says.
+/// 128 -> 126: THE FOUR `id` CASES ARE GONE, and they are worth a paragraph even as a
+/// subtraction. They pinned `lib/id.ts` -- the page's own uuid generator -- because
+/// `crypto.randomUUID` is secure-context-only and a phone reading the dev server over
+/// `http://192.168.x.x` threw `TypeError: crypto.randomUUID is not a function` before the
+/// page drew anything, while every gate stayed green on 127.0.0.1. THE FIX THAT OUTLIVED
+/// THE DAY is not the fallback chain: the page does not name conversations at all any
+/// more (`.scratch/server-named-sessions`). The name comes from the server (`GET
+/// /api/ids/new`), so there is no generator here to pin, no browser API to depend on and
+/// nothing left of that suite -- the rule that replaced it is pinned where the route is
+/// (`harness.edge.http-test`, `a-name-can-be-had-without-a-conversation`), and that a page
+/// STARTS over a LAN address is the browser walkthrough's half.
 /// 128 -> 130: the `picker` suite's two, for the model picker's ROW IDENTITY. A model id
 /// does not name a row -- two vendors may declare the same one -- and the row used to be
 /// carried by the id alone, so a pick under either vendor's heading resolved to whichever
@@ -339,7 +338,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// key, the rows the menu offers, and the session's own row when the menu cannot offer it),
 /// which is why these two are literals in and options out; that a click actually SENDS the
 /// vendor under whose heading it sat is the browser walkthrough's half.
-const EXPECTED_CASES = 130;
+const EXPECTED_CASES = 126;
 
 let total = 0;
 for (const suite of SUITES) {
