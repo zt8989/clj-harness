@@ -113,6 +113,7 @@
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.instruction-updates :as instructions]
+            [harness.cap.jobs :as jobs]
             [harness.cap.subagents :as subagents]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
@@ -2801,10 +2802,14 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  SEVEN OF THE TEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
+  SEVEN OF THE TWELVE ARE GETS, AND ONE VERB HAS BOTH METHODS: `stats`, `trajectory` and
+  `delegations` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
-  same file while it is still being written, and the window's two verbs (`feed`,
-  `page`) read it in pieces. The set stays closed and the 405 stays here -- what
+  same file while it is still being written, the window's two verbs (`feed` and
+  `page`) read it in pieces, and `jobs` reads the process's own JOB REGISTRY rather
+  than any file -- while a POST of that same verb STOPS one of those jobs (ticket 04
+  of `.scratch/right-pane-tasks`: a person's stop, which claims no telling). The set
+  stays closed and the 405 stays here -- what
   changed is that the sentence 'every verb on this shape is a POST' is no longer
   true, not where the refusal happens.
 
@@ -2819,14 +2824,14 @@
   too long to send, and the route a reader scrolling up uses. It is a GET, and it is the one
   verb here that answers a piece of a conversation rather than all of it.
 
-  AND `cancel` IS THE ONE THAT STOPS SOMETHING rather than reading it as it is: a POST
+  AND `cancel` IS THE ONE THAT STOPS A RUN rather than reading it as it is: a POST
   aimed at one conversation, whose run -- if this process has one going -- is told to
   stop (`.scratch/session-after-refresh` tickets 07/08). It is the server's half of
   the composer's Stop, and the half the browser's own abort never had: pressing that
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3185,6 +3190,80 @@
 
       :else
       (api-response 200 {:threadId stem :delegations (:ok folded)}))))
+
+(defn- jobs-get
+  "GET /api/threads/<stem>/jobs -- the background commands THIS PROCESS is running for
+  one session, as rows a task pane can draw: id, the command, how it is going, when it
+  started, and where its record is.
+
+  IT READS THE PROCESS'S REGISTRY, NOT A LOG, and that is the whole of its difference
+  from its siblings above: `stats`, `trajectory` and `delegations` fold a file and 404
+  when the stem is not under the tree, while a job IS the process's own memory of a
+  command (`harness.cap.jobs`). So there is nothing to locate and nothing to refuse:
+  'this process has no jobs for this session' is `:jobs []`, an ordinary answer to a
+  question about WHAT IS THERE. A stem nobody has run anything for and a stem whose
+  jobs went with an earlier process both answer `[]` -- the records outlive the
+  process, but the JOBS do not, and this route is about the jobs.
+
+  READ-ONLY, so no audit line: every GET on this edge only answers. Asking again a
+  second later is the ordinary use (`[]` polls the pane does), and a route that wrote
+  a line per poll would fill the logs with 'somebody looked'.
+
+  THE METHOD SAYS WHETHER THERE IS AN EFFECT, so this verb has two (ticket 04 of
+  `.scratch/right-pane-tasks`): a GET answers, and the POST below stops one of the jobs
+  this one listed. A pair this shape does not serve is still a 405, from the dispatch's
+  `case`."
+  [stem]
+  (api-response 200 {:threadId stem :jobs (jobs/listing stem)}))
+
+(defn- jobs-post
+  "POST /api/threads/<stem>/jobs {job: \"j1\"} -- STOP one of this session's background
+  jobs, as a PERSON. Answers {:id .. :stopped? .. :ending ..}: which job, whether THIS
+  call is what stopped it, and its record's last line -- the same three facts
+  `job_kill`'s answer carries, from the same place (`cap.jobs/stop!`).
+
+  IT IS THE SECOND INITIATOR, NOT A SECOND STOP. `stop!` takes WHO stopped it, and the
+  whole of what that changes is the telling: the model's `job_kill` passes nothing (the
+  default) and its answer claims `:told?`, while this route passes `{:by :user}`, which
+  claims nothing and marks the entry instead -- `take-notices!` then puts a `by=\"user\"`
+  block in front of the model at the next call (`cap.jobs/stop!` argues the split).
+
+  NO APPROVAL, AND FOR THE REASON `cancel-post` GIVES: a person already pressed the
+  button, and asking 'are you sure you want to stop it' about a stop somebody just asked
+  for turns a settled thing into a question. The pane's own second thought, if any, is
+  the pane's business; the server is not the place to second-guess a press.
+
+  AN ID THIS SESSION DOES NOT HAVE IS THE REFUSAL `cap.jobs` ALREADY HAS -- `unknown-job`,
+  which names the ids that DO exist -- raised here and answered 404 rather than written a
+  second time in this namespace. The tool face turns the same exception into a tool
+  result, so the two readers of one refusal say the same words.
+
+  AN ALREADY-ENDED JOB IS NOT AN ERROR: `stopped? false` with its own `[exit N]` is the
+  honest answer to a press that raced the command's own end -- and nothing at all was
+  changed in the registry (see `cap.jobs/stop!`).
+
+  A BODY THAT IS NOT JSON, OR THAT NAMES NO JOB, IS A 400: the difference between 'I
+  cannot understand you' and 'that job is not here' is the one `archive-post` draws too."
+  [req stem]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
+                                        :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        job-id (:job (:ok parsed))]
+    (cond
+      (:bad parsed)
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (string? job-id))
+      (api-response 400 {:error "job must be the id of a background job"})
+
+      :else
+      (let [stopped (try {:ok (jobs/stop! stem job-id {:by :user})}
+                         (catch Throwable t {:error (ex-message t) :data (ex-data t)}))]
+        (if-some [error (:error stopped)]
+          (if (= :unknown-job (:reason (:data stopped)))
+            (api-response 404 {:error error :job job-id})
+            (api-response 400 {:error error :job job-id}))
+          (api-response 200 (select-keys (:ok stopped) [:id :stopped? :ending])))))))
 
 (defn- close-off-open-run!
   "Close every run a log left open, so the conversation can be CONTINUED instead of
@@ -4915,10 +4994,11 @@
 
     :else
     (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
-      ;; The verb-carrying routes: one shape, many verbs. THREE OF THEM ARE POSTS
-      ;; because they have an effect, and `stats` is a GET because it only reads --
-      ;; so the rule is 'the method says whether there is an effect', not 'this
-      ;; shape is POST-only'. A method this shape does not serve is still answered
+      ;; The verb-carrying routes: one shape, many verbs. FOUR OF THEM ARE POSTS
+      ;; because they have an effect, and seven are GETs because they only read --
+      ;; and `jobs` HAS BOTH, because a GET lists the process's jobs and a POST
+      ;; stops one of them -- so the rule is 'the method says whether there is an
+      ;; effect', not 'this shape is POST-only'. A method this shape does not serve
       ;; 405 HERE rather than falling through to the run endpoint -- which is where
       ;; the pre-verb dispatch used to send it, and where it became a 500 from a
       ;; body that was never there.
@@ -4928,6 +5008,8 @@
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
+        [:get "jobs"]    (jobs-get stem)
+        [:post "jobs"]   (jobs-post req stem)
         [:get "trajectory"] (trajectory-get req stem)
         [:get "sofar"]    (sofar-get req stem)
         [:get "page"]     (page-get req stem)

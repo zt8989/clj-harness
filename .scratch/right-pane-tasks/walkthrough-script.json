@@ -1,0 +1,37 @@
+{
+  "turns": [
+    {
+      "content": "先起一条后台作业：它要跑两分钟，我们不在前台等它。",
+      "reasoning": "后台作业与前台 bash 的分别就在这里：这条命令没人等。",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "job",
+          "arguments": { "command": "echo 起点; sleep 120" }
+        }
+      ]
+    },
+    {
+      "content": "作业在后台跑了。顺手让一个子代理说一句，右栏上面那一段也该有它。",
+      "tool-calls": [
+        {
+          "id": "c2",
+          "name": "agent",
+          "arguments": {
+            "name": "general",
+            "prompt": "一句话说清 src/harness/cap 这个目录是干什么的。"
+          }
+        }
+      ]
+    },
+    {
+      "content": "（子代理：cap 是能力目录，一个文件装一种能力。）"
+    },
+    {
+      "content": "（主 agent：作业还在后台跑着，右栏下面那一段应该看得见它在跑、秒数在长。）"
+    },
+    {
+      "content": "（主 agent：人从面板上把作业停了——这一通之前，那条 by=user 的注入先进了历史。）"
+    }
+  ]
+}

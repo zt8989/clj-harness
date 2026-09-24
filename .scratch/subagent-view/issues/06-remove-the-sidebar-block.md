@@ -13,8 +13,11 @@
 它专用的三个键（`runsEmpty` / `running`），`DefinitionRows` 与范围那句话留着；
 `locales/{en,zh}/shell.json` 删掉只被那块用过的 `titleHint` / `definitions` / `runs` /
 `runsEmpty` / `running` / `changeInSettings`（逐键 grep 确认过；`title` / `loading` 设置页还在用）。
-`GET /api/subagents` 与它的 `runs` 留着 —— 前端不再读它这件事写在 `subagent-list.tsx` 的注释与
-提交信息里（原来的 `subagents` 套件仍钉着这个端点，`runs` 那一半也钉着）。
+`GET /api/subagents` 与它的 `runs` 留着 ~~—— 前端不再读它这件事写在 `subagent-list.tsx` 的注释与
+提交信息里~~（原来的 `subagents` 套件仍钉着这个端点，`runs` 那一半也钉着）。
+**2026-09-24**：划掉的那半句被 `.scratch/right-pane-tasks` 票 03 翻掉——任务视图的「子代理」那一段
+**重新读** `GET /api/subagents` 的 `runs`（按 `:parent` 收窄到本会话），读者是 `ui/src/lib/subagents-runs.ts`。
+端点与 `runs` 照旧留着，落地的决定一个字没改；过期的是 `subagent-list.tsx` 里那句「前端不再读它」。
 
 `EXPECTED_CASES` 102 -> 106，并在 `ui.test.ts` 的计数史里写清加减：**减 2** 条委派行渲染用例
 （`RunRows` 没有屏了），**加 6** 条 `subagent-view` 套件用例（读源码，钉 04/05/06 的决定）。
@@ -37,6 +40,8 @@
 - **后端先别跟着删。** `GET /api/subagents` 会因此没有前端读者（`runs` 那一半尤其）。它是便宜的、
   也是「这个家委派过什么」唯一的答案，**留着**；但要在提交信息或注释里说清「前端不再读它」，
   免得下一个读者以为漏了接线。要真的删是另一个决定。
+  **2026-09-24**：上面这条的前提（「会因此没有前端读者」）不再成立，理由见本文件开头那条注——
+  第二条读者回来了。「别急着删端点」这个决定本身没有翻。
 - **上一版的走查证据会过期。** `.scratch/subagents/evidence/` 里 `t04-*`（侧边栏面板）那几张截图
   描述的是一个不再存在的屏。**不要删**（那是上一版的记录），但在那里加一句话说明它们已被
   `.scratch/subagent-view/` 取代——一份读起来像现状的旧证据比没有证据更坏。

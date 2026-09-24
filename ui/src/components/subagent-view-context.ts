@@ -13,6 +13,21 @@ import { createContext, useContext } from "react";
 /// put in the header; `threadId` is the conversation to follow.
 export type SubagentView = { threadId: string; subagent: string };
 
+/// WHAT THE RIGHT-HAND COLUMN IS SHOWING, AND WHETHER IT IS THERE AT ALL -- ONE value with
+/// three shapes, held by the page (`app.tsx`). The column is a single element in two states
+/// (`.scratch/right-pane-tasks`, decision 1): the TASK VIEW, which is the switch's answer and
+/// the answer nothing else has chosen; or one delegation's MIRROR, which is the `agent` card's
+/// (`SubagentView` above, reused unchanged); or `null`, the column closed.
+///
+/// ONE VALUE AND NOT TWO (`open` plus `which`) is the decision: there is no moment at which the
+/// column is open and has nothing to show, because opening it IS choosing the task view -- and
+/// no moment at which it is showing a mirror while closed. Two flags could say both, and the
+/// column would then have to guess which one it is in.
+export type RightPane =
+  | null
+  | { kind: "tasks" }
+  | ({ kind: "mirror" } & SubagentView);
+
 /// The opener, or `null` where there is no panel to open (a story, a test that
 /// renders one message with no page around it). A null opener is why the card's
 /// door is drawn only when it can be walked through.

@@ -41,8 +41,7 @@
 // finished delegation, and no error is raised for it: that is simply what a finished
 // delegation looks like. Closing the panel aborts the request, and the server drops
 // the subscription with it.
-import { XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type FC } from "react";
+import { useEffect, useMemo, useState, type FC } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
@@ -51,6 +50,11 @@ import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
+import {
+  RIGHT_PANE_ID,
+  RightPaneBackButton,
+  RightPaneCollapseButton,
+} from "@/components/right-pane-toggle";
 import { type SubagentView } from "@/components/subagent-view-context";
 import { FollowAgent, framesUrl } from "@/lib/follow";
 
@@ -59,8 +63,13 @@ import { FollowAgent, framesUrl } from "@/lib/follow";
 /// its own about which subagent it is showing.
 export const SubagentViewPanel: FC<{
   view: SubagentView;
+  /// Closes the WHOLE column (the header's leading control).
   onClose: () => void;
-}> = ({ view, onClose }) => {
+  /// AND BACK TO THE TASK LIST: the trailing control leaves the mirror for the list, not
+  /// for a closed column -- the two controls are two verbs, and ticket 03 is where the
+  /// second one landed.
+  onBack: () => void;
+}> = ({ view, onClose, onBack }) => {
   const { t } = useTranslation();
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -116,13 +125,9 @@ export const SubagentViewPanel: FC<{
     };
   }, [runtime, agent]);
 
-  const close = useCallback(() => {
-    setFailure(null);
-    onClose();
-  }, [onClose]);
-
   return (
     <aside
+      id={RIGHT_PANE_ID}
       data-slot="subagent-view"
       aria-label={t("subagentView.title", { name: view.subagent })}
       // A THIRD `shrink-0` CHILD of the page's flex row, with a fixed width: the main
@@ -132,6 +137,12 @@ export const SubagentViewPanel: FC<{
       className="bg-background hidden w-[26rem] shrink-0 flex-col border-s md:flex"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+        {/* THE WAY OUT OF THE WHOLE COLUMN, at the leading edge of its own header. The X that
+            used to sit at the trailing end here is the SAME VERB as this control -- close the
+            column -- and one verb does not stand in one row twice, so it left (see
+            `components/right-pane-toggle.tsx` for the pair and where each of the two now lives).
+            The trailing end is the mirror's way back to the list, which ticket 03 put there. */}
+        <RightPaneCollapseButton onCollapse={onClose} />
         {/* WHO THIS IS. The card in the transcript says it too, but the panel can be
             open long after that card scrolled away, and a mirror with no name on it
             is a second conversation nobody can place. */}
@@ -141,16 +152,9 @@ export const SubagentViewPanel: FC<{
         >
           {t("subagentView.title", { name: view.subagent })}
         </span>
-        <button
-          type="button"
-          data-slot="subagent-view-close"
-          aria-label={t("subagentView.close")}
-          title={t("subagentView.close")}
-          onClick={close}
-          className="text-muted-foreground hover:text-foreground -me-1 rounded-md p-1.5 transition-colors"
-        >
-          <XIcon className="size-4" aria-hidden />
-        </button>
+        {/* THE WAY BACK TO THE LIST, at the trailing end of this row -- the end ticket 01
+            reserved for it, and the control is the shared one beside the collapse. */}
+        <RightPaneBackButton onBack={onBack} />
       </header>
 
       {failure !== null && (

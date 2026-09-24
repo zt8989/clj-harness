@@ -52,6 +52,7 @@ import { toolRowSuite } from "./suites/tool-row";
 import { subagentsSuite } from "./suites/subagents";
 import { subagentViewSuite } from "./suites/subagent-view";
 import { muxSuite } from "./suites/mux";
+import { rightPaneSuite } from "./suites/right-pane";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -65,7 +66,7 @@ import { muxSuite } from "./suites/mux";
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
 /// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
 /// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -353,7 +354,60 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// which is what a folded turn keeps. A turn that only thought or called tools has
 /// none, so the fold puts it away whole instead of leaving its last step on screen
 /// (`lib/turns.ts`, ticket 06 of `.scratch/events-mux-and-host`).
-const EXPECTED_CASES = 131;
+/// 128 -> 132: `.scratch/right-pane-tasks`' ticket 01, the switch on the RIGHT-hand column and the
+/// shell it opens onto -- the `right-pane` suite's three, and one more in `subagent-view`.
+///
+/// THE NEW SUITE RENDERS the two icon controls and the task pane to a string (the `sidebar`
+/// suite's idiom, on the other side) and READS the sources for what a render cannot reach: that
+/// the task pane is the mirror's own column (the class strings compared, so the two states of one
+/// element cannot drift), that the state is one value with three shapes and who writes each of
+/// them, and that the open control is drawn only while the column is closed -- `hidden` below the
+/// `md` the column itself stops at, because a control that does nothing when pressed is worse
+/// than no control. The LAYOUT (the column beside the conversation, the two corners, nothing
+/// drawn at 767px) is the browser walkthrough's half, as that suite's header says.
+///
+/// THE ONE IN `subagent-view` IS A MOVED ASSERTION, not an added one: the mirror header's close X
+/// is retired (the column's own collapse is the same verb, and one row does not get two doors into
+/// one room), so the case that pinned the panel's way out now pins the shared control standing
+/// where the X was -- and the `key={threadId}` assertion above it was renamed to the new state,
+/// not deleted. Nothing was removed from the count to make either one pass.
+/// 132 -> 133: `.scratch/right-pane-tasks`' ticket 02, the task pane's BOTTOM section -- the
+/// `right-pane` suite's fourth case. It renders a job row in both languages and pins the two
+/// things a green tree would not see: the command is ONE line whatever it was written as, and
+/// the clock is drawn ONLY on a row that is still running (a finished row's duration slot is
+/// absent, and that absence is the assertion). The same ticket REWROTE ticket 01's "no fetch"
+/// block rather than adding to it -- that boundary was written to move here -- and what the file
+/// pins now is that the pane still fetches nothing ITSELF: the read and the poll live in one hook
+/// (`hooks/use-task-pane.ts`) and one reader (`lib/jobs.ts`), which is what lets ticket 03's
+/// second read share the same tick. What a source read cannot show -- that a long command is
+/// clipped rather than widening the column, and that a closed pane really leaves nothing in
+/// flight -- is the browser walkthrough's half, as that suite's header says.
+/// 133 -> 137: `.scratch/right-pane-tasks`' ticket 03, the task pane's TOP section -- FOUR
+/// cases. Three in the `right-pane` suite: the join and the narrowing (`lib/subagents-runs.ts`)
+/// are PURE, so "only THIS session's delegations" and "a run whose definition was deleted still
+/// draws" are asserted without a browser, together with the door each row is (its OWN
+/// `threadId`, never a position); the row RENDERED in both languages (name, clipped description,
+/// the status word read from `running` ALONE, and `delegatedAt: null` drawing no line); and the
+/// column's new way back RENDERED, which also pins what it is not (a disclosure, or a second
+/// close). The fourth is in the `subagent-view` suite: the mirror's header carries that way back
+/// at its TRAILING end -- the place ticket 01 deliberately kept for it -- and the page wires it
+/// to the TASK VIEW rather than to a closed column. What a source read cannot show -- that the
+/// rows are clickable, and that the back control really lands on the list -- is the browser
+/// walkthrough's half, as that suite's header says.
+/// 137 -> 138: `.scratch/right-pane-tasks`' ticket 04, the stop control -- ONE case. The row
+/// RENDERED in both languages carries a ■ while its job is running and does not once it is
+/// over (the absence is the assertion, as it is for the clock); the rest is a source read --
+/// the in-flight bit and the disable that shape `components/session-run-stop.tsx` established,
+/// the refusal that is drawn rather than swallowed, the POST (`lib/jobs.stopJob`) and the fact
+/// that the row's new state arrives on the pane's EXISTING tick (no second clock, and no
+/// second reader of the list, for one press). What it cannot show -- that a real press stops
+/// the process tree, and that the NEXT model call is handed the person's block -- belongs to
+/// the Clojure suites and to the browser walkthrough.
+/// 131 + 10 IS THE MERGED ONE: the downlink side and the right-hand column were cut from
+/// the same 128 and neither touched the other's cases, so a merged tree owes the sum -- 131
+/// from `.scratch/events-mux-and-host` (the `mux` and `turns` suites above) plus the ten
+/// `.scratch/right-pane-tasks` added (128 -> 132 -> 133 -> 137 -> 138, above).
+const EXPECTED_CASES = 141;
 
 let total = 0;
 for (const suite of SUITES) {

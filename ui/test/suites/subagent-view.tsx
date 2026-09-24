@@ -32,6 +32,7 @@ import followSource from "../../src/lib/follow.ts?raw";
 import sidebarSource from "../../src/components/sidebar.tsx?raw";
 import listSource from "../../src/components/subagent-list.tsx?raw";
 import appSource from "../../src/app.tsx?raw";
+import toggleSource from "../../src/components/right-pane-toggle.tsx?raw";
 import shellEn from "../../src/locales/en/shell.json?raw";
 import shellZh from "../../src/locales/zh/shell.json?raw";
 import { expect } from "vitest";
@@ -203,7 +204,41 @@ const cases: Case[] = [
       // ONE AT A TIME, AT THE CONNECTION LEVEL: the panel is keyed by the child's id, so
       // switching subagents remounts it and the first child's follow connection goes with
       // its host rather than living on behind the second one's name.
-      expect(appSource).toContain("key={subagentView.threadId}");
+      expect(appSource).toContain("key={rightPane.threadId}");
+    },
+  },
+  {
+    name: "the-mirrors-close-x-is-gone-and-the-columns-own-collapse-stands-in-its-place",
+    run: async () => {
+      // THE TWO VERBS A HEADER COULD OFFER ARE ONE (`.scratch/right-pane-tasks`, decision 3):
+      // the X that used to sit at the trailing end of this header closed the whole column, and
+      // so does the switch's collapse -- so the X went, rather than the same door standing in
+      // one row twice. WHAT REPLACED IT IS THE SHARED CONTROL, not a second button that
+      // happens to look like it: the panel keeps the `onClose` it always had and hands it to
+      // `components/right-pane-toggle.tsx`, which is the file that owns the pair, their one
+      // id, and what each of them says.
+      //
+      // READ AS SOURCE, because this run cannot render the panel at all -- it needs an
+      // assistant runtime and a live SSE connection (see this file's header). What a source
+      // read can prove is the SHAPE of the header, and that is the decision here.
+      expect(panelSource).not.toContain("subagent-view-close");
+      expect(panelSource).not.toContain("XIcon");
+      expect(panelSource).toContain("<RightPaneCollapseButton onCollapse={onClose} />");
+      // AT THE LEADING EDGE, BEFORE THE NAME: the row reads `way out . what this is`, and the
+      // trailing end is kept for the way back to the list (ticket 03 of this feature).
+      expect(panelSource.indexOf("<RightPaneCollapseButton")).toBeLessThan(
+        panelSource.indexOf('data-slot="subagent-view-name"'),
+      );
+      // AND THE COLUMN CARRIES THE ID BOTH CONTROLS NAME. The mirror and the task pane are two
+      // states of ONE element (the other suite reads the other state), which is the whole of
+      // what `aria-controls` can be pointing at.
+      expect(panelSource).toContain("id={RIGHT_PANE_ID}");
+      // The one catalog key that went with the X: nothing names `subagentView.close` any more,
+      // and the `i18n` suite's orphan check would fail on an entry left behind -- this says
+      // WHICH way round the pair moved.
+      for (const shell of [shellEn, shellZh]) {
+        expect(Object.keys(JSON.parse(shell).subagentView)).toEqual(["title"]);
+      }
     },
   },
   {
@@ -238,6 +273,41 @@ const cases: Case[] = [
       // an asymmetry that is a decision, not a missing wire.
       expect(listSource).toContain("GET /api/subagents");
       expect(listSource).toContain("RunRows");
+    },
+  },
+  {
+    name: "the-mirrors-header-holds-a-way-back-to-the-list-at-its-trailing-end",
+    run: async () => {
+      // THE OTHER HALF OF THE HEADER'S ARRANGEMENT, and a MOVED boundary rather than a new
+      // one: ticket 01 kept the TRAILING end of this row free for exactly one thing (the case
+      // above reads that keeping), and ticket 03 put it there. One control folds the whole
+      // column -- the LEADING one -- and another steps back to the TASK LIST; two verbs, and
+      // the same row does not say either twice.
+      expect(panelSource).toContain("<RightPaneBackButton onBack={onBack} />");
+      expect(panelSource.indexOf("<RightPaneBackButton")).toBeGreaterThan(
+        panelSource.indexOf("<RightPaneCollapseButton"),
+      );
+      expect(panelSource.indexOf("<RightPaneBackButton")).toBeGreaterThan(
+        panelSource.indexOf('data-slot="subagent-view-name"'),
+      );
+      // THE CONTROL ITSELF is the shared one from the column's toggle module, and its glyph
+      // says back rather than close -- the same glyph-lie this file's other case refuses.
+      expect(toggleSource).toContain("export const RightPaneBackButton");
+      expect(toggleSource).toContain("<ArrowLeftIcon");
+      // AND THE TWO DOORS GO DIFFERENT PLACES ON THE PAGE: the back control writes the TASK
+      // VIEW, the collapse writes `null` (the column closes). Swapped, one of the two would be
+      // a button that lies about where it goes.
+      expect(appSource).toContain('onBack={() => setRightPane({ kind: "tasks" })}');
+      expect(appSource).toContain("onClose={() => setRightPane(null)}");
+      // THE WORDS LIVE IN BOTH CATALOGS, under the COLUMN's namespace and not the mirror's:
+      // `subagentView` still holds exactly `title` (the case above pins that), and the way
+      // back is a control of the column in whichever state it is drawing.
+      expect((JSON.parse(shellEn) as { rightPane: { back: string } }).rightPane.back).toBe(
+        "Back to the list",
+      );
+      expect((JSON.parse(shellZh) as { rightPane: { back: string } }).rightPane.back).toBe(
+        "返回列表",
+      );
     },
   },
 ];

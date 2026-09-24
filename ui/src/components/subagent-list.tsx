@@ -186,7 +186,6 @@ export const DefinitionButtons: FC<{
 //     navigate to. The side-by-side panel replaced the navigation, so a second way in
 //     would be a second answer to the same question;
 //   - THE SERVER'S ANSWER IS NOT REMOVED WITH IT. `GET /api/subagents` still reports
-//     `runs`, and the store still keeps every delegation -- the front end simply has no
-//     reader for that half any more. That is a deliberate asymmetry and not a missing
-//     wire: the route is cheap, it is the only answer to "what has this home ever
-//     delegated", and deleting it is a separate decision from retiring one screen.
+//     `runs`, and the store still keeps every delegation. It has a reader again the
+//     moment the right column's task pane lists delegations (`.scratch/right-pane-tasks`
+//     ticket 03): what was retired was a SCREEN, and the route was never what went.

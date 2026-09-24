@@ -128,6 +128,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一轮一行，`fold-trajectory` 折完一轮就吐一轮 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读） |
+| `/api/threads/<stem>/jobs` | GET | **本进程为这一场跑着的后台作业**：id、命令、状态、起点、记录的路径。读的是**进程内的作业注册表**，不是日志——没有作业、或作业随上一个进程死掉，都是 `:jobs []`（**不 404**）；状态就是记录末行（`[running]` / `[exit N]` / `[stopped]`，与 `job_output` 同一处出处） | 无（只读） |
+| `/api/threads/<stem>/jobs` | POST | **人从面板停掉一条**：body `{job}`。停的是同一处（`cap.jobs/stop!`），但发起人是**人**——不认领「告知」，改在条目标 `:stopped-by`，于是下一通调用前多一条 `by="user"` 的注入。未知 id 是既有的 `unknown-job`（404）、坏 body 400；不带审批（照 `cancel`） | 无 |
 | `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的动作到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
 | `/api/projects` | POST | 让一个目录成为项目（find-or-create） | 无 |
 | `/api/sessions` | POST | 让一条会话**存在**（`{threadId}`，find-or-create）：库里没有就插一行未绑定、无记忆的会话；已经有就原样不动（**不会解绑**）。**这是「一条会话什么时候成为这个家的一条会话」唯一的答案**：页面自己铸的那枚 id 在第一句真正发出去之前由它登记一次（任务走这一条，项目会话走 `/api/project`——同样认调用方给的 id、同样幂等），这正是「点击新增不立刻会话，发送才新建」要的那一次；而 run 那条边对陌生 id 是 **404**、不再静默创建（`refuse-unknown-session!`，`.scratch/sessions-live-on-the-server` 票 03），所以登记必须发生在这次 run 之前 | 无（只写库里一行，不开任何文件） |
@@ -163,8 +165,9 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **provider 用它的 id**（它在 `config.edn` 里就是那个键，也是凭据名的来源）。
 **这个形状上不该被服务的动词**由这里答 405，而不是掉进 run 端点——那正是它从前会变成一个
 「body 根本不存在的 500」的原因。**方法说有没有副作用**：`rebuild` 与 `archive` 是 POST，
-`stats` / `trajectory` / `sofar` / `feed` / `page` 是 GET——前三个只读日志，后两个是窗口那两条
-（见下）。
+`stats` / `trajectory` / `sofar` / `feed` / `page` 是 GET——前三个只读日志，后两个是窗口那两条（见下）。
+`jobs` 一个动词**两种方法**：GET 列本进程为这一场跑着的作业（只读注册表，不是日志），POST 停一条
+（发起人是人）——方法说有没有副作用，这一条两种都有。
 
 **一个叫 `models` 的 provider 与那条精确路由不冲突**：新建与改写走 collection（`/api/providers`），
 删除走 verb 形状（`/api/providers/<id>/remove`），所以那条路径永远只可能是探询。
