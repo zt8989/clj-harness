@@ -88,7 +88,15 @@
     "ahead_other": "这个页面显示过 {{count}} 条这场对话里已经没有的内容，已经去掉。"
   },
   "subagentView": {
-    "title": "子agent · {{name}}",
-    "close": "关闭"
+    "title": "子agent · {{name}}"
+  },
+  "rightPane": {
+    "title": "任务",
+    "open": "打开任务视图",
+    "collapse": "收起任务视图",
+    "subagents": "子代理",
+    "subagentsEmpty": "这个会话还没有委派过子代理。",
+    "jobs": "后台任务",
+    "jobsEmpty": "这个会话还没有后台任务。"
   }
 }

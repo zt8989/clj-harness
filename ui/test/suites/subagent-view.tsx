@@ -202,7 +202,41 @@ const cases: Case[] = [
       // ONE AT A TIME, AT THE CONNECTION LEVEL: the panel is keyed by the child's id, so
       // switching subagents remounts it and the first child's follow connection goes with
       // its host rather than living on behind the second one's name.
-      expect(appSource).toContain("key={subagentView.threadId}");
+      expect(appSource).toContain("key={rightPane.threadId}");
+    },
+  },
+  {
+    name: "the-mirrors-close-x-is-gone-and-the-columns-own-collapse-stands-in-its-place",
+    run: async () => {
+      // THE TWO VERBS A HEADER COULD OFFER ARE ONE (`.scratch/right-pane-tasks`, decision 3):
+      // the X that used to sit at the trailing end of this header closed the whole column, and
+      // so does the switch's collapse -- so the X went, rather than the same door standing in
+      // one row twice. WHAT REPLACED IT IS THE SHARED CONTROL, not a second button that
+      // happens to look like it: the panel keeps the `onClose` it always had and hands it to
+      // `components/right-pane-toggle.tsx`, which is the file that owns the pair, their one
+      // id, and what each of them says.
+      //
+      // READ AS SOURCE, because this run cannot render the panel at all -- it needs an
+      // assistant runtime and a live SSE connection (see this file's header). What a source
+      // read can prove is the SHAPE of the header, and that is the decision here.
+      expect(panelSource).not.toContain("subagent-view-close");
+      expect(panelSource).not.toContain("XIcon");
+      expect(panelSource).toContain("<RightPaneCollapseButton onCollapse={onClose} />");
+      // AT THE LEADING EDGE, BEFORE THE NAME: the row reads `way out . what this is`, and the
+      // trailing end is kept for the way back to the list (ticket 03 of this feature).
+      expect(panelSource.indexOf("<RightPaneCollapseButton")).toBeLessThan(
+        panelSource.indexOf('data-slot="subagent-view-name"'),
+      );
+      // AND THE COLUMN CARRIES THE ID BOTH CONTROLS NAME. The mirror and the task pane are two
+      // states of ONE element (the other suite reads the other state), which is the whole of
+      // what `aria-controls` can be pointing at.
+      expect(panelSource).toContain("id={RIGHT_PANE_ID}");
+      // The one catalog key that went with the X: nothing names `subagentView.close` any more,
+      // and the `i18n` suite's orphan check would fail on an entry left behind -- this says
+      // WHICH way round the pair moved.
+      for (const shell of [shellEn, shellZh]) {
+        expect(Object.keys(JSON.parse(shell).subagentView)).toEqual(["title"]);
+      }
     },
   },
   {

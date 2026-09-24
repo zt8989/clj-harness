@@ -96,7 +96,15 @@
     "ahead_other": "This page was showing {{count}} entries the conversation no longer has. They are gone."
   },
   "subagentView": {
-    "title": "Subagent · {{name}}",
-    "close": "Close"
+    "title": "Subagent · {{name}}"
+  },
+  "rightPane": {
+    "title": "Tasks",
+    "open": "Open task pane",
+    "collapse": "Collapse task pane",
+    "subagents": "Subagents",
+    "subagentsEmpty": "This session has not delegated to a subagent yet.",
+    "jobs": "Background jobs",
+    "jobsEmpty": "This session has no background job."
   }
 }

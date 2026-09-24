@@ -51,6 +51,7 @@ import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
 import { subagentsSuite } from "./suites/subagents";
 import { subagentViewSuite } from "./suites/subagent-view";
+import { rightPaneSuite } from "./suites/right-pane";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -64,7 +65,7 @@ import { subagentViewSuite } from "./suites/subagent-view";
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
 /// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
 /// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, rightPaneSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -343,7 +344,24 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// key, the rows the menu offers, and the session's own row when the menu cannot offer it),
 /// which is why these two are literals in and options out; that a click actually SENDS the
 /// vendor under whose heading it sat is the browser walkthrough's half.
-const EXPECTED_CASES = 128;
+/// 128 -> 132: `.scratch/right-pane-tasks`' ticket 01, the switch on the RIGHT-hand column and the
+/// shell it opens onto -- the `right-pane` suite's three, and one more in `subagent-view`.
+///
+/// THE NEW SUITE RENDERS the two icon controls and the task pane to a string (the `sidebar`
+/// suite's idiom, on the other side) and READS the sources for what a render cannot reach: that
+/// the task pane is the mirror's own column (the class strings compared, so the two states of one
+/// element cannot drift), that the state is one value with three shapes and who writes each of
+/// them, and that the open control is drawn only while the column is closed -- `hidden` below the
+/// `md` the column itself stops at, because a control that does nothing when pressed is worse
+/// than no control. The LAYOUT (the column beside the conversation, the two corners, nothing
+/// drawn at 767px) is the browser walkthrough's half, as that suite's header says.
+///
+/// THE ONE IN `subagent-view` IS A MOVED ASSERTION, not an added one: the mirror header's close X
+/// is retired (the column's own collapse is the same verb, and one row does not get two doors into
+/// one room), so the case that pinned the panel's way out now pins the shared control standing
+/// where the X was -- and the `key={threadId}` assertion above it was renamed to the new state,
+/// not deleted. Nothing was removed from the count to make either one pass.
+const EXPECTED_CASES = 132;
 
 let total = 0;
 for (const suite of SUITES) {
