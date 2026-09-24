@@ -98,12 +98,29 @@
 
 (defn- trajectory-of
   "The trajectory route as the CLIENT reads it: NDJSON (ticket 06 of
-  `.scratch/events-mux-and-host`). The first line is the header, every line after it is
-  one turn -- folded back into the payload the route used to answer with."
-  [resp]
-  (let [lines  (remove str/blank? (str/split-lines (.body ^HttpResponse resp)))
-        parsed (mapv #(json/read-str % :key-fn keyword) lines)]
-    (assoc (first parsed) :turns (vec (rest parsed)))))
+  `.scratch/events-mux-and-host`) -- the first line is the header, every line after it is one
+  turn. READS TURN-COUNT TURNS AND CLOSES THE STREAM: this process HOLDS the subagent's
+  session, and the route keeps the connection open for pushes then (ticket 13), so a reader
+  that waited for the body to end would wait forever."
+  [path turn-count]
+  (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
+                 (.GET)
+                 (.build))
+        resp (.send (HttpClient/newHttpClient) req
+                    (HttpResponse$BodyHandlers/ofInputStream))
+        in   (.body resp)
+        rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
+    (try
+      (let [line*  (fn [] (some-> (.readLine rd) str/trim not-empty))
+            header (json/read-str (or (line*) "{}") :key-fn keyword)
+            turns  (loop [acc [] left turn-count]
+                     (if (zero? left)
+                       acc
+                       (if-some [line (line*)]
+                         (recur (conj acc (json/read-str line :key-fn keyword)) (dec left))
+                         acc)))]
+        (assoc header :turns (vec turns)))
+      (finally (.close in)))))
 
 (defn- frames
   "The SSE body as maps. The wire shape is `data: {json}` lines, which is what the
@@ -529,7 +546,7 @@
            (post-run thread)
            (let [child (:thread-id (subagent-log thread))
                  _     (wait-for thread (fn [ls] (seq (messages-of ls "tool"))) 4000)
-                 mine  (trajectory-of (api-call :get (str "/api/threads/" child "/trajectory") nil))
+                 mine  (trajectory-of (str "/api/threads/" child "/trajectory") 1)
                  its   (read-json (api-call :post (str "/api/threads/" child "/rebuild") "{}"))
                  stem  (read-json (api-call :post (str "/api/threads/" thread "/rebuild") "{}"))]
              (testing "the trajectory is its own"

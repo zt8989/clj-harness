@@ -53,6 +53,7 @@
             [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]
             [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
             [harness.kernel.frames :as frames]
             [harness.kernel.tools :as tools]))
 
@@ -746,12 +747,15 @@
         state (-> state
                   (update :life life-step record)
                   (update :calls calls-step record))
-        segs  (:segments state)
-        next  (segments-step segs [i record])
-        newly (subvec (:closed next) (count (:closed segs)))]
+        ;; AT MOST ONE SEGMENT CLOSES PER ROW (a row can open at most one), so folding
+        ;; `:closed` and CLEARING it keeps this state the size of the PAYLOAD rather than the
+        ;; size of the run count. `run-segments` keeps its own accumulating machine.
+        next  (segments-step (:segments state) [i record])
+        folding (reduce (fn [f seg] (one-run f seg (:life state) (:calls state)))
+                        (:folding state)
+                        (:closed next))]
     (as-> state s
-      (reduce (fn [s seg] (update s :folding (fn [f] (one-run f seg (:life s) (:calls s))))) s newly)
-      (assoc s :segments next)
+      (assoc s :segments (assoc next :closed []) :folding folding)
       (cond-> s (= "event" kind) (assoc :last-event record))))))
 
 (defn trajectory-answer
@@ -847,3 +851,41 @@
   learns where the log came from."
   [f]
   (records->trajectory (stats/read-records f)))
+
+;; ------------------------------------------------- the session's view (ticket 13)
+
+(defn view-value
+  "STEM's trajectory STATE: the view kept on the session when there is one, else ONE streaming
+  walk that INSTALLS it (the 'first load', ticket 13). Answers nil when this process does not
+  hold STEM -- a read-only door does not build a session.
+
+  THE VALUE IS THE STATE, NOT THE PAYLOAD: the write stream's step (`trajectory-step`)
+  advances the state a row at a time, and `trajectory-answer` turns the state into the
+  payload. Installing the state means the payload is computed on read, never appended to.
+
+  THE RACE, SAID OUT LOUD: a row handed to the writer between the walk's end and the install
+  is not in the walk and lands before the view exists, so this process would miss it until the
+  session is rebuilt. The window is one writer hand-off wide, and a rebuild (or an eviction +
+  the next ask) reads the record again -- which the ticket allows."
+  [stem]
+  (when (some? (sessions/live-entry stem))
+    (or (sessions/fold-value stem :trajectory)
+        (let [folded (sessions/fold-record stem (trajectory-init) trajectory-step)]
+          (when (nil? (:missing folded))
+            (when (nil? (:error folded))
+              (let [state (:ok folded)]
+                (sessions/set-fold-value! stem :trajectory state)
+                state)))))))
+
+(defn install!
+  "Register the trajectory's LIVE step on the session's write stream (ticket 13), so the view
+  `view-value` builds goes on advancing with every row the writer lands. A session with no
+  view is left alone -- a missing value is a no-op, not an empty trajectory.
+
+  THE COMPOSITION ROOT CALLS THIS (`harness.edge.http/start!`); idempotent, returns the
+  teardown."
+  [ ] ; no arguments
+  (sessions/register-step! :trajectory
+                           (fn [value ctx pair]
+                             (if (some? value) (trajectory-step value ctx pair) nil)))
+  (fn teardown [] (sessions/unregister-step! :trajectory)))

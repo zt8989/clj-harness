@@ -433,6 +433,19 @@
   [thread-id name]
   (get-in (live-entry thread-id) [:folds name]))
 
+
+(defn set-fold-value!
+  "Install VALUE as NAME's answer on THREAD-ID's session -- the door an ON-DEMAND consumer
+  comes through, because `register-fold!` only feeds a session built AFTER the registration
+  (its fold rides the birth walk).
+
+  A NO-OP WHEN THIS PROCESS DOES NOT HOLD THREAD-ID: installing a value must not build a
+  session, for the same reason `live-entry` is a lookup. Answers whether it landed."
+  [thread-id name value]
+  (let [id (str thread-id)]
+    (if (contains? @registry id)
+      (do (swap! registry assoc-in [id :folds name] value) true)
+      false)))
 (defn read-records
   "THREAD-ID's RECORD, parsed, AS THE SESSION READS IT (tickets 05-07) -- the READ half of
   the two streams a session offers. A route asks the SESSION for the record now: the naming

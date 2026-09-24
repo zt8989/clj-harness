@@ -90,6 +90,7 @@
 (def touch! session/touch!)
 (def live-entry session/live-entry)
 (def fold-value session/fold-value)
+(def set-fold-value! session/set-fold-value!)
 (def read-records session/read-records)
 (def fold-record session/fold-record)
 (def register-fold! session/register-fold!)

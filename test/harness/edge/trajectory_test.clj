@@ -753,16 +753,19 @@
 
 (defn- send-run!
   "One real AG-UI run, drained. Returns its response body."
-  [port thread-id]
+  ([port thread-id] (send-run! port thread-id "u1"))
+  ([port thread-id message-id]
   (let [body (json/write-str {:threadId thread-id
                               ;; THE ACTION'S OWN ENTRIES (ticket 03), not the
-                              ;; conversation: the server holds that.
-                              :append [{:id "u1" :role "user" :content "看看这个项目"}]
+                              ;; conversation: the server holds that. THE ID IS THE TURN
+                              ;; BOUNDARY -- a second run must bring a NEW one, or the rule in
+                              ;; `harness.edge.trajectory/run-segments` reads it as a resume.
+                              :append [{:id message-id :role "user" :content "看看这个项目"}]
                               :tools []})
         ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run!`): the POST answers an ack,
         ;; the frames arrive on `events.mux`, and this hands back the run's SSE body as before.
         result (support/mux-run! port thread-id body nil)]
-    (:body result)))
+    (:body result))))
 
 (defn- get-json [port path]
   (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
@@ -774,18 +777,31 @@
 
 (defn- get-trajectory
   "The trajectory route as the CLIENT reads it: NDJSON. The FIRST line is the header
-  (`:threadId` / `:incomplete` / `:behind`); every line after it is one turn, written as
-  the fold finishes it. A non-200 answer is a single JSON object with no turn lines, so
-  the header position holds the error map."
-  [port path]
+  (`:threadId` / `:incomplete` / `:behind`); every line after it is one turn. A non-200 answer
+  is a single JSON object (the error map) and no turns.
+
+  READS TURN-COUNT TURNS AND THEN CLOSES THE STREAM: the route KEEPS THE CONNECTION OPEN when
+  this process holds the session (ticket 13 pushes later turns there), so a reader that waited
+  for the body to end would wait forever. TURN-COUNT is what the caller means to read."
+  [port path turn-count]
   (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
                  (.GET)
                  (.build))
         resp (.send (HttpClient/newHttpClient) req
-                    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))
-        lines (remove str/blank? (str/split-lines (.body resp)))
-        parsed (mapv #(json/read-str % :key-fn keyword) lines)]
-    [(.statusCode resp) (first parsed) (vec (rest parsed))]))
+                    (HttpResponse$BodyHandlers/ofInputStream))
+        in   (.body resp)
+        rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
+    (try
+      (let [line*  (fn [] (some-> (.readLine rd) str/trim not-empty))
+            header (json/read-str (or (line*) "{}") :key-fn keyword)
+            turns  (loop [acc [] left turn-count]
+                     (if (zero? left)
+                       acc
+                       (if-some [line (line*)]
+                         (recur (conj acc (json/read-str line :key-fn keyword)) (dec left))
+                         acc)))]
+        [(.statusCode resp) header (vec turns)])
+      (finally (.close in)))))
 
 (defn- log-messages
   "Every `message` record from THREAD-ID's own log, read back through the namespaces
@@ -844,7 +860,7 @@
         ;; BEFORE the fold, not after it: the route reads the log, so the log has to
         ;; have been finished being written (see await-run-recorded!).
         (await-run-recorded! thread-id 5000)
-        (let [[status head turns] (get-trajectory port (str "/api/threads/" thread-id "/trajectory"))
+        (let [[status head turns] (get-trajectory port (str "/api/threads/" thread-id "/trajectory") 1)
               items   (:items (first turns))
               by      (fn [k] (first (filter #(= k (:kind %)) items)))
               written (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
@@ -871,6 +887,68 @@
               "the tool call the model asked for, name and arguments and all")
           (is (string? (:argsText (by "tool"))))
           (is (string? (:result (by "tool")))))))))
+
+(deftest the-view-is-kept-and-a-second-ask-does-not-read-the-record
+  ;; TICKET 13: the FIRST ask folds the record ONCE and keeps the state on the session; every
+  ;; ask after that reads the view. MOVING THE RECORD OUT FROM UNDER THE SERVER is the test:
+  ;; the second ask must answer the SAME thing, because it never opened the file.
+  (with-server "trajectory-view" [{:content "answered"}]
+    (fn [port]
+      (send-run! port "trajectory-view")
+      (await-run-recorded! "trajectory-view" 5000)
+      (let [[status head turns] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)
+            f     (replay/locate (home/projects-dir) "trajectory-view")
+            moved (java.io.File. (str (.getAbsolutePath f) ".moved"))]
+        (is (= 200 status))
+        (is (seq turns) "the first ask folds the record and keeps the view")
+        (try
+          (is (.renameTo f moved) "the record is moved away from the server")
+          (let [[status2 head2 turns2] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)]
+            (is (= 200 status2) "the second ask still answers")
+            (is (= [status (:threadId head) (:incomplete head) turns]
+                   [status2 (:threadId head2) (:incomplete head2) turns2])
+                "and it answers the SAME thing -- from the view, not from the file"))
+          (finally (.renameTo moved f)))))))
+
+(deftest a-later-turn-is-pushed-on-the-open-stream
+  ;; TICKET 13: an open stream over a HELD session stays open and PUSHES the turns that
+  ;; finalize after it opened -- no second GET, and no file read.
+  (with-server "trajectory-push" [{:content "first"} {:content "second"}]
+    (fn [port]
+      (let [path "/api/threads/trajectory-push/trajectory"]
+        (send-run! port "trajectory-push")
+        (await-run-recorded! "trajectory-push" 5000)
+        (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                       (.GET)
+                       (.build))
+              resp (.send (HttpClient/newHttpClient) req
+                          (HttpResponse$BodyHandlers/ofInputStream))
+              in   (.body resp)
+              rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
+          (try
+            (json/read-str (.readLine rd) :key-fn keyword) ; the header
+            (let [first-turn (json/read-str (.readLine rd) :key-fn keyword)
+                  _          (is (= 1 (:index first-turn)))
+                  ;; THE SECOND RUN HAPPENS WHILE THIS STREAM IS OPEN. The stream is read
+                  ;; until the SECOND turn arrives -- the open one is re-sent as it grows, so
+                  ;; the first line pushed is not necessarily the new turn.
+                  running    (future (send-run! port "trajectory-push" "u2"))
+                  pushed     (loop [left 50]
+                               (if (zero? left)
+                                 ::timeout
+                                 (let [line (deref (future (.readLine rd)) 15000 ::timeout)]
+                                   (cond
+                                     (or (= ::timeout line) (nil? line)) ::timeout
+                                     (= 2 (:index (json/read-str line :key-fn keyword)))
+                                     (json/read-str line :key-fn keyword)
+                                     :else (recur (dec left))))))]
+              (is (= 2 (:index pushed)) (str "pushed=" (pr-str pushed)))
+              (is (some? (deref running 15000 ::timeout)))
+              (is (= 2 (count (:turns (trajectory/trajectory-answer (trajectory/view-value "trajectory-push")))))
+                  "the view itself has both turns")
+              (is (= 2 (count (:turns (trajectory/log-trajectory (replay/locate (home/projects-dir) "trajectory-push")))))
+                  "a FRESH fold of the record has both turns"))
+            (finally (.close in))))))))
 
 (deftest the-endpoint-says-not-here-for-a-session-that-has-no-log
   (with-server "trajectory-no-log" [{:content "unused"}]

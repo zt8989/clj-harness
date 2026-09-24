@@ -66,3 +66,33 @@ kernel 里的会话只持有**按 thread 的状态 + 订阅缝 + 开关**。
 - **05–07 是三个独立消费者**，互相不阻塞；它们表达的是「其他都是消费者」这个方向，不是 run 热路径
   （热路径是 01–04）。
 - `harness.edge.record`（写者）现在 require 会话，是 08–10 的 blast radius 之一，别漏。
+
+## 落地（2026-09-24）：票 12 + 票 13
+
+**轨迹折成一条流，然后成为会话的一个视图：一次读，之后由写流推。** 两句口径落成的形状：
+
+- **折法是一个 step，不是一遍扫**（票 12）。`harness.edge.trajectory` 长出 `segments-init` /
+  `segments-step` / `segments-answer`（`run-segments` 现在是它的答案）、`life-step` / `calls-step`
+  （`tool-lifecycles` / `call-index` 现在是它们的 reduce）、以及 **`trajectory-init` /
+  `trajectory-step` / `trajectory-answer`**：三条 prepass 并进同一趟按行的累加器。`trajectory-step`
+  是**双 arity** 的——会话的两条缝递 `[value ctx [i row]]`（票 02 / 04 的形状），`sessions/fold-record`
+  与内存里的 reduce 递 `[value [i row]]`。段一闭合（下一段开口，或记录到底）就折、就**丢掉**，
+  所以状态是 payload 的大小，不是 run 数的大小。`records->trajectory` 是这个 step 的内存孪生
+  （`replay/fold-consumers` 跑的同一份）。
+- **视图住在会话上，按需建**（票 13）。`trajectory/view-value` 第一次被问时走**一趟**
+  `sessions/fold-record` 把状态装进会话（新的 `kernel.session/set-fold-value!`，因为 `register-fold!`
+  只在 build 时喂）；`trajectory/install!` 在写流上登记一步，`row-written!` 每 append 一行就原地推进。
+  内存丢了（会话淘汰、连接关）就再走一趟——票面允许，是这个设计的正常代价。
+- **路由是长连接**（票 13）。`GET …/trajectory` 仍是 NDJSON（首行头、其后一轮一行），但对**持有着的**
+  会话**不关**：先把已定稿的轮吐出去，再挂在会话门铃上，每个新定稿的轮推下去；**运行中那一轮**每推一次
+  重发，客户端按 `:index` 原地替换（与窗口「同 id 是新版本」同一条）。不碰 `events.mux`，下行仍只承载对话。
+- **没给 JSONL 加字段**：折法是单向前进的一趟，跨段的查表在「下一段开口」时都齐了，所以「内存丢了重读
+  一次」这条已经足够——记录格式不动（决策 5 的账本是闭的）。
+
+验证：`harness.edge.trajectory-test` **25 / 109 / 0**（新增：`records->trajectory` 与 `fold-consumers`
+是同一份折、**挪走记录文件后第二次问仍答同一份**、**第二条 run 的轮在已开的流上被推**）；
+`harness.edge.http-test` 103 / 1147 / 0；后端全量 **1236 / 13526 / 1**（唯一那条红仍是既有的 fork 子进程
+`cap.claims-test`）；ui **131**、typecheck、build 过；真浏览器走查 `.scratch/session-as-kernel/walkthrough-view.mjs`
+**ALL GREEN**（对话栏一个轨迹请求都不发；打开轨迹栏**一条**流、画第一轮、**且它没关**——推送就骑在它上面）。
+
+**票 12 与票 13 到此收口，从 `issues/` 删除。**
