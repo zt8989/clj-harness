@@ -193,7 +193,11 @@
             (is (= [3] (mapv :seq replayed)))
             (is (= "b" (:delta (first replayed)))))))
 
-      (testing "a connection that never saw a frame gets the whole run"
+      (testing "and a NIL cursor replays nothing -- the buffer may hold the PREVIOUS run's terminal"
         (let [third-sent (atom []) third-ch (fake-channel third-sent)]
           (#'http/mux-attend! "tok-gap-3" third-ch [{:threadId "mux-gap"}])
-          (is (= [1 2 3] (mapv :seq (run-frames third-sent)))))))))
+          (is (= [] (mapv :seq (run-frames third-sent)))
+              "a connection about to START a run is handed none of the last one")
+          (#'http/mux-broadcast! "mux-gap" {:type "TEXT_MESSAGE_CONTENT" :delta "c"})
+          (is (= [4] (mapv :seq (run-frames third-sent)))
+              "...and hears what happens after it subscribed"))))))

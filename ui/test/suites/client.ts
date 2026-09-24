@@ -224,6 +224,10 @@ const cases: Case[] = [
       const bodies: Body[] = [];
       const agent = new HarnessAgent({
         url: runUrl(),
+        // THE BODY IS WHAT THIS CASE IS ABOUT, so the transport is the page's: the run's
+        // frames come down the downlink, and the recorded `fetch` above still sees every
+        // body the class builds.
+        runAck: true,
         fetch: (requestUrl, init) => {
           bodies.push(JSON.parse(String(init.body)) as Body);
           return fetch(requestUrl, init);

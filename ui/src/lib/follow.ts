@@ -25,11 +25,11 @@
 import { HttpAgent, type HttpAgentConfig, type HttpAgentFetchFn } from "@ag-ui/client";
 
 import { subscribeRun, type RunFrame } from "@/lib/mux";
-import { API_BASE } from "@/lib/threads";
+import { apiBase } from "@/lib/threads";
 
 /// The record's replay for one conversation. The LIVE tail is the downlink, not here.
 export function framesUrl(threadId: string): string {
-  return `${API_BASE}threads/${encodeURIComponent(threadId)}/frames`;
+  return `${apiBase()}threads/${encodeURIComponent(threadId)}/frames`;
 }
 
 const seqOf = (frame: RunFrame): number | null =>

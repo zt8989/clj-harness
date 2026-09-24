@@ -3715,13 +3715,19 @@
 
 (defn- mux-replay-run!
   "Hand TOKEN's downlink the run frames of THREAD-ID it is missing: everything remembered
-  after RUN-SINCE, oldest first. `nil` is 'I hold nothing' -- a connection that has just
-  subscribed to a run already in flight, and (with a cursor) a socket that dropped mid-run
-  and came back saying how far it got."
+  after RUN-SINCE, oldest first.
+  
+  A NIL CURSOR REPLAYS NOTHING, and that is deliberate rather than a shortcut: `nil` is 'I
+  hold nothing of this run', which is what a connection about to START one declares -- and the
+  buffer may still hold the PREVIOUS run's frames, terminal and all, which would finish the
+  new run before it began (measured: a suite resuming a parked run was handed the parked run's
+  RUN_FINISHED and stopped reading). A RECONNECTING reader has a cursor -- it saw frames -- and
+  gets exactly the gap."
   [token thread-id run-since]
-  (when-some [ch (mux/channel token)]
-    (doseq [frame (mux/run-frames-after thread-id run-since)]
-      (mux-send! ch (mux-frame thread-id frame)))))
+  (when (some? run-since)
+    (when-some [ch (mux/channel token)]
+      (doseq [frame (mux/run-frames-after thread-id run-since)]
+        (mux-send! ch (mux-frame thread-id frame))))))
 
 (defn- mux-end!
   "Tell one conversation's reader on this downlink that its window is over, naming why.

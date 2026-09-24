@@ -230,7 +230,16 @@ function runStream(
         } catch {
           return;
         }
-        if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") end(controller);
+        if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") {
+          // A SERVER'S OWN STOP IS NOT THE SAME ENDING as a run that finished: it arrives as a
+          // terminal and is then cancelled LOCALLY (`cancellationAware`, on `code: "stopped"`),
+          // and that path ABORTS this stream -- which is what makes the run `RUN_CANCELLED`.
+          // Closing here first would swallow it: a closed stream cannot be aborted into an
+          // AbortError, so the cancellation would read as a clean finish (measured: the client
+          // suite's stop case lost its `onRunFailed`).
+          if ((frame as { code?: string }).code === "stopped") return;
+          end(controller);
+        }
       };
       attach(push);
       for (const frame of buffer) push(frame);

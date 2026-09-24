@@ -18,7 +18,9 @@
 // `threadId`; the server filters to the threads this connection declared (so a page hears
 // nothing about a conversation it is not holding).
 import type { WindowFrame } from "./feed";
-import { API_BASE, downlinkUrl } from "./threads";
+// `apiBase` RATHER THAN `API_BASE`: a suite points the harness origin at a server it learned
+// at runtime, and this module is loaded before that (`threads.ts` says why).
+import { apiBase, downlinkUrl } from "./threads";
 
 /// HOW LONG TO WAIT BEFORE OPENING THE DOWNLINK AGAIN after it closed on its own -- the
 /// same fact the SSE feed's reconnect carried: while the socket is up nothing is asked at
@@ -174,7 +176,7 @@ function schedule(): void {
 
 function declare(body: { subscribe?: unknown[]; unsubscribe?: string[] }): Promise<void> | null {
   if (socket === null || socket.readyState !== WebSocket.OPEN) return null;
-  return fetch(`${API_BASE}events.mux/subscribe`, {
+  return fetch(`${apiBase()}events.mux/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ subscriber: token, ...body }),
