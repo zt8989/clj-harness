@@ -29,12 +29,10 @@ CORS 按**请求自己带来的 `Origin`** 判，不是按启动时定下的一�
 
 ## AG-UI 边
 
-`POST /api/agent` 收一个 `RunAgentInput`，以 SSE 回帧。两条 http-kit 的规矩必须同时成立：
-
-- **status 与 headers 骑在第一次 `send!` 上**，不能先单独发一次 header；
-- **最后一帧带 `close-after-send?`**——单独走一条 close 路径会丢掉缓冲里没冲出去的body。
-
-body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等于对非 ASCII 掷硬币）。
+`POST /api/agent` 收一个 `RunAgentInput`，**只起跑并回一个 ack（`{threadId, runId}`）**；这一轮的
+AG-UI 帧从**页面级的下行** `events.mux` 到达（ADR 0004），发起的页面与看客读的是同一条流。
+（2026-09-23 之前这里是「以 SSE 回帧」——那条响应体连同 `GET …/feed`、`GET …/follow` 两条流
+已经一起删掉，见 `.scratch/events-mux-and-host/spec.md` 票 05。）
 
 **每次 run 一个 converter、一个 emitter。** converter（`ag_ui/outbound`）持有「哪条消息开着」的状态机，
 逐事件重建它会把每条消息 id 重置、重复发 START 帧——AG-UI 客户端视为致命。
@@ -102,7 +100,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 
 | 路由 | 动词 | 干什么 | 落审计行 |
 |---|---|---|---|
-| `/api/agent` | POST | **AG-UI run（流式）** | 下面那些 |
+| `/api/agent` | POST | **AG-UI run：起跑并回 ack（`{threadId, runId}`）；帧走 `events.mux`** | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
 | `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
 | `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model（每个厂商带**有没有密钥**这一件事，不带值）、可选的思考档 | 无（只读） |
@@ -122,10 +120,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
 | `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上**每一条**没终结的 run（按 run id 认；各补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建。服务端持有这场会话时**从内存答**，而且**不修不合**——合上是对**死掉的**会话的收尾 | `session/rebuilt`，合上过则每一轮先有一行 `session/closed-off` |
-| `/api/threads/<stem>/sofar` | GET | **记录到哪了**：已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。服务端持有这场会话时读**内存**，但**有 run 正在跑时仍读记录**——那一刻「到哪里了」的答案在文件里。它**不是客户端的轮询**：有窗口的页面由 feed 报（见下），只有**没有窗口**的那几扇门在自己驱动的一轮结束后读它一次。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
-| `/api/threads/<stem>/feed` | GET | **窗口那条流**（SSE）：首帧是尾页（带 `since` 连上时是它之后的增量），此后**每落盘一批推一帧**，窗口结束时一帧 `end`。**有 run 正在跑时条目也从记录读**（见下），所以刷新/新开一个窗口看得到那一轮已经写下的帧。`since` 落在窗口外或 generation 不对 ⇒ **在推任何字节之前** 409，body 带当前值；会话被另一个活进程服务 ⇒ 409 点名（推送意味着持有） | 无（只读） |
+| `/api/threads/<stem>/sofar` | GET | **记录到哪了**：已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。服务端持有这场会话时读**内存**，但**有 run 正在跑时仍读记录**——那一刻「到哪里了」的答案在文件里。它**不是客户端的轮询**：有窗口的页面由下行（`events.mux`）报，只有**没有窗口**的那几扇门在自己驱动的一轮结束后读它一次。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
+| `/api/events.mux` | GET | **下行那条流**（WebSocket，ADR 0004）：一页一条，按 `?subscriber=<token>&sessions=<json>` 声明持有哪几场、各自从哪个游标开始；此后**每场被订阅的会话每落盘一批推一帧**（帧带 `threadId`），窗口结束一帧 `end`。**只推这条连接订阅的会话**——没订阅的会话一条都不推；token 随连接生、随连接死，服务端不记连接之外的订阅。run 的帧与子 agent 的帧也从这里下行 | 无（只读） |
+| `/api/threads/<stem>/frames` | GET | **子 agent 重放的半边**（JSON）：这场会话的帧按运行时要读的顺序（`RUN_STARTED` 起头、`MESSAGES_SNAPSHOT` 随后、记录的帧按序）加一个 `:running`。面板读它、再从 `events.mux` 取实时尾巴，两边靠帧自己的 `:seq` 对齐（ticket 04） | 无（只读） |
+| `/api/events.mux/subscribe` | POST | **改一条活着的下行的订阅集合**（socket 只下行，发不了订阅）：`{subscriber, subscribe: [{threadId, since, generation}], unsubscribe: [threadId]}`。连接已关闭或从未开 ⇒ 404 | 无（只读） |
 | `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存（**有 run 正在跑时读记录**，见下），不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
-| `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。带 `:behind` | 无（只读） |
+| `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一轮一行，`fold-trajectory` 折完一轮就吐一轮 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读） |
 | `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的动作到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
@@ -229,13 +229,12 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **它按段判轮，不认某种行**：悬置恢复会在同一个 runId 下再写一条 `system-prompt` 行（没有新的用户消息），
 那是同一轮的续，不是新的一轮（`trajectory/run-segments` 的第三种开段情形）。
 
-### 窗口：`feed` 与 `page`
-
-**一场会话可以长到不该整份发出去**（ADR 0003），所以它多两条路，读的是**同一段窗口**的两个方向：
-`GET /api/threads/<stem>/page[?beforeSeq=N]` 一次一页，`GET /api/threads/<stem>/feed[?since=N&generation=G]`
-一条流。**推与拉是同一个窗口的两个方向，不是两个接口**：三个动词——尾页 `tail`、增量 `since`、
-补页 `before`——由 `harness.edge.sessions` 里**同一组纯函数**算出来，所以 `baseSeq` 与 `hasMore`
-只有一处说了算。
+### 窗口：增量在下行，补页在 page
+**一场会话可以长到不该整份发出去**（ADR 0003），所以有一页一页的读：
+`GET /api/threads/<stem>/page[?beforeSeq=N]` 一次一页（尾页或读者手上最老那条之前的一页），
+**增量不再走一条自己的 SSE**——它随页面级的下行（`events.mux`）到达，帧带 `threadId`。三个方向——
+尾页 `tail`、增量 `since`、补页 `before`——由 `harness.edge.sessions` 里**同一组纯函数**算出来，
+所以 `baseSeq` 与 `hasMore` 只有一处说了算。
 
 **窗口切在「批」的边界上，不切条目。** 一次动作（或一轮 run）的条目落在同一条 jsonl 行里，于是共享
 一个 `:seq`；页因此既不重叠也不漏半批——`before` 严格切在读者手上最老那条之前，读者没拿到的条目必然

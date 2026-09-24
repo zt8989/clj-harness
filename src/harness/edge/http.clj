@@ -98,6 +98,8 @@
             [harness.edge.replay :as replay]
             [harness.edge.record :as record]
             [harness.edge.sessions :as sessions]
+            [harness.edge.mux :as mux]
+            [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.compaction :as compaction]
@@ -660,7 +662,11 @@
   that answer -- the composer's gate, the read side's decision to close a record off
   -- would be wrong forever rather than briefly."
   [thread-id run-id]
-  (sessions/run-started! thread-id run-id))
+  (sessions/run-started! thread-id run-id)
+  ;; AND THE HOST HEARS: a run starting is one of the facts a sidebar draws, and it
+  ;; does not ride on any one conversation's window (that is what `events.host` is for).
+  (host/ring!)
+  nil)
 
 (defn- unregister-run!
   "Forget THREAD-ID's run RUN-ID -- if that is the run this thread has registered.
@@ -670,7 +676,10 @@
   terminal was dispatched). The second call is a no-op, so 'exactly once' is a
   property of the shape rather than something each call site has to arrange."
   [thread-id run-id]
-  (sessions/run-finished! thread-id run-id))
+  (sessions/run-finished! thread-id run-id)
+  ;; AND THE HOST HEARS for the same reason: the row's "running" dot is this registry's.
+  (host/ring!)
+  nil)
 
 (defn entry-source
   "WHO PUT THIS MESSAGE INTO THE ARRAY THE MODEL READ, for a message an ACTION put in --
@@ -769,87 +778,56 @@
 
     nil))
 
+;; THE RUN'S FRAMES ALSO GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004). Declared here
+;; because the emitter is built near the top of this file and the mux section is far below
+;; it -- the Var is what a runtime call resolves either way.
+(declare mux-broadcast!)
 (defn- runner
-  "Build the frame emitter for one run. Two http-kit rules have to hold at once:
+  "Build the frame sink for one run: log every frame, keep it for the moment the run ends, and
+  BROADCAST it to the downlink (`events.mux`, ADR 0004) -- which is the carrier a run has now.
 
-    - the status and headers ride on the FIRST send!, not on the ring response, so a
-      separate header-only send is not an option;
-    - the LAST frame carries close-after-send?. Closing down a separate code path
-      loses the response: http-kit buffers small writes, and a lone close discards
-      whatever was never flushed. Watched a complete, correctly logged run deliver
-      zero frames that way.
+  WHERE THE RUN ENDS IS HERE and nowhere else: a terminal frame is the only fact that says so,
+  and this is the one place that sees every frame exactly once. So the registry stops claiming
+  the thread is running and the conversation is folded (`settle!`) BEFORE the terminal goes out
+  -- the window between 'the run ended' and 'its words are in the conversation' is one a fast
+  client would otherwise be racing this process through.
 
-  WHICH IS WHY THE CALLER'S ORIGIN COMES IN AS AN ARGUMENT. `handler` merges the
-  CORS headers onto the ring response, and for this one route that is not where
-  the wire's headers come from -- so the value has to reach the first frame by
-  another road, and this is it.
-
-  Bodies are UTF-8 BYTES: this machine's JVM default charset is GBK, so handing
-  http-kit a String would be a coin flip on any non-ASCII.
-
-  IT REPORTS THE TERMINAL INTO STATE -- the run's one side channel to the close
-  handler (`handle-run`), since `:on-open` and `:on-close` are two callbacks with
-  nothing else in common: whether this stream was ever told to end. (What the run
-  was DOING lives in the same atom and is set by the loop that drains the kernel,
-  not here -- this function only ever sees frames.) `send!`'s own answer is NOT a
-  liveness signal and is deliberately ignored: measured 2026-09-17 on a client that
-  had RESET the connection, every `send!` still answered true, four thousand frames
-  went into a socket nobody was reading, and http-kit called the close handler only
-  when the server closed the channel itself. A TCP socket cannot be asked whether
-  the peer is still listening, so 'the browser hung up' is not a fact this process
-  can discover by writing."
-  [thread-id run-id ch state origin]
-  (let [first? (atom true)]
-    (fn [frame]
-      ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the
-      ;; run's messages into the conversation at this same moment, and the record's
-      ;; offset of this line is the number they are given (`sessions/land!`). The line is
-      ;; logged before `settle!` runs, so the number is already on its way back when the
-      ;; entries appear -- and `land!` is idempotent and by group, so either order works.
-      (log! thread-id run-id "event" frame
-            (when (contains? terminal (:type frame))
-              (fn [offset] (sessions/land! thread-id run-id offset))))
-      ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the
-      ;; session's history is what this run was handed, and these frames are what came
-      ;; of it. Collected HERE because this is the one place that sees every frame
-      ;; exactly once, and settled at the terminal -- a half-written answer is not a
-      ;; turn, so the conversation changes when the run does.
-      (swap! state update :frames conj frame)
-      (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
-                             StandardCharsets/UTF_8)
-            head  (when @first?
-                    {:status  200
-                     :headers (merge (cors-headers origin) {"Content-Type" "text/event-stream"
-                                           "Cache-Control" "no-cache"})
-                     :body    body})
-            last? (contains? terminal (:type frame))]
-        (reset! first? false)
-        (when last?
-          ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS, and the emitter is
-          ;; the only place that sees it: this is where the registry stops saying the
-          ;; thread is running, rather than at whoever happens to drain the channel
-          ;; next (harness.edge.sessions/running? -- the fact the sidebar row reads).
-          (unregister-run! thread-id run-id)
-          ;; AND THE CONVERSATION IS NOW WHAT IT SAYS. Before the frame is sent, so that
-          ;; the client that reads this terminal and immediately sends its next action
-          ;; finds the answer already in the history -- the window between 'the run
-          ;; ended' and 'its words are in the conversation' is one a fast client would
-          ;; otherwise be racing this process through.
-          (sessions/settle! thread-id run-id (:frames @state))
-          (swap! state assoc :terminal (:type frame)))
-        (hk/send! ch (or head body) last?)
-        (when last?
-          ;; LOGGED WHERE IT IS DISPATCHED, not where it was built: this is the frame
-          ;; that carries close-after-send?, so 'the run reached a terminal frame' and
-          ;; 'the stream was told to end' are one moment. The outcome is the wire's
-          ;; own vocabulary (RUN_FINISHED / RUN_ERROR), and the reason rides along for
-          ;; the one terminal that has one.
-          ;;
-          ;; AFTER the send, not before it: a log write is a synchronous file write,
-          ;; and putting it in front would delay the frame that ends the run.
-          (log/info! :run/terminal {:thread-id thread-id :run-id run-id
-                                    :event     (:type frame)
-                                    :reason    (:message frame)}))))))
+  IT IS HANDS-OFF ABOUT WHO IS LISTENING. The broadcast writes to whatever connections declared
+  this conversation; one that declared it and then went away costs nothing (the write is caught
+  in `mux-send!`)."
+  [thread-id run-id state]
+  (fn [frame]
+    ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
+    ;; messages into the conversation at this same moment, and the record's offset of this line
+    ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
+    ;; so the number is already on its way back when the entries appear -- and `land!` is
+    ;; idempotent and by group, so either order works.
+    (log! thread-id run-id "event" frame
+          (when (contains? terminal (:type frame))
+            (fn [offset] (sessions/land! thread-id run-id offset))))
+    ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
+    ;; history is what this run was handed, and these frames are what came of it. Collected HERE
+    ;; because this is the one place that sees every frame exactly once, and settled at the
+    ;; terminal -- a half-written answer is not a turn, so the conversation changes when the run
+    ;; does.
+    (swap! state update :frames conj frame)
+    (when (contains? terminal (:type frame))
+      ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS: this is where the registry stops
+      ;; saying the thread is running (harness.edge.sessions/running? -- the fact the sidebar row
+      ;; reads), and where the conversation becomes what it says.
+      (unregister-run! thread-id run-id)
+      (sessions/settle! thread-id run-id (:frames @state))
+      (swap! state assoc :terminal (:type frame)))
+    ;; THE FRAME ITSELF, NOT A DECORATED COPY: the record logs this same map, so the wire and the
+    ;; record agree frame for frame (`:threadId`, the routing tag the downlink adds, is not part
+    ;; of the AG-UI frame and is stripped by the reader).
+    (mux-broadcast! thread-id frame)
+    (when (contains? terminal (:type frame))
+      ;; AFTER the broadcast: a log write is a synchronous file write, and putting it in front
+      ;; would delay the frame that ends the run.
+      (log/info! :run/terminal {:thread-id thread-id :run-id run-id
+                                :event     (:type frame)
+                                :reason    (:message frame)}))))
 
 ;; Keep a frame for the RECORD AND THE SESSION, and send it to NOBODY.
 ;;
@@ -1005,13 +983,13 @@
   whole point: the id names a run in THIS process and is minted at the door
   (`handle-run`), so it is not something the body has and not something a client can
   say. It goes to the record as the log line's own `:runId`, not inside the payload."
-  [ch state input run-id origin]
+  [state input run-id]
   (let [thread-id (str (:threadId input))
         run-id    (str run-id)
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
-        emit    (runner thread-id run-id ch state origin)
+        emit    (runner thread-id run-id state)
         ;; AND ONE WRITER THAT DOES NOT SEND: the frames of a stop's cut-off answers are the
         ;; record's and the session's, never the client's (see `recorder`).
         record! (recorder thread-id run-id state)
@@ -1124,6 +1102,7 @@
             ;; own entries cover the birth, when `history` is empty. Reading the log
             ;; instead would be the second truth ADR 0002 refuses.
             (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+            (host/ring!)
             ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
             ;; a text-only model -- or a resume naming an interrupt this process never
             ;; parked -- blows up before the run starts. Catch it here and push a
@@ -1619,6 +1598,16 @@
                   ;; frame already removed it) -- though the call would be harmless
                   ;; there too: it is idempotent by its own design.
                   (unregister-run! thread-id run-id)
+                  ;; AND THE READER IS TOLD, because a PUSH HAS NO CLOSE TO CARRY THE NEWS: the
+                  ;; run's frames go down `events.mux` now, so a client handed no terminal waits
+                  ;; forever (the SSE response used to end for it). The RECORD is left exactly as
+                  ;; it is -- it really did stop mid-sentence, and `rebuild` is the door that
+                  ;; closes such a log off -- while whoever is looking gets the one ending the
+                  ;; vocabulary has.
+                  (try (mux-broadcast! thread-id
+                                       (convert (ev/run-error
+                                                 "the run's event channel closed without a terminal frame")))
+                       (catch Throwable _ nil))
                   (log/warn! :run/events-closed-without-terminal
                              {:thread-id thread-id :run-id run-id
                               :last      (:last @state)})))))))
@@ -1638,10 +1627,12 @@
         (sessions/settle! thread-id run-id (:frames @state))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
-        ;; THE STREAM IS ENDED RATHER THAN LEFT OPEN: a client parked on a run
-        ;; that will never send another frame has nothing to look at and nothing
-        ;; to report, which is the state this whole wrapper exists to shorten.
-        (try (hk/close ch) (catch Throwable _ nil)))))))
+        ;; AND THE READER IS TOLD: a crashed run emits no terminal, and a reader on the downlink
+        ;; would otherwise wait forever. GUARDED, because the converter is one of the things
+        ;; that can BE what threw.
+        (try (mux-broadcast! thread-id (convert (ev/run-error (ex-message t))))
+             (catch Throwable _ nil))
+        nil)))))
 
 
 (defn- api-response
@@ -1658,6 +1649,15 @@
   {:status  status
    :headers {"Content-Type" "application/json; charset=utf-8"}
    :body    (.getBytes (json/write-str body) StandardCharsets/UTF_8)})
+
+(defn- rung
+  "Answer RESP after saying a HOST-LEVEL fact changed -- a row in the sidebar's listing, a
+  project, an archive flag. The mutation has already happened by the time a route builds
+  its answer, and the host stream (`events.host`) is how every OTHER page hears about it;
+  a route that answers a host-level write wraps its answer in this."
+  [resp]
+  (host/ring!)
+  resp)
 
 (defn- refuse-unknown-session!
   "The answer a client gets when it aims a run at an id this home has never been asked
@@ -1804,70 +1804,17 @@
                        " message and stop the run that comes back, or read the conversation"
                        " and continue it.")
         :threadId thread-id}))))
-(defn- stream-run
-  "Answer a run that the door let through: register it, and stream its frames.
+(defn- start-run
+  "Start a run the door let through and answer an ACK instead of a stream.
 
-  THE PARSE HAS ALREADY HAPPENED, and so have the door's decisions (`handle-run`): the
-  thread id, the RUN ID and the id of the session are all settled before this is called.
-  The run id comes from the door rather than the body because it is the SERVER'S now --
-  it names a run in this process and it goes into the record, so a client that repeated
-  one would collide two runs' frames in a rebuilt conversation (see
-  `harness.edge.replay/fold-frames`)."
-  [req input run-id]
-  (let [thread-id (str (:threadId input))
-        ;; WHAT PAGE IS ASKING, read HERE because this is the one route whose
-        ;; headers do not come from the ring response: they ride on the first
-        ;; frame. `handler` reads the same header for every other route.
-        origin    (request-origin req)
-        ;; THE RUN'S LIVE STATE, and the only thing the emitter and the close
-        ;; handler share. `:on-open` and `:on-close` are two callbacks on
-        ;; different threads with nothing else in common, so a fact one of them
-        ;; knows and the other must report lives here.
-        ;;
-        ;; `:frames` IS THIS RUN'S CONVERSATIONAL OUTPUT, collected as it is served so
-        ;; that the session can fold it into the conversation the moment the run ends
-        ;; (`sessions/settle!`). It is held HERE -- per run, in the one place that sees
-        ;; every frame exactly once -- rather than in the session, because a run's frames
-        ;; are not the conversation until the run is over.
-        state     (atom {:terminal nil :last nil :frames []})]
-    ;; as-channel wants no status or headers of its own. run-agent! returns immediately
-    ;; -- everything it does, the birth included, happens on the go block's thread, so it
-    ;; does not block the worker that :on-open runs on.
-    ;;
-    ;; ONE LINE PER STREAM END, SAYING WHETHER THE RUN SAID GOODBYE. Paired with
-    ;; `run/start`, that is what a reader needs to tell a finished run from one
-    ;; that stopped mid-flight, and the 'last' names where it stopped.
-    ;;
-    ;; WHAT IT CANNOT SAY IS WHO LEFT. A browser that aborts its fetch does not
-    ;; become visible here: an aborted fetch, a stopped tab and a live tab that
-    ;; simply stopped being sent anything all look the same from this side, and
-    ;; the client-side wording the browser puts on a run it cut off is its own
-    ;; ('BodyStreamBuffer was aborted'). What happens in the process is
-    ;; unambiguous either way -- NOTHING cancels a run when a client goes, so the
-    ;; run keeps running and its record keeps growing -- and that asymmetry is
-    ;; what makes the two failures tellable apart afterwards: a record that ends
-    ;; mid-tool with no terminal frame, beside a `run/start` and no `:shutdown`,
-    ;; is a run still going; beside a `:shutdown`, it is a process that was stopped.
-    (hk/as-channel req
-                   {:on-open  (fn [ch] (run-agent! ch state input run-id origin))
-                    :on-close (fn [_ch status]
-                                (let [{:keys [terminal last]} @state]
-                                  (if terminal
-                                    (log/info! :run/stream-closed
-                                               {:thread-id thread-id :run-id run-id
-                                                :status    status
-                                                :terminal  terminal})
-                                    ;; NOT OBSERVED YET, AND KEPT ANYWAY: http-kit
-                                    ;; reports `:server-close` even for a peer that
-                                    ;; has reset the connection (measured), so this
-                                    ;; branch is the one place a client-side close
-                                    ;; WOULD show up if the server ever starts
-                                    ;; hearing about one. Silent when it fires is
-                                    ;; how a lost stream stays unexplained.
-                                    (log/warn! :run/stream-closed-before-terminal
-                                               {:thread-id thread-id :run-id run-id
-                                                :status    status
-                                                :last      last}))))})))
+  THE FRAMES GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004) to every page that declared
+  this conversation -- the sender included, which is why it subscribes BEFORE it asks here.
+  THE SSE RESPONSE IS GONE (ticket 05): a run has ONE carrier now, the downlink, so this is
+  the only door. The record, the state and `settle!` are the emitter's, unchanged."
+  [input run-id]
+  (let [state (atom {:terminal nil :last nil :frames []})]
+    (run-agent! state input run-id)
+    (api-response 200 {:threadId (str (:threadId input)) :runId (str run-id)})))
 
 (defn- answer-of
   "The last thing a subagent SAID, out of the history its run produced. Walks back
@@ -2071,6 +2018,12 @@
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)
+                          ;; AND THE SAME NUMBERED FRAME GOES DOWN THE DOWNLINK (`events.mux`),
+                          ;; so a panel can read the child's live frames from the one page-wide
+                          ;; socket (ticket 04) instead of holding a channel of its own. The `:seq`
+                          ;; is the same counter the record carries, which is what makes the
+                          ;; boundary between the replay and the live tail exact.
+                          (mux-broadcast! thread-id f)
                           (swap! frames conj f)))
                       (recur)))
                   ;; THE CHANNEL CLOSED. The kernel closes it after :run/done, so an
@@ -2154,7 +2107,7 @@
       (refuse-second-run! thread-id)
 
       :else
-      (stream-run req input run-id))))
+      (start-run input run-id))))
 
 ;; ----------------------------------------------------- the management edge
 ;;
@@ -2515,6 +2468,7 @@
 
           :else
           (do (log! thread-id nil "project/bound" {:before (:before bound) :after (:abs bound) :via "http"})
+              (host/ring!)
               (api-response 200 {:threadId thread-id :dir (:abs bound)})))))))
 
 (defn- sessions-post
@@ -2560,7 +2514,7 @@
       (api-response 400 {:error "request body is not valid JSON"})
 
       :else
-      (api-response 200 {:threadId (project/register-session! thread-id)}))))
+      (rung (api-response 200 {:threadId (project/register-session! thread-id)})))))
 
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
@@ -2649,7 +2603,7 @@
                    :else                     (compare kb ka))))
              rows)))
 
-(defn- projects-get
+(defn- projects-body
   "GET /api/projects -- the sidebar's listing: every project this home knows, each
   with its sessions, PLUS every task this home knows.
 
@@ -2687,17 +2641,20 @@
   row offering to open it would be inviting somebody to talk to something that
   cannot answer. It still HAS a store row and still appears in the tree, which is
   what lets rebuild, trajectory and the subagent panel find it by id."
-  [_req]
-  (let [by-project (group-by :project-id (remove :subagent (project/sessions)))
+  [] (let [by-project (group-by :project-id (remove :subagent (project/sessions)))
         tasks      (project/tasks)]
-    (api-response 200
-                  {:projects (mapv (fn [{:keys [id canonical-path]}]
-                                     {:projectId id
-                                      :path      canonical-path
-                                      :sessions  (newest-first
-                                                  (mapv session-row (get by-project id)))})
-                                   (project/projects))
-                   :tasks    (newest-first (mapv session-row tasks))})))
+    {:projects (mapv (fn [{:keys [id canonical-path]}]
+                       {:projectId id
+                        :path      canonical-path
+                        :sessions  (newest-first
+                                    (mapv session-row (get by-project id)))})
+                     (project/projects))
+     :tasks    (newest-first (mapv session-row tasks))}))
+
+(defn- projects-get
+  "GET /api/projects -- `projects-body` as one JSON answer."
+  [_req]
+  (api-response 200 (projects-body)))
 
 (defn- subagent-run-row
   "One delegation, as a panel reads it: which subagent ran, whose session
@@ -2857,12 +2814,10 @@
   second later, and the answer says so (`replay/sofar`'s `:state`). Rebuild remains
   the door for 'give me the conversation, I will own it'.
 
-  AND TWO VERBS READS A CONVERSATION IN PAGES rather than whole (`feed` and `page`,
-  ticket 05 of `.scratch/sessions-live-on-the-server`): the window ADR 0003
-  describes, for a conversation too long to send. They are GETs and they are the
-  first pair here that a page uses continuously rather than once -- `page` answers
-  scrolling up, and `feed` stays open -- which is why they are the two routes on
-  this edge that are not request/response (`feed` streams; see `stream-feed!`).
+  AND `page` READS A CONVERSATION IN PAGES rather than whole (ticket 05 of
+  `.scratch/sessions-live-on-the-server`): the window ADR 0003 describes, for a conversation
+  too long to send, and the route a reader scrolling up uses. It is a GET, and it is the one
+  verb here that answers a piece of a conversation rather than all of it.
 
   AND `cancel` IS THE ONE THAT STOPS SOMETHING rather than reading it as it is: a POST
   aimed at one conversation, whose run -- if this process has one going -- is told to
@@ -2871,7 +2826,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -2983,7 +2938,7 @@
                          (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error written)]
           (api-response 404 {:error error :threadId stem})
-          (api-response 200 {:threadId stem :archived (:ok written)}))))))
+          (rung (api-response 200 {:threadId stem :archived (:ok written)})))))))
 
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
@@ -3065,7 +3020,7 @@
   AND IT CARRIES THE SAME `:behind` AS `stats`, for the same reason: this is the
   RECORD's trajectory, and the record can be behind the conversation being written to
   it. Absent means nothing is pending."
-  [stem]
+  [req stem]
   (let [read (sessions/read-records stem)]
     (cond
       (some? (:missing read))
@@ -3075,234 +3030,72 @@
       (api-response 400 {:error (:error read) :threadId stem})
 
       :else
-      (let [folded (try {:ok (trajectory/records->trajectory (:ok read))}
-                        (catch Throwable t {:error (ex-message t)}))]
-        (if (some? (:error folded))
-          (api-response 400 {:error (:error folded) :threadId stem})
-          (let [behind (record/pending-count stem)]
-            (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                                (pos? behind) (assoc :behind behind)))))))))
+      (let [records (:ok read)
+            behind  (record/pending-count stem)
+            header  (cond-> {:threadId stem :incomplete (stats/incomplete? records)}
+                      (pos? behind) (assoc :behind behind))
+            headers (merge {"Content-Type" "application/x-ndjson; charset=utf-8"}
+                           (cors-headers (request-origin req)))]
+        (hk/as-channel
+         req
+         {:on-open  (fn [ch]
+                      ;; ON-OPEN RUNS ON http-kit'S OWN THREAD, after this ring map was
+                      ;; returned -- so a throw here is a silently dropped connection
+                      ;; rather than a 500. The fold is netted and the stream simply ends.
+                      (try
+                        ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
+                        (hk/send! ch {:headers headers
+                                      :body    (str (json/write-str header) "\n")}
+                                  false)
+                        ;; THEN EACH TURN THE MOMENT THE FOLD CAN NO LONGER CHANGE IT.
+                        (trajectory/fold-trajectory
+                         records
+                         (fn [turn] (hk/send! ch (str (json/write-str turn) "\n") false)))
+                        (hk/close ch)
+                        (catch Throwable t
+                          (log/error! :trajectory/stream-failed t {:threadId stem}))))
+          :on-close (fn [_ch _status] nil)})))))
 
-(defn- follow-get
-  "GET /api/threads/<stem>/follow -- an SSE, READ-ONLY channel: the frames of
-  ONE thread as they land, for a panel that watches a delegation work. It is
-  NOT a run and must never be mistaken for one: it is a GET, it answers no
-  RunAgentInput, accepts no input at all -- there is nothing here to run --
-  and POST /api/agent is untouched: the parent's stream is still only its own
-  run's, because frames for a child mixed into that stream would be read as
-  the parent's messages (app.tsx keeps one core per host precisely so streams
-  cannot cross). Follow is the OTHER stream, read-only, and so father and
-  child never share a wire.
 
-  WHAT IT CAN FOLLOW IS A DELEGATION, which is not a narrowing of the route's
-  name but the truth about the bus: a subagent's run is what publishes (see
-  `run-subagent!`), because anybody else's frames already have a reader -- the
-  client that started that run, on its own stream. A thread with no delegation
-  in flight is answered from its record and ENDED rather than left open: a
-  stream that never produces and never ends reads as 'still running' to a
-  client, which is the one lie a follow channel must not tell.
+(defn- frames-get
+  "GET /api/threads/<stem>/frames -- the REPLAY half of the `follow` channel as JSON: this
+  conversation's frames as the record holds them, ordered the way a runtime must read them
+  (a `RUN_STARTED` first, then the conversation snapshot the frames cannot rebuild, then the
+  frames), and whether this process is still running it.
 
-  THE SHAPE OF A CONNECTION, in order:
+  WHY THIS IS APART FROM `follow`: the LIVE tail moves to the page-wide downlink
+  (`events.mux`, ADR 0004, ticket 04) -- one socket for every panel instead of a channel
+  each -- and the record is still where a panel CATCHES UP. The two are joined by the
+  frame's own `:seq` (the bus's counter, which the record carries too): a frame the live
+  tail hands over that is not past the replay's last number is one the replay already gave.
 
-    1. subscribe FIRST (frame-bus), THEN replay. The other order loses the
-       frames that land between replay's read and the subscribe -- replay
-       cannot see a frame that has not been written yet, and the bus drops
-       what nobody has asked for. Subscribing first leaves the race exactly
-       one shape: the boundary, where a frame arrives from BOTH sources;
-    2. replay what the RECORD already holds -- the stats-style reader, the
-       half-tolerant one, because a child that is running right now is the
-       case this route exists for and its last row may be half-written;
-       every wire frame becomes a frame on the channel, and the highest
-       `:seq` among them is remembered;
-    3. frames from the bus whose `:seq` is <= that number are dropped -- THE
-       EXPLICIT ANSWER to the boundary, which is why the publisher stamps the
-       number into the record as well as onto the bus (`run-subagent!`): the
-       comparison only means anything if both sides count the same thing;
-    4. a TERMINAL frame (RUN_FINISHED / RUN_ERROR) ends the stream, wherever
-       it came from: a replayed one means the run is already over, a live one
-       means it just ended. NOTHING FOLLOWS IT -- the terminal IS the ending
-       the client's vocabulary has;
-    5. THE STREAM OPENS WITH THE RUN, AND THE SNAPSHOT RIDES INSIDE IT. The
-       first thing on the wire is a `RUN_STARTED` and the second is one AG-UI
-       `MESSAGES_SNAPSHOT` -- WHAT THE FRAMES CANNOT REBUILD: the conversation
-       of the record MINUS the messages the replayed frames carry under the
-       same id. That is the task the subagent was handed, a `message` row no
-       frame ever mentions (frames only carry what a run RETURNED), and it is
-       the reason a panel needs no second read to show what was asked. The
-       snapshot is the same frame the run edge sends for the entries a client
-       never sent (`ag/conversation-snapshot`), and it is sent only when there
-       is something in it.
-
-       THAT ORDER IS NOT A PREFERENCE, and a browser walkthrough is what
-       settled it: `@ag-ui/client` refuses a stream whose FIRST event is not
-       `RUN_STARTED` (its verifier's own words: \"First event must be
-       'RUN_STARTED'\"), and a snapshot sent ahead of the run failed the panel
-       with that sentence while the wire looked perfectly reasonable. So the
-       record's own opening frame goes out first -- a real record's first
-       frame IS the child's `RUN_STARTED`, because `run-subagent!` writes it
-       before anything else -- and the snapshot follows it. A record that does
-       NOT open with one (a hand-written log, a repair) gets a synthesized
-       `RUN_STARTED` carrying the child's thread and run, because a channel a
-       runtime consumes has to be well-formed whatever the file holds;
-    6. A THREAD WITH NOBODY RUNNING AND NO TERMINAL IN ITS RECORD says so in
-       ONE SSE COMMENT and closes. A COMMENT, not a frame, and that is the
-       one shape this channel has to get right: a frame the client's parser
-       does not know is an ERROR there (`@ag-ui/client` validates every event
-       and fails the run on an unknown type), so a channel consumed by a
-       runtime can only ever carry frames that runtime's vocabulary has. The
-       sentence is for whoever is reading the wire (a person with `curl`, a
-       log), and the CLOSE is what the client acts on;
-    7. the client going away unsubscribes (the bus's stop!), which is where
-       the publisher-must-never-block guarantee is cashed out on this side.
-
-  READ-ONLY, like stats: the record is read, the bus is read, nothing is
-  written -- not the log, not the store, not ~/.clj-harness."
-  [req stem]
+  READ-ONLY, like `stats` and `follow`: nothing here writes."
+  [stem]
   (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))]
     (if (some? (:error located))
-      ;; An unknown stem is the management edge's ordinary JSON 404 -- there is
-      ;; nothing to follow, and a stream that opens just to say so would be a
-      ;; stream pretending a thread exists.
       (api-response 404 {:error (:error located) :threadId stem})
-      (let [;; THE TEARDOWN LIVES OUT HERE, and that is a fact about `as-channel`
-            ;; rather than about the bus: `on-open` and `on-close` are two callbacks
-            ;; with nothing in scope between them, and only the first one can TAKE the
-            ;; subscription while only the second one must END it. `open?` makes the
-            ;; ending idempotent, which both the terminal frame and the client's
-            ;; departure reach.
-            open?    (atom true)
-            teardown (atom nil)
-            end!     (fn end! []
-                       (when (compare-and-set! open? true false)
-                         (when-some [stop! @teardown] (stop!))))]
-        (hk/as-channel req
-         {:on-open
-          (fn [ch]
-            ;; 1. SUBSCRIBE FIRST, 2. REPLAY SECOND.
-            (let [{sub :ch stop! :stop!} (frame-bus/subscribe! stem)
-                  last-seq (atom nil)
-                  ;; The record, read the TOLERANT way (`stats/read-records`): a child
-                  ;; whose last row is being written right now is the case this route
-                  ;; is FOR, and a half row is 'we read this far', not damage.
-                  records  (try (stats/read-records (:ok located)) (catch Throwable _ []))
-                  frames   (->> records (filter replay/frame?) (mapv replay/payload))
-                  over?    (boolean (some #(contains? terminal (:type %)) frames))
-                  live?    (some? (subagents/live-subagent stem))
-                  ;; The HEAD rides the first send, like the runner's.
-                  head     (fn [body]
-                             {:status 200
-                              :headers (merge (cors-headers (request-origin req))
-                                              {"Content-Type" "text/event-stream"
-                                               "Cache-Control" "no-cache"})
-                              :body body})
-                  bytes    (fn [frame] (str "data: " (json/write-str frame) "\n\n"))
-                  ;; THE RUN'S OPENING, AND THEN WHAT THE FRAMES CANNOT REBUILD (5.): the
-                  ;; record's conversation minus the messages the frames carry under the
-                  ;; same id. See the docstring's point 5 for why the snapshot cannot go
-                  ;; first -- `@ag-ui/client` refuses a stream that does not open with
-                  ;; `RUN_STARTED`, which is what a real browser said.
-                  ;; The comparison is by MESSAGE ID because the fold that builds these
-                  ;; messages names each one after the frame that produced it
-                  ;; (`kernel.frames/apply-frames`), which is the same id the wire uses
-                  ;; -- so 'which messages would be drawn twice' is a question with an
-                  ;; exact answer rather than a guess about ordering.
-                  snapshot (let [streamed (into #{} (keep :messageId) frames)
-                                 opening  (remove #(contains? streamed (:id %))
-                                                  (try (replay/messages-so-far records)
-                                                       (catch Throwable _ [])))]
-                             (when (seq opening)
-                               (ag/conversation-snapshot opening)))
-                  ;; THE REPLAY IS WHAT THE RECORD ALREADY SAYS, and the `:seq` comes
-                  ;; off it on the way out: the number is the bus's bookkeeping for the
-                  ;; boundary, not a field of any AG-UI frame (票 02 writes it into the
-                  ;; record so the two sides count the same thing, and this is the one
-                  ;; place that must not pass it on).
-                  ;;
-                  ;; A REAL RECORD'S FIRST FRAME IS THE RUN'S `RUN_STARTED` -- written by
-                  ;; `run-subagent!` before the child has said anything -- so the ordinary
-                  ;; case is that frame going out verbatim. The synthesized one is for a
-                  ;; record that does not open with it (a hand-written log, a repaired
-                  ;; one): the child's own thread and run id are the truth about which run
-                  ;; this is, and a stream a runtime consumes must not start in the middle.
-                  opening  (when (= "RUN_STARTED" (:type (first frames))) (first frames))
-                  started  (or opening
-                               {:type "RUN_STARTED"
-                                :threadId stem
-                                :runId (or (some-> (first records) :runId)
-                                           (str (java.util.UUID/randomUUID)))})
-                  replay   (str (bytes (dissoc started :seq))
-                                (when snapshot (bytes snapshot))
-                                (apply str (map #(bytes (dissoc % :seq))
-                                                (if opening (rest frames) frames))))
-                  ;; 6. THE ENDING FOR A THREAD NOBODY IS RUNNING: the replay, one
-                  ;; comment, and the close. A comment because the client's parser must
-                  ;; never be handed a frame it does not know (see the docstring), and a
-                  ;; SENTENCE because 'why is this stream over' is what a reader of the
-                  ;; wire is about to ask. This is only ever reached BEFORE the head has
-                  ;; gone out -- the live path opens its own send below.
-                  ended!   (fn [why]
-                             (end!)
-                             (hk/send! ch (head (str "retry: 2000\n\n" replay
-                                                     ": " why "\n\n"))
-                                       true))]
-              (reset! teardown stop!)
-              (reset! last-seq (when-let [ss (seq (keep :seq frames))] (reduce max ss)))
-              (if (or over? (not live?))
-                ;; NOTHING IS RUNNING THIS, AND THE RECORD IS WHAT THERE IS: a run that
-                ;; already reached its terminal frame (the replay carries the terminal,
-                ;; which is the client's ending), or a thread no delegation is in
-                ;; flight for. THE REASON IS SAID RATHER THAN IMPLIED -- a reader can
-                ;; tell 'the run finished' from 'nothing here was ever live' without
-                ;; guessing -- and the channel ENDS, because a stream that never
-                ;; produces and never ends reads as 'still running' to a client, which
-                ;; is the one lie this route must not tell.
-                (if over?
-                  ;; THE REPLAY CARRIES THE TERMINAL, and that is the client's ending:
-                  ;; nothing is said behind it but the close.
-                  (do (end!) (hk/send! ch (head (str "retry: 2000\n\n" replay)) true))
-                  (ended! (str stem " is not running, and its record has no terminal frame")))
-                (do
-                  (hk/send! ch (head (str "retry: 2000\n\n" replay)) false)
-                  ;; 3. THE BUS SIDE, on this thread's go loop: the channel is a
-                  ;; sliding buffer, so reads never block the publisher.
-                  (async/go
-                    (loop []
-                      (if-some [frame (async/<! sub)]
-                        (cond
-                          ;; THE END MARKER: the subscription was stopped from
-                          ;; underneath us -- by the client's own on-close -- so this
-                          ;; loop is over either way.
-                          (= frame-bus/closed-marker frame)
-                          (do (hk/close ch) nil)
-
-                          ;; THE DEDUPE: anything the replay already delivered is
-                          ;; dropped, silently and BY NUMBER rather than by comparing
-                          ;; shapes -- a stream of text deltas has no identity to
-                          ;; compare. This is the boundary the ticket demands an
-                          ;; answer for, and the answer is the publisher's number.
-                          (and (some? @last-seq)
-                               (:seq frame)
-                               (<= (:seq frame) @last-seq))
-                          (recur)
-
-                          :else
-                          (do (when (:seq frame) (reset! last-seq (:seq frame)))
-                              (hk/send! ch (bytes (dissoc frame :seq)) false)
-                              ;; 4. THE TERMINAL ENDS IT: the client has its ending
-                              ;; (RUN_FINISHED / RUN_ERROR is the whole of it), so the
-                              ;; channel is unsubscribed and closed behind it.
-                              (if (contains? terminal (:type frame))
-                                (do (end!) (hk/close ch) nil)
-                                (recur))))
-                        (do (hk/close ch) nil))))))))
-          :on-close
-          (fn [_ch _status]
-            ;; 6. THE CLIENT WENT; THE SUBSCRIPTION GOES TOO -- otherwise the bus
-            ;; would go on filling a channel nobody reads (sliding, so the publisher
-            ;; still would not block -- but the frames would be lost to nobody, which
-            ;; is waste, not correctness).
-            (end!))})))))
+      (let [records  (try (stats/read-records (:ok located)) (catch Throwable _ []))
+            frames   (->> records (filter replay/frame?) (mapv replay/payload))
+            streamed (into #{} (keep :messageId) frames)
+            opening  (remove #(contains? streamed (:id %))
+                             (try (replay/messages-so-far records) (catch Throwable _ [])))
+            snapshot (when (seq opening) (ag/conversation-snapshot opening))
+            first-frame (first frames)
+            started? (= "RUN_STARTED" (:type first-frame))
+            started  (if started?
+                       first-frame
+                       {:type "RUN_STARTED"
+                        :threadId stem
+                        :runId (or (some-> (first records) :runId)
+                                   (str (java.util.UUID/randomUUID)))})
+            tail     (if started? (rest frames) frames)]
+        (api-response 200
+                      {:threadId stem
+                       :running  (some? (subagents/live-subagent stem))
+                       :frames   (vec (concat [(dissoc started :seq)]
+                                              (when snapshot [snapshot])
+                                              tail))})))))
 
 
 (defn- delegations-get
@@ -3645,29 +3438,6 @@
 ;; changes means holding them -- so connecting is an act on the session and it rings the
 ;; claim the same way an action does.
 
-(defn- feed-bytes
-  "One feed frame, encoded the way the run edge encodes its frames: `data: <json>` and a
-  blank line. The same spelling on purpose -- a client that reads runs already knows how
-  to read this, and there is one SSE dialect on this edge rather than two."
-  [frame]
-  (.getBytes (str "data: " (json/write-str frame) "\n\n") StandardCharsets/UTF_8))
-
-(defn- feed-head
-  "A feed frame as the INITIAL RESPONSE of the stream: the status and headers ride on
-  the first frame, which is http-kit's contract for a streaming answer (the same
-  spelling `runner` uses for a run).
-
-  AND `send!` MUST BE TOLD NOT TO CLOSE. Without the third argument http-kit treats a
-  send as the WHOLE response -- it computes a `content-length`, finishes it, and every
-  later frame is dropped -- which is what a feed did here until it was measured: the
-  window arrived, the socket stayed open, and nothing was ever pushed again. A stream
-  is the pair (head map, `false`), and `stream-feed!`'s later sends are `false` too,
-  with `true` only on the frame that ends it (`runner` has the same three cases)."
-  [origin bytes]
-  {:status  200
-   :headers (merge (cors-headers origin) {"Content-Type"  "text/event-stream"
-                                          "Cache-Control" "no-cache"})
-   :body    bytes})
 
 (defn- live-state
   "The state of a conversation THIS PROCESS HOLDS, in the same words `sofar` answers
@@ -3862,160 +3632,261 @@
                                                    page)
                                      :live (boolean (:live read))))))))))
 
-(defn- stream-feed!
-  "Serve a feed that has already been let through: the opening frame, then a frame per
-  landing, then one `end` frame when the window is over.
 
-  THE DOORBELL IS A ONE-SLOT CHANNEL (`harness.edge.sessions/watch!`), which is what
-  makes this loop free of both polling and lost wakeups: a ring that arrives while the
-  answer is being written is still in the slot when the loop next waits, and a dozen
-  rings that arrive while it is writing collapse into one wait -- because the loop does
-  not count events, it re-reads the delta from its own cursor. That is the whole reason
-  the watcher carries no cursor of its own (ADR 0003 decision 7).
+;; ---------------------------------------------------------------- the downlink
+;;
+;; ONE SOCKET FOR EVERY CONVERSATION A PAGE HOLDS (`events.mux`), because the SSE feed
+;; it replaces took a connection slot PER CONVERSATION: a page that had opened six
+;; sessions held six sockets, the browser's per-origin pool is six, and the next request
+;; -- a run, a read, an asset -- waited behind them (ADR 0004).
+;;
+;; THE SOCKET IS DOWNLINK-ONLY. A frame goes out; nothing comes in. The subscription is
+;; therefore an HTTP fact, in two halves:
+;;
+;;   the handshake URL     `GET /api/events.mux?subscriber=<token>&sessions=<json>`
+;;                         names the conversations this connection holds and the cursor
+;;                         each starts from -- the same `since`/`generation` the SSE feed
+;;                         carried, so a reconnect re-declares what the client holds
+;;                         rather than the server remembering it.
+;;   POST .../subscribe    the set changing while the socket is up.
+;;
+;; AND THE SERVER FILTERS: only a conversation this connection subscribed to has a watch,
+;; so a ring for any other one reaches nobody here. The cost of N conversations running at
+;; once no longer lands on every page -- the DSH broadcast bug this shape avoids.
 
-  THE CURSOR ONLY EVER MOVES FORWARD, and it moves to the last entry's record offset.
-  Entries still in the writer's queue carry no offset, so a frame can be followed by
-  another containing the same entries -- by the time it is written their line has landed
-  and the delta from the old cursor reaches them again. The reader drops the repeat by
-  message id, which is the same identity the session dedupes an action by; the
-  alternative, moving the cursor to a number the writer has not confirmed, is how a
-  reader ends up asking for a delta from an offset nothing is numbered at."
-  [req stem since generation]
-  (let [origin (request-origin req)
-        wake   (async/chan (async/sliding-buffer 1))
-        why    (atom nil)
-        f      (fn [_tid event]
-                 (when (= :gone (:kind event)) (reset! why (:reason event)))
-                 (async/offer! wake :ring))]
-    (sessions/watch! stem f)
-    (hk/as-channel req
-                   {:on-open
-                    (fn [ch]
-                      (async/go
-                        (try
-                          ;; THE OPENING FRAME COMES FIRST, before any wait: a client
-                          ;; that has news waiting for it must not wait for a doorbell
-                          ;; that has already rung.
-                          (let [page  (window-page stem since)
-                                frame (window-frame stem
-                                                    (if (nil? since) "window" "append")
-                                                    (live-state stem)
-                                                    page)]
-                            (hk/send! ch (feed-head origin (feed-bytes frame)) false)
-                            (loop [cursor (:cursor frame) state-0 (:state frame)]
-                              (async/<! wake)
-                              (if (nil? (sessions/live-entry stem))
-                                ;; THE WINDOW IS OVER, AND IT SAYS SO: the session was put
-                                ;; away, swept, or taken over. A stream that merely stopped
-                                ;; would leave the reader believing it holds everything.
-                                ;; `true`: this frame ends the response, which is the
-                                ;; one thing a feed is ever allowed to do on its own.
-                                (hk/send! ch (feed-bytes
-                                              {:type       "end"
-                                               :reason     (or @why "the session is gone")
-                                               :generation generation})
-                                          true)
-                                (let [delta (:entries (window-page stem cursor))
-                                      ;; THE STATE IS READ BEFORE THE FRAME IS BUILT, and
-                                      ;; it is worth a frame of its own: a run that settled
-                                      ;; without adding an entry (nothing was said) still
-                                      ;; changes what the reader should draw, and a frame
-                                      ;; sent only for entries would leave the turn on
-                                      ;; screen looking unfinished forever.
-                                      state (live-state stem)
-                                      frame (window-frame stem "append" state
-                                                          {:entries delta
-                                                           :baseSeq cursor
-                                                           :hasMore false})]
-                                  ;; A FRAME HAS TO CARRY NEWS, AND `nil` STATE IS NOT NEWS.
-                                  ;; Ending a run is two steps -- `run-finished!` unpins it,
-                                  ;; `settle!` folds the frames and writes the state -- and
-                                  ;; between them the conversation is neither running nor
-                                  ;; anything else yet, so `live-state` answers nil. Telling a
-                                  ;; reader "never run" for those milliseconds would be a lie,
-                                  ;; and telling it nothing is exactly right: the fold rings on
-                                  ;; its own, and the frame that follows says `unfinished` or
-                                  ;; `settled`, which is the truth. (The suite caught this as a
-                                  ;; flake: the state-only frame was the FIRST of the two, and
-                                  ;; it said nothing.)
-                                  (when (or (seq delta)
-                                            (and (some? state) (not= state state-0)))
-                                    (hk/send! ch (feed-bytes frame) false))
-                                  (recur (or (:cursor frame) cursor) state)))))
-                          (finally
-                            (sessions/unwatch! stem f)))))
-                    ;; ONE LINE PER FEED END, SAYING WHAT http-kit THINKS HAPPENED, for
-                    ;; the same reason the run route says it: a stream that stops is
-                    ;; otherwise indistinguishable from a stream nobody was sending on.
-                    :on-close (fn [_ch status]
-                                (log/info! :feed/stream-closed
-                                           {:thread-id stem :status status
-                                            :generation generation})
-                                (sessions/unwatch! stem f))})))
+(defn- mux-frame
+  "One frame on the downlink, tagged with the conversation it is about: every `window`
+  frame's fields, plus `:threadId`. The tag is what lets one socket carry many windows."
+  [thread-id frame]
+  (assoc frame :threadId (str thread-id)))
 
-(defn- feed-get
-  "GET /api/threads/<stem>/feed[?since=N&generation=G] -- the conversation as a LIVE
-  window: the tail page (or the delta after N), then every entry that lands afterwards,
-  until the window is over.
+(defn- mux-send!
+  "Write one JSON frame to a downlink. A channel that closed under us is not worth
+  raising: the close handler is already releasing the subscription."
+  [ch frame]
+  (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
 
-  CONNECTING IS AN ACT ON THE SESSION, so this route births it (a page opening a
-  conversation is the first ask, ADR 0002 decision 5) and rings the claim: pushing
-  changes means holding them. A conversation another live process is serving is refused
-  with the 409 that names it (`refuse-served-elsewhere!`) rather than half-served.
+(defn- mux-broadcast!
+  "Number ONE run frame for THREAD-ID, REMEMBER it (so a reader that reconnects can be
+  handed the gap -- `harness.edge.mux/record-run!` keeps a bounded ring, and a frame that
+  already carries a number, a subagent's, keeps it), and send it to every downlink watching
+  the conversation. A page that is not watching hears nothing, which is the subscription
+  doing its job."
+  [thread-id frame]
+  (let [numbered (mux/record-run! thread-id frame)
+        payload  (mux-frame thread-id numbered)]
+    (doseq [ch (mux/channels-for thread-id)]
+      (mux-send! ch payload))))
 
-  TWO REFUSALS BEFORE ANY BYTE IS STREAMED, and both are the same mistake: the client is
-  holding numbers from a window that no longer exists.
+(defn- mux-replay-run!
+  "Hand TOKEN's downlink the run frames of THREAD-ID it is missing: everything remembered
+  after RUN-SINCE, oldest first.
+  
+  A NIL CURSOR REPLAYS NOTHING, and that is deliberate rather than a shortcut: `nil` is 'I
+  hold nothing of this run', which is what a connection about to START one declares -- and the
+  buffer may still hold the PREVIOUS run's frames, terminal and all, which would finish the
+  new run before it began (measured: a suite resuming a parked run was handed the parked run's
+  RUN_FINISHED and stopped reading). A RECONNECTING reader has a cursor -- it saw frames -- and
+  gets exactly the gap."
+  [token thread-id run-since]
+  (when (some? run-since)
+    (when-some [ch (mux/channel token)]
+      (doseq [frame (mux/run-frames-after thread-id run-since)]
+        (mux-send! ch (mux-frame thread-id frame))))))
 
-    a generation that is not this window's   the session was put away, taken over, or
-                                             rebuilt, and every number the client has
-                                             is about a conversation that is gone
-                                             (ADR 0003 decision 6)
-    a `since` older than the tail page       the client is further behind than a page,
-                                             so the 'delta' would be the whole
-                                             conversation -- which is the cost the
-                                             window exists to refuse
+(defn- mux-end!
+  "Tell one conversation's reader on this downlink that its window is over, naming why.
+  THE SAME ENDING THE FEED SENDS, for the same reason: a stream that just stops leaves a
+  replica believing it holds everything. The client's repair is its own -- reopen the tail
+  page, then re-subscribe with the new cursor."
+  [ch thread-id reason]
+  (mux-send! ch (mux-frame thread-id
+                           {:type       "end"
+                            :reason     reason
+                            :entries    []
+                            :baseSeq    (:baseSeq (sessions/tail thread-id))
+                            :hasMore    false
+                            :cursor     nil
+                            :generation (sessions/generation thread-id)
+                            :state      (live-state thread-id)})))
 
-  Both answer 409 with the CURRENT generation and baseSeq, so the client's move is the
-  same in both cases and it is a move it can make: drop what it holds and open the tail.
+(defn- mux-sessions
+  "The `sessions` query parameter (a JSON array) as the subscriptions it names:
+  [{:threadId .. :since .. :generation ..} ..]. A parameter this server cannot read is NO
+  subscriptions rather than a failed handshake -- the client's move is a `page` read and a
+  re-declare either way."
+  [raw]
+  (try
+    (let [parsed (json/read-str (or raw "[]") :key-fn keyword)]
+      (if (vector? parsed)
+        (vec (keep (fn [s]
+                     (when (map? s)
+                       (when-some [tid (:threadId s)]
+                         {:threadId   (str tid)
+                          :since      (when (number? (:since s)) (long (:since s)))
+                          :generation (:generation s)
+                          :runSince   (when (number? (:runSince s)) (long (:runSince s)))})))
+                   parsed))
+        []))
+    (catch Throwable _ [])))
 
-  ONCE STREAMING, THE ONLY ENDING THAT IS NOT THE CLIENT'S is the window ending: the
-  session put away, swept, or the claim changing hands. That sends an `end` frame --
-  SAYING SO -- and closes. A stream that just stops leaves a replica believing it holds
-  everything (`harness.edge.sessions/watch!`)."
-  [req stem]
-  (let [params  (query-params (:query-string req))
-        held    (claims/holder stem)
-        parse   (try {:since (number-param params "since")
-                      :generation (get params "generation")}
-                     (catch Throwable t {:error (ex-message t)}))]
+(defn- mux-watch!
+  "Subscribe TOKEN's downlink to ONE conversation, starting from SINCE, and send the
+  opening frame. The doorbell re-reads the delta from the cursor this closure holds and
+  sends what is new -- nothing at all when the frame would carry no news, so a page parked
+  on a quiet conversation costs one idle socket. The FIRST frame is always sent, even
+  empty, so a reader never wonders whether the socket is working."
+  [token thread-id since]
+  (let [state (atom {:cursor since :state nil :sent false})]
+    (letfn [(push []
+              (when-some [ch (mux/channel token)]
+                (let [cursor (:cursor @state)
+                      page   (window-page thread-id cursor)
+                      frame  (window-frame thread-id
+                                           (if (nil? cursor) "window" "append")
+                                           (live-state thread-id)
+                                           page)]
+                  (when (or (not (:sent @state))
+                            (seq (:entries frame))
+                            (not= (:state frame) (:state @state)))
+                    (reset! state {:cursor (:cursor frame) :state (:state frame) :sent true})
+                    (mux-send! ch (mux-frame thread-id frame))))))]
+      (mux/subscribe! token thread-id push)
+      (push))))
+
+(defn- mux-add!
+  "Subscribe TOKEN's downlink to THREAD-ID under the window rules the feed already
+  enforces: a conversation another live process is serving, or a `generation`/`since` that
+  names a window that is over, is TOLD so with an `end` frame rather than half served
+  (ADR 0003 decision 6)."
+  [token thread-id since generation run-since]
+  (let [held (claims/holder thread-id)]
     (cond
-      (some? (:error parse))
-      (api-response 400 {:error (:error parse) :threadId stem})
-
       (and (some? held) (not (claims/mine? held)))
-      (refuse-served-elsewhere! stem held)
+      (when-some [ch (mux/channel token)]
+        (mux-end! ch thread-id (str "conversation " (pr-str (str thread-id))
+                                    " is being served by another harness process (pid "
+                                    (:pid held) ")")))
 
       :else
-      (let [{:keys [since generation]} parse
-            _      (sessions/touch! stem)
-            mine   (sessions/generation stem)
-            tail   (sessions/tail stem)
-            stale? (or (and (some? generation) (not= (str generation) (str mine)))
-                       (and (some? since) (some? (:baseSeq tail))
-                            (< (long since) (long (:baseSeq tail)))))]
-        (if stale?
-          (api-response 409 {:error (str "this window is over: "
-                                         (if (and (some? generation)
-                                                  (not= (str generation) (str mine)))
-                                           "the conversation is being served under a new generation"
-                                           (str "the client is holding a cursor (since=" since
-                                                ") older than the oldest entry this window still answers from"))
-                                         ". Drop what you hold and open the tail again: GET"
-                                         " /api/threads/" stem "/feed")
-                             :threadId stem
-                             :generation mine
-                             :baseSeq (:baseSeq tail)})
-          (stream-feed! req stem since mine))))))
+      (do
+        (sessions/touch! thread-id)
+        (let [mine   (sessions/generation thread-id)
+              tail   (sessions/tail thread-id)
+              stale? (or (and (some? generation) (not= (str generation) (str mine)))
+                         (and (some? since) (some? (:baseSeq tail))
+                              (< (long since) (long (:baseSeq tail)))))]
+          (if stale?
+            (when-some [ch (mux/channel token)]
+              (mux-end! ch thread-id
+                        (if (and (some? generation) (not= (str generation) (str mine)))
+                          "this conversation is being served under a new generation"
+                          (str "the cursor (since=" since ") is older than the oldest"
+                               " entry this window still answers from"))))
+            (do (mux-watch! token thread-id since)
+                ;; AND THE RUN FRAMES THIS CONNECTION IS MISSING. A window read is a PULL, so
+                ;; a cursor re-reads it; a run is a PUSH, so the frames that happened while a
+                ;; socket was down are only here because `mux-broadcast!` remembered them.
+                (mux-replay-run! token thread-id run-since))))))))
+
+(defn- mux-attend!
+  "A downlink just connected: remember it, and subscribe it to everything the handshake
+  URL declared."
+  [token ch wanted]
+  (mux/attach! token ch)
+  (doseq [{:keys [threadId since generation runSince]} wanted]
+    (mux-add! token threadId since generation runSince)))
+
+(defn- mux-get
+  "GET /api/events.mux?subscriber=<token>&sessions=<json> -- the downlink. A WebSocket, or
+  a 400 when there is no subscriber token to address the set with: the socket carries no
+  subscription message, so a connection that names no token could never change its set."
+  [req]
+  (let [params (query-params (:query-string req))
+        token  (get params "subscriber")
+        wanted (mux-sessions (get params "sessions"))]
+    (if (str/blank? token)
+      (api-response 400 {:error "events.mux needs a subscriber token: ?subscriber=<token>"
+                         :hint  (str "the socket is downlink-only, so the set is updated"
+                                     " by POST /api/events.mux/subscribe")})
+      (hk/as-channel req
+                     {:on-open  (fn [ch]
+                                  ;; ON-OPEN RUNS AFTER THIS RING MAP IS RETURNED, on http-kit's
+                                  ;; thread -- so `handler`'s net is not around it, and a throw
+                                  ;; here would be a silently dropped connection.
+                                  (try (mux-attend! token ch wanted)
+                                       (catch Throwable t
+                                         (log/error! :mux/attend-failed t {:subscriber token}))))
+                      :on-close (fn [ch _status]
+                                  (try (mux/detach! (mux/token-of ch))
+                                       (catch Throwable _ nil)))}))))
+
+(defn- mux-subscribe-post
+  "POST /api/events.mux/subscribe {subscriber, subscribe: [..], unsubscribe: [..]} --
+  UPDATE THE SET of a live downlink. This is the half of the subscription the socket
+  itself cannot carry; the handshake URL is the other half."
+  [req]
+  (let [parsed (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+                    (catch Throwable _ nil))]
+    (cond
+      (not (map? parsed))
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (str/blank? (:subscriber parsed))
+      (api-response 400 {:error "missing subscriber"})
+
+      (nil? (mux/channel (:subscriber parsed)))
+      (api-response 404 {:error (str "no such downlink connection "
+                                     (pr-str (str (:subscriber parsed)))
+                                     ": it has closed or was never opened")
+                         :subscriber (:subscriber parsed)})
+
+      :else
+      (let [token (str (:subscriber parsed))]
+        (doseq [thread-id (:unsubscribe parsed)]
+          (mux/unsubscribe! token thread-id))
+        (doseq [sub (:subscribe parsed)]
+          (mux-add! token (:threadId sub) (:since sub) (:generation sub) (:runSince sub)))
+        (api-response 200 {:subscriber token
+                           :threads    (vec (mux/subscriptions token))})))))
+
+;; ------------------------------------------------------------- the host stream
+;;
+;; THE OTHER DOWNLINK CATEGORY (ADR 0004): facts about the HOME rather than one
+;; conversation -- which sessions and projects exist, what they are called and when last
+;; sent to, which are archived, and which have a run going in this process. A sidebar draws
+;; all of it from `GET /api/projects`' one payload, and this is that same payload PUSHED
+;; whenever one of those facts changes, so two windows agree without a refresh button.
+;;
+;; NO SUBSCRIPTION HERE, unlike `events.mux`: every connection wants the same listing, so
+;; a ring writes to all of them (`harness.edge.host`).
+
+(defn- host-frame
+  "The host-level facts as one downlink frame: the SAME payload `GET /api/projects` answers
+  with, plus the type tag that tells this category from a window frame."
+  [] (assoc (projects-body) :type "projects"))
+
+(defn- host-get
+  "GET /api/events.host -- the host-level downlink. A WebSocket that is handed the listing
+  at once and then once per host-level change; nothing is sent over it and there is no set
+  to subscribe (see `host-frame`)."
+  [req]
+  (let [registered (atom nil)]
+    (hk/as-channel req
+                   {:on-open  (fn [ch]
+                               (try
+                                 (let [push (fn [] (mux-send! ch (host-frame)))]
+                                   (reset! registered push)
+                                   (host/watch! push)
+                                   ;; THE FIRST LISTING AT ONCE: a page that opens this
+                                   ;; stream must not wait for the next change to draw a
+                                   ;; sidebar.
+                                   (push))
+                                 (catch Throwable t
+                                   (log/error! :host/watch-failed t))))
+                    :on-close (fn [_ch _status]
+                                (when-some [push @registered]
+                                  (host/unwatch! push)))})))
 
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
@@ -4056,13 +3927,13 @@
                        (catch Throwable t {:error (ex-message t)}))]
         (if-some [error (:error added)]
           (api-response 400 {:error error})
-          (api-response 200 {:projectId (:project-id (:ok added))
-                             :path      (:path (:ok added))
-                             ;; Sessions that remembered this directory, coming
-                             ;; back with it -- see `remove-project!`. On a
-                             ;; fresh add it is 0, which is the truthful answer
-                             ;; rather than a field nobody sets.
-                             :adopted   (:adopted (:ok added))}))))))
+          (rung (api-response 200 {:projectId (:project-id (:ok added))
+                                      :path      (:path (:ok added))
+                                      ;; Sessions that remembered this directory, coming
+                                      ;; back with it -- see `remove-project!`. On a
+                                      ;; fresh add it is 0, which is the truthful answer
+                                      ;; rather than a field nobody sets.
+                                      :adopted   (:adopted (:ok added))})))))))
 
 (defn- remove-project-post
   "POST /api/projects/<canonical path>/remove -- take that directory out of this
@@ -4097,8 +3968,8 @@
                      (catch Throwable t {:error (ex-message t)}))]
     (if-some [error (:error removed)]
       (api-response 404 {:error error :path stem})
-      (api-response 200 {:path    (:path (:ok removed))
-                         :unbound (:unbound (:ok removed))}))))
+      (rung (api-response 200 {:path    (:path (:ok removed))
+                                  :unbound (:unbound (:ok removed))})))))
 
 (defn- mcp-get
   "GET /api/mcp?threadId=.. -- this session's MCP ledger: which servers it
@@ -4881,6 +4752,24 @@
     (case (:request-method req)
       :post (handle-run req)
       (api-response 405 {:error "method not allowed"}))
+
+    ;; THE DOWNLINK (ADR 0004): one WebSocket per page carrying every conversation it
+    ;; holds, and the HTTP route that updates which ones those are.
+    (= "/api/events.mux" (:uri req))
+    (case (:request-method req)
+      :get  (mux-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/events.mux/subscribe" (:uri req))
+    (case (:request-method req)
+      :post (mux-subscribe-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    ;; THE HOST DOWNLINK: the sidebar's listing, pushed. One per page, no subscription.
+    (= "/api/events.host" (:uri req))
+    (case (:request-method req)
+      :get  (host-get req)
+      (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)
       :get  (model-get req)
@@ -4994,12 +4883,11 @@
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
-        [:get "trajectory"] (trajectory-get stem)
+        [:get "trajectory"] (trajectory-get req stem)
         [:get "sofar"]    (sofar-get req stem)
-        [:get "feed"]     (feed-get req stem)
         [:get "page"]     (page-get req stem)
         [:get "delegations"] (delegations-get stem)
-        [:get "follow"]      (follow-get req stem)
+        [:get "frames"]    (frames-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

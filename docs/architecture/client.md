@@ -117,7 +117,8 @@ lib/
                     再用更具体的 `group-hover:disabled:opacity-50` 让「已揭示的禁用控制」仍旧发灰。
                     **零 import**（就是一条字符串），被 UI 套件渲染出来读回去
   session-memory.ts 「刷新回到刚才那一场」记的那个 id（`localStorage`，就是这里）
-  agent.ts          `HttpAgent` 那几行：地址、`threadId` 交给谁、run 结束的回调，以及
+  agent.ts          `HarnessAgent`：地址、`threadId` 交给谁、run 结束的回调，**把下行 socket
+                    的帧转回 SSE**（`runStream`）交给 `@ag-ui/client` 原来的解析器（ADR 0004），以及
                     **这一侧挂断的那条 run 报成中止而不是失败**——浏览器把掐断的流说成
                     `BodyStreamBuffer was aborted`，客户端库把它合成一条 `RUN_ERROR`，
                     于是按 Stop 会把那条工具卡画成「失败」加一句没人能处理的英文；
@@ -128,8 +129,13 @@ lib/
                     revision}` 与它的全部规则（`windowFrom` / `applied` / `prepended` /
                     `aligned` / `aheadOf`）。**全是纯函数**，所以 UI 套件直接测它；
                     `revision` 是「这份窗口变过几次」，与消息号 `seq` 不是一回事
-  feed.ts           那条 SSE 连接：`fetch` + `AbortController`（不是 `EventSource`——它自己
-                    重连、又看不见 409 的 body），加一个纯的 `feedFrames` 切帧
+  feed.ts           一页一页的读：`pageThread`（尾页，或读者手上最老那条之前的一页）与帧的形状
+                    （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
+  mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
+                     分发窗口帧；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
+                     重连时重新声明整份集合。`app.tsx` 的窗口跟随走它，不再每条会话一条 SSE
+  follow.ts          子 agent 面板的 AG-UI 载具：读记录的**重放**（`GET …/frames`），再从 `mux.ts`
+                     收实时尾巴，按帧自己的 `:seq` 去重、拼成 SSE 交给 `@ag-ui/client`（ticket 04）
   window-scroll.ts  补页时的锚：`measure` / `restoredTop` / `correctedTop` 三行算术（用例测）
                     与 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事
 ```
@@ -166,11 +172,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   断头日志、也会指名一份坏日志）、`window`（**这一页本来就在**的那场，比如刷新回来：看它，尾页 +
   一条 feed，一个字都不写）、`none`（本页刚铸、还没有会话的那场：没有可读的）。所以「侧栏点开」
   与「刷新回来」是两件事：前者接手，后者只看。
-- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走 **feed 一条连接**
-  （`GET …/feed?since=<cursor>&generation=<G>`）。服务端**还持有**这场会话时尾页走**内存**（答案是
+- **打开一场会话是拉尾页**（`GET /api/threads/<stem>/page`），增量走**页面级的下行**
+  （`events.mux`，握手带上游标 `since`/`generation`）。服务端**还持有**这场会话时尾页走**内存**（答案是
   `live: true`），记录的落后因此不会把人送回更早的一版——「刷新走内存」（ADR 0002 决策 8）就是这一条；
-  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。feed 连上之后帧都来自内存，
-  游标由副本自己带着重连。
+  不持有（进程重启过、会话被空闲放掉）就从记录折（`live: false`）。连上之后帧都来自内存，
+  游标由副本自己在重连时重新声明。
 - **两种修理是两件事**（`lib/window.ts` 的 `Effect`）：**断档 / 连接断了** ⇒ 拉尾页**对齐**
   （接得上就合、接不上就重建并从尾页重来），**读者的位置保住**；**`end` 帧 / generation 作废**
   （会话被放掉、被接管、换了进程）⇒ **重开**，并把「重开了」这句话画出来。副本手里有服务端没有的
@@ -387,6 +393,11 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   轮的**边界是数出来的**（相邻的助手消息，两端的邻居说话），算术全在 `lib/turns.ts`（零 import，
   UI 套件直接当数测），UI 在 `components/turn-steps.tsx`。**那一行不是当年删掉的「N tool call」组头回来**：
   那个头在**每个工具调用**前面、计数恒为 1，这一行是**一整轮**一行。
+- **折起来只留答案，且「有没有答案」是一条判据**（`lib/turns.ts` 的 `turnConclusion`）：折着的那一轮，
+  除答案那一条正文，思考行与工具行一条都不留；答案那条消息自己的 `reasoning` / `tool-call` 也一并藏起
+  （`thread.aui.tsx` 的 `foldedAnswer`）——「说了什么」留下，「怎么到的」收走。一轮**没有结论**
+  （最后一条没有非空正文：崩了、中途停、只调了工具）时连最后一条也收起来，只留摘要行；
+  正在跑的那一轮永远不折（`turnIsSettled` 已经挡住它）。
 - **composer 的四个选择器是一个可搜索的浮层，不是原生 `<select>`**（`components/picker.tsx`）：
   项目、分支、model、思考档都是「点一下 → 弹出一个带搜索框的列表」。列表**可以按组，但只有一层**——
   model 按**供应商**一行一组、底下是它自己的 model，一条平铺的清单，不是「先选厂商、再选 model」；
@@ -687,6 +698,11 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
   绝不拿「这个会话今天有什么」去填。
+- **它是流式的，而且只有被问到才取。** 路由答的是 **NDJSON**（首行是头、其后一轮一行，
+  `harness.edge.trajectory/fold-trajectory` 折完一轮就吐一轮），`lib/trajectory.ts` 边收边画，
+  `trajectory-view.tsx` 每落一个 turn 就 `setPayload` 一次——长记录不再等整份折完才画第一轮。
+  组件**只在 `Trajectory` 这一栏被打开时挂载**（`app.tsx` 的视图切换），所以 `对话` 一栏不发这个
+  请求：下行只承载对话本身，轨迹是按需取的那一半。
 - **注入物整场只画一次。** 服务端没有会话，所以每个 run 都会把开场块重新拼一遍、把历史里还留着的
   `/<名字>` 重新派生一遍——照搬「这个 run 扛了什么」，同一段字节就会画在每个 turn 底下，5 轮的会话看起来像
   开场发生了 5 次，**那是自造**。所以判据是**整段文本的字节**：没变就不再画（开场块只在第一轮），变了的那一轮再画一次

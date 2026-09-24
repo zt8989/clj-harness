@@ -235,6 +235,7 @@ import { SettingsPanel } from "@/components/settings-panel";
 import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/components/sidebar-toggle";
 import { newId } from "@/lib/id";
 import { REVEAL_ON_HOVER } from "@/lib/reveal";
+import { subscribeHost } from "@/lib/host";
 import { foldRows } from "@/lib/sidebar-rows";
 import { countAsk, nextAsk, type ListedRow } from "@/lib/sidebar-refetch";
 import { cn } from "@/lib/utils";
@@ -459,6 +460,21 @@ export const Sidebar: FC<SidebarProps> = ({
   useEffect(() => {
     void refresh();
   }, [refresh, currentThreadId]);
+
+  // AND THE LISTING IS PUSHED (ADR 0004, `events.host`): a row that appears because
+  // ANOTHER window sent, a project another window added, a run another window started or
+  // stopped -- all of it arrives here without the refresh button. The opening frame is the
+  // current listing, so this is a second read of what the mount already asked for: the
+  // same store answer, and the store stays the one source. The button remains as the
+  // manual fallback for a socket that cannot connect at all.
+  useEffect(
+    () =>
+      subscribeHost((listed) => {
+        setListing(listed);
+        onListed(listed);
+      }),
+    [onListed],
+  );
 
   // WHICH PROJECT ROW IS LIT, derived so it cannot point at something that is gone.
   // The current session's project wins when it has one -- pointing at the project you
@@ -1188,7 +1204,11 @@ export const Sidebar: FC<SidebarProps> = ({
                     session={task}
                     current={task.threadId === currentThreadId}
                     busy={busy}
-                    running={(statuses[task.threadId] ?? IDLE).running}
+                    // TWO SOURCES, ORED, exactly as the archived block's row does: this
+                    // page's registry knows a run it is holding; the listing's `running` is the
+                    // server registry, which is the only thing that knows about a run started
+                    // from ANOTHER window (pushed here on `events.host`).
+                    running={task.running || (statuses[task.threadId] ?? IDLE).running}
                     parked={(statuses[task.threadId] ?? IDLE).parked}
                     liveTitle={liveTitles[task.threadId] ?? null}
                     onOpen={() => void openThread(task.threadId, null)}
@@ -1284,7 +1304,7 @@ export const Sidebar: FC<SidebarProps> = ({
                     label={project === null ? null : projectName(project.path)}
                     current={session.threadId === currentThreadId}
                     busy={busy}
-                    running={(statuses[session.threadId] ?? IDLE).running}
+                    running={session.running || (statuses[session.threadId] ?? IDLE).running}
                     parked={(statuses[session.threadId] ?? IDLE).parked}
                     liveTitle={liveTitles[session.threadId] ?? null}
                     onOpen={() => void openThread(session.threadId, project?.path ?? null)}

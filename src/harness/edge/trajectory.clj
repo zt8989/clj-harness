@@ -718,6 +718,47 @@
         {:seen seen' :shownSystem texts :turns turns
          :history (into raw (:returned run))}))))
 
+(defn- finish-turn
+  "A folded turn as the payload carries it: the calls get their index, and a turn that
+  made none has no `:calls` key at all -- absent is a different answer from empty."
+  [turn]
+  (let [calls (:calls turn)]
+    (cond-> turn
+      (seq calls)    (assoc :calls (vec (map-indexed (fn [i call] (assoc call :index i)) calls)))
+      (empty? calls) (dissoc :calls))))
+
+(defn fold-trajectory
+  "RECORDS -> the same answer `records->trajectory` gives, but with EMIT! handed each
+  turn the moment the fold can no longer change it.
+
+  WHY A TURN IS NOT FINAL WHEN IT APPEARS: `one-run` appends to the turn it is in -- a
+  parked run resumed writes into the SAME turn (see `run-segments`), and that run's
+  injected context lands after the turn already exists. So a turn is final only once a
+  LATER turn has opened (or the record has ended): everything but the last turn is
+  handed over after each run, and the last one at the end.
+
+  WHAT IS NOT STREAMED HERE: the three passes that must see the whole record before the
+  first turn can be built -- `run-segments`, `tool-lifecycles` and `call-index` -- still
+  run first. Streaming THOSE is `.scratch/session-as-kernel` ticket 12's; what this buys
+  is that the turn-building walk no longer has to finish before a reader sees turn one."
+  [records emit!]
+  (let [life-of (tool-lifecycles records)
+        call-of (call-index records)
+        state   (reduce (fn [state run]
+                          (let [next  (one-run state run life-of call-of)
+                                turns (:turns next)
+                                ;; EVERY TURN BUT THE LAST IS FINAL NOW.
+                                final (max 0 (dec (count turns)))]
+                            (doseq [i (range (:emitted state) final)]
+                              (emit! (finish-turn (nth turns i))))
+                            (assoc next :emitted final)))
+                        {:seen #{} :shownSystem nil :turns [] :history [] :emitted 0}
+                        (run-segments records))
+        turns   (mapv finish-turn (:turns state))]
+    (doseq [i (range (:emitted state) (count turns))]
+      (emit! (nth turns i)))
+    {:turns turns :incomplete (stats/incomplete? records)}))
+
 (defn records->trajectory
   "RECORDS -> {:turns [...] :incomplete bool}. See the namespace docstring for the fold's
   rules and the route (GET /api/threads/<stem>/trajectory) for the payload.
@@ -759,19 +800,7 @@
   rows and must not hide one, because 'the model read these bytes again' is a fact a reader
   is here to see."
   [records]
-  (let [life-of (tool-lifecycles records)
-        call-of (call-index records)]
-    {:turns      (mapv (fn [turn]
-                         (let [calls (:calls turn)]
-                           (cond-> turn
-                             (seq calls)   (assoc :calls (vec (map-indexed
-                                                               (fn [i call] (assoc call :index i))
-                                                               calls)))
-                             (empty? calls) (dissoc :calls))))
-                       (:turns (reduce (fn [state run] (one-run state run life-of call-of))
-                                       {:seen #{} :shownSystem nil :turns [] :history []}
-                                       (run-segments records))))
-     :incomplete (stats/incomplete? records)}))
+  (fold-trajectory records (fn [_turn] nil)))
 
 (defn log-trajectory
   "A log FILE -> records->trajectory of it. The file entry point, the counterpart of

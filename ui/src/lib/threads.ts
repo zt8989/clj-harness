@@ -39,6 +39,29 @@ import type { RecordHealth } from "./record-health";
 
 const HARNESS = `${(import.meta.env.VITE_AGENT_URL ?? "/").replace(/\/+$/, "")}/`;
 
+/// AN ORIGIN THE SUITES CAN POINT AT. The page's own origin comes from `VITE_AGENT_URL` (or
+/// stays relative, which the document resolves); a suite runs in Node against a server on an
+/// OS-chosen port it only learns at runtime, and has no document to resolve against -- so the
+/// driver sets it here once. `null` puts the page's origin back.
+let harnessOverride: string | null = null;
+
+export function setHarnessOrigin(origin: string | null): void {
+  harnessOverride = origin === null ? null : `${origin.replace(/\/+$/, "")}/`;
+}
+
+/// The origin the DOWNLINK and the delegation panel's frames read talk to: the override when a
+/// suite set one, the page's own otherwise. A FUNCTION rather than the `API_BASE` const next
+/// to it, because a suite's override arrives after this module is loaded.
+function harness(): string {
+  return harnessOverride ?? HARNESS;
+}
+
+/// The management prefix, resolved at CALL time for the same reason. The app's own callers keep
+/// using `API_BASE`; this is for the two modules a suite drives through the app's code.
+export function apiBase(): string {
+  return `${harness()}api/`;
+}
+
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
 /// brands a translator with the namespace it was bound to, so a shell translator
 /// does not typecheck here and only the errors catalog's keys compile.
@@ -51,6 +74,18 @@ export const API_BASE = `${HARNESS}api/`;
 /// THE AG-UI ENDPOINT. An `HttpAgent` posts a `RunAgentInput` here and is answered
 /// with SSE; nothing else in the app posts a run.
 export const AGENT_URL = `${API_BASE}agent`;
+
+/// THE DOWNLINK'S ADDRESS: the same origin as the management calls, spoken as a
+/// WebSocket. `PATH` names the category (`events.mux`, `events.host` -- ADR 0004), and for
+/// `mux` the handshake URL is where the subscription is declared (the socket carries no
+/// client message). `VITE_AGENT_URL` unset leaves `HARNESS` relative, and a relative URL
+/// resolves against the document -- so the built page and the dev loop both work with no
+/// port written down, exactly as `API_BASE` does.
+export function downlinkUrl(path: string, params: URLSearchParams): string {
+  const base = harness().replace(/^http/, "ws").replace(/\/+$/, "");
+  const query = params.toString();
+  return `${base}/api/${path.replace(/^\/+/, "")}${query === "" ? "" : `?${query}`}`;
+}
 
 /// One row of `GET /api/threads`. `threadId` is the log file's stem -- the id a
 /// rebuild names -- and `lastActivity` is the file's mtime, epoch milliseconds.

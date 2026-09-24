@@ -55,13 +55,11 @@
                               ;; this thread is a session of it.
                               :append [{:id "u1" :role "user" :content "go"}]
                               :tools []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.send (HttpClient/newHttpClient) req
-           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+        ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run-response`): the POST answers an
+        ;; ack and the frames arrive on `events.mux`, so the helper subscribes first and hands
+        ;; back the same `HttpResponse` it always did.
+        result (support/mux-run-response *port* thread-id body nil)]
+    result))
 
 (defn- log-file
   "A thread's log, in the tree's reserved workspace.

@@ -1,6 +1,5 @@
 // What a TURN is, as arithmetic: which messages are one, whether it has stopped,
-// how much it did, and what its summary line says.
-//
+// what its conclusion is, how much it did, and what its summary line says.
 // A turn is a run of adjacent ASSISTANT messages -- the steps of one answer. The
 // AG-UI adapter opens a new assistant message for every LLM round, so a turn that
 // thought, read and then answered is several messages in a row, and the user
@@ -21,7 +20,7 @@ import type { TFunction } from "i18next";
 export type TurnMessage = {
   readonly role: string;
   readonly status?: { readonly type: string } | undefined;
-  readonly parts?: readonly { readonly type: string }[] | undefined;
+  readonly parts?: readonly { readonly type: string; readonly text?: string }[] | undefined;
 };
 
 /// The run of adjacent assistant messages `index` sits in, as first/last indices.
@@ -62,6 +61,37 @@ export function turnIsSettled(
   if (isRunning && last === messages.length - 1) return false;
   const type = messages[last]?.status?.type;
   return type === "complete" || type === "incomplete";
+}
+
+/// The turn's CONCLUSION: the last of its messages that carries a non-empty text body,
+/// or `undefined` when the turn never answered.
+///
+/// A TURN IS NOT ITS ANSWER. A ReAct turn is several messages -- it thought, read,
+/// thought again -- and only one of them speaks to the reader. The steps carry
+/// `reasoning` and `tool-call` parts; a message with a `text` part is what was said
+/// out loud. Whether such a message exists is what the fold has to know: a turn that
+/// stopped with no text at all (a crash, an abort mid-thought, a run that only ever
+/// called tools) has NO conclusion, and folding it must put the whole turn away rather
+/// than leave the last thought or tool call on screen pretending to be an answer.
+///
+/// THE LAST ONE WINS, NOT THE FIRST: a model may speak, call a tool, and speak again;
+/// the turn's answer is what it said last, and anything after it is a step of the same
+/// turn. `undefined` -- never `last` -- is the 'no answer' answer, so no caller can
+/// mistake 'the tail happens to be text-free' for 'there is nothing to keep'.
+///
+/// EMPTINESS COUNTS AS NOTHING SAID: a message whose text part is blank has not
+/// answered, and treating it as the conclusion would keep a blank line instead of
+/// folding the turn -- which is the very leak this predicate exists to close.
+export function turnConclusion(
+  messages: readonly TurnMessage[],
+  first: number,
+  last: number,
+): number | undefined {
+  for (let index = last; index >= first; index -= 1) {
+    const parts = messages[index]?.parts ?? [];
+    if (parts.some((part) => part.type === "text" && (part.text ?? "").trim() !== "")) return index;
+  }
+  return undefined;
 }
 
 /// What the turn did: its tool calls, and how many assistant messages it is.

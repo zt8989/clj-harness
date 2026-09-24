@@ -119,7 +119,8 @@ import {
   rememberSession,
 } from "@/lib/session-memory";
 import { AGENT_URL, rebuildThread, sofarThread, type SofarState } from "@/lib/threads";
-import { feedThread, pageThread, type WindowFrame } from "@/lib/feed";
+import { pageThread, type WindowFrame } from "@/lib/feed";
+import { subscribeMux } from "@/lib/mux";
 import {
   aheadOf,
   aligned,
@@ -598,14 +599,14 @@ function useWindowFeed(args: {
     earlier: () => {},
   });
 
-  /// OPEN THE FEED FROM WHERE THIS PAGE IS. The opening frame carries the conversation's
+  /// OPEN THE WINDOW'S DOWNLINK SUBSCRIPTION FROM WHERE THIS PAGE IS. The opening frame
+  /// carries the conversation's
   /// state whatever it is now (ticket 06's server half), so a state that changed with no
   /// entry to show still reaches this host.
   const follow = useCallback(() => {
-    close.current?.();
     const window = held.current;
     if (window === null) return;
-    close.current = feedThread(
+    close.current = subscribeMux(
       threadId,
       { since: window.cursor, generation: window.generation },
       {
@@ -644,14 +645,6 @@ function useWindowFeed(args: {
           // BY IDENTITY: a frame that changed nothing hands back the window it was
           // given, and an import for it would be a re-render per keep-alive.
           if (next !== current) commit(next);
-        },
-        onRefused: () => {
-          // THE SERVER WOULD NOT OPEN THE WINDOW: the generation this page holds is not
-          // the one being served (a put-away, a takeover, a restart) or the cursor is
-          // older than the window. Either way the window is over, and the answer is the
-          // same one `end` gets.
-          if (!alive.current) return;
-          verbs.current.reopen();
         },
         onClosed: () => {
           // THE CONNECTION WENT AWAY -- a restart, a proxy, a sleeper. Nothing is wrong
@@ -854,6 +847,8 @@ const SessionHost: FC<{
   // this host's state -- the pending directory lives up there -- so the memo depends on
   // its identity, and `registerPending` is a `useCallback` with stable dependencies.
   const agent = useMemo(() => {
+    // THE DOWNLINK IS WHERE THIS PAGE'S RUN FRAMES COME FROM (ADR 0004): the POST answers an
+    // ack and the socket carries the events, so the sender and every watcher read one stream.
     const created = new HarnessAgent({ url: AGENT_URL, ready: onReady });
     created.threadId = threadId;
     return created;

@@ -501,6 +501,22 @@
     (is (= ["user" "assistant"] (kinds (second turns)))
         "the run's output belongs to the turn its last user message opened")))
 
+(deftest the-fold-hands-over-each-turn-once-and-in-order
+  ;; The route's stream: `fold-trajectory` is the SAME fold as `records->trajectory`, with
+  ;; an emit for each turn. A turn is handed over only once a LATER one has opened (a
+  ;; parked run resumed writes into the turn it parked in), so the emission is in order,
+  ;; one apiece, and the answer is exactly what the one-shot fold gives.
+  (let [records (rows [(client 0 (user "u1" "a"))
+                       (client 0 (user "u2" "b"))
+                       (system-prompt 10 "S")
+                       finished
+                       (message 20 (assistant "answered"))])
+        emitted (atom [])
+        answer  (trajectory/fold-trajectory records (fn [turn] (swap! emitted conj turn)))]
+    (is (= (:turns answer) @emitted) "every turn is handed over exactly once, in order")
+    (is (= (trajectory/records->trajectory records) answer)
+        "the streaming fold and the one-shot fold are the same fold")))
+
 (deftest the-tool-table-a-call-went-out-with
   ;; Ticket 04's read half: a call leaves the table's SIGNATURE -- the name set as a
   ;; hash and the count -- not the table, and the shape a reader gets is the same
@@ -727,13 +743,10 @@
                               ;; conversation: the server holds that.
                               :append [{:id "u1" :role "user" :content "看看这个项目"}]
                               :tools []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/agent")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.body (.send (HttpClient/newHttpClient) req
-                  (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+        ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run!`): the POST answers an ack,
+        ;; the frames arrive on `events.mux`, and this hands back the run's SSE body as before.
+        result (support/mux-run! port thread-id body nil)]
+    (:body result)))
 
 (defn- get-json [port path]
   (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
@@ -742,6 +755,21 @@
         resp (.send (HttpClient/newHttpClient) req
                     (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
     [(.statusCode resp) (json/read-str (.body resp) :key-fn keyword)]))
+
+(defn- get-trajectory
+  "The trajectory route as the CLIENT reads it: NDJSON. The FIRST line is the header
+  (`:threadId` / `:incomplete` / `:behind`); every line after it is one turn, written as
+  the fold finishes it. A non-200 answer is a single JSON object with no turn lines, so
+  the header position holds the error map."
+  [port path]
+  (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                 (.GET)
+                 (.build))
+        resp (.send (HttpClient/newHttpClient) req
+                    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))
+        lines (remove str/blank? (str/split-lines (.body resp)))
+        parsed (mapv #(json/read-str % :key-fn keyword) lines)]
+    [(.statusCode resp) (first parsed) (vec (rest parsed))]))
 
 (defn- log-messages
   "Every `message` record from THREAD-ID's own log, read back through the namespaces
@@ -800,16 +828,16 @@
         ;; BEFORE the fold, not after it: the route reads the log, so the log has to
         ;; have been finished being written (see await-run-recorded!).
         (await-run-recorded! thread-id 5000)
-        (let [[status body] (get-json port (str "/api/threads/" thread-id "/trajectory"))
-              items   (:items (first (:turns body)))
+        (let [[status head turns] (get-trajectory port (str "/api/threads/" thread-id "/trajectory"))
+              items   (:items (first turns))
               by      (fn [k] (first (filter #(= k (:kind %)) items)))
               written (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
                            (filter replay/system-prompt?)
                            first replay/payload :content)]
           (is (= 200 status))
-          (is (= thread-id (:threadId body)))
-          (is (false? (:incomplete body)))
-          (is (= 1 (count (:turns body))) "one user message, one turn")
+          (is (= thread-id (:threadId head)))
+          (is (false? (:incomplete head)))
+          (is (= 1 (count turns)) "one user message, one turn")
           (is (every? #(set/subset? (set (keys %)) item-keys) items)
               "every field on the wire is one the inventory names")
           (is (= "system" (:kind (first items))) "the turn opens with the system message")

@@ -19,6 +19,7 @@ import path from "node:path";
 import type { Message } from "@ag-ui/client";
 
 import { HarnessAgent, appendOf } from "@/lib/agent";
+import { setHarnessOrigin } from "@/lib/threads";
 
 /// One test: a name, and a body. Registration belongs to the driver, so the
 /// driver is also the place that can refuse to run a suite that contributed
@@ -63,8 +64,13 @@ export interface Frame {
 
 let facts: HarnessFacts | null = null;
 
+/// Point the app's own modules at the harness this run started (see `lib/threads.setHarnessOrigin`).
 export function configure(next: HarnessFacts): void {
   facts = next;
+  // AND THE APP CODE LEARNS WHERE THE HARNESS IS: the downlink and the panel's frames read
+  // resolve their origin at call time, and a suite has no document to resolve a relative one
+  // against (`lib/threads.setHarnessOrigin`).
+  setHarnessOrigin(next.url);
 }
 
 function requireFacts(): HarnessFacts {
@@ -147,17 +153,78 @@ export function content(m: Message): string {
 /// THE SESSION IS MADE FIRST, on the same door the page uses: an id the run edge has
 /// never heard of is refused, so a suite that posted a run for a fresh `threadId(..)`
 /// would be testing the refusal rather than the run.
+/// HOW A RUN IS READ NOW (tickets 03/05 of `.scratch/events-mux-and-host`): the POST answers
+/// an ACK and the frames come down `events.mux`. THIS KEEPS THE OLD SHAPE -- a `Response`
+/// whose body is SSE -- by subscribing first, starting the run, and turning the socket's
+/// frames back into `data:` lines. `framesFromSse` below and every caller of it are unchanged:
+/// a suite still reads the wire, not an interpretation of it.
+const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
+
+/// THE DECLARATION MUST LAND BEFORE THE RUN STARTS -- the server filters run frames by it --
+/// and the socket's own `open` can beat the server's bookkeeping. This asks the route that
+/// only ANSWERS once the set is recorded, retrying that race away.
+async function muxDeclared(token: string, tid: string): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const res = await fetch(`${url()}api/events.mux/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscriber: token, subscribe: [{ threadId: tid }] }),
+    });
+    if (res.ok) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("events.mux never accepted this suite's declaration");
+}
+
 export async function postRun(
   tid: string,
   messages: readonly Message[],
   extra?: Record<string, unknown>,
 ): Promise<Response> {
   await ensureSession(tid);
-  return fetch(runUrl(), {
+  const token = crypto.randomUUID();
+  const params = new URLSearchParams();
+  params.set("subscriber", token);
+  params.set("sessions", JSON.stringify([{ threadId: tid }]));
+  const socket = new WebSocket(`${url().replace(/^http/, "ws")}api/events.mux?${params}`);
+  const frames: Frame[] = [];
+  let settle: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  socket.addEventListener("message", (event) => {
+    const frame = JSON.parse(String((event as MessageEvent).data)) as Frame & {
+      threadId?: string;
+      seq?: number;
+    };
+    if (frame.threadId !== tid || WINDOW_TYPES.has(frame.type)) return;
+    // ONLY THE NUMBER IS OURS: `:seq` is the downlink's bookkeeping for the reconnect
+    // cursor, and the rest of the frame -- `threadId` included -- is the AG-UI event the
+    // server sent, exactly as a runtime would read it.
+    const { seq: _seq, ...rest } = frame;
+    frames.push(rest as Frame);
+    if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") settle();
+  });
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve());
+    socket.addEventListener("error", () => reject(new Error("events.mux refused this suite")));
+  });
+  await muxDeclared(token, tid);
+  const started = await fetch(runUrl(), {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId: tid, append: appendOf(messages), tools: [], ...extra }),
   });
+  if (!started.ok) {
+    // A REFUSAL IS HANDED BACK AS IT CAME, so a case about a refusal still reads its status
+    // and its sentence; there is no run to follow.
+    socket.close();
+    return started;
+  }
+  await done;
+  socket.close();
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
 /// An SSE body -> an array of parsed data frames. Deliberately hand-rolled
@@ -201,6 +268,8 @@ export async function ensureSession(tid: string): Promise<string> {
 /// agent's first request would otherwise be refused by name.
 export async function agentFor(tid: string): Promise<HarnessAgent> {
   await ensureSession(tid);
+  // THE DOWNLINK IS THE TRANSPORT (ADR 0004): the suite's agent reads its run's frames the
+  // way the page does, so a change to that path is what a suite failure means.
   const agent = new HarnessAgent({ url: runUrl() });
   agent.threadId = tid;
   return agent;

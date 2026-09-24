@@ -1,54 +1,170 @@
 // THE PANEL'S AG-UI CLIENT: the one client on this page that never POSTs.
 //
-// `GET /api/threads/<stem>/follow` (ticket 02) is a READ-ONLY SSE of one thread's
-// frames: it replays what the record already holds -- the task the subagent was
-// handed, as a `MESSAGES_SNAPSHOT`, and then every frame the run has written --
-// and then follows the in-process frame bus until the run's terminal frame. A
-// panel that watches a delegation is that channel and nothing else.
+// A delegation panel watches a CHILD conversation it does not own. It reads that
+// conversation in TWO halves (ADR 0004, ticket 04):
 //
-// ------------------------------------------------- why a subclass, not a reader
+//   the record   `GET /api/threads/<stem>/frames` -- what the child has already written, as
+//                AG-UI frames, ordered the way a runtime must read them (a `RUN_STARTED`
+//                first, the conversation snapshot the frames cannot rebuild next, then the
+//                frames). This is how a panel opened on a FINISHED child still shows it.
+//   the downlink the same socket every other part of the page uses (`events.mux`): the
+//                child's LIVE frames, tagged and numbered like the record's.
 //
-// `lib/feed.ts` reads the WINDOW's wire by hand (fetch plus a reader) because that
-// wire is not AG-UI: its frames carry record entries, and `lib/window.ts` decides
-// what they mean for the copy the page holds. THIS wire IS AG-UI, frame for frame
-// -- it is what the child's own run sent -- and the runtime already knows what to
-// do with AG-UI frames. Re-implementing the SSE reader, the frame validation and
-// the message-id bookkeeping here would be a second implementation of the thing
-// `@ag-ui/client` is FOR, and the second one would drift.
+// THE SAME `:seq` JOINS THE TWO, which is the whole trick: the server numbers a child's
+// frames once (the frame bus's counter, which the record carries too), so a live frame whose
+// number is not past the replay's last is one the replay already handed over and is dropped.
+// Without that, a panel opened mid-report would draw the same token twice.
 //
-// So this class changes ONE thing about `HttpAgent`: the TRANSPORT. `run()` still
-// builds a `RunAgentInput` and still parses the event stream into frames; the
-// request that carries it is ours, and it is a `GET` with no body at all -- the
-// follow channel answers no `RunAgentInput`, accepts no input, and has nothing to
-// run. Everything else the base class does (the abort controller, the SSE parser,
-// the frame dispatch into the subscriber) is exactly what the panel needs, and the
-// abort is what makes closing the panel cost nothing on the server: killing the
-// request drops the subscription (`follow-get`'s `on-close`).
+// ------------------------------------------------- why still a subclass, not a reader
+//
+// THIS wire IS AG-UI, frame for frame -- it is what the child's own run sent -- and the
+// runtime already knows what to do with AG-UI frames. `HttpAgent`'s SSE parser, its frame
+// validation and its message-id bookkeeping are what the panel needs; this class changes ONE
+// thing about it: the TRANSPORT. `run()` still builds an input and parses an event stream;
+// where the bytes come from is ours.
 import { HttpAgent, type HttpAgentConfig, type HttpAgentFetchFn } from "@ag-ui/client";
 
-import { API_BASE } from "@/lib/threads";
+import { subscribeRun, type RunFrame } from "@/lib/mux";
+import { apiBase } from "@/lib/threads";
 
-/// The channel one subagent's panel reads.
-export function followUrl(threadId: string): string {
-  return `${API_BASE}threads/${encodeURIComponent(threadId)}/follow`;
+/// The record's replay for one conversation. The LIVE tail is the downlink, not here.
+export function framesUrl(threadId: string): string {
+  return `${apiBase()}threads/${encodeURIComponent(threadId)}/frames`;
+}
+
+const seqOf = (frame: RunFrame): number | null =>
+  typeof frame.seq === "number" ? frame.seq : null;
+
+const isTerminal = (type: string): boolean => type === "RUN_FINISHED" || type === "RUN_ERROR";
+
+/// ONE FRAME AS THE WIRE SPELLS IT. `:seq` is the server's bookkeeping for the boundary, not
+/// a field of any AG-UI frame, so it never reaches the runtime.
+function wire(frame: RunFrame): RunFrame {
+  const { seq: _seq, ...rest } = frame;
+  return rest as RunFrame;
 }
 
 export class FollowAgent extends HttpAgent {
-  /// A `GET`, whatever the base class asked for.
-  ///
-  /// THE INIT IS NOT MERGED, IT IS REPLACED, and both halves of that matter: the
-  /// method is `GET` (the base class's `requestInit` is a POST with a JSON body,
-  /// which this route would refuse), and the body is dropped rather than emptied --
-  /// "here is the conversation" is exactly the claim this channel does not make.
-  /// The signal is kept, because it is the abort path (see the header).
-  constructor(config: HttpAgentConfig) {
+  constructor(config: HttpAgentConfig & { threadId: string }) {
     super(config);
-    const read: HttpAgentFetchFn = (url, init) =>
-      fetch(url, {
-        method: "GET",
-        headers: { Accept: "text/event-stream" },
-        signal: init?.signal ?? null,
+    const { threadId } = config;
+    const read: HttpAgentFetchFn = async (_url, init) => {
+      // SUBSCRIBE FIRST, REPLAY SECOND -- the order the old channel used for the same
+      // reason: a frame written between the two reads would otherwise never be seen.
+      const buffer: RunFrame[] = [];
+      let deliver: ((frame: RunFrame) => void) | null = null;
+      const subscription = subscribeRun(threadId, (frame) => {
+        if (deliver === null) buffer.push(frame);
+        else deliver(frame);
       });
+      let replay: RunFrame[];
+      let running: boolean;
+      try {
+        const res = await fetch(framesUrl(threadId), { signal: init?.signal ?? null });
+        if (!res.ok) {
+          subscription.unsubscribe();
+          return res;
+        }
+        const body = (await res.json()) as { frames?: RunFrame[]; running?: boolean };
+        replay = body.frames ?? [];
+        running = body.running === true;
+      } catch (error) {
+        subscription.unsubscribe();
+        throw error;
+      }
+      return replayThenLive(
+        subscription,
+        replay,
+        buffer,
+        (next) => {
+          deliver = next;
+        },
+        running,
+        init?.signal,
+      );
+    };
     this.fetch = read;
   }
+}
+
+/// THE REPLAY, THEN THE LIVE TAIL, as one SSE. The replay's last `:seq` is the boundary: a
+/// live frame at or below it is one already drawn (the two sources overlap by construction,
+/// because the subscription exists before the replay is read).
+function replayThenLive(
+  subscription: { unsubscribe: () => void },
+  replay: readonly RunFrame[],
+  buffer: readonly RunFrame[],
+  attach: (deliver: (frame: RunFrame) => void) => void,
+  running: boolean,
+  signal: AbortSignal | null | undefined,
+): Response {
+  const encoder = new TextEncoder();
+  let closed = false;
+  let boundary: number | null = null;
+  for (const frame of replay) {
+    const seq = seqOf(frame);
+    if (seq !== null) boundary = boundary === null ? seq : Math.max(boundary, seq);
+  }
+  const endedInReplay = replay.length > 0 && isTerminal(replay[replay.length - 1].type);
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const end = () => {
+        if (closed) return;
+        closed = true;
+        subscription.unsubscribe();
+        try {
+          controller.close();
+        } catch {
+          // The reader already went away.
+        }
+      };
+      const emit = (frame: RunFrame) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(wire(frame))}\n\n`));
+        } catch {
+          // The reader already went away; nothing to do with the frame.
+        }
+      };
+      const push = (frame: RunFrame) => {
+        if (closed) return;
+        const seq = seqOf(frame);
+        if (seq !== null && boundary !== null && seq <= boundary) return;
+        emit(frame);
+        if (seq !== null) boundary = boundary === null ? seq : Math.max(boundary, seq);
+        if (isTerminal(frame.type)) end();
+      };
+
+      for (const frame of replay) emit(frame);
+      // A CHILD THAT IS NOT RUNNING (finished, or never ran) HAS NOTHING LIVE TO ADD: the
+      // replay is the whole conversation, terminal included when there is one.
+      if (endedInReplay || !running) {
+        end();
+        return;
+      }
+      attach(push);
+      for (const frame of buffer) push(frame);
+      const onAbort = () => {
+        if (closed) return;
+        closed = true;
+        subscription.unsubscribe();
+        // The name is the contract the client library reads (see `lib/agent.ts`).
+        try {
+          controller.error(new DOMException("the panel was closed", "AbortError"));
+        } catch {
+          // Already closed.
+        }
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    },
+    cancel() {
+      closed = true;
+      subscription.unsubscribe();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
 }

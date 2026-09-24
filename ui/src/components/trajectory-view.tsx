@@ -40,6 +40,14 @@
 // is written. There is no polling: a long call streams for minutes and this view stands
 // still for the length of it, which is honest, because the part of the record it would
 // show does not exist yet.
+//
+// AND IT IS ASKED FOR ONLY WHEN THIS VIEW IS THE ONE ON SCREEN. `app.tsx` mounts this
+// component for the `轨迹` tab alone, so the `对话` tab sends no trajectory request at
+// all -- the downlink carries the conversation and nothing else (ticket 06).
+//
+// THE ANSWER ARRIVES AS A STREAM. The route writes NDJSON, so each turn is drawn the
+// moment the fold reaches it instead of after the whole record has been folded -- which
+// is what 'the trajectory loads when it is asked for' looks like on the page.
 import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import type { TFunction } from "i18next";
@@ -528,9 +536,12 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
 
   useEffect(() => {
     let live = true;
-    void trajectoryFor(threadId).then((next) => {
-      // A late answer from a previous session must not land on this one.
-      if (live) setPayload(next);
+    void trajectoryFor(threadId, (soFar) => {
+      // A late turn from a previous session must not land on this one, and the same
+      // guard covers the finished payload below.
+      if (live) setPayload(soFar);
+    }).then((next) => {
+      if (live && next !== null) setPayload(next);
     });
     return () => {
       live = false;
