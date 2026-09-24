@@ -188,8 +188,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   conversation 可能还在长，拿整段重建的结果盖上去就是又一次孤儿（而窗口那条连接还在往同一个 core
   里送帧）。
 - **「现在看哪一场」是 App 的 state**（`shown`），带两个动作：`onShow`（这场有 conversation，第一次
-  host 时重建）与 `onShowFresh`（这场是刚开的、还没有会话：没有日志可重建，host 空着起，名字由页面
-  向后端要来 —— `GET /api/ids/new`）。
+  host 时重建）与 `onShowFresh`（这场是客户端刚 mint 的，没有日志可重建，host 空着起）。
 - **恢复的转换仍与 runtime 自己的快照导入路径逐字相同**（引上游，不另写）：`fromAgUiMessages` +
   `fromThreadMessageLike`，只是交给适配器的形状是 `{messages: [{parentId, message}]}`。
 - **history 适配器的 `append`/`update` 是空实现**：日志归服务端所有，客户端一个字节都不往回写。
@@ -204,12 +203,13 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   **列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取；**发送之后不用等刷新**——侧边栏握着一个
   「有标题、不在列表里、也不在跑」的会话时会自己再问一次库（每个 id 每次页面加载最多一次，`asked` ref，
   所以成不了环）。
-- **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只向后端要一枚
-  名**（`GET /api/ids/new`：铸一枚 id，什么都不写 —— 2026-09-23 起名字归服务端，页面不再铸 id；
-  `.scratch/server-named-sessions`）、**在页面里打开一场空会话**：不写库、不刷新、列表上什么都不出现
-  ——**会话是第一次发送才诞生的**（主人这一版的原话：「点击新增不立刻会话，发送才新建」）——那条路
-  见 `.scratch/store-backed-sidebar/spec.md`。名字通常**已经拿在手里**（`app.tsx` 的 `spareName`：
-  下一枚在后台先要到手），所以点击没有往返；真要不来时，句子落在列表上方（新建的会话还没有行）。
+- **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只铸一枚 id**
+  （`lib/id.ts`，就是 `@ag-ui/client` 自己导出的 `randomUUID()` —— AG-UI 的设计就是客户端铸 thread-id，
+  它的 `AbstractAgent` 也是 `threadId ?? v4()`；而**不能**用 `crypto.randomUUID`：那个只在安全上下文有，
+  手机走 `http://192.168.x.x` 时页面会在画出来之前抛 `TypeError`。见 `.scratch/client-named-sessions`）、
+  **在页面里打开一场空会话**：不写库、不刷新、列表上什么都不出现——**会话是第一次发送才诞生的**
+  （主人这一版的原话：「点击新增不立刻会话，发送才新建」）——那条路见
+  `.scratch/store-backed-sidebar/spec.md`。
   那一刻之前服务端什么都没听见，所以这枚 id 必须在那一场的第一次 run 请求**之前**登记一次：
   项目会话带着这枚 id 与目录走一次 `POST /api/project`（`bind!` 是 upsert，同时把它移进项目），
   任务走一次 `POST /api/sessions`（find-or-create，认调用方给的 id、幂等，已经有就原样不动）。

@@ -2468,34 +2468,6 @@
       :else
       (api-response 200 {:threadId (project/register-session! thread-id)}))))
 
-(defn- ids-new-get
-  "GET /api/ids/new -- one fresh conversation id, minted here and written NOWHERE.
-
-  WHY A ROUTE FOR A RANDOM STRING, when the page could call `crypto.randomUUID`
-  itself. Two reasons, and the second is the one that broke:
-
-  1. AN ID IS THIS HOME'S NAME FOR A CONVERSATION (`sessions-post`'s rule, ticket 03),
-     and the process that keeps conversations is the one that names them. A page
-     inventing a name was inventing one in a namespace it does not own.
-  2. THE BROWSER API IS A SECURE-CONTEXT FUNCTION. `crypto.randomUUID` is absent on a
-     phone reading this dev server over `http://192.168.x.x` -- not localhost, not
-     https -- so the page threw `TypeError: crypto.randomUUID is not a function`
-     before it drew anything, while every machine gate stayed green on 127.0.0.1
-     (2026-09-23, `.scratch/server-named-sessions`). A name the server hands over has
-     no such context and no such dependency.
-
-  IT WRITES NOTHING, which is what makes GET the right verb -- the rule this table
-  keeps is 'the method says whether there is an effect', and minting a name has none:
-  no row, no file, no audit line. The name starts to exist when its holder REGISTERS
-  it (`POST /api/sessions` or `POST /api/project`), and that is still the first SEND
-  ('点击新增不立刻会话，发送才新建'): clicking 新建 leaves the store exactly as it was.
-
-  AN ID NOBODY SPENDS IS NOT A LEAK -- one UUID in a 128-bit space, held by nothing.
-  It is the SAME namespace `sessions-post` and `project-post` mint from, so a caller
-  may hand this id to either door."
-  [_req]
-  (api-response 200 {:threadId (str (java.util.UUID/randomUUID))}))
-
 (defn- threads-get
   "GET /api/threads -- the conversations the projects tree holds, newest first.
   The listing is a DIRECTORY SCAN of files, so it knows nothing about whether a
@@ -4867,16 +4839,6 @@
     (= "/api/threads" (:uri req))
     (case (:request-method req)
       :get  (threads-get req)
-      (api-response 405 {:error "method not allowed"}))
-
-    ;; A NAME FOR A CONVERSATION THAT DOES NOT EXIST YET -- the minting half of
-    ;; `/api/sessions` below, and deliberately NOT that route: registering makes a row,
-    ;; and the page must be able to hold a name it has not spent, because the click
-    ;; that opens an empty conversation writes nothing (点击新增不立刻会话，发送才新建).
-    ;; GET, because nothing here has an effect: no row, no file, no audit line.
-    (= "/api/ids/new" (:uri req))
-    (case (:request-method req)
-      :get  (ids-new-get req)
       (api-response 405 {:error "method not allowed"}))
 
     ;; ONE CONVERSATION BECOMES A SESSION OF THIS HOME, under the collection that

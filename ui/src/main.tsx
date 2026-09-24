@@ -19,16 +19,17 @@
 // of raw keys (`view.conversation`) reaches the screen. See ./lib/i18n for the cost of
 // that round trip.
 //
-// AND THE MODULE IS ALSO READ, not only imported for its side effect: the page's first
-// conversation is named by the server below, and the failure sentence for it is the
-// `errors` catalog's -- see `boot`. The language has to be up before that sentence can be
-// asked for, which is why `boot` starts the language first.
+// AND IT IS THE ONLY THING THIS ENTRY WAITS FOR, which is worth saying because it was
+// briefly two. For one day the page's first conversation was named by the SERVER, and that
+// put a request in front of the first paint (2026-09-23, withdrawn on the 24th --
+// `.scratch/client-named-sessions`). The name belongs to the CLIENT: that is AG-UI's
+// design, `lib/id.ts` says which of its functions makes one and why that one, and `App`
+// opens its first conversation itself, synchronously, the moment it mounts.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app";
-import i18n, { startLanguage } from "./lib/i18n";
-import { mintThreadId } from "./lib/projects";
+import { startLanguage } from "./lib/i18n";
 import "./styles.css";
 
 const container = document.getElementById("root");
@@ -38,18 +39,8 @@ if (container === null) throw new Error("index.html has no #root element");
 /// with this.
 const root = createRoot(container);
 
-/// THE PAGE'S FIRST CONVERSATION IS NAMED BY THE SERVER, AND THE NAME IS ASKED FOR
-/// BEFORE THE FIRST PAINT (2026-09-23, `.scratch/server-named-sessions`).
-///
-/// WHY HERE AND NOT INSIDE `App`: the page is never without a conversation to be in --
-/// that is a property the roster was built for (there is no "no session" box) -- and a
-/// name that arrives asynchronously would have to be waited for SOMEWHERE. Waiting here
-/// keeps every id in `App` a real string from the first render, and the price is one
-/// request before the page appears: this harness SERVES the page, so a server that cannot
-/// answer this one is a server that could not have sent the bundle either.
-///
-/// A FAILURE IS STILL WORTH A SENTENCE rather than a blank document, because in
-/// development the page is served by vite while the harness is a second process -- and
+/// A FAILURE IS WORTH A SENTENCE rather than a blank document: the language is a fetch, and
+/// in development this page is served by vite while the harness is a second process -- so
 /// "the backend is not running" should read as itself.
 function BootFailure({ message }: { message: string }) {
   return (
@@ -61,15 +52,13 @@ function BootFailure({ message }: { message: string }) {
 
 async function boot(): Promise<void> {
   try {
-    // THE LANGUAGE COMES FIRST, and it is the one ordering that is not a preference:
-    // the failure sentence below is worded through i18n (the `errors` face), so the
-    // catalogs have to be up before anything asks for a sentence in them.
+    // THE LANGUAGE COMES FIRST, and it is the one ordering that is not a preference: it is
+    // what makes the first paint already be in the right language, and it is the catalogs
+    // this sentence comes from.
     await startLanguage();
-    const t = i18n.getFixedT(null, "errors");
-    const firstThreadId = await mintThreadId(t);
     root.render(
       <StrictMode>
-        <App initialThreadId={firstThreadId} />
+        <App />
       </StrictMode>,
     );
   } catch (failure: unknown) {

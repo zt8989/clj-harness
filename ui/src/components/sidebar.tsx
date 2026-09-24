@@ -233,6 +233,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingsPanel } from "@/components/settings-panel";
 import { SIDEBAR_ID, SidebarCollapseButton, SidebarOpenButton } from "@/components/sidebar-toggle";
+import { newId } from "@/lib/id";
 import { REVEAL_ON_HOVER } from "@/lib/reveal";
 import { foldRows } from "@/lib/sidebar-rows";
 import { countAsk, nextAsk, type ListedRow } from "@/lib/sidebar-refetch";
@@ -310,26 +311,19 @@ type SidebarProps = {
   /// SHOW A SESSION THAT HAS A CONVERSATION: host it if it has no host yet and
   /// rebuild its history once, then put it on screen.
   onShow: (threadId: string) => void;
-  /// SHOW A FRESH CONVERSATION -- one nobody has sent to, so there is nothing to rebuild
-  /// and the host starts empty. Kept distinct from `onShow` for that reason: under a
-  /// brand-new session there is no log, and asking the server to rebuild one is asking it
-  /// to find a file that is not there.
+  /// SHOW A SESSION THIS CLIENT HAS JUST MINTED: nothing to rebuild, so the host
+  /// starts empty. Kept distinct from `onShow` for that reason -- under a brand-new id
+  /// there is no log, and asking the server to rebuild one is asking it to find a file
+  /// that is not there.
   ///
-  /// IT HAS NO NAME UNTIL THE PAGE ASKS FOR ONE (2026-09-23,
-  /// `.scratch/server-named-sessions`). The name belongs to the SERVER -- the process that
-  /// keeps conversations is the one that names them -- so this component hands over what it
-  /// does know (the directory the conversation will belong to, or null for a task) and the
-  /// page answers with the session it opened. THAT ASK IS A REQUEST, which is why this
-  /// RETURNS A PROMISE: a server that will not give a name is a sentence, not a silent
-  /// no-op (see the caller's `openFresh`).
-  ///
-  /// IT IS NOT IN THE STORE YET, and that is the point of the whole shape: a session is
-  /// created by its first SEND, so opening one here writes nothing and the listing has no
-  /// row to show. THE DIRECTORY IS WHAT THE PAGE REMEMBERS on this session's behalf, and it
-  /// is applied at that first send (`app.tsx`, `showFresh` remembers it and `registerPending`
-  /// applies it). Nothing is bound here: this component is not the thing that sees the
-  /// message arrive.
-  onShowFresh: (projectDir: string | null) => Promise<void>;
+  /// IT IS NOT IN THE STORE YET, and that is the change this ticket is: a session is
+  /// created by its first SEND, so minting one here writes nothing and the listing has
+  /// no row to show. The second argument is therefore what the page has to remember on
+  /// this session's behalf -- the directory it belongs to, or null for a task -- and it
+  /// is applied at that first send (`app.tsx`, `showFresh` remembers it and
+  /// `registerPending` applies it). Nothing is bound here: this
+  /// component is not the thing that sees the message arrive.
+  onShowFresh: (threadId: string, projectDir: string | null) => void;
   /// EVERY LISTING THIS COMPONENT LANDS, handed up as it arrives. The page needs one
   /// of them and only one: the mount restore asks whether the session it remembers is
   /// still a session, and the answer is in exactly this payload (ticket 03). It is a
@@ -402,24 +396,6 @@ export const Sidebar: FC<SidebarProps> = ({
   const projects = listing.projects;
   const tasks = listing.tasks;
   const [listError, setListError] = useState<string | null>(null);
-  /// THE ONE SENTENCE A FRESH SESSION CAN RAISE, and it is the New task button's own:
-  /// the page asks the server for the new conversation's name (`app.tsx`'s `spareName`),
-  /// and that ask is the only step of a click with a request in it. Drawn above the list,
-  /// next to `listError`, because there is no row yet for it to land on.
-  const [freshError, setFreshError] = useState<string | null>(null);
-
-  /// OPEN A FRESH SESSION, wording the one failure that can come back: the page's ask for
-  /// a name. THE NAME IS USUALLY ALREADY IN HAND (`spareName`), so this waits for nothing
-  /// in the ordinary case; when it does fail, the page is left exactly as it was and the
-  /// sentence goes above the list -- there is no row to put it on.
-  const openFresh = async (projectDir: string | null): Promise<void> => {
-    setFreshError(null);
-    try {
-      await onShowFresh(projectDir);
-    } catch (failure: unknown) {
-      setFreshError(failure instanceof Error ? failure.message : String(failure));
-    }
-  };
   const [loaded, setLoaded] = useState(false);
   const [rowError, setRowError] = useState<RowError>(null);
   const [projectError, setProjectError] = useState<ProjectError>(null);
@@ -619,11 +595,11 @@ export const Sidebar: FC<SidebarProps> = ({
         } else {
           // NOTHING LEFT OF THIS KIND, so the page gets a brand-new one -- and "brand-new"
           // is now genuinely empty: nothing is written to the store until somebody sends
-          // the first message, so there is no row for the sidebar to draw. The pending
-          // directory is handed over instead; see `onShowFresh` -- and the NAME comes back
-          // from the page, which is the one request in this path.
+          // the first message, so there is no row for the sidebar to draw and no request
+          // to wait for. The pending directory is handed over instead; see `onShowFresh`.
+          const id = newId();
           setPinned(project === null ? null : project.path);
-          await openFresh(project === null ? null : project.path);
+          onShowFresh(id, project === null ? null : project.path);
         }
       }
       await refresh();
@@ -692,8 +668,9 @@ export const Sidebar: FC<SidebarProps> = ({
           // A BRAND-NEW TASK, and -- like every other "new session" -- it exists only on
           // this page until somebody sends to it (see `newTask`). There is no project
           // left to hand over, so nothing is pending: the first send makes it a task.
+          const id = newId();
           setPinned(null);
-          await openFresh(null);
+          onShowFresh(id, null);
         }
       }
       await refresh();
@@ -815,17 +792,15 @@ export const Sidebar: FC<SidebarProps> = ({
   /// are different verbs now rather than the same one with a selection.
   const newTask = () => {
     // NOT gated on a run in flight, and not gated on `busy` either: nothing here can
-    // race anything (no row). The ONE request is the page's ask for this conversation's
-    // name, and `openFresh` words it if it fails; a click that fails leaves the page on
-    // the session it was already showing. Starting a session used to be refused because
+    // race anything (no request, no row). Starting a session used to be refused because
     // it would abandon the one on screen; a new session gets its own host now, and
     // whatever is running keeps running in its own.
-    //
-    // SENTENCES THAT BELONGED TO THE OLD SESSION GO, so a refusal from an earlier click
-    // does not outlive the click that follows it.
+    const id = newId();
+    // Sentences that belonged to the OLD session go, so a refusal from an earlier click
+    // does not outlive the click that follows it (a minted id cannot fail itself).
     setRowError(null);
     setProjectError(null);
-    void openFresh(null);
+    onShowFresh(id, null);
   };
 
   /// A new session from a PROJECT'S OWN ROW: the same non-steps, with the directory
@@ -838,14 +813,14 @@ export const Sidebar: FC<SidebarProps> = ({
   /// opinion about a fact already settled. The directory travels in the `onShowFresh`
   /// argument instead, which is where the page needs it.
   ///
-  /// THE NAME IS THE ONE THING THAT CAN FAIL, and it is not this component's to report on a
-  /// row: there is no row yet. `openFresh` takes the refusal and draws it above the list,
-  /// so there is no `try` here. What fails LATER is the bind at send time -- and that one
-  /// is the page's, on the row the store then has (`app.tsx`'s `registerPending`).
+  /// NOTHING HERE CAN FAIL, so there is no `try` and no sentence to land on the row. What
+  /// CAN fail is the bind at send time -- and that failure is the page's to report, before
+  /// the run goes out and on the row the store then has (`app.tsx`'s `registerPending`).
   const newSession = (project: ProjectSummary): void => {
+    const id = newId();
     setProjectError(null);
     setRowError(null);
-    void openFresh(project.path);
+    onShowFresh(id, project.path);
   };
 
   /// A SESSION THIS PAGE IS HOLDING THAT THE STORE HAS NOT LISTED -- ask the listing again
@@ -1181,20 +1156,6 @@ export const Sidebar: FC<SidebarProps> = ({
         // unaffected -- verified by opening the project menu with this in place.
         className={cn("min-h-0 flex-1 overflow-y-auto px-2 pb-2 [contain:paint]", folded && "hidden")}
       >
-        {/* A FRESH SESSION THAT COULD NOT BE NAMED: the page asks the server for the new
-            conversation's name (`app.tsx`'s `spareName`) and that is the one request a
-            click makes. It is drawn here rather than on a row because there IS no row
-            yet -- a session is created by its first send. */}
-        {freshError !== null && (
-          <p
-            role="alert"
-            data-slot="sidebar-fresh-error"
-            className="text-destructive px-1.5 py-1 text-xs"
-          >
-            {freshError}
-          </p>
-        )}
-
         {listError !== null && (
           <p role="alert" data-slot="sidebar-list-error" className="text-destructive px-1.5 py-1 text-xs">
             {listError}

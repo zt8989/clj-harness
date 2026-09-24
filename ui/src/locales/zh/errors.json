@@ -4,8 +4,7 @@
     "listingProjects": "读取项目列表失败：HTTP {{status}}",
     "listingSessions": "读取会话列表失败：HTTP {{status}}",
     "listingSubagents": "读取子agent列表失败：HTTP {{status}}",
-    "askingQuestion": "读不出这个问题是什么：HTTP {{status}}",
-    "mintingSession": "新建会话取名字失败：HTTP {{status}}"
+    "askingQuestion": "读不出这个问题是什么：HTTP {{status}}"
   },
   "attachment": {
     "model": "这个模型 {{model}} 不收图片；它声明的是 {{declared}} —— 换模型，或只带它声明的东西",
