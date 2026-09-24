@@ -1,4 +1,5 @@
-// The language chain, and the parity the two catalogs have to keep.
+// How a language off the wire narrows to one the page speaks, and the parity the two
+// catalogs have to keep.
 //
 // BOTH CASES ARE PURE. Nothing here boots the harness, and nothing here needs a
 // browser: `src/lib/language.ts` imports nothing and `src/lib/catalogs.ts` imports
@@ -6,7 +7,9 @@
 // `vitest.config.ts` describes for `format.ts` and the same shape as the `stats`,
 // `attachments` and `turns` suites. The two files are imported by path rather than
 // through `@/` because that alias belongs to `vite.config.js`, which this run does
-// not load.
+// not load. The ROUTE that carries the server's answer (`lib/languageSetting.ts`)
+// does not import them and is not reached here -- its round trip is measured against
+// the real server in the Clojure suite and in the browser walkthrough.
 //
 // THE PARITY CASE IS THE ONE THAT MATTERS LONG-TERM. i18next answers a key it does
 // not have with the fallback language, so a Chinese entry nobody wrote does not
@@ -27,11 +30,9 @@ import { type Case, type Suite } from "../e2e";
 import { NAMESPACES, RESOURCES } from "../../src/lib/catalogs";
 import {
   FALLBACK_LANGUAGE,
-  LANGUAGE_STORAGE_KEY,
   SUPPORTED_LANGUAGES,
+  asLanguage,
   isLanguage,
-  languageFromNavigator,
-  resolveLanguage,
 } from "../../src/lib/language";
 
 type Catalog = Record<string, unknown>;
@@ -111,44 +112,27 @@ function isNamedSomewhere(key: string): boolean {
 
 const cases: Case[] = [
   {
-    name: "the-language-chain-falls-through-what-it-cannot-use",
+    name: "a-language-off-the-wire-narrows-to-one-the-page-speaks",
     run: async () => {
-      // WHAT THIS BROWSER WAS TOLD LAST TIME WINS, both ways round: a remembered
-      // choice is a choice somebody made, and it outranks a default.
-      expect(resolveLanguage("zh", "en-US")).toBe("zh");
-      expect(resolveLanguage("en", "zh-CN")).toBe("en");
+      // THE SERVER OWNS THE ANSWER -- config.edn's :ui :language, resolved with its
+      // fallbacks on the server (harness.infra.language) -- so the page only has to
+      // understand it. `zh-CN`, `zh_TW` and `zh-Hans-CN` are the same tag said several
+      // ways, and there is one Chinese here, so all of them are Chinese.
+      expect(asLanguage("zh")).toBe("zh");
+      expect(asLanguage("en")).toBe("en");
+      expect(asLanguage("zh-CN")).toBe("zh");
+      expect(asLanguage("zh_TW")).toBe("zh");
+      expect(asLanguage("zh-Hans-CN")).toBe("zh");
 
-      // A REMEMBERED TAG WITH A REGION STILL RESOLVES. Nobody writes this by hand --
-      // it is what an older build of the page may have stored -- and the base subtag
-      // is what decides, so it lands on its language rather than being discarded.
-      expect(resolveLanguage("zh-CN", "en-US")).toBe("zh");
-
-      // FIRST VISIT: the browser's answer, in all the spellings a browser uses.
-      // `zh-TW` and `zh_TW` are the same tag said two ways, and there is one Chinese
-      // here, so all three are the same answer.
-      expect(resolveLanguage(null, "zh")).toBe("zh");
-      expect(resolveLanguage(null, "zh-CN")).toBe("zh");
-      expect(resolveLanguage(null, "zh-TW")).toBe("zh");
-      expect(resolveLanguage(null, "zh_TW")).toBe("zh");
-      expect(resolveLanguage(null, "en-US")).toBe("en");
-
-      // A LANGUAGE THE PAGE DOES NOT SPEAK IS THE FALLBACK, and a REMEMBERED value
-      // that no longer resolves falls THROUGH rather than sticking -- here both are
-      // unusable, so the answer is English rather than the remembered `fr`.
-      expect(resolveLanguage(null, "fr")).toBe("en");
-      expect(resolveLanguage("fr", "de-DE")).toBe("en");
-      expect(languageFromNavigator("ja")).toBe("en");
-
-      // AND IT DOES NOT THROW ON GARBAGE. These values come out of localStorage,
-      // which anything on this origin can write and a person can edit by hand; a
-      // preference that cannot be understood is the first-visit case, not an error
-      // that takes the page down.
-      expect(resolveLanguage("", "zh")).toBe("zh");
-      expect(resolveLanguage("   ", "zh")).toBe("zh");
-      expect(resolveLanguage("{}", "zh")).toBe("zh");
-      expect(resolveLanguage(null, "")).toBe("en");
-      expect(resolveLanguage(undefined, undefined)).toBe("en");
-      expect(resolveLanguage(null, null)).toBe("en");
+      // ANYTHING THE PAGE CANNOT UNDERSTAND IS THE FALLBACK, and a route that answered
+      // nothing is the first-load case rather than an error worth a blank page.
+      expect(asLanguage("fr")).toBe("en");
+      expect(asLanguage("")).toBe("en");
+      expect(asLanguage("   ")).toBe("en");
+      expect(asLanguage("{}")).toBe("en");
+      expect(asLanguage(null)).toBe("en");
+      expect(asLanguage(undefined)).toBe("en");
+      expect(asLanguage(42)).toBe("en");
 
       // The DOM hands a switch its value as `string`, which is where a closed list
       // normally stops being closed: the guard answers "is this one of ours", and
@@ -160,11 +144,9 @@ const cases: Case[] = [
       expect(isLanguage("")).toBe(false);
       expect(isLanguage(null)).toBe(false);
 
-      // THE STORAGE KEY IS A CONTRACT WITH EVERY BROWSER THAT HAS ALREADY CHOSEN:
-      // renaming it silently puts everybody back on their browser's language. Pinned
-      // so that renaming is a deliberate act with a failing test in front of it.
-      expect(LANGUAGE_STORAGE_KEY).toBe("clj-harness.language");
+      // ENGLISH IS THE FLOOR, on this side as on the server's.
       expect(FALLBACK_LANGUAGE).toBe("en");
+      expect(SUPPORTED_LANGUAGES).toEqual(["en", "zh"]);
     },
   },
   {

@@ -87,10 +87,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 26 -> 29: the `turns` suite's three -- the boundary of a turn (a run of adjacent
 /// assistant messages), when it counts as settled, and the summary line's two
 /// numbers. All three are pure arithmetic over a literal message list.
-/// 31 -> 33: the `i18n` suite's two -- the language chain (remembered, then the
-/// browser's tag, then English, falling through anything unusable) and the parity
-/// between the two catalogs (the same keys, every value a non-empty string). Both
-/// pure; this is the pair that makes a half-translated page a red run.
+/// 31 -> 33: the `i18n` suite's two -- how a language the server hands the page
+/// narrows to one it speaks (falling back to English for anything unusable) and the
+/// parity between the two catalogs (the same keys, every value a non-empty string).
+/// Both pure; this is the pair that makes a half-translated page a red run.
 /// 33 -> 34: the `stats` suite's third -- the durations and the timestamps in BOTH
 /// languages, plus the two units that deliberately do not translate. Ticket 02 merged
 /// the four copies of the size/duration words into `lib/format.ts`, and this is the

@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.infra.language :as language]
             [harness.kernel.llm :as llm]
             [harness.cap.providers :as providers]
             [harness.kernel.tools :as tools]
@@ -1886,3 +1887,70 @@
 
         (testing "every row carries the fact, so a client never has to guess by omission"
           (is (every? #(contains? % :key) (rows))))))))
+
+;; --------------------------------------------------------- the :ui section
+
+(defn- with-config-text
+  "Run F with config.edn's exact bytes, restoring what was there afterwards -- the
+  shared temp home means a file left behind is a file the next case reads."
+  [text f]
+  (let [file (home/config-file)
+        old  (when (.exists file) (slurp file :encoding "UTF-8"))]
+    (try (spit file text :encoding "UTF-8") (f)
+         (finally (spit file (or old "{:default {:protocol :fake}}\n") :encoding "UTF-8")))))
+
+(deftest the-ui-section-is-this-homes-language-setting
+  ;; A language is not a knob a session starts from, so it does not belong in
+  ;; :default -- the closed top level is opened for a section of its own rather than
+  ;; letting that section's description start to lie.
+  (with-config-text "{:default {:provider :openrouter} :ui {:language :zh}}\n"
+    (fn []
+      (testing "a :ui section is read as configuration, not refused"
+        (is (= :zh (get-in (providers/config) [:ui :language]))))
+      (testing "and the knobs beside it are untouched"
+        (is (= :openrouter (get-in (providers/config) [:default :provider]))))))
+  (with-config-text "{:default {:provider :openrouter}}\n"
+    (fn []
+      (is (nil? (:ui (providers/config)))
+          "an absent :ui section is the everyday case, not a failure"))))
+
+(deftest a-ui-key-nobody-declared-is-a-named-failure
+  (with-config-text "{:ui {:langauge :zh}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "a :ui typo fails by name rather than sitting there doing nothing")
+        (is (str/includes? (ex-message e) ":langauge") "the sentence names the typo")
+        (is (str/includes? (ex-message e) ":language") "and the key it meant")))))
+
+(deftest a-language-nobody-speaks-is-a-named-failure
+  (with-config-text "{:ui {:language :fr}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":fr") "the sentence names the value")
+        (is (str/includes? (ex-message e) ":en") "and a language that may be written")))))
+
+(deftest the-top-level-sentence-names-the-ui-section-too
+  (with-config-text "{:oops 1}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":ui")
+            "the closed-top-level sentence says where the language goes")))))
+
+(deftest set-language-writes-the-choice-and-refuses-one-it-cannot-speak
+  (with-config-text "{:default {:provider :openrouter}}\n"
+    (fn []
+      (testing "a language this harness speaks is written into :ui :language"
+        (providers/set-language! "zh")
+        (is (= :zh (get-in (providers/config) [:ui :language])))
+        (is (= :zh (language/config-language))
+            "and the resolver reads it back out of the file"))
+      (testing "a value nobody speaks is refused by name and writes nothing"
+        (let [before (slurp (home/config-file) :encoding "UTF-8")
+              e      (try (providers/set-language! "fr") nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) ":fr") "the sentence names the value")
+          (is (= before (slurp (home/config-file) :encoding "UTF-8"))
+              "the file still holds the last good choice"))))))

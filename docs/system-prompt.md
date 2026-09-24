@@ -10,7 +10,7 @@
 | 身份、一组工具纪律 | `prompt.md`（冻结，进程首次读入后不再读） | 不变——它说的是每场会话都成立的事 |
 | `<provider>` | SystemPrompt 点的一条内建 hook（见 `.scratch/system-prompt-blocks/issues/04`） | 每次 run 派生 |
 | `<project>` | 同上（`harness.cap.system-prompt/project-block`） | 每次 run 派生 |
-| `<env>` | 同上（`env-block`，事实来自 `harness.infra.env/lines`） | 每次 run 派生 |
+| `<env>` | 同上（`env-block`，机器事实来自 `harness.infra.env/lines`，语言来自 `harness.infra.language`） | 每次 run 派生 |
 | `<instructions>` / `<skills>` | 开场块（`harness.cap.preamble`），会话出生那一轮注入 | 只进一次，此后是历史 |
 
 顺序为什么这么排：**升降的东西排在后段**。冻结开头是前缀缓存的锚，一条随 run 变动的句子混进去，
@@ -25,6 +25,9 @@
 ## 冻结段
 
 `prompt.md`，逐字。读它，别读这里的转述。
+
+其中一句说：给用户读的结论，用 `<env>` 说的语言写。这是那行语言的**第一处指向**——第二处是
+`ask` 的工具描述（模型写问题要用同一个语言）。两处都只「指」，不翻译后端的句子。
 
 ## hook 追加段（每次 run 派生）
 
@@ -49,11 +52,14 @@ platform: macos (Mac OS X 15.7.3, aarch64)
 shell: bash (at /opt/local/bin/bash); commands run through `/opt/local/bin/bash -lc`
 available: rg, fd, jq, git
 not found: (nothing from the list)
+language: Chinese (zh)
 </env>
 
 上面三块是**样例**：`<project>` 的围栏清单是 gate 自己的 `harness.cap.project/fence`，项目开
 `:approval {:strict true}` 时项目目录会从里面退场（配置家、技能根与本机临时目录不退场），未绑定时
 整块换成一句「没有绑定」。样例里的路径只对写这份文件时的那场会话成立。
+`<env>` 的语言那一行由 `harness.infra.language` 定：`config.edn` 的 `:ui :language` → 系统语言 →
+终端语言 → 英语；它**永远在**（模型与 `ask` 都指这一行）。
 
 ## 开场段（会话出生那一轮）
 

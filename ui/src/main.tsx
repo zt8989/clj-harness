@@ -12,24 +12,24 @@
 // on (Tailwind, the shadcn theme tokens, the shimmer/collapsible keyframes) is
 // reached through it. See src/styles.css.
 //
-// SO IS THE LANGUAGE, and its position in this list is the whole reason it is
-// imported here rather than inside App: `./lib/i18n` initializes i18next and sets
-// `<html lang>` as a side effect of being loaded, so importing it above the render
-// is what makes the first paint already be in the right language. Imported from
-// inside a component it would still work -- and would also let one frame of raw
-// keys (`view.conversation`) reach the screen.
+// THE LANGUAGE IS AWAITED HERE, BEFORE THE ROOT EXISTS, and that is the whole reason it
+// is not an import side effect any more: the language lives in config.edn and is fetched
+// (./lib/i18n's `startLanguage`), so nothing can know it synchronously. Two things below
+// depend on this order -- the first paint is already in the right language, and no frame
+// of raw keys (`view.conversation`) reaches the screen. See ./lib/i18n for the cost of
+// that round trip.
 //
-// AND THE MODULE IS ALSO READ HERE NOW, not only imported for that side effect: the
-// page's first conversation is named by the server below, and the failure sentence for
-// it is the `errors` catalog's -- see `boot`.
+// AND THE MODULE IS ALSO READ, not only imported for its side effect: the page's first
+// conversation is named by the server below, and the failure sentence for it is the
+// `errors` catalog's -- see `boot`. The language has to be up before that sentence can be
+// asked for, which is why `boot` starts the language first.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app";
-import i18n from "./lib/i18n";
+import i18n, { startLanguage } from "./lib/i18n";
 import { mintThreadId } from "./lib/projects";
 import "./styles.css";
-
 
 const container = document.getElementById("root");
 if (container === null) throw new Error("index.html has no #root element");
@@ -51,8 +51,6 @@ const root = createRoot(container);
 /// A FAILURE IS STILL WORTH A SENTENCE rather than a blank document, because in
 /// development the page is served by vite while the harness is a second process -- and
 /// "the backend is not running" should read as itself.
-const t = i18n.getFixedT(null, "errors");
-
 function BootFailure({ message }: { message: string }) {
   return (
     <p role="alert" data-slot="boot-error" className="text-destructive p-4 text-sm">
@@ -63,6 +61,11 @@ function BootFailure({ message }: { message: string }) {
 
 async function boot(): Promise<void> {
   try {
+    // THE LANGUAGE COMES FIRST, and it is the one ordering that is not a preference:
+    // the failure sentence below is worded through i18n (the `errors` face), so the
+    // catalogs have to be up before anything asks for a sentence in them.
+    await startLanguage();
+    const t = i18n.getFixedT(null, "errors");
     const firstThreadId = await mintThreadId(t);
     root.render(
       <StrictMode>

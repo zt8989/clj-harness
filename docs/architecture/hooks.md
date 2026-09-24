@@ -251,7 +251,7 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 | id | 块 | 说什么 |
 |---|---|---|
 | `builtin:project` | `<project>` | 绑在哪个目录（绝对路径）、相对路径/bash/绝对路径各自怎么解析、围栏的自由路径集合（含 `:approval {:strict true}` 与 `:approval {:allow ..}` 的两种变化）；未绑定就明说没绑定、不提围栏 |
-| `builtin:env` | `<env>` | 这台机器：平台、命令实际交给哪个 shell（kind + 路径 + 起法）、声明名单里这个 shell 看得见哪些命令行增强工具（`rg` / `fd` / `jq` / `git`）——**有说，没有也说** |
+| `builtin:env` | `<env>` | 这台机器：平台、命令实际交给哪个 shell（kind + 路径 + 起法）、声明名单里这个 shell 看得见哪些命令行增强工具（`rg` / `fd` / `jq` / `git`）——**有说，没有也说**；外加这一家说的语言（`language: English (en)` / `Chinese (zh)`），**永远在场** |
 
 **曾经还有两条，2026-09-16 的复议里退场**：`<tools>`（本会话的工具名册）与 `<provider>`（生效的
 vendor / model / 思考档）。名册在 wire 的 `:tools` 数组里**自描述**（每次请求都带着每个工具的名字与
@@ -264,12 +264,15 @@ vendor / model / 思考档）。名册在 wire 的 `:tools` 数组里**自描述
 （prefix 照旧命中），事实动了（换目录、关掉一条 hook）就付一次冷前缀——**宁可冷一次，也不让 system
 消息说一件已经不成立的事**。
 
-`<env>` 自己带两条纪律，值得单独写下来。**机器的事实每进程算一次，块每 run 现算**：平台、shell、
+`<env>` 自己带三条纪律，值得单独写下来。**机器的事实每进程算一次，块每 run 现算**：平台、shell、
 增强工具与 `harness.infra.shell` 的解析同住一个 `defonce`，而块本身照旧每 run 组装——那条纪律管的是
 **会话**事实。**探测走同一个 shell**：一次 spawn 跑一个逐个 `command -v` 的小循环，不是
 `System.getenv`——登录 shell 会重新 source profile，它的 PATH 与 JVM 的可以不同，而模型真去跑的时候
 用的是前者，用 JVM 的 PATH 答出来的是那句到执行时才不成立的话。探测答不上来（起不来、超时）就
 **如实说「不知道」**：这一半报问不出来，不让整块消失，也不假装没有。
+**语言那一行是唯一的非机器事实**：它来自这一家的 `config.edn`（`:ui :language`），每次 run 现读，
+缺了就按系统语言 → 终端语言 → 英语往下落（`harness.infra.language`）；系统语言按平台问系统本身
+（macOS 的 `AppleLanguages`），不是这个进程的 locale、也不是终端里的 `LANG` / `LC_ALL`。
 
 ## dispatch：谁在跑
 

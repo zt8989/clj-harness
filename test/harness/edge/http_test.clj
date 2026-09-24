@@ -6572,3 +6572,31 @@
                 (is (str/includes? (apply str (read-lines (:content got))) "row 0 zzzz")
                     "the spilled file comes back through the read tool"))))
           (finally (tools/session-unregister! tid "spew")))))))
+
+(deftest the-language-route-is-this-homes-one-source-for-it
+  ;; GET and POST /api/language are the interface's ONLY source for the language -- the
+  ;; same value <env> states -- so a page that reads the route and a run that states the
+  ;; block cannot disagree. No threadId: a language is a fact about the HOME.
+  (let [config (home/config-file)
+        saved  (when (.exists config) (slurp config :encoding "UTF-8"))]
+    (try
+      (spit config "{:default {:provider :alpha :model \"alpha-small\"}}\n" :encoding "UTF-8")
+      (with-server "lang-unused"
+        (fn []
+          (testing "GET always answers one of the two languages"
+            (let [body (read-json (api-call :get "/api/language" nil))]
+              (is (contains? #{"en" "zh"} (:language body)))))
+          (testing "POST writes the choice into config.edn and answers what is resolved"
+            (let [resp (api-call :post "/api/language" (json/write-str {:language "zh"}))]
+              (is (= 200 (.statusCode resp)))
+              (is (= "zh" (:language (read-json resp))))
+              (is (str/includes? (slurp config :encoding "UTF-8") ":language :zh"))))
+          (testing "a language nobody speaks is a 400 and leaves the file alone"
+            (let [before (slurp config :encoding "UTF-8")
+                  resp   (api-call :post "/api/language" (json/write-str {:language "fr"}))]
+              (is (= 400 (.statusCode resp)))
+              (is (str/includes? (:error (read-json resp)) ":fr")
+                  "the server's own sentence comes back")
+              (is (= before (slurp config :encoding "UTF-8")))))))
+      (finally
+        (if saved (spit config saved :encoding "UTF-8") (io/delete-file config true))))))
