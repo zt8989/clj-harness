@@ -12,7 +12,8 @@
 // sidebar's brand row follows (the row that says what the panel IS is the row an exit belongs
 // in), and the leading edge rather than the trailing one because that end of this header is
 // spoken for: it is where the mirror's way back to the list will sit (ticket 03 of this
-// feature). The row's name stays between the two, so it reads `way out · what this is ·
+// spoken for: it is where the mirror's way back to the list sits (ticket 03), the control
+// below. The row's name stays between the two, so it reads `way out · what this is ·
 // way back`, and the same verb never stands in it twice.
 //
 // THE OPEN CONTROL IS THE PAGE'S, floating in the TOP-RIGHT corner over the conversation while
@@ -25,7 +26,7 @@
 //
 // THE COLUMN IS ONE ELEMENT IN TWO STATES -- the task pane, or a subagent's mirror -- and that is
 // why BOTH draw the `id` below: `aria-controls` names the COLUMN, not the view inside it.
-import { PanelRightCloseIcon, PanelRightIcon } from "lucide-react";
+import { ArrowLeftIcon, PanelRightCloseIcon, PanelRightIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
@@ -84,6 +85,33 @@ export const RightPaneCollapseButton: FC<{ onCollapse: () => void }> = ({
     >
       <PanelRightCloseIcon data-slot="right-pane-collapse-icon" className="size-4" />
       <span className="sr-only">{t("rightPane.collapse")}</span>
+    </Button>
+  );
+};
+
+/// THE MIRROR'S WAY BACK TO THE LIST, at the TRAILING end of its header. The mirror is a
+/// detail view of the task pane (decision 1: one column, two states), so leaving it is a step
+/// back to the list rather than a fold of the column -- and the fold is the LEADING control's
+/// verb, which is why this row does not say it twice.
+///
+/// IT NAMES THE SAME REGION and deliberately carries no `aria-expanded`: the region did not
+/// change and stays open, and `aria-expanded` is a disclosure's own statement rather than a
+/// label a navigation puts on somebody else's box.
+export const RightPaneBackButton: FC<{ onBack: () => void }> = ({ onBack }) => {
+  const { t } = useTranslation();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      data-slot="right-pane-back"
+      aria-controls={RIGHT_PANE_ID}
+      onClick={onBack}
+      title={t("rightPane.back")}
+      className="text-muted-foreground hover:text-foreground size-8 shrink-0 p-0"
+    >
+      <ArrowLeftIcon data-slot="right-pane-back-icon" className="size-4" />
+      <span className="sr-only">{t("rightPane.back")}</span>
     </Button>
   );
 };

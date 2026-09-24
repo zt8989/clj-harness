@@ -1916,12 +1916,21 @@ export function App() {
             key={rightPane.threadId}
             view={rightPane}
             onClose={() => setRightPane(null)}
+            // AND THE LIST THE ROW CAME FROM: the mirror's trailing control goes back to the
+            // task view, which is the one state that is there whatever the transcript did.
+            onBack={() => setRightPane({ kind: "tasks" })}
           />
         )}
         {rightPane !== null && rightPane.kind === "tasks" && (
           // THE THREAD ID IS THE ONE ON SCREEN (`roster.shown`), which is what the pane polls:
-          // a pane showing one session must never draw another's jobs.
-          <TaskPane threadId={roster.shown} onCollapse={() => setRightPane(null)} />
+          // a pane showing one session must never draw another's jobs or delegations. And
+          // `onOpen` is the SAME writer the transcript's `agent` card uses, so a row and a card
+          // open one state rather than two doors that could drift apart.
+          <TaskPane
+            threadId={roster.shown}
+            onCollapse={() => setRightPane(null)}
+            onOpen={openMirror}
+          />
         )}
       </div>
       </SubagentViewContext.Provider>

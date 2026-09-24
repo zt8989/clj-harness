@@ -50,7 +50,11 @@ import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
-import { RIGHT_PANE_ID, RightPaneCollapseButton } from "@/components/right-pane-toggle";
+import {
+  RIGHT_PANE_ID,
+  RightPaneBackButton,
+  RightPaneCollapseButton,
+} from "@/components/right-pane-toggle";
 import { type SubagentView } from "@/components/subagent-view-context";
 import { FollowAgent, followUrl } from "@/lib/follow";
 
@@ -59,8 +63,13 @@ import { FollowAgent, followUrl } from "@/lib/follow";
 /// its own about which subagent it is showing.
 export const SubagentViewPanel: FC<{
   view: SubagentView;
+  /// Closes the WHOLE column (the header's leading control).
   onClose: () => void;
-}> = ({ view, onClose }) => {
+  /// AND BACK TO THE TASK LIST: the trailing control leaves the mirror for the list, not
+  /// for a closed column -- the two controls are two verbs, and ticket 03 is where the
+  /// second one landed.
+  onBack: () => void;
+}> = ({ view, onClose, onBack }) => {
   const { t } = useTranslation();
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -125,7 +134,7 @@ export const SubagentViewPanel: FC<{
             used to sit at the trailing end here is the SAME VERB as this control -- close the
             column -- and one verb does not stand in one row twice, so it left (see
             `components/right-pane-toggle.tsx` for the pair and where each of the two now lives).
-            The trailing end is where the mirror's way back to the list will sit (ticket 03). */}
+            The trailing end is the mirror's way back to the list, which ticket 03 put there. */}
         <RightPaneCollapseButton onCollapse={onClose} />
         {/* WHO THIS IS. The card in the transcript says it too, but the panel can be
             open long after that card scrolled away, and a mirror with no name on it
@@ -136,6 +145,9 @@ export const SubagentViewPanel: FC<{
         >
           {t("subagentView.title", { name: view.subagent })}
         </span>
+        {/* THE WAY BACK TO THE LIST, at the trailing end of this row -- the end ticket 01
+            reserved for it, and the control is the shared one beside the collapse. */}
+        <RightPaneBackButton onBack={onBack} />
       </header>
 
       {failure !== null && (

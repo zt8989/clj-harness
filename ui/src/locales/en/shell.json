@@ -102,8 +102,12 @@
     "title": "Tasks",
     "open": "Open task pane",
     "collapse": "Collapse task pane",
+    "back": "Back to the list",
     "subagents": "Subagents",
     "subagentsEmpty": "This session has not delegated to a subagent yet.",
+    "subagentRunning": "Running",
+    "subagentSettled": "Finished",
+    "subagentStarted": "started {{time}}",
     "jobs": "Background jobs",
     "jobsEmpty": "This session has no background job.",
     "jobElapsed": "{{time}} so far"

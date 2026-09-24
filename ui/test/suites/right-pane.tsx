@@ -27,17 +27,23 @@ import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
 import {
   RIGHT_PANE_ID,
+  RightPaneBackButton,
   RightPaneCollapseButton,
   RightPaneOpenButton,
 } from "../../src/components/right-pane-toggle";
 import { TaskPane } from "../../src/components/task-pane";
 import { JobRows } from "../../src/components/task-pane-jobs";
 import type { JobRow } from "../../src/lib/jobs";
+import { SubagentRows } from "../../src/components/task-pane-subagents";
+import { mirrorOf, subagentRowsOf, type SubagentTaskRow } from "../../src/lib/subagents-runs";
+import type { SubagentListing } from "../../src/lib/subagents";
 import toggleSource from "../../src/components/right-pane-toggle.tsx?raw";
 import taskPaneSource from "../../src/components/task-pane.tsx?raw";
 import jobRowsSource from "../../src/components/task-pane-jobs.tsx?raw";
 import taskPaneHookSource from "../../src/hooks/use-task-pane.ts?raw";
 import jobsLibSource from "../../src/lib/jobs.ts?raw";
+import taskPaneSubagentsSource from "../../src/components/task-pane-subagents.tsx?raw";
+import subagentsRunsSource from "../../src/lib/subagents-runs.ts?raw";
 import panelSource from "../../src/components/subagent-view.tsx?raw";
 import contextSource from "../../src/components/subagent-view-context.ts?raw";
 import appSource from "../../src/app.tsx?raw";
@@ -91,10 +97,18 @@ function collapseControl(language: Language): string {
   );
 }
 
+function backControl(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <RightPaneBackButton onBack={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
 function taskPane(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <TaskPane threadId="t1" onCollapse={() => {}} />
+      <TaskPane threadId="t1" onCollapse={() => {}} onOpen={() => {}} />
     </I18nextProvider>,
   );
 }
@@ -236,10 +250,17 @@ const cases: Case[] = [
       // delegation at a time, at the connection level -- and the task pane is the other arm.
       expect(appSource).toContain("rightPane.kind === \"mirror\"");
       expect(appSource).toContain("rightPane.kind === \"tasks\"");
-      // THE THREAD ID IS THE ONE ON SCREEN (`roster.shown`) -- the pane polls THAT session, so
-      // a pane showing one session never draws another's jobs.
-      expect(appSource).toContain(
-        "<TaskPane threadId={roster.shown} onCollapse={() => setRightPane(null)} />",
+      // THE THREAD ID IS THE ONE ON SCREEN (`roster.shown`) -- the pane polls THAT session,
+      // so a pane showing one session never draws another's jobs or delegations. It is also
+      // handed the page's DOOR (`onOpen`), the same writer the transcript's `agent` card
+      // uses, so a row and a card open one state rather than two that could drift.
+      //
+      // NORMALIZED FIRST: this run reads a SOURCE, and a Windows checkout (`core.autocrlf`)
+      // hands a multi-line `?raw` import CRLF -- so a `\n` search finds nothing and the red
+      // run would be about the checkout rather than about the page.
+      const app = appSource.replace(/\r\n/g, "\n");
+      expect(app).toContain(
+        "<TaskPane\n            threadId={roster.shown}\n            onCollapse={() => setRightPane(null)}\n            onOpen={openMirror}\n          />",
       );
 
       // THE OPEN CONTROL IS DRAWN ONLY WHILE THE COLUMN IS CLOSED, and it is drawn by the PAGE:
@@ -312,6 +333,160 @@ const cases: Case[] = [
       // languages: the number is `lib/format`'s one formatter, the words are the shells'.
       expect(textOf(live, "task-pane-job-duration")).toBe("3.2s so far");
       expect(textOf(rows([running], "zh"), "task-pane-job-duration")).toBe("已跑 3.2 秒");
+    },
+  },
+  {
+    name: "the-subagent-section-is-this-sessions-runs-joined-to-their-definitions",
+    run: async () => {
+      // THE JOIN AND THE NARROWING, both pure (`lib/subagents-runs.ts`), so both are
+      // assertable without a browser. The section answers "what did THIS session delegate",
+      // so another session's run is not in it -- and the definition that carries the same
+      // name is what supplies the description.
+      const listing: SubagentListing = {
+        subagents: [
+          {
+            name: "explore",
+            description: "find every namespace",
+            baseline: "read-only",
+            exclude: [],
+            builtin: true,
+          },
+          {
+            name: "build",
+            description: "change the tree",
+            baseline: "all",
+            exclude: [],
+            builtin: false,
+          },
+        ],
+        problem: null,
+        path: "C:\\home\\harness.edn",
+        runs: [
+          { threadId: "s-new", parent: "t1", subagent: "build", project: null, delegatedAt: 2_000, running: true },
+          { threadId: "s-gone", parent: "t1", subagent: "removed", project: null, delegatedAt: null, running: false },
+          { threadId: "s-other", parent: "t2", subagent: "explore", project: null, delegatedAt: 3_000, running: true },
+          { threadId: "s-old", parent: "t1", subagent: "explore", project: null, delegatedAt: 1_000, running: false },
+        ],
+      };
+
+      const rows = subagentRowsOf(listing, "t1");
+      // THE SERVER'S ORDER IS THE ORDER: newest delegation first, and no second sort here.
+      expect(rows.map((row) => row.threadId)).toEqual(["s-new", "s-gone", "s-old"]);
+      // THE DEFINITION IS JOINED BY NAME...
+      expect(rows[0]).toMatchObject({
+        name: "build",
+        description: "change the tree",
+        running: true,
+        delegatedAt: 2_000,
+      });
+      expect(rows[2]).toMatchObject({ name: "explore", description: "find every namespace", running: false });
+      // ...AND A NAME NO DEFINITION CARRIES STILL DRAWS: the name, the status, no
+      // description. The subagent was deleted after it was delegated to, which
+      // `cap.subagents/runs` calls an ordinary record rather than an error to catch --
+      // and `delegatedAt: null` is drawn as no line at all (the row case below).
+      expect(rows[1]).toMatchObject({
+        name: "removed",
+        description: null,
+        running: false,
+        delegatedAt: null,
+      });
+      // A SESSION THAT DELEGATED NOTHING IS THE EMPTY ANSWER, not an error.
+      expect(subagentRowsOf(listing, "nothing-here")).toEqual([]);
+
+      // AND A ROW OPENS ITS OWN DELEGATION. Two of these rows name two different children
+      // -- the concurrent case -- and pairing a row with a child BY POSITION is exactly
+      // what this refuses.
+      expect(mirrorOf(rows[0]!)).toEqual({ threadId: "s-new", subagent: "build" });
+      expect(mirrorOf(rows[2]!)).toEqual({ threadId: "s-old", subagent: "explore" });
+
+      // THE WIRING A RENDER CANNOT CLICK (this run has no DOM): the row hands
+      // `mirrorOf(row)` -- its own -- and the pane hands the page's `openMirror`, the same
+      // writer the transcript's `agent` card writes through.
+      expect(taskPaneSubagentsSource).toContain("onClick={() => onOpen(mirrorOf(row))}");
+      expect(taskPaneSource).toContain("<SubagentRows rows={subagents} onOpen={onOpen} />");
+      expect(appSource).toContain("onOpen={openMirror}");
+      // THE SECOND READ: one route, the same one `lib/subagents.ts` reads, sharing the
+      // tick's ONE controller (`hooks/use-task-pane.ts`) rather than starting a timer.
+      expect(subagentsRunsSource).toContain("${API_BASE}subagents");
+      expect(subagentsRunsSource).toContain("run.parent === parent");
+      expect(taskPaneHookSource).toContain("subagentsFor(threadId, flight.signal)");
+    },
+  },
+  {
+    name: "a-subagent-row-says-which-delegation-and-how-it-is-going",
+    run: async () => {
+      // A ROW IS A PURE FUNCTION OF THE SERVER'S ROW, so it draws to a string in both
+      // languages -- and the two claims a green tree would miss are here: the status word
+      // comes from `running` ALONE (there is no third state), and a null `delegatedAt` is
+      // no line rather than a zero.
+      const row = (r: SubagentTaskRow, language: Language, now = 181_000): string =>
+        renderToStaticMarkup(
+          <I18nextProvider i18n={renderI18n(language)}>
+            <SubagentRows rows={[r]} onOpen={() => {}} now={now} />
+          </I18nextProvider>,
+        );
+
+      const running: SubagentTaskRow = {
+        threadId: "s1",
+        name: "explore",
+        description: "find every namespace",
+        delegatedAt: 1_000,
+        running: true,
+      };
+      const gone: SubagentTaskRow = {
+        threadId: "s2",
+        name: "removed",
+        description: null,
+        delegatedAt: null,
+        running: false,
+      };
+
+      // THE NAME AND THE DESCRIPTION, each in its own slot; the description is clipped by
+      // CSS (`truncate`) and the whole of it rides on the slot's `title`.
+      const live = row(running, "en");
+      expect(textOf(live, "task-pane-subagent-name")).toBe("explore");
+      expect(textOf(live, "task-pane-subagent-description")).toBe("find every namespace");
+      expect(attrOf(live, "task-pane-subagent-description", "title")).toBe("find every namespace");
+      expect(attrOf(live, "task-pane-subagent-description", "class")).toContain("truncate");
+
+      // THE STATUS IS THE SERVER'S ONE BOOLEAN SAID IN THE CATALOG'S TWO WORDS, and no
+      // third: the same row with `running` flipped is the other word, in both languages.
+      expect(textOf(live, "task-pane-subagent-status")).toBe("Running");
+      expect(textOf(row(running, "zh"), "task-pane-subagent-status")).toBe("运行中");
+      const over = row(gone, "en");
+      expect(textOf(over, "task-pane-subagent-status")).toBe("Finished");
+      expect(textOf(row(gone, "zh"), "task-pane-subagent-status")).toBe("已结束");
+
+      // WHEN IT STARTED: 181 000 - 1 000 = 3 minutes, as a bucket (`lib/relative-time.ts`)
+      // with the shell's own words around it.
+      expect(textOf(live, "task-pane-subagent-started")).toBe("started 3 min ago");
+      expect(textOf(row(running, "zh"), "task-pane-subagent-started")).toBe("3 分钟前开始");
+      // ...AND NO LINE AT ALL WHEN `delegatedAt` IS NULL -- the absence is the assertion.
+      expect(over).not.toContain('data-slot="task-pane-subagent-started"');
+      // A NAME WITH NO DEFINITION DRAWS NO DESCRIPTION EITHER.
+      expect(over).not.toContain('data-slot="task-pane-subagent-description"');
+      expect(textOf(over, "task-pane-subagent-name")).toBe("removed");
+    },
+  },
+  {
+    name: "the-way-back-to-the-list-is-a-control-of-the-columns-own",
+    run: async () => {
+      // A THIRD CONTROL OF THE SAME COLUMN (ticket 03, at the trailing end the pair above
+      // deliberately kept free): it names the region its siblings name, and it says in both
+      // languages where it goes.
+      expect(attrOf(backControl("en"), "right-pane-back", "aria-controls")).toBe(RIGHT_PANE_ID);
+      expect(textOf(backControl("en"), "right-pane-back")).toBe("Back to the list");
+      expect(textOf(backControl("zh"), "right-pane-back")).toBe("返回列表");
+      // AND IT IS NOT A DISCLOSURE: it steps back inside a region that stays open, so it
+      // makes no `aria-expanded` claim about the box it names. (The class string mentions
+      // `aria-expanded` because it is a VARIANT rule -- so the claim is read off the
+      // element's own attributes, not off its classes.)
+      const back = /<button[^>]*data-slot="right-pane-back"[^>]*>/.exec(backControl("en"));
+      expect(back, "no back control in the render").not.toBeNull();
+      expect(back![0]).not.toContain("aria-expanded=");
+      // WHICH GLYPH, read from the source because a rendered `lucide` svg carries no name:
+      // a way back, not a fold.
+      expect(toggleSource).toContain("<ArrowLeftIcon");
     },
   },
 ];

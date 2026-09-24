@@ -372,7 +372,19 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// second read share the same tick. What a source read cannot show -- that a long command is
 /// clipped rather than widening the column, and that a closed pane really leaves nothing in
 /// flight -- is the browser walkthrough's half, as that suite's header says.
-const EXPECTED_CASES = 133;
+/// 133 -> 137: `.scratch/right-pane-tasks`' ticket 03, the task pane's TOP section -- FOUR
+/// cases. Three in the `right-pane` suite: the join and the narrowing (`lib/subagents-runs.ts`)
+/// are PURE, so "only THIS session's delegations" and "a run whose definition was deleted still
+/// draws" are asserted without a browser, together with the door each row is (its OWN
+/// `threadId`, never a position); the row RENDERED in both languages (name, clipped description,
+/// the status word read from `running` ALONE, and `delegatedAt: null` drawing no line); and the
+/// column's new way back RENDERED, which also pins what it is not (a disclosure, or a second
+/// close). The fourth is in the `subagent-view` suite: the mirror's header carries that way back
+/// at its TRAILING end -- the place ticket 01 deliberately kept for it -- and the page wires it
+/// to the TASK VIEW rather than to a closed column. What a source read cannot show -- that the
+/// rows are clickable, and that the back control really lands on the list -- is the browser
+/// walkthrough's half, as that suite's header says.
+const EXPECTED_CASES = 137;
 
 let total = 0;
 for (const suite of SUITES) {

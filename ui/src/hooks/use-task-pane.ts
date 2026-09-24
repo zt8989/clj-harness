@@ -8,8 +8,8 @@
 // no server-side subscription to leak.
 //
 // ONE TICK, ONE PLACE. The pane has TWO sections to fill and they read the same moment:
-// ticket 02 fills the jobs half, ticket 03 fills the subagents half, and ticket 03 adds
-// its read HERE -- to this one tick -- rather than to a second interval that would be a
+// ticket 02 fills the jobs half and ticket 03 the subagents half, and ticket 03's read
+// joins HERE -- this one tick -- rather than a second interval that would be a
 // second clock and a second thing to stop. That is why this hook is named for the PANE
 // and not for the jobs list.
 //
@@ -22,6 +22,7 @@
 import { useEffect, useState } from "react";
 
 import { jobsFor, type JobRow } from "@/lib/jobs";
+import { subagentsFor, type SubagentTaskRow } from "@/lib/subagents-runs";
 
 /// HOW OFTEN THE PANE ASKS, in milliseconds. A NAMED CONSTANT because the cadence is a
 /// decision rather than a detail: fast enough that a running job's clock visibly moves,
@@ -29,21 +30,26 @@ import { jobsFor, type JobRow } from "@/lib/jobs";
 /// exported so a test can name the number instead of re-writing it.
 export const TASK_PANE_POLL_MS = 1000;
 
-/// What the pane draws, this moment. Ticket 03 adds `subagents` beside `jobs`.
+/// What the pane draws, this moment: both of its sections, read on the same tick.
 export type TaskPaneData = {
   /// The session's background jobs, in the order the server listed them. Empty means
   /// either "nothing is running" or "we have not heard yet"; the pane draws the same
   /// sentence for both, and neither is an error.
   jobs: readonly JobRow[];
+  /// AND THE SAME SESSION'S DELEGATIONS, in the server's order (newest first). Empty is
+  /// the same kind of answer as `jobs`'s empty, and so is a section that could not be
+  /// read this second: the pane keeps what it had rather than blinking to empty.
+  subagents: readonly SubagentTaskRow[];
 };
 
 /// Watch WHAT THREAD-ID HAS RUNNING while the caller is mounted and the page is visible.
 ///
 /// THREAD-ID IS A DEPENDENCY OF THE EFFECT, so switching sessions stops the old tick and
 /// starts one for the new session -- a pane showing one session must never draw another's
-/// jobs.
+/// jobs, nor another's delegations.
 export function useTaskPane(threadId: string): TaskPaneData {
   const [jobs, setJobs] = useState<readonly JobRow[]>([]);
+  const [subagents, setSubagents] = useState<readonly SubagentTaskRow[]>([]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -60,6 +66,12 @@ export function useTaskPane(threadId: string): TaskPaneData {
         // null is "we could not ask" -- keep the rows we have. An empty LIST is a real answer
         // ("nothing is running") and does replace them.
         if (rows !== null && !flight.signal.aborted) setJobs(rows);
+      });
+      // THE SECOND READ OF THE SAME MOMENT, sharing the tick's ONE controller: the two
+      // sections answer one question ("what has this session got going on") and the same
+      // abort ends both, so there is still exactly one thing in flight to stop.
+      void subagentsFor(threadId, flight.signal).then((rows) => {
+        if (rows !== null && !flight.signal.aborted) setSubagents(rows);
       });
     };
 
@@ -94,5 +106,5 @@ export function useTaskPane(threadId: string): TaskPaneData {
     };
   }, [threadId]);
 
-  return { jobs };
+  return { jobs, subagents };
 }

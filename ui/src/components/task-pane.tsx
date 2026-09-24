@@ -6,31 +6,40 @@
 // ONE element, not two panels that could drift apart. The suite compares the two strings rather
 // than trusting that they were copied correctly.
 //
-// TWO SECTIONS, FILLED BY TWO TICKETS. The top one is the subagents this session delegated
-// to (ticket 03, still an empty sentence); the bottom one is this session's background jobs
-// (ticket 02), drawn as rows. BOTH READ FROM ONE TICK, and that is why this component does
-// not fetch: `hooks/use-task-pane.ts` owns the poll (one read a second while the pane is
-// open and the page is visible, and nothing in flight after either ends), so ticket 03's
-// second read joins the SAME tick instead of starting a second timer. What is left here is
+// TWO SECTIONS, NOW BOTH FILLED. The top one is the subagents this session delegated to
+// (ticket 03); the bottom one is this session's background jobs (ticket 02). BOTH READ FROM
+// ONE TICK, and that is why this component does not fetch: `hooks/use-task-pane.ts` owns the
+// poll (one read a second while the pane is open and the page is visible, and nothing in
+// flight after either ends), and ticket 03's read joined the SAME tick rather than starting
+// a second timer. What is left here is the shell: which section is which, and the sentence a
+// section says when it has no rows.
 // the shell: which section is which, and the sentence a section says when it has no rows.
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
 import { RIGHT_PANE_ID, RightPaneCollapseButton } from "@/components/right-pane-toggle";
+import { type SubagentView } from "@/components/subagent-view-context";
 import { JobRows } from "@/components/task-pane-jobs";
+import { SubagentRows } from "@/components/task-pane-subagents";
 import { useTaskPane } from "@/hooks/use-task-pane";
 
 /// The column, with the way out in its header. `onCollapse` closes the WHOLE column -- it is the
 /// same verb as the mirror's collapse, because it is the same column (see
 /// `components/right-pane-toggle.tsx` for the pair and the `aria-controls` they share).
-export const TaskPane: FC<{ threadId: string; onCollapse: () => void }> = ({
-  threadId,
-  onCollapse,
-}) => {
+///
+/// `onOpen` IS THE PAGE'S DOOR, handed down so a row can walk through it: clicking a
+/// delegation opens that delegation's mirror, which is the SAME state the transcript's
+/// `agent` card writes -- so the writer is `App`'s (`openMirror`), and the row supplies only
+/// which delegation it is.
+export const TaskPane: FC<{
+  threadId: string;
+  onCollapse: () => void;
+  onOpen: (view: SubagentView) => void;
+}> = ({ threadId, onCollapse, onOpen }) => {
   const { t } = useTranslation();
   // THE WHOLE OF THIS COMPONENT'S RUNTIME: one hook, mounted with the pane. Closing the pane
   // unmounts it, which is one of the two ways the poll stops (`hooks/use-task-pane.ts`).
-  const { jobs } = useTaskPane(threadId);
+  const { jobs, subagents } = useTaskPane(threadId);
   return (
     <aside
       id={RIGHT_PANE_ID}
@@ -50,8 +59,7 @@ export const TaskPane: FC<{ threadId: string; onCollapse: () => void }> = ({
 
       {/* EACH SECTION KEEPS ITS OWN HALF AND SCROLLS INSIDE IT: a section's rows are a list,
           and a list that grew past the fold would otherwise push the other section off the
-          bottom of the column. The bottom section is filled (ticket 02); the top one still
-          says its empty sentence, which is ticket 03's. */}
+          bottom of the column. */}
       <section
         data-slot="task-pane-subagents"
         className="flex min-h-0 flex-1 flex-col border-b px-3 py-3"
@@ -59,12 +67,16 @@ export const TaskPane: FC<{ threadId: string; onCollapse: () => void }> = ({
         <h2 data-slot="task-pane-subagents-title" className="shrink-0 text-sm font-medium">
           {t("rightPane.subagents")}
         </h2>
-        <p
-          data-slot="task-pane-subagents-empty"
-          className="text-muted-foreground mt-1 text-xs"
-        >
-          {t("rightPane.subagentsEmpty")}
-        </p>
+        {/* THE ROWS, OR THE SENTENCE -- the same two arms the jobs section below chooses
+            between, and for the same reason: a heading over nothing would say this section
+            is empty whichever it is. */}
+        {subagents.length === 0 ? (
+          <p data-slot="task-pane-subagents-empty" className="text-muted-foreground mt-1 text-xs">
+            {t("rightPane.subagentsEmpty")}
+          </p>
+        ) : (
+          <SubagentRows rows={subagents} onOpen={onOpen} />
+        )}
       </section>
 
       <section data-slot="task-pane-jobs" className="flex min-h-0 flex-1 flex-col px-3 py-3">
