@@ -56,3 +56,15 @@
   再存一份表。
 - **`stats/incomplete?` 今天收 records。** 流式之后它要么收段，要么由段自己说（「最后一段没有终帧」），
   别为了它再读一遍文件——那正是这一票要消掉的那种读。
+
+## 复议（2026-09-24）：票 06 落地之后，参照物换一个
+
+`.scratch/events-mux-and-host` 票 06 已经先把一半落了：`harness.edge.trajectory/fold-trajectory`（带
+emit，逐轮折逐轮吐）与 **NDJSON 路由**都在了。但路由仍走 `sessions/read-records`，折法仍收一份记录
+**向量**——所以上面「峰值堆」那一格仍未成立，剩下的就是这三条：折法收流、三条 prepass 并进同一步、
+路由走 `sessions/fold-record`。
+
+**参照物要换掉**：`harness.edge.stats` 今天**没有** `stats-init` / `stats-step` / `stats-answer` 这套
+（上面「交付」那三条是立票时的假设，没有落地）。真正的先例是 `harness.edge.pressure` 的 `band-step` +
+`replay/fold-consumers`：**一份折法，三种驱动**（内存走一遍 / 会话 build 走一遍 / 写流一行一遍）。
+票 13 要把这一步挂上会话的两条缝，所以写的时候按 `band-step` 的形状写，别照一份不存在的 stats 步。

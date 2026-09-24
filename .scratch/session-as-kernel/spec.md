@@ -56,6 +56,7 @@ kernel 里的会话只持有**按 thread 的状态 + 订阅缝 + 开关**。
 | 10 | 会话搬进 kernel：删掉 edge 那份 | 09 | 只会话机制在 kernel；`layers-test` 绿 |
 | 11 | 收口：文档与全量 | 01–10 | ADR / layers.md / edge.md / CONTEXT.md；全量 + 走查 |
 | 12 | 轨迹也走流 | — | `run-segments` 成流式 step；路由走会话的读流；票 06 的峰值堆那格成立 |
+| 13 | 轨迹成为会话的一个视图：一次读，之后写流增量推 | 12 | `:trajectory` 按需装值；`row-written!` 原地推进；路由长连接先吐已定稿的轮、再推新定稿的轮 |
 
 ## 备注
 
