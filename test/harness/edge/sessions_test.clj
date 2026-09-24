@@ -109,20 +109,22 @@
          'memory is the authority': the fold has to land on the same bytes or putting
          a session away would be a silent edit")))
 
-(deftest the-cards-are-not-part-of-the-conversation
-  ;; A card is a message the log carries so the screen can draw it again. It is not
-  ;; something the model read, and handing one to a provider is a named refusal
-  ;; (`harness.edge.ag-ui/provider-part` has no case for a `data` part) -- which is
-  ;; exactly the failure this keeps from happening.
+(deftest an-injected-card-becomes-the-message-the-model-read
+  ;; A card is a message the log carries so the screen can draw it again, and its bytes
+  ;; are the ones the model READ (`harness.edge.ag-ui/injection-value`). The model view
+  ;; REALISES them back, so an injection stays in the conversation once instead of being
+  ;; dropped and re-derived (and re-drawn) on every turn. Handing the raw `data` part to
+  ;; a provider is still a named refusal (`harness.edge.ag-ui/provider-part` has no case
+  ;; for one) -- which is the half this keeps from happening.
   (write-log! "t-cards" [(ev/context-injected {:role "user"
                                                :content "<instructions path=\"AGENTS.md\">规矩</instructions>"})])
   (let [built (sessions/messages "t-cards")]
-    (testing "the conversation is still just the user turn and the answer"
-      (is (= ["user" "assistant"] (mapv :role built))))
+    (testing "the injection is a user message the model is handed"
+      (is (= ["user" "user" "assistant"] (mapv :role built)))
+      (is (= "<instructions path=\"AGENTS.md\">规矩</instructions>"
+             (:content (second built)))))
     (testing "no message carries a data part"
-      (is (not-any? (fn [m] (some #(= "data" (:type %)) (:content m))) built)))
-    (testing "and the injected bytes are nowhere in it"
-      (is (not-any? #(str/includes? (str (:content %)) "规矩") built)))))
+      (is (not-any? (fn [m] (some #(= "data" (:type %)) (:content m))) built)))))
 
 ;; ------------------------------------------------------------------- its lifetime
 

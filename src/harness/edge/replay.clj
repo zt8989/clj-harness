@@ -446,7 +446,7 @@
   can say is already somewhere else: `system-prompt` is the prompt the client never has,
   `model` and `tool` are what the run returned (the frames carry them), and `skill` and
   `job` are what the pre-LLM step derived for one run (the frames carry those as cards
-  too, and the next run re-derives them rather than reading them back)."
+  too, and every later run reads those bytes back through `sessions/model-view`)."
   #{"client" "injection" "opening"})
 
 (defn entries

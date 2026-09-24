@@ -570,15 +570,13 @@
   message'). A body spliced into the middle of a batch of results breaks that; a body
   at the very end is behind every result there is.
 
-  IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
-  applepi's server holds the session, so its tool can push a message into history
-  and persist it. Here the session is held server-side too (`harness.edge.sessions`),
-  but an injection is NOT part of that conversation: it is a per-call derived text
-  -- the conversation holds what was said, and the instruction files, the skills
-  catalog and these bodies are recomputed for every call (so a file edited a second
-  ago is honoured this second). Folding one in would freeze it. So the body is
-  recomputed from the conversation itself, every time, and the two properties that
-  makes possible are the ones that matter:
+  IT IS DERIVED FROM THE CONVERSATION, NOT FROM A SIDE TABLE. A body's CARD is part of
+  the conversation once a run has folded it in (`harness.edge.sessions`), and
+  `sessions/model-view` realises its bytes back into the message the model read -- so
+  'is this name already loaded' is answered by the conversation itself, and a body is
+  added only for the name that is not there yet. The instruction files and the catalog
+  behave the same way (`.scratch/session-opening`): an edited SKILL.md takes effect at
+  its NEXT load rather than mid-session. The two properties that matter are:
 
     - IDEMPOTENT. Applying this to its own output changes nothing, because the
       body is already in place where it belongs. That is what lets the kernel

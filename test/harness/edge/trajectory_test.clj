@@ -287,12 +287,12 @@
       (is (= 2 (count (filter #(= "context" (:kind %)) (:items turn))))
           "the de-duplication is by bytes, and these are different bytes"))))
 
-(deftest an-injection-is-shown-once-for-the-whole-session
-  ;; The runs RESTATE their injections: the server holds no session, so every run re-reads
-  ;; the instruction files, re-renders the catalog, and re-derives every skill body the
-  ;; history still triggers. Drawing each run's own bytes would put the opening under every
-  ;; turn, and a five-turn session would read as if it had opened five times.
-  (testing "the opening blocks are re-spliced into every run and are shown once"
+(deftest an-injection-is-drawn-in-every-run-that-carried-it
+  ;; THE RECORD IS THE TRUTH, so this view draws every `message` row a run carried, in the
+  ;; run that carried it. A block two runs carried is drawn twice; hiding the second would
+  ;; conceal a real re-reading from the one reader who is here to see it (owner, 2026-09-24:
+  ;; 轨迹要真实还原 jsonl 的 kind=message，不隐瞒).
+  (testing "the opening blocks a later run restates are drawn again, in that run"
     (let [turns (turns-of
                  [(system-prompt 10 "S")
                   (message 11 (user "" "<instructions>rules</instructions>"))
@@ -306,10 +306,10 @@
                   finished])]
       (is (= 2 (count turns)))
       (is (= ["system" "context" "context" "user"] (kinds (first turns))))
-      (is (= ["user"] (kinds (second turns)))
-          "the second turn opens no blocks: those bytes were already shown")))
+      (is (= ["context" "context" "user"] (kinds (second turns)))
+          "the same two blocks, because this run carried them again")))
 
-  (testing "bytes that CHANGED are bytes nobody has seen, so they are shown again"
+  (testing "a block whose bytes changed is drawn as the bytes this run carried"
     (let [turns (turns-of
                  [(system-prompt 10 "S")
                   (message 11 (user "" "<instructions>rules</instructions>"))
@@ -336,8 +336,8 @@
                   (message 113 (user "" "- project: clj-harness"))
                   finished])]
       (is (= ["system" "user" "context"] (kinds (first turns))))
-      (is (= ["user"] (kinds (second turns)))
-          "the same trailing context, and it is not drawn a second time"))))
+      (is (= ["user" "context"] (kinds (second turns)))
+          "the same trailing context, drawn again because this run carried it"))))
 
 (deftest a-derived-block-is-not-the-client-s-own-words
   ;; The `/name` that asked for a body is in the conversation already, so every later run
@@ -365,9 +365,9 @@
         "the person's message first -- it is what the run brought -- then the blocks it derived")
     (is (= 2 (count (ctx one)))
         "the blocks, then the body the ask put there -- one kind, no source")
-    (is (= ["user" "assistant"] (kinds two))
-        "the second turn opens nothing: it is the same bytes, and the client's own message
-         is not drawn as injected context"))
+    (is (= ["user" "context" "context" "assistant"] (kinds two))
+        "the run restated both blocks, so both are drawn -- and the client's own message
+         is still not one of them (which is this test's point)"))
 
   (testing "a body nobody has shown yet lands with the turn that carried it"
     (let [turns (turns-of
@@ -408,7 +408,7 @@
 (deftest a-resume-continues-the-parked-turn
   ;; A park/resume hands the same conversation to the model AGAIN under the same runId and
   ;; brings no new user message: the prompt row is written once more, which is what says a
-  ;; second array went out. It is the same turn -- and its injections are not listed twice.
+  ;; second array went out. It is the same turn -- and its injections are drawn as the resume carried them.
   (let [turns (turns-of
                [(system-prompt 10 "S")
                 (message 11 (user "" "<instructions>rules</instructions>"))
@@ -428,9 +428,9 @@
                 (message 130 (tool-msg "c1" "vetoed by human: the call was not executed."))
                 (message 131 (assistant "已经被拦住了。"))])]
     (is (= 1 (count turns)) "one user message, one turn -- the resume opens none")
-    (is (= ["system" "context" "user" "assistant" "tool" "assistant"] (kinds (first turns))))
-    (is (= 1 (count (filter #(= "context" (:kind %)) (:items (first turns)))))
-        "the retransmitted instruction block is shown once, not once per run")
+    (is (= ["system" "context" "user" "assistant" "context" "tool" "assistant"] (kinds (first turns))))
+    (is (= 2 (count (filter #(= "context" (:kind %)) (:items (first turns)))))
+        "the retransmitted instruction block is drawn twice: the resume really carried it again")
     (let [called (item-of (first turns) "tool")]
       (is (false? (:executed called)) "no execute line: it never ran")
       (is (= "vetoed" (:outcome called)) "the LAST verdict is the one that stuck"))))

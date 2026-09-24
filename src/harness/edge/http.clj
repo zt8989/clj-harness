@@ -1352,8 +1352,8 @@
               ;; injections folded in beside the conversation -- a body an earlier turn
               ;; loaded, a job that ended between two runs: ordinary user messages to the
               ;; provider, parts of the array this run was handed, and NOT entries of the
-              ;; conversation (the client gets them as cards, and the next run re-derives
-              ;; them rather than reading them back). The rest of the submitted array was
+              ;; conversation (the client gets the card, and the next run reads its bytes
+              ;; back through `sessions/model-view` rather than deriving them again). The rest of the submitted array was
               ;; written by the runs that produced it -- which is the whole saving of this
               ;; ticket: a run logs what IT put in, never the conversation again.
               (log-messages! thread-id run-id injected)

@@ -11,14 +11,11 @@
   a file, and the file is the thing that outlives this process.
 
   WHAT IT HOLDS, AND WHAT IT DELIBERATELY DOES NOT. It holds the CONVERSATION and
-  nothing the run derives for itself. Two things are absent on purpose:
+  nothing the run derives for itself. One thing is absent on purpose:
 
     - THE SYSTEM MESSAGE. It is assembled per run (`harness.cap.system-prompt`: the
       frozen opening plus what the `SystemPrompt` hooks append), and a copy kept here
       would be a sentence that stopped being true the moment a binding moved.
-    - THE DERIVED INJECTIONS -- a skill body, a job's ending. They are recomputed from
-      the conversation on every run (`harness.cap.project/before-llm`), so a copy kept
-      here would be a copy that stopped matching what it was derived from.
 
   THE SESSION'S OPENING IS NOT ON THAT LIST, and that is the change of 2026-09-21
   (`.scratch/session-opening`). The instruction files and the skills catalog are part of
@@ -31,8 +28,12 @@
   opening -- a new session, or a compaction that rebuilds one -- rather than mid
   conversation. That is deliberate: the opening is an event, not a per-run splice.
 
-  SO THIS TABLE DOES NOT MAKE THE DERIVED INJECTIONS STOP BEING RECOMPUTED. It takes the
-  CLIENT out of the loop, which is the half that was never a decision.
+  SO THIS TABLE DOES NOT RE-READ THE OPENING, AND IT DOES NOT RE-DERIVE A LOADED SKILL.
+  What a run derived once -- a skill body, a job's ending -- is here as its CARD, and the
+  model view REALISES that card back into the message the model read, so every later run
+  continues from it as history: the pre-LLM step finds the skill already loaded and adds
+  nothing, instead of deriving the body again and re-showing its card on every turn. That
+  takes the CLIENT out of the loop, which is the half that was never a decision.
 
   WHAT IT HOLDS IS THE VIEW A CLIENT DRAWS, numbers and all. Each entry is the message
   plus the arrival it came in (`:group`) and the RECORD OFFSET of the line it arrived in
@@ -41,14 +42,14 @@
 
   THE CARDS ARE PART OF IT, AND THE MODEL VIEW IS DERIVED FROM IT. A log carries a
   message per injected-context frame so a rebuilt conversation can draw the cards again
-  (`harness.kernel.frames/apply-frames`); those messages are for the screen and the model
-  never had them. The table used to drop them at birth, which made memory and the record
-  two different conversations -- exactly the drift the feed was built to end -- so the
-  cards are KEPT here (they are what the page draws, and what `sofar` answers) and the
-  model view is `model-view` of them, computed where a run asks for its history
-  (`messages`). One conversation, two readings of it, and the reading that must not see a
-  `data` part (`harness.edge.ag-ui/provider-part` refuses one by name) is the one that
-  filters.
+  (`harness.kernel.frames/apply-frames`). A card is the SCREEN half of a message the model
+  READ, so `model-view` realises its bytes back for the model; the table used to drop the
+  card at birth AND lose that reading, which made memory and the record two different
+  conversations -- exactly the drift the feed was built to end. So the cards are KEPT here
+  (they are what the page draws, and what `sofar` answers) and the model view is
+  `model-view` of them, computed where a run asks for its history (`messages`). One
+  conversation, two readings of it, and the reading that must not see a `data` part
+  (`harness.edge.ag-ui/provider-part` refuses one by name) is the one that filters.
 
   THE BUILD IS THE ONLY READ OF DISK. Everything after it arrives through `append!` --
   the entries a client's action carried, with an entry the conversation already holds
@@ -90,7 +91,9 @@
 
   Nothing else here writes: no jsonl, no process log, nothing under the log tree. That
   is asserted, not assumed (see the test)."
-  (:require [harness.cap.claims :as claims]
+  (:require [clojure.string :as str]
+            [harness.cap.claims :as claims]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
             [harness.kernel.frames :as frames]
@@ -212,17 +215,35 @@
 
 ;; ------------------------------------------------------------------- the views
 
+(defn- injected-card-of
+  "The injected-context card among M's parts, or nil. Its `:data` carries the role and
+  text of the message it views (`harness.edge.ag-ui/injection-value`)."
+  [m]
+  (let [c (:content m)]
+    (when (sequential? c)
+      (some (fn [p]
+              (when (and (= "data" (:type p)) (= ag/injected-part-name (:name p)))
+                p))
+            c))))
+
 (defn model-view
   "MESSAGES -> the conversation AS A PROVIDER MAY BE HANDED IT: the cards taken out.
 
-  A card is a message (or part) the record carries so the screen can draw it again; it
-  is not something the model ever read. `harness.edge.ag-ui/provider-part` refuses a
+  A card is a message (or part) the record carries so the screen can draw it again. It is
+  USUALLY not something the model ever read -- but a run's own injection is the exception,
+  and the paragraph below is about it. `harness.edge.ag-ui/provider-part` refuses a
   `data` part BY NAME, and it should keep refusing: this is the function that makes sure
   one is never offered.
 
-  DROPPING A WHOLE MESSAGE IS RIGHT because a card is usually its own message
-  (`harness.kernel.frames/apply-frames` makes one per frame), and a message left with no
-  parts at all is dropped with it rather than sent as an empty turn.
+  A CARD-ONLY MESSAGE IS REALISED, NOT DROPPED, when it is one of a run's own
+  injections (`harness.edge.ag-ui/injected-part-name`): a skill body or a job's ending
+  is a message the model READ, and the card is only its screen half. Handing it back in
+  the provider's shape is what makes the pre-LLM step idempotent ACROSS RUNS -- the body
+  is now part of the conversation, so `cap.project/before-llm` finds it already loaded
+  instead of deriving it again and re-showing its card on every turn. The bytes are the
+  card's own `:text` and the role is the role it arrived with; a card with no text to
+  realise (an older record, an empty injection) is still dropped rather than sent as an
+  empty turn.
 
   AN OPENING ENTRY IS THE ONE MESSAGE THAT CARRIES BOTH (`harness.edge.ag-ui/opening-entries`):
   the `data` half is the card the page draws, the `text` half is what the model reads. So
@@ -240,7 +261,13 @@
                 (let [c (:content m)]
                   (if (and (sequential? c) (some #(= "data" (:type %)) c))
                     (let [kept (into [] (remove #(= "data" (:type %))) c)]
-                      (when (seq kept) (assoc m :content kept)))
+                      (if (seq kept)
+                        (assoc m :content kept)
+                        ;; THE WHOLE MESSAGE WAS A CARD: realise the injection it views.
+                        (let [data (:data (injected-card-of m))
+                              text (:text data)]
+                          (when (and (map? data) (string? text) (not (str/blank? text)))
+                            (assoc m :role (or (:role data) (:role m)) :content text)))))
                     m))))
         messages))
 

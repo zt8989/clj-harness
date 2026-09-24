@@ -45,7 +45,8 @@
   (`.scratch/session-opening`), so it stands in FRONT of the question on every run after
   that; the run's own context entry is a user message behind the question, and skill
   bodies land where the call that wanted them did. All of that is what the model saw, so
-  it is what this returns."
+  it is what this returns -- VERBATIM, every `message` row a run carried: a block carried
+  again is drawn again, because this is a mirror of the record and not a tidied retelling."
   (:require [clojure.string :as str]
             [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]
@@ -374,36 +375,23 @@
     (update-in turns [(dec (count turns)) :items] into items)))
 
 (defn- add-context
-  "Append injected context to the last turn, SKIPPING what the readback already carries
-  byte for byte.
+  "Append injected context to the last turn, VERBATIM -- every block the run carried, in
+  the record's order. The row is STYLED `context`, but its CONTENT is never converted:
+  the bytes are the message row's, and a block a later run carried again is drawn again.
 
-  AN INJECTION IS SHOWN ONCE FOR THE WHOLE SESSION, not once per turn. A run RESTATES
-  its injections -- the instruction files and the catalog are re-read and re-rendered on
-  every run (the server holds no session), and a skill body is re-derived on every turn
-  its trigger is still in the history -- so 'show what the run carried' draws the same
-  bytes under every turn, and a five-turn session reads as if the opening happened five
-  times. That is a picture of a flow that
-  did not happen, and it is the one thing this view may not do. So the question 'has
-  this been shown?' is asked against the WHOLE trajectory.
-
-  The CHANGE case falls out of that rather than being written beside it: bytes that
-  changed are bytes nobody has seen, so they are shown again, in the turn where they
-  changed -- the same rule the system item already follows (see
-  `the-system-message-appears-again-only-when-it-changes`).
-
-  The caller hands in one run's blocks in the record's order, so what this drops is
-  exactly the repeats."
+  WHY THERE IS NO DE-DUPLICATION, and it is the reason this view exists: the trajectory
+  MIRRORS the record's `message` rows, so it may not HIDE one. 'The model read these
+  bytes a second time' is a fact the reader is here to see; an earlier version dropped
+  byte-identical repeats, which hid a genuine re-injection (a skill body re-derived on
+  every turn) and made this view disagree with the log. The bytes are still the judge of
+  'the same block' (`context-item`); what changed is that 'the same block twice' is now
+  drawn twice."
   [turns messages]
   (if (empty? turns)
     turns
-    (let [i     (dec (count turns))
-          turn  (get turns i)
-          shown (into #{}
-                      (comp (filter #(= "context" (:kind %))) (map :text))
-                      (mapcat :items turns))
-          items (mapv context-item messages)
-          fresh (remove #(contains? shown (:text %)) items)]
-      (assoc-in turns [i :items] (into (:items turn) fresh)))))
+    (let [i (dec (count turns))]
+      (assoc-in turns [i :items]
+                (into (:items (get turns i)) (mapv context-item messages))))))
 
 (defn- open-turn [turns]
   (conj turns {:index (inc (count turns)) :items [] :calls []}))
@@ -570,19 +558,19 @@
     [system?] [injected context] [user …] [injected context] [assistant / tool …]
 
   THE INJECTIONS SIT ON BOTH SIDES OF THE USER'S MESSAGE NOW, and which side is a fact
-  about where they were read rather than a preference. The session's OPENING -- its
-  instruction files and skills catalog -- enters the conversation at its birth
-  (`.scratch/session-opening`), so it is IN FRONT of the question on every run after that
-  and is drawn there; the session's own context entry sits behind it, where ticket 03 of
-  `.scratch/sessions-live-on-the-server` put it. What a run DERIVES for itself (a skill
-  body, a job's ending) still lands after the client's messages -- system, question,
-  context, skill context (see harness.edge.ag_ui/inbound) -- so those blocks are drawn
-  after this turn's own user message and before its answer. Blocks that arrived BETWEEN
-  two retransmitted messages (an older layout, and a `/name` body in a log written before
-  today) are drawn where they were too; the retransmitted history they sat inside is not
-  listed, because a client restates its whole conversation on every run. All of it is
-  deduped like every other injection, so the ordinary case -- the same bytes already
-  shown in the turn that asked for them -- draws nothing here.
+  about where they were read rather than a preference. WHAT A RUN CARRIED IS WHAT IS DRAWN,
+  and only that: an injected block is a `message` ROW some run wrote, and it is drawn under
+  the run that wrote it. The session's OPENING -- its instruction files and skills catalog
+  -- is the BIRTH's row (`harness.edge.ag_ui/opening-entries`), so it appears under that
+  run and no later one; a later run carries it as history but writes no row for it, and
+  this view does not invent one. The session's own context entry sits behind the question,
+  where ticket 03 of `.scratch/sessions-live-on-the-server` put it, and is the birth's row
+  too. What a run DERIVES for itself (a skill body, a job's ending) is a row the run
+  wrote, so it is drawn in EVERY run that wrote one -- system, question, context, skill
+  context, in the order `harness.edge.ag_ui/inbound` lines them up. Blocks that arrived
+  BETWEEN two retransmitted messages (an older layout, and a `/name` body in a log written
+  before today) are drawn where they were too; the retransmitted history they sat inside is
+  not listed, because a client restates its whole conversation on every run.
 
   AN INJECTION IS NOT A TURN: the opening enters as ordinary user messages, and a turn
   belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule
@@ -628,14 +616,18 @@
         own-of    (into {} (map-indexed (fn [i m] [i m]) own))
         texts     (str (:content sys))
         at        (:at run)
+        ;; THIS RUN'S OWN `message` ROWS, not the conversation carried in from before it.
+        ;; `added` is what the run BROUGHT (its `:brought` rows); drawing `raw` here would
+        ;; re-draw the session's opening under every later turn -- a block the run never
+        ;; re-sent, which is the one thing the record does not contain and this view may not
+        ;; invent (see `add-context`).
         fresh     (vec (remove #(contains? seen (:id %))
-                               (filter #(= "user" (:role %)) raw)))
+                               (filter #(= "user" (:role %)) added)))
         changed?  (not= texts shownSystem)
         ;; WHO HAD ALREADY BEEN SEEN: the CLIENT's own user messages (`stats/user-ids` is
         ;; that rule, and asks a row's own `source` now). The birth's entries are NOT added
-        ;; here on purpose -- they are deduped by their bytes when they are drawn
-        ;; (`add-context`), which is what makes an instruction file appear once and appear
-        ;; AGAIN when it changed.
+        ;; here on purpose -- `add-context` draws them in the turn that carried them, every
+        ;; time they are carried (see there for why there is no de-duplication).
         seen'     (into seen (mapcat stats/user-ids (:brought-rows run)))
         ;; THIS RUN'S CALLS, and where they start counting inside the turn: a resumed
         ;; run's calls continue the same turn's numbering, so an item's :call stays a
@@ -683,7 +675,7 @@
          :history (into raw (:returned run))})
 
       ;; No new user message: the run continues the turn it parked in. Its injections are
-      ;; deduped like every other one, and its output lands after them.
+      ;; drawn exactly as this run carried them (no de-duplication), and its output lands after them.
       (let [turns (-> turns
                       (add-context before)
                       (add-context between)
@@ -729,12 +721,11 @@
   written N times -- but a prompt that CHANGED between turns is the single most important
   thing this view could show, and hiding it would be worse than repeating it.
 
-  THE INJECTED CONTEXT OBEYS THE SAME RULE, spelled out in `add-context`: a block is shown
-  once for the whole session, and again only in the turn where its bytes changed. The runs
-  restate their injections -- the server holds no session, so it re-reads the instruction
-  files and re-derives every skill body on every run -- and drawing each run's own bytes
-  would repeat one fact under every turn, making a five-turn session look like five
-  openings."
+  THE INJECTED CONTEXT IS DRAWN VERBATIM, spelled out in `add-context`: every block a run
+  carried is drawn in that run, and a block two runs carried is drawn twice. It is styled
+  `context`, but its content is never converted -- this view mirrors the record's `message`
+  rows and must not hide one, because 'the model read these bytes again' is a fact a reader
+  is here to see."
   [records]
   (let [life-of (tool-lifecycles records)
         call-of (call-index records)]

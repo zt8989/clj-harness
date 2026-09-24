@@ -1022,8 +1022,8 @@
   first is the one that counts; a model that asked is not told again.
 
   THE MARK IS THE ONLY MEMORY THIS CAN HAVE. A skill body can be recognised in the
-  history -- `<skill name=…>` stays in the conversation, because the CLIENT keeps
-  resending it -- so that derivation is idempotent for free. A notice has no such anchor:
+  history -- `<skill name=…>` is part of the conversation, because `sessions/model-view`
+  hands its bytes back on every later run -- so that derivation is idempotent for free. A notice has no such anchor:
   the client never holds one (it is computed per call and sent to nobody), so 'has this
   been said' lives here, in the registry: process-local, per session, the same lifetime
   as the jobs themselves. A process that dies takes the unsaid endings with it, and the

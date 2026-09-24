@@ -4242,18 +4242,19 @@
                                                  (= "first" (get-in (replay/payload %) [:content])))
                                            ls))
                             2000)
-         ;; THE SECOND RUN'S OWN FRAMES: this run loaded nothing -- the ask that pulled the
-         ;; body is still in the client's history, so the edge folds the body in before the
-         ;; first call. Its cards are what the last block below reads.
+         ;; THE SECOND RUN'S OWN FRAMES: this run derives NOTHING. The body the first run
+         ;; folded in is part of the conversation by now -- `sessions/model-view` realises
+         ;; the injection card back into the message the model read -- so the pre-LLM step
+         ;; finds it already loaded and the edge has no card to send.
          (let [frames2 (wire/frames-from-sse
                               (.body (post-run "it-slash-side"
                                                ;; ONLY WHAT THIS ACTION ADDS (ticket 03). The
                                                ;; ask that pulled the body is in the SESSION's
-                                               ;; history -- it was appended by run one -- so
-                                               ;; the edge still folds the body in before this
-                                               ;; run's first call, which is what the blocks
-                                               ;; below are about. Sending the ask again would
-                                               ;; be sending what the server already holds.
+                                               ;; history -- appended by run one -- and the body
+                                               ;; it pulled is in the conversation too (folded
+                                               ;; back by `sessions/model-view`), so this run
+                                               ;; RE-USES it instead of deriving it again: no
+                                               ;; re-injection and no second card.
                                                {:append [{:id "u2" :role "user" :content "and another thing"}]})))
                records (wait-for-recorded
                         (log-file-for "it-slash-side")
@@ -4267,52 +4268,39 @@
                                     (str/starts-with? (text-of r) "<skill name=\"alpha\">")))
                input?  (fn [r] (and (= "message" (replay/kind r)) (= "client" (:source r))))
                event?  (fn [r] (= "event" (replay/kind r)))
+               i1      (first (keep-indexed (fn [i r] (when (input? r) i)) records))
                i2      (second (keep-indexed (fn [i r] (when (input? r) i)) records))
+               e1      (first (keep-indexed (fn [i r] (when (and (event? r) (> i i1)) i))
+                                            records))
                e2      (first (keep-indexed (fn [i r] (when (and (event? r) (> i i2)) i))
-                                           records))]
-           (testing "the body is folded into the submitted side -- the run's real first prompt"
-             (is (= 1 (count (filter body? (subvec records i2 e2)))))
-             (is (empty? (filter body? (subvec records e2)))
+                                            records))]
+           (testing "the body is folded into the FIRST run's submitted side -- its real prompt"
+             (is (= 1 (count (filter body? (subvec records i1 e1)))))
+             (is (empty? (filter body? (subvec records e1)))
                  "and it is NOT filed past the split, as if the kernel had added it"))
+           (testing "the SECOND run derives no body at all -- the ask is not re-folded"
+             (is (empty? (filter body? (subvec records i2 e2))))
+             (is (empty? (filter body? (subvec records e2)))
+                 "the body lives in the conversation now, not in a per-run injection"))
 
-            (testing "and the body this run did NOT load is a card too -- it opened with it"
-              ;; THE RUN THE KERNEL CANNOT SPEAK FOR. This one loaded nothing: the body is
-              ;; folded in by the EDGE, before the first call, because the ask that pulled it
-              ;; is still in the client's history. The kernel's own step then finds it already
-              ;; there and adds nothing, so without the edge taking the same diff the model
-              ;; would be reading a body that no card in the conversation column accounted for.
-              ;;
-              ;; ONE CARD, AND IT IS THE BODY: the catalog is the opening entry the
-              ;; conversation was born with (drawn from the session, not from a frame here),
-              ;; and this run's own injection is the body. Ids are the run's own, so a
-              ;; refresh rebuilds the same cards under the same names.
-              (let [cards (filter #(and (= "CUSTOM" (:type %))
-                                        (= "injected-context" (:name %)))
-                                  frames2)
-                    card-texts (mapv #(str (get-in % [:value :text])) cards)]
-                (is (= 1 (count cards)))
-                (is (str/starts-with? (first card-texts) "<skill name=\"alpha\">"))
-                (is (str/includes? (first card-texts) "ALPHA BODY"))
-                (is (every? #(re-find #"-pre\d+$" (str (:messageId %))) cards)
-                    (str "named by the run and the place among the injections it started"
-                         " with -- `-pre`, never the kernel's `-ctx` (two families counting"
-                         " from zero would fold two cards into one)"))
-                (is (= (count (map :messageId cards))
-                       (count (distinct (map :messageId cards))))
-                    "and no two of a run's injection cards share an id")
-                (let [types   (mapv :type frames2)
-                      custom  (.indexOf types "CUSTOM")
-                      spoken  (.indexOf types "TEXT_MESSAGE_START")]
-                  (is (and (<= 0 custom) (< custom spoken))
-                      "and they are out with the run's start, before anything the model said")))
+           (testing "and the second run draws NO card -- the skill was injected once"
+             ;; THE RUN THAT MUST NOT RE-INJECT. The body is already in the conversation
+             ;; (`sessions/model-view` realises the card back into the message the model
+             ;; read), so the pre-LLM step finds it loaded: the edge's diff is empty, the
+             ;; kernel adds nothing, and the conversation keeps the ONE card the first run
+             ;; drew. Before this, every run re-derived the body and re-showed its card.
+             (let [cards (filter #(and (= "CUSTOM" (:type %))
+                                       (= "injected-context" (:name %)))
+                                 frames2)]
+               (is (empty? cards)
+                   "no injection card on a run that loaded nothing")))
 
            (testing "the trajectory then draws the ask's turn carrying it, and nothing else"
              ;; THE ORDER THE VIEW DRAWS IS THE ORDER THE MODEL READ: the question first
              ;; (ticket 03: the opening sits BEHIND it, `.scratch/session-opening`), then
              ;; the session's opening -- here the catalog -- and the body the ask pulled
-             ;; in, both of them as context. One `context` kind and no source: WHERE a
-             ;; block sat stopped being a fact when the injections stopped all sitting in
-             ;; one place.
+             ;; in, both of them as context. And the SECOND turn carries no context: the
+             ;; body is history by then, injected once rather than re-shown.
              (let [turns (:turns (trajectory/records->trajectory (vec records)))
                    ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
                (is (= 2 (count turns)))
@@ -4327,7 +4315,7 @@
                    "and neither of them claims to have come from a place")
                (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
                    "no context this run did not carry -- and the client's own message is not
-                    drawn as one instead")))))))
+                    drawn as one instead"))))))
       (finally
         (project/bind! "it-slash-side" nil)
         (support/wipe-tree! proj))))))
