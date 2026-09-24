@@ -14,7 +14,7 @@
 // a second timer. What is left here is the shell: which section is which, and the sentence a
 // section says when it has no rows.
 import { useTranslation } from "react-i18next";
-import type { FC } from "react";
+import { useRef, type FC } from "react";
 
 import { RIGHT_PANE_ID, RightPaneCollapseButton } from "@/components/right-pane-toggle";
 import { type SubagentView } from "@/components/subagent-view-context";
@@ -37,11 +37,15 @@ export const TaskPane: FC<{
 }> = ({ threadId, onCollapse, onOpen }) => {
   const { t } = useTranslation();
   // THE WHOLE OF THIS COMPONENT'S RUNTIME: one hook, mounted with the pane. Closing the pane
-  // unmounts it, which is one of the two ways the poll stops (`hooks/use-task-pane.ts`).
-  const { jobs, subagents } = useTaskPane(threadId);
+  // unmounts it, which is one of the three ways the poll stops -- the other two are the page
+  // going hidden and this element leaving the screen (`hooks/use-task-pane.ts`, and the
+  // narrow-window walkthrough that found the third).
+  const pane = useRef<HTMLElement | null>(null);
+  const { jobs, subagents } = useTaskPane(threadId, pane);
   return (
     <aside
       id={RIGHT_PANE_ID}
+      ref={pane}
       data-slot="task-pane"
       aria-label={t("rightPane.title")}
       className="bg-background hidden w-[26rem] shrink-0 flex-col border-s md:flex"

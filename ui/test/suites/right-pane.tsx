@@ -182,16 +182,25 @@ const cases: Case[] = [
       expect(jobsLibSource).toContain("threads/${encodeURIComponent(threadId)}/jobs");
       expect(jobsLibSource).toContain("RUNNING_STATUS");
       expect(jobRowsSource).toContain("isRunning(job)");
-      // THE TICK: a named cadence, ONE interval, and the two ways it stops -- the pane unmounting
-      // and the page going hidden -- each of which also aborts a read in flight. A SOURCE READ
-      // CAN PIN THE DECISIONS, NOT THE BEHAVIOUR: that a closed pane and a hidden page really
-      // leave nothing in flight is the browser walkthrough's half (this suite's header).
+      // THE TICK: a named cadence, ONE interval, and the THREE ways it stops -- the pane unmounting,
+      // the page going hidden, and the pane leaving the screen (a narrow window hides the column by
+      // CSS while the state can still say "open", which a walkthrough caught the pane polling
+      // through) -- each of which also aborts a read in flight. A SOURCE READ CAN PIN THE DECISIONS,
+      // NOT THE BEHAVIOUR: that a closed pane, a hidden page and a hidden column really leave nothing
+      // in flight is the browser walkthrough's half (this suite's header).
       expect(taskPaneHookSource).toContain("export const TASK_PANE_POLL_MS = 1000");
       expect(taskPaneHookSource).toContain("setInterval(read, TASK_PANE_POLL_MS)");
       expect(taskPaneHookSource).toContain("clearInterval(timer)");
       expect(taskPaneHookSource).toContain('document.addEventListener("visibilitychange"');
       expect(taskPaneHookSource).toContain("AbortController");
       expect(taskPaneHookSource).toContain("stop();");
+      // THE THIRD WAY, ASKED OF THE LAYOUT RATHER THAN OF A BREAKPOINT: an observation says
+      // whether the element has boxes at all, so the hook stops when the column is not drawn --
+      // and the pane hands its own element in, because that is the thing being asked about.
+      expect(taskPaneHookSource).toContain("IntersectionObserver");
+      expect(taskPaneHookSource).toContain("observer.disconnect()");
+      expect(taskPaneSource).toContain("useTaskPane(threadId, pane)");
+      expect(taskPaneSource).toContain("useRef<HTMLElement | null>(null)");
     },
   },
   {

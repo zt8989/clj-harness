@@ -14,12 +14,14 @@
 // and not for the jobs list.
 //
 // STOPPED WHEN NOBODY IS LOOKING, and that is the whole discipline (the same rule the
-// mirror's follow channel keeps): the timer exists only while (a) the pane is MOUNTED --
-// closing it unmounts this hook -- and (b) the document is VISIBLE. Either ending clears
-// the timer AND aborts the read in flight, so a closed or hidden pane leaves nothing
-// running on the server's behalf. What a source read can pin is these decisions; that a
-// browser really stops asking when the tab is hidden is the walkthrough's half.
-import { useEffect, useState } from "react";
+// mirror's channel keeps). THREE things end it, and each clears the timer AND aborts the
+// read in flight, so a pane nobody can see leaves nothing running on the server's behalf:
+// the pane UNMOUNTS (closing it does that), the document goes HIDDEN, and the pane is NO
+// LONGER RENDERED -- the third one was found by a walkthrough on a narrow window, where
+// the column is `display:none` below `md` while the STATE can still be "open", so a
+// mounted pane was asking the server for rows nothing could draw. What a source read can
+// pin is these decisions; that a browser really stops asking is the walkthrough's half.
+import { useEffect, useState, type RefObject } from "react";
 
 import { jobsFor, type JobRow } from "@/lib/jobs";
 import { subagentsFor, type SubagentTaskRow } from "@/lib/subagents-runs";
@@ -42,18 +44,27 @@ export type TaskPaneData = {
   subagents: readonly SubagentTaskRow[];
 };
 
-/// Watch WHAT THREAD-ID HAS RUNNING while the caller is mounted and the page is visible.
+/// Watch WHAT THREAD-ID HAS RUNNING while the caller is mounted, rendered and the page is
+/// visible. PANE is the column's own element -- the thing whose being on screen this reads.
 ///
 /// THREAD-ID IS A DEPENDENCY OF THE EFFECT, so switching sessions stops the old tick and
 /// starts one for the new session -- a pane showing one session must never draw another's
 /// jobs, nor another's delegations.
-export function useTaskPane(threadId: string): TaskPaneData {
+export function useTaskPane(
+  threadId: string,
+  pane: RefObject<HTMLElement | null>,
+): TaskPaneData {
   const [jobs, setJobs] = useState<readonly JobRow[]>([]);
   const [subagents, setSubagents] = useState<readonly SubagentTaskRow[]>([]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
     let inFlight: AbortController | null = null;
+    // THE THIRD FACT (`rendered`): "this hook is mounted" and "the pane is on screen" are
+    // not the same thing, because the column is `display:none` below `md` and the state can
+    // still say "open". True until the observer says otherwise, so the very first read
+    // happens without waiting for a callback that is only sent on a CHANGE of state.
+    let rendered = true;
 
     const read = (): void => {
       // ONE READ AT A TIME, the previous one aborted: two answers arriving out of order
@@ -91,20 +102,37 @@ export function useTaskPane(threadId: string): TaskPaneData {
       timer = setInterval(read, TASK_PANE_POLL_MS);
     };
 
-    const onVisibility = (): void => {
-      if (document.visibilityState === "visible") start();
+    /// Whether the tick should be running, asked of the three facts together. ONE function,
+    /// because a second place that decided this would be a second answer to one question --
+    /// `stop()` is idempotent and `start()` is guarded, so the extra calls are free.
+    const sync = (): void => {
+      if (document.visibilityState === "visible" && rendered) start();
       else stop();
     };
 
+    // WHETHER THE COLUMN IS DRAWN IS ASKED OF THE LAYOUT, NOT OF A BREAKPOINT. An
+    // observation reports `false` for an element with no boxes at all -- `display:none`,
+    // which is exactly the narrow-window case -- and it goes on telling the truth if the
+    // column is hidden some other way later. A resize listener would be this module
+    // deciding a fact the stylesheet already has; see `components/sidebar-toggle.tsx`,
+    // which argues the same line about the sidebar's fold.
+    const observer = new IntersectionObserver((entries) => {
+      const last = entries[entries.length - 1];
+      if (last !== undefined) rendered = last.isIntersecting;
+      sync();
+    });
+    if (pane.current !== null) observer.observe(pane.current);
+
     // FIRST READ IMMEDIATELY, not in a second: a pane opened onto a session already
     // running something draws the row at once, and the interval is for what comes after.
-    if (document.visibilityState === "visible") start();
-    document.addEventListener("visibilitychange", onVisibility);
+    sync();
+    document.addEventListener("visibilitychange", sync);
     return () => {
+      observer.disconnect();
       stop();
-      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("visibilitychange", sync);
     };
-  }, [threadId]);
+  }, [threadId, pane]);
 
   return { jobs, subagents };
 }
