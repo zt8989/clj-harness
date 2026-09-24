@@ -50,13 +50,13 @@
   a record belongs, so it needs neither `harness.cap.project` nor a second opinion
   about the log tree. The one thing that must happen BEFORE the first line of a
   thread is `harness.edge.http`'s carry-back, installed here as `prepare-with!`
-  -- the same shape as `harness.edge.sessions/watch-unflushed!`: the fact belongs
+  -- the same shape as `harness.kernel.session/watch-unflushed!`: the fact belongs
   to this engine, the knowledge belongs to its caller.
 
   AND IT WRITES NOTHING ELSE. No sqlite, no process log: the only thing this
   namespace puts on disk is the line it was handed."
   (:require [clojure.java.io :as io]
-            [harness.edge.sessions :as sessions])
+            [harness.kernel.session :as session])
   (:import (java.io File)
            (java.util.concurrent ConcurrentLinkedQueue LinkedBlockingQueue)))
 
@@ -468,14 +468,17 @@
   once by a test suite (the shape `harness.kernel.hooks/install!` lives with too),
   and one thing here must NOT happen twice: a second writer."
   []
-  (sessions/watch-unflushed! pending?)
+  ;; THE WRITER REGISTERS WITH THE MECHANISM, not with the edge's adapter (ticket 09): the
+  ;; pin it installs is a fact about the kernel's table, and this namespace never needed to
+  ;; know what a session is made of.
+  (session/watch-unflushed! pending?)
   (ensure-exit-hook!)
   (start-consumer!)
   nil)
 
 (defn reset-writer!
   "Drop every queued line and every count, and stop the consumer. FOR TESTS: the
-  clean slate between cases that `harness.edge.sessions/drop!` is for the table. A
+  clean slate between cases that `harness.kernel.session/drop!` is for the table. A
   process that calls this with lines still queued is a process throwing them away
   on purpose."
   []

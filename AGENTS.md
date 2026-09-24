@@ -52,12 +52,15 @@ cd ui && npm run build     # tsc + vite
 ### E2E 走查（脚本）
 
 ```bash
-node scripts/dev.mjs --scripted                  # 真浏览器走查（隔离家、OS 分配端口、默认回放 scripts/example.json、跑完收摊）
-node scripts/dev.mjs --scripted my.json --ui-port 5211   # 换脚本（照 scripts/example.json 的形状改）、钉死前端端口
-```
+node scripts/dev.mjs --scripted                  # 起一个走查用的服务：隔离家、OS 分配端口、默认回放
+                                                 # scripts/example.json —— 先 npm run build，页面由后端
+                                                 # 从 ui/dist 发出。**它不驱动浏览器**（见下）
+node scripts/dev.mjs --scripted my.json          # 换脚本（照 scripts/example.json 的形状改）
 
-**动过 `ui/src/` 的改动，合之前跑一次 `node scripts/dev.mjs --scripted` 走查。** 机器门全绿挡不住
-「渲染看不到布局」的那一格——2026-09-18 那次 i18n 合并，900 多条全过而侧栏标题全是空的。
+**动过 `ui/src/` 的改动，合之前跑一次 `node scripts/dev.mjs --scripted`，并自己开浏览器走一趟。**
+它把页面建好、由一个地址发出来（`ui/dist`，后端自己发），**但不驱动浏览器**——打开它报的那个地址、
+发一句话，脚本 provider 才会回放 `scripts/example.json`。机器门全绿挡不住「渲染看不到布局」的那一格
+——2026-09-18 那次 i18n 合并，900 多条全过而侧栏标题全是空的。
 
 细则（隔离怎么造、临时目录怎么取、用例要自己守什么）：`docs/rules/testing.md`。
 

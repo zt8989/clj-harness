@@ -8,9 +8,16 @@
 //   node scripts/dev.mjs --port 8080         the address the client used to hardcode
 //   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
 //                                            model, a temp home, a provider that replays
-//                                            scripts/example.json
+//                                            scripts/example.json -- AND NO DEV SERVER: the
+//                                            page is BUILT (`npm run build`) and served by
+//                                            the harness itself, one process one address
+//                                            IT DOES NOT DRIVE A BROWSER: open the printed
+//                                            address and send a message; the scripted
+//                                            provider replays then
 //   node scripts/dev.mjs --scripted my.json  ...with your own turns instead
-//   node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand, as below
+//   node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand, as below (a dev
+//                                            server's port -- --scripted serves the page
+//                                            from the harness and ignores it)
 //
 // WHY THIS EXISTS. `npm run dev` on its own expects a harness on 8080, and 8080 is
 // the one port a second checkout, a test run, or yesterday's forgotten session is
@@ -95,8 +102,14 @@
 // when no file is named, and the thing to copy rather than this comment.
 //
 // LOOKING AT THE UI IS A VERIFICATION STEP IN THIS REPO -- the one layer a suite cannot
-// reach -- so --scripted is that step's entry point, and the three rules the suites keep
-// are properties of THIS invocation rather than a checklist somebody assembles by hand:
+// reach -- so --scripted is that step's entry point. IT IS THE SERVICE, NOT THE WALK: it
+// builds the page, starts the backend that serves it, prints the address and then waits.
+// Opening that address and sending a message is the verification -- that message is what
+// makes the scripted provider replay `scripts/example.json`. NOTHING HERE DRIVES A BROWSER
+// (there is no Playwright in this repo), so an unattended `--scripted` proves only that the
+// thing STARTS -- a person or an agent with a browser is what makes it a walkthrough.
+// The three rules the suites keep are properties of THIS invocation rather than a
+// checklist somebody assembles by hand:
 //
 //   * THE HOMES ARE TEMP, SIBLINGS, AND GONE ON THE WAY OUT. The config root and the OS
 //     home are made under one temp directory -- never nested, see AGENTS.md -- because a
@@ -104,8 +117,10 @@
 //     read from the home, and neither may be the developer's. Both are removed when this
 //     stops, Ctrl-C included.
 //   * NEITHER PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
-//     announces becomes vite's proxy target, and the UI's port is one the OS hands out as
-//     vite starts -- so no source file learns a number, and neither the 8080 nor the 5173
+//     announces is the address the page is told to call -- and, under --scripted, the one
+//     address that also serves the page. In the dev-server modes the UI has a port of its
+//     own, one the OS hands out as vite starts -- so no source file learns a number, and
+//     neither the 8080 nor the 5173
 //     that a forgotten session is most likely to be holding has to be cleared first.
 //   * THE TEMP PATHS ARE PRINTED. A run's record lands under the root AS IT STREAMS and
 //     the directory is gone once this exits, so the banner is the only window in which a
@@ -147,9 +162,15 @@ const USAGE = `Start the harness on a port nobody is using, and the UI in front 
   node scripts/dev.mjs --port 8080         the address the client used to hardcode
   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
                                            model, a temp home, a provider that replays
-                                           scripts/example.json
+                                           scripts/example.json -- and no dev server: the
+                                           page is built (npm run build) and served by the
+                                           harness itself
+                                           IT DOES NOT DRIVE A BROWSER: open the address it
+                                           prints and send a message; the scripted provider
+                                           replays then
   node scripts/dev.mjs --scripted my.json  ...with your own turns instead
-  node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand
+  node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand (a dev server's port;
+                                           --scripted serves the page from the harness)
 
 Both ports are the OS's choice unless one is named: the backend is started on port 0 and the
 port it announces becomes both the address the page is told to call (VITE_AGENT_URL) and
@@ -332,6 +353,28 @@ function uiEnv(backendPort) {
   };
 }
 
+/// `npm run build` into `ui/dist`, so the backend can serve the page itself. node_modules
+/// first, exactly as the dev path below does it: a fresh worktree (a git worktree, a clone)
+/// has none, and `vite build` without it fails with a message about a missing binary.
+async function buildUi() {
+  if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
+    console.log("dev.mjs: no ui/node_modules -- running npm install first");
+    const installed = await exitOf(
+      run("npm", ["install"], { cwd: UI_DIR, stdio: "inherit" }),
+    );
+    if (installed !== 0) {
+      console.error("dev.mjs: npm install failed");
+      process.exit(1);
+    }
+  }
+  console.log("dev.mjs: building the page (npm run build) -- the harness serves ui/dist");
+  const built = await exitOf(run("npm", ["run", "build"], { cwd: UI_DIR, stdio: "inherit" }));
+  if (built !== 0) {
+    console.error("dev.mjs: npm run build failed");
+    process.exit(1);
+  }
+}
+
 /// The UI in a pane to the RIGHT of this one, and the pane's id back so `cleanup` can
 /// take it down again.
 ///
@@ -422,6 +465,13 @@ if (scripted) {
   backendArgv = ["clojure", "-M:run", "--port", String(port)];
 }
 
+// A SCRIPTED RUN SERVES THE BUILT PAGE, NOT A DEV SERVER (owner, 2026-09-24): the point of
+// --scripted is a walkthrough of the REAL thing -- one process, one address, the page the
+// backend actually serves -- so the UI is BUILT here and the backend is the only server.
+// The build has to happen BEFORE the backend starts: it resolves `ui/dist` once, at
+// startup, and a page that appears afterwards is a page nobody serves.
+if (scripted) await buildUi();
+
 const log = fs.createWriteStream(logPath);
 backend = run(backendArgv[0], backendArgv.slice(1), {
   cwd: ROOT,
@@ -490,9 +540,11 @@ console.log(
     (port === 0 ? " (a port the OS picked)" : ""),
 );
 console.log(
-  `dev.mjs: UI on http://localhost:${uiPort}` +
-    (uiPicked ? " (a port the OS picked)" : "") +
-    (tmux ? ", in the pane to the right" : " (Ctrl-C stops both)"),
+  scripted
+    ? `dev.mjs: the page is that same address -- the built ui/dist, served by the harness`
+    : `dev.mjs: UI on http://localhost:${uiPort}` +
+      (uiPicked ? " (a port the OS picked)" : "") +
+      (tmux ? ", in the pane to the right" : " (Ctrl-C stops both)"),
 );
 if (homes !== null) {
   console.log(
@@ -520,7 +572,12 @@ if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
 }
 
 let exitCode;
-if (tmux) {
+if (scripted) {
+  // ONE PROCESS, ONE ADDRESS: the backend is serving the built page, so there is no dev
+  // server to hand a port to and none to wait on. What ends the run is the backend -- the
+  // child this process owns, and the only one there is.
+  exitCode = await exitOf(backend);
+} else if (tmux) {
   // THE PANE IS OPENED ONCE THE PORT IS KNOWN, which is the same ordering the other
   // mode has: the dev server is handed the backend's address at the moment it starts,
   // and there is no second chance to tell it.

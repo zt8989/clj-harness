@@ -75,6 +75,13 @@
   (doseq [tid (keys (sessions/live))] (sessions/drop! tid)))
 
 (use-fixtures :each (fn [f]
+                      ;; THE MECHANISM'S OUTSIDE FACTS ARE INSTALLED, not assumed: what a record
+                      ;; is and what a provider may be handed arrive through the adapter
+                      ;; (`harness.edge.sessions/install!`), which the composition root calls in
+                      ;; the running server. This namespace drives the table directly, so it says
+                      ;; so here -- one line, and 'why is this session real' is answered in the
+                      ;; test rather than by what somebody else required.
+                      (sessions/install!)
                       (forget-everything!)
                       (sessions/watch-unflushed! (constantly false))
                       (try (f) (finally (forget-everything!)
@@ -504,3 +511,51 @@
         (is (= [{:id "i1" :toolCallId "c1" :reason "may I?"}]
                (:interrupts (sessions/live-entry tid)))
             "the card survives a refresh because it is part of the conversation's state")))))
+
+;; ------------------------------------------------- a consumer rides the walk (ticket 02)
+
+(deftest a-fold-rides-the-one-walk-the-session-already-makes
+  ;; TICKET 02 of `.scratch/session-as-kernel`: a consumer registers a fold and the session
+  ;; feeds it every row of the record ON THE WALK IT WAS ALREADY MAKING -- the consumer never
+  ;; opens the file and never folds it again. With no fold registered the build is unchanged,
+  ;; which is what all the cases above assert.
+  (sessions/register-fold! ::probe
+                            {:init (fn [] [])
+                             :step (fn [acc _ctx [i row]] (conj acc [i (replay/kind row)]))})
+  (try
+    (let [f (write-log! "t-fold-ride")]
+      (sessions/messages "t-fold-ride")
+      (let [rows (sessions/fold-value "t-fold-ride" ::probe)]
+        (is (seq rows) "the fold saw the record")
+        (is (= (map-indexed (fn [i row] [i (replay/kind row)]) (replay/read-records f))
+               rows)
+            "every row, once, in file order, each with its own line index")
+        (is (= (range (count rows)) (map first rows))
+            "ONE PASS: the line indices run 0..n-1, so there was no second walk"))
+      (testing "the fold's value lives on the session; a lookup does not build one"
+        (is (contains? (:folds (sessions/live-entry "t-fold-ride")) ::probe)
+            "the answer is a field of the session row, not a side table")
+        (is (nil? (sessions/fold-value "never-built-here" ::probe)))))
+    (finally
+      (sessions/unregister-fold! ::probe))))
+
+(deftest a-write-step-advances-only-a-session-this-process-holds
+  ;; TICKET 04: the ONE writer path tells the session a row was written, and every registered
+  ;; live step advances in place. A thread this process does not hold is left alone -- the fold
+  ;; that installs its band at build will have the whole record.
+  (let [seen (atom [])]
+    (sessions/register-step! ::probe
+                             (fn [value _ctx [_i row]]
+                               (swap! seen conj (:payload row))
+                               (inc (or value 0))))
+    (try
+      (testing "a thread nobody holds runs no step"
+        (sessions/row-written! "nobody-holds-this" [nil {:runId "r" :type "message" :payload {:x 1}}])
+        (is (= [] @seen)))
+      (testing "a held session advances the step in place"
+        (sessions/touch! "t-write-step")
+        (sessions/row-written! "t-write-step" [nil {:runId "r" :type "message" :payload {:x 1}}])
+        (is (= [{:x 1}] @seen))
+        (is (= 1 (sessions/fold-value "t-write-step" ::probe))))
+      (finally
+        (sessions/unregister-step! ::probe)))))
