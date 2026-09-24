@@ -384,7 +384,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// to the TASK VIEW rather than to a closed column. What a source read cannot show -- that the
 /// rows are clickable, and that the back control really lands on the list -- is the browser
 /// walkthrough's half, as that suite's header says.
-const EXPECTED_CASES = 137;
+/// 137 -> 138: `.scratch/right-pane-tasks`' ticket 04, the stop control -- ONE case. The row
+/// RENDERED in both languages carries a ■ while its job is running and does not once it is
+/// over (the absence is the assertion, as it is for the clock); the rest is a source read --
+/// the in-flight bit and the disable that shape `components/session-run-stop.tsx` established,
+/// the refusal that is drawn rather than swallowed, the POST (`lib/jobs.stopJob`) and the fact
+/// that the row's new state arrives on the pane's EXISTING tick (no second clock, and no
+/// second reader of the list, for one press). What it cannot show -- that a real press stops
+/// the process tree, and that the NEXT model call is handed the person's block -- belongs to
+/// the Clojure suites and to the browser walkthrough.
+const EXPECTED_CASES = 138;
 
 let total = 0;
 for (const suite of SUITES) {

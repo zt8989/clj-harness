@@ -957,6 +957,19 @@
        :to     to
        :total  total})))
 
+(defn- still-running?
+  "Is JOB still going -- BOTH FACTS, and this is the one place a stop decides whether
+  it is the call doing the stopping.
+
+  THE RECORD AND THE PROCESS, because either alone is one moment wrong: the record is
+  open until an ending has been claimed in it (`terminal?`), and a command that let go of
+  its stdout and lives on (`exec 1>&-`) has no ending written and so stays open while it
+  runs. A job that is over the other way -- process gone, `[exit N]` not yet written by
+  the pump -- is over too, which is why `alive?` is asked as well: a stop must say 'that was
+  not me' about it rather than claim it."
+  [job]
+  (and (not (terminal? job)) (boolean ((:alive? (:handle job))))))
+
 (defn stop!
   "Stop JOB-ID -- it and everything it started. Answers
   `{:id .. :path .. :stopped? .. :ending ..}`: the record's location, whether THIS
@@ -987,20 +1000,49 @@
   again instead of refusing an id it handed out itself. The entry holds a path and a
   closed writer, and the process goes with this process.
 
+  TWO INITIATORS, ONE STOP (`by`), and the whole of what differs is WHO THE TELLING
+  IS. `:by :model` -- the default, and what the `job_kill` tool passes -- also claims
+  `:told? true` on the entry, because its answer IS the telling: no notice may follow a
+  model that has just been handed the ending. `:by :user` -- a person pressing stop in
+  the pane, through `POST /api/threads/<stem>/jobs` -- CLAIMS NOTHING, because the
+  model is not there to be told; it marks the entry `:stopped-by :user` instead, and
+  `take-notices!` hands that mark over at the next model call as a block that says a
+  PERSON stopped this one (`notice`). The killing, the `[stopped]` claim, the
+  `:stopped?` bit and the ending answered are the same code on both paths: there is ONE
+  way to stop a job here, and `still-running?` above is the judgement both paths make.
+
+  A PERSON STOPPING A JOB THAT HAS ALREADY ENDED CHANGES NOTHING -- not the record, not
+  this answer (`:stopped? false`, and its own `[exit N]` comes back), and NOT the entry:
+  the ending is the command's business, so there is no `:stopped-by` mark and the
+  ordinary notice, if one is still owed, says nothing about who stopped it.
+
   THROWS for a job id this session does not have."
-  [thread-id job-id]
-  ;; AND ITS ANSWER IS ALWAYS AN ENDING -- `[stopped]` or the one it had already
-  ;; written -- so this call tells the model, and no notice follows it.
-  (let [job (with-job thread-id job-id (fn [reg p] (assoc-in reg (conj p :told?) true)))
-        running? (and (not (terminal? job)) ((:alive? (:handle job))))]
-    (if running?
-      (do (write-last-line! job "[stopped]")
-          (future (try (close! job) (catch Throwable _ nil))))
-      ;; NOT RUNNING: the exit line is written here only if the record is still open
-      ;; (the pump may have beaten us to it), and the claim makes asking twice safe.
-      (write-exit-line! job))
-    {:id job-id :path (:path job) :stopped? running?
-     :ending (ending-of (:path job))}))
+  ([thread-id job-id] (stop! thread-id job-id {}))
+  ([thread-id job-id {:keys [by] :or {by :model}}]
+   ;; THE MARK IS DECIDED ON THE ENTRY ITSELF, in the same atomic step that hands back
+   ;; the snapshot (`with-job`): a model's stop claims `:told?` whatever the job's state
+   ;; (`job_kill` about a finished job is still being told how it went), while a
+   ;; person's marks `:stopped-by` ONLY on a job that is still running -- a press on one
+   ;; that had already ended is not a person's stop and must leave no trace.
+   (let [mark (case by
+                :model (fn [reg p] (assoc-in reg (conj p :told?) true))
+                :user  (fn [reg p] (if (still-running? (get-in reg p))
+                                     (assoc-in reg (conj p :stopped-by) :user)
+                                     reg)))
+         job (with-job thread-id job-id mark)
+         running? (still-running? job)]
+     (if running?
+       (do (write-last-line! job "[stopped]")
+           (future (try (close! job) (catch Throwable _ nil))))
+       ;; NOT RUNNING: the exit line is written here only if the record is still open
+       ;; (the pump may have beaten us to it), and the claim makes asking twice safe.
+       (write-exit-line! job))
+     ;; AND A MODEL'S ANSWER IS ALWAYS AN ENDING -- `[stopped]` or the one it had
+     ;; already written -- so that call tells the model and no notice follows it. A
+     ;; person's answer is the same sentence, and it tells the model nothing: the
+     ;; `:stopped-by` mark above is what the notice is made of.
+     {:id job-id :path (:path job) :stopped? running?
+      :ending (ending-of (:path job))})))
 
 ;; ------------------------------------------------------------------- the listing
 ;;
@@ -1096,13 +1138,31 @@
   all three places the caller's next move is the same. It is deliberate all the same: a
   job exists precisely because the model went off to do something else, so the one thing
   the reminder owes it is where to look. It names the
-  id a second time so the line is usable as written, and it is one line."
+  id a second time so the line is usable as written, and it is one line.
+
+  WHO STOPPED IT, WHEN IT WAS A PERSON. The same block carries a `by` attribute
+  whose value is `user` when the ending came from a person pressing stop in the pane --
+  the entry's `:stopped-by`, which only a person's stop ever writes (`stop!`) -- and
+  its sentence says so. THE TAG DOES NOT CHANGE: `job-ended` is the prefix
+  `edge/http.clj` classifies an injected
+  block by and what the pane's card reads its title from, so a second tag would be two
+  places to teach about one fact. The WHO is an ATTRIBUTE, and that is the same
+  judgement the command follows one line below: a tag is a fixed shape, and a command
+  -- or a name -- is arbitrary text that would then need escaping."
   [job]
-  (let [ending (or (ending-of (:path job)) "[exit ?]")]
+  (let [ending  (or (ending-of (:path job)) "[exit ?]")
+        ;; ONE SPELLING reaches the wire: the entry's mark is `:user`, and the
+        ;; attribute is `user`. A second name for it here is a second name to keep in
+        ;; step with the entry.
+        person? (= :user (:stopped-by job))]
     {:role "user"
-     :content (str "<job-ended id=\"" (:id job) "\">" ending "</job-ended>\n"
+     :content (str "<job-ended id=\"" (:id job) "\"" (when person? " by=\"user\"")
+                   ">" ending "</job-ended>\n"
                    "<command>" (:command job) "</command>\n"
-                   "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")}))
+                   (if person?
+                     (str "A person stopped it from the pane; read what it said with"
+                          " job_output {\"job\": \"" (:id job) "\"}.")
+                     (str "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")))}))
 
 (defn take-notices!
   "The messages that tell THREAD-ID's model about jobs that have finished and whose

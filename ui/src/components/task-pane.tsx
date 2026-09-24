@@ -90,7 +90,7 @@ export const TaskPane: FC<{
             {t("rightPane.jobsEmpty")}
           </p>
         ) : (
-          <JobRows jobs={jobs} />
+          <JobRows jobs={jobs} threadId={threadId} />
         )}
       </section>
     </aside>

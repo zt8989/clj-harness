@@ -102,6 +102,7 @@
     "subagentStarted": "{{time}}开始",
     "jobs": "后台任务",
     "jobsEmpty": "这个会话还没有后台任务。",
-    "jobElapsed": "已跑 {{time}}"
+    "jobElapsed": "已跑 {{time}}",
+    "jobStop": "停掉这条后台任务"
   }
 }

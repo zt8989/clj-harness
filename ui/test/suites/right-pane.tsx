@@ -306,7 +306,7 @@ const cases: Case[] = [
       const rows = (jobs: readonly JobRow[], language: Language): string =>
         renderToStaticMarkup(
           <I18nextProvider i18n={renderI18n(language)}>
-            <JobRows jobs={jobs} now={4_200} />
+            <JobRows jobs={jobs} threadId="t1" now={4_200} />
           </I18nextProvider>,
         );
 
@@ -333,6 +333,76 @@ const cases: Case[] = [
       // languages: the number is `lib/format`'s one formatter, the words are the shells'.
       expect(textOf(live, "task-pane-job-duration")).toBe("3.2s so far");
       expect(textOf(rows([running], "zh"), "task-pane-job-duration")).toBe("已跑 3.2 秒");
+    },
+  },
+  {
+    name: "a-running-job-is-stopped-from-its-own-row",
+    run: async () => {
+      // TICKET 04'S CONTROL: the ■ on a row whose job is STILL RUNNING. What a render can
+      // see is where it is drawn and what it says. The press itself, the tick that carries
+      // `[stopped]` back, and the browser's real behaviour are source reads and the
+      // walkthrough's half -- this run has no DOM (see this file's header).
+      const running: JobRow = {
+        id: "j2",
+        command: "npm run dev",
+        status: "[running]",
+        startedAt: 1_000,
+        path: "C:\\home\\jobs\\t1\\j2-run.log",
+      };
+      const finished: JobRow = { ...running, id: "j1", status: "[exit 0]" };
+      const rows = (jobs: readonly JobRow[], language: Language): string =>
+        renderToStaticMarkup(
+          <I18nextProvider i18n={renderI18n(language)}>
+            <JobRows jobs={jobs} threadId="t1" now={4_200} />
+          </I18nextProvider>,
+        );
+
+      // A FINISHED JOB HAS NOTHING TO STOP, so the control is simply not drawn -- the
+      // absence is the assertion, exactly as it is for the duration line above.
+      const live = rows([running], "en");
+      expect(live).toContain('data-slot="task-pane-job-stop"');
+      expect(rows([finished], "en")).not.toContain('data-slot="task-pane-job-stop"');
+
+      // AND IT SAYS WHAT IT DOES, IN BOTH LANGUAGES: an icon button whose whole meaning is
+      // its accessible name, the hole `suites/sidebar.tsx` pins for the two toggles.
+      expect(attrOf(live, "task-pane-job-stop", "aria-label")).toBe("Stop this job");
+      expect(attrOf(rows([running], "zh"), "task-pane-job-stop", "aria-label")).toBe(
+        "停掉这条后台任务",
+      );
+
+      // THE IN-FLIGHT STATE IS THE COMPOSER'S STOP'S (`session-run-stop.tsx`): the press is
+      // a bit, the control is disabled while it is on, and it is let go when either the
+      // answer or the next tick arrives. SSR draws it unpressed, so what is pinned here is
+      // the wiring -- the bit, the disable, the glyph.
+      const jobRows = jobRowsSource.replace(/\r\n/g, "\n");
+      expect(jobRows).toContain("setPressing(true)");
+      expect(jobRows).toContain("disabled={pressing}");
+      expect(jobRows).toContain("<SquareIcon");
+
+      // A REFUSAL IS DRAWN, NEVER SWALLOWED. The sentence is the SERVER's, read through the
+      // `errors` face; what this side owes is the slot and the end of the press.
+      expect(jobRows).toContain('data-slot="task-pane-job-stop-refusal"');
+      expect(jobRows).toContain("setFailure(error instanceof Error ? error.message : String(error))");
+      expect(jobRows).toContain("setPressing(false)");
+
+      // THE ROW'S NEW STATE ARRIVES ON THE PANE'S EXISTING TICK, and that is the whole
+      // reason this component applies no answer: it drops the press when the row stops
+      // being a running one, which is one read later by construction (`TASK_PANE_POLL_MS`).
+      // NO SECOND CLOCK, and no second reader of the list, is started for one press.
+      expect(jobRows).toContain("if (!running) {");
+      expect(jobRows).not.toContain("setInterval");
+      expect(jobRows).not.toContain("jobsFor(");
+
+      // THE CALL ITSELF: one URL, the verb, and the id in a JSON body the route reads the
+      // way `archive-post` reads its own -- and a refusal worded rather than swallowed.
+      expect(jobsLibSource).toContain("threads/${encodeURIComponent(threadId)}/jobs");
+      expect(jobsLibSource).toContain('method: "POST"');
+      expect(jobsLibSource).toContain("JSON.stringify({ job: jobId })");
+      expect(jobsLibSource).toContain("refusalFrom(res, t)");
+
+      // AND THE ROW KNOWS WHICH SESSION IT BELONGS TO: the pane hands down the ONE on
+      // screen, so a press can never address another session's job.
+      expect(taskPaneSource).toContain("<JobRows jobs={jobs} threadId={threadId} />");
     },
   },
   {

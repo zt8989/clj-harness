@@ -16,7 +16,9 @@
 // ONE READER, AND THE SAME NULL DISCIPLINE AS `lib/stats.ts`: a read that could not be
 // made answers null so its caller can tell "nothing is running" from "we could not ask"
 // -- the pane keeps what it had rather than blinking to empty on one dropped request.
-import { API_BASE } from "@/lib/threads";
+import type { TFunction } from "i18next";
+
+import { API_BASE, refusalFrom } from "@/lib/threads";
 
 /// One background job, as the route states it.
 export type JobRow = {
@@ -69,4 +71,37 @@ export async function jobsFor(threadId: string, signal?: AbortSignal): Promise<J
     // the caller gets null, and null means "keep what you had".
     return null;
   }
+}
+
+/// The translator a REFUSAL is worded through, pinned to the `errors` face exactly as
+/// `lib/threads.ts` pins its own: the server's sentence is the answer, and only the
+/// errors catalog's keys compile here.
+type Translate = TFunction<"errors">;
+
+/// STOP ONE OF THIS SESSION'S BACKGROUND JOBS -- `POST /api/threads/<id>/jobs {job}`.
+///
+/// THE ONE ACTION IN THIS MODULE THAT IS NOT A READ, and the pane's stop: a job belongs
+/// to the SERVER's process, so a page that opened somebody else's session has no local
+/// process to kill and has to ask. It is the SECOND INITIATOR of one stop
+/// (`harness.cap.jobs/stop!`): the answer carries the same three facts `job_kill` gets,
+/// but the server marks the entry as a PERSON's stop and claims nothing -- so the NEXT
+/// model call is handed a block saying a person stopped it. This module does not write
+/// into the conversation, and it should not: a page has no standing there, and the
+/// injection seam already exists (`.scratch/right-pane-tasks`, decision 6).
+///
+/// A REFUSAL IS AN ORDINARY ANSWER AND THE CALLER WORDS IT: 404 with the server's own
+/// `unknown job: …` (the id outlived its process, say) and 400 for a body the server
+/// could not read. The row shows that sentence rather than swallowing it.
+///
+/// WHAT COMES BACK IS DELIBERATELY NOT APPLIED HERE. The row's new state IS its status
+/// line, and the pane's tick is what brings it (`hooks/use-task-pane.ts`): drawing
+/// `[stopped]` out of this answer would be a second place that spells an ending, which
+/// is the one thing the status vocabulary forbids.
+export async function stopJob(threadId: string, jobId: string, t: Translate): Promise<void> {
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ job: jobId }),
+  });
+  if (!res.ok) throw new Error(await refusalFrom(res, t));
 }

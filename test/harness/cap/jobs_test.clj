@@ -135,6 +135,97 @@
     (is (true? (:stopped? (jobs/stop! t id))))
     (is (= [] (jobs/take-notices! t)) "its answer WAS the ending")))
 
+(deftest a-models-stop-is-still-the-telling-and-its-answer-unchanged
+  ;; 这次改动加的是第二个发起人，不是改第一个。模型走的 `job_kill` 仍是「答案即告知」：
+  ;; 答句逐字钉住（四个键和它们的值），而且**之后不发通知**。
+  (let [t "jt-model-stop"
+        {:keys [id path]} (jobs/start! t {:command "sleep 30"})]
+    (is (= {:id id :path path :stopped? true :ending "[stopped]"}
+           (jobs/stop! t id))
+        "the sentence `job_kill` has always answered with, key for key")
+    (is (= [] (jobs/take-notices! t))
+        "a model that has just been handed the ending is not told again")
+    (testing "and asking about a job it stopped itself is still an answer, not a second telling"
+      (is (false? (:stopped? (jobs/stop! t id))))
+      (is (= [] (jobs/take-notices! t)))))
+  (testing "and `job_kill` about a job that had already ended claims the telling too"
+    ;; 模型问一条已经结束的作业，拿到的就是它自己的末行 -- 那也是一次告知，所以照样不发通知。
+    ;; 这条正是把人按 ■ 的那条衬出来的地方：同一个「已经结束」，模型这条路认领，人那条不认领。
+    (let [t2 "jt-model-stop-late"
+          {:keys [id path]} (jobs/start! t2 {:command "exit 6"})]
+      (record-until path #(re-find #"\[exit" %) 10000)
+      (is (= {:id id :path path :stopped? false :ending "[exit 6]"}
+             (jobs/stop! t2 id))
+          "this call stopped nothing, and it still answers the ending it found")
+      (is (= [] (jobs/take-notices! t2))
+          "which is a telling: nothing follows a model that has just read it"))))
+
+(deftest a-persons-stop-of-a-running-job-is-not-a-telling
+  ;; 人从面板上按 ■ 走的是第二个发起人：停是真的停（杀死、`[stopped]`、答句都与模型那条同源），
+  ;; 但**不认领** `:told?` -- 说话的不是模型。于是 `take-notices!` 那条既有机制在下一通调用
+  ;; 把它送进历史，块里写明是**人**停的：属性 `by`、命令原文、一句读法。
+  (let [t "jt-user-stop"
+        {:keys [id path]} (jobs/start! t {:command "sleep 30"})]
+    (testing "the stop itself is the same stop the model's is"
+      (is (= {:id id :path path :stopped? true :ending "[stopped]"}
+             (jobs/stop! t id {:by :user})))
+      (is (= "[stopped]" (last (record path)))))
+    (let [notices (jobs/take-notices! t)
+          content (:content (first notices))]
+      (testing "and the model is told, exactly once, in a block that says WHO"
+        ;; 逐字：同一个标签（`edge/http.clj` 的注入分类按 `<job-ended ` 认它，界面那张卡也
+        ;; 按同一个标签画），一个属性说明是人，命令照旧在自己的元素里。
+        (is (= 1 (count notices)))
+        (is (= (str "<job-ended id=\"" id "\" by=\"user\">[stopped]</job-ended>\n"
+                    "<command>sleep 30</command>\n"
+                    "A person stopped it from the pane; read what it said with"
+                    " job_output {\"job\": \"" id "\"}.")
+               content))
+        (is (str/includes? content "A person stopped it from the pane")
+            "the last line says a person did it, and not only the attribute"))
+      (testing "and it is not said twice"
+        (is (= [] (jobs/take-notices! t)))))
+    (testing "and it is the history a run is handed, through the same pre-LLM seam"
+      ;; `before-llm` is `take-notices!` plus a history；这里断言的是那条路真的长一条。
+      (let [t2 "jt-user-stop-history"
+            history [{:role "user" :content "go"}]]
+        (jobs/stop! t2 (:id (jobs/start! t2 {:command "sleep 30"})) {:by :user})
+        (let [next-history (jobs/before-llm history t2)]
+          (is (= 2 (count next-history)))
+          (is (= history (subvec next-history 0 1)) "the history it was handed, untouched")
+          (is (str/includes? (:content (peek next-history)) "by=\"user\"")))))))
+
+(deftest a-persons-stop-on-a-job-that-already-ended-changes-nothing
+  ;; 人按 ■ 而作业已经结束：那不是人停的，所以什么也不改 -- 记录仍是它自己的末行，条目的
+  ;; `:stopped-by` 不留痕，于是之后该发的是既有的 `[exit N]` 那条通知，一个字都不提人。
+  (let [t "jt-user-late"
+        {:keys [id path]} (jobs/start! t {:command "echo ended-on-its-own; exit 3"})]
+    (record-until path #(re-find #"\[exit" %) 10000)
+    (let [answer (jobs/stop! t id {:by :user})]
+      (testing "the answer is the ending it already had, and this call stopped nothing"
+        (is (false? (:stopped? answer)))
+        (is (= "[exit 3]" (:ending answer))))
+      (testing "and the notice is the ordinary one: no attribute, no sentence about a person"
+        (let [notices (jobs/take-notices! t)
+              content (:content (first notices))]
+          (is (= 1 (count notices)))
+          (is (= (str "<job-ended id=\"" id "\">[exit 3]</job-ended>\n"
+                      "<command>echo ended-on-its-own; exit 3</command>\n"
+                      "Read what it said with job_output {\"job\": \"" id "\"}.")
+                 content))
+          (is (not (str/includes? content "by=\"user\""))))))))
+
+(deftest a-persons-stop-of-an-unknown-id-is-the-same-refusal
+  ;; 人这条路由点名一个本会话没有的 id 时，出处只能是既有的那一句：别处再写一句就是同一件事
+  ;; 的第二种说法。
+  (let [t "jt-user-unknown"
+        {:keys [id]} (jobs/start! t {:command "sleep 30"})]
+    (let [e (try (jobs/stop! t "j9" {:by :user}) nil (catch Exception e e))]
+      (is (some? e))
+      (is (= :unknown-job (:reason (ex-data e))))
+      (is (str/includes? (ex-message e) "unknown job: j9"))
+      (is (str/includes? (ex-message e) id) "and it names the ids that do exist"))))
+
 (deftest a-notice-is-the-same-size-whatever-the-record-is
   ;; A NOTICE IS A FACT, NOT AN ANSWER. It used to carry the end of the record (up to a
   ;; budget, with the truncation sentence when it did not fit); that made a reminder the
