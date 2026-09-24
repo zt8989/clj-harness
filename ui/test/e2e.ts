@@ -268,9 +268,9 @@ export async function ensureSession(tid: string): Promise<string> {
 /// agent's first request would otherwise be refused by name.
 export async function agentFor(tid: string): Promise<HarnessAgent> {
   await ensureSession(tid);
-  // THE DOWNLINK IS THE TRANSPORT (ticket 03): the suite's agent reads its run's frames the
+  // THE DOWNLINK IS THE TRANSPORT (ADR 0004): the suite's agent reads its run's frames the
   // way the page does, so a change to that path is what a suite failure means.
-  const agent = new HarnessAgent({ url: runUrl(), runAck: true });
+  const agent = new HarnessAgent({ url: runUrl() });
   agent.threadId = tid;
   return agent;
 }

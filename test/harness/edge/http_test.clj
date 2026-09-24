@@ -222,91 +222,6 @@
        (try (binding [*port* port] (f))
             (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
 
-(defn- sse-headers
-  "The ack's headers, with the Content-Type the body `post-run` builds actually is."
-  [ack]
-  (let [m (into {} (remove (fn [[k _]] (= "content-type" (str/lower-case (str k))))
-                           (.map (.headers ack))))]
-    (java.net.http.HttpHeaders/of
-     (assoc m "content-type" (java.util.List/of "text/event-stream"))
-     (fn [_ _] true))))
-
-(def ^:private window-frame-types
-  "The frame types the WINDOW speaks. Everything else on the downlink is a run's AG-UI event
-  (`lib/mux.ts` routes by the same set)."
-  #{"window" "append" "page" "tail" "end"})
-
-(defn- mux-run!
-  "Drive one run over the DOWNLINK and answer `{:status :headers :body}`.
-
-  A RUN IS READ FROM `events.mux` NOW (ADR 0004, tickets 03/05): the POST answers an ACK and
-  the frames arrive on the socket. So this SUBSCRIBES FIRST -- the server filters a run's
-  frames by what a connection declared -- starts the run with the ack header, collects the
-  frames until the terminal, and hands back the SSE `post-run` has always answered with. A
-  REFUSED RUN sends no frames: the ack's own status and body are passed through whole."
-  [thread-id body origin]
-  (let [token  (str (java.util.UUID/randomUUID))
-        frames (atom [])
-        seen   (promise)
-        pending (atom "")
-        params (java.net.URLEncoder/encode (json/write-str [{:threadId thread-id}]) "UTF-8")
-        ws     (-> (HttpClient/newHttpClient)
-                   (.newWebSocketBuilder)
-                   (.buildAsync (URI/create (str "ws://127.0.0.1:" *port* "/api/events.mux"
-                                                 "?subscriber=" token "&sessions=" params))
-                                (reify java.net.http.WebSocket$Listener
-                                  (onText [_ socket data last]
-                                    ;; A BIG FRAME ARRIVES IN FRAGMENTS (the JDK client splits one
-                                    ;; message across several `onText` calls), and parsing a
-                                    ;; fragment throws -- which closes the socket and loses the
-                                    ;; terminal (measured: `post-run` waited its full 30s and the
-                                    ;; namespace hit the 300s limit). So a message is assembled
-                                    ;; until `last` says it is whole.
-                                    (swap! pending str data)
-                                    (when last
-                                      (let [frame (try (json/read-str @pending :key-fn keyword)
-                                                       (catch Throwable _ nil))]
-                                        (reset! pending "")
-                                        (when-some [t (:type frame)]
-                                          (when-not (contains? window-frame-types t)
-                                            (swap! frames conj (dissoc frame :seq))
-                                            (when (contains? #{"RUN_FINISHED" "RUN_ERROR"} t)
-                                              (deliver seen true))))))
-                                    (.request socket 1)
-                                    (java.util.concurrent.CompletableFuture/completedFuture nil))))
-                   (.join))
-        ;; THE DECLARATION MUST LAND BEFORE THE RUN STARTS, and the socket's own handshake can
-        ;; beat the server's bookkeeping -- so this asks the route that only ANSWERS once it is
-        ;; recorded, retrying that race away (the same one `lib/mux.ts` retries).
-        declared (loop [attempt 0]
-                   (let [resp (api-call :post "/api/events.mux/subscribe"
-                                        (json/write-str {:subscriber token
-                                                         :subscribe [{:threadId thread-id}]}))]
-                     (cond
-                       (= 200 (.statusCode resp)) true
-                       (< attempt 40) (do (Thread/sleep 20) (recur (inc attempt)))
-                       :else false)))
-        req    (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                   (.header "Content-Type" "application/json")
-                   (.header "X-Clj-Harness-Run-Ack" "1")
-                   (cond-> origin (.header "Origin" origin))
-                   (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                   (.build))
-        ack    (.send (HttpClient/newHttpClient) req
-                      (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
-    (if (not= 200 (.statusCode ack))
-      {:status (.statusCode ack) :headers (.headers ack) :body (.body ack)}
-      (do
-        (when declared (deref seen 30000 nil))
-        ;; `sendClose`, NOT `close`: the JDK WebSocket interface has no `close(int, String)`.
-        (.sendClose ws java.net.http.WebSocket/NORMAL_CLOSURE "done")
-        {:status 200
-         ;; THE TRANSPORT IS AN ACK, BUT THE BODY IS SSE: what `post-run` hands back is the run's
-         ;; frame stream, so its Content-Type says so. The rest of the ack's headers (the CORS
-         ;; answer, which is about the REQUEST) ride along untouched.
-         :headers (sse-headers ack)
-         :body (apply str (map (fn [frame] (str "data: " (json/write-str frame) "\n\n")) @frames))}))))
-
 (defn- post-run
   "A real request for THREAD-ID -- which must be a session this home knows, and
   `with-server` registers every thread it names so that every caller's premise holds.
@@ -334,7 +249,7 @@
                                                 :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
                                       :tools []}
                                      extra))
-         result (mux-run! thread-id body origin)]
+         result (support/mux-run! *port* thread-id body origin)]
      (reify java.net.http.HttpResponse
        (statusCode [_] (:status result))
        (headers [_] (:headers result))
@@ -2052,12 +1967,21 @@
    "minted-run"
    [{:content "first"} {:content "second"}]
    (fn []
-     (let [resp (raw-run {:threadId "minted-run"
-                          :append   [{:id "u1" :role "user" :content "go"}]
-                          :tools    []
-                          :runId    "the-name-the-client-wanted"})]
+     ;; `post-run`, NOT `raw-run`: with the ack door a raw POST returns before the run does,
+     ;; and the second run below would then be refused as a second run of the same session.
+     ;; What this case is about -- a body that NAMES a runId -- rides `:extra` unchanged.
+     (let [resp (post-run "minted-run"
+                          {:append   [{:id "u1" :role "user" :content "go"}]
+                           :tools    []
+                           :runId    "the-name-the-client-wanted"})]
        (is (= 200 (.statusCode resp))
            "a body carrying runId is not refused -- the field simply has no say")
+       ;; THE ACK RETURNS BEFORE THE RECORD'S ROWS LAND -- the SSE response used to hold the
+       ;; request open until the run ended -- so the read waits for the line it is about.
+       (wait-for-recorded (log-file "minted-run")
+                          (fn [ls] (some #(and (= "message" (replay/kind %))
+                                               (= "client" (:source %))) ls))
+                          5000)
        (let [runs (fn [] (mapv :runId (filter #(and (= "message" (replay/kind %))
                                                     (= "client" (:source %)))
                                               (log-lines-for "minted-run"))))
@@ -2068,6 +1992,11 @@
            (is (not (str/includes? first-run "the-name-the-client-wanted"))))
          (testing "every run of the session gets its own name"
            (post-run "minted-run" {:append [{:id "u2" :role "user" :content "again"}]})
+           (wait-for-recorded (log-file "minted-run")
+                              (fn [ls] (>= (count (filter #(and (= "message" (replay/kind %))
+                                                               (= "client" (:source %))) ls))
+                                           2))
+                              5000)
            (is (= 2 (count (runs))))
            (is (apply distinct? (runs)) "two runs share one name, and the record cannot tell them apart"))
          (testing "and a rebuild answers those names back -- twice the same"

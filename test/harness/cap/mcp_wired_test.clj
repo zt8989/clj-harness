@@ -72,22 +72,24 @@
          (finally (stop) (providers/use-provider! thread nil)))))
 
 (defn- post-run
+  "A real run for THREAD-ID, read from the DOWNLINK (`harness.test-support/mux-run!`): the POST
+  answers an ack and the frames arrive on `events.mux`. What it hands back is the SAME SHAPE it
+  always was -- an `HttpResponse` whose body is the run's SSE -- so `interrupt-of` and every
+  caller read it unchanged."
   ([thread-id] (post-run thread-id {}))
   ([thread-id extra]
     (let [body (json/write-str (merge {:threadId thread-id
-                                      ;; THE ACTION'S OWN ENTRIES (ticket 03): the
-                                      ;; server holds the conversation, and `with-server`
-                                      ;; has made sure this thread is a session of it.
+                                      ;; THE ACTION'S OWN ENTRIES (ticket 03): the server holds
+                                      ;; the conversation, and `with-server` has made sure this
+                                      ;; thread is a session of it.
                                       :append [{:id "u1" :role "user" :content "go"}]
                                       :tools []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                  (.header "Content-Type" "application/json")
-                  (.header "Accept" "text/event-stream")
-                    (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-            (.build))]
-       (.send (HttpClient/newHttpClient) req
-              (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+          result (support/mux-run! *port* thread-id body nil)]
+      (reify java.net.http.HttpResponse
+        (statusCode [_] (:status result))
+        (headers [_] (:headers result))
+        (body [_] (:body result))))))
 
 (defn- api-get
   "A management-edge GET, as {:status :body}."

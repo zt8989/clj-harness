@@ -847,10 +847,9 @@ const SessionHost: FC<{
   // this host's state -- the pending directory lives up there -- so the memo depends on
   // its identity, and `registerPending` is a `useCallback` with stable dependencies.
   const agent = useMemo(() => {
-    // THE DOWNLINK IS WHERE THIS PAGE'S RUN FRAMES COME FROM (`runAck`, ADR 0004): the POST
-    // answers an ack and the socket carries the events, so the sender and every watcher read
-    // one stream. A caller without the flag keeps the POST's SSE response.
-    const created = new HarnessAgent({ url: AGENT_URL, ready: onReady, runAck: true });
+    // THE DOWNLINK IS WHERE THIS PAGE'S RUN FRAMES COME FROM (ADR 0004): the POST answers an
+    // ack and the socket carries the events, so the sender and every watcher read one stream.
+    const created = new HarnessAgent({ url: AGENT_URL, ready: onReady });
     created.threadId = threadId;
     return created;
   }, [threadId, onReady]);

@@ -737,3 +737,97 @@
     (when-some [f (replay/find-log (home/projects-dir) id)]
       (io/delete-file f true))
     (project/register-session! id)))
+
+
+
+;; ------------------------------------------------------- the downlink's test reader
+
+(def ^:private window-frame-types
+  "The frame types the WINDOW speaks. Everything else on the downlink is a run's AG-UI event
+  (`lib/mux.ts` routes by the same set)."
+  #{"window" "append" "page" "tail" "end"})
+
+(defn sse-headers
+  "ACK's headers, with the Content-Type the body `mux-run!` builds actually is (SSE): a caller
+  reads the run's frames, not the ack."
+  [ack]
+  (let [m (into {} (remove (fn [[k _]] (= "content-type" (str/lower-case (str k))))
+                           (.map (.headers ack))))]
+    (java.net.http.HttpHeaders/of
+     (assoc m "content-type" (java.util.List/of "text/event-stream"))
+     (fn [_ _] true))))
+
+(defn mux-run!
+  "Drive one run over the DOWNLINK and answer `{:status :headers :body}`.
+
+  A RUN IS READ FROM `events.mux` NOW (ADR 0004): the POST answers an ACK and the frames arrive on
+  the socket. So this SUBSCRIBES FIRST -- the server filters a run's frames by what a connection
+  declared -- starts the run with the ack header, collects the frames until the terminal, and
+  hands back the SSE a caller has always read. A REFUSED RUN sends no frames: the ack's own status
+  and body are passed through whole.
+
+  PORT is the server's (`*port*` is per-namespace); ORIGIN, when given, is sent as the page the
+  request comes from."
+  [port thread-id body origin]
+  (let [token   (str (java.util.UUID/randomUUID))
+        frames  (atom [])
+        seen    (promise)
+        pending (atom "")
+        params  (java.net.URLEncoder/encode (json/write-str [{:threadId thread-id}]) "UTF-8")
+        ws      (-> (java.net.http.HttpClient/newHttpClient)
+                    (.newWebSocketBuilder)
+                    (.buildAsync (java.net.URI/create
+                                  (str "ws://127.0.0.1:" port "/api/events.mux"
+                                       "?subscriber=" token "&sessions=" params))
+                                 (reify java.net.http.WebSocket$Listener
+                                   (onText [_ socket data last]
+                                     ;; A BIG FRAME ARRIVES IN FRAGMENTS; parse only when whole.
+                                     (swap! pending str data)
+                                     (when last
+                                       (let [frame (try (json/read-str @pending :key-fn keyword)
+                                                        (catch Throwable _ nil))]
+                                         (reset! pending "")
+                                         (when-some [t (:type frame)]
+                                           (when-not (contains? window-frame-types t)
+                                             (swap! frames conj (dissoc frame :seq))
+                                             (when (contains? #{"RUN_FINISHED" "RUN_ERROR"} t)
+                                               (deliver seen true))))))
+                                     (.request socket 1)
+                                     (java.util.concurrent.CompletableFuture/completedFuture nil))))
+                    (.join))
+        declared (loop [attempt 0]
+                   (let [req  (-> (java.net.http.HttpRequest/newBuilder
+                                   (java.net.URI/create
+                                    (str "http://127.0.0.1:" port "/api/events.mux/subscribe")))
+                                  (.header "Content-Type" "application/json")
+                                  (.POST (java.net.http.HttpRequest$BodyPublishers/ofString
+                                          (json/write-str {:subscriber token
+                                                           :subscribe [{:threadId thread-id}]})
+                                          java.nio.charset.StandardCharsets/UTF_8))
+                                  (.build))
+                         resp (.send (java.net.http.HttpClient/newHttpClient) req
+                                     (java.net.http.HttpResponse$BodyHandlers/ofString
+                                      java.nio.charset.StandardCharsets/UTF_8))]
+                     (cond
+                       (= 200 (.statusCode resp)) true
+                       (< attempt 40) (do (Thread/sleep 20) (recur (inc attempt)))
+                       :else false)))
+        req     (-> (java.net.http.HttpRequest/newBuilder
+                     (java.net.URI/create (str "http://127.0.0.1:" port "/api/agent")))
+                    (.header "Content-Type" "application/json")
+                    (.header "X-Clj-Harness-Run-Ack" "1")
+                    (cond-> origin (.header "Origin" origin))
+                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString
+                            body java.nio.charset.StandardCharsets/UTF_8))
+                    (.build))
+        ack     (.send (java.net.http.HttpClient/newHttpClient) req
+                       (java.net.http.HttpResponse$BodyHandlers/ofString
+                        java.nio.charset.StandardCharsets/UTF_8))]
+    (if (not= 200 (.statusCode ack))
+      {:status (.statusCode ack) :headers (.headers ack) :body (.body ack)}
+      (do
+        (when declared (deref seen 30000 nil))
+        (.sendClose ws java.net.http.WebSocket/NORMAL_CLOSURE "done")
+        {:status 200
+         :headers (sse-headers ack)
+         :body (apply str (map (fn [frame] (str "data: " (json/write-str frame) "\n\n")) @frames))}))))

@@ -180,11 +180,6 @@ export type HarnessAgentConfig = HttpAgentConfig & {
   /// it awaits), because only the page knows what a minted session was waiting to
   /// belong to. This class holds no state about what has been registered.
   ready?: (threadId: string) => Promise<void>;
-  /// READ THE RUN'S FRAMES FROM THE DOWNLINK (`events.mux`, ADR 0004) INSTEAD OF THE POST'S
-  /// RESPONSE. The POST then answers an ACK and the socket carries the frames; a caller
-  /// that leaves this out keeps the SSE response it always had (the door is in
-  /// `harness.edge.http`, chosen by a request header this class sets).
-  runAck?: boolean;
 };
 
 /// THE REQUEST THE ACK DOOR IS ASKED THROUGH: the SSE door for every caller that does not set
@@ -291,7 +286,7 @@ export class HarnessAgent extends HttpAgent {
   /// STILL unknown when the request arrives, the edge's own refusal is the honest answer
   /// to give the person.
   constructor(config: HarnessAgentConfig) {
-    const { ready, runAck, ...rest } = config;
+    const { ready, ...rest } = config;
     super(rest);
     const send: HttpAgentFetchFn = this.fetch;
     this.fetch = async (url, init) => {
@@ -303,10 +298,8 @@ export class HarnessAgent extends HttpAgent {
         // and it must not cost the run. Nothing is logged -- the row carries the
         // sentence, and a second copy in the console would be a fact nobody reads.
       }
-      // THE SSE DOOR IS STILL OPEN for every caller that did not ask for the ack.
-      if (runAck !== true) return send(url, init);
-
-      // THE DOWNLINK DOOR (ticket 03). SUBSCRIBE BEFORE STARTING: the server filters a run's
+      // THE RUN'S FRAMES COME FROM THE DOWNLINK (`events.mux`, ADR 0004) -- the only carrier
+      // a run has now. SUBSCRIBE BEFORE STARTING: the server filters a run's
       // frames by what this connection declared, so a run begun before the declaration lands
       // would lose its first frames. Then start it -- the answer is an ACK -- and hand back
       // the socket's frames as the SSE the base class parses.
