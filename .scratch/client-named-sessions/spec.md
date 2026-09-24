@@ -81,4 +81,16 @@
 
 ## 报数
 
-（落地当天补）
+- **前端**：`npm run typecheck` 干净、`npm run build` 干净、`npm test` → **128 passed**（`id` 两条在里面）。
+- **后端全量（合并后的 main）**：`Ran 1211 tests containing 13465 assertions. 1 failures, 0 errors.`
+  —— 那 1 条**不是本特征的**：`harness.cap.claims-test` 的
+  `a-second-jvm-owns-a-conversation-until-it-goes-away`（等 5 秒要子进程日志里那行 `taken-over`，
+  那行 13 秒后才出现），在**没带任何本特征改动、干净的 HEAD**（`0f1976d`，另开 worktree）上跑同一个命名
+  空间同样红。隔离判据只有一行 `ISOLATION NOTE`（我自己那个活着的 harness 会话在写同一个库，
+  `docs/rules/testing.md` 说的那条，不算失败）。
+- **真浏览器走查（非安全源）**：`node scripts/dev.mjs --scripted --port 5199`，浏览器打开
+  `http://192.168.196.54:5199/`（`isSecureContext` **false**、`crypto.randomUUID` 为 **undefined**）：
+  页面起得来、控制台没有 TypeError、挂载就铸好一枚 v4（`15692a52-…`，**没有**任何「要名字」的请求）、
+  点「新建任务」又铸一枚（`2b051d0e-…`，同样没有请求）、发一句话才 `POST /api/sessions` 把它登记、
+  紧接着 `POST /api/agent` 跑起来（标题变成「你好」）。控制台剩下的只有 favicon 与
+  「这场会话还没登记」的 stats 404 —— 懒创建本来就有的那两条。
