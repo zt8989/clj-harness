@@ -2,13 +2,15 @@
 
 `harness.cap.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
 
-## 一份配置，两节：`config.edn`
+## 一份配置，三节：`config.edn`
 
-配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好两节——`:default`（三个旋钮的默认档）与
-`:providers`（厂商目录）：
+配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好三节——`:default`（三个旋钮的默认档）、
+`:providers`（厂商目录）与 `:ui`（界面自己的设置，今天只有 `:language`）：
 
 ```edn
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+
+ :ui {:language :en}                         ; 这个家说的语言：:en 或 :zh
 
  :providers
  {:openrouter {:protocol :openai-completions
@@ -41,6 +43,11 @@
 所以别的坏法仍然原样留着让读侧的句子去解释。两节都可以缺席：只有 `:providers` 的家里，
 会话档照样能从中挑一个厂商（用户级配置**不进库**，见 [home-and-storage](home-and-storage.md)）。
 
+
+**`:ui` 是有意开的一格**：语言不是「会话起点的旋钮」，塞进 `:default` 会让那一节的说明开始走样，所以它
+自成一节、与厂商目录同住一个家——都是**这一个家**的事实。这一节自己也是闭的（今天只认 `:language`，
+值是 `:en` / `:zh`），键或值不认识都是**指名失败**；整节缺席是日常情形，语言交给
+`harness.infra.language` 那条链去定（`config.edn` → 系统语言 → 终端语言 → 英语）。
 **`providers.edn` 退休了**，不再被读：目录搬进了 `config.edn` 的 `:providers`。家里还留着一份就是
 **指名失败**——句子说清把条目挪进去、然后删掉那个文件。一个看着还权威、写进去却什么也不发生的文件，
 正是这个目录存在的意义要杀掉的那种静默空操作。

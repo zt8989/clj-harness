@@ -73,6 +73,7 @@
     harness.infra.db-test
     harness.infra.shell-test
     harness.infra.env-test
+    harness.infra.language-test
     harness.kernel.llm-test
     harness.cap.skills-test
     harness.cap.preamble-test

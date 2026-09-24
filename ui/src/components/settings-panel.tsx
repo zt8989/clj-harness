@@ -59,7 +59,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { setLanguage } from "@/lib/i18n";
+import { applyLanguage } from "@/lib/i18n";
+import { saveLanguage } from "@/lib/languageSetting";
 import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
   probeModels,
@@ -383,10 +384,17 @@ const LANGUAGE_NAMES: Record<Language, string> = {
   zh: "中文",
 };
 
-/// The panel's own language, and the only control on any page of it that writes no
-/// file.
+/// The panel's own language -- and the ONE control on any page of it that writes
+/// config.edn's `:ui` section rather than a provider: the language is the HOME's own
+/// setting, not a knob a session starts from.
 const LanguageRow: FC = () => {
   const { t, i18n } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  // THE WRITE IS A ROUND TRIP NOW, so the row owns its own state: whether a save is in
+  // flight, and what the server said when it refused. The language in force is still
+  // i18n's -- nothing here keeps a second copy of it.
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   return (
     <section data-slot="settings-language">
       <SectionTitle>{t("language.title")}</SectionTitle>
@@ -399,12 +407,24 @@ const LanguageRow: FC = () => {
           aria-label={t("language.field")}
           className={inputClass}
           value={i18n.language}
+          disabled={saving}
           onChange={(event) => {
             // The options are generated from the same list, so this is always one of
             // them -- and the guard is here rather than a cast because the value is
             // DOM-supplied, which is exactly where a closed list stops being closed.
             const chosen = event.target.value;
-            if (isLanguage(chosen)) setLanguage(chosen);
+            if (!isLanguage(chosen)) return;
+            setError(null);
+            setSaving(true);
+            // WRITE FIRST, THEN SWITCH: a switch that could not be saved must not be
+            // shown as if it had been. The server's own sentence is what the person
+            // reads when it refuses.
+            void saveLanguage(chosen, tErrors)
+              .then(() => applyLanguage(chosen))
+              .catch((reason: unknown) => {
+                setError(reason instanceof Error ? reason.message : String(reason));
+              })
+              .finally(() => setSaving(false));
           }}
         >
           {SUPPORTED_LANGUAGES.map((language) => (
@@ -413,6 +433,11 @@ const LanguageRow: FC = () => {
             </option>
           ))}
         </select>
+        {error !== null && (
+          <p className="text-destructive mt-2 text-xs break-words" role="alert">
+            {error}
+          </p>
+        )}
       </Field>
     </section>
   );

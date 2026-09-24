@@ -49,7 +49,8 @@
             [harness.kernel.hooks.dispatch :as hook]
             [harness.kernel.llm :as llm]
             [harness.cap.project :as project]
-            [harness.infra.env :as env]))
+            [harness.infra.env :as env]
+            [harness.infra.language :as language]))
 
 ;; ------------------------------------------------------------------ assembly
 
@@ -190,7 +191,8 @@
 
 (defn- env-block
   "The <env> block: what this MACHINE is -- the platform, the shell a command
-  actually goes to, and which command-line enhancers that shell can see.
+  actually goes to, and which command-line enhancers that shell can see -- plus the
+  one line that is not a machine fact: the language this home speaks.
 
   THE ONE THING A MODEL CANNOT READ OFF THE WIRE. Every tool carries its own
   description in the request's :tools array, and <project> states the binding; none
@@ -203,10 +205,19 @@
   resolution -- the one place that decides it -- and the enhancer list plus the probe
   that fills it are harness.infra.env's. Those are facts about the MACHINE, so they
   are resolved once per process there; this block is still assembled on every run,
-  because that is the discipline for what a hook appends."
+  because that is the discipline for what a hook appends.
+
+  THE LANGUAGE LINE IS THE ONE LINE THAT IS NOT A MACHINE FACT. It is this HOME's
+  setting (config.edn's :ui :language, then the OS's own language, then the
+  terminal's -- see harness.infra.language), read fresh so a person who edits it gets
+  it on the next run. It is stated here, beside the machine, because 'answer in the
+  language <env> names' is the one thing the system prompt and the ask tool both
+  point at -- and that anchor may not vanish when a source is absent."
   [_payload]
   {:exit 0 :err ""
-   :out (str "<env>\n" (str/join "\n" (env/lines)) "\n</env>")})
+   :out (str "<env>\n"
+             (str/join "\n" (concat (env/lines) [(language/line)]))
+             "\n</env>")})
 
 (defn install!
   "Put the kernel's own two rows at the SystemPrompt point, and answer the

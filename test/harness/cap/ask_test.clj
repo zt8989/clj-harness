@@ -518,3 +518,16 @@
                   serve"
           (is (true? (editing/served? "ask-not-approval" "ask")))
           (is (false? (editing/served? "ask-not-approval" "edit"))))))))
+
+(deftest the-ask-description-says-which-language-to-ask-in
+  ;; The description rides in the request's :tools array, so this sentence is what the
+  ;; model reads before it writes a question -- not a comment. It points at the <env>
+  ;; block, which always names a language (harness.infra.language).
+  (let [td (cap-tools/install!)]
+    (try
+      (let [ask (first (filter #(= "ask" (get-in % [:function :name])) (tools/specs)))]
+        (is (some? ask) "ask is in the table")
+        (is (str/includes? (get-in ask [:function :description])
+                           "the language the <env> block names")
+            "and its description says which language to write the question in"))
+      (finally (td)))))

@@ -70,6 +70,7 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [harness.infra.home :as home]
+            [harness.infra.language :as language]
             ;; For the implemented-protocol set, READ off the multimethod
             ;; rather than keeping a list that could disagree with it. cap -> kernel
             ;; is the allowed direction, and kernel.llm does not require this
@@ -402,17 +403,24 @@
 ;; to meet them in.
 
 (def ^:private config-sections
-  "The two sections config.edn is made of, and the whole of its top level:
+  "The sections config.edn is made of, and the whole of its top level:
 
     :default    the three knobs a session starts from (:provider / :model /
                 :reasoning-effort), or a provider DESCRIBED inline
     :providers  the vendor catalog, {name entry}, laid over the built-in table
+    :ui         the interface's own settings (today just :language)
 
-  TWO SECTIONS IN ONE FILE, which is the point of the shape: which vendors this
-  process can reach and which one it starts on are one question asked twice, so a
-  person answering either opens one file. What used to be providers.edn is the
-  :providers section now -- see `catalog`."
-  #{:default :providers})
+  ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
+  starts on, and which language it speaks are all facts about THIS home, so a person
+  changing any of them opens one file. What used to be providers.edn is the :providers
+  section now -- see `catalog`.
+
+  :ui IS THE ONE SECTION THAT IS NOT ABOUT MODELS, and the closed top level is opened
+  for it deliberately: a language is not a knob a session starts from, so folding it
+  into :default would make that section's own description start to lie. It rides the
+  same file because it is the same home's configuration, not because it is a provider.
+  See harness.infra.language for what it means and how it is resolved."
+  #{:default :providers :ui})
 
 (defn- check-config
   "A parsed config.edn -> the same map, or a named failure about its SHAPE.
@@ -422,15 +430,16 @@
   so the answer cannot differ between the two."
   [raw path]
   (when-not (map? raw)
-    (fail (str path " must be a map of the two sections (:default and :providers), not "
+    (fail (str path " must be a map of the sections (:default, :providers and :ui), not "
                (pr-str (type raw)))
           {:path path}))
   (let [unknown (sortable (remove config-sections (keys raw)))]
     (when (seq unknown)
-      (fail (str path " carries " (pr-str unknown) " at its top level; it is made of two"
+      (fail (str path " carries " (pr-str unknown) " at its top level; it is made of"
                  " sections -- :default (the three knobs a session starts from:"
-                 " :provider / :model / :reasoning-effort) and :providers (the vendors,"
-                 " {name entry}). The knobs used to sit at the top level themselves:"
+                 " :provider / :model / :reasoning-effort), :providers (the vendors,"
+                 " {name entry}) and :ui (the interface's own settings, today just"
+                 " :language). The knobs used to sit at the top level themselves:"
                  " start the server once and it moves them under :default for you,"
                  " or move them yourself.")
             {:path path :unknown unknown})))
@@ -438,11 +447,24 @@
     (when-not (map? (get raw k))
       (fail (str path "'s " (pr-str k) " must be a map, not " (pr-str (get raw k)))
             {:path path :section k})))
+  (when-let [ui (:ui raw)]
+    (let [unknown-ui (sortable (remove language/section-keys (keys ui)))]
+      (when (seq unknown-ui)
+        (fail (str path "'s :ui carries " (pr-str unknown-ui) "; it is made of one key --"
+                   " :language, the language this harness speaks ("
+                   (str/join " / " (sort language/supported)) ")")
+              {:path path :unknown unknown-ui})))
+    (when-let [tag (:language ui)]
+      (when-not (contains? language/supported tag)
+        (fail (str path "'s :ui :language is " (pr-str tag) ", which is not a language"
+                   " this harness speaks; it is one of ("
+                   (str/join " / " (sort language/supported)) ")")
+              {:path path :language tag}))))
   raw)
 
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs ->
-  the two sections it is made of, checked as such.
+  the sections it is made of, checked as such.
 
   THE TOP LEVEL IS CLOSED, and that check IS the migration: this file used to BE
   the default tier, with :provider / :model / :reasoning-effort at the top. Those
@@ -1754,9 +1776,10 @@
   moment they open this file is which sections exist and that leaving them empty is a
   working state. A write from the settings form replaces these comments with its own
   header, which the file then says out loud."
-  (str ";; The two sections of this file, both of which the settings panel writes:\n"
+  (str ";; The three sections of this file, all of which the settings panel writes:\n"
        ";;   :default    the three knobs a session starts from\n"
        ";;   :providers  the vendors, {name entry}\n"
+       ";;   :ui         the interface's own settings (today just :language)\n"
        ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
        ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
        "\n{}\n"))
@@ -1850,6 +1873,29 @@
     (user-catalog (:providers next))
     (write-config! next)
     next))
+
+(defn set-language!
+  "VALUE (a keyword, or the string the wire carried) -> the config map now written,
+  with `:ui :language` set to it.
+
+  VALIDATED BEFORE ANYTHING IS WRITTEN, the same rule every other writer here keeps:
+  a value this harness cannot speak is refused by name and the file is left exactly as
+  it was. The WHOLE config is checked as well (`check-config`), so a `:ui` shape a
+  typo broke fails here rather than being written.
+
+  NO WAY TO 'CLEAR'. `:ui` is left in place rather than deleted: removing the section
+  would put a hand-edited home back on its OS language without the person saying so.
+  An absent section and a set one both resolve through harness.infra.language."
+  [value]
+  (let [kw (try (keyword (name value)) (catch Throwable _ nil))]
+    (when-not (contains? language/supported kw)
+      (fail (str "unknown language " (pr-str kw) "; this harness speaks "
+                 (str/join " / " (sort language/supported)))
+            {:language value}))
+    (let [next (assoc-in (config) [:ui :language] kw)]
+      (check-config next (config-path))
+      (write-config! next)
+      next)))
 
 (defn put-provider!
   "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the

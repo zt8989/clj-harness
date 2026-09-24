@@ -86,6 +86,7 @@
             [harness.cap.git :as git]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.infra.home :as home]
+            [harness.infra.language :as language]
             [harness.infra.log :as log]
             [harness.infra.logging :as logging]
             [harness.cap.providers :as providers]
@@ -4153,6 +4154,33 @@
   (let [thread-id (get (query-params (:query-string req)) "threadId")]
     (api-response 200 (providers/wire (providers/active-provider thread-id)))))
 
+(defn- language-get
+  "GET /api/language -- the language this home speaks, resolved by
+  harness.infra.language (config.edn's :ui :language, then the OS's, then the
+  terminal's, then English). It always answers one of the two, so a client that has
+  nowhere else to look still has an answer.
+
+  IT CARRIES NO THREAD and needs none: a language is a fact about the HOME, not a
+  session, which is why this is a route of its own rather than a field on
+  /api/settings -- that one is asked with a threadId and answers per-session state."
+  [_req]
+  (api-response 200 {:language (name (language/resolved))}))
+
+(defn- language-post
+  "POST /api/language {language: \"zh\" | \"en\"} -- write the choice into config.edn's
+  :ui :language and answer the language now resolved.
+
+  A REFUSED VALUE IS A 400 WITH THE SERVER'S SENTENCE and nothing is written, the same
+  rule POST /api/model keeps. The answer is the RESOLVED language rather than the value
+  that was sent, so a caller never has to guess what its own value meant."
+  [req]
+  (let [body   (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+        answer (try {:ok (providers/set-language! (:language body))}
+                    (catch Throwable t {:error (ex-message t)}))]
+    (if-some [error (:error answer)]
+      (api-response 400 {:error error})
+      (api-response 200 {:language (name (language/resolved))}))))
+
 (defn- settings-get
   "GET /api/settings?threadId=.. -- the read-only settings panel's answer: what
   configuration is in force for this session, where each choice came from, where
@@ -4778,6 +4806,12 @@
     (= "/api/elicitation" (:uri req))
     (case (:request-method req)
       :get  (elicitation-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/language" (:uri req))
+    (case (:request-method req)
+      :get  (language-get req)
+      :post (language-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/settings" (:uri req))

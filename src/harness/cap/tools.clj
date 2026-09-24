@@ -1243,6 +1243,8 @@
        "`options` offers a closed list to pick from; add `allow_other` when they may "
        "need an answer that is not on it, and `multiple` when the answer may be "
        "several of them. "
+       "Write the question in the language the <env> block names, so the person "
+       "reads it in their own language. "
        "What comes back is one line per question. A question they left blank comes "
        "back as \"(no answer)\", a multiple-choice question they ticked nothing on "
        "comes back as \"(nothing chosen)\", and a person who declines the form "
