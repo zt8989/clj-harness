@@ -111,6 +111,7 @@
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.instruction-updates :as instructions]
+            [harness.cap.jobs :as jobs]
             [harness.cap.subagents :as subagents]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
@@ -2844,9 +2845,10 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  SEVEN OF THE TEN ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
+  EIGHT OF THE TWELVE ARE GETS: `stats`, `trajectory` and `delegations` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
-  same file while it is still being written, and the window's two verbs (`feed`,
+  same file while it is still being written, `jobs` reads the process's own JOB
+  REGISTRY rather than any file, and the window's two verbs (`feed`,
   `page`) read it in pieces. The set stays closed and the 405 stays here -- what
   changed is that the sentence 'every verb on this shape is a POST' is no longer
   true, not where the refusal happens.
@@ -2871,7 +2873,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel"})
+  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "feed" "page" "delegations" "follow" "cancel" "jobs"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3347,6 +3349,29 @@
 
       :else
       (api-response 200 {:threadId stem :delegations (:ok folded)}))))
+
+(defn- jobs-get
+  "GET /api/threads/<stem>/jobs -- the background commands THIS PROCESS is running for
+  one session, as rows a task pane can draw: id, the command, how it is going, when it
+  started, and where its record is.
+
+  IT READS THE PROCESS'S REGISTRY, NOT A LOG, and that is the whole of its difference
+  from its siblings above: `stats`, `trajectory` and `delegations` fold a file and 404
+  when the stem is not under the tree, while a job IS the process's own memory of a
+  command (`harness.cap.jobs`). So there is nothing to locate and nothing to refuse:
+  'this process has no jobs for this session' is `:jobs []`, an ordinary answer to a
+  question about WHAT IS THERE. A stem nobody has run anything for and a stem whose
+  jobs went with an earlier process both answer `[]` -- the records outlive the
+  process, but the JOBS do not, and this route is about the jobs.
+
+  READ-ONLY, so no audit line: every GET on this edge only answers. Asking again a
+  second later is the ordinary use (`[]` polls the pane does), and a route that wrote
+  a line per poll would fill the logs with 'somebody looked'.
+
+  A METHOD THIS SHAPE DOES NOT SERVE IS STILL A 405, from the dispatch's `case` -- a
+  POST of a job is ticket 04's, and answering a GET the POST is not here to answer."
+  [stem]
+  (api-response 200 {:threadId stem :jobs (jobs/listing stem)}))
 
 (defn- close-off-open-run!
   "Close every run a log left open, so the conversation can be CONTINUED instead of
@@ -4994,6 +5019,7 @@
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
         [:get "stats"]    (stats-get stem)
+        [:get "jobs"]    (jobs-get stem)
         [:get "trajectory"] (trajectory-get stem)
         [:get "sofar"]    (sofar-get req stem)
         [:get "feed"]     (feed-get req stem)

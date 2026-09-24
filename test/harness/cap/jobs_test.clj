@@ -212,6 +212,50 @@
         (is (str/includes? (ex-message e) a))
         (is (str/includes? (ex-message e) b))))))
 
+(deftest a-listing-is-what-this-session-has-and-how-each-is-going
+  ;; THE LISTING DOES NOT ADDRESS A JOB, unlike every verb above it: a person looking at
+  ;; a pane does not know the ids, so this is the read side of the registry as a LIST --
+  ;; and what it may not do is invent a second way to say how a job is going. The status
+  ;; is `output`'s own line: the record's ending once the record is closed, and
+  ;; `[running]` while it is not.
+  (testing "a session with no jobs is an empty list -- an answer, not a refusal"
+    (is (= [] (jobs/listing "jt-list-none")))
+    (is (= [] (jobs/listing "jt-list-never-heard-of"))
+        "the registry is about THIS process, and it has nothing to refuse: the stem is never located"))
+  (testing "a finished job is a row whose status is the last line of its own record"
+    (let [t "jt-list-done"
+          {:keys [id path]} (jobs/start! t {:command "echo one; exit 0"})]
+      (record-until path #(re-find #"\[exit" %) 10000)
+      (let [[row] (jobs/listing t)]
+        (is (= id (:id row)))
+        (is (= "echo one; exit 0" (:command row)))
+        (is (= "[exit 0]" (:status row)) "its OWN ending, read off the record")
+        (is (= path (:path row)) "and the path, because the pane that draws this IS a reader")
+        (is (integer? (:startedAt row)) "when it started, as a number of milliseconds"))))
+  (testing "a job still going says so, and the row is the same shape"
+    (let [t "jt-list-going"
+          {:keys [id]} (jobs/start! t {:command "sleep 30"})]
+      (let [row (first (jobs/listing t))]
+        (is (= id (:id row)))
+        (is (= "[running]" (:status row)))
+        (is (integer? (:startedAt row))))))
+  (testing "rows come back in id order, and a printed lookalike is not an ending"
+    (let [t "jt-list-order"
+          a (jobs/start! t {:command "echo '[exit 0]'; sleep 30"})
+          b (jobs/start! t {:command "exit 0"})]
+      (record-until (:path b) #(re-find #"\[exit" %) 10000)
+      (let [rows (jobs/listing t)]
+        (is (= [(:id a) (:id b)] (map :id rows))
+            "ordered by id, the module's own lexical order (`known-ids`, `take-notices!`)")
+        (is (= "[running]" (:status (first rows)))
+            "the command PRINTED an ending; the Writer is still open, so it is still running"))))
+  (testing "another session's jobs are not this session's"
+    (let [a "jt-list-a" b "jt-list-b"
+          ja (jobs/start! a {:command "sleep 30"})
+          jb (jobs/start! b {:command "sleep 30"})]
+      (is (= [(:id ja)] (map :id (jobs/listing a))))
+      (is (= [(:id jb)] (map :id (jobs/listing b)))))))
+
 (deftest the-process-going-away-takes-its-jobs-and-not-its-records
   ;; `shutdown!` is what the exit hook runs, and it is asserted by CALLING it: a
   ;; forked JVM against this repo's config home hangs (harness.cap.mcp-test records

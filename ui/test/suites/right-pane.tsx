@@ -31,8 +31,13 @@ import {
   RightPaneOpenButton,
 } from "../../src/components/right-pane-toggle";
 import { TaskPane } from "../../src/components/task-pane";
+import { JobRows } from "../../src/components/task-pane-jobs";
+import type { JobRow } from "../../src/lib/jobs";
 import toggleSource from "../../src/components/right-pane-toggle.tsx?raw";
 import taskPaneSource from "../../src/components/task-pane.tsx?raw";
+import jobRowsSource from "../../src/components/task-pane-jobs.tsx?raw";
+import taskPaneHookSource from "../../src/hooks/use-task-pane.ts?raw";
+import jobsLibSource from "../../src/lib/jobs.ts?raw";
 import panelSource from "../../src/components/subagent-view.tsx?raw";
 import contextSource from "../../src/components/subagent-view-context.ts?raw";
 import appSource from "../../src/app.tsx?raw";
@@ -89,7 +94,7 @@ function collapseControl(language: Language): string {
 function taskPane(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <TaskPane onCollapse={() => {}} />
+      <TaskPane threadId="t1" onCollapse={() => {}} />
     </I18nextProvider>,
   );
 }
@@ -147,12 +152,32 @@ const cases: Case[] = [
       expect(emptyEn).not.toBe(emptyEnJobs);
       expect(emptyZh).not.toBe(emptyZhJobs);
 
-      // AND IT ASKS NOBODY FOR ANYTHING. Ticket 01's boundary is the shell: the two lists, the
-      // polling and the stop button are tickets 02/03, and a pane that had started fetching here
-      // would have taken those decisions without their tests.
+      // THE BOUNDARY MOVED, AND TICKET 02 IS THE TICKET THAT MOVED IT -- exactly as ticket 01
+      // said this block was for. That boundary was "the pane asks nobody for anything, because
+      // the two lists are tickets 02/03"; the BOTTOM section is ticket 02, so it reads now. What
+      // still holds, and is what this block pins instead, is HOW it reads: the pane fetches
+      // nothing and owns no timer itself -- the read lives in ONE reader (`lib/jobs.ts`) and the
+      // poll in ONE hook (`hooks/use-task-pane.ts`), so ticket 03's second read joins the SAME
+      // tick rather than starting a second one.
       expect(taskPaneSource).not.toContain("fetch(");
-      expect(taskPaneSource).not.toContain("useEffect");
-      expect(taskPaneSource).not.toContain("useState");
+      expect(taskPaneSource).not.toContain("setInterval");
+      expect(taskPaneSource).toContain("useTaskPane(");
+      expect(taskPaneSource).toContain("<JobRows");
+      // THE READ ITSELF: one URL in one place, and the status vocabulary that is the record's
+      // (the row asks `isRunning`, and never invents a word for an ending).
+      expect(jobsLibSource).toContain("threads/${encodeURIComponent(threadId)}/jobs");
+      expect(jobsLibSource).toContain("RUNNING_STATUS");
+      expect(jobRowsSource).toContain("isRunning(job)");
+      // THE TICK: a named cadence, ONE interval, and the two ways it stops -- the pane unmounting
+      // and the page going hidden -- each of which also aborts a read in flight. A SOURCE READ
+      // CAN PIN THE DECISIONS, NOT THE BEHAVIOUR: that a closed pane and a hidden page really
+      // leave nothing in flight is the browser walkthrough's half (this suite's header).
+      expect(taskPaneHookSource).toContain("export const TASK_PANE_POLL_MS = 1000");
+      expect(taskPaneHookSource).toContain("setInterval(read, TASK_PANE_POLL_MS)");
+      expect(taskPaneHookSource).toContain("clearInterval(timer)");
+      expect(taskPaneHookSource).toContain('document.addEventListener("visibilitychange"');
+      expect(taskPaneHookSource).toContain("AbortController");
+      expect(taskPaneHookSource).toContain("stop();");
     },
   },
   {
@@ -211,7 +236,11 @@ const cases: Case[] = [
       // delegation at a time, at the connection level -- and the task pane is the other arm.
       expect(appSource).toContain("rightPane.kind === \"mirror\"");
       expect(appSource).toContain("rightPane.kind === \"tasks\"");
-      expect(appSource).toContain("<TaskPane onCollapse={() => setRightPane(null)} />");
+      // THE THREAD ID IS THE ONE ON SCREEN (`roster.shown`) -- the pane polls THAT session, so
+      // a pane showing one session never draws another's jobs.
+      expect(appSource).toContain(
+        "<TaskPane threadId={roster.shown} onCollapse={() => setRightPane(null)} />",
+      );
 
       // THE OPEN CONTROL IS DRAWN ONLY WHILE THE COLUMN IS CLOSED, and it is drawn by the PAGE:
       // that is the whole reason the state lives in `app.tsx` rather than in the column -- a closed
@@ -227,6 +256,62 @@ const cases: Case[] = [
       expect(classes).toContain("hidden");
       expect(classes).toContain("md:flex");
       expect(classes).not.toContain("inline-flex");
+    },
+  },
+  {
+    name: "a-job-row-says-which-command-and-how-it-is-going",
+    run: async () => {
+      // WHAT A RENDER CAN SEE, and it is the whole point of ticket 02's bottom section. A row is
+      // a pure function of what the server sent (`lib/jobs.ts`), so it can be drawn to a string
+      // in both languages -- and the two claims this store exists for are exactly the two a green
+      // tree would not notice: a RUNNING row grows a clock and a FINISHED one does not, and the
+      // status is the record's OWN line rather than anything this side decided to call it.
+      const finished: JobRow = {
+        id: "j1",
+        command: "npm test --\n  --watch=false",
+        status: "[exit 0]",
+        startedAt: 1_000,
+        path: "C:\\home\\jobs\\t1\\j1-run.log",
+      };
+      const running: JobRow = {
+        id: "j2",
+        command: "npm run dev",
+        status: "[running]",
+        startedAt: 1_000,
+        path: "C:\\home\\jobs\\t1\\j2-run.log",
+      };
+      // `now` IS AN ARGUMENT, exactly as `lib/relative-time.ts` takes one: a duration is a
+      // function of two instants, and a suite that had to wait for a clock would be about time.
+      const rows = (jobs: readonly JobRow[], language: Language): string =>
+        renderToStaticMarkup(
+          <I18nextProvider i18n={renderI18n(language)}>
+            <JobRows jobs={jobs} now={4_200} />
+          </I18nextProvider>,
+        );
+
+      const done = rows([finished], "en");
+      // THE ENDING IS THE RECORD'S WORD, NOT A TRANSLATION OF IT: a row that said "succeeded"
+      // here would be a second vocabulary over the one `job_output` hands the model.
+      expect(textOf(done, "task-pane-job-status")).toBe("[exit 0]");
+      // A FINISHED JOB HAS NO CLOCK, and the ABSENCE is the assertion -- the slot simply is not
+      // in the markup.
+      expect(done).not.toContain('data-slot="task-pane-job-duration"');
+      // THE COMMAND IS ONE LINE: written over two, drawn as one (the newline becomes a space).
+      expect(textOf(done, "task-pane-job-command")).toBe("npm test -- --watch=false");
+      // THE ID IS MONO AND THE COMMAND IS CLIPPED -- the two things that keep a long command
+      // from deciding the column's width. That the column really does not grow is the
+      // walkthrough's half, and this suite's header says so.
+      expect(attrOf(done, "task-pane-job-id", "class")).toContain("font-mono");
+      expect(attrOf(done, "task-pane-job-command", "class")).toContain("truncate");
+      // THE RECORD'S PATH rides on the row, because this pane is a reader.
+      expect(attrOf(done, "task-pane-job", "title")).toBe(finished.path);
+
+      const live = rows([running], "en");
+      expect(textOf(live, "task-pane-job-status")).toBe("[running]");
+      // 4 200 - 1 000 = 3 200 ms -> `3.2s`, and the phrase around it is the catalog's, in both
+      // languages: the number is `lib/format`'s one formatter, the words are the shells'.
+      expect(textOf(live, "task-pane-job-duration")).toBe("3.2s so far");
+      expect(textOf(rows([running], "zh"), "task-pane-job-duration")).toBe("已跑 3.2 秒");
     },
   },
 ];

@@ -1919,7 +1919,9 @@ export function App() {
           />
         )}
         {rightPane !== null && rightPane.kind === "tasks" && (
-          <TaskPane onCollapse={() => setRightPane(null)} />
+          // THE THREAD ID IS THE ONE ON SCREEN (`roster.shown`), which is what the pane polls:
+          // a pane showing one session must never draw another's jobs.
+          <TaskPane threadId={roster.shown} onCollapse={() => setRightPane(null)} />
         )}
       </div>
       </SubagentViewContext.Provider>

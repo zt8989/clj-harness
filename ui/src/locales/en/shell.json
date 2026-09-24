@@ -105,6 +105,7 @@
     "subagents": "Subagents",
     "subagentsEmpty": "This session has not delegated to a subagent yet.",
     "jobs": "Background jobs",
-    "jobsEmpty": "This session has no background job."
+    "jobsEmpty": "This session has no background job.",
+    "jobElapsed": "{{time}} so far"
   }
 }

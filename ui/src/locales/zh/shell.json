@@ -97,6 +97,7 @@
     "subagents": "子代理",
     "subagentsEmpty": "这个会话还没有委派过子代理。",
     "jobs": "后台任务",
-    "jobsEmpty": "这个会话还没有后台任务。"
+    "jobsEmpty": "这个会话还没有后台任务。",
+    "jobElapsed": "已跑 {{time}}"
   }
 }

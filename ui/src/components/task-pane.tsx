@@ -6,20 +6,31 @@
 // ONE element, not two panels that could drift apart. The suite compares the two strings rather
 // than trusting that they were copied correctly.
 //
-// TWO SECTIONS AND NOTHING IN THEM YET (ticket 01). The top one is the subagents this session
-// delegated to (ticket 03), the bottom one this session's background jobs (ticket 02); each draws
-// its heading and the sentence it says when it has no rows. The lists, the polling and the stop
-// button are those tickets' -- so this component fetches nothing and holds no state at all.
+// TWO SECTIONS, FILLED BY TWO TICKETS. The top one is the subagents this session delegated
+// to (ticket 03, still an empty sentence); the bottom one is this session's background jobs
+// (ticket 02), drawn as rows. BOTH READ FROM ONE TICK, and that is why this component does
+// not fetch: `hooks/use-task-pane.ts` owns the poll (one read a second while the pane is
+// open and the page is visible, and nothing in flight after either ends), so ticket 03's
+// second read joins the SAME tick instead of starting a second timer. What is left here is
+// the shell: which section is which, and the sentence a section says when it has no rows.
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
 import { RIGHT_PANE_ID, RightPaneCollapseButton } from "@/components/right-pane-toggle";
+import { JobRows } from "@/components/task-pane-jobs";
+import { useTaskPane } from "@/hooks/use-task-pane";
 
 /// The column, with the way out in its header. `onCollapse` closes the WHOLE column -- it is the
 /// same verb as the mirror's collapse, because it is the same column (see
 /// `components/right-pane-toggle.tsx` for the pair and the `aria-controls` they share).
-export const TaskPane: FC<{ onCollapse: () => void }> = ({ onCollapse }) => {
+export const TaskPane: FC<{ threadId: string; onCollapse: () => void }> = ({
+  threadId,
+  onCollapse,
+}) => {
   const { t } = useTranslation();
+  // THE WHOLE OF THIS COMPONENT'S RUNTIME: one hook, mounted with the pane. Closing the pane
+  // unmounts it, which is one of the two ways the poll stops (`hooks/use-task-pane.ts`).
+  const { jobs } = useTaskPane(threadId);
   return (
     <aside
       id={RIGHT_PANE_ID}
@@ -37,10 +48,10 @@ export const TaskPane: FC<{ onCollapse: () => void }> = ({ onCollapse }) => {
         </span>
       </header>
 
-      {/* EACH SECTION KEEPS ITS OWN HALF AND SCROLLS INSIDE IT: the rows ticket 02/03 add are
-          lists, and a list that grew past the fold would otherwise push the other section off
-          the bottom of the column. Empty for now, which is what the sentence under each heading
-          is for. */}
+      {/* EACH SECTION KEEPS ITS OWN HALF AND SCROLLS INSIDE IT: a section's rows are a list,
+          and a list that grew past the fold would otherwise push the other section off the
+          bottom of the column. The bottom section is filled (ticket 02); the top one still
+          says its empty sentence, which is ticket 03's. */}
       <section
         data-slot="task-pane-subagents"
         className="flex min-h-0 flex-1 flex-col border-b px-3 py-3"
@@ -60,9 +71,15 @@ export const TaskPane: FC<{ onCollapse: () => void }> = ({ onCollapse }) => {
         <h2 data-slot="task-pane-jobs-title" className="shrink-0 text-sm font-medium">
           {t("rightPane.jobs")}
         </h2>
-        <p data-slot="task-pane-jobs-empty" className="text-muted-foreground mt-1 text-xs">
-          {t("rightPane.jobsEmpty")}
-        </p>
+        {/* THE ROWS, OR THE SENTENCE. A heading over nothing would say this section is empty
+            whichever it is, so the two are the two arms of one choice. */}
+        {jobs.length === 0 ? (
+          <p data-slot="task-pane-jobs-empty" className="text-muted-foreground mt-1 text-xs">
+            {t("rightPane.jobsEmpty")}
+          </p>
+        ) : (
+          <JobRows jobs={jobs} />
+        )}
       </section>
     </aside>
   );

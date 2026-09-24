@@ -3089,6 +3089,56 @@
            (is (pos? (get-in (replay/payload (first rb)) [:messages])))
            (is (= "http" (get-in (replay/payload (first rb)) [:via])))))))))
 
+(deftest the-jobs-route-answers-what-this-process-is-running
+  ;; THE LISTING OVER THE REAL EDGE. Unlike its sibling GETs this route reads no log --
+  ;; it reads the PROCESS's own registry -- so the answers worth pinning are what
+  ;; 'nothing' looks like (an ordinary answer, never a 404), a row whose status is the
+  ;; record's own last line, and a running row carrying a numeric clock. That the records
+  ;; outlive the process while the JOBS do not is the registry's own case
+  ;; (`harness.cap.jobs-test`); what belongs here is how the route spells it.
+  (let [t "it-jobs-list"
+        other "it-jobs-list-other"
+        jobs-of (fn [tid]
+                  (:jobs (read-json (api-call :get (str "/api/threads/" tid "/jobs") nil))))]
+    (try
+      (with-bare-server
+       (fn []
+         (testing "a session with no jobs answers an empty list, not a refusal"
+           (let [resp (api-call :get (str "/api/threads/" t "/jobs") nil)]
+             (is (= 200 (.statusCode resp)))
+             (is (= t (:threadId (read-json resp))))
+             (is (= [] (:jobs (read-json resp))))))
+         (testing "and a stem this process has never heard of is empty too"
+           ;; The route never locates the stem: it answers about what the REGISTRY holds,
+           ;; and it holds nothing for a session nobody has started a job from.
+           (let [resp (api-call :get "/api/threads/no-such-session-anywhere/jobs" nil)]
+             (is (= 200 (.statusCode resp)))
+             (is (= [] (:jobs (read-json resp))))))
+         (testing "a finished job is a row whose status is the last line of its record"
+           (let [{:keys [id path]} (jobs/start! t {:command "echo done; exit 0"})]
+             (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000))
+             (let [row (first (jobs-of t))]
+               (is (= id (:id row)))
+               (is (= "echo done; exit 0" (:command row)))
+               (is (= "[exit 0]" (:status row)) "no second vocabulary: the record's own ending")
+               (is (= path (:path row)))
+               (is (integer? (:startedAt row)) "a number, not a string a clock would have to parse"))))
+         (testing "a job still going is [running] and carries the clock it started with"
+           (let [{:keys [id]} (jobs/start! t {:command "sleep 30"})
+                 row (first (filter #(= id (:id %)) (jobs-of t)))]
+             (is (= "[running]" (:status row)))
+             (is (integer? (:startedAt row)))))
+         (testing "another session's jobs are not this session's"
+           (jobs/start! other {:command "echo other-only; sleep 30"})
+           (is (= (map :id (jobs-of t)) (sort (map :id (jobs-of t))))
+               "ordered by id")
+           (is (not-any? #(= "echo other-only; sleep 30" (:command %)) (jobs-of t))))
+         (testing "only GET is served, and a wrong method is refused the usual way"
+           (let [resp (api-call :post (str "/api/threads/" t "/jobs") "{}")]
+             (is (= 405 (.statusCode resp)))
+             (is (= "method not allowed" (:error (read-json resp))))))))
+      (finally (jobs/shutdown!)))))
+
 (deftest rebuilding-a-session-that-has-never-run-answers-an-empty-conversation
   ;; The sidebar's very first click on a brand-new session. Binding wrote an audit
   ;; line and nothing else, so the log exists and holds no run -- and a 400 here

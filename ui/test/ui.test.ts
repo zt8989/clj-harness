@@ -361,7 +361,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// one room), so the case that pinned the panel's way out now pins the shared control standing
 /// where the X was -- and the `key={threadId}` assertion above it was renamed to the new state,
 /// not deleted. Nothing was removed from the count to make either one pass.
-const EXPECTED_CASES = 132;
+/// 132 -> 133: `.scratch/right-pane-tasks`' ticket 02, the task pane's BOTTOM section -- the
+/// `right-pane` suite's fourth case. It renders a job row in both languages and pins the two
+/// things a green tree would not see: the command is ONE line whatever it was written as, and
+/// the clock is drawn ONLY on a row that is still running (a finished row's duration slot is
+/// absent, and that absence is the assertion). The same ticket REWROTE ticket 01's "no fetch"
+/// block rather than adding to it -- that boundary was written to move here -- and what the file
+/// pins now is that the pane still fetches nothing ITSELF: the read and the poll live in one hook
+/// (`hooks/use-task-pane.ts`) and one reader (`lib/jobs.ts`), which is what lets ticket 03's
+/// second read share the same tick. What a source read cannot show -- that a long command is
+/// clipped rather than widening the column, and that a closed pane really leaves nothing in
+/// flight -- is the browser walkthrough's half, as that suite's header says.
+const EXPECTED_CASES = 133;
 
 let total = 0;
 for (const suite of SUITES) {
