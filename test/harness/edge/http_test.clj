@@ -154,7 +154,7 @@
 ;; Declared rather than moved up to it: each is used by a case near the top of the file
 ;; and belongs with its own kind further down (the bare fixture with the fixtures, the
 ;; two log readers with the cases about reading a log).
-(declare with-bare-server process-log log-lines-for until)
+(declare with-bare-server process-log log-lines-for until api-call)
 
 (defn- start-session!
   "A session of this home with nothing in it -- see `harness.test-support/start-session!`,
@@ -222,6 +222,91 @@
        (try (binding [*port* port] (f))
             (finally (stop) (doseq [t (keys pins)] (providers/use-provider! (str t) nil))))))))
 
+(defn- sse-headers
+  "The ack's headers, with the Content-Type the body `post-run` builds actually is."
+  [ack]
+  (let [m (into {} (remove (fn [[k _]] (= "content-type" (str/lower-case (str k))))
+                           (.map (.headers ack))))]
+    (java.net.http.HttpHeaders/of
+     (assoc m "content-type" (java.util.List/of "text/event-stream"))
+     (fn [_ _] true))))
+
+(def ^:private window-frame-types
+  "The frame types the WINDOW speaks. Everything else on the downlink is a run's AG-UI event
+  (`lib/mux.ts` routes by the same set)."
+  #{"window" "append" "page" "tail" "end"})
+
+(defn- mux-run!
+  "Drive one run over the DOWNLINK and answer `{:status :headers :body}`.
+
+  A RUN IS READ FROM `events.mux` NOW (ADR 0004, tickets 03/05): the POST answers an ACK and
+  the frames arrive on the socket. So this SUBSCRIBES FIRST -- the server filters a run's
+  frames by what a connection declared -- starts the run with the ack header, collects the
+  frames until the terminal, and hands back the SSE `post-run` has always answered with. A
+  REFUSED RUN sends no frames: the ack's own status and body are passed through whole."
+  [thread-id body origin]
+  (let [token  (str (java.util.UUID/randomUUID))
+        frames (atom [])
+        seen   (promise)
+        pending (atom "")
+        params (java.net.URLEncoder/encode (json/write-str [{:threadId thread-id}]) "UTF-8")
+        ws     (-> (HttpClient/newHttpClient)
+                   (.newWebSocketBuilder)
+                   (.buildAsync (URI/create (str "ws://127.0.0.1:" *port* "/api/events.mux"
+                                                 "?subscriber=" token "&sessions=" params))
+                                (reify java.net.http.WebSocket$Listener
+                                  (onText [_ socket data last]
+                                    ;; A BIG FRAME ARRIVES IN FRAGMENTS (the JDK client splits one
+                                    ;; message across several `onText` calls), and parsing a
+                                    ;; fragment throws -- which closes the socket and loses the
+                                    ;; terminal (measured: `post-run` waited its full 30s and the
+                                    ;; namespace hit the 300s limit). So a message is assembled
+                                    ;; until `last` says it is whole.
+                                    (swap! pending str data)
+                                    (when last
+                                      (let [frame (try (json/read-str @pending :key-fn keyword)
+                                                       (catch Throwable _ nil))]
+                                        (reset! pending "")
+                                        (when-some [t (:type frame)]
+                                          (when-not (contains? window-frame-types t)
+                                            (swap! frames conj (dissoc frame :seq))
+                                            (when (contains? #{"RUN_FINISHED" "RUN_ERROR"} t)
+                                              (deliver seen true))))))
+                                    (.request socket 1)
+                                    (java.util.concurrent.CompletableFuture/completedFuture nil))))
+                   (.join))
+        ;; THE DECLARATION MUST LAND BEFORE THE RUN STARTS, and the socket's own handshake can
+        ;; beat the server's bookkeeping -- so this asks the route that only ANSWERS once it is
+        ;; recorded, retrying that race away (the same one `lib/mux.ts` retries).
+        declared (loop [attempt 0]
+                   (let [resp (api-call :post "/api/events.mux/subscribe"
+                                        (json/write-str {:subscriber token
+                                                         :subscribe [{:threadId thread-id}]}))]
+                     (cond
+                       (= 200 (.statusCode resp)) true
+                       (< attempt 40) (do (Thread/sleep 20) (recur (inc attempt)))
+                       :else false)))
+        req    (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
+                   (.header "Content-Type" "application/json")
+                   (.header "X-Clj-Harness-Run-Ack" "1")
+                   (cond-> origin (.header "Origin" origin))
+                   (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
+                   (.build))
+        ack    (.send (HttpClient/newHttpClient) req
+                      (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
+    (if (not= 200 (.statusCode ack))
+      {:status (.statusCode ack) :headers (.headers ack) :body (.body ack)}
+      (do
+        (when declared (deref seen 30000 nil))
+        ;; `sendClose`, NOT `close`: the JDK WebSocket interface has no `close(int, String)`.
+        (.sendClose ws java.net.http.WebSocket/NORMAL_CLOSURE "done")
+        {:status 200
+         ;; THE TRANSPORT IS AN ACK, BUT THE BODY IS SSE: what `post-run` hands back is the run's
+         ;; frame stream, so its Content-Type says so. The rest of the ack's headers (the CORS
+         ;; answer, which is about the REQUEST) ride along untouched.
+         :headers (sse-headers ack)
+         :body (apply str (map (fn [frame] (str "data: " (json/write-str frame) "\n\n")) @frames))}))))
+
 (defn- post-run
   "A real request for THREAD-ID -- which must be a session this home knows, and
   `with-server` registers every thread it names so that every caller's premise holds.
@@ -229,10 +314,12 @@
 
   ORIGIN, when given, is sent as the page this request comes from -- which is the
   header a browser always sends on a cross-origin call and the one this file's
-  other callers leave out. The run edge is the case worth asking about that way:
-  its headers ride on the frames rather than on the ring response (see
-  harness.edge.http/runner), so a CORS rule that held for the management edge could
-  still be wrong here."
+  other callers leave out.
+
+  WHAT IT ANSWERS IS THE SAME SHAPE IT ALWAYS HAS -- an `HttpResponse` whose body is
+  SSE and whose status and headers are the run's answer -- but the bytes come from the
+  DOWNLINK now (`mux-run!` above): the POST is an ack. A caller reads it the way it
+  always did, and the route it reads is the one the page's agent reads."
   ([thread-id] (post-run thread-id {} nil))
   ([thread-id extra] (post-run thread-id extra nil))
   ([thread-id extra origin]
@@ -247,14 +334,11 @@
                                                 :content "\u770b\u770b\u8fd9\u4e2a\u9879\u76ee"}]
                                       :tools []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                  (.header "Content-Type" "application/json")
-                  (.header "Accept" "text/event-stream")
-                  (cond-> origin (.header "Origin" origin))
-                  (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                  (.build))]
-     (.send (HttpClient/newHttpClient) req
-            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+         result (mux-run! thread-id body origin)]
+     (reify java.net.http.HttpResponse
+       (statusCode [_] (:status result))
+       (headers [_] (:headers result))
+       (body [_] (:body result))))))
 
 (defn- log-dir
   "Where the server under test writes its logs, for a thread with NO project
@@ -880,9 +964,15 @@
           (fn [ls] (>= (count (filter #(= "event" (replay/kind %)) ls)) (count sent)))
           5000)
          (testing "what the socket carried is what the record kept, frame for frame"
-           (is (= sent (mapv replay/payload
-                             (filter replay/frame?
-                                     (replay/lines->records (replay/read-lines log)))))))
+           ;; THE TAG IS THE CARRIER'S: `mux-frame` adds `:threadId` to every frame so one
+           ;; socket can route many conversations, and the record has no such field (only the
+           ;; AG-UI frames that carry one themselves do). Removed from BOTH sides, the frames
+           ;; are the same frames -- which is what this case is about.
+           (is (= (mapv #(dissoc % :threadId) sent)
+                  (mapv #(dissoc % :threadId)
+                        (mapv replay/payload
+                              (filter replay/frame?
+                                      (replay/lines->records (replay/read-lines log))))))))
          (testing "and the record alone rebuilds the conversation the session held"
            (let [rebuilt (mapv #(select-keys % [:role :content])
                                (replay/lines->messages (replay/read-lines log)))
@@ -4992,7 +5082,9 @@
         out   (.getOutputStream sock)]
     (.write out (.getBytes (str "POST /api/agent HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                                 "Content-Type: application/json\r\n"
-                                "Accept: text/event-stream\r\n"
+                                ;; THE ACK DOOR: this socket is never read (`fire-run!` says so), so
+                                ;; it asks for the short answer rather than a stream nobody drains.
+                                "X-Clj-Harness-Run-Ack: 1\r\n"
                                 "Content-Length: " (count bytes) "\r\n\r\n")
                            StandardCharsets/UTF_8))
     (.write out bytes)
@@ -5011,8 +5103,10 @@
      (is (await-log #"start .*thread-id=diag-story") "the run's start is in the file")
      (is (await-log #"terminal event=RUN_FINISHED .*thread-id=diag-story")
          "and the frame that ended it")
-     (is (await-log #"stream-closed .*terminal=RUN_FINISHED .*thread-id=diag-story")
-         "and the close, carrying http-kit's own reason"))))
+     ;; AND NO 'STREAM CLOSED' LINE: a run is read from the DOWNLINK now (`post-run` above),
+     ;; so there is no SSE response to close, and the line that said so went with that route
+     ;; (ticket 05). The START and the TERMINAL are what this case is about.
+     )))
 
 (deftest a-call-that-does-not-run-is-named-in-the-process-log
   ;; `:outcome` lands on this line ONLY when the call did not simply pass, which is

@@ -835,7 +835,10 @@
       ;; thread and the run: the SSE response below is the DRIVING page's carrier for now
       ;; (ticket 03 migrates it), and this is what lets any OTHER page draw the live run
       ;; instead of only what the record has caught up to.
-      (mux-broadcast! thread-id (assoc frame :runId run-id))
+      ;; THE FRAME ITSELF, NOT A DECORATED COPY: the record logs this same map, and a test (and
+      ;; a reader) compares the wire to the record frame for frame -- an extra key added only on
+      ;; the way out would make the two disagree.
+      (mux-broadcast! thread-id frame)
       (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
                              StandardCharsets/UTF_8)
             head  (when @first?
