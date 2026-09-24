@@ -392,3 +392,101 @@
     (is (= 1000 (:context-window (:latest-start band)))
         "the run's own call is what the band took, not the harness's")
     (is (= "usage" (:baseline (pressure/state->pressure band messages pressure/default-ratios))))))
+
+;; ------------------------------- the delivery mode decides whether a hook move counts
+
+(defn- sys-at
+  "A system row with its hooks hash ON THE ENVELOPE, written by DELIVERY
+  (:in-place / :replace) -- the shape harness.edge.http writes since ticket 02."
+  [ts run-id text hooks-hash delivery]
+  (assoc (record ts run-id "message" {:role "system" :content text})
+         :source "system-prompt" :hash "h" :hooks-names-hash hooks-hash
+         :instruction-updates delivery))
+
+(defn- user-at [ts run-id id text]
+  (assoc (record ts run-id "message" {:role "user" :content text})
+         :source "client" :id id))
+
+(defn- update-at
+  "A developer message an instruction update rode in on: no id, its own source, in
+  the array the call was handed."
+  [ts run-id text]
+  (assoc (record ts run-id "message" {:role "developer" :content text})
+         :source "instruction-update"))
+
+(defn- turn-one
+  "Run `r1`: anchored on the vendor's number, assembled from hooks `H1`, with TOOLS."
+  [delivery tools]
+  [(user-at 0 "r1" "u1" "hi")
+   (sys-at 1 "r1" "OLD" "H1" delivery)
+   (start 10 1000 tools)
+   (end 20 (usage 900 5))
+   finished])
+
+(defn- turn-two
+  "Run `r2`: its system row is (TEXT . HOOKS), delivered by DELIVERY, with EXTRA
+  rows after it (an instruction update, a second tool call)."
+  [delivery text hooks extra]
+  (vec (concat [(user-at 101 "r2" "u2" "more")
+                (sys-at 102 "r2" text hooks delivery)]
+               extra)))
+
+(deftest a-moved-hook-set-invalidates-the-anchor-under-replace
+  ;; :replace swaps message[0], so a different hook set means a different prefix.
+  (is (= "estimated"
+         (:baseline (pressure-of (vec (concat (turn-one :replace nil)
+                                              (turn-two :replace "NEW" "H2" []))))))))
+
+(deftest a-moved-hook-set-keeps-the-anchor-under-in-place
+  ;; Under :in-place message[0] is FROZEN -- the system row still names H1 -- so the
+  ;; anchor stands, and the new instruction full text is charged as the delta.
+  (let [without (vec (concat (turn-one :in-place nil) (turn-two :in-place "OLD" "H1" [])))
+        with    (vec (concat (turn-one :in-place nil)
+                             (turn-two :in-place "OLD" "H1"
+                                       [(update-at 103 "r2" "NEW INSTRUCTIONS")])))
+        a       (pressure-of without)
+        b       (pressure-of with)]
+    (is (= "usage" (:baseline b)))
+    (is (= (pressure/estimate-message {:role "developer" :content "NEW INSTRUCTIONS"})
+           (- (:pressureTokens b) (:pressureTokens a)))
+        "the difference between the two runs IS the new instruction text")))
+
+(deftest a-moved-tool-set-invalidates-the-anchor-in-both-modes
+  ;; The tool array sits in FRONT of the messages: a name added or removed breaks
+  ;; the prefix whichever way an instruction would have been delivered.
+  (doseq [delivery [:in-place :replace]]
+    (let [records (vec (concat (turn-one delivery (tool-table "read" 10))
+                               (turn-two delivery "OLD" "H1"
+                                         [(record 110 "r2" "model/start"
+                                                  {:model "scripted" :tools (tool-table "grep" 10)})])))]
+      (is (= "estimated" (:baseline (pressure-of records)))
+          (str "delivery " delivery " must drop the anchor when the names move")))))
+
+(deftest a-tool-description-change-keeps-the-anchor-in-both-modes
+  (doseq [delivery [:in-place :replace]]
+    (let [records (vec (concat (turn-one delivery (tool-table "read" 10))
+                               (turn-two delivery "OLD" "H1"
+                                         [(record 110 "r2" "model/start"
+                                                  {:model "scripted" :tools (tool-table "read" 40)})])))]
+      (is (= "usage" (:baseline (pressure-of records)))
+          (str "delivery " delivery ": the NAME set did not move")))))
+
+(deftest a-cross-mode-switch-drops-the-anchor
+  ;; The two modes put DIFFERENT bytes at message[0], so an anchor taken under one
+  ;; is not an assertion about a request sent under the other -- even when the hooks
+  ;; hash happens to be the same.
+  (is (= "estimated"
+         (:baseline (pressure-of (vec (concat (turn-one :replace nil)
+                                              (turn-two :in-place "OLD" "H1" [])))))))
+  (is (= "estimated"
+         (:baseline (pressure-of (vec (concat (turn-one :in-place nil)
+                                              (turn-two :replace "OLD" "H1" []))))))))
+
+(deftest a-row-written-before-the-mode-existed-reads-as-replace
+  ;; An old record has no mode on the envelope. It must not be read as :in-place --
+  ;; that would keep an anchor this harness has no reason to trust.
+  (let [old-two (fn [] [(user-at 101 "r2" "u2" "more")
+                        (assoc (record 102 "r2" "message" {:role "system" :content "NEW"})
+                               :source "system-prompt" :hash "h" :hooks-names-hash "H2")])
+        records (vec (concat (turn-one :replace nil) (old-two)))]
+    (is (= "estimated" (:baseline (pressure-of records))))))

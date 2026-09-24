@@ -92,6 +92,7 @@
     "fetchTitle": "Ask the vendor what it serves",
     "offeredEmpty": "The vendor listed no models.",
     "offeredHint": "Tick what you want in the catalog. Each arrives declaring text only — raise it if the vendor takes images.",
+    "offeredSuggested": "suggested: {{value}}",
     "takeWithCount_one": "Add {{count}} to the catalog",
     "takeWithCount_other": "Add {{count}} to the catalog",
     "errorNote": "Nothing was written — config.edn is exactly as it was.",
@@ -111,7 +112,12 @@
     "maxOut": "max out",
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
-    "limitsNote": "Reported, not enforced. Omit what you have not verified."
+    "limitsNote": "Reported, not enforced. Omit what you have not verified.",
+    "instructionUpdates": "Instruction updates",
+    "instructionUpdatesLabel": "How this model receives a moved instruction",
+    "instructionUpdatesUndeclared": "not declared",
+    "instructionUpdatesInPlace": "in-place",
+    "instructionUpdatesReplace": "replace"
   },
   "mcp": {
     "heading": "MCP servers",

@@ -156,6 +156,14 @@
   (the client's messages, the opening blocks, the skill bodies that rode along) and
   the returned side (what the kernel appended). The injected context is not a fourth
   bucket: it IS a message line, and it is in the conversation.
+ 
+  AN INSTRUCTION UPDATE (role \"developer\", source \"instruction-update\") IS IN THE
+  CONVERSATION TOO, and that is a decision, not a default: the `system` bucket is
+  literally the record's system row -- message[0] as it went out -- while an update is
+  an ordinary tail message the model was handed, and turning `system` into 'anything
+  instructional' would answer a different question than the record's own split does.
+  Its price is visible and honest: under :in-place the chain grows in the conversation
+  bucket because it is resent every run (`.scratch/instruction-updates` decision 3).
 
   THE KEYS ARE STRINGS, like the trajectory's item kinds: this is an enum-shaped
   value that goes out on the wire and comes back to a client that matches on it, and

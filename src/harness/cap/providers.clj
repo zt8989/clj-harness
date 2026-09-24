@@ -113,11 +113,13 @@
   #{:context-window :max-output-tokens})
 
 (def model-keys
-  "Everything a model entry may carry: the two modality sets it MUST declare and
-  the two counts it MAY. A key outside this fails by name -- a stray
-  :context_window would otherwise be silently dropped, and the entry would look
-  like it declared nothing."
-  (into #{:input :output} counts))
+  "Everything a model entry may carry: the two modality sets it MUST declare, the
+  two counts it MAY, and the one delivery capability it MAY
+  (`.scratch/instruction-updates`): whether the endpoint accepts a mid-conversation
+  `developer` message, so a moved instruction can ride the tail instead of replacing
+  `message[0]`. A key outside this fails by name -- a stray :context_window would
+  otherwise be silently dropped, and the entry would look like it declared nothing."
+  (into #{:input :output :instruction-updates} counts))
 
 (def knobs
   "The three things a tier may choose. Everything else about a provider is the
@@ -130,9 +132,11 @@
   counts ride along with the modalities: they are answers about the model that
   was selected, and a reader asking 'what is this session on' wants them. The
   display name is an answer about the PROVIDER rather than the model, and it
-  rides along for the same reason: it is the catalog's to say, never a tier's."
+  rides along for the same reason: it is the catalog's to say, never a tier's. The
+  delivery capability is the model's, and it comes resolved because the sent array
+  depends on it -- a tier does not choose it, and `selection` refuses it by name."
   [:protocol :base-url :model :display-name :input :output
-   :context-window :max-output-tokens])
+   :context-window :max-output-tokens :instruction-updates])
 
 (def catalog-fields
   "What a TIER may never name: everything the catalog answers once a selection has
@@ -268,6 +272,28 @@
     {:input  (modalities entry :input input-types where)
      :output (modalities entry :output output-types where)}))
 
+
+(def ^:private instruction-update-modes
+  "The delivery modes a model entry may declare, and the WHOLE of them: a name
+  outside this is refused by name rather than silently read as the default, because
+  a person who wrote :inplace would otherwise believe it was in force."
+  #{:in-place :replace})
+
+(defn- instruction-updates-of
+  "ENTRY's declared :instruction-updates as a keyword, checked against the closed
+  set -- or nil when the entry is silent, which is the DEFAULT's business and not
+  this function's: `resolved-fields` is where the silence becomes :replace, so the
+  report can still tell 'said nothing' from 'said :replace'."
+  [entry where]
+  (when-let [v (get entry :instruction-updates)]
+    (let [k (->kw v ":instruction-updates" where)]
+      (when-not (instruction-update-modes k)
+        (fail (str where " declares :instruction-updates " (pr-str k)
+                   ", which this harness does not know; it knows "
+                   (pr-str (sortable (map name instruction-update-modes))))
+              {:where where :instruction-updates v
+               :known (sortable (map name instruction-update-modes))}))
+      {:instruction-updates k})))
 (defn- check-model
   "One model entry -> what it declares: the two required modality sets, plus
   whichever of the two counts it states.
@@ -277,7 +303,8 @@
   typo into a model that quietly declares nothing."
   [entry where]
   (unknown-keys! where entry model-keys)
-  (merge (modalities-of entry where) (limits entry where)))
+  (merge (modalities-of entry where) (limits entry where)
+         (instruction-updates-of entry where)))
 
 ;; --------------------------------------------------------- one provider entry
 
@@ -388,7 +415,8 @@
                   {:missing k})))
         (let [id    (str (:model entry))
               half? (or (contains? entry :input) (contains? entry :output))
-              dirs  (cond-> (limits entry where)
+              dirs  (cond-> (merge (limits entry where)
+                                   (instruction-updates-of entry where))
                       half? (merge (modalities-of entry where)))]
           (cond-> {:protocol (:protocol entry)
                    :base-url (:base-url entry)
@@ -586,6 +614,65 @@
   (into {} (map (fn [[n e]] [(->kw n "a provider name" "harness.builtin-raw")
                              (check-provider n e)]))
         builtin-raw))
+
+(def ^:private instruction-updates-hints
+  "MODEL-ID PREFIX -> the delivery mode to SUGGEST when a vendor's own listing is
+  taken into the catalog. A suggestion, not a rule: it prefills a form field a person
+  sees and can change, and run time never consults it (`probe-models` attaches it to
+  the probe's answer and nothing else).
+ 
+  WHY THE TABLE EXISTS. Taking an id into the catalog means either writing a
+  `:instruction-updates` value or leaving that model on the conservative default;
+  leaving a whole family that plainly accepts a mid-conversation `developer` message
+  on `:replace` is a saving nobody would find. So the families whose FIRST-PARTY
+  endpoint is the OpenAI-compatible protocol -- where `developer` is a role in the
+  specification -- arrive already saying so, and everything else arrives silent.
+ 
+  EVERY ROW HAS A BASIS, and a row without one does not go in (`.scratch/
+  instruction-updates` decision 8). A row is an assertion about a VENDOR, and a wrong
+  one points at `:in-place` for an endpoint that would refuse the message. The known
+  limit of an id-keyed table is written down rather than wished away: an id names a
+  MODEL, not the endpoint serving it (measured 2026-09-25 -- a kongming relay rejects
+  `developer` with 422 while listing `deepseek-*` ids). The suggestion stays visible
+  and editable and the runtime rule stays the file's, which is what makes the limit
+  survivable."
+  [["gpt-"      :in-place]  ;; OpenAI's own Chat Completions: `developer` is the role the spec added for exactly this.
+   ["o1"        :in-place]  ;; OpenAI's reasoning models, same first-party endpoint.
+   ["o3"        :in-place]
+   ["o4"        :in-place]
+   ["claude-"   :in-place]  ;; Anthropic's OpenAI-compatible endpoint names its models this way.
+   ["deepseek-" :in-place]  ;; DeepSeek's own API is the OpenAI-compatible shape (a relay listing these ids may not be).
+   ["kimi-"     :in-place]  ;; Moonshot's first-party endpoint.
+   ["moonshot-" :in-place]
+   ["qwen"      :in-place]  ;; Alibaba's compatible-mode endpoint; the family is spelled qwen-, qwen2.5-, qwen3- …
+   ["glm-"      :in-place]]) ;; Zhipu's OpenAI-compatible endpoint.
+
+(defn suggested-instruction-updates
+  "TABLE + MODEL-ID -> the value to suggest, or nil when nothing speaks for it.
+ 
+  IT TAKES ITS TABLE AS AN ARGUMENT so the longest-prefix rule can be asserted
+  directly (a test feeds an overlapping table -- `gpt-4` and `gpt-4o` -- rather than
+  redefining a var).
+ 
+  LONGEST PREFIX WINS, and nothing else may decide: 'the first that matches' would
+  make the answer depend on the iteration order of a map, which is not a fact about
+  the vendor. `starts-with?` does the whole comparison -- no trimming, no case
+  folding, because the id is the vendor's own spelling and normalising it would be a
+  second answer to 'which model is this'.
+ 
+  A GATEWAY OFTEN WRITES THE VENDOR INTO THE ID (`openai/gpt-4o-mini`,
+  `moonshotai/kimi-k2`), and the rule speaks about the MODEL rather than about the
+  endpoint's spelling -- so the part after the LAST slash is tried as well, and the
+  longest prefix still wins across both spellings."
+  [table id]
+  (let [s    (str id)
+        tail (if-some [i (str/last-index-of s "/")] (subs s (inc i)) s)
+        hits (for [candidate (distinct [s tail])
+                   [prefix value] table
+                   :when (str/starts-with? candidate (str prefix))]
+               [prefix value])]
+    (when-let [found (seq hits)]
+      (second (apply max-key (comp count first) found)))))
 
 (defn- over
   "The user's entry for NAME laid over the built-in one, field by field, with
@@ -816,11 +903,18 @@
     (let [m (get models id)]
       (cond-> (merge {:protocol (:protocol entry)
                       :base-url (:base-url entry)
-                      :model    id}
+                      :model    id
+                      ;; THE DEFAULT LIVES HERE AND NOWHERE ELSE. A model that said
+                      ;; nothing about :instruction-updates is served with :replace, so
+                      ;; 'what is this session on' has an answer without a second rule at
+                      ;; the delivery site; the report (model-row) still shows the file's
+                      ;; silence, because 'said nothing' and 'said :replace' are two facts
+                      ;; a form must not be made to confuse.
+                      :instruction-updates (or (:instruction-updates m) :replace)}
                      ;; The model's own declaration travels as ONE unit: whatever
-                     ;; check-model validated, keyed by model-keys -- modalities
-                     ;; and counts alike. Copying them one at a time is how a
-                     ;; third count would get declared, validated, and then
+                     ;; check-model validated, keyed by model-keys -- modalities, counts
+                     ;; and the delivery capability alike. Copying them one at a time is
+                     ;; how a third field would get declared, validated, and then
                      ;; silently left out of every resolution.
                      (select-keys m model-keys))
         ;; The PROVIDER's label, not the model's: it travels from the entry for the
@@ -1579,13 +1673,17 @@
 
 (defn- model-row
   "One model entry -> the row a form edits: the id, its two modality sets as wire
-  strings, and whichever counts it states."
+  strings, whichever counts it states, and its delivery capability IF THE FILE SAID
+  ONE. THE SILENCE IS KEPT, deliberately: a row that always carried a value could
+  not be used to tell 'never declared' from 'declared :replace', and a save that
+  fills the default in for every model would rewrite lines nobody touched."
   [id m]
   (cond-> {:id     id
            :input  (set->wire (:input m))
            :output (set->wire (:output m))}
-    (some? (:context-window m))    (assoc :context-window (:context-window m))
-    (some? (:max-output-tokens m)) (assoc :max-output-tokens (:max-output-tokens m))))
+    (some? (:context-window m))       (assoc :context-window (:context-window m))
+    (some? (:max-output-tokens m))    (assoc :max-output-tokens (:max-output-tokens m))
+    (some? (:instruction-updates m))  (assoc :instruction-updates (:instruction-updates m))))
 
 (defn registry-report
   "The catalog as the settings page needs it:
@@ -2084,7 +2182,7 @@
   (fn [provider] (openai-models provider)))
 
 (defn probe-models
-  "What a vendor serves, asked of the vendor itself: {:models [id …]}, or a named
+  "What a vendor serves, asked of the vendor itself: {:models [{:id .. :instruction-updates ..}]}, or a
   failure carrying the vendor's own answer.
 
   ENDPOINT AND PROTOCOL COME FROM THE CALLER, or from the catalog when the caller
@@ -2122,11 +2220,21 @@
       (fail (str "cannot ask a " (pr-str proto) " vendor: this harness speaks "
                  (pr-str (protocol-names)))
             {:protocol proto}))
-    {:models (*list-models* {:protocol proto
-                             :base-url url
-                             :api-key  (or (:api-key asked)
-                                           (when (some? k) (api-key k)))})
-     :asked    url}))
+    (let [ids (*list-models* {:protocol proto
+                           :base-url url
+                           :api-key  (or (:api-key asked)
+                                         (when (some? k) (api-key k)))})]
+      ;; THE CATALOG'S OPINION IS ADDED TO THE VENDOR'S ANSWER, not folded into the
+      ;; seam: `*list-models*` still answers with the ids the vendor listed (a stub
+      ;; keeps returning a vector of ids), and `suggested-instruction-updates` says
+      ;; what to prefill for each. A miss carries NO key, the same 'only when there is
+      ;; something to say' the report keeps.
+      {:models (mapv (fn [id]
+                       (if-some [v (suggested-instruction-updates instruction-updates-hints id)]
+                         {:id id :instruction-updates v}
+                         {:id id}))
+                     ids)
+       :asked  url})))
 
 (defn put-defaults!
   "KNOBS (a map over the three knobs) -> the default tier now in config.edn's

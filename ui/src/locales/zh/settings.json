@@ -90,6 +90,7 @@
     "fetchTitle": "问一下这个提供方都提供什么",
     "offeredEmpty": "这个提供方没有列出任何模型。",
     "offeredHint": "勾选你想放进模型目录的。每个加进来时只声明文本——如果这个提供方也收图片，就把它加上。",
+    "offeredSuggested": "建议：{{value}}",
     "takeWithCount_other": "把 {{count}} 个加入模型目录",
     "errorNote": "什么都没写进去——config.edn 与原来一模一样。",
     "save": "保存提供方",
@@ -108,7 +109,12 @@
     "maxOut": "最大输出",
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
-    "limitsNote": "只是报出来，不强制执行。拿不准的就别填。"
+    "limitsNote": "只是报出来，不强制执行。拿不准的就别填。",
+    "instructionUpdates": "指令更新",
+    "instructionUpdatesLabel": "这个模型怎么收下一条变动了的指令",
+    "instructionUpdatesUndeclared": "未声明",
+    "instructionUpdatesInPlace": "in-place",
+    "instructionUpdatesReplace": "replace"
   },
   "mcp": {
     "heading": "MCP 服务器",

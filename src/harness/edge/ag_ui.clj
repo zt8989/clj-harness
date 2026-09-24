@@ -929,3 +929,35 @@
   (provider-array (absorbed (cond-> (vec messages)
                               (seq context) (conj (context-entry context))))
                   prompt))
+
+(defn place-updates
+  "A provider array already built by `inbound` + UPDATES -> the same array with one
+  `developer` message per update inserted before the LAST user message.
+ 
+  WHERE IT GOES AND WHY. `system -> history -> developer updates -> the question`:
+  the update is the PREMISE of the question, so it stands before it, while the
+  context and skill bodies the pre-LLM step appends are MATERIAL FOR the question and
+  stay behind it (`.scratch/instruction-updates` decision 3). The message is the FULL
+  new instruction text, not a diff -- the vendor's instruction slot overwrites, and a
+  diff would ask the model to merge two sources.
+ 
+  IT ANSWERS NIL WHEN IT CANNOT PLACE THEM, and that is a fact the caller must act on
+  rather than a failure to swallow: a history whose last message is not a user turn has
+  no 'before the question' to be before, and guessing a position would put the update
+  somewhere the model was never handed it. The caller falls back to :replace and says
+  so (decision 3). An empty UPDATES returns MESSAGES unchanged.
+ 
+  THE CHAIN IS RESENT EVERY RUN because the client does not hold these messages --
+  they are not entries of the conversation and never come back. Their price is the
+  tail, which every run re-sends anyway; the SHARED PREFIX (message[0] plus the
+  history the client restates) is what stays cached, and that is the whole difference
+  from :replace."
+  [messages updates]
+  (if (empty? updates)
+    messages
+    (let [msgs (vec messages)
+          i    (dec (count msgs))]
+      (when (and (>= i 0) (= "user" (:role (nth msgs i))))
+        (into (subvec msgs 0 i)
+              (concat (map (fn [text] {:role "developer" :content text}) updates)
+                      (subvec msgs i)))))))

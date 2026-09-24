@@ -80,6 +80,14 @@
 
 (defonce frozen-prompt (atom nil))
 
+(defonce ^:private prompt-replacements (atom 0))
+;; HOW MANY TIMES THE FROZEN OPENING WAS DELIBERATELY REPLACED. prompt.md's CONTENT is
+;; not part of any signature -- the owner's rule is that only name sets are compared
+;; (`.scratch/instruction-updates` decision 1) -- but a `reset-prompt!` is a person
+;; saying 'the opening moved', and a signature that cannot see it would let a cached
+;; instruction text outlive the file it was read from. So the epoch is the EXPLICIT
+;; invalidation door: cheap, content-free, and it moves exactly when the file is re-read.
+
 (defn prompt
   "The system prompt, FROZEN: prompt.md is read once -- on the first call -- and
   every run after that reuses the same text. The provider's prefill (prompt
@@ -95,7 +103,19 @@
   freezing: the agent -- or you, in the REPL -- opts into a new prefix, trading
   one cold prefill for the change."
   []
-  (reset! frozen-prompt nil))
+  (reset! frozen-prompt nil)
+  ;; THE ONE THING WATCHING THIS FILE MOVES WITH IT: a cached instruction text that
+  ;; was assembled under the old opening must be rebuilt, and the epoch is how the
+  ;; signature (`.scratch/instruction-updates`) learns that without carrying the bytes.
+  (swap! prompt-replacements inc)
+  nil)
+
+(defn prompt-epoch
+  "How many times the frozen opening has been deliberately replaced in this process.
+  A reader that caches anything derived from `prompt` compares this value -- it is the
+  explicit invalidation door, not a content hash."
+  []
+  @prompt-replacements)
 
 ;; ------------------------------------------------------------ openai-completions
 

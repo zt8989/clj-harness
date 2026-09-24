@@ -4693,14 +4693,18 @@
        (try
          (stub! (fn [vendor]
                   (swap! seen conj vendor)
-                  ["gpt-x" "gpt-y"]))
+                  ;; ONE ID FROM A FAMILY THE PREFIX TABLE SPEAKS FOR, ONE IT DOES NOT:
+                  ;; the answer's rows are only interesting if both sides are asserted.
+                  ["gpt-x" "acme-7"]))
          (testing "the ids the vendor lists come back"
            (let [resp (ask {"base-url" "https://gateway.example/v1"
                             "protocol" "openai-completions"
                             "api-key"  "sk-typed-into-the-form"})
                  body (read-json resp)]
              (is (= 200 (.statusCode resp)))
-             (is (= ["gpt-x" "gpt-y"] (:models body)))
+             (is (= [{:id "gpt-x" :instruction-updates "in-place"} {:id "acme-7"}]
+                    (:models body))
+                 "the id the vendor listed, plus the catalog's suggestion when one exists")
              (is (= "https://gateway.example/v1" (:asked body)))
              (testing "and the key the FORM typed is the one that was sent"
                (is (= "sk-typed-into-the-form" (:api-key (last @seen))))
@@ -4715,7 +4719,8 @@
            (let [resp (ask {"id" "openrouter"})
                  body (read-json resp)]
              (is (= 200 (.statusCode resp)))
-             (is (= ["gpt-x" "gpt-y"] (:models body)))
+             (is (= [{:id "gpt-x" :instruction-updates "in-place"} {:id "acme-7"}]
+                    (:models body)))
              (is (= "https://openrouter.ai/api/v1" (:asked body))
                  "the catalog's endpoint, not one the caller guessed")
              (is (= :openai-completions (:protocol (last @seen))))
@@ -6586,3 +6591,86 @@
               (is (= before (slurp config :encoding "UTF-8")))))))
       (finally
         (if saved (spit config saved :encoding "UTF-8") (io/delete-file config true))))))
+
+;; ------------------------------------ instruction updates on the record (tickets 02/03)
+
+(defn- rows-of-kind [lines]
+  (filter #(= "message" (replay/kind %)) lines))
+
+(defn- with-iu-server
+  "A live server whose thread is served by a scripted provider carrying
+  INSTRUCTION-UPDATES on its provider map (the pin IS the resolved provider)."
+  [thread-id turns instruction-updates f]
+  (providers/use-provider! thread-id
+                           (cond-> (fake/scripted turns)
+                             instruction-updates (assoc :instruction-updates instruction-updates)))
+  (start-session! thread-id)
+  (let [stop (http/start! {:port 0})]
+    (try
+      (binding [*port* (:local-port (meta stop))]
+        (f))
+      (finally
+        (stop)
+        (support/wipe-hooks!)
+        (providers/use-provider! thread-id nil)))))
+
+(deftest an-in-place-run-freezes-message-zero-and-writes-the-update-on-the-record
+  (let [thread-id "iu-http-in-place"
+        turns     [{:content "first answer"} {:content "second answer"}]]
+    (with-iu-server thread-id turns :in-place
+      (fn []
+        (post-run thread-id)
+        (let [f (log-file thread-id)]
+          (wait-for-recorded f (fn [ls]
+                                 (some #(= "first answer" (get-in (replay/payload %) [:content])) ls))
+                             3000)
+          (let [before  (wait-for-recorded f (fn [ls] (some replay/system-prompt? ls)) 3000)
+                first-sys (->> before (filter replay/system-prompt?) first)]
+            (is (empty? (filter #(= "instruction-update" (:source %)) before))
+                "nothing moved, so nothing rides the tail")
+            (support/write-hooks! {:system-prompt [{:command "printf 'A NEW INSTRUCTION'"}]})
+            (post-run thread-id {:append [{:id "u2" :role "user" :content "another question"}]})
+            (let [after    (wait-for-recorded
+                            f (fn [ls] (some #(= "instruction-update" (:source %)) ls)) 3000)
+                  sys-rows (filterv replay/system-prompt? after)
+                  updates  (filterv #(and (= "message" (replay/kind %))
+                                          (= "instruction-update" (:source %)))
+                                    after)
+                  u2       (first (filter #(and (= "message" (replay/kind %)) (= "u2" (:id %))) after))]
+              (is (= 2 (count sys-rows)) "one system row per run")
+              (is (= (get-in (replay/payload first-sys) [:content])
+                     (get-in (replay/payload (second sys-rows)) [:content]))
+                  "message[0] is byte-identical to the previous run's -- the prefix held")
+              (is (= 1 (count updates)) "exactly ONE developer message rides the tail")
+              (is (= "developer" (get-in (replay/payload (first updates)) [:role])))
+              (is (str/includes? (get-in (replay/payload (first updates)) [:content])
+                                 "A NEW INSTRUCTION")
+                  "carrying the FULL new instruction text")
+              (is (< (.indexOf (vec after) (first updates)) (.indexOf (vec after) u2))
+                  "and standing before the new question")
+              (is (= "in-place" (:instruction-updates (second sys-rows)))
+                  "the row says which delivery the run was served by (ticket 06)"))))))))
+
+(deftest a-replace-run-swaps-message-zero-and-writes-no-update
+  (let [thread-id "iu-http-replace"
+        turns     [{:content "first answer"} {:content "second answer"}]]
+    (with-iu-server thread-id turns nil
+      (fn []
+        (post-run thread-id)
+        (let [f (log-file thread-id)]
+          (wait-for-recorded f (fn [ls]
+                                 (some #(= "first answer" (get-in (replay/payload %) [:content])) ls))
+                             3000)
+          (let [before (wait-for-recorded f (fn [ls] (some replay/system-prompt? ls)) 3000)]
+            (support/write-hooks! {:system-prompt [{:command "printf 'A NEW INSTRUCTION'"}]})
+            (post-run thread-id {:append [{:id "u2" :role "user" :content "another question"}]})
+            (let [after    (wait-for-recorded
+                            f (fn [ls] (some #(= "second answer" (get-in (replay/payload %) [:content])) ls))
+                            3000)
+                  sys-rows (filterv replay/system-prompt? after)]
+              (is (empty? (filter #(= "instruction-update" (:source %)) after))
+                  "the default delivery never writes a developer message")
+              (is (not= (get-in (replay/payload (first (filter replay/system-prompt? before))) [:content])
+                        (get-in (replay/payload (last sys-rows)) [:content]))
+                  "message[0] IS the new text instead")
+              (is (= "replace" (:instruction-updates (last sys-rows)))))))))))

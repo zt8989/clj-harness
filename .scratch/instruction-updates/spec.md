@@ -175,3 +175,90 @@
 ## 已验证到什么程度
 
 **未验证（尚未落地）。** 基线：见票 05 落地的报数。
+
+## 落地记录
+
+2026-09-25 — **票 01、02、03、06 与 04 的后端一半已落地**（工作区直接改在 `main`，未开 worktree）。
+下面按「与票面不同的地方」写；票面没改。
+
+### 票 01（比较的缝与那份记忆）
+
+- **那份记忆与签名住在 `harness.cap.instruction-updates`**（新命名空间）：`signature` / `plan` / `commit!` /
+  `forget!` / `fallback`。`plan` 在 hook sink 绑定之内被调用（`edge/http.clj` 的两条 run 路径里，
+  `cap.system-prompt/assemble*` 原来的位置），没变就复用上一轮的文本、**一个 hook 都不跑**。
+- **`hooks` 那一半的名字集合换了个算法**：`cap.system-prompt/hooks-names-hash` 直接读
+  `hooks/declarations-at`，不跑 hook 就能算。`assemble*` 仍用它自己那次 `emit` 的 `:hooks`，两者在
+  有 sink 时相等（SystemPrompt 点没有 matcher），docstring 写下了这个边界。
+- **跨特征前置（票面写的 `system-prompt-blocks` 票 03）换了个落法**：那个 `<tools>` 块**故意不进正文**
+  （该 spec 2026-09-24 的边界，决策 6 不变），所以「工具名字集合」的家不是 prompt 正文，而是
+  `model/start` 上的 `:tools-names-hash`（`.scratch/model-surface-and-meter` 票 04）与 system 行信封上的
+  `:tools`。本票的签名因此照 `kernel.tools` 现算，不依赖那个块。
+- **偏离决策 6 一处（记明细）**：票面写「签名不含 provider / binding 档，本项目今天也不允许中途换它们」。
+  实际上 `POST /api/project` 就是中途换绑定，`cap/project/bind!` 也允许；只比两个 name hash 会让
+  `:in-place` 的会话把旧的 `<project>` 块**一直**发下去（模型读到一句不再成立的围栏）。所以 `signature`
+  多带了 `:project-dir` 与 `:prompt-epoch`（后者是 `reset-prompt!` 的显式作废门，`llm/prompt-epoch`）。
+  两个 name hash 一字未动；验收里「没变就不重建 / 只改描述不算变」照样成立。
+- **`:in-place` 下 system 那条 `message` 行写的是 message[0] 的字节**（冻结那份），不是这一轮的新组装——
+  这是票 06 能只靠 `:sig` 就分档的原因（见下）。
+
+### 票 02（原位的送达）
+
+- 能力位在 `cap/providers.clj`：`model-keys` / `resolved-fields` 各加 `:instruction-updates`，
+  `check-model` 按**闭集**校验值（`instruction-updates-of`，写错名字指名报错），缺省落在
+  `fold-and-assemble`（`:replace`），`model-row` 只在文件写过时才带上它。内联那个扁平形状也跟着带。
+- 拼装点在 `edge/ag-ui/place-updates`（纯函数）：插在**最后一条 user 消息之前**；最后一条不是 user 就
+  **答 nil**，调用方退回 `:replace` 并记一行 `:instruction/update-unplaced`。`developer` 这个 role 只
+  在这里拼一次。
+- **更新行落在记录上**（票 03 的第 2 条）：`edge/http.clj` 在每个 run 写条目行时，把更新行插在
+  「新提问」那条条目之前；来源是 `"instruction-update"`。它**不是会话条目**（`replay/entries` /
+  `trajectory/entry-row?` 都不收）。
+
+### 票 03（不支持的端点与读侧三处）
+
+- `:replace` 是缺省那一档，也是「没有记忆 / 历史不合法」时的落点；它与 `:in-place` 各有一条端到端用例
+  （`http_test`：两条 run、中间换一次 hook 集合，断言 message[0] 逐字节相同 / 换成新全文、更新条数）。
+- 记录：`message` 行的 submitted 侧含那条 developer 行（用例读记录断言）。
+- `run-segments` 仍按 record kind 切；developer 行不是 entry，切分不变。
+- `context` 的归属**定为 conversation 桶**（`shares` 的 docstring 写了理由：`system` 桶就是记录里那一条
+  role=system 的行，更新是一条尾部消息）。
+
+### 票 06（压力表的锚点）
+
+- 判据加了**交付方式**一格：system 行的信封写 `:instruction-updates`，`band-step` 折成 `latest-mode`，
+  `anchored?` 要求锚那次与最新一次**同档**。`:sig` 只分得出「同档下 hook 集合变没变」——`:in-place` 下
+  system 行是冻结的，hook 变了 `:sig` 也不变（锚点保留、新指令算进 delta）；`:replace` 下 system 行换成
+  新文本，`:sig` 变（锚点作废）。跨档切换 message[0] 是另一份字节，所以同档这一条把两种切换都作废。
+- 老记录（信封没有这个键）读成 `:replace`，保守那一档。
+- `instruction-update` 行加进了 `band-step` 的「run 自己的注入」集合，所以**在线表针与离线折法对同一份
+  记录给出同一个答案**（`messages-in` 的 `injected-rows` 本来就不看来源、只看有没有 id）。
+
+### 票 04（按模型配置能力位）
+
+- **后端与设置页已落**：`ModelRow` / payload 多一个 `"instruction-updates"`；Models 页每个 model 行多一个
+  **三态** `<select>`（未声明 / `in-place` / `replace`），未声明就删键；中英两套文案一起加。
+- **决策 8 的内置前缀预填也已落**（主人当日拍板「照票做，但只对走 Models 接口那些 provider；手填的按
+  custom 走」）：`cap/providers.clj` 里一张 `instruction-updates-hints`（前缀 → 值的 vector，旁边逐行写
+  依据），`suggested-instruction-updates` 是一个**收表的纯函数**、最长前缀赢；`probe-models` 把 id 变成行
+  （`{:id .. :instruction-updates ..}`，没命中的没有那个键），`*list-models*` 那道缝合线答的还是 id 向量；
+  前端只照搬答案预填，自己不做前缀匹配，手打进来的 id 不预填。**实测记在旁边的一句话里**：id 名字是模型、
+  不是端点——kongming 那台网关列 `deepseek-*` 却拿 422 拒 `developer`（2026-09-25 实测）。
+- **真机走查**（2026-09-25）：真配置的一份临时副本 + 真厂商 + Playwright。三态控件看得见；Fetch 一个 provider
+  之后命中前缀表的 id 印「建议：`in-place`」（`z-ai/glm-5.3-prime`、`openai/gpt-6-luna-pro`），没命中的只有
+  id（`fireworks/ember-1`）；take 进来后命中那行的 `<select>` 停在 `in-place`、没命中的停在未声明。
+
+### 票 05（收口）
+
+- `docs/architecture/overview.md`：铁律 2 的推论补了「送达有两种，选择权在端点能力位」；状态表里
+  system 消息那一行补了那份**进程内存**。
+- `docs/architecture/providers.md`：model 条目多了 `:instruction-updates` 一段（闭集、缺省、报告与解析
+  各说各的那半句）。
+- `docs/architecture/edge.md`：`message` 行那一节补了 `:in-place` 的字节落法、`instruction-update` 行、
+  以及 system 行信封上的 `:instruction-updates`。
+- `docs/architecture/client.md`：设置面板那一节补了 Models 页那个三态控件。
+- **ADR**：没有单开。交付方式这一条已经是架构级的（铁律 2 的推论），落进了 `overview.md`；如果以后
+  「前缀怎么保」还要长，再单开一条。
+- 全量数字见票 05 的 `## Comments`（跑在 main 上）。
+
+### 尚未做的（如实说）
+
+1. 决策 6 里「provider 中途换」那一格：该块已退场，本特征不涉及；换 model 会改 route，压力表那一格照旧作废。

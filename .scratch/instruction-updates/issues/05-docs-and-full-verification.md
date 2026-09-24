@@ -34,6 +34,23 @@
       没有别处引用——防止有人顺手把它接进解析那条路
 - [ ] 前缀表的每一行在 `providers.md` 里说得出依据，表旁边那句「没有依据的行不进表」还在
 - [ ] 后端全量 + UI 套件 + 构建全绿，报数写进 spec
-- [ ] `node scripts/dev.mjs --scripted` 走查：一轮里改一次绑定 → 那一轮照常跑完，**会话界面**上不多任何
+- [ ] `node scripts/dev.mjs --scripted` 走查：一轮里加/删一个工具 → 那一轮照常跑完，**会话界面**上不多任何
       东西；同一次走查里点到设置 → Models 页那一栏（票 04 的验收，两件事一起看）
 - [ ] README 的 diff 为空
+
+## Comments
+
+2026-09-25 — **票 01、02、03、06 与 04 的后端 + 设置页控件已落地**，逐条与「未做」写在本 feature 的
+`spec.md` 的「落地记录」一节（那份才是记录，按仓库约定票面不改）。要点：
+
+- 后端全量（干净地跑一轮）：**1240 tests / 13571 assertions / 1 failure / 0 errors**，唯一那条红是**预存在**的
+  `harness.cap.claims-test/a-second-jvm-owns-a-conversation-until-it-goes-away`（KILLED 接管那条，与本特征无关）。
+- UI：`npm run typecheck` 过；`npm test` **128/128**（有一次 `skills` 套件的 `asking-for-the-list-changes-nothing`
+  在第一次跑里红了——那是 `written` 这个测试助手「文件一存在就返回」的既有竞态，重跑即绿，与本特征无关）；
+  `npm run build` 过。
+- **真机走查（2026-09-25，用真配置的一份临时副本 + 真厂商）**：那三态控件看得见；Fetch 一个 provider 之后，
+  命中前缀表的 id 在候选清单里印「建议：`in-place`」（`z-ai/glm-5.3-prime`），没命中的只有 id
+  （`fireworks/ember-1`）；take 进来后命中那行的 `<select>` 停在 `in-place`、没命中的停在未声明（读 DOM 断言）。
+  走查用的是**真服务 + Playwright**，不是 `scripts/dev.mjs --scripted`。
+- **未做**：(a) 没单开 ADR（交付方式写进了 `overview.md` 铁律 2 的推论）；(b) `scripts/dev.mjs --scripted` 那条
+  脚本化回放没跑（真机这一次替代了它）。

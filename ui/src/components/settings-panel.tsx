@@ -70,6 +70,7 @@ import {
   removeProvider,
   type DefaultKnobs,
   type ModelRow,
+  type ModelSuggestion,
   type Origin,
   type ProviderRow,
   type Registry,
@@ -573,6 +574,31 @@ const ModelRowEditor: FC<{
           </label>
         ))}
         <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
+        {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
+            as one whose line says `replace`: the first is silence the server fills
+            with the conservative default, the second is something a person wrote. So
+            the empty option DELETES the key rather than writing `replace`, and a save
+            that never touched this control leaves every other model's line alone. */}
+        <label className="flex items-center gap-1 text-xs">
+          {t("form.instructionUpdates")}
+          <select
+            data-slot="settings-provider-model-instruction-updates"
+            aria-label={t("form.instructionUpdatesLabel")}
+            className={inputClass}
+            value={row["instruction-updates"] ?? ""}
+            onChange={(e) => {
+              const next = { ...row };
+              const value = e.target.value;
+              if (value === "") delete next["instruction-updates"];
+              else next["instruction-updates"] = value as "in-place" | "replace";
+              onChange(next);
+            }}
+          >
+            <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+            <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
+            <option value="replace">{t("form.instructionUpdatesReplace")}</option>
+          </select>
+        </label>
         <details data-slot="settings-provider-model-limits" className="ml-auto">
           <summary className="text-muted-foreground cursor-pointer text-xs">
             {t("form.limits")}
@@ -659,7 +685,7 @@ const ProviderForm: FC<{
   const [draft, setDraft] = useState<Draft>(initial);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [offered, setOffered] = useState<string[] | null>(null);
+  const [offered, setOffered] = useState<ModelSuggestion[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
 
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -864,18 +890,30 @@ const ProviderForm: FC<{
                 : t("form.offeredHint")}
             </p>
             <div className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">
-              {offered.map((id) => (
-                <label key={id} className="flex items-center gap-1.5 font-mono text-xs">
+              {offered.map((row) => (
+                <label key={row.id} className="flex items-center gap-1.5 font-mono text-xs">
                   <input
                     type="checkbox"
-                    checked={picked.includes(id)}
+                    checked={picked.includes(row.id)}
                     onChange={(e) =>
                       setPicked(
-                        e.target.checked ? [...picked, id] : picked.filter((p) => p !== id),
+                        e.target.checked ? [...picked, row.id] : picked.filter((p) => p !== row.id),
                       )
                     }
                   />
-                  {id}
+                  {row.id}
+                  {/* THE RULE'S ANSWER, SHOWN AND NOT APPLIED: the server's prefix table
+                      spoke for this family, and the checkbox stays a checkbox. Taking the
+                      row prefills the field with it -- a value the person can see and
+                      change, which is what keeps a wrong guess survivable. */}
+                  {row["instruction-updates"] !== undefined && (
+                    <span
+                      data-slot="settings-provider-model-suggested"
+                      className="text-muted-foreground font-sans"
+                    >
+                      {t("form.offeredSuggested", { value: row["instruction-updates"] })}
+                    </span>
+                  )}
                 </label>
               ))}
             </div>
@@ -887,7 +925,19 @@ const ProviderForm: FC<{
                 data-slot="settings-provider-model-take"
                 onClick={() => {
                   const have = new Set(draft.models.map((m) => m.id));
-                  const add = picked.filter((id) => !have.has(id)).map((id) => emptyModel(id));
+                  // THE PREFILL COMES FROM THE PROBE'S ANSWER, never from a matching
+                  // run here: a second prefix table on this side would be a second answer
+                  // free to drift from the server's.
+                  const hint = new Map(offered.map((r) => [r.id, r["instruction-updates"]]));
+                  const add = picked
+                    .filter((id) => !have.has(id))
+                    .map((id) => {
+                      const row = emptyModel(id);
+                      const value = hint.get(id);
+                      return value === undefined
+                        ? row
+                        : { ...row, "instruction-updates": value };
+                    });
                   set({ models: [...draft.models, ...add] });
                   setOffered(null);
                   setPicked([]);

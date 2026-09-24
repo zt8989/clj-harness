@@ -145,3 +145,12 @@
       保存、退出再进来值还在（这是「渲染看不到布局」那一格）
 - [ ] 后端全量绿（`clojure -M:test -m harness.test-runner`）——这票动的是 catalog 的一件产品事实
       （那张前缀表与探测答案），送达那条路一个字节没动
+## Comments
+
+2026-09-25 — 后端那一半（`model-keys` / `resolved-fields` / 值闭集校验 / 缺省落解析 / `model-row` 照文件说）
+与设置页那个三态控件（未声明 / `in-place` / `replace`，选未声明就删键）都已落地，中英文案一起加。
+**决策 8 的内置前缀预填也已落**：`cap/providers.clj` 的 `instruction-updates-hints` +
+`suggested-instruction-updates`（收表的纯函数、最长前缀赢）、`probe-models` 的答案带行
+（`*list-models*` 那道缝合线不变，仍是 id 向量）、前端只照搬答案预填、手打的 id 不预填。
+`http_test` 那段探测用例按新形状改了（`gpt-x` 命中 / `acme-7` 不命中，两侧都断言）。
+**没做**：真浏览器走查（那一栏与候选清单里那个建议标记没在浏览器里点过）。详见 `../spec.md` 的「落地记录」。

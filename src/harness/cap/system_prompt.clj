@@ -152,6 +152,24 @@
                    (.getBytes (str text) java.nio.charset.StandardCharsets/UTF_8))]
     (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
 
+(defn hooks-names-hash
+  "THREAD-ID's hooks at the SystemPrompt point as one hash -- the identity half of
+  `assemble*`'s answer, computed WITHOUT RUNNING A SINGLE HOOK.
+ 
+  THIS IS HOW 'DID THE HOOK SET MOVE' IS ASKED CHEAPLY. `assemble*` can answer it too,
+  but only by firing every declaration -- and a declaration can be a shell command,
+  which is exactly the cost a run that changed nothing must not pay
+  (`.scratch/instruction-updates` decision 1). The two agree because `hook/emit`
+  reports `(mapv :id decls)` for the same `hooks/declarations-at` this reads; the point
+  has no matcher, so nothing is filtered either way.
+ 
+  AN UNBOUND SINK DOES NOT CHANGE THIS ANSWER -- which is the one behavioural
+  difference from `assemble*`, whose unbound answer is the hash of nothing. This
+  function answers about the TABLE (who is in force), not about a run: a caller with no
+  sink that wants the run's answer must use `assemble*`."
+  [thread-id]
+  (digest (str/join "\n" (mapv :id (hooks/declarations-at thread-id :system-prompt)))))
+
 ;; -------------------------------------------------------- the kernel's own rows
 ;;
 ;; TWO rows at the SystemPrompt point, registered from here because building one

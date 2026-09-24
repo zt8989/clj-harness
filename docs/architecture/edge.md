@@ -391,6 +391,13 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
   **身份**集合的 SHA-256，票 04，压力表判「前缀断没断」的那半格；`prompt.md` 不参与签名）与 `:tools`
   （**整张工具表**，名字 + 描述 + parameters）——表**不进正文**（放了模型就读第二遍、白付 token），在
   信封上：`replay/payload` 把信封挡在消息外，所以**记录里回读得到、模型读不到**。
+- **送出去的指令是哪一份，记录说什么就是什么**（`.scratch/instruction-updates`）：`:replace` 时 `message[0]` 就是
+  这一轮的新全文；`:in-place` 时 `message[0]` 是**上一轮那份**（一个字节不动），新全文作一条 `role=developer`
+  的 `message` 行，插在这个 run 的 `client` 行之后、新提问之前，信封 `:source` 是 `"instruction-update"`。
+  它**不是会话条目**（`replay/entries` 与 `trajectory/entry-row?` 都不收），但**在模型读到的那个数组里**，
+  所以它折进 pressure 的「这个 run 自己的注入」、在 context 圈里算进 conversation 那一桶。system 那条行的
+  信封因此还带 `:instruction-updates`（这一轮实际用哪一档）——`:sig`（hooks 的 hash）分不出「同档下 hook 变了」
+  与「跨档切换」，交付方式这一格才分得出（票 06）。
 - **被主动放弃的一件事实**：`input` 行的 payload 里还带着当时的**请求体**（`:provider` / `:model` /
   `:tools` / `:context`，即"客户端要的是什么"）。行删掉后这份事实**没有新家**：记录只答"这次跑的是哪一档"
   （`provider/init` / `provider/changed` 的 `:resolved`）。

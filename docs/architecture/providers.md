@@ -65,6 +65,14 @@
 - `:max-output-tokens` **不写进请求体**，输出上限仍是厂商默认值；
 - 读它们的人是**选模型的人**：`GET /api/model`、日志两行、`active-provider`。
 
+一个能力位（`:instruction-updates`）也**可选**，取值是闭集 `:in-place` / `:replace`，**缺省 `:replace`**：
+它说这个端点**收不收对话中途的 `developer` 消息**（`.scratch/instruction-updates` 决策 5）。
+保守的一档是有理由的——不声明只是少省一次前缀，**错发一条厂商不认的消息是整个 run 起不来**，
+所以它挑的是能恢复的那一半。缺省落在**解析**那一步（`fold-and-assemble`），不落在文件里：
+报告（`model-row`）照文件说，没写就是没有这个键——「没说」与「说了 `replace`」是两件事，
+设置页的三态控件靠这个分别（见 [client](client.md)）。这个值也是**闭集**，写别的名字在
+`check-model` 里**指名报错**，不静默退化。
+
 **校验会指名报错**：未知键（`:context_window` 这种拼错）、未声明的 model id、搬不动的模态、
 非正整数的数字、`max-output-tokens > context-window`——四条都在加载时停下，不静默丢弃。
 **旧扁平形状不读不迁移**（provider 自己就是一个裸 model 字符串而没有 `:models` 表）——指名报错并说明该写成什么。
@@ -152,6 +160,23 @@ session 保持原样、日志里一行不落。先写后败会把一个每轮都
   正是内置表自己注释里记着犯过的那种错。它**不写任何东西**（文件、库、日志都不动），
   密钥可以由表单临时带（试一把还没落盘的钥匙），否则按 `api-key` 的规矩解析。测试里用
   `providers/*list-models*` 这个缝把它换掉，**测试不出网**。
+  
+  **答案现在是「行」而不是裸 id**（`.scratch/instruction-updates` 票 04）：`{:models [{:id "gpt-x"
+  :instruction-updates :in-place} …]}`。多出来的那半句是 catalog 的意见——**内置前缀表**
+  （`instruction-updates-hints`）命中的家族带上一个建议值，没命中的**没有那个键**。前端只照搬，
+  不做前缀匹配。**它不参与解析**：一个模型条目没写这个键、id 又命中规则，run 照旧走 `:replace`——
+  「这次 run 按哪一档送」不许有一个不在 `config.edn` 里的主人。
+  
+  **前缀表逐行要有依据**，而且是有方向的那种（猜错的方向是整个 run 起不来）。今天的行全是
+  `:in-place`，每一条都是**厂商自营的 OpenAI 兼容端点**——`developer` 正是那族规范里的角色：
+  `gpt-` / `o1` / `o3` / `o4`（OpenAI 自己的 Chat Completions）、`claude-`（Anthropic 的兼容端点）、
+  `deepseek-`（DeepSeek 自营）、`kimi-` / `moonshot-`（Moonshot）、`qwen`（阿里 compatible-mode 的
+  整个家族，`qwen-` / `qwen2.5-` / `qwen3-` 都算）、`glm-`（智谱）。**最长前缀赢**，并且**斜杠后的那段也
+  试**（网关常把厂商写进 id：`openai/gpt-4o-mini`、`moonshotai/kimi-k2` 照样命中）。
+  
+  **这张表按 model id 说话，而 id 名字是模型、不是端点**——已知的边界，收在这个表旁边：id 前缀相同的
+  转发网关未必收 `developer`（2026-09-25 实测：一台 kongming 网关列着 `deepseek-*`，却拿 422 拒掉
+  对话中途的 `developer` 消息）。所以建议**看得见、改得动**，而运行时那条规矩始终是文件说了算。
 - `POST /api/defaults` 设默认档：**缺席 = 不动那一项，`null` = 清掉那个键**（前者是「别管我的 model」，
   后者是「别再选 model」，两件不同的事）。**命名一个 provider 是替换整档**，这也是 inline 描述唯一的出路。
   先解析后写，与 `POST /api/model` 同一条规矩。

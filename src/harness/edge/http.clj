@@ -110,6 +110,7 @@
             ;; skill-picker 的 /api/skills 用它（那一票在 main 上，本分支没有）：
             [harness.cap.skills :as skills]
             [harness.cap.system-prompt :as system-prompt]
+            [harness.cap.instruction-updates :as instructions]
             [harness.cap.subagents :as subagents]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
@@ -1135,7 +1136,7 @@
             ;; the point does not dispatch at all. A declaration at that point that
             ;; says no lands in the catch below as an ordinary refusal, with the
             ;; hook's own words as the RUN_ERROR reason.
-            (let [[provider messages decisions resolved injected sys]
+            (let [[provider messages decisions resolved injected sys plan]
                 (try (let [;; THE PROVIDER IS THE SESSION'S, NOT THE REQUEST'S. It used to
                            ;; be layered with whatever `:provider` the run body carried,
                            ;; which made the selection a thing a CLIENT said per request --
@@ -1145,11 +1146,14 @@
                            ;; run is served by whatever that action left in force. `input`
                            ;; is not consulted here at all, which is the point.
                            provider (providers/current-provider thread-id)
-                           ;; THE ASSEMBLY AND ITS SIGNATURE, ASKED FOR ONCE. `sys` is
-                           ;; assembled* -- the text AND the hash of the hooks that wrote
-                           ;; it -- because the system row below has to carry both, and a
-                           ;; second assembly would be a second answer (`cap.system-prompt`).
-                           sys (system-prompt/assemble* thread-id)]
+                           ;; THE INSTRUCTION PLAN, ASKED FOR ONCE, and ONLY THIS RUN'S: what
+                           ;; message[0] is, whether the instructions moved since the last send,
+                           ;; and the chain of updates to resend. `plan` runs the SystemPrompt
+                           ;; hooks ONLY when something moved, so a run that changed nothing reuses
+                           ;; the text it sent last time -- which is the whole saving of
+                           ;; `.scratch/instruction-updates`. It sits inside the hook sink binding
+                           ;; above because assembly is what fires the point.
+                           plan (instructions/plan thread-id (:instruction-updates provider))]
                        ;; THE OPENING THAT COULD NOT BE READ, raised here -- now that the
                        ;; conversation holds what the person sent -- so it lands in this
                        ;; try's own catch, beside every other could-not-start failure, and
@@ -1212,9 +1216,33 @@
                              ;; what the page draws from). Handing that to a provider is the
                              ;; one thing `ag/provider-part` refuses by name, so the two
                              ;; halves go through `sessions/model-view` together.
-                             assembled (ag/inbound (sessions/model-view (into history added))
-                                                   (:text sys)
-                                                   nil)
+                             client    (sessions/model-view (into history added))
+                             base      (ag/inbound client (:content (:system plan)) nil)
+                             ;; THE UPDATES STAND BEFORE THE QUESTION. `place-updates` answers
+                             ;; nil when the last message is not a user turn (a pathological
+                             ;; history); that is a fact to act on, not to paper over, so the run
+                             ;; falls back to :replace and says why (decision 3).
+                             placed    (when (and (= :in-place (:mode plan))
+                                                  (seq (:updates plan)))
+                                         (ag/place-updates base (:updates plan)))
+                             unplaced? (and (= :in-place (:mode plan))
+                                            (seq (:updates plan))
+                                            (nil? placed))
+                             plan      (if unplaced?
+                                         (do (log/warn!
+                                              :instruction/update-unplaced
+                                              {:thread-id thread-id
+                                               :reason (str "the last message this run"
+                                                            " carries is not a user turn, so an"
+                                                            " instruction update has nowhere to"
+                                                            " stand before the question; the"
+                                                            " change went out by replacing"
+                                                            " message[0] instead")})
+                                             (instructions/fallback plan))
+                                         plan)
+                             assembled (if unplaced?
+                                         (ag/inbound client (:content (:system plan)) nil)
+                                         (or placed base))
                              applied   (project/before-llm assembled thread-id)
                              injected  (subvec applied (count assembled))]
                          [provider
@@ -1225,7 +1253,8 @@
                           ;; provider/init and provider/changed lines are written from.
                           (providers/resolve-provider thread-id)
                           injected
-                          sys]))
+                          (:system plan)
+                          plan]))
                      (catch Throwable t
                        ;; A run that could not even be set up -- no provider, a
                        ;; refused model -- is reported to the client as a
@@ -1273,12 +1302,21 @@
             ;; (`:source`, `:hash`) and `harness.edge.replay/payload` keeps it out of the
             ;; message. So the record carries the whole table and the model never sees it.
             ;; See ADR 0004.
+            ;; WHAT THE MODEL READ AS ITS SYSTEM MESSAGE, which under :in-place is the
+            ;; FROZEN text we sent before (the update rides the tail), not this run's
+            ;; assembly. The row says what was SENT, so a reader comparing signatures
+            ;; sees the prefix the model is actually still reading.
             (when (some? sys)
-              (let [prompt (:text sys)]
-                (log! thread-id run-id "message" {:role "system" :content prompt} nil
-                      {:source "system-prompt" :hash (system-prompt/digest prompt)
-                       :hooks-names-hash (:hooks-names-hash sys)
-                       :tools (tools/specs thread-id)})))
+              (log! thread-id run-id "message"
+                    {:role "system" :content (:content sys)} nil
+                    {:source "system-prompt" :hash (:hash sys)
+                     :hooks-names-hash (:hooks-names-hash sys)
+                     ;; WHICH DELIVERY THIS RUN WAS SERVED BY, so the meter can tell a
+                     ;; hook change that broke the prefix (:replace) from one that rode the
+                     ;; tail (:in-place) -- the two are indistinguishable from the hooks
+                     ;; hash alone (`.scratch/instruction-updates` ticket 06).
+                     :instruction-updates (:mode plan)
+                     :tools (tools/specs thread-id)}))
             ;; ONE ROW PER ENTRY, AND THE LINE THAT CARRIES IT IS THE LINE THAT NUMBERS IT
             ;; (`.scratch/jsonl-two-kinds` 票 02): the action's entries are `message` rows
             ;; now -- each with ITS OWN identity (the envelope's `:id`, the name the session
@@ -1299,13 +1337,31 @@
             ;; `land-at!` matches an unnamed entry by. AN ENTRY THAT TRANSLATES TO NOTHING
             ;; WRITES NO ROW: a lone `reasoning` is folded into the assistant it precedes, and
             ;; a row for it would claim the model was handed something it never saw.
-            (doseq [[i m] (map-indexed vector added)
-                    :let [shown (first (ag/provider-messages (sessions/model-view [m])))]
-                    :when (some? shown)]
-              (log! thread-id run-id "message" shown
-                    (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
-                    (cond-> {:source (entry-source m)}
-                      (:id m) (assoc :id (:id m)))))
+            ;; THE INSTRUCTION UPDATES ARE SUBMITTED MESSAGES TOO, and they stand where the
+            ;; ARRAY put them: immediately before the question. They are written by this run
+            ;; (the client never holds them) and carry `:source "instruction-update"` so no
+            ;; reader mistakes them for a person's turn -- they are not conversation entries,
+            ;; and `replay/entries` and `trajectory/entry-row?` both leave them out.
+            (let [updates    (:updates plan)
+                  ;; the question is the LAST added entry; when the run brought none, the
+                  ;; conversation's own last message is the question and the updates stand at
+                  ;; the head of this run's rows (right behind it on the record).
+                  updates-at (when (and (seq updates) (seq added)) (dec (count added)))]
+              (when (and (seq updates) (empty? added))
+                (doseq [u updates]
+                  (log! thread-id run-id "message" {:role "developer" :content u} nil
+                        {:source "instruction-update"})))
+              (doseq [[i m] (map-indexed vector added)
+                      :let [shown (first (ag/provider-messages (sessions/model-view [m])))]]
+                (when (= i updates-at)
+                  (doseq [u updates]
+                    (log! thread-id run-id "message" {:role "developer" :content u} nil
+                          {:source "instruction-update"})))
+                (when (some? shown)
+                  (log! thread-id run-id "message" shown
+                        (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
+                        (cond-> {:source (entry-source m)}
+                          (:id m) (assoc :id (:id m)))))))
             (when provider
               ;; THE RUN'S FIRST LINE IN THE PROCESS LOG, and the anchor every later
               ;; line about this run is read against: a run whose start has no
@@ -1318,6 +1374,11 @@
               ;; for that thread -- which is the whole use of the fact, and an ordering
               ;; the other way round would make every such reader race the registry.
               (register-run! thread-id run-id)
+              ;; REMEMBERED ONLY NOW: the run let a request go out under this plan, so the
+              ;; next one can tell whether its instructions still hold. A run that never got
+              ;; here -- no provider, a hook that refused -- leaves the memory as it was,
+              ;; because what never went out is not 'what we said last'.
+              (instructions/commit! thread-id plan)
               (log/info! :run/start {:thread-id thread-id :run-id run-id
                                      :model     (:model provider)
                                      :provider  (:provider provider)})
@@ -4384,8 +4445,10 @@
 
   THE KEY MAY COME FROM THE FORM -- somebody typing one into a field means to try
   that key before it is written anywhere -- and when it does not, it is resolved
-  exactly as a run resolves it. The answer carries model ids and the endpoint that
-  was asked; the key is in neither, and nothing is written: no file, no store, no
+  exactly as a run resolves it. The answer carries model ROWS -- the id, and the
+  delivery mode the catalog suggests for it when a prefix table speaks for that family
+  (`providers/suggested-instruction-updates`, ticket 04's prefill) -- and the endpoint
+  that was asked; the key is in neither, and nothing is written: no file, no store, no
   log line. The vendor's refusal comes back in the vendor's own words (see
   providers/probe-models), which is what makes a 401 debuggable from the form."
   [req]

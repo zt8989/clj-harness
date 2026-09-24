@@ -135,6 +135,15 @@
     h
     (some-> row replay/payload :content)))
 
+(defn- delivery-of
+  "The delivery mode a run's system row was written under, off the ENVELOPE
+  (`:instruction-updates`, since `.scratch/instruction-updates` ticket 02), or nil
+  for a row that predates it. NIL IS NOT A MODE: `anchored?` reads it as :replace,
+  the conservative default this feature chose for an endpoint whose capability is
+  unknown (a wrong `developer` message would keep a run from starting at all)."
+  [row]
+  (:instruction-updates row))
+
 ;; ------------------------------------------------------------- reading the record
 
 (defn- call-pairs
@@ -258,7 +267,7 @@
 ;; -------------------------------------------------------------------- the answer
 
 (defn- empty-band []
-  {:latest-start nil :latest-sig nil :system nil :run nil :injections []
+  {:latest-start nil :latest-sig nil :latest-mode nil :system nil :run nil :injections []
    :anchor nil :timeline-window nil})
 
 (defn- band-step
@@ -274,7 +283,9 @@
         own start carries NO run id and is left alone.
     `model/end` with a run id and a `prompt_tokens` -> the ANCHOR, with the conversation, the
         system message and this run's injections snapshotted as they stood at that call.
-    `message` whose source is `system-prompt` -> `:system` and `:latest-sig`.
+    `message` whose source is `system-prompt` -> `:system`, `:latest-sig` and
+        `:latest-mode` (the delivery mode that run was served with).
+    a run's own injection (`skill` / `job` / `injection` / `instruction-update`,
     a run's own injection (`skill` / `job` / `injection`, no id) -> `:injections`.
     `provider/init` / `provider/changed` -> the window in force."
   [band ctx [i row]]
@@ -295,12 +306,20 @@
                               :messages   ((:messages ctx))
                               :system     (:system band)
                               :sig        (:latest-sig band)
+                              :mode       (:latest-mode band)
                               :injections (vec (:injections band))})
                       band)
       "message"     (if (= "system-prompt" (:source extra))
-                      (assoc band :system payload :latest-sig (hooks-signature row))
+                      (assoc band :system payload
+                             :latest-sig (hooks-signature row)
+                             :latest-mode (delivery-of row))
                       (if (and own? (nil? (:id extra))
-                               (contains? #{"skill" "job" "injection"} (:source extra)))
+                               (contains? #{"skill" "job" "injection"
+                                             ;; a developer message an instruction update
+                                             ;; rode the tail in -- it carries no id and is in the
+                                             ;; array the call was handed, like the rest of these
+                                             ;; (`.scratch/instruction-updates`).
+                                             "instruction-update"} (:source extra)))
                         (update band :injections conj payload)
                         band))
       ("provider/init" "provider/changed")
@@ -326,7 +345,7 @@
   system message in force, and that run's own injections. NOTHING HERE REACHES FOR A RECORD
   OR A FILE -- a run start hands in MESSAGES and this answers (ticket 03)."
   [meter messages ratios]
-  (let [{:keys [latest-start latest-sig anchor timeline-window]} meter
+  (let [{:keys [latest-start latest-sig latest-mode anchor timeline-window]} meter
         start-p    (:start anchor)
         prompt     (:prompt anchor)
         anchor-est (when anchor
@@ -340,6 +359,16 @@
                         (= (tools-names-hash-of start-p) (tools-names-hash-of latest-start))
                         (= (route-of start-p) (route-of (or latest-start start-p)))
                         (= (:sig anchor) latest-sig)
+                        ;; THE PREFIX SURVIVES A HOOK CHANGE ONLY UNDER :in-place, and
+                        ;; `:sig` alone cannot tell the two apart -- under :in-place the
+                        ;; system row is FROZEN, so its hash is the one the anchor rests on
+                        ;; and a moved hook set does not move it. What `:sig` does not catch
+                        ;; is a run that MOVED between the two delivery modes: message[0]
+                        ;; is a different message then, so the anchor is dropped. A row
+                        ;; written before this feature (no mode) reads as :replace, the
+                        ;; conservative default.
+                        (= (or (:mode anchor) :replace)
+                           (or latest-mode :replace))
                         (>= prompt anchor-est))
         total      (if anchored?
                      (max 0 (- (+ prompt current) anchor-est))

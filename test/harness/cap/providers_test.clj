@@ -1954,3 +1954,113 @@
           (is (str/includes? (ex-message e) ":fr") "the sentence names the value")
           (is (= before (slurp (home/config-file) :encoding "UTF-8"))
               "the file still holds the last good choice"))))))
+
+;; ---------------------------------------------------- instruction delivery bit
+
+(def ^:private iu-reg
+  "A catalog whose three models say three different things about instruction
+  delivery: one in-place, one explicitly replace, one silent."
+  (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                   :model "silent"
+                   :models {"in-place"    {:input #{:text} :output #{:text}
+                                           :instruction-updates :in-place}
+                            "explicit"    {:input #{:text} :output #{:text}
+                                           :instruction-updates :replace}
+                            "silent"      {:input #{:text} :output #{:text}}}}}))
+
+(def ^:private iu-bad-reg
+  "A catalog whose only model misspells the delivery mode -- alone, because the
+  catalog validates every model in a provider and one bad row refuses them all."
+  (pr-str {:bad {:protocol :openai-completions :base-url "https://bad/v1"
+                 :model "misspelled"
+                 :models {"misspelled" {:input #{:text} :output #{:text}
+                                         :instruction-updates :inplace}}}}))
+
+(defn- iu-row [id]
+  (->> (providers/registry-report)
+       :providers
+       (filter #(= "alpha" (:name %)))
+       first
+       :models
+       (filter #(= id (:id %)))
+       first))
+
+(deftest a-model-says-where-a-moved-instruction-goes
+  (with-home (cfg :alpha :model "in-place") iu-reg
+    (fn []
+      (is (= :in-place
+             (:instruction-updates (:provider (providers/resolve-provider "iu-in-place"))))
+          "a declared mode travels with the resolution")
+      (is (= :in-place (:instruction-updates (iu-row "in-place")))
+          "and the report shows what the file said")))
+
+  (with-home (cfg :alpha :model "explicit") iu-reg
+    (fn []
+      (is (= :replace (:instruction-updates (:provider (providers/resolve-provider "iu-explicit")))))))
+
+  (testing "a model that says nothing is served :replace, but the report keeps the silence"
+    ;; THE TWO ANSWERS ARE DIFFERENT QUESTIONS: 'what is this run served by' always has
+    ;; one, while 'what did the file say' may be nothing -- and a form must be able to
+    ;; tell them apart or an unrelated save would write the default into every line.
+    (with-home (cfg :alpha :model "silent") iu-reg
+      (fn []
+        (is (= :replace (:instruction-updates (:provider (providers/resolve-provider "iu-silent"))))
+            "the default lives in the resolution")
+        (is (not (contains? (iu-row "silent") :instruction-updates))
+            "and not in the report")))))
+
+(deftest a-misspelled-delivery-mode-is-refused-by-name
+  (with-home (cfg :bad :model "misspelled") iu-bad-reg
+    (fn []
+      (let [e (try (providers/resolve-provider "iu-bad") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":instruction-updates"))
+        (is (str/includes? (ex-message e) ":inplace")
+            "the sentence names the value that was written")))))
+
+;; --------------------------------------- the instruction-updates prefill table
+
+(deftest the-longest-prefix-wins-and-a-miss-says-nothing
+  ;; IT TAKES THE TABLE AS AN ARGUMENT, which is what lets an OVERLAPPING table be fed
+  ;; in here: 'the first that matches' would make the answer depend on a map's
+  ;; iteration order, and that is not a fact about the vendor.
+  (let [table [["gpt-4" :in-place] ["gpt-4o" :replace] ["claude-" :in-place]]]
+    (is (= :replace (providers/suggested-instruction-updates table "gpt-4o-2024-08-06"))
+        "both prefixes match; the LONGER one speaks")
+    (is (= :in-place (providers/suggested-instruction-updates table "gpt-4-turbo")))
+    (is (= :in-place (providers/suggested-instruction-updates table "claude-sonnet-4.5")))
+    (is (= :replace (providers/suggested-instruction-updates table "openai/gpt-4o-mini"))
+        "a gateway that writes the vendor into the id still hits, and the longest prefix wins through it")
+    (is (nil? (providers/suggested-instruction-updates table "acme/whatever")))
+    (is (nil? (providers/suggested-instruction-updates table "acme-7"))
+        "a family nothing speaks for carries NO value, not a default")
+    (is (nil? (providers/suggested-instruction-updates [] "gpt-x"))
+        "an empty table says nothing either")
+    (is (nil? (providers/suggested-instruction-updates table "gpt"))
+        "a prefix longer than the id is not a match")))
+
+(deftest the-probe-answer-carries-the-catalogs-suggestion
+  ;; THE SEAM STILL ANSWERS WITH IDS -- the catalog's opinion is added ON TOP of the
+  ;; vendor's answer, not folded into `*list-models*` (whose stub keeps returning a
+  ;; vector of ids).
+  (binding [providers/*list-models* (fn [_] ["gpt-4o-mini" "acme-7"])]
+    (let [answer (providers/probe-models {:base-url "https://x/v1"
+                                          :protocol :openai-completions})]
+      (is (= [{:id "gpt-4o-mini" :instruction-updates :in-place} {:id "acme-7"}]
+             (:models answer))
+          "the hit carries a value, the miss carries no key at all")
+      (is (= "https://x/v1" (:asked answer))))))
+
+(deftest the-suggestion-does-not-participate-in-resolution
+  ;; DECISION 8, ASSERTED: a model whose id the table speaks for, and whose entry says
+  ;; nothing about delivery, is still served :replace -- 'this run goes out under which
+  ;; mode' may not have a master that is not in config.edn.
+  (with-home (cfg :alpha :model "gpt-x")
+             (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                              :model "gpt-x"
+                              :models {"gpt-x" {:input #{:text} :output #{:text}}}}})
+    (fn []
+      (is (= :replace
+             (:instruction-updates (:provider (providers/resolve-provider "iu-hint-unused"))))
+          "the rule prefills a form; it never decides a run"))))

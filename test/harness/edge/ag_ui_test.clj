@@ -674,3 +674,42 @@
       (is (= (str (apply str (repeat 199 "a")) "😀")
              (ag/first-user-text [{:role "user" :content emoji}]))
           "200 code points: the 199 a's and ONE emoji, whole"))))
+
+;; ----------------------------------------------- instruction updates in the array
+
+(deftest place-updates-stands-before-the-last-user-message
+  (let [built [{:role "system" :content "S"}
+               {:role "user" :content "old question"}
+               {:role "assistant" :content "old answer"}
+               {:role "user" :content "the new question"}]
+        placed (ag/place-updates built ["NEW INSTRUCTIONS"])]
+    (is (= [{:role "system" :content "S"}
+            {:role "user" :content "old question"}
+            {:role "assistant" :content "old answer"}
+            {:role "developer" :content "NEW INSTRUCTIONS"}
+            {:role "user" :content "the new question"}]
+           placed)
+        "the update is the premise of the question, so it stands right before it")
+    (is (= built (ag/place-updates built []))
+        "nothing to place: the array comes back untouched")
+    (is (not (identical? built (ag/place-updates built ["x"])))
+        "and placing never mutates the array it was given")))
+
+(deftest place-updates-refuses-a-history-it-cannot-place-into
+  (let [pathological [{:role "system" :content "S"}
+                      {:role "user" :content "a question"}
+                      {:role "tool" :content "a result"}]]
+    (is (nil? (ag/place-updates pathological ["NEW"]))
+        "the last message is not a user turn, so there is no 'before the question'")
+    (is (nil? (ag/place-updates [{:role "system" :content "S"}] ["NEW"]))
+        "nor when there is no question at all")))
+
+(deftest a-chain-of-updates-goes-out-in-order
+  (let [placed (ag/place-updates [{:role "system" :content "S"}
+                                  {:role "user" :content "q"}]
+                                 ["ONE" "TWO"])]
+    (is (= [{:role "system" :content "S"}
+            {:role "developer" :content "ONE"}
+            {:role "developer" :content "TWO"}
+            {:role "user" :content "q"}]
+           placed))))

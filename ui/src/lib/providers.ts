@@ -48,6 +48,24 @@ export type ModelRow = {
   output: readonly string[];
   "context-window"?: number;
   "max-output-tokens"?: number;
+  /// WHERE A MOVED INSTRUCTION GOES, IF THIS MODEL's line says. ABSENT is not
+  /// the same as "replace": absent means the file is SILENT (and the server serves
+  /// the conservative default), while "replace" is something a person wrote. The
+  /// control is three-state for exactly that reason (`lib/providers.ts`'s caller,
+  /// the Models form).
+  "instruction-updates"?: "in-place" | "replace";
+};
+
+/// One row of a vendor's own `/models` listing: the id it gave, and -- WHEN A PREFIX
+/// TABLE SPEAKS FOR THAT FAMILY -- the delivery mode to prefill a row with. A miss
+/// carries no key, the same "only when there is something to say" the report keeps.
+///
+/// THE MATCHING IS THE SERVER'S (`.scratch/instruction-updates` decision 8): this side
+/// only carries the answer to the form, because a second prefix table here would be a
+/// second answer free to drift from the one the run's file is written against.
+export type ModelSuggestion = {
+  id: string;
+  "instruction-updates"?: "in-place" | "replace";
 };
 
 /// Where a provider came from, which is what the page must tell apart: the built-in
@@ -105,6 +123,7 @@ export type ProviderPayload = {
     output: readonly string[];
     "context-window"?: number;
     "max-output-tokens"?: number;
+    "instruction-updates"?: "in-place" | "replace";
   }[];
   "api-key"?: string;
 };
@@ -155,12 +174,12 @@ export async function putDefaults(knobs: DefaultKnobs, t: Translate): Promise<Re
 export async function probeModels(
   ask: { id?: string; "base-url"?: string; protocol?: string; "api-key"?: string },
   t: Translate,
-): Promise<{ models: string[]; asked: string }> {
+): Promise<{ models: ModelSuggestion[]; asked: string }> {
   const res = await fetch(`${API_BASE}providers/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ask),
   });
   if (!res.ok) throw new Error(await reasonFrom(res, t));
-  return (await res.json()) as { models: string[]; asked: string };
+  return (await res.json()) as { models: ModelSuggestion[]; asked: string };
 }
