@@ -727,13 +727,10 @@
                               ;; conversation: the server holds that.
                               :append [{:id "u1" :role "user" :content "看看这个项目"}]
                               :tools []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port "/api/agent")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.body (.send (HttpClient/newHttpClient) req
-                  (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+        ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run!`): the POST answers an ack,
+        ;; the frames arrive on `events.mux`, and this hands back the run's SSE body as before.
+        result (support/mux-run! port thread-id body nil)]
+    (:body result)))
 
 (defn- get-json [port path]
   (let [req (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))

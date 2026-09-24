@@ -41,8 +41,10 @@ host 永不被回收，隐藏的 host 也照旧攥着自己的 feed，服务端�
 - **每页一条 socket 的接线**：一个页面级单例（`ui/src/lib/mux.ts`），由每个跟随窗口的 host 注册；
   重连时在握手 URL 重新声明整份集合。
 - **`events.mux` 之后是 `events.host`**：两条类别、两条 socket，各有自己的连接纪律。
-- **契约期**：三条 SSE 路由（`POST /api/agent` 的响应体、`GET …/follow`、`GET …/feed`）在
-  没有调用者之后删除。
+- **契约期（已落，票 05）**：三条 SSE 路由（`POST /api/agent` 的响应体、`GET …/follow`、
+  `GET …/feed`）在没有调用者之后删掉了——`POST /api/agent` 现在只回 ack。`runner` 也不再拼
+  SSE 字节，只记录、广播、在终帧处收口；异常结束（崩溃、事件通道无终帧）由它广播一条合成的
+  `RUN_ERROR`，替原来那条 SSE close 收尾。
 
 ## 边界（不做的事）
 

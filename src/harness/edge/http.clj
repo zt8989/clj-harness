@@ -218,11 +218,7 @@
   (when-some [allowed (cors-origin origin)]
     {"Access-Control-Allow-Origin"  allowed
      "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-     ;; `x-clj-harness-run-ack` IS THE ACK DOOR'S OWN HEADER (ticket 03), and a non-safelisted
-     ;; request header means a PREFLIGHT in the dev loop's cross-origin shape -- without this
-     ;; the run never leaves the browser (measured: the fetch was refused, and the run edge
-     ;; logged no `run/start` at all).
-     "Access-Control-Allow-Headers" "Content-Type, X-Clj-Harness-Run-Ack"}))
+     "Access-Control-Allow-Headers" "Content-Type"}))
 
 ;; ------------------------------------------------------------------- logging
 
@@ -786,94 +782,51 @@
 ;; it -- the Var is what a runtime call resolves either way.
 (declare mux-broadcast!)
 (defn- runner
-  "Build the frame emitter for one run. Two http-kit rules have to hold at once:
+  "Build the frame sink for one run: log every frame, keep it for the moment the run ends, and
+  BROADCAST it to the downlink (`events.mux`, ADR 0004) -- which is the carrier a run has now.
 
-    - the status and headers ride on the FIRST send!, not on the ring response, so a
-      separate header-only send is not an option;
-    - the LAST frame carries close-after-send?. Closing down a separate code path
-      loses the response: http-kit buffers small writes, and a lone close discards
-      whatever was never flushed. Watched a complete, correctly logged run deliver
-      zero frames that way.
+  WHERE THE RUN ENDS IS HERE and nowhere else: a terminal frame is the only fact that says so,
+  and this is the one place that sees every frame exactly once. So the registry stops claiming
+  the thread is running and the conversation is folded (`settle!`) BEFORE the terminal goes out
+  -- the window between 'the run ended' and 'its words are in the conversation' is one a fast
+  client would otherwise be racing this process through.
 
-  WHICH IS WHY THE CALLER'S ORIGIN COMES IN AS AN ARGUMENT. `handler` merges the
-  CORS headers onto the ring response, and for this one route that is not where
-  the wire's headers come from -- so the value has to reach the first frame by
-  another road, and this is it.
-
-  Bodies are UTF-8 BYTES: this machine's JVM default charset is GBK, so handing
-  http-kit a String would be a coin flip on any non-ASCII.
-
-  IT REPORTS THE TERMINAL INTO STATE -- the run's one side channel to the close
-  handler (`handle-run`), since `:on-open` and `:on-close` are two callbacks with
-  nothing else in common: whether this stream was ever told to end. (What the run
-  was DOING lives in the same atom and is set by the loop that drains the kernel,
-  not here -- this function only ever sees frames.) `send!`'s own answer is NOT a
-  liveness signal and is deliberately ignored: measured 2026-09-17 on a client that
-  had RESET the connection, every `send!` still answered true, four thousand frames
-  went into a socket nobody was reading, and http-kit called the close handler only
-  when the server closed the channel itself. A TCP socket cannot be asked whether
-  the peer is still listening, so 'the browser hung up' is not a fact this process
-  can discover by writing."
-  [thread-id run-id ch state origin]
-  (let [first? (atom true)]
-    (fn [frame]
-      ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the
-      ;; run's messages into the conversation at this same moment, and the record's
-      ;; offset of this line is the number they are given (`sessions/land!`). The line is
-      ;; logged before `settle!` runs, so the number is already on its way back when the
-      ;; entries appear -- and `land!` is idempotent and by group, so either order works.
-      (log! thread-id run-id "event" frame
-            (when (contains? terminal (:type frame))
-              (fn [offset] (sessions/land! thread-id run-id offset))))
-      ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the
-      ;; session's history is what this run was handed, and these frames are what came
-      ;; of it. Collected HERE because this is the one place that sees every frame
-      ;; exactly once, and settled at the terminal -- a half-written answer is not a
-      ;; turn, so the conversation changes when the run does.
-      (swap! state update :frames conj frame)
-      ;; AND TO EVERY PAGE FOLLOWING THIS CONVERSATION ON THE DOWNLINK, tagged with the
-      ;; thread and the run: the SSE response below is the DRIVING page's carrier for now
-      ;; (ticket 03 migrates it), and this is what lets any OTHER page draw the live run
-      ;; instead of only what the record has caught up to.
-      ;; THE FRAME ITSELF, NOT A DECORATED COPY: the record logs this same map, and a test (and
-      ;; a reader) compares the wire to the record frame for frame -- an extra key added only on
-      ;; the way out would make the two disagree.
-      (mux-broadcast! thread-id frame)
-      (let [body  (.getBytes (str "data: " (json/write-str frame) "\n\n")
-                             StandardCharsets/UTF_8)
-            head  (when @first?
-                    {:status  200
-                     :headers (merge (cors-headers origin) {"Content-Type" "text/event-stream"
-                                           "Cache-Control" "no-cache"})
-                     :body    body})
-            last? (contains? terminal (:type frame))]
-        (reset! first? false)
-        (when last?
-          ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS, and the emitter is
-          ;; the only place that sees it: this is where the registry stops saying the
-          ;; thread is running, rather than at whoever happens to drain the channel
-          ;; next (harness.edge.sessions/running? -- the fact the sidebar row reads).
-          (unregister-run! thread-id run-id)
-          ;; AND THE CONVERSATION IS NOW WHAT IT SAYS. Before the frame is sent, so that
-          ;; the client that reads this terminal and immediately sends its next action
-          ;; finds the answer already in the history -- the window between 'the run
-          ;; ended' and 'its words are in the conversation' is one a fast client would
-          ;; otherwise be racing this process through.
-          (sessions/settle! thread-id run-id (:frames @state))
-          (swap! state assoc :terminal (:type frame)))
-        (hk/send! ch (or head body) last?)
-        (when last?
-          ;; LOGGED WHERE IT IS DISPATCHED, not where it was built: this is the frame
-          ;; that carries close-after-send?, so 'the run reached a terminal frame' and
-          ;; 'the stream was told to end' are one moment. The outcome is the wire's
-          ;; own vocabulary (RUN_FINISHED / RUN_ERROR), and the reason rides along for
-          ;; the one terminal that has one.
-          ;;
-          ;; AFTER the send, not before it: a log write is a synchronous file write,
-          ;; and putting it in front would delay the frame that ends the run.
-          (log/info! :run/terminal {:thread-id thread-id :run-id run-id
-                                    :event     (:type frame)
-                                    :reason    (:message frame)}))))))
+  IT IS HANDS-OFF ABOUT WHO IS LISTENING. The broadcast writes to whatever connections declared
+  this conversation; one that declared it and then went away costs nothing (the write is caught
+  in `mux-send!`)."
+  [thread-id run-id state]
+  (fn [frame]
+    ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
+    ;; messages into the conversation at this same moment, and the record's offset of this line
+    ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
+    ;; so the number is already on its way back when the entries appear -- and `land!` is
+    ;; idempotent and by group, so either order works.
+    (log! thread-id run-id "event" frame
+          (when (contains? terminal (:type frame))
+            (fn [offset] (sessions/land! thread-id run-id offset))))
+    ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
+    ;; history is what this run was handed, and these frames are what came of it. Collected HERE
+    ;; because this is the one place that sees every frame exactly once, and settled at the
+    ;; terminal -- a half-written answer is not a turn, so the conversation changes when the run
+    ;; does.
+    (swap! state update :frames conj frame)
+    (when (contains? terminal (:type frame))
+      ;; THE RUN IS OVER THE MOMENT ITS TERMINAL FRAME EXISTS: this is where the registry stops
+      ;; saying the thread is running (harness.edge.sessions/running? -- the fact the sidebar row
+      ;; reads), and where the conversation becomes what it says.
+      (unregister-run! thread-id run-id)
+      (sessions/settle! thread-id run-id (:frames @state))
+      (swap! state assoc :terminal (:type frame)))
+    ;; THE FRAME ITSELF, NOT A DECORATED COPY: the record logs this same map, so the wire and the
+    ;; record agree frame for frame (`:threadId`, the routing tag the downlink adds, is not part
+    ;; of the AG-UI frame and is stripped by the reader).
+    (mux-broadcast! thread-id frame)
+    (when (contains? terminal (:type frame))
+      ;; AFTER the broadcast: a log write is a synchronous file write, and putting it in front
+      ;; would delay the frame that ends the run.
+      (log/info! :run/terminal {:thread-id thread-id :run-id run-id
+                                :event     (:type frame)
+                                :reason    (:message frame)}))))
 
 ;; Keep a frame for the RECORD AND THE SESSION, and send it to NOBODY.
 ;;
@@ -1029,13 +982,13 @@
   whole point: the id names a run in THIS process and is minted at the door
   (`handle-run`), so it is not something the body has and not something a client can
   say. It goes to the record as the log line's own `:runId`, not inside the payload."
-  [ch state input run-id origin]
+  [state input run-id]
   (let [thread-id (str (:threadId input))
         run-id    (str run-id)
         ;; ONE emitter and ONE converter per run. The converter owns the open-message
         ;; state machine, so building it per event restarts every message id and
         ;; re-emits START frames -- which an AG-UI client treats as fatal.
-        emit    (runner thread-id run-id ch state origin)
+        emit    (runner thread-id run-id state)
         ;; AND ONE WRITER THAT DOES NOT SEND: the frames of a stop's cut-off answers are the
         ;; record's and the session's, never the client's (see `recorder`).
         record! (recorder thread-id run-id state)
@@ -1584,6 +1537,16 @@
                   ;; frame already removed it) -- though the call would be harmless
                   ;; there too: it is idempotent by its own design.
                   (unregister-run! thread-id run-id)
+                  ;; AND THE READER IS TOLD, because a PUSH HAS NO CLOSE TO CARRY THE NEWS: the
+                  ;; run's frames go down `events.mux` now, so a client handed no terminal waits
+                  ;; forever (the SSE response used to end for it). The RECORD is left exactly as
+                  ;; it is -- it really did stop mid-sentence, and `rebuild` is the door that
+                  ;; closes such a log off -- while whoever is looking gets the one ending the
+                  ;; vocabulary has.
+                  (try (mux-broadcast! thread-id
+                                       (convert (ev/run-error
+                                                 "the run's event channel closed without a terminal frame")))
+                       (catch Throwable _ nil))
                   (log/warn! :run/events-closed-without-terminal
                              {:thread-id thread-id :run-id run-id
                               :last      (:last @state)})))))))
@@ -1603,10 +1566,12 @@
         (sessions/settle! thread-id run-id (:frames @state))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
-        ;; THE STREAM IS ENDED RATHER THAN LEFT OPEN: a client parked on a run
-        ;; that will never send another frame has nothing to look at and nothing
-        ;; to report, which is the state this whole wrapper exists to shorten.
-        (try (hk/close ch) (catch Throwable _ nil)))))))
+        ;; AND THE READER IS TOLD: a crashed run emits no terminal, and a reader on the downlink
+        ;; would otherwise wait forever. GUARDED, because the converter is one of the things
+        ;; that can BE what threw.
+        (try (mux-broadcast! thread-id (convert (ev/run-error (ex-message t))))
+             (catch Throwable _ nil))
+        nil)))))
 
 
 (defn- api-response
@@ -1778,96 +1743,16 @@
                        " message and stop the run that comes back, or read the conversation"
                        " and continue it.")
         :threadId thread-id}))))
-(defn- stream-run
-  "Answer a run that the door let through: register it, and stream its frames.
-
-  THE PARSE HAS ALREADY HAPPENED, and so have the door's decisions (`handle-run`): the
-  thread id, the RUN ID and the id of the session are all settled before this is called.
-  The run id comes from the door rather than the body because it is the SERVER'S now --
-  it names a run in this process and it goes into the record, so a client that repeated
-  one would collide two runs' frames in a rebuilt conversation (see
-  `harness.edge.replay/fold-frames`)."
-  [req input run-id]
-  (let [thread-id (str (:threadId input))
-        ;; WHAT PAGE IS ASKING, read HERE because this is the one route whose
-        ;; headers do not come from the ring response: they ride on the first
-        ;; frame. `handler` reads the same header for every other route.
-        origin    (request-origin req)
-        ;; THE RUN'S LIVE STATE, and the only thing the emitter and the close
-        ;; handler share. `:on-open` and `:on-close` are two callbacks on
-        ;; different threads with nothing else in common, so a fact one of them
-        ;; knows and the other must report lives here.
-        ;;
-        ;; `:frames` IS THIS RUN'S CONVERSATIONAL OUTPUT, collected as it is served so
-        ;; that the session can fold it into the conversation the moment the run ends
-        ;; (`sessions/settle!`). It is held HERE -- per run, in the one place that sees
-        ;; every frame exactly once -- rather than in the session, because a run's frames
-        ;; are not the conversation until the run is over.
-        state     (atom {:terminal nil :last nil :frames []})]
-    ;; as-channel wants no status or headers of its own. run-agent! returns immediately
-    ;; -- everything it does, the birth included, happens on the go block's thread, so it
-    ;; does not block the worker that :on-open runs on.
-    ;;
-    ;; ONE LINE PER STREAM END, SAYING WHETHER THE RUN SAID GOODBYE. Paired with
-    ;; `run/start`, that is what a reader needs to tell a finished run from one
-    ;; that stopped mid-flight, and the 'last' names where it stopped.
-    ;;
-    ;; WHAT IT CANNOT SAY IS WHO LEFT. A browser that aborts its fetch does not
-    ;; become visible here: an aborted fetch, a stopped tab and a live tab that
-    ;; simply stopped being sent anything all look the same from this side, and
-    ;; the client-side wording the browser puts on a run it cut off is its own
-    ;; ('BodyStreamBuffer was aborted'). What happens in the process is
-    ;; unambiguous either way -- NOTHING cancels a run when a client goes, so the
-    ;; run keeps running and its record keeps growing -- and that asymmetry is
-    ;; what makes the two failures tellable apart afterwards: a record that ends
-    ;; mid-tool with no terminal frame, beside a `run/start` and no `:shutdown`,
-    ;; is a run still going; beside a `:shutdown`, it is a process that was stopped.
-    (hk/as-channel req
-                   {:on-open  (fn [ch] (run-agent! ch state input run-id origin))
-                    :on-close (fn [_ch status]
-                                (let [{:keys [terminal last]} @state]
-                                  (if terminal
-                                    (log/info! :run/stream-closed
-                                               {:thread-id thread-id :run-id run-id
-                                                :status    status
-                                                :terminal  terminal})
-                                    ;; NOT OBSERVED YET, AND KEPT ANYWAY: http-kit
-                                    ;; reports `:server-close` even for a peer that
-                                    ;; has reset the connection (measured), so this
-                                    ;; branch is the one place a client-side close
-                                    ;; WOULD show up if the server ever starts
-                                    ;; hearing about one. Silent when it fires is
-                                    ;; how a lost stream stays unexplained.
-                                    (log/warn! :run/stream-closed-before-terminal
-                                               {:thread-id thread-id :run-id run-id
-                                                :status    status
-                                                :last      last}))))})))
-
-(def ^:private silent-channel
-  "A CHANNEL THAT SWALLOWS FRAMES, for the ack door: a run started there still logs,
-  collects its frames, BROADCASTS them to the downlink and settles the conversation, and
-  there is no SSE response for it to write to."
-  (reify hk/Channel
-    (open? [_] true)
-    (websocket? [_] false)
-    (close [_] nil)
-    (send! [_ _] true)
-    (send! [_ _ _] true)
-    (on-receive [_ _] nil)
-    (on-close [_ _] nil)
-    (on-ping [_ _] nil)))
-
 (defn- start-run
   "Start a run the door let through and answer an ACK instead of a stream.
 
   THE FRAMES GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004) to every page that declared
   this conversation -- the sender included, which is why it subscribes BEFORE it asks here.
-  The record, the state and `settle!` are the emitter's, unchanged; only the client's
-  carrier moved. THE SSE DOOR STAYS (ticket 03 is expand-then-contract), so a caller that
-  asks for a stream still gets one."
-  [req input run-id]
+  THE SSE RESPONSE IS GONE (ticket 05): a run has ONE carrier now, the downlink, so this is
+  the only door. The record, the state and `settle!` are the emitter's, unchanged."
+  [input run-id]
   (let [state (atom {:terminal nil :last nil :frames []})]
-    (run-agent! silent-channel state input run-id (request-origin req))
+    (run-agent! state input run-id)
     (api-response 200 {:threadId (str (:threadId input)) :runId (str run-id)})))
 
 (defn- answer-of
@@ -2161,9 +2046,7 @@
       (refuse-second-run! thread-id)
 
       :else
-      (if (= "1" (get (:headers req) "x-clj-harness-run-ack"))
-        (start-run req input run-id)
-        (stream-run req input run-id)))))
+      (start-run input run-id))))
 
 ;; ----------------------------------------------------- the management edge
 ;;

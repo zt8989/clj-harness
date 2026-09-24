@@ -29,12 +29,10 @@ CORS 按**请求自己带来的 `Origin`** 判，不是按启动时定下的一�
 
 ## AG-UI 边
 
-`POST /api/agent` 收一个 `RunAgentInput`，以 SSE 回帧。两条 http-kit 的规矩必须同时成立：
-
-- **status 与 headers 骑在第一次 `send!` 上**，不能先单独发一次 header；
-- **最后一帧带 `close-after-send?`**——单独走一条 close 路径会丢掉缓冲里没冲出去的body。
-
-body 是 **UTF-8 字节**（本机 JVM 默认 GBK，交字符串给 http-kit 等于对非 ASCII 掷硬币）。
+`POST /api/agent` 收一个 `RunAgentInput`，**只起跑并回一个 ack（`{threadId, runId}`）**；这一轮的
+AG-UI 帧从**页面级的下行** `events.mux` 到达（ADR 0004），发起的页面与看客读的是同一条流。
+（2026-09-23 之前这里是「以 SSE 回帧」——那条响应体连同 `GET …/feed`、`GET …/follow` 两条流
+已经一起删掉，见 `.scratch/events-mux-and-host/spec.md` 票 05。）
 
 **每次 run 一个 converter、一个 emitter。** converter（`ag_ui/outbound`）持有「哪条消息开着」的状态机，
 逐事件重建它会把每条消息 id 重置、重复发 START 帧——AG-UI 客户端视为致命。
@@ -102,7 +100,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 
 | 路由 | 动词 | 干什么 | 落审计行 |
 |---|---|---|---|
-| `/api/agent` | POST | **AG-UI run（流式）** | 下面那些 |
+| `/api/agent` | POST | **AG-UI run：起跑并回 ack（`{threadId, runId}`）；帧走 `events.mux`** | 下面那些 |
 | `/api/model` | GET | 本会话服务的模型收什么、出什么、多大 | 无（只读） |
 | `/api/model` | POST | 换本会话的 provider / model / 思考档（`clear` 退回配置档） | `provider/session-changed` |
 | `/api/choices` | GET | 三个选择器可以摆出来的东西：现状、厂商与 model（每个厂商带**有没有密钥**这一件事，不带值）、可选的思考档 | 无（只读） |

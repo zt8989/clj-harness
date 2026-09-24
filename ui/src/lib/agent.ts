@@ -182,14 +182,6 @@ export type HarnessAgentConfig = HttpAgentConfig & {
   ready?: (threadId: string) => Promise<void>;
 };
 
-/// THE REQUEST THE ACK DOOR IS ASKED THROUGH: the SSE door for every caller that does not set
-/// this, and `{threadId, runId}` from the one that does.
-function withAckHeader(init: RequestInit): RequestInit {
-  const headers = new Headers(init.headers);
-  headers.set("X-Clj-Harness-Run-Ack", "1");
-  return { ...init, headers };
-}
-
 /// A RUN'S FRAMES AS THE SSE `@ag-ui/client` PARSES: every event the socket delivers for
 /// this conversation, encoded as a `data:` frame, closed at the terminal. THIS IS THE WHOLE
 /// TRANSPORT TRICK of ticket 03 -- the base class's reader, frame loop and abort handling
@@ -311,7 +303,7 @@ export class HarnessAgent extends HttpAgent {
       });
       try {
         await subscription.declared;
-        const started = await send(url, withAckHeader(init));
+        const started = await send(url, init);
         if (!started.ok || !(started.headers.get("content-type") ?? "").includes("application/json")) {
           // A REFUSAL IS HANDED BACK WHOLE so the base class's error path words it (it reads
           // the body), and a caller that somehow still got a stream keeps reading that.

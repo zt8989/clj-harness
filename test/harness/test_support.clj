@@ -815,7 +815,6 @@
         req     (-> (java.net.http.HttpRequest/newBuilder
                      (java.net.URI/create (str "http://127.0.0.1:" port "/api/agent")))
                     (.header "Content-Type" "application/json")
-                    (.header "X-Clj-Harness-Run-Ack" "1")
                     (cond-> origin (.header "Origin" origin))
                     (.POST (java.net.http.HttpRequest$BodyPublishers/ofString
                             body java.nio.charset.StandardCharsets/UTF_8))
@@ -831,3 +830,13 @@
         {:status 200
          :headers (sse-headers ack)
          :body (apply str (map (fn [frame] (str "data: " (json/write-str frame) "\n\n")) @frames))}))))
+
+(defn mux-run-response
+  "The same run as `mux-run!`, as an `HttpResponse` -- the shape a caller that reads
+  `.statusCode` / `.headers` / `.body` was already using."
+  [port thread-id body origin]
+  (let [result (mux-run! port thread-id body origin)]
+    (reify java.net.http.HttpResponse
+      (statusCode [_] (:status result))
+      (headers [_] (:headers result))
+      (body [_] (:body result)))))

@@ -117,7 +117,8 @@ lib/
                     再用更具体的 `group-hover:disabled:opacity-50` 让「已揭示的禁用控制」仍旧发灰。
                     **零 import**（就是一条字符串），被 UI 套件渲染出来读回去
   session-memory.ts 「刷新回到刚才那一场」记的那个 id（`localStorage`，就是这里）
-  agent.ts          `HttpAgent` 那几行：地址、`threadId` 交给谁、run 结束的回调，以及
+  agent.ts          `HarnessAgent`：地址、`threadId` 交给谁、run 结束的回调，**把下行 socket
+                    的帧转回 SSE**（`runStream`）交给 `@ag-ui/client` 原来的解析器（ADR 0004），以及
                     **这一侧挂断的那条 run 报成中止而不是失败**——浏览器把掐断的流说成
                     `BodyStreamBuffer was aborted`，客户端库把它合成一条 `RUN_ERROR`，
                     于是按 Stop 会把那条工具卡画成「失败」加一句没人能处理的英文；

@@ -212,7 +212,7 @@ export async function postRun(
   await muxDeclared(token, tid);
   const started = await fetch(runUrl(), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Clj-Harness-Run-Ack": "1" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ threadId: tid, append: appendOf(messages), tools: [], ...extra }),
   });
   if (!started.ok) {

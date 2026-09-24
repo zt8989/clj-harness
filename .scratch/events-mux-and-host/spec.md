@@ -204,26 +204,21 @@ run 帧，socket 一断，断开那一段的 AG-UI 帧就没了；重连后只�
 验证：`harness.edge.mux-test` 新增 `a-reconnecting-reader-is-handed-the-run-frames-it-missed`
 （9 tests / 32 assertions / 0 failures）；后端全量与 ui 见下。**票 03 到此收口，从 `issues/` 删除。**
 
-### 票 05 进行中（同日）：测试读取器迁移（第一批），契约步待分批
+### 票 05 收口（同日，已完成）：run 的 SSE 响应体也删了
 
-**客户端与两处测试读取器已经走 ack+下行。** `HarnessAgent` 不再有 `runAck` 开关（只有一条路：
-订阅下行、把 socket 的帧转回 SSE）；`harness.test-support/mux-run!` 把这套测试读法收在一处
-（JDK 的 WebSocket 客户端读下行，按 `last` 拼整分片——不分片就会丢终帧，实测 `post-run` 干等 30s），
-`http_test`（**84 处调用点一行未改**）与 `mcp-wired-test` 都用它。
+**一条 run 只剩一个载体。** `handle-run` 直接 `start-run`（那颗 `X-Clj-Harness-Run-Ack` 头连同
+它进 CORS 白名单的那一条一起删了），`stream-run` 与 `silent-channel` 删除，`runner` 不再拼 SSE
+字节、也不再拿 channel 与 origin——它只做三件事：记录每帧、在终帧处注销与折叠、把帧广播到下行。
 
-**契约步（删掉 `POST /api/agent` 的 SSE 响应体）暂时不做，因为它是宽改动的收口**：删掉之后，
-**每一个自带 run 读取器的测试命名空间会同时变红**——试过一次，全量 83 failures / 20 errors。
-还没迁移的有 9 个命名空间，各有一个 `post-run` 形状的助手：
+**异常结束补上了终帧**：崩溃、以及「事件通道无终帧关闭」这两条路，各广播一条合成的 `RUN_ERROR`
+（记录不动——它确实停在半句，交给 `rebuild` 收口——只是给看客一个词）。这是删门的前提：SSE 那条
+close 原本替读者收尾，而下行的读者只认终帧。
 
-`cap/ask-test`、`edge/context-test`、`edge/delegation-test`、`edge/delegation-line-test`、
-`edge/frames-route-test`、`edge/stats-test`、`edge/trajectory-test`、`edge/ui-test`、
-`kernel/hooks-wired-test`。
+**测试面全迁**：9 个自带 run 读取器的命名空间各换成 `harness.test-support` 的 `mux-run!` /
+`mux-run-response`——`cap/ask-test`、`edge/context-test`、`edge/delegation-test`、
+`edge/delegation-line-test`、`edge/frames-route-test`、`edge/stats-test`、`edge/trajectory-test`、
+`kernel/hooks-wired-test`（`edge/ui-test` 那处只是「静态文件不吃 /api/agent」的路由断言，不动），
+加上更早的 `http_test`（84 处调用点未改）与 `mcp-wired-test`。
 
-每个都是一小步（换 `support/mux-run!`、保住返回形状）；全部迁完之后才删服务端的门
-（`stream-run`、`silent-channel`、`runner` 的 SSE 拼字节、`handle-run` 的那颗 ack 头）。
-
-**一处如实记下的缺口**：异常结束的 run（崩溃、事件通道无终帧关闭）现在靠 SSE close 替读者收尾；
-下行的读者要等一个终帧，而这两条路不发。删门前应给它们补一个合成的 `RUN_ERROR` 广播。
-
-验证：后端全量 **1148 / 13189 / 0**；ui **126**、typecheck、build 过；reload-mid-run 真浏览器走查
-**ALL GREEN**（在客户端收掉 `runAck`、只走下行之后跑的）。
+验证：后端全量 **1148 / 13189 / 0**；ui **126**、typecheck、build 过；三份真浏览器走查
+（reload-mid-run、两窗口侧栏、子 agent 面板）**ALL GREEN**。

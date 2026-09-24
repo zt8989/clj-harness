@@ -5011,9 +5011,6 @@
         out   (.getOutputStream sock)]
     (.write out (.getBytes (str "POST /api/agent HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                                 "Content-Type: application/json\r\n"
-                                ;; THE ACK DOOR: this socket is never read (`fire-run!` says so), so
-                                ;; it asks for the short answer rather than a stream nobody drains.
-                                "X-Clj-Harness-Run-Ack: 1\r\n"
                                 "Content-Length: " (count bytes) "\r\n\r\n")
                            StandardCharsets/UTF_8))
     (.write out bytes)
