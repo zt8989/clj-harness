@@ -37,7 +37,8 @@
             [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
             [harness.edge.stats :as stats]
-            [harness.edge.trajectory :as trajectory]))
+            [harness.edge.trajectory :as trajectory]
+            [harness.kernel.tools :as tools]))
 
 ;; ------------------------------------------------------------------- proportions
 
@@ -93,16 +94,44 @@
   (reduce + 0 (map estimate-message messages)))
 
 (defn estimate-tools
-  "The request's tool table -> an estimated token count. Each tool is one block of
+  "A call's tool table -> an estimated token count, from THE SIGNATURE a `model/start`
+  line keeps rather than from the table (ticket 04). Each tool is one block of
   structured JSON -- short fragments, quotes and field names -- which is the other kind
-  of text the estimator underprices."
-  [tools]
-  (reduce + 0
-          (map (fn [tool]
-                 (+ (long (Math/ceil (/ (double (context/size-of tool))
-                                        (double chars-per-token))))
-                    block-overhead))
-               tools)))
+  of text the estimator underprices, so the framing is charged per tool (`:tools-count`)
+  and the table's bytes, when the record has them (`:tools-bytes`), are charged at the
+  same four-characters-to-a-token rule as everything else.
+ 
+  AN OLD RECORD STILL CARRIES THE TABLE, and its size is the best it has to offer."
+  [start-payload]
+  (let [n     (or (:tools-count start-payload) (count (:tools start-payload)))
+        bytes (or (:tools-bytes start-payload)
+                  (when (seq (:tools start-payload))
+                    (context/size-of (:tools start-payload))))]
+    (+ (* block-overhead n)
+       (if (number? bytes)
+         (long (Math/ceil (/ (double bytes) (double chars-per-token))))
+         0))))
+
+(defn- tools-names-hash-of
+  "PAYLOAD -> the NAME set of the tool table the call went out with, however the record
+  spells it: `:tools-names-hash` on a record written since ticket 04, or a hash taken
+  here over the `:tools` table an older record kept. nil when the call carried none.
+ 
+  THE COMPARISON IS THE NAME SET, NOT THE BYTES: re-describing a tool does not move it,
+  an added or removed one does (owner's rule, 2026-09-24)."
+  [payload]
+  (or (:tools-names-hash payload)
+      (when (seq (:tools payload)) (tools/names-hash (:tools payload)))))
+
+(defn- hooks-signature
+  "The identity of the hook set a run's system message was assembled from, however the
+  record spells it: `:hooks-names-hash` on the row written since ticket 04, or -- for an
+  older record, which kept only the text -- the text itself. nil when there is no system
+  row to compare."
+  [row]
+  (if-some [h (:hooks-names-hash row)]
+    h
+    (some-> row replay/payload :content)))
 
 ;; ------------------------------------------------------------- reading the record
 
@@ -127,6 +156,19 @@
       :else
       (recur more pending acc))))
 
+
+(defn- own-calls
+  "ONE RUN'S OWN model calls, in order -- the `model/start`/`model/end` rows that carry the
+  run's OWN id.
+
+  A CALL THE HARNESS WROTE FOR ITSELF ALSO LANDS IN A RUN'S `:calls`. A compaction's
+  summarizer call is logged with no run id, and `run-segments` attaches an event to whichever
+  run is still open (a fact opens no run): the newest such row used to become `latest-start`,
+  and its empty tool table flipped `:baseline` from \"usage\" to \"estimated\", moving the
+  anchor off the vendor's own number (2026-09-24, thread `bbcd4ae4-…`). Only the RUN's own
+  calls are the calls 'the next one continues from'."
+  [run]
+  (filterv #(and (some? (:runId %)) (= (:run-id run) (:runId %))) (:calls run)))
 (defn- last-reporting-call
   "The most recent call whose vendor reported a `prompt_tokens`, as
   {:run <the run map> :start <its start row> :end <its end row>} -- nil when nobody
@@ -139,14 +181,15 @@
                         {:run run :start start :end end}
                         acc))
                     acc
-                    (call-pairs (:calls run))))
+                    (call-pairs (own-calls run))))
           nil
           runs))
 
 (defn- latest-start
-  "The newest model call's start row: what the NEXT call continues from."
+  "The newest RUN call's start row: what the NEXT call continues from. A call the harness
+  wrote for itself (a compaction's summarizer) is not one -- see `own-calls`."
   [runs]
-  (last (filter #(= "model/start" (replay/kind %)) (mapcat :calls runs))))
+  (last (filter #(= "model/start" (replay/kind %)) (mapcat own-calls runs))))
 
 (defn- system-row [records] (last (filter replay/system-prompt? records)))
 
@@ -168,20 +211,32 @@
   [run]
   (vec (remove #(or (= "system" (:role %)) (some? (:id %))) (:submitted run))))
 
+(defn- messages-of
+  "ENTRY-MESSAGES (the conversation's own, RAW -- cards and all) + a SYSTEM payload +
+  INJECTIONS -> the array the model was handed, in the array's own order: the system message
+  first, then the conversation (with its cards taken off by `sessions/model-view`), then the
+  run's own injections.
+ 
+  IT IS THE ONE PLACE THAT SPELLS THAT ORDER, so the record's fold and the cached METER
+  (ticket 03) cannot disagree about what a call was handed."
+  [entry-messages system injections]
+  (into [] (concat (when system [system])
+                   (sessions/model-view (vec entry-messages))
+                   injections)))
+
 (defn- messages-in
   "RECORDS -> the messages the model was handed, AS FAR AS THE RECORD DESCRIBES THEM: the
   conversation's own entries (deduped and card-stripped the way a run hands them over),
   the newest system message in front, and the last run's own injections (which carry no id
   and so are not entries).
-
+ 
   THE SYSTEM MESSAGE IS ADDED BY HAND because it is not a conversation entry -- the
   client never holds the prompt (`harness.edge.replay/entries`) -- and it is the single
   largest fixed cost in every request."
   [records]
-  (let [conversation (sessions/model-view (mapv :message (replay/entries records)))
-        system       (some-> (system-row records) replay/payload)
-        injections   (injected-rows (last (trajectory/run-segments records)))]
-    (into [] (concat (when system [system]) conversation injections))))
+  (messages-of (mapv :message (replay/entries records))
+               (some-> (system-row records) replay/payload)
+               (injected-rows (last (trajectory/run-segments records)))))
 
 (defn- identity-index
   "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
@@ -200,85 +255,232 @@
 
 ;; -------------------------------------------------------------------- the answer
 
+(defn meter-of-records
+  "RECORDS -> the METER BAND `state->pressure` eats, and nothing else (ticket 03): the newest
+  TRUE run call's `model/start` payload, the newest system row's signature, and the ANCHOR --
+  the last call whose vendor reported a `prompt_tokens` -- together with the conversation AS IT
+  STOOD at that call (its `:messages`, the system message in force, and that run's own
+  injections).
+ 
+  IT IS THE SAME FOLD `records->pressure` HAS ALWAYS RUN, stopping at the facts a later
+  reading needs instead of finishing the arithmetic: `records->pressure` is `meter-of-records`
+  + `state->pressure`, so the offline reading and the cached one CANNOT disagree. The live
+  side keeps an equivalent band as rows are written (`meter-step`), which is what lets a run
+  start answer without reading the record at all.
+ 
+  THE EXTRA KEYS (`:system` / `:run` / `:injections`) are what a LIVE band needs to carry on
+  from here; `state->pressure` ignores them."
+  [records]
+  (let [records  (vec records)
+        runs     (trajectory/run-segments records)
+        latest   (latest-start runs)
+        last-run (last runs)
+        anchor   (last-reporting-call runs)
+        start-p  (some-> anchor :start replay/payload)
+        prefix   (when anchor (upto records (:start anchor)))
+        system   (system-row records)
+        a-system (when anchor (system-row prefix))
+        a-run    (:run anchor)]
+    {:latest-start    (some-> latest replay/payload)
+     :latest-sig      (hooks-signature system)
+     :system          (some-> system replay/payload)
+     :run             (:run-id last-run)
+     :injections      (vec (injected-rows last-run))
+     :anchor          (when (and anchor start-p)
+                        {:start      start-p
+                         :prompt     (get-in (some-> anchor :end replay/payload) [:usage :prompt_tokens])
+                         :messages   (mapv :message (replay/entries prefix))
+                         :system     (some-> a-system replay/payload)
+                         :sig        (hooks-signature a-system)
+                         :injections (vec (when a-run (injected-rows a-run)))})
+     :timeline-window (when (seq records)
+                        (context/timeline-window records (last records)))}))
+
+(defn state->pressure
+  "METER + the request an edge has assembled + RATIOS -> how full the next request is: the
+  same answer, FIELD FOR FIELD, that `records->pressure` gives for the record the meter was
+  taken from. See `records->pressure` for what the fields mean and when they are absent.
+ 
+  THE METER IS THE WHOLE INPUT, on purpose: an anchor is an assertion about the prefix a
+  call rested on, so it carries the conversation it was priced against (`:messages`), the
+  system message in force, and that run's own injections. NOTHING HERE REACHES FOR A RECORD
+  OR A FILE -- a run start hands in MESSAGES and this answers (ticket 03)."
+  [meter messages ratios]
+  (let [{:keys [latest-start latest-sig anchor timeline-window]} meter
+        start-p    (:start anchor)
+        prompt     (:prompt anchor)
+        anchor-est (when anchor
+                     (+ (estimate-messages
+                         (messages-of (:messages anchor) (:system anchor) (:injections anchor)))
+                        (estimate-tools start-p)))
+        window     (or (:context-window latest-start) timeline-window)
+        current    (+ (estimate-messages messages) (estimate-tools latest-start))
+        anchored?  (and anchor
+                        prompt
+                        (= (tools-names-hash-of start-p) (tools-names-hash-of latest-start))
+                        (= (route-of start-p) (route-of (or latest-start start-p)))
+                        (= (:sig anchor) latest-sig)
+                        (>= prompt anchor-est))
+        total      (if anchored?
+                     (max 0 (- (+ prompt current) anchor-est))
+                     current)]
+    (cond-> {:pressureTokens total
+             :baseline       (if anchored? "usage" "estimated")}
+      (and (number? window) (pos? window))
+      (assoc :windowTokens    window
+             :percent         (long (Math/round (* 100.0 (/ (double total) (double window)))))
+             :thresholdTokens (long (Math/floor (* (double window) (:threshold-ratio ratios))))
+             :retainTokens    (long (Math/floor (* (double window) (:retain-ratio ratios))))))))
+
 (defn records->pressure
   "RECORDS (and, in the two-argument arity, the request an edge has assembled) -> how
   full the next request is:
-
+ 
     {:pressureTokens 812000 :windowTokens 1000000 :percent 81
      :thresholdTokens 700000 :retainTokens 160000 :baseline \"usage\"}
-
+ 
   `:baseline` is `\"usage\"` when the vendor's own number anchored the answer and
   `\"estimated\"` when nothing reusable was available and the whole surface was counted
   in characters. `:windowTokens`, `:percent`, `:thresholdTokens` and `:retainTokens` are
   ABSENT when the record says nothing about a window -- a percentage needs both halves,
-  and nobody is asked to divide by a number they were not given."
+  and nobody is asked to divide by a number they were not given.
+ 
+  IT IS `meter-of-records` + `state->pressure` (ticket 03): the offline reading and the
+  live one run the SAME arithmetic over the SAME facts, so they cannot drift apart. Use this
+  when the records are in hand (a test, an offline tool); a run start uses the live band
+  (`log-pressure` / `band-pressure`)."
   ([records]
    (records->pressure records (messages-in records) default-ratios))
   ([records messages]
    (records->pressure records messages default-ratios))
   ([records messages ratios]
-   (let [records    (vec records)
-         runs       (trajectory/run-segments records)
-         latest     (latest-start runs)
-         latest-p   (some-> latest replay/payload)
-         tools      (:tools latest-p)
-         anchor     (last-reporting-call runs)
-         start-p    (some-> anchor :start replay/payload)
-         prompt     (get-in (some-> anchor :end replay/payload) [:usage :prompt_tokens])
-         prefix     (when anchor (upto records (:start anchor)))
-         anchor-est (when anchor
-                      (+ (estimate-messages (messages-in prefix))
-                         (estimate-tools (:tools start-p))))
-         window     (or (:context-window latest-p)
-                        (when (seq records)
-                          (context/timeline-window records (last records))))
-         current    (+ (estimate-messages messages) (estimate-tools tools))
-         anchored?  (and anchor
-                         prompt
-                         (= (:tools start-p) tools)
-                         (= (route-of start-p) (route-of (or latest-p start-p)))
-                         (= (some-> (system-row prefix) replay/payload :content)
-                            (some-> (system-row records) replay/payload :content))
-                         (>= prompt anchor-est))
-         total      (if anchored?
-                      (max 0 (- (+ prompt current) anchor-est))
-                      current)]
-     (cond-> {:pressureTokens total
-              :baseline       (if anchored? "usage" "estimated")}
-       (and (number? window) (pos? window))
-       (assoc :windowTokens    window
-              :percent         (long (Math/round (* 100.0 (/ (double total) (double window)))))
-              :thresholdTokens (long (Math/floor (* (double window) (:threshold-ratio ratios))))
-              :retainTokens    (long (Math/floor (* (double window) (:retain-ratio ratios)))))))))
+   (state->pressure (meter-of-records records) messages ratios)))
+
+;; ----------------------------------------------------------- the live meter band (ticket 03)
+;;
+;; `records->pressure` folds a WHOLE RECORD, and a run start used to pay that fold two or
+;; three times over (the auto-compaction check, the `context/pressure` row, the window). The
+;; band below is the SAME FACTS KEPT INCREMENTALLY: `harness.edge.http/log!` -- the one writer
+;; path -- hands every row here as it is written, and the band is updated IN PLACE. A run start
+;; then answers from the band (O(1)) instead of reading the file.
+;;
+;; A THREAD'S BAND IS SEEDED ONCE PER PROCESS (`seed-band!`), by folding the record exactly
+;; the way `meter-of-records` does -- and `meter-row!` leaves a thread it has never seen
+;; alone, so rows written before that seed are not lost: the seed's fold has them.
+
+(defonce ^:private bands
+  ;; thread-id -> the band `state->pressure` eats, kept current by `meter-row!`.
+  (atom {}))
+
+(defn- empty-band []
+  {:latest-start nil :latest-sig nil :system nil :run nil :injections []
+   :anchor nil :timeline-window nil})
+
+(defn meter-row!
+  "ONE jsonl ROW, AS IT IS WRITTEN -> THREAD-ID's band, updated in place (ticket 03). Called
+  from `harness.edge.http/log!`, the one writer path, so the band never re-reads the record.
+ 
+  KINDS IT CARES ABOUT, and nothing else:
+    `model/start` with a run id      -> `:latest-start` (the newest TRUE run call). A
+                                        compaction's own start carries NO run id and is left
+                                        alone -- that is the bug ticket 02 fixed, and it is
+                                        the same rule `own-calls` applies to a record.
+    `model/end` with a run id and a `prompt_tokens` -> the ANCHOR, with the conversation, the
+                                        system message and this run's injections snapshotted
+                                        as they stood at that call.
+    `message` whose source is `system-prompt` -> `:system` and `:latest-sig`.
+    `message` with no id, not a system message, in a run -> this run's injections.
+ 
+  A THREAD WITH NO BAND IS LEFT ALONE: the fold that installs one (`seed-band!`) reads the
+  whole record, so it has every row written so far."
+  [thread-id run-id kind payload extra]
+  (let [id (str thread-id)]
+    (when (contains? @bands id)
+      (swap! bands update id
+             (fn [b]
+               (let [;; a new run clears the injection list; a run's injections are written at
+                     ;; its birth, before its first call.
+                     b   (if (and (some? run-id) (not= (str run-id) (:run b)))
+                           (assoc b :run (str run-id) :injections [])
+                           b)
+                     own? (some? run-id)]
+                 (case kind
+                   "model/start" (if own? (assoc b :latest-start payload) b)
+                   "model/end"   (if (and own? (number? (get-in payload [:usage :prompt_tokens])))
+                                   (assoc b :anchor {:start      (:latest-start b)
+                                                     :prompt     (get-in payload [:usage :prompt_tokens])
+                                                     :messages   (sessions/raw-messages thread-id)
+                                                     :system     (:system b)
+                                                     :sig        (:latest-sig b)
+                                                     :injections (vec (:injections b))})
+                                   b)
+                   "message"     (if (= "system-prompt" (:source extra))
+                                   (assoc b :system payload
+                                            :latest-sig (or (:hooks-names-hash extra)
+                                                            (:content payload)))
+                                   ;; A RUN'S OWN INJECTION, and only that: `returned-source`
+                                   ;; names what the pre-LLM step derived `skill` / `job` /
+                                   ;; `injection`, while what the model RETURNED is `model` /
+                                   ;; `tool` -- so this is `injected-rows`' rule (no id, not the
+                                   ;; system message) spelled by source, and a returned
+                                   ;; assistant message can never be mistaken for one.
+                                   (if (and own?
+                                            (nil? (:id extra))
+                                            (contains? #{"skill" "job" "injection"}
+                                                        (:source extra)))
+                                     (update b :injections conj payload)
+                                     b))
+                   b)))))))
+
+(defn seed-band!
+  "FOLD RECORDS INTO THREAD-ID's band and install it: the ONE read a process pays per thread,
+  after which `meter-row!` keeps it current."
+  [thread-id records]
+  (let [b (meter-of-records records)]
+    (swap! bands assoc (str thread-id) b)
+    b))
+
+(defn- band-for
+  "THREAD-ID's band: the live one, or one seeded from FILE (the first time this process is
+  asked about the thread)."
+  [thread-id ^java.io.File f]
+  (or (get @bands (str thread-id))
+      (seed-band! thread-id (if (and f (.exists f)) (stats/read-records f) []))))
+
+(defn band-pressure
+  "THREAD-ID's band + MESSAGES + RATIOS -> the same answer `records->pressure` gives, WITHOUT
+  reading the record (beyond the one seed a process pays per thread). The cheap check a
+  compaction trigger starts from."
+  [thread-id f messages ratios]
+  (state->pressure (band-for thread-id f) messages ratios))
 
 (defn log-pressure
-  "A log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same
-  answer. The file supplies the anchor (the previous call is long on disk); MESSAGES
-  supplies the surface, because the lines for the run in flight are still with the writer.
-  WINDOW, when given, is the window THIS run will go out under -- the call that declares
-  it has not happened yet, so the record cannot supply it and the edge hands it in.
-
+  "THREAD-ID's log FILE plus the request an edge has ASSEMBLED BUT NOT YET WRITTEN -> the same
+  answer. MESSAGES supplies the surface, because the lines for the run in flight are still
+  with the writer. WINDOW, when given, is the window THIS run will go out under -- the call
+  that declares it has not happened yet, so the record cannot supply it and the edge hands it
+  in.
+ 
+  IT NO LONGER READS THE RECORD (ticket 03): the band is kept as rows are written, and only a
+  thread this process has never seen is seeded with one read. WINDOW is the only thing the
+  cached answer cannot know.
+ 
   A file that does not exist yet (and a window nobody declared) are both normal: the answer
   is then the estimate over MESSAGES, with no window-derived numbers."
-  ([f messages] (log-pressure f messages nil))
-  ([f messages window]
-   ;; A REPORT-ONLY METER MUST NEVER KILL A RUN. Reading the record can throw -- the file
-   ;; was moved out from under us by a rebind, an old-contract line the strict reader
-   ;; refuses, a permissions change -- and this call sits on the run's own path, inside the
-   ;; try that turns any escape into RUN_ERROR. So a failed read degrades to the estimate.
-   ;;
-   ;; AND THE SNAPSHOT RACES THE WRITER: the previous call's model/end may still be queued
-   ;; (the record writer appends off-thread), in which case there is simply no anchor yet
-   ;; and `:baseline` says "estimated". That is the honest answer for a reading taken while
-   ;; the record is still catching up.
+  ([thread-id f messages] (log-pressure thread-id f messages nil))
+  ([thread-id f messages window]
+   ;; A REPORT-ONLY METER MUST NEVER KILL A RUN. The band can be wrong or stale -- the file
+   ;; was moved out from under us by a rebind, the writer is behind, a band was never seeded
+   ;; -- and this call sits on the run's own path, inside the try that turns any escape into
+   ;; RUN_ERROR. So anything at all degrades to the estimate over MESSAGES.
    (let [answer (try
-                 (records->pressure (if (.exists f) (stats/read-records f) []) messages)
-                 (catch Throwable _ (records->pressure [] messages)))]
+                  (band-pressure thread-id f messages default-ratios)
+                  (catch Throwable _ (state->pressure (empty-band) messages default-ratios)))]
      (if (and (number? window) (pos? window))
        (assoc answer
               :windowTokens    window
               :percent         (long (Math/round (* 100.0 (/ (double (:pressureTokens answer))
-                                                       (double window)))))
+                                                             (double window)))))
               :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
               :retainTokens    (long (Math/floor (* (double window) retain-ratio))))
        answer))))

@@ -235,6 +235,17 @@
         (is (thrown-with-msg? Exception #"not valid JSON" (stats/log-stats f))
             "a corrupt line before the last one names itself")
         (finally (.delete f))))))
+(deftest log-stats-is-records->stats-on-a-stream
+  ;; TICKET 06: `log-stats` folds the FILE -- the reader lives inside the fold and the rows
+  ;; are never all held at once -- while `records->stats` folds an array. Same `stats-step`
+  ;; behind both, so they cannot disagree.
+  (let [records (vec (conversation 0 "u1" (usage 100 20 80)))
+        f       (java.io.File/createTempFile "stats-stream" ".jsonl")]
+    (try
+      (spit f (str (str/join "\n" (map row-json records)) "\n") :encoding "UTF-8")
+      (is (= (stats/records->stats records) (stats/log-stats f)))
+      (finally (.delete f)))))
+
 
 ;; ----------------------------------------------------------------- the endpoint
 

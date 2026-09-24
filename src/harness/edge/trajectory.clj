@@ -50,7 +50,8 @@
   (:require [clojure.string :as str]
             [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]
-            [harness.edge.replay :as replay]))
+            [harness.edge.replay :as replay]
+            [harness.kernel.tools :as tools]))
 
 ;; ------------------------------------------------------------------- the runs
 
@@ -75,10 +76,12 @@
 (defn run-segments
   "RECORDS split into runs, in order:
   [{:opener <row> :at <ms> :brought [msg…] :submitted [msg…] :returned [msg…]
-    :calls [row…] :streaming bool}].
+    :calls [row…] :streaming bool :prompt-row <the run's system row or nil>}].
 
-  A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there,
-  whether that row is the client's own or the system prompt (`harness.edge.http`). A HARNESS
+  A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there.
+  `harness.edge.http` writes the prompt BEFORE the action's own entries, so that row IS the
+  system prompt on every run this build records (a record written before that reordering opens
+  at the client's own message instead, and this reader still handles it). A HARNESS
   FACT does not open one: the fact rows are `event`s, which is the same distinction
   `harness.edge.replay/runs` draws. What the run BROUGHT into the CONVERSATION is
   `:brought`, and an entry is a row that carries one (`replay/entries`' reading). Its
@@ -137,6 +140,9 @@
                (and (replay/system-prompt? record) (:prompt? current))))
       (recur more (cond-> {:run-id       (:runId record)
                            :prompt?      (replay/system-prompt? record)
+                           ;; THE RUN'S SYSTEM ROW, kept whole (envelope and all) so its
+                           ;; `:tools` can ride the system ITEM -- an item is self-contained.
+                           :prompt-row   (when (replay/system-prompt? record) record)
                            :opener       record
                            :at           (:ts record)
                            :brought      []
@@ -160,6 +166,9 @@
                  (update current :returned conj (row-message record))
                  (-> current
                      (update :submitted conj (row-message record))
+                     ;; an OLDER record's run can open at an entry and reach its system row
+                     ;; later; keep whichever system row this run has.
+                     (cond-> (replay/system-prompt? record) (assoc :prompt-row record))
                      (cond-> (entry-row? record)
                        (-> (update :brought conj (row-message record))
                            (update :brought-rows conj record))))))
@@ -419,16 +428,27 @@
   as it spelled it) and the total is derived on top; what the request carried is taken
   from the start's payload. Nothing is renamed and nothing is filled in."
   [start end]
-  (let [payload (replay/payload end)
-        usage   (:usage payload)]
+  (let [payload   (replay/payload end)
+        usage     (:usage payload)
+        start-p   (replay/payload start)
+        ;; THE TABLE ITSELF IS NOT IN THE RECORD ANY MORE (ticket 04): what a call
+        ;; left is its NAME SET as a hash and its count. An OLD record still carries
+        ;; the table, and the same two answers are derived here so a reader of either
+        ;; record gets the same shape -- and two tables that differ only in a
+        ;; DESCRIPTION still group together, which is the point of the name set.
+        names-hash (or (:tools-names-hash start-p)
+                       (when (seq (:tools start-p)) (tools/names-hash (:tools start-p))))
+        n-tools    (or (:tools-count start-p)
+                       (when (seq (:tools start-p)) (count (:tools start-p))))]
     (cond-> {}
-      (some? (:model (replay/payload start))) (:model (replay/payload start))
-      (seq (:tools (replay/payload start)))   (assoc :tools (:tools (replay/payload start)))
-      (some? start)                     (assoc :startedAt (:ts start))
-      (some? end)                       (assoc :endedAt (:ts end))
-      (seq usage)                       (assoc :usage usage)
-      (some? (stats/tokens-of usage))   (assoc :tokens (stats/tokens-of usage))
-      (some? (:finish-reason payload))  (assoc :finishReason (:finish-reason payload)))))
+      (some? (:model start-p))        (assoc :model (:model start-p))
+      (some? names-hash)              (assoc :toolsNamesHash names-hash)
+      (some? n-tools)                 (assoc :toolsCount n-tools)
+      (some? start)                   (assoc :startedAt (:ts start))
+      (some? end)                     (assoc :endedAt (:ts end))
+      (seq usage)                     (assoc :usage usage)
+      (some? (stats/tokens-of usage)) (assoc :tokens (stats/tokens-of usage))
+      (some? (:finish-reason payload)) (assoc :finishReason (:finish-reason payload)))))
 
 (defn- calls-of
   "The model calls one run made, in order, from its `model/start` / `model/end` lines:
@@ -547,9 +567,19 @@
 
 ;; ------------------------------------------------------------------- the answer
 
-(defn- system-item [text initial?]
+(defn- system-item
+  "The `system` item: the prompt's TEXT, whether it is the run's FIRST system message, and
+  -- when the record kept it -- the TOOL TABLE that went out with that run.
+ 
+  THE TABLE RIDES THE ITEM, from the system row's envelope (`:tools`, see
+  `harness.edge.http` and ADR 0004): a trajectory item is SELF-CONTAINED, so a reader
+  (or a pane) never has to go and pull a second record to find out what tools the run
+  served. Absent -- not empty -- when the row kept none (a record written before the
+  table moved to the envelope, or a session that serves no tools)."
+  [text initial? tools]
   (cond-> {:kind "system" :text text}
-    initial? (assoc :initial true)))
+    initial? (assoc :initial true)
+    (seq tools) (assoc :tools (vec tools))))
 
 (defn- one-run
   "STATE + one run -> STATE. Turns are opened by new user messages, and everything the
@@ -652,7 +682,8 @@
             turns (-> turns
                       open-turn
                       (cond-> changed?
-                        (append-last [(system-item texts (nil? shownSystem))]))
+                        (append-last [(system-item texts (nil? shownSystem)
+                                                     (:tools (:prompt-row run)))]))
                       (add-context before)
                       (add-context lead)
                       (add-context between))
@@ -680,7 +711,8 @@
                       (add-context before)
                       (add-context between)
                       (add-context after)
-                      (cond-> changed? (append-last [(system-item texts false)]))
+                      (cond-> changed?
+                        (append-last [(system-item texts false (:tools (:prompt-row run)))]))
                       (append-last (returned-items (:returned run) call-of life-of offset))
                       (append-calls calls))]
         {:seen seen' :shownSystem texts :turns turns
@@ -693,7 +725,7 @@
   EACH TURN CARRIES WHAT THE MODEL HAD, IN THE RECORD'S ORDER. A turn is :index, the
   :calls it made, and one :items vector whose entries are keyed by :kind --
 
-    system     :text :initial
+    system     :text :initial :tools (the run's table, off the row's envelope)
     context    :text
     user       :id :text
     assistant  :text :call :reasoning (only when the vendor reported some)

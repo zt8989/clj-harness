@@ -63,7 +63,8 @@
   "tools": {
     "unnamed": "unnamed tool",
     "predates": "this record predates the model-call lines, so it cannot say which tools were on the table.",
-    "noTable": "no call in this turn carried a tool table."
+    "noTable": "no call in this turn carried a tool table.",
+    "notKept": "the whole table is on the ENVELOPE of the system row (key `:tools`), out of the message itself; what is grouped here is each call's envelope, by the tool NAME set."
   },
   "empty": {
     "noRecord": "no record for this session yet.",

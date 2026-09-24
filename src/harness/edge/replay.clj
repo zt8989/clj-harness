@@ -46,15 +46,42 @@
             [harness.kernel.loop :as loop]
             [harness.cap.system-prompt :as system-prompt]))
 
-(defn read-lines
-  "A log FILE's raw lines (see harness.infra.home/log-file). A missing log is a NAMED
-  failure, not an empty conversation: continuing from nothing would silently drop
-  a whole history."
-  [^java.io.File f]
+(defn- log-reader
+  "An open reader over FILE's bytes, UTF-8 NAMED EXPLICITLY -- never the JVM's default
+  charset, which is not a fact this repo will rest a conversation's bytes on. A missing
+  log is a NAMED failure, not an empty conversation: continuing from nothing would
+  silently drop a whole history."
+  ^java.io.BufferedReader [^java.io.File f]
   (when-not (.exists f)
     (throw (ex-info (str "no log at " (.getAbsolutePath f))
                     {:path (.getAbsolutePath f)})))
-  (str/split-lines (slurp f :encoding "UTF-8")))
+  (io/reader f :encoding "UTF-8"))
+
+(defn- closing-lines
+  "READER's lines, LAZY, with the reader CLOSED when the seq runs out (or when reading
+  throws). A consumer that walks it to the end leaves no handle behind -- which is every
+  caller of `read-lines`; a consumer that may stop early should use `fold-records`, which
+  owns the reader inside its own extent instead."
+  [^java.io.BufferedReader r]
+  (let [step (fn step []
+               (lazy-seq
+                (try
+                  (if-some [line (.readLine r)]
+                    (cons line (step))
+                    (do (.close r) nil))
+                  (catch Throwable t (.close r) (throw t)))))]
+    (step)))
+
+(defn read-lines
+  "A log FILE's raw lines, as a LAZY seq (see harness.infra.home/log-file). A missing log
+  is a NAMED failure, not an empty conversation: continuing from nothing would silently
+  drop a whole history.
+ 
+  ONE LINE AT A TIME (ticket 06): it used to `slurp` the whole file into a String and
+  `split-lines` that into 362,359 Strings. The reader is UTF-8 explicitly and closes
+  itself at end of file; no caller ever holds the lines together."
+  [^java.io.File f]
+  (closing-lines (log-reader f)))
 
 (def ^:private row-types
   "THE RECORD HAS EXACTLY TWO KINDS OF ROW (`.scratch/jsonl-two-kinds`, 拍定 2026-09-21):
@@ -184,33 +211,70 @@
   "Parse a log's lines into ROWS -- the file's own shape, validated. A line that will not
   parse -- or is not one of the record's two rows -- is a hard failure that names the line:
   a log killed mid-write must not be mistaken for a shorter conversation, and an
-  old-contract record must not be mistaken for an unreadable one (see `read-row`)."
+  old-contract record must not be mistaken for an unreadable one (see `read-row`).
+ 
+  LAZY (ticket 06): nothing is read until something is asked for, and a caller that folds
+  the rows never holds them all. STRICT ON EVERY LINE, INCLUDING THE LAST -- the tolerance
+  for a half-written final line is `read-records`' / `fold-records`' rule, not this one's,
+  and a caller that only PROBES must force the seq itself."
   [lines]
-  (mapv read-row (range) lines))
+  (map-indexed read-row lines))
+
+(defn- rows-tolerating-a-torn-last-line
+  "LINES -> the file's records, with the LAST line's parse TOLERATED: a half-written final
+  line (the writer was mid-flush) is dropped, and EVERY OTHER LINE IS READ STRICTLY -- a
+  torn line in the middle is corruption and is refused by `read-row`.
+ 
+  STREAMED BY HOLDING ONE LINE BACK, which is what makes 'drop the last line' work
+  without `butlast` (recursive, a stack overflow on a 362k-line lazy seq) or `drop-last`
+  (one more full pass): a line is parsed only once a LATER line has arrived, so at EOF
+  the one still held is the last, and only its failure is swallowed."
+  [lines]
+  (letfn [(step [idx held more]
+            (lazy-seq
+             (if-some [s (seq more)]
+               (cons (read-row idx held) (step (inc idx) (first s) (rest s)))
+               (when-some [row (try (read-row idx held) (catch Throwable _ nil))]
+                 (list row)))))]
+    (when-some [s (seq lines)]
+      (step 0 (first s) (rest s)))))
+
+(defn fold-records
+  "FILE, INIT and RF -> the records of the log REDUCED AS A STREAM: (reduce RF INIT ...),
+  with RF handed each record as `[line-index row]` so a fold that numbers by line needs no
+  second pass, and the reader closed before this returns.
+ 
+  USE THIS INSTEAD OF `(read-records f)` WHENEVER THE CONSUMER ONLY FOLDS. `read-records`
+  hands back a vector, and thread `bbcd4ae4-…`'s 129.7 MB log is ~307 MB of rows -- the
+  whole pile a fold does not need. THE READER LIVES INSIDE THIS CALL, so a fold that stops
+  early still leaves no handle behind; that is also why there is no public lazy line source
+  to leak one -- `read-lines` closes at end of file, and a fold may not reach it."
+  [^java.io.File f init rf]
+  (with-open [r (log-reader f)]
+    (reduce rf init (map-indexed vector (rows-tolerating-a-torn-last-line (line-seq r))))))
 
 (defn read-records
-  "A log FILE's records, DROPPING a half-written LAST line -- the one shape a file being
-  appended to legitimately has.
-
+  "A log FILE's records, as a VECTOR, DROPPING a half-written LAST line -- the one shape a
+  file being appended to legitimately has.
+ 
   The writer hands whole lines to one consumer (`harness.edge.record/append!`), but a reader
   can still catch the newest line mid-flush: that is a fact about reading a live log, not a
   corrupt one, and dropping it is the honest answer -- the rest is what has happened so far.
   EVERY OTHER LINE IS READ STRICTLY: a torn line in the middle is corruption, and a reader
   that swallowed it would hand back a shorter conversation as if it were the whole one.
-
+ 
+  BUILT ON THE STREAM (`fold-records`), so the file is never slurped and the lines are
+  never all held at once. THIS IS THE ENTRY FOR A CALLER THAT WANTS THE WHOLE ARRAY -- a
+  test, `rebuild`, a route that filters and maps -- while a caller that only FOLDS uses
+  `fold-records` and keeps its peak heap at the size of the answer (ticket 06).
+ 
   TWO READERS, ONE RULE, spelled here so they cannot drift: `harness.edge.stats/read-records`
   (the numbers strip, which asks while a run streams) delegates to this, and the window asks
   through it while a run it holds is in flight (`harness.edge.http/record-entries`).
   `lines->records` remains the reader for a file that is supposed to be finished -- refusing
   a torn line there is what sends a client to the `rebuild` door."
   [^java.io.File f]
-  (let [lines (read-lines f)]
-    (if (empty? lines)
-      []
-      (let [head (lines->records (butlast lines))
-            tail (try (first (lines->records [(last lines)]))
-                      (catch Throwable _ nil))]
-        (cond-> (vec head) (some? tail) (conj tail))))))
+  (fold-records f [] (fn [acc [_ row]] (conj acc row))))
 
 (defn- runs
   "Every run a log holds, in the order its first MESSAGE row opened it: {:run-id .. :frames
@@ -449,6 +513,73 @@
   too, and every later run reads those bytes back through `sessions/model-view`)."
   #{"client" "injection" "opening"})
 
+;; --------------------------------------------------------- the entries fold
+;;
+;; WHAT `entries` FOLDS WITH, HOISTED SO A STREAM CAN DRIVE IT (ticket 06): `entries-step`
+;; is the same fold `entries` has always run, spelled as a reducing function, so
+;; `fold-records` can hand it one record at a time and nothing holds the conversation's
+;; ~307 MB of rows. `entries` remains for a caller that already has the array.
+
+(defn- our-entry?
+  "Is ROW one of the conversation's own (see `conversation-sources`)? AN INJECTED ROW
+  COUNTS ONLY WITH AN ID: the client's messages always carry one and the conversation's
+  birth wrote its context and opening with theirs, while a block a later run RE-DERIVED
+  for itself is logged with no id, because nothing appended it to the conversation."
+  [row]
+  (and (contains? conversation-sources (:source row))
+       (or (= "client" (:source row)) (some? (:id row)))))
+
+(defn- seen-entry?
+  "Has ACC's conversation already taken ROW's id? A row with NO id cannot be recognised
+  and is therefore kept, exactly as `append!` decides it."
+  [acc row]
+  (and (some? (:id row)) (contains? (:seen acc) (:id row))))
+
+(defn- add-entries [acc seq-n msgs]
+  (update acc :entries into (map (fn [m] {:seq seq-n :message m}) msgs)))
+
+(defn- flush-group
+  "Close ACC's open FRAME GROUP at FALLBACK's line (or `:after`'s, when a terminal gave
+  the group one): the frames become messages, numbered together."
+  [acc fallback]
+  (let [new (frames/apply-frames (:pending acc))
+        at  (or (:after acc) fallback)]
+    (-> (if (seq new) (add-entries acc at new) acc)
+        (assoc :pending [] :after nil))))
+
+(defn- entries-init [] {:entries [] :pending [] :after nil :seen #{} :last -1})
+
+(defn- entries-step
+  "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. `:last` is the line
+  index seen so far, so the FINAL flush needs no second pass over the records."
+  [acc [i row]]
+  (let [value (payload row)
+        acc   (assoc acc :last i)]
+    (case (kind row)
+      "message" (let [acc (flush-group acc (max 0 (dec i)))]
+                  (if (and (our-entry? row) (not (seen-entry? acc row)))
+                    (-> acc
+                        (add-entries i [(cond-> value (:id row) (assoc :id (:id row)))])
+                        (update :seen conj (:id row)))
+                    acc))
+      "event" (let [acc (update acc :pending conj value)]
+                ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the frames after a
+                ;; terminal belong to a line this reader would otherwise number short.
+                (if (frames/terminal? value) (assoc acc :after i) acc))
+      acc)))
+
+(defn- entries-answer
+  "The fold's answer: the entries, with the trailing group flushed at the LAST line read
+  (a run that never reached a terminal is numbered by where the record stops)."
+  [acc]
+  (:entries (flush-group acc (max 0 (:last acc)))))
+
+(defn fold-entries
+  "FILE -> the conversation's entries, folded from a STREAM (ticket 06): the same answer
+  `(entries (read-records f))` gives, at the peak heap of the answer rather than the
+  file."
+  [^java.io.File f]
+  (entries-answer (fold-records f (entries-init) entries-step)))
 (defn entries
   "Parsed log records -> the conversation's entries IN ORDER, each numbered:
   [{:seq N :message M} ..].
@@ -497,59 +628,10 @@
   how an old input line that carried the whole conversation reads the same as a new
   one that carried only what it added)."
   [records]
-  (let [add   (fn [acc seq-n msgs]
-                (update acc :entries into (map (fn [m] {:seq seq-n :message m}) msgs)))
-        folded (fn [acc] (mapv :message (:entries acc)))
-        ;; THE MESSAGE ROWS THAT ARE THE CONVERSATION'S OWN (see the docstring): what the
-        ;; client sent, and what the birth put in on the session's behalf. Everything else
-        ;; a `message` row can be is either not the client's to see (the prompt) or is
-        ;; already drawn from the frames.
-        ;; AN INJECTED ROW IS AN ENTRY ONLY WHEN IT HAS AN ID. The client's messages always
-        ;; carry one (`harness.edge.http/entry-source`), and the conversation's birth wrote
-        ;; its context and opening blocks with theirs -- while a block a later run
-        ;; RE-DERIVED for itself (the same instruction files, the same context, read again)
-        ;; is logged with no id, because nothing appended it to the conversation. That is
-        ;; the whole difference between the two, and it is why `append!` and this fold can
-        ;; dedupe by id.
-        ours?  (fn [row]
-                 (and (contains? conversation-sources (:source row))
-                      (or (= "client" (:source row)) (some? (:id row)))))
-        seen?  (fn [acc row] (and (some? (:id row)) (contains? (:seen acc) (:id row))))
-        flush (fn [acc fallback]
-                (let [new (frames/apply-frames (:pending acc))
-                      at  (or (:after acc) fallback)]
-                  (-> (if (seq new) (add acc at new) acc)
-                      (assoc :pending [] :after nil))))]
-    (:entries
-     (flush
-      (reduce (fn [acc [i row]]
-                (let [value (payload row)]
-                 (case (kind row)
-                  ;; A MESSAGE ROW IS AN ENTRY when it is the conversation's own, and it is
-                  ;; numbered by its OWN line (`land-at!` gives the live session the same
-                  ;; number). A repeat is dropped by `:id` -- the client only ever appends,
-                  ;; so a row whose name the conversation already holds is one it sent
-                  ;; before (a retry, or a page re-sending what it holds); an entry with NO
-                  ;; id cannot be recognised and is therefore kept, exactly as `append!`
-                  ;; decides it.
-                  "message" (let [acc (flush acc (max 0 (dec i)))]
-                              (if (and (ours? row) (not (seen? acc row)))
-                                (-> acc
-                                    (add i [(cond-> value (:id row) (assoc :id (:id row)))])
-                                    (update :seen conj (:id row)))
-                                acc))
-                  "event" (let [acc (update acc :pending conj value)]
-                            ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the
-                            ;; frames after a terminal belong to a line this reader
-                            ;; would otherwise number short. (A run has one terminal;
-                            ;; `frames/terminal?` is the same rule `runs` pairs by.)
-                            (if (frames/terminal? value)
-                              (assoc acc :after i)
-                              acc))
-                  acc)))
-              {:entries [] :pending [] :after nil :seen #{}}
-              (map-indexed vector records))
-      (max 0 (dec (count records)))))))
+  ;; THE FOLD ITSELF IS `entries-step`'s, above -- one pass, and the trailing group is
+  ;; flushed at the last line index the fold saw (`:last`), not from a second `(count
+  ;; records)` pass, which is what kept a lazy caller from streaming (ticket 06).
+  (entries-answer (reduce entries-step (entries-init) (map-indexed vector records))))
 
 (defn- fold-frames
   "Parsed log records -> the AG-UI message list they describe, WITHOUT judging
@@ -701,10 +783,12 @@
   -- not a numeric interval, because the summary it stands for has a LARGER record seq than
   the range it replaces and yet sits where that range was."
   [records]
+  ;; OVER THE SEQ, NOT `(vec records)`: a `vec` here would drag the whole file back into
+  ;; memory and undo the streaming the read path just won (ticket 06).
   (keep-indexed (fn [i row]
                   (when (= "context/compacted" (kind row))
                     (assoc (payload row) :seq i)))
-                (vec records)))
+                records))
 
 (defn prune-facts
   "RECORDS -> the tool-result prunings the record declares, in the order they happened, each as
@@ -717,10 +801,11 @@
   elided version. `:shadowed` names the event whose text it replaced, and `:toolCallId` is the
   call the two share -- which is also how the fold finds the message to change."
   [records]
+  ;; OVER THE SEQ, for the same reason `compaction-facts` is (ticket 06).
   (keep-indexed (fn [i row]
                   (when (= "context/pruned" (kind row))
                     (assoc (payload row) :seq i)))
-                (vec records)))
+                records))
 
 (defn- compaction-summary
   "The message the model reads in a compacted range: one ordinary user message wrapping the
@@ -760,6 +845,64 @@
                 m))
             messages))))
 
+(defn- injected-card-of
+  "The injected-context card among M's parts, or nil. Its `:data` carries the role and text
+  of the message it views (`harness.edge.ag-ui/injection-value`)."
+  [m]
+  (let [c (:content m)]
+    (when (sequential? c)
+      (some (fn [p]
+              (when (and (= "data" (:type p)) (= ag/injected-part-name (:name p)))
+                p))
+            c))))
+
+(defn model-message
+  "ONE ENTRY MESSAGE -> the message a provider may be handed, or nil when it is a card with
+  nothing to realise. The PER-MESSAGE half of `model-view`, so a fold that must keep one node
+  per entry (`model-nodes`) can ask the same question without losing the ids it walks by.
+
+  The rule -- and why an injected card is REALISED rather than dropped -- is `model-view`'s."
+  [m]
+  (let [c (:content m)]
+    (if (and (sequential? c) (some #(= "data" (:type %)) c))
+      (let [kept (into [] (remove #(= "data" (:type %))) c)]
+        (if (seq kept)
+          (assoc m :content kept)
+          ;; THE WHOLE MESSAGE WAS A CARD: realise the injection it views.
+          (let [data (:data (injected-card-of m))
+                text (:text data)]
+            (when (and (map? data) (string? text) (not (str/blank? text)))
+              (assoc m :role (or (:role data) (:role m)) :content text)))))
+      m)))
+
+(defn model-view
+  "MESSAGES -> the conversation AS A PROVIDER MAY BE HANDED IT: the cards taken out.
+
+  A card is a message (or part) the record carries so the screen can draw it again. It is
+  USUALLY not something the model ever read -- but a run's own injection is the exception,
+  and the paragraph below is about it. `harness.edge.ag-ui/provider-part` refuses a
+  `data` part BY NAME, and it should keep refusing: this is the function that makes sure
+  one is never offered.
+
+  A CARD-ONLY MESSAGE IS REALISED, NOT DROPPED, when it is one of a run's own injections
+  (`harness.edge.ag-ui/injected-part-name`): a skill body or a job's ending is a message the
+  model READ, and the card is only its screen half. Handing it back in the provider's shape
+  is what makes the pre-LLM step idempotent ACROSS RUNS. The bytes are the card's own `:text`
+  and the role is the role it arrived with; a card with no text to realise (an older record,
+  an empty injection) is still dropped rather than sent as an empty turn.
+
+  AN OPENING ENTRY IS THE ONE MESSAGE THAT CARRIES BOTH (`harness.edge.ag-ui/opening-entries`):
+  the `data` half is the card the page draws, the `text` half is what the model reads, so
+  removing the `data` part leaves exactly what the model is owed.
+
+  IT LIVES HERE, BESIDE `model-nodes`, BECAUSE THE MODEL-FACING SURFACE HAS ONE OWNER: a
+  reader that folds the record into a provider's message vector must not write its own
+  version of this rule. `harness.edge.sessions` delegates and compaction's plan reads the
+  nodes below -- a second copy is exactly how a `data` card reached a summarizer once
+  (2026-09-24, thread `bbcd4ae4-…`: HTTP 422 `unknown variant data`)."
+  [messages]
+  (into [] (keep model-message) messages))
+
 (defn model-nodes
   "ENTRIES (replay/entries) + FACTS (compaction-facts) -> the MODEL-FACING SURFACE as
   NODES `{:id <record seq> :message M}`, in order, every compaction's summary standing where
@@ -777,13 +920,22 @@
   so a later compaction can shadow it -- and then `start` can be GREATER than `end`, which is
   exactly why the walk is by position and not by comparison.
 
+  EACH NODE'S MESSAGE IS ALREADY THE MODEL VIEW (`model-message`), so the surface a
+  compaction's summarizer is handed carries no `data` card. An injected card realises to its
+  text and the node is KEPT (its id is its record seq, `:shadowed`'s unit); only a card that
+  realises to nothing drops, and it drops the same way every time the fold is re-run.
+
   PRUNES (prune-facts) ARE APPLIED FIRST, so an elided tool result is what a compaction's
   RANGE measures over: a pruning moves no node and changes no pairing, and only the MODEL view
   changes. A caller that has no prunings passes the two-argument arity and pays nothing for it."
   ([entries facts] (model-nodes entries facts []))
   ([entries facts prunes]
-   (let [msgs (prune-messages (mapv :message entries) prunes)
-         base (mapv (fn [{:keys [seq]} m] {:id seq :message m}) entries msgs)]
+   (let [nodes (keep (fn [{:keys [seq] :as e}]
+                       (when-some [m (model-message (:message e))]
+                         {:id seq :message m}))
+                     entries)
+         msgs  (prune-messages (mapv :message nodes) prunes)
+         base  (mapv (fn [{:keys [id]} m] {:id id :message m}) nodes msgs)]
      (vec (reduce apply-compaction base (sort-by :seq facts))))))
 
 (defn compacted-messages

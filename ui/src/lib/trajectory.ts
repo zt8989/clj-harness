@@ -17,7 +17,10 @@ import { API_BASE } from "@/lib/threads";
 
 /// One thing in a turn, in the order the model had it.
 export type TrajectoryItem =
-  | { kind: "system"; text: string; initial?: boolean }
+  /// The table the run SERVED, off the system row's envelope (`:tools`) -- so the item
+  /// is self-contained and the pane never pulls a second record. Absent for a record
+  /// written before the table moved to the envelope.
+  | { kind: "system"; text: string; initial?: boolean; tools?: readonly unknown[] }
   | { kind: "context"; text: string; call?: number }
   | { kind: "user"; text: string; id?: string; at?: number }
   | { kind: "assistant"; text: string; reasoning?: string; call?: number }
@@ -47,8 +50,10 @@ export type TrajectoryItem =
 export type TrajectoryCall = {
   index: number;
   model?: string;
-  /// The tool table AS SENT, verbatim. Absent when the request carried none.
-  tools?: readonly unknown[];
+  /// THE TOOL TABLE'S SIGNATURE, not the table (ticket 04): the NAME set as a hash and
+  /// how many tools it held. Absent -- not empty -- when the request carried no table.
+  toolsNamesHash?: string;
+  toolsCount?: number;
   startedAt?: number;
   endedAt?: number;
   /// The vendor's own usage map, its own key names intact, and the total derived from

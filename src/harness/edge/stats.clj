@@ -74,21 +74,6 @@
       (let [id (or (:id record) (:id message))]
         (when (some? id) [id])))))
 
-(defn- turns
-  "How many turns RECORDS hold.
-
-  A TURN IS ONE USER MESSAGE and all the output it caused (CONTEXT.md), so a turn
-  is counted per user message that had NOT been seen before -- and one run that brings two
-  new ones brings two turns. A RESUME brings no user message at all (what the parked run
-  left in the conversation is already there), so it opens none: that run is the continuation
-  of the turn that parked."
-  [records]
-  (:n (reduce (fn [{:keys [seen n]} record]
-                (let [ids (set (user-ids record))]
-                  {:seen (into seen ids)
-                   :n    (+ n (count (remove seen ids)))}))
-              {:seen #{} :n 0}
-              records)))
 
 ;; --------------------------------------------------------------- model calls
 
@@ -108,32 +93,6 @@
   (let [usage (:usage (replay/payload end-record))]
     {:usage (when (seq usage) usage)
      :ms    (when-some [started (:ts pending)] (- (:ts end-record) started))}))
-
-(defn- calls
-  "The model calls in RECORDS, in order: [{:usage <vendor map or nil> :ms <int or nil>}].
-
-  A call BEGINS at `model/start` and ends at the next `model/end` -- a pair, by
-  order. An end whose payload is empty is a call that reported NOTHING (it died
-  mid-stream): it is a call, and it has a duration, and it contributes no tokens.
-  A start with no end at all (the log stops here) is still a call: it started, and
-  nothing about it has been reported yet."
-  [records]
-  (loop [[record & more] records
-         pending        nil
-         acc            []]
-    (cond
-      (nil? record)
-      (if pending (conj acc {:usage nil :ms nil}) acc)
-
-      (= "model/start" (replay/kind record))
-      ;; A previous start with no end is a call that never closed; keep it as one.
-      (recur more record (if pending (conj acc {:usage nil :ms nil}) acc))
-
-      (= "model/end" (replay/kind record))
-      (recur more nil (conj acc (close-call pending record)))
-
-      :else
-      (recur more pending acc))))
 
 (defn- number-at
   "A number out of a vendor's usage map, or nil -- nil for a key that is absent, for
@@ -233,6 +192,58 @@
 
 ;; ----------------------------------------------------------------- the answer
 
+;; ------------------------------------------------------ the stats fold, one pass
+;;
+;; TICKET 06: `records->stats` used to walk its records THREE times -- once for the calls,
+;; once for the turns, once for the last frame -- and a lazy seq walked three times pins
+;; every row it realized, which is the whole file. All three are accumulated in ONE pass,
+;; so `harness.edge.replay/fold-records` can drive this and hold only the answer.
+
+(defn- stats-init [] {:calls [] :pending nil :seen #{} :turns 0 :last-frame nil})
+
+(defn- stats-step
+  "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. The line index is
+  not needed here (calls pair by ORDER), so it is destructured and ignored.
+ 
+  THREE RULES, ONE PASS:
+    - A CALL BEGINS at `model/start` and ends at the next `model/end`, by order. An end
+      whose payload is empty is a call that reported NOTHING (it died mid-stream) -- a
+      call, with a duration and no tokens -- and a start with no end at all is still a
+      call: it started, and nothing has been reported about it yet.
+    - A TURN IS ONE USER MESSAGE and the output it caused (CONTEXT.md), counted per user
+      message NOT seen before; a resume brings none and opens none.
+    - `:last-frame` is the last EVENT row's payload, which is what `:incomplete` is read
+      from -- the file's last frame, found in the same walk rather than a second one."
+  [acc [_ row]]
+  (let [k   (replay/kind row)
+        ids (set (user-ids row))
+        acc (-> acc
+                (update :seen into ids)
+                (update :turns + (count (remove (:seen acc) ids))))
+        acc (if (= "event" k) (assoc acc :last-frame (replay/payload row)) acc)]
+    (case k
+      "model/start" (-> acc
+                        (cond-> (:pending acc) (update :calls conj {:usage nil :ms nil}))
+                        (assoc :pending row))
+      "model/end"   (-> acc
+                        (update :calls conj (close-call (:pending acc) row))
+                        (assoc :pending nil))
+      acc)))
+
+(defn- stats-answer
+  "The fold's answer from its accumulated state (see `stats-step` for what each part is)."
+  [{:keys [calls pending turns last-frame]}]
+  (let [cs      (cond-> calls pending (conj {:usage nil :ms nil}))
+        usage   (usage-of cs)
+        cached  (cache-hit-rate cs)
+        per-sec (output-tokens-per-second cs)]
+    (cond-> {:turns      turns
+             :incomplete (boolean (and last-frame (not (frames/terminal? last-frame))))}
+      (seq cs) (assoc :steps (count cs)
+                      :stepsWithUsage (count (filter :usage cs)))
+      (seq usage) (assoc :usage usage)
+      (some? cached) (assoc :cacheHitPercent cached)
+      (some? per-sec) (assoc :outputTokensPerSecond per-sec))))
 (defn records->stats
   "RECORDS -> the session's numbers. See the namespace docstring for what this is
   and read-records for what a record is; the payload this builds is the one
@@ -245,21 +256,13 @@
   key. `stepsWithUsage` is carried so a reader can see how much of the session the
   sums actually cover."
   [records]
-  (let [cs      (calls records)
-        usage   (usage-of cs)
-        cached  (cache-hit-rate cs)
-        per-sec (output-tokens-per-second cs)]
-    (cond-> {:turns      (turns records)
-             :incomplete (incomplete? records)}
-      (seq cs) (assoc :steps (count cs)
-                      :stepsWithUsage (count (filter :usage cs)))
-      (seq usage) (assoc :usage usage)
-      (some? cached) (assoc :cacheHitPercent cached)
-      (some? per-sec) (assoc :outputTokensPerSecond per-sec))))
+  (stats-answer (reduce stats-step (stats-init) (map-indexed vector records))))
 
 (defn log-stats
   "A log FILE -> records->stats of it. The file entry point, the counterpart of
   harness.edge.replay/rebuild: the caller locates the stem, this namespace never
   learns where the log came from."
   [f]
-  (records->stats (read-records f)))
+  ;; FOLDED FROM A STREAM (ticket 06): the same answer `records->stats` gives, and the
+  ;; file's rows are never all held at once.
+  (stats-answer (replay/fold-records f (stats-init) stats-step)))

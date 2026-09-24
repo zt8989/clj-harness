@@ -253,12 +253,14 @@ id 的拼法让三个来源一眼分得开：文件 `pre-tool-use#0`（点在文
 | `builtin:project` | `<project>` | 绑在哪个目录（绝对路径）、相对路径/bash/绝对路径各自怎么解析、围栏的自由路径集合（含 `:approval {:strict true}` 与 `:approval {:allow ..}` 的两种变化）；未绑定就明说没绑定、不提围栏 |
 | `builtin:env` | `<env>` | 这台机器：平台、命令实际交给哪个 shell（kind + 路径 + 起法）、声明名单里这个 shell 看得见哪些命令行增强工具（`rg` / `fd` / `jq` / `git`）——**有说，没有也说**；外加这一家说的语言（`language: English (en)` / `Chinese (zh)`），**永远在场** |
 
-**曾经还有两条，2026-09-16 的复议里退场**：`<tools>`（本会话的工具名册）与 `<provider>`（生效的
-vendor / model / 思考档）。名册在 wire 的 `:tools` 数组里**自描述**（每次请求都带着每个工具的名字与
-描述），说第二遍是把同一件事说两遍；`<provider>` 是**净损失**，如实记在
-`.scratch/session-context/spec.md`（`active-provider` 仍可问、`/api/model` 仍答，只是不再主动说）。
-工作与逐条断言在同一个目录，`.scratch/system-prompt-blocks/spec.md` 末尾记着这次复议**没有推翻它
-的任何一条决策**——被改的是行的集合，不是机制。
+**`<tools>` 与 `<provider>` 都退场**（2026-09-16）：名册在 wire 的 `:tools` 数组里**自描述**（每次请求都
+带着每个工具的名字与描述），说第二遍是把同一件事说两遍。**2026-09-24 主人补了一句边界**：「tools 应该写进
+`role=system`」——但它的意思不是把 `<tools>` 块加回**正文**（那正是「说第二遍」、模型白付 token），而是
+把整张表写到 **system 那条 `message` 行的信封上**（`:tools`，由 `harness.edge.http` 在写那行时带上，
+`replay/payload` 把它挡在消息之外）：记录里回读得到、模型读不到。所以这里的两条行**不再增加**，
+`.scratch/system-prompt-blocks/spec.md` 决策 6 也不改；`harness.cap.system-prompt` 只管正文的两块。
+（`.scratch/model-surface-and-meter` 票 04：那张表曾经一字不差重复 672 遍、占 129.7 MB 日志四成。）
+`<provider>` 同理退场，如实记在 `.scratch/session-context/spec.md`。
 
 两块都是**现算**的：binding 随 `project/bind!` 变，机器事实随进程变。因此**事实不动则文本逐字节不动**
 （prefix 照旧命中），事实动了（换目录、关掉一条 hook）就付一次冷前缀——**宁可冷一次，也不让 system
