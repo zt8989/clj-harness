@@ -5858,6 +5858,13 @@
   (wipe-dir! sofar-dir)
   (with-server
    "sofar-a"
+   ;; AN EXPLICIT SCRIPT, AND A TOOL THAT REACHES THE SEAM -- the same premise its sibling states
+   ;; for itself. This case holds the run at `tools/run!`, so the turn has to make a call that
+   ;; gets there; leaning on a shared default script made that the script's business instead of
+   ;; the test's.
+   [{:content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}
+                              {:id "c2" :name "read" :arguments {:path "README.md"}}]}
+    {:content "done"}]
    (fn []
      (bind! "sofar-a" sofar-dir)
      (let [gate (support/window-gate #'tools/run! 20000)
@@ -6129,6 +6136,11 @@
   (wipe-dir! sofar-dir-2)
   (with-server
    "sofar-b"
+   ;; AN EXPLICIT SCRIPT, AND A TOOL THAT REACHES THE SEAM. This case holds the run at
+   ;; `tools/run!` -- so the turn has to make a call that gets there -- and it used to lean on
+   ;; whatever was in a shared default script. The premise is the test's, so the test says it.
+   [{:content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
+    {:content "done"}]
    (fn []
      (bind! "sofar-b" sofar-dir-2)
      (let [gate (support/window-gate #'tools/run! 20000)

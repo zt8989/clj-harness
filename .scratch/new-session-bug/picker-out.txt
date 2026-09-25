@@ -1,0 +1,90 @@
+   >> GET /api/projects
+   >> GET /api/projects
+   >> GET /api/git?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> GET /api/choices?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> GET /api/model?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> GET /api/projects
+   >> GET /api/projects
+   >> GET /api/git?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> GET /api/choices?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> GET /api/model?threadId=58dadb99-532e-4cdf-9885-879b9bc5e2db
+   >> POST /api/projects
+   >> GET /api/projects
+   >> GET /api/projects
+   >> GET /api/projects
+   >> GET /api/git?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/choices?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/model?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/projects
+   >> GET /api/git?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/choices?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/model?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+minted: d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+composer directory strip: {
+ "text": "",
+ "value": "",
+ "title": "",
+ "html": "<button type=\"button\" data-slot=\"composer-directory-trigger\" aria-label=\"项目目录\" aria-haspopup=\"listbox\" title=\"\" class=\"text-muted-foreground hover:text-foreground flex min-w-0 items-center gap-1.5 text-sm outline-none disabled:opacity-50\" aria-expanded=\"false\" data-state=\"closed\"><svg xmlns=\"http://"
+}
+   >> GET /api/projects
+store before the pick: {"inProject":[["4cd2c206-0178-47af-8b82-31115018071e",null,null],["74cddb53-d269-4b08-8a29-4e122b8f1c04","这个项目里的第一句",1789996694674],["5ce30ad3-fc46-415c-aacc-5954ecba4101","项目里发出去的第一句",1789996787712],["2d9f387c-3acb-4806-8da4-fbdedebef7c7","项目里发出去的第一句",1789996842251],["ab7613ea-6dce-4599-afd0-3e8fa44b2a66","时间线探针：项目里的第一句",1789997062445],["8c196d9c-9b90-44d5-b123-52fe83ccc908","看行探针：项目里的第一句",1789997213024]],"tasks":[["4eff01c2-5539-4daf-adff-ac54d70d0fae","侧栏只从库里读，一行就够",1789996692585],["c234979e-8ddb-4d09-abea-4713985acc29","侧栏只从库里读，一行就够",1789996590584]]}
+
+--- open the directory picker ---
+options: ["store-backed-sidebar-Llxu0NC:\\Users\\zhouteng\\AppData\\Local\\Temp\\store-backed-sidebar-Llxu0N","store-backed-sidebar-BZuV05C:\\Users\\zhouteng\\AppData\\Local\\Temp\\store-backed-sidebar-BZuV05","probe-new-session-ZSdmW0C:\\Users\\zhouteng\\AppData\\Local\\Temp\\probe-new-session-ZSdmW0","probe-new-session-vK390FC:\\Users\\zhouteng\\AppData\\Local\\Temp\\probe-new-session-vK390F","who-asks-WMYxPxC:\\Users\\zhouteng\\AppData\\Local\\Temp\\who-asks-WMYxPx","timeline-CEMhIXC:\\Users\\zhouteng\\AppData\\Local\\Temp\\timeline-CEMhIX","watch-rows-B6dyThC:\\Users\\zhouteng\\AppData\\Local\\Temp\\watch-rows-B6dyTh","reload-r92uI2C:\\Users\\zhouteng\\AppData\\Local\\Temp\\reload-r92uI2","picker-c2cjFXC:\\Users\\zhouteng\\AppData\\Local\\Temp\\picker-c2cjFX","picker-l1OpP9C:\\Users\\zhouteng\\AppData\\Local\\Temp\\picker-l1OpP9","picker-IB1tIEC:\\Users\\zhouteng\\AppData\\Local\\Temp\\picker-IB1tIE"]
+
+--- pick the project ---
+   >> POST /api/project
+   >> GET /api/projects
+   >> GET /api/git?threadId=d0a5b48d-0f85-4abc-99e9-5c6088697dc9
+   >> GET /api/projects
+store after the pick: {"inProject":[["4cd2c206-0178-47af-8b82-31115018071e",null,null],["d0a5b48d-0f85-4abc-99e9-5c6088697dc9",null,null],["74cddb53-d269-4b08-8a29-4e122b8f1c04","这个项目里的第一句",1789996694674],["5ce30ad3-fc46-415c-aacc-5954ecba4101","项目里发出去的第一句",1789996787712],["2d9f387c-3acb-4806-8da4-fbdedebef7c7","项目里发出去的第一句",1789996842251],["ab7613ea-6dce-4599-afd0-3e8fa44b2a66","时间线探针：项目里的第一句",1789997062445],["8c196d9c-9b90-44d5-b123-52fe83ccc908","看行探针：项目里的第一句",1789997213024]],"tasks":[["4eff01c2-5539-4daf-adff-ac54d70d0fae","侧栏只从库里读，一行就够",1789996692585],["c234979e-8ddb-4d09-abea-4713985acc29","侧栏只从库里读，一行就够",1789996590584]]}
+   >> GET /api/projects
+rows after a refresh: [
+ {
+  "id": "4eff01c2-5539-4daf-adff-ac54d70d0fae",
+  "says": "侧栏只从库里读，一行就够",
+  "block": "tasks"
+ },
+ {
+  "id": "c234979e-8ddb-4d09-abea-4713985acc29",
+  "says": "侧栏只从库里读，一行就够",
+  "block": "tasks"
+ },
+ {
+  "id": "4cd2c206-0178-47af-8b82-31115018071e",
+  "says": "4cd2c206-0178-47af-8b82-31115018071e",
+  "block": "project"
+ },
+ {
+  "id": "d0a5b48d-0f85-4abc-99e9-5c6088697dc9",
+  "says": "d0a5b48d-0f85-4abc-99e9-5c6088697dc9",
+  "block": "project"
+ },
+ {
+  "id": "74cddb53-d269-4b08-8a29-4e122b8f1c04",
+  "says": "这个项目里的第一句",
+  "block": "project"
+ },
+ {
+  "id": "5ce30ad3-fc46-415c-aacc-5954ecba4101",
+  "says": "项目里发出去的第一句",
+  "block": "project"
+ },
+ {
+  "id": "2d9f387c-3acb-4806-8da4-fbdedebef7c7",
+  "says": "项目里发出去的第一句",
+  "block": "project"
+ },
+ {
+  "id": "ab7613ea-6dce-4599-afd0-3e8fa44b2a66",
+  "says": "时间线探针：项目里的第一句",
+  "block": "project"
+ },
+ {
+  "id": "8c196d9c-9b90-44d5-b123-52fe83ccc908",
+  "says": "看行探针：项目里的第一句",
+  "block": "project"
+ }
+]
+
+VERDICT: the pick put a row in the list named "d0a5b48d-0f85-4abc-99e9-5c6088697dc9"

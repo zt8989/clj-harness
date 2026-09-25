@@ -367,8 +367,9 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 | 事实（CUSTOM 帧的 `name`） | 何时 |
 |---|---|
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
-| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同），加工具表的**签名**：`:tools-names-hash`（工具**名字**集合的 SHA-256——改描述不动它，加删工具才动）/ `:tools-count` / `:tools-bytes`（`context/size-of` 的字符数，给上下文圈画数）。**整张工具表不在这一行**（票 04：runtime 配置，一轮里一字不差重复几百遍，曾占整份日志四成）——它落在 system 那条 `message` 行的**信封**上（`:tools`，整张表，见下）。表为空时不写这三个键，**不上 wire** |
-| `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象，**不上 wire** |
+| `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同），加工具表的**签名**：`:tools-names-hash`（工具**名字**集合的 SHA-256——改描述不动它，加删工具才动）/ `:tools-count` / `:tools-bytes`（`context/size-of` 的字符数，给上下文圈画数）。**整张工具表不在这一行**（票 04：runtime 配置，一轮里一字不差重复几百遍，曾占整份日志四成）——它落在 system 那条 `message` 行的**信封**上（`:tools`，整张表，见下）。表为空时不写这三个键。**两处都在**：照旧进记录，**并且上会话那条下行**（ADR 0006 决策 4），线上的载荷就是这一行的载荷 |
+| `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象。**两处都在**（同上），而线上的那一份多一层 **`numbers`**：到这一刻的 `steps` / `usage` / `cacheHitPercent` / `outputTokensPerSecond` / `context`——它是**会话自己那几份折叠**当时的答案（`stats-get` 答的就是它们），所以线上不是第二份真相，是同一个答案早一点到 |
+| `turn/start` / `turn/end` | 一轮的两端。**只上会话那条下行，不进记录**：轮的边界在记录里由「没见过的 `:source "client"` user 行」算得出来（`harness.edge.stats/user-ids`），再写一行就是同一件事的第二份。`turn/start` 在那条 user 行**写入之前**发（行号就是它将要拿到的那一行）；`turn/end` 在**返回尾巴落地之后**发，带 `{turnId, calls, messages, seqFrom, seqTo}`——`calls` / `messages` 是 `harness.edge.turn` 那份**按轮**的折叠（客户端 `lib/turns.ts` 的 `turnCounts` 是同一套读数）。**parked 的一轮不收口**：`run/interrupt` 不是终局，带着人答复回来的那个 run 关的是**同一轮**（ADR 0006 决策 3） |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
 | `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |

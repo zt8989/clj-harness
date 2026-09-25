@@ -160,6 +160,13 @@ export function content(m: Message): string {
 /// a suite still reads the wire, not an interpretation of it.
 const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
 
+/// AND THE FACT FAMILY IS NOT A RUN'S FRAME EITHER (ADR 0006): `turn/*` and `model/*` are about
+/// the conversation, they carry the record's line number, and the CLIENT routes them away from
+/// `@ag-ui/client` (`src/lib/mux.ts`'s `familyOf`). A suite that reads "the frames this run
+/// sent" has to do the same, or every case that hands them to AG-UI's schema check fails on a
+/// frame that was never meant for it -- which is the property this reader exists to keep honest.
+const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+
 /// THE DECLARATION MUST LAND BEFORE THE RUN STARTS -- the server filters run frames by it --
 /// and the socket's own `open` can beat the server's bookkeeping. This asks the route that
 /// only ANSWERS once the set is recorded, retrying that race away.
@@ -197,7 +204,10 @@ export async function postRun(
       threadId?: string;
       seq?: number;
     };
-    if (frame.threadId !== tid || WINDOW_TYPES.has(frame.type)) return;
+    // THE WINDOW'S OWN AND THE FACT FAMILY ARE NEITHER OF THEM THIS RUN'S (`FACT_TYPES` above).
+    if (frame.threadId !== tid || WINDOW_TYPES.has(frame.type) || FACT_TYPES.has(frame.type)) {
+      return;
+    }
     // ONLY THE NUMBER IS OURS: `:seq` is the downlink's bookkeeping for the reconnect
     // cursor, and the rest of the frame -- `threadId` included -- is the AG-UI event the
     // server sent, exactly as a runtime would read it.

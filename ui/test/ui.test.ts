@@ -443,7 +443,8 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// and the window's `running` only wins if the status RIDES ON THE MESSAGE -- the difference
 /// between a `bash` call in flight drawn as a spinner and drawn as 待审批. The second case is
 /// the four words that reading can be.
-const EXPECTED_CASES = 155;
+// 155 on main, plus the one this branch added (the pushed numbers joining the snapshot).
+const EXPECTED_CASES = 156;
 
 let total = 0;
 for (const suite of SUITES) {

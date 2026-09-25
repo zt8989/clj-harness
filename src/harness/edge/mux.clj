@@ -150,6 +150,45 @@
          (filter (fn [[n _]] (> (long n) since)))
          (mapv second))))
 
+(def ^:private fact-buffer-size
+  "How many of a conversation's most recent FACTS (`turn/*`, `model/*`, ADR 0006) are kept for
+  a reader that reconnects. A GAP IS SHORT BY NATURE -- the client re-declares a cursor it held
+  a moment ago -- so this is a bound on memory, not a promise to a reader that was away for a
+  whole turn. `harness.edge.http/family-send!` is the one writer."
+  1024)
+
+(defonce ^:private facts
+  ;; thread-id -> [fact ..], oldest first, each carrying the RECORD's `seq` (a line number).
+  ;;
+  ;; WHY THIS EXISTS: a fact is a PUSH like a run frame, and a push nobody heard is gone. The
+  ;; difference from `runs` above is the numbering -- a run's frames are numbered by the sender
+  ;; (`record-run!`), while a fact already HAS its number: the record line it was written for.
+  ;; So there is no counter here, only a bound.
+  (atom {}))
+
+(defn record-fact!
+  "Remember FACT for THREAD-ID, so a reader that reconnects can be handed the ones it missed.
+  A fact with no `:seq` is still sent -- it is simply not something a cursor can ask after --
+  and it is remembered all the same (a reader that declares 'I hold nothing' gets it)."
+  [thread-id fact]
+  (let [tid (str thread-id)]
+    (swap! facts update tid
+           (fn [kept] (vec (take-last fact-buffer-size (conj (or kept []) fact)))))
+    fact))
+
+(defn facts-after
+  "THREAD-ID's remembered facts whose record `seq` is greater than SINCE, oldest first. SINCE
+  nil means 'I hold nothing', which is what a reader that never saw a fact declares. A fact
+  that carries no `:seq` is only ever handed to that reader: a cursor cannot place it."
+  [thread-id since]
+  (let [kept (or (get @facts (str thread-id)) [])]
+    (if (nil? since)
+      (vec kept)
+      (let [since (long since)]
+        (->> kept
+             (filter (fn [f] (let [n (:seq f)] (or (nil? n) (> (long n) since)))))
+             vec)))))
+
 (defn channels-for
   "Every connection's channel watching THREAD-ID, for a broadcaster that has a frame of
   its own to send (`harness.edge.http`'s run emitter). `mux-send!` on a closed channel is

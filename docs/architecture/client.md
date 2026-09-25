@@ -132,7 +132,11 @@ lib/
   feed.ts           一页一页的读：`pageThread`（尾页，或读者手上最老那条之前的一页）与帧的形状
                     （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
   mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
-                     分发窗口帧；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
+                     分发**三族**：窗口帧、run 的 AG-UI 帧，以及**关于会话的事实**（`turn/*` /
+                     `model/*`，ADR 0006）。**分派是显式的**（`familyOf(type)` → `window | fact | run`，
+                     票 04）：事实若落进 `else` 就会被交给 `@ag-ui/client`，那份 schema 校验会当场把这一轮
+                     打死。事实有自己的订阅面（`subscribeFacts`——它属于**会话**而不是某一次 run，所以
+                     只看着的人也想要它）；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
                      重连时重新声明整份集合。`app.tsx` 的窗口跟随走它，不再每条会话一条 SSE
   follow.ts          子 agent 面板的 AG-UI 载具：读记录的**重放**（`GET …/frames`），再从 `mux.ts`
                      收实时尾巴，按帧自己的 `:seq` 去重、拼成 SSE 交给 `@ag-ui/client`（ticket 04）

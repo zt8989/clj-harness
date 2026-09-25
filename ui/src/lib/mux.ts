@@ -122,6 +122,15 @@ const runCursors = new Map<string, number>();
 /// (driving nothing) still wants them.
 const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
 
+/// HOW FAR EACH CONVERSATION'S FACT STREAM HAS BEEN READ -- the `:seq` of the last fact this
+/// page saw, WHICH IS A RECORD LINE NUMBER (`harness.edge.mux/facts-after`), not a counter the
+/// sender keeps. A reconnecting socket re-declares it (`factSince`), and it is a SEPARATE number
+/// from `runCursors` because the two count different things: a run frame is numbered by the
+/// sender, a fact by the record line it was written for.
+///
+/// IT NEVER RESETS, unlike the run cursor: the record does not start over when a run does.
+const factCursors = new Map<string, number>();
+
 /// THE ROUTING, in one place, because the batch below hands frames over in groups.
 ///
 /// ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
@@ -141,6 +150,17 @@ function deliver(frame: MuxFrame & RunFrame): void {
   }
   if (family === "fact") {
     const fact = frame as unknown as FactFrame;
+    // REMEMBER HOW FAR THIS CONVERSATION'S FACTS HAVE BEEN READ (ticket 05): the number is the
+    // RECORD LINE the fact was written for, so it is not reset by a run -- and it is taken AT
+    // DELIVERY, like the run's below, for the same reason: a frame still waiting in the batch has
+    // been seen by nobody, and a cursor ahead of it would make the reconnect SKIP it.
+    if (typeof fact.seq === "number") {
+      if (fact.seq > (factCursors.get(fact.threadId) ?? 0)) {
+        factCursors.set(fact.threadId, fact.seq);
+      }
+    }
+    // AND THE SUBSCRIBERS: this frame is about the conversation, not about a run, so it goes to
+    // whoever asked for the fact family (`subscribeFacts`).
     for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
     return;
   }
@@ -205,6 +225,9 @@ export function declaredSet(): Array<{
   since: number | null;
   generation: string | null;
   runSince: number | null;
+  /// THE FACT FAMILY'S OWN CURSOR (ticket 05): a RECORD line number, and a separate number from
+  /// `runSince` because the two count different things.
+  factSince: number | null;
 }> {
   return wantedThreads().map((threadId) => {
     const sub = subscriptions.get(threadId);
@@ -213,6 +236,7 @@ export function declaredSet(): Array<{
       since: sub?.since ?? null,
       generation: sub?.generation ?? null,
       runSince: runCursors.get(threadId) ?? null,
+      factSince: factCursors.get(threadId) ?? null,
     };
   });
 }
@@ -296,6 +320,7 @@ function declareThread(threadId: string): Promise<void> | null {
         since: sub?.since ?? null,
         generation: sub?.generation ?? null,
         runSince: runCursors.get(threadId) ?? null,
+        factSince: factCursors.get(threadId) ?? null,
       },
     ],
   });

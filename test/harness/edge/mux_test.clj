@@ -25,7 +25,10 @@
   (reset! (var-get #'mux/connections) {})
   ;; AND THE RUN BUFFERS, which outlive a connection on purpose (that is the point of them) --
   ;; a case must not inherit another case's remembered frames under the same thread id.
-  (reset! (var-get #'mux/runs) {}))
+  (reset! (var-get #'mux/runs) {})
+  ;; AND THE FACT RING IS THE SAME KIND OF THING (ticket 05), for the same reason: it outlives a
+  ;; connection on purpose, so a case must not inherit another case's remembered facts.
+  (reset! (var-get #'mux/facts) {}))
 
 (use-fixtures :each (fn [f]
                       (forget-everything!)
@@ -201,3 +204,33 @@
           (#'http/mux-broadcast! "mux-gap" {:type "TEXT_MESSAGE_CONTENT" :delta "c"})
           (is (= [4] (mapv :seq (run-frames third-sent)))
               "...and hears what happens after it subscribed"))))))
+
+(deftest a-reconnecting-page-is-handed-the-facts-it-missed
+  ;; TICKET 05 OF `.scratch/turn-and-model-events`. A fact is a PUSH like a run frame, and a push
+  ;; nobody heard is gone -- so the sender remembers the last few (`harness.edge.mux/record-fact!`,
+  ;; written by `family-send!`) and a reader declares how far it got.
+  ;;
+  ;; THE NUMBER IS THE RECORD'S LINE, so it is asked with its OWN cursor (`factSince`) rather than
+  ;; the run's (`runSince`): the two count different things, and a reader can be current on one and
+  ;; behind on the other.
+  ;;
+  ;; THE CHANNEL WRITES JSON STRINGS (`fake-channel` above is http-kit's own protocol), so the
+  ;; facts are read back the way a socket reads them -- `json/read-str`, then filter by type.
+  (let [facts (fn [sent]
+                (->> @sent
+                     (mapv #(json/read-str % :key-fn keyword))
+                     (filterv #(contains? #{"turn/start" "turn/end" "model/start" "model/end"}
+                                          (:type %)))
+                     (mapv :seq)))
+        sent  (atom [])
+        ch    (fake-channel sent)]
+    (#'http/mux-attend! "tok-fact-1" ch [{:threadId "mux-fact" :factSince 7}])
+    (is (= [] (facts sent)) "a cursor that is current is handed nothing")
+    (#'http/family-send! "mux-fact" {:type "model/end" :seq 8 :numbers {}})
+    (is (= [8] (facts sent)) "a fact that lands after the cursor is pushed")
+    (testing "and the page that was AWAY is handed the gap it missed"
+      (let [back    (atom [])
+            back-ch (fake-channel back)]
+        (#'http/mux-attend! "tok-fact-2" back-ch [{:threadId "mux-fact" :factSince 7}])
+        (is (= [8] (facts back)))))))
+
