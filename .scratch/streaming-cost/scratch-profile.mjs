@@ -79,18 +79,22 @@ const MESSAGES = '[data-slot="aui_assistant-message-root"]';
 /// composer and an autosize mirror), and a bare `textarea` selector is a strict-mode violation.
 async function send(page) {
   await page.waitForTimeout(2500);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await page.getByRole("textbox", { name: "消息输入框" }).fill("想一下再答。");
-    await page.getByRole("textbox", { name: "消息输入框" }).press("Enter");
-    try {
-      await page.waitForSelector(ROW, { timeout: 15000 });
-      break;
-    } catch {
-      console.log("                (no run started -- settling and sending again)");
-    }
+  const before = await page.locator(MESSAGES).count();
+  await page.getByRole("textbox", { name: "消息输入框" }).fill("想一下再答。");
+  await page.getByRole("textbox", { name: "消息输入框" }).press("Enter");
+  /// A MESSAGE IS THE PROOF THE TURN RAN, and the stop control going away is the proof it
+  /// finished. Waiting for the STREAMING ROW (what this script's earlier versions did) never
+  /// returns for a turn that has no reasoning in it -- and a tool-call turn has none, which is
+  /// exactly the turn that gives a conversation its steps.
+  await page.waitForFunction(
+    (was) => document.querySelectorAll('[data-slot="aui_assistant-message-root"]').length > was,
+    before,
+    { timeout: 60000 }
+  );
+  for (let waited = 0; waited < 180000; waited += 250) {
+    if ((await page.locator('[data-slot="session-stop"]').count()) === 0) return;
+    await page.waitForTimeout(250);
   }
-  await page.waitForSelector(ROW, { timeout: 90000 });
-  await page.waitForSelector(ROW, { state: "detached", timeout: 300000 });
 }
 
 /// ---- 1. GROW, on the page the harness serves itself (the fast, minified one).

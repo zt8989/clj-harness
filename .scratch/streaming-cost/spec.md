@@ -182,3 +182,32 @@ after 那次屏上还**多两条消息**（34 vs 32），所以这个 −25% 是
 **走查的一次假红**：同一份代码在不同机器负载下红过一次「the thought ends, and the row stops being
 live」（`until` 的 60s 超时；那一跑采到 861 个样本 = 流被拖到 60s 以上）。少起两个服务后全绿。
 判据本身没问题（那条挂的是 `until`），但「超时值按秒写死」这件事值得记住。
+
+## 量了（第二刀：折起的步骤根本不画，2026-09-25）
+
+**改的是什么**：`thread.aui.tsx` 里 `fold === "step"` 的消息原来是**画出来再用 CSS 藏**（`hidden`
+类），现在**直接不画**（早退 `return null`）。对布局这两者等价 —— `display: none` 的孩子本来就不参与
+消息列表的 flex gap，它的 `innerText` 也是空的（`lib/window-scroll.ts` 找锚点时跳过的正是这一类）——
+但**对 React 不等价**：每一个挂着的步骤都会在**每次 store 更新**时被 reconcile，而真实会话里步骤是
+消息的多数（同一个会话实测：99 条 assistant 消息 / 17 回合 ⇒ 每个答案配五个步骤）。
+
+**同一场会话、同一页面状态上的读数**（6 个带工具调用的回合 + 那段长思考）：
+
+| | 挂载的 assistant 消息 | 其中 `data-fold="step"` | 屏幕上可见的工具行 |
+|---|---|---|---|
+| 改之前 | 26 | 12 | 0 |
+| 改之后 | **12（−54%）** | **0** | 0 |
+
+**观感不变** ✓ 可见的工具行两版都是 0、答案都在；**点开折起的回合步骤照样回来**（手点验：工具行
+0→2、思考行 0→1、挂载数 12→14），`turn-steps-trigger` 的摘要行仍在。
+
+**一处写错又被工具抓出来的地方**：我第一版写的是 `if (fold === "step" && !folded) return null;`
+—— `folded` 的含义是「回合现在是折起的」（`useTurnFolded` 返回 `foldable && !unfolded`），而
+`useStepFold` 里 `"step"` 是 `if (!folded) return "none"` **之后**才可能出现的答案 ⇒ 那半句让整条
+判断成为死代码（**第一版改动等于没改**）。TypeScript 的窄化把下面那条 `fold === "step" && "hidden"`
+判成「两个类型没有交集」，正是它把这件事说了出来。
+
+**判据**：`.scratch/events-mux-and-host/walkthrough-fold.mjs` 的那几条用的全是 `:visible`（「折起时
+看不到步骤 / 点开就回来」），这一刀对它们等价；那份走查自己有 Node 24 下 `import` 绝对路径的毛病
+（和 `thinking-row-tail` 那份一样），所以这次是同几条判据**自己开浏览器手点**走的。
+`npm run typecheck` 绿；套件不受影响（它不渲染 `thread.aui.tsx`）。

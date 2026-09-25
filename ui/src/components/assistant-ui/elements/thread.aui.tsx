@@ -635,6 +635,19 @@ const AssistantMessage: FC = () => {
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // LOCAL: A FOLDED TURN'S STEPS ARE NOT DRAWN AT ALL, rather than drawn and hidden.
+  // `display: none` and "no element" are THE SAME THING TO LAYOUT -- a hidden child does not
+  // take part in the message list's flex gap, and its `innerText` is empty, which is already
+  // how `lib/window-scroll.ts` skips it while looking for an anchor -- but they are NOT the
+  // same thing to React: every mounted step is reconciled on EVERY store update, and in a real
+  // conversation the steps are most of the messages (measured on one real session: 99 assistant
+  // messages over 17 turns -- five steps for every answer).
+  //
+  // NO `folded` CHECK IS NEEDED HERE, and that is not an omission: `useStepFold` answers
+  // `"step"` only on the far side of `if (!folded) return "none"`, so a `"step"` message is
+  // one whose turn IS folded. (An earlier cut of this asked for `&& !folded` as well, which
+  // made it dead code -- the first attempt at this change did nothing at all.)
+  if (fold === "step") return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -643,7 +656,8 @@ const AssistantMessage: FC = () => {
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
         continues && STEP_SPACING,
-        fold === "step" && "hidden",
+        // (the `hidden` class a step used to get is gone with the early return above: a step
+        // is not drawn at all, so there is nothing left to hide)
       )}
     >
       {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
