@@ -858,6 +858,34 @@
                   before (tree)]
               (jobs/records-for t)
               (is (= before (tree)))))
+          (testing "a record whose run is gone and which never wrote a last line says `[exit ?]`"
+            ;; THE PID IN THE STAMP IS WHAT CAN BE ASKED about a record this process does not
+            ;; hold: the ticket's rule (no last line = still running) is true while that process
+            ;; is there, and a lie once it is gone. Half a line is what a crashed run leaves.
+            (let [gone (io/file (jobs/records-dir t) "j7-20250101T000000000-999999.log")]
+              (spit gone "half a line\n" :encoding "UTF-8")
+              (let [row (first (filter #(= "j7" (:id %)) (jobs/records-for t)))]
+                (is (= "[exit ?]" (:status row)))
+                (is (false? (:running? row)) "and it is not counted as still running"))))
+          (testing "a file that is not a record is not a row"
+            ;; A DASH IS NOT ENOUGH TO BE ONE: `my-notes.log` splits into id `my` and a stamp
+            ;; that is not one, and a row addressing `my` is a row the model can do nothing with.
+            (let [stray (io/file (jobs/records-dir t) "my-notes.log")]
+              (spit stray "mine\n" :encoding "UTF-8")
+              (is (not-any? #(= "my" (:id %)) (jobs/records-for t)))
+              (is (not-any? #(= (str stray) (:path %)) (jobs/records-for t)))))
+          (testing "among the ones that are over, the newest first"
+            ;; MTIME IS THE CLOCK THIS ORDERS BY, so the case SETS it rather than racing it: two
+            ;; records written in the same millisecond fall to the path tie-break, which is not
+            ;; the claim under test.
+            (let [a (io/file (jobs/records-dir t) "c7-20250101T000000001-9999.log")
+                  b (io/file (jobs/records-dir t) "c8-20250101T000000002-9999.log")]
+              (spit a "a\n[exit 0]\n" :encoding "UTF-8")
+              (spit b "b\n[exit 0]\n" :encoding "UTF-8")
+              (.setLastModified b 1000)
+              (let [ids (vec (map :id (jobs/records-for t)))]
+                (is (< (.indexOf ids "c7") (.indexOf ids "c8"))
+                    "the newer of two finished records comes first"))))
           (jobs/shutdown!))
         (testing "a session-less caller sees the root's own files, never another session's"
           ;; THE REGISTRY'S KEY MAY BE NIL -- `job` files such a session's records at the `jobs/`
@@ -875,5 +903,17 @@
           cut  (jobs/command-line long)]
       (is (< (count cut) (count long)))
       (is (str/starts-with? cut (subs long 0 jobs/max-command-chars)))
-      (is (str/ends-with? cut (str "(+" (- 300 jobs/max-command-chars) " chars)"))))))
+      (is (str/ends-with? cut (str "(+" (- 300 jobs/max-command-chars) " chars)")))))
+  (testing "and the cut never lands inside a character"
+    ;; A SURROGATE PAIR STRADDLING THE BOUNDARY is the case `count` and `subs` cannot see: half of
+    ;; an emoji is not text, and this module already refuses to do that to BYTES
+    ;; (`tail-within-budget`: 'whole or absent, never half of one').
+    (let [long (str (apply str (repeat (dec jobs/max-command-chars) "x"))
+                    "😀"
+                    (apply str (repeat 50 "y")))
+          cut  (jobs/command-line long)
+          head (subs cut 0 (str/index-of cut "…"))]
+      (is (= (dec jobs/max-command-chars) (count head))
+          "the orphaned half of the pair was dropped, not kept")
+      (is (not (Character/isSurrogate (.charAt head (dec (count head)))))))))
 

@@ -1062,7 +1062,7 @@
        " command SAID, and only this process's own entry ever had the command itself. "
        "The status is the record's own last line (`[exit N]` / `[stopped]`), or `[running]`"
        " while it is still being written -- the same words `job_output` prints, from the same"
-       " place -- and `[exit ?]` for a record whose run went away without leaving one. "
+       " place -- `[running]` while the process that wrote the record is still there, and `[exit ?]`"
        "Jobs that are still RUNNING come first, then the rest newest first; at most "
        jobs/max-listed-records " rows are drawn, and the answer says how many it left out. "
        "READ-ONLY: nothing here deletes, moves or rewrites a record. Use it when you do not have"

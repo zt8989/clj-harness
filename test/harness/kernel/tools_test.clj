@@ -1186,10 +1186,16 @@
         (is (not (str/includes? drawn "echo one &&\n"))
             "and no row in the answer is a wrapped command")))
     (testing "the cap says how many it left out, and where the rest are"
-      (with-redefs [jobs/max-listed-records 1]
-        (let [drawn (:content (call "job_list" {}))]
-          (is (str/includes? drawn "more not listed"))
-          (is (str/includes? drawn (str (home/root))) "under the configuration home, where the rest are"))))
+      ;; THE NUMBER IN THE NOTE IS ASSERTED, not just the phrase: 'some rows were left out' is
+      ;; true of any cap, and the count is the half a reader acts on.
+      (let [all  (:content (call "job_list" {}))
+            rows (count (re-seq #"(?m)^[jc]\d+ · " all))]
+        (is (pos? rows) "the listing drew rows to leave out")
+        (with-redefs [jobs/max-listed-records 1]
+          (let [drawn (:content (call "job_list" {}))]
+            (is (str/includes? drawn (str "(" (- rows 1) " more not listed")))
+            (is (str/includes? drawn (str (home/root)))
+                "under the configuration home, where the rest are")))))
     (testing "a session with nothing at all gets the sentence `unknown-job` refuses with"
       (let [answer (:content (tools/run! {:function {:name "job_list"
                                                    :arguments (json/write-str {})}}

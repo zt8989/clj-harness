@@ -1128,20 +1128,39 @@
   listing out of the answer."
   200)
 
+(defn- writer-alive?
+  "Is the PROCESS THAT WROTE RUN still there? The stamp `process-tag` makes ends in its pid
+  (`<clock>-<pid>`), and that is the one thing a record this process does not hold can be asked.
+
+  A PID IS A BET, in both directions: it may have been recycled, so 'alive' is 'somebody with
+  that number is running', not 'the command you saw is running'. It is the same bet the
+  milliseconds in the stamp already hedge (`process-tag` says why), and the other side of the
+  bet is worse: calling a live run finished, or calling a dead run alive forever."
+  [run]
+  (boolean
+   (try
+     (let [i   (str/last-index-of run "-")
+           pid (Long/parseLong (subs run (inc i)))
+           h   (.orElse (java.lang.ProcessHandle/of pid) nil)]
+       (and (some? h) (.isAlive ^java.lang.ProcessHandle h)))
+     (catch Exception _ false))))
+
 (defn- record-file
   "What F's NAME says -- `{:id .. :run ..}` -- or nil when the name is not one this module
   writes.
 
   SPLIT ON THE FIRST DASH: an id never has one (`j1`, `c3`) and the run stamp always does (a
-  clock and a pid), so that seam is the only unambiguous one. A FILE THAT DOES NOT PARSE IS NOT
-  A RECORD: a file somebody put in this directory by hand is their business, and inventing an id
-  for it would put a row in front of the model that addresses nothing."
+  clock and a pid), so that seam is the only unambiguous one. THE ID ALSO HAS TO LOOK LIKE
+  ONE -- `[jc]` and digits, the two shapes this module hands out -- because a file somebody
+  dropped in by hand is not a record: `my-notes.log` has a dash and would otherwise be a row
+  addressing id `my`, which is exactly the row this docstring promises does not appear."
   [^java.io.File f]
   (let [n (.getName f)]
     (when (str/ends-with? n ".log")
       (let [stem (subs n 0 (- (count n) 4))
             i    (str/index-of stem "-")]
-        (when (and i (pos? i) (< (inc i) (count stem)))
+        (when (and i (pos? i) (< (inc i) (count stem))
+                   (re-matches #"[jc]\d+" (subs stem 0 i)))
           {:id (subs stem 0 i) :run (subs stem (inc i))})))))
 
 (defn records-for
@@ -1179,7 +1198,17 @@
                  (when-let [{:keys [id run]} (record-file f)]
                    (let [path (str f)
                          job  (get held path)
-                         status (if job (status-of job) (or (ending-of path) "[exit ?]"))]
+                         ;; THE RECORD IS THE ONLY WITNESS for a row this process does not hold: its own
+                         ;; last line when it has one, and otherwise the only two ways 'nothing more is
+                         ;; coming' can look. The run stamp ENDS IN THE PID of whoever wrote it, so a pid
+                         ;; that is gone means the ending never got written (`[exit ?]`, this module's
+                         ;; own spelling for that), while a pid that is still there is the ticket's own
+                         ;; rule -- no last line means it is still being written. The pid may have been
+                         ;; recycled, which is the same bet `process-tag` already hedges with its
+                         ;; milliseconds; the alternative is calling a live run finished.
+                         status (if job (status-of job)
+                                  (or (ending-of path)
+                                      (if (writer-alive? run) running-status "[exit ?]")))]
                      {:id id
                       :run run
                       :this-run? (= run stamp)
@@ -1205,8 +1234,17 @@
   (let [one (str/trim (str/replace (str command) #"\s+" " "))]
     (if (<= (count one) max-command-chars)
       one
-      (str (subs one 0 max-command-chars)
-           "… (+" (- (count one) max-command-chars) " chars)"))))
+      ;; THE CUT LANDS ON A CHARACTER, NOT INSIDE ONE. What `count` and `subs` count here are
+      ;; UTF-16 units, so an emoji's surrogate pair can straddle the boundary -- and half a pair
+      ;; is not text. Dropping the orphaned half is the same judgement `tail-within-budget` makes
+      ;; for bytes ('a multi-byte character is whole or absent, never half of one'), and the count
+      ;; in the note is what was really left out.
+      (let [cut (subs one 0 max-command-chars)
+            whole (if (and (pos? (count cut))
+                         (Character/isHighSurrogate (.charAt cut (dec (count cut)))))
+                    (subs cut 0 (dec (count cut)))
+                    cut)]
+        (str whole "… (+" (- (count one) (count whole)) " chars)")))))
 
 ;; ---------------------------------------------------- telling the model it is over
 ;;
