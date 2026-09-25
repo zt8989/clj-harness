@@ -209,7 +209,8 @@ function open(): void {
           factCursors.set(fact.threadId, fact.seq);
         }
       }
-      const fact = frame as unknown as FactFrame;
+      // AND THE SUBSCRIBERS: this frame is about the conversation, not about a run, so it goes
+      // to whoever asked for the fact family (`subscribeFacts`).
       for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
     } else {
       for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
