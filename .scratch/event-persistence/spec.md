@@ -100,3 +100,17 @@ SQLite 投影 / 崩溃恢复 / 监控）。这一份**不是照抄它**，而是
 `harness.edge.sessions/evictable?` 的 `pending?`、`replay/fold-sofar` 与条目编号那条路。
 **判据**：`record_test` 里「一行一次写、顺序、降级、原地重试」那一族改成同步的等价说法；
 `http-test` 与 `stats-test` 全绿；一次 run 的帧循环上多加的微秒数进 `evidence/`。
+
+### 第五样：**锁要往下搬一层**（改之前必须知道）
+
+今天 `harness.edge.http/log!` 自己在 `(locking log-lock …)` 里调 `record/append!`（513 行），
+而 `lands` 是**写手线程**调的——也就是说它今天落在任何锁**外面**。
+
+**同步之后 `lands` 会落进 `log-lock` 里面**：它调 `sessions/land!` / `land-at!`（那是会话的锁），
+于是「先拿会话锁、再拿 log-lock」的那条路上就是**锁序倒置**。
+（`log-lock` 的注释自己写着它管的是「一行写到哪」，而 `project-post` 也拿它。）
+
+**所以票 01 的形状是**：`log!` 在 `log-lock` 里**只解决「写到哪个文件」**，出了锁再调 `record/append!`；
+**锁搬进 `record.clj`**（它现在同步了，锁本来就该在这儿），由它**罩住 write+flush**，
+写完**先出锁、再调 `lands`**。这与 0007 决策 1（同步）是同一件事的两半：
+同步之后，「谁在什么时候拿锁」从写手线程的一个实现细节，变成了调用路径上必须说清的一件事。
