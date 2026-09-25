@@ -765,8 +765,8 @@
 ;; THOSE ARE THE ONLY STATES. There is no separate enum of running/stopping/
 ;; completed/killed/failed to invent, keep and get wrong: the two things a reader
 ;; wants to know are whether it is over and how it ended, and the last line says
-;; both. `job_output`'s answer prints that line as its first line and the command's
-;; own output below it.
+;; both. `job_output`'s answer prints that line as its LAST line, with the command's own output
+;; above it -- the order the record itself is in, and the order a `bash` answer ends in.
 
 (defn- record-lines
   "PATH's record as a vector of lines -- empty when the file is empty, and empty when

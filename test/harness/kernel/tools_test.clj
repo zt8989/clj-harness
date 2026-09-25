@@ -797,7 +797,7 @@
       ;; and 'it is over' is an answer, not an unknown id.
       (let [{:keys [content error]} (call "job_output" {:job job-id})]
         (is (false? error))
-        (is (str/starts-with? content "[stopped]"))))
+        (is (str/ends-with? content "[stopped]"))))
     (testing "while stopping it again answers the same thing instead of refusing"
       (let [{:keys [content error]} (call "job_kill" {:job job-id})]
         (is (false? error))
@@ -862,10 +862,10 @@
         elapsed (- (System/currentTimeMillis) t0)]
     (is (some? job-id))
     (is (false? error))
-    (testing "the first line is how it went, and it is the record's own last line"
-      (is (str/starts-with? content "[exit 0]\n")))
-    (testing "below it, what the command said"
-      (is (str/includes? content "\none\ntwo")))
+    (testing "the LAST line is how it went, and it is the record's own last line"
+      (is (str/ends-with? content "[exit 0]")))
+    (testing "above it, what the command said"
+      (is (str/includes? content "one\ntwo\n")))
     (testing "and the call really waited: it came back after the command, not before"
       (is (>= elapsed 900) (str "elapsed " elapsed "ms")))
     (jobs/shutdown!)))
@@ -877,7 +877,7 @@
         {:keys [content error]} (call "job_output" {:job job-id :wait true :timeout 300})
         elapsed (- (System/currentTimeMillis) t0)]
     (is (false? error) "a job that outlives the wait is not a failure")
-    (is (str/starts-with? content "[running]"))
+    (is (str/ends-with? content "[running]"))
     (is (< elapsed 10000) (str "it answered at the timeout: " elapsed "ms"))
     (jobs/shutdown!)))
 
@@ -888,17 +888,25 @@
     (support/read-until #(slurp path :encoding "UTF-8") #(re-find #"three" (:answer %)) 10000)
     (testing "an offset in the record, exactly as `grep -n` would number the same lines"
       (let [answer (:content (call "job_output" {:job job-id :offset 2 :limit 1}))]
-        (is (= ["[running]" "two"
-                (str "[3 lines in all; this answer shows lines 2-2; the whole record is " path "]")]
+        (is (= ["two"
+                (str "[3 lines in all; this answer shows lines 2-2; the whole record is " path "]")
+                "[running]"]
                (str/split-lines answer)))
         (is (str/includes? answer path)
             "and the part it did not carry is not lost: the answer names the file")))
     (testing "and no offset means the tail -- what it has just said"
       (let [answer (:content (call "job_output" {:job job-id}))]
-        (is (str/starts-with? answer "[running]"))
+        (is (str/ends-with? answer "[running]"))
         (is (str/includes? answer "three"))
         (is (not (str/includes? answer path))
             "the window IS the record here, so there is nothing beyond it to point at")))
+    (testing "a job that has said nothing answers with its state, and says so above it"
+      ;; THE EMPTY BODY IS STILL A BODY: the answer is the sentence `bash` uses, then the ending
+      ;; -- which is also the case a reader is most likely to skim past.
+      (let [quiet (:content (background "sleep 30"))
+            id    (second (re-find #"job (j\d+) started" quiet))]
+        (is (some? id))
+        (is (= "(no output)\n[running]" (:content (call "job_output" {:job id}))))))
     (testing "an unknown job is refused, naming what this session does have"
       (let [{:keys [content error]} (call "job_output" {:job "j-not-a-job"})]
         (is (true? error))

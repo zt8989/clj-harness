@@ -968,9 +968,9 @@
 
 (def ^:private job-output-description
   (str "Read what a background job has said, and how it went. "
-       "The first line of the answer is how it stands: `[exit N]` once the command is gone,"
+       "The LAST line of the answer is how it stands: `[exit N]` once the command is gone,"
        " `[stopped]` if it was stopped, `[running]` while it is still going (a job that has"
-       " said nothing yet is `[running]` too). Below that is what it has said -- by default the"
+       " said nothing yet is `[running]` too). Above it is what it has said -- by default the"
        " LAST " jobs/answer-budget-bytes " bytes of it, so a command that has printed thousands"
        " of lines answers with its end rather than its beginning. "
        "`offset` (1-based, a line number of the record) reads from a given line instead, and"
@@ -1005,8 +1005,7 @@
                       :limit   (positive-int :limit limit)
                       :wait    wait
                       :timeout (positive-int :timeout timeout)})]
-    (str status "\n"
-         (cond
+    (str (cond
            ;; THE TWO EMPTY CASES ARE DIFFERENT FACTS, and a reader can tell them
            ;; apart: a job that has not printed is not a job whose lines the reader
            ;; asked for by a number that is past the end of them.
@@ -1015,9 +1014,19 @@
            ;; seen one of these has seen the other.
            (zero? total)   "(no output)\n"
            :else           "(no lines in that range)\n")
+         ;; THE RANGE/PATH LINE IS PART OF THE WINDOW'S OWN SENTENCE -- it is what this answer is
+         ;; a window OF -- so it stays with the body, above the ending. Putting it under the status
+         ;; would leave the answer ending on "…the whole record is /path]" and nowhere saying how
+         ;; the command went.
          (when (and (seq lines) (or (> from 1) (< to total)))
            (str "[" total " lines in all; this answer shows lines " from "-" to
-                "; the whole record is " path "]")))))
+                "; the whole record is " path "]\n"))
+         ;; THE ENDING IS THE LAST LINE, matching the record it was read from (whose own last line
+         ;; this is) and matching `bash` (whose answer ends the same way). It was the FIRST line
+         ;; until `.scratch/readback-verbs` ticket 03: a reader that wanted to know how the command
+         ;; went had to scroll past the answer to find it, and a reader that skimmed the top read
+         ;; the status as the command's first output line.
+         status)))
 
 (register! "job_kill"
   (tool job-kill-description
