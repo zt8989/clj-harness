@@ -84,12 +84,46 @@ const idOf = (entry: WindowEntry): string | null => {
   return typeof message?.id === "string" ? message.id : null;
 };
 
-/// WHETHER TWO ENTRIES ARE THE SAME THING, by value. The server hands its entries over as
-/// fresh JSON on every frame, so identity says nothing; the one fact this side needs is
-/// whether what arrived is the version it is already holding, and that is a comparison of
-/// the entry as the wire spells it (its record offset and its message).
+/// WHAT A MESSAGE'S SHAPE SAYS ABOUT IT, as a string: its role, how many parts it has, and for
+/// each part its kind and the length of its text.
+///
+/// NOT A HASH OF THE MESSAGE AND NOT MEANT TO BE ONE. It exists to settle the growing case
+/// without touching the bytes, and it is only ever used to say "these two cannot be the same" --
+/// so it is allowed to be coarse (two messages that come out equal here still have to survive
+/// the full comparison). What it must never do is differ for two messages that ARE the same,
+/// because that would turn a repeat into a version and a frozen draft into a growing one.
+export function fingerprint(message: unknown): string {
+  if (message === null || typeof message !== "object") return typeof message;
+  const held = message as { role?: unknown; parts?: unknown };
+  const role = typeof held.role === "string" ? held.role : "";
+  if (!Array.isArray(held.parts)) return `${role}/no-parts`;
+  const shape = held.parts.map((part) => {
+    if (part === null || typeof part !== "object") return typeof part;
+    const { type, text } = part as { type?: unknown; text?: unknown };
+    return `${typeof type === "string" ? type : "?"}:${typeof text === "string" ? text.length : "-"}`;
+  });
+  return `${role}/${held.parts.length}/${shape.join(",")}`;
+}
+
+/// WHETHER TWO MESSAGES ARE THE SAME THING, by value. The server hands its entries over as
+/// fresh JSON on every frame, so identity says nothing; the one fact this side needs is whether
+/// what arrived is the version it is already holding.
+///
+/// TWO STEPS, AND THE FIRST ONE IS CHEAP ON PURPOSE. A run's half-written group is re-sent on
+/// EVERY frame (`merged`'s header: the fold numbers it by the record's last line, so every line
+/// the run writes re-sends the answer so far), which means this comparison runs once per
+/// arriving entry per frame -- and serialising both sides of it is a full walk of a message
+/// that grows to kilobytes, for as long as the run lasts. The FINGERPRINT settles the common
+/// case by itself: two versions of a growing answer differ in a text length, so "not the same"
+/// is answered without touching the bytes. Only a candidate REPEAT -- the same bytes arriving
+/// again, which is what a frame still in the writer's queue looks like -- reaches the
+/// serialisation, and a repeat is exactly where a deep comparison is the honest one.
+export function sameMessage(a: unknown, b: unknown): boolean {
+  return fingerprint(a) === fingerprint(b) && JSON.stringify(a) === JSON.stringify(b);
+}
+
 const sameEntry = (a: WindowEntry, b: WindowEntry): boolean =>
-  a.seq === b.seq && JSON.stringify(a.message) === JSON.stringify(b.message);
+  a.seq === b.seq && sameMessage(a.message, b.message);
 
 /// MERGE WHAT ARRIVED INTO WHAT THIS COPY HOLDS, AND SAY WHETHER ANYTHING CHANGED.
 ///

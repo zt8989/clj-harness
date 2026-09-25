@@ -40,6 +40,8 @@ import { type WindowEntry, type WindowFrame } from "../../src/lib/feed";
 import { correctedTop, measure, restoredTop } from "../../src/lib/window-scroll";
 import {
   aheadOf,
+  fingerprint,
+  sameMessage,
   aligned,
   applied,
   prepended,
@@ -471,6 +473,52 @@ const cases: Case[] = [
       // NO VIEWPORT (a load in flight, the trajectory view) IS NOT A CRASH: the helper
       // measures nothing and restores nothing.
       expect(measure(null)).toBeNull();
+    },
+  },
+  {
+    name: "a-growing-answer-is-settled-by-its-shape-and-only-a-repeat-is-serialised",
+    run: async () => {
+      // THE COST THIS RULE IS PAID FOR. A run's half-written group is re-sent on every frame,
+      // so `sameMessage` runs once per arriving entry per frame -- and the question it is
+      // asked is nearly always "is this the version I am holding, one token longer?"
+      const growing = (text: string) => ({
+        id: "m-1",
+        role: "assistant",
+        parts: [{ type: "text", text }],
+      });
+
+      // A LENGTH SETTLES IT, without walking either message: the fingerprint alone says these
+      // two cannot be the same, which is the whole point of having one (the serialisation in
+      // `sameMessage` is only reached once the fingerprints agree).
+      expect(fingerprint(growing("我是跑在"))).not.toBe(fingerprint(growing("我是跑在你这台机器上")));
+      expect(sameMessage(growing("我是跑在"), growing("我是跑在你这台机器上"))).toBe(false);
+
+      // AND THE SAME BYTES ARE THE SAME, whichever step answers: a repeat has to stay a repeat,
+      // or a frame still in the writer's queue would be taken for a new version and the draft
+      // on screen would be replaced by itself (and, worse, a version could be taken for a
+      // repeat and the draft would freeze -- `merged`'s two cases).
+      expect(sameMessage(growing("同一个字"), growing("同一个字"))).toBe(true);
+
+      // THE SECOND STEP IS NOT DECORATION: a fingerprint is allowed to be coarse, so a message
+      // that changes somewhere the fingerprint does not look -- a tool call's result, with every
+      // length the same -- HAS to fall through to the bytes and come out different.
+      const call = (result: string) => ({
+        id: "t-1",
+        role: "assistant",
+        parts: [{ type: "tool-call", text: "读取", result }],
+      });
+      expect(fingerprint(call("ok"))).toBe(fingerprint(call("no")));
+      expect(sameMessage(call("ok"), call("no"))).toBe(false);
+
+      // DEFENSIVE, because the wire's message is `unknown` and a function that throws here
+      // takes a frame down with it: nothing, no parts, parts that are not objects. None of them
+      // may be reported as "the same" unless the bytes really are.
+      expect(() => fingerprint(null)).not.toThrow();
+      expect(() => fingerprint("a string")).not.toThrow();
+      expect(() => fingerprint({ role: "assistant" })).not.toThrow();
+      expect(() => fingerprint({ parts: [null, 7, "x"] })).not.toThrow();
+      expect(sameMessage(null, { role: "assistant" })).toBe(false);
+      expect(sameMessage(null, null)).toBe(true);
     },
   },
 ];
