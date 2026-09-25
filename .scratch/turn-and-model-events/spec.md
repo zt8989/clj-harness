@@ -314,3 +314,32 @@ provider 时间线的 `[ts window]` 组合、以及最后那条 `event` 行（`s
 
 **跑过的门**：`harness.edge.http-test` 108 个用例 / 1199 个断言、
 `stats-test` + `context-test` + `sessions-test` 49 个用例 / 210 个断言，**全绿**。
+
+## 票 04 的分类器：落了（2026-09-25）
+
+`ui/src/lib/mux.ts` 那句「不在 `WINDOW_TYPES` 里 ⇒ 当 run 帧」换成了**显式三族**：`familyOf(type)`
+答 `"window" | "fact" | "run"`，`onmessage` 按它分派，事实那一族有自己的订阅面（`subscribeFacts`，
+与 `runSubscriptions` 分开——那是**会话**的事实，不是某一次 run 的，所以只看着的人也想要）。
+一条用例钉住它（`test/suites/mux.ts` 的 `a-fact-frame-is-not-a-run-frame`）：**这是必须先落的那半**——
+事实若落进 `else`，就会被交给 `@ag-ui/client`，那份 schema 校验会当场把这一轮打死。
+
+## 票 03 的第一次尝试：两处硬伤（2026-09-25，撤回）
+
+**落了又撤了**，因为两件事只在跑起来之后才看得见，而它们都指向同一个根源：**行号只在异步的
+`land` 回调里存在**。
+
+1. **模型那一族确实上了线**（这是好消息）：`model/start` 带 `payload`、`model/end` 带 `payload` +
+   `numbers`，其中 `numbers.context` 是上下文圈那四个字段 ✔。也就是说**折叠 → 线上**这条路是通的。
+2. **但每一条事实都缺 `:seq`**，而 `:seq` 正是决策 5 与票 05 的地基。`log!` 的 land 回调是唯一知道
+   「这一行落在第几行」的地方，而它在**记录写手的线程**上——第一次把 `live-numbers`（会读会话折叠、
+   还会让压力表走一遍对话）也放进去，结果是**一次停在工具缝上的 run 再也到不了那道缝**（实测）。
+   改成「在 drain 循环里算好、回调只负责发」之后，`:seq` 仍然没跟上。
+3. **`turn/*` 一条都没发**：`turn/start` 的条件要「这一轮开场的那一行」，而那同样只有 land 回调
+   知道——于是「这一轮开了吗」是在行号存在之前就被问的。
+
+**下一次要做的是先解决行号**，三选一：(a) `log!` 同步回答它将要写的行号（`(+ (record/flushed-seq tid)
+(record/pending-count tid))` 或让写手回一个 promise）；(b) 事实不进 land 回调，而是**由 drain 循环
+自己算行号**（同一个表达式，在 run 自己的线程上）；(c) 事实不带 `:seq`，改由客户端按到达次序编号——
+这与窗口那半对不齐，**不建议**。
+
+**保留下来的是票 04 的分类器**（它本来就该先落，且与行号无关）。

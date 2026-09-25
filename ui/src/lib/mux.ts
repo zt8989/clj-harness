@@ -44,6 +44,35 @@ export type MuxFrame = WindowFrame & { threadId: string };
 /// route it and hands the rest through to the SSE the agent parses.
 export type RunFrame = { threadId: string; type: string; [key: string]: unknown };
 
+/// THE THIRD FAMILY: FACTS ABOUT a conversation rather than parts OF it -- a turn's two ends
+/// and a model call's two ends (`harness.edge.http`; ADR 0006). They are NOT AG-UI frames: they
+/// never make a message, a rebuilt conversation does not contain them, and nothing echoes them
+/// back to a vendor. They are not window frames either -- they are not the conversation's copy.
+///
+/// THEY CARRY THE RECORD'S `seq` (a line number, so the two halves of the downlink can be
+/// aligned) and, for the two that have them, the session's numbers.
+export type FactFrame = {
+  threadId: string;
+  seq: number | null;
+  type: "turn/start" | "turn/end" | "model/start" | "model/end";
+  payload?: unknown;
+  numbers?: unknown;
+};
+
+/// THE FACT FAMILY'S TYPES, NAMED IN ONE PLACE. `harness.edge.http` writes these names and this
+/// side routes by them, so the spelling is a contract between two processes, not a detail.
+const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+
+/// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
+/// without a socket (`test/suites/mux.ts`), and so `onmessage` states it once. The `default` is
+/// deliberate: anything that is not one of the two named families is a RUN frame, which is
+/// AG-UI's own (upper-case) vocabulary.
+export function familyOf(type: string): "window" | "fact" | "run" {
+  if (WINDOW_TYPES.has(type)) return "window";
+  if (FACT_TYPES.has(type)) return "fact";
+  return "run";
+}
+
 export type MuxHandlers = {
   onFrame: (frame: MuxFrame) => void;
   /// The socket went away. Nothing is wrong with the window; it is BEHIND, and the repair
@@ -80,6 +109,13 @@ const runSubscriptions = new Map<string, Set<(event: RunFrame) => void>>();
 /// fresh buffer per run): carrying a finished run's high-water mark into the next one would
 /// ask for frames numbered above anything the new run will ever send.
 const runCursors = new Map<string, number>();
+
+/// WHAT THIS PAGE READS FACTS FROM, by conversation: the turn and model-call families
+/// (`FactFrame`). A `Map` of SETS for the same reason the run map is one -- a page may hold
+/// more than one conversation -- and a separate map from `runSubscriptions` ON PURPOSE: these
+/// frames are not a run's, they are the conversation's, and a page that is only WATCHING
+/// (driving nothing) still wants them.
+const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
 
 let socket: WebSocket | null = null;
 /// THE NAME OF THE CURRENT SOCKET, minted when it opens. It exists so the HTTP route that
@@ -140,12 +176,21 @@ function open(): void {
       // and every other conversation on it alive.
       return;
     }
-    // ONE SOCKET, TWO KINDS OF FRAME. A window frame is about the conversation's copy
-    // (routed to the window's own follower); anything else is a run event and goes to
-    // whoever is driving that run. A frame for a conversation we are not holding reaches
-    // nobody, which is right.
-    if (WINDOW_TYPES.has(frame.type)) {
+    // ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
+    // the conversation's copy; a FACT is about the conversation (a turn's or a call's two
+    // ends); everything else is a RUN event -- AG-UI's own vocabulary, which goes to whoever
+    // is driving that run.
+    //
+    // WHY THE MIDDLE CASE MUST BE NAMED RATHER THAN LEFT TO THE `else`: this used to be
+    // 'not a window type => a run frame', and a fact falling through to `@ag-ui/client` would
+    // be validated against AG-UI's schema and take the whole run down with it. A frame for a
+    // conversation we are not holding still reaches nobody, which is right.
+    const family = familyOf(frame.type);
+    if (family === "window") {
       subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    } else if (family === "fact") {
+      const fact = frame as unknown as FactFrame;
+      for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
     } else {
       for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
       // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the
@@ -266,6 +311,30 @@ export function subscribeRun(
       if (!subscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
     },
     declared,
+  };
+}
+
+
+/// READ A CONVERSATION'S FACTS: every turn and model-call frame for THREAD-ID is handed to
+/// ON_FACT. This is the family the composer's strip takes its numbers from (and the family the
+/// fold line will take its counts from), so it is the same shape as `subscribeRun` minus the
+/// promise: a fact is a push nobody has to declare a cursor for yet (`_scratch/turn-and-model-
+/// events` ticket 05 adds that), and one missed while the socket was down is repaired by the
+/// next snapshot -- a page that opens a conversation asks `/stats` once.
+export function subscribeFacts(
+  threadId: string,
+  onFact: (fact: FactFrame) => void,
+): { unsubscribe: () => void } {
+  const set = factSubscriptions.get(threadId) ?? new Set<(fact: FactFrame) => void>();
+  set.add(onFact);
+  factSubscriptions.set(threadId, set);
+  ensure();
+  return {
+    unsubscribe: () => {
+      const current = factSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onFact)) return;
+      if (current.size === 0) factSubscriptions.delete(threadId);
+    },
   };
 }
 
