@@ -571,7 +571,16 @@
         ;; a tool call. The list is reset where a RUN begins, in `entries-step`'s event branch.
         (assoc :pending [] :after nil
                :model-ids (into (or (:model-ids acc) [])
-                                (mapv :id (filter #(= "assistant" (:role %)) new)))
+                                ;; A CARD IS NOT A MESSAGE THE RUN RETURNED. An `injected-context`
+                                ;; frame folds into an ASSISTANT-role message whose content is a `data`
+                                ;; part (`harness.kernel.frames/apply-frames`), and counting it here
+                                ;; would shift every pairing by the number of injections in the run --
+                                ;; measured on a real log: the reasoning then landed on a card and the
+                                ;; assistant that carried the tool call answered nil. A message the
+                                ;; model returned has TEXT for content; a card does not.
+                                (mapv :id (filter #(and (= "assistant" (:role %))
+                                                        (string? (:content %)))
+                                                  new)))
                :reasoned? (boolean (or (:reasoned? acc)
                                        (some #(= "reasoning" (:role %)) new)))))))
 
