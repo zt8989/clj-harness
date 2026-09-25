@@ -27,6 +27,7 @@ import { apiBase, downlinkUrl } from "./threads";
 /// on every phone. A connection name is not a conversation name, but it is still a name the
 /// page mints in the browser, so it comes from the same cross-platform generator.
 import { newId } from "./id";
+import { createBatch } from "./coalesce";
 
 /// HOW LONG TO WAIT BEFORE OPENING THE DOWNLINK AGAIN after it closed on its own -- the
 /// same fact the SSE feed's reconnect carried: while the socket is up nothing is asked at
@@ -92,6 +93,10 @@ type Subscription = {
 /// the sender and a watcher read one stream.
 const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
 
+/// THE FRAMES THAT MAY NOT WAIT (`lib/coalesce.ts`): a run is over, or the window is. The
+/// reader is told the moment one arrives -- whatever was held in front of it goes first.
+const TERMINAL_TYPES = new Set(["end", "RUN_FINISHED", "RUN_ERROR", "RUN_CANCELLED"]);
+
 /// WHAT THIS PAGE FOLLOWS, by conversation. A `Map` rather than an object because a thread
 /// id is not a property name (a stem can be anything).
 const subscriptions = new Map<string, Subscription>();
@@ -116,6 +121,65 @@ const runCursors = new Map<string, number>();
 /// frames are not a run's, they are the conversation's, and a page that is only WATCHING
 /// (driving nothing) still wants them.
 const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
+
+/// THE ROUTING, in one place, because the batch below hands frames over in groups.
+///
+/// ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
+/// the conversation's copy; a FACT is about the conversation (a turn's or a call's two
+/// ends); everything else is a RUN event -- AG-UI's own vocabulary, which goes to whoever
+/// is driving that run.
+///
+/// WHY THE MIDDLE CASE IS NAMED RATHER THAN LEFT TO THE `else`: this used to be 'not a
+/// window type => a run frame', and a fact falling through to `@ag-ui/client` would be
+/// validated against AG-UI's schema and take the whole run down with it. A frame for a
+/// conversation we are not holding still reaches nobody, which is right.
+function deliver(frame: MuxFrame & RunFrame): void {
+  const family = familyOf(frame.type);
+  if (family === "window") {
+    subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    return;
+  }
+  if (family === "fact") {
+    const fact = frame as unknown as FactFrame;
+    for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
+    return;
+  }
+  for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
+  // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the rest.
+  // AT DELIVERY AND NOT AT ARRIVAL (`lib/coalesce.ts`'s header): a frame still waiting in
+  // the batch has been seen by nobody, and a mark ahead of it would make the reconnect
+  // SKIP it. `RUN_STARTED` RESETS the mark rather than raising it -- the sender starts a
+  // fresh numbering per run, and a stale high-water mark would suppress the new run's
+  // frames.
+  const seq = frame.seq;
+  // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
+  // so its `type` reads as the window union alone until it is asked for as a string.
+  const type: string = frame.type;
+  if (typeof seq === "number") {
+    if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
+      runCursors.set(frame.threadId, seq);
+    }
+  }
+}
+
+/// THE BATCH EVERY FRAME GOES THROUGH (`lib/coalesce.ts`): run frames, window frames and
+/// facts alike, so what comes out is what arrived, in the order it arrived.
+const batch = createBatch<MuxFrame & RunFrame>({
+  deliver: (frames) => {
+    for (const frame of frames) deliver(frame);
+  },
+  terminal: (frame) => TERMINAL_TYPES.has(frame.type),
+  schedule: (flush) => {
+    // A CLOCK THAT CANNOT ARRANGE A FLUSH MUST NOT COST A FRAME: the page has
+    // `requestAnimationFrame`, a suite's environment may not -- and a frame that was held
+    // and never scheduled is a frame nobody ever sees (which is exactly what the client
+    // suite caught: an undefined `requestAnimationFrame` inside `push` left the run's
+    // frames in the queue). With no clock, the batch goes out AT ONCE, which is what this
+    // side did before the batch existed.
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+    else flush();
+  },
+});
 
 let socket: WebSocket | null = null;
 /// THE NAME OF THE CURRENT SOCKET, minted when it opens. It exists so the HTTP route that
@@ -176,41 +240,20 @@ function open(): void {
       // and every other conversation on it alive.
       return;
     }
-    // ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
-    // the conversation's copy; a FACT is about the conversation (a turn's or a call's two
-    // ends); everything else is a RUN event -- AG-UI's own vocabulary, which goes to whoever
-    // is driving that run.
-    //
-    // WHY THE MIDDLE CASE MUST BE NAMED RATHER THAN LEFT TO THE `else`: this used to be
-    // 'not a window type => a run frame', and a fact falling through to `@ag-ui/client` would
-    // be validated against AG-UI's schema and take the whole run down with it. A frame for a
-    // conversation we are not holding still reaches nobody, which is right.
-    const family = familyOf(frame.type);
-    if (family === "window") {
-      subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
-    } else if (family === "fact") {
-      const fact = frame as unknown as FactFrame;
-      for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
-    } else {
-      for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
-      // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the
-      // rest. `RUN_STARTED` RESETS the mark rather than raising it: the sender starts a fresh
-      // numbering per run, and a stale high-water mark would suppress the new run's frames.
-      const seq = frame.seq;
-      // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
-      // so its `type` reads as the window union alone until it is asked for as a string.
-      const type: string = frame.type;
-      if (typeof seq === "number") {
-        if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
-          runCursors.set(frame.threadId, seq);
-        }
-      }
-    }
+    // HELD, NOT DROPPED (`lib/coalesce.ts`): the frame joins the batch for the browser's
+    // next animation frame, which is what keeps a fast vendor's stream at one React update
+    // per frame instead of one per token. WHICH KIND of frame this is, and who reads it, is
+    // `deliver` above.
+    batch.push(frame);
   };
   ws.onclose = () => {
     if (socket !== ws) return; // a newer socket replaced this one; its close is not ours
     socket = null;
     if (!wanted) return;
+    // WHAT WAS HELD GOES OUT BEFORE THE REPAIR IS ASKED FOR: `onClosed` must be told about a
+    // position the readers have already been given, or the repair reads from a mark ahead
+    // of frames nobody has seen (`lib/coalesce.ts`'s header).
+    batch.flush();
     // EVERY FOLLOWED WINDOW IS NOW BEHIND, and each has its own repair (a tail page).
     for (const sub of subscriptions.values()) sub.handlers.onClosed();
     schedule();
