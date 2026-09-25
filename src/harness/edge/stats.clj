@@ -27,7 +27,8 @@
   (:require [clojure.data.json :as json]
             [harness.kernel.frames :as frames]
             [harness.edge.ag-ui :as ag]
-            [harness.edge.replay :as replay]))
+            [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]))
 
 ;; --------------------------------------------------------------- reading lines
 
@@ -199,12 +200,23 @@
 ;; every row it realized, which is the whole file. All three are accumulated in ONE pass,
 ;; so `harness.edge.replay/fold-records` can drive this and hold only the answer.
 
-(defn- stats-init [] {:calls [] :pending nil :seen #{} :turns 0 :last-frame nil})
+(defn stats-init []
+  "The numbers fold's opening state. PUBLIC, like `stats-step` and `stats-answer`, because a
+  SESSION registers this fold (`install!`): the same three functions drive the birth walk,
+  every later written row, and the cold read."
+  {:calls [] :pending nil :seen #{} :turns 0 :last-frame nil})
 
-(defn- stats-step
+(defn stats-step
   "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. The line index is
   not needed here (calls pair by ORDER), so it is destructured and ignored.
- 
+
+  TWO ARITIES, ONE RULE. A session's folds are all called as `[value ctx [line-index row]]`
+  (`harness.edge.replay/fold-consumers`, `harness.kernel.session/row-written!`), while the
+  whole-record driver calls `[value [line-index row]]` (`harness.edge.replay/fold-records`,
+  which is what `log-stats` streams with). Rather than a second spelling of this rule for one
+  of them, the short arity hands the long one a nil ctx -- this fold reads everything it
+  needs out of the row, which is why two drivers can share it at all.
+
   THREE RULES, ONE PASS:
     - A CALL BEGINS at `model/start` and ends at the next `model/end`, by order. An end
       whose payload is empty is a call that reported NOTHING (it died mid-stream) -- a
@@ -214,7 +226,15 @@
       message NOT seen before; a resume brings none and opens none.
     - `:last-frame` is the last EVENT row's payload, which is what `:incomplete` is read
       from -- the file's last frame, found in the same walk rather than a second one."
-  [acc [_ row]]
+  ;; A NIL ACCUMULATOR STAYS NIL, and that is a statement rather than a guard: it means THIS
+  ;; SESSION DOES NOT HOLD THIS FOLD (`register-fold!`: the fold's value is the walk, so a fold
+  ;; registered after the session was built has none), and there is nothing to advance. Starting
+  ;; fresh instead would answer from the rows written since -- a partial sum wearing the same
+  ;; shape as the whole one. Nil keeps `fold-value` answering nil and sends the reader to the
+  ;; record, which is the only place the whole thing can be read.
+  ([acc pair] (stats-step acc nil pair))
+  ([acc _ctx [_ row]]
+  (when (some? acc)
   (let [k   (replay/kind row)
         ids (set (user-ids row))
         acc (-> acc
@@ -228,9 +248,9 @@
       "model/end"   (-> acc
                         (update :calls conj (close-call (:pending acc) row))
                         (assoc :pending nil))
-      acc)))
+      acc)))))
 
-(defn- stats-answer
+(defn stats-answer
   "The fold's answer from its accumulated state (see `stats-step` for what each part is)."
   [{:keys [calls pending turns last-frame]}]
   (let [cs      (cond-> calls pending (conj {:usage nil :ms nil}))
@@ -266,3 +286,13 @@
   ;; FOLDED FROM A STREAM (ticket 06): the same answer `records->stats` gives, and the
   ;; file's rows are never all held at once.
   (stats-answer (replay/fold-records f (stats-init) stats-step)))
+
+(defn install! []
+  "Register the numbers fold on BOTH of a session's seams (the birth walk and the write stream),
+  so a live session can answer the composer's five cells without opening the record -- the shape
+  `harness.edge.pressure/install!` established. Idempotent; returns the teardown."
+  (sessions/register-fold! :stats {:init stats-init :step stats-step})
+  (sessions/register-step! :stats stats-step)
+  (fn teardown []
+    (sessions/unregister-fold! :stats)
+    (sessions/unregister-step! :stats)))

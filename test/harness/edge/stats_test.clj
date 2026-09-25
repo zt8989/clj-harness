@@ -311,6 +311,7 @@
           (is (pos? (:outputTokensPerSecond body)))
           (is (false? (:incomplete body))))))))
 
+;; ---------------------------------------------------------- the live answer (ticket 01)
 (deftest the-endpoint-says-not-here-for-a-session-that-has-no-log
   (with-server "stats-no-log" [{:content "unused"}]
     (fn [port]

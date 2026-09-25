@@ -2953,6 +2953,10 @@
           (api-response 404 {:error error :threadId stem})
           (rung (api-response 200 {:threadId stem :archived (:ok written)})))))))
 
+;; `live-numbers` is defined just below its one caller, and a `defn-` has to be known before it is
+;; read: a plain `declare` rather than moving it up, because the live answer reads like the
+;; fallback it guards -- the record read comes second, only when there is no live answer.
+(declare live-numbers)
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
   (harness.edge.stats): turns, model calls, what those calls reported, how much of
@@ -2990,7 +2994,15 @@
   is there is a warning that the numbers below it are that many record lines short of the
   conversation."
   [stem]
-  (let [read (sessions/read-records stem)]
+  ;; THE LIVE ANSWER FIRST, and it is the whole of ticket 01: a session this process holds has
+  ;; both folds on it (installed at birth above), so answering reads no file -- no locate, no
+  ;; walk, no torn tail. A session this process does NOT hold has no folds, and `live-numbers`
+  ;; answers nil, which sends the read below to the record exactly as it always did.
+  (if-some [live (live-numbers stem)]
+    (api-response 200 (cond-> (assoc live :threadId stem)
+                        (pos? (record/pending-count stem))
+                        (assoc :behind (record/pending-count stem))))
+    (let [read (sessions/read-records stem)]
     (cond
       (some? (:missing read))
       (api-response 404 {:error (:missing read) :threadId stem})
@@ -3009,7 +3021,25 @@
           (api-response 400 {:error (:error folded) :threadId stem})
           (let [behind (record/pending-count stem)]
             (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                                (pos? behind) (assoc :behind behind)))))))))
+                                (pos? behind) (assoc :behind behind))))))))))
+(defn- live-numbers
+  "THREAD-ID's numbers as THIS PROCESS holds them -- the stats payload, the context section and
+  the meter's band, all from the folds the session installed at birth -- or NIL, which is 'this
+  process does not hold that conversation' and sends the caller to the record.
+
+  BOTH FOLDS OR NEITHER. `stats` and `context` are registered together (`start!`), and half an
+  answer from memory beside half from a file would be two moments of one log pretending to be
+  one -- which is the failure `stats-get` has always refused."
+  [stem]
+  (when-some [st (sessions/fold-value stem :stats)]
+    (when-some [ctx (sessions/fold-value stem :context)]
+      (assoc (stats/stats-answer st)
+             :context (context/state->context ctx)
+             ;; THE BAND IS THE THIRD FOLD and it takes the conversation as its walk has it
+             ;; (`harness.edge.pressure/band-pressure`), which is memory for a session held
+             ;; here -- the same call the compaction trigger makes mid-run.
+             :pressure (pressure/band-pressure stem (sessions/messages stem)
+                                               (compaction/config stem))))))
 
 (defn- trajectory-get
   "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
@@ -5202,6 +5232,13 @@
     ;; that never starts a server registers neither.
     (sessions/install!)
     (pressure/install!)
+    ;; AND THE TWO FOLDS THE COMPOSER'S STRIP READS (ticket 01 of `.scratch/turn-and-model-events`):
+    ;; the numbers (`stats`) and the context ring (`context`), each registered on both of a
+    ;; session's seams. With them on the session, `stats-get` answers a conversation this process
+    ;; HOLDS without opening its record at all -- which is what the next `model/end` will need to
+    ;; say 'this much so far' (that ticket's decision 4).
+    (stats/install!)
+    (context/install!)
     ;; AND THE TRAJECTORY'S LIVE STEP, the same shape as the meter's: the view is built ON
     ;; DEMAND (`harness.edge.trajectory/view-value`) and this step advances it (ticket 13).
     (trajectory/install!)

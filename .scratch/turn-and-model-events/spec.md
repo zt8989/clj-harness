@@ -273,3 +273,37 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 
 **轮**，不是 turn（`CONTEXT.md` 的「别叫成」写死了这三个词：turn / 回合 / 迭代）；**一次模型调用**，
 不是 step（中文里是「模型调用」，不是「步」）。
+
+## 落地（票 01，2026-09-25）
+
+**落了。** 落在 `turn-and-model-events` 这个 worktree 里，改动三处源码：
+
+| 文件 | 改了什么 |
+|---|---|
+| `harness.edge.context` | `records->context` 拆成 `state-init` / `state-step` / `state->context`，`install!` 两条缝 |
+| `harness.edge.stats` | `stats-init` / `stats-answer` 公开，`stats-step` 多一个三参数的 arity，`install!` 两条缝 |
+| `harness.edge.http` | `start!` 里与 `pressure/install!` 并肩注册两份折叠；`stats-get` 先问 `live-numbers`，冷会话照旧读文件 |
+
+**`context` 那一份没有当初担心的那么难，因为切段本来就是折叠。**
+`trajectory/segments-step` 已经是一个 `(fn [state ctx [i row]] state)`，而 `run-segments` 的 docstring 自己写着
+本命名空间是它的第二个读者（「a second implementation of it would be a second chance to disagree
+about where a run starts」）。所以增量版就是把**那台机器**放进状态里，再加两样只有本读者要的：
+provider 时间线的 `[ts window]` 组合、以及最后那条 `event` 行（`stats/incomplete?` 收一个只有一行的
+数列就能算）。`window-of` / `timeline-pair` / `window-at` 各只有一份拼写。
+
+**一处实情要记下来：`row-written!` 会对着一个还没有那份折叠的会话调它的 step。**
+`register-fold!` 自己写着「a session already in the table does not gain a fold until it is built again」
+——于是那个 value 是 nil，而把 nil 喂给一个往值里折的 step 就是 NPE（测试里真的撞到了）。
+**修法是让 nil 保持 nil**：`stats-step` 与 `state-step` 都在 nil 上原样返回 nil，
+于是 `fold-value` 照样答 nil、路由照样回落到记录——那是对的答案（这份会话的内存里没有整份，
+而记录里有）。**不要**在 nil 上新建一份：那是「从建立以来的那些行」冒充整体，形似而数不对。
+
+**判据的状态**：「活着的会话答 `/stats` 不再打开那份 jsonl」——`stats-get` 走的就是这条路，
+而端点那两条既有用例（答案与记录折出来的逐字相同）在改成走内存之后**仍然全绿**。
+但还差一条**钉住它**的用例：我写过一个「把 `replay/read-records` 改成一调用就抛」的用例，
+它在测试夹具下的会话**建于注册之前**，于是回落到了文件（那正是上面那条实情）。
+要把它变成绿的，得先让「折叠必须在会话出生之前就注册好」这件事对夹具也成立——
+**这是票 01 剩下的那一小块，票面留在这里。**
+
+**跑过的门**：`harness.edge.http-test` 108 个用例 / 1199 个断言、
+`stats-test` + `context-test` + `sessions-test` 49 个用例 / 210 个断言，**全绿**。
