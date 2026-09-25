@@ -21,6 +21,12 @@ import type { WindowFrame } from "./feed";
 // `apiBase` RATHER THAN `API_BASE`: a suite points the harness origin at a server it learned
 // at runtime, and this module is loaded before that (`threads.ts` says why).
 import { apiBase, downlinkUrl } from "./threads";
+/// `newId` RATHER THAN `crypto.randomUUID` -- the same trap `lib/id.ts` documents, and this
+/// file walked into it once: the socket's name was minted with the platform's shortcut,
+/// which does not exist over `http://192.168.x.x`, so the page threw before it drew anything
+/// on every phone. A connection name is not a conversation name, but it is still a name the
+/// page mints in the browser, so it comes from the same cross-platform generator.
+import { newId } from "./id";
 
 /// HOW LONG TO WAIT BEFORE OPENING THE DOWNLINK AGAIN after it closed on its own -- the
 /// same fact the SSE feed's reconnect carried: while the socket is up nothing is asked at
@@ -112,7 +118,7 @@ export function declaredSet(): Array<{
 }
 
 function open(): void {
-  token = crypto.randomUUID();
+  token = newId();
   const params = new URLSearchParams();
   params.set("subscriber", token);
   params.set("sessions", JSON.stringify(declaredSet()));

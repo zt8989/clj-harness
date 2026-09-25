@@ -417,7 +417,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// one of its ids is addressed. Until this ticket NONE of the four had an entry, so every one of
 /// them drew the fallback's `WrenchIcon` -- 'the page does not know this tool' about tools the
 /// backend has had for months. What an icon LOOKS like is still the walkthrough's.
-const EXPECTED_CASES = 143;
+const EXPECTED_CASES = 144;
 
 let total = 0;
 for (const suite of SUITES) {

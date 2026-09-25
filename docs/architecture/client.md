@@ -213,6 +213,10 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （`lib/id.ts`，就是 `@ag-ui/client` 自己导出的 `randomUUID()` —— AG-UI 的设计就是客户端铸 thread-id，
   它的 `AbstractAgent` 也是 `threadId ?? v4()`；而**不能**用 `crypto.randomUUID`：那个只在安全上下文有，
   手机走 `http://192.168.x.x` 时页面会在画出来之前抛 `TypeError`。见 `.scratch/client-named-sessions`）、
+  **这条规矩只是「会话 id 不许这么铸」是不够的**：页面在浏览器里铸的**每一个**名字都是这个坑，而且它已经
+  踩过第二次——`lib/mux.ts` 的下行连接名一度写成 `crypto.randomUUID()`（同一天的 mux 那张票带来的），于是
+  手机在同一个报错上又死一次。所以它现在不是一条纪律，而是一条**被源码级用例钉住的约束**：
+  `test/suites/id.ts` 扫 `ui/src/**`，任何一行**代码**里出现那次调用（注释里提到不算）就红。
   **在页面里打开一场空会话**：不写库、不刷新、列表上什么都不出现——**会话是第一次发送才诞生的**
   （主人这一版的原话：「点击新增不立刻会话，发送才新建」）——那条路见
   `.scratch/store-backed-sidebar/spec.md`。

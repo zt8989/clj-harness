@@ -24,6 +24,35 @@ import { newId } from "../../src/lib/id";
 /// `threadId` and a record's stem are all written in.
 const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/// EVERY SOURCE FILE THE PAGE IS BUILT FROM, as raw text -- the whole page and not just the
+/// file that names conversations, because the discipline is about a CALL SITE and the one
+/// that broke was in another file.
+///
+/// `import.meta.glob` rather than `node:fs`, for the reason `suites/i18n.ts` gives: the glob is
+/// vite's own file list, so there is no second notion of "the source".
+const SOURCES = import.meta.glob("../../src/**/*.{ts,tsx}", {
+  eager: true,
+  query: "?raw",
+  import: "default",
+}) as Record<string, string>;
+
+/// A CALL to the platform's secure-context-only mint -- `crypto.randomUUID(` -- as opposed to
+/// the prose that names it.
+///
+/// THE PARENTHESIS IS THE WHOLE POINT: `lib/id.ts`'s header discusses the function at length,
+/// and so does this file, so a bare-text search would fail on the documentation that exists to
+/// warn about it. A call has an argument list; the prose does not.
+///
+/// A line opening a comment is skipped, which is what keeps those `///` notes from counting.
+const PLATFORM_MINT = /crypto\s*\.\s*randomUUID\s*\(/;
+const COMMENT_LINE = /^\s*(\/\/|\*)/;
+
+function callsThePlatformsMint(text: string): boolean {
+  return text
+    .split("\n")
+    .some((line) => !COMMENT_LINE.test(line) && PLATFORM_MINT.test(line));
+}
+
 const cases: Case[] = [
   {
     name: "the-name-comes-from-the-client-library-and-not-from-the-platform",
@@ -45,6 +74,23 @@ const cases: Case[] = [
       // felt there rather than here -- which is exactly why it is pinned here.
       expect(newId()).toMatch(V4);
       expect(newId()).not.toBe(newId());
+    },
+  },
+  {
+    name: "no-source-file-reaches-for-the-platform-s-mint",
+    run: async () => {
+      // THE HALF THIS SUITE COULD NOT SEE, and the bug's second arrival. The decision above was
+      // made, documented and pinned -- and the page still died on a phone, because `lib/mux.ts`
+      // named each downlink socket with `crypto.randomUUID()`: one file agreed, another called
+      // the platform, and the platform is not there over `http://192.168.x.x`.
+      //
+      // IT IS A SOURCE-LEVEL CHECK BECAUSE THE BUG IS A CALL SITE RATHER THAN A VALUE: node's
+      // `crypto` HAS `randomUUID`, so a runtime case run here would pass whichever function was
+      // called and prove nothing about a browser on a LAN address.
+      const offenders = Object.entries(SOURCES)
+        .filter(([, text]) => callsThePlatformsMint(text))
+        .map(([path]) => path);
+      expect(offenders).toEqual([]);
     },
   },
 ];
