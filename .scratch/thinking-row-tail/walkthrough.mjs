@@ -56,42 +56,11 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { launchBrowser } from "../lib/playwright.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE = path.join(HERE, "evidence");
 
-/// WHERE PLAYWRIGHT IS, which is not one place and is never a path written for one
-/// machine: the global root first (the shape this file shipped with), then the copies
-/// npm's cache holds for `npx` -- which is where `@playwright/mcp` puts one, the
-/// declaration in `~/.clj-harness/mcp.edn` -- then this checkout's `ui/node_modules`.
-///
-/// IT HAS TO BE A `file://` URL: an absolute path is not a specifier the ESM loader
-/// takes on Windows, which is how this file failed the first time it was run under
-/// Node 24 (`ERR_UNSUPPORTED_ESM_URL_SCHEME`, received protocol `c:`).
-///
-/// AND THE COPY THAT LAUNCHES IS THE ONE THAT IS USED. A copy can be installed without
-/// its browsers -- `browserType.launch: Executable doesn't exist at
-/// ...ms-playwright/chromium_headless_shell-1246` is what that looks like -- and this
-/// machine has TWO copies in the cache with one set of browsers between them. Which is
-/// why the launch happens in a loop rather than at a path picked in advance.
-const playwrightEntries = (() => {
-  const candidates = [
-    path.join(execSync("npm root -g", { encoding: "utf8" }).trim(), "playwright", "index.mjs"),
-  ];
-  const npxRoot = path.join(
-    execSync("npm config get cache", { encoding: "utf8" }).trim(),
-    "_npx"
-  );
-  if (fs.existsSync(npxRoot)) {
-    for (const entry of fs.readdirSync(npxRoot)) {
-      candidates.push(path.join(npxRoot, entry, "node_modules", "playwright", "index.mjs"));
-    }
-  }
-  candidates.push(path.join(HERE, "..", "..", "ui", "node_modules", "playwright", "index.mjs"));
-  return candidates.filter((candidate) => fs.existsSync(candidate));
-})();
-if (playwrightEntries.length === 0) {
-  throw new Error("playwright is not installed anywhere npm can see");
-}
 
 const url = process.argv[2] ?? "http://localhost:5393/";
 
@@ -154,18 +123,7 @@ if (flat.length <= TAIL_KEEP + TAIL_DROP * 2) {
   process.exit(1);
 }
 
-const browser = await (async () => {
-  const refusals = [];
-  for (const entry of playwrightEntries) {
-    try {
-      const { chromium } = await import(pathToFileURL(entry).href);
-      return await chromium.launch();
-    } catch (error) {
-      refusals.push(`${entry}: ${error.message.split("\n")[0]}`);
-    }
-  }
-  throw new Error(`no playwright copy could start a browser:\n${refusals.join("\n")}`);
-})();
+const browser = await launchBrowser();
 const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
 page.on("pageerror", (e) => check("no page error", false, e.message));
 
@@ -348,12 +306,18 @@ check(
 //   * and between two samples the WORDS often stand still while the POSITION
 //     moves -- the duration the component sets is what does that, and it is the
 //     whole difference between a scroll and the snap this replaced.
+/// HOW LONG THE STREAM IS ALLOWED TO TAKE IS A WALL CLOCK, and the default is not enough on a
+/// loaded machine: this waited 60 s (the `until` default) and went RED twice while two harnesses
+/// and a preview server were running -- the same code, the same fixture, green as soon as they
+/// were stopped. So the wait is named here, and it is generous: the stream is throttled to about
+/// thirty-five seconds by the walkthrough's own CDP setting, and everything else on the machine
+/// is somebody else's.
 const ended = await until(async () => {
   const row = await readRow();
   if (row === null) return true;
   samples.push(row);
   return row.live !== true;
-});
+}, 240000);
 const live_samples = samples.filter((s) => s.live);
 const texts = live_samples.map((s) => s.text);
 

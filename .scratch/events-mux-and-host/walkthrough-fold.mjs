@@ -25,12 +25,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
+import { launchBrowser } from "../lib/playwright.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE = path.join(HERE, "evidence");
 fs.mkdirSync(EVIDENCE, { recursive: true });
 
-const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
-const { chromium } = await import(path.join(globalRoot, "playwright", "index.mjs"));
+/// THE BROWSER, from the one place that knows where playwright is on this machine
+/// (`.scratch/lib/playwright.mjs`): this file's own two lines -- `npm root -g` and an absolute
+/// import -- could not start at all under Node 24 (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), and eight
+/// other walkthroughs in this repo still carry them.
+const browser = await launchBrowser();
 
 const url = process.argv[2] ?? "http://localhost:5394/";
 
@@ -47,7 +52,6 @@ const check = (label, ok, detail = "") => {
   if (!ok) failures += 1;
 };
 
-const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(e.message));
