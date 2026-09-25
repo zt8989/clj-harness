@@ -20,15 +20,17 @@ id** 会被反复给出、每次内容更长（项目自己的用例 `a-log-that
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** 已落地（2026-09-25）。**依赖票 03**：服务端不说话时这条缝没东西可合并，所以两票一起落的。
 
-- [ ] 整页刷新回到一场服务端仍在回答的会话：那一轮回答在刷新后继续增长（文字与工具行都算），
-      不再停在刷新那一刻。
-- [ ] 从侧栏点开一场服务端仍在回答的会话，得到同样的效果。
-- [ ] 同一个 id、内容**一模一样**的重复仍然不算第二条目；一帧什么都没改变时窗口按**原身份**返回
-      （不产生多余的导入与重渲染）。
-- [ ] run 结束后，这一轮的**最终版本**落在原位置，那一轮不再被画成「还在写」。
-- [ ] 客户端用例：新增一条钉住「同 id、内容变长 ⇒ 原地更新，既不去重也不重复」；既有的
-      「重复不是第二条目」用例保持绿。
-- [ ] 真浏览器走查：run 跑到一半整页刷新，断言刷新之后屏幕上的回答文本**确实在变长**（`ALL GREEN`）。
-- [ ] `cd ui && npm test`、`npm run typecheck`、`npm run build` 绿；`node scripts/dev.mjs --scripted` 过。
+- [x] 整页刷新回到一场服务端仍在回答的会话：那一轮回答在刷新后继续增长。走查实测（1500×900，脚本
+      `pace-ms` 150）：刷新落在 run 中间之后，答案的文本长度 0 → 8 → 235 → 275 → 310 → 335 → 370
+      → 395 → 440 → 475，跑完 503。`ui/src/lib/window.ts` 的 `merged`。
+- [x] 从侧栏点开一场服务端仍在回答的会话走同一扇门、同一段合并代码，所以同样接着长。
+- [x] 同一个 id、内容一模一样的重复仍然不算第二条目；一帧什么都没改变时窗口按**原身份**返回
+      （`ui/test/suites/window.tsx` 的两条：`...a-repeat-is-not-a-second-entry` 与新增的
+      `a-same-id-that-comes-back-longer-grows-in-place...`）。
+- [x] run 结束后这一轮的最终版本落在原位置（走查：settle 后 len 503，那一轮不再画成「还在写」）。
+- [x] 客户端用例已新增（同上），既有重复用例保持绿。
+- [x] 真浏览器走查：`node scripts/dev.mjs --scripted .scratch/refreshed-turn-keeps-growing/walk.json`，
+      截图在 `evidence/01-after-reload-still-growing.png`、`02-still-growing-3s-later.png`。
+- [x] `cd ui && npm test`（144 全绿）、`npm run typecheck`、`npm run build` 绿。

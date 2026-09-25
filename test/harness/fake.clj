@@ -8,9 +8,15 @@
 
 (def ^:private chunk-size 5)
 
-(defn- emit! [make-event s on-event]
-  (doseq [c (partition-all chunk-size s)]
-    (on-event (make-event (str/join c)))))
+(defn- emit! [make-event s on-event pace-ms]
+  ;; ABSENT IS ZERO, and that is not the same as 'the caller always says': a provider built
+  ;; by a TEST (a catalog entry in config.edn, a registry fixture) never went through
+  ;; `scripted`, so it carries no `:pace-ms` at all -- and `(pos? nil)` is an NPE, which is
+  ;; exactly how a resolved-config run used to die with a sentence about `doubleValue`.
+  (let [pause (long (or pace-ms 0))]
+    (doseq [c (partition-all chunk-size s)]
+      (when (pos? pause) (Thread/sleep pause))
+      (on-event (make-event (str/join c))))))
 
 ;; A SHARED script for tests that need a script living in an EDN file (a
 ;; registry entry cannot carry an atom -- edn/read-string has no reader for
@@ -19,7 +25,7 @@
 ;; unaffected.
 (defonce test-script (atom []))
 
-(defn- script-provider [script on-event]
+(defn- script-provider [script on-event pace-ms]
   (let [turn (first @script)
         {:keys [reasoning reasoning-after content tool-calls usage refuse]} turn]
     (swap! script #(vec (rest %)))
@@ -28,8 +34,8 @@
                             [(:status refuse 400) (:body refuse)]
                             [400 refuse])]
         (throw (ex-info (str "HTTP " status ": " body) {:status status}))))
-    (emit! ev/reasoning-delta reasoning on-event)
-    (emit! ev/text-delta content on-event)
+    (emit! ev/reasoning-delta reasoning on-event pace-ms)
+    (emit! ev/text-delta content on-event pace-ms)
     ;; THE VENDOR SHAPE THAT PUT A SECOND 思考 ROW ON THE PAGE (2026-09-22). A thinking-mode
     ;; model can go BACK to its reasoning after the answer has started -- measured on a
     ;; real session, whose stream was `reasoning "…Answer briefly"`, the answer's first
@@ -37,7 +43,7 @@
     ;; reasoning message open across that (see harness.edge.ag-ui), and a turn is the only
     ;; way to play it here. `:reasoning-after` is that late piece; a turn without it
     ;; behaves exactly as it did.
-    (emit! ev/reasoning-delta reasoning-after on-event)
+    (emit! ev/reasoning-delta reasoning-after on-event pace-ms)
     (let [calls (mapv (fn [{:keys [id name arguments]}]
                         (let [args (json/write-str arguments)]
                           (on-event (ev/tool-call id name args))
@@ -89,10 +95,20 @@
     :thinking  be a THINKING-MODE VENDOR on the way in as well as on the way out --
                refuse any request whose assistant messages do not carry
                `reasoning_content`, with the real vendor's own 400. See
-               `refuse-unless-echoed!`."
+               `refuse-unless-echoed!`.
+    :pace-ms   how long each CHUNK of the stream takes, in milliseconds, and zero unless
+               a caller asks. THE KNOB A WALKTHROUGH NEEDS to watch an answer GROW --
+               see the note beside it in the map below."
   ([turns] (scripted turns {}))
-  ([turns {:keys [thinking]}]
+  ([turns {:keys [thinking pace-ms]}]
    {:protocol :fake :script (atom (vec turns)) :thinking (boolean thinking)
+    ;; HOW LONG EACH CHUNK OF THE STREAM TAKES, in milliseconds, and zero -- no pause at
+    ;; all -- unless a caller asks (a walkthrough that has to SEE an answer grow does;
+    ;; the offline suite must not, or every case that streams would pay for it). A REAL
+    ;; VENDOR TAKES TIME, and this is the knob that makes the double able to reproduce
+    ;; the one shape a test cannot otherwise reach: a turn that is still being written
+    ;; while somebody looks at it. See `harness.e2e-server/script-in`'s "pace-ms".
+    :pace-ms (long (or pace-ms 0))
     ;; THE PIN NAMES ITSELF, like every other scripted provider in the repo does
     ;; (the seeded config, http_test's pins, providers_test's fixtures all carry
     ;; both). Without them a `model/start` audit line would name nobody, and the
@@ -142,4 +158,4 @@
   ;; request without it is a different mode and gets no refusal, so the boundary
   ;; between the two is testable.
   (when (and thinking (:reasoning-effort provider)) (refuse-unless-echoed! messages))
-  (script-provider (or script test-script) on-event))
+  (script-provider (or script test-script) on-event (:pace-ms provider)))

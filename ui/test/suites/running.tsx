@@ -37,7 +37,7 @@ import { expect } from "vitest";
 import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
 import { SessionRunStop } from "../../src/components/session-run-stop";
-import { IDLE, statusOf, type SessionStatus } from "../../src/lib/session-status";
+import { IDLE, statusOf, stillBeingWritten, type SessionStatus } from "../../src/lib/session-status";
 import type { Language } from "../../src/lib/language";
 
 /// THE BUTTON AS A PERSON MEETS IT: the stop inside a real i18n instance, rendered to a
@@ -97,6 +97,40 @@ const cases: Case[] = [
       // the approval gate, and a server that has moved on says nothing about it.
       const parked: SessionStatus = { running: false, parked: true };
       expect(statusOf(parked, "settled")).toEqual(parked);
+    },
+  },
+  {
+    name: "a-turn-the-server-is-writing-is-not-a-finished-turn-and-wears-no-action-bar",
+    run: async () => {
+      // TICKET 02 OF `.scratch/refreshed-turn-keeps-growing`. The action bar (Copy /
+      // Refresh / More) is drawn for a turn that has STOPPED, and upstream asks the
+      // RUNTIME whether it is running -- which is 'a run THIS PAGE is driving'. After a
+      // reload that is false while the process is still answering, so the bar sat under a
+      // message that was still arriving and (ticket 01) still growing: a reader took it
+      // for finished. `stillBeingWritten` is the criterion the composer's gate uses, and
+      // the bar asks it now.
+      //
+      // THE SERVER'S WORD ALONE IS ENOUGH, which is the case the bug was: nothing in this
+      // page is running, and the conversation is being written.
+      expect(stillBeingWritten(false, "running")).toBe(true);
+
+      // AND THE PAGE'S OWN RUN ALONE IS ENOUGH, for the reason the union exists at all:
+      // a run this page just sent is running in the runtime before the window has said
+      // anything about it (the frame naming the state is still in the writer's queue).
+      expect(stillBeingWritten(true, null)).toBe(true);
+      expect(stillBeingWritten(true, "running")).toBe(true);
+
+      // THE WORDS THAT ARE NOT 'STILL BEING WRITTEN': a settled turn answered, an
+      // unfinished one stopped with nothing more coming, and a conversation with no
+      // window at all has nothing to say -- the bar belongs on all three.
+      for (const state of ["settled", "unfinished", null]) {
+        expect(stillBeingWritten(false, state), `${state} is not a turn still being written`).toBe(false);
+      }
+      expect(stillBeingWritten(false, "something-else")).toBe(false);
+
+      // A PARKED RUN IS NOT STILL BEING WRITTEN EITHER -- it ENDED on its interrupt, and
+      // the card that answers it is the turn's own furniture; the bar is drawn.
+      expect(stillBeingWritten(false, "parked")).toBe(false);
     },
   },
   {

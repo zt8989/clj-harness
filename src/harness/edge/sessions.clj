@@ -132,3 +132,5 @@
 (def watch! session/watch!)
 (def unwatch! session/unwatch!)
 (def watch-unflushed! session/watch-unflushed!)
+(def record-grew! session/record-grew!)
+(def ring-growth! session/ring-growth!)

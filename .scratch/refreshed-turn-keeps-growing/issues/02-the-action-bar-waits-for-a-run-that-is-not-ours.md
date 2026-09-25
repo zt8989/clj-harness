@@ -13,10 +13,17 @@
 
 **Blocked by:** 01（票 01 没落地之前，这一轮根本不长，藏不藏按钮都不是重点）。
 
-**Status:** ready-for-agent
+**Status:** 已落地（2026-09-25）。**落地时学到的**：upstream 的 `hideWhenRunning` **不能**用来表达这条
+判据——它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是看着」正是 runtime 说 false 的那一格，
+所以传 `true` 什么也没藏（浏览器实测，见票面下方）。现在的做法是**在这个组件里决定不画**：
+`if (stillBeingWritten(...)) return null`，`hideWhenRunning` 留着管本页自己驱动 run 那一格。
 
-- [ ] 服务端说这一场 `running`、而本页没有自己的 run 时，正在写的那一轮不画动作条。
-- [ ] run 结束、窗口说 `settled` 之后，动作条自己回来。
-- [ ] 本页自己驱动 run 时行为不变（照旧藏）。
-- [ ] 客户端用例钉住这条判据（页面的读数与服务端的词取或，和 composer 的门同源）。
-- [ ] 真浏览器走查：刷新回到一场正在跑的会话，断言刷新后这段时间里动作条不在；跑完出现。
+- [x] 服务端说这一场 `running`、而本页没有自己的 run 时，正在写的那一轮不画动作条。走查实测：
+      刷新落进一场还在跑的会话后，sidebar 那行 `running: 1` 的整段时间里动作条高度一直是空（不在），
+      `evidence/01-…png`、`02-…png`。
+- [x] run 结束（窗口说 `settled`）之后动作条自己回来：同一次走查 settle 后 24px 高。
+- [x] 本页自己驱动 run 时行为不变（`hideWhenRunning` 那条路照旧藏，走查 send 之后一直到刷新前都不在）。
+- [x] 客户端用例：`ui/test/suites/running.tsx` 的
+      `a-turn-the-server-is-writing-is-not-a-finished-turn-and-wears-no-action-bar`（本页的读数与服务端的
+      词取或，和 composer 的门同源：都走 `lib/session-status.ts`）。
+- [x] 真浏览器走查：刷新回到一场正在跑的会话，断言刷新后这段时间里动作条不在；跑完出现（截图三张）。
