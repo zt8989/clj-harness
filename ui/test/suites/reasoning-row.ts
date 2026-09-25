@@ -9,16 +9,32 @@
 // WORDS would be unmeasurable if they were written inside it.
 //
 // WHAT THIS SUITE CANNOT SEE: that the row does not unfold itself, that the
-// window keeps the END of the line in view (characters leaving at the left edge
-// while the new ones arrive at the right one), and that the sliding is
-// interpolated rather than a jump per token. All three are properties of the
+// WHAT THIS SUITE CAN SEE OF IT: the words (`previewOf`) and WHICH BLOCK OF THEM
+// THE DOM IS HOLDING (`tailStart`) -- both pure, both a string (or a length) in and
+// a string (or a number) out.
+//
+// WHAT IT CANNOT SEE: that the row does not unfold itself, that the window keeps the
+// END of the line in view (characters leaving at the left edge while the new ones
+// arrive at the right one), that the sliding is interpolated rather than a jump per
+// token, and that LETTING GO OF A BLOCK IS INVISIBLE (the row pays for the block
+// with the padding that puts the line back where layout would have left it). Those
+// are properties of the RENDERED page, and they are measured in a real browser --
+// `.scratch/thinking-row-tail/walkthrough.mjs`, which is also the only place the
+// several parts of a group are read through a real runtime.
 // RENDERED page, and they are measured in a real browser --
 // `.scratch/thinking-row-tail/walkthrough.mjs`, which is also the only place the
 // several parts of a group are read through a real runtime.
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
-import { PREVIEW_LIMIT, previewOf, thoughtAt } from "../../src/lib/reasoning-preview";
+import {
+  PREVIEW_LIMIT,
+  TAIL_DROP,
+  TAIL_KEEP,
+  previewOf,
+  tailStart,
+  thoughtAt,
+} from "../../src/lib/reasoning-preview";
 
 /// A part list, spelled the way the caller's is: every part carries its type tag,
 /// and the ones this rule reads carry text. The others are here because they are
@@ -217,6 +233,64 @@ const cases: Case[] = [
       ];
       expect(thoughtAt(split, 0, 0).parts).toHaveLength(2);
       expect(thoughtAt(split, 0, 2).drawn).toBe(false);
+    },
+  },
+  {
+    name: "the-row-holds-a-block-of-a-live-thought-and-never-a-window",
+    run: async () => {
+      // WHERE THE DOM'S COPY OF A LIVE THOUGHT BEGINS. The other half of this rule --
+      // that a block leaving is INVISIBLE -- is not here: the row pays for the block
+      // with a padding, in the same frame, and only the rendered page can be asked
+      // (`.scratch/thinking-row-tail/walkthrough.mjs`). What IS here is the shape of
+      // the holding, which is what makes that payment worth making.
+
+      // A COPY THE ROW CAN HOLD WHOLE IS HELD WHOLE, so a short thought -- and every
+      // thought on its way up to the bound -- is handed over untouched.
+      const short = runOf(TAIL_KEEP + TAIL_DROP);
+      expect(tailStart(short, { text: short, start: 0 })).toBe(0);
+
+      // PAST THE BOUND A BLOCK LEAVES, and it is a whole `TAIL_DROP` of characters,
+      // never one: what is held stays longer than `TAIL_KEEP`, which is the window's
+      // own material for the drag.
+      const long = runOf(TAIL_KEEP + TAIL_DROP * 3 + 7);
+      const held = tailStart(long, { text: long, start: 0 });
+      expect(held).toBe(TAIL_DROP * 3);
+      expect(long.length - held).toBe(TAIL_KEEP + 7);
+
+      // THE ANSWER ONLY MOVES WHEN THE COPY CROSSES: one more character is not
+      // enough, `TAIL_DROP` of them are -- and asking twice about the same text is
+      // the same answer, which is what the row needs (its effect runs more than once
+      // per frame).
+      expect(tailStart(`${long}x`, { text: long, start: held })).toBe(held);
+      const crossed = runOf(long.length + TAIL_DROP);
+      expect(tailStart(crossed, { text: long, start: held })).toBe(held + TAIL_DROP);
+      expect(tailStart(crossed, { text: crossed, start: held + TAIL_DROP })).toBe(
+        held + TAIL_DROP,
+      );
+
+      // A DIFFERENT LINE IS NOT A GROWN ONE: a thought that arrives in two parts (the
+      // vendor's `思考 · 答案 · 思考`, whose tail the runtime makes a message of its
+      // own), a restored conversation, another thought -- the offsets of the old line
+      // mean nothing, and the answer is the beginning of the new one.
+      expect(tailStart(" in Chinese.", { text: long, start: held })).toBe(0);
+      expect(tailStart("先读一下。", { text: "", start: 0 })).toBe(0);
+
+      // AND THE COPY THE ROW HOLDS IS BOUNDED, which is the whole point of the rule:
+      // over a thought that grows a character at a time, the offset never goes
+      // backwards and what the DOM is asked to draw never exceeds
+      // `TAIL_KEEP + TAIL_DROP` -- while the thought itself gets as long as the model
+      // likes.
+      let start = 0;
+      let previous = "";
+      for (let length = 1; length <= TAIL_KEEP * 8; length += 7) {
+        const text = runOf(length);
+        const next = tailStart(text, { text: previous, start });
+        expect(next).toBeGreaterThanOrEqual(start);
+        expect(text.length - next).toBeLessThanOrEqual(TAIL_KEEP + TAIL_DROP);
+        if (length > TAIL_KEEP) expect(text.length - next).toBeGreaterThan(TAIL_KEEP);
+        start = next;
+        previous = text;
+      }
     },
   },
 ];

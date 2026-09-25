@@ -8,10 +8,11 @@
 // (temp homes, a scripted provider, no api-key) -- the script next to this file
 // is what the model "thinks", and THIS SCRIPT READS THE SAME FILE to know what
 // the row should say: the first line at rest, and -- while it is arriving -- the
-// whole of what has arrived, flattened to one line.
+// END of what has arrived, flattened to one line, and HOW MUCH of it the row may hold
 //
 // WHY IT EXISTS. `src/lib/reasoning-preview.ts` decides WHAT the row is handed
-// and is tested as a string (`test/suites/reasoning-row.ts`, three cases). The
+// (its words, and which BLOCK of them the DOM is holding) and is tested as strings and
+// numbers (`test/suites/reasoning-row.ts`). The
 // rest are properties of the RENDERED page and no suite can see them:
 //
 //   1. THE ROW NEVER UNFOLDS ITSELF. It used to -- upstream's `streaming`, whose
@@ -28,6 +29,17 @@
 //   4. THE FIRST LINE COMES BACK when the thought ends (and stays folded when the
 //      same conversation is restored from disk).
 //
+//   5. THE COPY THE DOM HOLDS IS BOUNDED. A live thought runs to thousands of
+//      characters and the row holds a block of it: once the held copy is past
+//      `TAIL_KEEP + TAIL_DROP`, a whole `TAIL_DROP` leaves the front (`tailStart`). A
+//      row that held the thought instead made every token's work grow with the
+//      thought -- which is what this change is for.
+//   6. AND LETTING GO OF A BLOCK COSTS NOTHING. The block is paid for in the same
+//      frame with a padding, so the line does not move: the sample to look for is one
+//      where the line is SHORTER and its left edge is no further right. Without the
+//      payment the drag's target follows the width, and the line is pulled thousands
+//      of pixels back to the right -- the jump a reader would see.
+//
 // WHY IT THROTTLES THE NETWORK. `harness.fake` emits a thought in 5-character
 // chunks with no pause between them, so the whole scripted stream lands in one
 // burst and there is nothing to watch. Chrome's own bandwidth throttling (CDP,
@@ -42,23 +54,64 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE = path.join(HERE, "evidence");
 
-const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
-const { chromium } = await import(path.join(globalRoot, "playwright", "index.mjs"));
+/// WHERE PLAYWRIGHT IS, which is not one place and is never a path written for one
+/// machine: the global root first (the shape this file shipped with), then the copies
+/// npm's cache holds for `npx` -- which is where `@playwright/mcp` puts one, the
+/// declaration in `~/.clj-harness/mcp.edn` -- then this checkout's `ui/node_modules`.
+///
+/// IT HAS TO BE A `file://` URL: an absolute path is not a specifier the ESM loader
+/// takes on Windows, which is how this file failed the first time it was run under
+/// Node 24 (`ERR_UNSUPPORTED_ESM_URL_SCHEME`, received protocol `c:`).
+///
+/// AND THE COPY THAT LAUNCHES IS THE ONE THAT IS USED. A copy can be installed without
+/// its browsers -- `browserType.launch: Executable doesn't exist at
+/// ...ms-playwright/chromium_headless_shell-1246` is what that looks like -- and this
+/// machine has TWO copies in the cache with one set of browsers between them. Which is
+/// why the launch happens in a loop rather than at a path picked in advance.
+const playwrightEntries = (() => {
+  const candidates = [
+    path.join(execSync("npm root -g", { encoding: "utf8" }).trim(), "playwright", "index.mjs"),
+  ];
+  const npxRoot = path.join(
+    execSync("npm config get cache", { encoding: "utf8" }).trim(),
+    "_npx"
+  );
+  if (fs.existsSync(npxRoot)) {
+    for (const entry of fs.readdirSync(npxRoot)) {
+      candidates.push(path.join(npxRoot, entry, "node_modules", "playwright", "index.mjs"));
+    }
+  }
+  candidates.push(path.join(HERE, "..", "..", "ui", "node_modules", "playwright", "index.mjs"));
+  return candidates.filter((candidate) => fs.existsSync(candidate));
+})();
+if (playwrightEntries.length === 0) {
+  throw new Error("playwright is not installed anywhere npm can see");
+}
 
 const url = process.argv[2] ?? "http://localhost:5393/";
 
-// Bytes per second. The thought is ~1,000 characters of text, and a scripted
-// frame carries five of them, so the whole stream is ~25 kB of SSE -- at this rate
-// it arrives over about four seconds, i.e. ~250 characters a second, which is what
-// a fast real vendor looks like. Not an accident of the fixture: the drag is
-// capped at a speed (`TAIL_SPEED`, `message-parts.tsx`), and a stream faster than
-// that cap is one the window deliberately falls behind rather than teleports.
-const THROTTLE = 6 * 1024;
+// Bytes per second. The thought is ~2,800 characters of text and a scripted frame
+// carries five of them, so the whole stream is ~70 kB of SSE once every frame's JSON
+// is counted. MEASURED, NOT ARITHMETIC: at this rate the whole thought arrives over
+// about thirty-five seconds, i.e. ~80 characters a second -- a *slow* vendor, and that
+// is the honest reason for the number: it is what keeps this walkthrough under a
+// minute. Six kilobytes a second was the old rate, right for a thought of a thousand
+// characters (~250 characters a second, the original note's arithmetic) and far too
+// slow for this one.
+// vendor looks like. Not an accident of the fixture: the drag is capped at a speed
+// (`TAIL_SPEED`, `message-parts.tsx`), and a stream faster than that cap is one the
+// window deliberately falls behind rather than teleports.
+//
+// AND IT IS WHY THE FIXTURE IS THIS LONG: a thought of a thousand characters never
+// fills the row past its bound (`TAIL_KEEP + TAIL_DROP`), so blocks leaving -- what
+// section 5 measures -- would never happen, and every criterion about them would be
+// green about nothing.
+const THROTTLE = 24 * 1024;
 
 let failures = 0;
 function check(label, ok, detail = "") {
@@ -75,7 +128,44 @@ const thought = script.turns[0].reasoning;
 const firstLine = thought.split("\n").map((l) => l.trim()).find((l) => l !== "");
 const flat = thought.replace(/\s+/g, " ").trim();
 
-const browser = await chromium.launch();
+/// HOW MUCH THE ROW HOLDS, taken from the module that decides it rather than copied:
+/// the bound is one of the things this script measures, and a second 600 in here would
+/// stay 600 through a change that moved it.
+const MODULE = path.join(HERE, "..", "..", "ui", "src", "lib", "reasoning-preview.ts");
+const moduleSource = fs.readFileSync(MODULE, "utf8");
+const constOf = (name) => {
+  const found = moduleSource.match(new RegExp(`export const ${name} = (\\d+);`));
+  if (found === null) throw new Error(`${name} is not an exported number in ${MODULE}`);
+  return Number(found[1]);
+};
+const TAIL_KEEP = constOf("TAIL_KEEP");
+const TAIL_DROP = constOf("TAIL_DROP");
+/// The fixture appends five characters per frame (`harness.fake`), and a sample can
+/// land one frame after the copy crossed the bound: what the DOM holds is the module's
+/// number plus that.
+const CHUNK_SLACK = 64;
+
+/// THE FIXTURE HAS TO BE LONG ENOUGH TO EMPTY THE ROW, or the criteria below are
+/// green about nothing: a thought the row can hold whole never lets a block go.
+if (flat.length <= TAIL_KEEP + TAIL_DROP * 2) {
+  console.log(
+    `\nthe scripted thought is ${flat.length} characters -- too short to fill the row and empty it (more than ${TAIL_KEEP + TAIL_DROP * 2} is what a block needs)`
+  );
+  process.exit(1);
+}
+
+const browser = await (async () => {
+  const refusals = [];
+  for (const entry of playwrightEntries) {
+    try {
+      const { chromium } = await import(pathToFileURL(entry).href);
+      return await chromium.launch();
+    } catch (error) {
+      refusals.push(`${entry}: ${error.message.split("\n")[0]}`);
+    }
+  }
+  throw new Error(`no playwright copy could start a browser:\n${refusals.join("\n")}`);
+})();
 const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
 page.on("pageerror", (e) => check("no page error", false, e.message));
 
@@ -235,13 +325,14 @@ check(
 check("the row is still ONE line while it runs", live.rowHeight <= 32, `${live.rowHeight}px tall`);
 
 // ---------------------------------------------------------- 4. what it shows
-// THE LINE IS THE ARRIVED TEXT, WHOLE. It is not a window cut to its last N
-// characters: what has run off the left edge has to stay in the DOM for the drag
-// to be able to move it (see `ReasoningTail`). So every sample's line is a PREFIX
-// of the thought -- and the first sample is what has arrived after a few
-// characters, not the beginning of a cut window.
+// ---------------------------------------------------------- 4. what it holds
+// THE LINE BEGINS WHERE THE THOUGHT BEGINS. This sample is the first moment the window
+// is drawn, which is a few characters into the thought -- nothing has left the front by
+// then -- so the line is a PREFIX of the thought and not a window cut out of the
+// middle of it. What happens to that front LATER is section 5's: a block leaves once
+// the held copy is past `TAIL_KEEP + TAIL_DROP`, and it leaves for nothing.
 check(
-  "the line is the arrived text, whole -- not a window cut out of it",
+  "the line starts at the beginning of the thought, not in the middle of one",
   live.text !== null && flat.startsWith(live.text),
   `line: ${live.text?.length ?? 0} characters of ${flat.length}, ends ${JSON.stringify((live.text ?? "").slice(-16))}`,
 );
@@ -322,12 +413,46 @@ check(
   `lag: max ${worst}px, median ${lags.slice().sort((a, b) => a - b)[Math.floor(lags.length / 2)]}px, last ${lags[lags.length - 1]}px, ${lags.filter((l) => l <= 2).length} of ${lags.length} samples caught up`,
 );
 const lengths = live_samples.map((s) => (s.text ?? "").length);
+/// THE LINE IS A RUN OF THE THOUGHT, AND THE COPY THE DOM HOLDS IS BOUNDED. Nothing
+/// is drawn that the model did not say, no seam shows between two blocks -- and the
+/// DOM never holds more than the module's bound (plus the chunk a frame appends),
+/// while the thought itself is thousands of characters. THE BOUND IS THE POINT: the
+/// row used to hold the thought, and every token's work grew with it.
+const heldMax = Math.max(...lengths);
 check(
-  "every sample is the thought so far, and shorter than the thought",
-  live_samples.every((s) => flat.startsWith(s.text ?? "\u0000")) &&
-    lengths.every((n, i) => i === 0 || n >= lengths[i - 1]) &&
+  "the line is a run of the thought, and the copy the DOM holds is bounded",
+  live_samples.every((s) => (s.text ?? "") === "" || flat.includes(s.text ?? "\u0000")) &&
+    lengths.every((n) => n <= TAIL_KEEP + TAIL_DROP + CHUNK_SLACK) &&
     lengths[lengths.length - 1] < flat.length,
-  `line ${lengths[0]} -> ${lengths[lengths.length - 1]} of ${flat.length} characters`,
+  `line ${lengths[0]} -> ${lengths[lengths.length - 1]} of ${flat.length} characters, longest ${heldMax} (bound ${TAIL_KEEP + TAIL_DROP + CHUNK_SLACK})`,
+);
+
+/// AND A BLOCK LEFT, MORE THAN ONCE. The stream only ever APPENDS, so a sample whose
+/// line is shorter than the one before it can only be a block going.
+const left = live_samples
+  .map((s, i) => (i > 0 && lengths[i] < lengths[i - 1] ? i : -1))
+  .filter((i) => i >= 0);
+check(
+  "a block leaves the front of the line more than once",
+  left.length >= 2,
+  `${left.length} blocks left, at ${left.map((i) => `${lengths[i - 1]}->${lengths[i]}`).join(", ")}`
+);
+
+/// AND LETTING GO OF ONE COSTS NOTHING -- the criterion this whole change exists for.
+/// The block is paid for in the same frame with a padding, so the line does not move:
+/// the pair to look for is one where the line is SHORTER and its LEFT EDGE IS NO
+/// FURTHER RIGHT. Without the payment, the drag's target follows the width, so the line
+/// is dragged thousands of pixels back to the right -- over up to 400ms, which is a
+/// reader watching the thought rewind.
+const jumped = left.filter(
+  (i) => (live_samples[i].trackLeft ?? 0) > (live_samples[i - 1].trackLeft ?? 0) + 1
+);
+check(
+  "a block leaving does not move the line: it is paid for, not jumped over",
+  left.length > 0 && jumped.length === 0,
+  jumped.length === 0
+    ? `${left.length} blocks left, none moved the line`
+    : `${jumped.length} of ${left.length} moved the line right, worst ${Math.round(Math.max(...jumped.map((i) => (live_samples[i].trackLeft ?? 0) - (live_samples[i - 1].trackLeft ?? 0))))}px`
 );
 
 check("the thought ends, and the row stops being live", ended === true);
@@ -382,7 +507,10 @@ await page.screenshot({ path: path.join(EVIDENCE, "02-after-thinking.png") });
 await page.click(ROW);
 const opened = await until(async () => {
   const row = await readRow();
-  return isFolded(row) ? null : row;
+  // THE PANEL ANIMATES OPEN, so "not folded" is true for a frame BEFORE there is any
+  // height in it: what to wait for is the open state WITH its height, or the criterion
+  // below is a race with the animation.
+  return row !== null && row.contentState === "open" && row.contentHeight > 0 ? row : null;
 }, 10000, 25);
 check(
   "a click opens the thought",
