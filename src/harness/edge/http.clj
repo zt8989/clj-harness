@@ -105,6 +105,7 @@
             [harness.edge.compaction :as compaction]
             [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
+            [harness.edge.turn :as turn]
             [harness.edge.trajectory :as trajectory]
             ;; The built page, when this process has one: `ui/dist`, served at the
             ;; root. See harness.edge.ui for why the server carries it at all.
@@ -509,14 +510,22 @@
    (let [row  (merge {:ts (System/currentTimeMillis) :runId run-id}
                      extra
                      (row-of kind payload))
-         line (str (json/write-str row) "\n")]
+         line (str (json/write-str row) "\n")
+         ;; THE OFFSET COMES BACK FROM THE WRITE ITSELF (ADR 0007), and this is the caller that
+         ;; hands it out: the fact families of ADR 0006 are stamped with it, and `lands` -- when
+         ;; it was given -- has already been called with it from inside `append!` (after THAT
+         ;; namespace's lock, never inside this one).
+         offset (record/append! thread-id (locking log-lock (log-file-for thread-id)) line lands)]
      ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
      ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
      ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,
      ;; INSIDE `record/append!` (ADR 0007). The split matters for one concrete reason: `lands`
      ;; takes the SESSION's lock, and a `lands` called while holding this one is a lock-order
      ;; inversion (`.scratch/event-persistence/spec.md`, '锁要往下搬一层').
-     (record/append! thread-id (locking log-lock (log-file-for thread-id)) line lands)
+     ;; THE OFFSET COMES BACK FROM THE WRITE ITSELF (ADR 0007), and this is the caller that
+     ;; hands it out: the fact families of ADR 0006 are stamped with it, and `lands` -- when it
+     ;; was given -- has already been called with it from inside `append!` (after THAT
+     ;; namespace's lock, never inside this one).
      ;; THE SESSION IS TOLD, NOT A CONSUMER (ticket 04): this is the one write path, and
      ;; every registered live step advances from the row here. Adding a consumer is
      ;; registering a step (`harness.edge.sessions/register-step!`), never editing this
@@ -529,7 +538,8 @@
      ;; changed'. It is a MARK here and a ring on the session's own clock, because what a
      ;; ring costs is a reader re-reading the whole conversation and this call sits on the
      ;; frame loop (see `harness.kernel.session/growth-interval-ms`).
-     (sessions/record-grew! thread-id))))
+     (sessions/record-grew! thread-id)
+     offset)))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
@@ -581,6 +591,10 @@
                            :paths [(.getAbsolutePath ^java.io.File from)
                                    (.getAbsolutePath ^java.io.File other)]})))
         (.mkdirs (.getParentFile to))
+        ;; LET GO OF EVERY HANDLE FIRST: the next thing this does is RENAME the file, and Windows
+        ;; refuses to rename one that is open (ADR 0007 decision 3's price, paid on the one
+        ;; occasion it costs anything -- a person re-binding a project).
+        (record/release-handles!)
         (when-not (.renameTo from to)
           ;; A rename between two directories under one home does not fail for
           ;; want of a filesystem, so this is a real refusal and not a warning:
@@ -708,6 +722,21 @@
     (ag/opening-entry? message)                  "opening"
     (= ag/context-entry-id (:id message))       "injection"
     :else                                       "client"))
+
+;; THE FACT FAMILY'S WRITER AND THE NUMBERS ITS `model/end` CARRIES (ADR 0006): both are defined
+;; with the downlink machinery, far below the emitter that calls them.
+(declare family-send! live-numbers-slice)
+
+(defn speaks-for-a-person?
+  "Whether MESSAGE is something A PERSON said, as the record spells it: a `user` message whose
+  envelope says the CLIENT put it in the array (`entry-source`).
+
+  THIS IS THE TURN'S OPENING CONDITION (ADR 0006 decision 3). A run can bring entries and still
+  not open a turn -- a resume brings none (`harness.edge.stats`: 'a resume brings none and opens
+  none'), and the conversation's BIRTH brings entries that ride as user messages without anybody
+  having typed them (`source` = `opening` / `injection`)."
+  [message]
+  (and (= "user" (:role message)) (= "client" (entry-source message))))
 
 (defn returned-source
   "WHO PUT THIS MESSAGE INTO THE ARRAY, for a message a RUN added: what the model returned,
@@ -1012,7 +1041,11 @@
     ;; is turned into a RUN_ERROR frame, so the birth is on its side of the parens.
     ;; `input`, `thread-id`, `run-id` and the two stateful closures above are all it
     ;; needs.
-    (async/go
+    ;; A THREAD, NOT A `go` BLOCK (ADR 0007): everything below -- including every `log!` -- now
+    ;; does its file I/O ON THIS THREAD, and a blocked `go` block PARKS A core.async DISPATCH
+    ;; THREAD for every other block in the process. Measured on the first attempt: a run held at
+    ;; a tool seam stopped reaching it at all, because this body logs its own frames.
+    (async/thread
       ;; A GO BLOCK'S EXCEPTION GOES NOWHERE: core.async throws it into the block's
       ;; own channel, which nobody reads -- so a consumer that dies takes the run
       ;; down in silence. The kernel's producer blocks on its next put, the client
@@ -1340,6 +1373,19 @@
                 (doseq [u updates]
                   (log! thread-id run-id "message" {:role "developer" :content u} nil
                         {:source "instruction-update"})))
+              ;; A TURN OPENS WITH A PERSON'S OWN WORDS, AND ONLY WITH THEM (ADR 0006 decision 3):
+              ;; a resume brings none and opens none, and the conversation's birth rides as user
+              ;; messages nobody typed (`speaks-for-a-person?`).
+              ;;
+              ;; ITS OPENING LINE IS THE NEXT ONE THE RECORD WILL TAKE: this sits before the rows
+              ;; below, and the write is synchronous (ADR 0007), so `flushed-seq` is that line's
+              ;; number rather than a prediction about a queue. The counts start from zero here
+              ;; and the write stream takes them from there.
+              (when-some [from (when (some speaks-for-a-person? added)
+                                 (record/flushed-seq thread-id))]
+                (sessions/set-fold-value! thread-id :turn (turn/state-init))
+                (swap! state assoc :turn/from from)
+                (family-send! thread-id {:type "turn/start" :seq from}))
               (doseq [[i m] (map-indexed vector added)
                       :let [shown (first (ag/provider-messages (sessions/model-view [m])))]]
                 (when (= i updates-at)
@@ -1481,7 +1527,18 @@
                                                              ;; `harness.edge.context/tool-signature`).
                                                              :tool-signature context/tool-signature})]
                 (loop []
-                  (when-let [ev (async/<! events)]
+                  (when-let [ev (async/<!! events)]
+                    ;; WHETHER THIS RUN'S END LEAVES THE TURN OWING ANYTHING, AND WHERE ITS RANGE
+                    ;; ENDS (ADR 0006 decision 3). The terminal EVENT arrives before the frame it
+                    ;; becomes, so the next line written for this thread IS that frame's line --
+                    ;; `record/flushed-seq` counts what is written, and the write is synchronous
+                    ;; (ADR 0007), so this asks the record rather than guessing.
+                    ;;
+                    ;; `:run/interrupt` IS NOT AN ENDING: the calls are a human's to decide, and the
+                    ;; run that carries the answer closes the SAME turn.
+                    (when (contains? #{:run/end :run/error :run/stopped} (:type ev))
+                      (swap! state assoc :turn/closes? true)
+                      (swap! state assoc :turn/to (record/flushed-seq thread-id)))
                     (if (= :run/done (:type ev))
                       (do
                         ;; What happened to this run's MCP servers, drained from the
@@ -1508,6 +1565,25 @@
                       ;; terminal frame, so a reader racing the consumer may not see it
                       ;; yet.
                       (log-messages! thread-id run-id (:added ev))
+                      ;; A TURN CLOSES HERE, AND ONLY WHEN ITS RUN LEFT NOTHING OWED (ADR 0006
+                      ;; decision 3): AFTER THE RETURNED TAIL HAS LANDED, because the counts it
+                      ;; carries (`harness.edge.turn/answer`) include the assistant messages this
+                      ;; run just wrote.
+                      (when (:turn/closes? @state)
+                        (let [counts (turn/answer (sessions/fold-value thread-id :turn))
+                              from   (:turn/from @state)
+                              to     (:turn/to @state)]
+                          (family-send! thread-id
+                                        (cond-> {:type "turn/end" :seq to
+                                                 :numbers (merge {:seqFrom from :seqTo to} counts)}
+                                          ;; THE TURN'S NAME IS DERIVED, NOT MINTED: the record line
+                                          ;; it opened on. Nothing has to be kept for it to be
+                                          ;; stable, the same reason a call's id is `<run>-m<n>`.
+                                          (some? from) (assoc :turnId (str thread-id "-t" from)))))
+                        ;; THE NEXT TURN COUNTS FROM ZERO: 'this turn', not 'since this session
+                        ;; began'. `set-fold-value!` is the door an on-demand consumer comes
+                        ;; through, and the write stream takes it from here.
+                        (sessions/set-fold-value! thread-id :turn (turn/state-init)))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -1521,7 +1597,20 @@
                       (do ;; Tool-lifecycle events are audit lines, not wire frames:
                           ;; each lands as its own jsonl line, keyed by toolCallId.
                           (when-let [[kind payload] (lifecycle-record ev)]
-                            (log! thread-id run-id kind payload)
+                            ;; THE MODEL FAMILY GOES OUT HERE (ADR 0006 decision 4), stamped with the
+                            ;; line's own number -- which `log!` now ANSWERS, because the write is
+                            ;; synchronous (ADR 0007). Nothing is read off disk for the number.
+                            (let [offset (log! thread-id run-id kind payload)]
+                              (when (contains? #{"model/start" "model/end"} kind)
+                                (family-send!
+                                 thread-id
+                                 (cond-> {:type kind :seq offset}
+                                   (= "model/start" kind) (assoc :payload payload)
+                                   ;; THE NUMBERS RIDE ON THE END, and they are the session's own
+                                   ;; folds at this moment -- ADR 0006 decision 8: the fold has to
+                                   ;; be in memory for this to have anything to say.
+                                   (= "model/end" kind) (assoc :payload payload
+                                                              :numbers (live-numbers-slice thread-id))))))
                             ;; WHAT THE RUN IS DOING, KEPT FOR THE WAY OUT. Only the
                             ;; close handler and the drop warning read it, and both
                             ;; are read when the run is over -- a run that stops
@@ -3829,6 +3918,43 @@
   [ch frame]
   (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
 
+(defn- live-numbers-slice
+  "The slice of `live-numbers` that `model/end` puts on the wire (ADR 0006 decision 4): the
+  session's numbers AT THIS MOMENT -- how many calls so far, what they reported, how fast the
+  answers came, and the context ring's four fields.
+
+  WHY A SLICE RATHER THAN THE WHOLE PAYLOAD: the wire's fact is about a MODEL CALL, while the
+  pressure band (the third fold `live-numbers` carries) is the edge's own pre-flight estimate --
+  a different question, answered by a different reader. Narrowing here keeps 'one key does not
+  mean two things' true across the two families.
+
+  NIL WHEN THIS PROCESS HOLDS NOTHING, and the caller then sends NO numbers rather than zeroes:
+  'not reported' is not zero, which is `harness.edge.stats`'s oldest rule."
+  [stem]
+  (when-some [n (live-numbers stem)]
+    (let [s (:stats n)]
+      (cond-> {}
+        (contains? s :steps) (assoc :steps (:steps s))
+        (contains? s :usage) (assoc :usage (:usage s))
+        (contains? s :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent s))
+        (contains? s :outputTokensPerSecond)
+        (assoc :outputTokensPerSecond (:outputTokensPerSecond s))
+        (seq (:context n)) (assoc :context (:context n))))))
+
+(defn- family-send!
+  "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
+
+  IT DOES NOT GO THROUGH THE RUN RING, unlike `mux-broadcast!`: a run frame is NUMBERED by that
+  ring and replayed from it when a socket reconnects (`runSince`), while a fact carries THE
+  RECORD'S `seq` (a line number, ADR 0003 decision 1/9) -- the number that can be aligned with
+  the window half of the same socket. There is no cursor for this family yet (ticket 05); until
+  there is, a page that missed one repairs itself with the snapshot it asks for when it opens
+  the conversation, which is decision 5's 'no history'."
+  [thread-id fact]
+  (let [payload (mux-frame thread-id fact)]
+    (doseq [ch (mux/channels-for thread-id)]
+      (mux-send! ch payload))))
+
 (defn- mux-broadcast!
   "Number ONE run frame for THREAD-ID, REMEMBER it (so a reader that reconnects can be
   handed the gap -- `harness.edge.mux/record-run!` keeps a bounded ring, and a frame that
@@ -5233,6 +5359,9 @@
     ;; that never starts a server registers neither.
     (sessions/install!)
     (pressure/install!)
+    ;; AND THE CURRENT TURN'S TWO COUNTS (`harness.edge.turn`), which is what `turn/end` carries
+    ;; (ADR 0006 decision 1). Read at the turn's end, reset at the start of the next one.
+    (turn/install!)
     ;; AND THE TWO FOLDS THE COMPOSER'S STRIP READS (ticket 01 of `.scratch/turn-and-model-events`):
     ;; the numbers (`stats`) and the context ring (`context`), each registered on both of a
     ;; session's seams. With them on the session, `stats-get` answers a conversation this process

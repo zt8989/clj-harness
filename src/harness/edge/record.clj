@@ -85,15 +85,21 @@
             (get @handles p)
             (do (.close w) (get @handles p)))))))
 
-(defn- close-handles!
-  "Flush and close every open handle. FOR EXIT (and for a test's teardown): a process that goes
-  away normally must not leave a line in a buffer -- that would be uglier than a crash, which at
-  least has an excuse."
+(defn release-handles!
+  "Flush and close every open handle, NOW. Two callers, and the second is the reason this is
+  public: the EXIT PATH (a process that goes away normally must not leave a line in a buffer --
+  that would be uglier than a crash, which at least has an excuse), and A MOVE -- `move-log!`
+  RENAMES this conversation's file, and **WINDOWS WILL NOT RENAME A FILE THAT HAS AN OPEN
+  HANDLE** (measured: the rebind route answered 400 and its whole suite went red). The next
+  line opens a fresh one, so the cost is one syscall on a move, which happens when a person
+  re-binds a project -- not per line."
   []
   (doseq [[_ ^Writer w] @handles]
     (try (.flush w) (catch Throwable _ nil))
     (try (.close w) (catch Throwable _ nil)))
   (reset! handles {}))
+
+(defn- close-handles! [] (release-handles!))
 
 (defn- real-sink! [^File f line]
   (let [^Writer w (handle-for f)]
