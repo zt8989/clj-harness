@@ -42,7 +42,7 @@
 
 ### 二、融合之后，每一族的边界与内容
 
-- **`turn/start` / `turn/end`**：轮的开合照「决策 三」；`turn/end` 带 `{turnId, calls, reasoning, messages,
+- **`turn/start` / `turn/end`**：轮的开合照「决策 三」；`turn/end` 带 `{turnId, calls, messages,
   conclusionId, seqFrom, seqTo}`。**只上 wire，不进记录**——轮的边界在记录里由「没见过的 user 消息」
   算得出来（`harness.edge.stats/user-ids`），再写一行就是同一件事的第二份。**没有记录行，就没有历史**，
   这与决策 5「不背历史」是同一条。
@@ -60,7 +60,7 @@ turn/start                                    ← 人说了话（没见过的 us
   model/start   {…身份, context-window, 签名}
   model/end     {payload: 厂商逐字, numbers: 到这一刻的总量 + 上下文}
   …（一次轮里的每一次调用都是一对）
-turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
+turn/end      {turnId, calls, messages, conclusionId, seqFrom, seqTo}
 ```
 
 **轮的结束在返回尾巴落地之后**（决策 三 末），因为它的 `messages` 要数这一 run 的返回侧；
@@ -107,12 +107,12 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 ### 一、两族挂在会话级那条下行上，各管自己那一级
 
 1. **`turn/start` / `turn/end` —— 轮这一级。** `turn/end` 带的就是**折叠那一行要显示的东西**：
-   `{turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}`。今天 `turnCounts` 在客户端现算的
-   `calls` / `messages` 就是它，`reasoning` 是新增的那一格（**定义必须先钉死**，见「代价」）；
-   带 `conclusionId` 与 `seq` 区间，是为了让展开时按区间把那几轮的原始消息拉回来（`cheap-session-load`
-   票 04 的寻址）。**发了之后，这几个数的主人在服务端。**
-   **统计只在事件里做，展示照旧。** 这几个数今天只画 `calls` · `messages` 两个（`turnSummaryLabel` 一个字不改）；
-   `reasoning` 带在事件里是为了把轮的事实说全，**不上画面**（见决策 五）。
+   `{turnId, calls, messages, conclusionId, seqFrom, seqTo}`。今天 `turnCounts` 在客户端现算的
+   `calls` / `messages` 就是它；带 `conclusionId` 与 `seq` 区间，是为了让展开时按区间把那几轮的原始消息
+   拉回来（`cheap-session-load` 票 04 的寻址）。**发了之后，这几个数的主人在服务端。**
+   **统计只在事件里做，展示照旧**：这两个数今天只画 `calls` · `messages`（`turnSummaryLabel` 一个字不改）。
+   **没有 `reasoning` 这一格**（主人 2026-09-25 拍的：*直接去掉思考这一段，反正也不需要*）——原票要的
+   「思考几次」随之作废：一个口径、一张共享用例表都不必存在了，因为那个数没有出口。
 2. **`model/start` / `model/end` —— 模型这一级。**
    - `model/end` 带**这次用了多少**：厂商的 `:usage` / `:finish-reason` / `:model`，**逐字**（记录里怎么写就怎么发，
    不重命名）；**以及到这一刻的总量**：`{steps, usage, cacheHitPercent, outputTokensPerSecond, context}`。
@@ -150,7 +150,7 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 ### 五、客户端：装配，不是算
 
 - `turn/start` 每来一条，轮数 +1（基准来自打开时那一次快照）；**折叠那一行照旧画 `calls` · `messages`**
-  （`turnSummaryLabel` 一个字不改）—— 只是这两个数改由 `turn/end` 带来；`reasoning` 进的是事件，不进画面。
+  （`turnSummaryLabel` 一个字不改）—— 只是这两个数改由 `turn/end` 带来。
 - `model/end` 的 `numbers` **直接落进 composer 那份载荷**（`steps` / `usage` / `cacheHitPercent` /
   `outputTokensPerSecond` / `context`），`ui/src/lib/format.ts` 的 `statsCells` / `contextCells` **一个字不改** ——
   客户端的活只是把两族装成它们今天吃的那个形状，**没有一处估算**。
@@ -184,10 +184,9 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 
 ## 代价与风险
 
-- **「思考几次」必须先把定义钉死。** 今天仓里没有这个数：客户端一个 assistant 消息里可以有一段或多段
-  `reasoning` part（`components/message-parts.tsx` 把相邻的包成一组），服务端 `harness.kernel.frames` 把推理
-  折成 `role: "reasoning"` 的消息。是「几条推理消息」「几次模型调用带推理」还是「几段推理」，**三选一，
-  且两份实现必须同一张用例表**。中途变一次口径，折叠那一行就会在两个客户端之间不一样。
+- **「思考几次」整格去掉（主人 2026-09-25）。** 它本来就没有出口（画面上不显示），而它的口径是三选一、
+  两份实现还要靠一张共享用例表对齐——为一个没人看的数付这个价不值得。**于是票 02 作废**，
+  `turn/end` 的载荷里没有 `reasoning`。
 - **顺序变了：折叠要先落地。** 事件成了「那份折叠的投递」，所以 `stats` / `context` 注册进会话读流是它的前置。
 - **`turn/end` 的时机是个真陷阱**（决策 三 末）：发早了条数是错的，发晚了折叠要等；而且尾巴在**另一个线程**上落盘。
 - **两个 `usage` 要守命名纪律**（决策 一.2 末）。
@@ -196,8 +195,6 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 - **断线要补得上**：事件是推的，推丢一段就少一段；游标按 `seq`（记录的行号）而不是内存计数，才能与窗口那半对齐。
 - **每个 step 不出帧的规矩要守住**：`edge.md` 记着「每个条目发一张 CUSTOM 卡」被打回的那次；模型调用按轮的
   量级（392 次调用 vs 6 轮），所以这族只在**开着的那一场、看着的那段时间**发，不做逐条持久缓冲。
-- **「思考几次」这一格今天没有出口。** 它带在事件里是为了把轮的事实说全，**画面上不显示**（决策 五）——
-  所以它是一格数据，不是一次 UI 改动。口径仍要先钉死（见上一条）。
 
 ## 落点（每张票动哪里 —— 2026-09-25 逐处查证）
 
@@ -243,8 +240,8 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 | # | 票 | 依赖 | 交付 |
 |---|---|---|---|
 | 01 | stats/context 成为会话的读折叠 | 无 | 照 `harness.edge.pressure`：`register-fold!`（出生那一遍读）+ `register-step!`（写流）；`stats-get` 活着时答内存、冷会话照旧读文件；**判据：活着的会话答 `/stats` 不再打开那份 jsonl** |
-| 02 | 「思考几次」的口径 | 无 | 一个定义 + `ui/test/suites/turns.ts` 里那条共享用例（服务端与客户端都读它） |
-| 03 | 会话级下行多两族 | 01, 02 | `harness.edge.http` 的 emitter 处多发四帧（`threadId` / `seq` / `payload` / `numbers`）；轮的开合照决策 三；`turn/end` 的时机照决策 三 末 |
+| ~~02~~ | ~~「思考几次」的口径~~ **作废**：整格去掉（主人 2026-09-25），没有数就没有口径 | — |
+| 03 | 会话级下行多两族 | 01 | `harness.edge.http` 那条 drain 循环里多发四帧（`threadId` / `seq` / `payload` / `numbers`）——**不是** `runner` 那一处，理由见「落点」；轮的开合照决策 三；`turn/end` 的时机照决策 三 末 |
 | 04 | 客户端认这第三族、composer 直接画它 | 03 | `ui/src/lib/mux.ts` 显式分类 + 订阅面；装配那个纯函数 + 用例；`composer-numbers.tsx` 拿推送的载荷、删 `assistantCount` 依赖；用例钉住「AG-UI 之外的帧不会被喂给 `@ag-ui/client`」 |
 | 05 | 游标：断线补齐 | 03 | 这族有自己的一条 `seq` 游标，重连按它补缺口（照 `runSince`）；用例钉住断线一段不漏不重 |
 | 06 | 收口 | 01–05 | `edge.md` / `kernel.md` / `client.md` 改口；两套全量表 + 真浏览器走查（含「展示逐字不变」那一条） |
@@ -253,7 +250,7 @@ turn/end      {turnId, calls, reasoning, messages, conclusionId, seqFrom, seqTo}
 
 - **总量与拉到的相等**（这条最硬）：同一场会话、同一个时刻，`model/end` 里 `numbers` 的那些字段与
   `GET /stats` 的对应字段相等。这一条一立，composer 换载体就只是换载体。
-- **轮的那三个数**：同一轮上，`turn/end` 的 `calls` / `reasoning` / `messages` 与客户端 `turns.ts` 的
+- **轮的那两个数**：同一轮上，`turn/end` 的 `calls` / `messages` 与客户端 `turns.ts` 的
   同口径答案相等（共享用例表那条）。
 - **展示逐字不变**：同一份输入，改前/改后的 `statsCells` / `contextCells` / `turnSummaryLabel` 输出相等；
   真浏览器里状态带与上下文圈的文本、折叠那一行，与改前逐字一样。
