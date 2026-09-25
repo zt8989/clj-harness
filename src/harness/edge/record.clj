@@ -102,10 +102,19 @@
 (defn- close-handles! [] (release-handles!))
 
 (defn- real-sink! [^File f line]
-  (let [^Writer w (handle-for f)]
-    (.write w (str line))
-    ;; PER LINE, NOT PER BATCH: the window is a reader of this file while a run is in flight.
-    (.flush w)))
+  ;; OPEN, WRITE, CLOSE -- THE HANDLE IS NOT HELD, and that is a WITHDRAWN DECISION rather than an
+  ;; optimisation left undone. ADR 0007 decision 3 said 'one handle per file, held open', for the
+  ;; syscall `spit :append true` paid on every line. Measured (thirteen assertions, six cases):
+  ;; **A LOG'S LIFE INCLUDES BEING DELETED, RENAMED AND MOVED** -- a test wipes one, `project-post
+  ;; remove` deletes one, the carry-back renames a leftover segment, `move-log!` moves a
+  ;; conversation's file -- AND WINDOWS REFUSES EVERY ONE OF THOSE WHILE A HANDLE IS OPEN. The
+  ;; held handle cost five suites to save a syscall per line; what ticket 01 of
+  ;; `.scratch/event-persistence` actually needed was the SYNC write and the offset, and neither
+  ;; of those is a handle.
+  ;;
+  ;; PER LINE, NOT PER BATCH, for the reason it always was: the window READS this file while a run
+  ;; is in flight, so bytes left in a buffer are bytes the reader cannot see.
+  (spit f line :append true :encoding "UTF-8"))
 
 ;; ------------------------------------------------------------------ the table
 

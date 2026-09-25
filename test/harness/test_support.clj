@@ -747,6 +747,14 @@
   (`lib/mux.ts` routes by the same set)."
   #{"window" "append" "page" "tail" "end"})
 
+(def ^:private fact-frame-types
+  "The frame types of the FACT family -- a turn's two ends and a model call's two ends
+  (ADR 0006). They ride the same socket as a run's frames and they are NOT part of the run: they
+  make no message, a rebuilt conversation does not contain them, and the CLIENT drops them at the
+  same seam (`ui/src/lib/mux.ts`'s `familyOf`). This reader drops them too, or every case that
+  asks 'what frames did this run send' gets a `turn/start` where it expected its terminal."
+  #{"turn/start" "turn/end" "model/start" "model/end"})
+
 (defn sse-headers
   "ACK's headers, with the Content-Type the body `mux-run!` builds actually is (SSE): a caller
   reads the run's frames, not the ack."
@@ -788,7 +796,11 @@
                                                         (catch Throwable _ nil))]
                                          (reset! pending "")
                                          (when-some [t (:type frame)]
-                                           (when-not (contains? window-frame-types t)
+                                           ;; THE WINDOW'S OWN AND THE FACT FAMILY ARE NOT THIS RUN'S:
+                                           ;; the facts are about the conversation (ADR 0006) and the
+                                           ;; client routes them the same way (`familyOf`).
+                                           (when-not (contains? (into window-frame-types
+                                                                     fact-frame-types) t)
                                              (swap! frames conj (dissoc frame :seq))
                                              (when (contains? #{"RUN_FINISHED" "RUN_ERROR"} t)
                                                (deliver seen true))))))
