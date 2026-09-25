@@ -310,7 +310,7 @@
         (is (= [:system] (mapv :layer groups))
             "and the project's group has nothing left in it, so it is not drawn")))))
 
-(deftest the-list-holds-what-a-person-may-load-not-what-the-model-may-use
+(deftest a-host-field-the-reader-skips-does-not-take-a-skill-off-any-list
   (let [root (lay-user-skills! "alpha")]
     (lay-skill! root "manual-only"
                 (skill-md "manual-only" "only a human runs this" "disable-model-invocation: true\n"))
@@ -318,13 +318,13 @@
     (let [{:keys [groups]} (skills/skill-list (skills/root-layers))
           by-name (into {} (map (juxt :name identity)) (mapcat :skills groups))]
 
-      (testing "a skill the MODEL may not invoke is still on the person's list"
-        ;; A person typing /name is the person deciding -- the server loads it for
-        ;; them -- so a list of what a person can load that left it out would be
-        ;; answering a different question than the one it is asked.
+      (testing "a file field outside the spec is skipped, not obeyed"
+        ;; `disable-model-invocation` is the HOST's field (see
+        ;; harness.cap.skills/frontmatter-keys): what this session may do with a
+        ;; skill is the session's answer, so this is an ordinary row.
         (is (true? (:available? (by-name "manual-only"))))
-        (is (not (str/includes? (skills/catalog-text [root]) "manual-only"))
-            "and it is still absent from the model's catalog"))
+        (is (str/includes? (skills/catalog-text [root]) "manual-only")
+            "and the model's catalog lists it like any other skill"))
 
       (testing "a broken skill is on the list too, with the reason it is broken"
         (is (some? (by-name "misnamed")))
@@ -362,21 +362,23 @@
       (.mkdirs (io/file root "empty-dir"))
       (is (nil? (skills/catalog-text [root]))))))
 
-(deftest disable-model-invocation-keeps-a-skill-out-of-the-catalog-but-in-the-scan
-  ;; The file says this one is not for the model to decide to use. A session has
-  ;; no other way in, so it is genuinely unavailable -- and it stays VISIBLE,
-  ;; because 'the file is there and the capability is not' must never be a
-  ;; mystery somebody has to solve by reading source.
+(deftest a-skill-asking-not-to-be-model-invoked-is-still-model-invoked
+  ;; Claude Code's field, read-and-ignored -- see harness.cap.skills/frontmatter-keys.
+  ;; Nothing in a SKILL.md takes away a path this session has, so a file asking for
+  ;; one changes NOTHING: it is catalogued, scanned, and loadable (that last half is
+  ;; asserted at the tool, in the deftest below).
   (let [root (lay-user-skills! "automatic")]
     (lay-skill! root "manual-only"
                 (skill-md "manual-only" "only a human runs this" "disable-model-invocation: true\n"))
     (let [catalog (skills/catalog-text [root])
           scanned (skills/scan [root])]
       (is (str/includes? catalog "automatic"))
-      (is (not (str/includes? catalog "manual-only")))
+      (is (str/includes? catalog "manual-only")
+          "the field does not hide it from the model")
       (is (some #(= "manual-only" (:name %)) scanned)
-          "it is still in the table a session can read")
-      (is (true? (:disable-model-invocation? (skills/skill-for [root] "manual-only")))))))
+          "it is in the table a session reads")
+      (is (nil? (:disable-model-invocation? (skills/skill-for [root] "manual-only")))
+          "and the entry carries no trace of the host field"))))
 
 (deftest a-broken-skill-is-a-diagnostic-not-a-failure
   (let [root (str (io/file (home/user-home) ".agents" "skills"))]
@@ -801,25 +803,23 @@
               {:role "assistant" :content "sure"}]]
     (is (identical? msgs (skills/derived-injections msgs [root])))))
 
-(deftest a-person-can-load-a-skill-the-model-may-not
-  ;; `disable-model-invocation: true` is the file saying this is not the model's to
-  ;; reach for. Two paths, one difference -- and each half has to be asserted on
-  ;; its own, because either one alone would pass while the pair was backwards.
+(deftest both-load-paths-reach-a-skill-that-asks-not-to-be-model-invoked
+  ;; The field is the host's and this session does not honor it, so the two paths
+  ;; land on the same skills -- and each half is asserted on its own, because either
+  ;; one alone would pass while the pair was backwards.
   (let [root (lay-user-skills! "automatic")]
     (lay-skill! root "manual-only"
                 (skill-md "manual-only" "only a human runs this" "disable-model-invocation: true\n"))
 
-    (testing "the catalog does not offer it to the model"
-      (is (not (str/includes? (skills/catalog-text [root]) "manual-only"))))
+    (testing "the catalog offers it to the model"
+      (is (str/includes? (skills/catalog-text [root]) "manual-only")))
 
-    (testing "the tool refuses it, by name, and says who can"
+    (testing "the tool loads it, like any other skill"
       (let [r (tools/run! {:function {:name "skill"
                                       :arguments (json/write-str {:name "manual-only"})}}
                           "sk-2")]
-        (is (true? (:error r)))
-        (is (str/includes? (str (:content r)) "not for the model to load"))
-        (is (str/includes? (str (:content r)) "/manual-only")
-            "and it names the way a person can")))
+        (is (not (:error r)))
+        (is (str/includes? (str (:content r)) "is now in this conversation"))))
 
     (testing "a person typing it gets the body"
       (let [out (skills/derived-injections [{:role "user" :content "/manual-only go"}] [root])]

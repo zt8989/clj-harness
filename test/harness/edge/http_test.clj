@@ -4229,10 +4229,10 @@
                  "...so the project's copy is not on the list -- it cannot be loaded")
              (is (= ["only-project"] (keys (rows (second groups))))))
 
-           (testing "the list holds what a PERSON may load, not what the model may use"
+           (testing "a row is what a menu draws, whatever the frontmatter says"
              (let [machine (rows (first groups))]
                (is (true? (:available? (machine "manual-only")))
-                   "a person typing /name is the person deciding; the server loads it for them")
+                   "its field asked for model-invocation-off; that changes nothing here")
                (is (false? (:available? (machine "misnamed")))
                    "a broken skill is still listed -- it says why it cannot be used")
                (is (= "manual-only" (:name (machine "manual-only"))))

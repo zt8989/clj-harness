@@ -443,9 +443,12 @@
   as an unknown skill rather than resolved into anything.
 
   THE MODEL'S HALF OF A TWO-WAY LOAD. A person loads a skill by typing `/name` in
-  the composer (harness.cap.skills/slash-request); this tool is the model's way, and
-  the two differ in exactly one place: `disable-model-invocation` is refused here
-  and allowed there.
+  the composer (harness.cap.skills/slash-request); this tool is the model's way. The
+  two reach the SAME skills -- nothing in a SKILL.md closes either path, which is
+  what harness.cap.skills/frontmatter-keys skipping `disable-model-invocation`
+  amounts to -- so the only thing left to differ is how a MISS is reported: a
+  refusal here, a notice spliced into the conversation there
+  (harness.cap.skills/load-text).
 
   NOT marked :requires-approval. Reading instructions is not a side effect, and
   everything the body goes on to ask for is gated by its own seam: the fence
@@ -469,20 +472,6 @@
       ;; which is the only reason it survived; skills_test reaches it now.
       (throw (ex-info (skills/broken-notice name entry)
                       {:name name :reason (:reason entry) :path (:path entry)}))
-
-      ;; THE FLAG, FINALLY ENFORCED. `disable-model-invocation: true` is the file
-      ;; saying this one is not the model's to reach for -- and leaving the name
-      ;; out of the catalog was concealment, not a refusal: a guessed name loaded
-      ;; it. Now the guess is refused by name. A PERSON still can (that is what
-      ;; the flag reserves), which is the one thing the two load paths do
-      ;; differently, and the refusal says so rather than leaving the model to
-      ;; read a missing catalog entry as an oversight.
-      (:disable-model-invocation? entry)
-      (throw (ex-info (str "skill " (pr-str name) " is not for the model to load: its"
-                           " SKILL.md sets disable-model-invocation, so it is kept out of"
-                           " the catalog on purpose. A person can still load it by typing"
-                           " /" name " in the composer.")
-                      {:name name :reason :model-invocation-disabled}))
 
       :else
       (let [{:keys [body missing]} (skills/body entry)]

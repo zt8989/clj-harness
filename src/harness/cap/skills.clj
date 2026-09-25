@@ -111,14 +111,25 @@
 
 (def frontmatter-keys
   "The keys this reader understands. Everything else in a SKILL.md's frontmatter
-  -- allowed-tools, license, metadata, argument-hint, user-invocable, hidden --
-  belongs to the HOST that wrote the file, and is read-and-ignored rather than
-  reported as a mistake: a file having a field we do not use is not an error.
+  -- allowed-tools, license, metadata, argument-hint, user-invocable, hidden,
+  disable-model-invocation -- belongs to the HOST that wrote the file, and is
+  read-and-ignored rather than reported as a mistake: a file having a field we do
+  not use is not an error.
 
-  Note what is NOT here: `allowed-tools`. A skill cannot widen this session's
-  toolset. The toolset is decided by the session and the editing mode, and a
-  file that could grant itself capabilities is a different security story."
-  #{:name :description :disable-model-invocation})
+  TWO of those are skipped KNOWING what they ask for, and for one reason: a
+  SKILL.md says what a skill IS, never what this session may do with it.
+  `allowed-tools` cannot widen the toolset -- the session and the editing mode
+  decide that, and a file that could grant itself capabilities is a different
+  security story -- and `disable-model-invocation` cannot close the model's path
+  to a skill either: who may reach one is this session's business, answered in
+  exactly two places, the `skill` tool and a person's `/name` (harness.kernel.tools/
+  t-skill, harness.cap.skills/slash-request). A file that could switch either one
+  off would be deciding something that is not the file's to decide.
+
+  Neither skip is silent in the sense of being unreadable: a field outside this
+  set travels through untouched, which is what lets a reader that DOES honor one
+  of them -- another host, a later version of this one -- still find it here."
+  #{:name :description})
 
 (defn- escape-attr [s] (str/replace (str s) "\"" "&quot;"))
 
@@ -219,10 +230,7 @@
               :else
               {:name name :dir (str dir) :path path :root root
                :available? true :reason nil
-               :description (str/trim (str (:description fm)))
-               :disable-model-invocation?
-               (boolean (or (true? (:disable-model-invocation fm))
-                            (= "true" (str (:disable-model-invocation fm)))))})))))))
+               :description (str/trim (str (:description fm)))})))))))
 
 (defn scan
   "ROOTS -> the skills they hold, in precedence order: EARLIER ROOTS WIN A NAME
@@ -259,14 +267,13 @@
   user asks...') is exactly what the model selects on, and a length cap cuts
   precisely that. See the spec for the measurement behind the choice.
 
-  A skill with disable-model-invocation is LEFT OUT: the file says this is not
-  for the model to decide to use, and a session has no other way to invoke one.
-  It is still in `scan`, which is where a reader can find out why it is absent --
+  A BROKEN skill is LEFT OUT, and it is the only thing left out: the block
+  advertises what this session can LOAD, and a skill that cannot be loaded is not
+  one of those. It is still in `scan`, which is where a reader finds out why --
   'the file is there and the capability is not' is the one outcome this design
   refuses to leave unexplained."
   [roots]
-  (let [usable (filter #(and (:available? %) (not (:disable-model-invocation? %)))
-                       (scan roots))]
+  (let [usable (filter :available? (scan roots))]
     (when (seq usable)
       (str/join "\n"
                 (concat [(str "## Skills")
@@ -283,7 +290,7 @@
 (defn- menu-row
   "A `scan` entry -> the four things a row on the person's list needs. Deliberately
   not the whole entry: :dir and :root belong to the group that holds the row, and
-  :disable-model-invocation? is not a row's business (see `skill-list`)."
+  nothing else about an entry is a row's business (see `skill-list`)."
   [{:keys [name description available? reason]}]
   {:name name :description description :available? available? :reason reason})
 
@@ -299,18 +306,13 @@
   `scan` is the one place that answers 'whose is this name', and re-deriving the
   loser would be a second answer to a question that already has one.
 
-  TWO DELIBERATE DIFFERENCES FROM THE MODEL'S CATALOG (`catalog-text`), and they
-  are about who is choosing:
-
-    - `disable-model-invocation` skills ARE here. The file says the MODEL may not
-      decide to use it; a person typing /name is the person deciding, and the
-      server loads it for them -- so a list of what a person can load that left it
-      out would be answering a different question than the one it is asked.
-    - BROKEN skills are here too, with :available? false and their :reason -- the
-      same standing `scan` gives them, and the same rule: a skill that silently
-      vanished and a skill that was never installed look identical from the
-      outside, and the second is much harder to debug. The caller draws them as
-      unpickable; being told WHY is the whole point of their being there.
+  ONE DELIBERATE DIFFERENCE FROM THE MODEL'S CATALOG (`catalog-text`): BROKEN
+  skills are here too, with :available? false and their :reason -- the same
+  standing `scan` gives them, and the same rule: a skill that silently vanished
+  and a skill that was never installed look identical from the outside, and the
+  second is much harder to debug. The caller draws them as unpickable; being told
+  WHY is the whole point of their being there. The catalog leaves them out
+  because the block the model selects from may only offer what it can load.
 
   Empty groups are left out rather than drawn as a heading over nothing. A session
   whose roots hold no skills at all answers {:groups []} -- an ordinary state, not
@@ -499,11 +501,7 @@
 
 (defn known-names
   "The skill names this session can load, in scan order. The list a refusal quotes
-  and the list a notice quotes, so 'what can I load' has one answer.
-
-  `disable-model-invocation` skills are NOT in it: they are loadable by a person
-  who knows the name (see slash-request) but this list is what to answer a MODEL
-  with, and the flag is the file saying the model may not have it."
+  and the list a notice quotes, so 'what can I load' has one answer."
   [roots]
   (vec (keep #(when (:available? %) (:name %)) (scan roots))))
 
