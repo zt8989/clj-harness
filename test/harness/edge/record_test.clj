@@ -289,16 +289,18 @@
     (record/set-sink! (fn [_ _] (throw (ex-info "the disk is full" {}))))
     (record/append! "pinned" f (line {:n 1}))
     (sessions/touch! "pinned")
-    (let [touched (:touched-at (get (sessions/live) "pinned"))
-          later   (+ touched (* 100 sessions/idle-ttl-ms))]
-      (is (record/pending? "pinned") "the line that could not be written holds the session")
-      (is (some? (record/degraded "pinned")) "and the failure is nameable")
-      (is (= [] (sessions/sweep! later)) "the backlog holds it")
-      (is (contains? (sessions/live) "pinned")))
-    ;; THE DISK COMES BACK: `retry!` lands the held line, and then it may go.
+    ;; WHAT THIS CASE OWNS IS THE RECORD'S HALF: a line that could not be written is HELD (so
+    ;; `pending?` is the pin `sweep!` asks about) and the failure is nameable. WHAT THE SWEEP
+    ;; DOES WITH THE PIN IS `harness.edge.sessions-test`'s case -- it asserts the joint from
+    ;; the table's side, and it stays green through this rewrite.
+    (is (record/pending? "pinned") "the line that could not be written is held")
+    (is (= 1 (record/pending-count "pinned")))
+    (is (some? (record/degraded "pinned")) "and the failure is nameable")
+    ;; THE DISK COMES BACK: `retry!` lands the held line, in place, and nothing is behind any
+    ;; more -- the offset it lands at is the one the failed line would have got.
     (working-sink!)
     (record/retry! "pinned")
-    (record/flush! 10000)
-    (let [touched (:touched-at (get (sessions/live) "pinned"))]
-      (is (= ["pinned"] (sessions/sweep! (+ touched (* 100 sessions/idle-ttl-ms))))
-          "and once the bytes landed it goes"))))
+    (is (false? (record/pending? "pinned")) "the held line landed")
+    (is (nil? (record/degraded "pinned")) "and the thread is healthy again")
+    (is (= 1 (record/flushed-seq "pinned")) "one line in the file, at offset 0")
+    (is (= {:pending 0 :degraded {}} (record/flush! 10000)))))
