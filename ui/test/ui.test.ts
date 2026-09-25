@@ -53,6 +53,7 @@ import { subagentsSuite } from "./suites/subagents";
 import { subagentViewSuite } from "./suites/subagent-view";
 import { muxSuite } from "./suites/mux";
 import { rightPaneSuite } from "./suites/right-pane";
+import { threadMessagesSuite } from "./suites/thread-messages";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -66,7 +67,11 @@ import { rightPaneSuite } from "./suites/right-pane";
 /// `subagent-view` is the fifth, and it brought `reasoningRowSuite`, `toolRowSuite`,
 /// `subagentsSuite` and `subagentViewSuite`. `new-session-appears` is the sixth, and it
 /// appended `sidebarRefetchSuite` after `sidebarRowsSuite` -- each side only ever appended.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite];
+/// `refreshed-turn-keeps-growing` is the seventh: it appended `threadMessagesSuite` -- the suite
+/// for the module that builds the page's copy of a conversation out of the server's messages,
+/// where a tool call still in flight used to lose the server's word (`state: running`) and come
+/// back 待审批. APPENDED, like every side before it.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -426,12 +431,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// action bar`). Both are arithmetic over values the page holds; whether the dot REPLACES the
 /// bar on screen, and whether the answer GROWS on screen, are the browser walkthrough's.
 /// THE NUMBER IS ASSERTED AGAINST THE SUITES THEMSELVES, which is what makes a fork's drift
-/// visible: 146 is what they contribute, so a suite dropped from `SUITES` still fails.
+/// visible: the count below is what they contribute, so a suite dropped from `SUITES` still fails.
 /// AND ONE CASE THIS BRANCH WROTE IS NOT HERE: it mirrored upstream's in-body dot so that only
 /// one of the two was ever on screen -- two rules chasing one fact, which the owner's second
 /// report (two dots) showed does not hold. The body's dot is switched OFF instead
-/// (`indicator="never"` in `thread.aui.tsx`) and the case went with the rule; the count below
-/// is therefore unchanged.
+/// (`indicator="never"` in `thread.aui.tsx`) and the case went with the rule.
+/// 146 -> 148: the SAME feature's fourth finding, and a NEW SUITE for it (`thread-messages`,
+/// appended to `SUITES`): the status a rebuilt conversation is handed. `fromAgUiMessages` reads
+/// a message whose tool call has no result yet as `requires-action` (right for a PARKED run),
+/// and the window's `running` only wins if the status RIDES ON THE MESSAGE -- the difference
+/// between a `bash` call in flight drawn as a spinner and drawn as 待审批. The second case is
+/// the four words that reading can be.
+const EXPECTED_CASES = 148;
 const EXPECTED_CASES = 146;
 
 let total = 0;
