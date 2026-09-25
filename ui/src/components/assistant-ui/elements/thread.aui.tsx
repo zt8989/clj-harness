@@ -608,6 +608,13 @@ const AssistantMessage: FC = () => {
   const turnEnd = useAuiState(isTurnEnd);
   const continues = useAuiState(isStepAfter);
 
+  // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): WHO IS WRITING THIS TURN,
+  // read here because the footer draws ONE OF TWO things with it -- the sign that the turn is
+  // still arriving, or the furniture that says it has stopped. See `stillBeingWritten`.
+  const runState = useContext(SessionRunContext);
+  const ownRunning = useAuiState((s) => s.thread.isRunning);
+  const writing = stillBeingWritten(ownRunning, runState);
+
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
   // of it except the answer, which stays where it is -- and its first message
   // draws the one-line summary of what went away. `fold === "step"` is this whole
@@ -761,10 +768,33 @@ const AssistantMessage: FC = () => {
             THIS message, which is now the turn's last one -- the answer, which is
             what "regenerate" means to a reader. */}
         <AuiIf condition={isTurnEnd}>
-          <AssistantActionBar />
+          {writing ? <WorkingDot /> : <AssistantActionBar />}
         </AuiIf>
       </div>
     </MessagePrimitive.Root>
+  );
+};
+
+/// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE SIGN THAT THIS TURN IS
+/// STILL ARRIVING, drawn where the action bar will take over.
+///
+/// IT IS THE DOT UPSTREAM ALREADY DRAWS while an assistant message has no parts yet (the
+/// `indicator` part `MessagePrimitive.Parts` adds): the same glyph, the same pulse, the same
+/// `aria-label`, so one state has one sign. What upstream cannot draw is that dot at the END
+/// of a turn that already has parts -- and that is exactly what a reload lands in: the answer
+/// is on screen, still growing, and the turn's furniture (Copy / Refresh / More) has not been
+/// earned yet. Before this, the row was simply EMPTY, which reads as 'it is done' -- the same
+/// mistake the action bar made, made by saying nothing.
+const WorkingDot: FC = () => {
+  const { t } = useTranslation("elements-thread");
+  return (
+    <span
+      data-slot="aui_assistant-message-indicator"
+      className="animate-pulse font-sans"
+      aria-label={t("message.working")}
+    >
+      {"●"}
+    </span>
   );
 };
 
@@ -778,18 +808,14 @@ const AssistantActionBar: FC = () => {
   // for 'this is finished', and a reload in the middle of somebody else's turn is exactly
   // where they used to appear (measured in a browser, 2026-09-25).
   //
-  // THE DECISION IS TAKEN HERE RATHER THAN HANDED TO `hideWhenRunning`, and that is the
-  // whole tuning: upstream's prop is ANDed with the RUNTIME's own `isRunning` -- `if
-  // (hideWhenRunning && s.thread.isRunning) return Hidden` -- and a run this page is only
-  // WATCHING is precisely the case where the runtime says false, so passing `true` hid
-  // nothing (measured: `hideWhenRunning={true}` with `thread.isRunning === false` drew the
-  // bar). The criterion is the composer's own (`stillBeingWritten`: this page's run OR the
-  // server's word), so the two surfaces cannot drift; the prop stays for the runtime's own
-  // case.
-  const serverState = useContext(SessionRunContext);
-  const ownRunning = useAuiState((s) => s.thread.isRunning);
+  // THE CHOICE IS THE FOOTER'S (`AssistantMessage`: `WorkingDot` while it is being written,
+  // this bar afterwards), rather than upstream's `hideWhenRunning`, and that is the whole
+  // tuning: that prop is ANDed with the RUNTIME's own `isRunning` -- `if (hideWhenRunning &&
+  // s.thread.isRunning) return Hidden` -- and a run this page is only WATCHING is precisely
+  // the case where the runtime says false, so passing `true` hid nothing (measured:
+  // `hideWhenRunning={true}` with `thread.isRunning === false` drew the bar). The prop stays
+  // for the runtime's own case, which is the one it can speak about.
   const { t } = useTranslation("elements-thread");
-  if (stillBeingWritten(ownRunning, serverState)) return null;
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning

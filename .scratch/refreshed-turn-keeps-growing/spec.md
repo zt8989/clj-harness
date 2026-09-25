@@ -66,5 +66,6 @@
   而且 ring 的那一瞬记录里**已经有这个 run 的帧**（没有票 03 就一条都没有）。
 - 实测脚本 `dev/scratch_refresh_watch.clj`：run 跑着取样，回答的字节数一路涨、ring 数一路涨。
 - 真浏览器走查：`node scripts/dev.mjs --scripted walk.json`（脚本带 `pace-ms` 让回答慢慢流），run 跑到一半
-  整页刷新，断言刷新之后屏幕上的回答文本**在变长**、动作条不在，跑完动作条回来。
+  整页刷新，断言刷新之后屏幕上的回答文本**在变长**、turn 末尾摆的是**「在写」那颗 `●`** 而不是动作条
+  （空位也算错：主人指出来过），跑完 `●` 换成动作条（两态都是 24px，不跳）。
 - `cd ui && npm test` / `npm run typecheck` / `npm run build`；`clojure -M:test -m harness.test-runner`。
