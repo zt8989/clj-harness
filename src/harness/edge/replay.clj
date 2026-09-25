@@ -1000,9 +1000,15 @@
       (contains? state :open-runs)  (assoc :open-runs (:open-runs state))
       (contains? state :interrupts) (assoc :interrupts (:interrupts state)))))
 
-(defn- folds-init
+(defn folds-init
   "The initial value of every extra fold, from its `:init` (a thunk, so two sessions never
-  share one accumulator)."
+  share one accumulator).
+
+  PUBLIC BECAUSE THE NO-RECORD HALF OF A BIRTH NEEDS IT. A session born from a log gets its
+  folds from the walk (`fold-sofar`); a session born with NO log at all -- the first message of
+  a brand-new conversation -- has no walk to seed them, and `harness.edge.sessions`' `:build`
+  answers that case. Leaving them unseeded made every consumer fold start from nil at the first
+  written row, which is not 'an empty conversation' but 'a fold that never began'."
   [folds]
   (into {} (map (fn [[name {:keys [init]}]] [name (init)])) folds))
 
