@@ -17,11 +17,19 @@
 //
 // THE OPEN CONTROL IS THE PAGE'S, floating in the TOP-RIGHT corner over the conversation while
 // the column is closed. A closed column is not drawn at all -- there is no subtree to hold the
-// control that brings it back -- so the page draws it, exactly as it draws the sidebar's. It is
-// `hidden md:flex` rather than the sidebar corner's `lg:hidden` for a reason that is this
-// column's own: THE COLUMN DOES NOT EXIST BELOW `md` (see `components/subagent-view.tsx`, whose
-// aside is `hidden ... md:flex`), so neither control is drawn there. A control that does nothing
-// when pressed is worse than no control.
+// control that brings it back -- so the page draws it, exactly as it draws the sidebar's.
+//
+// IT IS DRAWN AT EVERY WIDTH, and that is the rule that changed: THIS COLUMN IS A DRAWER BELOW
+// `md` AND A COLUMN BESIDE THE CONVERSATION FROM `md` UP, the two shapes the sidebar has on
+// either side of `lg` and drawn the same way -- over the conversation, with the page's backdrop
+// behind it, tapped or collapsed away (`components/task-pane.tsx` owns the class; `app.tsx`
+// draws the backdrop). So the corner control is that panel's door at every width: below `md` it
+// is the only way in, and from `md` up it is still the only way in (this column has no rail).
+//
+// IT USED TO BE `hidden ... md:flex`, on the argument that a control which does nothing when
+// pressed is worse than none -- true then, because the column was `display: none` below `md`
+// and a covered conversation would have been the alternative. The argument still stands; what
+// moved is the fact under it.
 //
 // THE COLUMN IS ONE ELEMENT IN TWO STATES -- the task pane, or a subagent's mirror -- and that is
 // why BOTH draw the `id` below: `aria-controls` names the COLUMN, not the view inside it.
@@ -36,6 +44,29 @@ import { Button } from "@/components/ui/button";
 /// a constant here for the same reason: a literal written twice is a reference nothing in this
 /// repo could see (there is no DOM to resolve it against), and the suites compare the strings.
 export const RIGHT_PANE_ID = "app-right-pane";
+
+/// THE WIDTH AT WHICH THIS COLUMN IS NO LONGER A DRAWER, spelled the way the CSS spells it:
+/// `md` in Tailwind v4 is `48rem`, so this query and the `md:` classes in
+/// `components/task-pane.tsx` / `components/subagent-view.tsx` (and the backdrop's `md:hidden`
+/// in `app.tsx`) are the SAME media query -- one breakpoint with four readers, rather than four
+/// numbers that happen to agree today.
+const WIDE_ENOUGH = "(min-width: 48rem)";
+
+/// WHETHER THIS WINDOW DRAWS THE COLUMN OVER THE CONVERSATION RATHER THAN BESIDE IT.
+///
+/// READ ONE SHOT, AT THE MOMENT SOMETHING NEEDS TO KNOW, which is `components/sidebar-toggle.tsx`'s
+/// `isWideWindow` rule and its reason: the DRAWING of the two shapes is the `md:` classes and
+/// nothing here, and a resize listener would be a mounted second answer to a fact CSS has.
+///
+/// THE ONE READER IS `app.tsx`, and it asks one question: whether the two overlays are on the
+/// page at once. Below `md` the sidebar's drawer and this column's cover the same conversation,
+/// so opening either closes the other; from `md` up this column is a sibling that covers
+/// nothing and the sidebar may stay a drawer over the conversation without anybody's loss.
+/// NO WINDOW (this suite's node process) ANSWERS `false`: it is not a drawer, so no exclusion
+/// is asked for, and the answer needs no viewport to be the right one.
+export function rightPaneIsDrawer(): boolean {
+  return typeof window === "undefined" ? false : !window.matchMedia(WIDE_ENOUGH).matches;
+}
 
 /// The control that brings the column back, drawn by the PAGE in the top-right corner while the
 /// column is closed. Its accessible name is its `title` and its `sr-only` span, the pattern every
@@ -55,7 +86,7 @@ export const RightPaneOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
       aria-expanded={false}
       onClick={onOpen}
       title={t("rightPane.open")}
-      className="border-border bg-background/80 hover:bg-muted absolute end-2 top-2 z-40 hidden size-8 border p-0 shadow-sm backdrop-blur md:flex"
+      className="border-border bg-background/80 hover:bg-muted absolute end-2 top-2 z-40 flex size-8 border p-0 shadow-sm backdrop-blur"
     >
       <PanelRightIcon data-slot="right-pane-open-icon" className="size-4" />
       <span className="sr-only">{t("rightPane.open")}</span>

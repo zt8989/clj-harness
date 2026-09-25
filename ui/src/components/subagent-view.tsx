@@ -130,11 +130,24 @@ export const SubagentViewPanel: FC<{
       id={RIGHT_PANE_ID}
       data-slot="subagent-view"
       aria-label={t("subagentView.title", { name: view.subagent })}
-      // A THIRD `shrink-0` CHILD of the page's flex row, with a fixed width: the main
-      // column keeps `min-w-0 flex-1` and gives up exactly this much, which is what
-      // "side by side" means here (ticket 05). It is a column of its own rather than
-      // an overlay, so the conversation stays readable while a subagent works.
-      className="bg-background hidden w-[26rem] shrink-0 flex-col border-s md:flex"
+      // TWO SHAPES, AND THE WINDOW DECIDES WHICH (`md`, the same breakpoint the pair in
+      // `components/right-pane-toggle.tsx` reads):
+      //
+      //   * FROM `md` UP it is a THIRD `shrink-0` CHILD of the page's flex row at a fixed
+      //     width -- the main column keeps `min-w-0 flex-1` and gives up exactly this much,
+      //     which is what "side by side" means here (ticket 05), so the conversation stays
+      //     readable while a subagent works.
+      //   * BELOW `md` IT IS A DRAWER, the shape `components/sidebar.tsx` takes below `lg`: what
+      //     is left of a 390px screen once a 26rem column sits in it is not a conversation, so
+      //     the column floats OVER it instead -- `absolute`, from the trailing edge, `z-30` (the
+      //     page's backdrop is `z-20` behind it) -- and the strip the `max-w` leaves is what
+      //     keeps that backdrop tappable rather than a full-width panel with no way out but its
+      //     own header.
+      //
+      // BOTH COME OUT OF THE SAME CLASS STRING, and it is also the task pane's -- one column in
+      // two states, so a width or a breakpoint edited on one side and not the other is the drift
+      // `suites/right-pane.tsx` reads both files to refuse.
+      className="bg-background absolute inset-y-0 end-0 z-30 flex w-[26rem] max-w-[calc(100%_-_3rem)] shrink-0 flex-col border-s md:static md:z-auto md:max-w-none"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {/* THE WAY OUT OF THE WHOLE COLUMN, at the leading edge of its own header. The X that

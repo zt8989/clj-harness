@@ -297,12 +297,17 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 `rightPane` 是**一个值三种形状**（`components/subagent-view-context.ts` 的 `RightPane`）——`null`（关着）、
 `{kind:"tasks"}`（**任务视图**）、`{kind:"mirror", threadId, subagent}`（**镜像**，一次一个）。一个值而不是
 `open` 加 `which`：开着就是选了任务视图，没有「开着却没东西可看」的那一刻。栏**不记**「上次看的是哪个」
-（短暂看法，与左栏折叠同一条理由）；`md`（768px）以下整列不画——宁可看不到镜子，也不许把主对话压到不能用。
+（短暂看法，与左栏折叠同一条理由）。`md`（768px）以下是**抽屉**——与左栏在 `lg` 以下是同一个形状：这一列浮在对话之上、
+身后是页面那层 `z-20` 遮罩，点遮罩或栏内那颗收起关掉（`max-w` 故意留一条能点到的边，铺满就没遮罩可点了）。390px 里塞
+进一列 26rem 之后剩下的不是对话，而**一条点了没反应的开关比没有更坏**——2026-09-25 之前这里的选择是整列不画，那条理由
+（不许把主对话压到不能用）今天由抽屉兑现。**同一台手机上两个抽屉一次只开一个**：`rightPaneIsDrawer()` 读 `md` 当场判，
+开右栏就收起左栏、展开左栏就关右栏，否则两层遮罩叠在同一屏上。
 
 **两扇门。** 开关那一对是 `components/right-pane-toggle.tsx`：`components/sidebar-toggle.tsx` 那条契约的
 右侧版本（一件契约两个地方、共用一个 id、`aria-expanded` 报**区域**的状态、**不持久化**——理由在那边，不重写）。
 **收起**在栏自己头部的**前缘**（`RightPaneCollapseButton`）；**打开**是页面**右上角**的浮标
-（`RightPaneOpenButton`，只在栏关着时画，因为关着的列没有子树可挂它）。两颗都 `hidden md:flex`，与列同生共死。
+（`RightPaneOpenButton`，只在栏关着时画，因为关着的列没有子树可挂它），**每个宽度都画**：`md` 以下它是抽屉那扇门，`md`
+以上它是唯一的门（右栏这一侧没有 rail）。
 第二扇门在对话里：主对话那张 `agent` 工具卡（`message-parts.tsx` 读 `SubagentViewContext`），以及任务视图里
 子代理的一行（`components/task-pane-subagents.tsx`，点的是**那一行自己的 `threadId`**）——两者写的是 `App` 那同一个
 `openMirror`，不按位置配。镜像头部那颗 X 因此退场：它和收起是同一个动词，同一个头部不放两遍。

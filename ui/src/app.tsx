@@ -89,7 +89,7 @@ import { SessionRunContext } from "@/components/session-run-state";
 import { SessionRunStop } from "@/components/session-run-stop";
 import { SubagentViewPanel } from "@/components/subagent-view";
 import { SubagentViewContext, type RightPane, type SubagentView } from "@/components/subagent-view-context";
-import { RightPaneOpenButton } from "@/components/right-pane-toggle";
+import { RightPaneOpenButton, rightPaneIsDrawer } from "@/components/right-pane-toggle";
 import { TaskPane } from "@/components/task-pane";
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
@@ -1395,7 +1395,7 @@ export function App() {
   /// the one prop every tool card in every transcript reads (`useOpenSubagentView`), and a fresh
   /// function per render would re-render all of them on every status or title this page holds.
   const openMirror = useCallback(
-    (view: SubagentView) => setRightPane({ kind: "mirror", ...view }),
+    (view: SubagentView) => openPane({ kind: "mirror", ...view }),
     [],
   );
   // One answer per session, reported by its host and read by the sidebar.
@@ -1457,6 +1457,31 @@ export function App() {
     if (!isWideWindow()) setFolded(true);
   }, []);
 
+  /// THE TWO DRAWERS ARE ONE AT A TIME, AND ONLY WHERE BOTH REALLY ARE DRAWERS. Below `md` the
+  /// right column and the sidebar's are two opaque panels over the same conversation, with two
+  /// backdrops behind them on one phone screen -- so opening either closes the other. From `md`
+  /// up the column is a sibling that covers nothing (the sidebar may still be a drawer over the
+  /// conversation, which is its own `lg`), so neither door closes the other.
+  ///
+  /// THE WIDTH IS READ NOW, at the moment of the decision -- `foldDrawer`'s rule above, and the
+  /// reason `rightPaneIsDrawer` spells out: a window dragged across `md` since mount is exactly
+  /// the case a remembered answer gets wrong.
+  ///
+  /// EVERY WRITER GOES THROUGH IT rather than repeating the rule: the corner button, the `agent`
+  /// card and the task pane's own rows all open this column, and three doors that each had to
+  /// remember to fold the sidebar would be three chances to forget.
+  const openPane = useCallback((pane: RightPane) => {
+    if (rightPaneIsDrawer()) setFolded(true);
+    setRightPane(pane);
+  }, []);
+
+  /// AND THE SAME RULE THE OTHER WAY ROUND: unfolding the sidebar below `md` closes the right
+  /// column, because that column is the panel the sidebar's would be opening over.
+  const unfold = useCallback(() => {
+    if (rightPaneIsDrawer()) setRightPane(null);
+    setFolded(false);
+  }, []);
+
   // ESCAPE CLOSES THE DRAWER, because that is what Escape does to a panel drawn over the
   // page. A Radix overlay that already took this key -- the remove-project dialog, a
   // picker -- calls `preventDefault` before it dismisses, so the drawer does not fold out
@@ -1464,11 +1489,19 @@ export function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      // THE DRAWER ON TOP IS THE ONE THAT ANSWERS: below `md` both panels are overlays and the
+      // right one is drawn over the left, so Escape closes what the person is looking at rather
+      // than what is behind it. From `md` up there is no such cover to close -- the column is a
+      // sibling -- and `foldDrawer` decides the sidebar's half by the same reading of the window.
+      if (rightPane !== null && rightPaneIsDrawer()) {
+        setRightPane(null);
+        return;
+      }
       foldDrawer();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [foldDrawer]);
+  }, [foldDrawer, rightPane]);
 
   /// Show a session, hosting it if it has no host yet. `hydrate` says whether
   /// there is a conversation under that id to rebuild -- true when a row from the
@@ -1813,6 +1846,20 @@ export function App() {
             className="absolute inset-0 z-20 bg-black/30 lg:hidden"
           />
         )}
+        {/* AND THE SAME COURTESY FOR THE COLUMN ON THE RIGHT, on the widths where THAT column
+            is a drawer too (`md:hidden`: below `md`, which is exactly where its `absolute`
+            classes stop and its `md:static` takes over -- one breakpoint, two readers). It is
+            drawn by the page for the reason the sidebar's is -- the backdrop is the page's box,
+            not the panel's -- and `aria-hidden` for the same reason again: it is the second way
+            to press the column's own collapse control, and that one is the one with a name. */}
+        {rightPane !== null && (
+          <div
+            data-slot="right-pane-backdrop"
+            aria-hidden={true}
+            onClick={() => setRightPane(null)}
+            className="absolute inset-0 z-20 bg-black/30 md:hidden"
+          />
+        )}
         {/* OUTSIDE every runtime provider, because it manages ALL sessions:
             its rows, their refusal sentences, and the projects they belong to.
             It used to sit inside the one provider only to reach
@@ -1837,7 +1884,7 @@ export function App() {
           onShowFresh={showFresh}
           folded={folded}
           onCollapse={() => setFolded(true)}
-          onExpand={() => setFolded(false)}
+          onExpand={unfold}
         />
         {/* THE WAY BACK FOR A NARROW WINDOW, and it lives here rather than in the
             sidebar for the reason the state does: a folded sidebar is hidden on a narrow
@@ -1845,14 +1892,15 @@ export function App() {
             On a wide one the same control is drawn by the rail's top cell instead -- the
             component is the same, its `shape` decides, and that one carries `lg:hidden`,
             so exactly one of the two is ever on screen. */}
-        {folded && <SidebarOpenButton onOpen={() => setFolded(false)} />}
+        {folded && <SidebarOpenButton onOpen={unfold} />}
         {/* AND THE WAY BACK FOR THE RIGHT-HAND COLUMN, drawn here for the same reason the
             sidebar's is: a closed column is not drawn at all, so the control that brings it
             back cannot live inside it. It floats in the top-right corner ONLY WHILE THE COLUMN
-            IS CLOSED, and it is `hidden md:flex` because below `md` the column does not exist
-            either -- a control that does nothing when pressed is worse than no control. See
-            `components/right-pane-toggle.tsx` for the pair and where each control sits. */}
-        {rightPane === null && <RightPaneOpenButton onOpen={() => setRightPane({ kind: "tasks" })} />}
+            IS CLOSED, at EVERY width -- below `md` the column is a drawer over the conversation
+            (the backdrop above) and this button is its door, and from `md` up it is the only
+            door there is, since this side has no rail. See `components/right-pane-toggle.tsx`
+            for the pair and where each control sits. */}
+        {rightPane === null && <RightPaneOpenButton onOpen={() => openPane({ kind: "tasks" })} />}
         {/* `min-w-0` IS LOAD-BEARING, not tidiness: a flex item's automatic minimum
             width is its content's min-content width, and the trajectory's rows are
             single-line mono JSON with no spaces -- so without this the column

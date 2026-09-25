@@ -17,7 +17,8 @@
 // has no browser by design (`vitest.config.ts`). So the state the column is mounted from, which
 // control is drawn when, and the fact that the task pane is the SAME column as the mirror are read
 // as SOURCE, the idiom `suites/subagent-view.tsx` introduced. The LAYOUT -- the column appearing
-// beside the conversation, the two corners the controls sit in, nothing drawn below `md` -- is the
+// beside the conversation, the drawer it becomes below `md`, the backdrop behind that drawer, the
+// two corners the controls sit in -- is the
 // browser walkthrough's half (`node scripts/dev.mjs --scripted`, see AGENTS.md).
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nextProvider } from "react-i18next";
@@ -127,6 +128,15 @@ const cases: Case[] = [
       // ...and the element carries the `id` the two controls name (the mirror's side of that is
       // read by `suites/subagent-view.tsx`).
       expect(taskPaneSource).toContain("id={RIGHT_PANE_ID}");
+
+      // AND THAT ONE CLASS STRING DRAWS TWO SHAPES, both read off it as text because this run has
+      // no stylesheet: OVER the conversation below `md` (absolute, from the trailing edge, above
+      // the page's backdrop), and a fixed-width sibling from `md` up. A `hidden` left in it, or an
+      // `absolute` with no `md:static` to undo it, would cost the page either the phone or the desk
+      // -- and the browser walkthrough below measures which one it got.
+      expect(mirrorColumn![1]).toContain("absolute");
+      expect(mirrorColumn![1]).toContain("md:static");
+      expect(mirrorColumn![1]).not.toContain("hidden");
 
       // TWO SECTIONS, SUBAGENTS ABOVE JOBS: which one is first is a decision of the spec's, and a
       // source read is where it lives. Each keeps its own half of the column.
@@ -249,10 +259,13 @@ const cases: Case[] = [
       );
       expect(appSource).toContain("const [rightPane, setRightPane] = useState<RightPane>(null)");
 
-      // WHO WRITES WHICH SHAPE: the switch opens the TASK VIEW, the `agent` card opens the MIRROR
-      // (through the context value every tool card reads), and both ways out write `null`.
-      expect(appSource).toContain('setRightPane({ kind: "tasks" })');
-      expect(appSource).toContain('setRightPane({ kind: "mirror", ...view })');
+      // WHO WRITES WHICH SHAPE, AND THROUGH WHICH DOOR: the switch opens the TASK VIEW, the
+      // `agent` card opens the MIRROR (through the context value every tool card reads), and
+      // both ways out write `null`. THE TWO OPENERS GO THROUGH ONE WRITER (`openPane`) because
+      // that writer also owns the drawer rule below: a door that wrote the state directly would
+      // be a door that could stack this panel over the sidebar's on a phone.
+      expect(appSource).toContain('openPane({ kind: "tasks" })');
+      expect(appSource).toContain('openPane({ kind: "mirror", ...view })');
       expect(appSource).toContain("setRightPane(null)");
 
       // AND THE COLUMN IS DRAWN FROM THAT VALUE: the mirror's panel keeps its `key` -- one
@@ -277,15 +290,34 @@ const cases: Case[] = [
       // column cannot draw the control that opens it (see `components/right-pane-toggle.tsx`).
       expect(appSource).toContain("{rightPane === null && <RightPaneOpenButton");
 
-      // BELOW `md` NEITHER IS DRAWN: that is where the column stops existing (the mirror's own
-      // `hidden ... md:flex`), so the corner control is hidden with it rather than offered as a
-      // button that would do nothing. The classes are read back off the RENDERED control, through
-      // the same merge the component uses -- and `inline-flex` being gone is the point: two display
-      // utilities left in one class string would leave the winner to the stylesheet's order.
+      // THE CORNER CONTROL IS DRAWN AT EVERY WIDTH, which is what this block used to refuse: the
+      // column is no longer `display: none` below `md` -- it is the DRAWER there (the mirror's own
+      // `absolute ... md:static`) -- so this button opens something on a phone too. The classes
+      // are read back off the RENDERED control, through the same merge the component uses -- and
+      // `inline-flex` being gone is the point: two display utilities left in one class string
+      // would leave the winner to the stylesheet's order.
       const classes = attrOf(openControl("en"), "right-pane-open", "class").split(/\s+/);
-      expect(classes).toContain("hidden");
-      expect(classes).toContain("md:flex");
+      expect(classes).toContain("flex");
+      expect(classes).not.toContain("hidden");
       expect(classes).not.toContain("inline-flex");
+
+      // THE PHONE'S WAY OUT OF THE DRAWER, which is the page's box rather than the panel's, the
+      // same arrangement the sidebar has: a backdrop drawn exactly where the column is a drawer
+      // (`md:hidden` -- one breakpoint, two readers) that closes it when tapped. Read as SOURCE
+      // because `app.tsx` cannot be rendered here (this file's header).
+      const backdrop = /data-slot="right-pane-backdrop"[\s\S]*?className="([^"]*)"/.exec(appSource);
+      expect(backdrop, "no backdrop for the right column in app.tsx").not.toBeNull();
+      expect(backdrop![1]!.split(/\s+/)).toContain("md:hidden");
+      expect(appSource).toContain('onClick={() => setRightPane(null)}');
+
+      // AND ONLY ONE DRAWER AT A TIME WHERE BOTH REALLY ARE DRAWERS: `rightPaneIsDrawer` reads
+      // the width AT THE MOMENT of the decision (its own comment argues that), and the two doors
+      // close the other panel through it -- so a phone cannot end up with two panels and two
+      // backdrops stacked. From `md` up it answers `false` and neither door touches the other.
+      expect(appSource).toContain("if (rightPaneIsDrawer()) setFolded(true)");
+      expect(appSource).toContain("if (rightPaneIsDrawer()) setRightPane(null)");
+      expect(toggleSource).toContain("export function rightPaneIsDrawer()");
+      expect(toggleSource).toContain('const WIDE_ENOUGH = "(min-width: 48rem)"');
     },
   },
   {

@@ -48,7 +48,7 @@ export const TaskPane: FC<{
       ref={pane}
       data-slot="task-pane"
       aria-label={t("rightPane.title")}
-      className="bg-background hidden w-[26rem] shrink-0 flex-col border-s md:flex"
+      className="bg-background absolute inset-y-0 end-0 z-30 flex w-[26rem] max-w-[calc(100%_-_3rem)] shrink-0 flex-col border-s md:static md:z-auto md:max-w-none"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         <RightPaneCollapseButton onCollapse={onCollapse} />
