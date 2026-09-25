@@ -125,8 +125,11 @@
   (testing "and a plain read of an ended job counts too"
     (let [t "jt-read-it"
           {:keys [id path]} (jobs/start! t {:command "exit 5"})]
-      (record-until path #(re-find #"\[exit" %) 10000)
-      (is (= "[exit 5]" (:status (jobs/output t id {}))))
+      ;; WAIT FOR THE RECORD TO BE CLOSED, not merely for the line to be in the file: `output`
+      ;; asks `terminal?` (the Writer's claim), and a poll of the FILE can see the ending a moment
+      ;; before the claim lands. `:wait` waits for the claim itself, which is what this case is
+      ;; about -- the first half above already reads it that way.
+      (is (= "[exit 5]" (:status (jobs/output t id {:wait true :timeout 10000}))))
       (is (= [] (jobs/take-notices! t))))))
 
 (deftest stopping-a-job-counts-as-being-told

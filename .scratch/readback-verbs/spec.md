@@ -102,3 +102,55 @@
 2. **票面写前台记录与作业「分段标出来」，实现不分段**：一条一行，靠 id 前缀（`j*` / `c*`）与
    「(no command kept …)」说清——理由写在 `cap.tools/record-row` 的 docstring 里（前缀已经说了这件事，
    而分段会把「还在跑的在前」这条排序打断）。
+
+## 落地记录
+
+**2026-09-25，直接在 `main` 上落（本特征没开分支）：`c7505e8`(01) → `fcfb7a5`(02) → `9167184`(审后修) →
+`4492aaf`(03) → 收口（本提交）。** 票面按仓库约定删除，记录留在这里。
+
+### 01 — `todo_read`（`c7505e8`）
+
+- 渲染与拒绝都落在 `cap.todos`（与 `items-for` 同处）：抽出 `empty-answer` / `status-markers` / `item-count` /
+  `distribution`；`render` 的字节一字未变（空清单那句话原来就是这个字面量）。
+- 工具表 19：三处硬编码名单各加名；`CONTEXT.md` 的闭清单顺手补上漏掉的 `skill`，核到逐名相等。
+- 坑：没有参数的工具，schema 写成 `{}` + `[]`（`tool` 的调用形状）。
+
+### 02 — `job_list`（`fcfb7a5`，审后修 `9167184`）
+
+- `cap.jobs/records-for` 一行一份**文件**；状态仍取自记录末行（`status-of` 是唯一出处，`output` 也走它）。
+- 审（只读子代理）挑出三处真 bug，都在 `9167184` 里修掉：非本进程持有的记录曾一律判「结束」（现在按
+  进程戳里的 pid 问一句 `writer-alive?`）；`command-line` 曾会从代理对中间切（现在落在字符上）；手丢进
+  目录的文件曾被当成记录（id 现在要像 `[jc]` + 数字）。四处文档说谎跟着修：`layers.md`（十八→二十）、
+  `kernel.md`（两张模式表缺 `job_list`）、`client.md`（`TOOL_ICONS` 名单缺作业四只手）、`system-prompt.md`。
+- 坑：这一族其它三只手把 nil 会话当一个会话（注册表的键可以是 nil，`record-path` 把那种记录落在 `jobs/`
+  根上），所以 `job_list` **不**拒绝没会话的调用——改成只列**直接子文件**，否则会把整个家所有会话的记录倒出来。
+- 坑：`ProcessHandle` 不在 Clojure 的自动 import 里，要写全名。
+
+### 03 — `job_output` 的状态行归位（`4492aaf`）
+
+- 只动「脸」：`正文 → 范围/路径行 → 状态行`；`jobs/output` 的返回形状没动，状态那几个字也没动。
+- 用例三处 `starts-with?` 翻成 `ends-with?`（不是删），并补了「(no output) 也以状态收尾」一例。
+
+### 跨特征对照：四条都核过
+
+- tool-parity 03「不设读工具」：划线 + 2026-09-24 注 ✓
+- bash-record-persistence 非目标「不引入列出/找旧记录的动词」：划线 + 2026-09-25 注 ✓
+- job-output 决策 6、job-receipt-no-path：一个字没动；`job_list` 那一栏也是「读的那一个」，行上报路径合规 ✓
+- 与 `right-pane-tasks` 的两份列表同源（同一个 `ending-of` / `status-of`），范围不同：模型那份含 `c*`，
+  人那一栏只列作业——已写进 `CONTEXT.md` 的词条 ✓
+
+### 实测（收口这天，`main` @ `be2e959` 之后）
+
+- **后端全量**：`clojure -M:test -m harness.test-runner` → **1268 tests / 13716 assertions**，`2 failures, 0 errors`。
+  两条都不是本特征引入的：`jobs_test/asking-a-job-yourself-counts-as-being-told` 是**既有竞态**（它等文件里
+  出现 `[exit`，而 `output` 问的是「记录已关」）——收口时改用同族已有的 `:wait` 写法钉死，之后单跑
+  `harness.cap.jobs-test` 42 tests / 228 assertions 全绿；`hooks_wired_test` 那条是 hook 超时（当时机器上有
+  另一个 JVM 在跑）。另有 `ISOLATION NOTE` 一行：真家被开发者自己那个活着的会话写过，本进程没开过它。
+- **前端**：`npm run typecheck` 干净；`npm test` **143 passed**。
+- **浏览器走查**（`node scripts/dev.mjs --scripted`，真浏览器）：`todo_read` 的行与 `todo_write` 同族
+  （`lucide-list-todo`、没有 subject），它的卡逐项带上状态与总数；**作业那四行全是 `lucide-hourglass`**
+  （此前四个都落在扳手兜底上）；`job_output` 的卡是 `hi\n[running]`——状态在最后；`job_list` 的卡一行一份
+  记录（id / 哪一次 / 状态 / 命令 / 路径），`c1` 那行写明没有命令。没验到的两条：跨运行的进程戳行、以及
+  超过上限时的省略句（单次 scripted 运行造不出）。
+- 走查里顺带撞到一条**与本病征无关、但真实**的事：这台机器上 `bash` 会把含空格的**双引号**参数拆坏
+  （`echo ONE "TWO THREE" FOUR` 只得到 `ONE TWO`），单引号正常。
