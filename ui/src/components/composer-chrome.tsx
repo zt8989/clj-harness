@@ -76,7 +76,14 @@ import type {
   Unstable_TriggerAdapter,
   Unstable_TriggerItem,
 } from "@assistant-ui/core";
-import { BrainIcon, FolderIcon, GitBranchIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
+import {
+  BrainIcon,
+  CpuIcon,
+  FolderIcon,
+  GitBranchIcon,
+  PlusIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
@@ -423,6 +430,11 @@ const ComposerTools: FC = () => {
         <ContextRing />
         <Picker
         slot="composer-model"
+        // ON A PHONE THIS IS JUST A CHIP, and the same menu opens from it (`Picker`'s
+        // `iconOnly`). The ring stays its sibling: it is the door to the context panel and
+        // opening the model menu is not what clicking it does (see context-ring.tsx).
+        iconOnly
+        leading={<CpuIcon className="text-muted-foreground size-4 shrink-0 sm:hidden" />}
         label={t("model.label")}
         value={current}
         disabled={busy}
@@ -452,6 +464,9 @@ const ComposerTools: FC = () => {
         // Three options and a default: read at a glance, so no search box (see
         // `components/picker.tsx` on `searchable`).
         searchable={false}
+        // The brain already leads this picker, so collapsing it is the same act as the
+        // model's: on a phone the icon IS the control.
+        iconOnly
         options={[
           { value: "", label: t("effort.default") },
           ...data["reasoning-efforts"].map((effort) => ({ value: effort, label: effort })),

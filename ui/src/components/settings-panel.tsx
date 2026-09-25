@@ -1520,6 +1520,12 @@ const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "subagents", label: (t) => t("page.subagents") },
 ];
 
+/// THE PANEL HAS TWO SHAPES, and `sm` is the whole of the difference. From `sm` up it is
+/// two columns -- the nav beside the page you are on. Below it there is no room for both,
+/// so it becomes TWO LEVELS: the same `PAGES` drawn as a list, and tapping one REPLACES
+/// the list with that page and a way back. One table feeds both shapes, so a page added
+/// here appears in both without a second place to remember.
+
 export const SettingsPanel: FC<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -1528,6 +1534,11 @@ export const SettingsPanel: FC<{
   const { t } = useTranslation("settings");
   const { t: tErrors } = useTranslation("errors");
   const [page, setPage] = useState<Page>("general");
+  /// WHICH LEVEL A NARROW WINDOW IS ON: false is the list, true is a page. WIDE WINDOWS
+  /// IGNORE IT -- they draw the nav and the page at once, and the page they are on is
+  /// `page` above. It is put back to the list every time the dialog closes (see below), so
+  /// reopening on a phone starts at the list rather than wherever the last visit ended.
+  const [drilled, setDrilled] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -1575,6 +1586,14 @@ export const SettingsPanel: FC<{
     if (open) void load();
   }, [open, load]);
 
+  /// NARROW WINDOWS RETURN TO THE LIST WHEN THE DIALOG CLOSES. That is a decision about
+  /// the LEVEL rather than about `page`: the narrow shape keeps the page too, and only
+  /// forgets which level it was on. The wide shape has no list to return to, so this is
+  /// inert there.
+  useEffect(() => {
+    if (!open) setDrilled(false);
+  }, [open]);
+
   /// After a write: the same read, and stay where the person was. Not a second
   /// implementation of it -- a write that needs a different refresh is a sign the
   /// refresh was wrong.
@@ -1596,7 +1615,10 @@ export const SettingsPanel: FC<{
             buttons while somebody is typing in it. So the size is fixed here and the
             PAGE scrolls inside. */}
         <div className="flex h-[min(30rem,62vh)] gap-4">
-          <nav data-slot="settings-nav" className="flex w-36 shrink-0 flex-col gap-0.5">
+          {/* TWO SHAPES, ONE `sm` APART. From `sm` up this is two columns. Below it the nav
+              is not a column at all (`hidden sm:flex`): the list below is its narrow
+              spelling, and a tap on one of its rows swaps the list for that page. */}
+          <nav data-slot="settings-nav" className="hidden w-36 shrink-0 flex-col gap-0.5 sm:flex">
             {PAGES.map((p) => (
               <button
                 key={p.id}
@@ -1616,6 +1638,44 @@ export const SettingsPanel: FC<{
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto pr-1">
+            {/* NARROW, LEVEL ONE. The SAME `PAGES` the nav above reads, so there is one table
+                of pages and not two. `sm:hidden` keeps it out of the wide shape, and `!drilled`
+                keeps it up until a narrow window picks a page. It fills the column the page
+                will occupy, so the list is the whole screen rather than a second sidebar. */}
+            {!drilled && (
+              <div data-slot="settings-nav-list" className="flex flex-col gap-0.5 sm:hidden">
+                {PAGES.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    data-slot={`settings-list-${p.id}`}
+                    className="hover:bg-accent/40 rounded-md px-2 py-2 text-left text-sm"
+                    onClick={() => {
+                      setPage(p.id);
+                      setDrilled(true);
+                    }}
+                  >
+                    {p.label(t)}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* NARROW, LEVEL TWO. Once a page is picked this is the whole screen; `sm:block`
+                keeps it on screen in the wide shape whatever `drilled` says, so the two
+                columns never lose the page they were reading, and the way back is `sm:hidden`
+                because a two-column panel has nowhere to go back TO. */}
+            <div className={drilled ? "block" : "hidden sm:block"}>
+              {drilled && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-slot="settings-page-back"
+                  className="-ml-2 mb-1 sm:hidden"
+                  onClick={() => setDrilled(false)}
+                >
+                  <ArrowLeftIcon /> {t("panel.back")}
+                </Button>
+              )}
             {failure !== null && (
               <Refusal
                 slot="settings-error"
@@ -1660,6 +1720,7 @@ export const SettingsPanel: FC<{
                 and must give the same answer -- which is what "the settings form
                 writes the user level only" is for (see subagents.clj). */}
             {page === "subagents" && <SubagentsPage />}
+            </div>
           </div>
         </div>
 

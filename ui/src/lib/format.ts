@@ -149,9 +149,9 @@ export interface StatsPayload {
   context?: ContextPayload;
 }
 
-/// What the strip draws: one string per cell that EXISTS. `null` means draw
-/// nothing at all -- there is no session of numbers to show, or nothing worth a
-/// line yet.
+/// What the strip draws: one string per cell that EXISTS. `null` means there is no session
+/// of numbers to show, or nothing worth a line yet -- NO CELLS, which is not the same as no
+/// strip: `components/composer-stats.tsx` keeps the row and fills it when these arrive.
 export interface StatsCells {
   turns: string;
   steps: string | null;
@@ -162,9 +162,10 @@ export interface StatsCells {
 
 /// The payload -> the cells, with the absences kept absent.
 ///
-/// NOTHING IS INVENTED FOR A MISSING NUMBER, and the strip is not drawn at all
-/// for an empty session: a row of placeholders over a conversation that has not
-/// started is furniture, and "0 tok" would be a claim the record does not make.
+/// NOTHING IS INVENTED FOR A MISSING NUMBER: a row of placeholders over a conversation
+/// that has not started is furniture, and "0 tok" would be a claim the record does not
+/// make. An empty session therefore gets `null` here -- and the strip, which HOLDS ITS ROW
+/// through that null, simply draws nothing into it (see `components/composer-stats.tsx`).
 ///
 /// THE QUANTIFIER IS i18next's `count`, NOT A HAND-ROLLED `n === 1 ? …`. The two
 /// languages the page speaks have genuinely different rules -- English has a

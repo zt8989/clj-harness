@@ -54,40 +54,55 @@ export const ComposerStats: FC = () => {
   const { payload } = useComposerNumbers();
 
   const cells = statsCells(payload, t);
-  if (cells === null) return null;
 
+  /// THE STRIP HOLDS ITS ROW WHETHER OR NOT THERE IS ANYTHING TO SAY, and that is a
+  /// change of decision rather than a detail. It used to return `null` outright while
+  /// `cells` was null -- a first read still in flight, or a session that has never run --
+  /// and then the whole strip appeared the moment the numbers landed, growing the composer
+  /// frame and shoving the docked composer up under the reader's cursor. So the row's
+  /// height is FIXED below: it is the same whether cells are drawn into it or not, and
+  /// `data-slot="composer-stats"` is always in the DOM. Nothing is invented to fill it --
+  /// an empty row says nothing, rather than "0 tok" (see `statsCells`).
   return (
     <div
       data-slot="composer-stats"
       // `tabular-nums` because the numbers change: without it a digit growing from
       // 9 to 10 shifts the whole row, and a strip that twitches is worse than one
       // that is simply there.
-      className="text-muted-foreground flex items-center justify-between gap-4 px-1.5 pt-0.5 pb-1 text-xs tabular-nums"
+      //
+      // `h-5` is ONE LINE of this strip, expressed as a FIXED height rather than a `min-`:
+      // the row is reserved from the first paint, so neither a change of font size nor a
+      // number arriving late can change how tall the composer is.
+      className="text-muted-foreground flex h-5 items-center justify-between gap-4 px-1.5 pt-0.5 pb-1 text-[10px] tabular-nums"
     >
-      <span className="flex items-center gap-1.5">
-        <TimerIcon className="size-3.5 shrink-0" />
-        <span data-slot="stats-turns">{cells.turns}</span>
-        {cells.steps !== null && (
-          <>
-            <Sep />
-            <span data-slot="stats-steps">{cells.steps}</span>
-          </>
-        )}
-        {cells.rate !== null && (
-          <>
-            <Sep />
-            <span data-slot="stats-rate">{cells.rate}</span>
-          </>
-        )}
-      </span>
+      {cells !== null && (
+        <>
+          <span className="flex items-center gap-1.5">
+            <TimerIcon className="size-3.5 shrink-0" />
+            <span data-slot="stats-turns">{cells.turns}</span>
+            {cells.steps !== null && (
+              <>
+                <Sep />
+                <span data-slot="stats-steps">{cells.steps}</span>
+              </>
+            )}
+            {cells.rate !== null && (
+              <>
+                <Sep />
+                <span data-slot="stats-rate">{cells.rate}</span>
+              </>
+            )}
+          </span>
 
-      {(cells.total !== null || cells.cached !== null) && (
-        <span className="flex items-center gap-1.5">
-          <DatabaseIcon className="size-3.5 shrink-0" />
-          {cells.total !== null && <span data-slot="stats-usage">{cells.total}</span>}
-          {cells.total !== null && cells.cached !== null && <Sep />}
-          {cells.cached !== null && <span data-slot="stats-cached">{cells.cached}</span>}
-        </span>
+          {(cells.total !== null || cells.cached !== null) && (
+            <span className="flex items-center gap-1.5">
+              <DatabaseIcon className="size-3.5 shrink-0" />
+              {cells.total !== null && <span data-slot="stats-usage">{cells.total}</span>}
+              {cells.total !== null && cells.cached !== null && <Sep />}
+              {cells.cached !== null && <span data-slot="stats-cached">{cells.cached}</span>}
+            </span>
+          )}
+        </>
       )}
     </div>
   );
