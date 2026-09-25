@@ -17,7 +17,8 @@
     "sourceInline": "config.edn 以行内方式描述这个提供方",
     "sourceRequest": "这次请求选中了它",
     "reread": "重新读",
-    "rereadTitle": "再读一遍这些文件"
+    "rereadTitle": "再读一遍这些文件",
+    "back": "返回"
   },
   "report": {
     "title": "当前生效",

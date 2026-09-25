@@ -17,7 +17,8 @@
     "sourceInline": "config.edn describes this provider inline",
     "sourceRequest": "this run's request picked it",
     "reread": "Re-read",
-    "rereadTitle": "Read the files again"
+    "rereadTitle": "Read the files again",
+    "back": "Back"
   },
   "report": {
     "title": "In force",
