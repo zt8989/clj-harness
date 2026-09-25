@@ -51,7 +51,7 @@ import { cn } from "@/lib/utils";
 import { SessionRunContext } from "@/components/session-run-state";
 // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): the criterion the action bar
 // shares with the composer -- this page's run OR the server's word. See `AssistantActionBar`.
-import { stillBeingWritten } from "@/lib/session-status";
+import { wearsWorkingDot, stillBeingWritten } from "@/lib/session-status";
 import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
@@ -614,6 +614,11 @@ const AssistantMessage: FC = () => {
   const runState = useContext(SessionRunContext);
   const ownRunning = useAuiState((s) => s.thread.isRunning);
   const writing = stillBeingWritten(ownRunning, runState);
+  // ...AND ONLY THE LIVE TURN WEARS THE DOT: `writing` is a fact about the CONVERSATION, and the
+  // footer is drawn at EVERY turn end, so the two facts are kept apart by `wearsWorkingDot` --
+  // without the last-message half a settled turn's end wore a dot too the moment the next
+  // message was sent (owner's third report, 2026-09-25: two dots, one per turn end).
+  const lastMessage = useAuiState((s) => s.message.isLast);
 
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
   // of it except the answer, which stays where it is -- and its first message
@@ -778,7 +783,7 @@ const AssistantMessage: FC = () => {
             THIS message, which is now the turn's last one -- the answer, which is
             what "regenerate" means to a reader. */}
         <AuiIf condition={isTurnEnd}>
-          {writing ? <WorkingDot /> : <AssistantActionBar />}
+          {wearsWorkingDot(writing, lastMessage) ? <WorkingDot /> : <AssistantActionBar />}
         </AuiIf>
       </div>
     </MessagePrimitive.Root>

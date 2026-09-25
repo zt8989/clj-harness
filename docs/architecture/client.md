@@ -195,6 +195,10 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （`indicator: "no-text"`：消息在跑、最后一个 part 不是 text/reasoning 时它就在），于是第一次发送（末尾那条消息
   还是空的）和「一步交给下一步」的当口会**两颗一起出现**。所以那一颗**关掉了**（`indicator="never"`），
   「在写」只由 turn 末尾这一格说——**一个状态一个标记，一个标记一个地方**。
+  **而且只摆在「正在被写的那一轮」的末尾**（`lib/session-status.ts` 的 `wearsWorkingDot`：对话在被回答 **且** 这是线程
+  最后一条消息）。这两件事必须分开：`writing` 说的是**对话**（有人在回答它），而**每个** turn 末尾都会画这一格——
+  少了后一半，发下一条消息的瞬间**每个** turn 末尾都各长一颗点（主人第三次报的就是这个）。前面那些 turn 末尾照旧只穿
+  自己的家具（`autohide="not-last"`，悬停才现，一直是这个形状）。
   **这一格也不能交给 upstream 的 `hideWhenRunning`**：它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是
   看着」正是 runtime 说 false 的那一格（实测：传 `true` 照样画出来）。而**空位**和动作条犯的是同一个错：都读作
   「写完了」。

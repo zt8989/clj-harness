@@ -37,7 +37,13 @@ import { expect } from "vitest";
 import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
 import { SessionRunStop } from "../../src/components/session-run-stop";
-import { IDLE, statusOf, stillBeingWritten, type SessionStatus } from "../../src/lib/session-status";
+import {
+  IDLE,
+  statusOf,
+  stillBeingWritten,
+  wearsWorkingDot,
+  type SessionStatus,
+} from "../../src/lib/session-status";
 import type { Language } from "../../src/lib/language";
 
 /// THE BUTTON AS A PERSON MEETS IT: the stop inside a real i18n instance, rendered to a
@@ -131,6 +137,24 @@ const cases: Case[] = [
       // A PARKED RUN IS NOT STILL BEING WRITTEN EITHER -- it ENDED on its interrupt, and
       // the card that answers it is the turn's own furniture; the bar is drawn.
       expect(stillBeingWritten(false, "parked")).toBe(false);
+    },
+  },
+  {
+    name: "only-the-live-turn-wears-the-dot-every-other-turn-end-keeps-its-furniture",
+    run: async () => {
+      // THE OWNER'S THIRD REPORT (2026-09-25): the moment a second message is sent, TWO dots
+      // appeared -- one at each turn end. `writing` is a fact about the CONVERSATION, and a
+      // footer is drawn at EVERY turn end, so the two facts have to be kept apart: the dot
+      // belongs to the live turn (the thread's last message).
+      expect(wearsWorkingDot(true, true), "the live turn, while somebody is answering").toBe(true);
+
+      // A SETTLED TURN'S END, while a NEW one is being answered: its furniture, not a dot.
+      expect(wearsWorkingDot(true, false), "every earlier turn end keeps Copy / Refresh / More").toBe(false);
+
+      // AND A CONVERSATION NOBODY IS ANSWERING HAS NO DOT AT ALL -- the last turn ended, so it
+      // wears the same furniture the others do.
+      expect(wearsWorkingDot(false, true)).toBe(false);
+      expect(wearsWorkingDot(false, false)).toBe(false);
     },
   },
   {
