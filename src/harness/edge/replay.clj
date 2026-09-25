@@ -563,10 +563,17 @@
         ;; WHICH MESSAGES THIS GROUP BUILT, so the run's own `message` rows can be paired with
         ;; them in order (`entries-step`), and whether the FRAMES already carried the reasoning
         ;; (an old record) -- in which case the rows must not say it a second time.
+        ;; APPENDED, NOT OVERWRITTEN, AND THAT IS THE WHOLE OF THE PAIRING'S SAFETY: the ids
+        ;; belong to a RUN, and a run's frames may be flushed in MORE THAN ONE group (an injected
+        ;; row between two rounds closes the group it sits in). Overwriting here would drop the
+        ;; earlier messages from the list and pair a run's later rows with the wrong messages --
+        ;; measured: a two-round run then answered `reasoning_content: nil` on the round that had
+        ;; a tool call. The list is reset where a RUN begins, in `entries-step`'s event branch.
         (assoc :pending [] :after nil
-               :model-ids (mapv :id (filter #(= "assistant" (:role %)) new))
-               :model-next 0
-               :reasoned? (boolean (some #(= "reasoning" (:role %)) new))))))
+               :model-ids (into (or (:model-ids acc) [])
+                                (mapv :id (filter #(= "assistant" (:role %)) new)))
+               :reasoned? (boolean (or (:reasoned? acc)
+                                       (some #(= "reasoning" (:role %)) new)))))))
 
 (defn- entries-init []
   "The conversation's own fold. `:messages` IS THE SAME MESSAGES WITHOUT THEIR NUMBERS -- kept so
@@ -654,7 +661,14 @@
       "event" (let [acc (update acc :pending conj value)]
                 ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the frames after a
                 ;; terminal belong to a line this reader would otherwise number short.
-                (if (frames/terminal? value) (assoc acc :after i) acc))
+                ;; A RUN BEGINS HERE, so the pairing the MODEL rows this run will write is
+                ;; forgotten and starts over: those rows arrive at `:run/done`, long after these
+                ;; frames, and a leftover list from the previous run would pair them with the
+                ;; wrong messages (ticket 03 of `.scratch/event-persistence`).
+                (let [acc (cond-> acc
+                            (= "RUN_STARTED" (:type value))
+                            (assoc :model-ids [] :model-next 0 :reasoned? false))]
+                  (if (frames/terminal? value) (assoc acc :after i) acc)))
       acc)))
 
 (defn- entries-answer
