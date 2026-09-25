@@ -9,7 +9,8 @@
             [harness.edge.sessions :as sessions]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
-            [harness.kernel.event :as ev]))
+            [harness.kernel.event :as ev]
+            [harness.kernel.session :as session]))
 
 ;; THE LOG LINES BELOW ARE PRODUCED BY THE REAL EMITTER, not hand-written frames (the
 ;; same rule harness.edge.replay-test spells out): a log this file invented could encode
@@ -199,6 +200,29 @@
     (testing "and once the bytes land it goes"
       (sessions/watch-unflushed! (constantly false))
       (is (= ["t-pending"] (sessions/sweep! later))))))
+
+(deftest putting-a-session-away-knocks-on-the-jobs-door
+  ;; THE JOINT between a session's life and the processes it started. The kernel's half of that
+  ;; joint is the `:stop-jobs!` seam, and what it must do is ASK -- once, with the id, on both
+  ;; doors. What answers is `harness.cap.jobs`' business (stop every command that session still
+  ;; has running, keep their records), and it is driven with real processes in
+  ;; `harness.cap.jobs-test`; booting a shell here to check an arithmetic would be a second
+  ;; subject in this file's own.
+  (let [asked (atom [])]
+    (session/install! {:stop-jobs! (fn [tid] (swap! asked conj tid))})
+    (try
+      (testing "the idle door"
+        (sessions/touch! "t-away-idle")
+        (let [touched (:touched-at (get (sessions/live) "t-away-idle"))]
+          (is (= ["t-away-idle"] (sessions/sweep! (+ touched sessions/idle-ttl-ms))))
+          (is (= ["t-away-idle"] @asked) "the sweep asks about the session it just put away")))
+      (testing "and the explicit one"
+        (sessions/touch! "t-away-drop")
+        (sessions/drop! "t-away-drop")
+        (is (= ["t-away-idle" "t-away-drop"] @asked)
+            (str "a session somebody put away explicitly is asked about too -- and only about"
+                 " its own: one call per session put away, never one per session in the table")))
+      (finally (session/install! {:stop-jobs! (fn [_tid] nil)})))))
 
 ;; ------------------------------------------------------------ the running ceiling
 

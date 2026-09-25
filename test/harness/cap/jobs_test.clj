@@ -13,6 +13,7 @@
             [harness.cap.jobs :as jobs]
             [harness.infra.home :as home]
             [harness.infra.log :as log]
+            [harness.kernel.session :as session]
             [harness.test-support :as support]))
 
 ;; Every job this namespace starts is stopped on the way out, whatever happened in
@@ -418,6 +419,56 @@
       (let [e (try (jobs/stop! "jt-i" "j-never-handout") nil (catch Exception e e))]
         (is (= :unknown-job (:reason (ex-data e))))))
     (cleanup-dir! dir)))
+
+(deftest putting-a-session-away-takes-its-commands-and-not-its-records
+  ;; A JOB OUTLIVES A RUN -- `shutdown!`'s docstring argues why -- AND DOES NOT OUTLIVE ITS
+  ;; SESSION. Once a session is put away there is nothing left that could name the command: the
+  ;; registry is this process's, and the conversation's claim has gone back to the store, so the
+  ;; next process to serve that conversation answers about its OWN table. The kernel's half of
+  ;; this (that the door is knocked on, on both doors) is `harness.edge.sessions-test`'s; what
+  ;; is asserted here is CAP's answer to the knock, against real processes.
+  (session/install! {:stop-jobs! jobs/stop-session!})
+  (try
+    (let [dir        (support/temp-dir "jobs-away")
+          pid-file   (io/file dir "child.pid")
+          other-file (io/file dir "other.pid")
+          {:keys [id path]} (jobs/start! "jt-away" {:command (support/child-command pid-file)})
+          pid        (support/child-pid pid-file 10000)
+          other      (jobs/start! "jt-away-other" {:command (support/child-command other-file)})
+          other-pid  (support/child-pid other-file 10000)]
+      (is (some? pid) "the command booted and named its own child")
+      (is (some? other-pid) "and so did the session next door's")
+      (testing "the door answers with the ids it stopped"
+        (is (= [id] (jobs/stop-session! "jt-away"))))
+      (testing "the command and the child it started are both gone"
+        (is (support/gone-within? pid 5000)))
+      (testing "the record stays, and it ends the way a stop ends"
+        (is (.exists (io/file path)))
+        (is (= "[stopped]" (last (record path)))))
+      (testing "and the ending is still owed to the model -- a put-away is nobody's press"
+        ;; THIS IS READ BEFORE ANYTHING THAT SHOWS THE ENDING. `job_output` on a terminal record
+        ;; and `job_kill` are the other two ways an ending reaches a model (`take-notices!` says
+        ;; so) and whichever came first is the one that counts -- so a case asserting that nobody
+        ;; was told must not ask first. `(str content)` rather than `content`: a notice that never
+        ;; arrived is a failed assertion here, not a NullPointerException three frames down.
+        (let [{:keys [content]} (first (jobs/take-notices! "jt-away"))]
+          (is (string? content) "an ending nobody has been handed is handed over")
+          (is (str/includes? (str content) "[stopped]"))
+          (is (not (str/includes? (str content) "by=\"user\""))
+              (str "a put-away is nobody's press: a `by=user` block would tell the model that a"
+                   " person stopped a command nobody stopped by hand"))))
+      (testing "the entry stays, so a reader is still answered and the id is not re-handed"
+        (is (= [id] (map :id (jobs/listing "jt-away"))))
+        (is (false? (:stopped? (jobs/stop! "jt-away" id)))
+            "this call is not the one that stopped it")
+        (is (= "[stopped]" (:ending (jobs/stop! "jt-away" id)))))
+      (testing "and the session next door keeps its command"
+        (is (support/alive? other-pid))
+        (is (= [(:id other)] (map :id (jobs/listing "jt-away-other")))))
+      (testing "and a session that has run nothing is told so, rather than refused"
+        (is (= [] (jobs/stop-session! "jt-away-nowhere"))))
+      (cleanup-dir! dir))
+    (finally (session/install! {:stop-jobs! (fn [_tid] nil)}))))
 
 (deftest a-stopped-job-keeps-what-it-had-said
   ;; Stopping and reading are not interchangeable, and the order a caller chose must

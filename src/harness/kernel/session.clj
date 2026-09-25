@@ -152,6 +152,11 @@
 ;;   :read            (fn [thread-id] -> {:ok rows} | {:missing sentence} | {:error sentence})
 ;;   :fold            (fn [thread-id init rf] -> the same three shapes, folded as a stream)
 ;;   :claim           {:take! :release! :hand-over!}
+;;   :stop-jobs!      (fn [thread-id] -> nil): what happens to the PROCESSES a session started,
+;;                    when the session is put away. A seam because the answer belongs to
+;;                    `harness.cap.jobs` (this namespace must not grow a second opinion about
+;;                    what a command is), and because 'put away' and 'stop the commands it
+;;                    left running' are two facts that only move together -- see `drop!`.
 ;;
 ;; A DEFAULT IS INSTALLED FOR EACH, so this namespace loads and behaves with no adapter at
 ;; all: the walk is empty, nothing is claimed, the raw entries ARE the model's messages, and
@@ -171,7 +176,8 @@
                     {:missing (str "no record reader is installed for " (pr-str thread-id))})
    :claim          {:take!      (fn [_thread-id] {:token nil})
                     :release!   (fn [_thread-id _token] nil)
-                    :hand-over! (fn [_thread-id _from _to] nil)}})
+                    :hand-over! (fn [_thread-id _from _to] nil)}
+   :stop-jobs!     (fn [_thread-id] nil)})
 
 (defonce ^:private seams (atom default-seams))
 
@@ -1092,6 +1098,13 @@
         [before _] (swap-vals! registry dissoc id)]
     (when-some [e (get before id)]
       ((:release! (:claim @seams)) id (:claim e)))
+    ;; THE PROCESSES GO WITH THE SESSION. Putting a session away is the moment this process stops
+    ;; being able to reach what it started: the entry is gone, the claim is going back, and a
+    ;; conversation another process may pick up from here is one whose background commands live
+    ;; in THIS process's registry -- unreachable from there, and (before this line) unreachable
+    ;; from here too, because nothing ever looked at them again. The RECORDS stay: see
+    ;; `harness.cap.jobs/stop-session!` for what is kept and what is stopped.
+    ((:stop-jobs! @seams) id)
     (ring! id {:kind :gone :reason :put-away})
     nil))
 
@@ -1135,6 +1148,9 @@
     ;; must not be the one this deletes (`harness.cap.claims/release!`).
     (doseq [tid gone]
       ((:release! (:claim @seams)) tid (:claim (get before tid)))
+      ;; The same door `drop!` uses, one session at a time -- an idle conversation is not a
+      ;; reason to leave its commands running either.
+      ((:stop-jobs! @seams) tid)
       (ring! tid {:kind :gone :reason :idle}))
     gone))
 

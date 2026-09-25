@@ -17,10 +17,16 @@
                      (`replay/read-records`) and, for a fold, streamed (`replay/fold-records`).
     :claim           `harness.cap.claims`, which is why the session's lifetime is a claim on
                      the conversation and an idle one does not hold it forever.
+    :stop-jobs!      `harness.cap.jobs/stop-session!`: the PROCESSES a session started, stopped
+                     when the session is put away (idle `sweep!` or an explicit `drop!`).
+                     The records stay where they are -- an ending outlives the id that named
+                     it -- while the commands go, because a session this process no longer
+                     serves is one whose background commands nothing here could reach again.
 
   THE IRON LAW RIDES ON `:build`: the mechanism never reads a record during a run, and the one
   read -- the walk a session is BORN by -- is the fold installed here."
   (:require [harness.cap.claims :as claims]
+            [harness.cap.jobs :as jobs]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
             [harness.kernel.session :as session]))
@@ -62,7 +68,9 @@
   :claim
   {:take!      claims/take!
    :release!   claims/release!
-   :hand-over! claims/hand-over!}})
+   :hand-over! claims/hand-over!}
+
+  :stop-jobs! jobs/stop-session!})
 
 (defn install!
   "Install the adapter's half of the session mechanism (tickets 08-10): the map above,

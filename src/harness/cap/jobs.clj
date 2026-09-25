@@ -1016,7 +1016,7 @@
   again instead of refusing an id it handed out itself. The entry holds a path and a
   closed writer, and the process goes with this process.
 
-  TWO INITIATORS, ONE STOP (`by`), and the whole of what differs is WHO THE TELLING
+  THREE INITIATORS, ONE STOP (`by`), and the whole of what differs is WHO THE TELLING
   IS. `:by :model` -- the default, and what the `job_kill` tool passes -- also claims
   `:told? true` on the entry, because its answer IS the telling: no notice may follow a
   model that has just been handed the ending. `:by :user` -- a person pressing stop in
@@ -1026,6 +1026,15 @@
   PERSON stopped this one (`notice`). The killing, the `[stopped]` claim, the
   `:stopped?` bit and the ending answered are the same code on both paths: there is ONE
   way to stop a job here, and `still-running?` above is the judgement both paths make.
+
+  `:by :put-away` -- a SESSION being put away (`harness.kernel.session`'s `sweep!` / `drop!`,
+  which is where `stop-session!` below is reached from) -- marks NOTHING, and getting that
+  right is the whole of the branch: no person pressed anything, so the mark a person's stop
+  leaves would put a block in front of a model nobody ever pressed anything for; and no answer
+  in front of a model that no person ever pressed anything for; and no answer carried the
+  ending either, so a notice IS still owed -- the model of a session born again in this process
+  is told, at its next call, that its background command was stopped. A session that is never
+  born again costs one entry that dies with this process, which is what every entry costs.
 
   A PERSON STOPPING A JOB THAT HAS ALREADY ENDED CHANGES NOTHING -- not the record, not
   this answer (`:stopped? false`, and its own `[exit N]` comes back), and NOT the entry:
@@ -1044,7 +1053,8 @@
                 :model (fn [reg p] (assoc-in reg (conj p :told?) true))
                 :user  (fn [reg p] (if (still-running? (get-in reg p))
                                      (assoc-in reg (conj p :stopped-by) :user)
-                                     reg)))
+                                     reg))
+                :put-away (fn [reg _p] reg))
          job (with-job thread-id job-id mark)
          running? (still-running? job)]
      (if running?
@@ -1059,6 +1069,39 @@
      ;; `:stopped-by` mark above is what the notice is made of.
      {:id job-id :path (:path job) :stopped? running?
       :ending (ending-of (:path job))})))
+
+(defn stop-session!
+  "Stop every background command THREAD-ID still has running, and KEEP every record.
+
+  THE DOOR A SESSION'S OWN END COMES THROUGH. Until this existed, a job stopped in exactly two
+  ways: somebody's act inside the process that holds it (`stop!`, from the model or from a
+  pane), or this process exiting (`shutdown!` -- and that one needs the JVM to LEAVE, which on
+  Windows is not something an exit does: it is TerminateProcess, and it runs no hook at all). A
+  session being put away is neither, and its commands are the things that would otherwise keep
+  running with nothing left able to name them: the registry is PROCESS-LOCAL and the
+  conversation's claim is going back (so another process may pick that conversation up, and its
+  `job_kill` answers about its OWN table), and this process has just stopped serving the session
+  that could have asked. `harness.kernel.session` reaches this through the `:stop-jobs!` seam.
+
+  THE PROCESSES GO, THE RECORDS DO NOT -- `shutdown!`'s judgement about the same two things. A
+  record outlives the id that named it ('what did yesterday's `npm test` say?'), and what a
+  session's end takes with it is the commands, never what they said. THE ENTRIES STAY TOO, for
+  the reason they stay after `stop!`: a `job_output` must still answer, and an id must never
+  come back as one nobody handed out.
+
+  ANSWERS the ids it asked to stop, in the module's own id order -- `[]` for the ordinary
+  session that has run nothing, which is an answer and not a refusal."
+  [thread-id]
+  (let [running (->> (vals (get-in @registry [thread-id :jobs]))
+                     (filter still-running?)
+                     (map :id)
+                     (sort-by :id))]
+    (doseq [id running]
+      ;; ONE JOB MUST NOT STOP THE REST: `stop!` can throw (a record that cannot be written, a
+      ;; handle whose process went at that very moment), and a session being swept is not a place
+      ;; where the first refusal loses the list.
+      (try (stop! thread-id id {:by :put-away}) (catch Throwable _ nil)))
+    (vec running)))
 
 ;; ------------------------------------------------------------------- the listing
 ;;
