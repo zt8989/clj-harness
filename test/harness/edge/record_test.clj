@@ -117,25 +117,20 @@
 
 ;; ---------------------------------------------- 2 & 3. the backlog, and the offset
 
-(deftest the-backlog-and-the-offset-are-both-readable
+(deftest the-offset-comes-back-with-the-write
+  ;; REWRITTEN FOR ADR 0007 (the record is written synchronously). What used to be 'the
+  ;; backlog is readable behind a parked writer' is now 'the write is done when the call
+  ;; returns, and the offset comes back WITH it'. The gate that pinned the async behaviour
+  ;; is gone with it: there is no queue to park behind any more.
   (let [f       (log-file-in "lag")
-        release (gated-sink!)]
-    (try
-      (record/append! "lag" f (line {:n 1}))
-      (record/append! "lag" f (line {:n 2}))
-      (record/append! "lag" f (line {:n 3}))
-      (testing "the writer is parked inside the first write, so nothing is durable
-                -- the watermark is behind the three lines that were handed over"
-        (is (<= (or (record/flushed-seq "lag") 0) 0)
-            "`flushed-seq` is nil before the writer has looked at the file, and 0 once
-             it has: either way it has written nothing of this thread's")
-        (is (< (or (record/flushed-seq "lag") 0) 3)))
-      (testing "a line in the queue is a line that is NOT in the record"
-        (is (= 3 (record/pending-count "lag")))
-        (is (record/pending? "lag")))
-      (testing "and the offset the next entry will get counts what is queued"
-        (is (= 3 (+ (or (record/flushed-seq "lag") 0) (record/pending-count "lag")))))
-      (finally (deliver release true)))
+        offsets [(record/append! "lag" f (line {:n 1}))
+                 (record/append! "lag" f (line {:n 2}))
+                 (record/append! "lag" f (line {:n 3}))]]
+    (testing "every call answered the offset its own line got"
+      (is (= [0 1 2] offsets)))
+    (testing "and nothing is behind the record -- nothing was queued"
+      (is (= 0 (record/pending-count "lag")))
+      (is (false? (record/pending? "lag"))))
     (testing "once the writer is let go, the backlog drains and the offset catches up"
       (is (= {:pending 0 :degraded {}} (record/flush! 10000))))
     (testing "THE OFFSET IS THE RECORD'S OWN OFFSET: the file holds exactly that
@@ -286,17 +281,23 @@
   ;; away when its bytes are all on disk; the writer is the only thing that knows,
   ;; and `start!` is where it tells the table. Without this, putting a session away
   ;; would mean rebuilding from a record behind it -- silently.
-  (let [f       (log-file-in "pin")
-        release (gated-sink!)]
-    (try
-      (record/append! "pinned" f (line {:n 1}))
-      (sessions/touch! "pinned")
-      (let [touched (:touched-at (get (sessions/live) "pinned"))
-            later   (+ touched (* 100 sessions/idle-ttl-ms))]
-        (is (record/pending? "pinned"))
-        (is (= [] (sessions/sweep! later)) "the backlog holds it")
-        (is (contains? (sessions/live) "pinned")))
-      (finally (deliver release true)))
+  (let [f (log-file-in "pin")]
+    ;; REWRITTEN FOR ADR 0007: a HEALTHY thread has nothing pending (the write is done when
+    ;; the call returns), so what holds a session away from `sweep!` is the one case that
+    ;; still holds lines -- a write that FAILED. Same joint, same property: 'put away' may
+    ;; not mean rebuilding from a record that is missing bytes.
+    (record/set-sink! (fn [_ _] (throw (ex-info "the disk is full" {}))))
+    (record/append! "pinned" f (line {:n 1}))
+    (sessions/touch! "pinned")
+    (let [touched (:touched-at (get (sessions/live) "pinned"))
+          later   (+ touched (* 100 sessions/idle-ttl-ms))]
+      (is (record/pending? "pinned") "the line that could not be written holds the session")
+      (is (some? (record/degraded "pinned")) "and the failure is nameable")
+      (is (= [] (sessions/sweep! later)) "the backlog holds it")
+      (is (contains? (sessions/live) "pinned")))
+    ;; THE DISK COMES BACK: `retry!` lands the held line, and then it may go.
+    (working-sink!)
+    (record/retry! "pinned")
     (record/flush! 10000)
     (let [touched (:touched-at (get (sessions/live) "pinned"))]
       (is (= ["pinned"] (sessions/sweep! (+ touched (* 100 sessions/idle-ttl-ms))))

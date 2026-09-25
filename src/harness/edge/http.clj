@@ -510,12 +510,13 @@
                      extra
                      (row-of kind payload))
          line (str (json/write-str row) "\n")]
-     (locking log-lock
-       ;; `mkdirs` and the carry-back are the writer's now: the consumer creates the
-       ;; parent before every line, and runs the carry-back as its prepare step
-       ;; (`record/prepare-with!`, installed in `start!`). Doing either here would be a
-       ;; second place deciding when a file exists and what it already holds.
-       (record/append! thread-id (log-file-for thread-id) line lands))
+     ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
+     ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
+     ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,
+     ;; INSIDE `record/append!` (ADR 0007). The split matters for one concrete reason: `lands`
+     ;; takes the SESSION's lock, and a `lands` called while holding this one is a lock-order
+     ;; inversion (`.scratch/event-persistence/spec.md`, '锁要往下搬一层').
+     (record/append! thread-id (locking log-lock (log-file-for thread-id)) line lands)
      ;; THE SESSION IS TOLD, NOT A CONSUMER (ticket 04): this is the one write path, and
      ;; every registered live step advances from the row here. Adding a consumer is
      ;; registering a step (`harness.edge.sessions/register-step!`), never editing this

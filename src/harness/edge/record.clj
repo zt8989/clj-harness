@@ -186,6 +186,10 @@
 
 ;; -------------------------------------------------------------------- the API
 
+;; `mark-failed!` lives with the consumer below (it is what a write that cannot go through
+;; records); `append!` is the one caller now that the write is synchronous (ADR 0007).
+(declare mark-failed!)
+
 (defn append!
   "Hand LINE to the writer for THREAD-ID, to be appended to FILE.
 
@@ -194,26 +198,72 @@
   The line is written in the order this was called, once per call -- there is no
   batching, and nothing here decides to skip or merge one.
 
-  LANDS, WHEN GIVEN, IS CALLED WITH THE OFFSET THIS LINE GOT -- once, on the
-  consumer thread, after the line is on disk. That is ticket 05's half of the
-  sequence-number contract: an entry of a conversation is numbered by the record
-  offset of the line it arrived in, and the offset is not knowable when the line
-  is handed over (the base is counted, and possibly RE-based by the prepare step,
-  on the consumer). So the number comes back from the writer rather than being
-  predicted by the caller -- a prediction would be a lie exactly when the
-  carry-back moved the file. A line that cannot be written calls nothing: it is
+  THE WRITE HAPPENS ON THIS THREAD, AND THE OFFSET IS THIS CALL'S ANSWER (ADR 0007,
+  which overturns ADR 0002 decision 3's async writer). The lock is taken HERE rather than
+  by the caller, because it now covers the write itself (see the note at the bottom of the
+  body); `lands`, when given, is still called with the offset -- but INLINE, and AFTER the
+  lock is released, because it is the caller's code and it takes the session's lock.
+  A LINE THAT CANNOT BE WRITTEN calls nothing and IS NOT LOST: it takes the head of the
+  held queue, nothing more is written for that thread until `retry!`, and the record
   still at the head of the queue, and `retry!` will land it later."
   ([thread-id ^File file line]
    (append! thread-id file line nil))
   ([thread-id ^File file line lands]
    (let [tid (str thread-id)
-         q   (:queue (entry-for tid))]
-     ;; COUNT FIRST, THEN ENQUEUE: the consumer decrements on the way out, and an
-     ;; increment that lost that race would make the counter speak a negative.
-     (swap! pending inc)
-     (.add q {:file file :line line :lands lands})
-     (.put dirty tid)
-     nil)))
+         e   (entry-for tid)]
+     (if (:failed e)
+       ;; DEGRADED: THE RECORD STOPS AT THE LINE THAT FAILED. Writing this one anyway would
+       ;; put a HOLE in the record -- 'a record with a hole is not a shorter conversation, it
+       ;; is a different, unreplayable one' -- so the line is HELD in the queue and `retry!`
+       ;; is the one door that lands it and everything behind it.
+       (do (.add ^ConcurrentLinkedQueue (:queue e) {:file file :line line :lands lands})
+           (swap! pending inc)
+           nil)
+       ;; THE NORMAL PATH: ONE WRITE, ON THIS THREAD (ADR 0007). The lock that used to belong
+       ;; to the caller's addressing (`harness.edge.http/log!`) now covers the write itself,
+       ;; and it is released BEFORE `lands` is called -- see the note at the bottom.
+       (let [landed  (atom nil)
+             outcome (try
+                       (locking lock
+                         (when-some [parent (.getParentFile file)] (.mkdirs parent))
+                         ;; THE PREPARE STEP RUNS BEFORE EVERY LINE, and the offset is
+                         ;; re-based if it says it changed the file (the carry-back appends a
+                         ;; leftover segment): a base counted before that append would put this
+                         ;; thread's offsets short by the carried segment.
+                         (let [changed? (@prepare tid file)
+                               e        (get @threads tid)]
+                           (when (or (nil? (:base e))
+                                     (not= (.getAbsolutePath file) (:path e))
+                                     changed?)
+                             (re-base! tid file)))
+                         ((or @sink real-sink!) file line)
+                         (swap! threads update-in [tid :written] (fnil inc 0))
+                         ;; THE OFFSET THIS LINE GOT: base+written lines were in the file
+                         ;; before the write, so the line that just landed is the one at index
+                         ;; base+written-1. Counted in here, where the base and the write agree.
+                         (let [e (get @threads tid)]
+                           (reset! landed (+ (long (:base e)) (dec (long (:written e))))))
+                         (.notifyAll lock))
+                       :written
+                       (catch Throwable t
+                         (mark-failed! tid file t)
+                         ;; AND THE LINE IS NOT LOST: it takes the head of the held queue, so
+                         ;; the record stays an ordered prefix that stops exactly here.
+                         (let [e (get @threads tid)]
+                           (.add ^ConcurrentLinkedQueue (:queue e)
+                                 {:file file :line line :lands lands})
+                           (swap! pending inc))
+                         (locking lock (.notifyAll lock))
+                         :blocked))]
+         ;; `lands` IS CALLED OUTSIDE THE WRITE LOCK, ALWAYS. It is the caller's code and it
+         ;; takes the SESSION's lock (`sessions/land!`), so calling it while holding this one
+         ;; would be the lock-order inversion ADR 0007's ticket spells out
+         ;; (`.scratch/event-persistence/spec.md`, '锁要往下搬一层').
+         (when (and (= outcome :written) (some? lands))
+           (try (lands @landed) (catch Throwable _ nil)))
+         ;; WHAT THE SYNCHRONOUS WRITE BUYS: the offset is this call's ANSWER, so a caller that
+         ;; needs the line number (ADR 0006's facts) has it without a callback.
+         @landed)))))
 
 (defn pending-count
   "How many of THREAD-ID's lines have been handed over and not yet written."
