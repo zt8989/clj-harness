@@ -443,7 +443,6 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// between a `bash` call in flight drawn as a spinner and drawn as 待审批. The second case is
 /// the four words that reading can be.
 const EXPECTED_CASES = 148;
-const EXPECTED_CASES = 146;
 
 let total = 0;
 for (const suite of SUITES) {
