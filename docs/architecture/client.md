@@ -59,7 +59,7 @@ components/
                         `POST /api/threads/<id>/cancel`（票 09）。**单开文件**只为一个原因：它要在 UI
                         套件里被渲染出来读回去，而 `composer-chrome.tsx` 进不了那个运行（它经
                         `lib/attachments.ts` 摸到 `lib/i18n.ts`，后者在加载时碰 `document`）
-  composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
+  composer-stats.tsx    composer **下面**那条状态条（会话统计的五格；一行放不下时按 GIVE_UP 让格，不让折行）
   composer-numbers.tsx  这场会话的数字**取一次**的地方：取数、「什么时候取」的四个触发条件，
                         以及把它们交给 composer 里两个读者（状态条与那颗圈）的那个 scope
   context-ring.tsx      model **左边**那颗圈（占了多少，按三样分色）与点开后的面板：

@@ -82,14 +82,15 @@ const cases: Case[] = [
       // the catalog the thing under test rather than a decoration: the same payload
       // through the same function has to come out in the other language, with the
       // units (which do not translate) unchanged and the words (which do) not.
-      // `steps` is a count of MODEL CALLS, and `CONTEXT.md` says the Chinese word for
-      // one is 模型调用 -- not 步, which is the synonym the glossary exists to forbid.
+      // `steps` is a count of MODEL CALLS: `CONTEXT.md` forbids 步, and the STRIP's own
+      // cell is the one place the phrase is shortened to 调用 -- that row gives up whole
+      // cells before it lets one of them wrap (see `components/composer-stats.tsx`).
       expect(statsCells(payload, zh)).toEqual({
         turns: "1 轮",
-        steps: "2 次模型调用",
+        steps: "2 次调用",
         rate: "242 tok/s",
         total: "2k tok",
-        cached: "91% 命中缓存",
+        cached: "91% 缓存",
       });
 
       // The quantifier is a real rule and it is DIFFERENT in each language: English
