@@ -3951,6 +3951,10 @@
   there is, a page that missed one repairs itself with the snapshot it asks for when it opens
   the conversation, which is decision 5's 'no history'."
   [thread-id fact]
+  ;; REMEMBERED BEFORE IT IS SENT (ticket 05): a fact is a PUSH, and one that nobody heard is
+  ;; gone unless the sender kept it. A reader that reconnects declares how far it got
+  ;; (`factSince`, a RECORD line number) and is handed the rest by `mux-replay-facts!`.
+  (mux/record-fact! thread-id fact)
   (let [payload (mux-frame thread-id fact)]
     (doseq [ch (mux/channels-for thread-id)]
       (mux-send! ch payload))))
@@ -4014,7 +4018,12 @@
                          {:threadId   (str tid)
                           :since      (when (number? (:since s)) (long (:since s)))
                           :generation (:generation s)
-                          :runSince   (when (number? (:runSince s)) (long (:runSince s)))})))
+                          :runSince   (when (number? (:runSince s)) (long (:runSince s)))
+                          ;; TICKET 05: the FACT family's own cursor -- a RECORD line number,
+                          ;; and a separate number from the run's, because the two count
+                          ;; different things (a run frame is numbered by the sender, a fact by
+                          ;; the record line it was written for).
+                          :factSince  (when (number? (:factSince s)) (long (:factSince s)))})))
                    parsed))
         []))
     (catch Throwable _ [])))
@@ -4048,7 +4057,7 @@
   enforces: a conversation another live process is serving, or a `generation`/`since` that
   names a window that is over, is TOLD so with an `end` frame rather than half served
   (ADR 0003 decision 6)."
-  [token thread-id since generation run-since]
+  [token thread-id since generation run-since fact-since]
   (let [held (claims/holder thread-id)]
     (cond
       (and (some? held) (not (claims/mine? held)))
@@ -4076,15 +4085,23 @@
                 ;; AND THE RUN FRAMES THIS CONNECTION IS MISSING. A window read is a PULL, so
                 ;; a cursor re-reads it; a run is a PUSH, so the frames that happened while a
                 ;; socket was down are only here because `mux-broadcast!` remembered them.
-                (mux-replay-run! token thread-id run-since))))))))
+                (mux-replay-run! token thread-id run-since)
+                ;; AND THE FACTS THIS CONNECTION IS MISSING (ticket 05, ADR 0006): the same
+                ;; push and the same curse -- remembered by `family-send!`'s `record-fact!` and
+                ;; replayed here from the RECORD LINE NUMBER the reader last held. A reader that
+                ;; never held one declares `factSince` nil and is handed what is kept.
+                (when (some? fact-since)
+                  (when-some [ch (mux/channel token)]
+                    (doseq [fact (mux/facts-after thread-id fact-since)]
+                      (mux-send! ch (mux-frame thread-id fact))))))))))))
 
 (defn- mux-attend!
   "A downlink just connected: remember it, and subscribe it to everything the handshake
   URL declared."
   [token ch wanted]
   (mux/attach! token ch)
-  (doseq [{:keys [threadId since generation runSince]} wanted]
-    (mux-add! token threadId since generation runSince)))
+  (doseq [{:keys [threadId since generation runSince factSince]} wanted]
+    (mux-add! token threadId since generation runSince factSince)))
 
 (defn- mux-get
   "GET /api/events.mux?subscriber=<token>&sessions=<json> -- the downlink. A WebSocket, or
@@ -4135,7 +4152,10 @@
         (doseq [thread-id (:unsubscribe parsed)]
           (mux/unsubscribe! token thread-id))
         (doseq [sub (:subscribe parsed)]
-          (mux-add! token (:threadId sub) (:since sub) (:generation sub) (:runSince sub)))
+          (mux-add! token (:threadId sub) (:since sub) (:generation sub) (:runSince sub)
+                   ;; A SUBSCRIBE THAT DOES NOT DECLARE A FACT CURSOR IS HANDED WHAT IS KEPT:
+                   ;; nil means 'I hold nothing' (`harness.edge.mux/facts-after`).
+                   (:factSince sub)))
         (api-response 200 {:subscriber token
                            :threads    (vec (mux/subscriptions token))})))))
 
