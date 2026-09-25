@@ -69,13 +69,8 @@
 // identity survives re-renders.
 import type { TFunction } from "i18next";
 
-import { fromThreadMessageLike } from "@assistant-ui/core";
 import { AssistantRuntimeProvider, useAuiState } from "@assistant-ui/react";
-import {
-  fromAgUiMessages,
-  useAgUiInterrupts,
-  useAgUiRuntime,
-} from "@assistant-ui/react-ag-ui";
+import { useAgUiInterrupts, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { cn } from "cn";
 import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -93,7 +88,7 @@ import { RightPaneOpenButton } from "@/components/right-pane-toggle";
 import { TaskPane } from "@/components/task-pane";
 import { ContextCards } from "@/components/context-card";
 import { RecordNotice } from "@/components/record-notice";
-import { keepInjectionCards } from "@/lib/injections";
+import { readsOf, repositoryFrom } from "@/lib/thread-messages";
 import { newId } from "@/lib/id";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -120,7 +115,7 @@ import {
   rememberedSession,
   rememberSession,
 } from "@/lib/session-memory";
-import { AGENT_URL, rebuildThread, sofarThread, type SofarState } from "@/lib/threads";
+import { AGENT_URL, rebuildThread, sofarThread } from "@/lib/threads";
 import { pageThread, type WindowFrame } from "@/lib/feed";
 import { subscribeMux } from "@/lib/mux";
 import {
@@ -145,78 +140,11 @@ import { type RecordHealth } from "@/lib/record-health";
 /// is what keeps a server that is DOWN from being asked in a tight loop.
 const RECONNECT_MS = 1000;
 
-/// The converted history a restore hands the runtime: `fromAgUiMessages`
-/// rebuilds text, reasoning and tool calls -- and reads back a parked run's
-/// `metadata.custom.agui.interrupts` -- but its output is still the loose
-/// `ThreadMessageLike` shape; the repository wants the finished one. THE PAIR IS
-/// WHOLE ONLY BECAUSE THE SERVER FOLDS THAT METADATA (`kernel.frames/apply-frames`
-/// writes it from `RUN_FINISHED.outcome.interrupts`; ticket 06 of
-/// `.scratch/session-after-refresh`), and the per-message status below is not
-/// overwritten for anything but the running tail, so `requires-action`/`interrupt`
-/// survives. The runtime's own snapshot-import path runs this exact pair
-/// (AgUiThreadRuntimeCore.importMessagesSnapshot), so the conversion is upstream's,
-/// quoted rather than reinvented.
-/// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is the
-/// window's own `state` -- the tail page answers it, and every frame after that carries
-/// it -- which is how this page learns about a run it is only WATCHING. Null is every
-/// other case: a session this client has just minted (no window), or one read through
-/// `rebuild`, which is over by definition.
-///
-/// THE LAST MESSAGE'S STATUS IS WHERE THAT LANDS, and it is not decoration:
-/// `lib/turns.ts` folds a turn's steps into a one-line summary exactly when its last
-/// message is settled, so a conversation still being written has to say so HERE or it
-/// renders as a finished answer that happens to stop mid-sentence. Nothing else gets a
-/// status of its own -- the messages before it really are complete.
-type Reads = SofarState | null;
-
-function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
-  // `fromAgUiMessages` rebuilds text, reasoning and tool calls; the injection cards
-  // are put back right after it, because upstream's converter has no case for a `data`
-  // part (see `lib/injections.ts`). Everything else about a rebuilt message is
-  // upstream's.
-  const converted = keepInjectionCards(agUiMessages, fromAgUiMessages(agUiMessages));
-  const last = converted.length - 1;
-  return converted.map((message, index) => {
-    // THE STATUS A REBUILT MESSAGE ARRIVES WITH IS ITS OWN, and only the LAST one's is
-    // overridden -- and only by the window saying it is still being written. Everything
-    // else the converter already decided: `fromAgUiMessages` reads a parked run's
-    // `metadata.custom.agui.interrupts` and hands that message `requires-action`/
-    // `interrupt`, which is exactly the shape `getPendingInterrupts()` looks for. Forcing
-    // `complete` on every message (as this did) threw that away, so a refreshed parked
-    // conversation came back with no card and `assertNoPendingInterrupts()` wrongly
-    // opened (ticket 06 of `.scratch/session-after-refresh`).
-    const status =
-      index === last && reads === "running"
-        ? ({ type: "running" } as const)
-        : (message.status ?? { type: "complete", reason: "unknown" });
-    return fromThreadMessageLike(message, message.id ?? newId(), status);
-  });
-}
-
-/// The conversation's state as a READING (`Reads`), for a value that came off the wire
-/// as a string. A server that grows a fifth word reads here as "not running", which is
-/// the safe answer: the one thing a caller does with this is decide whether the last
-/// message on screen is still being written.
-function readsOf(state: string | null | undefined): Reads {
-  return state === "running" || state === "parked" || state === "settled" || state === "unfinished"
-    ? state
-    : null;
-}
-
-/// The rebuilt messages as the repository the history adapter returns: a flat
-/// chain, each message parented to the one before it. Built here rather than with
-/// `ExportedMessageRepository.fromArray` because that helper assigns fresh ids,
-/// and these messages already have the ids the runtime recorded.
-function repositoryFrom(agUiMessages: readonly unknown[], reads: Reads = null) {
-  const messages = toThreadMessages(agUiMessages, reads);
-  let parentId: string | null = null;
-  const items = messages.map((message) => {
-    const item = { parentId, message };
-    parentId = message.id;
-    return item;
-  });
-  return { messages: items };
-}
+// WHAT THE PAGE HANDS THE RUNTIME WHEN IT REBUILDS A CONVERSATION (`toThreadMessages` /
+// `repositoryFrom`) AND HOW FAR ALONG IT IS (`readsOf`) now live in `lib/thread-messages.ts`:
+// the status a rebuilt message is handed is the server's word over the AG-UI adapter's own
+// guess, and that rule is pinned over literals by a suite that cannot import this file. See
+// that module's head for the bug it exists for (a `bash` call in flight drawn 待审批).
 
 /// One session's history, for the adapter that loads it exactly once. See the
 /// header for why `hydrate` is a property of the session rather than something

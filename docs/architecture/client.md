@@ -198,6 +198,13 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   **这一格也不能交给 upstream 的 `hideWhenRunning`**：它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是
   看着」正是 runtime 说 false 的那一格（实测：传 `true` 照样画出来）。而**空位**和动作条犯的是同一个错：都读作
   「写完了」。
+- **重建回来的消息，状态是「服务端说的」，不是「适配器猜的」**（`lib/thread-messages.ts`）：
+  `fromAgUiMessages` 会给它转出来的每一条 assistant 消息**自己安一个 status**，而「有工具调用、结果还没回来」的那条它安的是
+  `requires-action`——那是**parked** 的 run 需要的形状（审批卡就认它），对一个**还在写这次调用**的 run 却是错的：工具行于是画成
+  「待审批」（感叹号）而不是转圈（主人报的。`bash` 在跑、刷新之后）。纠正这件事有个**容易静默失效**的地方：
+  `fromThreadMessageLike` 是 `status: status ?? fallbackStatus`，**消息自己的 status 优先**——所以那个 status 必须写在**消息上**，
+  只当 fallback 递进去等于没递。规则住在 `lib/thread-messages.ts`（叶子模块，套件 `thread-messages` 直接钉它），
+  `app.tsx` 只调它；parked / settled / 没有窗口那几条读数**原样留给适配器**（parked 那条一改就把停住那一轮唯一的门关上了）。
 - **「显示更早」一次一页，而且必须锚定**：补页是 `prepend`，会把它下面的一切往下推，所以问之前量、
   答之后修（`lib/window-scroll.ts`），一次也只有一个在飞（按钮的禁用态就是这一条）。**锚点是一条
   消息的文本，不是它的 DOM 节点**：assistant-ui 按位置保留消息节点，用节点当锚会算错——量到过节点
