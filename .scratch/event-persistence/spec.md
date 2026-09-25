@@ -114,3 +114,30 @@ SQLite 投影 / 崩溃恢复 / 监控）。这一份**不是照抄它**，而是
 **锁搬进 `record.clj`**（它现在同步了，锁本来就该在这儿），由它**罩住 write+flush**，
 写完**先出锁、再调 `lands`**。这与 0007 决策 1（同步）是同一件事的两半：
 同步之后，「谁在什么时候拿锁」从写手线程的一个实现细节，变成了调用路径上必须说清的一件事。
+
+## 票 03 的第一次尝试：读侧对了，写侧被**两条折叠**挡住（2026-09-25）
+
+**读侧落了并量过**：`harness.edge.replay` 的折叠现在能从**run 自己那一行**取回推理——
+`reasoning-row?` / `insert-entry-before` / `attach-reasoning`，按「这一 run 的帧造出的第 k 条
+assistant 消息 ↔ 这一 run 写下的第 k 条 assistant 行」配对，把推理消息**插在它前面**（与帧当年
+的位置、行号都一致）。拿一份手写的最小记录量过：
+
+```
+:ids   [u1 r1-m0-r r1-m0]
+:roles [user reasoning assistant]
+:content [hi THINKING answer]
+```
+
+**写侧（不再记录逐 token 的推理帧）没有落**，因为它撞上一条本仓的形状：**同一份记录有两条折叠**——
+`harness.edge.replay/entries`（窗口/rebuild 那条）与 `records->messages`（provider 形状的历史：
+`replay/history` 与 resume 那条）。配对只写进了前者，后者于是答 `reasoning_content: nil`
+（实测：`the-log-the-server-writes-is-one-replay-can-read` 红了）。
+
+**在两条折叠共享一份实现之前，写侧不能动**——再写一份配对正是本仓拒绝的那件事。所以这次只落读侧
+（对旧日志零变化：`replay_test` 30 用例 / 175 断言绿）与 `runner` 里那段「为什么还没落」的注释。
+
+**顺序因此是**：先让 `records->messages` 与 `entries` 共享同一遍折叠（它现在只比 `entries` 多一步
+`ensure-complete!`），再落写侧，再补那条判据（同一场对话，带推理帧与不带的日志，`entries` 逐字节相等）。
+
+**文本 delta（2%）另算**：它的口径与推理不同——被掐断的 run 靠它才留得住半句答案，所以那一族
+按票面写的「快照」落（50–100ms 一次），不是丢掉。

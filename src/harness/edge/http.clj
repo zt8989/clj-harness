@@ -841,6 +841,15 @@
     ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
     ;; so the number is already on its way back when the entries appear -- and `land!` is
     ;; idempotent and by group, so either order works.
+    ;; NOT YET: THE LINE IS STILL WRITTEN (see the ticket, 票 03 of `.scratch/event-persistence`).
+    ;; Dropping the per-token REASONING deltas here -- 82% of a log's bytes -- is the whole point of
+    ;; that ticket, and it is BLOCKED on one thing: the reasoning has to come back from the run's own
+    ;; `message` row, and there are TWO folds over these records (`harness.edge.replay/entries` for
+    ;; the window, `records->messages` for the provider-shaped history `replay/history` and the
+    ;; resume path read). The pairing was written into ONE of them and measured there; the other
+    ;; then answered `reasoning_content: nil` (`the-log-the-server-writes-is-one-replay-can-read`).
+    ;; So the write side waits until the two folds share one implementation -- writing a second copy
+    ;; of the pairing is the thing this repo refuses.
     (log! thread-id run-id "event" frame
           (when (contains? terminal (:type frame))
             (fn [offset] (sessions/land! thread-id run-id offset))))
@@ -2111,6 +2120,9 @@
                         ;; subagent thread runs exactly ONE delegation, so the run is
                         ;; the thread here). See `follow-get`.
                         (let [f (assoc frame :seq (swap! frame-seq inc))]
+                          ;; AND THE SAME FRAME GOES ON THE RECORD, subagent route or not: the
+                          ;; ticket that would drop the per-token reasoning deltas is blocked on the
+                          ;; fold that reads them back (see `runner` above).
                           (log! thread-id run-id "event" f
                                 (when (contains? terminal (:type frame))
                                   (fn [offset] (sessions/land! thread-id run-id offset))))
