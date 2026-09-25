@@ -1143,42 +1143,47 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   children,
   group,
 }) => {
-  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought
-  // is gathered across the turn's messages (and, for a live run, across the parts of
-  // one message), and the rules for that walk are in `lib/reasoning-preview.ts`.
-  // `s.thread.messages` is the conversation, `s.message.index` is where this message
-  // sits in it, and this row's own group names the part it starts at. Two selectors
-  // rather than one object, because the comparison is by reference -- an object
-  // literal here would re-render on every store update (see `useAuiState`'s note).
-  const messages = useAuiState((s) => s.thread.messages);
-  const index = useAuiState((s) => s.message.index);
-  // WHICH PART THIS ROW IS. A live run keeps one assistant message open for a whole
-  // turn -- several thoughts and the calls between them share its `parts` -- so the
-  // message alone cannot say which thought this row is. The group's first part index
-  // can, and `thoughtAt` reads the message part by part from there.
+  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought is
+  // gathered across the turn's messages (and, for a live run, across the parts of one
+  // message), and the rules for that walk are in `lib/reasoning-preview.ts`.
+  // `s.thread.messages` is the conversation, `s.message.index` is where this message sits in
+  // it, and this row's own group names the part it starts at.
+  //
+  // EVERY ANSWER IS A PRIMITIVE, AND THAT IS THE POINT. `useAuiState` compares a selector's
+  // answer BY VALUE, so a selector handing back `s.thread.messages` -- a fresh array on every
+  // store update -- re-rendered this row on EVERY delta: one whole re-render of the row's
+  // shell (the disclosure, the trigger, the icon, the catalog lookup) per thought per update.
+  // A long conversation has hundreds of rows, and that is the slope the per-commit cost grows
+  // along (measured: ~0.06 ms a message -- a 400-message session costs ~34 ms a commit, which
+  // is 29 fps). The walks behind these three selectors (`thoughtAt` over the turn's parts,
+  // `previewOf` over one thought) are microseconds; the re-render was not.
   const from = group.indices[0] ?? 0;
-  const thought = thoughtAt(messages, index, from);
+  const drawn = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).drawn);
+  const running = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).running);
   // The tail while it runs, the first line once it stops.
-  const preview = previewOf(thought.parts, thought.running);
+  const preview = useAuiState((s) => {
+    const thought = thoughtAt(s.thread.messages, s.message.index, from);
+    return previewOf(thought.parts, thought.running);
+  });
   const [open, setOpen] = useState(false);
 
   // NOT DRAWN: this run is the model going back to a thought it already started --
   // see the file comment. The row that began it says the same words a moment later
   // anyway (it is handed the newest part), so nothing is lost by saying this one
   // twice.
-  if (!thought.drawn) return null;
+  if (!drawn) return null;
 
   return (
     <ReasoningRoot
       variant="ghost"
       className="mb-0"
-      streaming={thought.running}
+      streaming={running}
       open={open}
       onOpenChange={setOpen}
     >
-      <ReasoningTrigger active={thought.running} preview={preview} />
-      <ReasoningContent aria-busy={thought.running}>
-        <ReasoningText className={thought.running ? "pt-1" : "max-h-none pt-1"}>
+      <ReasoningTrigger active={running} preview={preview} />
+      <ReasoningContent aria-busy={running}>
+        <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>
           {children}
         </ReasoningText>
       </ReasoningContent>

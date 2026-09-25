@@ -148,3 +148,37 @@
 而基线本来就是长会话那 34ms 里的大头。观看别人会话那条路（`sameEntry`）也没有单独取数字：
 那是一条**可证**的 O(L)→O(parts) 改动，判据在 `window` 套件里（形状先settle、只有重复才逐字节、
 指纹看不到的字段仍落到逐字节那一步）。
+
+## 量了（票 04 的第一刀：行不再为别人的更新重渲染，2026-09-25）
+
+**怎么量的**：同上（`scratch-profile.mjs`），但夹具换成**一场长会话** —— `fixture-turns.json`
+（16 个短回合 + 2 段长思考）。`harness.fake` **按次序**重放 turns，一次发送一回合，所以「连发 16 次」
+就是一场 16 轮的会话，第 17 次发送用那段长思考给采样。两版各起一个干净的服务；不压缩的构建里页面排得
+慢，所以**生长那一半跑在 harness 自己的 minified 页面上**，只有采样跑在预览页上（会话在 harness 里，
+两个地址看的是同一场）。
+
+| | 改之前（main） | 改之后 |
+|---|---|---|
+| idle | 35.5% | **48.6%** |
+| **页面自己的工作量** | **6539 ms** | **4931 ms（−25%）** |
+| `getBoundingClientRect`（行自己的测量） | 5.7% | 3.7% |
+| `renderWithHooks` / `createWorkInProgress` / `commitMutationEffectsOnFiber` /
+  `buildLucideIconNode`（重建图标＝行在重渲染） | 都在前 22 名里 | **全部消失** |
+
+after 那次屏上还**多两条消息**（34 vs 32），所以这个 −25% 是保守的。
+
+**改的是什么**：`message-parts.tsx` 的 `ReasoningBlock` 原来拿 `useAuiState((s) => s.thread.messages)`
+—— 那个数组每次 store 更新都是新的，而 `useAuiState` **按值**比较 selector 的答案 ⇒ **每一行**
+（长会话里几百行）每次更新都整行重渲染一遍（外壳、trigger、图标、文案查表全来）。现在三个 selector
+各回答一个**原始值**（`drawn` / `running` / `preview`），行只在**自己那段话真的变了**时重渲染。
+那条「随会话长度摊销」的斜率（~0.06 ms/条消息 ⇒ 400 条 ≈ 34 ms ⇒ 29 fps）因此塌掉；剩下的是
+`depsShallowEqual` / `checkIfSnapshotChanged` / `propagateContextChanges` 这些**库里每个订阅者自己**
+的记账，不是我们的。
+
+**为什么先做这一刀**：约 20 行，判据是既有的走查与套件（155 条 + 25 条全绿），砍掉的却是唯一一处
+写着「我们的」、又随会话长度增长的每更新工作。**仍然没动**的是库的 `MessagePrimitive.GroupedParts`
+/ 每消息 reconcile 与列表级 windowing —— 见票 04。
+
+**走查的一次假红**：同一份代码在不同机器负载下红过一次「the thought ends, and the row stops being
+live」（`until` 的 60s 超时；那一跑采到 861 个样本 = 流被拖到 60s 以上）。少起两个服务后全绿。
+判据本身没问题（那条挂的是 `until`），但「超时值按秒写死」这件事值得记住。
