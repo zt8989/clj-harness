@@ -663,6 +663,16 @@ const AssistantMessage: FC = () => {
             "tool-call": ["group-chainOfThought", "group-tool"],
             "standalone-tool-call": [],
           })}
+          // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE "STILL WORKING"
+          // DOT IS DRAWN IN ONE PLACE, AND IT IS THE TURN'S END (the footer below). Upstream's
+          // own indicator -- a synthetic `indicator` part it appends itself, `indicator:
+          // "no-text"` -- puts a second dot in the MESSAGE BODY whenever the last part is not
+          // text or reasoning (an empty message, a tool call, and -- while a step is being
+          // handed over -- two messages at once). Two dots for one state is what the owner
+          // reported twice; the sign a reader needs one of is 'this turn is still arriving',
+          // and that is the turn's own end. `never` is upstream's switch for it, and the
+          // footer answers it instead (`stillBeingWritten`).
+          indicator="never"
         >
           {({ part, children }) => {
             // A FOLDED ANSWER KEEPS ONLY WHAT WAS SAID. Reasoning and tool calls are

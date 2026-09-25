@@ -15,16 +15,19 @@
 
 **Status:** 已落地（2026-09-25）。
 
-**落地时学到的两件事。**
+**落地时学到的三件事**（后两条都是主人看出来的）。
 
 1. upstream 的 `hideWhenRunning` **不能**用来表达这条判据——它是
    `hideWhenRunning && s.thread.isRunning`，而「本页只是看着」正是 runtime 说 false 的那一格，所以传
    `true` 什么也没藏（浏览器实测，见票面下方）。现在是**选画哪一个**：`AssistantMessage` 在 turn 末尾这一格
    二选一。
-2. **光把动作条藏掉还不够，那一格会留下一个空位**——而空位和动作条犯的是同一个错：都读作「写完了」。主人
-   一眼就看出来了：那里应该是**那颗「在写」的小圆点**（upstream 在 assistant 消息还没有 part 时画的那颗
-   `●`：同一个字形、同一个脉冲、同一个 `aria-label`）。所以落地的形状是 `WorkingDot` ⇄ `AssistantActionBar`
-   二选一，两态都是 24px，动作条出现时不跳。
+2. **光把动作条藏掉还不够，那一格会留下一个空位**——而空位和动作条犯的是同一个错：都读作「写完了」。那里
+   应该是**那颗「在写」的小圆点**。所以落地的形状是 `WorkingDot` ⇄ `AssistantActionBar`，两态都是 24px，
+   动作条出现时不跳。
+3. **两颗点也不行**（主人第二次报）：upstream 的 `MessagePrimitive.GroupedParts` 自己也会往**消息正文**里塞一颗
+   （`indicator: "no-text"`），于是「第一次发送」（末尾那条消息还是空的）和「一步交给下一步」的当口会和我这一颗
+   同时出现。所以那一颗**关掉了**（`indicator="never"`）：「在写」只由 turn 末尾这一格说——**一个状态一个标记，
+   一个标记一个地方**。走查实测（带一次真 `sleep 4` 的工具调用，110 次采样覆盖整轮）：`dots` 的最大值**一直是 1**。
 
 - [x] 服务端说这一场 `running`、而本页没有自己的 run 时，正在写的那一轮**画一颗 `●`**、不画动作条。走查
       实测：刷新落进一场还在跑的会话后，sidebar 那行 `running: 1` 的整段时间里 `.aui-assistant-action-bar-root`

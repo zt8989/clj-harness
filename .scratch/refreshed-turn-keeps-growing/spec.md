@@ -65,7 +65,8 @@
   以及 `start!` 真把这个 tick 排上钟；`test/harness/edge/http_test.clj`：run 跑着的时候 watcher 被 ring 到，
   而且 ring 的那一瞬记录里**已经有这个 run 的帧**（没有票 03 就一条都没有）。
 - 实测脚本 `dev/scratch_refresh_watch.clj`：run 跑着取样，回答的字节数一路涨、ring 数一路涨。
-- 真浏览器走查：`node scripts/dev.mjs --scripted walk.json`（脚本带 `pace-ms` 让回答慢慢流），run 跑到一半
-  整页刷新，断言刷新之后屏幕上的回答文本**在变长**、turn 末尾摆的是**「在写」那颗 `●`** 而不是动作条
-  （空位也算错：主人指出来过），跑完 `●` 换成动作条（两态都是 24px，不跳）。
+- 真浏览器走查：`node scripts/dev.mjs --scripted walk.json`（脚本带 `pace-ms` 让回答慢慢流，并且第一次调用是
+  一次真 `sleep 4`，所以「工具在跑」那一格也被走查覆盖），run 跑到一半整页刷新，断言刷新之后屏幕上的回答文本
+  **在变长**、turn 末尾摆的是**「在写」那颗 `●`** 而不是动作条（空位也算错，主人指出来过）、而且**全场只有一颗**
+  （正文那颗关掉了，主人第二次报），跑完 `●` 换成动作条（两态都是 24px，不跳）。
 - `cd ui && npm test` / `npm run typecheck` / `npm run build`；`clojure -M:test -m harness.test-runner`。

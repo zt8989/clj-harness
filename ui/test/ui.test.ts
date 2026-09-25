@@ -412,10 +412,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// two as a pair, because a row for a tool with no arguments has nothing but its icon and
 /// its name to say which hand this call is. The DRAWING is still the browser walkthrough's.
 /// 142 -> 144: `.scratch/refreshed-turn-keeps-growing` -- TWO cases, one per ticket. Ticket 01
-/// is the window's merge (`a same id that comes back longer grows in place`), ticket 02 the
-/// action bar's criterion (`a turn the server is writing wears no action bar`). Both are
-/// arithmetic over values the page holds; whether the bar DISAPPEARS on screen and whether the
-/// answer GROWS on screen are the browser walkthrough's.
+/// is the window's merge (`a same id that comes back longer grows in place`); ticket 02 is the
+/// turn's furniture while it is still being written (`a turn the server is writing wears no
+/// action bar`). Arithmetic over values the page holds; whether the dot REPLACES the bar on
+/// screen, and whether the answer GROWS on screen, are the browser walkthrough's.
 const EXPECTED_CASES = 144;
 
 let total = 0;
