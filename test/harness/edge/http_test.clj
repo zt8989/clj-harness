@@ -6129,6 +6129,11 @@
   (wipe-dir! sofar-dir-2)
   (with-server
    "sofar-b"
+   ;; AN EXPLICIT SCRIPT, AND A TOOL THAT REACHES THE SEAM. This case holds the run at
+   ;; `tools/run!` -- so the turn has to make a call that gets there -- and it used to lean on
+   ;; whatever was in a shared default script. The premise is the test's, so the test says it.
+   [{:content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
+    {:content "done"}]
    (fn []
      (bind! "sofar-b" sofar-dir-2)
      (let [gate (support/window-gate #'tools/run! 20000)
