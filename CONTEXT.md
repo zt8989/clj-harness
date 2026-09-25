@@ -170,8 +170,8 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 *别叫成* 备份、历史（都不保留多次）。
 
 **工具名的写法**：`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` /
-`grep` / `bash` / `job` / `job_kill` / `job_output` / `eval` / `glob` / `todo_write` /
-`web_fetch` / `web_search` / `ask` —— 就是这些名字，
+`grep` / `bash` / `job` / `job_kill` / `job_output` / `eval` / `glob` / `skill` / `todo_write` /
+`todo_read` / `web_fetch` / `web_search` / `ask` —— 就是这些名字，
 不给它们起别名，也不把 `edit` 叫成"旧编辑"、把 `replace` 叫成"锚点编辑"。
 一律小写、多词用下划线（`undo_last_replace` 就是那个先例）：不写 `camelCase`、不写 `PascalCase`
 ——别人家的清单里写 `WebFetch`、`TodoWrite`，那是别人家的写法。
@@ -395,7 +395,7 @@ jobs 树里），是同一个动词的**另一种** spill；两者目录、id、
 每一轮的 `input` 行被重记一遍，那就是它留下的全部痕迹（2 MB 的上限就是为这件事立的）。
 *别叫成* 上传 / upload（那是本仓没有的一条路）、文件（file 是这一份东西的统称，附件是消息里的那一份）。
 
-**任务清单** —— 本会话的待办，由 `todo_write` 写。一次调用送的是**完整清单**，不是增量：整份替换
+**任务清单** —— 本会话的待办，由 `todo_write` 写、由 `todo_read` 读。一次调用送的是**完整清单**，不是增量：整份替换
 （空数组即清空），顺序本身就是信息。**正因为它每次被整份改写**，它是状态而不是记录，所以它进库
 （`todos`：一个会话一行，清单整存整取，读它的人渲染整个列表）。一次模型调用只写一次——两条
 "整份替换"之间不存在合并，而并发跑会让后写的赢、两个都报成功。

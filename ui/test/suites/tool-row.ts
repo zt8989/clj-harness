@@ -60,6 +60,17 @@ const cases: Case[] = [
       expect(messagePartsSource).toMatch(/case "grep":\s*return stringArg\(args, "pattern"\) \?\? null;/);
     },
   },
+  {
+    name: "the-read-half-of-the-list-carries-the-list-s-hand",
+    run: async () => {
+      // `todo_read` is `todo_write`'s other half -- the same list, read back rather
+      // than replaced -- so it draws the SAME icon. Pinned as a pair, because a row
+      // that looked like a different hand would be the one thing wrong with a call
+      // that has no arguments to show and nothing to say for itself but the name.
+      expect(iconTable()).toMatch(/^\s*todo_read: ListTodoIcon,$/m);
+      expect(iconTable()).toMatch(/^\s*todo_write: ListTodoIcon,$/m);
+    },
+  },
 ];
 
 export const toolRowSuite: Suite = { name: "tool-row", cases };

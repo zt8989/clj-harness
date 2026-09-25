@@ -407,7 +407,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the same 128 and neither touched the other's cases, so a merged tree owes the sum -- 131
 /// from `.scratch/events-mux-and-host` (the `mux` and `turns` suites above) plus the ten
 /// `.scratch/right-pane-tasks` added (128 -> 132 -> 133 -> 137 -> 138, above).
-const EXPECTED_CASES = 141;
+/// 141 -> 142: `.scratch/readback-verbs` ticket 01 -- ONE case, `todo_read`'s icon. It pins
+/// the read half of the task list to the SAME `ListTodoIcon` as `todo_write`, and pins the
+/// two as a pair, because a row for a tool with no arguments has nothing but its icon and
+/// its name to say which hand this call is. The DRAWING is still the browser walkthrough's.
+const EXPECTED_CASES = 142;
 
 let total = 0;
 for (const suite of SUITES) {

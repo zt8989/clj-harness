@@ -1060,7 +1060,7 @@
         {"name" {:type "string" :description "The skill's name, as listed in <skills>."}}
         [:name] t-skill))
 
-;; ------------------------------------------------------------------- todo_write
+;; --------------------------------------------------------- todo_write / todo_read
 ;;
 ;; The session's task list, and the only tool here whose subject is the run rather
 ;; than the tree. It belongs to NEITHER editing family (it touches no file), so it
@@ -1070,6 +1070,14 @@
 ;; makes two calls in one message meaningless. `sole-call-of-its-name?` is the
 ;; check, and it is the seam's own turn plan rather than anything tool-specific:
 ;; the run loop is the only place that sees a whole message (see `plan-turn`).
+;;
+;; TWO HANDS, ONE LIST. `todo_write` replaces the list and `todo_read` hands it
+;; back; both exist because the list lives in the STORE rather than in the
+;; conversation -- a compressed context, a later process and an eval all read the
+;; same row, so a model that no longer has the list in front of it needs a way back
+;; to it. The rendering and the refusal for a call with no session in scope are
+;; harness.cap.todos's (beside `items-for`, where the list is read from), so
+;; `todo_read`'s body is one line the same way this one's rules are not here either.
 
 (def ^:private todo-write-description
   (str "Record this session's task list: the items you are working through, in order,"
@@ -1120,6 +1128,30 @@
                           :required ["content" "status"]}
                   :description (str "The COMPLETE list, in order. [] clears it.")}}
         [:todos] t-todo-write))
+
+(def ^:private todo-read-description
+  (str "Read this session's task list back -- the items you are working through, in"
+       " order, with the state of each one. Use it when the list is no longer in"
+       " front of you: it belongs to the session and is stored with it, so it"
+       " outlives the run that wrote it and a later call, another process or an"
+       " eval can hand it back. "
+       "No arguments: the list is this session's, and there is no second way to ask. "
+       "The answer is one line per item, then one sentence with how many there are"
+       " and how they stand. A session that never wrote a list and a session that"
+       " cleared it get the same answer."))
+
+(defn- t-todo-read
+  "`todo_read`'s body. The answer -- and the refusal for a call with no session in
+  scope -- is harness.cap.todos's, beside `items-for`, which is where the list is
+  read from in the first place."
+  [_]
+  (todos/read-back kernel-tools/*thread-id*))
+
+(register! "todo_read"
+  ;; NO PARAMETERS, and said rather than left out: the list belongs to the session, so
+  ;; there is no second way to ask for it. `{}` and `[]` are what a schema with
+  ;; nothing to declare looks like -- the tool takes an empty object of arguments.
+  (tool todo-read-description {} [] t-todo-read))
 
 ;; ------------------------------------------------------------------ web_fetch
 ;;

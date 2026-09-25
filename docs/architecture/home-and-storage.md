@@ -263,7 +263,7 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
 
 ### 任务清单的表
 
-`todos` 装**一个会话的待办**（`harness.cap.todos`，写它的工具是 `todo_write`）：
+`todos` 装**一个会话的待办**（`harness.cap.todos`，写它的工具是 `todo_write`，读它的是 `todo_read`）：
 
 | 表 | 装什么 |
 |---|---|

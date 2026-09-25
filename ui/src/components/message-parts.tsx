@@ -303,6 +303,7 @@ const TOOL_ICONS: Record<string, ElementType> = {
   bash: SquareTerminalIcon,
   eval: BracesIcon,
   skill: SparklesIcon,
+  todo_read: ListTodoIcon,
   todo_write: ListTodoIcon,
   web_fetch: GlobeIcon,
   web_search: TelescopeIcon,

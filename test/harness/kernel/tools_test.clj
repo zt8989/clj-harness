@@ -233,7 +233,7 @@
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
       (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_output"
-              "read" "replace" "skill" "todo_write" "undo_last_replace" "web_fetch"
+              "read" "replace" "skill" "todo_read" "todo_write" "undo_last_replace" "web_fetch"
               "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
@@ -241,7 +241,7 @@
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
       (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
-              "skill" "todo_write" "web_fetch" "web_search" "write"]
+              "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project

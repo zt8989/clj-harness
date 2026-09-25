@@ -1,10 +1,16 @@
 (ns harness.cap.todos-test
-  "`todo_write`: a session's task list, and the two claims worth pinning about it.
+  "`todo_write` / `todo_read`: a session's task list, and the claims worth pinning
+  about it.
 
   IT IS IN THE STORE, which no in-process assertion can prove on its own -- a list
   kept in a map would pass every test in this file except the one that opens the
   database from ANOTHER PROCESS. So that case exists: one JVM writes, a second one
   reads, and the answer travels through a file.
+
+  IT IS THE SAME LIST EITHER WAY: `todo_write` is answered with how many items were
+  stored, `todo_read` with the items themselves -- one row each, in the order they
+  were written -- and a list that was cleared answers exactly what a list that was
+  never written answers.
 
   IT IS REPLACED RATHER THAN APPENDED, which is what makes it state (harness.infra.db
   keeps what can be rewritten) and what makes a message with two writes in it
@@ -152,6 +158,100 @@
         (is (= [{:content "survives a restart" :status "in_progress"}]
                (edn/read-string (slurp out :encoding "UTF-8")))
             "a process that never saw the write reads the list out of the store"))
+      (finally
+        (doseq [d [dir uhome]] (support/wipe-tree! d))))))
+
+;; ------------------------------------------------------------- reading it back
+
+(deftest a-written-list-reads-back-in-order-with-its-statuses
+  ;; The order is the list's own, so it is compared as one: one row per item, in the
+  ;; order it was written, then the total and the split in `render`'s vocabulary.
+  (todos/write! tid [{:content "read the code" :status "pending"}
+                     {:content "write the test" :status "in_progress"}
+                     {:content "run it" :status "completed"}])
+  (let [{:keys [content error]} (call "todo_read" {})]
+    (is (false? error) content)
+    (is (= ["- [ ] read the code"
+            "- [~] write the test"
+            "- [x] run it"
+            "3 items (1 in progress, 1 completed)."]
+           (str/split-lines content)))))
+
+(deftest a-list-that-was-never-written-and-a-cleared-one-answer-the-same
+  ;; 'No list' and 'an empty list' are two facts in the store and ONE answer to a
+  ;; reader (`items-for` already made them one), so the read does not invent a second
+  ;; sentence to tell them apart.
+  (let [{never :content :keys [error]} (call "todo_read" {})]
+    (is (false? error))
+    (is (str/includes? never "empty") "the sentence says there is nothing planned")
+    (todos/write! tid [{:content "one" :status "pending"}])
+    (is (not= never (:content (call "todo_read" {})))
+        "a list with something in it does not read as empty")
+    (todos/write! tid [])
+    (is (= never (:content (call "todo_read" {}))) "写空数组之后逐字同一句")
+    (is (= (todos/render []) never)
+        "and the receipt for a cleared list says the same sentence -- one vocabulary")))
+
+(deftest a-read-changes-nothing-not-even-the-rows-timestamp
+  (todos/write! tid [{:content "one" :status "pending"}
+                     {:content "two" :status "in_progress"}])
+  (let [stamp (fn [] (:updated-at (first (db/select (str "SELECT updated_at FROM todos"
+                                                    " WHERE thread_id = ?")
+                                              tid))))
+        before (stamp)
+        first-answer (:content (call "todo_read" {}))
+        second-answer (:content (call "todo_read" {}))]
+    (is (= first-answer second-answer) "连调两次答案逐字相同")
+    (is (= before (stamp))
+        "and the row's timestamp did not move: a read writes nothing, the row included")))
+
+(deftest the-read-declares-no-parameters-and-no-read-only-claim
+  (let [spec (first (filter #(= "todo_read" (get-in % [:function :name])) (tools/specs)))]
+    (is (some? spec) "todo_read is in the table")
+    (is (= {} (get-in spec [:function :parameters :properties]))
+        "no parameters: the list belongs to the session")
+    (is (= [] (get-in spec [:function :parameters :required])))
+    (is (nil? (:read-only (get (tools/effective-tools tid) "todo_read")))
+        "and no :read-only -- an exploring subagent's range must not move")))
+
+(deftest a-read-with-no-session-in-scope-is-refused-by-name
+  (testing "the reason is the family write! refuses with"
+    (let [e (try (todos/read-back nil) nil (catch Exception e e))]
+      (is (some? e))
+      (is (= :no-session (:reason (ex-data e))))
+      (is (str/includes? (ex-message e) "todo_read")
+          "and it names the tool to call from a run")))
+  (testing "同一个句子，只有工具名不同"
+    (let [write-said (try (todos/write! nil []) nil (catch Exception e (ex-message e)))
+          read-said  (try (todos/read-back nil) nil (catch Exception e (ex-message e)))]
+      (is (string? write-said))
+      (is (= write-said (str/replace read-said "todo_read" "todo_write")))))
+  (testing "and through the seam it is a tool result, not a throw"
+    (let [{:keys [content error]} (call nil "todo_read" {})]
+      (is (true? error))
+      (is (str/includes? content "session")))))
+
+(deftest the-list-reads-back-in-another-process
+  ;; Same shape as the case above, for the same reason -- the store is the only thing
+  ;; that can answer this -- but through the READ's own answer: a second JVM renders
+  ;; the list and writes THAT to the file, so the sentence a model would read is what
+  ;; travels, not the values behind it.
+  (let [dir   (support/temp-dir "todos-read")
+        uhome (io/file (support/temp-dir "todos-read-home"))
+        out   (io/file dir "answer.txt")]
+    (try
+      (todos/write! tid [{:content "read the code" :status "pending"}
+                         {:content "write the test" :status "in_progress"}
+                         {:content "run it" :status "completed"}])
+      (let [r (in-a-fresh-jvm
+               (str "(require 'harness.cap.todos)"
+                    " (spit (System/getenv \"CLJ_HARNESS_TEST_OUT\")"
+                    " (harness.cap.todos/read-back \"todos-test\")"
+                    " :encoding \"UTF-8\")")
+               out uhome)]
+        (is (zero? (:exit r)) (str "the second JVM failed:\n" (:out r)))
+        (is (= (todos/read-back tid) (slurp out :encoding "UTF-8"))
+            "a process that never saw the write reads the same list back"))
       (finally
         (doseq [d [dir uhome]] (support/wipe-tree! d))))))
 
