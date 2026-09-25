@@ -70,4 +70,33 @@ SQLite 投影 / 崩溃恢复 / 监控）。这一份**不是照抄它**，而是
 
 - 不照抄 asyncio 的形状（本仓是 http-kit 线程池，`docs/rules/concurrency.md` 那套纪律照旧）。
 - 不在每行存 `seq`（见二.4）。
-- 不把内容投影进 SQLite（除非主人拍那一条）。
+- ~~不把内容投影进 SQLite~~ → **主人拍了：连内容一起投影**（ADR 0008）。
+
+## 主人拍的（2026-09-25）
+
+| 问题 | 拍了什么 | 落在哪 |
+|---|---|---|
+| 记录的写入同步到什么程度 | **同步 append，不 fsync、不等 ack**（fsync 三个时机：会话放下 / 退出 / 每 N 批） | **ADR 0007** |
+| SQLite 投不投影内容 | **连内容一起投影**（`messages` / `tool_calls`），推翻「库不是日志索引」 | **ADR 0008** |
+| 流式 delta | **合并成快照**（50–100ms 一次），保住「无洞的有序前缀」 | 票 03 |
+
+## 票 01 的落点，以及**必须原样保住**的东西
+
+`harness.edge.record` 的形状要改：**队列、consumer 线程、`serve!`/`consume!`/`retry!`/`start-consumer!`
+`/`stop-consumer!` 那一段退役**（ADR 0007 决策 5），`append!` 改成「拿句柄、写一行、就地交出偏移」。
+
+**四样东西一个字都不能动，动了就是另一场事故**：
+
+1. **`prepare`（`prepare-with!`）那步 seam** —— `carry-back!` 靠它「搬回来的那一段先于即将写的这一行」，
+   而 `prepare` 会**重算基线**（`re-base!`）：行号的正确性挂在这上面。
+2. **`sink`（`set-sink!`）那步 seam** —— 测试用它当探针（写进去的每个字节都看得见），
+   去掉它 `record_test` 就没法证明「一行一次写」。
+3. **文件行数（`file-lines`）与基线** —— 行号 = 基线 + 已写行数；同步之后它**当场**可用，
+   而不是「写手知道、别人猜」。
+4. **降级的读侧出口**（`degraded` + 报告出来的那句话）—— 失败现在在调用者身上被接住并记账，
+   但**读侧还要能看见并说出来**，否则「写不进去」会变成沉默。
+
+**要一起核的读侧调用点**（它们今天踩在 `pending-count`/`flushed-seq` 上）：`stats-get` 的 `:behind`、
+`harness.edge.sessions/evictable?` 的 `pending?`、`replay/fold-sofar` 与条目编号那条路。
+**判据**：`record_test` 里「一行一次写、顺序、降级、原地重试」那一族改成同步的等价说法；
+`http-test` 与 `stats-test` 全绿；一次 run 的帧循环上多加的微秒数进 `evidence/`。
