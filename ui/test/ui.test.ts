@@ -411,7 +411,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the read half of the task list to the SAME `ListTodoIcon` as `todo_write`, and pins the
 /// two as a pair, because a row for a tool with no arguments has nothing but its icon and
 /// its name to say which hand this call is. The DRAWING is still the browser walkthrough's.
-const EXPECTED_CASES = 142;
+/// 142 -> 143: `.scratch/readback-verbs` ticket 02 -- ONE case, `job_list`'s family. The four names
+/// (`job`, `job_kill`, `job_list`, `job_output`) now carry ONE icon, because they are one subject --
+/// a command nobody is waiting for -- and their rows are read together: a listing is opened, then
+/// one of its ids is addressed. Until this ticket NONE of the four had an entry, so every one of
+/// them drew the fallback's `WrenchIcon` -- 'the page does not know this tool' about tools the
+/// backend has had for months. What an icon LOOKS like is still the walkthrough's.
+const EXPECTED_CASES = 143;
 
 let total = 0;
 for (const suite of SUITES) {

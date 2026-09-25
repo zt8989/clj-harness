@@ -232,16 +232,16 @@
   ;; question whichever way it edits files.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_output"
-              "read" "replace" "skill" "todo_read" "todo_write" "undo_last_replace" "web_fetch"
-              "web_search" "write"]
+      (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_list"
+              "job_output" "read" "replace" "skill" "todo_read" "todo_write"
+              "undo_last_replace" "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
     (let [names (mapv #(get-in % [:function :name])
                       (tools/specs "tt-strrep-toolset"))]
-      (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_output" "read"
-              "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_list" "job_output"
+              "read" "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
              names)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
@@ -1151,3 +1151,47 @@
     (let [thrown (try (tools/specs t) nil (catch Exception e e))]
       (is (some? thrown) "a set in a schema must not be given an order and shipped")
       (is (str/includes? (ex-message thrown) "a set may not reach the wire")))))
+
+(deftest job-list-answers-what-is-there-and-not-one-id
+  ;; THE ONE HAND IN THIS FAMILY THAT ADDRESSES NO ID, which is its whole reason to exist: the
+  ;; model that needs it has just been born into a session (a restart, a compaction) and holds
+  ;; none of the ids `job_output` / `job_kill` would want. So this is the answer a reader gets
+  ;; when it does not know what to ask about -- and it must say enough to ask next time.
+  (let [started (:content (background "echo one; exit 0"))
+        job-id  (second (re-find #"job (j\d+) started" started))]
+    (is (some? job-id) (str "a job really started: " started))
+    (let [{:keys [content error]} (call "job_list" {})]
+      (is (false? error))
+      (testing "the row names the job, how it went, what it was, and where its record is"
+        (is (str/includes? content job-id) "the id, so the next call can address it")
+        (is (str/includes? content "this run") "and which run it belongs to")
+        (is (str/includes? content (str (home/root))) "the record's path, which is a reader's next move")
+        (is (str/includes? content "echo one; exit 0") "and the command, for a job this process holds"))
+      (testing "a job's status is its own record's last line, said the way `job_output` says it"
+        (is (re-find #"\[(exit [^\]]*|stopped|running)\]" content)))
+      (testing "and the answer counts what it drew"
+        (is (re-find #"\d+ records?: \d+ still running, \d+ ended\." content))))
+    (testing "a command that is a script reads as ONE line"
+      ;; ITS OWN SESSION, because this namespace's home is shared by every case in it and a
+      ;; session's listing is every record it has: a fixed thread-id keeps this assertion about
+      ;; the command's shape rather than about what the case before it started.
+      (let [t "jt-list-script"
+            started (:content (background t "echo one &&\n  echo two"))
+            job-id  (second (re-find #"job (j\d+) started" started))
+            drawn   (:content (tools/run! {:function {:name "job_list"
+                                                     :arguments (json/write-str {})}}
+                                           t))]
+        (is (some? job-id))
+        (is (str/includes? drawn "echo one && echo two") "the newline folded to a space")
+        (is (not (str/includes? drawn "echo one &&\n"))
+            "and no row in the answer is a wrapped command")))
+    (testing "the cap says how many it left out, and where the rest are"
+      (with-redefs [jobs/max-listed-records 1]
+        (let [drawn (:content (call "job_list" {}))]
+          (is (str/includes? drawn "more not listed"))
+          (is (str/includes? drawn (str (home/root))) "under the configuration home, where the rest are"))))
+    (testing "a session with nothing at all gets the sentence `unknown-job` refuses with"
+      (let [answer (:content (tools/run! {:function {:name "job_list"
+                                                   :arguments (json/write-str {})}}
+                                         "jt-list-nothing"))]
+        (is (= jobs/no-jobs-line (str/trim answer)))))))

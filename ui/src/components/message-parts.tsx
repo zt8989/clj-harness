@@ -155,6 +155,7 @@ import {
   FileTextIcon,
   FolderSearchIcon,
   GlobeIcon,
+  HourglassIcon,
   ListTodoIcon,
   LoaderIcon,
   PencilIcon,
@@ -301,6 +302,16 @@ const TOOL_ICONS: Record<string, ElementType> = {
   grep: SearchIcon,
   glob: FolderSearchIcon,
   bash: SquareTerminalIcon,
+  // THE JOB FAMILY CARRIES ONE HAND: `job` starts, `job_output` reads, `job_kill` stops,
+  // `job_list` lists. They are four names for one subject -- a command nobody is waiting for --
+  // and their rows appear together (a listing is read, then one of its ids is addressed), so
+  // four different icons would read as four unrelated tools. They had NO entry at all until
+  // `job_list` arrived (`WrenchIcon`'s fallback said 'the page does not know this tool' about
+  // tools the backend has had for months), and half a family would be the worse half-measure.
+  job: HourglassIcon,
+  job_kill: HourglassIcon,
+  job_list: HourglassIcon,
+  job_output: HourglassIcon,
   eval: BracesIcon,
   skill: SparklesIcon,
   todo_read: ListTodoIcon,

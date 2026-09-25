@@ -1041,6 +1041,83 @@
                                       jobs/job-output-default-timeout-ms ".")}}
         [:job] t-job-output))
 
+;; -------------------------------------------------------------------- job_list
+;;
+;; THE FAMILY'S FOURTH HAND, and the first whose subject is not a single id: `job` starts one,
+;; `job_output` reads one, `job_kill` stops one -- all three ADDRESS an id the model already
+;; holds -- while a model that has lost it (a compaction, a restart, a turn that scrolled away)
+;; has nothing to address at all. This is the door back to it, and it opens on two things at
+;; once: the jobs this process is still holding, and the records earlier runs left in the same
+;; directory.
+
+(def ^:private job-list-description
+  (str "List this session's background jobs and the records earlier runs left behind, one row"
+       " per RECORD: the id, which run it was (`this run`, or the stamp in its filename), how it"
+       " went, and where the record is -- plus the command, for a job THIS process still holds. "
+       "Ids beginning with `j` are JOBS (something to read, wait for, stop); ids beginning with"
+       " `c` are records a FOREGROUND call spilled (`bash` keeps one when its output did not fit"
+       " the answer) -- they have no job behind them, so nothing can be stopped and no id can be"
+       " addressed, and the row says which kind it is. "
+       "A row without its command says so rather than leaving a blank: a record holds what the"
+       " command SAID, and only this process's own entry ever had the command itself. "
+       "The status is the record's own last line (`[exit N]` / `[stopped]`), or `[running]`"
+       " while it is still being written -- the same words `job_output` prints, from the same"
+       " place -- and `[exit ?]` for a record whose run went away without leaving one. "
+       "Jobs that are still RUNNING come first, then the rest newest first; at most "
+       jobs/max-listed-records " rows are drawn, and the answer says how many it left out. "
+       "READ-ONLY: nothing here deletes, moves or rewrites a record. Use it when you do not have"
+       " an id in hand; use `job_output` once you do."))
+
+(defn- record-row
+  "One row of `job_list`, as the line a model reads.
+
+  THE TWO KINDS OF ID SHARE ONE COLUMN and the row does not repeat which is which: the prefix
+  already says it (`j*` a job, `c*` a foreground record), and one spelling of that is enough.
+
+  THE RUN IS NAMED FOR WHAT IT IS: this process's stamp reads `this run`, because the raw stamp
+  (`20260924T193221314-5376`) is a filename fragment whose only job is to be unique. ANOTHER
+  run's stamp is printed raw, because a reader who wants to go looking in that directory has
+  nothing else to go on."
+  [row]
+  (str (:id row)
+       " · " (if (:this-run? row) "this run" (:run row))
+       " · " (:status row)
+       " · " (if-let [command (:command row)]
+               (jobs/command-line command)
+               "(no command kept -- a record holds what it said)")
+       " · " (:path row)))
+
+(defn- t-job-list
+  "`job_list`'s body: the rows harness.cap.jobs reads off the session's own directory, as the
+  answer a model reads. Which files, in which order, and what each one's status is are that
+  module's; what is here is the shape.
+
+  IT IS THE ONE ANSWER IN THIS FAMILY THAT ADDRESSES NO ID, and that is its whole reason to
+  exist: the other three hands all need one, and a model that has just been born into a session
+  (a restart, a compaction) has none."
+  [_]
+  (let [rows (jobs/records-for kernel-tools/*thread-id*)]
+    (if (empty? rows)
+      jobs/no-jobs-line
+      (let [shown   (vec (take jobs/max-listed-records rows))
+            hidden  (- (count rows) (count shown))
+            running (count (filter :running? rows))
+            ;; THE CAP SAYS SO, AND SAYS WHERE TO LOOK: a listing that stopped at fifty rows
+            ;; without a word would be a listing that lies about how much there is.
+            more    (when (pos? hidden)
+                      (str "\n(" hidden " more not listed; the whole directory is "
+                           (jobs/records-dir kernel-tools/*thread-id*) ")"))]
+        (str (str/join "\n" (map record-row shown))
+             "\n"
+             (count rows) " record" (when (not= 1 (count rows)) "s")
+             ": " running " still running, " (- (count rows) running) " ended."
+             more)))))
+
+(register! "job_list"
+  ;; NO PARAMETERS, said rather than left out: the question is what this session HAS, and there
+  ;; is no second way to ask it -- `todo_read`'s shape, and for the same reason.
+  (tool job-list-description {} [] t-job-list))
+
 (register! "eval"
   (tool "Evaluate Clojure in this process. Defs persist across calls."
         {"code" {:type "string" :description "Clojure source."}}

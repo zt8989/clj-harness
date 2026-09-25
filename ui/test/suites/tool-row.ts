@@ -71,6 +71,20 @@ const cases: Case[] = [
       expect(iconTable()).toMatch(/^\s*todo_write: ListTodoIcon,$/m);
     },
   },
+  {
+    name: "the-job-family-carries-one-hand",
+    run: async () => {
+      // FOUR NAMES, ONE SUBJECT: a command nobody is waiting for. `job_list` is the door back
+      // to the other three (a listing is read, then one of its ids is addressed), so a family
+      // whose rows sat together in one transcript must not read as four unrelated tools.
+      // BEFORE THIS TICKET none of the four had an entry at all, which is the fallback's
+      // sentence -- `WrenchIcon`, 'the page does not know this tool' -- said about tools the
+      // backend has had for months: half a family would have been the worse half-measure.
+      for (const name of ["job", "job_kill", "job_list", "job_output"]) {
+        expect(iconTable()).toMatch(new RegExp(`^\\s*${name}: HourglassIcon,$`, "m"));
+      }
+    },
+  },
 ];
 
 export const toolRowSuite: Suite = { name: "tool-row", cases };

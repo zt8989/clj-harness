@@ -163,6 +163,17 @@
              #(or % (str (format "%1$tY%1$tm%1$tdT%1$tH%1$tM%1$tS%1$tL" (java.util.Date.))
                           "-" (.pid (java.lang.ProcessHandle/current)))))))
 
+(defn records-dir
+  "The directory THREAD-ID's records live in, under the configuration home:
+  `<root>/jobs/<session>/`.
+
+  ONE PLACE BUILDS IT, for the reason `record-path` below gives about the FILE: whoever writes
+  into that directory and whoever lists it have to mean the same place, or a listing would be
+  an answer about somewhere else. PUBLIC, unlike `record-path`, because a listing quotes it --
+  the one line that says where the records which did not fit in an answer can be found."
+  [thread-id]
+  (io/file (home/root) "jobs" (home/sanitize thread-id)))
+
 (defn- record-path
   "Where THREAD-ID's ID keeps its record, under the configuration home:
   `<root>/jobs/<session>/<id>-<process tag>.log`.
@@ -176,13 +187,18 @@
   `process-tag` gives: a record
   that outlives its process must not be writable-over by the next one."
   [thread-id id]
-  (str (io/file (home/root) "jobs" (home/sanitize thread-id)
-                (str id "-" (process-tag) ".log"))))
+  (str (io/file (records-dir thread-id) (str id "-" (process-tag) ".log"))))
 
 (defn- known-ids
   "This session's job ids, for a refusal that says what the caller could have meant."
   [thread-id]
   (vec (sort (keys (:jobs (get @registry thread-id))))))
+
+(def no-jobs-line
+  "The sentence for a session with nothing to show. ONE SPELLING, TWO READERS: `unknown-job`
+  refuses with it, and the `job_list` face answers with it -- both are the same fact about the
+  same session, so a model that has read one has read the other."
+  "This session has no background jobs.")
 
 (defn- unknown-job
   "The refusal for a job id this session does not have. Named, with the ids that DO
@@ -193,7 +209,7 @@
     (ex-info (str "unknown job: " job-id ". "
                   (if (seq ids)
                     (str "This session's jobs are " (str/join ", " ids) ".")
-                    "This session has no background jobs.")
+                    no-jobs-line)
                   " A job lives only as long as this harness process; its RECORD does not -- the"
                   " file is still on disk.")
              {:reason :unknown-job :job job-id :known ids})))
@@ -1087,6 +1103,110 @@
                 :status (status-of job)
                 :startedAt (:started-at job)
                 :path (:path job)}))))
+
+;; ----------------------------------------------------------- the listing of RECORDS
+;;
+;; THE OTHER LISTING, AND THE OTHER QUESTION. `listing` above answers about JOBS: what this
+;; process is running right now, which is what a pane draws and what a person can stop. THIS
+;; answers about RECORDS: every file this session has under `jobs/`, the ones an earlier process
+;; left behind included, and the `c*` files a foreground `bash` call spilled. Two readers with two
+;; needs -- a pane watches something, while a model whose context has forgotten a job goes
+;; looking for what a command SAID -- and the difference shows up in the `c*` files: they are
+;; records with no job behind them (`spill!`), so nothing can be stopped and no id can be
+;; addressed, which is exactly why the pane does not draw them and this does.
+
+(def max-listed-records
+  "How many rows a listing draws. A NAMED `def` rather than a constant because a test binds it
+  down to something a case can reach -- the cap is the same code either way, so what a test
+  exercises is the judgement and not a miniature of it (the rule `record-tree-budget-bytes`
+  states)."
+  50)
+
+(def max-command-chars
+  "How much of a command one row may carry before it is clipped (`command-line`). Long enough
+  that an ordinary command is whole, short enough that a script does not push the rest of the
+  listing out of the answer."
+  200)
+
+(defn- record-file
+  "What F's NAME says -- `{:id .. :run ..}` -- or nil when the name is not one this module
+  writes.
+
+  SPLIT ON THE FIRST DASH: an id never has one (`j1`, `c3`) and the run stamp always does (a
+  clock and a pid), so that seam is the only unambiguous one. A FILE THAT DOES NOT PARSE IS NOT
+  A RECORD: a file somebody put in this directory by hand is their business, and inventing an id
+  for it would put a row in front of the model that addresses nothing."
+  [^java.io.File f]
+  (let [n (.getName f)]
+    (when (str/ends-with? n ".log")
+      (let [stem (subs n 0 (- (count n) 4))
+            i    (str/index-of stem "-")]
+        (when (and i (pos? i) (< (inc i) (count stem)))
+          {:id (subs stem 0 i) :run (subs stem (inc i))})))))
+
+(defn records-for
+  "Every record THIS SESSION has under the configuration home, as
+  `[{:id :run :this-run? :held? :running? :status :command :path :bytes :modified-at}]`.
+
+  ONE ROW PER FILE, NOT ONE PER ID. `j1` of this run and `j1` of the run before are two records,
+  and the run stamp in the name is what tells them apart (`process-tag`'s whole reason).
+
+  A JOB THAT IS STILL RUNNING COMES FIRST, and the rest follow NEWEST FIRST. `holding an entry`
+  and `still running` are TWO FACTS and only the second one is why the order matters: a finished
+  job keeps its entry until the process goes (`stop!`), so ordering by that would put last
+  night's records below this morning's for no reason -- while a job that is running MUST NOT be
+  pushed out by the cap, and a quiet job's record has an old mtime however alive it is.
+
+  `:command` IS ONLY THERE FOR A JOB THIS PROCESS HOLDS. The entry is the only place a command
+  ever lived: a record carries what the command SAID (`spill!`), and the run that could have
+  answered is gone. A row without one says so in the answer, rather than leaving a blank that
+  reads like an empty command.
+
+  DIRECT CHILDREN ONLY, and that is what makes a session-less caller safe: the registry's key
+  may be nil (`job` and `job_output` both answer for one, and `record-path` files those records
+  at the `jobs/` root), so a recursive walk here would answer about EVERY session this home has
+  ever run. One directory, one level, and the files in it are the answer.
+
+  IT ONLY READS. Nothing here deletes, moves, re-creates or repairs a record: the tree's one
+  collector is `prune-records!`, and it is nobody else's business."
+  [thread-id]
+  (let [dir   (records-dir thread-id)
+        held  (into {} (map (juxt :path identity)) (vals (get-in @registry [thread-id :jobs])))
+        stamp (process-tag)
+        files (if (.isDirectory dir) (filter #(.isFile ^java.io.File %) (.listFiles dir)) [])]
+    (->> files
+         (keep (fn [^java.io.File f]
+                 (when-let [{:keys [id run]} (record-file f)]
+                   (let [path (str f)
+                         job  (get held path)
+                         status (if job (status-of job) (or (ending-of path) "[exit ?]"))]
+                     {:id id
+                      :run run
+                      :this-run? (= run stamp)
+                      :held? (some? job)
+                      :running? (= running-status status)
+                      :status status
+                      :command (:command job)
+                      :path path
+                      :bytes (.length f)
+                      :modified-at (.lastModified f)}))))
+         (sort-by (fn [row] [(if (:running? row) 0 1) (- (:modified-at row)) (:path row)]))
+         vec)))
+
+(defn command-line
+  "COMMAND as ONE line, clipped to `max-command-chars` with a note of what was left out.
+
+  ONE LINE, because a command may be a script and a listing that wrapped one row into forty
+  would stop being a listing. CLIPPED WITH A NOTE -- and this is the OTHER CALL from `notice`,
+  which hands the command over UNCLIPPED because it is a reminder whose whole job is to be
+  recognisable; a row here is a door, the job still holds the command, and `job_output` is where
+  a reader goes next."
+  [command]
+  (let [one (str/trim (str/replace (str command) #"\s+" " "))]
+    (if (<= (count one) max-command-chars)
+      one
+      (str (subs one 0 max-command-chars)
+           "… (+" (- (count one) max-command-chars) " chars)"))))
 
 ;; ---------------------------------------------------- telling the model it is over
 ;;

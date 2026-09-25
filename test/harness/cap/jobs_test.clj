@@ -804,3 +804,76 @@
              (* 2 jobs/answer-budget-bytes))
           "and it is inside the budget"))))
 
+(deftest a-listing-of-records-is-one-row-per-file
+  ;; WHAT THIS ANSWERS ABOUT IS THE FILE, not a job. `job`, `job_output` and `job_kill` all
+  ;; address an id the caller already holds, and the model this listing exists for holds none --
+  ;; a compaction, a restart, a turn that scrolled away. So it reads the session's own
+  ;; directory, one row per FILE: this process's jobs, the records earlier runs left behind, and
+  ;; the `c*` a foreground call spilled.
+  (let [root (support/temp-dir "jobs-records")]
+    (try
+      (binding [home/*root-override* root]
+        (let [t "jt-rec"
+              {done-id :id done-path :path} (jobs/start! t {:command "echo one; exit 0"})
+              {live-id :id live-path :path} (jobs/start! t {:command "sleep 30"})]
+          (record-until done-path #(re-find #"\[exit" %) 10000)
+          (testing "every job of this session is a row, and its status is its own record's ending"
+            (let [rows (jobs/records-for t)]
+              (is (= #{done-id live-id} (set (map :id rows))))
+              (is (= "[exit 0]" (:status (first (filter #(= done-id (:id %)) rows)))))
+              (is (= "[running]" (:status (first (filter #(= live-id (:id %)) rows))))
+                  "no last line means it is still being written")
+              (is (every? :this-run? rows) "both were started by this process")
+              (is (= live-path (:path (first rows))) "a job this process still holds comes first")))
+          (testing "a stopped job says so"
+            (jobs/stop! t live-id)
+            (is (= "[stopped]"
+                   (:status (first (filter #(= live-id (:id %)) (jobs/records-for t)))))))
+          (testing "a foreground record is a row too, with no command to show"
+            (let [spilled (jobs/spill! t "foreground overflow\n[exit 0]\n")
+                  row (first (filter #(= spilled (:path %)) (jobs/records-for t)))]
+              (is (some? row) "the spilled record is listed")
+              (is (str/starts-with? (:id row) "c") "and its id says it is a foreground record")
+              (is (nil? (:command row)) "a spill has no job behind it, so there is no command")
+              (is (= "[exit 0]" (:status row)) "the status is still the record's own ending")))
+          (testing "another run's record is a row of its own -- same id, another stamp"
+            ;; A SECOND PROCESS IS NOT NEEDED TO MAKE THAT FILE: the stamp is IN THE NAME, and a
+            ;; file written by hand is what the next run finds. What is under test is the ROW.
+            (let [old (io/file (jobs/records-dir t) (str done-id "-20250101T000000000-9999.log"))]
+              (spit old "old words\n[exit 3]\n" :encoding "UTF-8")
+              (let [same-id (filter #(= done-id (:id %)) (jobs/records-for t))]
+                (is (= 2 (count same-id)) "one row per file: two runs of one id are two records")
+                (is (= 2 (count (distinct (map :run same-id)))) "told apart by the stamp")
+                (is (= 1 (count (filter :this-run? same-id))) "and only one of them is this run")
+                (is (= "[exit 3]" (:status (first (remove :this-run? same-id)))))
+                (is (.exists old) "nothing was deleted, moved or rewritten by listing it"))))
+          (testing "another session's records are not this session's"
+            (jobs/start! "jt-other" {:command "sleep 30"})
+            (is (empty? (filter #(str/includes? (:path %) "jt-other") (jobs/records-for t)))))
+          (testing "a listing is read-only: the tree is byte for byte what it was"
+            (let [tree (fn [] (->> (file-seq (jobs/records-dir t))
+                                   (filter (fn [^java.io.File f] (.isFile f)))
+                                   (map (fn [^java.io.File f] [(.getName f) (.length f)]))
+                                   sort vec))
+                  before (tree)]
+              (jobs/records-for t)
+              (is (= before (tree)))))
+          (jobs/shutdown!))
+        (testing "a session-less caller sees the root's own files, never another session's"
+          ;; THE REGISTRY'S KEY MAY BE NIL -- `job` files such a session's records at the `jobs/`
+          ;; root -- so that root IS its directory. A walk that went one level deeper would answer
+          ;; about every session this home has ever run, which is why it does not.
+          (is (not-any? (fn [row] (str/includes? (:path row) "jt-")) (jobs/records-for nil))
+              "a session's records live one directory down and stay there")))
+      (finally (support/wipe-tree! root)))))
+
+(deftest a-command-reads-as-one-line-and-says-what-was-cut
+  (testing "a script reads as one line, whatever shape it was written in"
+    (is (= "echo one && echo two" (jobs/command-line "echo one &&\n  echo two"))))
+  (testing "and a long one is clipped, with the count of what went"
+    (let [long (apply str (repeat 300 "x"))
+          cut  (jobs/command-line long)]
+      (is (< (count cut) (count long)))
+      (is (str/starts-with? cut (subs long 0 jobs/max-command-chars)))
+      (is (str/ends-with? cut (str "(+" (- 300 jobs/max-command-chars) " chars)"))))))
+
