@@ -427,6 +427,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// bar on screen, and whether the answer GROWS on screen, are the browser walkthrough's.
 /// THE NUMBER IS ASSERTED AGAINST THE SUITES THEMSELVES, which is what makes a fork's drift
 /// visible: 146 is what they contribute, so a suite dropped from `SUITES` still fails.
+/// AND ONE CASE THIS BRANCH WROTE IS NOT HERE: it mirrored upstream's in-body dot so that only
+/// one of the two was ever on screen -- two rules chasing one fact, which the owner's second
+/// report (two dots) showed does not hold. The body's dot is switched OFF instead
+/// (`indicator="never"` in `thread.aui.tsx`) and the case went with the rule; the count below
+/// is therefore unchanged.
 const EXPECTED_CASES = 146;
 
 let total = 0;
