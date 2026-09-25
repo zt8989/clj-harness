@@ -5953,6 +5953,58 @@
                "and the window says what `sofar` says about the settled conversation")))
        (testing "and the run kept exactly ONE terminal frame"
          (is (= 1 (count (terminals "sofar-a")))))))))
+(deftest a-run-that-is-being-written-tells-the-window-watcher-the-record-grew
+  ;; A PAGE THAT RELOADED INTO A RUNNING SESSION HOLDS A WINDOW AND NOTHING ELSE, and a
+  ;; window reads the RECORD while a run of the session is in flight (memory folds a run's
+  ;; frames only when the run ENDS). The file grows one line per frame -- so the doorbell has
+  ;; to ring for that growth, and it used to ring only for the moments the SESSION TABLE
+  ;; changed: the action's entries at the start, the run's registration, and the fold at the
+  ;; terminal. Measured in a browser (`.scratch/refreshed-turn-keeps-growing`): the answer
+  ;; froze at the moment of the reload and arrived in one lump when the run ended.
+  ;;
+  ;; THE RUN IS HELD AT THE TOOL SEAM so that there is a moment to look at: by then the
+  ;; model's own frames are on the record and the run is plainly still going.
+  (wipe-dir! sofar-dir-2)
+  (with-server
+   "grew-a"
+   (fn []
+     (bind! "grew-a" sofar-dir-2)
+     (let [gate (support/window-gate #'tools/run! 20000)
+           ;; WHAT EACH RING SAW, in the order the doorbell rang: the record's own state (how
+           ;; many frame rows this run has written by now) and whether the run was going.
+           rung (atom [])
+           watching (sessions/watch! "grew-a"
+                                     (fn [_ ev]
+                                       (swap! rung conj {:event   ev
+                                                          :frames  (count (log-frames "grew-a"))
+                                                          :running (sessions/running? "grew-a")})))
+           sock (fire-run! "grew-a")]
+       (try
+         (is (until #(and (pos? (long ((:entered gate))))
+                          (some (fn [f] (= "TOOL_CALL_START" (:type f))) (log-frames "grew-a")))
+                 5000)
+             "the model's turn is on the record and its call is held at the seam")
+         (testing "and the doorbell rang for THAT growth, while the run was still going"
+           ;; THE ASSERTION THAT FAILS WITHOUT THE FIX: every `:entries` ring a watcher got
+           ;; before this was one of two moments (the action's entries, the run's
+           ;; registration), and the record held no frame of this run at either of them. It
+           ;; is the frames a window draws, so a reader told only about those two watches
+           ;; the turn stop moving.
+           (is (some (fn [r] (and (= {:kind :entries} (:event r))
+                                  (:running r)
+                                  (pos? (:frames r))))
+                     @rung)
+               (str "the watcher was rung while the record grew, not only at the ends: "
+                    (pr-str @rung)))
+           ;; AND MORE THAN ONCE, because the record grew more than once: one ring per tick
+           ;; of `harness.kernel.session/growth-interval-ms` is the rate a live window is
+           ;; refreshed at.
+           (is (<= 2 (count (filter (fn [r] (and (= {:kind :entries} (:event r))
+                                                 (:running r)))
+                                    @rung)))
+               "a run that is writing its answer is not one doorbell and then silence"))
+         (finally (.close sock) ((:release gate)) (sessions/unwatch! "grew-a" watching)))))))
+
 
 (deftest a-parked-session-reads-as-parked-and-says-what-it-waits-on
   ;; THE SECOND WAY A CONVERSATION IS UNFINISHED, and the one a client has to treat

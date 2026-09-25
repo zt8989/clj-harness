@@ -478,6 +478,62 @@
       (sessions/append! tid "r3" [{:id "u3" :role "user" :content "quiet"}])
       (is (= [] @rings)))))
 
+(deftest the-record-growing-rings-a-watcher-and-only-a-watched-one
+  ;; A WINDOW READS THE RECORD WHILE A RUN OF THE SESSION IS IN FLIGHT (memory folds a run's
+  ;; frames only when the run ENDS), and the file grows one line per frame. So 'a line was
+  ;; written' is a fact a connected reader has to be told -- and the telling waits for a TICK
+  ;; (`record-grew!` marks, `ring-growth!` rings), because what a ring costs is that reader
+  ;; re-reading the whole conversation and the mark is put there by the run's own frame loop.
+  (let [tid   "t-grow"
+        rings (atom [])
+        f     (fn [id event] (swap! rings conj [id event]))]
+    (sessions/record-grew! tid)
+    (is (= [] @rings) "a mark is not a ring: nothing is told until the tick")
+    (sessions/ring-growth!)
+    (is (= [] @rings) "and a conversation nobody is watching is not rung at all")
+    (sessions/watch! tid f)
+    (try
+      (sessions/record-grew! tid)
+      (sessions/ring-growth!)
+      (is (= [[tid {:kind :entries}]] @rings)
+          "a watcher is told to come and read -- which is what a window needs mid-run")
+      ;; A BURST IS ONE RING: a run's frames arrive in bursts, and every line of one burst is
+      ;; the same news to a reader.
+      (reset! rings [])
+      (dotimes [_ 5] (sessions/record-grew! tid))
+      (sessions/ring-growth!)
+      (is (= 1 (count @rings)))
+      (testing "and the tick has nothing left to say once it has drained"
+        (reset! rings [])
+        (sessions/ring-growth!)
+        (is (= [] @rings)))
+      (finally (sessions/unwatch! tid f)))))
+
+(defn- until*
+  "Whether F becomes true within MS. The tick below is a CLOCK's, so a case that waited for
+  it has to be patient by a fixed amount rather than by an exact one."
+  [f ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (cond (f) true
+            (< (System/currentTimeMillis) deadline) (do (Thread/sleep 20) (recur))
+            :else false))))
+
+(deftest the-growth-doorbell-runs-on-the-clocks-own-tick
+  ;; THE OTHER HALF: the mark is only worth making if something rings it. `start!` schedules
+  ;; `ring-growth!`, and this case asserts the SCHEDULE rather than the fn -- a `start!` that
+  ;; forgot the line would leave every mark accumulating and every reloaded page frozen.
+  (let [tid   "t-grow-clock"
+        stop  (sessions/start!)
+        rings (atom [])
+        f     (fn [_ _] (swap! rings conj :rung))]
+    (sessions/watch! tid f)
+    (try
+      (sessions/record-grew! tid)
+      (is (true? (until* #(seq @rings) 2000))
+          "the clock rang for what grew, with nobody having to ask it to")
+      (finally (sessions/unwatch! tid f) (stop)))))
+
 (deftest the-generation-is-the-token-of-the-claim-that-holds-the-session
   ;; A window is only meaningful while the SAME claim serves the conversation (ADR 0003
   ;; decision 6), so the generation IS the claim's token rather than a second thing kept

@@ -417,7 +417,17 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// one of its ids is addressed. Until this ticket NONE of the four had an entry, so every one of
 /// them drew the fallback's `WrenchIcon` -- 'the page does not know this tool' about tools the
 /// backend has had for months. What an icon LOOKS like is still the walkthrough's.
-const EXPECTED_CASES = 144;
+/// 142 -> 144: the tree this branch forked from added TWO cases of its own before the merge --
+/// `the-job-family-carries-one-hand` (the note just above) and, in the `id` suite,
+/// `no-source-file-reaches-for-the-platform-s-mint` (the mobile mint that is not `crypto.randomUUID`).
+/// 144 -> 146: `.scratch/refreshed-turn-keeps-growing` -- TWO cases, one per ticket. Ticket 01
+/// is the window's merge (`a same id that comes back longer grows in place`), ticket 02 the
+/// turn's furniture while it is still being written (`a turn the server is writing wears no
+/// action bar`). Both are arithmetic over values the page holds; whether the dot REPLACES the
+/// bar on screen, and whether the answer GROWS on screen, are the browser walkthrough's.
+/// THE NUMBER IS ASSERTED AGAINST THE SUITES THEMSELVES, which is what makes a fork's drift
+/// visible: 146 is what they contribute, so a suite dropped from `SUITES` still fails.
+const EXPECTED_CASES = 146;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -347,6 +347,58 @@
     (try (f (str thread-id) event) (catch Throwable _ nil)))
   nil)
 
+;; --------------------------------------------------- the record's own doorbell
+;;
+;; A WATCHER READS THE RECORD WHILE A RUN OF THE SESSION IS IN FLIGHT, and the record grows
+;; ONE LINE AT A TIME. Memory folds a run's frames only when the run ENDS ('half an answer
+;; is not a turn'), so the file is what 'what has arrived' means mid-run -- which is why
+;; the window route answers from it -- but 'the conversation changed' was only ever said
+;; when a run's entries were folded into THIS table. A reader that arrived mid-run (a
+;; reload is the ordinary way) therefore drew the answer as far as it had got and saw the
+;; whole of it in one lump at the terminal; measured, `dev/scratch_refresh_watch.clj`.
+;;
+;; THE ONE WRITE PATH SAYS SO, AND THE RING ITSELF WAITS FOR A TICK. `harness.edge.http/
+;; log!` is the only thing that hands a line over, and it marks the conversation here;
+;; what a ring COSTS is a reader's whole re-read of the record, so the marks of one
+;; interval collapse into one ring instead of one per line. That is also what keeps the
+;; price off the run: `log!` is called by the frame loop, and a re-read there would leave
+;; a long conversation's run waiting on its own log.
+;;
+;; A CONVERSATION NOBODY IS WATCHING IS NOT RUNG, deliberately -- the mark is dropped at
+;; the tick and a reader that subscribes later is handed the tail page instead.
+(def growth-interval-ms
+  "How often the record's growth becomes a ring.
+
+  TEN TIMES A SECOND: fast enough that a growing answer reads as a stream on the far side
+  of the wire, and slow enough that a minute of watching costs a reader sixty re-reads of
+  its conversation rather than one per token (a stream is thousands of lines)."
+  100)
+
+(defonce ^:private grown
+  ;; thread-id -> true, since the last tick. A SET, because a run's frames arrive in
+  ;; bursts and every line of one burst is the same news to a reader.
+  (atom #{}))
+
+(defn record-grew!
+  "A line for THREAD-ID has just been handed to the writer (`harness.edge.http/log!`).
+  A MARK, NOT A RING: the watchers are told on the next tick, and only if somebody is
+  watching. See `growth-interval-ms`."
+  [thread-id]
+  (swap! grown conj (str thread-id))
+  nil)
+
+(defn ring-growth!
+  "THE TICK: ring every conversation marked since the last one, if somebody is WATCHING it.
+
+  `start!` schedules it (`growth-interval-ms`) so that nothing on the run's own thread ever
+  waits on a reader's re-read, and it is public for the reason `sweep!` is: the same tick a
+  clock calls is the one a case drives, with no sleep and no patience."
+  [ ] ; no arguments
+  (let [[before _] (swap-vals! grown (fn [_] #{}))]
+    (doseq [tid before]
+      (when (seq (get @watchers tid))
+        (ring! tid {:kind :entries})))))
+
 ;; ------------------------------------------------------------------- the views
 
 (defn- model-messages
@@ -1115,18 +1167,38 @@
 
 (defonce ^:private sweeper (atom nil))
 
+(defn- stop-clock!
+  "Stop the clock S and FORGET IT, so that the next `start!` starts one again.
+
+  THE FORGETTING IS THE POINT, and it is not tidiness: a `sweeper` slot left holding a
+  stopped executor answers the next `start!` with that dead clock's stop fn, so a process
+  that stopped it -- a suite between cases, a server that was shut down and started again
+  -- could never sweep a session nor hear the record grow for the rest of its life, and
+  nothing would say so. The slot is cleared only when it still names THIS clock, so a stop
+  racing a later start cannot take the new one down."
+  [^ScheduledExecutorService s]
+  (.shutdown s)
+  (compare-and-set! sweeper s nil)
+  nil)
+
 (defn start!
-  "Start the sweeper that enforces `idle-ttl-ms`, and answer the fn that stops it.
+  "Start the sweeper that enforces `idle-ttl-ms` and the clock the record's growth is
+  rung on, and answer the fn that stops both.
 
   A BACKGROUND THREAD RATHER THAN A CHECK ON ACCESS, because a bound that only bites
   when somebody asks is not a bound: the sessions nobody asks about are exactly the ones
   that would sit there. A DAEMON thread, so a process that never stops the server still
   exits; and idempotent, so a second `start!` answers the first one's stop fn rather
   than starting a second clock (the composition root may be called more than once by a
-  test suite, which is the shape `harness.kernel.hooks/install!` has to live with too)."
-  []
+  test suite, which is the shape `harness.kernel.hooks/install!` has to live with too).
+
+  THE TWO TASKS SHARE ONE THREAD, because neither is ever in a hurry and both are the same
+  shape: look at the table, say what changed. They cannot starve each other in any way that
+  matters -- a sweep that waits behind a reader's re-read is a sweep a few milliseconds
+  late, and the thing it waits behind is a conversation that was already dirty."
+  [ ] ; no arguments
   (if-some [s @sweeper]
-    (fn [] (.shutdown ^ScheduledExecutorService s))
+    (fn [] (stop-clock! s))
     (let [s (Executors/newSingleThreadScheduledExecutor
              (reify ThreadFactory
                (newThread [_ r]
@@ -1135,5 +1207,13 @@
       (.scheduleAtFixedRate ^ScheduledExecutorService s
                             ^Runnable (fn [] (sweep! (System/currentTimeMillis)))
                             0 sweep-interval-ms TimeUnit/MILLISECONDS)
+      ;; AND THE RECORD'S OWN DOORBELL, at its own rate: see `growth-interval-ms` for why
+      ;; the ring waits for a tick instead of following every line. IT IS CAUGHT AND
+      ;; SWALLOWED because a scheduled task that throws is CANCELLED by the executor --
+      ;; and a doorbell that died on its first surprise would be silent, which is the one
+      ;; failure this whole mechanism exists to end.
+      (.scheduleAtFixedRate ^ScheduledExecutorService s
+                            ^Runnable (fn [] (try (ring-growth!) (catch Throwable _ nil)))
+                            growth-interval-ms growth-interval-ms TimeUnit/MILLISECONDS)
       (when (compare-and-set! sweeper nil s)
-        (fn [] (.shutdown ^ScheduledExecutorService s))))))
+        (fn [] (stop-clock! s))))))

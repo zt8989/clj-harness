@@ -150,6 +150,57 @@ const cases: Case[] = [
     },
   },
   {
+    name: "a-same-id-that-comes-back-longer-grows-in-place-and-a-version-is-not-a-repeat",
+    run: async () => {
+      // THE SHAPE A RELOAD LANDS IN (`.scratch/refreshed-turn-keeps-growing`): the server is
+      // still answering, so the half-written answer arrives again and again under ONE id,
+      // each time a little longer, and each time numbered by the record's last line. The
+      // id is the message's, so the second arrival is a NEW VERSION of the entry this copy
+      // holds -- it takes that entry's place, at the same position, and the draft on screen
+      // grows. Dropping it is the freeze; appending it would draw the answer twice.
+      const turn = (content: string, seq: number): WindowEntry => ({
+        seq,
+        message: { id: "m1", role: "assistant", content },
+      });
+      const start = held([entry("m0", 0), turn("one", 1)], 0, false, 1);
+
+      const grown = applied(start, appended([turn("one two three", 4)], 1, 4));
+      expect(grown.effect).toEqual({ kind: "none" });
+      expect(grown.window.entries.map((e) => (e.message as { content: string }).content)).toEqual([
+        "m0",
+        "one two three",
+      ]);
+      expect(grown.window.entries).toHaveLength(2);
+      expect(grown.window.revision).toBe(2);
+      // AND THE VERSION IS THE SERVER'S OWN: the record offset that came with it, and the
+      // cursor that offset advances.
+      expect(grown.window.entries[1]!.seq).toBe(4);
+      expect(grown.window.cursor).toBe(4);
+
+      // A VERSION AND A NEW ENTRY IN ONE FRAME, which is the ordinary mid-turn case: the
+      // answer grows AND the tool call it just made appears -- in that order, with the
+      // answer still in the position it has held all along.
+      const both = applied(grown.window, appended([turn("one two three four", 6), entry("m2", 6)], 4, 6));
+      expect(both.window.entries.map((e) => (e.message as { id: string }).id)).toEqual([
+        "m0",
+        "m1",
+        "m2",
+      ]);
+      expect((both.window.entries[1]!.message as { content: string }).content).toBe(
+        "one two three four",
+      );
+
+      // THE SAME VERSION AGAIN IS NOT AN UPDATE. A byte-identical arrival is what the old
+      // dedupe was written for (a line that had not landed), and it must still change
+      // NOTHING -- the window comes back by identity, no revision, nothing to import. That
+      // is also what keeps a quiet stretch of a run (a long tool call, where the record
+      // does not grow) from re-importing the whole conversation on every frame.
+      const same = applied(both.window, appended([turn("one two three four", 6), entry("m2", 6)], 6, 6));
+      expect(same.window).toBe(both.window);
+      expect(same.window.revision).toBe(both.window.revision);
+    },
+  },
+  {
     name: "a-frame-that-does-not-continue-is-a-hole-and-the-tail-repair-keeps-what-the-reader-has",
     run: async () => {
       const start = held([entry("m1", 0), entry("m2", 1)], 0, true, 1);

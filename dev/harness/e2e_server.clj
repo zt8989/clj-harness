@@ -47,19 +47,27 @@
             [harness.cap.providers :as providers]))
 
 (defn- script-in
-  "The script file -> {:turns [..] :thinking bool}.
+  "The script file -> {:turns [..] :thinking bool :pace-ms int}.
 
   :thinking makes the served provider a THINKING-MODE VENDOR on the way in as well
   as on the way out (see harness.fake): a request whose assistant messages do not
   carry `reasoning_content` is answered with a DeepSeek-compatible gateway's own 400.
   A suite sets it when the case is about a conversation continuing -- the defect that
-  mode reproduces only shows up on the SECOND request."
+  mode reproduces only shows up on the SECOND request.
+
+  `pace-ms` IS THE ONE THE WALKTHROUGHS NEED and the offline suite must not have: a real
+  vendor takes time, and every other test here wants its answer NOW. With a pace, a turn
+  is still being written while somebody looks at it -- which is the only way to check what
+  a page does with a turn in flight (a reload in the middle of one, most of all: see
+  `.scratch/refreshed-turn-keeps-growing`). Absent from the file means zero: no pause."
   [file]
   (let [f (io/file file)]
     (if (.exists f)
       (let [parsed (json/read-str (slurp f :encoding "UTF-8") :key-fn keyword)]
-        {:turns (vec (or (:turns parsed) [])) :thinking (boolean (:thinking parsed))})
-      {:turns [] :thinking false})))
+        {:turns    (vec (or (:turns parsed) []))
+         :thinking (boolean (:thinking parsed))
+         :pace-ms  (long (or (:pace-ms parsed) 0))})
+      {:turns [] :thinking false :pace-ms 0})))
 
 (defn- install-pin!
   "Serve EVERY thread from SCRIPT-FILE, whatever its threadId.
@@ -86,12 +94,13 @@
       (fn [thread-id]
         (when (seq (str thread-id))
           (or (get @per-thread thread-id)
-              (let [{:keys [turns thinking]} (script-in script-file)
+              (let [{:keys [turns thinking pace-ms]} (script-in script-file)
                     ;; A thinking-mode vendor comes WITH a reasoning effort: that is
                     ;; the knob that puts the REQUEST in thinking mode, and both halves
                     ;; of the rule are conditioned on it (the refusal, and the padding
                     ;; that satisfies it). Without it a case would exercise neither.
-                    provider (cond-> (fake/scripted turns {:thinking thinking})
+                    provider (cond-> (fake/scripted turns {:thinking thinking
+                                                           :pace-ms  pace-ms})
                                thinking (assoc :reasoning-effort "high"))]
                 (swap! per-thread assoc thread-id provider)
                 provider))))))))

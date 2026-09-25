@@ -181,6 +181,19 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （接得上就合、接不上就重建并从尾页重来），**读者的位置保住**；**`end` 帧 / generation 作废**
   （会话被放掉、被接管、换了进程）⇒ **重开**，并把「重开了」这句话画出来。副本手里有服务端没有的
   条目时**说得出来**（`aheadOf`），不静默丢。
+- **同一个 id 再来的那一份是「更新」，不是「重复」**（`lib/window.ts` 的 `merged`）：服务端在被回答的那一轮
+  里把**同一份半写好的回答**一遍遍给回来（run 的那一组按**记录最后一行**编号，`harness.edge.replay/entries`），
+  每给一次内容就长一段、**id 一直不变**。所以它回来时**占原来那条的位置**、把内容换成新版本——屏幕上的
+  答案因此接着长（这就是「刷新回来那一轮冻住、结束才一股脑出来」那一格）。**一模一样**地再回来（行还没落盘、
+  游标过不去）仍旧什么都不改：窗口按**原身份**返回，不 import、不重渲染。没有 id 的条目一律留着——替两条
+  无名消息认一个身份，是这一侧没有的凭据。
+- **一个正在被人写的 turn 摆的是「在写」那颗点，不是一个空位、更不是动作条**：`thread.aui.tsx` 的
+  `AssistantMessage` 在 turn 末尾这一格二选一——`WorkingDot`（就是 upstream 在「assistant 消息还没有 part」
+  时画的那颗 `●`：同一个字形、同一个脉冲、同一个 `aria-label`）或 `AssistantActionBar`。判据与 composer 的
+  门**同源**（`lib/session-status.ts` 的 `stillBeingWritten`：本页自己的 run **或**窗口说的 `running`）。
+  **这一格不能交给 upstream 的 `hideWhenRunning`**：它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是
+  看着」正是 runtime 说 false 的那一格（实测：传 `true` 照样画出来），所以是组件自己选画哪一个。一个空位和
+  动作条犯的是同一个错：都读作「写完了」。
 - **「显示更早」一次一页，而且必须锚定**：补页是 `prepend`，会把它下面的一切往下推，所以问之前量、
   答之后修（`lib/window-scroll.ts`），一次也只有一个在飞（按钮的禁用态就是这一条）。**锚点是一条
   消息的文本，不是它的 DOM 节点**：assistant-ui 按位置保留消息节点，用节点当锚会算错——量到过节点

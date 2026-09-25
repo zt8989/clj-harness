@@ -84,21 +84,76 @@ const idOf = (entry: WindowEntry): string | null => {
   return typeof message?.id === "string" ? message.id : null;
 };
 
-/// ENTRIES THE WINDOW DOES NOT ALREADY HOLD, in order.
+/// WHETHER TWO ENTRIES ARE THE SAME THING, by value. The server hands its entries over as
+/// fresh JSON on every frame, so identity says nothing; the one fact this side needs is
+/// whether what arrived is the version it is already holding, and that is a comparison of
+/// the entry as the wire spells it (its record offset and its message).
+const sameEntry = (a: WindowEntry, b: WindowEntry): boolean =>
+  a.seq === b.seq && JSON.stringify(a.message) === JSON.stringify(b.message);
+
+/// MERGE WHAT ARRIVED INTO WHAT THIS COPY HOLDS, AND SAY WHETHER ANYTHING CHANGED.
 ///
-/// THE IDENTITY IS THE MESSAGE'S OWN `:id` -- the same identity the server uses to
-/// decide whether an action's entry entered (harness.edge.sessions/append!) and the same
-/// one the record folds by. It matters here because a frame CAN repeat: an entry whose
-/// line has not landed yet has no `seq`, so the cursor cannot advance past it and the
-/// next frame reaches it again. A repeat is dropped; an entry with no id is kept,
-/// because guessing that two unnamed messages are the same one would be inventing an
-/// identity this side has no licence to invent.
-function unseen(held: readonly WindowEntry[], arriving: readonly WindowEntry[]): WindowEntry[] {
-  const known = new Set(held.map(idOf).filter((id): id is string => id !== null));
-  return arriving.filter((entry) => {
+/// THE IDENTITY IS THE MESSAGE'S OWN `:id` -- the same identity the server uses to decide
+/// whether an action's entry entered (harness.edge.sessions/append!) and the same one the
+/// record folds by. What an id is worth is TWO different answers, and getting them apart is
+/// the whole of this function:
+///
+///   a version  -- WHILE A RUN IS BEING ANSWERED, the server hands the SAME id again and
+///                again, each time a little longer: the conversation's fold numbers the
+///                run's half-written group by the record's last line
+///                (`harness.edge.replay/entries`), so every line the run writes re-sends
+///                the answer so far under the id it has had all along. That arrival is a
+///                NEW VERSION of the entry this copy holds: it takes that entry's place,
+///                at the same position, and the draft on screen grows. Dropping it is the
+///                freeze `.scratch/refreshed-turn-keeps-growing` is about; appending it
+///                would draw the same answer twice.
+///   a repeat   -- an entry whose line has not landed yet has no `seq`, so the cursor
+///                cannot advance past it and a later frame reaches it byte for byte.
+///                That one changes NOTHING: it is not a version, it is the same version,
+///                and the window is handed back untouched (no revision, no import).
+///
+/// AN ENTRY WITH NO ID IS KEPT: guessing that two unnamed messages are the same one would
+/// be inventing an identity this side has no licence to invent.
+/// `where` SAYS WHERE AN ID THIS COPY HAS NEVER SEEN GOES -- the end of the window for a
+/// delta, the front of it for a page in front (`prepended`).
+function merged(
+  held: readonly WindowEntry[],
+  arriving: readonly WindowEntry[],
+  where: "end" | "front",
+): { entries: readonly WindowEntry[]; changed: boolean } {
+  const at = new Map<string, number>();
+  held.forEach((entry, index) => {
     const id = idOf(entry);
-    return id === null || !known.has(id);
+    if (id !== null) at.set(id, index);
   });
+  // THE ARRAY IS COPIED LAZILY, so a frame that changed nothing costs no allocation and the
+  // caller can tell by identity whether there is anything to import (see `applied`).
+  let out: WindowEntry[] | null = null;
+  const additions: WindowEntry[] = [];
+  let changed = false;
+  for (const entry of arriving) {
+    const id = idOf(entry);
+    const index = id === null ? undefined : at.get(id);
+    if (index !== undefined) {
+      const current = (out ?? held)[index];
+      if (current !== undefined && !sameEntry(current, entry)) {
+        out ??= [...held];
+        out[index] = entry;
+        changed = true;
+      }
+      continue;
+    }
+    // AN ID THIS FRAME HAS ALREADY ADDED IS NOT ADDED AGAIN: the wire does not send one
+    // twice, and a second copy is exactly the duplicate an id exists to prevent. `-1` is
+    // 'seen in this frame, not in what we hold', and the lookup above reads it as absent.
+    if (id !== null) at.set(id, -1);
+    additions.push(entry);
+    changed = true;
+  }
+  if (!changed) return { entries: held, changed: false };
+  const base = out ?? held;
+  const entries = where === "front" ? [...additions, ...base] : [...base, ...additions];
+  return { entries, changed: true };
 }
 
 /// THE WINDOW AS A FRAME STATES IT, for the frames that are a whole window rather than a
@@ -130,7 +185,9 @@ export function windowFrom(frame: WindowFrame): Window {
 ///      copy holds in front of it.
 ///   4. a frame that does not continue from our cursor -- a HOLE, whose repair is the
 ///      tail page and keeps the reader's place (`align`).
-///   5. otherwise it continues, and the entries are appended.
+///   5. otherwise it continues, and the entries are MERGED -- a new one appended, one this
+///      copy already holds replaced IN PLACE by its newer version while a run writes it
+///      (`merged`).
 ///
 /// A FRAME THAT CHANGES NOTHING RETURNS THE WINDOW IT WAS GIVEN, by identity: callers
 /// use that to decide whether there is anything to import, and a feed pushes plenty of
@@ -152,20 +209,20 @@ export function applied(window: Window, frame: WindowFrame): { window: Window; e
   if (frame.type === "append" && base !== null && window.cursor !== null && base > window.cursor) {
     return { window, effect: { kind: "align" } };
   }
-  const fresh = unseen(window.entries, frame.entries ?? []);
+  const grown = merged(window.entries, frame.entries ?? [], "end");
   // THE CURSOR ONLY MOVES FORWARD AND ONLY TO A NUMBER THE SERVER SENT. A frame whose
   // entries are all still in the writer's queue carries no cursor, and the old one
   // stands: it is the honest answer to "what have I been told about".
   const cursor = newest(window.cursor, frame.cursor ?? null);
   const state = frame.state ?? window.state;
   const generation = frame.generation ?? window.generation;
-  if (fresh.length === 0 && cursor === window.cursor && state === window.state && generation === window.generation) {
+  if (!grown.changed && cursor === window.cursor && state === window.state && generation === window.generation) {
     return { window, effect: { kind: "none" } };
   }
   return {
     window: {
       ...window,
-      entries: fresh.length === 0 ? window.entries : [...window.entries, ...fresh],
+      entries: grown.changed ? grown.entries : window.entries,
       cursor,
       generation,
       state,
@@ -182,10 +239,10 @@ export function applied(window: Window, frame: WindowFrame): { window: Window; e
 /// The server cuts pages at arrival boundaries, so the page ends exactly where this
 /// copy begins and there is nothing to reconcile (ADR 0003 decision 4).
 export function prepended(window: Window, frame: WindowFrame): Window {
-  const fresh = unseen(window.entries, frame.entries ?? []);
+  const { entries } = merged(window.entries, frame.entries ?? [], "front");
   return {
     ...window,
-    entries: [...fresh, ...window.entries],
+    entries,
     baseSeq: frame.baseSeq ?? window.baseSeq,
     hasMore: frame.hasMore ?? false,
     generation: frame.generation ?? window.generation,
@@ -210,12 +267,12 @@ export function aligned(window: Window, frame: WindowFrame): { window: Window; e
   if (window.cursor === null || page.baseSeq === null || page.baseSeq <= window.cursor) {
     // CONTIGUOUS: keep what we hold, add what the page adds. `baseSeq` stays ours --
     // this copy still holds entries in front of the page's first one.
-    const fresh = unseen(window.entries, page.entries);
+    const grown = merged(window.entries, page.entries, "end");
     const cursor = newest(window.cursor, page.cursor);
     const state = page.state ?? window.state;
     const generation = page.generation ?? window.generation;
     if (
-      fresh.length === 0 &&
+      !grown.changed &&
       cursor === window.cursor &&
       state === window.state &&
       generation === window.generation
@@ -225,7 +282,7 @@ export function aligned(window: Window, frame: WindowFrame): { window: Window; e
     return {
       window: {
         ...window,
-        entries: fresh.length === 0 ? window.entries : [...window.entries, ...fresh],
+        entries: grown.changed ? grown.entries : window.entries,
         cursor,
         generation,
         state,

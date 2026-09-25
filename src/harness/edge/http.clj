@@ -520,7 +520,15 @@
      ;; every registered live step advances from the row here. Adding a consumer is
      ;; registering a step (`harness.edge.sessions/register-step!`), never editing this
      ;; function -- it no longer knows the meter, or any other consumer, by name.
-     (sessions/row-written! thread-id [nil row]))))
+     (sessions/row-written! thread-id [nil row])
+     ;; AND A WINDOW IS TOLD, which is a different thing from the line above: a live step
+     ;; advances what the meter and the trajectory know, while a WINDOW reads the RECORD
+     ;; while a run is in flight -- the run's frames are folded into memory only when the
+     ;; run ENDS -- so 'a line was written' is exactly 'what a window would answer may have
+     ;; changed'. It is a MARK here and a ring on the session's own clock, because what a
+     ;; ring costs is a reader re-reading the whole conversation and this call sits on the
+     ;; frame loop (see `harness.kernel.session/growth-interval-ms`).
+     (sessions/record-grew! thread-id))))
 
 (defn- move-log!
   "Carry THREAD-ID's log from one workspace into another, because a rebind moved
