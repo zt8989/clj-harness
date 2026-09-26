@@ -18,7 +18,7 @@
    ```clojure
    {:served   #{name ..}          ; 这个 agent 这一刻服务的名字（已过 :narrow 的口径）
     :faces    {name :hashline}    ; 需要换脸的名字 → 用哪一张（read/write）
-    :hooks    {point-kw [decl ..]}
+    :hooks    {point-kw [decl ..]}   ; 内建行（第一条是指令文件的注入）＋ hooks.edn 的声明
     :unserved {name {:by :base|:enhance|:compose :key "…" :message "…"}}
     :read-only? bool}
    ```
@@ -60,7 +60,10 @@
 ## 验收
 
 - [ ] 目录覆盖 `@built-ins` 的每一个名字（用例交叉断言两个集合相等），且每个基础能力都标了层与"装不装"的默认。
-- [ ] `(resolve <主 agent 的默认配置>)` 的 `:served` 含除 `eval` 外的全部基础名字，`:hooks` 与今天逐字相同。
+- [ ] `(resolve <主 agent 的默认配置>)` 的 `:served` 含除 `eval` 外的全部基础名字；`:hooks` 折出来的
+      **生效集合**与今天逐字相同（`InstructionsLoaded` 那条内建行也在里面）。
+- [ ] `:hooks` 里**内建行与 `hooks.edn` 的声明都在**：默认档含 `instructions`（指令文件注入）；把它写进
+      `:off` ⇒ 它不在，而 `hooks.edn` 的声明**一条不少**（两条用例）。
 - [ ] `(resolve <子 agent 的配置>)` 里 `:served` **一个 `eval`、一个 `agent` 都没有**；配置里勾了它们 ⇒
       解析按名拒（一条用例各勾一个）。
 - [ ] `:read-only? true` 的解析：一个 `:source :mcp` 的名字、一个 `session-register!` 进来的名字

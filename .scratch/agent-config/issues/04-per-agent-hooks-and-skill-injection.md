@@ -3,9 +3,14 @@
 **What to build:** 让 hooks 也**按 agent 种类分家**，并把"技能在用户发送时注入"从特例变成一条真的 hook 点。
 
 1. **基础 hooks 层**（决策 14）：这个 agent 的 `:base :hooks {:off [..] :on [..]}` 说的是
-   "哪些声明跑、哪些不跑"。默认（键缺席）＝**每一个声明的 hook 每个 agent 都跑**，与今天逐字相同。
-   为能按名点一条 `hooks.edn` 声明，声明多一个**可选** `:name`
-   （`kernel/hooks.clj` 的 `declaration-keys`，`:189`）；没写名字的仍按位置 id（`stop#0`）寻址。
+   "哪些行跑、哪些不跑"，管**两类行**：
+   - **kernel 自己的内建行**，第一条是**指令文件（AGENTS.md）的注入**。今天这个动作不在 hook 表里：
+     `cap/preamble.clj` 的 `gather`（`:109`）在会话出生时把 `<instructions path="…">` 折进去，
+     `edge/http.clj:1136-1137` 只管发一条 `InstructionsLoaded` 观察行。本票把它收进基础 hooks 层
+     （一条内建行，名字 `instructions`）——**注入的机制与时机一个字不改**，只让"折不折"成为这个 agent 的配置。
+   - **`hooks.edn` 的声明**：声明多一个**可选** `:name`（`kernel/hooks.clj` 的 `declaration-keys`，`:189`）；
+     没写名字的仍按位置 id（`stop#0`）寻址。
+   默认（键缺席）＝**每一行每个 agent 都跑**，与今天逐字相同。
 2. **`UserPromptSubmit` 接线**（决策 12）：它在 `points` 表里已经登记
    （`kernel/hooks.clj:78`／`:abwl` 起，`{:name "UserPromptSubmit" :payload #{:prompt} :gate? true :on-error :block}`），
    今天 `src/` 里**一处 emit 都没有**。本票在"一个用户轮到达、模型还没看到它"那一刻 emit，
@@ -41,6 +46,9 @@
 - **不新增 hook 点**：本票只把 `UserPromptSubmit` 从"登记过、没接线"变成"接线了"。其余 P2/P3 点不动。
 - **`SKILL.md` 不能借 `hooks` 扩张工具集**：`allowed-tools` 仍然是"读而忽略"
   （`frontmatter-keys` 的 docstring 明写原因），本票只加**行为**（跑命令），不加**权限**。
+- **开场块的两半各归层**（决策 15）：**指令文件**归基础层（本票），**技能清单**归复合层（`preamble` 的
+  `<skills>` 那半）。今天两半在 `cap/preamble.clj` 的 `gather`（`:109`）里一起折，本票只让"折不折"可配，
+  两半的**内容来源**不动（`instruction-files`，`:50`，仍读 `harness.edn :instructions {:files ..}`——那是**声明**）。
 
 **Blocked by:** 02（`:base :hooks` 与 `:compose :skills` 的读法与校验）。
 与 03 并行；"这个线程属于哪个 agent"的查法两者共用，**谁先落谁把它放进 01 的 ns**（03 的验收里点了一次，
@@ -72,6 +80,11 @@
       `:base :hooks :off` ⇒ 主 agent 不跑它，**另一条照跑**；不带名字的按 `stop#0` 也能点掉。
 - [ ] 默认（`:hooks` 缺席）：主 agent 与任一子 agent 跑**同一批**声明，与今天逐字相同
       （拿 `effective-hooks` 的 id 集合交叉断言）。
+- [ ] **AGENTS.md 的注入是一条基础行**：一个子 agent 的 `:base :hooks :off` 里写 `instructions` ⇒
+      它的开场**没有** `<instructions>` 块（主 agent 照旧有），`InstructionsLoaded` 也**不为它发声**
+      （没折就没有这条观察行）。
+- [ ] **开场仍然只折一次**：改了 AGENTS.md，同一场会话的**第二轮看不到**新内容；新开会话才看到
+      （`CONTEXT.md` 的**注入**词条 / `.scratch/session-opening`，与今天逐字相同）。
 - [ ] **`UserPromptSubmit` 真的发声**：发一条用户消息 ⇒ 一条 `hook/user-prompt-submit` 审计行；
       挂一条 `command "exit 2"` 的声明 ⇒ 这一发被拦（拒绝话来自 stderr）。
 - [ ] **它是第二个内容点**：挂一条 `printf 'INJECTED'` 的声明 ⇒ 模型**看得到** `INJECTED`，
