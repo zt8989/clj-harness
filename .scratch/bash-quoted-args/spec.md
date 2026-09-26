@@ -81,14 +81,17 @@ POSIX 上 `ProcessBuilder` 拿到的向量就是子进程的 argv，谁也不改
 
 ## 状态
 
-`clojure -M:test -m harness.test-runner`（本 worktree）：**1290 条 / 13826 断言，1 红**。
+`clojure -M:test -m harness.test-runner`：**1295 条 / 13848 断言，0 红**（并入 main 之后跑的那一轮）。
 
-那一红是 `harness.edge.pressure-test/the-endpoint-answers-the-pressure-section-and-the-run-leaves-it-on-the-record`
-（`pressure_test.clj:344`：`(>= (:pressureTokens p) 50000)`，实得 49087）—— 按 token 估值的断言，
-属于压力表那条线，**在 main @ `8615ee3` 上同样红**，与本次改动无关。
+那一红曾经是
+`harness.edge.pressure-test/the-endpoint-answers-the-pressure-section-and-the-run-leaves-it-on-the-record`
+（`pressure_test.clj:344`：49087 < 50000）—— 与本次改动无关，但收尾时顺手查清了：不是估算器的错，是
+**量错了面**（端点与自动压缩递进去的是「对话」，锚点那一侧折回来时带系统消息）。修法记在
+`.scratch/compaction-shape/spec.md`，commit `c069f8e`。
 
-未做：真浏览器走查。本次没有动 `ui/src/`，那条铁律对着的是渲染；同一格路径由 `tools-test` 那条
-（`bash` 工具自己的答案）盖住。
+真浏览器走查：**已做**（`evidence/01-quoted-args.md` + `01-quoted-args-browser.png`）—— `node scripts/dev.mjs
+--scripted` 起一发含双引号的 `bash`，工具卡上的参数是 caller 的原文、结果是
+`[ONE][TWO THREE][FOUR] END-MARKER`；同一发在记录里也是原文。
 
 ## 票
 
