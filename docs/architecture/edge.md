@@ -51,6 +51,12 @@ token 关闭**：它一直开着，晚到的 delta 落进**同一条** reasoning
 `CUSTOM` 落成一个 `data` part，而交给下一轮的会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）
 ——于是注入物看得见、又**进不了**模型的向量（见 [client](client.md#注入物在会话栏里的一张卡)）。上面那五种只落审计行的事件照旧一个帧都不发。
 
+**线上一帧不少，记录不是一帧不落**：`REASONING_START` / `REASONING_MESSAGE_START` / `REASONING_MESSAGE_CONTENT` /
+`REASONING_MESSAGE_END` / `REASONING_END` 这五族**不写进记录**——同一段文字本来就在 run 自己那条 `message` 行
+（信封 `:source "model"`）的 `reasoning_content` 上，折法（`replay/reasoning-row?` / `attach-reasoning`）从那里取回来，
+折出来仍是那条 `role "reasoning"` 的消息，形状、位置、id 都不变（ADR [0009](../adr/0009-the-record-holds-a-thought-once.md)）。
+理由是字节：五族占一份真记录 80% 的字节、92% 的行。
+
 **出生那一轮把对话本身交给客户端**（`.scratch/session-opening`，2026-09-21 owner 拍定）：指令文件与技能
 清单在会话出生时写进对话本身，**卡片随那条 entry 走**（`harness.edge.ag_ui/opening-entries` 给每条 message
 同时带 `data` part 与 `text` part）。出生那一轮是**唯一**没有窗口、也没人跟 feed 的一轮——自己开出这一页
@@ -358,7 +364,9 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
   `CUSTOM injected-context`）的 payload **就是那一帧**；harness 自己知道的事实（下面表里的那些）
   包成一个 **CUSTOM 帧**，`name` 是那种事实的名字，payload 是它当时知道的东西。
 
-判据是这一句：**同一段记录，当时线上发过什么帧，重建就得到什么帧。** 读者**严格**：顶层出现 `kind`
+判据是这一句：**同一段记录，当时线上发过什么帧，重建就得到什么帧——除了推理那五族**（它们不落行，同一段思考靠模型那条
+`message` 行的 `reasoning_content` 折回来，ADR [0009](../adr/0009-the-record-holds-a-thought-once.md)）。读者**严格**：顶层出现
+`kind`
 （旧契约）、缺 `payload`、`type` 不是这两个之一、不是对象、半行 JSON —— 都**按行号抛异常**，
 理由写在 `:reason` 里；旧记录打开时报的是"这份记录是旧契约，请开一场新的会话"，不是"读不出来"。
 

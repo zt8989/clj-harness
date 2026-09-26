@@ -856,49 +856,103 @@
                 (json/read-str (str/trim (subs % 5)) :key-fn keyword)))
        vec))
 
-(deftest the-frames-a-run-sends-are-the-frames-its-record-rebuilds
-  ;; TICKET 03 OF `.scratch/jsonl-two-kinds` -- THE WHOLE POINT OF THE TWO ROWS. One real
-  ;; run over a real socket, and the answer is two comparisons that say the record lost
-  ;; nothing: the frames the client was handed are, frame for frame, the frames the record
-  ;; holds (the harness's own facts filtered out -- `model/start` and `hook/*` are rows and
-  ;; were never on the wire), and the conversation the fold rebuilds out of the rows alone
-  ;; is the conversation the session was holding when the run ended. The deleted `input` row
-  ;; used to be the second source of truth; if any case in this suite could be satisfied by
-  ;; it, this is the one that would fail without it.
+(defn- reasoning-frame?
+  "Is FRAME one of the per-token REASONING family? SPELLED HERE, NOT TAKEN FROM THE WRITER: the case
+  below claims the record lacks EXACTLY the family the wire carried, and a test that asked the writer
+  which frames it drops would agree with a writer that dropped the wrong ones."
+  [frame]
+  (str/starts-with? (str (:type frame)) "REASONING"))
+
+(deftest the-record-keeps-every-wire-frame-except-the-reasoning-family
+  ;; TICKET 03 OF `.scratch/jsonl-two-kinds`, RE-STATED BY `.scratch/reasoning-out-of-the-record`. One
+  ;; real run over a real socket. The record used to hold EVERY frame the client was handed; since
+  ;; that feature it holds every frame EXCEPT one family -- the per-token reasoning, whose text is on
+  ;; the run's own `message` row instead (those frames were 82% of a log's bytes). So the claim is
+  ;; exact now:
+  ;;
+  ;;     the record's frames == the wire's frames MINUS the reasoning family, in order
+  ;;
+  ;; and the wire really did carry that family (or the equality would hold vacuously). The rest of
+  ;; the case says the record lost nothing else: the conversation the fold rebuilds out of the rows
+  ;; alone is the conversation the session was holding when the run ended. The deleted `input` row
+  ;; used to be the second source of truth; if any case in this suite could be satisfied by it, this
+  ;; is the one that would fail without it.
   (with-server
    "frames-rebuilt"
    (fn []
      (let [log (log-file "frames-rebuilt")]
        (io/delete-file log true)
-       ;; THE SOCKET CARRIES ONE FAMILY THE RECORD DELIBERATELY DOES NOT (票 03 of
-       ;; `.scratch/event-persistence`): every `REASONING_*` frame -- 82% of a log's bytes, now carried
-       ;; by the run's own `message` row instead. Window frames and the FACT family are already
-       ;; filtered by the reader (`test_support/mux-run!`).
-       (let [sent (remove #(str/starts-with? (str (:type %)) "REASONING")
-                          (sse-frames (.body (post-run "frames-rebuilt"))))]
+       (let [sent (sse-frames (.body (post-run "frames-rebuilt")))]
          (is (seq sent) "the run answered with frames at all")
          (is (some #(= "TOOL_CALL_START" (:type %)) sent)
              "and with the tool round-trip in them, not just text")
+         (is (some reasoning-frame? sent)
+             "and with the reasoning family in them -- this case is about a family the RECORD does not keep")
          (wait-for-recorded
           log
-          (fn [ls] (>= (count (filter #(= "event" (replay/kind %)) ls)) (count sent)))
+          ;; WAIT FOR THE RUN TO BE OVER, not for a row count: the record now holds fewer event
+          ;; rows than the wire carried, so 'as many rows as frames' would never become true.
+          (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
           5000)
-         (testing "what the socket carried is what the record kept, frame for frame"
-           ;; THE TAG IS THE CARRIER'S: `mux-frame` adds `:threadId` to every frame so one
-           ;; socket can route many conversations, and the record has no such field (only the
-           ;; AG-UI frames that carry one themselves do). Removed from BOTH sides, the frames
-           ;; are the same frames -- which is what this case is about.
-           (is (= (mapv #(dissoc % :threadId) sent)
-                  (mapv #(dissoc % :threadId)
-                        (mapv replay/payload
-                              (filter replay/frame?
-                                      (replay/lines->records (replay/read-lines log))))))))
+         (testing "the record kept every frame the socket carried, except the one family it does not"
+           ;; THE TAG IS THE CARRIER'S: `mux-frame` adds `:threadId` to every frame so one socket
+           ;; can route many conversations, and the record has no such field (only the AG-UI frames
+           ;; that carry one themselves do). Removed from BOTH sides first.
+           (let [wire (mapv #(dissoc % :threadId) sent)
+                 kept (mapv #(dissoc % :threadId)
+                            (mapv replay/payload
+                                  (filter replay/frame?
+                                          (replay/lines->records (replay/read-lines log)))))]
+             (is (= (remove reasoning-frame? wire) kept)
+                 (str "the record is not the wire minus the reasoning family. wire-only: "
+                      (pr-str (remove (set kept) (remove reasoning-frame? wire)))
+                      " record-only: "
+                      (pr-str (remove (set (remove reasoning-frame? wire)) kept))))))
          (testing "and the record alone rebuilds the conversation the session held"
            (let [rebuilt (mapv #(select-keys % [:role :content])
                                (replay/lines->messages (replay/read-lines log)))
                  live    (mapv #(select-keys % [:role :content])
                                (sessions/messages "frames-rebuilt"))]
-             (is (= live rebuilt)))))))))
+             (is (= live rebuilt))
+             (is (some #(= "reasoning" (:role %)) (sessions/messages "frames-rebuilt"))
+                 "and the SESSION's own memory still carries the thinking -- only the RECORD changed")
+             (is (some #(= "reasoning" (:role %)) rebuilt)
+                 "the fold gets it back off the record: the frames are gone, the run's own row is not"))))))))
+
+(deftest a-run-that-stops-mid-thought-keeps-its-words-and-not-its-thinking
+  ;; THE ACCEPTED COST OF TICKET 01, PINNED SO NOBODY READS IT AS A BUG. The reasoning rides the run's
+  ;; own `message` row, and that row is written at `:run/done`; a run that never gets there -- killed,
+  ;; or its vendor abandoned -- has no row, and its frames are not on the record either, so the half a
+  ;; thought it had managed is GONE. What it SAID is not: the text frames are ordinary frames and they
+  ;; are written as they arrive. (Before `.scratch/reasoning-out-of-the-record` the record kept the
+  ;; half-thought, and the fold showed it; that is what this case would have caught.)
+  ;;
+  ;; THE SINK IS DRIVEN DIRECTLY, and that is the same fact with less machinery: 'the frames that had
+  ;; arrived when the run stopped' is exactly what a sink fed those frames sees -- no frozen vendor, no
+  ;; socket and no clock in the way. NO TERMINAL FRAME IS FED, which is what 'stopped' means here.
+  (let [log   (log-file "mid-thought")
+        state (atom {:frames []})
+        sink  (#'http/runner "mid-thought" "r-mid" state)
+        frames [{:type "RUN_STARTED" :threadId "mid-thought" :runId "r-mid"}
+                {:type "REASONING_START" :messageId "r-mid-r0"}
+                {:type "REASONING_MESSAGE_START" :messageId "r-mid-r0" :role "reasoning"}
+                {:type "REASONING_MESSAGE_CONTENT" :messageId "r-mid-r0" :delta "half a thought"}
+                {:type "TEXT_MESSAGE_START" :messageId "r-mid-m0" :role "assistant"}
+                {:type "TEXT_MESSAGE_CONTENT" :messageId "r-mid-m0" :delta "half an answer"}]]
+    (io/delete-file log true)
+    (doseq [frame frames] (sink frame))
+    (let [rows  (vec (filter replay/frame? (replay/read-records log)))
+          kinds (mapv #(get-in % [:payload :type]) rows)]
+      (testing "not one reasoning frame reached the record"
+        (is (not-any? #(str/starts-with? (str %) "REASONING") kinds)
+            (str "the record kept " (pr-str (filterv #(str/starts-with? (str %) "REASONING") kinds)))))
+      (testing "and what the run had SAID is there -- the words are not the cost"
+        (is (= ["RUN_STARTED" "TEXT_MESSAGE_START" "TEXT_MESSAGE_CONTENT"] kinds)))
+      (testing "while the session's memory took every frame -- the live fold reads THAT, not the file"
+        (is (= (mapv :type frames) (mapv :type (:frames @state)))))
+      (testing "THE COST: the record alone folds to an answer with no thinking on it"
+        (is (= [["assistant" "half an answer"]]
+               (mapv (juxt :role :content) (mapv :message (replay/entries rows)))))))))
 
 (defn- with-declaring-server
   "Like with-server, but the scripted pin DECLARES an input modality set -- which

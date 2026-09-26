@@ -778,6 +778,14 @@
 
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
+(def ^:private reasoning-frames
+  "The five frame types ADR 0009 keeps off the record. SPELLED OUT rather than matched by prefix: a
+  sixth `REASONING_*` frame would then be RECORDED and the case that pins the record against the wire
+  (`the-record-keeps-every-wire-frame-except-the-reasoning-family`) would fail -- where a prefix match
+  would drop it in silence."
+  #{"REASONING_START" "REASONING_MESSAGE_START" "REASONING_MESSAGE_CONTENT"
+    "REASONING_MESSAGE_END" "REASONING_END"})
+
 (defn- reasoning-frame?
   "Is FRAME one of the per-token REASONING family? THE RECORD SKIPS THE WHOLE FAMILY, and the
   predicate is spelled ONCE because there are two frame sinks (the agent route and a subagent's) and
@@ -787,13 +795,13 @@
   reasoning message from the START frame ALONE (empty content), and a fold that saw that message
   would think the frames had carried the reasoning and skip the run's own `message` row -- measured:
   that is exactly why `the-log-the-server-writes-is-one-replay-can-read` answered nil while only the
-  CONTENT frames were dropped. See 票 03 of `.scratch/event-persistence`.
+  CONTENT frames were dropped. See ADR 0009 and `.scratch/reasoning-out-of-the-record/spec.md`.
 
   THE FRAME IS NOT DROPPED, ONLY ITS LINE: it is still broadcast (`frame-bus`, `events.mux`) and
   still collected into the session's memory; the same text comes back off the run's `message` row
   (`harness.edge.replay/reasoning-row?`)."
   [frame]
-  (str/starts-with? (str (:type frame)) "REASONING"))
+  (contains? reasoning-frames (:type frame)))
 
 (defn- lifecycle-record
   "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
@@ -839,8 +847,11 @@
 ;; it -- the Var is what a runtime call resolves either way.
 (declare mux-broadcast!)
 (defn- runner
-  "Build the frame sink for one run: log every frame, keep it for the moment the run ends, and
-  BROADCAST it to the downlink (`events.mux`, ADR 0004) -- which is the carrier a run has now.
+  "Build the frame sink for one run: log every frame EXCEPT the per-token reasoning family (ADR 0009 --
+  its text is on the run's own `message` row, and those frames were 80% of a log's bytes), keep every
+  frame for the moment the run ends, and BROADCAST them all to the downlink (`events.mux`, ADR 0004)
+  -- which is the carrier a run has now. WHAT IS DROPPED IS A LINE, NOT A FRAME: `reasoning-frame?`
+  is the one place that decides, and the session's memory and the wire take every frame as before.
 
   WHERE THE RUN ENDS IS HERE and nowhere else: a terminal frame is the only fact that says so,
   and this is the one place that sees every frame exactly once. So the registry stops claiming
@@ -858,11 +869,12 @@
     ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
     ;; so the number is already on its way back when the entries appear -- and `land!` is
     ;; idempotent and by group, so either order works.
-    ;; THE PER-TOKEN REASONING DELTAS ARE NOT RECORDED (票 03 of `.scratch/event-persistence`): they
-    ;; were 82% of a log's bytes (measured on a real one: 8,640 of 13,631 lines), and the same text is
+    ;; THE PER-TOKEN REASONING DELTAS ARE NOT RECORDED (ADR 0009): they were **63% of the LINES of one
+    ;; real log** (8,640 of 13,631) and **80% of the BYTES of another** (41,896,984 of 52,248,775 --
+    ;; measured, `.scratch/reasoning-out-of-the-record/evidence/read_routes.txt`), and the same text is
     ;; on the run's OWN `message` row -- which the fold reads back (`harness.edge.replay/reasoning-row?`).
-    ;; VERIFIED ON A REAL LOG: drop every reasoning frame from one and `replay/history` answers the
-    ;; same 100 messages with the same per-message reasoning lengths, byte for byte.
+    ;; VERIFIED ON REAL LOGS: drop every reasoning frame from one and the fold answers the same
+    ;; conversation, message for message (same judge the tests run).
     ;; THE FRAME IS NOT DROPPED, ONLY ITS LINE: it still goes to the bus and into the session's
     ;; memory, and the run's own `message` row carries the same text back (`reasoning-frame?` says
     ;; which family, and why the WHOLE family and not just its CONTENT frames).
@@ -883,9 +895,9 @@
       (unregister-run! thread-id run-id)
       (sessions/settle! thread-id run-id (:frames @state))
       (swap! state assoc :terminal (:type frame)))
-    ;; THE FRAME ITSELF, NOT A DECORATED COPY: the record logs this same map, so the wire and the
-    ;; record agree frame for frame (`:threadId`, the routing tag the downlink adds, is not part
-    ;; of the AG-UI frame and is stripped by the reader).
+    ;; THE FRAME ITSELF, NOT A DECORATED COPY: this map is what the socket carries, and for every
+    ;; family but the reasoning one (ADR 0009) it is also the map the record logs -- `:threadId`, the
+    ;; routing tag the downlink adds, is not part of the AG-UI frame and is stripped by the reader).
     (mux-broadcast! thread-id frame)
     (when (contains? terminal (:type frame))
       ;; AFTER the broadcast: a log write is a synchronous file write, and putting it in front

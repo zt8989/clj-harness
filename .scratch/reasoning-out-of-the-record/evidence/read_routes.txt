@@ -1,0 +1,189 @@
+==========================================================
+read routes -- ticket 03 of .scratch/reasoning-out-of-the-record
+isolated config root: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-11785971372625791931
+os temp dir: C:\Users\zhouteng\AppData\Local\Temp\
+real config home (READ ONLY): C:/Users/zhouteng/.clj-harness
+logs read:
+   OLD  fa35f356 (written 2026-09-23/24) -> C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\fa35f356-1315-4a9d-8154-dfb1c7ee8dee.jsonl
+   NEW  ed334c9c (written 2026-09-26, BEFORE this change -- its frames are still there) -> C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe.jsonl
+
+== A. record size and whole-file parse ::  OLD  fa35f356 (written 2026-09-23/24)
+  file:                   C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\fa35f356-1315-4a9d-8154-dfb1c7ee8dee.jsonl
+  original:  bytes 68188479  lines 237012  records 237012  read-records ms 1257
+  reasoning family: lines 224308 (94.64% of lines)  bytes 44974083 (65.96% of bytes)
+  stripped copy:          C:\Users\zhouteng\AppData\Local\Temp\fa35f356-1315-4a9d-8154-dfb1c7ee8dee-no-reasoning.jsonl
+  stripped:  bytes 23214396  lines 12704  records 12704  read-records ms 300
+  bytes removed: 44974083 (65.96%)
+
+== A. record size and whole-file parse ::  NEW  ed334c9c (written 2026-09-26, BEFORE this change -- its frames are still there)
+  file:                   C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe.jsonl
+  original:  bytes 52248775  lines 225918  records 225918  read-records ms 841
+  reasoning family: lines 209011 (92.52% of lines)  bytes 41896984 (80.19% of bytes)
+  stripped copy:          C:\Users\zhouteng\AppData\Local\Temp\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe-no-reasoning.jsonl
+  stripped:  bytes 10351791  lines 16907  records 16907  read-records ms 161
+  bytes removed: 41896984 (80.19%)
+
+================ the four read routes ::  OLD  fa35f356 (written 2026-09-23/24)  ================
+  file: C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\fa35f356-1315-4a9d-8154-dfb1c7ee8dee.jsonl
+  parameters: rebuild / sofar / log-trajectory each take the File;
+              the page route is replay/entries (whole fold) cut by
+              harness.kernel.session/tail-of, then /before-of with beforeSeq =
+              (inc baseSeq of the tail page) -- the pair http/page-get calls.
+  runs that wrote a model row: 6
+  runs with reasoning frames but NO model row: [["3f547396-9640-4f1d-b5c6-f3e967ac16a3" 52]]
+  rebuild ran: entries 1226  messages 1226
+  rebuild (:messages):
+    reasoning texts handed out:       328  chars: 830361
+    ...restricted to runs with a model row: 276  chars: 705711
+    trajectory reasoning texts:       276  chars: 705711
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: none
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+  sofar ran: state :settled  messages 1226
+  sofar (:messages):
+    reasoning texts handed out:       328  chars: 830361
+    ...restricted to runs with a model row: 276  chars: 705711
+    trajectory reasoning texts:       276  chars: 705711
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: none
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+  page route ran: tail entries 61  baseSeq 224562  hasMore true
+  page tail (GET .../page):
+    reasoning texts handed out:       19  chars: 59497
+    ...restricted to runs with a model row: 19  chars: 59497
+    trajectory reasoning texts:       276  chars: 705711
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: false
+    whole fold as a contiguous slice of the trajectory: at offset 257 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 257 -- equal: true
+  page before: beforeSeq 224563  entries 133  baseSeq 218564
+  page before (?beforeSeq):
+    reasoning texts handed out:       41  chars: 79079
+    ...restricted to runs with a model row: 41  chars: 79079
+    trajectory reasoning texts:       276  chars: 705711
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: false
+    whole fold as a contiguous slice of the trajectory: at offset 221 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 221 -- equal: true
+  trajectory (:turns[].items[].reasoning):
+    reasoning texts handed out:       276  chars: 705711
+    ...restricted to runs with a model row: 276  chars: 705711
+    trajectory reasoning texts:       276  chars: 705711
+    reasoning present:                true
+    whole fold equal to trajectory:   true
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: at offset 0 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+
+================ the four read routes ::  NEW  ed334c9c (written 2026-09-26, BEFORE this change -- its frames are still there)  ================
+  file: C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe.jsonl
+  parameters: rebuild / sofar / log-trajectory each take the File;
+              the page route is replay/entries (whole fold) cut by
+              harness.kernel.session/tail-of, then /before-of with beforeSeq =
+              (inc baseSeq of the tail page) -- the pair http/page-get calls.
+  runs that wrote a model row: 12
+  runs with reasoning frames but NO model row: []
+  rebuild ran: entries 2083  messages 2083
+  rebuild (:messages):
+    reasoning texts handed out:       439  chars: 784786
+    ...restricted to runs with a model row: 439  chars: 784786
+    trajectory reasoning texts:       439  chars: 784786
+    reasoning present:                true
+    whole fold equal to trajectory:   true
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: at offset 0 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+  sofar ran: state :settled  messages 2083
+  sofar (:messages):
+    reasoning texts handed out:       439  chars: 784786
+    ...restricted to runs with a model row: 439  chars: 784786
+    trajectory reasoning texts:       439  chars: 784786
+    reasoning present:                true
+    whole fold equal to trajectory:   true
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: at offset 0 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+  page route ran: tail entries 194  baseSeq 224515  hasMore true
+  page tail (GET .../page):
+    reasoning texts handed out:       37  chars: 89432
+    ...restricted to runs with a model row: 37  chars: 89432
+    trajectory reasoning texts:       439  chars: 784786
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: false
+    whole fold as a contiguous slice of the trajectory: at offset 402 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 402 -- equal: true
+  page before: beforeSeq 224516  entries 191  baseSeq 224515
+  page before (?beforeSeq):
+    reasoning texts handed out:       36  chars: 88058
+    ...restricted to runs with a model row: 36  chars: 88058
+    trajectory reasoning texts:       439  chars: 784786
+    reasoning present:                true
+    whole fold equal to trajectory:   false
+    model-row part equal to trajectory: false
+    whole fold as a contiguous slice of the trajectory: at offset 402 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 402 -- equal: true
+  trajectory (:turns[].items[].reasoning):
+    reasoning texts handed out:       439  chars: 784786
+    ...restricted to runs with a model row: 439  chars: 784786
+    trajectory reasoning texts:       439  chars: 784786
+    reasoning present:                true
+    whole fold equal to trajectory:   true
+    model-row part equal to trajectory: true
+    whole fold as a contiguous slice of the trajectory: at offset 0 -- equal: true
+    model-row part as a contiguous slice of it:         at offset 0 -- equal: true
+
+== D. the same conversation, folded with the reasoning frames deleted ::  OLD  fa35f356 (written 2026-09-23/24)
+  file:             C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\fa35f356-1315-4a9d-8154-dfb1c7ee8dee.jsonl
+  frame-free copy:  C:\Users\zhouteng\AppData\Local\Temp\fa35f356-1315-4a9d-8154-dfb1c7ee8dee-no-reasoning.jsonl
+  original:  messages 1226  reasoning messages 328
+  blank reasoning the frames built and the row path deliberately does not (ADR 0009's accepted difference, NOT a pass): 0
+  frames fold minus blank reasoning: messages 1226   frame-free: messages 1174  reasoning messages 276
+  message lists equal (by :message -- :seq differs by construction): false
+  message positions that differ: 412   same role+content, only the :id differs: 0
+    original-message missing: 0   frame-free-message missing: 52
+    at message 814
+      original:    {:id "3f547396-9640-4f1d-b5c6-f3e967ac16a3-r0", :role "reasoning", :content "The user says \"继续\" (continue). So they want me to continue with ticket 09 (spill). Let me implement it.\n\nLet me set the todo to 09 in_progress, and implement carefully.\n\nPlan recap:\n1. `harness.cap.spill` — a general spill store, reusing the config-home location so `read`/`grep` reach it fence-free, exclusive write, best-effort.\n2. Intercept tool results at the kernel loop seam via OPTS `:on-tool-result` (or similar), supplied by the edge.\n3. Replacement content = preview + opaque locator + retrieval guidance.\n4. Docs (CONTEXT.md 剪枝/超窗恢复 area + a 取货单/spill entry; CONTEXT already mentions \"别叫成...剪枝\"; need to distinguish spill).\n5. Tests: unit + e2e.\n6. Full suite + commit.\n\nLet me first study the existing pieces thoroughly:\n- `harness.cap.jobs/spill!`, `record-path`, `next-record-id!`, dir layout, sweep.\n- `harness.cap.tools` bash foreground spill usage (line 374).\n- `home` for the config-home path.\n- The read tool's fence (to confirm config home is free).\n- How `before-llm`/`project` wires OPTS to the loop, so I add the spill fn similarly.\n\nLet me read:\n- jobs.clj: around `record-path`, `next-record-id!`, `records-dir`/spill dir, `sweep-once!`.\n- home.clj: for the root and any jobs dir helper.\n- loop.clj: the OPTS threading and the tool thread.\n- cap/tools.clj around 360-390 (bash spill).\n- The read tool fence (cap/editing? hashline/reading? cap/project fence).\n\nLet me start reading.\n\nActually, ticket 09 says \"本地后端写入是**排他**的（防止有人预先埋一个符号链接把写入重定向走）\". The existing `spill!` uses `spit` (not exclusive). For the new generic spill I must use exclusive creation.\n\nAlso \"命名不与既有的后台作业 spill 混淆，两处在文档里说清各是哪一种 spill\". So my new thing should be named distinctly, e.g. `harness.cap.spill` with functions `stash!`/`locator!`? Or keep \"spill\" but name the mechanism differently: the existing is `jobs/spill!` (foreground command → record); the new is a general \"tool-result spill\". Let me name the new namespace `harness.cap.spill` and its function `stash!`? The ticket title is \"spill：单条巨型输出挪走，只留一张取货单\" (pickup slip). So \"取货单\" = pickup slip/receipt. Let me name the replacement \"取货单\"/\"pickup slip\". The locator is an opaque token.\n\nHmm, let me re-read ticket 09 precisely:\n\n\"单条**刚产生**的巨型工具结果，在产生的那一刻就挪到别处，只给模型一个**不透明定位符** + 一句**取回指引**，模型能主动把它取回来（用已有的读工具）；存不下时**保留内联原样**，不把成功的调用变成错误。定位符**不透明**：消费方只按取回指引渲染，不假定「读文件」始终是正确的取回方式（后端可能返回 URI 或键）。\"\n\nChecklist:\n- 巨型工具结果在产生时被换成一条预览 + 定位符 + 取回指引；模型视图从这一步起就不带那坨大文本\n- 定位符不透明：消费方只按取回指引渲染，不假定它一定是文件路径\n- 模型能按指引取回原文（走已有的读工具）\n- 本地后端写入是排他的\n- 保存是尽力而为：失败时保留原始内联结果，不把成功的调用变成 isError\n- 三档分工写清楚：spill 管单条刚产生的工具结果，剪枝管已有的大工具结果，摘要管一整段历史；信封三者都不管\n- 端到端：一次巨大的 web 抓取被 spill，压力从一开始就没上去\n- 命名不与既有的后台作业 spill 混淆，两处在文档里说清各是哪一种 spill\n- 离线全量全绿\n\nKey design points:\n- The locator is opaque: the producer returns `{:locator ... :retrieval <guidance>}`. The consumer (the replacement text) renders preview + locator + guidance. For the local backend, the locator is a path and the guidance says to use the read tool. But the code should not assume the locator is a path; the backend decides. I'll model a backend as a function `(fn [thread-id content] -> {:locator s :retrieval s} or nil)` and have a local default. The replacement text is built from preview + locator + retrieval.\n- \"在产生的那一刻\" — at the tool result, before it enters history/frames.\n\nLet me design a namespace `harness.cap.spill`:\n```clojure\n(ns harness.cap.spill\n  \"SPILL: move ONE just-produced, oversized tool result out of the conversation and leave the\n   model a PICKUP SLIP -- a preview, an OPAQUE LOCATOR and the sentence that says how to\n   retrieve it. ...\"\n  (:require [clojure.java.io :as io]\n            [clojure.string :as str]\n            [harness.infra.home :as home]\n            [harness.infra.log :as log])\n  (:import [java.nio.file Files OpenOption LinkOption Path StandardOpenOption]\n           [java.nio.charset StandardCharsets]))\n```\n\nHmm, but the existing jobs spill already writes under a directory. Let me find the jobs records dir helper to reuse the same location (config home) and the same sweep. Actually, reusing `jobs/spill!` would clash semantically; the ticket says don't confuse. I'll create a separate dir, e.g. `home/spill-dir` or under `home/*root*/spill/`. Let me check `home` for helpers.\n\nLet me read home.clj and jobs.clj's dir helpers.\n\nAlso the threshold: the existing bash spill triggers at some size. Let me look at cap/tools.clj around 374 to see the trigger and the receipt text, since ticket 09's replacement should be consistent with the existing style (maybe reuse `truncation-line`-like wording).\n\nLet me read cap/tools.clj 355-400.\n\nLet me gather."}
+      frame-free:  {:id "3f547396-9640-4f1d-b5c6-f3e967ac16a3-m1", :role "assistant", :content "Continuing with ticket 09 (spill). Let me study the existing spill machinery and the seams.", :toolCalls [{:id "call_00_GoTeYPognzzI90vNnJto7405", :type "function", :function {:name "read", :arguments "{\"limit\": 60, \"offset\": 352, \"path\": \".worktrees/compaction/src/harness/cap/tools.clj\"}"}} {:id "call_01_22fXvxetbVl9yWTq7Nf43256", :type "function", :function {:name "grep", :arguments "{\"path\": \".worktrees/compaction/src/harness/cap/jobs.clj\", \"pattern\": \"defn- record-path|defn- next-record-id!|defn- records-dir|defn- sweep-once!|def jobs-dir|defn spill-threshold|spill-threshold|def .*threshold\"}"}}]}
+    at message 815
+      original:    {:id "3f547396-9640-4f1d-b5c6-f3e967ac16a3-m1", :role "assistant", :content "Continuing with ticket 09 (spill). Let me study the existing spill machinery and the seams.", :toolCalls [{:id "call_00_GoTeYPognzzI90vNnJto7405", :type "function", :function {:name "read", :arguments "{\"limit\": 60, \"offset\": 352, \"path\": \".worktrees/compaction/src/harness/cap/tools.clj\"}"}} {:id "call_01_22fXvxetbVl9yWTq7Nf43256", :type "function", :function {:name "grep", :arguments "{\"path\": \".worktrees/compaction/src/harness/cap/jobs.clj\", \"pattern\": \"defn- record-path|defn- next-record-id!|defn- records-dir|defn- sweep-once!|def jobs-dir|defn spill-threshold|spill-threshold|def .*threshold\"}"}}]}
+      frame-free:  {:id "3f547396-9640-4f1d-b5c6-f3e967ac16a3-t2", :role "tool", :toolCallId "call_00_GoTeYPognzzI90vNnJto7405", :content "yeVs│                                                            ;; asking to stop it.\ndcKa│                                                            :on-spawn\nIOav│                                                            (fn [p]\nprsu│                                                              (when-let [stop kernel-tools/*stop*]\nTaCh│                                                                (reset! stop #(shell/stop-tree! p))))})\nCCki│        ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's\nhvOM│        ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when\nNDny│        ;; the output did not fit, the record ends on this line and so does the\nusLi│        ;; answer, so the two can never disagree about how the command ended.\naiOt│        ending (cond stopped (str \"[timed out after \" limit \"ms — the command was stopped]\")\nFiCI│                     (not (zero? exit)) (str \"[exit \" exit \"]\"))\nmwEl│        out*  (jobs/tail-within-budget out jobs/answer-budget-bytes)\nRRCE│        err*  (jobs/tail-within-budget err jobs/answer-budget-bytes)\nAJLT│        body  (str (:text out*) (:text err*))]\nesGl│    (if (and (zero? (:omitted out*)) (zero? (:omitted err*)))\nKLPS│      (str (if (str/blank? body) \"(no output)\" body)\nryGe│           (when ending (str \"\\n\" ending)))\nVNMS│      ;; Over budget: the whole of it goes to a record, the answer keeps the tail of\nDPup│      ;; each stream -- they are counted separately, so a single line of stderr is\njoID│      ;; never squeezed out by a loud stdout -- and the bytes left out are said out\nOUdu│      ;; loud, per stream, next to where the rest can be read.\nwrBi│      (let [ending (or ending \"[exit 0]\")\ncaJB│            path   (jobs/spill! kernel-tools/*thread-id*\nHQnh│                                (record-text out err ending))]\norVP│        (str body\nSnMe│             (when (pos? (:omitted out*))\nBFoa│               (str \"\\n\" (jobs/truncation-line (:omitted out*) path \"stdout\")))\ngoKE│             (when (pos? (:omitted err*))\nMJdy│               (str \"\\n\" (jobs/truncation-line (:omitted err*) path \"stderr\")))\ntsNC│             \"\\n\" ending)))))\nYNhh│\nEqAl│(defn- t-job\nlsLU│  \"`job`'s body: hand the command to harness.cap.jobs and answer AT ONCE with the\nPrXY│  job's id and where its record is.\nzaMP│\ndsli│  THE SAME COMMAND `bash` RUNS, RUN THE OTHER WAY. `work-dir` resolves the directory\nInAD│  in one place for both, the record is written by one module, and the shell kind is\nqsAB│  resolved BEFORE anything starts -- so a kind this machine does not have refuses\nUKLe│  without a job id, a record file or a half-started process to clean up.\nCWca│\nilgh│  A JOB HAS NO TIMEOUT, so `timeout` is not one of this verb's arguments at all: a\nNaLI│  number that limits nothing is worse than no number, because it reads like a promise.\nviTs│  `stdin` is not one either -- nothing feeds a background command, so text sent as one\naxgi│  would never be read. Neither is refused, and that is the point of deleting them: a\nGOUn│  body only reads the keys its own schema declares (`t-bash` says the same about the\nnnjt│  verb it shares the spawn with), so there is nothing here to drop, and nothing to\nSEIM│  argue with. To write to a command's stdin, run it with `bash`; to wait for one, call\nAZBo│  `job_output` with `wait`.\"\nfhjt│  [{:keys [command workdir] shell-named :shell}]\nLDip│  (let [dir  (work-dir kernel-tools/*thread-id* workdir)\nspIn│        kind (named-shell shell-named)]\nWKss│    (let [{:keys [id path]} (jobs/start! kernel-tools/*thread-id*\nECBr│                                         {:command command :dir dir :kind kind})]\nknAK│      ;; TWO FACTS AND NOTHING ELSE. How it went is not known yet (it has just\nPBfh│      ;; started), and advice about reading the record belongs in the description\nxpDL│      ;; rather than in every answer.\ncrHW│      (str \"job \" id \" started; its record is \" path (redirect-note command)))))\nIEIL│\npgzz│\nTMmw│(defn- t-eval [{:keys [code]}]\n[Showing lines 1-411 of 1556 — stopped at limit=60. Use offset=412 to continue.]"}
+    ... and 410 more differing positions
+  reasoning recovered WITHOUT the frames: 276 (the run's own `message` rows carry it)
+  reasoning the frames carried and the frame-free fold does not, by run: [["3f547396-9640-4f1d-b5c6-f3e967ac16a3" 52]]
+  runs that streamed reasoning and wrote no model row: [["3f547396-9640-4f1d-b5c6-f3e967ac16a3" 52]]
+  with those runs' reasoning dropped too, message lists equal: true
+  frame-free reasoning whose (id, text) the frames fold does not spell: 0
+
+== D. the same conversation, folded with the reasoning frames deleted ::  NEW  ed334c9c (written 2026-09-26, BEFORE this change -- its frames are still there)
+  file:             C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe.jsonl
+  frame-free copy:  C:\Users\zhouteng\AppData\Local\Temp\ed334c9c-9b6c-4a8e-bd0e-1f695fbd37fe-no-reasoning.jsonl
+  original:  messages 2083  reasoning messages 439
+  blank reasoning the frames built and the row path deliberately does not (ADR 0009's accepted difference, NOT a pass): 4
+    dropped from the frames fold, ids: ["d477142f-f04c-4008-b22c-6a739dcc6712-r532" "836164c5-9798-45cb-8294-3d3df3a1ba95-r74" "836164c5-9798-45cb-8294-3d3df3a1ba95-r103" "836164c5-9798-45cb-8294-3d3df3a1ba95-r157"]
+  frames fold minus blank reasoning: messages 2079   frame-free: messages 2079  reasoning messages 435
+  message lists equal (by :message -- :seq differs by construction): false
+  message positions that differ: 137   same role+content, only the :id differs: 137
+    original-message missing: 0   frame-free-message missing: 0
+    at message 663
+      original:    {:id "d477142f-f04c-4008-b22c-6a739dcc6712-r535", :role "reasoning", :content "sessions-test and mux-test pass (37 tests, 0 failures) — including my two new cases.\n\nNow run the full http_test to verify my new case (and that nothing else broke). Earlier I ran it but the output was truncated by the bogus namespace. Let me run http_test alone and capture the tail. It's a long namespace (maybe 2-4 minutes)."}
+      frame-free:  {:id "d477142f-f04c-4008-b22c-6a739dcc6712-r534", :role "reasoning", :content "sessions-test and mux-test pass (37 tests, 0 failures) — including my two new cases.\n\nNow run the full http_test to verify my new case (and that nothing else broke). Earlier I ran it but the output was truncated by the bogus namespace. Let me run http_test alone and capture the tail. It's a long namespace (maybe 2-4 minutes)."}
+    at message 666
+      original:    {:id "d477142f-f04c-4008-b22c-6a739dcc6712-r538", :role "reasoning", :content "While that runs, let me do the docs work and the spec update.\n\n1. `.scratch/refreshed-turn-keeps-growing/spec.md` — add the server half + note the correction.\n2. Tickets 01/02 — check the boxes.\n3. Docs: `docs/architecture/edge.md` (the doorbell paragraph) and `docs/architecture/client.md` (the window merge).\n\nLet me first read the client doc's window section."}
+      frame-free:  {:id "d477142f-f04c-4008-b22c-6a739dcc6712-r537", :role "reasoning", :content "While that runs, let me do the docs work and the spec update.\n\n1. `.scratch/refreshed-turn-keeps-growing/spec.md` — add the server half + note the correction.\n2. Tickets 01/02 — check the boxes.\n3. Docs: `docs/architecture/edge.md` (the doorbell paragraph) and `docs/architecture/client.md` (the window merge).\n\nLet me first read the client doc's window section."}
+    ... and 135 more differing positions
+  reasoning recovered WITHOUT the frames: 435 (the run's own `message` rows carry it)
+  reasoning the frames carried and the frame-free fold does not, by run: [["836164c5-9798-45cb-8294-3d3df3a1ba95" 21] ["d477142f-f04c-4008-b22c-6a739dcc6712" 120]]
+  runs that streamed reasoning and wrote no model row: []
+  frame-free reasoning whose (id, text) the frames fold does not spell: 137
+    (recomputed after the blank reasoning was dropped) by run: [["836164c5-9798-45cb-8294-3d3df3a1ba95" 18] ["d477142f-f04c-4008-b22c-6a739dcc6712" 119]]
+
+isolation: store files this process opened: #{}
+isolation: any of them under the real config home? false
+done.

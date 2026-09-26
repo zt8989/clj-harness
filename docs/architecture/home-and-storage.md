@@ -64,6 +64,11 @@
 
 ### 一个会话一份文件
 
+**这份文件里只有两类行**（`message` / `event`），`event` 那一类装两样东西：线上发过的帧（`RUN_*` / `TEXT_MESSAGE_*` /
+`TOOL_CALL_*` / `CUSTOM`）与 harness 自己知道的事实（`model/*`、`tools/*`、`provider/*`…）。**推理那五族帧不在里面**
+（ADR [0009](../adr/0009-the-record-holds-a-thought-once.md)）：同一段文字留在模型那条 `message` 行（信封 `:source "model"`）的
+`reasoning_content` 上，写的时候不写第二遍，读的时候从那里取回来。
+
 **重放、重建、eval 读法各自都只读一个文件**，所以「一个会话一份文件」不是整洁癖，是这几条路能工作的前提：
 一次会话的记录被劈进两个 workspace，那几条路谁都看不见另一半，而它们都不会报错——它们只是读到一段更短的
 对话。于是**换绑要把文件一起搬**（`harness.edge.http/move-log!`）：搬之前先问整棵树「这个名字还有没有别的
@@ -302,6 +307,10 @@ B 的编辑就用 A 拥有的名字寻址。拆开主键，就是「两个会话
 - `harness.kernel.frames` 把记录的 AG-UI 帧**折叠回消息列表**（`terminal?` / `apply-frames`）。
 - `harness.edge.replay` 重建对话：`threads`（扫目录列清单）、`locate`（stem → 唯一文件）、
   `rebuild`（种子 = 第一条 input、折叠全部 event 帧、把 context 带回来）。
+
+**推理是这条折法里唯一的例外**：记录里没有推理帧，折法（`replay/reasoning-row?` / `attach-reasoning`）先看帧、再看行——旧记录靠帧，
+新记录靠那条 assistant `message` 行（信封 `:source "model"`）的 `reasoning_content`，折出来仍是 `role "reasoning"` 的那条消息
+（ADR [0009](../adr/0009-the-record-holds-a-thought-once.md)）。
 
 **重建 = 读一次，不是第二份权威**（**2026-09-22 改写**：本句从前写的是「交还，不是接管」——服务端把
 重建结果交给**客户端持有**、自己不因此成为会话状态权威。**那已经反了**，见

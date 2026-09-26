@@ -28,6 +28,11 @@
   harness.infra.home/sanitize: that one expression is the part the two sides must agree
   on, and sharing it is what stops them drifting.
 
+  IT SAYS ONE THING OUT LOUD (ticket 02 of `.scratch/reasoning-out-of-the-record`): a run whose own
+  `message` rows outnumber the assistant messages its frames built is a fact somebody needs to see,
+  so the fold leaves a WARN line for it (`harness.infra.log`) instead of skipping the row in silence.
+  NOTHING IS ATTACHED when the two lists disagree -- saying it is not the same as guessing.
+
   THE LISTING IS A TREE WALK. `threads` used to take one directory, because there
   was one; the logs are now a tree -- one workspace per project plus a reserved
   one -- so a listing has to walk it, and `locate` exists because a stem is no
@@ -41,6 +46,7 @@
             [harness.edge.ag-ui :as ag]
             [harness.kernel.frames :as frames]
             [harness.infra.home :as home]
+            [harness.infra.log :as log]
             [harness.cap.project :as project]
             [harness.cap.providers :as providers]
             [harness.kernel.loop :as loop]
@@ -599,20 +605,57 @@
    ;; `:reasoned?` IS THE GUARD FOR OLD LOGS: a record written BEFORE the frames stopped carrying
    ;; reasoning already has those messages, and attaching the row's copy as well would draw the
    ;; same thought twice. So a run whose frames produced reasoning is left exactly as it was.
-   :model-ids [] :model-next 0 :reasoned? false})
+   ;;
+   ;; `:unpaired-said?` IS ONLY ABOUT THE LINE IN THE PROCESS LOG: a run whose rows outran the messages
+   ;; its frames built says so ONCE (`say-unpaired!`), and this is how it remembers it has.
+   ;; `:run-from` IS WHERE THIS RUN'S OWN MESSAGES BEGIN in `:entries`, which is what lets the fold
+   ;; work out the number a frame's id was spelled with (`frame-groups-before`): the run's own frames
+   ;; are the only ones that counter counted.
+   :model-ids [] :model-next 0 :reasoned? false :unpaired-said? false :run-from 0})
 
-(defn- reasoning-row?
-  "Is ROW the RUN's own account of what the model returned -- an assistant `message` row whose
-  envelope says the model put it there -- AND is the reasoning it carries not already on the
-  record? Two why-nots, and both are real: a record written before the frames stopped carrying
-  reasoning has those messages already (`:reasoned?`), and a run whose rows outnumber the
-  messages its frames built is one this reader must not guess about (`:model-next`)."
+(defn- model-row?
+  "Is ROW the RUN's own account of what the model returned -- an assistant `message` row whose envelope
+  says the model put it there -- in a run whose frames have NOT already carried the reasoning? THE
+  TWO READERS BELOW ASK THIS SAME QUESTION and then part ways on the cursor: the k-th such row is the
+  k-th assistant message the frames built, and only one of them has a message left to take it.
+  `:reasoned?` is the other why-not: a record written BEFORE the frames stopped carrying reasoning
+  already has those messages, and attaching the row's copy as well would draw the same thought twice."
   [row acc]
   (and (= "message" (kind row))
        (= "assistant" (:role (payload row)))
        (= "model" (:source row))
-       (not (:reasoned? acc))
+       (not (:reasoned? acc))))
+
+(defn- reasoning-row?
+  "A `model-row?` WITH a message left for it -- the k-th assistant message its frames built is the
+  k-th one this run wrote, so the cursor has to still be inside that list."
+  [row acc]
+  (and (model-row? row acc)
        (< (long (or (:model-next acc) 0)) (count (:model-ids acc)))))
+
+(defn- unpaired-model-row?
+  "A `model-row?` with NO message left for it -- `:model-next` has run past what the frames built.
+  `reasoning-row?` REFUSES TO GUESS about such a run; this is what lets the fold SAY so instead of
+  passing over it."
+  [row acc]
+  (and (model-row? row acc)
+       (>= (long (or (:model-next acc) 0)) (count (:model-ids acc)))))
+
+(defn- say-unpaired!
+  "Leave ONE line about a run whose own rows outran the messages its frames built, and remember that
+  this run has been told about. ONCE, because the cursor does not move: every later row of the same
+  run would otherwise say the same sentence again.
+
+  NOTHING IS ATTACHED EITHER WAY -- the fold still answers what it can; what it refuses to be is
+  SILENT about a record whose two lists of assistant messages do not line up (ticket 02)."
+  [acc row]
+  (if (:unpaired-said? acc)
+    acc
+    (do (log/warn! :replay/unpaired-model-row
+                   {:run-id (:runId row)
+                    :carried-by-the-frames (count (:model-ids acc))
+                    :paired (:model-next acc)})
+        (assoc acc :unpaired-said? true))))
 
 (defn- insert-entry-before
   "Insert ENTRY into ACC's entries -- and the same message into `:messages`, which is the same
@@ -627,6 +670,29 @@
           (update :entries #(vec (concat (subvec % 0 at) [entry] (subvec % at))))
           (update :messages #(vec (concat (subvec % 0 at) [(:message entry)] (subvec % at))))))))
 
+(defn- frame-groups-before
+  "How many GROUPS this run's frames had built when they built the message with ID -- the assistant
+  messages, the tool results AND the injected cards, counted from where the run began (`:run-from`).
+
+  THIS IS THE NUMBER THE WIRE SPELLED THAT MESSAGE'S ID WITH. A run has ONE counter and every group
+  takes from it (`harness.edge.ag-ui`'s `:n`: text, reasoning, an injected card and a tool's result
+  alike), so a run that had a card spliced in before its first call spells its ids `ctx1, r1, m2,
+  t3, r4` -- the thought of the SECOND call of two is `r4`, not `r1`. THE CALL INDEX ALONE WOULD NOT
+  DO: a round with two tool calls spends two more numbers than a round with none.
+  THE CARD IS COUNTED even though it is not a message the model returned -- the `string?` filter
+  `flush-group` uses for `:model-ids` is about which ROWS pair with which messages, not about which
+  groups spent a number. Measured on a real log (`.scratch/reasoning-out-of-the-record/evidence/`):
+  with cards left out, 164 rebuilt thoughts wore an id one off the wire's, in the runs that had
+  cards -- and the fixtures, which had none, all passed. The frames this run DID record are the
+  evidence, and reading the number off them is what keeps a rebuilt conversation's id equal to the one
+  the client was handed: an id is what a client keys a message by.
+
+  THE REASONING GROUPS ARE THE ONE KIND NOT IN `:entries` for a NEW record -- the frames are not on
+  it -- so those are added by the caller from the rows it has already given back (`:reasoned-n`)."
+  [acc id]
+  (count (filter (fn [e] (contains? #{"assistant" "tool"} (:role (:message e))))
+                 (take-while #(not= id (:id (:message %)))
+                             (subvec (:entries acc) (long (or (:run-from acc) 0)))))))
 (defn- attach-reasoning
   "Give the group's NEXT assistant message the reasoning the run's own row carries, as the
   reasoning-role message the frames used to build -- with the SAME record number as the assistant
@@ -641,7 +707,11 @@
         ids    (:model-ids acc)
         idx    (long (or (:model-next acc) 0))
         msg-id (nth ids idx)
-        text   (str (:reasoning_content value))]
+        text   (str (:reasoning_content value))
+        ;; THE NUMBER IN THE ID IS THE FRAMES' OWN, worked out from what they recorded: how many
+        ;; groups the run's frames had opened when they built this call's message, plus the thoughts
+        ;; already given back (a reasoning group opens a number too). See `frame-groups-before`.
+        n      (+ (frame-groups-before acc msg-id) (long (or (:reasoned-n acc) 0)))]
     (if (str/blank? text)
       (update acc :model-next inc)
       (let [entry (first (filter (fn [e] (= msg-id (:id (:message e)))) (:entries acc)))]
@@ -656,8 +726,7 @@
                                                    ;; the envelope beside it does (`log!` stamps `:runId` on
                                                    ;; every line, and `harness.edge.ag-ui` spells this same
                                                    ;; id from its own run-id).
-                                                   :message {:id (str run-id "-r"
-                                                                   (long (or (:reasoned-n acc) 0)))
+                                                   :message {:id (str run-id "-r" n)
                                                              :role "reasoning"
                                                              :content text}})
               acc)
@@ -675,6 +744,9 @@
                   (cond
                     ;; THE RUN'S OWN ROW, CARRYING WHAT THE FRAMES NO LONGER DO (ticket 03).
                     (reasoning-row? row acc) (attach-reasoning acc row)
+                    ;; AND ONE THAT CANNOT BE PAIRED IS SAID OUT LOUD, not skipped in silence
+                    ;; (ticket 02): what it must never do is pair the wrong message.
+                    (unpaired-model-row? row acc) (say-unpaired! acc row)
                     (and (our-entry? row) (not (seen-entry? acc row)))
                     (-> acc
                         (add-entries i [(cond-> value (:id row) (assoc :id (:id row)))])
@@ -689,7 +761,8 @@
                 ;; wrong messages (ticket 03 of `.scratch/event-persistence`).
                 (let [acc (cond-> acc
                             (= "RUN_STARTED" (:type value))
-                            (assoc :model-ids [] :model-next 0 :reasoned? false :reasoned-n 0))]
+                            (assoc :model-ids [] :model-next 0 :reasoned? false :reasoned-n 0
+                                   :unpaired-said? false :run-from (count (:entries acc))))]
                   (if (frames/terminal? value) (assoc acc :after i) acc)))
       acc)))
 
@@ -836,7 +909,10 @@
 (defn rebuild
   "What a client needs to RE-OWN its conversation: the AG-UI message list (every
   action's own message, folded in file order with every recorded frame of the run it
-  started, reasoning and tool calls included) plus whatever context the log carries at
+  started, reasoning and tool calls included -- AND THE REASONING COMES OFF THE RUN'S OWN `message`
+  ROW for a record that no longer carries those frames, ADR 0009; both kinds of record rebuild to
+  the same conversation, which `a-run-without-its-reasoning-frames-rebuilds-the-same-conversation`
+  pins) plus whatever context the log carries at
   its start, which since ticket 03 is also an ordinary message in that list. The client
   takes both into its next ordinary RunAgentInput -- the server holds no rebuilt state,
   exactly as it holds no conversation state ever.

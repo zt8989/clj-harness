@@ -311,7 +311,7 @@ stdout 与 stderr **各算各的**。超过就整份落成一份记录，答案�
 **库装状态、文件装记录。** `~/.clj-harness/harness.infra.db`（sqlite）装"现在是什么"：项目、会话、
 **任务清单**（`todos` 一行一个会话），以及锚点
 （`hashline_snapshots` / `hashline_ownership` / `hashline_sessions` / `hashline_undo` 四张表）。
-日志 jsonl 装"发生过什么"：每一帧、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
+日志 jsonl 装"发生过什么"：每一帧（推理那五族除外，ADR 0009）、每一次调用与结果。**库不镜像日志**——新表进库，必须有人先写下它
 是状态还是记录（守着这条边界的是 `harness.infra.db-test` 的元断言）。
 
 **会话统计** —— 一条会话的**记录**折出来的几个数：轮数、模型调用数、输出速度、用量、缓存命中。

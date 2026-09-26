@@ -7,6 +7,7 @@
             [harness.kernel.event :as ev]
             [harness.kernel.frames :as frames]
             [harness.infra.home :as home]
+            [harness.infra.logging :as logging]
             [harness.kernel.llm :as llm]
             [harness.edge.replay :as replay]
             [harness.test-support :as support]
@@ -573,10 +574,13 @@
   ;; is the client's or the birth's. So this is not a second source of the bytes: it is a check
   ;; that the two recordings cannot drift, since a reader that trusted the other one would hand
   ;; a provider a different history than the run did.
-  (let [lines   (concat [(prompt-line "r1" "You are a coding agent.")]
+  (let [;; THE ROW COMES AFTER THE FRAMES, which is the order the WRITER uses: the returned side is
+        ;; written at `:run/done`, when the run's frames are already on disk. A record in the other
+        ;; order has a row with no message to pair with, and the fold says so (`unpaired-model-row?`).
+        lines   (concat [(prompt-line "r1" "You are a coding agent.")]
+                        (event-lines "r1" one-turn-frames)
                         [(log-line {:ts 2 :runId "r1" :kind "message" :source "model" :id "e1"
-                                    :payload live-assistant})]
-                        (event-lines "r1" one-turn-frames))
+                                    :payload live-assistant})])
         rows    (replay/lines->records lines)
         stored  (->> rows (filter #(= "model" (:source %))) first)
         rebuilt (assistant-with-calls (replay/history (log-one-turn "t-toolcall-pair")))]
@@ -918,3 +922,156 @@
              (:reasoning_content
               (first (filter #(and (= "assistant" (:role %)) (:tool_calls %))
                               (ag/provider-messages (replay/records->messages new-way))))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; TICKET 02 OF `.scratch/reasoning-out-of-the-record`: the match, made real
+
+(defn- reasoning-frame-line?
+  "Is LINE one of the per-token REASONING frames? PARSED, and spelled here rather than asked of the
+  writer: a case that asked would agree with a writer that dropped the wrong ones."
+  [line]
+  (let [row (json/read-str line :key-fn keyword)]
+    (and (= "event" (:type row))
+         (str/starts-with? (str (get-in row [:payload :type])) "REASONING"))))
+
+(defn- reasoning-ids-of [records]
+  "The ids the fold gave the thinking messages of RECORDS, in order."
+  (mapv (comp :id :message)
+        (filter #(= "reasoning" (:role (:message %))) (replay/entries records))))
+
+(deftest a-two-call-runs-second-thought-lands-on-the-second-message
+  ;; TICKET 02, WHERE THE MATCHING RULE HAS TO BE REAL: TWO calls in one run. There is no call id in
+  ;; the record and there must not be one (`model/start` refused the same field for the same reason:
+  ;; 'a counter in the record would be the same fact written a second time, and two copies drift'), so
+  ;; the pairing is BY ORDER within the run and IN THE FOLD: the k-th assistant message the run's
+  ;; frames built is the k-th assistant row the run wrote.
+  ;;
+  ;; AND THE ID THE REBUILT THOUGHT WEARS IS THE WIRE'S OWN. `<run>-r<n>` is not the thought's ordinal:
+  ;; `<n>` comes off the run's ONE counter, which every group takes from -- text, reasoning, a TOOL
+  ;; RESULT and AN INJECTED CARD alike. So a run that had a card spliced in before its first call
+  ;; spells its ids `ctx1, r1, m2, t3, r4`, and its SECOND thought of two is `r4`, not `r1`. An id is
+  ;; what a client keys a message by, and a rebuilt conversation that named that thought something else
+  ;; would draw one thought twice. (This exact case -- a run with a card in it -- is what the real-log
+  ;; walkthrough in `evidence/read_routes.txt` caught after the fixtures had passed: 164 rebuilt
+  ;; thoughts wore an id one off the wire's.)
+  (let [run-id "r-two"
+        seed   {:id "u1" :role "user" :content "hi"}
+        frames (event-lines run-id [(ev/run-start)
+                                   ;; A CARD IS SPLICED IN BEFORE THE FIRST CALL, which is what the
+                                   ;; pre-LLM step does (`harness.cap.project/before-llm`) and what
+                                   ;; spends one of the run's numbers.
+                                   (ev/context-injected {:role "user"
+                                                         :content "a skill body nobody asked for"})
+                                   (ev/model-start {:model "m"} nil)
+                                   (ev/reasoning-delta "first thought")
+                                   (ev/model-end nil)
+                                   (ev/text-delta "one")
+                                   (ev/tool-call "c1" "read" "{}")
+                                   (ev/tool-result "c1" "ok" false)
+                                   (ev/model-start {:model "m"} nil)
+                                   (ev/reasoning-delta "second thought")
+                                   (ev/model-end nil)
+                                   (ev/text-delta "two")
+                                   (ev/run-end)])
+        ;; THE RUN'S OWN ROWS, written at `:run/done` -- AFTER its terminal frame, which is where the
+        ;; record puts them (`http_test` has the measurement: 'it lands one beat AFTER the terminal').
+        rows   [(log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "one"
+                                     :reasoning_content "first thought"
+                                     :tool_calls [{:id "c1" :type "function"
+                                                   :function {:name "read" :arguments "{}"}}]}})
+                (log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "two"
+                                     :reasoning_content "second thought"}})]
+        old-way (replay/lines->records (concat (action-lines run-id [seed]) frames rows))
+        new-way (replay/lines->records (concat (action-lines run-id [seed])
+                                               (remove reasoning-frame-line? frames)
+                                               rows))]
+    (testing "the frames of this very run name its two thoughts r1 and r4"
+      ;; THE GROUND THE CASE BELOW STANDS ON, read off the run's frames rather than asserted from a
+      ;; fixture somebody typed: 'the same id' means the id THIS run's wire carried.
+      (is (= ["r-two-r1" "r-two-r4"] (reasoning-ids-of old-way))))
+    (testing "and a record without those frames rebuilds the same two thoughts, ids and all"
+      (is (= ["r-two-r1" "r-two-r4"] (reasoning-ids-of new-way))))
+    (testing "the conversation is the same one, message for message"
+      (is (= (mapv :message (replay/entries old-way))
+             (mapv :message (replay/entries new-way)))))
+    (testing "and so is what a provider is handed"
+      (is (= (replay/records->messages old-way) (replay/records->messages new-way))))))
+
+(deftest a-run-whose-rows-outrun-its-messages-is-not-paired-and-not-silent
+  ;; TICKET 02'S OTHER HALF: WHEN THE TWO LISTS DISAGREE, THE READER MUST NOT GUESS -- AND MUST NOT
+  ;; PASS OVER IT IN SILENCE. A call that returned nothing builds no message of its own, so a run's own
+  ;; rows can outnumber what its frames built; the extra row has nothing to attach to. The answer is
+  ;; 'attach nothing' (never the wrong message) PLUS a line somebody reading the process log can find.
+  (let [run-id  "r-loud"
+        seed    {:id "u1" :role "user" :content "hi"}
+        frames  (event-lines run-id [(ev/run-start)
+                                    (ev/model-start {:model "m"} nil)
+                                    (ev/reasoning-delta "the only thought")
+                                    (ev/model-end nil)
+                                    (ev/text-delta "the only answer")
+                                    (ev/run-end)])
+        ;; TWO ROWS, ONE MESSAGE: the second call returned nothing the frames could build.
+        rows    [(log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                            :payload {:role "assistant" :content "the only answer"
+                                      :reasoning_content "the only thought"}})
+                 (log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                            :payload {:role "assistant" :content ""
+                                      :reasoning_content "a thought with nowhere to go"}})]
+        ;; A NEW RECORD: the reasoning family is NOT in it, so the run's own rows are the only place its
+        ;; thinking could come from -- which is what makes the second row's lack of a message matter.
+        records (replay/lines->records (concat (action-lines run-id [seed])
+                                               (remove reasoning-frame-line? frames)
+                                               rows))
+        ;; THE LINE IS ASSERTED WHERE IT LANDS. `harness.infra.log` writes to the console and to a
+        ;; file under the root, and this is the repo's own way of standing where it claims to stand
+        ;; (`harness.infra.log-test`'s `with-capture`): move the root, point the console at a
+        ;; StringWriter, and read what the fold said.
+        out     (java.io.StringWriter.)
+        root    (support/temp-dir "replay-unpaired")]
+    (binding [home/*root-override* root]
+      (logging/configure! {:root root :console out})
+      (let [entries (replay/entries records)]
+        (testing "nothing was attached for the row that has no message"
+          (is (= ["r-loud-r0"] (mapv (comp :id :message)
+                                      (filter #(= "reasoning" (:role (:message %))) entries))))
+          (is (not-any? #(str/includes? (str (:content (:message %))) "nowhere to go") entries)
+              "the unpaired thought was attached to something after all"))
+        (testing "and the fold said so out loud rather than passing over it"
+          (is (str/includes? (str out) "unpaired-model-row")
+              (str "the fold kept a mispaired record to itself. it said: " (pr-str (str out))))
+          (is (str/includes? (str out) run-id)))))))
+
+(deftest a-thought-of-nothing-is-not-drawn-as-an-empty-message
+  ;; ADR 0009'S ONE DELIBERATE ASYMMETRY, pinned because a REAL LOG found it (four times in one
+  ;; conversation). A reasoning group whose whole text is a space gets a MESSAGE from the frames --
+  ;; an empty one -- and NOTHING from the rows: `attach-reasoning` reads a blank row as 'this call
+  ;; reported no reasoning', which is the honest answer, and a message saying nothing is not one.
+  ;; So the two spellings are NOT byte-identical here, on purpose, and the rebuilt conversation is the
+  ;; better of the two. The frames are the old spelling; nothing on the wire changes.
+  (let [run-id "r-blank"
+        seed   {:id "u1" :role "user" :content "hi"}
+        frames (event-lines run-id [(ev/run-start)
+                                    (ev/model-start {:model "m"} nil)
+                                    (ev/reasoning-delta " ")
+                                    (ev/model-end nil)
+                                    (ev/text-delta "the answer")
+                                    (ev/run-end)])
+        rows   [(log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "the answer"
+                                     :reasoning_content " "}})]
+        roles  (fn [records] (mapv (comp :role :message)
+                                   (filter #(some? (:role (:message %)))
+                                           (replay/entries records))))
+        old-way (replay/lines->records (concat (action-lines run-id [seed]) frames rows))
+        new-way (replay/lines->records (concat (action-lines run-id [seed])
+                                               (remove reasoning-frame-line? frames)
+                                               rows))]
+    (testing "the frames' way draws it -- an empty message, which is what the old record held"
+      (is (= ["user" "reasoning" "assistant"] (roles old-way)))
+      (is (= " " (:content (:message (second (replay/entries old-way)))))))
+    (testing "the rows' way draws nothing, which is the honest answer"
+      (is (= ["user" "assistant"] (roles new-way))))
+    (testing "and the answer itself is untouched either way"
+      (is (= (last (roles old-way)) (last (roles new-way)))))))

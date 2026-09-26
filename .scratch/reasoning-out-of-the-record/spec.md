@@ -97,3 +97,71 @@ signature（`harness.kernel.event/model-start` 的 docstring 记着），整张�
   - 两场里那 0.6–0.69 MB 的思考文字都仍在模型那一行上。
 - `clojure -M:test -m harness.test-runner`；动过 `ui/src/` 的话 `cd ui && npm test` 与一次
   `node scripts/dev.mjs --scripted` 的真浏览器走查（这一票按说一个 `ui/src` 文件都不用动）。
+
+## 落地（2026-09-26）——三张票面已删，这一段是「做了什么」
+
+**代码。** `harness.edge.http` 的两个帧 sink（agent 路线的 `runner`、子 agent 那条）不再把 `REASONING_*`
+**五族**交给记录；判据收成一处具名谓词 `reasoning-frame?`（放在 `terminal` 旁边，有 docstring 说清为什么是
+整族而不是只丢 CONTENT）。`harness.edge.replay` 的折法从模型那一行取回推理（`reasoning-row?` /
+`insert-entry-before` / `attach-reasoning`），按「这一 run 的帧造出的第 k 条 assistant 消息 ↔ 它写下的第 k
+条 assistant 行」配对。`rebuild` 与 `runner` 的 docstring 改到为真。
+
+**落地时发现两件票面没写到的事**，都改了：
+
+1. **推理消息的 id 编号不是「第几个思考」。** 一个 run 只有**一个**计数器，文本、推理、**注入卡**、工具结果都从
+   它取号（`harness.edge.ag-ui` 的 `:n`）：一次带工具往返的 run 是 `r0, m1, t2, r3, m4`，先被塞进一张卡的那一场
+   是 `ctx1, r1, m2, t3, r4`——两次调用的第二次思考是 **`r3`**、有卡时是 **`r4`**。折侧从**这一 run 记下来的帧**
+   里数出来（`frame-groups-before`：这条消息之前开过几个组），一个字段都不往记录里加。
+   **卡那一格是先漏后补的**：夹具里那几场 run 一张卡都没有，用例全绿；真记录（走查 D 段）一折就露馅——带卡的
+   run 里 164 条推理消息的 id 比线上小，因为 `frame-groups-before` 当时按「只数模型返回的消息」在数，而卡在线上
+   确实占一个号。补上之后是 137（那 137 条另有原因，见下）。
+2. **配不上也不能沉默。** 数量不等时（一次调用什么都没返回、run 中途断了、行先于帧到达）折法**不贴、不猜**，
+   并在进程日志里留一行 `replay/unpaired-model-row`（一个 run 一行）。
+
+**判据（都用例钉住）。**
+
+- `replay-test/a-run-without-its-reasoning-frames-rebuilds-the-same-conversation` —— 同一场 run 两种写法，
+  消息与 provider 形状逐字节相等（不比 `:seq`：两种写法的行数不同，行号是各文件自己的事实，ADR 0003 决策 9）。
+- `replay-test/a-two-call-runs-second-thought-lands-on-the-second-message` —— **两次调用**：k 配对 + id 是线上
+  那个拼法。
+- `replay-test/a-run-whose-rows-outrun-its-messages-is-not-paired-and-not-silent` —— 数量不等：没贴上，且说了。
+- `http-test/the-record-keeps-every-wire-frame-except-the-reasoning-family` —— 从「逐帧相同」改成**「记录的帧 ==
+  线上的帧减去那一族，且线上确实带了那一族」**（不真空：先在线上找那一族）。
+- `http-test/a-run-that-stops-mid-thought-keeps-its-words-and-not-its-thinking` —— **断掉的 run 那条代价**钉住：
+  记录里一条推理都没有、文本帧照旧在、内存里的会话仍然带着它。
+
+**走查（`evidence/read_routes.{clj,txt}`，可重跑；`~/.clj-harness` 只读）。** 两场真记录各量一次大小、行数与
+整份解析耗时，并在**旧那份 68 MB 的真文件**上跑通 `rebuild` / `sofar` / `page` / `trajectory` 四条读路由：
+推理都在，且与 `trajectory` 读到的 `reasoning_content` 是同一段话。
+
+| | 原样 | 推理五族 | 去掉之后 | 解析（原样 → 去掉） |
+|---|---|---|---|---|
+| 新 `ed334c9c` | 52,248,775 B / 225,918 行 | 209,011 行 / 41,896,984 B = **80.2% 的字节** | 10,351,791 B | 1010 ms → **267 ms** |
+| 旧 `fa35f356` | 68,188,479 B / 237,012 行 | 224,308 行 / 44,974,083 B = **66.0%** | 23,214,396 B | 1256 ms → **300 ms** |
+
+（比 spec 里那两行旧数字大：这两场在被量之后又长了。）
+
+**「两种写法逐条相同」在真文件上量到的是一句话加两笔账。** 走查 D 段把**两份真记录各自去掉推理族再折一遍**，
+与原件比：
+
+- **旧那份**：只差上面那**一个没有 model 行的 run**（52 段，逐段对得上）。**把那个 run 的推理也摘掉，两份
+  逐条相等**（`with those runs' reasoning dropped too, message lists equal: true`）——旧记录 100% 读得对。
+- **新那份**：**4 段只含空白的思考**（一个空格）帧那一路画出空消息、行那一路按 `str/blank?` 守卫不画（故意的，
+  一条说空话的消息不是本仓要的答案）；而且**那段空白在记录里不留痕迹**，那一组在线上占的号补不回来，所以
+  同一个 run 里它**之后的 137 条推理消息 id 比线上小一**（正文与顺序一字不差，分布在两个 run 上）。**这一格
+  补不了**——记录里没有「这里曾经有过一个空白思考」这条信息，猜就是错的。所以两种日志**不是**逐字节相同，
+  ADR 0009 把它写成知道的代价，不是通过。
+
+**测试**：`harness.edge.replay-test` 34 用例 / 190 断言，`harness.edge.http-test` 109 / 1207，全量 1289 / 13810
+（唯一的红是这台机器上本来就红的 `pressure_test.clj:344`，`.scratch/compaction-shape/spec.md` 有记录）；
+`cd ui && npm test`（158 通过）/ `npm run typecheck` / `npm run build` 各一遍——**一个 `ui/src` 文件都没改**，
+跑它是为了证明这一点（这三条在主树跑，worktree 里没有 `node_modules`；两棵树里的 `ui/src` 逐字节相同）。
+
+**ADR。** `docs/adr/0009-the-record-holds-a-thought-once.md`：写清它**不推翻** 0003 的窗口代数、0004 的下行、
+0005 的「会话拥有记录流」、0006 的两级、0007 的同步写、0008 的投影，只改**记录持有哪一族帧**；并引原文写明它
+**取代**哪两句（`runner` 的「log every frame」与 `jsonl-two-kinds` 的「逐帧相同，id 也在里面」）。票面写的
+`0006` 是写票面时还没被 0007/0008 占掉的号。三处 architecture 文档改到为真（`edge.md` 的帧族、
+`home-and-storage.md` 的记录内容与读侧、`overview.md` 那张表），`rg` 过一遍没有漏下的副本。
+
+**还没做的（不在本目录三张票里）。** 文本 delta（2%）照旧逐条写；把**它**合并成快照是
+`.scratch/event-persistence` 票 03 的另一半，没动。
