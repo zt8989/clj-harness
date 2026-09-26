@@ -14,8 +14,12 @@
 2. **`UserPromptSubmit` 接线**（决策 12）：它在 `points` 表里已经登记
    （`kernel/hooks.clj:78`／`:abwl` 起，`{:name "UserPromptSubmit" :payload #{:prompt} :gate? true :on-error :block}`），
    今天 `src/` 里**一处 emit 都没有**。本票在"一个用户轮到达、模型还没看到它"那一刻 emit，
-   并给它加上 **`:stdout :content`**——让它成为继 `SystemPrompt` 之后**第二个**把 stdout 当内容的点。
-   注入块落在**提问之后**（`derived-injections` 今天落的那一格，`cap/skills.clj:519`），不改位置规矩。
+   并给它加一格 **`:stdout :content`**（照 `SystemPrompt` 那一行的形状）——一条声明的 stdout 就是要注入的文本。
+   - **注入走唯一那个口**（决策 16）：就是 `harness.kernel.loop` 的 `:before-llm` 那一步——它加进去的每条
+     发一条 `:context.injected`（`action-fusion` 票 07 把同一个口以 `context/inject!` 露出来）。落成一条
+     `:context.injected` 的消息，位置与 `derived-injections` 今天落的一样（**提问之后**，`cap/skills.clj:519`）。
+   - **与 `SystemPrompt` 的区别写清楚**：同一个 `:stdout :content` 键，**去向由点决定**——`SystemPrompt` 的
+     进 **system message**，这一格的进**对话**（注入）。实现别把两者混成一条路。
 3. **技能带 command 与 hooks**（决策 12）：`SKILL.md` 的 frontmatter 多认两个键
    （`cap/skills.clj:111` 的 `frontmatter-keys`，今天只认 `#{:name :description}`）：
    - **`hooks`** —— 一份与 `hooks.edn` 同形的声明表 `{point-kw [decl ..]}`；
@@ -42,7 +46,7 @@
 - **"关掉"仍要看得见**（`effective-hooks`，`:556`，`disabled?` 标记）：被 agent 档关掉的声明**仍在表里**
   带 `:disabled? true`，不是消失——与工具表同一条规矩（`tool-toggles` 定的）。
 - **`gate? true` 的语义照旧**：一条 `UserPromptSubmit` 声明 exit 2 就**拦住这一发**（例如一个不许发的
-  策略 hook），exit 0 就放行；它的 stdout 同时是注入的文本。两件事一个点，是 `SystemPrompt` 已有的形状。
+  策略 hook），exit 0 就放行；它的 stdout 经**唯一那个口**注入（决策 16）。两件事一个点。
 - **不新增 hook 点**：本票只把 `UserPromptSubmit` 从"登记过、没接线"变成"接线了"。其余 P2/P3 点不动。
 - **`SKILL.md` 不能借 `hooks` 扩张工具集**：`allowed-tools` 仍然是"读而忽略"
   （`frontmatter-keys` 的 docstring 明写原因），本票只加**行为**（跑命令），不加**权限**。
@@ -87,8 +91,11 @@
       （`CONTEXT.md` 的**注入**词条 / `.scratch/session-opening`，与今天逐字相同）。
 - [ ] **`UserPromptSubmit` 真的发声**：发一条用户消息 ⇒ 一条 `hook/user-prompt-submit` 审计行；
       挂一条 `command "exit 2"` 的声明 ⇒ 这一发被拦（拒绝话来自 stderr）。
-- [ ] **它是第二个内容点**：挂一条 `printf 'INJECTED'` 的声明 ⇒ 模型**看得到** `INJECTED`，
-      且它在**提问之后**（拿历史断言位置，不是只看"有没有"）。
+- [ ] **它的输出经唯一的注入口落地**：挂一条 `printf 'INJECTED'` 的声明 ⇒ 模型**看得到** `INJECTED`，
+      且它是一条注入口加进对话的消息、在**提问之后**（拿历史与帧各断言一次，不是只看"有没有"）。
+- [ ] **一个口**：指令文件（开场）、技能正文（`/name` 与 `:compose :skills :load`）、作业结束的通知、
+      以及这一条 hook 的注入，在同一场会话里都由**同一个注入口**加进对话（一条用例把四种都跑到，
+      断言它们同形、且都经 `context/inject!` 那一处）——**不许哪一种另起一条路**。
 - [ ] 技能带 `command`：一个 `SKILL.md` 写了 `command: <跑起来会写文件的一条>`，被 `:compose :skills :load`
       选中 ⇒ 用户发送时它**真的跑了**；从 `:load` 里去掉 ⇒ 不跑。
 - [ ] 技能带 `hooks`：一份 `{pre-tool-use [{:command …}]}` ⇒ 那条声明在 `effective-hooks` 里，
