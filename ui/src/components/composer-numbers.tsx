@@ -44,7 +44,8 @@ import {
 import { useAuiState } from "@assistant-ui/react";
 
 import { type StatsPayload } from "@/lib/format";
-import { statsFor } from "@/lib/stats";
+import { subscribeFacts } from "@/lib/mux";
+import { statsFor, withPushedNumbers } from "@/lib/stats";
 
 /// What the composer draws with: the payload, and a way to ask again.
 export interface SessionNumbersValue {
@@ -76,14 +77,11 @@ export const useComposerNumbers = (): SessionNumbersValue => useContext(Numbers)
 
 /// The fetch and its triggers -- the whole of "when to ask".
 function useSessionNumbers(threadId: string): SessionNumbersValue {
-  // A COUNT of assistant messages, not the messages: `useAuiState` compares what the
-  // selector returns, and a selector handing back a fresh array would re-render on
-  // every token.
-  const assistantCount = useAuiState(
-    (s) => s.thread.messages.filter((m) => m.role === "assistant").length,
-  );
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  const [payload, setPayload] = useState<StatsPayload | null>(null);
+  // THE SNAPSHOT (an ask) AND THE PUSH (the session's own facts on the socket), kept apart
+  // until they are drawn: `withPushedNumbers` is the one place that decides how they meet.
+  const [snapshot, setSnapshot] = useState<StatsPayload | null>(null);
+  const [pushed, setPushed] = useState<Partial<StatsPayload> | null>(null);
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -91,12 +89,30 @@ function useSessionNumbers(threadId: string): SessionNumbersValue {
     let live = true;
     void statsFor(threadId).then((next) => {
       // A late answer from a previous session must not land on this one.
-      if (live) setPayload(next);
+      if (live) setSnapshot(next);
     });
     return () => {
       live = false;
     };
-  }, [threadId, assistantCount, isRunning, nonce]);
+    // `assistantCount` IS NOT A DEPENDENCY ANY MORE (ticket 04b): the numbers now arrive as
+    // the server writes them, so asking again after every message was the client guessing at
+    // a change it is told about. The asks that remain are the ones with a reason: this
+    // session, a run that ended, and a person opening the panel (`reload`).
+  }, [threadId, isRunning, nonce]);
+
+  // THE PUSH: every `model/end` the session sends carries the numbers its own folds had at
+  // that moment. A fact for another conversation -- or another family -- never reaches this
+  // subscription (`lib/mux.ts` routes by `familyOf`).
+  useEffect(() => {
+    const { unsubscribe } = subscribeFacts(threadId, (fact) => {
+      if (fact.type !== "model/end") return;
+      const numbers = fact.numbers as Partial<StatsPayload> | undefined;
+      if (numbers !== undefined) setPushed(numbers);
+    });
+    return unsubscribe;
+  }, [threadId]);
+
+  const payload = withPushedNumbers(snapshot, pushed);
 
   // AND ONE MORE ASK A BEAT AFTER A RUN ENDS, because the record's own writer is a
   // beat behind its last frame: the run's message tail lands on `:run/done`, which is

@@ -16,20 +16,25 @@
 //     `ReasoningBlock` in `message-parts.tsx`), so the row is the only place a
 //     live thought shows -- and a first line, frozen a second into the run, would
 //     be the whole of what a reader could watch. What the row then DOES with that
-//     text -- keep the end in view, and slide it left as it grows, so characters
-//     leave at the left edge while the new ones arrive at the right one -- is
-//     `ReasoningTail` plus the rule in `styles.css`.
+//     text -- keep the end in view, slide it left as it grows, and LET GO of the
+//     blocks that have run off it -- is `ReasoningTail` plus the rule in
+//     `styles.css`; WHICH block of it the DOM holds is `tailStart` below.
 //
-// WHY THE LIVE HALF IS NOT CUT HERE ANY MORE, when it used to be cut to the same
-// 120 characters. The window is made by MOVING the text (a transform), and only a
-// transform can be interpolated: a window that instead cut the text to its last
-// 120 characters slid by LAYOUT -- each token drops a character at the front, so
-// the whole line shifts one character left in one frame, with nothing to
-// interpolate and no frame in between. That is a snap per token, and it is
-// exactly what the first cut of this feature looked like in a real session. So
-// the row is handed what has arrived, and the part that has run off the left edge
-// stays in the DOM (one text node) because the transform has to be able to move
-// it: dropping it would put the motion back into layout.
+// WHY THE LIVE HALF IS NOT CUT HERE, when it used to be cut to the same 120
+// characters. The window is made by MOVING the text (a transform), and only a
+// transform can be interpolated: a window cut to the last N characters slid by
+// LAYOUT -- each token dropped a character at the front, so the whole line shifted
+// one character left in one frame, with nothing to interpolate and no frame in
+// between. That is a snap per token, and it is exactly what the first cut of this
+// feature looked like in a real session (`.scratch/thinking-row-tail/spec.md`,
+// 复议一). So CUTTING and MOVING are two different things, and they are done in two
+// different places: this module hands the row everything that has arrived, and the
+// row holds a BLOCK of it (`tailStart`), paying for what it lets go with the padding
+// that puts the line back where layout would have left it (`ReasoningTail`). A block
+// leaves once per `TAIL_DROP` characters and never once per token, so nothing a
+// reader can see moves when it does. Holding the whole thought instead -- because the
+// drag might have to move it -- is what made the row's own work grow with the
+// thought: every token re-laid-out and re-measured a line as long as the thought is.
 //
 
 /// How much of a STOPPED thought the row says, in characters -- the clip the `…`
@@ -231,4 +236,39 @@ function clip(text: string): string {
   return text.length > PREVIEW_LIMIT
     ? `${text.slice(0, PREVIEW_LIMIT).trimEnd()}…`
     : text;
+}
+
+/// ------------------------------------------------------- what the row holds
+///
+/// HOW MUCH OF A LIVE THOUGHT THE ROW HOLDS, and how much of it leaves at a time, in
+/// characters.
+///
+/// THE BOUND IS NOT `PREVIEW_LIMIT`. That 120 is what a STOPPED thought says in its
+/// one line; a live thought is dragged through the window, and the drag needs material
+/// in front of the window -- the characters leaving at the left edge ARE the motion.
+/// The window is tens of characters wide at this size, so `TAIL_KEEP` is many windows'
+/// worth, and a block leaves rarely enough that a reader never meets two seams.
+export const TAIL_KEEP = 600;
+export const TAIL_DROP = 600;
+
+/// WHERE THE DOM'S COPY OF A LIVE THOUGHT BEGINS -- an offset into the text
+/// `previewOf` hands over, and it only ever moves FORWARD.
+///
+/// `held` IS THE LAST ANSWER AND THE TEXT IT WAS COUNTED AGAINST, because the question
+/// is not "how much of this should be kept" but "did this line grow, or is it a
+/// different line": a thought that is not an EXTENSION of the one the row was holding
+/// -- the later part of one the runtime split into a message of its own, a restored
+/// conversation, another thought -- shares no offset with it, and the answer is the
+/// beginning of the new one.
+///
+/// A BLOCK LEAVES, WHICH IS WHY THE ANSWER IS QUANTISED. Advancing one character per
+/// token would be the snap this feature already shipped once (see the header); the row
+/// pays for a block, and that payment is worth making once per `TAIL_DROP`, not once
+/// per token. Between two answers here the text only ever GROWS by appending, which is
+/// the property the row's drag depends on.
+export function tailStart(text: string, held: { text: string; start: number }): number {
+  if (!text.startsWith(held.text)) return 0;
+  let start = held.start;
+  while (text.length - start > TAIL_KEEP + TAIL_DROP) start += TAIL_DROP;
+  return start;
 }

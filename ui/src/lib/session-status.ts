@@ -116,17 +116,9 @@ export const statusOf = (local: SessionStatus, server: string | null): SessionSt
 export const stillBeingWritten = (ownRunning: boolean, server: string | null): boolean =>
   statusOf({ running: ownRunning, parked: false }, server).running;
 
-/// WHICH OF THE TWO THINGS A TURN'S END WEARS: the dot that says it is still arriving, or the
-/// furniture that says it has stopped (Copy / Refresh / More).
-///
-/// TWO FACTS, NOT ONE, and the difference is the owner's third report (2026-09-25): `writing` is
-/// about the CONVERSATION -- somebody is answering it -- while a footer is drawn at EVERY turn
-/// end, so a settled turn's end wore the dot too the moment the next message was sent. Two dots,
-/// one per turn end. The dot belongs to the LIVE turn, and the live turn is the thread's LAST
-/// message; every earlier turn end keeps its furniture (which `autohide="not-last"` shows on
-/// hover, as it always has).
-export const wearsWorkingDot = (writing: boolean, isLastMessage: boolean): boolean =>
-  writing && isLastMessage;
+// WHICH OF THE TWO THINGS A TURN'S END WEARS IS NOT ASKED HERE ANY MORE: the dot is about the
+// TURN, and the turn has its own module (`lib/live-turn.ts`: `wearsWorkingDot` over the turn's
+// open/closed fact, this file's `writing`, and whether the footer is the live turn's).
 
 /// Whether this session must not be filed away or have its project removed: it
 /// has work that is not finished with the log.

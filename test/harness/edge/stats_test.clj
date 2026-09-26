@@ -311,6 +311,31 @@
           (is (pos? (:outputTokensPerSecond body)))
           (is (false? (:incomplete body))))))))
 
+;; ---------------------------------------------------------- the live answer (ticket 01)
+(deftest a-live-session-answers-stats-without-opening-the-record
+  ;; THE CRITERION OF TICKET 01: while this process HOLDS the conversation, the composer's
+  ;; numbers come from the session's own folds -- `stats` and `context` are registered on both of
+  ;; its seams at `start!` -- so the route opens no file at all.
+  ;;
+  ;; THE PROOF IS A `read-records` THAT THROWS. A route that reached for the record would answer
+  ;; 400 carrying that sentence; one that reads the folds answers 200 without ever evaluating it.
+  ;; Asserting the numbers alone would not show this -- they are the same numbers either way,
+  ;; which is the point: the fold is a READING of one record, not a second truth.
+  (let [thread-id "stats-live"]
+    (with-server thread-id
+      [{:content "hello"
+        :usage {:prompt_tokens 10 :completion_tokens 2 :total_tokens 12}}]
+      (fn [port]
+        ;; THE RUN IS OUTSIDE THE REDEFS: a run's own set-up legitimately reads the record.
+        (send-run! port thread-id)
+        (let [[status body]
+              (with-redefs [replay/read-records
+                            (fn [& _]
+                              (throw (ex-info "a live answer must not read the record" {})))]
+                (get-json port (str "/api/threads/" thread-id "/stats")))]
+          (is (= 200 status)
+              (str "a live session answers from memory, not from the file: " (:error body)))
+          (is (= 1 (:steps body)) "the one model call is in the fold"))))))
 (deftest the-endpoint-says-not-here-for-a-session-that-has-no-log
   (with-server "stats-no-log" [{:content "unused"}]
     (fn [port]

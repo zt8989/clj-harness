@@ -203,7 +203,7 @@ import {
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useDelegations } from "@/lib/delegations";
 import { formatMillis } from "@/lib/format";
-import { firstLine, previewOf, thoughtAt } from "@/lib/reasoning-preview";
+import { firstLine, previewOf, tailStart, thoughtAt } from "@/lib/reasoning-preview";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -983,9 +983,16 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
 /// interpolated a frame at a time. The measure is taken after layout and before
 /// paint (`useLayoutEffect`), so the untranslated line is never drawn.
 ///
-/// What is dragged is the ARRIVED text (`lib/reasoning-preview.ts`), not a window
-/// cut to its last N characters: dropping what has scrolled off the left edge would
-/// hand the motion back to layout, one dropped character at a time -- the snap
+/// WHAT THE WINDOW HOLDS IS A BLOCK, AND LETTING GO OF IT COSTS NOTHING. The row is
+/// handed everything that has arrived and holds the END of it: a block leaves once per
+/// `TAIL_DROP` characters (`tailStart`), and what is held is many windows' worth, so
+/// the drag always has material in front of it. Cutting what has scrolled off would
+/// hand the motion back to layout if it were done one character per token -- the snap
+/// the first cut of this feature shipped -- but a BLOCK is PAID FOR: the padding that
+/// replaces it (`pad` below) moves the line right by exactly what the block weighed,
+/// so every character that stays is drawn in the pixel it was drawn in the frame
+/// before, and the drag never notices. That is what keeps a token's work constant
+/// instead of proportional to the thought.
 ///
 /// THE DRAG HAS A SPEED RATHER THAN A DURATION. Interpolating over a fixed time
 /// would leave a lag proportional to how fast the model is writing -- the drag is
@@ -1010,17 +1017,76 @@ const ReasoningTail: FC<{ text: string }> = ({ text }) => {
   const trackRef = useRef<HTMLSpanElement>(null);
   /// Where the last step left the line, in the same units as the transform.
   const draggedRef = useRef(0);
+  /// WHAT THE ROW HAS LET GO OF, and what it is letting go of now: where in the
+  /// thought the DOM's copy begins (`start`, and the DOM is drawn from it), what the
+  /// characters before it weigh (`pad`, the padding the line carries so that they
+  /// still count towards its width), the width the line had just before the last
+  /// block left it (`before`), whether that block is in flight (`leaving`), and the
+  /// text the two offsets were counted against (`text`).
+  const held = useRef({ text: "", start: 0, pad: 0, before: 0, leaving: false });
+  const [start, setStart] = useState(0);
 
   useLayoutEffect(() => {
     const window = windowRef.current;
     const track = trackRef.current;
     if (window === null || track === null) return;
-    // How much of the line is off the window's right side: pull the line left by
-    // exactly that much, so its END is what the window shows. A line that FITS is
-    // not moved at all, which is what keeps a short thought sitting right after
-    // `思考 · ` instead of jumping to the window's right edge.
-    const hidden =
-      track.getBoundingClientRect().width - window.getBoundingClientRect().width;
+    const state = held.current;
+    let line = track.getBoundingClientRect().width;
+
+    // PAY FOR THE BLOCK THAT JUST LEFT. The `setStart` below asks React for a
+    // re-render, and React runs it in THIS frame, before the paint (an update from a
+    // layout effect is flushed synchronously). So by the time this runs a second
+    // time, the DOM is already a block shorter and the padding buys those pixels
+    // back. `D` is a DIFFERENCE OF TWO MEASUREMENTS OF THE SAME BOX -- what left is
+    // exactly what the width lost -- and not anything computed from the characters:
+    // the line is proportional, and a prefix of it is not a number to do arithmetic
+    // on.
+    if (state.leaving) {
+      state.leaving = false;
+      state.pad += state.before - line;
+      track.style.paddingLeft = state.pad === 0 ? "" : `${state.pad}px`;
+      // The payment restores the width to what it was a moment ago, so the number
+      // this pass drags by is the one it had before the block left -- the block
+      // leaving is invisible to the drag, which is the whole of this mechanism.
+      line = state.before;
+    }
+
+    // A THOUGHT THAT IS NOT AN EXTENSION OF THE ONE WE WERE HOLDING is a different
+    // line (the later part of one the runtime split into a message of its own, a
+    // restored conversation, another thought): the offsets mean nothing, and the line
+    // starts over at its beginning.
+    if (!text.startsWith(state.text)) {
+      state.leaving = false;
+      if (state.start !== 0) {
+        state.text = text;
+        state.start = 0;
+        state.pad = 0;
+        track.style.paddingLeft = "";
+        setStart(0);
+        return;
+      }
+    }
+
+    // AND WHEN THE COPY HAS GROWN PAST WHAT THE ROW HOLDS, the block leaves:
+    // `tailStart` says where the DOM's copy of the thought begins now, the re-render
+    // that follows does the shrinking, and the next pass pays for it (same frame).
+    const next = tailStart(text, state);
+    state.text = text;
+    if (next !== state.start) {
+      state.before = line;
+      state.leaving = true;
+      state.start = next;
+      setStart(next);
+      return;
+    }
+
+    // THE DRAG. Pull the line left by how much of it is off the window's right side,
+    // so its END is what the window shows. A line that FITS is not moved at all,
+    // which is what keeps a short thought sitting right after `思考 · ` instead of
+    // jumping to the window's right edge. `line` is the width of the WHOLE line --
+    // what the row has let go of is still carried, by the padding -- which is why
+    // this reads the number it always read.
+    const hidden = line - window.getBoundingClientRect().width;
     const target = hidden > 0 ? -hidden : 0;
     const travelled = Math.abs(target - draggedRef.current);
     track.style.transitionDuration = `${Math.min(TAIL_SETTLE_MAX, travelled / TAIL_SPEED)}ms`;
@@ -1034,7 +1100,7 @@ const ReasoningTail: FC<{ text: string }> = ({ text }) => {
       data-slot="reasoning-trigger-tail"
       className="aui-reasoning-trigger-tail"
     >
-      <span ref={trackRef}>{text}</span>
+      <span ref={trackRef}>{text.slice(start)}</span>
     </span>
   );
 };
@@ -1077,42 +1143,47 @@ const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   children,
   group,
 }) => {
-  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought
-  // is gathered across the turn's messages (and, for a live run, across the parts of
-  // one message), and the rules for that walk are in `lib/reasoning-preview.ts`.
-  // `s.thread.messages` is the conversation, `s.message.index` is where this message
-  // sits in it, and this row's own group names the part it starts at. Two selectors
-  // rather than one object, because the comparison is by reference -- an object
-  // literal here would re-render on every store update (see `useAuiState`'s note).
-  const messages = useAuiState((s) => s.thread.messages);
-  const index = useAuiState((s) => s.message.index);
-  // WHICH PART THIS ROW IS. A live run keeps one assistant message open for a whole
-  // turn -- several thoughts and the calls between them share its `parts` -- so the
-  // message alone cannot say which thought this row is. The group's first part index
-  // can, and `thoughtAt` reads the message part by part from there.
+  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought is
+  // gathered across the turn's messages (and, for a live run, across the parts of one
+  // message), and the rules for that walk are in `lib/reasoning-preview.ts`.
+  // `s.thread.messages` is the conversation, `s.message.index` is where this message sits in
+  // it, and this row's own group names the part it starts at.
+  //
+  // EVERY ANSWER IS A PRIMITIVE, AND THAT IS THE POINT. `useAuiState` compares a selector's
+  // answer BY VALUE, so a selector handing back `s.thread.messages` -- a fresh array on every
+  // store update -- re-rendered this row on EVERY delta: one whole re-render of the row's
+  // shell (the disclosure, the trigger, the icon, the catalog lookup) per thought per update.
+  // A long conversation has hundreds of rows, and that is the slope the per-commit cost grows
+  // along (measured: ~0.06 ms a message -- a 400-message session costs ~34 ms a commit, which
+  // is 29 fps). The walks behind these three selectors (`thoughtAt` over the turn's parts,
+  // `previewOf` over one thought) are microseconds; the re-render was not.
   const from = group.indices[0] ?? 0;
-  const thought = thoughtAt(messages, index, from);
+  const drawn = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).drawn);
+  const running = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).running);
   // The tail while it runs, the first line once it stops.
-  const preview = previewOf(thought.parts, thought.running);
+  const preview = useAuiState((s) => {
+    const thought = thoughtAt(s.thread.messages, s.message.index, from);
+    return previewOf(thought.parts, thought.running);
+  });
   const [open, setOpen] = useState(false);
 
   // NOT DRAWN: this run is the model going back to a thought it already started --
   // see the file comment. The row that began it says the same words a moment later
   // anyway (it is handed the newest part), so nothing is lost by saying this one
   // twice.
-  if (!thought.drawn) return null;
+  if (!drawn) return null;
 
   return (
     <ReasoningRoot
       variant="ghost"
       className="mb-0"
-      streaming={thought.running}
+      streaming={running}
       open={open}
       onOpenChange={setOpen}
     >
-      <ReasoningTrigger active={thought.running} preview={preview} />
-      <ReasoningContent aria-busy={thought.running}>
-        <ReasoningText className={thought.running ? "pt-1" : "max-h-none pt-1"}>
+      <ReasoningTrigger active={running} preview={preview} />
+      <ReasoningContent aria-busy={running}>
+        <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>
           {children}
         </ReasoningText>
       </ReasoningContent>

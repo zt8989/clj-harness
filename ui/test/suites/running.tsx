@@ -37,13 +37,16 @@ import { expect } from "vitest";
 import { type Case, type Suite } from "../e2e";
 import { renderI18n } from "../support/locale";
 import { SessionRunStop } from "../../src/components/session-run-stop";
+import { IDLE, statusOf, stillBeingWritten, type SessionStatus } from "../../src/lib/session-status";
+// THE TURN'S OWN THREE FACTS (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): when the dot
+// is drawn at a turn's end, and where the page learns whether a turn is open.
 import {
-  IDLE,
-  statusOf,
-  stillBeingWritten,
+  NO_TURN,
+  turnAfterFact,
+  turnFromWindow,
+  turnIsOpen,
   wearsWorkingDot,
-  type SessionStatus,
-} from "../../src/lib/session-status";
+} from "../../src/lib/live-turn";
 import type { Language } from "../../src/lib/language";
 
 /// THE BUTTON AS A PERSON MEETS IT: the stop inside a real i18n instance, rendered to a
@@ -140,21 +143,53 @@ const cases: Case[] = [
     },
   },
   {
-    name: "only-the-live-turn-wears-the-dot-every-other-turn-end-keeps-its-furniture",
+    name: "only-the-open-turns-own-end-wears-the-dot-every-other-turn-end-keeps-its-furniture",
     run: async () => {
-      // THE OWNER'S THIRD REPORT (2026-09-25): the moment a second message is sent, TWO dots
-      // appeared -- one at each turn end. `writing` is a fact about the CONVERSATION, and a
-      // footer is drawn at EVERY turn end, so the two facts have to be kept apart: the dot
-      // belongs to the live turn (the thread's last message).
-      expect(wearsWorkingDot(true, true), "the live turn, while somebody is answering").toBe(true);
+      // THE OWNER'S THIRD REPORT (2026-09-25), and the shape that answers it: the moment a second
+      // message is sent, an EARLIER turn's end must not wear the dot too. Three facts decide it
+      // (`lib/live-turn.ts`): the TURN is open, somebody is writing RIGHT NOW, and this footer is
+      // the LIVE turn's end.
+      const open = turnIsOpen;
+      const closed = NO_TURN;
 
-      // A SETTLED TURN'S END, while a NEW one is being answered: its furniture, not a dot.
-      expect(wearsWorkingDot(true, false), "every earlier turn end keeps Copy / Refresh / More").toBe(false);
+      // THE LIVE TURN, while somebody is answering: the dot.
+      expect(wearsWorkingDot(open, true, true), "the live turn, somebody writing").toBe(true);
 
-      // AND A CONVERSATION NOBODY IS ANSWERING HAS NO DOT AT ALL -- the last turn ended, so it
-      // wears the same furniture the others do.
-      expect(wearsWorkingDot(false, true)).toBe(false);
-      expect(wearsWorkingDot(false, false)).toBe(false);
+      // AN EARLIER TURN'S END, while a NEW one is answered: its own furniture (Copy / Refresh /
+      // More), which is the whole of the owner's report.
+      expect(wearsWorkingDot(open, true, false), "an earlier turn end keeps its furniture").toBe(false);
+
+      // A TURN NOBODY IS WRITING IN RIGHT NOW: a PARKED turn is still OPEN (the server sends no
+      // `turn/end` for an interrupt -- ADR 0006 decision 3) and the card that answers it is the
+      // sign there, so the dot stays off even though the turn has not closed.
+      expect(wearsWorkingDot(open, false, true), "a parked turn: the card, not the dot").toBe(false);
+
+      // AND A CLOSED TURN NEVER WEARS ONE, whatever else is true.
+      expect(wearsWorkingDot(closed, true, true)).toBe(false);
+      expect(wearsWorkingDot(closed, true, false)).toBe(false);
+      expect(wearsWorkingDot(closed, false, true)).toBe(false);
+    },
+  },
+  {
+    name: "the-open-turn-is-seeded-from-the-window-and-then-carried-by-the-turn-family",
+    run: async () => {
+      // TWO SOURCES, ONE VALUE, and neither is an opinion about the other's question: the turn
+      // family is LIVE-ONLY (`.scratch/turn-and-model-events` decision 5), so a page that OPENS a
+      // conversation mid-turn learns it from the window's own state word ...
+      expect(turnFromWindow("running"), "a run going: its turn is open").toEqual(turnIsOpen);
+      expect(turnFromWindow("parked"), "a parked turn is resumed, not closed").toEqual(turnIsOpen);
+      for (const state of ["settled", "unfinished", null, undefined, "something-else"]) {
+        expect(turnFromWindow(state), `${state} is no open turn`).toEqual(NO_TURN);
+      }
+
+      // ... and the FACTS then carry it from there: a turn opens with a person's own words and
+      // closes when its run leaves nothing owed. Every other frame of the family (the model
+      // calls) and every frame of the other families leaves the value alone.
+      expect(turnAfterFact(NO_TURN, "turn/start")).toEqual(turnIsOpen);
+      expect(turnAfterFact(turnIsOpen, "turn/end")).toEqual(NO_TURN);
+      for (const type of ["model/start", "model/end", "RUN_STARTED", "window", "append"]) {
+        expect(turnAfterFact(turnIsOpen, type), `${type} says nothing about the turn`).toEqual(turnIsOpen);
+      }
     },
   },
   {

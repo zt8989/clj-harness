@@ -78,6 +78,12 @@ import { useTranslation } from "react-i18next";
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { HeldSessionContext, ThreadIdContext, type HeldSession } from "@/components/composer-chrome";
 import { SessionRunContext } from "@/components/session-run-state";
+// THE TURN'S OWN WORD (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): which turn the
+// server says is open, as a value this host holds and the message footer reads -- see
+// `lib/live-turn.ts` for why the run's word cannot answer that question.
+import { SessionTurnContext } from "@/components/live-turn-state";
+import { NO_TURN, turnAfterFact, turnFromWindow, type LiveTurn } from "@/lib/live-turn";
+import { subscribeFacts } from "@/lib/mux";
 // THE STOP THE COMPOSER DRAWS WHEN THE SERVER SAYS THIS CONVERSATION IS RUNNING (ticket
 // 09): this host has the thread id the request has to name, which is the whole reason the
 // element asks for it rather than drawing one of its own.
@@ -855,6 +861,36 @@ const SessionHost: FC<{
   /// which reach it from here).
   const [runState, setRunState] = useState<string | null>(null);
 
+  /// WHAT THE SERVER SAYS ABOUT THIS SESSION'S OPEN TURN (`turn/start` / `turn/end`), which is
+  /// what the dot at a turn's end is about -- see `lib/live-turn.ts` for why the run's word
+  /// cannot answer it. TWO SOURCES, ONE VALUE, and they are not two opinions about one thing:
+  /// the window's state SEEDS it (the turn family is live-only, so a page that opens a
+  /// conversation mid-turn hears nothing about it) and the FACTS then carry it from there.
+  const [liveTurn, setLiveTurn] = useState<LiveTurn>(NO_TURN);
+
+  /// ONE DOOR FOR THE SERVER'S STATE, so `runState` and the turn's seed can never disagree about
+  /// which frame moved them (the composer's gate reads the first, the message footer the second).
+  const onServerState = useCallback((state: string | null) => {
+    setRunState(state);
+    setLiveTurn(turnFromWindow(state));
+  }, []);
+
+  /// AND THE TURN FAMILY ITSELF, for as long as this host is on screen: a `turn/start` opens a
+  /// turn and a `turn/end` closes it (`lib/live-turn.ts` says which frames those are and why a
+  /// park closes neither). The subscription is per THREAD and it dies with the host, the same
+  /// shape `components/composer-numbers.tsx` uses for the numbers in the same family.
+  useEffect(() => {
+    // NO DOOR IS EXCLUDED: this is the fact family's own subscription, and the two cases it has
+    // to cover are both real -- a session this page MINTED has no window to seed from (`read` is
+    // `none`) and its own run's `turn/start` is the only thing that will say the turn is open; a
+    // session the page is only WATCHING has a window AND hears the facts. Neither is a reason to
+    // skip the other.
+    const { unsubscribe } = subscribeFacts(threadId, (fact) => {
+      setLiveTurn((turn) => turnAfterFact(turn, fact.type));
+    });
+    return unsubscribe;
+  }, [threadId]);
+
   const history = useMemo(
     () => sessionHistory(threadId, read, tErrors, reportRecord, onWindowRead),
     [threadId, read, tErrors, reportRecord, onWindowRead],
@@ -997,7 +1033,7 @@ const SessionHost: FC<{
     started: windowStarted,
     onRecord: reportRecord,
     isOwnRun,
-    onState: setRunState,
+    onState: onServerState,
     onControls: reportControls,
   });
 
@@ -1011,6 +1047,10 @@ const SessionHost: FC<{
     // session has going is not a fact about the runtime (that is exactly what the bug was),
     // and nothing between these two lines reads it.
     <SessionRunContext.Provider value={runState}>
+      {/* AND THE TURN'S OWN WORD, by the same door and for the same reason: the message footer is
+          inside the copied element too, and what it draws at a turn's end is about THAT TURN
+          (`lib/live-turn.ts`), not about the run. */}
+      <SessionTurnContext.Provider value={liveTurn}>
       <AssistantRuntimeProvider runtime={runtime}>
         <SessionStatusReporter
           threadId={threadId}
@@ -1035,6 +1075,7 @@ const SessionHost: FC<{
           {visible ? children : null}
         </ApprovalBatchProvider>
       </AssistantRuntimeProvider>
+      </SessionTurnContext.Provider>
     </SessionRunContext.Provider>
   );
 };

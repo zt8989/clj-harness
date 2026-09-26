@@ -1,0 +1,143 @@
+# spec: Agent 事件持久化 —— 把主人那份方案对着本仓读一遍
+
+主人（2026-09-25）给了一份完整蓝图（关键事件同步组提交 / 有界队列背压 / JSONL 为真相 /
+SQLite 投影 / 崩溃恢复 / 监控）。这一份**不是照抄它**，而是逐条对本仓现状与已有裁定的核对：
+哪些已经是这样、哪些冲突、哪些是它确实有而本仓没有的。
+
+## 一、已经是现状的（不用做）
+
+| 蓝图里的东西 | 本仓今天 |
+|---|---|
+| 每会话一份追加式 JSONL | ✔ `projects/<workspace>/<thread>.jsonl`（`.scratch/jsonl-two-kinds` 两种行） |
+| 一个写者 | ✔ 唯一写路径 `harness.edge.http/log!` → `harness.edge.record` 的写手线程 |
+| 残缺尾部安全截断 | ✔ `rows-tolerating-a-torn-last-line`（读侧）、`record-state`（完整性判断） |
+| 崩溃恢复（半行 / 坏行 / 前缀） | ✔ `replay/read-records`（宽松）与 `lines->records`（严格）两条读法 |
+| 组提交的替身：有序前缀 + 降级 | ✔ `record.clj`：失败不跳过、队列停在原地、thread 标 DEGRADED、run 照跑 |
+| 推给客户端的增量 + 缺口补齐 | ✔ `events.mux` 的 `runSince` + 窗口的 `seq`/`generation`/`since` |
+| 「库只装可改写的状态」 | ✔ `harness.infra.db`（项目、会话归属、锚点、待办） |
+
+## 二、与本仓成文裁定**冲突**的四条（每条都要落 ADR 才能改）
+
+1. **「关键事件等 ack（fsync 后才继续）」** ↔ ADR 0002 决策 3（记录异步、允许落后）。
+   **建议：同步 append，但不 fsync、不等 ack。** 同步是为了**当场拿到行号**（票 03 卡的就是它），
+   不是为了一致性——run 不靠记录继续（内存是权威，ADR 0002 决策 1），所以「崩溃少丢一批」换
+   每个关键事件几毫秒，不值。fsync 留在**会话放下 / 进程退出 / 每 N 批**三个时机。
+2. **「SQLite 是可重建的投影，承担一切查询（messages / tool_calls 表）」** ↔
+   `.scratch/project-sidebar` 决策 2 与 `docs/architecture/home-and-storage.md` 的
+   **「库不是日志索引：jsonl 里的任何内容都不进库」**。
+   **建议：只投影位置与统计，不投影内容。** turn/step/entry 的字节区间、以及 `stats`/`context`
+   那种可增量维护的累加——这些是**可重算的索引**；而 `messages`/`tool_calls` 是内容的第二份，
+   一旦建了，库与记录就得永远同步，且内容从此有两个真相。
+3. **「非关键事件队列满可丢弃」** ↔ 记录是**无洞的有序前缀**（`record.clj` 原话：有洞的记录不是
+   更短的对话，是另一种、放不回去的对话）。
+   **建议：可丢的只有流式 delta，而丢了它就得同时改「重建靠 delta」这件事**——正是
+   `.scratch/reasoning-out-of-the-record` 的方向（合并成快照，或干脆不进记录）。
+   完整消息 / 工具调用 / 状态变更一律不可丢。
+4. **「文件头 + 每行一个显式 `seq` 字段」** ↔ ADR 0003 决策 9（序号必须能从记录**重放**出来）。
+   **反对在每行存 `seq`**：行号就是它（`replay/entries` 的 docstring），存一份是同一件事实的第二份
+   ——`model/start` 已经因为这个理由拒绝过 call 计数器（「two copies drift」）。
+   **文件头是好东西**（格式版本 / 会话身份），今天靠文件名与 `provider/init` 行承载，值得补。
+
+## 三、你那套里本仓确实缺、且不与任何裁定冲突的（值得加）
+
+- **拿着 handle + 攒批**：今天每一行是 `spit :append true` ⇒ **每行一次 open/write/close**。
+  真正的省不是省 fsync，是**省 syscall**。这条同时满足「同步」与「便宜」，也是解开票 03 的那一把。
+- **有界队列 + 背压**：今天队列是**无界**的，磁盘卡住时它涨内存而不是把压力顶回模型流。
+  本仓对应的「上游」是 `harness.kernel.llm` 消费 vendor SSE 的那一处。
+- **流式快照（50–100ms 合并）**：最大的一笔（本仓实测：推理 delta 占一份日志的 82%，
+  而其中 98% 是帧的壳）。
+- **降级四级（L0–L3）+ 那张监控表**：本仓今天只有 `log/info!` 与 `:behind`。
+- **退出时 flush_all + 一个结束事件**：本仓有 exit hook，值得核一遍「等它写完」这一步在不在。
+
+## 四、票
+
+| # | 票 | 依赖 | 交付 |
+|---|---|---|---|
+| 01 | 记录同步写：handle + 攒批 | 无 | 每会话持有 handle；`log!` 在调用者线程上写完并**当场回答行号**；逐行 catch ⇒ 失败仍降级、run 照跑。**它解开票 03 的 `:seq`。** |
+| 02 | 有界队列 + 背压 | 01 | 队列有上限；满了顶回上游（消费 vendor SSE 那一处），不是涨内存 |
+| 03 | 流式 delta 合并成快照 | 01 | 50–100ms 一次快照；关键事件（消息 / 工具 / 状态）照旧逐条 |
+| 04 | fsync 的时机与降级四级 | 01, 02 | 会话放下 / 退出 / 每 N 批；L0–L3 的判据与说出来的那句话 |
+| 05 | 监控与退出收口 | 01–04 | 那张指标表 + 退出时 flush_all |
+| 06 | 记录文件头 | 03 | 格式版本与会话身份（**不**在每行加 `seq`） |
+| ? | SQLite 投影 | 待定 | **只投影位置与统计**，不投影内容 —— 要主人拍 |
+
+## 五、ADR
+
+**一条新 ADR（0007）**：记录**同步写**，反转 ADR 0002 决策 3 的「异步落后」，并且**明确它换来的是
+什么**（行号当场可得）与**它没有换来的东西**（更少的写、更快的一致性）。
+
+## 非目标
+
+- 不照抄 asyncio 的形状（本仓是 http-kit 线程池，`docs/rules/concurrency.md` 那套纪律照旧）。
+- 不在每行存 `seq`（见二.4）。
+- ~~不把内容投影进 SQLite~~ → **主人拍了：连内容一起投影**（ADR 0008）。
+
+## 主人拍的（2026-09-25）
+
+| 问题 | 拍了什么 | 落在哪 |
+|---|---|---|
+| 记录的写入同步到什么程度 | **同步 append，不 fsync、不等 ack**（fsync 三个时机：会话放下 / 退出 / 每 N 批） | **ADR 0007** |
+| SQLite 投不投影内容 | **连内容一起投影**（`messages` / `tool_calls`），推翻「库不是日志索引」 | **ADR 0008** |
+| 流式 delta | **合并成快照**（50–100ms 一次），保住「无洞的有序前缀」 | 票 03 |
+
+## 票 01 的落点，以及**必须原样保住**的东西
+
+`harness.edge.record` 的形状要改：**队列、consumer 线程、`serve!`/`consume!`/`retry!`/`start-consumer!`
+`/`stop-consumer!` 那一段退役**（ADR 0007 决策 5），`append!` 改成「拿句柄、写一行、就地交出偏移」。
+
+**四样东西一个字都不能动，动了就是另一场事故**：
+
+1. **`prepare`（`prepare-with!`）那步 seam** —— `carry-back!` 靠它「搬回来的那一段先于即将写的这一行」，
+   而 `prepare` 会**重算基线**（`re-base!`）：行号的正确性挂在这上面。
+2. **`sink`（`set-sink!`）那步 seam** —— 测试用它当探针（写进去的每个字节都看得见），
+   去掉它 `record_test` 就没法证明「一行一次写」。
+3. **文件行数（`file-lines`）与基线** —— 行号 = 基线 + 已写行数；同步之后它**当场**可用，
+   而不是「写手知道、别人猜」。
+4. **降级的读侧出口**（`degraded` + 报告出来的那句话）—— 失败现在在调用者身上被接住并记账，
+   但**读侧还要能看见并说出来**，否则「写不进去」会变成沉默。
+
+**要一起核的读侧调用点**（它们今天踩在 `pending-count`/`flushed-seq` 上）：`stats-get` 的 `:behind`、
+`harness.edge.sessions/evictable?` 的 `pending?`、`replay/fold-sofar` 与条目编号那条路。
+**判据**：`record_test` 里「一行一次写、顺序、降级、原地重试」那一族改成同步的等价说法；
+`http-test` 与 `stats-test` 全绿；一次 run 的帧循环上多加的微秒数进 `evidence/`。
+
+### 第五样：**锁要往下搬一层**（改之前必须知道）
+
+今天 `harness.edge.http/log!` 自己在 `(locking log-lock …)` 里调 `record/append!`（513 行），
+而 `lands` 是**写手线程**调的——也就是说它今天落在任何锁**外面**。
+
+**同步之后 `lands` 会落进 `log-lock` 里面**：它调 `sessions/land!` / `land-at!`（那是会话的锁），
+于是「先拿会话锁、再拿 log-lock」的那条路上就是**锁序倒置**。
+（`log-lock` 的注释自己写着它管的是「一行写到哪」，而 `project-post` 也拿它。）
+
+**所以票 01 的形状是**：`log!` 在 `log-lock` 里**只解决「写到哪个文件」**，出了锁再调 `record/append!`；
+**锁搬进 `record.clj`**（它现在同步了，锁本来就该在这儿），由它**罩住 write+flush**，
+写完**先出锁、再调 `lands`**。这与 0007 决策 1（同步）是同一件事的两半：
+同步之后，「谁在什么时候拿锁」从写手线程的一个实现细节，变成了调用路径上必须说清的一件事。
+
+## 票 03 的第一次尝试：读侧对了，写侧被**两条折叠**挡住（2026-09-25）
+
+**读侧落了并量过**：`harness.edge.replay` 的折叠现在能从**run 自己那一行**取回推理——
+`reasoning-row?` / `insert-entry-before` / `attach-reasoning`，按「这一 run 的帧造出的第 k 条
+assistant 消息 ↔ 这一 run 写下的第 k 条 assistant 行」配对，把推理消息**插在它前面**（与帧当年
+的位置、行号都一致）。拿一份手写的最小记录量过：
+
+```
+:ids   [u1 r1-m0-r r1-m0]
+:roles [user reasoning assistant]
+:content [hi THINKING answer]
+```
+
+**写侧（不再记录逐 token 的推理帧）没有落**，因为它撞上一条本仓的形状：**同一份记录有两条折叠**——
+`harness.edge.replay/entries`（窗口/rebuild 那条）与 `records->messages`（provider 形状的历史：
+`replay/history` 与 resume 那条）。配对只写进了前者，后者于是答 `reasoning_content: nil`
+（实测：`the-log-the-server-writes-is-one-replay-can-read` 红了）。
+
+**在两条折叠共享一份实现之前，写侧不能动**——再写一份配对正是本仓拒绝的那件事。所以这次只落读侧
+（对旧日志零变化：`replay_test` 30 用例 / 175 断言绿）与 `runner` 里那段「为什么还没落」的注释。
+
+**顺序因此是**：先让 `records->messages` 与 `entries` 共享同一遍折叠（它现在只比 `entries` 多一步
+`ensure-complete!`），再落写侧，再补那条判据（同一场对话，带推理帧与不带的日志，`entries` 逐字节相等）。
+
+**文本 delta（2%）另算**：它的口径与推理不同——被掐断的 run 靠它才留得住半句答案，所以那一族
+按票面写的「快照」落（50–100ms 一次），不是丢掉。

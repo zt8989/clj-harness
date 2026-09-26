@@ -560,13 +560,96 @@
   (let [new (frames/apply-frames (:pending acc))
         at  (or (:after acc) fallback)]
     (-> (if (seq new) (add-entries acc at new) acc)
-        (assoc :pending [] :after nil))))
+        ;; WHICH MESSAGES THIS GROUP BUILT, so the run's own `message` rows can be paired with
+        ;; them in order (`entries-step`), and whether the FRAMES already carried the reasoning
+        ;; (an old record) -- in which case the rows must not say it a second time.
+        ;; APPENDED, NOT OVERWRITTEN, AND THAT IS THE WHOLE OF THE PAIRING'S SAFETY: the ids
+        ;; belong to a RUN, and a run's frames may be flushed in MORE THAN ONE group (an injected
+        ;; row between two rounds closes the group it sits in). Overwriting here would drop the
+        ;; earlier messages from the list and pair a run's later rows with the wrong messages --
+        ;; measured: a two-round run then answered `reasoning_content: nil` on the round that had
+        ;; a tool call. The list is reset where a RUN begins, in `entries-step`'s event branch.
+        (assoc :pending [] :after nil
+               :model-ids (into (or (:model-ids acc) [])
+                                ;; A CARD IS NOT A MESSAGE THE RUN RETURNED. An `injected-context`
+                                ;; frame folds into an ASSISTANT-role message whose content is a `data`
+                                ;; part (`harness.kernel.frames/apply-frames`), and counting it here
+                                ;; would shift every pairing by the number of injections in the run --
+                                ;; measured on a real log: the reasoning then landed on a card and the
+                                ;; assistant that carried the tool call answered nil. A message the
+                                ;; model returned has TEXT for content; a card does not.
+                                (mapv :id (filter #(and (= "assistant" (:role %))
+                                                        (string? (:content %)))
+                                                  new)))
+               :reasoned? (boolean (or (:reasoned? acc)
+                                       (some #(= "reasoning" (:role %)) new)))))))
 
 (defn- entries-init []
   "The conversation's own fold. `:messages` IS THE SAME MESSAGES WITHOUT THEIR NUMBERS -- kept so
   handed the conversation AS IT STANDS at each row (see `fold-consumers`). It is a second
   vector of the SAME message objects, so it costs refs, not bytes."
-  {:entries [] :messages [] :pending [] :after nil :seen #{} :last -1})
+  {:entries [] :messages [] :pending [] :after nil :seen #{} :last -1
+   ;; THE MODEL ROWS THAT MAY CARRY A RUN'S REASONING (ticket 03 of `.scratch/event-persistence`).
+   ;; A run's frames build its assistant messages; the run's OWN `message` rows (one per model
+   ;; call, written at `:run/done`) carry the same text the vendor returned -- including the
+   ;; reasoning, which is why a NEW record does not need the per-token frames at all (they were
+   ;; 82% of a log's bytes). The pairing is BY ORDER within the run: the k-th assistant message
+   ;; the run's frames built is the k-th assistant row the run wrote.
+   ;;
+   ;; `:reasoned?` IS THE GUARD FOR OLD LOGS: a record written BEFORE the frames stopped carrying
+   ;; reasoning already has those messages, and attaching the row's copy as well would draw the
+   ;; same thought twice. So a run whose frames produced reasoning is left exactly as it was.
+   :model-ids [] :model-next 0 :reasoned? false})
+
+(defn- reasoning-row?
+  "Is ROW the RUN's own account of what the model returned -- an assistant `message` row whose
+  envelope says the model put it there -- AND is the reasoning it carries not already on the
+  record? Two why-nots, and both are real: a record written before the frames stopped carrying
+  reasoning has those messages already (`:reasoned?`), and a run whose rows outnumber the
+  messages its frames built is one this reader must not guess about (`:model-next`)."
+  [row acc]
+  (and (= "message" (kind row))
+       (= "assistant" (:role (payload row)))
+       (= "model" (:source row))
+       (not (:reasoned? acc))
+       (< (long (or (:model-next acc) 0)) (count (:model-ids acc)))))
+
+(defn- insert-entry-before
+  "Insert ENTRY into ACC's entries -- and the same message into `:messages`, which is the same
+  vector of SAME message objects -- immediately in front of the first entry whose message has ID.
+  That is the position the reasoning FRAMES would have taken (`harness.kernel.frames/apply-frames`
+  puts a reasoning message in front of the assistant message it belongs to)."
+  [acc id entry]
+  (let [at (first (keep-indexed (fn [n e] (when (= id (:id (:message e))) n)) (:entries acc)))]
+    (if (nil? at)
+      acc
+      (-> acc
+          (update :entries #(vec (concat (subvec % 0 at) [entry] (subvec % at))))
+          (update :messages #(vec (concat (subvec % 0 at) [(:message entry)] (subvec % at))))))))
+
+(defn- attach-reasoning
+  "Give the group's NEXT assistant message the reasoning the run's own row carries, as the
+  reasoning-role message the frames used to build -- with the SAME record number as the assistant
+  entry (a frame group is numbered by ONE line, so the two are one arrival).
+
+  THE CURSOR ADVANCES EITHER WAY: every model call wrote one row and built one message, so a call
+  with no reasoning still spends its turn. A row whose text is blank is exactly that case, and the
+  honest answer is 'this call reported no reasoning' -- not a message saying nothing."
+  [acc ^long i value]
+  (let [ids    (:model-ids acc)
+        idx    (long (or (:model-next acc) 0))
+        msg-id (nth ids idx)
+        text   (str (:reasoning_content value))]
+    (if (str/blank? text)
+      (update acc :model-next inc)
+      (let [entry (first (filter (fn [e] (= msg-id (:id (:message e)))) (:entries acc)))]
+        (-> (if entry
+              (insert-entry-before acc msg-id {:seq (:seq entry)
+                                                   :message {:id (str msg-id "-r")
+                                                             :role "reasoning"
+                                                             :content text}})
+              acc)
+            (update :model-next inc))))))
 
 (defn- entries-step
   "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. `:last` is the line
@@ -576,15 +659,25 @@
         acc   (assoc acc :last i)]
     (case (kind row)
       "message" (let [acc (flush-group acc (max 0 (dec i)))]
-                  (if (and (our-entry? row) (not (seen-entry? acc row)))
+                  (cond
+                    ;; THE RUN'S OWN ROW, CARRYING WHAT THE FRAMES NO LONGER DO (ticket 03).
+                    (reasoning-row? row acc) (attach-reasoning acc i value)
+                    (and (our-entry? row) (not (seen-entry? acc row)))
                     (-> acc
                         (add-entries i [(cond-> value (:id row) (assoc :id (:id row)))])
                         (update :seen conj (:id row)))
-                    acc))
+                    :else acc))
       "event" (let [acc (update acc :pending conj value)]
                 ;; THE LAST TERMINAL OF THE GROUP WINS, not the first: the frames after a
                 ;; terminal belong to a line this reader would otherwise number short.
-                (if (frames/terminal? value) (assoc acc :after i) acc))
+                ;; A RUN BEGINS HERE, so the pairing the MODEL rows this run will write is
+                ;; forgotten and starts over: those rows arrive at `:run/done`, long after these
+                ;; frames, and a leftover list from the previous run would pair them with the
+                ;; wrong messages (ticket 03 of `.scratch/event-persistence`).
+                (let [acc (cond-> acc
+                            (= "RUN_STARTED" (:type value))
+                            (assoc :model-ids [] :model-next 0 :reasoned? false))]
+                  (if (frames/terminal? value) (assoc acc :after i) acc)))
       acc)))
 
 (defn- entries-answer
@@ -1000,9 +1093,15 @@
       (contains? state :open-runs)  (assoc :open-runs (:open-runs state))
       (contains? state :interrupts) (assoc :interrupts (:interrupts state)))))
 
-(defn- folds-init
+(defn folds-init
   "The initial value of every extra fold, from its `:init` (a thunk, so two sessions never
-  share one accumulator)."
+  share one accumulator).
+
+  PUBLIC BECAUSE THE NO-RECORD HALF OF A BIRTH NEEDS IT. A session born from a log gets its
+  folds from the walk (`fold-sofar`); a session born with NO log at all -- the first message of
+  a brand-new conversation -- has no walk to seed them, and `harness.edge.sessions`' `:build`
+  answers that case. Leaving them unseeded made every consumer fold start from nil at the first
+  written row, which is not 'an empty conversation' but 'a fold that never began'."
   [folds]
   (into {} (map (fn [[name {:keys [init]}]] [name (init)])) folds))
 

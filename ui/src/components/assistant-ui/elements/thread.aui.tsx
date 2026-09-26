@@ -49,9 +49,14 @@ import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
 import { SessionRunContext } from "@/components/session-run-state";
-// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): the criterion the action bar
-// shares with the composer -- this page's run OR the server's word. See `AssistantActionBar`.
-import { wearsWorkingDot, stillBeingWritten } from "@/lib/session-status";
+// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE TURN the server says is open
+// (`turn/start` / `turn/end`), which is what the dot at a turn's end is about -- see
+// `lib/live-turn.ts` for why it is not the run's word.
+import { SessionTurnContext } from "@/components/live-turn-state";
+// LOCAL (ticket 02): the criterion the action bar shares with the composer -- this page's run OR
+// the server's word. See `AssistantActionBar`.
+import { stillBeingWritten } from "@/lib/session-status";
+import { wearsWorkingDot } from "@/lib/live-turn";
 import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
@@ -614,10 +619,13 @@ const AssistantMessage: FC = () => {
   const runState = useContext(SessionRunContext);
   const ownRunning = useAuiState((s) => s.thread.isRunning);
   const writing = stillBeingWritten(ownRunning, runState);
-  // ...AND ONLY THE LIVE TURN WEARS THE DOT: `writing` is a fact about the CONVERSATION, and the
-  // footer is drawn at EVERY turn end, so the two facts are kept apart by `wearsWorkingDot` --
-  // without the last-message half a settled turn's end wore a dot too the moment the next
-  // message was sent (owner's third report, 2026-09-25: two dots, one per turn end).
+  // LOCAL (ticket 02): WHICH OF THE TWO THINGS THIS TURN'S END WEARS -- and the three facts it
+  // takes are in `lib/live-turn.ts`: the TURN is open (the server's `turn/start` / `turn/end`,
+  // seeded from the window's word where the family is silent), somebody is WRITING right now (the
+  // run's, `writing` above), and this footer is the LIVE turn's end (`isLast` -- only one turn can
+  // be open, and it is the last; without that half every earlier turn's end wore a dot too: the
+  // owner's third report, 2026-09-25).
+  const turn = useContext(SessionTurnContext);
   const lastMessage = useAuiState((s) => s.message.isLast);
 
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
@@ -640,6 +648,19 @@ const AssistantMessage: FC = () => {
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // LOCAL: A FOLDED TURN'S STEPS ARE NOT DRAWN AT ALL, rather than drawn and hidden.
+  // `display: none` and "no element" are THE SAME THING TO LAYOUT -- a hidden child does not
+  // take part in the message list's flex gap, and its `innerText` is empty, which is already
+  // how `lib/window-scroll.ts` skips it while looking for an anchor -- but they are NOT the
+  // same thing to React: every mounted step is reconciled on EVERY store update, and in a real
+  // conversation the steps are most of the messages (measured on one real session: 99 assistant
+  // messages over 17 turns -- five steps for every answer).
+  //
+  // NO `folded` CHECK IS NEEDED HERE, and that is not an omission: `useStepFold` answers
+  // `"step"` only on the far side of `if (!folded) return "none"`, so a `"step"` message is
+  // one whose turn IS folded. (An earlier cut of this asked for `&& !folded` as well, which
+  // made it dead code -- the first attempt at this change did nothing at all.)
+  if (fold === "step") return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -648,7 +669,8 @@ const AssistantMessage: FC = () => {
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
         continues && STEP_SPACING,
-        fold === "step" && "hidden",
+        // (the `hidden` class a step used to get is gone with the early return above: a step
+        // is not drawn at all, so there is nothing left to hide)
       )}
     >
       {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
@@ -783,7 +805,7 @@ const AssistantMessage: FC = () => {
             THIS message, which is now the turn's last one -- the answer, which is
             what "regenerate" means to a reader. */}
         <AuiIf condition={isTurnEnd}>
-          {wearsWorkingDot(writing, lastMessage) ? <WorkingDot /> : <AssistantActionBar />}
+          {wearsWorkingDot(turn, writing, lastMessage) ? <WorkingDot /> : <AssistantActionBar />}
         </AuiIf>
       </div>
     </MessagePrimitive.Root>

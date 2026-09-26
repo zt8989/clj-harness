@@ -59,7 +59,7 @@ components/
                         `POST /api/threads/<id>/cancel`（票 09）。**单开文件**只为一个原因：它要在 UI
                         套件里被渲染出来读回去，而 `composer-chrome.tsx` 进不了那个运行（它经
                         `lib/attachments.ts` 摸到 `lib/i18n.ts`，后者在加载时碰 `document`）
-  composer-stats.tsx    composer **下面**那条状态条（会话统计的五格）
+  composer-stats.tsx    composer **下面**那条状态条（会话统计的五格；一行放不下时按 GIVE_UP 让格，不让折行）
   composer-numbers.tsx  这场会话的数字**取一次**的地方：取数、「什么时候取」的四个触发条件，
                         以及把它们交给 composer 里两个读者（状态条与那颗圈）的那个 scope
   context-ring.tsx      model **左边**那颗圈（占了多少，按三样分色）与点开后的面板：
@@ -132,7 +132,11 @@ lib/
   feed.ts           一页一页的读：`pageThread`（尾页，或读者手上最老那条之前的一页）与帧的形状
                     （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
   mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
-                     分发窗口帧；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
+                     分发**三族**：窗口帧、run 的 AG-UI 帧，以及**关于会话的事实**（`turn/*` /
+                     `model/*`，ADR 0006）。**分派是显式的**（`familyOf(type)` → `window | fact | run`，
+                     票 04）：事实若落进 `else` 就会被交给 `@ag-ui/client`，那份 schema 校验会当场把这一轮
+                     打死。事实有自己的订阅面（`subscribeFacts`——它属于**会话**而不是某一次 run，所以
+                     只看着的人也想要它）；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
                      重连时重新声明整份集合。`app.tsx` 的窗口跟随走它，不再每条会话一条 SSE
   follow.ts          子 agent 面板的 AG-UI 载具：读记录的**重放**（`GET …/frames`），再从 `mux.ts`
                      收实时尾巴，按帧自己的 `:seq` 去重、拼成 SSE 交给 `@ag-ui/client`（ticket 04）
@@ -195,10 +199,19 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （`indicator: "no-text"`：消息在跑、最后一个 part 不是 text/reasoning 时它就在），于是第一次发送（末尾那条消息
   还是空的）和「一步交给下一步」的当口会**两颗一起出现**。所以那一颗**关掉了**（`indicator="never"`），
   「在写」只由 turn 末尾这一格说——**一个状态一个标记，一个标记一个地方**。
-  **而且只摆在「正在被写的那一轮」的末尾**（`lib/session-status.ts` 的 `wearsWorkingDot`：对话在被回答 **且** 这是线程
-  最后一条消息）。这两件事必须分开：`writing` 说的是**对话**（有人在回答它），而**每个** turn 末尾都会画这一格——
-  少了后一半，发下一条消息的瞬间**每个** turn 末尾都各长一颗点（主人第三次报的就是这个）。前面那些 turn 末尾照旧只穿
-  自己的家具（`autohide="not-last"`，悬停才现，一直是这个形状）。
+  **而且只摆在「正在被写的那一轮」的末尾**，判据是**三个事实**，各有各的家（`lib/live-turn.ts` 的
+  `wearsWorkingDot`）：
+    - `turn.open` —— **那一轮自己的生命周期**：`turn/start` / `turn/end`（`lib/mux.ts` 的 fact 家族，ADR 0006）。
+      **一个 turn 比一次 run 大**：它随人的话开，只在这一轮的 run「什么都没欠着」时才关（park 不关，resume 接着写
+      同一轮），所以这一格不能再拿 run 的词去猜。
+    - `writing` —— **此刻有人正在写**（本页的 run **或**窗口说的 `running`）：`turn.open` 与它不是同一个问题
+      （parked 的那一轮**还开着**，而那时谁也没在写——那里的标记是卡）。
+    - `isLast` —— **这一格就是那一轮的末尾**：同时只能有一轮开着，开着的那一轮就是线程最后一条；少了这个，
+      发下一条消息的瞬间**每个** turn 末尾都各长一颗点（主人第三次报的就是这个）。
+  **刷新那一格靠窗口的种子**：fact 家族是**只服务「你看着的时候」**的（`.scratch/turn-and-model-events` 决策 5，
+  过去只作为快照），所以刷新落在一轮中间时它对这一轮**一言不发**——页面从窗口自己的词种下去（`running` ⇒ 开着，
+  `parked` ⇒ 也开着，`settled` / `unfinished` ⇒ 没有开着的轮），此后由 fact 接着走。
+  前面那些 turn 末尾照旧只穿自己的家具（`autohide="not-last"`，悬停才现，一直是这个形状）。
   **这一格也不能交给 upstream 的 `hideWhenRunning`**：它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是
   看着」正是 runtime 说 false 的那一格（实测：传 `true` 照样画出来）。而**空位**和动作条犯的是同一个错：都读作
   「写完了」。

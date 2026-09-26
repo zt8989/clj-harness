@@ -236,8 +236,13 @@
 .aui-reasoning-trigger-tail > span {
   display: inline-block;
   will-change: transform;
-  /* The DURATION is not here: it is computed per step by `ReasoningTail`, so the
-     drag travels at a speed a reader can follow instead of over a fixed time
+  /* ONLY `transform` IS TRANSITIONED, and that is load-bearing: `padding-left` is
+     what pays for a block of the thought the row has let go of, it is written in
+     the same frame that block leaves, and the whole point is that it is instant --
+     a transition there would put the motion back into layout, which is the snap
+     this window replaced.
+     The DURATION is not here either: it is computed per step by `ReasoningTail`, so
+     the drag travels at a speed a reader can follow instead of over a fixed time
      (which would lag further behind the faster the model writes). */
   transition-property: transform;
   transition-timing-function: linear;

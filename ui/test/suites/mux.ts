@@ -8,7 +8,7 @@
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
-import { declaredSet } from "../../src/lib/mux";
+import { declaredSet, familyOf } from "../../src/lib/mux";
 import { downlinkUrl } from "../../src/lib/threads";
 
 const cases: Case[] = [
@@ -50,6 +50,24 @@ const cases: Case[] = [
       const url = downlinkUrl("events.host", new URLSearchParams());
       expect(url).toContain("/api/events.host");
       expect(url).not.toContain("?");
+    },
+  },
+  {
+    name: "a-fact-frame-is-not-a-run-frame",
+    run: async () => {
+      // THE ROUTING RULE, which is the whole of this module's safety for the third family:
+      // a fact (`turn/*`, `model/*`) must NEVER be handed to `@ag-ui/client`, whose schema
+      // would refuse it and take the run down with it. The two named families are explicit
+      // and the default is the run family, which is AG-UI's own (upper-case) vocabulary --
+      // the fall-through this test exists to keep from swallowing the middle case.
+      expect(familyOf("append")).toBe("window");
+      expect(familyOf("window")).toBe("window");
+      expect(familyOf("model/start")).toBe("fact");
+      expect(familyOf("model/end")).toBe("fact");
+      expect(familyOf("turn/start")).toBe("fact");
+      expect(familyOf("turn/end")).toBe("fact");
+      expect(familyOf("RUN_STARTED")).toBe("run");
+      expect(familyOf("TEXT_MESSAGE_CONTENT")).toBe("run");
     },
   },
 ];

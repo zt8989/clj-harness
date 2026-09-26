@@ -45,7 +45,14 @@
          :context     (vec context)
          :state       state
          :folds       folds})
-      {:entries [] :compactions [] :prunes [] :context [] :state nil :folds {}}))
+      ;; NO LOG YET: the first message of a brand-new conversation. THE FOLDS ARE STILL SEEDED --
+      ;; from their own `:init`, which is the truth for an empty record -- because the session's
+      ;; write stream advances them from the very first row it writes (`harness.kernel.session/
+      ;; row-written!`). Answering with an empty fold table instead left every consumer fold
+      ;; starting from nil at that first row: not 'an empty conversation' but 'a fold that never
+      ;; began', and for a fold that folds INTO its value, an exception.
+      {:entries [] :compactions [] :prunes [] :context [] :state nil
+       :folds   (replay/folds-init registered)}))
 
   :model-messages
   (fn [entries compactions prunes]

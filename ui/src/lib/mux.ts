@@ -27,6 +27,7 @@ import { apiBase, downlinkUrl } from "./threads";
 /// on every phone. A connection name is not a conversation name, but it is still a name the
 /// page mints in the browser, so it comes from the same cross-platform generator.
 import { newId } from "./id";
+import { createBatch } from "./coalesce";
 
 /// HOW LONG TO WAIT BEFORE OPENING THE DOWNLINK AGAIN after it closed on its own -- the
 /// same fact the SSE feed's reconnect carried: while the socket is up nothing is asked at
@@ -43,6 +44,35 @@ export type MuxFrame = WindowFrame & { threadId: string };
 /// window frame. Its shape is the client library's, not ours -- this side reads `type` to
 /// route it and hands the rest through to the SSE the agent parses.
 export type RunFrame = { threadId: string; type: string; [key: string]: unknown };
+
+/// THE THIRD FAMILY: FACTS ABOUT a conversation rather than parts OF it -- a turn's two ends
+/// and a model call's two ends (`harness.edge.http`; ADR 0006). They are NOT AG-UI frames: they
+/// never make a message, a rebuilt conversation does not contain them, and nothing echoes them
+/// back to a vendor. They are not window frames either -- they are not the conversation's copy.
+///
+/// THEY CARRY THE RECORD'S `seq` (a line number, so the two halves of the downlink can be
+/// aligned) and, for the two that have them, the session's numbers.
+export type FactFrame = {
+  threadId: string;
+  seq: number | null;
+  type: "turn/start" | "turn/end" | "model/start" | "model/end";
+  payload?: unknown;
+  numbers?: unknown;
+};
+
+/// THE FACT FAMILY'S TYPES, NAMED IN ONE PLACE. `harness.edge.http` writes these names and this
+/// side routes by them, so the spelling is a contract between two processes, not a detail.
+const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+
+/// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
+/// without a socket (`test/suites/mux.ts`), and so `onmessage` states it once. The `default` is
+/// deliberate: anything that is not one of the two named families is a RUN frame, which is
+/// AG-UI's own (upper-case) vocabulary.
+export function familyOf(type: string): "window" | "fact" | "run" {
+  if (WINDOW_TYPES.has(type)) return "window";
+  if (FACT_TYPES.has(type)) return "fact";
+  return "run";
+}
 
 export type MuxHandlers = {
   onFrame: (frame: MuxFrame) => void;
@@ -63,6 +93,10 @@ type Subscription = {
 /// the sender and a watcher read one stream.
 const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
 
+/// THE FRAMES THAT MAY NOT WAIT (`lib/coalesce.ts`): a run is over, or the window is. The
+/// reader is told the moment one arrives -- whatever was held in front of it goes first.
+const TERMINAL_TYPES = new Set(["end", "RUN_FINISHED", "RUN_ERROR", "RUN_CANCELLED"]);
+
 /// WHAT THIS PAGE FOLLOWS, by conversation. A `Map` rather than an object because a thread
 /// id is not a property name (a stem can be anything).
 const subscriptions = new Map<string, Subscription>();
@@ -80,6 +114,92 @@ const runSubscriptions = new Map<string, Set<(event: RunFrame) => void>>();
 /// fresh buffer per run): carrying a finished run's high-water mark into the next one would
 /// ask for frames numbered above anything the new run will ever send.
 const runCursors = new Map<string, number>();
+
+/// WHAT THIS PAGE READS FACTS FROM, by conversation: the turn and model-call families
+/// (`FactFrame`). A `Map` of SETS for the same reason the run map is one -- a page may hold
+/// more than one conversation -- and a separate map from `runSubscriptions` ON PURPOSE: these
+/// frames are not a run's, they are the conversation's, and a page that is only WATCHING
+/// (driving nothing) still wants them.
+const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
+
+/// HOW FAR EACH CONVERSATION'S FACT STREAM HAS BEEN READ -- the `:seq` of the last fact this
+/// page saw, WHICH IS A RECORD LINE NUMBER (`harness.edge.mux/facts-after`), not a counter the
+/// sender keeps. A reconnecting socket re-declares it (`factSince`), and it is a SEPARATE number
+/// from `runCursors` because the two count different things: a run frame is numbered by the
+/// sender, a fact by the record line it was written for.
+///
+/// IT NEVER RESETS, unlike the run cursor: the record does not start over when a run does.
+const factCursors = new Map<string, number>();
+
+/// THE ROUTING, in one place, because the batch below hands frames over in groups.
+///
+/// ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
+/// the conversation's copy; a FACT is about the conversation (a turn's or a call's two
+/// ends); everything else is a RUN event -- AG-UI's own vocabulary, which goes to whoever
+/// is driving that run.
+///
+/// WHY THE MIDDLE CASE IS NAMED RATHER THAN LEFT TO THE `else`: this used to be 'not a
+/// window type => a run frame', and a fact falling through to `@ag-ui/client` would be
+/// validated against AG-UI's schema and take the whole run down with it. A frame for a
+/// conversation we are not holding still reaches nobody, which is right.
+function deliver(frame: MuxFrame & RunFrame): void {
+  const family = familyOf(frame.type);
+  if (family === "window") {
+    subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    return;
+  }
+  if (family === "fact") {
+    const fact = frame as unknown as FactFrame;
+    // REMEMBER HOW FAR THIS CONVERSATION'S FACTS HAVE BEEN READ (ticket 05): the number is the
+    // RECORD LINE the fact was written for, so it is not reset by a run -- and it is taken AT
+    // DELIVERY, like the run's below, for the same reason: a frame still waiting in the batch has
+    // been seen by nobody, and a cursor ahead of it would make the reconnect SKIP it.
+    if (typeof fact.seq === "number") {
+      if (fact.seq > (factCursors.get(fact.threadId) ?? 0)) {
+        factCursors.set(fact.threadId, fact.seq);
+      }
+    }
+    // AND THE SUBSCRIBERS: this frame is about the conversation, not about a run, so it goes to
+    // whoever asked for the fact family (`subscribeFacts`).
+    for (const onFact of factSubscriptions.get(fact.threadId) ?? []) onFact(fact);
+    return;
+  }
+  for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
+  // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the rest.
+  // AT DELIVERY AND NOT AT ARRIVAL (`lib/coalesce.ts`'s header): a frame still waiting in
+  // the batch has been seen by nobody, and a mark ahead of it would make the reconnect
+  // SKIP it. `RUN_STARTED` RESETS the mark rather than raising it -- the sender starts a
+  // fresh numbering per run, and a stale high-water mark would suppress the new run's
+  // frames.
+  const seq = frame.seq;
+  // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
+  // so its `type` reads as the window union alone until it is asked for as a string.
+  const type: string = frame.type;
+  if (typeof seq === "number") {
+    if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
+      runCursors.set(frame.threadId, seq);
+    }
+  }
+}
+
+/// THE BATCH EVERY FRAME GOES THROUGH (`lib/coalesce.ts`): run frames, window frames and
+/// facts alike, so what comes out is what arrived, in the order it arrived.
+const batch = createBatch<MuxFrame & RunFrame>({
+  deliver: (frames) => {
+    for (const frame of frames) deliver(frame);
+  },
+  terminal: (frame) => TERMINAL_TYPES.has(frame.type),
+  schedule: (flush) => {
+    // A CLOCK THAT CANNOT ARRANGE A FLUSH MUST NOT COST A FRAME: the page has
+    // `requestAnimationFrame`, a suite's environment may not -- and a frame that was held
+    // and never scheduled is a frame nobody ever sees (which is exactly what the client
+    // suite caught: an undefined `requestAnimationFrame` inside `push` left the run's
+    // frames in the queue). With no clock, the batch goes out AT ONCE, which is what this
+    // side did before the batch existed.
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+    else flush();
+  },
+});
 
 let socket: WebSocket | null = null;
 /// THE NAME OF THE CURRENT SOCKET, minted when it opens. It exists so the HTTP route that
@@ -105,6 +225,9 @@ export function declaredSet(): Array<{
   since: number | null;
   generation: string | null;
   runSince: number | null;
+  /// THE FACT FAMILY'S OWN CURSOR (ticket 05): a RECORD line number, and a separate number from
+  /// `runSince` because the two count different things.
+  factSince: number | null;
 }> {
   return wantedThreads().map((threadId) => {
     const sub = subscriptions.get(threadId);
@@ -113,6 +236,7 @@ export function declaredSet(): Array<{
       since: sub?.since ?? null,
       generation: sub?.generation ?? null,
       runSince: runCursors.get(threadId) ?? null,
+      factSince: factCursors.get(threadId) ?? null,
     };
   });
 }
@@ -140,32 +264,20 @@ function open(): void {
       // and every other conversation on it alive.
       return;
     }
-    // ONE SOCKET, TWO KINDS OF FRAME. A window frame is about the conversation's copy
-    // (routed to the window's own follower); anything else is a run event and goes to
-    // whoever is driving that run. A frame for a conversation we are not holding reaches
-    // nobody, which is right.
-    if (WINDOW_TYPES.has(frame.type)) {
-      subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
-    } else {
-      for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
-      // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the
-      // rest. `RUN_STARTED` RESETS the mark rather than raising it: the sender starts a fresh
-      // numbering per run, and a stale high-water mark would suppress the new run's frames.
-      const seq = frame.seq;
-      // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
-      // so its `type` reads as the window union alone until it is asked for as a string.
-      const type: string = frame.type;
-      if (typeof seq === "number") {
-        if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
-          runCursors.set(frame.threadId, seq);
-        }
-      }
-    }
+    // HELD, NOT DROPPED (`lib/coalesce.ts`): the frame joins the batch for the browser's
+    // next animation frame, which is what keeps a fast vendor's stream at one React update
+    // per frame instead of one per token. WHICH KIND of frame this is, and who reads it, is
+    // `deliver` above.
+    batch.push(frame);
   };
   ws.onclose = () => {
     if (socket !== ws) return; // a newer socket replaced this one; its close is not ours
     socket = null;
     if (!wanted) return;
+    // WHAT WAS HELD GOES OUT BEFORE THE REPAIR IS ASKED FOR: `onClosed` must be told about a
+    // position the readers have already been given, or the repair reads from a mark ahead
+    // of frames nobody has seen (`lib/coalesce.ts`'s header).
+    batch.flush();
     // EVERY FOLLOWED WINDOW IS NOW BEHIND, and each has its own repair (a tail page).
     for (const sub of subscriptions.values()) sub.handlers.onClosed();
     schedule();
@@ -208,6 +320,7 @@ function declareThread(threadId: string): Promise<void> | null {
         since: sub?.since ?? null,
         generation: sub?.generation ?? null,
         runSince: runCursors.get(threadId) ?? null,
+        factSince: factCursors.get(threadId) ?? null,
       },
     ],
   });
@@ -266,6 +379,30 @@ export function subscribeRun(
       if (!subscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
     },
     declared,
+  };
+}
+
+
+/// READ A CONVERSATION'S FACTS: every turn and model-call frame for THREAD-ID is handed to
+/// ON_FACT. This is the family the composer's strip takes its numbers from (and the family the
+/// fold line will take its counts from), so it is the same shape as `subscribeRun` minus the
+/// promise: a fact is a push nobody has to declare a cursor for yet (`_scratch/turn-and-model-
+/// events` ticket 05 adds that), and one missed while the socket was down is repaired by the
+/// next snapshot -- a page that opens a conversation asks `/stats` once.
+export function subscribeFacts(
+  threadId: string,
+  onFact: (fact: FactFrame) => void,
+): { unsubscribe: () => void } {
+  const set = factSubscriptions.get(threadId) ?? new Set<(fact: FactFrame) => void>();
+  set.add(onFact);
+  factSubscriptions.set(threadId, set);
+  ensure();
+  return {
+    unsubscribe: () => {
+      const current = factSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onFact)) return;
+      if (current.size === 0) factSubscriptions.delete(threadId);
+    },
   };
 }
 
