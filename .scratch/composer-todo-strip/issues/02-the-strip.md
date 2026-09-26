@@ -1,4 +1,4 @@
-# 02 — Composer 之上那条横条：折着的一行，点开是明细
+# 02 — Composer 之上那条横条：折着的一行计数，点开是图标 + 原文
 
 Status: ready-for-agent
 Blocked by: 01
@@ -7,9 +7,8 @@ Blocked by: 01
 
 Composer 的输入框**之上**多一条横条，画的就是票 01 那条口子答回来的列表。
 
-**折着（默认）**：一行。左边一个清单图标（lucide 的 `ListTodoIcon` 与对话里 `todo_write` 那张卡同一个，
-`ui/src/components/message-parts.tsx` 已经在用），中间是**只列非零项**的计数，
-右边一颗随开合翻面的箭头（`^` / `v`）：
+**折着（默认）**：一行。左边一个清单图标（lucide 的 `ListTodoIcon`，与对话里 `todo_write` 那张卡同一个，
+`ui/src/components/message-parts.tsx` 已经在用），中间是**只列非零项**的计数，右边一颗随开合翻面的箭头：
 
 ```
 ☰  3 已完成 · 1 进行中 · 1 待处理                                    ^
@@ -18,22 +17,32 @@ Composer 的输入框**之上**多一条横条，画的就是票 01 那条口子
 顺序照截图：**已完成 · 进行中 · 待处理**。某一档是 0 就**不出现**（不画「0 待处理」）。
 一条都没有时**整条不画**——包括第一次答案还没回来的时候（`null` 与 `[]` 在这里是同一种「没得画」）。
 
-**点开**：在它下面（输入框之上，同一条横条之内）长出明细，一行一条：
+**点开**：在它下面（输入框之上，同一条横条之内）长出明细。**一行只有两样东西：一个状态图标，加模型写的那段原文。**
 
 ```
 ☰  3 已完成 · 1 进行中 · 1 待处理                                    v
-   [x] 读一遍 ComposerFrame
-   [~] 写横条
-   [ ] 走查一遍
+   ✓  读一遍 ComposerFrame
+   ◌  写横条                      ← 这个在转（animate-spin）
+   ○  走查一遍
 ```
 
-- 每行 = **状态标记 + 文本**，文本是模型写的原文，**不翻译**。
-- 标记复用 `harness.cap.todos` 那三个字符（`[x]` 完成 / `[~]` 进行中 / `[ ]` 待处理），不再造第二套：
-  屏幕上这三个字符与模型 `todo_read` 读回来的是同一份词汇表，于是「人看到的」与「模型回读的」对得上。
-  **状态词**（已完成 / 进行中 / 待处理）只出现在那行计数里。
+- **状态是一个图标，不是一段字。** 那张表是死的：
+  | `status` | 图标 | 说明 |
+  |---|---|---|
+  | `completed` | `CircleCheck` | 勾圈的实心形 |
+  | `in_progress` | `LoaderCircle` + `animate-spin` | **转圈的动图**——这条明细里唯一在动的东西 |
+  | `pending` | `Circle` | 空心圈 |
+  三个图标同一个尺寸（`size-4`）、同一列对齐，于是扫一眼是三种**形状**，不用读字。
+  系统开了「减少动态效果」时那颗不转（`motion-reduce:animate-none`）——它不是装饰，是状态，`sr-only` 的
+  状态词仍在，所以停住也不丢信息。
+- **明细里不出现状态词。** 已完成 / 进行中 / 待处理这三个词**只**出现在折着那行；明细里每行只有一个图标
+  加一段原文。`completed` 那一行不给它加删除线也不把它变灰到看不见——它仍是这条列表的一部分。
+- 每个图标配一个 `sr-only` 的状态词（屏幕阅读器读得到，屏幕上不出字）。
+- 每一行带 `data-status`（`completed` / `in_progress` / `pending`），测试与走查按它认，不靠图标 class。
+- 文本是模型写的原文，**不翻译**、不截断成省略号以外的东西（长了就换行）。
 - 明细长了要**自己滚**（一个 max-height + `overflow-y-auto`），**不许**把输入框顶下去或顶出屏幕：
   这条横条坐在 composer 的框里，框的长高会挤压对话。
-- 文本超长**换行或截断都行，但不许横向撑破**那条横条的宽度。
+- 文本超长**换行**，**不许**横向撑破那条横条的宽度。
 
 **位置与实现**：新组件 `ui/src/components/composer-todos.tsx`（`export const ComposerTodos`），
 挂在 `ui/src/components/composer-chrome.tsx` 的 `ComposerFrame` 里、**`{children}`（输入框那一坨）之前**，
@@ -62,11 +71,15 @@ Composer 的输入框**之上**多一条横条，画的就是票 01 那条口子
       顺序是 已完成 · 进行中 · 待处理。
 - [ ] 某档为 0 的那一档**不出现在文字里**；只有待处理的列表 ⇒ 只写「N 待处理」。
 - [ ] `todos` 是 `[]`（或第一次答案还没回来）⇒ **整个 `composer-todos` 不在 DOM 里**。
-- [ ] 点一次 ⇒ `composer-todos-list` 出现、每行一个 `composer-todos-item`、标记是 `[x]` / `[~]` / `[ ]`、
-      文本是原文；`composer-todos-toggle` 的 `aria-expanded` 从 `false` 变 `true`；再点一次 ⇒ 回到折着。
+- [ ] 点一次 ⇒ `composer-todos-list` 出现、行数与 `todos` 相等；**每一行的可见内容只有一颗图标和一段原文**
+      （`textContent` 里没有任何状态词）；`composer-todos-toggle` 的 `aria-expanded` 从 `false` 变 `true`；
+      再点一次 ⇒ 回到折着。
+- [ ] 三档各一行时：`[data-status="completed"]` 里是 `CircleCheck`，`[data-status="in_progress"]` 里那颗有
+      **`animate-spin`**（并且 `motion-reduce` 那一档把它关掉），`[data-status="pending"]` 里是 `Circle`。
+- [ ] 每个图标有 `sr-only` 的状态词（用 `getByRole` / 无障碍树能读到）。
 - [ ] 只按键盘也能开关（`Tab` 到那颗按钮 + `Enter` / `Space`），焦点样式看得见。
 - [ ] 30 条以上的列表展开后**输入框仍在屏幕上**（明细在自己那个盒子里滚）。
 - [ ] 它在输入框**之上**、在同一个 `composer-frame` 里：DOM 顺序上 `composer-todos` 在 `aui-composer-root` 之前。
-- [ ] 切语言 ⇒ 那行计数跟着变；明细里的文本**不变**（那是模型写的内容）。
+- [ ] 切语言 ⇒ 折着那行跟着变；明细里的原文**不变**。
 - [ ] 前端测试补一套 `ui/test/suites/composer-todos.tsx`（上面每一条至少一个断言）；
       `cd ui && npm test` 绿、`npm run typecheck` 0 error、`npm run build` 绿。
