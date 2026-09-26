@@ -890,9 +890,20 @@
              "and with the reasoning family in them -- this case is about a family the RECORD does not keep")
          (wait-for-recorded
           log
-          ;; WAIT FOR THE RUN TO BE OVER, not for a row count: the record now holds fewer event
-          ;; rows than the wire carried, so 'as many rows as frames' would never become true.
-          (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+          ;; WAIT FOR THE RUN TO BE OVER **AND** FOR ITS OWN RETURNED SIDE, not for a row count:
+          ;; the terminal frame is written a beat BEFORE `:run/done` reaches the consumer (the
+          ;; comment on that write says so), so a reader that stopped at the frame folds a record
+          ;; whose run has not left its `message` rows yet -- and since ADR 0009 the reasoning this
+          ;; case is about comes back off exactly those rows. Nor is it 'as many rows as frames':
+          ;; the record holds FEWER event rows than the wire carried, so that would never become
+          ;; true. The wait is for the run's LAST returned row, the way the sibling cases above do
+          ;; it. (`script` is the provider this case pins, so the row it waits for is the script's
+          ;; own answer rather than a literal repeated here.)
+          (fn [ls] (and (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls)
+                        (some #(and (= "message" (replay/kind %))
+                                    (= (get-in (second script) [:content])
+                                       (get-in (replay/payload %) [:content])))
+                              ls)))
           5000)
          (testing "the record kept every frame the socket carried, except the one family it does not"
            ;; THE TAG IS THE CARRIER'S: `mux-frame` adds `:threadId` to every frame so one socket
