@@ -582,6 +582,8 @@
     (testing "and the body is in the conversation the second request carried -- on the tool row"
       (let [results (filter #(= "tool" (:role %)) history)]
         (is (some #(str/includes? (str (:content %)) "Body of alpha") results))
+        (is (some #(str/includes? (str (:content %)) "is the skill's directory") results)
+            "the directory line is the other half of what a load answers with")
         (is (not-any? #(str/starts-with? (str (:content %)) "<skill name=") history)
             "and nothing was spliced for it: one call, its result, no second copy")))
 
@@ -732,7 +734,7 @@
       ;; the same order the run's other injections took.
       (is (= ["user" "assistant" "user"] (mapv :role out))))))
 
-(deftest a-slash-load-is-idempotent-and-shares-one-load-per-name
+(deftest a-slash-load-is-idempotent-and-two-paths-are-two-asks
   (let [root (lay-user-skills! "alpha")
         msgs [{:role "user" :content "/alpha go"}]]
     (testing "applying it again changes nothing"

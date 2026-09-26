@@ -44,6 +44,7 @@
 - `src/harness/cap/skills.clj`：删三个定义、收缩 `derived-injections`、清单块文案、几处注释，去掉 `clojure.data.json`。
 - `src/harness/cap/project.clj`（`before-llm`）与 `src/harness/kernel/session.clj`（重建那张表）：说明哪一半还从这里走。
 - `CONTEXT.md` 的注入条目 + `.scratch/skills-and-instructions/spec.md` 的更正。
+- `docs/architecture/*.md` 与 `docs/architecture.md`：那套设计文档里凡是「技能正文也是注入物之一」「正文由派生扫 `tool_calls` 补上」「工具回一句确认」的地方，主语都收到**人的 `/name`** 一路；`load-confirmations` / `loaded-prefix` 那对共用常量写成已退休，`skill` 工具那一节的输出示例换成新形状。
 - 测试：`skills_test`（工具两端 + 派生收缩 + 两条路两份正文）、`loop_test`（走真循环：正文在 tool 结果里、这一轮**零** `:context/injected`）、
   `http_test`（端到端：正文在 `role=tool` 的 `message` 行上、这一轮**没有** `-ctx` 的 CUSTOM 帧）、
   `trajectory_test`（模型那条路落在 tool 行；`/name` 那条路仍是 `context` 行）。
@@ -64,10 +65,13 @@
    改前正文是一条**派生出来的 user 消息**，prune 碰不到它；改后它就在 tool 结果里，所以够大又赶上请求超压时会被掐。不修的理由：prune 是压到极限前那一步免费动作，
    标记本身写着「这里被掐了 N 字」（不是静默），而 `skill` 是**可再调用**的 —— 要全文再调一次就有。这一点还比改前好：改前那条派生注入会因为「这个名字已在对话里」而拒绝再补。
    要把技能正文排除在 prune 之外是另一票的事（得按 `tool_calls` 的名字判，`prune-plan` 今天只看 role 与长度）。
+6. **我漏了 `docs/architecture/` 那一整套设计文档。** 第一遍只按「代码、测试、`CONTEXT.md`、feature 的 spec」搜旧说法，而 `rg` 的路径没带上 `docs/`——
+   而 `docs/architecture/skills-and-instructions.md` 正是这个特性的常驻说明书（`load-confirmations` / `loaded-prefix` 都在里面点名）。
+   **下一次改机制时：`rg '旧说法' docs/ src/ test/ ui/ CONTEXT.md`，路径一个都别省**——注释与文档是这个仓的说明书，漏了它们等于让下一个读者照着作废的机制实现。
 
 ## 验证
 
-离线全量 `clojure -M:test -m harness.test-runner`：**1277 tests / 13767 assertions，0 errors**，退出码 0。
+离线全量 `clojure -M:test -m harness.test-runner`：**1277 tests / 13768 assertions，0 errors**；唯一一条红是既存的、与本次无关的那一条（见下）。
 
 ### 一条既存的、与本次无关的红
 
