@@ -157,9 +157,9 @@
 ;;                    `harness.cap.jobs` (this namespace must not grow a second opinion about
 ;;                    what a command is), and because 'put away' and 'stop the commands it
 ;;                    left running' are two facts that only move together -- see `drop!`.
-;;   :put-away!       (fn [thread-id] -> nil): TOLD THE MOMENT A SESSION LEAVES THIS PROCESS, on both
-;;                    doors (`sweep!` and `drop!`). A seam for the same reason `:stop-jobs!` is one:
-;;                    what has to happen then belongs to whoever owns what is left -- the RECORD
+;;   :put-away!       (fn [thread-id] -> nil): THE MOMENT A SESSION LEAVES THIS PROCESS, on both doors
+;;                    (`sweep!` and `drop!`). A seam for the same reason `:stop-jobs!` is one: what
+;;                    has to happen then belongs to whoever owns what is left -- the RECORD
 ;;                    writer promises the tail of the bytes here (ticket 04 of
 ;;                    `.scratch/event-persistence`), and this namespace must not grow an opinion
 ;;                    about file handles.
