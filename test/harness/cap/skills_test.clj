@@ -1,9 +1,9 @@
 (ns harness.cap.skills-test
   "Where a session's skills come from: the two default roots, the `:skills` key's
   whole-list replacement, the relative-path rule, and the named failures a bad
-  value earns -- plus the two ways a skill gets LOADED (the `skill` tool and a
-  person's `/name`), which are two sources for one derivation and so are tested
-  against each other as much as against themselves.
+  value earns -- plus the two ways a skill gets LOADED: the `skill` tool, whose
+  RESULT is the body itself, and a person's `/name`, which is the only source the
+  derivation has left and is therefore asserted from both ends.
 
   The derivation ends at the WIRE: a body spliced where a vendor refuses the request
   was not placed at all, so one case here drives a whole run against a provider that
@@ -482,29 +482,33 @@
   {:role "assistant" :content "" :tool_calls [(call id "skill" {:name name})]})
 
 (defn- skill-result [id name]
-  {:role "tool" :tool_call_id id :content (skills/loaded-summary name 42)})
+  ;; WHAT THE TOOL ANSWERS WITH NOW (`harness.cap.tools/t-skill`): the body itself.
+  ;; These tests are about the derivation NOT caring about it, which is why what this
+  ;; fake result says is deliberately not a shape the tool could produce.
+  {:role "tool" :tool_call_id id :content (str "Body of " name)})
 
-(deftest a-loaded-body-is-spliced-in-right-after-its-tool-result
+(defn- load-with-tool
+  "Run the real `skill` tool for NAME, the way the kernel does."
+  [name]
+  (tools/run! {:function {:name "skill" :arguments (json/write-str {:name name})}} "sk-3"))
+
+(deftest a-tool-load-adds-nothing-to-the-conversation
+  ;; THE MODEL'S PATH IS NOT A SOURCE ANY MORE. `skill` answers with the body, so the
+  ;; conversation already carries it -- the client holds it, the record has it in a
+  ;; `tool` row, and the model reads it back on every later turn -- and a body spliced
+  ;; here would be a SECOND copy of instructions the model had just read.
   (let [root (lay-user-skills! "alpha")
         msgs [{:role "user" :content "please use alpha"}
               (assistant-with-skill-call "c1" "alpha")
-              (skill-result "c1" "alpha")]
-        out  (skills/derived-injections msgs [root])]
-    (testing "one more message than came in"
-      (is (= 4 (count out))))
+              (skill-result "c1" "alpha")]]
+    (testing "the vector comes back as ITSELF"
+      (is (identical? msgs (skills/derived-injections msgs [root]))))
 
-    (testing "and it is a USER message carrying the whole body, tagged with the name"
-      (let [injected (nth out 3)]
-        (is (= "user" (:role injected)))
-        (is (str/starts-with? (:content injected) "<skill name=\"alpha\">"))
-        (is (str/ends-with? (:content injected) "</skill>"))
-        (is (str/includes? (:content injected) "Body of alpha"))))
+    (testing "so the call and its result stay adjacent, which is what a vendor checks"
+      (is (= ["user" "assistant" "tool"] (mapv :role msgs)))
+      (is (nil? (support/refuse-unanswered-calls! msgs))))))
 
-    (testing "placed directly AFTER the tool result -- the calls stay adjacent"
-      (is (= "tool" (:role (nth out 2))))
-      (is (= "user" (:role (nth out 3)))))))
-
-(deftest a-load-never-splits-the-results-of-one-model-call
+(deftest a-load-beside-another-call-cannot-split-the-results-of-one-model-call
   ;; THE 400 THIS EXISTS FOR (thread d841d970, 2026-09-18). An OpenAI-shaped vendor
   ;; refuses a request whose assistant message with tool_calls is not followed,
   ;; immediately, by a tool message for EVERY id that message asked for:
@@ -512,42 +516,33 @@
   ;;   "An assistant message with 'tool_calls' must be followed by tool messages
   ;;    responding to each 'tool_call_id'."
   ;;
-  ;; One model call may ask for a skill AND something else in the same breath, and
-  ;; the kernel answers them in CALL order (`harness.kernel.loop/drive!`). Splicing
-  ;; a body "directly after the message that asked" then puts it BETWEEN two results
-  ;; of the SAME assistant message -- which is the refusal above, verbatim. The
-  ;; asking call's whole result block is what the body belongs behind.
+  ;; Keeping that true used to be this derivation's job: it spliced the body behind the
+  ;; LAST result of the asking call, never between two of them. The body is now one of
+  ;; those results, so the shape holds by construction -- and this case holds the
+  ;; construction to it, through the vendor's own check.
   (let [root (lay-user-skills! "alpha")
-        msgs [{:role "user" :content "please use alpha"}
-              {:role "assistant" :content ""
-               :tool_calls [(call "c1" "skill" {:name "alpha"})
-                            (call "c2" "bash" {:command "ls"})]}
-              (skill-result "c1" "alpha")
-              {:role "tool" :tool_call_id "c2" :content "a\nb"}]
-        out  (skills/derived-injections msgs [root])]
-    (testing "the body lands after the LAST result of the call that asked"
-      (is (= ["user" "assistant" "tool" "tool" "user"] (mapv :role out)))
+        asked [{:role "user" :content "please use alpha"}
+               {:role "assistant" :content ""
+                :tool_calls [(call "c1" "skill" {:name "alpha"})
+                             (call "c2" "bash" {:command "ls"})]}
+               (skill-result "c1" "alpha")
+               {:role "tool" :tool_call_id "c2" :content "a\nb"}]
+        out   (skills/derived-injections asked [root])]
+    (testing "nothing is added, so nothing can land between two results"
+      (is (identical? asked out))
       (is (= ["c1" "c2"] (mapv :tool_call_id (filter #(= "tool" (:role %)) out)))
           "the two results stay adjacent -- that is what the vendor checks")
-      (is (str/starts-with? (:content (nth out 4)) "<skill name=\"alpha\">")))
+      (is (nil? (support/refuse-unanswered-calls! out))))
 
-    (testing "and the derivation is still idempotent there"
-      (is (= out (skills/derived-injections out [root]))))
-
-    (testing "two skills asked in one call both land behind the block, in call order"
+    (testing "two skills asked in one call are two results, in call order"
       (lay-skill! root "beta" (skill-md "beta" "b"))
-      (let [out (skills/derived-injections
-                 [{:role "user" :content "go"}
+      (let [both [{:role "user" :content "go"}
                   {:role "assistant" :content ""
                    :tool_calls [(call "c1" "skill" {:name "alpha"})
                                 (call "c2" "skill" {:name "beta"})]}
                   (skill-result "c1" "alpha")
-                  (skill-result "c2" "beta")]
-                 [root])]
-        (is (= ["user" "assistant" "tool" "tool" "user" "user"] (mapv :role out)))
-        (is (str/starts-with? (:content (nth out 4)) "<skill name=\"alpha\">"))
-        (is (str/starts-with? (:content (nth out 5)) "<skill name=\"beta\">"))))))
-
+                  (skill-result "c2" "beta")]]
+        (is (identical? both (skills/derived-injections both [root])))))))
 ;; --------------------------------------- the request the vendor actually sees
 
 ;; THE VENDOR-SHAPED PROVIDER IS harness.test-support's -- the rule it refuses with is the
@@ -584,18 +579,22 @@
       (is (not-any? #(= :run/error (:type %)) seen)
           (str "saw " (pr-str (mapv :type seen)))))
 
-    (testing "and the body is in the conversation the second request carried"
-      (let [out (filter #(= "user" (:role %)) history)]
-        (is (some #(str/starts-with? (str (:content %)) "<skill name=\"alpha\">") out))))
+    (testing "and the body is in the conversation the second request carried -- on the tool row"
+      (let [results (filter #(= "tool" (:role %)) history)]
+        (is (some #(str/includes? (str (:content %)) "Body of alpha") results))
+        (is (not-any? #(str/starts-with? (str (:content %)) "<skill name=") history)
+            "and nothing was spliced for it: one call, its result, no second copy")))
 
     (testing "every assistant message's results stay adjacent in what came back"
       (is (nil? (support/refuse-unanswered-calls! history))))))
 
 (deftest derivation-is-idempotent-and-loads-once-per-name
+  ;; THE SLASH PATH'S TWO PROPERTIES, and the reason the kernel can apply this before
+  ;; every call with no bookkeeping at all. What a TOOL load contributes is the case
+  ;; in the middle -- nothing.
   (let [root (lay-user-skills! "alpha")
         msgs [{:role "user" :content "go"}
-              (assistant-with-skill-call "c1" "alpha")
-              (skill-result "c1" "alpha")]]
+              {:role "user" :content "/alpha please"}]]
 
     (testing "applying it again changes nothing -- this is what lets the kernel apply it every turn"
       (let [once   (skills/derived-injections msgs [root])
@@ -604,57 +603,68 @@
         (is (= once twice))
         (is (= twice thrice))))
 
-    (testing "loading the SAME skill twice contributes its body once"
-      (let [msgs2 (into msgs [(assistant-with-skill-call "c2" "alpha")
-                              (skill-result "c2" "alpha")])
-            out   (skills/derived-injections msgs2 [root])]
+    (testing "asking for the SAME name twice contributes its body once"
+      (let [asked (conj msgs {:role "user" :content "/alpha again"})
+            out   (skills/derived-injections asked [root])]
         (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out))))))
 
-    (testing "two DIFFERENT skills both arrive, in the order they were asked for"
+    (testing "a tool load beside the ask contributes nothing of its own"
+      (let [asked    (into msgs [(assistant-with-skill-call "c1" "alpha")
+                                 (skill-result "c1" "alpha")])
+            out      (skills/derived-injections asked [root])
+            injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
+        (is (= 1 (count injected)) "one body: the one the person asked for")
+        (is (= ["user" "user" "assistant" "tool" "user"] (mapv :role out))
+            "and it is still the LAST thing in the history")))
+
+    (testing "two DIFFERENT names both arrive, in the order they were asked for"
       (lay-skill! root "beta" (skill-md "beta" "b"))
-      (let [msgs2    (into msgs [(assistant-with-skill-call "c2" "beta")
-                                 (skill-result "c2" "beta")])
-            out      (skills/derived-injections msgs2 [root])
+      (let [asked    [{:role "user" :content "go"}
+                      {:role "user" :content "/alpha please"}
+                      {:role "user" :content "/beta too"}]
+            out      (skills/derived-injections asked [root])
             injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
         (is (= 2 (count injected)))
         (is (str/starts-with? (:content (first injected)) "<skill name=\"alpha\">"))
         (is (str/starts-with? (:content (second injected)) "<skill name=\"beta\">"))
-        ;; AT THE END, BOTH OF THEM: the bodies are the last two messages of the
-        ;; history, in the order they were asked for -- see the function's own note
-        ;; about where a body goes and why it moved there.
-        (is (= ["user" "assistant" "tool" "assistant" "tool" "user" "user"]
-               (mapv :role out)))))))
+        ;; AT THE END, BOTH OF THEM, in the order they were asked for -- see the
+        ;; function's own note about where a body goes and why it moved there.
+        (is (= (mapv :content injected) (mapv :content (take-last 2 out))))))))
 
 
-(deftest only-a-real-load-is-injected
+(deftest nothing-a-tool-result-says-injects-anything
+  ;; THE JUDGEMENT-BY-CONFIRMATION-STRING IS GONE with the confirmation it looked for.
+  ;; Whatever a `skill` result says, the conversation already carries whatever the
+  ;; model got, and this derivation adds nothing to it. (`skill` refuses by THROWING,
+  ;; so the rows below are shapes only a hand-built history can hold -- which is
+  ;; exactly what a derivation has to survive.)
   (let [root (lay-user-skills! "alpha")
         base [{:role "user" :content "go"}
               (assistant-with-skill-call "c1" "alpha")]]
-
-    (testing "a call that was vetoed, disabled, or malformed never wrote the confirmation"
-      ;; The judgement is the confirmation string, not a re-derivation of which
-      ;; of those happened -- that is why the tool and this function share it.
-      (doseq [not-a-load ["vetoed by human: the call was not executed."
-                          "disabled in this session: skill is switched off."
-                          "missing required argument(s): name"
-                          "no skill named \"nope\"; this session can load [\"alpha\"]"]]
-        (let [out (skills/derived-injections (conj base {:role "tool" :tool_call_id "c1"
-                                                         :content not-a-load})
-                                             [root])]
-          (is (= 3 (count out)) (str (pr-str not-a-load) " must not inject")))))
+    (doseq [content ["Body of alpha"
+                     "vetoed by human: the call was not executed."
+                     "disabled in this session: skill is switched off."
+                     "missing required argument(s): name"
+                     "no skill named \"nope\"; this session can load [\"alpha\"]"
+                     "<skill name=\"alpha\">sneaky</skill>"]]
+      (let [msgs (conj base {:role "tool" :tool_call_id "c1" :content content})]
+        (is (identical? msgs (skills/derived-injections msgs [root]))
+            (str (pr-str content) " must not inject"))))
 
     (testing "nor does an unrelated tool's success, whatever it says"
       (let [msgs [{:role "user" :content "go"}
                   {:role "assistant" :content ""
                    :tool_calls [(call "c9" "read" {:path "x"})]}
-                  {:role "tool" :tool_call_id "c9" :content (skills/loaded-summary "alpha" 1)}]]
-        (is (= 3 (count (skills/derived-injections msgs [root]))))))))
+                  {:role "tool" :tool_call_id "c9" :content "a file"}]]
+        (is (identical? msgs (skills/derived-injections msgs [root])))))))
 
 (deftest a-body-is-read-fresh-and-a-vanished-skill-says-so
+  ;; THE SLASH PATH'S OWN PROPERTIES. The body is read off disk on every turn, so an
+  ;; edit takes effect at the NEXT one; a skill that has since vanished says so rather
+  ;; than quietly dropping instructions the model believes it is following.
   (let [root (lay-user-skills! "alpha")
-        msgs [{:role "user" :content "go"}
-              (assistant-with-skill-call "c1" "alpha")
-              (skill-result "c1" "alpha")]
+        msgs [{:role "user" :content "/alpha go"}
+              {:role "assistant" :content "on it"}]
         f    (str (io/file root "alpha" "SKILL.md"))]
     (testing "editing the skill changes the next derivation -- nothing is frozen into the conversation"
       (spit! f (skill-md "alpha" "d" "EDITED BODY\n"))
@@ -732,21 +742,19 @@
         (is (= once twice))
         (is (= twice thrice))))
 
-    (testing "the slash and the tool are two ways to ASK, not two gets of the body"
-      (let [slash-then-tool (skills/derived-injections
-                             [{:role "user" :content "/alpha go"}
-                              (assistant-with-skill-call "c1" "alpha")
-                              (skill-result "c1" "alpha")]
-                             [root])
-            tool-then-slash (skills/derived-injections
-                             [{:role "user" :content "go"}
-                              (assistant-with-skill-call "c1" "alpha")
-                              (skill-result "c1" "alpha")
-                              {:role "user" :content "/alpha again"}]
-                             [root])]
-        (doseq [out [slash-then-tool tool-then-slash]]
-          (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out)))
-              "the body arrives once whichever path asked first"))))
+    (testing "a name the MODEL already loaded gets a SECOND copy -- a person asking is a new ask"
+      ;; The body the tool returned carries no tag, so `loaded-names` cannot see it.
+      ;; See the note above the slash form: a person typing `/alpha` after the model
+      ;; loaded alpha is asking for it again, and a second judgement about which tool
+      ;; results count as loads is exactly what the retired prefix existed to avoid.
+      (let [out (skills/derived-injections
+                 [{:role "user" :content "go"}
+                  (assistant-with-skill-call "c1" "alpha")
+                  (skill-result "c1" "alpha")
+                  {:role "user" :content "/alpha again"}]
+                 [root])]
+        (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out)))
+            "one injected body -- and the tool result in that history is the other copy")))
 
     (testing "two different names both arrive, each after the message that asked"
       (lay-skill! root "beta" (skill-md "beta" "b"))
@@ -815,14 +823,60 @@
       (is (str/includes? (skills/catalog-text [root]) "manual-only")))
 
     (testing "the tool loads it, like any other skill"
-      (let [r (tools/run! {:function {:name "skill"
-                                      :arguments (json/write-str {:name "manual-only"})}}
-                          "sk-2")]
+      (let [r (load-with-tool "manual-only")]
         (is (not (:error r)))
-        (is (str/includes? (str (:content r)) "is now in this conversation"))))
+        (is (str/includes? (str (:content r)) "Body of manual-only"))
+        (is (str/includes? (str (:content r)) "is the skill's directory"))))
 
     (testing "a person typing it gets the body"
       (let [out (skills/derived-injections [{:role "user" :content "/manual-only go"}] [root])]
         (is (= 2 (count out)))
         (is (str/includes? (:content (second out)) "Body of manual-only"))
         (is (not (str/includes? (:content (second out)) "cannot be loaded")))))))
+
+;; ------------------------------------------------------------------ the tool
+
+(deftest the-tool-answers-with-the-skill-s-own-text-and-its-directory
+  ;; WHAT A LOAD HANDS THE MODEL, asserted at the tool, because that is where it is
+  ;; decided now: the body IS the result. The directory line is the other half of it
+  ;; -- a skill's instructions say 'read references/x.md', and that path is relative
+  ;; to the SKILL, not to the session's project.
+  (let [root (lay-user-skills! "alpha")
+        big  (skill-md "alpha" "d" (str (apply str (repeat 20000 "y")) "\n"))]
+
+    (testing "the whole body comes back, frontmatter and all, never cut"
+      (lay-skill! root "alpha" big)
+      (let [r (load-with-tool "alpha")]
+        (is (not (:error r)))
+        (is (str/includes? (str (:content r)) "# alpha"))
+        (is (str/includes? (str (:content r)) (apply str (repeat 20000 "y"))))
+        (is (not (str/includes? (str (:content r)) "[truncated]"))
+            "a clipped skill is a wrong instruction, not a smaller one")))
+
+    (testing "and the directory it lives in is named, absolutely"
+      (let [r (load-with-tool "alpha")]
+        (is (str/includes? (str (:content r))
+                           (str (io/file root "alpha") " is the skill's directory")))))))
+
+(deftest the-tool-refuses-by-name-and-never-with-half-an-instruction
+  ;; A MISS IS A REFUSAL, NOT A RESULT: an instructions-shaped answer that is not
+  ;; instructions is worse than an error, and the model has to be able to tell.
+  (let [root (lay-user-skills! "alpha")]
+    (lay-skill! root "nodesc" "---\nname: nodesc\n---\n\nbody\n")
+
+    (testing "an unknown name is refused, and the refusal says what this session CAN load"
+      (let [r (load-with-tool "nope")]
+        (is (:error r))
+        (is (str/includes? (str (:content r)) "no skill named"))
+        (is (str/includes? (str (:content r)) "alpha"))))
+
+    (testing "a broken skill is refused with its reason and the file to look at"
+      (let [r (load-with-tool "nodesc")]
+        (is (:error r))
+        (is (str/includes? (str (:content r)) "cannot be loaded"))
+        (is (str/includes? (str (:content r)) "no-description"))))
+
+    (testing "and a path is not a name"
+      (let [r (load-with-tool "../../etc/passwd")]
+        (is (:error r))
+        (is (str/includes? (str (:content r)) "no skill named"))))))

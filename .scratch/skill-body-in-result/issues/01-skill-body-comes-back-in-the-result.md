@@ -74,7 +74,7 @@
       同一条断言里，开场块与 `/name` 的注入照旧触发）。
 - [ ] 未知名字 / 坏技能照旧**指名拒绝**、`:error` 为真（沿用既有用例），拒绝的话里带上能用的名字；路径拼不出来这条纪律不变。
 - [ ] **`/name` 那半一条不改地绿**（`skills_test` 与 `http_test` 里 slash 的用例原样通过），
-      并新增一条钉住上面那个选择：先工具加载、再 `/name` 同名，对话里的正文**恰好一份**。
+      并新增一条钉住上面那个选择：先工具加载、再 `/name` 同名，得到**第二份**正文 —— 人又开口要了一次，
 - [ ] 既有断言旧形状的用例改成断言新形状而不是删掉：`skills_test` 的
       `a-loaded-body-is-spliced-in-right-after-its-tool-result`、`a-load-never-splits-the-results-of-one-model-call`、
       `a-skill-loaded-beside-another-call-does-not-break-the-next-request`、`derivation-is-idempotent-and-loads-once-per-name`、

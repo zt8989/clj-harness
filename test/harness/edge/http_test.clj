@@ -4061,8 +4061,8 @@
               ;; written BEHIND the question that caused it, which is the order
               ;; `.scratch/context-frames` decision 7 and `CONTEXT.md`'s 注入 entry
               ;; state. Ticket 01 of this feature had it in front of the question; this
-              ;; ticket is the correction. Per-run material (the skill body the model
-              ;; asks for) still lands behind the whole conversation.
+              ;; ticket is the correction. Per-run material (the body a `/name` asked
+              ;; for) still lands behind the whole conversation.
               ;; The reading is by TEXT because an opening entry carries parts (a card for
               ;; the screen, this text for the model).
               (let [reading    (fn [content]
@@ -4083,10 +4083,17 @@
                 (is (str/includes? (nth user-texts 3) "- alpha: alpha does a thing")
                     "and the catalog is the last thing the opening says")))
 
-           (testing "loading it mid-run puts the BODY into the conversation"
-             (is (some #(and (str/includes? % "ALPHA BODY")
-                             (str/starts-with? % "<skill name=\"alpha\">"))
-                       texts)))
+           (testing "loading it mid-run puts the BODY into the conversation -- as the tool result"
+             ;; ONE CALL, ONE ROW, NO SECOND CARD: `skill` answers with the body, so the
+             ;; client reads it in the ordinary tool card and nothing was spliced beside it.
+             (let [results (mapv #(str (get-in (replay/payload %) [:content]))
+                                 (filter #(and (= "message" (replay/kind %))
+                                               (= "tool" (get-in (replay/payload %) [:role])))
+                                         lines))]
+               (is (some #(str/includes? % "ALPHA BODY") results))
+               (is (some #(str/includes? % "is the skill's directory") results))
+               (is (not-any? #(str/starts-with? % "<skill name=") texts)
+                   "and no message was spliced beside it")))
 
            (testing "the opening is on the wire TOO, as the CONVERSATION this run wrote"
              ;; WHY IT IS HERE AT ALL: the page that MINTED this session holds no window
@@ -4101,7 +4108,6 @@
              (let [cards    (filterv #(and (= "CUSTOM" (:type %))
                                            (= "injected-context" (:name %)))
                                      frames)
-                   derived  (filterv #(re-find #"-ctx\d+$" (str (:messageId %))) cards)
                    snapshot (first (filter #(= "MESSAGES_SNAPSHOT" (:type %)) frames))
                    messages (:messages snapshot)
                    opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
@@ -4111,11 +4117,9 @@
                    text-of  (fn [m] (let [c (:content m)]
                                       (if (sequential? c)
                                         (str/join "\n" (keep :text c))
-                                        (str c))))
-                   card-text (fn [card] (str (get-in card [:value :text])))]
-               (is (= 1 (count cards))
-                   "the only CUSTOM card is the body this run derived for itself")
-               (is (str/includes? (card-text (first derived)) "ALPHA BODY"))
+                                        (str c))))]
+               (is (empty? cards)
+                   "no CUSTOM card at all: the body rode the tool result, so this run derived nothing to draw")
                (is (some? snapshot) "and the birth's opening rides as a snapshot")
                (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
                       (mapv :id opening))

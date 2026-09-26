@@ -216,12 +216,12 @@
 
 ;; ------------------------------------------------------------- skill injection
 
-(deftest a-loaded-skill-body-is-in-the-very-next-request
-  ;; The point of deriving rather than remembering: a load has to be visible to
-  ;; the NEXT call, because the model asked for the instructions in order to
-  ;; follow them now. This asserts that through the real loop, not the function --
-  ;; and it passes the step the EDGE passes (harness.cap.project/before-llm),
-  ;; because the loop no longer requires one: it applies whatever it is handed.
+(deftest a-loaded-skill-is-in-the-request-as-the-result-itself
+  ;; THE MODEL'S PATH, THROUGH THE REAL LOOP. It used to be a derived body spliced
+  ;; beside the tool result; the body IS the result now, so the run that answers the
+  ;; call needs no derivation at all -- and this asserts both halves of that: the
+  ;; bytes are in the conversation the NEXT call carries, and nothing was injected to
+  ;; put them there. (A `/name` is the other half, asserted just below.)
   (let [root (support/temp-dir "loop-skills")]
     ;; Under .agents/skills, which is the convention directory the default roots
     ;; point at -- laying it at the project root would make it a skill this
@@ -231,7 +231,7 @@
           "---\nname: alpha\ndescription: a thing\n---\n\n# alpha\n\nALPHA BODY\n"
           :encoding "UTF-8")
     (project/bind! "t-skills" root)
-    (let [{:keys [history]}
+    (let [{:keys [history seen]}
           (drain-chan (loop/run-chan (fake/scripted [{:content ""
                                                       :tool-calls [{:id "c1" :name "skill"
                                                                     :arguments {:name "alpha"}}]}
@@ -239,12 +239,15 @@
                                      [{:role "user" :content "load alpha"}]
                                      {:thread-id "t-skills"
                                       :before-llm project/before-llm}))]
-      (testing "the body is in the history, as a user message right after the tool result"
-        (let [roles (mapv :role history)
-              idx   (.indexOf roles "tool")]
-          (is (some? idx))
-          (is (str/includes? (str (:content (nth history (inc idx)))) "ALPHA BODY"))
-          (is (str/starts-with? (str (:content (nth history (inc idx)))) "<skill name=")))))
+      (testing "the body is in the history, as the tool result"
+        (let [results (filter #(= "tool" (:role %)) history)]
+          (is (some #(str/includes? (str (:content %)) "ALPHA BODY") results))
+          (is (some #(str/includes? (str (:content %)) "is the skill's directory") results))))
+
+      (testing "and nothing was injected to put it there"
+        (is (not-any? #(= :context/injected (:type %)) seen)
+            (str "saw " (pr-str (mapv :type seen))))
+        (is (not-any? #(str/starts-with? (str (:content %)) "<skill name=") history))))
     (project/bind! "t-skills" nil)))
 
 (deftest a-run-with-no-skill-loads-is-untouched
@@ -344,8 +347,8 @@
   ;; THE LOOP'S HALF OF THE SKILL CONTRACT, and the half that is actually this
   ;; namespace's: it applies whatever step it was handed immediately before EACH
   ;; llm/stream!, for as many calls as the run makes, and applies nothing at all
-  ;; when it was handed nothing. What the step DOES -- folding in a session's
-  ;; loaded skill bodies -- is harness.cap.project/before-llm's business, and is
+  ;; when it was handed nothing. What the step DOES -- folding in the body a
+  ;; `/name` asked for -- is harness.cap.project/before-llm's business, and is
   ;; asserted above through this same loop.
   (let [mark (fn [history _thread-id] (conj history {:role "user" :content "STEP"}))
         {:keys [history]}

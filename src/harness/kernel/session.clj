@@ -29,9 +29,9 @@
   conversation. That is deliberate: the opening is an event, not a per-run splice.
 
   SO THIS TABLE DOES NOT RE-READ THE OPENING, AND IT DOES NOT RE-DERIVE A LOADED SKILL.
-  What a run derived once -- a skill body, a job's ending -- is here as its CARD, and the
+  What a run derived once -- the body a `/name` asked for, a job's ending -- is here as its CARD, and the
   model view REALISES that card back into the message the model read, so every later run
-  continues from it as history: the pre-LLM step finds the skill already loaded and adds
+  continues from it as history: the pre-LLM step finds the body already there and adds
   nothing, instead of deriving the body again and re-showing its card on every turn. That
   takes the CLIENT out of the loop, which is the half that was never a decision.
 
