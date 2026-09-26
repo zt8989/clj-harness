@@ -1,21 +1,31 @@
 // `GET /api/projects`: the sidebar's listing, typed thin.
 //
-// One call answers the whole sidebar, because the sidebar's two halves come from
-// two different places on the server and only the server can join them: the STORE
-// says which projects and sessions exist, which session belongs where and which
-// are archived; the TREE says how big each log is and when it last changed. A
-// client that tried to join them itself would need the log directory layout, and
-// that knowledge belongs on the side that writes the files.
+// EVERY ROW HERE IS A STORE FACT, except one. That is the rule this shape exists to
+// keep (the owner's: "左侧所有会话信息都是从 sqlite 加载，除了运行状态"): which projects
+// and sessions exist, which session belongs where, which are archived, what each is
+// called and WHEN IT WAS LAST SENT TO all come out of the sqlite rows; the only other
+// source is the process's live-runs registry, which answers `running` because no file
+// can. Nothing in this payload is a stat().
 //
-// Every session of every project arrives in one answer. That is affordable at
-// this scale and it is what makes the sidebar a single render: no per-project
-// fetch, no page cursor, no half-drawn list.
+// IT USED TO BE A JOIN, and giving that up is the feature: the listing walked the log
+// tree per row (size, mtime) and, for a task, the whole projects directory by stem --
+// so one refresh was a SELECT plus a walk. A refresh is now a SELECT plus a registry
+// lookup, and the disk half of every row is gone (`bytes`, `lastActivity`).
 //
-// `lastActivity` and `bytes` are NULLABLE, and that nullability is meaningful
-// rather than defensive: a session with no log yet -- one just created, before
-// its first run -- is a row with no disk facts. See the row component for how
-// that is drawn; the one thing it must never become is a zero-byte file, which
-// would be a lie about a broken log.
+// THE ANSWER IS TWO LISTS, and they are the sidebar's two blocks: `projects`, each
+// with its sessions, and `tasks` -- conversations with no project at all, flat.
+// Every session of every project arrives in one answer, and every task with them.
+// That is affordable at this scale and it is what makes the sidebar a single render:
+// no per-project fetch, no page cursor, no half-drawn list, and no second request
+// that could disagree with the first about which conversations exist.
+//
+// `lastSentAt` IS NULLABLE, and the null is meaningful rather than defensive: no send
+// has ever reached this session, so there is no time to draw. That is the shape of a
+// row somebody registered and never used (an old client's, or one whose log was
+// removed by hand) -- never a zero, which would claim a send at the epoch. The row
+// answers it with a word (`session.neverRun`); the LISTING answers it by sorting it
+// last, because "never used" is not "brand new" any more -- a session is created by
+// its first send, so nothing recent sits at NULL.
 import type { TFunction } from "i18next";
 
 import { API_BASE } from "@/lib/threads";
@@ -32,10 +42,41 @@ type Translate = TFunction<"errors">;
 export type SessionSummary = {
   threadId: string;
   archived: boolean;
-  /// The log's mtime in epoch milliseconds, or null when there is no log yet.
-  lastActivity: number | null;
-  /// The log's size in bytes, or null when there is no log yet.
-  bytes: number | null;
+  /// WHETHER A RUN IS IN FLIGHT FOR THIS SESSION, and the ONE field here that is not a
+  /// store fact: it is read off the server process's live-runs registry, which is the
+  /// only place that knows. It is why the listing can light a spinner on a conversation
+  /// this browser has never opened -- a run belongs to the process, not to the tab that
+  /// started it.
+  ///
+  /// IT IS A SNAPSHOT, like every other field: the row also draws the page's own
+  /// registry (`statuses`), which is fresher for the sessions THIS page is running.
+  /// The two are ORed rather than ranked (see `sidebar.tsx`), because either one being
+  /// true means a run is in flight.
+  running: boolean;
+  /// WHEN SOMEBODY LAST PRESSED SEND IN THIS CONVERSATION, in epoch milliseconds, or
+  /// null when nothing has ever been sent to it (see this file's header).
+  ///
+  /// IT IS THE MOMENT OF THE SEND, NOT THE MOMENT OF THE LAST WRITE. A run that takes
+  /// five minutes stamps this at the start and leaves it there -- which is what "上次发送
+  /// 时间" means, and what makes it different from the file's mtime that used to be
+  /// drawn here. It is written by every run that arrives (the same statement that names
+  /// the session, `cap.project/remember-send!`), and the rows that predate the column
+  /// were backfilled from their logs once, in the migration.
+  ///
+  /// HOW IT IS DRAWN is `lib/relative-time.ts`'s ladder; the exact instant goes into
+  /// the row's tooltip.
+  lastSentAt: number | null;
+  /// WHAT THE PERSON FIRST SAID IN THIS CONVERSATION, as the STORE remembers it
+  /// (`sessions.title`, written once by the first run that arrives), or null when
+  /// the session has not been named yet -- it never ran, or it ran before the
+  /// column existed. RAW AND LONG: the server keeps up to 200 code points as a
+  /// storage guard, and how much of it a row shows is `lib/session-title.ts`'s
+  /// question (`titleOf`), asked by whoever draws it.
+  ///
+  /// IT IS A SENTENCE SOMEBODY TYPED, kept in the store because the sidebar draws forty
+  /// rows and cannot open forty logs -- see the migration's docstring in
+  /// `harness.infra.db` for the whole argument, including what it costs.
+  firstUserText: string | null;
 };
 
 /// One project: a directory this home knows, and the sessions in it.
@@ -48,10 +89,54 @@ export type ProjectSummary = {
   sessions: readonly SessionSummary[];
 };
 
-export async function listProjects(t: Translate): Promise<ProjectSummary[]> {
+/// THE WHOLE SIDEBAR, in one answer: the projects, and the tasks.
+///
+/// TWO HALVES RATHER THAN TWO CALLS, and that is a decision about what a snapshot
+/// is: the sidebar draws one moment, and two requests are two moments that can
+/// disagree about which conversation exists. The mount restore reads the same
+/// payload (`lib/session-memory.ts`), so "is the session I remember still a
+/// session" is answered by the same read that draws the list.
+export type SidebarListing = {
+  projects: readonly ProjectSummary[];
+  /// THE TASKS: conversations with no project and no memory of one, flat and
+  /// ungrouped -- the half that makes the sidebar two blocks instead of one.
+  /// Same row shape as a project's sessions, because they are the same kind of
+  /// thing: what differs is only that nothing owns them.
+  tasks: readonly SessionSummary[];
+};
+
+export async function listSidebar(t: Translate): Promise<SidebarListing> {
   const res = await fetch(`${API_BASE}projects`);
   if (!res.ok) throw new Error(t("http.listingProjects", { status: res.status }));
   return res.json();
+}
+
+/// Make one conversation a session of this home, with no project (POST
+/// /api/sessions), and answer the id to use from here on. It is FIND-OR-CREATE on the
+/// server: an id that already exists -- belonging to a project even -- is left exactly
+/// as it is, so this can never unbind anything, and asking twice is asking once.
+///
+/// THE SERVER MINTS THE ID when THREAD-ID is not given (ticket 03 of
+/// `.scratch/sessions-live-on-the-server`), and THE ANSWER IS THE ID either way: a
+/// client that made one up had to be right about a namespace it does not own, and the
+/// run edge refuses an id this home has never heard of.
+///
+/// THREAD-ID IS THEREFORE THE TWO USES THAT MATTER HERE. The page passes the id it
+/// MINTED, at the one moment the two halves of this product meet: immediately before a
+/// task's first run (`app.tsx`'s `registerPending`, through the agent's `ready` hook) --
+/// lazy creation means nothing was written at the click (点击新增不立刻会话，发送才新建),
+/// and the run edge's refusal is what makes the write required before the send. With
+/// nothing to bring, this is how a caller that has no session yet asks for one (a
+/// script, a suite, `test/e2e.ts`): the id comes back from the server.
+export async function startTask(t: Translate, threadId?: string): Promise<string> {
+  const res = await fetch(`${API_BASE}sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(threadId === undefined ? {} : { threadId }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// A project's display name: its last path segment, or the whole path when there
@@ -139,6 +224,14 @@ export async function pickFolder(t: Translate): Promise<string | null> {
 /// makes a session belong to a project, and for a brand-new session it is also
 /// what makes the session exist at all: the store learns about a conversation
 /// when something asks for it to belong somewhere.
+///
+/// THE MOMENT IS THE FIRST RUN, not the click, since lazy creation
+/// (`.scratch/store-backed-sidebar`): the sidebar mints a project session's id
+/// and hands the directory over (`onShowFresh`), and the page binds the two together
+/// immediately before that session's first run -- through the agent's `ready` hook, so
+/// the bind is ordered against the request that would otherwise be refused for naming
+/// an unknown id. One POST per id; a failure is a sentence on the row and is not
+/// retried behind the person's back.
 export async function bindThread(threadId: string, dir: string, t: Translate): Promise<string> {
   const res = await fetch(`${API_BASE}project`, {
     method: "POST",
@@ -148,6 +241,33 @@ export async function bindThread(threadId: string, dir: string, t: Translate): P
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   const body = (await res.json()) as { dir: string };
   return body.dir;
+}
+
+/// START A CONVERSATION IN DIR (POST /api/project, with no thread id): the server mints
+/// the id AND binds it in one action, and answers the id to use from here on.
+///
+/// ONE ACTION RATHER THAN "mint a task, then bind it". Two calls would be right most of
+/// the time and would leave an UNBOUND conversation behind every time the bind failed.
+/// The route is the one `bindThread` posts to; what differs is that the body names no
+/// thread, which is the server's cue to name it.
+///
+/// NOTHING IN THE PAGE CALLS THIS ANY MORE, and that is the merge's decision rather than
+/// an oversight: the sidebar's "new session" button mints its id locally and writes
+/// nothing (点击新增不立刻会话，发送才新建), and the first send binds it with `bindThread`
+/// -- an ask for an id would be the write lazy creation removed. It is kept because the
+/// route and its one-action promise are still the server's, and a caller that wants the
+/// server to name the conversation (a script, a suite) has no other way to say so; a
+/// dead export is cheaper than a deleted capability. If nothing ever calls it, that is
+/// the day to delete it, not this one.
+export async function startSessionIn(dir: string, t: Translate): Promise<string> {
+  const res = await fetch(`${API_BASE}project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { threadId: string };
+  return body.threadId;
 }
 
 /// Take a directory out of this home's project list

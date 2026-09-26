@@ -10,6 +10,13 @@
     // renders itself on screen. Vite reads the same files natively.
     "resolveJsonModule": true,
     "jsx": "react-jsx",
+    // The UI suites' support code reaches `scripts/proc.mjs`, the repo's one tree-killer for a
+    // spawned child (`startHarness` must stop a server that is a grandchild of the process it
+    // holds). That module is JavaScript, and a hand-written declaration beside it would be a
+    // second statement of its surface -- free to drift from the file that decides. So the real
+    // file is read instead: `noEmit` is already set, and nothing here is checked as JS
+    // (`checkJs` is off), so this changes the program's INPUT and not its strictness.
+    "allowJs": true,
     "types": ["vite/client", "node"],
 
     // The assistant-ui components are copied in verbatim and import through

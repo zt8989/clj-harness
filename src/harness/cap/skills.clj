@@ -18,8 +18,7 @@
   and a require back would be a cycle Clojure refuses at load. Each caller
   therefore supplies what it already has in hand: the fence has the binding, a
   tool body has its thread-id, a test has neither and passes nil."
-  (:require [clojure.data.json :as json]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.infra.home :as home]))
 
@@ -111,14 +110,25 @@
 
 (def frontmatter-keys
   "The keys this reader understands. Everything else in a SKILL.md's frontmatter
-  -- allowed-tools, license, metadata, argument-hint, user-invocable, hidden --
-  belongs to the HOST that wrote the file, and is read-and-ignored rather than
-  reported as a mistake: a file having a field we do not use is not an error.
+  -- allowed-tools, license, metadata, argument-hint, user-invocable, hidden,
+  disable-model-invocation -- belongs to the HOST that wrote the file, and is
+  read-and-ignored rather than reported as a mistake: a file having a field we do
+  not use is not an error.
 
-  Note what is NOT here: `allowed-tools`. A skill cannot widen this session's
-  toolset. The toolset is decided by the session and the editing mode, and a
-  file that could grant itself capabilities is a different security story."
-  #{:name :description :disable-model-invocation})
+  TWO of those are skipped KNOWING what they ask for, and for one reason: a
+  SKILL.md says what a skill IS, never what this session may do with it.
+  `allowed-tools` cannot widen the toolset -- the session and the editing mode
+  decide that, and a file that could grant itself capabilities is a different
+  security story -- and `disable-model-invocation` cannot close the model's path
+  to a skill either: who may reach one is this session's business, answered in
+  exactly two places, the `skill` tool and a person's `/name` (harness.kernel.tools/
+  t-skill, harness.cap.skills/slash-request). A file that could switch either one
+  off would be deciding something that is not the file's to decide.
+
+  Neither skip is silent in the sense of being unreadable: a field outside this
+  set travels through untouched, which is what lets a reader that DOES honor one
+  of them -- another host, a later version of this one -- still find it here."
+  #{:name :description})
 
 (defn- escape-attr [s] (str/replace (str s) "\"" "&quot;"))
 
@@ -219,10 +229,7 @@
               :else
               {:name name :dir (str dir) :path path :root root
                :available? true :reason nil
-               :description (str/trim (str (:description fm)))
-               :disable-model-invocation?
-               (boolean (or (true? (:disable-model-invocation fm))
-                            (= "true" (str (:disable-model-invocation fm)))))})))))))
+               :description (str/trim (str (:description fm)))})))))))
 
 (defn scan
   "ROOTS -> the skills they hold, in precedence order: EARLIER ROOTS WIN A NAME
@@ -259,31 +266,30 @@
   user asks...') is exactly what the model selects on, and a length cap cuts
   precisely that. See the spec for the measurement behind the choice.
 
-  A skill with disable-model-invocation is LEFT OUT: the file says this is not
-  for the model to decide to use, and a session has no other way to invoke one.
-  It is still in `scan`, which is where a reader can find out why it is absent --
+  A BROKEN skill is LEFT OUT, and it is the only thing left out: the block
+  advertises what this session can LOAD, and a skill that cannot be loaded is not
+  one of those. It is still in `scan`, which is where a reader finds out why --
   'the file is there and the capability is not' is the one outcome this design
   refuses to leave unexplained."
   [roots]
-  (let [usable (filter #(and (:available? %) (not (:disable-model-invocation? %)))
-                       (scan roots))]
+  (let [usable (filter :available? (scan roots))]
     (when (seq usable)
       (str/join "\n"
                 (concat [(str "## Skills")
                          ""
                          "A skill is a set of instructions for a kind of task. Load one with the `skill`"
-                         " tool when its description matches what you are about to do; its full text then"
-                         " joins this conversation, and it stays available for the rest of the session."
+                         " tool when its description matches what you are about to do; its instructions"
+                         " come back as that call's result, together with the directory they live in."
                          " A PERSON can load one too, by starting a message with `/name ` -- when that"
-                         " happens the message keeps the `/name` as typed and the full text is the"
-                         " message right after it, so it is already in this conversation."]
+                         " happens the message keeps the `/name` as typed and the full text arrives as"
+                         " the message right after it."]
                         (map (fn [{:keys [name description]}] (str "- " name ": " description))
                              usable))))))
 
 (defn- menu-row
   "A `scan` entry -> the four things a row on the person's list needs. Deliberately
   not the whole entry: :dir and :root belong to the group that holds the row, and
-  :disable-model-invocation? is not a row's business (see `skill-list`)."
+  nothing else about an entry is a row's business (see `skill-list`)."
   [{:keys [name description available? reason]}]
   {:name name :description description :available? available? :reason reason})
 
@@ -299,18 +305,13 @@
   `scan` is the one place that answers 'whose is this name', and re-deriving the
   loser would be a second answer to a question that already has one.
 
-  TWO DELIBERATE DIFFERENCES FROM THE MODEL'S CATALOG (`catalog-text`), and they
-  are about who is choosing:
-
-    - `disable-model-invocation` skills ARE here. The file says the MODEL may not
-      decide to use it; a person typing /name is the person deciding, and the
-      server loads it for them -- so a list of what a person can load that left it
-      out would be answering a different question than the one it is asked.
-    - BROKEN skills are here too, with :available? false and their :reason -- the
-      same standing `scan` gives them, and the same rule: a skill that silently
-      vanished and a skill that was never installed look identical from the
-      outside, and the second is much harder to debug. The caller draws them as
-      unpickable; being told WHY is the whole point of their being there.
+  ONE DELIBERATE DIFFERENCE FROM THE MODEL'S CATALOG (`catalog-text`): BROKEN
+  skills are here too, with :available? false and their :reason -- the same
+  standing `scan` gives them, and the same rule: a skill that silently vanished
+  and a skill that was never installed look identical from the outside, and the
+  second is much harder to debug. The caller draws them as unpickable; being told
+  WHY is the whole point of their being there. The catalog leaves them out
+  because the block the model selects from may only offer what it can load.
 
   Empty groups are left out rather than drawn as a heading over nothing. A session
   whose roots hold no skills at all answers {:groups []} -- an ordinary state, not
@@ -363,56 +364,20 @@
     {:missing (str "skill " (pr-str name) " is no longer in any skill root;"
                    " its instructions cannot be read, and it should not be assumed")}))
 
-;; ------------------------------------------------------------------ injection
-
-(def loaded-prefix
-  "The opening of the confirmation the `skill` tool answers with, and therefore
-  also the TEST OF WHETHER A LOAD HAPPENED. One string, two users: the tool
-  writes it and derived-injections looks for it.
-
-  The reason it is shared rather than duplicated is that the second use is a
-  JUDGEMENT ABOUT THE FIRST. A call that was vetoed, disabled, or made with a
-  missing argument never reaches the tool body and so never writes this line --
-  and reconstructing that fact anywhere else would mean re-deriving which of
-  those happened, in a second place, from a log."
-
-  "[skill-loaded]")
-
-(defn loaded-summary
-  "NAME + CHARS -> what the tool answers with. It reads as a statement about the
-  SESSION rather than about the call -- after this the instructions are in the
-  conversation -- because that is what the model needs to know, and because it
-  is what the derivation below then looks for."
-  [name chars]
-  (str loaded-prefix " " name
-       " is now in this conversation and stays available for the rest of the session"
-       " (" chars " chars). Follow it unless a later instruction supersedes it."))
-
-(defn- load-confirmations
-  "A message vector -> the tool results that ARE skill loads, as a
-  {tool-call-id result} map.
-
-  A tool result is a load when its content starts with loaded-prefix. The result
-  carries no tool name of its own -- only the id of the call that produced it --
-  so the name comes from the assistant message's tool_calls; matching those two
-  up is what makes this work on any provider-shaped history."
-  [messages]
-  (let [ids (into #{}
-                  (comp (filter #(= "assistant" (:role %)))
-                        (mapcat :tool_calls)
-                        (filter #(= "skill" (get-in % [:function :name])))
-                        (map :id))
-                  messages)]
-    (into {}
-          (comp (filter #(= "tool" (:role %)))
-                (filter #(contains? ids (:tool_call_id %)))
-                (filter #(str/starts-with? (str (:content %)) loaded-prefix))
-                (map (juxt :tool_call_id :content)))
-          messages)))
+;; ------------------------------------------------------------------ the body
+;;
+;; THE ONE SOURCE LEFT IS A PERSON'S `/name`. The MODEL'S path used to arrive here too
+;; -- the tool answered with a confirmation line and this namespace turned that line
+;; into a body -- and it does not any more: `skill`'s result IS the body, so it
+;; rides the tool call and nothing is derived for it. That also retired the shared
+;; `[skill-loaded]` prefix, which existed only to judge 'did a load really happen'.
+;; See `.scratch/skill-body-in-result`.
 
 (defn- loaded-names
   "The skill names a message vector already carries as injected bodies, in the
-  order they appear. Used for idempotency and for the one-load-per-name rule."
+  order they appear. Used for idempotency and for the one-load-per-name rule --
+  among the bodies this derivation wrote, which is only ever a person's `/name` --
+  a body that arrived as a tool result carries no tag to be found."
   [messages]
   (into []
         (keep (fn [m]
@@ -431,17 +396,23 @@
 
 ;; ------------------------------------------------------------ the slash form
 ;;
-;; THE HUMAN'S WAY IN. A skill is loaded by the model through the `skill` tool,
-;; and by a person by typing "/name ..." in the composer -- and those are the only
-;; two ways. They are not two mechanisms: both are SOURCES for the same
-;; derivation, both end as a `<skill name=..>` user message spliced in after the
-;; message that asked, and both obey the same one-load-per-name rule. Keeping them
-;; one derivation is what stops the two paths from drifting apart.
+;; THE HUMAN'S WAY IN. A skill is loaded by the model with the `skill` tool -- whose
+;; RESULT is the body, so nothing about that path is derived -- and by a person by
+;; typing "/name ..." in the composer. A person's message carries no result of its
+;; own, so this is the ONE source left for the derivation below: the ask ends as a
+;; `<skill name=..>` user message appended at the end of the history.
 ;;
-;; The trigger lives in the conversation rather than in a server-side record, for
-;; the reason the whole design is derived rather than accumulated: the client owns
-;; the history, so the "/name" a person typed is still there to be re-read on every
-;; turn -- no bookkeeping, and nothing to lose on a refresh.
+;; A NAME BOTH PATHS ASK FOR ARRIVES TWICE, and that is the decision rather than an
+;; oversight: `loaded-names` recognises a body by the tag this namespace writes, and
+;; a body that came back as a tool result carries no tag to be found. A person typing
+;; `/alpha` after the model already loaded alpha is asking for it again, and inventing
+;; a judgement about which tool results count as loads is exactly the second derivation
+;; the shared `[skill-loaded]` prefix existed to avoid.
+;; The trigger lives in the conversation rather than in a side record, which is the
+;; same line the whole design draws: what a person SAID is part of the conversation
+;; (so the "/name" is still there to be re-read on every turn, and survives a
+;; refresh), while what the harness DERIVED from it -- the body, the catalog -- is
+;; recomputed and never folded in. No bookkeeping, and nothing to lose on a refresh.
 
 (def slash-pattern
   "What a slash-load looks like: the slash, the name, then a space, a newline, or
@@ -458,9 +429,9 @@
   "TEXT -> the skill name TEXT asks to load by slash, or nil when it asks for
   nothing.
 
-  It answers only WHICH NAME was asked for. Everything after that is the
-  derivation the tool path shares, so a second copy of 'how a body gets injected'
-  does not exist.
+  It answers only WHICH NAME was asked for. Everything after that is the same body
+  (and the same missing-body notice) every ask gets, so a second copy of 'how a body
+  gets injected' does not exist.
 
   THE TEXT IS NOT REWRITTEN, and that is a decision rather than an omission: what
   the model reads as this message's own words is what the person typed, slash and
@@ -498,11 +469,7 @@
 
 (defn known-names
   "The skill names this session can load, in scan order. The list a refusal quotes
-  and the list a notice quotes, so 'what can I load' has one answer.
-
-  `disable-model-invocation` skills are NOT in it: they are loadable by a person
-  who knows the name (see slash-request) but this list is what to answer a MODEL
-  with, and the flag is the file saying the model may not have it."
+  and the list a notice quotes, so 'what can I load' has one answer."
   [roots]
   (vec (keep #(when (:available? %) (:name %)) (scan roots))))
 
@@ -550,79 +517,68 @@
       (or (:body (body entry)) (:missing (body entry))))))
 
 (defn derived-injections
-  "MESSAGES + ROOTS -> MESSAGES with the skill bodies this conversation has
-  loaded spliced in, after the message that asked for it.
+  "MESSAGES + ROOTS -> MESSAGES with the skill bodies a person's `/name` asked for,
+  appended AT THE END.
 
-  A TOOL ASK ENDS ITS BLOCK, NOT ITS OWN CALL. One model call may ask for a skill AND
-  something else in the same breath, and the kernel answers them in call order -- so
-  a body spliced directly behind its own tool result would land BETWEEN two results
-  of one assistant message. That is not tidiness: an OpenAI-shaped vendor refuses a
-  request whose assistant message with tool_calls is not followed, immediately, by a
-  tool message for each 'tool_call_id' (HTTP 400, 'insufficient tool messages
-  following tool_calls message'), so the body waits for the LAST result of the call
-  that asked. A person's slash is not a tool call, and still lands right behind the
-  message that asked.
+  THE MODEL'S PATH IS NOT HERE. `skill` answers with the body itself, so a load by
+  the model is an ordinary tool result the conversation already carries and this
+  derivation has nothing to add -- and because the body IS one of the tool results,
+  the vendor rule below cannot be broken by that path at all. What is left is the
+  person's `/name`: the trigger is a user message, there is no result to carry the
+  body, and this is what puts it beside them.
 
-  IT IS DERIVED, NOT ACCUMULATED, and the difference is forced rather than chosen.
-  applepi's server holds the session, so its tool can push a message into history
-  and persist it. Here the CLIENT owns the conversation and the server is
-  stateless per run: an injection held server-side dies on refresh, and one sent
-  to the client gets rendered. So the body is recomputed from the conversation
-  itself, every time, and the two properties that makes possible are the ones that
-  matter:
+  WHERE A BODY GOES, AND WHY IT MOVED. It used to be spliced directly behind the
+  message that asked for it. It is now the LAST thing in the history, and that is the
+  same order the rest of a session's injections took: the system prompt, the question,
+  the material for it, and the skill body closest to the end (see
+  `harness.edge.ag_ui/inbound`, which puts the instruction files and the catalog just
+  after the client's messages). A model reads what it asked for beside the question it
+  is answering, which is where a person would put it.
+
+  THE VENDOR'S RULE IS WHY IT CANNOT GO ANYWHERE IT LIKES, and appending satisfies it
+  by construction: an OpenAI-shaped vendor refuses a request whose assistant message
+  with tool_calls is not followed, IMMEDIATELY, by a tool message for each
+  'tool_call_id' (HTTP 400, 'insufficient tool messages following tool_calls
+  message'). A body spliced into the middle of a batch of results breaks that; a body
+  at the very end is behind every result there is.
+
+  IT IS DERIVED FROM THE CONVERSATION, NOT FROM A SIDE TABLE. A body's CARD is part of
+  the conversation once a run has folded it in (`harness.edge.sessions`), and
+  `sessions/model-view` realises its bytes back into the message the model read -- so
+  'is this name already loaded' is answered by the conversation itself, and a body is
+  added only for the name that is not there yet. The instruction files and the catalog
+  behave the same way (`.scratch/session-opening`): an edited SKILL.md takes effect at
+  its NEXT load rather than mid-session. The two properties that matter are:
 
     - IDEMPOTENT. Applying this to its own output changes nothing, because the
       body is already in place where it belongs. That is what lets the kernel
       apply it before every LLM call with no bookkeeping at all.
-    - FIRST LOAD WINS, ACROSS SOURCES. A name contributes one body however many
-      times it is asked for, and it does not matter whether the ask was the
-      model's tool call or a person's slash -- they are two ways to ask the same
-      question, not two gets of the same instructions.
-
-  TWO SOURCES, and keeping them here together is the point:
-
-    - a tool result that IS a skill load -- judged by the shared confirmation
-      prefix, never by re-deriving which of veto/disabled/missing-argument
-      happened (see load-confirmations);
-    - a user message opening with `/name` -- the human's path (see slash-request).
+    - ONE LOAD PER NAME, AMONG THE ASKS THIS DERIVATION SEES. A name contributes one
+      body however many times a person asks for it. TWO PATHS ARE TWO ASKS: a name the
+      MODEL already loaded is not recognised here, because its body carries no tag --
+      the note above the slash form is where that call is written down.
 
   A name that can no longer be read plants a one-line notice instead of vanishing,
   and an unknown name gets the same treatment: instructions the model believes it
   is following are the last thing to drop silently, and a typo that loaded nothing
   must not look like a skill that loaded nothing TO SAY.
 
-  The result is a message vector and nothing else: no AG-UI frame is produced for
-  any of this, which is exactly why a client never sees these messages."
+  The result is a message vector and nothing else: the frames a person sees are the
+  run's, and they are emitted where the history is assembled and applied (see
+  `harness.edge.ag_ui/injected-frame`), not here -- a derivation that talked to a wire
+  would be a derivation that could not be tested without one."
   [messages roots]
-  (let [confirmations (load-confirmations messages)
-        name-of       (into {}
-                            (for [m messages
-                                  :when (= "assistant" (:role m))
-                                  tc    (:tool_calls m)
-                                  :when (= "skill" (get-in tc [:function :name]))
-                                  :let  [args (try (json/read-str (str (get-in tc [:function :arguments]))
-                                                                  :key-fn keyword)
-                                                   (catch Throwable _ {}))]
-                                  :when (contains? confirmations (:id tc))]
-                              [(:id tc) (str (:name args))]))]
-    (if (and (empty? confirmations) (not-any? slash-of messages))
-      messages
-      (let [present (set (loaded-names messages))]
-        (loop [out [] seen present pending [] [m & more :as ms] messages]
-          (if (empty? ms)
-            out
-            (let [out     (conj out m)
-                  nm      (or (get name-of (:tool_call_id m)) (slash-of m))
-                  pending (cond-> pending nm (conj nm))]
-              (if (and (= "tool" (:role m)) (= "tool" (:role (first more))))
-                ;; MID-BLOCK: this result is not the last of its assistant message's,
-                ;; and nothing may come between those results (see above).
-                (recur out seen pending more)
-                (let [[out seen] (reduce (fn [[out seen] nm]
-                                           (if (contains? seen nm)
-                                             [out seen]
-                                             [(conj out (skill-message nm (load-text roots nm)))
-                                              (conj seen nm)]))
-                                         [out seen]
-                                         (distinct pending))]
-                  (recur out seen [] more))))))))))
+  (if (not-any? slash-of messages)
+    messages
+    ;; WHAT WAS ASKED FOR, IN ORDER, AND ONLY WHAT IS NOT ALREADY THERE. The walk is
+    ;; over the whole history because the person's ask is in it, and `loaded-names` is
+    ;; what makes the step idempotent: a body already in the history contributes
+    ;; nothing, however many times it was asked for.
+    (let [present (set (loaded-names messages))
+          asked   (distinct (keep slash-of messages))
+          missing (remove (conj present nil) asked)]
+      (if (empty? missing)
+        messages
+        (into (vec messages)
+              (map (fn [nm] (skill-message nm (load-text roots nm))))
+              missing)))))

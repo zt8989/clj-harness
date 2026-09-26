@@ -1,0 +1,33 @@
+票 02 的验收：在真实记录上复算（`.scratch/compaction-shape/spec.md`）
+
+命令（worktree `compaction-shape`，`~/.clj-harness` 只读，进程跑在隔离家里）：
+
+    clojure -J-Dstdout.encoding=UTF-8 -M:dev -m scratch-real-meter
+
+脚本：`03-slice-compaction.clj` 旁边的 `02-real-meter.clj`（同一份，可重跑）。
+
+前缀 = `f59c09dd-…jsonl` 的前 449,640 行，即事故那行 `context/pressure` **之前**的记录。
+（那行自己就是被量的对象，不在前缀里。）
+
+    prefix lines: 449640
+    anchor prompt (the vendor's own last number): 1019523
+    AG-UI shape:      roles {"system" 1, "user" 36, "reasoning" 588, "assistant" 899, "tool" 1119} estimate 689229
+    provider shape:   roles {"system" 1, "user" 36, "assistant" 899, "tool" 1119} estimate 686877
+
+    meter on the AG-UI shape (what `records->pressure` answers):
+      {:pressureTokens 1023349, :baseline "usage", :windowTokens 1048576, :percent 98,
+       :thresholdTokens 734003, :retainTokens 167772}
+    meter on the PROVIDER shape (what the run start hands in -- the LIVE reading):
+      {:pressureTokens 1020997, :baseline "usage", :windowTokens 1048576, :percent 97,
+       :thresholdTokens 734003, :retainTokens 167772}
+
+    the incident logged 651,432 / 62% here; the first request cost 1,020,335 tokens.
+
+读到的三件事：
+
+1. **两种形状对齐了**：provider 形状 686,877 对 AG-UI 形状 689,229 —— 差 2,352（0.34%），
+   修之前是 330,648 对 689,229（差 358,581）。
+2. **那个前缀的 LIVE 读数从 651,432 抬到 1,020,997（62% → 97%）**，跨过阈值 734,003，
+   于是 `compact-if-pressured!` 在这一次 run 起点就会压 —— 事故里它没有。
+3. **厂商自己给那个数组的数是 1,020,335**：修完之后的 meter 与它差 662 token（0.06%）。
+   这一条比「跨过阈值」更硬：meter 不再只是「够得着」，它对**将要发出去的那一发**几乎说对了数。

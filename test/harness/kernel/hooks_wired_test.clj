@@ -16,6 +16,7 @@
             [harness.fake :as fake]
             [harness.infra.home :as home]
             [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.test-support :as support]
@@ -41,6 +42,7 @@
 
 (defn- with-server [thread f]
   (providers/use-provider! thread (fake/scripted script))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
@@ -48,16 +50,16 @@
 
 (defn- post-run [thread-id]
   (let [body (json/write-str {:threadId thread-id
-                              :runId (str (java.util.UUID/randomUUID))
-                              :messages [{:id "u1" :role "user" :content "go"}]
-                              :tools [] :context []})
-        req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                 (.header "Content-Type" "application/json")
-                 (.header "Accept" "text/event-stream")
-                 (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                 (.build))]
-    (.send (HttpClient/newHttpClient) req
-           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+                              ;; THE ACTION'S OWN ENTRIES (ticket 03): the server
+                              ;; holds the conversation, and `with-server` has made sure
+                              ;; this thread is a session of it.
+                              :append [{:id "u1" :role "user" :content "go"}]
+                              :tools []})
+        ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run-response`): the POST answers an
+        ;; ack and the frames arrive on `events.mux`, so the helper subscribes first and hands
+        ;; back the same `HttpResponse` it always did.
+        result (support/mux-run-response *port* thread-id body nil)]
+    result))
 
 (defn- log-file
   "A thread's log, in the tree's reserved workspace.
@@ -89,7 +91,10 @@
   (into []
         (keep (fn [l]
                 (when-not (str/blank? l)
-                  (try (json/read-str l :key-fn keyword) (catch Throwable _ nil)))))
+                  ;; THROUGH THE RECORD'S OWN READER (`.scratch/jsonl-two-kinds`): a row
+                  ;; is `{:type .. :payload ..}`, reading it is what validates it, and
+                  ;; `replay/kind` is how an assertion below asks what it is.
+                  (try (first (replay/lines->records [l])) (catch Throwable _ nil)))))
         (try (str/split-lines (slurp f :encoding "UTF-8")) (catch Throwable _ []))))
 
 (defn- wait-for [f pred ms]
@@ -100,8 +105,25 @@
           ls
           (do (Thread/sleep 50) (recur)))))))
 
+
+(defn- wait-for-text
+  "A FILE'S TEXT once PRED holds of it, or its last reading when MS runs out."
+  ;;
+  ;; THE MARKER IS WRITTEN BY THE HOOK'S OWN CHILD, and `marker-script` appends the payload
+  ;; and then a label line -- so the LABEL's presence is 'that command ran to the end', and
+  ;; it is the moment the record's hook line and the file agree. Reading the file as soon as
+  ;; the record shows the hook fired is a race, and it lost one on 2026-09-23: a
+  ;; FileNotFoundException about a point that had, as far as the record went, fired.
+  [path pred ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (let [f (io/file path)
+            text (if (.exists f) (slurp f :encoding "UTF-8") "")]
+        (if (or (pred text) (> (System/currentTimeMillis) deadline))
+          text
+          (do (Thread/sleep 50) (recur)))))))
 (defn- hook-lines [ls]
-  (filter #(str/starts-with? (str (:kind %)) "hook/") ls))
+  (filter #(str/starts-with? (str (replay/kind %)) "hook/") ls))
 
 (defn- wipe! []
   (support/wipe-hooks!)
@@ -140,7 +162,7 @@
      (io/delete-file (log-file "hw-none") true)
      (post-run "hw-none")
      (let [_  (wait-for (log-file "hw-none")
-                        (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+                        (fn [ls] (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls))
                         1500)
            ;; Stop fires as the run ends and the returned message tail lands one
            ;; beat after the terminal frame, so the run is given a moment to finish
@@ -149,14 +171,14 @@
            _  (Thread/sleep 300)
            ls (log-lines (log-file "hw-none"))]
        (testing "the only hook line is the kernel's own SystemPrompt trigger"
-         (is (= ["hook/SystemPrompt"] (mapv :kind (hook-lines ls)))))
+         (is (= ["hook/SystemPrompt"] (mapv replay/kind (hook-lines ls)))))
        (testing "and every point a session would have to declare at is silent"
          (is (empty? (filter #(contains? #{"hook/SessionStart" "hook/PostToolUse"
                                            "hook/Stop" "hook/InstructionsLoaded"}
-                                         (:kind %))
+                                         (replay/kind %))
                              ls))))
        (testing "the run itself is complete and well-formed"
-         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))
+         (is (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls)))))))
 
 ;; ------------------------------------------------------------------ SessionStart
 
@@ -171,21 +193,21 @@
      (io/delete-file (log-file "hw-start") true)
      (post-run "hw-start")
      (let [ls (wait-for (log-file "hw-start")
-                        (fn [ls] (some #(= "hook/SessionStart" (:kind %)) ls))
+                        (fn [ls] (some #(= "hook/SessionStart" (replay/kind %)) ls))
                         1500)
-           starts (filter #(= "hook/SessionStart" (:kind %)) ls)]
+           starts (filter #(= "hook/SessionStart" (replay/kind %)) ls)]
        (testing "the audit line names the point the way the payload does"
          (is (= 1 (count starts))))
        (testing "one declaration matched, and it was allowed"
-         (is (= 1 (get-in (first starts) [:payload :matched])))
-         (is (= "allow" (get-in (first starts) [:payload :verdict]))))
+         (is (= 1 (get-in (replay/payload (first starts)) [:matched])))
+         (is (= "allow" (get-in (replay/payload (first starts)) [:verdict]))))
        (testing "the command really ran"
          (is (str/includes? (slurp (str (home/root) "/hooks-fired.txt")) "session-start")))
        (testing "a SECOND run of the same thread does not repeat it"
          (post-run "hw-start")
          (Thread/sleep 600)
          (let [ls2 (log-lines (log-file "hw-start"))]
-           (is (= 1 (count (filter #(= "hook/SessionStart" (:kind %)) ls2))))))))))
+           (is (= 1 (count (filter #(= "hook/SessionStart" (replay/kind %)) ls2))))))))))
 
 ;; ------------------------------------------------------------------ PostToolUse
 
@@ -200,12 +222,12 @@
        (io/delete-file (log-file "hw-post") true)
        (post-run "hw-post")
        (let [ls (wait-for (log-file "hw-post")
-                          (fn [ls] (some #(= "hook/PostToolUse" (:kind %)) ls))
+                          (fn [ls] (some #(= "hook/PostToolUse" (replay/kind %)) ls))
                           1500)
-             line (first (filter #(= "hook/PostToolUse" (:kind %)) ls))]
+             line (first (filter #(= "hook/PostToolUse" (replay/kind %)) ls))]
          (testing "the point fired once, for the one matching call"
            (is (some? line))
-           (is (= 1 (get-in line [:payload :matched]))))
+           (is (= 1 (get-in (replay/payload line) [:matched]))))
          (testing "and the hook received the tool name and its arguments on stdin"
            (let [fired (slurp marker)]
              (is (str/includes? fired "\"tool_name\":\"read\""))
@@ -223,10 +245,10 @@
        (io/delete-file (log-file "hw-nomatch") true)
        (post-run "hw-nomatch")
        (let [ls (wait-for (log-file "hw-nomatch")
-                          (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
+                          (fn [ls] (some #(= "hook/Stop" (replay/kind %)) ls))
                           1500)]
          (testing "no PostToolUse line: the call was not selected"
-           (is (empty? (filter #(= "hook/PostToolUse" (:kind %)) ls))))
+           (is (empty? (filter #(= "hook/PostToolUse" (replay/kind %)) ls))))
          (testing "and the command never ran"
            (is (not (.exists (io/file marker))))))))))
 
@@ -242,9 +264,9 @@
        (io/delete-file (log-file "hw-stop") true)
        (post-run "hw-stop")
        (let [ls (wait-for (log-file "hw-stop")
-                          (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
+                          (fn [ls] (some #(= "hook/Stop" (replay/kind %)) ls))
                           1500)
-             line (first (filter #(= "hook/Stop" (:kind %)) ls))]
+             line (first (filter #(= "hook/Stop" (replay/kind %)) ls))]
          (testing "the line is there and the command ran"
            (is (some? line))
            (is (str/includes? (slurp marker) "stop")))
@@ -264,6 +286,10 @@
     :stop          [{:command (marker-script (str (home/root) "/hooks-fired.txt")
                                              "stop")}]})
   (providers/use-provider! "hw-frames-off" (fake/scripted script))
+  ;; THE SECOND THREAD IS A SESSION TOO: this case compares two runs, and the one that is
+  ;; not the fixture's own thread has to exist before it can run (ticket 03 refuses a run
+  ;; of an id the store has never heard of).
+  (support/start-session! "hw-frames-off")
   (with-server
    "hw-frames-on"
    (fn []
@@ -310,11 +336,11 @@
          (is (empty? (wire/violations frames))))
        (testing "the tool never ran: no :tool/execute for that call"
          (let [ls (wait-for (log-file "hw-gate")
-                            (fn [ls] (some #(= "hook/PreToolUse" (:kind %)) ls))
+                            (fn [ls] (some #(= "hook/PreToolUse" (replay/kind %)) ls))
                             1500)]
-           (is (some? (first (filter #(= "hook/PreToolUse" (:kind %)) ls))))
-           (is (empty? (filter #(and (= "tools/execute" (:kind %))
-                                     (= "c1" (get-in % [:payload :toolCallId])))
+           (is (some? (first (filter #(= "hook/PreToolUse" (replay/kind %)) ls))))
+           (is (empty? (filter #(and (= "tools/execute" (replay/kind %))
+                                     (= "c1" (get-in (replay/payload %) [:toolCallId])))
                                ls))
                "a blocked call is never executed, so it leaves no execute line")))))))
 
@@ -344,18 +370,18 @@
      (io/delete-file (log-file "hw-audit") true)
      (post-run "hw-audit")
      (let [ls (wait-for (log-file "hw-audit")
-                        (fn [ls] (some #(= "hook/PreToolUse" (:kind %)) ls))
+                        (fn [ls] (some #(= "hook/PreToolUse" (replay/kind %)) ls))
                         1500)
-           hook-line (first (filter #(= "hook/PreToolUse" (:kind %)) ls))
-           pre (first (filter #(and (= "tools/pre-execute" (:kind %))
-                                    (= "c1" (get-in % [:payload :toolCallId])))
+           hook-line (first (filter #(= "hook/PreToolUse" (replay/kind %)) ls))
+           pre (first (filter #(and (= "tools/pre-execute" (replay/kind %))
+                                    (= "c1" (get-in (replay/payload %) [:toolCallId])))
                               ls))]
        (testing "the hook line carries the point, the count and the folded verdict"
-         (is (= 1 (get-in hook-line [:payload :matched])))
-         (is (= "block" (get-in hook-line [:payload :verdict])))
-         (is (= "denied" (get-in hook-line [:payload :reason]))))
+         (is (= 1 (get-in (replay/payload hook-line) [:matched])))
+         (is (= "block" (get-in (replay/payload hook-line) [:verdict])))
+         (is (= "denied" (get-in (replay/payload hook-line) [:reason]))))
        (testing "and the seam says hook-blocked -- a NEW outcome, documented, not an unknown"
-         (is (= "hook-blocked" (get-in pre [:payload :outcome]))))))))
+         (is (= "hook-blocked" (get-in (replay/payload pre) [:outcome]))))))))
 
 (deftest a-disabled-tool-is-refused-without-asking-the-gate
   ;; The ordering claim: "switched off" has to mean no work happens, so the gate
@@ -376,13 +402,13 @@
          (io/delete-file (log-file "hw-disabled") true)
          (post-run "hw-disabled")
          (let [ls (wait-for (log-file "hw-disabled")
-                            (fn [ls] (some #(= "hook/Stop" (:kind %)) ls))
+                            (fn [ls] (some #(= "hook/Stop" (replay/kind %)) ls))
                             1500)]
            (testing "the call is refused as disabled"
-             (let [pre (first (filter #(= "tools/pre-execute" (:kind %)) ls))]
-               (is (= "disabled" (get-in pre [:payload :outcome])))))
+             (let [pre (first (filter #(= "tools/pre-execute" (replay/kind %)) ls))]
+               (is (= "disabled" (get-in (replay/payload pre) [:outcome])))))
            (testing "and the gate never ran -- not even its audit line"
-             (is (empty? (filter #(= "hook/PreToolUse" (:kind %)) ls)))
+             (is (empty? (filter #(= "hook/PreToolUse" (replay/kind %)) ls)))
              (is (not (.exists (io/file marker))))))))
       (finally (tools/session-enable! "hw-disabled" "read")))))
 
@@ -419,15 +445,15 @@
            (is (nil? (:outcome (first (filter #(= "RUN_FINISHED" (:type %)) frames))))))
          (testing "the seam records it as an approval, like a human's"
            (let [ls (wait-for (log-file "hw-delegate-ok")
-                              (fn [ls] (some #(= "hook/PermissionRequest" (:kind %)) ls))
+                              (fn [ls] (some #(= "hook/PermissionRequest" (replay/kind %)) ls))
                               1500)
-                 pre (first (filter #(= "tools/pre-execute" (:kind %)) ls))
+                 pre (first (filter #(= "tools/pre-execute" (replay/kind %)) ls))
                  ;; the log reader keywordizes keys, so the hook's own JSON comes
                  ;; back as :decision rather than "decision"
-                 hook-line (first (filter #(= "hook/PermissionRequest" (:kind %)) ls))]
-             (is (= "approved" (get-in pre [:payload :outcome])))
-             (is (= "approve" (get-in hook-line [:payload :answer :decision])))
-             (is (= 1 (get-in hook-line [:payload :matched]))))))))
+                 hook-line (first (filter #(= "hook/PermissionRequest" (replay/kind %)) ls))]
+             (is (= "approved" (get-in (replay/payload pre) [:outcome])))
+             (is (= "approve" (get-in (replay/payload hook-line) [:answer :decision])))
+             (is (= 1 (get-in (replay/payload hook-line) [:matched]))))))))
     (finally (tools/session-require-approval! "hw-delegate-ok" "no-such-tool"))))
 
 (deftest a-permission-request-hook-can-deny-a-parked-call
@@ -513,27 +539,35 @@
     (spit (str proj "/AGENTS.md") "project rules\n" :encoding "UTF-8")
     (project/bind! "hw-instructions" proj)
     (support/write-hooks!
-     {:instructions-loaded [{:command (marker-script marker "instructions-loaded")}]})
+     ;; THE ENGINE'S DEFAULT BUDGET FOR A HOOK IS 10s, AND THAT IS TIGHT FOR THIS ONE: the
+     ;; command has to open a login shell first (2.2s on the machine this was measured on) and
+     ;; then read its payload to EOF before it writes its label. This case was seen with the
+     ;; point fired and allowed and its marker file never written -- killed at the limit before
+     ;; `cat` had seen the end of its stdin. The budget is the CASE's, not the engine's.
+     {:instructions-loaded [{:command (marker-script marker "instructions-loaded")
+                             :timeout 30000}]})
     (with-server
      "hw-instructions"
      (fn []
        (io/delete-file (log-file-for "hw-instructions") true)
        (post-run "hw-instructions")
        (let [ls (wait-for (log-file-for "hw-instructions")
-                          (fn [ls] (>= (count (filter #(= "hook/InstructionsLoaded" (:kind %)) ls)) 2))
+                          (fn [ls] (>= (count (filter #(= "hook/InstructionsLoaded" (replay/kind %)) ls)) 2))
                           1500)
-             lines (filter #(= "hook/InstructionsLoaded" (:kind %)) ls)]
+             lines (filter #(= "hook/InstructionsLoaded" (replay/kind %)) ls)]
          (testing "one line per folded file -- and NOT for the one that is missing"
            (is (= 2 (count lines))))
          (testing "each was an observer, allowed, and named the point the way the payload does"
-           (is (every? #(= "allow" (get-in % [:payload :verdict])) lines))
-           (is (every? #(= 1 (get-in % [:payload :matched])) lines)))
+           (is (every? #(= "allow" (get-in (replay/payload %) [:verdict])) lines))
+           (is (every? #(= 1 (get-in (replay/payload %) [:matched])) lines)))
 
          (testing "the hook command really received each path on stdin"
            ;; The marker script cats its stdin, so the payload lines are in the
            ;; file -- parsed rather than substring-matched, because JSON escapes
            ;; the path separators.
-           (let [fired (slurp marker)
+           ;; WAITED FOR, NOT READ ONCE: the label's presence is 'the command ran to the end'
+           ;; (see `wait-for-text`), and the record's hook line arrives BEFORE that.
+           (let [fired (wait-for-text marker #(str/includes? % "instructions-loaded") 30000)
                  payloads (into []
                                 (keep (fn [l]
                                         (when (str/starts-with? l "{")
@@ -546,8 +580,15 @@
              (is (every? #(= "InstructionsLoaded" (:hook %)) payloads))))
 
          (testing "and the folded text really reached the model, as user messages"
-           (let [texts (map #(str (get-in % [:payload :content]))
-                            (filter #(= "message" (:kind %)) ls))]
+           ;; THE OPENING ENTRIES CARRY PARTS, not a bare string (`.scratch/session-opening`:
+           ;; one message, two readings -- a card for the screen, this text for the model), so
+           ;; the reading here is 'what text would the provider take out of this message'.
+           (let [reading (fn [content]
+                           (if (sequential? content)
+                             (str/join "\n" (keep :text content))
+                             (str content)))
+                 texts (map #(reading (get-in (replay/payload %) [:content]))
+                            (filter #(= "message" (replay/kind %)) ls))]
              (is (some #(str/includes? % "user rules") texts))
              (is (some #(str/includes? % "project rules") texts))
              (testing "tagged with an absolute path, not a bare filename"
@@ -566,14 +607,14 @@
      (io/delete-file (log-file "hw-noinstructions") true)
      (post-run "hw-noinstructions")
      (let [ls (wait-for (log-file "hw-noinstructions")
-                        (fn [ls] (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+                        (fn [ls] (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls))
                         1500)]
        (testing "nothing was folded, so the point does not fire"
-         (is (empty? (filter #(= "hook/InstructionsLoaded" (:kind %)) ls))))
+         (is (empty? (filter #(= "hook/InstructionsLoaded" (replay/kind %)) ls))))
        (testing "and no hook line of any kind is written for it"
-         (is (empty? (filter #(str/starts-with? (str (:kind %)) "hook/InstructionsLoaded") ls))))
+         (is (empty? (filter #(str/starts-with? (str (replay/kind %)) "hook/InstructionsLoaded") ls))))
        (testing "the run itself is complete -- a missing file is not a failure"
-         (is (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls)))))))
+         (is (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls)))))))
 
 ;; ------------------------------------------------------- two runs, one thread
 ;;
@@ -597,16 +638,16 @@
        (is (not= ::timeout (deref a 30000 ::timeout)) "the first run finished")
        (is (not= ::timeout (deref b 30000 ::timeout)) "and so did the second")
        (let [ls (wait-for (log-file "hw-both")
-                          (fn [ls] (some #(= "provider/init" (:kind %)) ls))
+                          (fn [ls] (some #(= "provider/init" (replay/kind %)) ls))
                           1500)]
-         (is (= 1 (count (filter #(= "hook/SessionStart" (:kind %)) ls)))
+         (is (= 1 (count (filter #(= "hook/SessionStart" (replay/kind %)) ls)))
              (str "SessionStart fired once, not once per run: "
-                  (pr-str (mapv :kind (hook-lines ls)))))
+                  (pr-str (mapv replay/kind (hook-lines ls)))))
          ;; The provider init LINE is not written at all under a scripted pin -- there is
          ;; no resolution to record -- so its once-only half is what
          ;; harness.edge.http-test's timeline case covers. What this case adds is the half
          ;; that needs two runs at once.
-         (is (empty? (filter #(= "provider/init" (:kind %)) ls))
+         (is (empty? (filter #(= "provider/init" (replay/kind %)) ls))
              "no init line: this session is served by a scripted pin")
          (is (str/includes? (slurp (str (home/root) "/hooks-fired.txt")) "session-start")
              "the hook command really ran"))))))

@@ -2,13 +2,15 @@
 
 `harness.cap.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
 
-## 一份配置，两节：`config.edn`
+## 一份配置，三节：`config.edn`
 
-配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好两节——`:default`（三个旋钮的默认档）与
-`:providers`（厂商目录）：
+配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好三节——`:default`（三个旋钮的默认档）、
+`:providers`（厂商目录）与 `:ui`（界面自己的设置，今天只有 `:language`）：
 
 ```edn
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
+
+ :ui {:language :en}                         ; 这个家说的语言：:en 或 :zh
 
  :providers
  {:openrouter {:protocol :openai-completions
@@ -41,6 +43,11 @@
 所以别的坏法仍然原样留着让读侧的句子去解释。两节都可以缺席：只有 `:providers` 的家里，
 会话档照样能从中挑一个厂商（用户级配置**不进库**，见 [home-and-storage](home-and-storage.md)）。
 
+
+**`:ui` 是有意开的一格**：语言不是「会话起点的旋钮」，塞进 `:default` 会让那一节的说明开始走样，所以它
+自成一节、与厂商目录同住一个家——都是**这一个家**的事实。这一节自己也是闭的（今天只认 `:language`，
+值是 `:en` / `:zh`），键或值不认识都是**指名失败**；整节缺席是日常情形，语言交给
+`harness.infra.language` 那条链去定（`config.edn` → 系统语言 → 终端语言 → 英语）。
 **`providers.edn` 退休了**，不再被读：目录搬进了 `config.edn` 的 `:providers`。家里还留着一份就是
 **指名失败**——句子说清把条目挪进去、然后删掉那个文件。一个看着还权威、写进去却什么也不发生的文件，
 正是这个目录存在的意义要杀掉的那种静默空操作。
@@ -57,6 +64,14 @@
 - 本仓**不数 token**，所以 `:context-window` 不拦任何 run——拿近似值去拦，是把谎话写进错误信息；
 - `:max-output-tokens` **不写进请求体**，输出上限仍是厂商默认值；
 - 读它们的人是**选模型的人**：`GET /api/model`、日志两行、`active-provider`。
+
+一个能力位（`:instruction-updates`）也**可选**，取值是闭集 `:in-place` / `:replace`，**缺省 `:replace`**：
+它说这个端点**收不收对话中途的 `developer` 消息**（`.scratch/instruction-updates` 决策 5）。
+保守的一档是有理由的——不声明只是少省一次前缀，**错发一条厂商不认的消息是整个 run 起不来**，
+所以它挑的是能恢复的那一半。缺省落在**解析**那一步（`fold-and-assemble`），不落在文件里：
+报告（`model-row`）照文件说，没写就是没有这个键——「没说」与「说了 `replace`」是两件事，
+设置页的三态控件靠这个分别（见 [client](client.md)）。这个值也是**闭集**，写别的名字在
+`check-model` 里**指名报错**，不静默退化。
 
 **校验会指名报错**：未知键（`:context_window` 这种拼错）、未声明的 model id、搬不动的模态、
 非正整数的数字、`max-output-tokens > context-window`——四条都在加载时停下，不静默丢弃。
@@ -75,18 +90,18 @@
 | 序 | 档 | 来源 |
 |---|---|---|
 | 1 | 默认档 | `config.edn` 的 `:default` 一节：三个旋钮，或一个 **inline** 描述的 provider（逃生门） |
-| 2 | 会话档 | `session-configure` 工具调用（**经人工审批**后写入） |
+| 2 | 会话档 | `POST /api/model`——composer 的选档器写进来（`clear: true` 丢回下层） |
 | 3 | 本次请求 | AG-UI 入参顶层的 `provider` / `model` / `reasoning-effort`，只影响这次 run |
 
 **换 provider 不指定 model，就落在新厂商的默认 model 上**——endpoint 随厂商走，所以「只换厂商」是一个旋钮
 就能表达的动作。
 
-**写进档位的目录属性必须指名失败**：`:context-window` 这类字段写进 `:default`、写进
-`session-configure` 调用、写进一次 run 的入参，三处都是**指名报错**（并说明该写在 `:providers` 里那个
-model 的条目下）。`selection` 只取三个旋钮，从前静默丢弃正是要杀掉的那种失败形态。
+**写进档位的目录属性必须指名失败**：`:context-window` 这类字段写进 `:default` 是**指名报错**（并说明该写在
+`:providers` 里那个 model 的条目下）；会话档更早一步就挡下了——`POST /api/model` 只认三个旋钮加 `clear`，
+多一个键当场指名拒绝。`selection` 只取三个旋钮，从前静默丢弃正是要杀掉的那种失败形态。
 
-`session-configure` 的 body **先解析后写**：provider 名不在目录里、或 model id 不是该 provider 声明的，
-当场指名失败、session 保持原样、`provider/changed` 一行不落。先写后败会把一个每轮都跑不起来的配置
+`POST /api/model` **先解析后写**：provider 名不在目录里、或 model id 不是该 provider 声明的，当场指名失败、
+session 保持原样、日志里一行不落。先写后败会把一个每轮都跑不起来的配置
 钉在会话上，而报错要等到**下一次** run 才出现。
 
 ## api-key
@@ -145,9 +160,26 @@ model 的条目下）。`selection` 只取三个旋钮，从前静默丢弃正�
   正是内置表自己注释里记着犯过的那种错。它**不写任何东西**（文件、库、日志都不动），
   密钥可以由表单临时带（试一把还没落盘的钥匙），否则按 `api-key` 的规矩解析。测试里用
   `providers/*list-models*` 这个缝把它换掉，**测试不出网**。
+  
+  **答案现在是「行」而不是裸 id**（`.scratch/instruction-updates` 票 04）：`{:models [{:id "gpt-x"
+  :instruction-updates :in-place} …]}`。多出来的那半句是 catalog 的意见——**内置前缀表**
+  （`instruction-updates-hints`）命中的家族带上一个建议值，没命中的**没有那个键**。前端只照搬，
+  不做前缀匹配。**它不参与解析**：一个模型条目没写这个键、id 又命中规则，run 照旧走 `:replace`——
+  「这次 run 按哪一档送」不许有一个不在 `config.edn` 里的主人。
+  
+  **前缀表逐行要有依据**，而且是有方向的那种（猜错的方向是整个 run 起不来）。今天的行全是
+  `:in-place`，每一条都是**厂商自营的 OpenAI 兼容端点**——`developer` 正是那族规范里的角色：
+  `gpt-` / `o1` / `o3` / `o4`（OpenAI 自己的 Chat Completions）、`claude-`（Anthropic 的兼容端点）、
+  `deepseek-`（DeepSeek 自营）、`kimi-` / `moonshot-`（Moonshot）、`qwen`（阿里 compatible-mode 的
+  整个家族，`qwen-` / `qwen2.5-` / `qwen3-` 都算）、`glm-`（智谱）。**最长前缀赢**，并且**斜杠后的那段也
+  试**（网关常把厂商写进 id：`openai/gpt-4o-mini`、`moonshotai/kimi-k2` 照样命中）。
+  
+  **这张表按 model id 说话，而 id 名字是模型、不是端点**——已知的边界，收在这个表旁边：id 前缀相同的
+  转发网关未必收 `developer`（2026-09-25 实测：一台 kongming 网关列着 `deepseek-*`，却拿 422 拒掉
+  对话中途的 `developer` 消息）。所以建议**看得见、改得动**，而运行时那条规矩始终是文件说了算。
 - `POST /api/defaults` 设默认档：**缺席 = 不动那一项，`null` = 清掉那个键**（前者是「别管我的 model」，
   后者是「别再选 model」，两件不同的事）。**命名一个 provider 是替换整档**，这也是 inline 描述唯一的出路。
-  先解析后写，与 `session-configure` 同一条规矩。
+  先解析后写，与 `POST /api/model` 同一条规矩。
 
 ## 思考模式：`reasoning_content` 的往返
 
@@ -162,7 +194,8 @@ DeepSeek 系的网关都这么要求，而**空串也算「送回来了」**。
    我们的 `llm/consume-sse` 因此按「厂商**提到过**这个字段」保留它——空串也保留——而不是按「有没有文本」。
    这是历史上出过事的那一步：早先的写法是「有文本才带键」，于是那一轮的历史里没有键，下一轮被厂商拒掉。
    反过来，一个**从没提过**这个字段的厂商（OpenRouter 有时如此）仍然不会凭空多出一个键。
-2. **历史不是只有我们组装的。** 下一轮的历史来自客户端，客户端不必知道某个厂商的字段要求，
+2. **历史不是只有我们组装的。** 下一轮的历史来自服务端手里那场会话——里面有工具结果、注入块、
+   上一轮别处放进去的条目，它们都不必知道某个厂商的字段要求，
    所以 `llm/thinking-mode-history` 在**请求发出去之前**把缺的补成空串（**只补空串，不编内容**），
    并且**只对思考模式生效**。它由边在写 `message` 审计行之前调用——那行的契约是「LLM 真正看到的，
    逐字」，补在 `stream!` 里会让日志与发出去的不一致。

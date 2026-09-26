@@ -8,8 +8,16 @@
 //   node scripts/dev.mjs --port 8080         the address the client used to hardcode
 //   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
 //                                            model, a temp home, a provider that replays
-//   node scripts/dev.mjs --scripted my.json  ...with your own turns
-//   node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
+//                                            scripts/example.json -- AND NO DEV SERVER: the
+//                                            page is BUILT (`npm run build`) and served by
+//                                            the harness itself, one process one address
+//                                            IT DOES NOT DRIVE A BROWSER: open the printed
+//                                            address and send a message; the scripted
+//                                            provider replays then
+//   node scripts/dev.mjs --scripted my.json  ...with your own turns instead
+//   node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand, as below (a dev
+//                                            server's port -- --scripted serves the page
+//                                            from the harness and ignores it)
 //
 // WHY THIS EXISTS. `npm run dev` on its own expects a harness on 8080, and 8080 is
 // the one port a second checkout, a test run, or yesterday's forgotten session is
@@ -66,6 +74,19 @@
 // ask the backend to trust a port it did not choose. So the wait below is for that
 // line, not for a sleep.
 //
+// THE UI'S PORT IS ASKED OF THE OS THE OTHER WAY ROUND, AND 5173 IS WHY. A dev server
+// that cannot have 5173 is the common case, not the exception: a second checkout, a
+// forgotten `npm run dev`, a walkthrough somebody left running -- so the dev server gets
+// an OS-picked port too, and the number is printed. What it cannot get is the handshake
+// above: the backend can be read back because its stdout comes to this process, and vite's
+// does not -- in --tmux its stdout belongs to the pane, and off it the terminal is vite's
+// (`stdio: "inherit"`, so a keystroke still reaches vite's own shortcuts). So the number
+// is asked for and let go: a socket is bound to port 0, the OS's answer is kept, and that
+// socket is closed before vite is handed the number. THE RELEASE IS THE PART TO KNOW
+// ABOUT -- vite binds it a moment later -- and `strictPort` in ui/vite.config.js is what
+// makes losing that race a failed start with vite's own message rather than a dev server
+// quietly drifting to 5174. A 5173 somebody is still holding is simply stepped around.
+//
 // THE REAL MODE USES YOUR OWN ~/.clj-harness -- that is what it is for: your harness,
 // your config, your provider, your key. THE SCRIPTED MODE MUST NOT: it gets a temp
 // config root AND a temp OS home (the two are siblings, never nested -- see AGENTS.md
@@ -75,34 +96,49 @@
 //              {"content": "", "tool-calls": [{"id": "c1", "name": "read",
 //                                             "arguments": {"path": "deps.edn"}}]}]}
 //
-// consumed one per model call -- one tool round costs two.
+// consumed one per model call -- one tool round costs two. A turn may also carry
+// `"reasoning"` (a thinking row) and `"usage"` (the numbers the context ring divides),
+// both optional. `scripts/example.json` IS that shape: it is what --scripted replays
+// when no file is named, and the thing to copy rather than this comment.
 //
 // LOOKING AT THE UI IS A VERIFICATION STEP IN THIS REPO -- the one layer a suite cannot
-// reach -- so --scripted is that step's entry point, and the three rules the suites keep
-// are properties of THIS invocation rather than a checklist somebody assembles by hand:
+// reach -- so --scripted is that step's entry point. IT IS THE SERVICE, NOT THE WALK: it
+// builds the page, starts the backend that serves it, prints the address and then waits.
+// Opening that address and sending a message is the verification -- that message is what
+// makes the scripted provider replay `scripts/example.json`. NOTHING HERE DRIVES A BROWSER
+// (there is no Playwright in this repo), so an unattended `--scripted` proves only that the
+// thing STARTS -- a person or an agent with a browser is what makes it a walkthrough.
+// The three rules the suites keep are properties of THIS invocation rather than a
+// checklist somebody assembles by hand:
 //
 //   * THE HOMES ARE TEMP, SIBLINGS, AND GONE ON THE WAY OUT. The config root and the OS
 //     home are made under one temp directory -- never nested, see AGENTS.md -- because a
 //     session's jsonl is written under the root and ~/AGENTS.md plus ~/.agents/skills are
 //     read from the home, and neither may be the developer's. Both are removed when this
 //     stops, Ctrl-C included.
-//   * NO PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
-//     announces becomes vite's proxy target, so no source file learns a number and there
-//     is no 8080 to clear first.
+//   * NEITHER PORT IS EVER WRITTEN DOWN. The backend is asked for port 0 and the port IT
+//     announces is the address the page is told to call -- and, under --scripted, the one
+//     address that also serves the page. In the dev-server modes the UI has a port of its
+//     own, one the OS hands out as vite starts -- so no source file learns a number, and
+//     neither the 8080 nor the 5173
+//     that a forgotten session is most likely to be holding has to be cleared first.
 //   * THE TEMP PATHS ARE PRINTED. A run's record lands under the root AS IT STREAMS and
 //     the directory is gone once this exits, so the banner is the only window in which a
-//     walkthrough can read the two sessions it just drove.
+//     walkthrough can read the two sessions it just drove. The two ports are on it too --
+//     a port nothing printed is a port nobody can open.
 //
 // The announced port is read from stdout, which is where AGENTS.md's "do not read a
 // child's answer from stdout" does not bite: this is a handshake the e2e server prints
 // on purpose, not an answer it computes, and the match runs over the accumulated stream
 // -- so a JDK warning arriving first delays it by a chunk instead of losing it.
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { exitOf, run, stopTree } from "./proc.mjs";
+import { LISTENING } from "./backend.mjs";
 
 // THE REPOSITORY IS THIS FILE'S PARENT, and that is what makes the script movable: it is
 // invoked from wherever a reader is standing (`node scripts/dev.mjs`, at the root or
@@ -110,6 +146,12 @@ import { exitOf, run, stopTree } from "./proc.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const UI_DIR = path.join(ROOT, "ui");
+
+// THE TURNS --SCRIPTED REPLAYS WHEN NONE WAS NAMED, and a file in this repo rather than
+// one composed per run: a walkthrough whose script nobody can read is a walkthrough nobody
+// can adjust, and the shape is easier to copy from a file that exists than from the
+// comment above. Beside this script, so the pair moves together.
+const DEFAULT_SCRIPT = path.join(HERE, "example.json");
 
 // ---------------------------------------------------------------- arguments
 
@@ -121,20 +163,28 @@ const USAGE = `Start the harness on a port nobody is using, and the UI in front 
   node scripts/dev.mjs --port 8080         the address the client used to hardcode
   node scripts/dev.mjs --scripted          the scripted double instead: no api-key, no
                                            model, a temp home, a provider that replays
-  node scripts/dev.mjs --scripted my.json  ...with your own turns
-  node scripts/dev.mjs --ui-port 5199      somewhere other than 5173
+                                           scripts/example.json -- and no dev server: the
+                                           page is built (npm run build) and served by the
+                                           harness itself
+                                           IT DOES NOT DRIVE A BROWSER: open the address it
+                                           prints and send a message; the scripted provider
+                                           replays then
+  node scripts/dev.mjs --scripted my.json  ...with your own turns instead
+  node scripts/dev.mjs --ui-port 5199      the UI's port pinned by hand (a dev server's port;
+                                           --scripted serves the page from the harness)
 
-The backend is started on port 0 (the OS picks); the port it announces becomes both the
-address the page is told to call (VITE_AGENT_URL) and vite's proxy target
-(HARNESS_BACKEND_URL). The UI's own port is vite's business alone: the harness answers a
-page served from this machine whatever port it is on, so nothing is reported back to it.
-Ctrl-C stops both, and the two temp homes the scripted mode made are deleted with it --
-their paths are printed when it starts, which is the only time they exist. --tmux splits
-the pane it was run in, so it wants a shell that is inside tmux.`;
+Both ports are the OS's choice unless one is named: the backend is started on port 0 and the
+port it announces becomes both the address the page is told to call (VITE_AGENT_URL) and
+vite's proxy target (HARNESS_BACKEND_URL); the UI's port is picked before vite starts and
+printed with the rest. The UI's port is vite's alone: the harness answers a page served from
+this machine whatever port it is on, so nothing is reported back to it. Ctrl-C stops both,
+and the two temp homes the scripted mode made are deleted with it -- their paths are printed
+when it starts, which is the only time they exist. --tmux splits the pane it was run in, so
+it wants a shell that is inside tmux.`;
 
 const argv = process.argv.slice(2);
 let port = 0;
-let uiPort = 5173;
+let uiPort = 0;
 let scripted = false;
 let scriptFile = "";
 let tmux = false;
@@ -167,6 +217,29 @@ for (const [name, value] of [["--port", port], ["--ui-port", uiPort]]) {
     process.exit(2);
   }
 }
+
+// ------------------------------------------------------------ the UI's port
+
+/// A port the OS says is free, for the dev server: bind port 0, keep the answer, let the
+/// socket go. THE RELEASE IS THE PART TO UNDERSTAND -- vite binds this number a moment
+/// later, and `strictPort` is what keeps a lost race there from turning into a dev server
+/// on some third port. It cannot be the backend's handshake instead: see the header.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on("error", reject);
+    probe.listen(0, () => {
+      const found = probe.address().port;
+      probe.close(() => resolve(found));
+    });
+  });
+}
+
+// ZERO IS "WHOEVER CAN", for both ports. A number has to be in hand before vite starts --
+// --tmux opens the pane with it and the banner prints it -- and the probe is the only way
+// to get one, since vite's own announcement goes to the pane rather than here.
+const uiPicked = uiPort === 0;
+if (uiPicked) uiPort = await freePort();
 
 // --TMUX ASKS THE WINDOW IT IS IN FOR A PANE, so there has to be a window: $TMUX is
 // what a shell inside tmux is handed, and its absence is not a missing binary to go
@@ -281,6 +354,28 @@ function uiEnv(backendPort) {
   };
 }
 
+/// `npm run build` into `ui/dist`, so the backend can serve the page itself. node_modules
+/// first, exactly as the dev path below does it: a fresh worktree (a git worktree, a clone)
+/// has none, and `vite build` without it fails with a message about a missing binary.
+async function buildUi() {
+  if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
+    console.log("dev.mjs: no ui/node_modules -- running npm install first");
+    const installed = await exitOf(
+      run("npm", ["install"], { cwd: UI_DIR, stdio: "inherit" }),
+    );
+    if (installed !== 0) {
+      console.error("dev.mjs: npm install failed");
+      process.exit(1);
+    }
+  }
+  console.log("dev.mjs: building the page (npm run build) -- the harness serves ui/dist");
+  const built = await exitOf(run("npm", ["run", "build"], { cwd: UI_DIR, stdio: "inherit" }));
+  if (built !== 0) {
+    console.error("dev.mjs: npm run build failed");
+    process.exit(1);
+  }
+}
+
 /// The UI in a pane to the RIGHT of this one, and the pane's id back so `cleanup` can
 /// take it down again.
 ///
@@ -324,10 +419,9 @@ const logPath = path.join(tmp, "backend.log");
 
 /// The line each backend announces itself on, and the port it names: the e2e
 /// server's is machine-readable on purpose, `start!`'s is its own banner with the
-/// BOUND port on it (which is the whole reason `--port 0` is usable at all).
-const READY = scripted
-  ? /PRINT-READY \{:port (\d+)\}/
-  : /harness listening on http:\/\/localhost:(\d+)/;
+/// BOUND port on it (which is the whole reason `--port 0` is usable at all). That
+/// banner is spelled in `scripts/backend.mjs`, where both launchers read it.
+const READY = scripted ? /PRINT-READY \{:port (\d+)\}/ : LISTENING;
 
 let backendArgv;
 let backendEnv = { ...process.env };
@@ -342,8 +436,23 @@ if (scripted) {
     '{:default {:protocol :fake :base-url "http://offline.invalid/v1" :model "seeded"}}\n',
   );
   if (scriptFile === "") {
-    scriptFile = path.join(tmp, "script.json");
-    fs.writeFileSync(scriptFile, '{"turns": [{"content": "（这是脚本厂商的一条回答。）"}]}\n');
+    scriptFile = DEFAULT_SCRIPT;
+  } else {
+    // RESOLVED AGAINST THE CALLER'S CWD, which is where a relative path was written from.
+    // The backend's cwd is ROOT, so passing one straight through would have a file that
+    // exists here read as missing there -- and the check below is what would have said so.
+    scriptFile = path.resolve(scriptFile);
+  }
+  // A MISSING SCRIPT IS NOT A BACKEND THAT HAS NOTHING TO SAY: harness.e2e-server reads an
+  // absent file as `{:turns []}`, which answers every call with an empty turn and looks
+  // like a broken harness rather than a typed path. Said here, once, in the invoker's words.
+  if (!fs.existsSync(scriptFile)) {
+    console.error(
+      `dev.mjs: no script file at ${scriptFile}\n` +
+        `  --scripted replays the turns in one; with none named it uses ${DEFAULT_SCRIPT},\n` +
+        "  and the shape of a turn is in this script's header.",
+    );
+    process.exit(2);
   }
   backendArgv = [
     "clojure", "-M:dev", "-m", "harness.e2e-server",
@@ -355,6 +464,13 @@ if (scripted) {
 } else {
   backendArgv = ["clojure", "-M:run", "--port", String(port)];
 }
+
+// A SCRIPTED RUN SERVES THE BUILT PAGE, NOT A DEV SERVER (owner, 2026-09-24): the point of
+// --scripted is a walkthrough of the REAL thing -- one process, one address, the page the
+// backend actually serves -- so the UI is BUILT here and the backend is the only server.
+// The build has to happen BEFORE the backend starts: it resolves `ui/dist` once, at
+// startup, and a page that appears afterwards is a page nobody serves.
+if (scripted) await buildUi();
 
 const log = fs.createWriteStream(logPath);
 backend = run(backendArgv[0], backendArgv.slice(1), {
@@ -424,9 +540,11 @@ console.log(
     (port === 0 ? " (a port the OS picked)" : ""),
 );
 console.log(
-  tmux
-    ? `dev.mjs: UI on http://localhost:${uiPort}, in the pane to the right`
-    : `dev.mjs: UI on http://localhost:${uiPort} (Ctrl-C stops both)`,
+  scripted
+    ? `dev.mjs: the page is that same address -- the built ui/dist, served by the harness`
+    : `dev.mjs: UI on http://localhost:${uiPort}` +
+      (uiPicked ? " (a port the OS picked)" : "") +
+      (tmux ? ", in the pane to the right" : " (Ctrl-C stops both)"),
 );
 if (homes !== null) {
   console.log(
@@ -435,6 +553,9 @@ if (homes !== null) {
   );
   console.log(`dev.mjs: temp OS home   ${homes.userHome}`);
   console.log("dev.mjs: siblings, deleted when this stops -- read the jsonl while it runs");
+  // WHICH TURNS ARE BEING REPLAYED, because the default is a file in the repo: a reader
+  // who wants a different conversation edits that one or names their own with --scripted.
+  console.log(`dev.mjs: replaying ${scriptFile}`);
 }
 console.log(`dev.mjs: the log is ${logPath}`);
 
@@ -451,7 +572,12 @@ if (!fs.existsSync(path.join(UI_DIR, "node_modules"))) {
 }
 
 let exitCode;
-if (tmux) {
+if (scripted) {
+  // ONE PROCESS, ONE ADDRESS: the backend is serving the built page, so there is no dev
+  // server to hand a port to and none to wait on. What ends the run is the backend -- the
+  // child this process owns, and the only one there is.
+  exitCode = await exitOf(backend);
+} else if (tmux) {
   // THE PANE IS OPENED ONCE THE PORT IS KNOWN, which is the same ordering the other
   // mode has: the dev server is handed the backend's address at the moment it starts,
   // and there is no second chance to tell it.

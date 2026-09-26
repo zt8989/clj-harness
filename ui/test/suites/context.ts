@@ -180,7 +180,7 @@ const cases: Case[] = [
         },
       ]);
       const tid = threadId("context-ring");
-      const resp = await postRun(tid, "context-ring-run-1", [
+      const resp = await postRun(tid, [
         { id: "u1", role: "user", content: "看看这个项目" },
       ]);
       expect(resp.status).toBe(200);

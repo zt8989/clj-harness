@@ -1,5 +1,6 @@
 // What sits around and inside the composer: the directory and branch above it,
-// the model and thinking inside it, and the refusal a file can earn.
+// the model and thinking inside it, the refusal a file can earn, and the sentence
+// a conversation the server is still answering owes the reader.
 //
 // ------------------------------------------------ three slots, and why they are here
 //
@@ -75,7 +76,14 @@ import type {
   Unstable_TriggerAdapter,
   Unstable_TriggerItem,
 } from "@assistant-ui/core";
-import { BrainIcon, FolderIcon, GitBranchIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
+import {
+  BrainIcon,
+  CpuIcon,
+  FolderIcon,
+  GitBranchIcon,
+  PlusIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
@@ -87,19 +95,26 @@ import {
   choicesFor,
   gitStateFor,
   modelFor,
-  providerLabel,
   setModel,
   switchBranch,
   type Choices,
   type ModelAnswer,
 } from "@/lib/composer";
-import { bindThread, listProjects, projectName } from "@/lib/projects";
+import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
+import { bindThread, listSidebar, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
 import { Picker } from "./picker";
+// THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING USED TO OWE IS GONE (ticket 09
+// of `.scratch/session-after-refresh`): what stands there now is a STOP button, drawn in
+// the composer's own action row by the element itself (`thread.aui.tsx`'s `ComposerStop`
+// seam, supplied by `App`, which is where the thread id is), because the thing it
+// replaces is Send. The CONTEXT it reads still lives in a module of its own --
+// `./session-run-state` -- for the same reason as before: a suite renders what stands on
+// the server's word, and THIS file cannot be imported there.
 
 /// The thread the composer is composing for. Supplied by `App`, which owns it --
 /// see the comment there on why the id's owner is React state rather than the
@@ -134,30 +149,96 @@ function useRemote<T>(load: () => Promise<T>): {
   return { data, error, reload: useCallback(() => setNonce((n) => n + 1), []) };
 }
 
+/// WHAT THIS PAGE IS HOLDING FOR A SESSION THAT DOES NOT EXIST YET -- supplied by `App`
+/// for exactly the sessions it minted and nobody has sent in, and NULL for every other
+/// session (an id the store knows is a session whose directory is a fact the server
+/// already holds, and this is not that).
+///
+/// WHY THE COMPOSER HAS TO KNOW. `rebind` below used to POST `/api/project` for whatever
+/// id it was given, and for a session this page had just minted that POST is what CREATED
+/// it: `project/bind!` is a find-or-create (`touch-session!`), so one pick of a directory
+/// wrote a session row and a 160-byte log whose only line is the `project/bound` audit --
+/// a thread id with no conversation behind it, listed by every later refresh as a session
+/// nobody has sent to. That is the one thing lazy creation removed from every OTHER door
+/// (点击新增不立刻会话，发送才新建), and the picker was the door it was left in.
+///
+/// SO A HELD SESSION'S PICK REMEMBERS AND WRITES NOTHING, and the first send binds it --
+/// the same registration every other minted session goes through (`app.tsx`'s
+/// `pendingBinds`, which `onShowFresh` already fills from the sidebar). The directory is
+/// held there rather than here because the page, not this bar, is the thing that sees the
+/// message arrive.
+export type HeldSession = {
+  /// THE DIRECTORY ITS FIRST SEND WILL BIND IT TO, or null for a task. Read at render
+  /// from the page's own pending map, so a bar that has just been remounted still shows
+  /// what was picked.
+  readonly dir: string | null;
+  /// REMEMBER A DIFFERENT ONE. Writes nothing: the first send is what binds, and this is
+  /// the only thing a pick can do to a session that does not exist yet.
+  remember: (dir: string) => void;
+};
+///
+/// NULL IS THE ORDINARY ANSWER -- every session the store can answer for, and every
+/// session this page did not mint.
+export const HeldSessionContext = createContext<HeldSession | null>(null);
+
+const useHeldSession = (): HeldSession | null => useContext(HeldSessionContext);
+
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("composer");
   // The fetch failures below are this side's fallback sentences (see
   // lib/projects.ts and lib/composer.ts), so they are drawn from `errors`.
   const { t: tErrors } = useTranslation("errors");
+  // THE PROJECTS HALF OF THE SIDEBAR'S LISTING, because that is what a session can
+  // be bound to: the tasks in the same payload are conversations with no directory,
+  // and this picker is the thing that gives one -- so lists them nothing to offer.
   const projects = useRemote(
-    useCallback(() => listProjects(tErrors), [tErrors]),
+    useCallback(() => listSidebar(tErrors), [tErrors]),
   );
   const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // WHETHER THIS SESSION EXISTS IN THIS HOME AT ALL -- null for every session it does,
+  // and the page's own memory of the directory for the ones it minted and nothing has
+  // been sent in. See `HeldSessionContext`.
+  const held = useHeldSession();
+  // AND WHAT THIS BAR SHOWS AFTER A PICK, because `remember` writes to a ref the page
+  // holds (the run reads it at the first send) and a ref does not re-render: this is the
+  // render a pick owes the person who made it, and it is dropped the moment the session
+  // stops being held -- the server's answer takes over at the first send.
+  const [picked, setPicked] = useState<string | null>(null);
 
   // The label is the last path segment -- a row has to be scannable -- and the
   // whole path rides along as the hint: it is what the row is searched by (a
   // person remembers `workspace`) and what it shows when the list is open.
-  const dirs = (projects.data ?? []).map((p) => ({
+  const dirs = (projects.data?.projects ?? []).map((p) => ({
     value: p.path,
     label: projectName(p.path),
     hint: p.path,
   }));
-  const current = git.data?.dir ?? "";
+  /// THE DIRECTORY THIS BAR NAMES. THREE SOURCES, in this order, and the order is the
+  /// whole of it: a session the page is HOLDING has no binding to read -- `/api/git`
+  /// answers `{dir: nil}` for an id this home has never heard of, which is the honest
+  /// answer and the wrong one to draw -- so the page's pending directory comes first,
+  /// then the pick that was just made, and only then the server's binding.
+  const current = held === null ? (git.data?.dir ?? "") : (held.dir ?? picked ?? "");
 
+  /// PUT THIS SESSION IN DIR. Two verbs, in one function, because the picker asks one
+  /// question and which verb answers it is a fact about the SESSION rather than about the
+  /// pick:
+  ///
+  ///   * a session the page is HOLDING does not exist anywhere yet, so a pick can only
+  ///     REMEMBER the directory -- this bar cannot be the thing that creates a session
+  ///     (see `HeldSessionContext`). No request, nothing to fail, no sentence;
+  ///   * every other session is bound here and now, which for one the store already holds
+  ///     is a REBIND: `POST /api/project` moves the log with it (`move-log!`).
   const rebind = async (path: string) => {
+    if (held !== null) {
+      held.remember(path);
+      setPicked(path);
+      setError(null);
+      return;
+    }
     if (busy) return;
     setBusy(true);
     setError(null);
@@ -312,32 +393,33 @@ const ComposerTools: FC = () => {
     );
   }
 
-  // GROUPED BY VENDOR, ONE FLAT LIST, and that is the whole shape of this menu: a
-  // heading per provider with its models under it, so a long catalog reads as a
-  // short list of vendors -- but one pick rather than vendor-then-model, because
-  // two menus for one decision is one menu too many. The row's VALUE is the model
-  // id alone, because the vendor is implied by which heading it was under (`hint`
-  // carries nothing: the heading above the row already says it, and searching
-  // matches the heading too -- see `lib/picker.ts`). The heading's TEXT is the
-  // vendor's display name when it has one and its id otherwise (see
-  // `providerLabel`): the id stays the truth either way, which is what the server
-  // is sent and what a log line will say.
-  // A session served by a model the catalog does not list -- an inline provider in
-  // config.edn, a vendor that has since been removed -- still has to be drawable,
-  // exactly as the directory picker treats a directory this home does not list: a
-  // picker showing nothing at all reads as a session with no model.
-  const listed = data.providers.flatMap((provider) =>
-    provider.models.map((model) => ({
-      value: model,
-      label: model,
-      group: providerLabel(provider),
-    })),
+  // GROUPED BY VENDOR, ONE FLAT LIST, and that is the whole shape of this menu: a heading
+  // per provider with its models under it, so a long catalog reads as a short list of
+  // vendors -- but one pick rather than vendor-then-model, because two menus for one
+  // decision is one menu too many. The heading's TEXT is the vendor's display name when it
+  // has one and its id otherwise (`lib/provider-label.ts`); the id stays the truth either
+  // way, which is what the server is sent and what a log line will say.
+  //
+  // A ROW IS NAMED BY ITS VENDOR AND ITS ID, and that is a rule rather than a detail: a
+  // model id does NOT name a row, because two vendors may declare the same one -- and then
+  // the id alone marks both rows as the current one and sends whichever vendor the catalog
+  // lists first. `lib/model-rows.ts` owns that identity, and the two facts below; this
+  // component draws what it answers.
+  //
+  // BOTH FACTS ARE IN THAT ONE ANSWER. Only the vendors this home holds a key for are
+  // offered (`lib/provider-key.ts` is the one copy of that rule -- the settings page reads
+  // it too), because offering a vendor that will certainly refuse leads a person to a run
+  // that cannot work. THE SESSION'S OWN ROW IS NOT TOUCHED BY THAT FILTER: if it falls out
+  // of the list -- its vendor has no key, it is an inline provider, that vendor is gone --
+  // it comes back at the top as ITS OWN row (the same pair) carrying the existing 'not in
+  // the catalog' hint, exactly as the directory picker treats a directory this home does
+  // not list. A picker showing nothing at all reads as a session with no model, and erasing
+  // what a session is being SERVED BY is a bigger lie than listing a vendor without a key.
+  const { current, options } = modelMenu(
+    data.providers,
+    { provider: data.provider, model: data.model },
+    t("model.notInCatalog"),
   );
-  const options =
-    data.model === undefined || listed.some((option) => option.value === data.model)
-      ? listed
-      : [{ value: data.model, label: data.model, hint: t("model.notInCatalog") }, ...listed];
-  const currentModel = data.model ?? options[0]?.value ?? "";
 
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
@@ -348,19 +430,26 @@ const ComposerTools: FC = () => {
         <ContextRing />
         <Picker
         slot="composer-model"
+        // ON A PHONE THIS IS JUST A CHIP, and the same menu opens from it (`Picker`'s
+        // `iconOnly`). The ring stays its sibling: it is the door to the context panel and
+        // opening the model menu is not what clicking it does (see context-ring.tsx).
+        iconOnly
+        leading={<CpuIcon className="text-muted-foreground size-4 shrink-0 sm:hidden" />}
         label={t("model.label")}
-        value={currentModel}
+        value={current}
         disabled={busy}
         title={data.provider === undefined ? data.model : `${data.provider} / ${data.model}`}
         options={options}
         onPick={(option) => {
-          // The provider comes from the vendor that declares this model, because an
-          // id is only meaningful against the one that does.
-          const owner = data.providers.find((p) => p.models.includes(option.value));
+          // THE ROW NAMES ITS OWN VENDOR: what the heading above it said is what gets
+          // sent, not whichever vendor the catalog happens to list first for this id.
+          // A row with no vendor -- an inline provider has no id -- has none to send, so
+          // only the model travels, which is what a change of model alone looks like.
+          const row = modelRowFromKey(option.value);
           void change(
-            owner === undefined
-              ? { model: option.value }
-              : { provider: owner.name, model: option.value },
+            row.provider === undefined
+              ? { model: row.model }
+              : { provider: row.provider, model: row.model },
           );
         }}
         />
@@ -375,6 +464,9 @@ const ComposerTools: FC = () => {
         // Three options and a default: read at a glance, so no search box (see
         // `components/picker.tsx` on `searchable`).
         searchable={false}
+        // The brain already leads this picker, so collapsing it is the same act as the
+        // model's: on a phone the icon IS the control.
+        iconOnly
         options={[
           { value: "", label: t("effort.default") },
           ...data["reasoning-efforts"].map((effort) => ({ value: effort, label: effort })),
@@ -709,6 +801,10 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <SkillPicker threadId={threadId} />
         {!started && <ComposerContextBar threadId={threadId} />}
+        {/* NOTHING IS SAID ABOVE THE INPUT ABOUT A RUN THE SERVER IS ANSWERING anymore
+            (ticket 09): the composer's own action row draws a STOP there instead
+            (`thread.aui.tsx`'s `ComposerStop`), because the thing that was shut is a
+            thing a person can now act on. */}
         {children}
         {refusal !== null && (
           <p

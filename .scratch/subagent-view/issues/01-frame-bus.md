@@ -21,4 +21,8 @@
 
 **Blocked by:** 无
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** 帧总线在 `src/harness/cap/frame_bus.clj`（发布 / 订阅 / 订阅者计数，
+滑动缓冲 256，进程内、随进程退出消失）。`run-subagent!` 在写记录**之前**盖 `:seq` 再 `publish!`，
+所以记录与总线上是同一个数 —— 边界去重靠它。用例：`harness.cap.frame-bus-test`。

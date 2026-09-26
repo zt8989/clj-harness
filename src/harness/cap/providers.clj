@@ -70,6 +70,7 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [harness.infra.home :as home]
+            [harness.infra.language :as language]
             ;; For the implemented-protocol set, READ off the multimethod
             ;; rather than keeping a list that could disagree with it. cap -> kernel
             ;; is the allowed direction, and kernel.llm does not require this
@@ -112,11 +113,13 @@
   #{:context-window :max-output-tokens})
 
 (def model-keys
-  "Everything a model entry may carry: the two modality sets it MUST declare and
-  the two counts it MAY. A key outside this fails by name -- a stray
-  :context_window would otherwise be silently dropped, and the entry would look
-  like it declared nothing."
-  (into #{:input :output} counts))
+  "Everything a model entry may carry: the two modality sets it MUST declare, the
+  two counts it MAY, and the one delivery capability it MAY
+  (`.scratch/instruction-updates`): whether the endpoint accepts a mid-conversation
+  `developer` message, so a moved instruction can ride the tail instead of replacing
+  `message[0]`. A key outside this fails by name -- a stray :context_window would
+  otherwise be silently dropped, and the entry would look like it declared nothing."
+  (into #{:input :output :instruction-updates} counts))
 
 (def knobs
   "The three things a tier may choose. Everything else about a provider is the
@@ -129,9 +132,11 @@
   counts ride along with the modalities: they are answers about the model that
   was selected, and a reader asking 'what is this session on' wants them. The
   display name is an answer about the PROVIDER rather than the model, and it
-  rides along for the same reason: it is the catalog's to say, never a tier's."
+  rides along for the same reason: it is the catalog's to say, never a tier's. The
+  delivery capability is the model's, and it comes resolved because the sent array
+  depends on it -- a tier does not choose it, and `selection` refuses it by name."
   [:protocol :base-url :model :display-name :input :output
-   :context-window :max-output-tokens])
+   :context-window :max-output-tokens :instruction-updates])
 
 (def catalog-fields
   "What a TIER may never name: everything the catalog answers once a selection has
@@ -267,6 +272,28 @@
     {:input  (modalities entry :input input-types where)
      :output (modalities entry :output output-types where)}))
 
+
+(def ^:private instruction-update-modes
+  "The delivery modes a model entry may declare, and the WHOLE of them: a name
+  outside this is refused by name rather than silently read as the default, because
+  a person who wrote :inplace would otherwise believe it was in force."
+  #{:in-place :replace})
+
+(defn- instruction-updates-of
+  "ENTRY's declared :instruction-updates as a keyword, checked against the closed
+  set -- or nil when the entry is silent, which is the DEFAULT's business and not
+  this function's: `resolved-fields` is where the silence becomes :replace, so the
+  report can still tell 'said nothing' from 'said :replace'."
+  [entry where]
+  (when-let [v (get entry :instruction-updates)]
+    (let [k (->kw v ":instruction-updates" where)]
+      (when-not (instruction-update-modes k)
+        (fail (str where " declares :instruction-updates " (pr-str k)
+                   ", which this harness does not know; it knows "
+                   (pr-str (sortable (map name instruction-update-modes))))
+              {:where where :instruction-updates v
+               :known (sortable (map name instruction-update-modes))}))
+      {:instruction-updates k})))
 (defn- check-model
   "One model entry -> what it declares: the two required modality sets, plus
   whichever of the two counts it states.
@@ -276,7 +303,8 @@
   typo into a model that quietly declares nothing."
   [entry where]
   (unknown-keys! where entry model-keys)
-  (merge (modalities-of entry where) (limits entry where)))
+  (merge (modalities-of entry where) (limits entry where)
+         (instruction-updates-of entry where)))
 
 ;; --------------------------------------------------------- one provider entry
 
@@ -387,7 +415,8 @@
                   {:missing k})))
         (let [id    (str (:model entry))
               half? (or (contains? entry :input) (contains? entry :output))
-              dirs  (cond-> (limits entry where)
+              dirs  (cond-> (merge (limits entry where)
+                                   (instruction-updates-of entry where))
                       half? (merge (modalities-of entry where)))]
           (cond-> {:protocol (:protocol entry)
                    :base-url (:base-url entry)
@@ -402,17 +431,24 @@
 ;; to meet them in.
 
 (def ^:private config-sections
-  "The two sections config.edn is made of, and the whole of its top level:
+  "The sections config.edn is made of, and the whole of its top level:
 
     :default    the three knobs a session starts from (:provider / :model /
                 :reasoning-effort), or a provider DESCRIBED inline
     :providers  the vendor catalog, {name entry}, laid over the built-in table
+    :ui         the interface's own settings (today just :language)
 
-  TWO SECTIONS IN ONE FILE, which is the point of the shape: which vendors this
-  process can reach and which one it starts on are one question asked twice, so a
-  person answering either opens one file. What used to be providers.edn is the
-  :providers section now -- see `catalog`."
-  #{:default :providers})
+  ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
+  starts on, and which language it speaks are all facts about THIS home, so a person
+  changing any of them opens one file. What used to be providers.edn is the :providers
+  section now -- see `catalog`.
+
+  :ui IS THE ONE SECTION THAT IS NOT ABOUT MODELS, and the closed top level is opened
+  for it deliberately: a language is not a knob a session starts from, so folding it
+  into :default would make that section's own description start to lie. It rides the
+  same file because it is the same home's configuration, not because it is a provider.
+  See harness.infra.language for what it means and how it is resolved."
+  #{:default :providers :ui})
 
 (defn- check-config
   "A parsed config.edn -> the same map, or a named failure about its SHAPE.
@@ -422,15 +458,16 @@
   so the answer cannot differ between the two."
   [raw path]
   (when-not (map? raw)
-    (fail (str path " must be a map of the two sections (:default and :providers), not "
+    (fail (str path " must be a map of the sections (:default, :providers and :ui), not "
                (pr-str (type raw)))
           {:path path}))
   (let [unknown (sortable (remove config-sections (keys raw)))]
     (when (seq unknown)
-      (fail (str path " carries " (pr-str unknown) " at its top level; it is made of two"
+      (fail (str path " carries " (pr-str unknown) " at its top level; it is made of"
                  " sections -- :default (the three knobs a session starts from:"
-                 " :provider / :model / :reasoning-effort) and :providers (the vendors,"
-                 " {name entry}). The knobs used to sit at the top level themselves:"
+                 " :provider / :model / :reasoning-effort), :providers (the vendors,"
+                 " {name entry}) and :ui (the interface's own settings, today just"
+                 " :language). The knobs used to sit at the top level themselves:"
                  " start the server once and it moves them under :default for you,"
                  " or move them yourself.")
             {:path path :unknown unknown})))
@@ -438,11 +475,24 @@
     (when-not (map? (get raw k))
       (fail (str path "'s " (pr-str k) " must be a map, not " (pr-str (get raw k)))
             {:path path :section k})))
+  (when-let [ui (:ui raw)]
+    (let [unknown-ui (sortable (remove language/section-keys (keys ui)))]
+      (when (seq unknown-ui)
+        (fail (str path "'s :ui carries " (pr-str unknown-ui) "; it is made of one key --"
+                   " :language, the language this harness speaks ("
+                   (str/join " / " (sort language/supported)) ")")
+              {:path path :unknown unknown-ui})))
+    (when-let [tag (:language ui)]
+      (when-not (contains? language/supported tag)
+        (fail (str path "'s :ui :language is " (pr-str tag) ", which is not a language"
+                   " this harness speaks; it is one of ("
+                   (str/join " / " (sort language/supported)) ")")
+              {:path path :language tag}))))
   raw)
 
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs ->
-  the two sections it is made of, checked as such.
+  the sections it is made of, checked as such.
 
   THE TOP LEVEL IS CLOSED, and that check IS the migration: this file used to BE
   the default tier, with :provider / :model / :reasoning-effort at the top. Those
@@ -564,6 +614,65 @@
   (into {} (map (fn [[n e]] [(->kw n "a provider name" "harness.builtin-raw")
                              (check-provider n e)]))
         builtin-raw))
+
+(def ^:private instruction-updates-hints
+  "MODEL-ID PREFIX -> the delivery mode to SUGGEST when a vendor's own listing is
+  taken into the catalog. A suggestion, not a rule: it prefills a form field a person
+  sees and can change, and run time never consults it (`probe-models` attaches it to
+  the probe's answer and nothing else).
+ 
+  WHY THE TABLE EXISTS. Taking an id into the catalog means either writing a
+  `:instruction-updates` value or leaving that model on the conservative default;
+  leaving a whole family that plainly accepts a mid-conversation `developer` message
+  on `:replace` is a saving nobody would find. So the families whose FIRST-PARTY
+  endpoint is the OpenAI-compatible protocol -- where `developer` is a role in the
+  specification -- arrive already saying so, and everything else arrives silent.
+ 
+  EVERY ROW HAS A BASIS, and a row without one does not go in (`.scratch/
+  instruction-updates` decision 8). A row is an assertion about a VENDOR, and a wrong
+  one points at `:in-place` for an endpoint that would refuse the message. The known
+  limit of an id-keyed table is written down rather than wished away: an id names a
+  MODEL, not the endpoint serving it (measured 2026-09-25 -- a kongming relay rejects
+  `developer` with 422 while listing `deepseek-*` ids). The suggestion stays visible
+  and editable and the runtime rule stays the file's, which is what makes the limit
+  survivable."
+  [["gpt-"      :in-place]  ;; OpenAI's own Chat Completions: `developer` is the role the spec added for exactly this.
+   ["o1"        :in-place]  ;; OpenAI's reasoning models, same first-party endpoint.
+   ["o3"        :in-place]
+   ["o4"        :in-place]
+   ["claude-"   :in-place]  ;; Anthropic's OpenAI-compatible endpoint names its models this way.
+   ["deepseek-" :in-place]  ;; DeepSeek's own API is the OpenAI-compatible shape (a relay listing these ids may not be).
+   ["kimi-"     :in-place]  ;; Moonshot's first-party endpoint.
+   ["moonshot-" :in-place]
+   ["qwen"      :in-place]  ;; Alibaba's compatible-mode endpoint; the family is spelled qwen-, qwen2.5-, qwen3- …
+   ["glm-"      :in-place]]) ;; Zhipu's OpenAI-compatible endpoint.
+
+(defn suggested-instruction-updates
+  "TABLE + MODEL-ID -> the value to suggest, or nil when nothing speaks for it.
+ 
+  IT TAKES ITS TABLE AS AN ARGUMENT so the longest-prefix rule can be asserted
+  directly (a test feeds an overlapping table -- `gpt-4` and `gpt-4o` -- rather than
+  redefining a var).
+ 
+  LONGEST PREFIX WINS, and nothing else may decide: 'the first that matches' would
+  make the answer depend on the iteration order of a map, which is not a fact about
+  the vendor. `starts-with?` does the whole comparison -- no trimming, no case
+  folding, because the id is the vendor's own spelling and normalising it would be a
+  second answer to 'which model is this'.
+ 
+  A GATEWAY OFTEN WRITES THE VENDOR INTO THE ID (`openai/gpt-4o-mini`,
+  `moonshotai/kimi-k2`), and the rule speaks about the MODEL rather than about the
+  endpoint's spelling -- so the part after the LAST slash is tried as well, and the
+  longest prefix still wins across both spellings."
+  [table id]
+  (let [s    (str id)
+        tail (if-some [i (str/last-index-of s "/")] (subs s (inc i)) s)
+        hits (for [candidate (distinct [s tail])
+                   [prefix value] table
+                   :when (str/starts-with? candidate (str prefix))]
+               [prefix value])]
+    (when-let [found (seq hits)]
+      (second (apply max-key (comp count first) found)))))
 
 (defn- over
   "The user's entry for NAME laid over the built-in one, field by field, with
@@ -794,11 +903,18 @@
     (let [m (get models id)]
       (cond-> (merge {:protocol (:protocol entry)
                       :base-url (:base-url entry)
-                      :model    id}
+                      :model    id
+                      ;; THE DEFAULT LIVES HERE AND NOWHERE ELSE. A model that said
+                      ;; nothing about :instruction-updates is served with :replace, so
+                      ;; 'what is this session on' has an answer without a second rule at
+                      ;; the delivery site; the report (model-row) still shows the file's
+                      ;; silence, because 'said nothing' and 'said :replace' are two facts
+                      ;; a form must not be made to confuse.
+                      :instruction-updates (or (:instruction-updates m) :replace)}
                      ;; The model's own declaration travels as ONE unit: whatever
-                     ;; check-model validated, keyed by model-keys -- modalities
-                     ;; and counts alike. Copying them one at a time is how a
-                     ;; third count would get declared, validated, and then
+                     ;; check-model validated, keyed by model-keys -- modalities, counts
+                     ;; and the delivery capability alike. Copying them one at a time is
+                     ;; how a third field would get declared, validated, and then
                      ;; silently left out of every resolution.
                      (select-keys m model-keys))
         ;; The PROVIDER's label, not the model's: it travels from the entry for the
@@ -811,26 +927,39 @@
 
 ;; ------------------------------------------------------- provider outbox
 ;;
-;; A PENDING-OUTBOX, not a copy of state: the tool body records that the session
-;; changed and what it changed from and to, and the http edge drains it to the
-;; jsonl. It exists for exactly the reason parked-registry does -- to carry a
-;; fact across the seam from the code that knows it (the tool) to the code that
-;; writes it down (the edge -- the only writer). Once drained it is gone, and
-;; nothing reads it back.
+;; A PENDING-OUTBOX, not a copy of state: whoever knows the session changed
+;; records what it changed from and to, and the http edge drains it to the jsonl.
+;; It exists for exactly the reason parked-registry does -- to carry a fact
+;; across the seam from the code that knows it to the code that writes it down
+;; (the edge -- the only writer). Once drained it is gone, and nothing reads it
+;; back.
+;;
+;; NOTHING FEEDS IT TODAY, and that is the honest state rather than an oversight:
+;; its only producer was the `session-configure` tool, and that tool is gone. The
+;; KIND stays -- `provider/changed` is read back by the prompt context
+;; (harness.edge.context) and by the trajectory, and a kind is vocabulary rather
+;; than a producer -- so the drain stays too: should a tool ever move the
+;; selection again, the line, its `:verdict` and its `:resolved` are already wired
+;; end to end. `POST /api/model` deliberately does NOT come through here -- it IS
+;; the edge, so it writes its own line at the moment of the change.
 
 (defonce ^:private provider-changes
   (atom []))
 ;; [{:thread-id .. :before <knob slice> :after <knob slice>
-;;   :trigger "session-configure" :override <session tier afterwards>
+;;   :trigger <the path that pressed it> :override <session tier afterwards>
 ;;   :resolved <what the catalog assembled from that tier>}]
 
 (defn record-provider-change!
   "Note that THREAD-ID's provider moved from BEFORE to AFTER, by an APPROVED
-  change of TRIGGER (a string identifying the path that pressed the change --
-  currently always \"session-configure\"). The body only runs on an approval --
-  a vetoed call never reaches it -- so landing here means the human said yes;
-  a veto leaves no change line at all, and the reader tells the two apart by
-  the presence of this line (paired with its approval/decided row).
+  change of TRIGGER (a string identifying the path that pressed the change).
+  The body only runs on an approval -- a vetoed call never reaches it -- so
+  landing here means the human said yes; a veto leaves no change line at all,
+  and the reader tells the two apart by the presence of this line (paired with
+  its approval/decided row).
+
+  NO CALLER TODAY: the `session-configure` tool was the only one, and it has been
+  removed -- this and the drain are kept as the shape a tool-made change travels
+  in, and the tests drive them directly (see the outbox note above).
 
   OVERRIDE is the session's OWN tier after the change -- the partial the next
   resolve-provider would consult. :before / :after are slices (only the knobs
@@ -1066,7 +1195,7 @@
   Three tiers, each overriding the one before it KNOB BY KNOB:
 
     1. config.edn's default tier       (or a provider described inline)
-    2. this session's override         (the session-configure tool)
+    2. this session's override         (written by POST /api/model -- the picker)
     3. this run's request              (REQUEST, from the input map)
 
   The fold produces a SELECTION, and the catalog assembles it: the selected
@@ -1100,7 +1229,7 @@
 
 (defn resolve-override
   "What THREAD-ID's session would be served by if its own tier WERE OV -- the
-  question session-configure asks before it writes anything.
+  question `POST /api/model` asks before it writes anything.
 
   A change that cannot be served is not a change: a provider name that is not in
   the catalog, or a model id the selected provider does not declare, has to fail
@@ -1127,9 +1256,11 @@
   ONE ATOM OPERATION, and that is the whole of it. Reading the override, folding the
   change in and writing it back is three steps, so two callers who do that LOSE one of
   the two changes -- and, worse, both then record a before->after pair that never
-  happened. Two callers is the ordinary case, not a rare one: `session-configure` (on a
-  tool thread) and the model endpoint (on an http-kit thread) write to this same tier,
-  and the endpoint can be pressed while a run is deciding to reconfigure itself. Here the
+  happened. THE TWO CALLERS ARE ONE CALLER TWICE, which is the ordinary case rather
+  than a rare one: this route runs on an http-kit thread, so two presses of the picker
+  -- or a press while the previous one is still resolving -- land here at once. Before
+  `session-configure` was removed the second caller was the tool, on a tool thread; the
+  discipline is unchanged, and the test that pins it drives two swaps at once. Here the
   write is a compare-and-set on the map itself, retried until it lands, and the pair it
   answers with is the pair it made.
 
@@ -1433,7 +1564,7 @@
   here would refuse one a vendor accepts. The list is therefore not a guard, it is
   an OFFER: the three OpenAI-compatible values, which is what the providers in the
   built-in table speak. A session that wants something else can still be given it
-  by `session-configure` or by config.edn; the picker just does not put it on the
+  by `POST /api/model` or by config.edn; the picker just does not put it on the
   menu."
   ["low" "medium" "high"])
 
@@ -1442,7 +1573,8 @@
 
     {:provider \"openrouter\" :model \"…\" :reasoning-effort \"high\"
      :reasoning-efforts [\"low\" \"medium\" \"high\"]
-     :providers [{:name \"deepseek\" :models [\"deepseek-flash\" \"…\"]} …]}
+     :providers [{:name \"deepseek\" :models [\"deepseek-flash\" \"…\"]
+                  :key {:present? true :source :env-file :name \"DEEPSEEK_API_KEY\"}} …]}
 
   THE THREE CURRENT VALUES ARE SCALARS PICKED BY NAME, and the provider list is
   built here rather than passed through `wire`. That is not a shortcut around the
@@ -1457,6 +1589,16 @@
   least one model, sorted by name so the menu has one order. A provider with no
   :models cannot be switched TO (naming it would fail in `assemble`), so offering
   it would be offering a refusal.
+
+  EACH ROW ALSO CARRIES WHETHER THIS HOME HOLDS A KEY FOR THAT VENDOR, and the rule
+  the picker applies to it is the settings page's rule rather than a second one: a
+  vendor is shown when this home has a key pointing at it, because putting a vendor
+  that will certainly refuse in front of a person leads them to a run that cannot
+  work. It arrives WITH the list instead of being fetched beside it, so the two can
+  never be out of step. `api-key-source` is the one place that question is answered
+  -- the same function the settings rows carry -- and it is a FACT, NOT A VALUE: it
+  never reads a key out of the map it reports on, which is why :api-key stays absent
+  here at every depth, exactly as everywhere else in this answer.
 
   :name IS THE ID AND :display-name IS THE LABEL, and the two are deliberately
   different keys rather than one already-decided string: what to SHOW is the
@@ -1475,7 +1617,8 @@
                      (keep (fn [[n entry]]
                              (let [models (keys (:models entry))]
                                (when (seq models)
-                                 (cond-> {:name (name n) :models (sortable models)}
+                                 (cond-> {:name (name n) :models (sortable models)
+                                          :key  (api-key-source n)}
                                    (some? (:display-name entry))
                                    (assoc :display-name (:display-name entry)))))))
                      (sort-by :name)
@@ -1530,13 +1673,17 @@
 
 (defn- model-row
   "One model entry -> the row a form edits: the id, its two modality sets as wire
-  strings, and whichever counts it states."
+  strings, whichever counts it states, and its delivery capability IF THE FILE SAID
+  ONE. THE SILENCE IS KEPT, deliberately: a row that always carried a value could
+  not be used to tell 'never declared' from 'declared :replace', and a save that
+  fills the default in for every model would rewrite lines nobody touched."
   [id m]
   (cond-> {:id     id
            :input  (set->wire (:input m))
            :output (set->wire (:output m))}
-    (some? (:context-window m))    (assoc :context-window (:context-window m))
-    (some? (:max-output-tokens m)) (assoc :max-output-tokens (:max-output-tokens m))))
+    (some? (:context-window m))       (assoc :context-window (:context-window m))
+    (some? (:max-output-tokens m))    (assoc :max-output-tokens (:max-output-tokens m))
+    (some? (:instruction-updates m))  (assoc :instruction-updates (:instruction-updates m))))
 
 (defn registry-report
   "The catalog as the settings page needs it:
@@ -1727,9 +1874,10 @@
   moment they open this file is which sections exist and that leaving them empty is a
   working state. A write from the settings form replaces these comments with its own
   header, which the file then says out loud."
-  (str ";; The two sections of this file, both of which the settings panel writes:\n"
+  (str ";; The three sections of this file, all of which the settings panel writes:\n"
        ";;   :default    the three knobs a session starts from\n"
        ";;   :providers  the vendors, {name entry}\n"
+       ";;   :ui         the interface's own settings (today just :language)\n"
        ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
        ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
        "\n{}\n"))
@@ -1824,6 +1972,29 @@
     (write-config! next)
     next))
 
+(defn set-language!
+  "VALUE (a keyword, or the string the wire carried) -> the config map now written,
+  with `:ui :language` set to it.
+
+  VALIDATED BEFORE ANYTHING IS WRITTEN, the same rule every other writer here keeps:
+  a value this harness cannot speak is refused by name and the file is left exactly as
+  it was. The WHOLE config is checked as well (`check-config`), so a `:ui` shape a
+  typo broke fails here rather than being written.
+
+  NO WAY TO 'CLEAR'. `:ui` is left in place rather than deleted: removing the section
+  would put a hand-edited home back on its OS language without the person saying so.
+  An absent section and a set one both resolve through harness.infra.language."
+  [value]
+  (let [kw (try (keyword (name value)) (catch Throwable _ nil))]
+    (when-not (contains? language/supported kw)
+      (fail (str "unknown language " (pr-str kw) "; this harness speaks "
+                 (str/join " / " (sort language/supported)))
+            {:language value}))
+    (let [next (assoc-in (config) [:ui :language] kw)]
+      (check-config next (config-path))
+      (write-config! next)
+      next)))
+
 (defn put-provider!
   "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the
   catalog entry that is now in config.edn's :providers.
@@ -1902,8 +2073,52 @@
 
 ;; ------------------------------------------------- asking a vendor what it serves
 
+(defn listed-models
+  "A provider's own 2xx body -> the model ids it lists, in the order it listed them.
+
+  THE LAYER BELOW `*list-models*`, and a function of the body on purpose. The probe's
+  outbound call is stubbed in tests, and while the parse lived inside that same
+  function the stub replaced the parse too -- which is how a body read with STRING
+  keys and looked up with a KEYWORD key shipped: `(:data parsed)` was nil for every
+  provider, so every 2xx answer came back empty, a provider listing thirty models
+  included. A stub cannot be wrong, so the seam could not see it.
+
+  BASE IS CARRIED ONLY SO A REFUSAL CAN NAME THE ADDRESS it came from: a person with
+  a half-filled form holds several endpoints, and 'answered something that is not
+  JSON' without one sends them to all of them. Both arguments are data -- no request
+  is made here, the body is the only thing read, and nothing comes back but ids.
+
+  THE SHAPE IS THE PROVIDER'S, WHICH MEANS STRING KEYS: `json/read-str`'s default
+  `:key-fn` is `identity`, so `{\"data\": …}` arrives as `{\"data\" …}`.
+
+  AND 'IT LISTED NOTHING' IS AN ANSWER, NOT AN ERROR: an absent `data`, one that is
+  not an array, rows that are not maps, ids that are not strings -- each is an empty
+  list, because a provider with nothing to offer is an ordinary provider. Only a body
+  that is not JSON at all is a refusal, and it is a different sentence from the
+  vendor's own 4xx: this one says the answer could not be READ, not that it said no."
+  [base body]
+  (let [parsed (try (json/read-str body)
+                    (catch Throwable _
+                      (fail (str "the vendor at " base " answered something that is not JSON")
+                            {:base-url base})))]
+    ;; `vector?` rather than `coll?`: `data` as a JSON OBJECT decodes to a map, and a
+    ;; map walked as a sequence yields its ENTRIES -- which would answer ["id" "gpt-x"]
+    ;; for a body that listed no array at all.
+    (if (vector? (get parsed "data"))
+      (->> (get parsed "data")
+           (keep (fn [row]
+                   (when (map? row)
+                     (let [id (get row "id")]
+                       (when (string? id) id)))))
+           vec)
+      [])))
+
 (defn- openai-models
   "GET <base-url>/models with the key as a bearer token -> the ids it lists.
+
+  THIS IS THE REQUEST, NOT THE PARSE: the body is handed to `listed-models`, which is
+  a function of the body alone and therefore the thing a test can feed. The two were
+  one function, and a stub at `*list-models*` replaced both -- see `listed-models`.
 
   The OpenAI-compatible listing shape (`{\"data\": [{\"id\": …}, …]}`), which is
   what the one protocol this harness implements speaks. ONE PROTOCOL TODAY, so one
@@ -1936,13 +2151,7 @@
                              (or (ex-message e) "the connection failed"))
                         {:base-url base :unreachable true})))]
     (if (<= 200 (.statusCode resp) 299)
-      (let [body   (.body resp)
-            parsed (try (json/read-str body)
-                        (catch Throwable _ (fail (str "the vendor at " base " answered something that is not JSON")
-                                                 {:base-url base})))]
-        (->> (:data parsed)
-             (keep (fn [row] (let [id (get row "id")] (when (string? id) id))))
-             vec))
+      (listed-models base (.body resp))
       ;; THE VENDOR'S OWN WORDS, trimmed: a 401 that says "invalid api key" is worth
       ;; more to a person than this harness' paraphrase of it, and the status is
       ;; carried so a form can tell 'wrong key' from 'wrong address'.
@@ -1964,11 +2173,16 @@
   ONE SHAPE TODAY: `openai-models` speaks the listing shape of the one protocol
   `implemented-protocols` contains. When a second vendor needs a different shape, this becomes a
   multimethod dispatched on `:protocol` -- the seam stays a seam, the dispatch
-  arrives underneath it."
+  arrives underneath it.
+
+  AND THE PARSE IS NOT BEHIND THIS SEAM ANY MORE: a stub here replaces the REQUEST,
+  while `listed-models` -- the body -> ids half -- stays real and is fed directly.
+  Stubbing this var used to replace both, which is what let a nil `:data` lookup pass
+  for a vendor that lists nothing."
   (fn [provider] (openai-models provider)))
 
 (defn probe-models
-  "What a vendor serves, asked of the vendor itself: {:models [id …]}, or a named
+  "What a vendor serves, asked of the vendor itself: {:models [{:id .. :instruction-updates ..}]}, or a
   failure carrying the vendor's own answer.
 
   ENDPOINT AND PROTOCOL COME FROM THE CALLER, or from the catalog when the caller
@@ -2006,11 +2220,21 @@
       (fail (str "cannot ask a " (pr-str proto) " vendor: this harness speaks "
                  (pr-str (protocol-names)))
             {:protocol proto}))
-    {:models (*list-models* {:protocol proto
-                             :base-url url
-                             :api-key  (or (:api-key asked)
-                                           (when (some? k) (api-key k)))})
-     :asked    url}))
+    (let [ids (*list-models* {:protocol proto
+                           :base-url url
+                           :api-key  (or (:api-key asked)
+                                         (when (some? k) (api-key k)))})]
+      ;; THE CATALOG'S OPINION IS ADDED TO THE VENDOR'S ANSWER, not folded into the
+      ;; seam: `*list-models*` still answers with the ids the vendor listed (a stub
+      ;; keeps returning a vector of ids), and `suggested-instruction-updates` says
+      ;; what to prefill for each. A miss carries NO key, the same 'only when there is
+      ;; something to say' the report keeps.
+      {:models (mapv (fn [id]
+                       (if-some [v (suggested-instruction-updates instruction-updates-hints id)]
+                         {:id id :instruction-updates v}
+                         {:id id}))
+                     ids)
+       :asked  url})))
 
 (defn put-defaults!
   "KNOBS (a map over the three knobs) -> the default tier now in config.edn's

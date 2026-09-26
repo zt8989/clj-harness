@@ -1,5 +1,13 @@
-// The subagent rows, RENDERED: the definitions group, the delegation records, and the
-// roster the settings form opens a row from.
+// The subagent rows, RENDERED: the definitions group, and the roster the settings form
+// opens a row from.
+//
+// THE DELEGATION ROWS ARE GONE FROM HERE WITH THE ROW ITSELF (`.scratch/subagent-view`
+// ticket 06): `RunRows` had one reader -- the sidebar block -- and the sidebar block is
+// retired, because the door into a subagent's conversation is the `agent` call in the
+// transcript now, and the mirror that call opens is a panel rather than a navigation.
+// The ENDPOINT is still pinned below, `runs` included: the route stays (`GET
+// /api/subagents` is the only answer to "what has this home ever delegated"), and a
+// front end with no reader for half of an answer is a fact worth keeping visible.
 //
 // ================================================================ why this file
 //
@@ -35,23 +43,9 @@ import { renderI18n } from "../support/locale";
 import {
   DefinitionButtons,
   DefinitionRows,
-  RunRows,
 } from "../../src/components/subagent-list";
 import type { Language } from "../../src/lib/language";
-import type { SubagentDefinition, SubagentRun } from "../../src/lib/subagents";
-
-/// The instant a delegation's timestamp is read from. FIXED, and a literal date string
-/// is what a case must NOT assert: `formatTime` draws the machine's timezone, so a
-/// pinned string would pass on one laptop and fail on the next. The expectation reads
-/// the same instant back through the same locale instead.
-const AT = Date.UTC(2026, 8, 18, 2, 15);
-
-/// The session that delegated, and two sessions that were delegated TO. Three
-/// different ids, because "which one does this row open" is the question the ids are
-/// there to answer.
-const PARENT = "9b0a4b0e-6f8e-4a02-9d3d-1c2b3a4d5e6f";
-const FIRST = "1f2e3d4c-5b6a-4798-8c9d-0e1f2a3b4c5d";
-const SECOND = "2a3b4c5d-6e7f-4809-9a1b-2c3d4e5f6a7b";
+import type { SubagentDefinition } from "../../src/lib/subagents";
 
 /// The two built-ins as the ENDPOINT sends them -- the same four fields plus
 /// `builtin`, spelled the way JSON has them (`baseline` as a string, not a keyword).
@@ -79,20 +73,6 @@ const AUDITOR: SubagentDefinition = {
   builtin: false,
 };
 
-/// One delegation. `running` is the server's in-memory table sampled at the moment the
-/// listing was answered, which is why it is a field of the row and not a subscription.
-function run(overrides: Partial<SubagentRun> = {}): SubagentRun {
-  return {
-    threadId: FIRST,
-    parent: PARENT,
-    subagent: "explore",
-    project: null,
-    delegatedAt: AT,
-    running: false,
-    ...overrides,
-  };
-}
-
 /// Render ONE component inside a real i18n instance, the way a screen would.
 function inline(node: ReactElement, language: Language): string {
   return renderToStaticMarkup(<I18nextProvider i18n={renderI18n(language)}>{node}</I18nextProvider>);
@@ -100,9 +80,9 @@ function inline(node: ReactElement, language: Language): string {
 
 /// EVERY element carrying one `data-slot`, as its attributes and its stripped text.
 ///
-/// ALL OF THEM, NOT THE FIRST, and that is the case that needs it: "one delegation is
-/// in flight and the other is not" is a claim about two rows, and a helper that
-/// answered only for the first could not tell the two apart.
+/// ALL OF THEM, NOT THE FIRST, because the claims below are about a LIST -- which rows
+/// carry which marker -- and a helper that answered only for the first could not tell
+/// two rows apart.
 ///
 /// The trailing quote in the pattern is what keeps `subagent-run` from matching
 /// `subagent-run-trigger`. `\1` closes the tag that was opened, so an element holding
@@ -151,7 +131,10 @@ const cases: Case[] = [
         subagents: SubagentDefinition[];
         problem: string | null;
         path: string | null;
-        runs: SubagentRun[];
+        /// THE HALF NO SCREEN READS ANY MORE (ticket 06): the route keeps answering it,
+        /// so it is still pinned here -- an endpoint half of which quietly disappeared
+        /// from the wire is a change nobody would see in a browser.
+        runs: unknown[];
       };
 
       expect(body.subagents.map((s) => s.name)).toEqual(["general", "explore"]);
@@ -171,58 +154,6 @@ const cases: Case[] = [
       // here would print an empty name at the one moment it matters most.
       expect(body.path?.endsWith("harness.edn")).toBe(true);
       expect(Array.isArray(body.runs)).toBe(true);
-    },
-  },
-  {
-    name: "a-delegation-row-names-the-subagent-and-the-parent-session",
-    run: async () => {
-      const html = inline(<RunRows runs={[run()]} busy={false} onOpen={() => {}} />, "en");
-
-      // WHICH SUBAGENT IT WENT TO, and the three facts are in the order a person asks
-      // them. The parent's id is drawn TRUNCATED in a real column, so its whole value
-      // rides in `title` -- asserted because a row whose only id line is ellipsized
-      // away is a row nobody can match against anything.
-      expect(textOf(html, "subagent-run-subagent")).toBe("explore");
-      expect(textOf(html, "subagent-run-parent")).toBe(PARENT);
-      expect(oneWith(html, "subagent-run-parent").attrs).toContain(`title="${PARENT}"`);
-      expect(textOf(html, "subagent-run-at")).toBe(new Date(AT).toLocaleString("en"));
-
-      // NOT RUNNING, and the absence is asserted in BOTH of the places the state is
-      // written -- the attribute a stylesheet keys off, and the word a person reads.
-      // Either one alone would let the other drift.
-      expect(carries(oneWith(html, "subagent-run"), "data-running")).toBe(false);
-      expect(() => oneWith(html, "subagent-run-state")).toThrow();
-    },
-  },
-  {
-    name: "a-delegation-still-in-flight-says-so-in-its-own-row-and-only-its-own",
-    run: async () => {
-      // TWO ROWS IN ONE LIST, which is the only arrangement that can catch a state
-      // drawn from the wrong source: a component that read a prop, a constant, or the
-      // list's own length would mark both or neither.
-      const html = inline(
-        <RunRows
-          runs={[run({ running: true, subagent: "general" }), run({ threadId: SECOND })]}
-          busy={false}
-          onOpen={() => {}}
-        />,
-        "en",
-      );
-
-      const rows = allWith(html, "subagent-run");
-      expect(rows.length).toBe(2);
-      expect(carries(rows[0]!, "data-running")).toBe(true);
-      expect(carries(rows[1]!, "data-running")).toBe(false);
-
-      // AND THE WORD IS IN ONE ROW, NOT THE LIST. Same claim, from the side a person
-      // reads: a badge hoisted out of the row would say "running" about a list.
-      expect(textsOf(html, "subagent-run-state").map((word) => word.trim())).toEqual([
-        "running",
-      ]);
-
-      // The row it is true of is still the one that says WHICH subagent -- so the two
-      // facts are on one row rather than the state being attached to the list.
-      expect(textsOf(html, "subagent-run-subagent")).toEqual(["general", "explore"]);
     },
   },
   {
@@ -310,27 +241,13 @@ const cases: Case[] = [
       expect(textOf(definitionsZh, "subagent-definitions-custom-empty").length).toBeGreaterThan(0);
       expect(textOf(definitionsZh, "subagent-definition-range")).toContain("eval");
 
-      const runningEn = inline(
-        <RunRows runs={[run({ running: true })]} busy={false} onOpen={() => {}} />,
-        "en",
-      );
-      const runningZh = inline(
-        <RunRows runs={[run({ running: true })]} busy={false} onOpen={() => {}} />,
-        "zh",
-      );
-      expect(textOf(runningEn, "subagent-run-state").trim()).toBe("running");
-      expect(textOf(runningZh, "subagent-run-state").trim()).toBe("跑着");
-
-      // AND THE EMPTY STATE IS A STATE, in both. It is the answer to "has anything ever
-      // been delegated", and a group that drew nothing at all would be an answer
-      // nobody could tell from a group that failed to load.
-      const emptyEn = inline(<RunRows runs={[]} busy={false} onOpen={() => {}} />, "en");
-      const emptyZh = inline(<RunRows runs={[]} busy={false} onOpen={() => {}} />, "zh");
-      expect(textOf(emptyEn, "subagent-runs-empty").trim()).toBe(
-        "Nothing has been delegated yet.",
-      );
-      expect(textOf(emptyZh, "subagent-runs-empty").trim()).toBe("还没有委派过。");
-      expect(() => oneWith(emptyEn, "subagent-runs")).toThrow();
+      // AND THE EMPTY STATE IS A STATE, in both: a home with no subagents of its own
+      // gets a line saying so rather than a blank group, because "none" and "failed to
+      // load" must not look the same.
+      const emptyEn = inline(<DefinitionRows definitions={[GENERAL, EXPLORE]} />, "en");
+      const emptyZh = inline(<DefinitionRows definitions={[GENERAL, EXPLORE]} />, "zh");
+      expect(textOf(emptyEn, "subagent-definitions-custom-empty").length).toBeGreaterThan(0);
+      expect(textOf(emptyZh, "subagent-definitions-custom-empty").length).toBeGreaterThan(0);
     },
   },
 ];

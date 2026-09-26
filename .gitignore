@@ -4,8 +4,17 @@
 target/
 node_modules/
 ui/dist/
+# The unminified profile build `scratch-profile.mjs` asks for (`vite build --minify false
+# --outDir dist-profile`): a measurement's artifact, never served, never committed.
+ui/dist-profile/
 
-# Local agent tooling: browser-driver artifacts and WorkBuddy's per-project
-# memory. Both are machine-local working state, not source.
+# Local agent tooling: browser-driver artifacts, WorkBuddy's per-project memory,
+# and the semantic index zvec_search builds. All three are machine-local working
+# state, not source.
 .playwright-mcp/
 .workbuddy/
+.zvec-grep/
+
+# Isolated checkouts of this repo (`git worktree add .worktrees/<name>`): a second
+# working tree is a place to work, not a thing to commit.
+.worktrees/

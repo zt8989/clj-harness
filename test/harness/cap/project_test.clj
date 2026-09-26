@@ -12,7 +12,9 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.infra.env :as env]
             [harness.test-support :as support]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project])
   (:import (java.io File)
            (java.sql DriverManager)))
@@ -236,6 +238,37 @@
       (write-project-harness! "{}")
       (is (false? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))))))
 
+
+(deftest the-fence-frees-the-machines-temp-directories
+  ;; This case points the machine's temp answer at a REAL tree (the runner's stand-in is
+  ;; fixture-free by design), so the fence's freedom is exercised the way production
+  ;; reads it rather than as an accident of the arrangement.
+  (let [tree (support/temp-dir "temp-free")]
+    (binding [env/*temp-dir-override* [tree]]
+      (project/bind! "pt-temp" root)
+      (try
+        (testing "a path under the machine's temp directory is free"
+          (is (false? (project/out-of-bounds? "pt-temp" (str (io/file tree "scratch.txt")))))
+          (is (false? (project/out-of-bounds? "pt-temp" tree))))
+        (testing "but one level up is outside it"
+          (is (true? (project/out-of-bounds? "pt-temp"
+                                             (str (io/file tree ".." "escape.txt"))))))
+        (testing ":strict does not take it away, exactly like the config home"
+          (write-project-harness! "{:approval {:strict true}}")
+          (is (false? (project/out-of-bounds? "pt-temp" (str (io/file tree "x.txt")))))
+          (is (true? (project/out-of-bounds? "pt-temp" "in.txt"))))
+        (finally
+          (project/bind! "pt-temp" nil))))))
+
+(deftest the-suites-own-temp-stand-in-is-what-the-fence-frees
+  ;; No binding here: the isolated answer (harness.test-runner/isolate!) is the real
+  ;; directory the fence frees for every case in this JVM.
+  (let [stand-in (first (env/temp-dirs))]
+    (project/bind! "pt-temp-stand-in" root)
+    (try
+      (is (false? (project/out-of-bounds? "pt-temp-stand-in"
+                                         (str (io/file stand-in "x.txt")))))
+      (finally (project/bind! "pt-temp-stand-in" nil)))))
 (deftest cwd-changed-is-the-hook-payload-shape
   ;; The CwdChanged event source (ticket 04): the facts a P2 hook engine will
   ;; consume verbatim at the binding-change point. Locked here so the shape
@@ -738,3 +771,108 @@
          (finally
            (project/bind! "pt-skills" nil)
            (doseq [d [proj skill-dir elsewhere]] (support/wipe-tree! d))))))))
+
+;; ---------------------------------------------------------------- the pre-LLM step
+;;
+;; ONE PLACE DECORATES A SESSION'S HISTORY, and this is it: the skill bodies a load asked
+;; for, and the endings of background jobs nobody waited for. The second half is the
+;; reason these cases live here rather than in either capability -- what is being
+;; asserted is that the SESSION's step carries both, and that it stays idempotent (the
+;; loop applies it before every call and promises that applying it twice changes
+;; nothing).
+
+(deftest the-session-step-carries-the-endings-of-jobs-nobody-waited-for
+  (let [t "pt-notice"
+        {:keys [path]} (jobs/start! t {:command "echo JOB-SAYS-$((6*7)); exit 0"})]
+    ;; WAIT BY READING THE RECORD, not through a verb: `job_output` would count as
+    ;; telling the model, which is exactly the thing being tested here.
+    (is (support/holds-within? #(re-find #"\[exit" (slurp path :encoding "UTF-8")) 10000)
+        "the job finished, and nobody asked about it")
+    (let [history [{:role "user" :content "hi"}]
+          once    (project/before-llm history t)]
+      (testing "a notice is appended, tagged like every other injection"
+        (is (= 2 (count once)))
+        (is (= "hi" (:content (first once))) "the client's own message is untouched")
+        (is (str/starts-with? (:content (second once)) "<job-ended"))
+        (is (str/includes? (:content (second once)) "[exit 0]") "how it went")
+        (is (str/includes? (:content (second once))
+                           "<command>echo JOB-SAYS-$((6*7)); exit 0</command>")
+            "which command it was -- the id alone identifies nothing")
+        (is (str/includes? (:content (second once)) "job_output")
+            "and the one line that says where to read it")
+        (is (not (str/includes? (:content (second once)) path))
+            "but not the path: the `job` answer carried that, and it is still in the history")
+        (is (not (str/includes? (:content (second once)) "JOB-SAYS-42"))
+            "nothing of what the command SAID: the notice quotes the command, not the record"))
+      (testing "and applying the step to its own output changes nothing"
+        ;; The loop's promise: a step that grew a second copy each time it ran would
+        ;; put the same notice in front of the model on every call of every turn.
+        (is (= once (project/before-llm once t))))
+      (testing "while a session with nothing to say gets its history back unchanged"
+        (is (= history (project/before-llm history "pt-nobody"))))))
+  (jobs/shutdown!))
+
+(defn- stored-title
+  "What this home says a session is called, read the way the sidebar's listing reads
+  it: through `sessions`, not through a query of the test's own."
+  [thread-id]
+  (:title (first (filter #(= thread-id (:id %)) (project/sessions)))))
+
+(defn- stored-sent
+  "The same, for the SEND TIME: epoch millis of the last send, or nil when nothing
+  has ever been sent to THREAD-ID.
+
+  Read through `project/sessions` on purpose -- that is the SELECT the sidebar is
+  served from, so a column that made it into the table but not into the listing's
+  query would fail here rather than pass."
+  [thread-id]
+  (:last-sent-at (first (filter #(= thread-id (:id %)) (project/sessions)))))
+
+(deftest a-send-names-the-session-once-and-restamps-the-clock-every-time
+  ;; `remember-send!`, and the two rules it holds in one statement.
+  ;;
+  ;; ONE SEND = ONE EVENT: the time moves on every send, the name is written by the
+  ;; FIRST one and never again. Both live in one UPDATE because a send is one thing
+  ;; that happened -- split in two, a path that stamped the time and forgot the name
+  ;; (or the reverse) would be a row whose two facts came from different turns.
+  (let [id (str "pt-named-" (System/nanoTime))]
+    (project/register-session! id)
+    (testing "a session nothing has been sent to says so: no name, no time"
+      (is (nil? (stored-title id)))
+      (is (nil? (stored-sent id))))
+    (testing "the first send names it AND stamps the clock"
+      (let [before (System/currentTimeMillis)]
+        (is (true? (project/remember-send! id "把侧边栏的标题改成会话标题")))
+        (is (= "把侧边栏的标题改成会话标题" (stored-title id)))
+        (is (<= before (stored-sent id) (System/currentTimeMillis))
+            "the stamp is the moment of the call, in epoch millis")))
+    (testing "and the fortieth send does not rename it -- but does move the clock"
+      ;; `COALESCE(title, ?)` is the rule rather than an optimization: a name the
+      ;; session acquired must not be overwritten by whatever the most recent turn
+      ;; happened to say. The TIME is the opposite kind of fact: it is meant to move.
+      (let [first-send (stored-sent id)]
+        (Thread/sleep 5)
+        (is (true? (project/remember-send! id "另一句话，来得更晚")))
+        (is (= "把侧边栏的标题改成会话标题" (stored-title id)))
+        (is (<= first-send (stored-sent id) (System/currentTimeMillis))
+            "the clock followed the new send, not the old one")))
+    (testing "a send that carries no user text still stamps the clock"
+      ;; A run whose messages hold no user turn is still a run that happened -- the
+      ;; sidebar's order is about activity, not about how talkative the turn was. The
+      ;; name, of course, has nothing to learn from it.
+      (let [before-blank (stored-sent id)]
+        (Thread/sleep 5)
+        (is (true? (project/remember-send! id nil)))
+        (is (true? (project/remember-send! id "   \n\t ")) "and blank is the same absence")
+        (is (= "把侧边栏的标题改成会话标题" (stored-title id)) "an absent text cannot name anything")
+        (is (<= before-blank (stored-sent id)))))
+    (testing "a session this home has never heard of is not invented by a send"
+      ;; The write is an UPDATE: a conversation nobody registered stays unregistered,
+      ;; which is what makes it safe to call for any id a run names.
+      (is (false? (project/remember-send! "pt-never-registered" "谁？")))
+      (is (nil? (stored-title "pt-never-registered")))
+      (is (nil? (stored-sent "pt-never-registered"))))
+    (testing "both facts are in the store's FILE, not in this process's memory"
+      (is (= [["把侧边栏的标题改成会话标题"]]
+             (foreign-rows (str "SELECT title FROM sessions WHERE id = '" id "'"))))
+      (is (some? (first (foreign-rows (str "SELECT last_sent_at FROM sessions WHERE id = '" id "'"))))))))

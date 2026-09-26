@@ -1,5 +1,6 @@
 (ns harness.cap.jobs
-  "The commands this process is running in the background, and what they have said.
+  "The commands this process is running in the background, the records they leave
+  behind, and the verbs over both.
 
   A JOB IS NOT A SLOW TOOL CALL. `bash` returns when its command does, or at its
   own limit; a background job returns nothing at all until somebody asks, because
@@ -13,14 +14,26 @@
   run's end killed would be a background command nobody could ever check on, which
   is the only reason to start one.
 
-  A JOB'S OUTPUT IS A FILE, AND THE FILE IS THE RECORD. `start!` makes
-  `<root>/jobs/<thread-id>/<job-id>.log` in the configuration home, every line the
-  command prints is appended to it and flushed, and the model reads it with the
-  tools it already has: `bash` (`tail` / `grep` / `cat`), `read`, `grep`. So there
-  is nothing to lose and therefore nothing to report as lost -- no bounded tail, no
-  dropped-line count, no cursor recording how much of it this session has already
-  seen. A record is a file, and reading a file is a problem this repo does not need
-  to solve a second time.
+  A COMMAND'S OUTPUT IS A FILE, AND THE FILE IS THE RECORD. A background job gets one
+  from the moment it starts (`start!`: `<root>/jobs/<thread-id>/<job-id>.log`, every
+  line appended and flushed as it arrives), and a FOREGROUND `bash` call gets one when
+  its answer would not fit (`spill!`, `c1`, `c2`, …) -- the same directory, the same
+  lifetime, the same ending line, because it is the same thing: what a command said.
+  So there is nothing to lose and therefore nothing to report as lost -- no bounded
+  tail, no dropped-line count, no cursor recording how much of it this session has
+  already seen.
+
+  READING IS STILL A FILE, AND NOW ALSO A VERB. The record is a plain file under the
+  configuration home, where `read`, `grep` and `bash` (`tail` / `grep` / `cat`) reach it
+  without parking a human. THE RECEIPTS DO NOT HAND THE PATH OUT -- `job` and `job_kill`
+  name `job_output` instead, because a caller holding a receipt can do nothing with a path --
+  and THE READER DOES: when the window `output` answers with is not the whole record, the
+  answer says which file holds the rest. `output` is the model's reader, and it answers
+  the record's last line plus a window of what it said, and `wait: true` blocks on
+  the job's own `:ended` promise until that line is written. The position in the
+  record is the CALLER'S (`offset`, a line number) -- there is no cursor here, and
+  that is on purpose: 'how much have I already seen' is a question this module has no
+  standing to answer, and every reader that answered it invented its own edges.
 
   AND ITS STATE IS ITS LAST LINE. The command's own output is whatever the command
   wrote; this repo appends exactly one line of its own when the job is over --
@@ -36,13 +49,18 @@
   `stop!` stopping the job at that same moment. Whoever claims it writes it; the
   other finds the record closed.
 
-  THE RECORD LIVES IN THE CONFIGURATION HOME, and that is a decision rather than a
-  convenience: `cap.project/fence` lists the config home as free, so `read` and
-  `grep` reach a record without parking a human, and `bash` (which has no fence of
-  its own) can `tail` it. It is NOT session history -- into no jsonl, no database,
-  no audit line, and it does not survive the process: the exit hook deletes this
-  process's records on the way out (`shutdown!`). A hard-killed process leaves them
-  behind, which is the one moment they are most worth reading.
+  THE RECORD LIVES IN THE CONFIGURATION HOME AND OUTLIVES THE PROCESS, and both halves
+  are decisions rather than conveniences: `cap.project/fence` lists the config home as
+  free, so `read` and `grep` reach a record without parking a human -- which is what
+  makes keeping one worth anything -- and `bash` (which has no fence of its own) can
+  `tail` it. It is NOT session history -- into no jsonl, no database, no audit line --
+  but it IS a file somebody can come back to: 'what did yesterday's `npm test` say?' is
+  the question a record answers, and a file deleted on the way out answered only the
+  easier one. What a process's exit takes with it is the JOBS -- the registry, the ids,
+  the processes -- never the records: the file outlives the id that named it, and the
+  next run writes beside it rather than over it. The tree is capped by TOTAL BYTES rather
+  than by age (`prune-records!`): a record's worth is not a function of its age, and
+  bytes are what the home actually pays.
 
   ONE READER PER STREAM. `infra.shell/start` owns the two pipe pumps; the thread
   here is that queue's consumer and nothing else may read it. A queue nobody drains
@@ -54,6 +72,7 @@
             [harness.infra.log :as log]
             [harness.infra.shell :as shell])
   (:import [java.io Writer]
+           [java.nio.charset StandardCharsets]
            [java.util.concurrent TimeUnit]
            [java.util.concurrent.atomic AtomicReference]))
 
@@ -88,25 +107,98 @@
   ;; will use it.
   (atom {}))
 
+(defonce ^:private record-counters
+  ;; thread-id -> how many FOREGROUND records it has spilled. A separate count from
+  ;; the job ids above, because `c3` and `j3` are two different kinds of thing: one
+  ;; is a file a `bash` answer pointed at, the other is a command that can be
+  ;; asked, stopped and waited for. Same discipline otherwise -- never reused.
+  (atom {}))
+
+(defonce ^:private this-process
+  ;; This process's half of every record's filename -- nil until something needs a
+  ;; path. See `process-tag`.
+  (atom nil))
+
+(def ^:dynamic *tag-override*
+  "Test-only override for the stamp that names this process's records -- the same seam,
+  and the same rule, as harness.infra.home's `*root-override*`: UNBOUND in production,
+  where `process-tag` reads the clock and the pid. Bound by a test that has to be two
+  runs of one session, which is the one thing a single JVM cannot otherwise be."
+  nil)
+
+(defonce ^:private pruned?
+  ;; Has THIS process swept the record tree yet? Once is what `prune-records!` promises: the
+  ;; sweep walks every record this home holds, so it is not a per-write cost.
+  (atom false))
+
 (defonce ^:private exit-hook-installed
   (atom false))
 
 (defn- path [thread-id job-id] [thread-id :jobs job-id])
 
-(defn- record-path
-  "Where THREAD-ID's JOB-ID keeps its record, under the configuration home.
+(defn- process-tag
+  "Which PROCESS this is, as the stamp that goes into every record's filename: the
+  moment it first needed one, and its pid.
 
-  ONE PLACE BUILDS THIS STRING. The answers the tools give quote it back, and a path
-  assembled twice is a path that will eventually be assembled differently -- the same
-  reason the default timeout is interpolated into `bash`'s description rather than
-  repeated there."
-  [thread-id job-id]
-  (str (io/file (home/root) "jobs" (home/sanitize thread-id) (str job-id ".log"))))
+  AN ID IS NOT ENOUGH, and that is the whole reason this exists. `j1` is unique only
+  inside one process (`counters` is per session and in memory), while the file is
+  opened TRUNCATING (`open-record!`) -- so a session's second run would write its own
+  `j1.log` straight over the first run's, and a record that survives its process would
+  survive exactly until the next one. The tag says which RUN a record belongs to, and
+  the id in front of it goes on saying which command.
+
+  The pid is what makes two processes that start in the same second -- a server and a
+  replay, two test JVMs side by side -- two names rather than one, and the milliseconds
+  in the clock half are what stop a RECYCLED pid from landing on an earlier run's name.
+  The clock half is also sorted: two runs of one session list in the order they happened.
+
+  ASKED ONCE AND ANSWERED THE SAME WAY AFTERWARDS, which is not an optimisation: an
+  answer quotes a path, and a stamp that moved would leave the answer pointing at a
+  file nobody is writing. `*tag-override*` is the seam for the one caller that cannot
+  be a second process -- a test."
+  []
+  (or *tag-override*
+      @this-process
+      (swap! this-process
+             #(or % (str (format "%1$tY%1$tm%1$tdT%1$tH%1$tM%1$tS%1$tL" (java.util.Date.))
+                          "-" (.pid (java.lang.ProcessHandle/current)))))))
+
+(defn records-dir
+  "The directory THREAD-ID's records live in, under the configuration home:
+  `<root>/jobs/<session>/`.
+
+  ONE PLACE BUILDS IT, for the reason `record-path` below gives about the FILE: whoever writes
+  into that directory and whoever lists it have to mean the same place, or a listing would be
+  an answer about somewhere else. PUBLIC, unlike `record-path`, because a listing quotes it --
+  the one line that says where the records which did not fit in an answer can be found."
+  [thread-id]
+  (io/file (home/root) "jobs" (home/sanitize thread-id)))
+
+(defn- record-path
+  "Where THREAD-ID's ID keeps its record, under the configuration home:
+  `<root>/jobs/<session>/<id>-<process tag>.log`.
+
+  ONE PLACE BUILDS THIS STRING. A path assembled twice is a path that will eventually be
+  assembled differently -- the same reason the default timeout is interpolated into
+  `bash`'s description rather than repeated there. THE RECEIPTS DO NOT QUOTE IT (`job` and
+  `job_kill` name `job_output` instead); THE READER DOES, through `output`'s `:path`, at the
+  one moment it is worth anything -- when the window the answer carries is not the whole
+  record (`.scratch/job-receipt-no-path`). THE TAG IS PART OF IT for the reason
+  `process-tag` gives: a record
+  that outlives its process must not be writable-over by the next one."
+  [thread-id id]
+  (str (io/file (records-dir thread-id) (str id "-" (process-tag) ".log"))))
 
 (defn- known-ids
   "This session's job ids, for a refusal that says what the caller could have meant."
   [thread-id]
   (vec (sort (keys (:jobs (get @registry thread-id))))))
+
+(def no-jobs-line
+  "The sentence for a session with nothing to show. ONE SPELLING, TWO READERS: `unknown-job`
+  refuses with it, and the `job_list` face answers with it -- both are the same fact about the
+  same session, so a model that has read one has read the other."
+  "This session has no background jobs.")
 
 (defn- unknown-job
   "The refusal for a job id this session does not have. Named, with the ids that DO
@@ -117,8 +209,9 @@
     (ex-info (str "unknown job: " job-id ". "
                   (if (seq ids)
                     (str "This session's jobs are " (str/join ", " ids) ".")
-                    "This session has no background jobs.")
-                  " A job lives only as long as this harness process.")
+                    no-jobs-line)
+                  " A job lives only as long as this harness process; its RECORD does not -- the"
+                  " file is still on disk.")
              {:reason :unknown-job :job job-id :known ids})))
 
 (defn- next-id!
@@ -135,18 +228,31 @@
   (let [[_ after] (swap-vals! counters update thread-id (fnil inc 0))]
     (str "j" (get after thread-id))))
 
+(defn- next-record-id!
+  "The session's next FOREGROUND record id -- `c1`, `c2`, … Same one-step arithmetic as
+  the job ids above, and the same promise: a number handed out is never handed out
+  again, so a `bash` answer quoting a record path can never be pointing at a later
+  command's record."
+  [thread-id]
+  (let [[_ after] (swap-vals! record-counters update thread-id (fnil inc 0))]
+    (str "c" (get after thread-id))))
+
 ;; ------------------------------------------------------------------- the record
 
 (defn- open-record!
   "Start JOB-ID's record file, under the config home, and answer the Writer that
   appends to it.
 
-  TRUNCATING rather than appending: job ids do not repeat inside a process, so the
-  only file this can find is one a HARD-KILLED earlier process left behind, and that
-  file belongs to a command that is not this one. The parent directory is made here
-  too -- the record's own directory is the only thing a job adds to the home. UTF-8,
-  because that is what `infra.shell` decoded the command's output with: a record that
-  re-encoded those lines would turn a command's own bytes into a guess."
+  TRUNCATING rather than appending, and the NAME is what makes that safe: an id is
+  unique inside its process and the tag says which process, so the file this can find
+  is at worst one THIS run already wrote there (the id was spent on a job that then
+  failed to register). Another run's record cannot be reached from here at all -- which
+  is the whole reason the tag is in the name (`process-tag`).
+
+  The parent directory is made here too -- the record's own directory is the only thing
+  a job adds to the home. UTF-8, because that is what `infra.shell` decoded the
+  command's output with: a record that re-encoded those lines would turn a command's own
+  bytes into a guess."
   [thread-id job-id]
   (let [f (io/file (record-path thread-id job-id))]
     (io/make-parents f)
@@ -174,9 +280,14 @@
   and a `stop!` stopping the job at that same moment. Whoever gets the Writer writes
   it; the other finds nil and leaves the record alone.
 
-  Answers true when this call is the one that wrote the line, false when somebody
   Answers true when this call is the one that wrote the line, and nil when the record
-  already had its last line -- neither is an error, and neither is reported as one."
+  already had its last line -- neither is an error, and neither is reported as one.
+
+  AND IT RELEASES EVERYBODY WAITING ON THIS JOB (`:ended`). The moment this line
+  lands is the moment a reader can know how the command went, so it is the moment a
+  `job_output {wait: true}` stops waiting -- whoever wrote the line, the pump or a
+  `stop!`. Delivering here rather than in each caller is what keeps that promise in
+  one place."
   [job line]
   (locking (:writer job)
     (when-let [^Writer w (.getAndSet ^AtomicReference (:writer job) nil)]
@@ -185,27 +296,124 @@
         (.flush w)
         true
         (catch Exception _ nil)
-        (finally (try (.close w) (catch Exception _ nil)))))))
+        (finally
+          (try (.close w) (catch Exception _ nil))
+          (when-let [ended (:ended job)] (deliver ended line)))))))
 
 (defn- close-record!
   "Let go of JOB's record file without writing anything more -- what `shutdown!`
-  wants, since its records are about to be deleted."
+  wants: the Writer is a handle nothing will ever write through again, and the file
+  it was holding is staying."
   [job]
   (locking (:writer job)
     (when-let [^Writer w (.getAndSet ^AtomicReference (:writer job) nil)]
       (try (.close w) (catch Exception _ nil)))))
 
 (defn- delete-record!
-  "Take JOB's record off the disk.
+  "Take the record at PATH off the disk.
 
   BEST EFFORT ON PURPOSE: a record that will not delete is a file in this process's
   own home, and failing a tool call -- or an exit -- over it helps nobody. It is
   logged all the same, because a cleanup that silently stopped working is a cleanup
   nobody knows is gone."
-  [job]
-  (let [f (io/file (:path job))]
+  [path]
+  (let [f (io/file path)]
     (when (and (.exists f) (not (.delete f)))
-      (log/warn! :jobs/record-not-deleted {:path (:path job)}))))
+      (log/warn! :jobs/record-not-deleted {:path path}))))
+
+;; ------------------------------------------------------------ what the tree may cost
+;;
+;; RECORDS DO NOT DISAPPEAR WHEN THE PROCESS DOES, so something has to say how much of
+;; the configuration home they may hold. That is this section, and it is deliberately
+;; ONE rule with ONE knob rather than a policy language. Three judgements are in it:
+;;
+;;   BYTES, NOT AGE. A record's worth is not a function of its age -- the one somebody
+;;   wants tomorrow may be a month old -- and bytes are what the home actually pays.
+;;   So nothing is deleted at all while the tree fits, and when it does not, the OLDEST
+;;   goes first: the newest is the last thing to survive.
+;;
+;;   A RECORD STILL BEING WRITTEN IS NOT A CANDIDATE. A job that has printed nothing
+;;   since Tuesday has a Tuesday-old mtime; taking its file away would be taking it out
+;;   from under a running command.
+;;
+;;   ONCE PER PROCESS. The sweep walks every record this home holds, and it runs on the
+;;   way into running a command -- the one path that has to stay cheap.
+
+(def record-tree-budget-bytes
+  "How many bytes of records the configuration home's `jobs/` tree may hold.
+
+  SIXTY-FOUR MEGABYTES is a great deal of text (a few million lines) and nothing at
+  all next to a home that already holds a sqlite database and every session's jsonl.
+  It is a `def` rather than a constant because a test binds it down to something a
+  case can actually reach -- the sweep is the same code either way, so what a test
+  exercises is the judgement and not a miniature of it."
+  (* 64 1024 1024))
+
+(defn- record-files
+  "Every record file in this home's `jobs/` tree, OLDEST FIRST (by last-modified time).
+
+  A DIRECTORY IS NOT A RECORD, and the `jobs/` root is named rather than the home: the
+  home holds things that are not this module's (harness.db, projects/, config.edn), and a
+  sweep that walked the whole of it would be a sweep with no business being there."
+  []
+  (->> (file-seq (io/file (home/root) "jobs"))
+       (filter #(.isFile ^java.io.File %))
+       (sort-by #(.lastModified ^java.io.File %))))
+
+(defn- open-record-paths
+  "The records THIS process is still writing -- job ids it holds in its registry."
+  []
+  (into #{} (map :path) (mapcat (fn [[_ v]] (vals (:jobs v))) @registry)))
+
+(defn prune-records!
+  "Delete the OLDEST records until this home's `jobs/` tree fits
+  `record-tree-budget-bytes`; answer the paths deleted, oldest first.
+
+  THE WHOLE TREE IS THE BUDGET'S SUBJECT: every record in every session's directory,
+  not just this session's or this process's. The home is one disk, and a session that
+  ran a great deal yesterday is exactly what a session starting today has to make room
+  for. (A record this process is writing is counted but not a candidate -- see below.)
+
+  A RECORD THIS PROCESS IS STILL WRITING IS SKIPPED, whatever its mtime says, and
+  skipped rather than merely protected from deletion: a job quiet since Tuesday must not
+  cost its own file OR push other files out to compensate for bytes it is still using.
+  A record another LIVE harness process holds open is past what this can see; two
+  processes on one session id is the case no file here can arbitrate.
+
+  DELETION IS BEST EFFORT. A file that will not go (permissions, a Windows handle) is
+  skipped rather than raised: this runs on the way into running a command, and no
+  command should fail over housekeeping. It IS logged, for the reason `delete-record!`
+  gives about one file -- a sweep that quietly stopped working is a sweep nobody knows
+  is gone. The budget is the goal, not a promise: if everything deletable is gone and
+  the tree is still over, that is where it stands."
+  []
+  (let [all        (record-files)
+        held       (open-record-paths)
+        total      (reduce + 0 (map #(.length ^java.io.File %) all))
+        candidates (remove #(contains? held (str %)) all)]
+    (loop [left candidates, over (- total record-tree-budget-bytes), gone []]
+      (if (or (empty? left) (<= over 0))
+        gone
+        (let [^java.io.File f (first left)
+              path (str f)
+              ;; READ BEFORE THE FILE GOES: `length` of a deleted file is 0, and a budget
+              ;; that never comes down is a budget that deletes the whole tree.
+              bytes (.length f)]
+          (if (.delete f)
+            (recur (rest left) (- over bytes) (conj gone path))
+            (do (log/warn! :jobs/record-not-pruned {:path path})
+                (recur (rest left) over gone))))))))
+
+(defn- sweep-once!
+  "`prune-records!` ONCE per process -- what the callers below actually ask for.
+
+  The flag is set BEFORE the sweep, so two commands starting at the same moment cannot
+  both walk the tree (and the loser of that race does not walk it again after).
+  `prune-records!` itself is not cached, which is what lets a test drive the sweep
+  directly without a seam to clear."
+  []
+  (when (compare-and-set! pruned? false true)
+    (prune-records!)))
 
 (defn- ended-line
   "`[exit N]` for a process that is gone. Asked of the process rather than remembered,
@@ -258,7 +466,14 @@
   (future
     (try
       (loop []
-        (when (get-in @registry (path thread-id job-id))
+        (when (and (get-in @registry (path thread-id job-id))
+                   ;; AND THE RECORD IS STILL OPEN. An entry now OUTLIVES its job
+                   ;; (a stopped one stays, so `job_output` and a second `job_kill`
+                   ;; can answer for it), so the registry is no longer the thing that
+                   ;; says 'stop reading': the claimed Writer is. Without this the
+                   ;; loop would spin forever on a job whose pumps are cancelled,
+                   ;; asking a dead queue for a line every second.
+                   (some? (.get ^AtomicReference (:writer job))))
           (let [line ((:next-line (:handle job)) 1000)]
             (cond
               (shell/eof? line)     (do (settle! job)
@@ -276,12 +491,19 @@
 
 (defn shutdown!
   "Stop every background job this process started, in every session, and forget
-  them all -- records included.
+  them all -- and LEAVE EVERY RECORD WHERE IT IS.
 
-  THE RECORDS GO BECAUSE THE ANSWER THAT NAMED THEM IS GONE TOO. A job lives as long
-  as this process and no longer, and a record pointing at a command nobody can ask
-  about any more is litter in the configuration home. It is also why `stop!` does NOT
-  delete: there, the path was just handed to a caller to read.
+  THE RECORDS STAY BECAUSE THE COMMAND'S WORDS OUTLIVE THE COMMAND. A job lives as
+  long as this process and no longer, but what it said is a file, and 'what did that
+  test run say yesterday?' is the question worth keeping a file for -- which is why
+  this used to be the wrong way round (it deleted them, on the argument that a record
+  nobody can ask about is litter; the day somebody came back to read one, that
+  argument was over). `stop!` never deleted for the same reason: there the path had
+  just been handed to a caller.
+
+  THE FILE IS CLOSED, THOUGH, and that is the one thing the exit still has to do: an
+  open Writer is a handle nothing will ever write to again, and on Windows a held-open
+  file is also an undeletable one. Closing is not deleting.
 
   Called by the JVM-exit hook below, and callable directly -- which is how it is
   tested. A forked JVM against this repo's config home is a known hang
@@ -293,13 +515,11 @@
   []
   (let [jobs (vec (mapcat (fn [[_ v]] (vals (:jobs v))) @registry))]
     (reset! registry {})
-    ;; The order is the order of the filesystem: stop the processes, let go of the
-    ;; records, and only then delete them -- a file still held open is a file
-    ;; Windows will not delete. The pumps cannot write after the reset anyway (the
-    ;; last line is claimed, and a claim is once).
+    ;; The order is the order of the filesystem: stop the processes first, then let go
+    ;; of the records. Nothing is deleted -- see the docstring -- and the pumps cannot
+    ;; write after the reset anyway (the last line is claimed, and a claim is once).
     (doseq [j jobs] (close! j))
     (doseq [j jobs] (close-record! j))
-    (doseq [j jobs] (delete-record! j))
     nil))
 
 (defn install-hook!
@@ -331,6 +551,131 @@
   []
   (reset! exit-hook-installed false))
 
+;; --------------------------------------------------------------- the answer
+;;
+;; A COMMAND CAN SAY MORE THAN AN ANSWER MAY CARRY, and this section is where that
+;; ceiling is decided and where the overflow goes. Three judgements are in it, and
+;; each of them is a decision rather than a detail:
+;;
+;;   BY BYTES, NOT BY LINES. One line of JSON can be a hundred kilobytes, so a line
+;;   budget is a budget with a hole in it.
+;;
+;;   THE TAIL, NOT THE HEAD. What a reader wants from a command that said a great
+;;   deal is where it ended up -- a test run's first lines are all `Testing …`. The
+;;   whole of it is in the record, and `grep` reaches the middle.
+;;
+;;   THE OVERFLOW IS WRITTEN, NOT DROPPED, and the answer says how many bytes are
+;;   missing and where the rest is. Silently cutting output is how a model comes to
+;;   believe it has seen everything (see .scratch/job-output/spec.md, which deleted
+;;   a whole verb that had a hole exactly like that one).
+;;
+;; ONE BUDGET, TWO READERS: `bash` cuts each of its two streams with it, and
+;; `job_output` answers with a window of a record that fits inside it. Both tool
+;; descriptions interpolate the number rather than writing their own.
+
+(def answer-budget-bytes
+  "How many bytes of a command's own output one answer carries before the rest is
+  left in the record for a reader to fetch.
+
+  ONE SOURCE. `bash` and `job_output` both interpolate this number into their own
+  descriptions and both cut their answers down to it -- a second literal would be a
+  second answer to 'how much fits', and the one in the description would be the
+  wrong one for however long it took somebody to notice."
+  8000)
+
+(defn- utf8-bytes [s]
+  (alength (.getBytes ^String s StandardCharsets/UTF_8)))
+
+(defn- char-bytes
+  "How many bytes CH takes in UTF-8, as an OVER-estimate: each half of a surrogate
+  pair counts three, so the pair comes to six where four would do. Over-counting is
+  the safe direction -- it is what keeps a multi-byte character from being cut in
+  half -- and the exact number comes from `utf8-bytes` once the cut is made."
+  [ch]
+  (let [c (int ch)]
+    (cond (< c 0x80) 1, (< c 0x800) 2, :else 3)))
+
+(defn- line-start
+  "I moved forward to the start of the next line, so a tail never begins with the back
+  half of a line. I itself when there is no line break after it: one enormous line is
+  still better than an empty answer."
+  [s i]
+  (if (or (zero? i) (= \newline (.charAt s (dec i))))
+    i
+    (if-let [j (str/index-of s "\n" i)]
+      (inc j)
+      i)))
+
+(defn tail-within-budget
+  "S as the largest TAIL of it that fits BUDGET bytes, and how many bytes that leaves
+  out: `{:text .. :omitted ..}`. Answers the whole of S -- with nothing omitted --
+  when it fits, so a caller can branch on `:omitted` alone.
+
+  THE CUT IS MADE AT A LINE BOUNDARY where there is one, and never inside a
+  character: an answer that began with the second half of a line, or with a broken
+  UTF-8 sequence, would be a bug the reader has to guess at. The omitted count is
+  exact -- it is measured against the text that is actually handed back, not against
+  the cut point."
+  [s budget]
+  (let [total (utf8-bytes s)]
+    (if (<= total budget)
+      {:text s :omitted 0}
+      (loop [i (count s), used 0]
+        (if (zero? i)
+          ;; Unreachable while every char counts at least one byte, and cheap
+          ;; insurance against a budget of zero.
+          {:text "" :omitted total}
+          (let [w (char-bytes (.charAt ^String s (dec i)))]
+            (if (> (+ used w) budget)
+              (let [text (subs s (line-start s i))]
+                {:text text :omitted (- total (utf8-bytes text))})
+              (recur (dec i) (+ used w)))))))))
+
+(defn truncation-line
+  "The line an answer carries when it could not carry everything: how many bytes are
+  missing (from WHICH stream, when the answer has two of them), and where the whole
+  of it can be read. NIL PATH means the record could not be written, and then the
+  line says that instead of naming a file that is not there."
+  ([omitted path] (truncation-line omitted path nil))
+  ([omitted path what]
+   (str "[truncated: omitted " omitted " bytes" (when what (str " of " what))
+        "; " (if path
+               (str "the whole output is " path)
+               "the whole output could not be written to a record")
+        "]")))
+
+(defn spill!
+  "Write TEXT as the record of a command THIS CALL ran in the foreground, and answer
+  where it is -- or nil when it could not be written.
+
+  A FOREGROUND RECORD IS NOT A JOB. There is no process to stop, no id anyone will
+  address, and nothing to read while it grows: it is written once, whole, by the call
+  that ran the command. It lives exactly where a job's record lives, though, and for
+  the same two reasons -- the configuration home is free of the fence, so `read` and
+  `grep` reach it with no human in the way, and it stays there when the process goes.
+
+  FAILING TO WRITE IS NOT AN ERROR the caller has to handle: the answer it was going
+  to point at is already bounded, so the call still returns a tail and a line saying
+  the rest could not be kept. It is logged, because a record nobody can write is a
+  leak, not a hiccup.
+
+  THIS IS NOT THE GENERAL TOOL-RESULT SPILL. `harness.cap.spill` moves ANY oversized tool
+  result out of the conversation at production, replacing it with a pickup slip; THIS is the
+  narrower one a `bash` answer uses against its own byte budget, and it keeps a tail plus a
+  truncation line rather than replacing the answer. Two spills, two trees -- a reader should
+  never have to guess which one wrote a file."
+  [thread-id text]
+  (try
+    (let [p (record-path thread-id (next-record-id! thread-id))
+          f (io/file p)]
+      (sweep-once!)
+      (io/make-parents f)
+      (spit f text :encoding "UTF-8")
+      p)
+    (catch Exception e
+      (log/warn! :jobs/record-not-written {:error (ex-message e)})
+      nil)))
+
 ;; ------------------------------------------------------------------- the verbs
 
 (defn- with-job
@@ -353,60 +698,721 @@
   "Start COMMAND as a background job for THREAD-ID, in DIR. Answers the new job's id
   and where its record is: `{:id \"j1\" :path \"…\"}`.
 
+  THE PATH IS THIS MODULE'S HANDLE ON THE RECORD, and it stops here: the RECEIPTS name
+  `job_output` instead of quoting it, and the reader hands the path out at the moment it
+  is worth anything (see `record-path` and `output`).
+
   THROWS when the command cannot be spawned at all (this machine has no shell, the
   process limit), and registers NOTHING in that case -- a job record for a process
   that never started would be a path pointing at nothing, and the file it left behind
   would be a command's last words that no command ever said.
 
   The command goes to the shell a foreground `bash` call would use (`:shape :shell`)
-  rather than to `cmd /c` on Windows -- the promise here is the same as `bash`'s."
-  [thread-id {:keys [command dir]}]
-  (let [handle (shell/start {:command command :dir dir :shape :shell})
+  rather than to `cmd /c` on Windows -- the promise here is the same as `bash`'s.
+
+  THE COMMAND IS KEPT ON THE JOB, not only run: the notice that announces this job's
+  ending says which command it was (`notice`), and that is the only place it can come
+  from -- the registry entry is what outlives the call.
+
+  `:kind` NAMES WHICH SHELL, exactly as it does for a foreground call; without it this
+  machine's own is used. `shell/start` resolves it BEFORE the job id is taken, so a kind
+  this machine does not have throws with nothing registered -- the same promise the
+  paragraph above makes about a command that cannot be spawned at all."
+  [thread-id {:keys [command dir kind]}]
+  (let [handle (shell/start {:command command :dir dir :shape :shell :kind kind})
         job-id (next-id! thread-id)
         p      (record-path thread-id job-id)]
     (try
+      ;; BEFORE THE RECORD IS OPENED, so that what this call is about to write is not in
+      ;; the tree the sweep is looking at (and could not be a candidate if it were: see
+      ;; `prune-records!`).
+      (sweep-once!)
       (let [job {:id job-id :handle handle :path p
-                 :writer (AtomicReference. (open-record! thread-id job-id))}]
+                 ;; THE COMMAND IS KEPT, not just run: `notice` hands the model back
+                 ;; "which job" when it announces an ending, and an id alone (`j1`) says
+                 ;; nothing about what the job was.
+                 :command command
+                 ;; WHEN IT STARTED, in epoch milliseconds -- the one thing the
+                 ;; panel's "has been going for how long" needs and the thing the
+                 ;; entry did not carry. Taken HERE and not earlier: the shell has
+                 ;; spawned (a command that never started has no beginning), and the
+                 ;; entry is registered below with its clock already on it, so a
+                 ;; reader that can see a job can see when it began.
+                 :started-at (System/currentTimeMillis)
+                 :writer (AtomicReference. (open-record! thread-id job-id))
+                 ;; DELIVERED WHEN THE RECORD GETS ITS LAST LINE, whoever writes it.
+                 ;; A `job_output {wait: true}` blocks on this rather than polling the
+                 ;; file: the line and this and the moment are one event, so there is
+                 ;; nothing to poll for.
+                 :ended (promise)}]
         (ensure-exit-hook!)
         (swap! registry assoc-in (path thread-id job-id) job)
         (pumping! thread-id job-id job)
         {:id job-id :path p})
       (catch Throwable t
         (close! {:handle handle})
-        (delete-record! {:path p})
+        (delete-record! p)
         (throw t)))))
 
+;; --------------------------------------------------------------- reading a job
+;;
+;; TWO FACTS, AND THE RECORD ANSWERS BOTH. What a job SAID is its file, and how it
+;; went is the file's last line -- a convention this repo already keeps
+;; (`.scratch/job-output/spec.md` decision 6): `[exit N]` once the stream is drained
+;; and the process is gone, `[stopped]` when we stopped it, and NO such line means it
+;; is still running.
+;;
+;; THOSE ARE THE ONLY STATES. There is no separate enum of running/stopping/
+;; completed/killed/failed to invent, keep and get wrong: the two things a reader
+;; wants to know are whether it is over and how it ended, and the last line says
+;; both. `job_output`'s answer prints that line as its LAST line, with the command's own output
+;; above it -- the order the record itself is in, and the order a `bash` answer ends in.
+
+(defn- record-lines
+  "PATH's record as a vector of lines -- empty when the file is empty, and empty when
+  it is not there at all (a caller asking about a record that has been taken away
+  gets an answer, not an exception)."
+  [path]
+  (try
+    (let [text (slurp path :encoding "UTF-8")]
+      (if (str/blank? text) [] (vec (str/split-lines text))))
+    (catch Exception _ [])))
+
+(defn- ending-line
+  "LAST when it is one of the lines this repo appends to a record -- `[exit N]` or
+  `[stopped]` -- and nil when it is a line the command wrote itself.
+
+  THE PATTERN LIVES HERE AND NOWHERE ELSE. `ending-of` reaches it through a PATH and
+  `status-of` through lines a caller already holds (the jobs listing), and a record is
+  free to end on something that LOOKS like an ending (`echo '[exit 0]'; sleep 30`):
+  what makes a line an ending is that this repo wrote it as the LAST one, which is a
+  fact about the Writer (`terminal?`), never about the text alone.
+
+  `[exit ?]` IS INCLUDED because `ended-line` can produce it: it is what is left for
+  the moment between the process being gone and its exit code being readable, and a
+  reader that did not recognise it would report a finished job as a running one."
+  [last]
+  (when last
+    (when (re-matches #"\[(exit [^\]]*|stopped)\]" last) last)))
+(defn- ending-of
+  "The last line of the record at PATH when it is one of the lines this repo appends
+
+  -- `[exit N]` or `[stopped]` -- and nil when the record does not end on one.
+
+  THE `[exit ?]` SPELLING IS INCLUDED because `ended-line` can produce it: it is what
+  is left for the moment between the process being gone and its exit code being
+  readable, and a reader that did not recognise it would report a finished job as a
+  running one."
+  [path]
+  (ending-line (peek (record-lines path))))
+
+(defn- terminal?
+  "Is JOB over? Asked of the record rather than of the process, and asked as ONE fact:
+
+  `write-last-line!` claims the Writer at the same moment it writes the ending, so
+  'the record is closed' and 'the last line is written' cannot disagree. A write that
+  fails still closes the record -- what is over, is over."
+  [job]
+  (nil? (.get ^AtomicReference (:writer job))))
+
+(def ^:private running-status
+  "The status of a job that has not ended. ONE SPELLING: `output` prints it as its
+  status line, and the jobs listing puts the same word on a row."
+  "[running]")
+
+(defn- status-of
+  "How JOB is going, in ONE line: the record's ending when the record is CLOSED
+  (`terminal?`), and `[running]` while it is not.
+
+  THE CLOSED RECORD, NOT THE TEXT, IS WHAT MAKES AN ENDING. A command may print
+  something that looks exactly like one (`echo '[exit 0]'; sleep 30`), so a reader
+  that only looked at the last line would report a running job as finished -- the
+  claim on the Writer is what says the record is closed, and only then does its last
+  line mean an ending. This is the one place both the reader (`output`) and the
+  listing ask that question, so a row, a receipt and a wait cannot say three things
+  about one job.
+
+  LINES IS WHAT THE CALLER ALREADY READ when it has them, so `output` does not open
+  the same file twice; without it the record is read from JOB's path."
+  ([job] (status-of job (record-lines (:path job))))
+  ([job lines]
+   (if (terminal? job)
+     (or (ending-line (peek lines)) "[exit ?]")
+     running-status)))
+
+(defn- line-bytes [line]
+  (alength (.getBytes ^String (str line "\n") StandardCharsets/UTF_8)))
+
+(defn- tail-window
+  "Where the largest SUFFIX of LINES that fits BUDGET bytes begins -- always at least
+  one line, so a single enormous line is answered with rather than swallowed."
+  [lines budget]
+  (let [n (count lines)]
+    (loop [i n, used 0]
+      (if (zero? i)
+        i
+        (let [b (line-bytes (nth lines (dec i)))]
+          (cond
+            (= i n)               (recur (dec i) b)
+            (> (+ used b) budget) i
+            :else                 (recur (dec i) (+ used b))))))))
+
+(defn- forward-window
+  "Where a window that BEGINS at START stops when it runs into BUDGET bytes -- at
+  least the line at START, for the same reason as `tail-window`."
+  [lines start budget]
+  (loop [i start, used 0]
+    (if (>= i (count lines))
+      i
+      (let [b (line-bytes (nth lines i))]
+        (if (or (= i start) (<= (+ used b) budget))
+          (recur (inc i) (+ used b))
+          i)))))
+
+(def job-output-default-timeout-ms
+  "How long `job_output` waits for a job when the call says `wait` and does not say for
+  how long.
+
+  NOT A LIMIT ON THE JOB -- a job has none, and this changes nothing about it. It is
+  the caller saying 'this is how long I am willing to sit here', and when it runs out
+  the answer is the state of things as they are (`[running]`), which is an answer
+  and not an error. The tool's description interpolates it, so there is one number.
+
+  A VALUE RATHER THAN A FUNCTION, and that is about the wire rather than about taste.
+  The description it is interpolated into sits in the request's HEAD -- ahead of the
+  system prompt and of every message -- and the vendor's prefix cache keys on those
+  bytes, so ONE changed byte there throws away the whole prefix, the conversation
+  included. A function interpolated without being called prints as
+  `harness.cap.jobs$job_output_default_timeout_ms@1a2b3c4d`: an identity hash that
+  differs in every process, so every restart and every namespace reload paid for the
+  entire conversation again. A plain value is a pure function of the source.
+  See .scratch/llm-prefix-cache/."
+  120000)
+
+(defn- mark-told!
+  "Record that the ending of JOB-ID has been handed to the model.
+
+  THE GUARD IS THE POINT: `update-in` puts back whatever the function returns, so a
+  change written for a missing path would recreate the entry as nil -- the trap
+  `with-job` documents, and the same one a job that leaves the registry springs here."
+  [thread-id job-id]
+  (let [p (path thread-id job-id)]
+    (swap! registry (fn [reg]
+                      (if-let [job (get-in reg p)]
+                        (if (terminal? job) (assoc-in reg (conj p :told?) true) reg)
+                        reg)))))
+
+(defn output
+  "What JOB-ID has said, and how it went, as
+  `{:status .. :lines [..] :from .. :to .. :total .. :path ..}`:
+
+  - `:status` -- the record's last line when the job is over (`[exit N]` / `[stopped]`),
+    else `[running]`. ONE LINE, because that is what the record itself says.
+  - `:lines`  -- the window of the command's own lines this answer carries. `:from`
+    and `:to` are its 1-based line numbers IN THE RECORD, so they can be checked
+    against `grep -n` on the same file, and `:total` is how many lines there are.
+  - `:path`   -- where the record is. The tool face hands it out exactly when the window it
+    is about to send is NOT the whole record (`cap.tools/t-job-output`): that is the moment
+    a reader can do something with it -- `read` / `grep` / `bash` the rest of the file
+    instead of paging through the window.
+
+  WHERE THE WINDOW IS, when the caller did not say: THE TAIL. 'What has it said
+  lately' is what a glance at a job asks, and a job that has printed ten thousand
+  lines should not answer with its first hundred. `offset` asks for a stretch that
+  begins somewhere (`read`'s own convention, 1-based, INTO the record), and `limit`
+  caps how many lines come back. Both are bounded by `answer-budget-bytes` -- the
+  same ceiling a `bash` answer has, from the same place.
+
+  WAIT MEANS WAIT FOR IT TO BE OVER: `wait: true` blocks until the record is closed
+  or `timeout` runs out, and a timeout is an ordinary answer (`[running]` plus
+  whatever it has said so far), never an error. There is nothing to poll and no way
+  to be notified otherwise -- a job is a command nobody is waiting for, and this is
+  how a caller decides to wait anyway.
+
+  IT WAITS FOR THE ENDING LINE, NOT FOR THE STREAM: a command that lets go of its
+  stdout and lives on (`exec 1>&-`) has an ended stream and no ending line, and no
+  ending line is the honest answer to 'is it over' -- so a `wait` on that one runs to
+  the timeout and says `[running]` rather than inventing an end for it.
+
+  THE JOB MUST BELONG TO THIS SESSION, and a job that is over still answers -- for as
+  long as this process lives. Its RECORD outlives the process and this verb does not,
+  which is a distinction a reader can be caught by: after a restart the file is still
+  on disk, and `job_output` answers `unknown job` about it."
+  [thread-id job-id {:keys [offset limit wait timeout]}]
+  (let [job (with-job thread-id job-id (fn [reg _] reg))]
+    (when (and wait (not (terminal? job)))
+      (deref (:ended job) (long (or timeout job-output-default-timeout-ms)) ::timeout))
+    ;; HANDING BACK AN ENDING IS TELLING. A job whose ending the model has just been
+    ;; shown -- by a read, or by a wait that ended while it waited -- has no notice
+    ;; coming: an ending it has already read is not news. ASKED AFTER THE WAIT,
+    ;; because the wait is often exactly what ended it.
+    (when (terminal? job) (mark-told! thread-id job-id))
+    (let [lines    (record-lines (:path job))
+          over?    (terminal? job)
+          status   (status-of job lines)
+          content  (if over? (vec (butlast lines)) lines)
+          total    (count content)
+          ;; WHERE THE WINDOW IS. `offset` starts one where the reader says (and a
+          ;; number past the end of the record is an EMPTY window rather than an
+          ;; error -- the status is still the truth, and `:from`/`:to`/`:total` say
+          ;; what happened). With no offset it is the TAIL: the last lines that fit,
+          ;; which is what a glance at a job asks for.
+          [from to] (if offset
+                      (let [start (min (dec offset) total)
+                            end   (min total (+ start (or limit
+                                                         (forward-window content start answer-budget-bytes))))]
+                        [start (max start end)])
+                      [(if limit
+                         (max 0 (- total limit))
+                         (tail-window content answer-budget-bytes))
+                       total])]
+      {:path   (:path job)
+       :status status
+       :lines  (subvec content from to)
+       :from   (inc from)
+       :to     to
+       :total  total})))
+
+(defn- still-running?
+  "Is JOB still going -- BOTH FACTS, and this is the one place a stop decides whether
+  it is the call doing the stopping.
+
+  THE RECORD AND THE PROCESS, because either alone is one moment wrong: the record is
+  open until an ending has been claimed in it (`terminal?`), and a command that let go of
+  its stdout and lives on (`exec 1>&-`) has no ending written and so stays open while it
+  runs. A job that is over the other way -- process gone, `[exit N]` not yet written by
+  the pump -- is over too, which is why `alive?` is asked as well: a stop must say 'that was
+  not me' about it rather than claim it."
+  [job]
+  (and (not (terminal? job)) (boolean ((:alive? (:handle job))))))
+
 (defn stop!
-  "Stop JOB-ID -- it and everything it started -- and forget it. Answers
-  `{:id .. :path .. :stopped? ..}`: the record's location, and whether this call is
-  what stopped it or the command had already ended by itself.
+  "Stop JOB-ID -- it and everything it started. Answers
+  `{:id .. :path .. :stopped? .. :ending ..}`: the record's location, whether THIS
+  call is what stopped it, and the record's last line (which is how it went, whether
+  or not this call had anything to do with it).
 
-  THE RECORD SURVIVES THE STOP, and that is the point of answering with its path:
+  THE RECORD SURVIVES THE STOP, and that is why `:path` is still in this answer:
   'stop it, then read what it said' is the ordinary order, and the alternative -- a
-  stop that took the output with it -- would make the model decide whether to read
-  before knowing whether it needed to.
+  stop that took the output with it -- would make the caller decide whether to read
+  before knowing whether it needed to. NO RECEIPT QUOTES THE PATH: `job_kill`'s answer names
+  `job_output`, and that verb hands the path out itself when the window is short of the
+  whole record (`.scratch/job-receipt-no-path`).
 
-  `[stopped]` IS CLAIMED BEFORE THE KILL, so the pump that wakes to a dead process
-  cannot write `[exit N]` after we have said `[stopped]`. A command that had ALREADY
-  ended writes nothing here: its exit code is the honest last line, and the pump is
-  the one holding the tail it has not drained yet.
+  `[stopped]` IS CLAIMED BEFORE ANYTHING IS KILLED, so the pump that wakes to a dead
+  process cannot write `[exit N]` after we have said `[stopped]`. A command that had
+  ALREADY ended writes nothing here: its exit code is the honest last line, and the
+  pump is the one holding the tail it has not drained yet.
 
-  A JOB THAT HAS ALREADY ENDED IS FORGOTTEN TOO, and this is the only verb that
-  leaves the registry, so `job_kill` means 'stop caring about this job' in both
-  cases. Asking twice therefore gets the unknown-job refusal the second time --
-  idempotent in the only way that matters, since the second caller finds it gone
-  rather than finding it twice.
+  THE CALL DOES NOT WAIT FOR THE PROCESS TO DIE. Killing a tree is `destroy`, a
+  bounded wait and then `destroyForcibly` (see `infra.shell`), and that wait is the
+  wrong thing to spend a tool call on: what the caller asked for is 'stop it', and
+  the fact it needs back is the one `[stopped]` already states. So the tree is walked
+  on a thread of its own and the answer comes back at once.
+
+  THE JOB STAYS, AND ASKING AGAIN IS ALLOWED. A stopped (or finished) job keeps its
+  entry, with its record closed -- which is what makes `job_output` able to answer
+  for a job that is over, and a second `job_kill` able to answer the same thing
+  again instead of refusing an id it handed out itself. The entry holds a path and a
+  closed writer, and the process goes with this process.
+
+  THREE INITIATORS, ONE STOP (`by`), and the whole of what differs is WHO THE TELLING
+  IS. `:by :model` -- the default, and what the `job_kill` tool passes -- also claims
+  `:told? true` on the entry, because its answer IS the telling: no notice may follow a
+  model that has just been handed the ending. `:by :user` -- a person pressing stop in
+  the pane, through `POST /api/threads/<stem>/jobs` -- CLAIMS NOTHING, because the
+  model is not there to be told; it marks the entry `:stopped-by :user` instead, and
+  `take-notices!` hands that mark over at the next model call as a block that says a
+  PERSON stopped this one (`notice`). The killing, the `[stopped]` claim, the
+  `:stopped?` bit and the ending answered are the same code on both paths: there is ONE
+  way to stop a job here, and `still-running?` above is the judgement both paths make.
+
+  `:by :put-away` -- a SESSION being put away (`harness.kernel.session`'s `sweep!` / `drop!`,
+  which is where `stop-session!` below is reached from) -- marks NOTHING, and getting that
+  right is the whole of the branch: no person pressed anything, so the mark a person's stop
+  leaves would put a block in front of a model nobody ever pressed anything for; and no answer
+  in front of a model that no person ever pressed anything for; and no answer carried the
+  ending either, so a notice IS still owed -- the model of a session born again in this process
+  is told, at its next call, that its background command was stopped. A session that is never
+  born again costs one entry that dies with this process, which is what every entry costs.
+
+  A PERSON STOPPING A JOB THAT HAS ALREADY ENDED CHANGES NOTHING -- not the record, not
+  this answer (`:stopped? false`, and its own `[exit N]` comes back), and NOT the entry:
+  the ending is the command's business, so there is no `:stopped-by` mark and the
+  ordinary notice, if one is still owed, says nothing about who stopped it.
 
   THROWS for a job id this session does not have."
-  [thread-id job-id]
-  (let [job (with-job thread-id job-id
-                      (fn [reg _] (update-in reg [thread-id :jobs] dissoc job-id)))
-        running? ((:alive? (:handle job)))]
-    (if running?
-      (do (write-last-line! job "[stopped]")
-          (close! job))
-      (write-exit-line! job))
-    {:id job-id :path (:path job) :stopped? running?}))
+  ([thread-id job-id] (stop! thread-id job-id {}))
+  ([thread-id job-id {:keys [by] :or {by :model}}]
+   ;; THE MARK IS DECIDED ON THE ENTRY ITSELF, in the same atomic step that hands back
+   ;; the snapshot (`with-job`): a model's stop claims `:told?` whatever the job's state
+   ;; (`job_kill` about a finished job is still being told how it went), while a
+   ;; person's marks `:stopped-by` ONLY on a job that is still running -- a press on one
+   ;; that had already ended is not a person's stop and must leave no trace.
+   (let [mark (case by
+                :model (fn [reg p] (assoc-in reg (conj p :told?) true))
+                :user  (fn [reg p] (if (still-running? (get-in reg p))
+                                     (assoc-in reg (conj p :stopped-by) :user)
+                                     reg))
+                :put-away (fn [reg _p] reg))
+         job (with-job thread-id job-id mark)
+         running? (still-running? job)]
+     (if running?
+       (do (write-last-line! job "[stopped]")
+           (future (try (close! job) (catch Throwable _ nil))))
+       ;; NOT RUNNING: the exit line is written here only if the record is still open
+       ;; (the pump may have beaten us to it), and the claim makes asking twice safe.
+       (write-exit-line! job))
+     ;; AND A MODEL'S ANSWER IS ALWAYS AN ENDING -- `[stopped]` or the one it had
+     ;; already written -- so that call tells the model and no notice follows it. A
+     ;; person's answer is the same sentence, and it tells the model nothing: the
+     ;; `:stopped-by` mark above is what the notice is made of.
+     {:id job-id :path (:path job) :stopped? running?
+      :ending (ending-of (:path job))})))
+
+(defn stop-session!
+  "Stop every background command THREAD-ID still has running, and KEEP every record.
+
+  THE DOOR A SESSION'S OWN END COMES THROUGH. Until this existed, a job stopped in exactly two
+  ways: somebody's act inside the process that holds it (`stop!`, from the model or from a
+  pane), or this process exiting (`shutdown!` -- and that one needs the JVM to LEAVE, which on
+  Windows is not something an exit does: it is TerminateProcess, and it runs no hook at all). A
+  session being put away is neither, and its commands are the things that would otherwise keep
+  running with nothing left able to name them: the registry is PROCESS-LOCAL and the
+  conversation's claim is going back (so another process may pick that conversation up, and its
+  `job_kill` answers about its OWN table), and this process has just stopped serving the session
+  that could have asked. `harness.kernel.session` reaches this through the `:stop-jobs!` seam.
+
+  THE PROCESSES GO, THE RECORDS DO NOT -- `shutdown!`'s judgement about the same two things. A
+  record outlives the id that named it ('what did yesterday's `npm test` say?'), and what a
+  session's end takes with it is the commands, never what they said. THE ENTRIES STAY TOO, for
+  the reason they stay after `stop!`: a `job_output` must still answer, and an id must never
+  come back as one nobody handed out.
+
+  ANSWERS the ids it asked to stop, in the module's own id order -- `[]` for the ordinary
+  session that has run nothing, which is an answer and not a refusal."
+  [thread-id]
+  (let [running (->> (vals (get-in @registry [thread-id :jobs]))
+                     (filter still-running?)
+                     (map :id)
+                     (sort-by :id))]
+    (doseq [id running]
+      ;; ONE JOB MUST NOT STOP THE REST: `stop!` can throw (a record that cannot be written, a
+      ;; handle whose process went at that very moment), and a session being swept is not a place
+      ;; where the first refusal loses the list.
+      (try (stop! thread-id id {:by :put-away}) (catch Throwable _ nil)))
+    (vec running)))
+
+;; ------------------------------------------------------------------- the listing
+;;
+;; WHAT THIS PROCESS HAS RUNNING FOR ONE SESSION, as rows a panel can draw. It is the
+;; read side of the registry, and it is a different question from the three verbs above:
+;; each of those ADDRESSES one job (`j1`) because the model already knows which one it
+;; started, while a person looking at a pane does not know the ids -- they want the list.
+;;
+;; THE STATUS COMES FROM `status-of`, which is `output`'s own answer (see there): the
+;; record's ending once the record is closed, `[running]` while it is not. There is no
+;; SECOND VOCABULARY here -- a row, a receipt and a wait say the same words about the
+;; same job.
+;;
+;; THE REGISTRY IS THE AUTHORITY, NOT A LOG. This says what THIS PROCESS has, so a
+;; session it has run nothing for is `[]` -- 'what is there' has an answer, and for a
+;; session with no jobs (or one whose jobs died with an earlier process) that answer is
+;; 'nothing'. The stem is never located against a record: the records outlive the
+;; registry by design, and asking about one is `read` / `grep` / `bash`'s question.
+
+(defn listing
+  "This session's background jobs as
+  `[{:id .. :command .. :status .. :startedAt .. :path ..}]`, ordered by id.
+
+  ORDERED BY ID in the module's own lexical sense, the order `known-ids` and
+  `take-notices!` already use -- a second ordering for the same ids would be a second
+  answer to 'which one is first'.
+
+  THE ROW CARRIES THE RECORD'S PATH, and this is one of the two places the path is
+  handed out (`output` is the other, and only when its window missed something): the
+  pane that draws these rows IS a reader -- 'go look at what it said' is the natural
+  next move from a row -- while `job` and `job_kill` still name `job_output` instead
+  (`.scratch/job-receipt-no-path`).
+
+  `:startedAt` IS EPOCH MILLISECONDS, the clock `start!` wrote onto the entry; it is
+  the beginning of the one number a reader wants about a job that is still going."
+  [thread-id]
+  (->> (vals (get-in @registry [thread-id :jobs]))
+       (sort-by :id)
+       (mapv (fn [job]
+               {:id (:id job)
+                :command (:command job)
+                :status (status-of job)
+                :startedAt (:started-at job)
+                :path (:path job)}))))
+
+;; ----------------------------------------------------------- the listing of RECORDS
+;;
+;; THE OTHER LISTING, AND THE OTHER QUESTION. `listing` above answers about JOBS: what this
+;; process is running right now, which is what a pane draws and what a person can stop. THIS
+;; answers about RECORDS: every file this session has under `jobs/`, the ones an earlier process
+;; left behind included, and the `c*` files a foreground `bash` call spilled. Two readers with two
+;; needs -- a pane watches something, while a model whose context has forgotten a job goes
+;; looking for what a command SAID -- and the difference shows up in the `c*` files: they are
+;; records with no job behind them (`spill!`), so nothing can be stopped and no id can be
+;; addressed, which is exactly why the pane does not draw them and this does.
+
+(def max-listed-records
+  "How many rows a listing draws. A NAMED `def` rather than a constant because a test binds it
+  down to something a case can reach -- the cap is the same code either way, so what a test
+  exercises is the judgement and not a miniature of it (the rule `record-tree-budget-bytes`
+  states)."
+  50)
+
+(def max-command-chars
+  "How much of a command one row may carry before it is clipped (`command-line`). Long enough
+  that an ordinary command is whole, short enough that a script does not push the rest of the
+  listing out of the answer."
+  200)
+
+(defn- writer-alive?
+  "Is the PROCESS THAT WROTE RUN still there? The stamp `process-tag` makes ends in its pid
+  (`<clock>-<pid>`), and that is the one thing a record this process does not hold can be asked.
+
+  A PID IS A BET, in both directions: it may have been recycled, so 'alive' is 'somebody with
+  that number is running', not 'the command you saw is running'. It is the same bet the
+  milliseconds in the stamp already hedge (`process-tag` says why), and the other side of the
+  bet is worse: calling a live run finished, or calling a dead run alive forever."
+  [run]
+  (boolean
+   (try
+     (let [i   (str/last-index-of run "-")
+           pid (Long/parseLong (subs run (inc i)))
+           h   (.orElse (java.lang.ProcessHandle/of pid) nil)]
+       (and (some? h) (.isAlive ^java.lang.ProcessHandle h)))
+     (catch Exception _ false))))
+
+(defn- record-file
+  "What F's NAME says -- `{:id .. :run ..}` -- or nil when the name is not one this module
+  writes.
+
+  SPLIT ON THE FIRST DASH: an id never has one (`j1`, `c3`) and the run stamp always does (a
+  clock and a pid), so that seam is the only unambiguous one. THE ID ALSO HAS TO LOOK LIKE
+  ONE -- `[jc]` and digits, the two shapes this module hands out -- because a file somebody
+  dropped in by hand is not a record: `my-notes.log` has a dash and would otherwise be a row
+  addressing id `my`, which is exactly the row this docstring promises does not appear."
+  [^java.io.File f]
+  (let [n (.getName f)]
+    (when (str/ends-with? n ".log")
+      (let [stem (subs n 0 (- (count n) 4))
+            i    (str/index-of stem "-")]
+        (when (and i (pos? i) (< (inc i) (count stem))
+                   (re-matches #"[jc]\d+" (subs stem 0 i)))
+          {:id (subs stem 0 i) :run (subs stem (inc i))})))))
+
+(defn records-for
+  "Every record THIS SESSION has under the configuration home, as
+  `[{:id :run :this-run? :held? :running? :status :command :path :bytes :modified-at}]`.
+
+  ONE ROW PER FILE, NOT ONE PER ID. `j1` of this run and `j1` of the run before are two records,
+  and the run stamp in the name is what tells them apart (`process-tag`'s whole reason).
+
+  A JOB THAT IS STILL RUNNING COMES FIRST, and the rest follow NEWEST FIRST. `holding an entry`
+  and `still running` are TWO FACTS and only the second one is why the order matters: a finished
+  job keeps its entry until the process goes (`stop!`), so ordering by that would put last
+  night's records below this morning's for no reason -- while a job that is running MUST NOT be
+  pushed out by the cap, and a quiet job's record has an old mtime however alive it is.
+
+  `:command` IS ONLY THERE FOR A JOB THIS PROCESS HOLDS. The entry is the only place a command
+  ever lived: a record carries what the command SAID (`spill!`), and the run that could have
+  answered is gone. A row without one says so in the answer, rather than leaving a blank that
+  reads like an empty command.
+
+  DIRECT CHILDREN ONLY, and that is what makes a session-less caller safe: the registry's key
+  may be nil (`job` and `job_output` both answer for one, and `record-path` files those records
+  at the `jobs/` root), so a recursive walk here would answer about EVERY session this home has
+  ever run. One directory, one level, and the files in it are the answer.
+
+  IT ONLY READS. Nothing here deletes, moves, re-creates or repairs a record: the tree's one
+  collector is `prune-records!`, and it is nobody else's business."
+  [thread-id]
+  (let [dir   (records-dir thread-id)
+        held  (into {} (map (juxt :path identity)) (vals (get-in @registry [thread-id :jobs])))
+        stamp (process-tag)
+        files (if (.isDirectory dir) (filter #(.isFile ^java.io.File %) (.listFiles dir)) [])]
+    (->> files
+         (keep (fn [^java.io.File f]
+                 (when-let [{:keys [id run]} (record-file f)]
+                   (let [path (str f)
+                         job  (get held path)
+                         ;; THE RECORD IS THE ONLY WITNESS for a row this process does not hold: its own
+                         ;; last line when it has one, and otherwise the only two ways 'nothing more is
+                         ;; coming' can look. The run stamp ENDS IN THE PID of whoever wrote it, so a pid
+                         ;; that is gone means the ending never got written (`[exit ?]`, this module's
+                         ;; own spelling for that), while a pid that is still there is the ticket's own
+                         ;; rule -- no last line means it is still being written. The pid may have been
+                         ;; recycled, which is the same bet `process-tag` already hedges with its
+                         ;; milliseconds; the alternative is calling a live run finished.
+                         status (if job (status-of job)
+                                  (or (ending-of path)
+                                      (if (writer-alive? run) running-status "[exit ?]")))]
+                     {:id id
+                      :run run
+                      :this-run? (= run stamp)
+                      :held? (some? job)
+                      :running? (= running-status status)
+                      :status status
+                      :command (:command job)
+                      :path path
+                      :bytes (.length f)
+                      :modified-at (.lastModified f)}))))
+         (sort-by (fn [row] [(if (:running? row) 0 1) (- (:modified-at row)) (:path row)]))
+         vec)))
+
+(defn command-line
+  "COMMAND as ONE line, clipped to `max-command-chars` with a note of what was left out.
+
+  ONE LINE, because a command may be a script and a listing that wrapped one row into forty
+  would stop being a listing. CLIPPED WITH A NOTE -- and this is the OTHER CALL from `notice`,
+  which hands the command over UNCLIPPED because it is a reminder whose whole job is to be
+  recognisable; a row here is a door, the job still holds the command, and `job_output` is where
+  a reader goes next."
+  [command]
+  (let [one (str/trim (str/replace (str command) #"\s+" " "))]
+    (if (<= (count one) max-command-chars)
+      one
+      ;; THE CUT LANDS ON A CHARACTER, NOT INSIDE ONE. What `count` and `subs` count here are
+      ;; UTF-16 units, so an emoji's surrogate pair can straddle the boundary -- and half a pair
+      ;; is not text. Dropping the orphaned half is the same judgement `tail-within-budget` makes
+      ;; for bytes ('a multi-byte character is whole or absent, never half of one'), and the count
+      ;; in the note is what was really left out.
+      (let [cut (subs one 0 max-command-chars)
+            whole (if (and (pos? (count cut))
+                         (Character/isHighSurrogate (.charAt cut (dec (count cut)))))
+                    (subs cut 0 (dec (count cut)))
+                    cut)]
+        (str whole "… (+" (- (count one) (count whole)) " chars)")))))
+
+;; ---------------------------------------------------- telling the model it is over
+;;
+;; A JOB NOBODY IS WAITING FOR STILL HAS TO BE HEARD FROM. The three verbs above are
+;; all things the MODEL does, and the whole reason a job exists is that the model went
+;; off to do something else -- so without a fourth channel the ending of a background
+;; command sits in a file until somebody remembers to ask, and a model that is running
+;; a synchronous loop does not remember to ask.
+;;
+;; SO THE ENDING IS PUT IN FRONT OF IT, as a message in the history the next model call
+;; is sent. The seam for that already exists and is not this namespace's: the kernel
+;; runs a session's pre-LLM step before EVERY call (`cap.project/before-llm`, which
+;; composes `before-llm` below with the skills half), so a job that ends while the model
+;; is busy is in front of it at the very next call, and one that ends after the turn is
+;; in front of it at the next turn's first call.
+;;
+;; IT IS NOT A PUSH. Nothing wakes the model up, no run is started for a notice, and no
+;; frame goes to the client: it rides whatever call comes next.
+;;
+;; AND IT IS SAID ONCE. That claim needs a place to live -- see `take-notices!`.
+
+(defn- notice
+  "The message that tells the model JOB is over, and ONLY THAT: which command it was, how
+  it went, and the verb that reads what it said.
+
+  TWO FACTS, THE COMMAND, AND ONE SENTENCE. A notice is a reminder, not an answer: it does
+  not carry a tail of what the command said (a record of five thousand lines is
+  announced in the same few bytes as an empty one), it does not repeat the truncation
+  sentence, and it does NOT carry the record's path -- a receipt names no path (`job` and
+  `job_kill` hand the reader over instead, and `job_output` is where a path comes from), so
+  the line below names the reader instead.
+
+  THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
+  `<skill name=…>` and `<instructions path=…>` are for their own blocks. What rides on
+  it is the id and the line the record ended on -- two facts, nothing about where
+  anything is.
+
+  THE COMMAND IS THE ONLY THING THAT SAYS WHICH JOB THIS IS, and that is why it is here
+  although it is also in the history above: a notice can arrive many turns after the
+  call, past whatever the model still holds, and `j1` on its own identifies nothing --
+  the model would have to ask `job_output` (or guess) before it could even tell whether
+  this is the build or the test suite. It rides inside its own element rather than as an
+  attribute, because a command is arbitrary text with quotes in it and escaping is the
+  one thing a tag attribute would force on us. It is NOT clipped: a command the model
+  cannot recognise is a reminder that failed, and these are the model's own bytes.
+
+  THE SENTENCE IS NO LONGER AN EXCEPTION to 'answers carry facts, descriptions carry
+  usage': the two receipts say it too now (`.scratch/job-receipt-no-path`), because in
+  all three places the caller's next move is the same. It is deliberate all the same: a
+  job exists precisely because the model went off to do something else, so the one thing
+  the reminder owes it is where to look. It names the
+  id a second time so the line is usable as written, and it is one line.
+
+  WHO STOPPED IT, WHEN IT WAS A PERSON. The same block carries a `by` attribute
+  whose value is `user` when the ending came from a person pressing stop in the pane --
+  the entry's `:stopped-by`, which only a person's stop ever writes (`stop!`) -- and
+  its sentence says so. THE TAG DOES NOT CHANGE: `job-ended` is the prefix
+  `edge/http.clj` classifies an injected
+  block by and what the pane's card reads its title from, so a second tag would be two
+  places to teach about one fact. The WHO is an ATTRIBUTE, and that is the same
+  judgement the command follows one line below: a tag is a fixed shape, and a command
+  -- or a name -- is arbitrary text that would then need escaping."
+  [job]
+  (let [ending  (or (ending-of (:path job)) "[exit ?]")
+        ;; ONE SPELLING reaches the wire: the entry's mark is `:user`, and the
+        ;; attribute is `user`. A second name for it here is a second name to keep in
+        ;; step with the entry.
+        person? (= :user (:stopped-by job))]
+    {:role "user"
+     :content (str "<job-ended id=\"" (:id job) "\"" (when person? " by=\"user\"")
+                   ">" ending "</job-ended>\n"
+                   "<command>" (:command job) "</command>\n"
+                   (if person?
+                     (str "A person stopped it from the pane; read what it said with"
+                          " job_output {\"job\": \"" (:id job) "\"}.")
+                     (str "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")))}))
+
+(defn take-notices!
+  "The messages that tell THREAD-ID's model about jobs that have finished and whose
+  ending it has NOT been handed yet -- MARKING THEM TOLD in the same step.
+
+  THREE WAYS AN ENDING REACHES THE MODEL, and this is the third: `job_output` showed it
+  a terminal record, `job_kill` showed it how the command went, or this. Whichever came
+  first is the one that counts; a model that asked is not told again.
+
+  THE MARK IS THE ONLY MEMORY THIS CAN HAVE. A skill body can be recognised in the
+  history -- `<skill name=…>` is part of the conversation, because `sessions/model-view`
+  hands its bytes back on every later run -- so that derivation is idempotent for free. A notice has no such anchor:
+  the client never holds one (it is computed per call and sent to nobody), so 'has this
+  been said' lives here, in the registry: process-local, per session, the same lifetime
+  as the jobs themselves. A process that dies takes the unsaid endings with it, and the
+  records are still there to be asked about.
+
+  IN ONE STEP, the registry's own discipline: the entries this answers about and the
+  entries it leaves behind come from one snapshot, so a job ending at this very moment
+  is in this answer or in the next one -- never in both, never in neither.
+
+  A MODEL THAT READ THE FILE ITSELF IS NOT MARKED: `tail` on a record leaves no trace
+  here, so that job is announced once anyway. The notice is two facts and said once,
+  and being told something twice costs less than never being told at all."
+  [thread-id]
+  (let [pending? (fn [job] (and (terminal? job) (not (:told? job))))
+        [before _] (swap-vals! registry
+                               (fn [reg]
+                                 (if-let [jobs (get-in reg [thread-id :jobs])]
+                                   (reduce-kv (fn [r id job]
+                                                (if (pending? job)
+                                                  (assoc-in r [thread-id :jobs id :told?] true)
+                                                  r))
+                                              reg jobs)
+                                   reg)))]
+    (->> (vals (get-in before [thread-id :jobs]))
+         (filter pending?)
+         (sort-by :id)
+         (mapv notice))))
+
+(defn before-llm
+  "HISTORY with a notice appended for every job that has finished since the model was
+  last told -- the jobs half of a session's pre-LLM step, in the same shape
+  `harness.cap.project/before-llm` has (and composed by it).
+
+  WHAT IT LOOKS LIKE WHEN THERE IS NOTHING TO SAY IS THE HISTORY ITSELF, unchanged: a
+  session with no finished jobs pays a call to this function and nothing else."
+  [history thread-id]
+  (into (vec history) (take-notices! thread-id)))
 
 ;; -------------------------------------------------------- what a command sends away
 

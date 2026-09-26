@@ -1,0 +1,766 @@
+# spec: 会话归服务端 —— 内存是权威、记录异步落后、浏览器只发动作
+
+**一句话**：会话从「客户端每轮递上来的一份消息列表」变成「服务端内存里的一场对话」——初次从记录重建，
+之后在内存里操作，异步写回记录（落后允许），浏览器降为**只发动作的只读副本**；而服务端把它当作一条
+**带窗口的 feed** 供出去：**尾页 + 增量推送 + 按需补页**，浏览器拿到的从来不是全史。决策见
+`docs/adr/0002-sessions-live-on-the-server.md`（十条）与 `docs/adr/0003-the-feed-is-a-window.md`（九条，
+**修正 0002 的决策 8**）；本文件是它们的落地。
+
+2026-09-20 立票；同日按 ADR 0003 重切为七张票：`01 → 02 → 03 → 04 → 05 → 06 → 07`。
+
+## 问题
+
+**读侧已经是副本了，写侧还是客户端；而读侧读的是全量、走的是轮询。**
+
+1. **客户端已经会从服务端读历史。** `session-after-refresh` 的 01–03 已落地：页面把「我在哪一场」记在
+   `localStorage`（`ui/src/lib/session-memory.ts`），挂载时 `sessionHistory.load` 走 `rebuildThread` /
+   `readSofar`（`app.tsx:207`），adapter 的 `append` / `update` 是 **no-op**。
+2. **但每一轮还是把整份累积的 `messages` 送回去。** 服务端只读 `(:messages input)`，`ag/inbound` 只是
+   转换它——所以「谁是会话的作者」仍然在客户端。由此：
+   - **两个标签页是常态，而服务端不拒绝第二条 run。** 同一个 id 共享 localStorage
+     （`session-memory.ts`：「TWO TABS LANDING IN ONE SESSION is the ordinary case」），那条门是
+     `.scratch/session-after-refresh/issues/05`，**没落地**（`http.clj:513` 的注释指着它）。
+   - **注入每轮重算、每轮一张卡。** 注入不在任何一方**持有**的历史里（客户端不回发它），所以每次模型调用
+     都要现算、现送、现画——`.scratch/context-frames` 的卡因此每轮重复一张。
+   - **两份真相并存**：客户端手里那份 vs 记录那份，没有裁决处；`rebuild` / `sofar` 读记录，
+     live 视图读帧，两边可以不一致。
+3. **读侧还是全量 + 轮询**（ADR 0003 的背景）。挂载时 `sofar` / `rebuild` 答的是**整份** `:messages`
+   （`http.clj:1948`）——长会话的 wire 成本随会话长度线性涨；而「只是看着」的标签页每 1.2 秒轮询一次
+   （`app.tsx:110` 的 `WATCH_INTERVAL_MS = 1200`），读的还是**记录**（落后那份）。`app.tsx:336` 的注释
+   自己写着「never a second streaming path」——它是一个妥协。参考实现在这里走的是另一条路，
+   同时解掉这两件事。
+
+## 决策
+
+见 ADR 0002 与 ADR 0003；这里只列每一票要吃的那一条，不重复理由。
+
+## 非目标
+
+- **不做鉴权、不做多人协作**（ADR 的边界）。feed 是本特征唯一新接的端点（票 05）——不是「不接新端点」，
+  那条 0002 立票时的边界被 ADR 0003 改了。
+- **不改记录的格式**（一行一个 JSON，只 append，不迁移）与 `message` 行的形状。
+- **不改 AG-UI 那几帧的形状**：`context-frames` 刚立的 `CUSTOM` / `data` 契约不动；序号是**新增字段**，
+  不引入 `STATE_SNAPSHOT` / `STATE_DELTA`。
+- **不推全史、不做订阅注册表、不自动加载全史**（ADR 0003）：存量是尾页，更早的历史是一颗按钮。
+- **不做 `cancel` 的语义**（`.scratch/session-after-refresh` 票 07/08/09 的活）；本特征只把「停止」当成
+  输入面上的一件**动作**登记，不实现它。
+- **不做消息的编辑/删除/重放**：副本不许改历史。
+- **不改 `before-llm` 的派生逻辑**（技能正文、作业通知）：会话成了权威之后它们是内存里的追加，
+  但它们**怎么算出来**不变。
+
+## 验收主线
+
+1. **历史归服务端**：一轮跑完，客户端**不再**送 `messages`；下一轮服务端用内存里那份继续。
+   （**2026-09-20 修正**：原措辞要求它与记录里 `message` 行 submitted 侧**逐字节相同**——票 01 落地时
+   推翻了这一条：那份里有每轮现组装的 system 消息与每轮现读的注入物，冻结它们就是「改了没生效」。
+   会话持有的是 `replay/sofar` 折出来的**对话**，卡消息被丢掉。见票 01 的落地记录。）
+2. **关掉浏览器不丢会话**：关标签页 → 重新打开 → 回到那一场，历史与屏幕上最后看到的**逐字节一致**。
+3. **两个标签页**：第二个标签页进同一场是**一等的读者**（连同一场 feed，看得到增量），但**不能**发起
+   第二条并发 run：服务端拒绝并说出理由（不是静默、不是分叉）。（**修正**：原措辞只说「拒绝第二条
+   run」；ADR 0003 之后「看」与「发」要分开说——门只需要拒第二条 run，不必拒第二个读者。）
+4. **落后可见但不假装完整**：进程在 run 中途被杀 → 重开时重建先 `close-off-open-run!` 补收尾帧，
+   客户端看见的是「它在那儿断了」。
+5. **写失败说出来**：把记录目录变成不可写 → 那个会话进降级态并在界面上说出来，run 不因此静默丢历史。
+   （**2026-09-21 票 02 落地**：降级是**写者**的状态——那一行停在队首，记录因此永远是有序前缀，
+   `retry!` 是回来的路；会话照跑。界面那一半是 `:record` 字段 + 一根常驻的条。
+   证据：`test/harness/edge/record_test.clj`、`http_test.clj` 的一个用例、`ui/test/suites/record.tsx`。）
+6. **（作废，2026-09-20 实现票 01 时发现）注入仍然每轮重算，卡仍然每轮一张。** 会话持有的是**对话**，
+   不是 system 消息、也不是注入物：指令文件与清单每轮现读现拼（`opening-blocks!` 的 docstring 写着
+   「改了没生效」正是它要防的），冻结进会话就是把那条纪律换掉。所以本特征**不解**这个问题；
+   它解的是「客户端当作者」，而那是另一半。（要不要把注入挪进缓存前缀／改成只画一次，是另一条决定，
+   见票 07 的判断 3。）
+7. **窗口**（ADR 0003）：打开一场长会话，第一个响应只带**尾页**（条数是一个写下来的数字）；更早的
+   历史要点一下才来；断档只重建**已加载窗口**，不重读全史。
+8. 两套全量与真浏览器走查证据（动过 `ui/src/`，走查是硬要求）。
+
+## 跨特征对照
+
+- **`.scratch/session-after-refresh` 票 05（拒绝同一会话的第二条 run）**：本特征的**前置**——不过
+  ADR 0003 之后它的分量变了：第二个标签页有了正当的读法，那条门只需要拒**第二条 run**，不必拒第二个
+  **读者**。**已落地（2026-09-21，就落在本分支上）**：`handle-run` 成了门（同会话已有活着的 run 就
+  409、具名拒绝），函数体搬进 `stream-run`；用例是
+  `test/harness/edge/http_test.clj` 的
+  `a-session-answers-one-run-at-a-time-and-two-sessions-still-both-run`（拒绝与放行同一条，票面要求）
+  与 `a-crashed-run-does-not-close-its-session-for-good`。它的票面已删、落地记录写进
+  `.scratch/session-after-refresh/spec.md`；`parallel-sessions` 票 06 里留了指针，别写第二份。
+  票 06（parked 刷新回来还能答）与 07–09（停止）**不改**，但它们的「停止」在本特征里是一件
+  **动作**。
+- **`.scratch/context-frames`**：它的卡与帧契约不动。**原以为本特征会让注入不再每轮重画，实现票 01 时
+  发现不成立**（见验收 6）：注入之所以每轮重算，是因为指令文件必须每轮现读，不是因为客户端持有着历史。
+  两件事看着像一条根，其实不是。
+- **`.scratch/job-output` 决策 3（「帧就是客户端的会话」）**：**被推翻**的地方要写进那一份的对照，不改它。
+- **`.scratch/skills-and-instructions`**：「对话归客户端所有，服务端每轮现收现算」那一节的推导要重写
+  （票 07），但「技能正文是派生的」**不改**。
+- **`.scratch/parallel-sessions` / `.scratch/immutable-data`**：认领（决策 7）与新的一堆进程内状态要和它们
+  的既得分家规矩对齐，票 04 核。**票 02 已经动了其中一处描述**：`immutable-data/spec.md` 把 carry-back 写成
+  「在 `log-lock` 内」办的事，而 `log-lock` 已随单消费者写者退役（`harness.edge.record`），那条措辞不再成立
+  ——收口（文档层面）留给票 07。
+- **`.scratch/jsonl-message-record`**：`message` 行是「那次真送出去的那份」这一定义**不动**；它是验收 1
+  的凭据。注意它同时是**序号重放**的底座：记录 append-only、一个写者，第 N 条就是第 N 条（票 05 判断 1）。
+- **参考实现（DeepSeek Harness）**：ADR 0003 的形状来自它的 `dsh-api-session-controller`
+  （`open()` / `loadOlder()` / `loadThrough()`、`windowSnapshot(hasMore, revision, change)`）、
+  `dsh-client-connection`（带重连的 journal 流）与 `dsh-client-ui-trajectory`
+  （`hasEarlierRecords` / `onLoadEarlier`）。**参照的是形状，不是它的代码**：本仓的记录格式、帧词汇表、
+  锁与线程纪律都不同——票 05 的判断 4/5 就是要在这里做自己的选择。
+
+## 交付顺序
+
+| # | 票 | Blocked by | 交付什么 |
+|---|---|---|---|
+| 01 | 会话表：出生、寿命、上界 | — | **已落地**。`thread-id → 会话` 的内存表；出生时从记录重建一次；空闲 30s 放掉；两个钉子（正在跑 / 还有没落盘的）；限制同时运行的会话数。落地记录见下（含 ADR 0003 之后的四条修正：序号、窗口读法、`running?` 二份） |
+| 02 | 异步写：每帧、失败进降级态 | 01 | **已落地**。帧入队、单消费者逐行 append、每帧；`flushed-seq` 是一条序号（`(+ flushed pending)` = 下一条要铸的序号）；写失败 ⇒ 降级态，`sofar` / `rebuild` 带 `:record`，界面上一根常驻的条；退出时收干净。落地记录见下（两处实现时发现的坑、两处既有漏，以及它留给票 05/06 的两条边界） |
+| 03 | 输入面：`messages` 退役 | 01, `session-after-refresh` 票 05（跨特征） | **已落地**。动作的载荷是新字段 `append`（不是 AG-UI 的 `messages`）；`messages` 具名 400、不认识的 id 具名 404、`runId` 门里铸并进记录、`provider` 只认会话档、`context` 只在出生那一轮读；页面不再铸任何会话 id（`POST /api/sessions` / `POST /api/project` 由服务端铸）；客户端那半是 `ui/src/lib/agent.ts` 的 `HarnessAgent`。落地记录见下（含留给 04/05/06 的边界） |
+| 04 | 认领：一个 thread 归一个进程 | 01 | **已落地**。库里一行 owner（`session_claims`，不是锁文件）；会话出生时认领、放掉会话（显式 `drop!` 或空闲 30s）时交还、进程正常退出走 shutdown hook 交还；`kill -9` 留下的行靠 **pid + 起始时刻**判死并明说易主；后到的进程**只读 + 明说**（动作 409 点名 pid，读路由照常）；认领的 token 就是票 05 的 generation。落地记录见下 |
+| 05 | 会话 feed：尾页、增量、补页 | 01 | **已落地**。`GET …/feed`（SSE：窗口帧 → 每落盘一批推一帧 → 终态帧 `end`）与 `GET …/page?beforeSeq=N`；序号 = **记录偏移**，写者落盘时报出、不由人预测；窗口在**批**的边界上切（不重叠不丢）；`since` 落在窗口外或 generation 不对 ⇒ 409 且 body 带当前值；`rebuild` / `sofar` 对活会话读内存；放掉 / 易主都是一帧终态。落地记录见下 |
+| 06 | 副本：窗口、补页、刷新 | 03, 05 | **已落地**。浏览器手里是一段窗口 `{entries, baseSeq, hasMore, cursor, generation, state, revision}`（`revision` 是副本自己的「窗口变过几次」，不是消息序号）；`GET …/feed` 是那条连接（断档 / 重连 ⇒ 拉尾页**对齐**、保住读者的位置；`end` / generation 作废 ⇒ **重开**并说出来）；「显示更早」一次一页、一次只有一个在飞；刷新拉尾页 ⇒ 落点是最新（走内存）；打字 / 输一半的字 / 滚动位置都不动（锚点是一条消息的文本，不是它的 DOM 节点）。落地记录见下 |
+| 07 | 收口：两条铁律、状态表、文档、报数 | 02–06 | **已落地**。`overview.md` 铁律 1 与 3 的新措辞（按 ADR 0002 决策 10、ADR 0003 决策 7）+ 状态表改写并新加窗口那一行；`edge.md` / `client.md` / `kernel.md` / `skills-and-instructions.md` 的推导；`CONTEXT.md` 的「会话」词条 + 窗口 / 尾页 / 补页 / feed / generation 五个新术语；**8 处还说着旧模型的代码 docstring**；两套全量 + 真浏览器走查；01/02 的票面折进这里。落地记录见下 |
+
+## 状态
+
+**2026-09-20 立票，同日按 ADR 0003 重切为七张票。七张全部落地**（01 与 02 的票面文件已按
+`docs/agents/issue-tracker.md` 的约定折进下面、并从 `issues/` 删掉）；本节的报数是收口时的基线。
+
+## 已验证到什么程度
+
+**票 01**（`src/harness/edge/sessions.clj` + `test/harness/edge/sessions_test.clj`，11 个用例）
+与**票 02**（`src/harness/edge/record.clj` + `test/harness/edge/record_test.clj`，9 个用例 51 条断言；
+`http.clj` 的接线 + `http_test.clj` 的一个用例；UI 的 `lib/record-health.ts` /
+`components/record-notice.tsx` / `test/suites/record.tsx`）已落地。
+
+**收口基线（2026-09-23，`.worktrees/sessions-live-on-the-server`）：**
+
+- 后端全量：**1044 tests / 12466 assertions / 0 failures / 0 errors**（exit 0）。票 05 落地时是
+  1042 / 12455，票 06 加了两条（会话表的「有人看着就不放」、feed 的「只变状态的一帧」）。
+- `sessions` + `http` 两套（本特征改动最密的地方）：**115 tests / 1100 assertions / 0 failures /
+  0 errors**，票 06 修完那个 flake 之后**连跑 6 次全绿**。
+- UI：**65 cases 全绿**，`npx tsc --noEmit` 与 `npm run build` 干净。
+- 真浏览器走查 **GREEN** 三次，各自留在 `evidence/`：
+  - 票 02（`evidence/go.json` + `evidence/walkthrough.mjs`，图 `02-record-notice.png`）：第一轮正常落盘，
+    第二轮之前把那个 jsonl 改成只读 ⇒ 跑完**不刷新**页面上多出一条常驻的条，`sofar` 同时报
+    `state=degraded`，记录行数 14 → 14 一个字节没动。
+  - 票 03（`evidence/03-go.json` + `evidence/03-walkthrough.mjs`，图 `03-action-body.png`）。
+  - 票 06（`evidence/06-go.json` + `evidence/06-walkthrough.mjs`，图 `06-window-earlier.png`）：
+    四个场面——新会话（本页刚铸 ⇒ **没有窗口**）；刷新回同一场（`GET /page` 答 `{live: true}`，
+    走内存）并开一条 feed；**第二个页面**看着第一个页面跑（自己一轮没驱动，全程 `sofar` **0** 次，
+    对面跑完它一次请求都没多发）；长会话点「显示更早」（两次同步点击只上了一次网、到达紧邻的那一页、
+    被读的那条消息 `83 → 82.5`、打了一半的字还在）。细节在票 06 的落地记录里。
+
+**这个分母和票 01 记的不是同一个，原因值得留着**：`test/harness/test_runner.clj` 的
+`test-namespaces` 是一张**字面清单**，票 01 的 `sessions-test` 与自己新写的 `record-test`
+都没有进去——票 01 那句「982 / 12083」因此**从未包含 sessions-test**（一个从不运行的命名空间
+不可能是红的）。两张都已登记，上面这个数才是真的跑了它们的数。
+
+**「界面说出来」验到哪一步**：降级态在两条读路由上的形状、以及它渲染成一句话（两种语言、复数形式）
+都有用例；`app.tsx` 里的**接线与位置**（读到的 `:record` 交给这根条、摆在视图切换下面）没有自动用例
+——那个文件在 vitest 里渲染不了（它要走 `lib/i18n.ts` 与 assistant runtime），靠类型门 + 真浏览器走查，
+而**走查正是在那里抓到一个真洞**：自己在驱动这一轮的页面原本收不到跑中的降级（见票 02 的落地记录），
+修完之后走查 GREEN。这正是 `.scratch/session-title-blank/` 那次的教训形状，所以那句话被提成了一个
+能渲染的组件。
+
+## 票 01 落地记录（2026-09-20）
+
+**交付物**：`src/harness/edge/sessions.clj` + `test/harness/edge/sessions_test.clj`（11 个用例
+36 条断言，绿；票 05 起长到 24 个用例）。`thread-id → 会话` 一张表；出生在「有人看它 / 对它发起一次
+动作」时，从记录**读一次**（不是每轮读）；空闲 30 秒放掉；两个钉子（**正在跑** / **还有没落盘的**）；
+同时运行的会话数是一条**显式的上界**，超了具名拒绝，且**不留下一场没跑起来的会话**。
+
+**接口**：`born!` / `live` / `live-entry` / `drop!` / `sweep!` / `touch!` / `watch-unflushed!`
+（桩，票 02 填）/ `run-started!` / `run-finished!` / `state` / `running?`（票 05 把 `http.clj` 里
+那份第二权威 `live-runs` 并进这里）。
+
+**三处实现时才发现、写票时没写到的**：
+
+1. **会话持有的是「对话」，不是 `message` 行的 submitted 侧。** 那份里有 **system 消息**（每轮现组装）
+   与**注入物**（每轮现读现拼），冻结它们就是「改了没生效」。所以持有的是 `replay/sofar` 折出来的那份，
+   **并且把只给屏幕看的卡消息（`data` part）丢掉**——它们进不了 provider（`provider-part` 按名字拒绝）。
+   这条推翻了票面原来那句「与 submitted 侧逐字节相同」，也把 spec 的验收 6 作废了。
+2. **从记录读的是 `sofar` 不是 `rebuild`**：一个会话正是在「有人看它」的那一刻出生，而那在进程重启
+   之后就是一份**停在 run 中间**的日志——`rebuild` 会拒绝它，`sofar` 才是为这个场面存在的那个门。
+3. **幂等**：`run-started!` 对「表里已经持有的那一枚 run」不当作第二条（否则收口时重放同一次注册会被拒）。
+
+**验证**：放掉再重建，重建出来的历史与放掉之前**逐字节相同**；跑着不放；没落盘不放；喂一个未来的
+时刻 ⇒ 空闲 30 秒确实放掉（不真等）；超同时运行的上界 ⇒ 具名拒绝且不留下会话；表里没有任何东西写进
+sqlite / jsonl / 进程日志（读过的日志长度与 mtime 一个字节没动、日志树里一个文件都没多）。
+
+**ADR 0003 之后的四条修正**（补在票 05 / 06，不改已经成立的实现）：读法是窗口不是全量（票 05）；
+每条消息要带**能从记录重放出来**的序号（票 05）；`registry` 的 `:runs` 与 `http.clj` 的 `running?`
+是同一件事实的两份，接 feed 之前**必须合并成一处**（票 05 做了）；`watch-unflushed!` 的桩由票 02 填。
+
+**边界**：「同一场连跑两轮，第二轮用内存那份」是**接线**，属于票 03——表立好了而 run 还没读它，
+在本票上是正常的。
+
+## 票 02 落地记录（2026-09-21）
+
+**交付物**：`src/harness/edge/record.clj`（一个写者）+ `test/harness/edge/record_test.clj`
+（9 个用例 51 条断言）；`http.clj` 的接线（`log!` 解析路径后 `append!`、`log-lock` 退役、`carry-back!`
+进消费者、`rebuild-post` 落盘后 `flush!`、`sofar` / `rebuild` 两条读路由带 `:record`）；
+`http_test.clj` +1 用例；UI：`ui/src/lib/record-health.ts`、`ui/src/components/record-notice.tsx`、
+`ui/test/suites/record.tsx`（2 个用例，渲染成字符串来读）。
+
+**队列替代锁**：写者是**一个消费者线程**，`log-lock` 删掉（原位留一段说明为什么不再需要它）。
+`carry-back!` 留在**消费者线程里**（每行写之前跑）：它要写文件，而且它改变「这一行是第几行」——
+放在入队时做就有两个写者，锁省不掉。它还必须回答「文件变了吗」，变了就把水位**重新基准化**。
+
+**水位是一条序号**：`flushed-seq` = 记录里最后一条的序号，`pending-count` = 还没写的条数，
+`(+ flushed pending)` 就是下一条要铸的序号；落盘之后**文件行数 = `flushed-seq`**。票 01 的
+`watch-unflushed!` 接到 `record/pending?`，用例钉住「有未落盘的行 ⇒ `sweep!` 不放」。
+
+**失败进降级态**：`degraded` 答出**原因 / 还有几条 / 哪个文件**；`retry!` 是回来的路。界面走 `:record`
+字段——**没有问题时不出现**（缺席 = 没事；一个每答都带的 `:state "ok"` 是没人会读的字段），只在降级
+时出现在 `sofar` 与 `rebuild` 两条读路由上。`recordNotice` 把它变成一句话，`RecordNotice` 是一根
+**常驻的条**（不是 toast：状态还在，通知不能先消失）。
+
+**走查抓到一个真洞，它决定了这一票的最终形状**：第一版只在**挂载那次读**与**盯着别人跑的轮询**里
+上报记录状态，而**自己驱动这一轮**的页面两者都不走——于是跑中写失败**谁都收不到**，页面安静地继续、
+记录安静地落后。修法是在**这一轮结束**时再读一次记录：同一个门、同一个 fallback，一次 run 一次读，
+**不刷新**就出条（走查 GREEN 就是两次 turn 之间没有 reload）。证据：`evidence/02-record-notice.png`
+与 `evidence/README.md`。
+
+**实现时才发现的三件事**：写者**不跳行**（一行写失败就停在它上面，所以记录永远是**有序前缀**，
+降级 ≠ 丢行，也不等于会话失败）；`prepare`（carry-back 的口子）**每一行都要问一次**（第一版按
+「一天问一次」写，被 `records-that-landed-unbound-are-carried-back-into-the-project-file` 抓出来：
+期望 `[1 2 3 4 5]` 得到 `[1 2 5]`）；水位会**重新基准化**（换文件、或 prepare 改了文件），它记的是
+「相对这个文件的条数」，不是进程内的计数器——票 05 的重放靠的就是这个。
+
+**顺手补上的两处既有漏**：`test/harness/test_runner.clj` 的 `test-namespaces` 是**字面清单**，
+票 01 的 `sessions-test` 与本票的 `record-test` 都不在里面（所以票 01 记的那句「982 / 12083」
+**从来没有跑过 sessions-test**）——两个都登记了，并写明「新命名空间要和文件同一个提交进这张清单」；
+票面验收 3 里「会话铸到 N」那半句当时还读不到（序号是票 05 才铸的）。
+
+**它留给票 05/06 的两条边界，都已经有了下文**：一轮**跑到一半**盘坏时条要等这一轮结束才出现
+（盯着别人跑的页面反而实时）——票 06 让 feed **每帧都带 `:record`**，于是有窗口的读者是实时的，
+只有没有窗口的那几扇门还留着「一轮一次读」；**记录目录从会话一出生就不可写**这个子情形，
+页面拿不到 `:record` 可搭的 200——那条读会**失败**，失败照票 03 的规矩落在**所点的那一行**上说出来。
+
+## 票 03 落地记录（2026-09-22）
+
+**交付物**：`edge/sessions.clj`（`append!` / `settle!`）、`edge/ag_ui.clj`（`context-entry` 与新的
+`inbound`）、`edge/replay.clj`（追加折叠与 `:added`）、`edge/http.clj`（四道路口 + `run-agent!`）、
+`cap/project.clj`（`session-exists?` / `register-session!` / `bind!`）、`edge/stats.clj` 与
+`edge/trajectory.clj`（读 `:added`）；UI 侧的 `src/lib/agent.ts`、`src/lib/projects.ts`、
+`src/app.tsx`、`src/components/sidebar.tsx`。票面文件已按 `docs/agents/issue-tracker.md` 删掉
+（它的结论在这里）。
+
+### 线上形状（票面判断 1 要的「选一个」）
+
+动作的载荷走**一个新字段 `append`**，不叫 `messages`：这样「客户端还在送旧的那个形状」是一件
+**能具名拒绝**的事——400，`:field "messages"`，句子里点名 `append`——而不是被悄悄读成新的意思。
+于是 run 的请求体是 `{threadId, append, tools, resume?}`：
+
+- **`append`**：这次动作**新加进对话**的条目（AG-UI 消息形状，带 id）。服务端按 id 去重
+  （`sessions/append!` 用 `swap-vals!` 判「谁真的进去了」），所以客户端重发同一条是幂等的。
+- **`messages`** ⇒ 400（具名）。**`runId`** 不再被读：门里铸 UUID，它进记录（`input` 行的 `:runId`）
+  和帧，所以「同一场同一轮重建两次，卡的 id 相同」靠的是记录，不是「再铸一枚一模一样的」。
+  客户端还送 `runId` 也不报错，只是不看。
+- **`provider`**：`current-provider` 只按 `thread-id` 取，请求里那层不再被 consult（但请求体原样
+  进 `input` 行，事后能追问）。
+- **`context`**：只在 **出生那一轮**（会话还是空的）被读，构成一条 id 为 `session-context` 的 user
+  消息，跟着 `append` 一起进会话——此后它就在历史里，不再进输入面。
+- **不认识的 `threadId`** ⇒ 404，句子点名那个 id 并指路 `POST /api/sessions`。**不静默建**
+  （这一条退掉了 ADR 0001 决策 3 那个补丁：挂载铸一枚 id ⇒ 每刷新一次多一条空会话）。
+- **`resume`** 行为不动（`resume-decisions`，认不出就拒），只是它现在与 `append` 并列在同一条动作里。
+
+### 客户端那半
+
+`ui/src/lib/agent.ts` 的 `HarnessAgent extends HttpAgent`，只覆盖 `requestInit`：剥掉 `messages` 与
+`runId`，把 `appendOf(messages)`（**最后一条非 user 消息之后的那段 user 消息**）塞进 `append`。
+页面不再铸任何**会话** id：新任务 = `POST /api/sessions`（body 不具名），项目里的新会话 =
+`POST /api/project {dir}`（一次调用里铸 + bind，所以不会留下没绑上的空会话）；`sidebar.tsx` 里
+四处 `crypto.randomUUID()` 都换成了这两个动词，`app.tsx` 的 `onListed` 在「没有可恢复的会话」时
+问服务端要一枚（要不到就把服务端那句话画在对话区，`data-slot="no-session"`）。
+
+### 实现时才发现、写票时没写到的
+
+1. **`POST /api/sessions` 早就有**（脚本与测试在用），把它变成「页面铸 id 的动词」之后，
+   `project/register-session!` 得是 `INSERT … ON CONFLICT DO NOTHING`——具名要两次同一枚 id 不是错，
+   但**不能**铸出第二行。
+2. **记录的 `input` 行多了一个 `:added`**：请求体原样 + 「这次真的进去了什么」。两者不同出现在
+   重发（什么都没进）与出生（context 进去了，而客户端没送过它）。`stats` / `trajectory` / `rebuild`
+   都改读 `:added`（老记录回落到 `:messages`），`trajectory/one-run` 的 `:history` = `added` + 返回的。
+3. **会话在「帧发出去之前」落定**：终帧先 `sessions/settle!` 再发给客户端，否则一个快的客户端在
+   收到 RUN_FINISHED 之后立刻发下一步动作，会在「run 结束了」与「它的话进了对话」之间赛跑。
+   run 崩掉那条路也 settle（已经发出去的半句是模型说过的话，丢掉它会让下一轮从一段没有半点
+   痕迹的对话继续）。
+4. **UI 的两套 E2E 都得换客户端**：`ui/test/e2e.ts` 里那些 `new HttpAgent(...)` 造出来的 body 现在会
+   被服务端拒（它们送 `messages`），所以 `postRun` 改成送 `append`、并加了 `ensureSession` /
+   `agentFor`；`suites/turn.ts`、`client.ts`、`approval.ts`、`concurrent.ts` 改用它。
+5. **模型模态守门改看 `:append`**：`guard-input-modalities!` 以前检查「客户端递上来的整份」，
+   现在检查这次动作自己的条目——三轮前的一张图不该让这一轮被拒。
+
+### 边界（写给票 04/05/06）
+
+- **`context` 出生时只有一个来源，而今天没人往里放东西**：服务端会在出生那一轮读请求里的
+  `context`，页面却始终没有构造过它，所以出生 context 现在是空的。真要放，入口是出生那一轮。
+- **页面手里那份 `agent.messages` 还在长**（运行时的副本），只是不再送出去；窗口（票 06）才是给它
+  上界的地方。
+- **`(sessions/messages thread-id)` 仍是全量读**（票 01 的修正项 1），票 05 换成窗口。
+- **`sessions/runs` 与 `http/live-runs` 仍是两份**（票 01 的修正项 3），票 05 合并。
+
+### 验证
+
+**后端全量：1011 tests / 12258 assertions / 0 failures / 0 errors**（2026-09-21，本 worktree，
+exit 0）。新用例落在 `edge/http_test.clj`：不认识的 id 具名 404、带 `messages` 的 body 具名 400、
+请求里的 `provider` 不被读、run id 在门里铸且**记录**是命名它的地方、出生 context 只进一次、
+项目里的新会话由服务端铸并绑上、同一会话的第二条 run 仍被拒。`ag_ui_test` / `replay_test` /
+`stats_test` / `trajectory_test` 跟着 `:added` 改（老记录回落 `:messages`）；`test_support.clj`
+多了 `support/start-session!`——**五个驱动 run 的命名空间原来靠运行边的静默登记**，那条路没了之后
+每个 fixture 得自己先把会话建出来。
+
+**UI：56 cases 全绿**（54 → 56），`tsc --noEmit` 与 `vite build` 干净。两条新用例在
+`ui/test/suites/client.ts`：一条读**线上的 body**（用 `HttpAgent` 自己的 `fetch` 缝抓下来）——
+没有 `messages`、没有 `runId`，第二轮 `append` 只有第二条问题；另一条证明服务端铸的 id 是页面下一步
+能用的（列得出来、跑得起来）。`suites/turn.ts` / `client.ts` / `approval.ts` / `concurrent.ts`
+都改用页面自己的 `HarnessAgent`（`test/e2e.ts` 的 `agentFor` / `ensureSession`），因为旧写法送
+`messages`，现在会被服务端拒——**这条本身就是那次改动最好的回归门**。
+
+**真浏览器走查 GREEN**（`evidence/03-walkthrough.mjs` + `03-go.json` + `03-action-body.png`）：
+空 localStorage 的新页面 → `POST /api/sessions` body 是 `{}` → 服务端答一枚 id；三轮 body
+逐条打印，都能看见 `{threadId, append:[这一条], tools}`，没有 `messages` / `runId`；刷新回同一场且
+**没有再问一次** id；从页面里敲一个不认识的 id，得到 404 和那句点名的话；`GET /api/threads` 里那个 id
+只出现一次，记录里三条 `input` 各带服务端铸的 `runId`。
+
+## 票 04 落地记录（2026-09-22）
+
+**认领是一行库里的 owner，不是锁文件。** 选择理由写在新模块的 docstring 里，一句话版：库已经是
+「同一个 home 的两个进程唯一会达成一致的地方」（`with-transaction` 用 `BEGIN IMMEDIATE` 开，
+读-改-写不会输给抢跑的进程），而认领正好是库擅长的那种东西——**可重写的一行状态**，不是记录。
+锁文件要自带目录、原子创建和它自己的「放哪儿」，而 pid 活性那一问它答得和这里一模一样，
+所以它只多一套机制，不多一个答案。
+
+### 接口
+
+- **表**：`session_claims (thread_id PK, instance, token, pid, started_at, since)`，迁移链上多一步
+  `session-claims`（append-only，`test/harness/infra/db_test.clj` 的「store 里有哪些表」守卫同步更新）。
+- **`harness.cap.claims`**：`holder`（**活着的**持有者，陈旧行答 nil）、`mine?`、
+  `take!`（活着的别人 ⇒ 抛 `:session-claimed`，异常里带着那一行；陈旧行 ⇒ 接手并写一行 WARN）、
+  `release!`（**按 token**）、`release-all!`（按 instance，退出钩子用）、`hand-over!`（下面那条竞态用）、
+  `held`（给读者看全部行）。`take!` 自己装退出钩子（幂等），所以**不靠「谁启动了 server」**——
+  一个只认领不开 http 的进程也要正常退出时交还。
+- **接线**：`sessions/ensure-session` 在**建表那一步**认领（认领属于会话的寿命，不属于 run）；
+  `sessions/drop!` 与 `sweep!` 交还（按**条目里那个 token**，不按 thread-id）；`http/handle-run` 在
+  门口问一次 `holder`，是别人的 ⇒ `refuse-served-elsewhere!`（409，body 里有 `:holder {:pid :since
+  :instance}`，句子说得出「停掉那个进程或等它退出」）；`http/project-post` 同一条规则——因为**改绑会
+  移动日志文件**，那是在别的进程的写者脚下抽地板。
+
+### 三个决定，以及为什么不是另一种
+
+1. **owner = instance + pid + 起始时刻，三个事实各答一问**：`instance` 是进程自己铸一次的随机 id，
+   「这行是不是我的」是字符串比较、不碰 OS；`pid` + `started_at` 才是后到进程问 OS 的东西。
+   **只要 pid 会犯错**：pid 会被复用，一个复用的号会让一场对话被一个陌生人钉住——起始时刻就是判这个的。
+   没有心跳：心跳要每个进程一个定时器，而 OS 直接答同一个问题；心跳唯一能多买到的是「发现卡住的进程」，
+   而卡住的进程**仍然是**主人，抢它的认领正是这一票要防的两份权威。
+2. **粒度是进程、寿命是会话**（判断 3/4）：run 结束不让认领（否则下一轮要重新认领，而重建是冷的）；
+   空闲 30s 放掉会话时**一起放**，否则空闲会话会永远占着一个进程。两票的接口就在 `sweep!` 里对齐。
+3. **后到的是「只读 + 明说」**（判断 5/9）：看（列表、`rebuild`、`sofar`、统计、轨迹）照常——那些读的是
+   文件；动作（run、改绑）409 并点名 pid。**非 owner 的页面没有增量，就是降级**（判断 9 的选定）：
+   代理要引入一条跨进程长连接、它的寿命、重连与背压，而「只读」要买的只是「看得见历史」。
+
+### 两个竞态，写下来免得后人重新踩
+
+- **放掉会话是「先摘表、后交还」，两者之间那一场可能已经重生**：所以 `take!` 每次**换一个 token**，
+  `release!` 按 token 删。按 thread-id 删会删掉刚重生的新认领，留下一个没有认领却被人服务的会话——
+  比「删不掉」坏得多（两份权威）。
+- **同一进程里两次出生抢一张表**（运行边的门口检查与 `register-run!` 之间那个众所周知的窗口，见
+  `handle-run` 的 docstring）：两次 `take!` 都会铸 token，赢下 `swap-vals!` 的那个条目的 token 可能不是
+  行里那个。**输的一方**在两个 token 都看得见，所以由它把行交过去（`hand-over!`）；不做这件事的话，
+  那一行会一直挂到进程退出为止，期间别的进程**连一场这个进程早就不服务的对话也拿不到**。
+
+### 与票 05 的接口（判断 8）
+
+**认领的 token 就是 generation。** 会话表条目里带着 `:claim`（`(sessions/live)` 也读得出来），
+`take!` / `hand-over!` 换 token、`release!` 删行——所以「这一场易主或放掉」和「副本窗口作废」是
+**同一个时刻的同一个事实**，票 05 只要拿窗口建立时的 token 与 `holder` 比一次就知道该发终态。
+本票不造 feed（票 05 的活），只把这条缝对齐并用用例钉住：`sessions_test` 里「放掉会话 ⇒ 行没了」，
+`claims_test` 里「正常退出 ⇒ 行没了」「被杀 ⇒ 行留着且下一次接手会明说」。
+
+### 验证
+
+**后端全量：1028 tests / 12355 assertions / 0 failures / 0 errors**（2026-09-22，本 worktree，exit 0）。
+新用例三处，各有各的理由：
+
+- `test/harness/cap/claims_test.clj`（10 个用例 59 条断言）：行的三个事实、重复 `take!` 换 token、
+  活着的陌生进程被具名拒绝、死 pid 与**复用 pid**两种陈旧、按 token 释放、`hand-over!`、`release-all!`
+  不碰别人的行、退出钩子只装一次；再加**两个真 JVM**：第二个进程（`sessions/touch!` 走真正的出生路径）
+  活着时本进程被点名拒绝 → 正常退出 ⇒ 行没了、本进程接手 → 再起一个 **`destroyForcibly`** ⇒ 行留着、
+  `holder` 答 nil、接手时日志里有一行 `taken-over`。这一条是整票唯一一件进程内测不了的事
+  （`alive?` 问的是 OS，退出钩子只有真的退出才跑）。
+- `test/harness/edge/sessions_test.clj`（+4 个用例）：出生即认领且条目带着 token；`drop!` 与**空闲扫除**
+  都交还；别人正服务的会话在这里**生不出来**、被拒之后表里没有残留条目；陈旧行被接手。
+- `test/harness/edge/http_test.clj`（+3 个用例）：门里 409 且 body 点名 pid/`since`、日志**一个字节没长**
+  （等文件稳定再比——记录是异步的，`pending?` 空了之后行还可能在落盘路上，实测 20KB 的
+  `model/start` 晚 3ms 才落）；读路由（列表、`rebuild`）照常 200；没人服务时同一条 run 立刻能跑；
+  复用 pid 的陈旧行不拒任何东西；改绑别的进程正服务的会话 ⇒ 409 且绑定一动不动。
+- `test/harness/infra/db_test.clj` 与 `test/harness/cap/hashline/store_test.clj` 的表清单/列名守卫跟着
+  加了 `session_claims`（这两条守卫就是设计来逼人写清「为什么它是状态不是记录」的）。
+
+**判据没变的那一半**：`running?` 的既有用例（同会话第二条 run 的拒绝）全绿——本票补的是跨进程那一半，
+没有替换它（判断 2）。**UI 一行没动**：非 owner 的页面今天拿到的就是「降级」——它读的是 `rebuild` /
+`sofar`，没有增量；真要发动作会拿到那句 409，落进既有的错误卡。
+
+### 边界（写给票 05/06/07）
+
+- **feed 的终态还没人发**（票 05）：本票给的是缝（token = generation + 「行没了」这个事实），
+  终态那一帧是 feed 自己的事。
+- **`POST /api/project` 里只有「具名改绑」被挡**：`dir` 必填，所以走这条路一定会移动日志；
+  「解除绑定」这条 HTTP 路今天不存在，等它出现时同样要问认领。
+- **`sessions` 表的**其余**写入没有新增第二份**（判断 7）：锚点、待办仍然只存在库里按 thread-id 分家，
+  本票在进程内只多了一个 `:claim` 字符串（token），没有多出任何对话内容。
+
+## 票 05 落地记录（2026-09-23）
+
+**一条 source，三个动词，落在同一个窗口状态上。** 服务端把一场会话当作一条 feed：
+`GET /api/threads/<stem>/feed`（SSE：首帧是窗口或增量，此后每落盘一批推一帧，结束发一帧 `end`）
+与 `GET /api/threads/<stem>/page?beforeSeq=N`（补页，一次一页）。两个动词都由
+`harness.edge.sessions` 里**同一组纯函数**算出来（`tail` / `since` / `before`），所以 `hasMore`
+与 `baseSeq` 只有一处说了算——这是判断 3 的全部内容。
+
+### 接口
+
+- **`harness.edge.sessions`**：注册表条目的 `:entries` 从「消息的向量」变成
+  `[{:seq N :message M}]`（`:seq` 是**记录偏移**，nil = 写者还没落盘）。新增
+  `watch!` / `unwatch!` / `ring!`（一个**只报事实、不报状态**的门铃：`{:kind :entries}` 或
+  `{:kind :gone :reason :put-away|:idle}`）、`generation`（= 票 04 认领的 token）、
+  `messages` / `display` / `drawn` 三种读法、`append!` / `settle!` / `land!`，以及窗口的三个纯函数。
+  `page-size` = **50，是一个判断**（参考实现同数），docstring 里写明了。
+- **`harness.edge.record/append!`**：多一个 4 元版 `[thread-id file line lands]`，在锁**里面**取到
+  这一行落地的偏移、在锁**外面**成功后回调一次。**偏移由写者报告，不由任何人预测**——这是判断 1
+  那句「会话铸号必须与写者落盘一致」的机械保证：没有第二条路径能产生一个序号。
+- **`harness.edge.replay/entries`**：把记录折成 `[{:seq :message}]`，序号就是那一行在文件里的下标
+  （0 起）。`fold-frames` / `rebuild` / `sofar` 都改从它取，`sofar` 与 `rebuild` 因此多一个 `:entries`。
+- **路由**：`thread-verbs` 多两个动词（`feed` / `page`）；`rebuild` 与 `sofar` 对**活着的**会话读内存
+  （`sofar` 只在**没有 run 在跑**时读内存——跑着的时候记录才是权威，见下）；`stats` / `trajectory`
+  仍读记录，但多一个 `:behind`（= `record/pending-count`，为 0 时不出现）。
+- **`live-runs` 那份第二权威没了**：`running?` / `running-run-id` / `register-run!` / `unregister-run!`
+  现在都问 `sessions`，`http.clj` 里的那张表被删掉。
+
+### 五个决定，以及为什么不是另一种
+
+1. **序号 = 记录偏移，而不是内存计数器，也不是写进 jsonl 的新字段。** 三个约束（不改格式 / 可重放 /
+   两套折叠对「第几条」的回答不同）同时成立只有这一个坐标系。代价写在票面上：内存里比记录新的条目
+   还没号，所以 `:seq` 可以是 nil，**而帧可以因此重发**——读者的游标只前进到「已经落盘的最后一个号」，
+   于是同一批条目可能在两帧里各出现一次。这不是缺陷，是 `:seq` 必须诚实：把游标推到一个写者还没确认的
+   号，等于让副本去请求一个**没有任何东西按它编号**的区间。副本按消息 id 去重（票 03 的 `append`
+   本来就要按 id 认账）。
+2. **窗口按「批」切，不按条目切。** 一次 `append!` 落成一条 jsonl 行（票 02），所以一批条目的 `:seq`
+   相同。`tail` / `since` / `before` 都在批的边界上切，于是 `before` **不可能**与读者手上的那页重叠、
+   也不可能漏掉半批。若按条目切，补页会把一批拆成两半，而拆开的那一半与读者已持有的部分谁也不知道
+   边界在哪——这正是「不重叠、不丢」那条验收的全部难点。
+3. **门铃不携带状态（ADR 0003 决策 7）。** watcher 收到 `{:kind :entries}` 只做一件事：
+   把一槽的 `async/chan`（`sliding-buffer 1`）填上。feed 的循环醒来后**从自己的游标重读增量**，
+   不数事件、不记偏移。所以十几个 ring 折成一次重读、一次由 append 触发的 ring 与随后由落盘触发的
+   ring 不会互相丢——「没有轮询」与「不丢唤醒」在这里是同一件事。
+4. **`since` 落在窗口外 ⇒ 409，body 带当前的 `generation` 与 `baseSeq`**（判断 5）：不从头发（会重复）、
+   不静默断（副本会以为到齐了）。**认领易主与放掉会话是同一个事实**（票 04 的 token 就是 generation），
+   所以「窗口作废」只有一条规则。
+5. **`rebuild` / `sofar` 的 live 语义是「读内存」，但有一个例外。** 活着的会话从内存读，**不调**
+   `close-off-open-run!`（那是对**死掉的**会话做的收尾）；冷启动 / 归档 / `evals` 仍读记录。
+   例外是 **有 run 正在跑的时候**：那一刻记录才是权威，因为内存里可能还缺正在写的那些帧的落盘结果，
+   而 `sofar` 的语义是「记录到哪里了」。分岔写进了两个路由的 docstring。
+
+### 踩出来的两个坑（都会重犯，所以写下来）
+
+- **`hk/send!` 的第三个参数不是可选的。** `(hk/send! ch body)` 是「这就是整个响应」：http-kit 会算一个
+  `content-length`、把响应收掉，此后每一帧都被丢掉。症状极具欺骗性——**窗口那一帧正常到达、socket 也
+  开着**，只是再也不推任何东西，而且 `:on-close` 立刻报 `:server-close`。SSE 必须是
+  `(send! ch head false)` 打头、后续 `false`、最后一帧 `true`（`runner` 早就是这三段式，本票照抄）。
+  探针之所以能一眼看出：`AsyncChannel.firstWrite` 里 `close?` 决定 `Content-Length` 还是
+  `Transfer-Encoding: chunked`。
+- **go block 里的异常是静默的**（`http.clj` 里已有一次同名教训）。feed 的循环在 go block 里读增量、
+  发帧，第一版因为上面那条把响应收掉之后 `send!` 抛了，异常进了没人读的 channel **而 watch 被
+  `finally` 摘掉**：表现是「连接还在、门铃还在响、就是没有帧」。所以 feed 的每一处结束都写一行
+  `:feed/stream-closed`（跟着 http-kit 报的状态），这是唯一能事后区分「没人发」与「发不出去」的证据。
+
+### 验证
+
+**后端全量：1042 tests / 12455 assertions / 0 failures / 0 errors**（2026-09-23，本 worktree，exit 0）。
+本票新写的用例：
+
+- `test/harness/edge/sessions_test.clj`（+7 个用例，与票 01 的合计 23 个 95 条断言）：序号从记录自己的
+  行里来（不靠预测）、落盘填号且幂等、窗口按批切、`before` 不重叠不丢、`since` 的边界、
+  门铃只报事实、generation 就是认领 token、settle 把终态与 interrupts 存下来。
+- `test/harness/edge/replay_test.clj`（+3 个用例）：`entries` 的编号——一个动作自己的条目按**它那一行**
+  编号、一个 run 的条目全部按**它的终局行**编号（所以一批一个号）、同一份记录读两次号相同、第二个
+  run 按自己的行而不是第一个 run 的、日志断在 run 中间时那半句按**记录停下的那一行**编号。
+- `test/harness/edge/http_test.clj`（+3 个用例）：300 条消息的会话只拿尾页且 `hasMore` 为真、
+  `beforeSeq` 补页不重叠、坏游标具名 400、**没有会话的冷 stem 从记录读且 `:live false`**、
+  `?since=` 落在窗口外与 generation 不对两种 409（body 带当前值）、**真 socket 打开的 feed**：
+  首帧窗口 → 落盘后**没人再问**也收到一帧（带号）→ `drop!` 之后收到 `{:type "end" :reason "put-away"}`
+  然后 EOF。
+- `test/harness/edge/http_test.clj` 的既有用例改动一条：跑中 `rebuild` 现在是 200 + 读内存 +
+  「记录一个字节没长」。
+
+### 边界（写给票 06/07）
+
+- **走查那一格（没有轮询）留给票 06**：本票只保证服务端推，副本这一半（窗口 `{entries, baseSeq,
+  hasMore, revision}`、「显示更早」、刷新走内存、锚定）是票 06 的活；停在 `sofar` 轮询上的 UI 要到
+  票 06 才拆掉，所以「全程没有 `sofar` 轮询」这条验收在那时才可测。
+- **`stats` / `trajectory` 只加了 `:behind`**，没有做「从内存读同一场会话」的第二份实现：它们读的是
+  记录的聚合（行数、帧数、时长），内存里那份少了落盘这一环，做第二份就是在两个算法之间维护一个
+  必须永远相等的不变量。落后多少由 `:behind` 说出来，界面自己决定要不要等（票 06）。
+
+## 票 06 落地记录（2026-09-23）
+
+**浏览器从「每隔 1200ms 重读一遍记录」变成「手里握着一段窗口」。** 这一票把票 05 那条 feed 接上：
+开窗拉尾页、增量走 feed、更早的打一页、断档时对齐、窗口作废时重开、刷新回同一场看到最新。票 03
+留下的那个轮询（`sofar`）在这里拆掉——除了一个门（见决定 9），页面上再也不问「记录到哪了」。
+
+### 接口
+
+- **`ui/src/lib/window.ts`（新）**：窗口的形状是
+  `{entries, baseSeq, hasMore, cursor, generation, state, revision}`，纯函数 `windowFrom` /
+  `applied` / `prepended` / `aligned` / `aheadOf` / `unseen` / `newest` 就是全部规则；
+  `Effect` 只有四种（`none` / `align` / `reopen` / `rebuilt`），句子是 `WindowNotice`
+  （`reopened` / `rebuilt{dropped}` / `ahead{count}` / `failed{message}`）+ `windowNotice(t, …)`。
+  「什么都没变」时 `applied` **按身份**把原窗口还回去，调用者据此决定要不要 import。
+- **`ui/src/lib/feed.ts`（新）**：`feedThread(id, {since, generation}, handlers)` 拿 `fetch` +
+  `AbortController` 读 SSE（不是 `EventSource`，见决定 7），配一个纯的 `feedFrames(text)`
+  （按空行切帧、丢认不出的、把剩下的还回来给下一次调用）。
+- **`ui/src/lib/window-scroll.ts`（新）**：`measure` / `restoredTop` / `correctedTop` 三行纯算术
+  （用例里测），加 `registerViewport` / `withHeldScroll` 那两件只有真浏览器能验的事。
+- **`ui/src/components/window-top.tsx`（新）**：消息上方那一行——`hasMore` 时才画按钮（补页中
+  禁用）、有一句话时画 `[data-slot="window-notice"]`。
+- **`ui/src/app.tsx`**：`HistoryRead` 从三个读法变成 `none | rebuild | window`（`sofar` 那扇门没了）；
+  `useWindowFeed` 拿窗口、帧、两种修理和补页；票 03 的 `sofar` 轮询 effect 删掉。
+- **`ui/src/components/assistant-ui/elements/thread.aui.tsx`**：viewport 注册给锚点用，
+  `window` 这一行插在骨架与消息之间（补页长在**消息下面**，锚的才是读者在看的内容）。
+- **服务端（票 06 补的）**：`window-frame` 多带 `:state`（读者要知道对面的 run 停了没有）与
+  `:record`（票 02 的降级态跟着窗口一起到）；`live-state` 是那句话的唯一来源；`read-entries` 的
+  两个分支都答 `:state`；`sessions/watched?` 进了 `evictable?`；`replay/record-state` 变公开。
+
+### 五个决定，以及为什么不是另一种
+
+1. **`revision` 是副本自己的计数，不是消息序号**（判断 1）。每次窗口内容真的变了加一，`windowFrom`
+   开窗时置 1；消息的号是 `seq`（记录偏移，票 05），两个名字在这个文件里从头到尾没有混用过。用例专
+   门盯着这一条：一帧什么都不改时，`applied` 返回的是**同一个对象**（身份），`revision` 不动。
+2. **游标只进不退，而且只接受服务端送来的数**（`newest`）。一帧里条目全还在写者队列里时它不带
+   `cursor`，此时旧值照旧——「我已经被告知到哪」这个问题，猜一个数就是让下一次去请求一个没有任何
+   东西按它编号的区间。`applied` 与 `aligned` 都走 `newest`。
+3. **`applied` 的五问顺序就是五种答案**：`end` ⇒ 重开；generation 变了 ⇒ 重开；整窗帧（feed 的首帧、
+   `page` 的 tail 答案）⇒ 交给 `aligned`（能接上就合、接不上就**重建并从尾页重来**，把丢掉的
+   `dropped` 数说出来）；`baseSeq > cursor`（断档）⇒ 拉尾页对齐；否则追加。**整窗帧不能当追加处理**：
+   它说的是「窗口从哪里到哪里」，对副本手里更早的那些一个字都没说，当追加会既丢内容又谎报丢了多少。
+4. **两种处置是两件事，触发条件写下来：** 断档 / 重连 ⇒ `align`（拉尾页，`windowFrom` + `aligned`，
+   **保住读者的位置**）；`end` / generation 作废 ⇒ `reopen`（尾页 + `adopt`，把「重开了」这句话
+   **最后**说——先说的话会被后面那次 `commit` 的清理顺手抹掉）。重连失败不猜：`RECONNECT_MS`（1s）
+   之后再来一次。
+5. **副本超前说得出来**（判断 5）。`aheadOf(before, frame)` 只看「我手里有、seq 落在这一页覆盖的
+   区间里、而这一页没有」的条目——落在页外面的不算（副本可能合法地比尾页更早），没有 id 的也不算。
+   有了就 `setNotice({kind:"ahead"})`，绝不静默丢。服务端那一半（一个窗口一个权威）已经让这种状态
+   在本特征之后不可能出现，这条是保险丝。
+
+### 另外五条，都是被走查逼出来的
+
+6. **锚点是消息的文本，不是它的 DOM 节点。** 第一版拿屏幕上那个元素当锚（`isConnected` 判死活），
+   走查当场证伪：assistant-ui 按**位置**保留消息节点，import 之后本来画「第 3 轮」的那个节点还是第一
+   个孩子、位置几乎没动，里面已经换成了「第一轮」——量到的数是 `top 83 → 49`，而上面多了 4437px，
+   算出来的修正是 0。节点不是消息，文本才是；再加一条索引检查（补页只会把消息往后推，匹配到更靠前
+   的位置说明是另一条说了同样话的消息，宁可不锚也不能锚反几万像素）。
+7. **`EventSource` 换成 `fetch` + `AbortController`。** 两件事 `EventSource` 做不到：它自己重连
+   （重连要带 `since` 和 `generation`，还要按 409 的 body 分辨「窗口作废」），以及它看不见响应状态
+   与 body——窗口作废是一条具名的 409，看不见就只能瞎重连。
+8. **一次只有一页在飞，但「补页中」和「修理中」是两个标记**（不是同一个 loading）。合成一个的两种
+   坏法都真实：读者点「显示更早」会吞掉一次断档修理（窗口就一直落后到下次有事发生），而一次修理
+   会把为旧窗口取回的那一页拼进去（`earlier` 在 await 之后**重查 `baseSeq`** 正是为这个）。
+9. **自己驱动的那一轮只在「没有窗口」的门上读一次 `sofar`。** 有窗口的页面由 feed 报降级
+   （每帧都带 `:record`），再问一次就是每跑一轮一问、说的还是连接已经说过的事；`read: none`
+   （本页刚铸的会话）、`rebuild`（侧栏点开 / 修好的断头记录）这两个门没有连接可听，那一次读留着。
+   走查里 27 轮只看到 **1** 次 `sofar` 请求，就是这一条。
+10. **连着的窗口把会话钉住**（`evictable?` 多一条 `(not (watched? tid))`）。不加的话，一个页面开着
+    超过 30s，会话会被扫地出门 ⇒ 页面收到 `end` ⇒ 重开 ⇒ 再被扫，来回循环。这是「窗口是一条连接」
+    这句话在会话寿命上的代价，用例 `a-session-somebody-is-watching-is-not-put-away` 盯着。
+
+### 踩出来的坑（都会重犯）
+
+- **`:state` 为 nil 的「没新闻」帧**（一次 flake 抓到的）：一轮 run 结束是**两步**——`run-finished!`
+  摘钉子、`settle!` 折完帧并把状态写下来——两步之间 `live-state` 答 `nil`，而 `(not= nil "running")`
+  为真 ⇒ feed 推了一帧「这个会话从来没跑过」。修法是「一帧要有新闻」：有增量就发，只有状态变了才发
+  而且状态必须不是 nil。这一条修完连跑 6 次两套件全绿（修之前 2/6 红）。**第一版修错了**：写成
+  `(and (some? state) (or (seq delta) …))`，把「条目落了但会话还没状态」的帧也吞了 ⇒ 5 个用例红。
+- **React 提交完，布局还没完**：补页之后量到 10729px，200ms 后是 8327px（一轮跑的时候画成展开的
+  回合，import 回来是折叠的）。一次校正必然算错，所以校正分三趟（rAF + 80ms + 160ms），公式幂等
+  （锚点回到原位后，下一趟算出来是 0）。
+- **页面刚铸的会话没有窗口**（`read: none`，本页自己的 run 走 run 自己那条流）⇒ 走查第一场要断言的
+  是「刷新回来才有窗口」，不是「一开场就有 feed」。
+- **测试里没有 DOM**（`renderToStaticMarkup`）：`scrollHeight` 恒为 0，锚定那一格只能靠真浏览器走查，
+  这也正是本票把算术（纯函数，有用例）与接线（走查）分开的原因。
+
+### 验证
+
+**后端全量：1044 tests / 12466 assertions / 0 failures / 0 errors**（2026-09-23，本 worktree，exit 0）。
+`sessions` + `http` 两套 **115 tests / 1100 assertions / 0 failures / 0 errors**，连跑 6 次全绿。
+本票新写的用例：
+
+- `test/harness/edge/sessions_test.clj`（+1）：有窗口连着的会话不被放掉（`evictable?` 的第四个条件）。
+- `test/harness/edge/http_test.clj`（+4）：一页按会话写成的那几批切（`?beforeSeq` 不重叠不丢）；
+  窗口已经不在时 feed **在推任何字节之前**就 409；真 socket 的 feed：首帧窗口 → 落盘后没人再问也
+  收到一帧 → 终态一帧 `end`；**只变了状态的一帧**（一个 run 没说话就结束）带 `:state`、不带条目、
+  游标不动。
+- `ui/test/suites/window.tsx`（新，9 个用例）：追加 / 去重 / 静默帧不改 `revision`；缺口 ⇒ `align`；
+  接不上 ⇒ `rebuilt` 且报 `dropped`；接得上 ⇒ 合并且不丢；`end` / generation / 整窗帧；补页的顺序与
+  `hasMore` / `state`；`aheadOf` 的三种范围规则；`WindowTop` 画不画按钮；两种语言的句子；
+  `feedFrames` 的解析；`measure` / `restoredTop` / `correctedTop` 的算术。
+  `ui/test/ui.test.ts` 的 `EXPECTED_CASES` 从 56 提到 **65**。
+
+**UI**：`npx tsc --noEmit` 干净、`npm test` **65 passed**、`npm run build` 通过。
+
+**走查 GREEN**（`node scripts/dev.mjs --scripted .scratch/sessions-live-on-the-server/evidence/06-go.json
+--ui-port 5226` + `evidence/06-walkthrough.mjs <ui-url> <config-root>`，四个场面）：
+
+1. 新页面（服务端铸 id）→ 跑一轮 → 改一次模型选择。刚铸的会话**没有窗口**（`page 0 / feed 0`），
+   这是对的：没有记录可读，自己那一轮的答案走 run 自己的流。
+2. 刷新回同一场：`GET /page` 的答案是 `{live: true, baseSeq: 0, hasMore: false}`（**走内存**，
+   判断 7），并开一条 feed；模型选择还在。
+3. **第二个页面看着第一个页面跑**（票 05 边界里留给本票的那一格）：它自己一轮都没驱动，
+   全程 `sofar` 请求 **0** 次（断言的就是「没有轮询」），那一轮的内容由 feed 送达；对面那一轮跑完，
+   它一次请求都没多发（`page 0 / feed 0 / sofar 0`）。
+4. 长会话（27 轮，每 5 轮刷新一次直到尾部**前面还有东西**）⇒ 滚到顶、点一次「显示更早」：
+   两次同步点击**只上了一次网**（`page` 请求 +1）、到达的是紧邻的那一页（`baseSeq 31 → 0`）、
+   被读的那条消息从 `83` 挪到 `82.5`（4px 以内）、输入框里打了一半的字还在、截图
+   `evidence/06-window-earlier.png`（读者停在原地，上面多了 4 组）。同期页面的窗口请求计数：
+   `page 7 / feed 6 / sofar 1`（6 次刷新 6 条 feed + 1 次补页；`sofar` 那 1 次就是决定 9 说的那个门）。
+
+验收对照：尾页 + 「显示更早」+ 紧邻（走查 4 与 `a-page-is-cut-at-the-arrivals…`）；`hasMore` 为假
+不画按钮（`WindowTop` 用例 + 走查里补到头的两帧）；连点只有一页在飞（走查 4 的两次同步点击）；
+打字 / 滚动不动（走查 4）；「内存比记录新 ⇒ 刷新看到新的那份」（走查 2 的 `live: true`）；序号缺口
+⇒ 补一页对齐（`window.ts` 的 `align` 用例 + `aligned` 的两种答案）；generation 作废 ⇒ 重开并说出来
+（用例）；副本超前 ⇒ 说出来（`aheadOf` 用例）。
+
+### 边界（写给票 07）
+
+- **跳转（`loadThrough(seq)`）没做**（判断 4）：本票只有「补一页」，从轨迹点跳到某一轮需要一个属于
+  轨迹视图的入口，不在副本自己手里。
+- **窗口只往前长，不裁剪**：一页页补上去的内容一直留着（内存随会话增长），ADR 0003 的窗口管的是
+  **传输与重建的范围**，不是客户端的内存上界。要做裁剪是另一张票。
+- **拿不到锚点文本时退回容器高度算法**：误差是同一瞬间**消息上方**变了多少——实际会发生的是
+  「显示更早」那条控制条在最后一页到位后消失，五十几个像素。
+- **走查里滚到顶用的是真滚轮**（`mouse.wheel`）：程序化 `scrollTo(0)` 会被 assistant-ui 的
+  「贴着最新」吃掉（量过：scrollTop 又回到 6225），而滚轮正是它认为「读者自己动了」的信号。
+
+## 票 07 落地记录（2026-09-23）
+
+**这一票是扇入点：01–06 落地之后，仓库里关于「会话归谁」「历史从哪来」「记录是什么」的每一处说法才
+真的过时到可以一次改对。** 改了 5 篇文档 + 术语表 + 8 处代码 docstring，README 一个字没动。
+
+### 两条铁律的新说法
+
+**铁律 1**（照 ADR 0002 决策 10 逐字）：**「run 中不读自己的日志（内存里就有）。日志只 append、异步写、
+允许落后，且永远是会话的有序前缀。日志是恢复源；运行时的真相在内存。」** 旧措辞那句推论
+**「写不进去就发不出去」删掉了**（它随同步写一起废掉），换成的说法是：写不进去**不许静默**——那个会话
+进降级态，`sofar` / `rebuild` 带上 `:record`，界面上是一根常驻的条。
+
+**铁律 3 反过来**：从「客户端持有会话，服务端不建会话状态权威」改成**「会话归服务端；浏览器是只读副本，
+只发动作」**。同时把它真正想保的那件事换个说法留着：**服务端不记谁在订阅**（ADR 0003 决策 7）——
+游标随连接走（`since=<读者的游标>`），除了活着的连接进程里没有任何「谁订了什么」的表。写下来的边界句是
+**「这一条反过来的是『谁持有会话』，不是『服务端不推送』——feed 就是推的」**（票 05 落地时那句
+「副本自播 + 对账，不是推送」按这条改了）。
+
+**状态表**：`会话消息` 那一行从「**客户端**（+ jsonl 记录）」改成「**服务端内存**（会话表；jsonl 是恢复源）」；
+**新加一行**「**窗口**（`entries` / `baseSeq` / `hasMore` / `cursor` / generation）——**连接与浏览器**，
+一条 feed 一条连接，服务端不记谁订了什么」；`system 消息里 hook 追加的那部分` 那行照核，**注入物不是
+会话的一部分**这条结论不变（理由换了：它是每轮现算的**派生文本**，不是那场对话说过的话）。
+
+### 五篇文档 + 术语表
+
+- `overview.md`：铁律 1 / 3、状态表两行 + 新一行；顺手把那张路径图上还写着 `POST /` + `messages` 的两行
+  改成 `POST /api/agent {threadId, append, context, resume?}` 与「入站 = 这场对话 + 这次动作的 `append`」
+  （图上那句「开场块拼在客户端消息之后、每轮 context 仍变尾随 user 消息」是旧模型的**两半都错**，见坑 4）。
+- `edge.md`：路由表补齐 `feed` / `page` / `trajectory` 三行、改写 `rebuild` / `sofar` / `stats`；
+  新增 `### 窗口：feed 与 page`——三个动词由同一组纯函数算、切在**批**的边界、`page-size` = 50 是一个判断；
+  五种帧各是什么；**两条拒绝在推任何字节之前** 409 且 body 带当前值；一条 feed 一条连接（连接就是游标）；
+  连上是一条**动作**（出生 + 认领）；连着的窗口把会话钉住不被空闲扫除；活会话从内存读、死掉的从记录读。
+- `client.md`：「状态的归属」重写（会话归服务端、手里是**一段窗口**、`revision` 与 `seq` 不是一回事、
+  三扇门两种读法、打开 = 拉尾页 + feed、两种修理、锚定、降级由 feed 每帧的 `:record` 说）；补上 `lib/`
+  地图里缺的**六个模块**（`window.ts` / `feed.ts` / `window-scroll.ts` / `record-health.ts` /
+  `session-memory.ts` / `agent.ts`，前三份正是新写的段落引用的）；测试那节的套件清单补 `record` / `window`。
+- `kernel.md`：交给内核的那份向量是**已经拼好的**（system → 会话的历史 + 这次动作的 `append` → 开场块 →
+  会话自己的注入）；**一轮 run 的输入是动作**（`messages` 具名 400）；`:run/done` 的尾巴逐条落 `message`
+  行，而会话在**终帧**那一刻先折进内存（`sessions/settle!`），下一次 run 从会话取。
+- `skills-and-instructions.md`：`技能正文是派生的` 那一节的推导重写（会话确实归服务端了，但**注入物不进
+  对话**——它是每轮现算的派生文本；折进去就是冻结）；`/name` 留在原地的理由换成真的那个（它是「被人要求
+  加载」在对话里**唯一**的痕迹）；「看得见但仍然不是会话的一部分」改成「卡是给屏幕的，对话里没有它」；
+  顺序句与形状图按上一条改（删掉「每轮请求携带的 context」那一行、`客户端带来的会话消息` → `这场会话的
+  消息`）。**标题一个字没动**（`edge.md` 链接的是那个锚点）。
+- `CONTEXT.md`：「会话」词条改成**服务端持有**的一段对话（内存是权威、记录是恢复源、记录路径也从
+  `logs/<id>.jsonl` 改成 `projects/<workspace>/<thread>.jsonl`——那个路径跟着 home 那次搬家早就变了）；
+  **新增五个承重名词**：**窗口** / **尾页** / **补页** / **feed** / **generation**，每个都带「别叫成」
+  那半（尤其是「`revision` 别当成序号」这条最容易犯的错）。
+
+### 代码里还说着旧模型的地方（一并改掉）
+
+文档不是唯一过时的地方：**8 处 docstring / 注释**都还以「客户端持有对话」为前提。按名字搜过一遍，
+逐句核过（不是「大意一致」）：
+
+- `src/harness/cap/preamble.clj` 的 `messages`：说技能清单「still ahead of the conversation」——与运行时
+  **相反**（`tail-blocks` 拼在对话**之后**）。
+- `src/harness/cap/skills.clj` 的 `derived-injections`（两处）：前提写成「the CLIENT owns the conversation
+  and the server is stateless per run」。结论（派生、幂等、同名一份）不变，理由换成「会话归服务端，但注入物
+  不进对话」。
+- `src/harness/edge/ag_ui.clj` 的 `tail-blocks`：「the conversation the client re-states every turn」。
+- `src/harness/kernel/loop.clj`：`unanswerable-call-message` 里「a client-side history bug」。
+- `src/harness/kernel/llm.clj`：一份缺 `reasoning_content` 的历史「the client sent it back」。
+- `src/harness/edge/http.clj`：`thread-verbs` 的「THREE OF THE FIVE ARE GETS」（七个动词、五个 GET）；
+  `log-file-for` 的「an id the client owns」。
+- `ui/src/app.tsx`：两处注释（`running` 说成「读自 `GET …/sofar`」；恢复那扇门说成「`sofar` 而不是
+  `rebuild`」，而代码早已是 `show(pending, "window")`）。
+
+### 踩出来的坑
+
+1. **「改一次模型」这条验收，第一版是假绿的。** `--scripted` 的模型选择器列的是**模型目录**，而脚本替身
+   （`seeded`）不在目录里，所以第一项是 `seeded not in the catalog`——它就是「重选当前值」。走查按
+   「挑一个不等于当前值的」点下去，点中的正是它，值没变而那一行照样打出来：**断言必须盯值，不能盯动作**。
+   现在挑一个真的目录模型（`deepseek-flash`）并断言变更真的发生。
+2. **改回去没有 UI 的路。** 一旦会话选了一个目录模型，那个「not in the catalog」条目就消失了——选择器里
+   **没有**「回到 config.edn」的入口。后面几场还要跑 run（在目录模型上会去一个这台机器没有 key 的厂商），
+   所以走查用同一条路由的 `POST /api/model {clear: true}` 退回替身，并读一次 `GET /api/model` 证明它真的
+   回去了。（这个入口的缺席是个产品观察，记在这里，不在本票的范围内。）
+3. **第二个页面的 localStorage 有 race。** `browser.newPage()` 给每一页**一个新 context**，所以「先打开
+   （应用铸一场会话并把它写进 localStorage），再手写 key，再 reload」——**铸那一场的写可能落在手写之后**，
+   于是 reload 回到的是一分钟前刚铸、**没有记录**的那一场：`read: none` ⇒ 一个请求都不发。症状是最容易被
+   误读的那一种：**「feed 没有把对面那一轮的答案带过来」**（`watch(mine)` 那边一次 RED）。修法是
+   `newContext()` + `addInitScript`，在页面的任何脚本之前写 key——没有那个窗口。
+4. **「客户端消息之后」这句话坏在两个地方**：位置（块拼在对话**之后**）与 `context`（出生的那一条已经在
+   对话里，不再每轮出现）。铁律、状态表、术语表、四篇文档都改到了，`overview.md` 的那个路径图与
+   `edge.md` 的 4-arity 那段是最初各留下一次的。
+5. **`skills-and-instructions.md` 的 prefill 那句本来就不准**：它说注入物「本来就在前缀之外」、
+   挪动「前缀长度一模一样」——实际相反，前缀**变长了**（从前注入物夹在 system 与对话之间，前缀到那里就
+   断，一加载技能就把它后面整段对话一起作废）。按 `tail-blocks` 的实际论证重写。
+6. **README 一个字没加**（四节铁律 + 本票验收「README diff 为空」）。README 里那句「下一轮请求里没有它
+   （客户端不回发）」的**结论**仍然成立，机制说法旧了——按铁律不动，记在这里。
+
+### 验证
+
+- **后端全量：1044 tests / 12466 assertions / 0 failures / 0 errors**（exit 0，2026-09-23）。
+- **UI：65 cases 全绿**，`npx tsc --noEmit` 干净，`npm run build` 通过。
+- **真浏览器走查 GREEN**（`evidence/06-go.json` + `evidence/06-walkthrough.mjs`，四个场面）：新会话
+  （本页刚铸 ⇒ 没有窗口，`page 0 / feed 0` 是对的）；**一轮里改一次模型**（`seeded → deepseek-flash`，
+  断言真的变了）→ 刷新 → **还在同一场、那个选择还在**（`GET /page` 答 `{live: true}`，走内存）→ 用
+  `clear: true` 退回替身并读回来；第二个页面看着对面跑（它自己一轮没驱动，**0 次 `sofar`**）；长会话点
+  「显示更早」（两次同步点击只上了一次网、到达紧邻的那一页、被读的那条消息 `83 → 83`、打了一半的字还在、
+  截图 `06-window-earlier.png`）。
+- 按名字搜过一遍：「客户端持有会话」「服务端不存会话」「对话归客户端所有」「客户端不回发」
+  「客户端消息之后」在 `docs/`、`CONTEXT.md`、`src/`、`ui/src/` 里只剩 `docs/adr/0002` 里那两处
+  ——**ADR 是当时的决策记录**，本票按约定不改旧记录（对照写在本 spec 的跨特征那一节）。
+- 01 与 02 的票面文件已按 `docs/agents/issue-tracker.md` 折进本文件、并从 `issues/` 删掉。
+
+## 2026-09-22 补记：收口漏掉的旧模型句子
+
+上面那轮「按名字搜过一遍」**词选窄了**：搜的是「客户端持有会话」，而漏掉的那些句子写的是
+「会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录」——同一个意思，另一个说法；
+「服务端每轮现收现算」压根不在那张词表里。主人一眼看见的就是 README 开头那一句。
+
+这一次按**意思**扫了开头与「谁持有 / 谁权威 / 谁重发」那类断言，逐句改掉：
+
+- `README.md` 的介绍、`docs/architecture.md` 的「系统一句话」、`CONTEXT.md` 的开头：会话归服务端
+  （内存是权威、记录是恢复源）、浏览器手里是一段窗口；顺带把「唯一对外接口 / 协议是 AG-UI」改成
+  「跑一轮的接口是 AG-UI（`POST /api/agent`），其余 `/api/*` 是管理边」——管理边早就不止一条，
+  「极简内核 + 一个接口」那套说法是合并前的话。
+- `home-and-storage.md`：「**重建 = 交还，不是接管**（服务端不因此成为会话状态权威）」——正好相反，
+  改写并留日期注；`todos` 那节「而对话是客户端手里的东西」；标题那节「那次 run 的 input 带着整段历史」
+  （现在是服务端把会话自己的消息 + 这次动作的 `append` 交给 `first-user-text`）。
+- `client.md`：2 MB 那段「客户端每一轮把整段历史重发」（现在是 `append`，图留在会话里、每次模型调用
+  再送一遍）；状态条那行「客户端确实持有 conversation」。
+- `providers.md`：思考模式那节「下一轮的历史来自客户端」。
+- 两张状态表补上后来进库的两样：任务清单（`todos`）与认领（`session_claims`）。
+
+**留给下一次**：这类收口别只按自己写下的词去搜——**换个说法就漏**。搜的应该是那些**断言本身**
+（谁持有、谁是权威、谁在重发），不是当初写它的那几个字。

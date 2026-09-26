@@ -58,7 +58,7 @@
   ([thread-id] (mapv #(get-in % [:function :name]) (tools/specs thread-id))))
 
 (def ^:private anchor-tools
-  #{"replace" "insert" "anchor_grep" "undo_last_replace"})
+  #{"replace" "insert" "grep" "undo_last_replace"})
 
 (def ^:private str-replace-tools
   #{"edit"})
@@ -94,9 +94,9 @@
   ;; THE FLIP, pinned. Ticket 12 moved the default from the exact-string editor to
   ;; anchor editing, and this is the assertion that would move first if somebody
   ;; changed it back by accident -- or changed it to something that is neither.
-  (is (= ["anchor_grep" "bash" "eval" "glob" "insert" "job" "job_kill" "read"
-          "replace" "session-configure" "skill" "todo_write" "undo_last_replace"
-          "web_fetch" "web_search" "write"]
+  (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_list"
+          "job_output" "read" "replace" "skill" "todo_read" "todo_write"
+          "undo_last_replace" "web_fetch" "web_search" "write"]
          (spec-names nil))
       "an unconfigured process is served the anchor toolset")
   (testing "and a thread with no project file is served the same"
@@ -171,8 +171,8 @@
   (let [names (spec-names "emt-anchor")]
     (is (not (contains? (set names) "edit")))
     (testing "and everything that is not an editing tool is untouched"
-      (is (= ["bash" "eval" "glob" "job" "job_kill" "read" "session-configure"
-             "skill" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "job_list" "job_output" "read"
+              "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-anchor"))))))
 
 (deftest str-replace-mode-does-not-serve-the-anchor-tools
@@ -186,8 +186,8 @@
     (testing "and `edit` does"
       (is (contains? (set names) "edit")))
     (testing "with everything else untouched"
-      (is (= ["bash" "eval" "glob" "job" "job_kill" "read" "session-configure"
-             "skill" "todo_write" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "eval" "glob" "job" "job_kill" "job_list" "job_output" "read"
+              "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
              (non-editing-names "emt-strrep"))))))
 
 (deftest a-session-added-tool-is-served-by-the-filter-not-by-the-mode
@@ -197,10 +197,10 @@
   ;; mode and withheld in string mode, with no code anywhere that knows about it.
   (let [ran (atom [])]
     (set-mode! "emt-standin" root ":hashline")
-    (tools/session-register! "emt-standin" "anchor_grep" (stub ran))
-    (is (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+    (tools/session-register! "emt-standin" "grep" (stub ran))
+    (is (contains? (set (spec-names "emt-standin")) "grep"))
     (set-mode! "emt-standin" root ":str-replace")
-    (is (not (contains? (set (spec-names "emt-standin")) "anchor_grep"))
+    (is (not (contains? (set (spec-names "emt-standin")) "grep"))
         "the mode subtracts it by name, having no idea what it is")))
 
 (deftest the-mode-sees-every-registered-tool-even-the-ones-it-does-not-serve

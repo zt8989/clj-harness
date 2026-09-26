@@ -26,14 +26,19 @@
 // Tool cards start CLOSED and open only when clicked -- the content is never on
 // screen until somebody asks for it.
 //
-// A THOUGHT IS THE ONE EXCEPTION, and it is the reader's own request: while its
-// tokens stream, the disclosure opens itself and shows the thinking as it
-// arrives. A row whose label is the thought's first line stops moving a second
-// in, and the thing worth watching is the thought itself. It is upstream's
-// behaviour (`streaming`), kept for upstream's reason -- the live window follows
-// the newest token, and the panel folds itself when the thought ends -- with this
-// repo's row around it. See `ReasoningBlock` for what it costs and what it does
-// not change.
+// NOTHING OPENS ITSELF: the reader's click is the only thing that does. A
+// THOUGHT IS THE ONE PART THAT SHOWS WHILE IT IS STILL BEING WRITTEN, and it
+// shows on its own ROW -- the row says the newest window of the thought and
+// gives back the first line when the thought ends. It used to open the
+// disclosure instead (upstream's `streaming`, whose rule is
+// `userOpen ?? streaming`), and that is what this repo undid: a panel that
+// unfolds itself ONCE PER THOUGHT -- a turn that thinks, reads and thinks again
+// opens it twice -- moves the transcript under a reader who is looking at
+// something else, in a column whose whole point is that its steps are listed
+// rather than unfolded. The live WINDOW stays upstream's (`max-h-64`, the fades,
+// the follow-the-newest-token scroll) and a reader who asks for it mid-run still
+// gets it; what is gone is it opening by itself. See `ReasoningBlock` below and
+// `lib/reasoning-preview.ts` for the row's words.
 //
 // The "still working" signal is on the collapsed ROW as well, not only in the
 // panel: a spinning mark at its end for a tool call, a shimmering label for
@@ -70,6 +75,34 @@
 // (see `ReasoningTrigger` below). The disclosure SHELL is still the copied kit's:
 // the scroll lock, the fades and the animation are not ours to re-derive.
 //
+// ------------------------------------------------- and one call that opens a door
+//
+// `agent` IS THE ONE CALL THAT IS NOT ONLY A ROW. A delegation is a whole other
+// conversation happening because of this line, and the line is the only place in the
+// transcript that knows it: the record's own pairing (`toolCallId` -> the child
+// session, ticket 03 of `.scratch/subagent-view`) is read once per parent session by
+// `lib/delegations.ts`, and a call it names gets a DOOR beside its subject -- the
+// right-hand mirror opens on the child's conversation (ticket 05).
+//
+// WHY THE FALLBACK GREW A CONTROLLED EXCEPTION INSTEAD OF A NAMED RENDERER, which is
+// the shape question ticket 04 left open. This file registers exactly one renderer
+// (see the head of `THREAD_COMPONENTS`), and the property that buys is the one
+// `subjectOf`'s own comment states: a tool nobody has taught this page about still
+// appears, with its name and its first string argument. A registered `agent` renderer
+// would take that call out of the fallback and re-draw the trigger, the arguments, the
+// result and the two parked-call cards -- five things that must look the same as every
+// other call's, duplicated so that one of them can carry a button. So the exception is
+// inside the fallback, it is two lines of it, and it asks the same two questions any
+// renderer would (`is this call a delegation?`, `is there a panel to open?`).
+//
+// THE DOOR IS INSIDE THE ROW RATHER THAN BEING THE ROW. The row's own click belongs to
+// the disclosure -- it opens the arguments and the result, which is how a person checks
+// what a subagent was actually handed -- so a row that also opened a panel would be one
+// click doing two things, or a card whose arguments could no longer be reached. The
+// subject gains the door: a control with the hover, pointer and underline of a control,
+// drawn ONLY when it can be walked through (an old record with no `delegation` row, or a
+// page with no panel, gets the plain subject it has always had).
+//
 // The tool group draws nothing, and that is the whole of it: a run of tool calls
 // is a run of ROWS, one per call. It used to carry a header -- "N tool calls" --
 // and the count was never anything but 1. `groupPartByType` groups tool calls
@@ -103,7 +136,15 @@
 // reasoning -- the shell only: `ReasoningRoot` / `ReasoningContent` /
 // `ReasoningText`. The group's own pieces are no longer imported at all: the
 // slot draws nothing.
-import { type ElementType, type FC, type PropsWithChildren } from "react";
+import {
+  type ElementType,
+  type FC,
+  type PropsWithChildren,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertCircleIcon,
   BetweenHorizontalStartIcon,
@@ -114,12 +155,12 @@ import {
   FileTextIcon,
   FolderSearchIcon,
   GlobeIcon,
+  HourglassIcon,
   ListTodoIcon,
   LoaderIcon,
   PencilIcon,
   ReplaceIcon,
   SearchIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
   SquareTerminalIcon,
   TelescopeIcon,
@@ -131,7 +172,6 @@ import { useAgUiInterrupts } from "@assistant-ui/react-ag-ui";
 import {
   useAuiState,
   useToolCallElapsed,
-  type PartState,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
@@ -144,7 +184,8 @@ import {
   isApprovalInterrupt,
   isElicitationInterrupt,
 } from "@/components/approval-gate";
-import { ComposerAttachButton, ComposerFrame, ComposerTools } from "@/components/composer-chrome";
+import { ComposerAttachButton, ComposerFrame, ComposerTools, ThreadIdContext } from "@/components/composer-chrome";
+import { useOpenSubagentView } from "@/components/subagent-view-context";
 import {
   ReasoningContent,
   ReasoningRoot,
@@ -160,7 +201,9 @@ import {
   ToolFallbackRoot,
 } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { CollapsibleTrigger } from "@/components/ui/collapsible";
+import { useDelegations } from "@/lib/delegations";
 import { formatMillis } from "@/lib/format";
+import { firstLine, previewOf, tailStart, thoughtAt } from "@/lib/reasoning-preview";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -256,12 +299,22 @@ const TOOL_ICONS: Record<string, ElementType> = {
   replace: ReplaceIcon,
   insert: BetweenHorizontalStartIcon,
   undo_last_replace: Undo2Icon,
-  anchor_grep: SearchIcon,
+  grep: SearchIcon,
   glob: FolderSearchIcon,
   bash: SquareTerminalIcon,
+  // THE JOB FAMILY CARRIES ONE HAND: `job` starts, `job_output` reads, `job_kill` stops,
+  // `job_list` lists. They are four names for one subject -- a command nobody is waiting for --
+  // and their rows appear together (a listing is read, then one of its ids is addressed), so
+  // four different icons would read as four unrelated tools. They had NO entry at all until
+  // `job_list` arrived (`WrenchIcon`'s fallback said 'the page does not know this tool' about
+  // tools the backend has had for months), and half a family would be the worse half-measure.
+  job: HourglassIcon,
+  job_kill: HourglassIcon,
+  job_list: HourglassIcon,
+  job_output: HourglassIcon,
   eval: BracesIcon,
   skill: SparklesIcon,
-  "session-configure": SlidersHorizontalIcon,
+  todo_read: ListTodoIcon,
   todo_write: ListTodoIcon,
   web_fetch: GlobeIcon,
   web_search: TelescopeIcon,
@@ -312,16 +365,6 @@ function lineCount(args: Args, key: string): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
-/// The first line that is not blank, trimmed. Models open a thought -- and often
-/// a command -- with a newline, and "the first line" would then be nothing.
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed !== "") return trimmed;
-  }
-  return "";
-}
-
 /// What this call is about, in one line.
 ///
 /// The tool names this table knows are the ones `docs/architecture/client.md`
@@ -367,23 +410,29 @@ function subjectOf(toolName: string, args: Args, t: Translate): string | null {
       const direction = stringArg(args, "direction") ?? "after";
       return `${direction} ${anchor} · ${t("subject.lines", { count: lineCount(args, "lines") })}`;
     }
-    case "anchor_grep":
+    case "grep":
       return stringArg(args, "pattern") ?? null;
     case "bash":
       return firstLine(stringArg(args, "command") ?? "") || null;
     case "eval":
       return firstLine(stringArg(args, "code") ?? "") || null;
+    case "agent": {
+      // WHICH SUBAGENT, AND WHAT IT WAS ASKED -- the two things this call is about,
+      // in that order. The name goes first because the row already reads
+      // `agent · <subject>`, so the sentence is `agent · explore · find every ns that
+      // deps.edn needs`, and a reader sees who is working before what it is doing.
+      //
+      // WITHOUT THIS ARM THE ROW WOULD LIE BY OMISSION: the default answers the first
+      // string argument, which for this tool is the TASK -- so the row would read
+      // `agent · find every ns that deps.edn needs`, with nothing saying which
+      // subagent was picked, and the task (often a paragraph) would be the subject.
+      const name = stringArg(args, "name");
+      const task = firstLine(stringArg(args, "prompt") ?? "");
+      if (name === undefined) return task || null;
+      return task === "" ? name : `${name} · ${task}`;
+    }
     case "skill":
       return stringArg(args, "name") ?? null;
-    case "session-configure":
-      return (
-        ["provider", "model", "reasoning-effort"]
-          .flatMap((key) => {
-            const value = stringArg(args, key);
-            return value === undefined ? [] : [`${key}=${value}`];
-          })
-          .join(" ") || null
-      );
     case "glob": {
       const pattern = stringArg(args, "pattern");
       if (pattern === undefined) return null;
@@ -440,7 +489,12 @@ const ToolCallTrigger: FC<{
   toolName: string;
   state: CallState;
   subject: string | null;
-}> = ({ toolName, state, subject }) => {
+  /// WHAT THE SUBJECT'S DOOR DOES, when this call has one (see the head comment: only
+  /// a call the record names as a delegation, on a page that has a panel). Absent --
+  /// the ordinary case for every tool, and for a delegation nobody can follow -- means
+  /// the subject is plain text, and nothing about the row says otherwise.
+  onOpen?: (() => void) | undefined;
+}> = ({ toolName, state, subject, onOpen }) => {
   const elapsedMs = useToolCallElapsed();
   const { t } = useTranslation("thread");
   // The elapsed time's words come from the `format` face, because `formatMillis` is
@@ -476,7 +530,30 @@ const ToolCallTrigger: FC<{
             className="aui-tool-call-trigger-subject"
           >
             {" · "}
-            {subject}
+            {onOpen === undefined ? (
+              subject
+            ) : (
+              // THE DOOR. A `<button>`, so it is reachable by keyboard and named for a
+              // screen reader; `stopPropagation` because the row's own click is the
+              // disclosure's (the head comment argues why the door is inside the row);
+              // and `underline-offset` + `group-hover/door` so "it looks clickable"
+              // and "it is clickable" are the same statement. The underline is always
+              // on for a hovered/focused door and never on for a subject with no
+              // `onOpen`, which is the ticket's rule about not drawing a promise the
+              // card cannot keep.
+              <button
+                type="button"
+                data-slot="tool-call-trigger-door"
+                title={t("subject.openSubagent")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpen();
+                }}
+                className="aui-tool-call-trigger-door hover:text-foreground focus-visible:text-foreground cursor-pointer underline decoration-dotted underline-offset-4"
+              >
+                {subject}
+              </button>
+            )}
           </span>
         )}
       </span>
@@ -672,6 +749,36 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   const parsedArgs = parseArgs(argsText);
   const subject = parsedArgs === null ? null : subjectOf(toolName, parsedArgs, t);
 
+  // THE CARD THAT OPENS A MIRROR (the head comment has the whole argument). The
+  // parent's own id comes from the composer's context -- the same value the composer's
+  // chrome uses to know which session it is configuring -- and the pairing is the
+  // `toolCallId` the wire put on this part, never a position in the transcript: two
+  // delegations can be in flight at once, and "the second one in this conversation"
+  // would pick the wrong child for one of them.
+  //
+  // THE READ IS SHARED (`lib/delegations.ts`: one request per parent, and every card
+  // told) and it does NOT wait for the call's result: a delegation is worth opening
+  // while it runs, which is the moment there is no result yet -- and the row that
+  // pairs this card with a child is written a moment AFTER the card is drawn, which
+  // is why the hook is handed `settled` and retries a few times. That module's header
+  // has the whole of it; what matters here is that the door can appear while the
+  // subagent is still working, which is the only thing this panel is for.
+  const parentThreadId = useContext(ThreadIdContext);
+  // ASKED ONLY FOR A CALL OF THIS TOOL (`null` for every other row): the request is
+  // about delegations, and a conversation that has none should not send it because a
+  // card happened to render.
+  const delegations = useDelegations(
+    parentThreadId,
+    toolName === "agent" ? toolCallId : null,
+    settled,
+  );
+  const openView = useOpenSubagentView();
+  const delegation = toolName === "agent" ? delegations.get(toolCallId) : undefined;
+  const openMirror =
+    delegation !== undefined && openView !== null
+      ? () => openView({ threadId: delegation.threadId, subagent: delegation.subagent })
+      : undefined;
+
   return (
     <>
       {/* Uncontrolled, and `defaultOpen` stays at its default of false: this is
@@ -681,7 +788,12 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
           decision it is waiting for is a block of its own underneath (below),
           drawn at full width so it cannot be missed. */}
       <ToolFallbackRoot>
-        <ToolCallTrigger toolName={toolName} state={state} subject={subject} />
+        <ToolCallTrigger
+          toolName={toolName}
+          state={state}
+          subject={subject}
+          onOpen={openMirror}
+        />
         <ToolFallbackContent>
           <ToolFallbackError status={status} />
           <ToolCallArgs argsText={argsText} />
@@ -755,8 +867,8 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 //
 // Reasoning is drawn as a ROW, and it is deliberately the same row a tool call
 // is drawn as: an icon, a bold name, the subject this step is about, `py-1.5
-// text-[13px]`, revealed by a click -- or, while the thought is still arriving,
-// by the thought itself. Upstream's reasoning is a CARD -- `ReasoningRoot`'s
+// text-[13px]`, revealed by a click and by nothing else -- a thought that is
+// still arriving included. Upstream's reasoning is a CARD -- `ReasoningRoot`'s
 // default variant is `outline`, i.e. `rounded-lg border px-3 py-2` -- and this
 // repo does not want a second visual species in one transcript: the things a turn
 // did (thought, read, thought, ran) are a list of steps, and a step that is boxed
@@ -779,53 +891,29 @@ const FlatToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
 // card: the row says "still going" while the work is going, and stops when it
 // stops.
 //
-// The row carries the FIRST LINE of the thought, for the same reason a tool row
-// carries its subject: a step whose content is invisible until clicked makes the
-// reader click to find out whether they needed to. The label is this row's own
+// The row carries the SUBJECT of the thought -- its first line once it has
+// stopped, its newest window while it is still arriving -- for the same reason a
+// tool row carries its subject: a step whose content is invisible until clicked
+// makes the reader click to find out whether they needed to. The label is this
+// row's own
 // word and it lives in the `thread` catalog (`思考` / `Thinking`), so each language
 // has its own -- it was once the one Chinese label in an English transcript, and
 // moving this face's words into the catalog is what stopped that being true. The
 // tool names stay literal (`read`, `bash`): they are the model's vocabulary, and
 // translating them would break the correspondence with the arguments panel.
 
-/// How much of a thought the row shows before the CSS ellipsis takes over.
+// The row's WORDS are `lib/reasoning-preview.ts`: the first line at rest, the
+// newest window of a live thought, and the 120-character bound both halves are
+// held to. They live in that module rather than here because a suite can call
+// them; what the row LOOKS like is the browser walkthrough's half
+// (`.scratch/thinking-row-tail/`).
 ///
-/// The clip is not only cosmetic. The preview is a STRING (see `previewOf`), and
-/// `useAuiState` compares what a selector returns BY VALUE -- so once the first
-/// line has reached this many characters, the row stops re-rendering on every
-/// token of a thought that is still arriving. Handing the row the whole text and
-/// letting CSS do all the cutting would keep that subscription alive for the
-/// length of the stream.
-const PREVIEW_LIMIT = 120;
-
-function clip(text: string): string {
-  return text.length > PREVIEW_LIMIT
-    ? `${text.slice(0, PREVIEW_LIMIT).trimEnd()}…`
-    : text;
-}
-
-/// The first line of a reasoning group's thinking, or "".
-///
-/// The group knows which parts it covers (`indices`) and the row knows nothing
-/// else, so the parts are read from the message state here. A group can hold
-/// several parts; the first one WITH a non-blank line wins, because joining them
-/// would put a seam in the middle of a sentence.
-///
-/// This returns a string rather than the parts for the reason `PREVIEW_LIMIT`
-/// gives: the caller is `useAuiState`, and a string it can compare by value is
-/// what keeps the row from re-rendering per token.
-function previewOf(
-  parts: readonly PartState[],
-  indices: readonly number[],
-): string {
-  for (const index of indices) {
-    const part = parts[index];
-    if (part?.type !== "reasoning") continue;
-    const line = firstLine(part.text);
-    if (line !== "") return clip(line);
-  }
-  return "";
-}
+/// The row's subject is drawn in TWO shapes, and which one is the same question
+/// as whether the thought is still arriving. A thought that has stopped is a plain
+/// string -- the row's own `truncate` cuts it and the `…` is the module's. A live
+/// one is `ReasoningTail` below: the same one line, inside a window that keeps its
+/// END in view, so characters leave at the left edge while the new ones arrive at
+/// the right one.
 
 const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   active,
@@ -845,19 +933,34 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
       />
       <span
         data-slot="reasoning-trigger-label"
-        className={cn(
-          "aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none",
-          active && "shimmer motion-reduce:animate-none",
-        )}
+        // THE SHIMMER IS NOT ON THIS SPAN ANY MORE, and that is a bug fix with
+        // pixels behind it. `shimmer` (tw-shimmer) paints text THROUGH A MASK --
+        // `-webkit-mask-clip: text`, the glyphs are the mask -- and that mask is
+        // taken from the text's LAYOUT. The live line is drawn somewhere else (the
+        // drag is a transform), so everything the window moves is masked away.
+        // Measured on one row: the shimmer on this span cuts its ink from 1097
+        // pixels to 583 at rest, and while a thought is arriving the row was
+        // BLANK -- which is what a reader saw (空白 while it thinks, 思考 · 首行 the
+        // instant it stops, i.e. once the tail is gone and the mask lines up
+        // again). On the NAME alone it keeps the whole of its signal and costs the
+        // line nothing (1032 of those 1097 pixels).
+        className="aui-reasoning-trigger-label min-w-0 flex-1 truncate text-start leading-none"
       >
-        <b className="aui-reasoning-trigger-name">{t("reasoning.label")}</b>
+        <b
+          className={cn(
+            "aui-reasoning-trigger-name",
+            active && "shimmer motion-reduce:animate-none",
+          )}
+        >
+          {t("reasoning.label")}
+        </b>
         {preview !== "" && (
           <span
             data-slot="reasoning-trigger-subject"
             className="aui-reasoning-trigger-subject"
           >
             {" · "}
-            {preview}
+            {active ? <ReasoningTail text={preview} /> : preview}
           </span>
         )}
       </span>
@@ -865,36 +968,219 @@ const ReasoningTrigger: FC<{ active: boolean; preview: string }> = ({
   );
 };
 
-/// A run of adjacent reasoning parts, behind one row that is folded unless the
-/// thought is still arriving.
+/// The live window: the newest part of a thought, kept in view and sliding left
+/// as it arrives -- characters leave at the LEFT edge while the new ones arrive at
+/// the right one.
 ///
-/// `streaming` is what does that, and it is read off the GROUP rather than off the
-/// message: `group.status` runs while any part the group covers is running, so the
-/// panel follows the THOUGHT and not the run -- a turn that thinks, reads and then
-/// thinks again opens for the first thought, folds, and opens again for the next
-/// one. When the last token lands the panel folds itself and the row is left
-/// saying the first line, which is what a thought that never streamed says too. A
-/// restored conversation is never streaming, so history arrives folded.
+/// WHY THE MOTION IS A TRANSFORM. The window shows a line's worth of a thought and
+/// the thought is longer, so something has to move; the question is WHAT moves it.
+/// Moving the text by LAYOUT -- which is all a left-edge clip does -- happens
+/// inside one frame: the browser draws position A and then position B, and a reader
+/// sees a snap per token (the first cut of this shipped that way, and a real
+/// session is what showed it). So the line is laid out left-aligned and the WHOLE
+/// of it is dragged left by a transform until its END sits at the window's right
+/// edge, and `styles.css` gives that transform a transition: the same motion,
+/// interpolated a frame at a time. The measure is taken after layout and before
+/// paint (`useLayoutEffect`), so the untranslated line is never drawn.
 ///
-/// The kit's live window is kept for the streaming case and only for it. Without a
-/// height cap (`max-h-64`, the kit's own) the panel would grow for as long as the
-/// model thinks, and the newest tokens -- the ones the window exists to follow --
-/// would be the furthest down the page. A thought that has stopped gets
-/// `max-h-none` back, so a reader who opens one reads it whole, the same rule a
-/// tool's result gets.
+/// WHAT THE WINDOW HOLDS IS A BLOCK, AND LETTING GO OF IT COSTS NOTHING. The row is
+/// handed everything that has arrived and holds the END of it: a block leaves once per
+/// `TAIL_DROP` characters (`tailStart`), and what is held is many windows' worth, so
+/// the drag always has material in front of it. Cutting what has scrolled off would
+/// hand the motion back to layout if it were done one character per token -- the snap
+/// the first cut of this feature shipped -- but a BLOCK is PAID FOR: the padding that
+/// replaces it (`pad` below) moves the line right by exactly what the block weighed,
+/// so every character that stays is drawn in the pixel it was drawn in the frame
+/// before, and the drag never notices. That is what keeps a token's work constant
+/// instead of proportional to the thought.
 ///
-/// Nothing is remembered across that transition: the open state is the kit's
-/// (`userOpen ?? streaming`), so a panel opened by hand stays open and one closed
-/// by hand stays closed.
-const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
-  group,
-  children,
-}) => {
-  const running = group.status.type === "running";
-  const preview = useAuiState((s) => previewOf(s.message.parts, group.indices));
+/// THE DRAG HAS A SPEED RATHER THAN A DURATION. Interpolating over a fixed time
+/// would leave a lag proportional to how fast the model is writing -- the drag is
+/// always that many milliseconds behind the arrival, so a fast stream shows text
+/// that is a second old, and the newest characters (the ones the window exists
+/// for) would be the ones cut off at the right edge. So each step is given the
+/// time it takes to travel at this many PIXELS PER MILLISECOND, capped at
+/// `TAIL_SETTLE_MAX`: a character's worth of text moves in a few milliseconds, and
+/// a whole sentence that lands at once still slides rather than teleports.
+///
+/// 4px/ms is about 300 characters a second at this size, which is as fast as a
+/// vendor streams on a good day -- so a real session sees the drag keep up (the
+/// newest characters a moment from being in view), and only a burst that outruns
+/// it is allowed to fall behind. Measured at a scripted, bandwidth-throttled
+/// ~250 characters a second: the whole of what is still off the right edge is
+/// under a quarter of the window (`.scratch/thinking-row-tail/`).
+const TAIL_SPEED = 4;
+const TAIL_SETTLE_MAX = 400;
+
+const ReasoningTail: FC<{ text: string }> = ({ text }) => {
+  const windowRef = useRef<HTMLSpanElement>(null);
+  const trackRef = useRef<HTMLSpanElement>(null);
+  /// Where the last step left the line, in the same units as the transform.
+  const draggedRef = useRef(0);
+  /// WHAT THE ROW HAS LET GO OF, and what it is letting go of now: where in the
+  /// thought the DOM's copy begins (`start`, and the DOM is drawn from it), what the
+  /// characters before it weigh (`pad`, the padding the line carries so that they
+  /// still count towards its width), the width the line had just before the last
+  /// block left it (`before`), whether that block is in flight (`leaving`), and the
+  /// text the two offsets were counted against (`text`).
+  const held = useRef({ text: "", start: 0, pad: 0, before: 0, leaving: false });
+  const [start, setStart] = useState(0);
+
+  useLayoutEffect(() => {
+    const window = windowRef.current;
+    const track = trackRef.current;
+    if (window === null || track === null) return;
+    const state = held.current;
+    let line = track.getBoundingClientRect().width;
+
+    // PAY FOR THE BLOCK THAT JUST LEFT. The `setStart` below asks React for a
+    // re-render, and React runs it in THIS frame, before the paint (an update from a
+    // layout effect is flushed synchronously). So by the time this runs a second
+    // time, the DOM is already a block shorter and the padding buys those pixels
+    // back. `D` is a DIFFERENCE OF TWO MEASUREMENTS OF THE SAME BOX -- what left is
+    // exactly what the width lost -- and not anything computed from the characters:
+    // the line is proportional, and a prefix of it is not a number to do arithmetic
+    // on.
+    if (state.leaving) {
+      state.leaving = false;
+      state.pad += state.before - line;
+      track.style.paddingLeft = state.pad === 0 ? "" : `${state.pad}px`;
+      // The payment restores the width to what it was a moment ago, so the number
+      // this pass drags by is the one it had before the block left -- the block
+      // leaving is invisible to the drag, which is the whole of this mechanism.
+      line = state.before;
+    }
+
+    // A THOUGHT THAT IS NOT AN EXTENSION OF THE ONE WE WERE HOLDING is a different
+    // line (the later part of one the runtime split into a message of its own, a
+    // restored conversation, another thought): the offsets mean nothing, and the line
+    // starts over at its beginning.
+    if (!text.startsWith(state.text)) {
+      state.leaving = false;
+      if (state.start !== 0) {
+        state.text = text;
+        state.start = 0;
+        state.pad = 0;
+        track.style.paddingLeft = "";
+        setStart(0);
+        return;
+      }
+    }
+
+    // AND WHEN THE COPY HAS GROWN PAST WHAT THE ROW HOLDS, the block leaves:
+    // `tailStart` says where the DOM's copy of the thought begins now, the re-render
+    // that follows does the shrinking, and the next pass pays for it (same frame).
+    const next = tailStart(text, state);
+    state.text = text;
+    if (next !== state.start) {
+      state.before = line;
+      state.leaving = true;
+      state.start = next;
+      setStart(next);
+      return;
+    }
+
+    // THE DRAG. Pull the line left by how much of it is off the window's right side,
+    // so its END is what the window shows. A line that FITS is not moved at all,
+    // which is what keeps a short thought sitting right after `思考 · ` instead of
+    // jumping to the window's right edge. `line` is the width of the WHOLE line --
+    // what the row has let go of is still carried, by the padding -- which is why
+    // this reads the number it always read.
+    const hidden = line - window.getBoundingClientRect().width;
+    const target = hidden > 0 ? -hidden : 0;
+    const travelled = Math.abs(target - draggedRef.current);
+    track.style.transitionDuration = `${Math.min(TAIL_SETTLE_MAX, travelled / TAIL_SPEED)}ms`;
+    track.style.transform = `translateX(${target}px)`;
+    draggedRef.current = target;
+  });
 
   return (
-    <ReasoningRoot variant="ghost" className="mb-0" streaming={running}>
+    <span
+      ref={windowRef}
+      data-slot="reasoning-trigger-tail"
+      className="aui-reasoning-trigger-tail"
+    >
+      <span ref={trackRef}>{text.slice(start)}</span>
+    </span>
+  );
+};
+
+/// A THOUGHT, behind ONE ROW -- folded unless the reader opens it, a thought that
+/// is still arriving included.
+///
+/// ONE ROW PER THOUGHT, AND A TOOL CALL IS WHAT ENDS ONE. A turn that thinks, reads
+/// and then thinks again gives three rows in that order: the first thought, the
+/// call, the second thought -- the row follows the THOUGHT and not the run. TEXT
+/// DOES NOT END ONE, and that is the whole of `thoughtAt`: a vendor interleaves its
+/// thinking with the answer it is writing (measured on a real session: reasoning,
+/// the answer's first token, then ` in Chinese.` -- the tail of the same thought),
+/// the runtime makes each of those blocks a MESSAGE of its own, and drawing them as
+/// they come leaves a second 思考 row AFTER the answer carrying the fragment -- what
+/// a reader reported. So a thought is gathered across the messages of its turn, and
+/// the row that began it is the one that draws it: a continuation returns nothing,
+/// and the row above it stays live for reasoning that arrives later (see `thoughtAt`
+/// in `lib/reasoning-preview.ts` for both walks).
+///
+/// A restored conversation is never running, so history arrives as first lines.
+///
+/// THE OPEN STATE IS HELD HERE and it starts false, which is the whole of "a live
+/// thought does not unfold itself". Upstream keeps that state internally as
+/// `userOpen ?? (streaming || defaultOpen)` -- a rule that opens the panel for a
+/// condition nobody clicked on -- so passing `streaming` alone is what used to
+/// unfold every live thought, twice in a turn that thinks around a tool call.
+/// Holding it is what removes that and keeps everything else upstream's:
+/// `streaming` still decides whether an OPEN panel follows the newest token and
+/// grows a bottom fade, so a reader who clicks during a run gets exactly the live
+/// window they got before.
+///
+/// The kit's live window is therefore kept for the streaming case and only for
+/// it. Without a height cap (`max-h-64`, the kit's own) the open panel would grow
+/// for as long as the model thinks, and the newest tokens -- the ones the window
+/// exists to follow -- would be the furthest down the page. A thought that has
+/// stopped gets `max-h-none` back, so a reader who opens one reads it whole, the
+/// same rule a tool's result gets.
+const ReasoningBlock: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
+  children,
+  group,
+}) => {
+  // WHICH THOUGHT THIS ROW IS ABOUT is a question about the whole TURN: the thought is
+  // gathered across the turn's messages (and, for a live run, across the parts of one
+  // message), and the rules for that walk are in `lib/reasoning-preview.ts`.
+  // `s.thread.messages` is the conversation, `s.message.index` is where this message sits in
+  // it, and this row's own group names the part it starts at.
+  //
+  // EVERY ANSWER IS A PRIMITIVE, AND THAT IS THE POINT. `useAuiState` compares a selector's
+  // answer BY VALUE, so a selector handing back `s.thread.messages` -- a fresh array on every
+  // store update -- re-rendered this row on EVERY delta: one whole re-render of the row's
+  // shell (the disclosure, the trigger, the icon, the catalog lookup) per thought per update.
+  // A long conversation has hundreds of rows, and that is the slope the per-commit cost grows
+  // along (measured: ~0.06 ms a message -- a 400-message session costs ~34 ms a commit, which
+  // is 29 fps). The walks behind these three selectors (`thoughtAt` over the turn's parts,
+  // `previewOf` over one thought) are microseconds; the re-render was not.
+  const from = group.indices[0] ?? 0;
+  const drawn = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).drawn);
+  const running = useAuiState((s) => thoughtAt(s.thread.messages, s.message.index, from).running);
+  // The tail while it runs, the first line once it stops.
+  const preview = useAuiState((s) => {
+    const thought = thoughtAt(s.thread.messages, s.message.index, from);
+    return previewOf(thought.parts, thought.running);
+  });
+  const [open, setOpen] = useState(false);
+
+  // NOT DRAWN: this run is the model going back to a thought it already started --
+  // see the file comment. The row that began it says the same words a moment later
+  // anyway (it is handed the newest part), so nothing is lost by saying this one
+  // twice.
+  if (!drawn) return null;
+
+  return (
+    <ReasoningRoot
+      variant="ghost"
+      className="mb-0"
+      streaming={running}
+      open={open}
+      onOpenChange={setOpen}
+    >
       <ReasoningTrigger active={running} preview={preview} />
       <ReasoningContent aria-busy={running}>
         <ReasoningText className={running ? "pt-1" : "max-h-none pt-1"}>

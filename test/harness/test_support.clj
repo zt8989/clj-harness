@@ -28,6 +28,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
+            [harness.cap.project :as project]
+            [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.mcp :as cap-mcp]
             [harness.cap.tools :as cap-tools]
@@ -107,6 +110,123 @@
   (doseq [f (reverse (file-seq (io/file dir)))]
     (io/delete-file f true)))
 
+(defonce ^:private live-temp-dirs
+  ;; THE TREES `temp-dir` HAS HANDED OUT AND NOBODY HAS REMOVED YET, as absolute path
+  ;; strings. A SET, so a path that is handed back twice (nothing does, but the registry
+  ;; is not the place to find out) is still one entry, and an atom because `temp-dir` is
+  ;; called from the run's thread and from test threads both.
+  (atom #{}))
+
+(defn tracked-temp-dirs
+  "The paths `wipe-temp-dirs!` would take right now: the scratch trees this process has
+  handed out and not yet cleaned up.
+
+  EXPOSED FOR ONE ASSERTION THAT CANNOT HONESTLY BE MADE ANY OTHER WAY -- that the
+  RUN's own root and OS home are NOT among them. The behavioural version of that
+  question is 'wipe, then see whether the run still works', and on the day the
+  invariant broke it would answer by deleting the run's root out from under the suite
+  that is still writing into it: the reader would get hundreds of failures somewhere
+  else and no line pointing here. Same shape as
+  `harness.infra.db/store-paths-opened` -- a set kept by the thing that acts on it,
+  read by the thing that checks it."
+  []
+  (vec (sort @live-temp-dirs)))
+
+(defn wipe-temp-dirs!
+  "Delete scratch trees `temp-dir` has handed out, and answer how many were asked for.
+
+  WHY THE DELETE IS HERE RATHER THAN AT THE CALL SITES. A hundred-odd call sites make
+  their own tree and NONE of them says who removes it, and that is what the machine
+  looked like on 2026-09-22: 19,512 `clj-harness-*` directories under `java.io.tmpdir`,
+  409MB of them, still climbing -- 10,148 of the lot were made the day before. A delete
+  written at every call site is a delete the NEXT case forgets, and the case that
+  forgets is the ordinary one rather than the careless one. The place that knows a
+  tree's name as it is made is the place that hands it out.
+
+  THE BARE CALL IS THE RUN'S, AND ONLY THE RUN'S -- its end, and the exit hook. Every
+  namespace in the suite is LOADED BEFORE ANY OF THEM RUNS (`run-suite!` requires the
+  whole list first), so a namespace that makes its tree at load time -- `(def ^:private
+  root (support/temp-dir \"project\"))`, and a dozen of them do -- already has it in the
+  registry while an earlier namespace's case is still running. A bare wipe from inside a
+  case takes those loaded-early trees with it, and each of those namespaces then dies
+  when it finally runs, with `no such directory: .../clj-harness-project-...` -- one
+  message, in namespaces that have nothing to do with the case that fired it. Measured
+  2026-09-22: 4 failures and 55 errors, every one of them that message, from a case that
+  called this with no arguments.
+
+  A CASE THAT WANTS TO WATCH A WIPE HANDS OVER ITS OWN TREES: `(wipe-temp-dirs! [a b])`
+  takes exactly those and leaves the registry's other entries alone.
+
+  THE REGISTRY IS EMPTIED BEFORE ANYTHING IS DELETED, so a tree made while this runs
+  -- another thread's case, a namespace still starting -- is not lost by arriving after
+  the list was read.
+
+  SILENT, unlike `harness.test-runner/cleanup!`: this is a run's ordinary end and a
+  process's exit, and a tree that is already gone (with-temp-env removed its own pair)
+  is the normal case, not news. The count comes back so the caller can say it out loud."
+  ([]
+   (let [[dirs] (swap-vals! live-temp-dirs (constantly #{}))]
+     (wipe-temp-dirs! dirs)))
+  ([dirs]
+   (doseq [dir dirs] (wipe-tree! dir))
+   ;; WHAT WAS HANDED OVER IS NO LONGER THIS PROCESS'S TO REMOVE, whether or not the
+   ;; platform let it go: a registry that keeps a tree the caller already wiped is a
+   ;; registry that lies about what is left.
+   (swap! live-temp-dirs #(apply disj % dirs))
+   (count dirs)))
+
+(defonce ^:private cleanup-hook-installed
+  (atom false))
+
+(defn ensure-cleanup-hook!
+  "Make THIS PROCESS take its scratch trees with it when it goes, whatever the reason:
+  a Ctrl+C, a SIGTERM, an orderly end.
+
+  THE RUNNER'S `finally` IS NOT ENOUGH BY ITSELF, and that is the whole reason this
+  exists. A JVM that receives SIGINT runs its shutdown hooks and then halts; the main
+  thread's `finally` -- where `harness.test-runner/cleanup!` and its wipe live -- is NOT
+  one of them. An interrupted suite would otherwise leave every tree it had made up to
+  that moment, which is the same leak arriving by a different road.
+
+  INSTALLED ONCE, by compare-and-set rather than by reading a flag: `temp-dir` is
+  called from other threads too, and 'did I install it' has to have one answer. The
+  call goes through harness.infra.shell/install-hook! for the reason that var exists --
+  a test can then count installations without exiting a JVM."
+  []
+  (when (compare-and-set! cleanup-hook-installed false true)
+    (shell/install-hook! (Thread. ^Runnable (fn [] (try (wipe-temp-dirs!)
+                                                      (catch Throwable _ nil)))
+                                   "test-scratch-cleanup")))
+  nil)
+
+(defn reset-cleanup-hook!
+  "Forget that the hook was installed, so the next `ensure-cleanup-hook!` installs one.
+  For tests that drive the installation, exactly as `harness.infra.shell/reset-exit-hook!`
+  lets a test drive its own; a running process's hook is installed once and stays."
+  []
+  (reset! cleanup-hook-installed false))
+
+(defn track-temp-dir!
+  "Take DIR into the registry by hand -- for a tree this process makes WITHOUT
+  `temp-dir` -- and answer it as a path string.
+
+  THE SHAPE THIS IS FOR: a case that composes a SIBLING of a temp tree, `(str
+  (temp-dir \"git\") \"-refuse\")`, and makes that instead. The name has to stay the
+  composed one (the case asserts on it, and one of them is asserted on through the log
+  directory the server names), so `temp-dir` never hears about it and the sweep never
+  takes it. Measured 2026-09-22, with the sweep already in place: a full run left
+  exactly 9 trees, every one of them this shape -- 7 through harness.cap.git-test's
+  `scratch-repo`, 2 beside http-test's listing and archive fixtures -- where it had left
+  265 before.
+
+  CALLED BY THE HELPER THAT MAKES THE DIRECTORY, not at each call site: `scratch-repo`
+  is the one door those seven go through, and `wipe-dir!` is where http-test's pair is
+  made."
+  [dir]
+  (ensure-cleanup-hook!)
+  (swap! live-temp-dirs conj (str dir))
+  (str dir))
+
 (defn temp-dir
   "A fresh, empty directory under the system temp directory, named for LABEL.
 
@@ -123,11 +243,29 @@
 
   THE DIRECTORY COMES BACK EMPTY, so the delete-then-mkdir a fixed path needed first has
   nothing left to do -- and doing it anyway would take away the directory this just
-  handed back."
-  [label]
-  (str (java.nio.file.Files/createTempDirectory
-        (str "clj-harness-" label "-")
-        (make-array java.nio.file.attribute.FileAttribute 0))))
+  handed back.
+
+  AND IT IS TAKEN BACK ON THE WAY OUT. The tree is registered in the same call that
+  makes it and removed by `wipe-temp-dirs!` when the run ends, so a case makes its
+  scratch tree and never mentions it again: nothing to write in a `finally`, and nothing
+  to forget -- which is all the 19,512 trees under one day of runs ever were. (A tree
+  made at LOAD time by a `def`, which a dozen namespaces do, is taken by the same sweep
+  -- which is why that sweep belongs to the run and not to a case: see
+  `wipe-temp-dirs!`.)
+
+  `:track? false` IS FOR THE ONE CALLER THAT REMOVES ITS OWN: harness.test-runner/
+  isolate! makes the run's root and OS home, and those two are the RUN's environment
+  rather than a case's scratch tree. A wipe that could reach them would take the run out
+  from under itself while it was still writing into them."
+  ([label] (temp-dir label {}))
+  ([label {:keys [track?] :or {track? true}}]
+   (let [dir (str (java.nio.file.Files/createTempDirectory
+                   (str "clj-harness-" label "-")
+                   (make-array java.nio.file.attribute.FileAttribute 0)))]
+     (when track?
+       (ensure-cleanup-hook!)
+       (swap! live-temp-dirs conj dir))
+     dir)))
 
 (defn shell-path
   "PATH spelled the way the shell this process spawns reads it: forward slashes.
@@ -569,3 +707,148 @@
   [provider messages on-event thread-id]
   (refuse-unanswered-calls! messages)
   (llm/stream! (assoc provider :protocol :fake) messages on-event thread-id))
+
+
+;; ------------------------------------------------------- a session that exists
+
+(defn start-session!
+  "Begin THREAD-ID as a session of this home with NOTHING in it: the row a run needs,
+  an empty conversation, and no record.
+
+  A RUN OF AN ID THE STORE HAS NEVER HEARD OF IS REFUSED, and what that means in a test
+  is that every case has to say 'this session exists' before it sends anything -- in the
+  page, the new-task action is what says it (see `.scratch/sessions-live-on-the-server`,
+  ticket 03). A fixture that names the threads it serves says it here, once, instead of
+  at every call site.
+
+  ALL THREE PARTS ARE NEEDED, and the reason is the same for each: the row, because the
+  run edge insists on it; the drop, because the session TABLE is process-wide while the
+  fixture is not, so an earlier case's conversation would otherwise be this one's history
+  under the same id; and THE RECORD, because a conversation is BORN FROM ITS LOG when the
+  table has none (`harness.edge.sessions/build`) -- deleting the entry alone would just
+  make the next run read the previous case's bytes off disk and continue from those.
+
+  `replay/find-log` is what finds the record, so a thread bound to a project is emptied
+  where its log actually is. A case that runs the same session twice keeps all three by
+  not calling this again."
+  [thread-id]
+  (let [id (str thread-id)]
+    (sessions/drop! id)
+    (when-some [f (replay/find-log (home/projects-dir) id)]
+      (io/delete-file f true))
+    (project/register-session! id)))
+
+
+
+;; ------------------------------------------------------- the downlink's test reader
+
+(def ^:private window-frame-types
+  "The frame types the WINDOW speaks. Everything else on the downlink is a run's AG-UI event
+  (`lib/mux.ts` routes by the same set)."
+  #{"window" "append" "page" "tail" "end"})
+
+(def ^:private fact-frame-types
+  "The frame types of the FACT family -- a turn's two ends and a model call's two ends
+  (ADR 0006). They ride the same socket as a run's frames and they are NOT part of the run: they
+  make no message, a rebuilt conversation does not contain them, and the CLIENT drops them at the
+  same seam (`ui/src/lib/mux.ts`'s `familyOf`). This reader drops them too, or every case that
+  asks 'what frames did this run send' gets a `turn/start` where it expected its terminal."
+  #{"turn/start" "turn/end" "model/start" "model/end"})
+
+(defn sse-headers
+  "ACK's headers, with the Content-Type the body `mux-run!` builds actually is (SSE): a caller
+  reads the run's frames, not the ack."
+  [ack]
+  (let [m (into {} (remove (fn [[k _]] (= "content-type" (str/lower-case (str k))))
+                           (.map (.headers ack))))]
+    (java.net.http.HttpHeaders/of
+     (assoc m "content-type" (java.util.List/of "text/event-stream"))
+     (fn [_ _] true))))
+
+(defn mux-run!
+  "Drive one run over the DOWNLINK and answer `{:status :headers :body}`.
+
+  A RUN IS READ FROM `events.mux` NOW (ADR 0004): the POST answers an ACK and the frames arrive on
+  the socket. So this SUBSCRIBES FIRST -- the server filters a run's frames by what a connection
+  declared -- starts the run with the ack header, collects the frames until the terminal, and
+  hands back the SSE a caller has always read. A REFUSED RUN sends no frames: the ack's own status
+  and body are passed through whole.
+
+  PORT is the server's (`*port*` is per-namespace); ORIGIN, when given, is sent as the page the
+  request comes from."
+  [port thread-id body origin]
+  (let [token   (str (java.util.UUID/randomUUID))
+        frames  (atom [])
+        seen    (promise)
+        pending (atom "")
+        params  (java.net.URLEncoder/encode (json/write-str [{:threadId thread-id}]) "UTF-8")
+        ws      (-> (java.net.http.HttpClient/newHttpClient)
+                    (.newWebSocketBuilder)
+                    (.buildAsync (java.net.URI/create
+                                  (str "ws://127.0.0.1:" port "/api/events.mux"
+                                       "?subscriber=" token "&sessions=" params))
+                                 (reify java.net.http.WebSocket$Listener
+                                   (onText [_ socket data last]
+                                     ;; A BIG FRAME ARRIVES IN FRAGMENTS; parse only when whole.
+                                     (swap! pending str data)
+                                     (when last
+                                       (let [frame (try (json/read-str @pending :key-fn keyword)
+                                                        (catch Throwable _ nil))]
+                                         (reset! pending "")
+                                         (when-some [t (:type frame)]
+                                           ;; THE WINDOW'S OWN AND THE FACT FAMILY ARE NOT THIS RUN'S:
+                                           ;; the facts are about the conversation (ADR 0006) and the
+                                           ;; client routes them the same way (`familyOf`).
+                                           (when-not (contains? (into window-frame-types
+                                                                     fact-frame-types) t)
+                                             (swap! frames conj (dissoc frame :seq))
+                                             (when (contains? #{"RUN_FINISHED" "RUN_ERROR"} t)
+                                               (deliver seen true))))))
+                                     (.request socket 1)
+                                     (java.util.concurrent.CompletableFuture/completedFuture nil))))
+                    (.join))
+        declared (loop [attempt 0]
+                   (let [req  (-> (java.net.http.HttpRequest/newBuilder
+                                   (java.net.URI/create
+                                    (str "http://127.0.0.1:" port "/api/events.mux/subscribe")))
+                                  (.header "Content-Type" "application/json")
+                                  (.POST (java.net.http.HttpRequest$BodyPublishers/ofString
+                                          (json/write-str {:subscriber token
+                                                           :subscribe [{:threadId thread-id}]})
+                                          java.nio.charset.StandardCharsets/UTF_8))
+                                  (.build))
+                         resp (.send (java.net.http.HttpClient/newHttpClient) req
+                                     (java.net.http.HttpResponse$BodyHandlers/ofString
+                                      java.nio.charset.StandardCharsets/UTF_8))]
+                     (cond
+                       (= 200 (.statusCode resp)) true
+                       (< attempt 40) (do (Thread/sleep 20) (recur (inc attempt)))
+                       :else false)))
+        req     (-> (java.net.http.HttpRequest/newBuilder
+                     (java.net.URI/create (str "http://127.0.0.1:" port "/api/agent")))
+                    (.header "Content-Type" "application/json")
+                    (cond-> origin (.header "Origin" origin))
+                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString
+                            body java.nio.charset.StandardCharsets/UTF_8))
+                    (.build))
+        ack     (.send (java.net.http.HttpClient/newHttpClient) req
+                       (java.net.http.HttpResponse$BodyHandlers/ofString
+                        java.nio.charset.StandardCharsets/UTF_8))]
+    (if (not= 200 (.statusCode ack))
+      {:status (.statusCode ack) :headers (.headers ack) :body (.body ack)}
+      (do
+        (when declared (deref seen 30000 nil))
+        (.sendClose ws java.net.http.WebSocket/NORMAL_CLOSURE "done")
+        {:status 200
+         :headers (sse-headers ack)
+         :body (apply str (map (fn [frame] (str "data: " (json/write-str frame) "\n\n")) @frames))}))))
+
+(defn mux-run-response
+  "The same run as `mux-run!`, as an `HttpResponse` -- the shape a caller that reads
+  `.statusCode` / `.headers` / `.body` was already using."
+  [port thread-id body origin]
+  (let [result (mux-run! port thread-id body origin)]
+    (reify java.net.http.HttpResponse
+      (statusCode [_] (:status result))
+      (headers [_] (:headers result))
+      (body [_] (:body result)))))

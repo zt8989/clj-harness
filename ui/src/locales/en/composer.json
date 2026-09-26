@@ -32,5 +32,8 @@
   },
   "attach": {
     "label": "Add Attachment"
+  },
+  "run": {
+    "stop": "Stop answering"
   }
 }

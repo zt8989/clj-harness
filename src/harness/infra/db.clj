@@ -228,6 +228,35 @@
 (defonce ^:private recovery-log
   (atom []))
 
+(defonce ^:private opened-stores
+  (atom #{}))
+
+(defn store-paths-opened
+  "Every store FILE this process has resolved and opened, as absolute paths --
+  which is the one thing a test run has to be able to prove about itself.
+
+  THE QUESTION IT ANSWERS IS 'DID WE GO TO THIS HOME?', and it is asked because the
+  answer used to be guessed from the file's [bytes mtime] and could therefore be
+  wrong in the one case that happens all day: a LIVE HARNESS SESSION keeps its own
+  state (anchors, todo lists, session rows) in that store while somebody runs the
+  suite, so the developer's store moves for reasons that have nothing to do with
+  the tests. `harness.test-runner` reads this set before it decides anything, and
+  a store this process never opened is somebody else's writing -- reported, not
+  blamed (see `isolation-verdict`).
+
+  Absolute paths, because that is the form a comparison with `home/db-file` can be
+  made in whatever root was in force when the connection opened."
+  []
+  @opened-stores)
+
+(defn forget-store-paths-opened!
+  "Empty the record above. ONE CALLER, AND IT IS THE REASON THIS EXISTS: isolation
+  is installed in the MIDDLE of a process's life, so everything resolved before it
+  (the runner's own look at the developer's store, to fingerprint it) has to be
+  forgotten or the verdict below would convict the fixture itself."
+  []
+  (reset! opened-stores #{}))
+
 (defonce ^:private store-open-lock
   ;; ONE THREAD OPENS OR BUILDS THE STORE AT A TIME. Every connection runs this, so
   ;; 'the store is not usable yet' and 'the store is not there yet' are answers several
@@ -559,6 +588,67 @@
                                         WHERE projects.id = sessions.project_id)
             WHERE project_id IS NOT NULL"))
 
+(defn- sessions-remember-their-title
+  "Version n -> n+1: `sessions.title`, the first thing the person said in that
+  conversation, written ONCE when the first run arrives (`harness.cap.project/
+  remember-title!`).
+
+  THE STORE NOW HOLDS ONE PIECE OF CONVERSATION CONTENT, AND THAT IS A DECISION
+  SOMEBODY MADE RATHER THAN AN ACCIDENT -- `harness.infra.db-test/sessions-hold-no-
+  conversation-content` used to list `title` as the example of what may never live
+  here. The owner overruled it (2026-09-21) after being shown both sides: the log
+  answers the same question, and reading the head of every log costs 0.15 MB and
+  39 ms for a 53-session home -- cheap, but paid on EVERY listing, against one
+  SELECT here. What bought the reversal is a property the other candidates do not
+  have: THE FIRST MESSAGE CANNOT CHANGE. A stored copy of it is not a second truth
+  that drifts as the conversation grows (a summary would be; so would a title
+  derived from the LATEST turn) -- it is a name the session acquires once, in the
+  same sense `last_project_path` is a memory this store keeps because the row it
+  named may be gone.
+
+  WHAT THAT COSTS, stated rather than discovered later: a log edited by hand can
+  now disagree with this column, and a session whose log is deleted keeps its
+  title. Both are accepted: the column is what the SIDEBAR shows, and the log
+  remains the only record of what was said.
+
+  NO BACKFILL, on the owner's instruction ('老的不管'). A session that ran before
+  this column existed has NULL here and falls back to its id in the sidebar --
+  until the next time it runs, when the input it sends carries the whole history
+  and the first user message in it is still the session's first."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN title TEXT"))
+
+(defn- sessions-remember-their-last-send
+  "Version n -> n+1: `sessions.last_sent_at`, the moment the person last pressed
+  send in that conversation, in epoch milliseconds -- written on every run that
+  arrives (`harness.cap.project/remember-send!`).
+
+  THIS IS WHAT LETS THE SIDEBAR STOP READING DISKS. Until it existed, the listing
+  took each row's time and size off its log file (`File.lastModified`, `File.length`),
+  which meant the panel that draws forty conversations touched forty files every
+  time it refreshed; the owner's rule is that everything on the left comes from the
+  store except whether a run is in flight right now. The size simply went away (nobody
+  asked for it), and the time became this column.
+
+  AND IT IS BACKFILLED, which is where the one disk read of the whole change lives:
+  a session that ran before this column existed would otherwise be a row with NO
+  time at all, and in a home with fifty of them that is not a quiet absence -- it is
+  the panel losing the fact it was just asked to show. The value is the log's
+  MTIME, which is exactly what the listing used to display, so the old rows keep
+  the number they had; from now on the value is the SEND time instead. The two
+  differ by however long the last run ran, which is the honest difference between
+  'last active' and 'last asked'.
+
+  A row with no log -- registered and never used, or a log deleted by hand -- stays
+  NULL, and the client draws that absence in words (`session.neverRun`) rather than
+  inventing a time."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN last_sent_at INTEGER")
+  (doseq [{:keys [id]} (query c "SELECT id FROM sessions WHERE last_sent_at IS NULL")]
+    (when-let [f (home/log-file-for-stem id)]
+      (execute! c "UPDATE sessions SET last_sent_at = ? WHERE id = ?"
+                (.lastModified ^java.io.File f) id))))
+
 (defn- sessions-know-their-subagent
   "Version 2 -> 3: `sessions.parent_id` and `sessions.subagent`.
 
@@ -743,6 +833,36 @@
               items      TEXT NOT NULL,
               updated_at INTEGER NOT NULL)"))
 
+(defn- session-claims
+  "WHICH PROCESS IS SERVING A CONVERSATION: one row per live claim, gone when the
+  claim is handed back.
+
+  A CLAIM IS NOT A SESSION ROW, and the two lifetimes are why it is its own table.
+  `sessions` says which conversations this home KEEPS -- for good, one row each,
+  read by every listing. This says which of them a PROCESS is serving right now:
+  seconds to minutes, one row each while it lasts, read by the run edge. A column on
+  the other table would be NULL for almost every session and would need clearing by
+  a process that died without clearing it, which is precisely the case the row's
+  own contents have to answer (harness.cap.claims).
+
+  THREE FACTS ABOUT THE OWNER, because they answer different questions: `instance`
+  is a random id the owning process minted for itself, so 'is this row mine?' needs
+  no OS call; `pid` and `started_at` are what a LATER process asks the OS about to
+  decide whether the owner is still there. `started_at` is the owner's own start
+  instant, and it is the column that keeps a REUSED pid from pinning a conversation
+  forever. `token` belongs to the CLAIM rather than to the process -- see
+  `harness.cap.claims/release!` for the race it closes.
+
+  `since` is when this claim was taken, for the sentence a refused client reads."
+  [^Connection c]
+  (ddl! c "CREATE TABLE session_claims (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              instance   TEXT NOT NULL,
+              token      TEXT NOT NULL,
+              pid        INTEGER NOT NULL,
+              started_at INTEGER NOT NULL,
+              since      INTEGER NOT NULL)"))
+
 (def migrations
   "The forward migration chain, as NAMED steps.
 
@@ -805,7 +925,24 @@
     :run      hashline-undo-served}
    {:name     "todos"
     :present? #(table? % "todos")
-    :run      todos-table}])
+    :run      todos-table}
+   ;; THE SIDEBAR'S TWO COLUMNS FIRST, THEN THE CLAIMS TABLE, and the order is free
+   ;; rather than load-bearing: every step below is found by its own `:present?` probe,
+   ;; so a store that already has one of them records it as done instead of running it
+   ;; again. Keeping the two sides' steps in this order keeps their diffs readable --
+   ;; title and `last_sent_at` are one feature's pair (`brand-header`), and
+   ;; `session_claims` is main's.
+   {:name     "sessions-remember-their-title"
+    :present? #(column? % "sessions" "title")
+    :run      sessions-remember-their-title}
+   {:name     "sessions-remember-their-last-send"
+    :present? #(column? % "sessions" "last_sent_at")
+    :run      sessions-remember-their-last-send}
+   ;; APPENDED, like every step after the first: a store written before this table
+   ;; existed has no record of it, and the probe is what says whether it needs it.
+   {:name     "session-claims"
+    :present? #(table? % "session_claims")
+    :run      session-claims}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."
@@ -996,6 +1133,7 @@
   fresh JDBC connection per call anyway, and the queries that follow run unlocked."
   [steps]
   (let [f     (home/db-file)
+        _     (swap! opened-stores conj (.getAbsolutePath f))
         judge (fn []
                 (let [seen (inspect f)]
                   (case (:state seen)

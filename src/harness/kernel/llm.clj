@@ -30,8 +30,8 @@
   VERBATIM INCLUDES THE FIELD'S PRESENCE, not just its text: a thinking-mode vendor
   mentions `reasoning_content` on every round, empty when the round had no reasoning,
   and it demands the field back -- so an empty mention is kept as an empty value rather
-  than dropped (`consume-sse`). A history that arrives WITHOUT it -- the client sent it
-  back, or a round predates this rule -- is repaired on the way out by
+  than dropped (`consume-sse`). A history that arrives WITHOUT it -- a session rebuilt
+  from a record written before this rule -- is repaired on the way out by
   `thinking-mode-history`, which the edge applies before the `message` audit line is
   written. See .scratch/reasoning-round-trip/spec.md for the verified vendor behaviour.
 
@@ -43,6 +43,15 @@
   (harness.cap.providers/effective-provider) can be handed straight to loop/run-chan:
     {:protocol :openai-completions, :base-url .., :model .., :api-key ..
      :reasoning-effort ..}
+
+  WHAT WENT OUT AND WHAT CAME BACK can also be written down for reading later, and
+  that is a different thing from the telemetry above: the telemetry is a fact the run
+  acts on, while the traffic log (harness.infra.llm-debug) is evidence for a question
+  asked afterwards -- 'why did the vendor's prefix cache miss on this call', say,
+  which only the exact request bytes can answer. It is OPT-IN
+  (CLJ_HARNESS_LLM_DEBUG) and best-effort: the wire path never waits on it and never
+  fails because of it.
+
   :reasoning-effort is present only when some tier chose one. :input/:output and
   the two counts (:context-window / :max-output-tokens) are not read here at all:
   they describe what a model is, which is the edge's business
@@ -53,6 +62,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [harness.infra.llm-debug :as llm-debug]
             [harness.kernel.event :as ev])
   (:import [java.net URI]
            [java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
@@ -70,6 +80,14 @@
 
 (defonce frozen-prompt (atom nil))
 
+(defonce ^:private prompt-replacements (atom 0))
+;; HOW MANY TIMES THE FROZEN OPENING WAS DELIBERATELY REPLACED. prompt.md's CONTENT is
+;; not part of any signature -- the owner's rule is that only name sets are compared
+;; (`.scratch/instruction-updates` decision 1) -- but a `reset-prompt!` is a person
+;; saying 'the opening moved', and a signature that cannot see it would let a cached
+;; instruction text outlive the file it was read from. So the epoch is the EXPLICIT
+;; invalidation door: cheap, content-free, and it moves exactly when the file is re-read.
+
 (defn prompt
   "The system prompt, FROZEN: prompt.md is read once -- on the first call -- and
   every run after that reuses the same text. The provider's prefill (prompt
@@ -85,7 +103,19 @@
   freezing: the agent -- or you, in the REPL -- opts into a new prefix, trading
   one cold prefill for the change."
   []
-  (reset! frozen-prompt nil))
+  (reset! frozen-prompt nil)
+  ;; THE ONE THING WATCHING THIS FILE MOVES WITH IT: a cached instruction text that
+  ;; was assembled under the old opening must be rebuilt, and the epoch is how the
+  ;; signature (`.scratch/instruction-updates`) learns that without carrying the bytes.
+  (swap! prompt-replacements inc)
+  nil)
+
+(defn prompt-epoch
+  "How many times the frozen opening has been deliberately replaced in this process.
+  A reader that caches anything derived from `prompt` compares this value -- it is the
+  explicit invalidation door, not a content hash."
+  []
+  @prompt-replacements)
 
 ;; ------------------------------------------------------------ openai-completions
 
@@ -164,17 +194,45 @@
   `prompt_tokens_details.cached_tokens`; a fold that wanted a translated key
   would be guessing at a second spelling this repo has no evidence for).
 
-  A KEY IS WRITTEN ONLY WHEN THE CHUNK HAS IT, and finish_reason only when it is
-  non-nil: most chunks carry `\"finish_reason\": null`, and 'null on every chunk'
-  would otherwise overwrite the one chunk that said `tool_calls`. Usage arrives on
-  the LAST chunk of a stream, which is also why this is folded rather than read
-  once at the top."
+  A KEY IS WRITTEN ONLY WHEN THE CHUNK HAS A NON-NIL VALUE FOR IT, and a `null` is
+  never allowed to stand in for a real one. Most chunks carry `\"finish_reason\": null`,
+  and a vendor that reports usage at all usually carries `\"usage\": null` on every chunk
+  BUT the last -- so a fold that wrote every occurrence would erase the one chunk that
+  said `tool_calls`, or the one that carried the numbers. The second loss is the worse
+  one: usage is the number this whole log exists to make readable
+  (`prompt_tokens_details.cached_tokens`), OURS is the only copy of it -- the vendor is
+  not asked twice -- and a wiped usage does not look wiped, it looks like a call that
+  reported nothing."
   [chunk]
   (cond-> {}
-    (contains? chunk :usage) (assoc :usage (:usage chunk))
-    (contains? chunk :model) (assoc :model (:model chunk))
+    (some? (:usage chunk)) (assoc :usage (:usage chunk))
+    (some? (:model chunk)) (assoc :model (:model chunk))
     (some? (get-in chunk [:choices 0 :finish_reason]))
     (assoc :finish-reason (get-in chunk [:choices 0 :finish_reason]))))
+
+(defn tee-lines
+  "LINES -> the same lines, each one (plus a newline) also appended to SB as it is
+  realized. The raw frame text, for the traffic log.
+
+  WHY THE RAW TEXT IS WORTH THE BYTES: a folded `:telemetry` is a READING of the stream,
+  and a reading cannot be checked against its source once the source is gone. 'The
+  vendor never mentioned cached tokens' and 'our fold dropped them' look identical in a
+  folded map, and only the second one is a bug -- so the evidence behind the reading
+  stays on the record.
+
+  THE LINES ARE ALREADY DECODED TEXT, which is what keeps this honest: what lands is the
+  vendor's own frame text (`data: {...}`), NOT a re-serialization of the parsed chunks --
+  the same property the request line has, for the same reason (the prefix cache keys on
+  bytes, so a second spelling is not evidence about the wire). ONE THING IS NORMALIZED,
+  said here rather than left to be discovered: `line-seq` has already dropped the line
+  terminators, so a `\\n` is put back and a CRLF vendor reads as LF. The frame text --
+  which is what any question is actually about -- is untouched.
+
+  LAZY ON PURPOSE, so this cannot make the stream wait for its last line: it is the
+  consumer's realization that fills SB. A stream that dies mid-way therefore leaves a
+  PARTIAL record of what did arrive, which is exactly the case somebody is reading."
+  [^StringBuilder sb lines]
+  (map (fn [line] (.append sb line) (.append sb "\n") line) lines))
 
 (defn consume-sse
   "Fold a seq of SSE lines into the assistant message AND the call's telemetry,
@@ -243,9 +301,14 @@
   vendor never enters thinking mode, the field means nothing to it, and adding one
   would be our invention rather than its requirement.
 
-  CALLED WHERE THE RUN'S MESSAGES ARE ASSEMBLED rather than inside `stream!`: the
-  `message` audit line's contract is 'what the LLM actually saw, verbatim', so the
-  padding has to happen before that line is written. See harness.edge.http/run-agent!."
+  CALLED WHERE THE RUN'S MESSAGES ARE ASSEMBLED rather than inside `stream!`, so that the
+  array handed to the provider is the array the run reasoned about -- and NOT inside the
+  record's writer: since `.scratch/jsonl-two-kinds` 票 02 a run logs the ENTRIES it was
+  handed (each one a `message` row, in the provider's own shape), and this pad is the
+  wire's requirement rather than a statement about what entered the conversation -- it
+  writes an empty `reasoning_content` onto a message nobody sent one for. The record keeps
+  the message; the vendor's demand is met on the way out. See
+  harness.edge.http/run-agent!."
   [messages provider]
   (if-not (:reasoning-effort provider)
     messages
@@ -293,6 +356,99 @@
               (distinct))
         (range (count messages))))
 
+(defn adjacent-answers
+  "MESSAGES -> the same messages, with every recorded tool answer sitting DIRECTLY BEHIND
+  the assistant message that named its call, in call order.
+  
+  THE OTHER HALF OF `unanswered-tool-calls`, and it exists because a RECORD CAN DELIVER AN
+  ANSWER LATE. A run cut off mid-call is repaired by
+  `harness.edge.replay/closing-frames`, whose TOOL_CALL_RESULT is APPENDED to the log --
+  after whatever else the client recorded in the meantime, its next messages included.
+  Folded back in file order, that answer lands BEHIND those messages, so the call reads as
+  unanswered and the vendor refuses the whole conversation before the model runs: the
+  session is bricked even though a result for the call is sitting right there.
+  
+  MOVING IT IS NOT INVENTING A RESULT: the message is already in the history, and this is
+  the same placement `harness.kernel.loop/answer!` makes for a replayed call, one layer up.
+  What it never does is invent one: an answer with no assistant message in the list to sit
+  behind is LEFT WHERE IT IS, exactly as `answer!` leaves an unplaced replay -- nothing
+  here reports it, because there is no call for the vendor to miss either.
+  
+  A WELL-SHAPED HISTORY COMES BACK UNCHANGED, message for message: an answer already
+  directly behind its call is emitted where it was, and the rest of the list does not move."
+  [messages]
+  (let [msgs    (vec messages)
+        ;; THE ASSISTANT MESSAGE THAT NAMED EACH CALL, by call id -- the same reading
+        ;; `unanswered-tool-calls` walks, so the two cannot disagree about what a call is.
+        owner   (into {}
+                      (for [[i m] (map-indexed vector msgs)
+                            :when (= "assistant" (:role m))
+                            tc    (:tool_calls m)]
+                        [(:id tc) i]))
+        ;; CALL ID -> THE INDICES OF THE TOOL MESSAGES THAT ANSWER IT *and have a call here
+        ;; to sit behind*. An answer with no owner is not movable (see the docstring).
+        answers (reduce (fn [acc [i m]]
+                          (let [cid (when (= "tool" (:role m)) (:tool_call_id m))]
+                            (if (and cid (contains? owner cid))
+                              (update acc cid (fnil conj []) i)
+                              acc)))
+                        {} (map-indexed vector msgs))
+        moved?  (into #{} (mapcat val answers))]
+    (vec
+     (mapcat (fn [i]
+               (let [m (nth msgs i)]
+                 (cond
+                   ;; THIS ONE IS EMITTED BEHIND ITS CALL, not here.
+                   (contains? moved? i)
+                   nil
+                   ;; THE CALL: itself, then its answers in call order.
+                   (= "assistant" (:role m))
+                   (cons m (mapcat (fn [tc] (map #(nth msgs %) (get answers (:id tc))))
+                                   (:tool_calls m)))
+                   :else
+                   [m])))
+             (range (count msgs))))))
+
+(def ^:private overflow-refusals
+  "The phrases a vendor's own CONTEXT-OVERFLOW refusal carries, as substrings of its
+  verbatim sentence. They are copied from real refusals rather than invented, because the
+  sentence IS the evidence: OpenAI says 'This model's maximum context length is N tokens.',
+  Anthropic says 'prompt is too long', and a gateway may send the machine code
+  'context_length_exceeded'. A vendor whose wording is absent here is simply not recognised
+  and the run fails as it did before -- the honest failure, not a wrong recovery."
+  ["maximum context length"
+   "context length exceeded"
+   "context_length_exceeded"
+   "context window"
+   "prompt is too long"
+   "reduce the length of the messages"
+   "too many tokens"
+   "maximum number of tokens"
+   "input is too long"
+   "message is too long"])
+
+(defn context-overflow?
+  "T -> true when T is a vendor's refusal for LENGTH -- 'this request is too big for my
+  context window' -- and false for every other failure.
+
+  IT IS ONE FAILURE, NOT ALL OF THEM. A 400 is a vendor's answer to many mistakes (a malformed
+  tool call, an undeclared modality, a bad parameter), and treating every 400 as 'too long'
+  would make a caller throw away history over an unrelated bug -- losing the very context that
+  explains it. So two things must agree: the status is a CLIENT error the length refusals
+  actually use (400/413/422), AND the vendor's own sentence carries one of `overflow-refusals`.
+  The sentence is the evidence, and it is the part that cannot be paraphrased away.
+
+  NO CAPACITY IS CONSULTED. The vendor has already answered, so a caller needs no window and no
+  estimate to act -- which is the point: the estimate `harness.edge.pressure` makes is known to
+  be wrong, and this is the path that does not rest on it."
+  [t]
+  (boolean
+   (when (instance? Throwable t)
+     (let [{:keys [status]} (ex-data t)
+           message          (str/lower-case (str (ex-message t)))]
+       (and (contains? #{400 413 422} status)
+            (some #(str/includes? message %) overflow-refusals))))))
+
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
@@ -300,12 +456,32 @@
                                       :tools tools
                                       :stream true}
                                reasoning-effort (assoc :reasoning_effort reasoning-effort)))
+        ;; THE REQUEST LANDS BEFORE IT GOES OUT, so a call that never comes back is
+        ;; still on the record -- a hang is exactly when somebody wants to read what
+        ;; was sent. Best-effort, and off unless CLJ_HARNESS_LLM_DEBUG is set:
+        ;; harness.infra.llm-debug is the file and the whole argument for it.
+        _    (llm-debug/record! {:at :request :thread-id thread-id :model model
+                                 :base-url (:base-url provider) :body body})
         resp (.send http-client (request provider body) (HttpResponse$BodyHandlers/ofInputStream))]
     (when-not (= 200 (.statusCode resp))
-      (throw (ex-info (str "HTTP " (.statusCode resp) ": "
-                           (slurp (.body resp) :encoding "UTF-8"))
-                      {:status (.statusCode resp)})))
+      (let [refusal (slurp (.body resp) :encoding "UTF-8")]
+        (llm-debug/record! {:at :error :thread-id thread-id :model model
+                            :status (.statusCode resp) :body refusal})
+        (throw (ex-info (str "HTTP " (.statusCode resp) ": " refusal)
+                        {:status (.statusCode resp)}))))
     ;; line-seq is lazy: it MUST be forced inside with-open, or the body leaks and
     ;; the caller deadlocks waiting on a stream nobody is draining.
     (with-open [r (io/reader (.body resp) :encoding "UTF-8")]
-      (consume-sse (line-seq r) on-event))))
+      (let [raw (StringBuilder.)
+            out (consume-sse (tee-lines raw (line-seq r)) on-event)]
+        ;; THE RESPONSE IS LOGGED AS THE VENDOR SENT IT *AND* AS WHAT IT MEANT, and it
+        ;; takes both to be able to check either. `:body` is the raw frame text, the way
+        ;; the request line's `:body` is the raw request -- the same argument on the
+        ;; other side of the wire. `:message` and `:telemetry` stay because they are what
+        ;; a reader usually wants and what a fold is FOR; the raw text is the evidence
+        ;; behind them rather than a replacement for them. WITHOUT IT there was no way to
+        ;; tell 'the vendor never mentioned cached tokens' from 'our fold dropped them'.
+        (llm-debug/record! {:at :response :thread-id thread-id :model model
+                            :body (str raw)
+                            :message (:message out) :telemetry (:telemetry out)})
+        out))))

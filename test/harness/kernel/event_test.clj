@@ -1,6 +1,9 @@
 (ns harness.kernel.event-test
   (:require [clojure.test :refer [deftest is testing]]
-            [harness.kernel.event :as ev]))
+            [harness.kernel.event :as ev]
+            [harness.kernel.tools :as tools]
+            [harness.edge.context :as context]
+            [clojure.data.json :as json]))
 
 (deftest tool-lifecycle-shapes
   (is (= {:type :tool/pre-execute :id "c" :name "read" :outcome :pass :missing []}
@@ -44,15 +47,21 @@
         (is (not (contains? ev :api-key)))
         (is (not (contains? ev :input))))))
 
-  (testing "the request's tool table is on the line, VERBATIM, and only when there is one"
-    ;; The table that went out is the table recorded: the caller hands in the very
-    ;; value it put in the request body, so 'described exactly like this' is a fact
-    ;; about the request rather than a second resolution that happens to agree.
+  (testing "the request's ENVELOPE is on the line -- the name set and the count, never the table"
+    ;; THE TABLE IS NOT KEPT (ticket 04). It is runtime configuration repeated on every
+    ;; call of a run, and what a reader deciding 'is this the same envelope' needs is the
+    ;; NAME set, not the descriptions (a re-description does not move it).
     (let [specs [{:type "function"
-                  :function {:name "read" :description "Read a file" :parameters {}}}]]
-      (is (= specs (:tools (ev/model-start {:model "m"} specs)))))
-    (is (= {:type :model/start :model "m"} (ev/model-start {:model "m"} []))
-        "a call with no tools says nothing about tools -- an empty array is not a fact")
+                  :function {:name "read" :description "Read a file" :parameters {}}}]
+          ev    (ev/model-start {:model "m"} (tools/default-signature specs))]
+      (is (= {:type :model/start :model "m"
+              :tools-names-hash (tools/names-hash specs)
+              :tools-count 1}
+             ev))
+      (is (not (contains? ev :tools))
+          "the table itself is gone -- the signature stands in for it"))
+    (is (= {:type :model/start :model "m"} (ev/model-start {:model "m"} (tools/default-signature [])))
+        "a call with no tools says nothing about tools -- an empty table is not a fact")
     (is (= {:type :model/start :model "m"} (ev/model-start {:model "m"} nil))))
 
   (testing "the end carries the vendor's report verbatim, keys and all"
@@ -73,3 +82,24 @@
          (ev/tool-result "c" "x" false)))
   (is (= {:type :run/end} (ev/run-end)))
   (is (= {:type :run/error :message "boom"} (ev/run-error "boom"))))
+
+(deftest a-real-tool-table-costs-the-line-a-couple-hundred-bytes
+  ;; TICKET 04's SIZE BENCHMARK. A 98-tool table with realistic prose is ~78 KB of JSON,
+  ;; and it used to be written into EVERY `model/start` line of a run (thread
+  ;; `bbcd4ae4-…`: 672 lines, 50.2 MB of a 129.7 MB log). What the line keeps now is the
+  ;; signature -- the name set as a hash, the byte size and the count -- which is under a
+  ;; couple of hundred bytes and does not grow with the descriptions.
+  (let [specs (mapv (fn [i]
+                      {:type "function"
+                       :function {:name (str "tool-" i)
+                                  :description (apply str (repeat 800 "d"))
+                                  :parameters {:type "object" :properties {}}}})
+                    (range 98))
+        table-bytes (count (json/write-str specs))
+        line        (ev/model-start {:model "m"} (context/tool-signature specs))]
+    (is (> table-bytes 75000) (str "a realistic table is ~75 KB, got " table-bytes))
+    (is (< (count (json/write-str line)) 300)
+        "the line is the signature, not the table -- two orders of magnitude smaller")
+    (is (not (contains? line :tools)))
+    (is (>= (:tools-bytes line) 75000))
+    (is (= 98 (:tools-count line)))))

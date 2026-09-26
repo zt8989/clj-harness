@@ -18,6 +18,7 @@ import { expect } from "vitest";
 import { type Case, type Suite, postRun, script, threadId, url } from "../e2e";
 import { translator } from "../support/locale";
 import { type StatsPayload, formatBytes, formatMillis, formatTime, statsCells } from "../../src/lib/format";
+import { withPushedNumbers } from "../../src/lib/stats";
 
 /// English is the language these cells were first written in, and it stays the one
 /// the shapes are read against; the Chinese half of each case is below it, pinning
@@ -30,6 +31,21 @@ async function statsOf(tid: string): Promise<{ status: number; body: StatsPayloa
   const res = await fetch(`${url()}api/threads/${encodeURIComponent(tid)}/stats`);
   const body = (await res.json().catch(() => ({}))) as StatsPayload;
   return { status: res.status, body };
+}
+
+/// THE ENDPOINT'S ANSWER ONCE THE RUN'S RECORD IS WHOLE, or whatever it last said when MS ran
+/// out. A run is over when its body is drained, but the record's LAST LINE is written by the
+/// harness on a schedule of its own -- so a fold read once, a moment too early, reports
+/// `incomplete` with every other number already right. That was this case's one red on
+/// 2026-09-23 (a full run on a loaded machine), and it is what this waits for: the record,
+/// not the response.
+async function wholeRecord(tid: string, ms = 10_000): Promise<{ status: number; body: StatsPayload }> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const answer = await statsOf(tid);
+    if (answer.body.incomplete === false || Date.now() > deadline) return answer;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /// A vendor's usage, spelled the way the wire spells it.
@@ -67,14 +83,15 @@ const cases: Case[] = [
       // the catalog the thing under test rather than a decoration: the same payload
       // through the same function has to come out in the other language, with the
       // units (which do not translate) unchanged and the words (which do) not.
-      // `steps` is a count of MODEL CALLS, and `CONTEXT.md` says the Chinese word for
-      // one is 模型调用 -- not 步, which is the synonym the glossary exists to forbid.
+      // `steps` is a count of MODEL CALLS: `CONTEXT.md` forbids 步, and the STRIP's own
+      // cell is the one place the phrase is shortened to 调用 -- that row gives up whole
+      // cells before it lets one of them wrap (see `components/composer-stats.tsx`).
       expect(statsCells(payload, zh)).toEqual({
         turns: "1 轮",
-        steps: "2 次模型调用",
+        steps: "2 次调用",
         rate: "242 tok/s",
         total: "2k tok",
-        cached: "91% 命中缓存",
+        cached: "91% 缓存",
       });
 
       // The quantifier is a real rule and it is DIFFERENT in each language: English
@@ -175,13 +192,15 @@ const cases: Case[] = [
         },
         { content: "done", usage: usage(1200, 8, 1100) },
       ]);
-      const resp = await postRun(tid, "stats-strip-run-1", [
+      const resp = await postRun(tid, [
         { id: "u1", role: "user", content: "看看这个项目" },
       ]);
       expect(resp.status).toBe(200);
       await resp.text(); // drain: the run is over when the body is
 
-      const { status, body } = await statsOf(tid);
+      // WAITED FOR, NOT READ ONCE (see `wholeRecord`): the numbers below are a fold of the
+      // whole record, and the record's last line lands after the response did.
+      const { status, body } = await wholeRecord(tid);
       expect(status).toBe(200);
       expect(body.turns).toBe(1);
       expect(body.steps).toBe(2);
@@ -215,6 +234,45 @@ const cases: Case[] = [
       const { status, body } = await statsOf(threadId("stats-fresh"));
       expect(status).toBe(404);
       expect((body as { error?: string }).error).toMatch(/no log for thread/);
+    },
+  },
+  {
+    name: "the-pushed-numbers-join-the-snapshot-without-erasing-it",
+    run: async () => {
+      // TICKET 04b OF `.scratch/turn-and-model-events`. The strip's numbers arrive two ways --
+      // the snapshot a page asks for when it opens, and the push the server sends at the end of
+      // every model call -- and this is the one place that decides how they meet.
+      const snapshot = {
+        turns: 3,
+        steps: 4,
+        usage: { totalTokens: 100, promptTokens: 90, completionTokens: 10, cachedTokens: 0 },
+        incomplete: false,
+      } as StatsPayload;
+
+      // THE PUSH OWNS ITS KEYS: the four cells and the context ring are replaced by what the
+      // session's own folds said at that moment.
+      const merged = withPushedNumbers(snapshot, {
+        steps: 5,
+        context: { usedTokens: 10, windowTokens: 100, percent: 10 },
+      }) as StatsPayload;
+      expect(merged.steps).toBe(5);
+      expect(merged.context?.usedTokens).toBe(10);
+
+      // AND IT DOES NOT OWN THE REST: a turn is counted where a run is opened, and
+      // 'incomplete' is a fact about the log as the reader found it -- neither is a number a
+      // fold can update, so both stay the snapshot's.
+      expect(merged.turns).toBe(3);
+      expect(merged.incomplete).toBe(false);
+      expect(merged.usage?.totalTokens).toBe(100);
+
+      // NO PUSH YET IS THE SNAPSHOT (a page that just opened, and no call has ended), and no
+      // snapshot yet is the push (the first fact can arrive before the ask answers).
+      expect(withPushedNumbers(snapshot, undefined)).toBe(snapshot);
+      expect(withPushedNumbers(null, { steps: 1 })?.steps).toBe(1);
+
+      // NOT REPORTED IS NOT ZERO: a push that carries nothing leaves the snapshot's number
+      // where it is rather than blanking it.
+      expect((withPushedNumbers(snapshot, {}) as StatsPayload).steps).toBe(4);
     },
   },
 ];

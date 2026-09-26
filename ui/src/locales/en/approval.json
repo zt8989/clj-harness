@@ -9,8 +9,10 @@
     "hold": "The message box stays closed until this is decided -- a message sent now would be refused rather than queued."
   },
   "elicitation": {
-    "title": "A server is asking you something",
+    "title": "Someone is asking you something",
     "named": "{{server}} is asking you something",
+    "model": "The model is asking you something",
+    "other": "or type your own",
     "send": "Send",
     "sent": "Sent",
     "decline": "Decline",

@@ -12,25 +12,64 @@
 // on (Tailwind, the shadcn theme tokens, the shimmer/collapsible keyframes) is
 // reached through it. See src/styles.css.
 //
-// SO IS THE LANGUAGE, and its position in this list is the whole reason it is
-// imported here rather than inside App: `./lib/i18n` initializes i18next and sets
-// `<html lang>` as a side effect of being loaded, so importing it above the render
-// is what makes the first paint already be in the right language. Imported from
-// inside a component it would still work -- and would also let one frame of raw
-// keys (`view.conversation`) reach the screen.
+// THE LANGUAGE IS AWAITED HERE, BEFORE THE ROOT EXISTS, and that is the whole reason it
+// is not an import side effect any more: the language lives in config.edn and is fetched
+// (./lib/i18n's `startLanguage`), so nothing can know it synchronously. Two things below
+// depend on this order -- the first paint is already in the right language, and no frame
+// of raw keys (`view.conversation`) reaches the screen. See ./lib/i18n for the cost of
+// that round trip.
+//
+// AND IT IS THE ONLY THING THIS ENTRY WAITS FOR, which is worth saying because it was
+// briefly two. For one day the page's first conversation was named by the SERVER, and that
+// put a request in front of the first paint (2026-09-23, withdrawn on the 24th --
+// `.scratch/client-named-sessions`). The name belongs to the CLIENT: that is AG-UI's
+// design, `lib/id.ts` says which of its functions makes one and why that one, and `App`
+// opens its first conversation itself, synchronously, the moment it mounts.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app";
-import "./lib/i18n";
+import { startLanguage } from "./lib/i18n";
 import "./styles.css";
-
 
 const container = document.getElementById("root");
 if (container === null) throw new Error("index.html has no #root element");
+/// THE ROOT IS MADE HERE, where the narrowing above still holds: `boot` is a closure, and a
+/// closure does not keep a narrowing -- which is why the render is the only thing it does
+/// with this.
+const root = createRoot(container);
 
-createRoot(container).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+/// A FAILURE IS WORTH A SENTENCE rather than a blank document: the language is a fetch, and
+/// in development this page is served by vite while the harness is a second process -- so
+/// "the backend is not running" should read as itself.
+function BootFailure({ message }: { message: string }) {
+  return (
+    <p role="alert" data-slot="boot-error" className="text-destructive p-4 text-sm">
+      {message}
+    </p>
+  );
+}
+
+async function boot(): Promise<void> {
+  try {
+    // THE LANGUAGE COMES FIRST, and it is the one ordering that is not a preference: it is
+    // what makes the first paint already be in the right language, and it is the catalogs
+    // this sentence comes from.
+    await startLanguage();
+    root.render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+  } catch (failure: unknown) {
+    root.render(
+      <StrictMode>
+        <BootFailure
+          message={failure instanceof Error ? failure.message : String(failure)}
+        />
+      </StrictMode>,
+    );
+  }
+}
+
+void boot();

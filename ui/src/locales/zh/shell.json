@@ -5,8 +5,10 @@
   },
   "session": {
     "neverRun": "还没跑过",
-    "noLog": "还没有日志",
-    "current": "当前",
+    "justNow": "刚刚",
+    "minutesAgo_other": "{{count}} 分钟前",
+    "hoursAgo_other": "{{count}} 小时前",
+    "daysAgo_other": "{{count}} 天前",
     "running": "运行中",
     "parked": "等你回应",
     "archive": "归档",
@@ -15,7 +17,10 @@
     "unarchiveTitle": "取消归档——把这个会话放回项目里其他会话中间",
     "empty": "这个项目里还没有会话。",
     "allArchived": "这里的会话都归档了。",
-    "archived": "已归档"
+    "showMore_other": "还有 {{count}} 个",
+    "showLess": "收起",
+    "archived": "已归档",
+    "untitled": "新会话"
   },
   "project": {
     "newSession": "新建会话",
@@ -24,32 +29,31 @@
     "moreTitle": "更多——这个项目的操作",
     "remove": "移除"
   },
+  "task": {
+    "section": "任务"
+  },
   "sidebar": {
     "newTask": "新建任务",
+    "open": "打开侧边栏",
+    "collapse": "收起侧边栏",
     "addProject": "添加项目",
     "addProjectTitle": "添加项目——打开文件夹选择器，你选的目录会成为项目",
     "refresh": "刷新",
-    "refreshTitle": "从磁盘和库重新读取列表",
-    "empty": "还没有项目。会话属于项目，所以要新建任务，得先添加一个项目。",
+    "refreshTitle": "从库里重新读取列表",
+    "empty": "这里还什么都没有。添加一个项目，或者新建一个任务。",
     "settings": "设置",
     "settingsTitle": "设置：这个会话正在用什么跑，这个配置家可以选什么"
   },
   "subagents": {
     "title": "子agent",
-    "titleHint": "子agent——这个会话能把活交给谁，以及已经交出去过哪些",
     "loading": "正在读子agent…",
-    "definitions": "这里定义了什么",
-    "runs": "委派记录",
     "builtin": "内置",
     "yours": "自建",
-    "running": "跑着",
     "baselineAll": "这个会话的全部工具，除了 eval 和委派",
     "baselineReadOnly": "只保留改不了任何东西的工具",
     "minus": "再排除 {{tools}}",
     "nothingElse": "没有其他排除",
-    "customEmpty": "还没有你自己建的子agent——去设置里加一个。",
-    "runsEmpty": "还没有委派过。",
-    "changeInSettings": "这一组只读，要改去设置里。"
+    "customEmpty": "还没有你自己建的子agent——去设置里加一个。"
   },
   "addProject": {
     "path": "绝对路径——D:\\work\\lisp-harness",
@@ -59,12 +63,13 @@
     "emptyPath": "请填写目录的绝对路径——什么都没填。"
   },
   "refusal": {
-    "noProject": "先添加一个项目——会话属于项目。",
-    "noProjectSelected": "先选一个项目——会话属于项目。",
     "archiveRunning": "那个会话还在跑；结束之后再归档。",
     "archiveParked": "那个会话在等你回应；结束之后再归档。",
     "removeProjectRunning": "{{session}} 还在跑；结束之后再移除项目。",
     "removeProjectParked": "{{session}} 在等你回应；结束之后再移除项目。"
+  },
+  "record": {
+    "degraded_other": "这段对话没能存到磁盘上：{{reason}}。还有 {{count}} 行在等着写。"
   },
   "dialog": {
     "removeTitle": "移除这个项目？",
@@ -74,5 +79,30 @@
     "removeSessions_other": "{{count}} 个会话将不再在这里列出。",
     "keep": "保留",
     "removeSubmit": "移除项目"
+  },
+  "window": {
+    "earlier": "显示更早",
+    "loadingEarlier": "正在加载更早的消息",
+    "reopened": "这一场在服务端已经关掉，窗口在新消息处重新打开了。",
+    "rebuilt_other": "窗口中间有一段补不回来，已按最新一页重建：丢了 {{count}} 条。",
+    "ahead_other": "这个页面显示过 {{count}} 条这场对话里已经没有的内容，已经去掉。"
+  },
+  "subagentView": {
+    "title": "子agent · {{name}}"
+  },
+  "rightPane": {
+    "title": "任务",
+    "open": "打开任务视图",
+    "collapse": "收起任务视图",
+    "back": "返回列表",
+    "subagents": "子代理",
+    "subagentsEmpty": "这个会话还没有委派过子代理。",
+    "subagentRunning": "运行中",
+    "subagentSettled": "已结束",
+    "subagentStarted": "{{time}}开始",
+    "jobs": "后台任务",
+    "jobsEmpty": "这个会话还没有后台任务。",
+    "jobElapsed": "已跑 {{time}}",
+    "jobStop": "停掉这条后台任务"
   }
 }

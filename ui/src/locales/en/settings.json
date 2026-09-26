@@ -2,7 +2,7 @@
   "language": {
     "title": "Language",
     "field": "Interface language",
-    "hint": "This browser only — remembered here, written to no file. The harness's own sentences (tool results, errors) are not translated."
+    "hint": "The language this harness speaks — written to config.edn, and the same one the model is told to answer in. The harness's own sentences (tool results, errors) are not translated."
   },
   "page": {
     "general": "General",
@@ -17,7 +17,8 @@
     "sourceInline": "config.edn describes this provider inline",
     "sourceRequest": "this run's request picked it",
     "reread": "Re-read",
-    "rereadTitle": "Read the files again"
+    "rereadTitle": "Read the files again",
+    "back": "Back"
   },
   "report": {
     "title": "In force",
@@ -58,7 +59,10 @@
     "keyPresent": "key ✓",
     "keyMissing": "no key",
     "count_one": "{{count}} model · {{credential}}",
-    "count_other": "{{count}} models · {{credential}}"
+    "count_other": "{{count}} models · {{credential}}",
+    "withoutKeys_one": "{{count}} provider has no key — open to add one",
+    "withoutKeys_other": "{{count}} providers have no key — open to add one",
+    "withoutKeysHint": "A provider with no key cannot serve a run, so it is not offered above. Add its key and it moves back into the list."
   },
   "origin": {
     "builtin": "built-in",
@@ -89,6 +93,7 @@
     "fetchTitle": "Ask the vendor what it serves",
     "offeredEmpty": "The vendor listed no models.",
     "offeredHint": "Tick what you want in the catalog. Each arrives declaring text only — raise it if the vendor takes images.",
+    "offeredSuggested": "suggested: {{value}}",
     "takeWithCount_one": "Add {{count}} to the catalog",
     "takeWithCount_other": "Add {{count}} to the catalog",
     "errorNote": "Nothing was written — config.edn is exactly as it was.",
@@ -108,7 +113,12 @@
     "maxOut": "max out",
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
-    "limitsNote": "Reported, not enforced. Omit what you have not verified."
+    "limitsNote": "Reported, not enforced. Omit what you have not verified.",
+    "instructionUpdates": "Instruction updates",
+    "instructionUpdatesLabel": "How this model receives a moved instruction",
+    "instructionUpdatesUndeclared": "not declared",
+    "instructionUpdatesInPlace": "in-place",
+    "instructionUpdatesReplace": "replace"
   },
   "mcp": {
     "heading": "MCP servers",

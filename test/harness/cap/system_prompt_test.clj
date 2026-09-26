@@ -59,8 +59,11 @@
   [text tag]
   (let [open  (str "<" tag ">")
         close (str "</" tag ">")
-        start (str/index-of text open)
-        end   (str/index-of text close)]
+        ;; LAST, not first: the frozen opening can NAME a tag it tells the model to
+        ;; read (prompt.md points at `<env>` for the language), and only the appended
+        ;; blocks are real. The block is always behind the opening.
+        start (str/last-index-of text open)
+        end   (str/last-index-of text close)]
     (when (and start end) (subs text start (+ end (count close))))))
 
 ;; ------------------------------------------------- the no-sink half, byte for byte
@@ -243,7 +246,7 @@
   (support/write-hooks! {:system-prompt [{:command "printf 'from-the-file\n'"}]})
   (hooks/session-add! "sp-order-all" :system-prompt (says "from-the-session"))
   (let [text (:text (assemble-run "sp-order-all"))
-        at   (fn [s] (str/index-of text s))]
+        at   (fn [s] (str/last-index-of text s))]
     (is (every? some? [(at "<project>") (at "<env>")
                        (at "\n\nfrom-the-file\n") (at "\n\nfrom-the-session")]))
     (is (< (at "<project>") (at "<env>")
@@ -301,6 +304,9 @@
       (is (str/includes? proj (str dir " -- this project")))
       (is (str/includes? proj (str (home/root) " -- this harness's configuration home")))
       (is (str/includes? proj "reading your own configuration there is allowed")))
+      (is (str/includes? proj (str (first (env/temp-dirs)) " -- "))
+          "the machine's temp directory, stated with its reason like every other free path")
+      (is (str/includes? proj "scratch that is meant to be thrown away"))
     (testing "and no strict sentence, because this project is not strict"
       (is (not (str/includes? proj ":strict true"))))))
 
@@ -357,7 +363,8 @@
             e    (block text "env")]
         (testing "the block is there, and behind <project>"
           (is (some? e))
-          (is (< (str/index-of text "<project>") (str/index-of text "<env>"))))
+          (is (< (str/last-index-of text "<project>") (str/last-index-of text "<env>"))
+              "the <env> block is behind <project>, not the mention in the opening"))
         (testing "the shell is harness.infra.shell's answer, reported and not re-decided"
           (is (str/includes? e "pwsh"))
           (is (str/includes? e "/usr/local/bin/pwsh"))
@@ -418,6 +425,17 @@
   ;; rather than re-asked (and re-worded) on every run.
   (is (= (:text (assemble-run "sp-env-stable"))
          (:text (assemble-run "sp-env-stable")))))
+
+(deftest the-env-block-states-which-language-this-harness-speaks
+  ;; The line is this HOME's setting, resolved from a chain whose tail is the OS and the
+  ;; terminal -- facts about the machine the suite happens to run on -- so the assertion
+  ;; is that the line EXISTS and names a language this harness speaks, not WHICH one
+  ;; this machine answers. The chain itself is asserted source by source, with every
+  ;; link stubbed, in harness.infra.language-test.
+  (let [e (block (:text (assemble-run "sp-env-lang")) "env")]
+    (is (some? e))
+    (is (re-find #"(?m)^language: (?:English \(en\)|Chinese \(zh\))$" e)
+        "the language line is always there, naming the value and what to call it")))
 
 (deftest the-env-row-is-an-ordinary-row
   ;; Visible in the table, switchable by name, off means gone, on means back -- the

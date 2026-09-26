@@ -44,7 +44,7 @@
 
 (def max-bytes
   "How much of a page one answer may carry, in bytes of text. THE SAME NUMBER as
-  `anchor_grep`'s max-bytes, deliberately: it bounds the same thing (how much of a
+  `grep`'s max-bytes, deliberately: it bounds the same thing (how much of a
   document goes into one tool answer), and two different budgets for one idea
   would be a difference nobody asked for and nobody would remember."
   51200)

@@ -5,7 +5,7 @@
 
   THE FOURTH READER OF THE SAME LOG, beside harness.edge.replay (the conversation),
   harness.edge.stats (the numbers) and harness.edge.trajectory (what the model saw).
-  What it reads is the `input` / `message` / `model/*` lines and the provider
+  What it reads is the `message` / `model/*` lines and the provider
   timeline, and the question it answers is none of the other three's: 'this call was
   sent N tokens -- out of how much room, and what was in them'.
 
@@ -29,11 +29,14 @@
   the live resolution would divide one call's prompt by another model's window."
   (:require [clojure.data.json :as json]
             [harness.edge.stats :as stats]
-            [harness.edge.trajectory :as trajectory]))
+            [harness.edge.trajectory :as trajectory]
+            [harness.edge.replay :as replay]
+            [harness.edge.sessions :as sessions]
+            [harness.kernel.tools :as tools]))
 
 ;; ----------------------------------------------------------------- measured size
 
-(defn- size-of
+(defn size-of
   "The size of VALUE as this record spells it: characters of its JSON, unicode NOT
   escaped.
 
@@ -44,6 +47,21 @@
   against a tool table written in ASCII."
   [value]
   (count (json/write-str value :escape-unicode false)))
+
+(defn tool-signature
+  "SPECS -> the small statement of a request's tool table that a `model/start` line
+  keeps (harness.kernel.event): the NAME set as a hash, the count, and the size in
+  characters as this record spells it (`size-of`). nil for an empty table, which
+  writes no `:tools-*` key at all.
+
+  THE EDGE IS WHERE THIS LIVES because `size-of` is the wire's character rule and the
+  kernel does not own it. The kernel owns the MECHANISM -- `harness.kernel.loop`
+  hands the signature through, `harness.kernel.tools` owns the name hash -- and this
+  is the capability half, the one number that has to be measured rather than hashed.",
+  [specs]
+  (when (seq specs)
+    (assoc (tools/default-signature specs)
+           :tools-bytes (size-of specs))))
 
 ;; --------------------------------------------------------------------- the call
 
@@ -62,10 +80,10 @@
       (nil? record)
       (cond-> acc pending (conj {:start pending :end nil}))
 
-      (= "model/start" (:kind record))
+      (= "model/start" (replay/kind record))
       (recur more record (cond-> acc pending (conj {:start pending :end nil})))
 
-      (= "model/end" (:kind record))
+      (= "model/end" (replay/kind record))
       (recur more nil (conj acc {:start pending :end record}))
 
       :else
@@ -82,7 +100,7 @@
   [runs]
   (reduce (fn [acc [i run]]
             (reduce (fn [acc call]
-                      (let [prompt (get-in call [:end :payload :usage :prompt_tokens])]
+                      (let [prompt (get-in (replay/payload (:end call)) [:usage :prompt_tokens])]
                         (if (number? prompt)
                           {:run i :start (:start call) :end (:end call)}
                           acc)))
@@ -102,11 +120,30 @@
   whose session never changed provider -- which is most of them, and the failure looks
   like 'this model declares no window' rather than like a bug."
   [record]
-  (let [payload (:payload record)]
+  (let [payload (replay/payload record)]
     (or (get-in payload [:resolved :context-window])
         (:context-window payload))))
 
-(defn- timeline-window
+(defn- timeline-row?
+  "Whether ROW is one of the lines a provider's window is read from."
+  [row]
+  (contains? #{"provider/init" "provider/changed"} (replay/kind row)))
+
+(defn- timeline-pair
+  "ROW -> [ts window]: the pair the timeline is kept as, so the session's fold can hold the
+  same value a whole-record reader builds, instead of folding the records again at answer time."
+  [row]
+  [(:ts row) (window-of row)])
+
+(defn- window-at
+  "The window in force at TS, read off TIMELINE's [ts window] pairs.
+
+  BY THE CLOCK, NOT BY POSITION: the lines a session's provider timeline is made of land
+  outside runs too, and a log's `:ts` only ever goes forwards."
+  [timeline ts]
+  (->> timeline (filter (fn [[t _]] (<= t ts))) last second))
+
+(defn timeline-window
   "The window the provider timeline said was in force at or before RECORD: the last
   `provider/init` / `provider/changed` before it, as the edge wrote it down at the time.
 
@@ -116,13 +153,8 @@
   timeline line at all -- there is no resolution to record -- and takes its window
   from the call's own line, which is why that is the primary source."
   [records end-record]
-  (->> records
-       (filter #(contains? #{"provider/init" "provider/changed"} (:kind %)))
-       ;; By the clock, not by position: the lines a session's provider timeline is
-       ;; made of land outside runs too, and a log's :ts only ever goes forwards.
-       (filter #(<= (:ts %) (:ts end-record)))
-       last
-       window-of))
+  (window-at (into [] (comp (filter timeline-row?) (map timeline-pair)) records)
+             (:ts end-record)))
 
 ;; -------------------------------------------------------------------- the split
 
@@ -139,6 +171,14 @@
   (the client's messages, the opening blocks, the skill bodies that rode along) and
   the returned side (what the kernel appended). The injected context is not a fourth
   bucket: it IS a message line, and it is in the conversation.
+ 
+  AN INSTRUCTION UPDATE (role \"developer\", source \"instruction-update\") IS IN THE
+  CONVERSATION TOO, and that is a decision, not a default: the `system` bucket is
+  literally the record's system row -- message[0] as it went out -- while an update is
+  an ordinary tail message the model was handed, and turning `system` into 'anything
+  instructional' would answer a different question than the record's own split does.
+  Its price is visible and honest: under :in-place the chain grows in the conversation
+  bucket because it is resent every run (`.scratch/instruction-updates` decision 3).
 
   THE KEYS ARE STRINGS, like the trajectory's item kinds: this is an enum-shaped
   value that goes out on the wire and comes back to a client that matches on it, and
@@ -148,7 +188,10 @@
         system   (filter #(= "system" (:role %)) messages)
         rest     (remove #(= "system" (:role %)) messages)]
     [["system"       (reduce + 0 (map size-of system))]
-     ["tools"        (size-of (or (:tools start-payload) []))]
+     ["tools"        (if-some [b (:tools-bytes start-payload)]
+                       b
+                       ;; AN OLD RECORD KEEPS THE TABLE, and its size is still the answer.
+                       (size-of (or (:tools start-payload) [])))]
      ["conversation" (reduce + 0 (map size-of rest))]]))
 
 (defn- apportion
@@ -170,8 +213,44 @@
 
 ;; ------------------------------------------------------------------- the answer
 
-(defn records->context
-  "RECORDS -> the context section of the session's payload. See the namespace
+(defn state-init []
+  "The state the context section is read from: THE SAME RUN-SEGMENT MACHINE the trajectory
+  view folds (`harness.edge.trajectory/segments-init`), plus the two small things only this
+  reader needs -- the provider timeline as [ts window] pairs, and the log's last event row.
+
+  REUSING THE SEGMENT MACHINE IS THE POINT. `segments-step` is already a fold, and
+  `harness.edge.trajectory/run-segments` says in its own docstring that this namespace is the
+  second reader of it ('a second implementation of it would be a second chance to disagree
+  about where a run starts'). Registering THAT fold on the session therefore adds no second
+  reading of the record -- which is what `.scratch/turn-and-model-events` ticket 01 asks for."
+  {:segments   (trajectory/segments-init)
+   :timeline   []            ;; [[ts window] ...], provider lines only, in file order
+   :last-event nil})         ;; the last 'event' row -- what `stats/incomplete?` reads
+
+(defn state-step
+  "ONE ROW of the fold -> the next state: [LINE-INDEX ROW] -> state, with CTX ignored.
+
+  A STEP RATHER THAN A WHOLE-RECORD FUNCTION, because the session advances it as rows are
+  written (`sessions/register-step!`): the same function drives the birth walk and every
+  later line, so the live answer and a cold read cannot disagree."
+  [st _ctx [i row]]
+  ;; A NIL STATE STAYS NIL -- this session does not hold this fold (it was built before the
+  ;; registration), and there is nothing to advance. See `harness.edge.stats/stats-step` for the
+  ;; longer note; the reason is the same one.
+  (when (some? st)
+    (cond-> (update st :segments trajectory/segments-step [i row])
+      (timeline-row? row) (update :timeline conj (timeline-pair row))
+      (= "event" (replay/kind row)) (assoc :last-event row))))
+
+(defn- incomplete-here?
+  "Whether the log this state describes ends mid-run -- the same reading
+  `harness.edge.stats/incomplete?` makes, handed the one row it needs rather than the
+  whole record."
+  [st]
+  (boolean (and (:last-event st) (stats/incomplete? [(:last-event st)]))))
+
+(defn state->context
+  "STATE -> the context section of the session's payload. See the namespace
   docstring for the rules; the shape is the one documented on the route
   (GET /api/threads/<stem>/stats):
 
@@ -190,17 +269,18 @@
   is still going, or whose tail has not landed, reports the vendor's numbers and no
   split at all. Half a message set would make the conversation look like a small
   share of a large prompt."
-  [records]
-  (let [runs   (trajectory/run-segments records)
+  [st]
+  (let [runs   (trajectory/segments-answer (:segments st))
         chosen (last-reporting-call runs)]
     (if (nil? chosen)
       {}
       (let [run       (nth runs (:run chosen))
             start     (:start chosen)
-            payload   (:payload start)
-            usage     (:payload (:end chosen))
+            payload   (replay/payload start)
+            usage     (replay/payload (:end chosen))
             used      (get-in usage [:usage :prompt_tokens])
-            window    (or (:context-window payload) (timeline-window records (:end chosen)))
+            window    (or (:context-window payload)
+                          (window-at (:timeline st) (:ts (:end chosen))))
             ;; THE SPLIT NEEDS THE RUN'S MESSAGE SIDE TO BE ON DISK. Two ways it is
             ;; not: the chosen call is in the log's LAST run and that run has no
             ;; terminal frame (it is still going), or its returned tail has not landed
@@ -208,7 +288,7 @@
             ;; Either way the vendor's numbers are already true and the split is not, so
             ;; the numbers are reported and the split is left out.
             unfinished? (or (and (= (:run chosen) (dec (count runs)))
-                                 (stats/incomplete? records))
+                                 (incomplete-here? st))
                             (empty? (:returned run)))
             parts     (when-not unfinished?
                         (apportion used (shares run payload)))]
@@ -218,6 +298,30 @@
                  :percent (long (Math/round (* 100.0 (/ (double used) (double window))))))
 
           (seq parts) (assoc :parts parts))))))
+
+(defn records->context
+  "A whole record -> its context section, folded from a stream: the same answer `state->context`
+  gives, driven one row at a time so a session can advance it between reads.
+
+  FOLDED FROM A STREAM, and that is not only about memory: the SAME `state-step` is what the
+  session registers (`install!`), so a cold read and a live answer are one implementation."
+  [records]
+  ;; THE CTX IS PASSED AS NIL HERE AND IGNORED: the read fold's driver hands a step
+  ;; `[value ctx [line-index row]]` (see `harness.edge.pressure/band-step`, which is the
+  ;; same shape), and this reader has no use for it -- what it folds is in the rows.
+  (state->context (reduce (fn [st pair] (state-step st nil pair))
+                          (state-init)
+                          (map-indexed vector records))))
+
+(defn install! []
+  "Register this reader's fold on BOTH of a session's seams (the birth walk and the write
+  stream), so a live session can answer without opening the record at all -- the shape
+  `harness.edge.pressure/install!` established. Idempotent; returns the teardown."
+  (sessions/register-fold! :context {:init state-init :step state-step})
+  (sessions/register-step! :context state-step)
+  (fn teardown []
+    (sessions/unregister-fold! :context)
+    (sessions/unregister-step! :context)))
 
 (defn log-context
   "A log FILE -> records->context of it. The file entry point, the counterpart of

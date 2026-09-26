@@ -136,6 +136,12 @@ tool_call + tool 结果，注入物只在服务端那一侧存在——这恰好
     `harness.providers` 那句 "no provider named X; the registry defines …" 的形状），`:error` 为真。
     **不标 `:requires-approval`**：读一份指令不是副作用；正文里让人做的事，各自过各自那道缝。
 
+
+> **更正（2026-09-26，票 01 of `.scratch/skill-body-in-result`）：决策 9 / 10 描述的「工具回一句确认、正文由派生补一条 `<skill>` 消息」已经不成立。**
+> `skill` 的**工具结果就是正文本身**（末尾一行说技能目录），工具路径不再产生 `<skill>` 消息、`:context/injected` 事件或那张卡；
+> `loaded-prefix` / `loaded-summary` / `load-confirmations` 随之删除。
+> 派生只剩**人的 `/name`** 这一半——它没有工具结果可以携带正文。
+> 上面第 9 / 10 条与「验收主线」第 2 条里凡说「工具加载的正文是一份注入」的句子，以该票为准。
 11. **`InstructionsLoaded` 钩子点接线。** 点表里**已经声明了这个点**（`payload #{:path}`，
     "an instruction file is folded into the run's context"），而本特征正是它的触发源——它的子系统到了，
     点就该活。每折叠一个文件触发一次，观察者（`:gate? false`），verdict 丢弃，失败按点自己的 `:on-error`。

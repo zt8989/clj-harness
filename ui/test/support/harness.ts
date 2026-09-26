@@ -18,10 +18,15 @@
 // runs on whatever `java` is on PATH (the repo targets 17). The child simply
 // inherits the ambient environment.
 import { spawn, type ChildProcess } from "node:child_process";
+import { stopTree } from "../../../scripts/proc.mjs";
+// The repo's one answer to a TREE of processes: `taskkill /T /F` on Windows, the process group
+// elsewhere. It is not re-implemented here -- a second tree-killer is a second set of edges to get
+// wrong, and the edges are exactly what this file got wrong.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import net from "node:net";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
@@ -125,6 +130,34 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<Ready> {
  * spawner made is the one the server actually reads -- a check can plant a
  * system-level skill in it and see that skill arrive.
  */
+// IS ANYTHING STILL ANSWERING ON PORT? A TCP connect is the cheapest honest answer there is:
+// the server IS a socket, so 'accepts' and 'refuses' are the only two states it has -- no
+// string matching on output, no guessing from a process's exit event (see `stop` for why that
+// event is not the fact worth waiting on).
+async function accepts(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const settle = (answer: boolean): void => {
+      socket.destroy();
+      resolve(answer);
+    };
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
+// Wait for PORT to stop answering, for at most WITHIN_MS. Answers whether it stopped -- a
+// server that refuses to die must not hang the whole suite, so the caller reports the leftover
+// rather than waiting on it forever (the same judgement the temp directory gets below).
+async function waitForGone(port: number, withinMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + withinMs;
+  for (;;) {
+    if (!(await accepts(port))) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number } = {}): Promise<Harness> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "clj-harness-ui-test-"));
   const home = path.join(base, "home");
@@ -159,21 +192,49 @@ export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number
 
   const { port, output } = await waitForReady(proc, timeoutMs);
 
-  // Stops the server AND removes its temp directory. The removal waits for the
-  // process to actually exit: the JVM's shutdown hook closes the socket on
-  // SIGTERM, and deleting the log directory out from under a still-running
-  // server would leave the directory behind anyway (or resurrect it). The
-  // timeout is a floor, not a promise -- a JVM that refuses to die must not hang
-  // the whole suite, so the directory is attempted regardless and a leftover is
-  // reported.
+
+  // A SIGNAL IS NOT AN `afterAll`. `npm test` interrupted never reaches the hook that calls
+  // `stop`, and the server has no reason to mind: it keeps serving a run nobody is watching.
+  // So a signal stops the tree -- and RE-RAISES rather than exiting here, because a listener is
+  // what stops Node from killing the process on its own, and a test run that cannot be
+  // interrupted with Ctrl+C is worse than one that leaves a server behind. Both are `once`, and
+  // `stop` takes them back off again.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    stopTree(proc);
+    process.kill(process.pid, signal);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  // Stops the server AND removes its temp directory.
+  //
+  // THE CHILD IS NOT THE SERVER. What `spawn` hands back is a LAUNCHER -- `clojure` is a shim
+  // that starts `deps.exe`, which starts the JVM -- so killing that one pid does not stop the
+  // server: the JVM is a grandchild, and on Windows it is also never asked politely (an exit
+  // there is TerminateProcess, which runs no shutdown hook, so nothing of the server's own
+  // runs on the way out either). Measured on this machine: the launcher reports SIGTERM and
+  // the JVM keeps serving, one per test run, on a port nobody is watching any more.
+  // `stopTree` is the repo's one tree-killer, and the port below is the proof it worked.
+  //
+  // THE REMOVAL WAITS FOR THE PROCESS: deleting the log directory out from under a
+  // still-running server would leave the directory behind anyway (or resurrect it). Both waits
+  // are floors rather than promises -- a JVM that refuses to die must not hang the whole
+  // suite, so the directory is attempted regardless and a leftover is reported.
   const stop = async (): Promise<void> => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    stopTree(proc);
     if (proc.exitCode === null && proc.signalCode === null) {
       await new Promise<void>((resolve) => {
         const done = () => resolve();
         proc.once("exit", done);
-        proc.kill("SIGTERM");
         setTimeout(done, 5000);
       });
+    }
+    // THE PORT IS THE FACT, not the exit event: the launcher exits whether or not the server
+    // it started is still there, which is exactly how this used to believe it had cleaned up.
+    if (!(await waitForGone(port))) {
+      console.warn(`warning: the harness for this run is still answering on port ${port}`);
     }
     try {
       // Retry once: on Windows the JVM's file handles may take a moment to drop.

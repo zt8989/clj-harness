@@ -25,6 +25,7 @@
             [harness.infra.home :as home]
             [harness.kernel.hooks :as hooks]
             [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
             [harness.cap.project :as project]
             [harness.cap.providers :as providers]
             [harness.test-support :as support])
@@ -49,29 +50,37 @@
 
 (defn- with-server
   "A live server on an OS-chosen port, with a scripted provider pinned to THREAD.
-  The port is never written down: see AGENTS.md."
+  The port is never written down: see AGENTS.md.
+
+  THE SESSION IS BORN FIRST. The run door refuses an action for a conversation the
+  store has never heard of (`harness.edge.http/refuse-unknown-session!`: turning up is
+  not how a session is created), so this stands in for the page's POST /api/sessions --
+  which is also what binds THREAD's record to a project's workspace when the test binds
+  one."
   [thread turns f]
   (providers/use-provider! thread (fake/scripted turns))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
          (finally (stop) (providers/use-provider! thread nil)))))
 
 (defn- post-run
+  "One action on the run edge, as a page sends it: the ENTRIES it adds (`:append`) and
+  nothing that is per-run. There is no body `:runId` any more -- the server mints it,
+  because it names a run in THIS process -- and no `:messages`, which the door refuses
+  by name (`harness.edge.http/refuse-retired-messages!`)."
   ([thread-id] (post-run thread-id {}))
   ([thread-id extra]
    (let [body (json/write-str (merge {:threadId thread-id
-                                      :runId (str (java.util.UUID/randomUUID))
-                                      :messages [{:id "u1" :role "user" :content "go"}]
+                                      :append   [{:id "u1" :role "user" :content "go"}]
                                       :tools [] :context []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                  (.header "Content-Type" "application/json")
-                  (.header "Accept" "text/event-stream")
-                  (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-                  (.build))]
-     (.send (HttpClient/newHttpClient) req
-            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+         ;; THE RUN IS READ FROM THE DOWNLINK NOW (`support/mux-run-response`): the POST answers
+         ;; an ack and the frames arrive on `events.mux`, so the helper subscribes first and
+         ;; hands back the same `HttpResponse` (status, headers, SSE body) it always did.
+         result (support/mux-run-response *port* thread-id body nil)]
+     result)))
 
 (defn- api-call
   "A plain JSON call to the management edge -- the /api/* endpoints, not the AG-UI
@@ -86,6 +95,32 @@
            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
 
 (defn- read-json [resp] (json/read-str (.body resp) :key-fn keyword))
+
+(defn- trajectory-of
+  "The trajectory route as the CLIENT reads it: NDJSON (ticket 06 of
+  `.scratch/events-mux-and-host`) -- the first line is the header, every line after it is one
+  turn. READS TURN-COUNT TURNS AND CLOSES THE STREAM: this process HOLDS the subagent's
+  session, and the route keeps the connection open for pushes then (ticket 13), so a reader
+  that waited for the body to end would wait forever."
+  [path turn-count]
+  (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
+                 (.GET)
+                 (.build))
+        resp (.send (HttpClient/newHttpClient) req
+                    (HttpResponse$BodyHandlers/ofInputStream))
+        in   (.body resp)
+        rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
+    (try
+      (let [line*  (fn [] (some-> (.readLine rd) str/trim not-empty))
+            header (json/read-str (or (line*) "{}") :key-fn keyword)
+            turns  (loop [acc [] left turn-count]
+                     (if (zero? left)
+                       acc
+                       (if-some [line (line*)]
+                         (recur (conj acc (json/read-str line :key-fn keyword)) (dec left))
+                         acc)))]
+        (assoc header :turns (vec turns)))
+      (finally (.close in)))))
 
 (defn- frames
   "The SSE body as maps. The wire shape is `data: {json}` lines, which is what the
@@ -143,37 +178,59 @@
           ls
           (do (Thread/sleep 50) (recur)))))))
 
-(defn- kinds [lines] (mapv :kind lines))
+(defn- kinds
+  "Each row's OWN name, asked the way every reader of a record asks it
+  (`harness.edge.replay/kind`): `message`, a wire frame's `type`, or the name of the
+  CUSTOM frame the harness writes about itself (`hook/SubagentStart`,
+  `tools/pre-execute`, `model/start`, ...).
+
+  NOT A ROW'S `:type`, and that distinction is the whole of this helper. The record has
+  exactly two row types -- `message` and `event` -- so `:type` answers `event` for every
+  fact below, including the ones these tests are about. The name is derived, in one
+  place, by the reader that folds records; spelling it again here is how a test comes to
+  disagree with the record it is reading."
+  [lines]
+  (mapv replay/kind lines))
 
 (defn- messages-of [lines role]
   (->> lines
-       (filter #(= "message" (:kind %)))
-       (map :payload)
+       (filter replay/message?)
+       (map replay/payload)
        (filter #(= role (:role %)))
        (map :content)))
 
 (defn- subagent-log
-  "The record of the delegation THIS thread made: the jsonl in the delegating
-  session's workspace whose opening input line names THREAD-ID as its delegator.
+  "The record of the delegation THIS thread made: the jsonl of the child session the
+  STORE says THREAD-ID's delegation created.
 
-  FOUND BY THE LINE, NOT BY ELIMINATION. The workspace is shared with every other
-  delegation this JVM ran, the file's name is a fresh UUID nobody can predict, and a
-  test that took 'the jsonl that is not mine' would read the previous test's
-  subagent -- which is exactly what it did before this comment existed."
+  ASKED OF THE STORE, NOT OF THE FILE. The record no longer opens with an `input` line
+  naming the delegator -- `.scratch/jsonl-two-kinds` 票 02 deleted that row, and a
+  subagent's file holds its own CONVERSATION while the link back to the delegator lives
+  where every other session fact does. The workspace is shared with every other
+  delegation this JVM ran and the file's name is a fresh UUID nobody can predict, so
+  the row is what identifies the file rather than the file being guessed at.
+
+  IT WAITS FOR THE RUN TO BE ON DISK. The record is written by a consumer off the run's
+  own thread, so 'the HTTP response arrived' and 'the last line landed' are two
+  moments; the run's terminal frame is the row that says the first is over."
   [thread-id]
-  (let [dir (workspace-of thread-id)
-        own (str (home/sanitize thread-id) ".jsonl")]
-    (->> (.listFiles dir)
-         (remove nil?)
-         (filter #(and (.isFile %) (str/ends-with? (.getName %) ".jsonl")))
-         (remove #(= own (.getName %)))
-         (keep (fn [^java.io.File f]
-                 (let [lines (read-lines f)
-                       input (->> lines (filter #(= "input" (:kind %))) first :payload)]
-                   (when (= thread-id (:delegatedBy input))
-                     {:thread-id (str/replace (.getName f) #"\.jsonl$" "")
-                      :lines     lines}))))
-         (first))))
+  (let [deadline (+ (System/currentTimeMillis) 4000)
+        child    #(some-> (db/select (str "SELECT id FROM sessions WHERE parent_id = ?"
+                                          " ORDER BY created_at DESC")
+                                     thread-id)
+                          first :id)
+        done?    #(boolean (some (fn [l] (and (= "event" (replay/kind l))
+                                              (contains? #{"RUN_FINISHED" "RUN_ERROR"}
+                                                         (:type (replay/payload l)))))
+                                 %))]
+    (loop []
+      (let [id (child)
+            f  (when id (log-file id))
+            ls (if (and f (.exists f)) (read-lines f) [])]
+        (cond
+          (and id (done? ls))                     {:thread-id id :lines ls}
+          (> (System/currentTimeMillis) deadline) (when id {:thread-id id :lines ls})
+          :else                                   (do (Thread/sleep 50) (recur)))))))
 
 (def ^:private explore-task "where is the tool execution seam")
 
@@ -239,19 +296,26 @@
         (let [{:keys [thread-id lines]} (subagent-log thread)]
           (is (some? thread-id) "a delegation leaves a record of its own")
           (is (not= thread (str thread-id)) "under the subagent's own id, not the parent's")
-          (testing "opened by an input line that says who delegated to whom"
-            (let [input (->> lines (filter #(= "input" (:kind %))) first :payload)]
-              (is (= thread (:delegatedBy input)))
-              (is (= "explore" (:subagent input)))
-              (is (= explore-task (get-in input [:messages 0 :content]))
-                  "and the task as the tool was handed it")))
+          (testing "opened by the task, as this conversation's own first message"
+            ;; WHAT USED TO BE AN `input` LINE. The row is gone
+            ;; (`.scratch/jsonl-two-kinds` 票 02): a run logs the messages IT put into
+            ;; the array the model read, and the task IS one of them -- this session's
+            ;; first, and its only client message.
+            (let [first-msg (first (filter replay/message? lines))]
+              (is (= "user" (:role (replay/payload first-msg))))
+              (is (= explore-task (:content (replay/payload first-msg)))
+                  "and the task as the tool was handed it")
+              (is (= "client" (:source first-msg))
+                  "whose element it was: the delegating model is this session's client,
+                   which is the source the fold reads as a speaking part")
+              (is (string? (:id first-msg)) "named, so a repeat or a rebuild folds it once")))
           (testing "with the subagent's own system message -- who it is"
             (let [system (first (messages-of lines "system"))]
               (is (str/includes? (str system) "<subagent>"))
               (is (str/includes? (str system) "You are the explore subagent"))
               (is (str/includes? (str system) "cannot delegate"))))
           (testing "and its conversation, not the parent's"
-            (let [roles (->> (filter #(= "message" (:kind %)) lines) (map :payload) (map :role) set)]
+            (let [roles (->> (filter replay/message? lines) (map replay/payload) (map :role) set)]
               (is (contains? roles "user"))
               (is (contains? roles "assistant"))
               (is (contains? roles "tool") "it really read a file"))))))))
@@ -288,7 +352,7 @@
       (with-server thread script
         (fn []
           (post-run thread)
-          (let [ls (wait-for thread (fn [ls] (some #(= "hook/SubagentStop" (:kind %)) ls)) 4000)
+          (let [ls (wait-for thread (fn [ls] (some #(= "hook/SubagentStop" (replay/kind %)) ls)) 4000)
                 ks (kinds ls)]
             (testing "each point fired exactly once, in order"
               (is (= [:subagent-start :subagent-stop] (mapv first @seen)))
@@ -345,11 +409,12 @@
                            (map str)
                            (filter #(str/includes? % "not part of this subagent's range"))
                            first)
-              pre     (->> lines (filter #(= "tools/pre-execute" (:kind %))) (map :payload))]
+              pre     (->> lines (filter #(= "tools/pre-execute" (replay/kind %)))
+                           (map replay/payload))]
           (is (some? refusal) "the call was refused and the reason went back to the model")
           (is (str/includes? (str refusal) "explore") "naming the range it is in")
           (is (some #(= "unserved" (:outcome %)) pre) "and the record says why it did not run")
-          (is (empty? (filter #(= "tools/execute" (:kind %)) lines))
+          (is (empty? (filter #(= "tools/execute" (replay/kind %)) lines))
               "it never executed: the range is enforced at the seam, not read and ignored"))))))
 
 (deftest a-subagent-is-told-when-a-call-would-need-a-human-it-cannot-ask
@@ -450,8 +515,14 @@
        (with-server thread project-script
          (fn []
            (post-run thread)
+           ;; THE ANSWER IS A MAP OF TWO LISTS (`harness.edge.http/projects-get`):
+           ;; `:projects`, each with its sessions, and `:tasks` for conversations that
+           ;; never had a home. Reading it as a bare list of projects is what this
+           ;; assertion spent one rebase doing -- and an empty listing passes every
+           ;; 'is not in it' check below, which is why the first of the three says the
+           ;; row is really there.
            (let [child  (:thread-id (subagent-log thread))
-                 listed (->> (read-json (api-call :get "/api/projects" nil))
+                 listed (->> (:projects (read-json (api-call :get "/api/projects" nil)))
                              (filter #(= (.getCanonicalPath (io/file dir)) (:path %)))
                              first
                              :sessions
@@ -475,7 +546,7 @@
            (post-run thread)
            (let [child (:thread-id (subagent-log thread))
                  _     (wait-for thread (fn [ls] (seq (messages-of ls "tool"))) 4000)
-                 mine  (read-json (api-call :get (str "/api/threads/" child "/trajectory") nil))
+                 mine  (trajectory-of (str "/api/threads/" child "/trajectory") 1)
                  its   (read-json (api-call :post (str "/api/threads/" child "/rebuild") "{}"))
                  stem  (read-json (api-call :post (str "/api/threads/" thread "/rebuild") "{}"))]
              (testing "the trajectory is its own"

@@ -1,7 +1,7 @@
 (ns harness.cap.hashline.write-test
   "`write` under anchor mode: the boundary where a file's anchors stop meaning
-  anything, the refusal of an echo, and the rows that let the model edit what it
-  just wrote without a read."
+  anything, the refusal of an echo, and the answer that states what happened
+  instead of handing a head of the file back."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -90,7 +90,7 @@
   ;; The file's content is no longer what those anchors were minted against -- not
   ;; approximately: the anchors addressed LINES, and these are other lines. So the
   ;; anchors go.
-  (use-mode! :hashline {:auto-read false})
+  (use-mode!)
   (spit file "alpha\nbeta\ngamma\n" :encoding "UTF-8")
   (let [[_ b _] (read!)]
     (is (false? (:error (write! "completely\ndifferent\n"))))
@@ -106,19 +106,6 @@
         (is (str/includes? content (path)) "and names the file to read")
         (is (= "completely\ndifferent\n" (slurp file :encoding "UTF-8"))
             "nothing was edited")))))
-
-(deftest the-auto-read-replaces-the-anchors-the-write-took-away
-  ;; With `:auto-read` on -- the default -- the file does not end up anchorless:
-  ;; the rows in the answer mint a fresh set, so the model can go straight on
-  ;; editing. The OLD anchors are still gone, which is the invariant.
-  (use-mode!)
-  (spit file "alpha\nbeta\n" :encoding "UTF-8")
-  (let [[a _] (read!)]
-    (write! "fresh\ncontent\n")
-    (let [now (:anchors (store/state tid (path)))]
-      (is (seq now) "the auto-read left a view behind")
-      (is (not (contains? (set now) a)) "and it is not the set the write invalidated")
-      (is (some? (store/state tid (path)))))))
 
 (deftest a-write-clears-the-files-undo-history
   ;; The edit that came before this write is not something to offer to take back:
@@ -161,7 +148,7 @@
   ;; the control, so a guard that simply never fired could not pass this.
   ;;
   ;; Each case reads its anchors FRESH, because a successful write releases them
-  ;; and the auto-read mints new ones: reusing a name from before a write in a case
+  ;; and a later read mints a new set: reusing a name from before a write in a case
   ;; about something else is how a test ends up asserting that a stale anchor is
   ;; "not an echo", which would be true for the wrong reason.
   (use-mode!)
@@ -196,52 +183,30 @@
       (is (= before-owners (store/ownership tid)) "the anchors are still this session's")
       (is (= before-undo (store/undo-for (path))) "and the undo record survives"))))
 
-;; ------------------------------------------------------------- the auto-read
+;; ----------------------------------------------------- the answer is a receipt
 
-(deftest a-write-hands-back-rows-that-are-immediately-usable
-  ;; THE POINT OF THE TICKET. Just written a file, the next move is usually to
-  ;; adjust something in it -- and the write released the anchors, so without this
-  ;; the model pays a read for a fact this call can supply.
+(deftest the-answer-states-the-two-facts-and-names-read
+  ;; WRITING IS NOT READING. What was written is in the call that wrote it, and the
+  ;; anchors are gone because the write released them -- so the answer says exactly
+  ;; that, and names the one action that brings anchors back. Nothing that was
+  ;; written is handed back: a model that wants to edit a line has to be shown it.
   (use-mode!)
-  (let [out (write! "one\ntwo\nthree\n")
-        [anchor line] (first (filter (fn [[_ l]] (= "two" l)) (rows (content-of out))))]
-    (is (some? anchor) (str "no row for line two in:\n" (content-of out)))
-    (is (anchors/anchor? anchor))
-    (testing "and a replace addressed at that anchor goes through, with no read"
-      (let [again (call "replace" {:remove_from anchor :replacement_lines ["TWO"]})]
-        (is (false? (:error again)) (content-of again))
-        (is (= "one\nTWO\nthree\n" (slurp file :encoding "UTF-8")))))))
-
-(deftest the-auto-read-does-not-flood-the-answer
-  ;; It is a head, not the file: enough to cover where a first edit lands, with the
-  ;; offset that continues named for the rest.
-  (use-mode!)
-  (let [out (content-of (write! (str/join "\n" (map #(str "line" %) (range 1 60)))))]
-    (is (< (count (str/split-lines out)) 40) "not sixty rows")
-    (is (str/includes? out "offset=") "and the rest is one read away")))
-
-(deftest auto-read-off-says-how-to-get-anchors
-  ;; A session that does not want the extra read-back gets one sentence instead of
-  ;; rows -- and it says what to do, because 'no anchors here' is only useful with
-  ;; the next step.
-  (use-mode! :hashline {:auto-read false})
   (let [out (content-of (write! "one\ntwo\n"))]
+    (is (str/includes? out "wrote") "how much was written")
+    (is (str/includes? out (path)) "where it went")
     (is (not (str/includes? out "│")) "no rows came back")
-    (is (str/includes? out "read") "the way to get anchors is named")
-    (testing "and the write itself still happened"
+    (is (str/includes? out "read") "and the way to get anchors is named")
+    (testing "the write itself still happened"
       (is (= "one\ntwo\n" (slurp file :encoding "UTF-8"))))))
 
-(deftest a-write-that-cannot-be-read-back-still-succeeded
-  ;; A note that could not be produced is not a failure of the thing it is a note
-  ;; about. The write is done; what went wrong is said so the model knows why it
-  ;; has no anchors.
+(deftest no-answer-grows-with-the-file
+  ;; It is not a head, a tail or a sample: the same two facts come back for a file
+  ;; of three lines and a file of sixty. (The auto-read this replaced showed the
+  ;; first twenty.)
   (use-mode!)
-  (let [out (content-of (write! "text\u0000binary\n"))]
-    (is (str/includes? out "wrote") "the write is reported as done")
-    (is (not (str/includes? out "Error")) (str out))
-    (is (str/includes? out "could not be produced") "and the missing note is explained")
-    (testing "the file really is what was written"
-      (is (str/includes? (slurp file :encoding "UTF-8") "text\u0000binary")))))
+  (let [out (content-of (write! (str/join "\n" (map #(str "line" %) (range 1 60)))))]
+    (is (< (count (str/split-lines out)) 5) "not sixty rows, and not twenty")
+    (is (not (str/includes? out "offset=")) "and nothing points at a continuation")))
 
 ;; ------------------------------------------------- one file, one ledger
 
@@ -301,15 +266,20 @@
 ;;
 ;; LOCK ORDER IS PART OF THE DATA. `read` takes the session lock first and the file's
 ;; underneath it; `write` and `undo_last_replace` USED to take the file's first and
-;; reach the session lock underneath (through the read that mints anchors). Two tool
-;; calls in one message run on two threads, so one of them plus a `read` of the same
-;; file is all it takes -- and then neither finishes: no result, no run end, a spinner
-;; forever.
+;; reach the session lock underneath (through the read that minted the anchors the
+;; answer handed back). Two tool calls in one message run on two threads, so one of
+;; them plus a `read` of the same file was all it took -- and then neither finishes:
+;; no result, no run end, a spinner forever.
+;;
+;; WRITE NO LONGER TAKES THE SESSION LOCK AT ALL: its answer hands nothing back, so
+;; nothing inside it mints. `undo_last_replace` is the call whose order still matters,
+;; and the write case below is the evidence for the other half -- a write lands WHILE
+;; the session lock is held, because it never wanted it.
 ;;
 ;; THE CYCLE NEEDS A CALLER THAT HOLDS THE SESSION LOCK AND HAS NOT TAKEN THE FILE'S
-;; YET, and nothing can be gated inside that instant. So these cases hold the session
-;; lock themselves and freeze the call ONE STEP EARLIER -- at `store/canonical`, which
-;; either order runs before it takes anything -- then ask what the call did with the
+;; YET, and nothing can be gated inside that instant. So the undo case holds the session
+;; lock itself and freezes the call ONE STEP EARLIER -- at `store/canonical`, which
+;; either order runs before it takes anything -- then asks what the call did with the
 ;; file after that. The freeze is what takes the machine's speed out of the question:
 ;; what happens next is decided by the ORDER the two locks are taken in.
 
@@ -354,23 +324,31 @@
         (deref holder 10000 ::stuck)
         (deref call 10000 ::stuck)))))
 
-(deftest a-write-never-holds-the-file-while-it-waits-for-the-session
+(deftest a-write-does-not-wait-for-the-session-lock
+  ;; THE DEADLOCK FACE SHRANK, and this is the evidence. `write` used to take the
+  ;; session lock (through the read that minted the anchors it handed back); it takes
+  ;; only the file's now, so a write lands even while another thread holds the session
+  ;; lock. That edge of the cycle is gone rather than merely reordered.
   (use-mode!)
   (spit file "alpha\nbeta\n" :encoding "UTF-8")
-  (let [out (behind-the-locks
-             #(hashline-write/perform! tid identity
-                                       {:path (path) :content "fresh\n"}
-                                       {:mode :hashline :auto-read true}))]
-    (is (:held? out) "the session lock really was held")
-    (is (:entered? out) "and the write was frozen one step before its first lock")
-    (is (false? (:file-changed? out))
-        (str "the file was left alone while the session lock was held. A read of that"
-             " file takes the session lock first, so a write that takes the file's"
-             " lock and THEN waits for the session has already overwritten the file"
-             " by the time it waits -- and with the two orders meeting, the run never"
-             " ends."))
-    (is (= "fresh\n" (slurp file :encoding "UTF-8"))
-        "the write lands once the session lock is released")))
+  (let [holding (promise)
+        release (promise)
+        holder  (future (store/with-session-lock
+                         tid
+                         (fn []
+                           (deliver holding true)
+                           (deref release 30000 false))))
+        held?   (true? (deref holding 5000 false))
+        call    (future (hashline-write/perform! tid identity
+                                                {:path (path) :content "fresh\n"}))]
+    (try
+      (is held? "the session lock really was held")
+      (is (support/holds-within? #(= "fresh\n" (slurp file :encoding "UTF-8")) 5000)
+          "the write waited for the session lock instead of not wanting it")
+      (finally
+        (deliver release true)
+        (deref holder 10000 ::stuck)
+        (deref call 10000 ::stuck)))))
 
 (deftest an-undo-never-holds-the-file-while-it-waits-for-the-session
   (use-mode!)
@@ -381,7 +359,7 @@
           out    (behind-the-locks
                   #(hashline-undo/perform! tid identity
                                            {:path (path)}
-                                           {:mode :hashline :auto-read true}))]
+                                           {:mode :hashline}))]
       (is (:held? out) "the session lock really was held")
       (is (:entered? out) "and the undo was frozen one step before its first lock")
       (is (false? (:file-changed? out))

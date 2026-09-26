@@ -18,6 +18,9 @@ import path from "node:path";
 
 import type { Message } from "@ag-ui/client";
 
+import { HarnessAgent, appendOf } from "@/lib/agent";
+import { setHarnessOrigin } from "@/lib/threads";
+
 /// One test: a name, and a body. Registration belongs to the driver, so the
 /// driver is also the place that can refuse to run a suite that contributed
 /// nothing (see test/ui.test.ts).
@@ -61,8 +64,13 @@ export interface Frame {
 
 let facts: HarnessFacts | null = null;
 
+/// Point the app's own modules at the harness this run started (see `lib/threads.setHarnessOrigin`).
 export function configure(next: HarnessFacts): void {
   facts = next;
+  // AND THE APP CODE LEARNS WHERE THE HARNESS IS: the downlink and the panel's frames read
+  // resolve their origin at call time, and a suite has no document to resolve a relative one
+  // against (`lib/threads.setHarnessOrigin`).
+  setHarnessOrigin(next.url);
 }
 
 function requireFacts(): HarnessFacts {
@@ -132,19 +140,101 @@ export function content(m: Message): string {
   return typeof m.content === "string" ? m.content : "";
 }
 
-/// POST an AG-UI RunAgentInput, answered with the raw Response. `extra` is
-/// merged over the four required keys, which is how a resume is sent.
+/// POST an AG-UI action, answered with the raw Response. `extra` is merged over the
+/// three keys every action carries, which is how a resume is sent.
+///
+/// THE BODY IS AN ACTION'S, NOT A CONVERSATION'S (ticket 03 of
+/// `.scratch/sessions-live-on-the-server`): no `messages`, no `runId` -- the run edge
+/// refuses the first by name and mints the second, and both rules are asserted in
+/// `test/suites/client.ts`. What MESSAGES contributes is the trailing run of user
+/// messages (`appendOf`, the page's own rule), so a suite can keep writing the
+/// conversation it means and have the wire carry only what a run adds.
+///
+/// THE SESSION IS MADE FIRST, on the same door the page uses: an id the run edge has
+/// never heard of is refused, so a suite that posted a run for a fresh `threadId(..)`
+/// would be testing the refusal rather than the run.
+/// HOW A RUN IS READ NOW (tickets 03/05 of `.scratch/events-mux-and-host`): the POST answers
+/// an ACK and the frames come down `events.mux`. THIS KEEPS THE OLD SHAPE -- a `Response`
+/// whose body is SSE -- by subscribing first, starting the run, and turning the socket's
+/// frames back into `data:` lines. `framesFromSse` below and every caller of it are unchanged:
+/// a suite still reads the wire, not an interpretation of it.
+const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
+
+/// AND THE FACT FAMILY IS NOT A RUN'S FRAME EITHER (ADR 0006): `turn/*` and `model/*` are about
+/// the conversation, they carry the record's line number, and the CLIENT routes them away from
+/// `@ag-ui/client` (`src/lib/mux.ts`'s `familyOf`). A suite that reads "the frames this run
+/// sent" has to do the same, or every case that hands them to AG-UI's schema check fails on a
+/// frame that was never meant for it -- which is the property this reader exists to keep honest.
+const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+
+/// THE DECLARATION MUST LAND BEFORE THE RUN STARTS -- the server filters run frames by it --
+/// and the socket's own `open` can beat the server's bookkeeping. This asks the route that
+/// only ANSWERS once the set is recorded, retrying that race away.
+async function muxDeclared(token: string, tid: string): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const res = await fetch(`${url()}api/events.mux/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscriber: token, subscribe: [{ threadId: tid }] }),
+    });
+    if (res.ok) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("events.mux never accepted this suite's declaration");
+}
+
 export async function postRun(
   tid: string,
-  rid: string,
   messages: readonly Message[],
   extra?: Record<string, unknown>,
 ): Promise<Response> {
-  return fetch(runUrl(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ threadId: tid, runId: rid, messages, tools: [], context: [], ...extra }),
+  await ensureSession(tid);
+  const token = crypto.randomUUID();
+  const params = new URLSearchParams();
+  params.set("subscriber", token);
+  params.set("sessions", JSON.stringify([{ threadId: tid }]));
+  const socket = new WebSocket(`${url().replace(/^http/, "ws")}api/events.mux?${params}`);
+  const frames: Frame[] = [];
+  let settle: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    settle = resolve;
   });
+  socket.addEventListener("message", (event) => {
+    const frame = JSON.parse(String((event as MessageEvent).data)) as Frame & {
+      threadId?: string;
+      seq?: number;
+    };
+    // THE WINDOW'S OWN AND THE FACT FAMILY ARE NEITHER OF THEM THIS RUN'S (`FACT_TYPES` above).
+    if (frame.threadId !== tid || WINDOW_TYPES.has(frame.type) || FACT_TYPES.has(frame.type)) {
+      return;
+    }
+    // ONLY THE NUMBER IS OURS: `:seq` is the downlink's bookkeeping for the reconnect
+    // cursor, and the rest of the frame -- `threadId` included -- is the AG-UI event the
+    // server sent, exactly as a runtime would read it.
+    const { seq: _seq, ...rest } = frame;
+    frames.push(rest as Frame);
+    if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") settle();
+  });
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve());
+    socket.addEventListener("error", () => reject(new Error("events.mux refused this suite")));
+  });
+  await muxDeclared(token, tid);
+  const started = await fetch(runUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId: tid, append: appendOf(messages), tools: [], ...extra }),
+  });
+  if (!started.ok) {
+    // A REFUSAL IS HANDED BACK AS IT CAME, so a case about a refusal still reads its status
+    // and its sentence; there is no run to follow.
+    socket.close();
+    return started;
+  }
+  await done;
+  socket.close();
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
 /// An SSE body -> an array of parsed data frames. Deliberately hand-rolled
@@ -157,9 +247,42 @@ export function framesFromSse(body: string): Frame[] {
     .map((line) => JSON.parse(line.slice(5).trim()) as Frame);
 }
 
-export async function fetchFrames(tid: string, rid: string, messages: readonly Message[]): Promise<Frame[]> {
-  const resp = await postRun(tid, rid, messages);
+export async function fetchFrames(tid: string, messages: readonly Message[]): Promise<Frame[]> {
+  const resp = await postRun(tid, messages);
   return framesFromSse(await resp.text());
+}
+
+/// MAKE SURE THIS HOME KNOWS TID, answering the id to use (POST /api/sessions).
+///
+/// Find-or-create, and never an unbind (the server's own rule), so a case may say this
+/// about any conversation, at any point, more than once. It is the page's
+/// `lib/projects.startTask` with no id to bring, then with one: a suite's ids are its
+/// own making, which is what `threadId(..)` is for -- and registering is how an id this
+/// suite made up becomes a conversation this home keeps.
+export async function ensureSession(tid: string): Promise<string> {
+  const resp = await fetch(`${url()}api/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId: tid }),
+  });
+  if (!resp.ok) throw new Error(`POST /api/sessions refused ${tid}: HTTP ${resp.status} ${await resp.text()}`);
+  return ((await resp.json()) as { threadId: string }).threadId;
+}
+
+/// THE PAGE'S OWN AGENT, for a session this home knows: the class `app.tsx` builds
+/// (`lib/agent.HarnessAgent`), driving the address the running harness announced.
+///
+/// A SUITE THAT BUILT ITS OWN CLIENT WOULD PROVE NOTHING ABOUT THE PAGE, which is the
+/// whole reason this exists: the thing that changed in ticket 03 is what a run's BODY
+/// is, and the body is built by this class. `ensureSession` runs first because the
+/// agent's first request would otherwise be refused by name.
+export async function agentFor(tid: string): Promise<HarnessAgent> {
+  await ensureSession(tid);
+  // THE DOWNLINK IS THE TRANSPORT (ADR 0004): the suite's agent reads its run's frames the
+  // way the page does, so a change to that path is what a suite failure means.
+  const agent = new HarnessAgent({ url: runUrl() });
+  agent.threadId = tid;
+  return agent;
 }
 
 // -------------------------------------------------------------- the filesystem

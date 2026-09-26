@@ -181,3 +181,41 @@
 changed during this run`），那不是树里的问题——`layer-layout/spec.md:322-332` 已经用硬证据说明这台机器上
 有**活的 app** 在用**真** `~/.clj-harness`。报数只认 `Ran … 0 failures` 那两行；撞到守卫先看它打印的
 before/after，别急着当成自己写红的。
+
+## 落地结果
+
+**票 01（`anchor_grep` → `grep`，`:anchor-grep` → `:grep`）**：2026-09-22 落地，票文件按本仓规矩删掉。
+
+- 工具名与配置键改成 `grep` / `:grep`：`register!`、`cap.editing` 的 `defaults` / `vocab` /
+  `families` / `search-tool`（工具名与键两处）、`harness.edn.example` 的开关与注释。
+- 交叉引用与话术跟着改：`glob` 描述里的「use `grep` when you are looking for content」、
+  `infra/rg.clj` 的 `require-posix!` 报错、`cap.hashline.grep` / `reading` / `web` / `web.search` /
+  `glob` 的 docstring。
+- **描述文本一个字没改**（除自指与交叉引用）：`anchor│` 那套、`literal`、
+  「No read afterwards is needed」都在原地。
+- **不给别名**：`CONTEXT.md` 那张闭清单仍是唯一的名字来源，旧的 `anchor_grep` 认不出来。
+- 文档与提示词：`docs/architecture.md`（工具清单与 edit-merge 那段）、`kernel.md`（模式表与三处）、
+  `client.md` 的 `TOOL_ICONS` 表、`CONTEXT.md`、`README.md`、`prompt.md`；`docs/architecture/layers.md:45`
+  那句历史例子一个字不动。
+- **`.scratch/`**：未落地的计划跟改（`write-no-content` 的 spec 与 01，例子 `{:anchor-grep false}` →
+  `{:grep false}`；`edit-merge` 的 05 / 06）；`edit-merge` 决策 7、非目标那一行与 `issues/04` 各加**加注的
+  复议**（旧话划删除线 + 理由），已落地特征的 spec 不动。
+- **用例**：两条硬编码的工具名向量把 `grep` 挪到 `glob` 之后（排序是断言的一部分）；
+  「关掉它的开关」那条从「消息里含 grep」收紧成「消息里含 `:grep false`」；`glob_test.clj` 新增
+  `the-description-sends-the-reader-to-the-content-search`，把交叉引用钉住（且不许再出现旧名）。
+- **UI**：`TOOL_ICONS` 与 `subjectOf` 两处改名，并新增 `ui/test/suites/tool-row.ts` 两条用例各钉一处。
+  票面要的是「渲染出来读回」，而这个 run 到不了那一行——`message-parts.tsx` 经
+  `composer-chrome.tsx` → `lib/attachments.ts` 摸到 `lib/i18n.ts` 的 `document`（模块作用域），
+  而本仓的 vitest 刻意没有 jsdom/window，所以那两种情况改读**源码**（`?raw`），
+  与本目录里 `sidebar.tsx` / `i18n.ts` 两条同样的做法。**画出来的那半是走查的**：
+  `node scripts/dev.mjs --scripted`。`EXPECTED_CASES` 92 → 94。
+- 实测：后端全量 `Ran 1086 tests containing 12815 assertions. 0 failures, 0 errors.`（`EXIT=0`，
+  隔离正常——那条 `ISOLATION NOTE` 说的正是这台机器上那个活着的 app）；
+  `cd ui && npm run typecheck` 干净；`cd ui && npm test` → 93 passed / 1 failed，失败的是
+  `skills > asking-for-the-list-changes-nothing`，**与本次改名无关**：把本票的改动全部 stash 掉，
+  同一条用例照样红（后端与 UI 都不碰它；另一轮 92 条全绿过，所以它是这条机器上的不稳定项）。
+- **画出来的那一行，在真浏览器里看过**：用 `node scripts/dev.mjs --scripted` 配一份带 `grep` 工具调用的
+  脚本起一套隔离实例，页面里发一条消息，那一行渲染成：名字 `grep`、图标 `lucide lucide-search`
+  （不是兜底的 `lucide-wrench`）、主题 ` · clj-harness`（就是 pattern）。证据：
+  `evidence/grep-row-after-rename.png`。这条也解释了上面那条用例为什么读源码也不算糊弄——
+  它钉的是两张表的名字，**画**的那半在这里补上了。

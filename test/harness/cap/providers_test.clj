@@ -1,6 +1,6 @@
 (ns harness.cap.providers-test
   "The provider catalog, the tier fold, the session-state introspection surface,
-  and the authorised session-configure tool.
+  and the outbox the edge drains into the provider timeline.
 
   Everything here runs under the runner's isolated config root, so the fixtures
   write their own config.edn -- the one file, with its :default and :providers
@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.infra.home :as home]
+            [harness.infra.language :as language]
             [harness.kernel.llm :as llm]
             [harness.cap.providers :as providers]
             [harness.kernel.tools :as tools]
@@ -1072,288 +1073,47 @@
         (is (not-any? #(str/includes? (str %) "api-key")
                       (tree-seq coll? seq (providers/active-provider "t-act"))))))))
 
-;; ------------------------------------------------------- the configure tool
+;; ------------------------------------------------- the outbox the edge drains
+;;
+;; The `session-configure` tool that used to feed this is gone, so nothing records a
+;; change in production today. The mechanism stays -- `provider/changed` is a line the
+;; prompt context reads back (harness.edge.context), and the edge's drain is live code --
+;; so its contract is pinned here, driving the recorder directly instead of through a
+;; tool that no longer exists.
 
-(defn- configure!
-  "Run the session-configure tool through the real seam, as the agent would,
-  with THREAD-ID's session in scope. Returns the seam's result map."
-  [thread-id args]
-  (tools/run! {:id "sc1" :type "function"
-               :function {:name "session-configure"
-                          :arguments (json/write-str args)}}
-              thread-id))
-
-(defn- approve!
-  "Drive a parked session-configure to APPROVED the way a resume does: park it,
-  hand the human's verdict to the seam's memory, then call again -- the second
-  call consumes the decision and runs the body. Returns the second call's map."
-  [thread-id id args]
-  (let [call (fn [] (tools/run! {:id id :type "function"
-                                 :function {:name "session-configure"
-                                            :arguments (json/write-str args)}}
-                                thread-id))
-        {:keys [parked]} (call)
-        _ (tools/decide-approval! (:interrupt-id parked) :approved {})]
-    (call)))
-
-(defn- veto!
-  "Drive a parked session-configure to VETOED. The body never runs."
-  [thread-id id args]
-  (let [call (fn [] (tools/run! {:id id :type "function"
-                                 :function {:name "session-configure"
-                                            :arguments (json/write-str args)}}
-                                thread-id))
-        {:keys [parked]} (call)]
-    (tools/decide-approval! (:interrupt-id parked) :vetoed {:reason "no"})
-    (call)))
-
-(deftest session-configure-parks-rather-than-writing
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [parked]} (configure! "t-conf" {:model "alpha-small"})]
-        (testing "with no decision yet, the call parks and nothing is written"
-          (is (some? parked) "the seam reports the call as parked")
-          (is (nil? (providers/override-for "t-conf")) "the session override is untouched"))))))
-
-(deftest an-approved-configure-writes-only-what-it-names
+(deftest a-recorded-change-is-drained-once-and-carries-what-it-was-given
+  ;; The recorder is a plain function now: what the caller hands it is what the edge
+  ;; writes down, once. :before/:after are the session's tier before and after (the whole
+  ;; tier, not just the patch), :override is that same tier afterwards so a reader can
+  ;; reconstruct the session from the line alone, and :resolved is that tier ASSEMBLED --
+  ;; the catalog moves under an old log, so a reader must not re-resolve.
   (with-home (cfg :alpha) reg
     (fn []
       (try
-        (providers/set-override! "t-ok" {:reasoning-effort "low"})
-        (approve! "t-ok" "sc-ok" {:model "alpha-small"})
-        (let [ov (providers/override-for "t-ok")]
-          (is (= "alpha-small" (:model ov)))
-          (is (= "low" (:reasoning-effort ov))
-              "the knob it did not name is left exactly as it was")
-          (is (not (contains? ov :base-url))
-              "and nothing it could not know about was invented"))
-        (finally (providers/set-override! "t-ok" nil))))))
-
-(deftest an-approved-vendor-switch-moves-the-endpoint
-  ;; The session-configure half of the feature: an agent naming a provider gets
-  ;; that vendor, and the change is real rather than recorded-but-inert.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-vendor" "sc-vend" {:provider "beta"})
-        (is (= :beta (:provider (providers/override-for "t-vendor"))))
-        (let [p (providers/effective-provider "t-vendor")]
-          (is (= "https://beta/v1" (:base-url p)))
-          (is (= "beta-plain" (:model p))))
-        (finally (providers/set-override! "t-vendor" nil))))))
-
-(deftest a-vendor-switch-with-no-model-lands-on-the-new-vendors-default
-  (with-home (cfg :alpha :model "alpha-small") reg
-    (fn []
-      (try
-        (is (= "alpha-small" (:model (providers/effective-provider "t-dflt"))))
-        (approve! "t-dflt" "sc-dflt" {:provider "beta"})
-        (is (= "beta-plain" (:model (providers/effective-provider "t-dflt")))
-            "the old model id was alpha's, so it is gone -- not carried into beta")
-        (finally (providers/set-override! "t-dflt" nil))))))
-
-(deftest a-configure-with-nothing-to-change-is-refused
-  (with-home (cfg :alpha) reg
-    (fn []
-      ;; The refusal lives in the body, so it only surfaces on the approved
-      ;; transit -- which is also the only transit that could ever write.
-      (let [{:keys [content error]} (approve! "t-empty" "sc-empty" {})]
-        (is (true? error))
-        (is (str/includes? content "nothing to change"))
-        (is (nil? (providers/override-for "t-empty")) "and nothing was written")))))
-
-(deftest a-configure-naming-a-model-the-provider-cannot-serve-is-refused
-  ;; Validated BEFORE the write. A change that cannot be served must not become
-  ;; the session's configuration: the next run would fail, far from this call.
-  (with-home (cfg :beta) reg
-    (fn []
-      (testing "a model id belonging to another vendor"
-        (let [{:keys [content error]} (approve! "t-badmodel" "sc-bm" {:model "alpha-large"})]
-          (is (true? error))
-          (is (str/includes? content "alpha-large"))
-          (is (nil? (providers/override-for "t-badmodel")) "nothing was written")))
-      (testing "and no change was queued for the writer"
-        (is (empty? (providers/take-provider-changes! "t-badmodel")))))))
-
-(deftest a-configure-naming-a-count-is-refused-before-anything-is-written
-  ;; The tool takes three knobs; a count is not one of them and cannot become one.
-  ;; Two things are asserted, and the second is the important one: the refusal is
-  ;; NAMED (not 'reconfigured' while nothing happened), and nothing was written --
-  ;; no override, no queued change line. A configuration that cannot be served
-  ;; must never become the session's, which is the same discipline that makes a
-  ;; bad model id fail here rather than on the next run.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [content error]} (approve! "t-count" "sc-cnt" {:context-window 200000})]
-        (is (true? error) "a count is not something this tool can change")
-        (is (str/includes? content "context-window") "the field is named")
-        (is (str/includes? content ":providers") "and it says where it belongs")
-        (is (nil? (providers/override-for "t-count")) "nothing was written")
-        (is (empty? (providers/take-provider-changes! "t-count"))
-            "and no change line was queued for the writer")))))
-
-(deftest a-configure-naming-a-provider-that-does-not-exist-is-refused
-  (with-home (cfg :alpha) reg
-    (fn []
-      (let [{:keys [content error]} (approve! "t-badprov" "sc-bp" {:provider "ghost"})]
-        (is (true? error))
-        (is (str/includes? content "ghost"))
-        (is (nil? (providers/override-for "t-badprov")))
-        (is (empty? (providers/take-provider-changes! "t-badprov")))))))
-
-(deftest the-configure-tool-describes-the-selection-it-makes
-  ;; A tool's description is what a model reads before deciding to call it, so it
-  ;; has to say what its arguments MEAN under the catalog shape: a provider is a
-  ;; vendor and a model is one of that vendor's ids. The old wording ("A provider
-  ;; name from providers.edn (e.g. \"cheap\")") described a scheme where those
-  ;; were the same thing -- precisely the confusion this shape removed. A model
-  ;; reading it would try to pass a model id as a provider name.
-  (let [t     (get @tools/registry "session-configure")
-        props (-> t :parameters :properties)]
-    (is (str/includes? (get-in props ["provider" :description]) "vendor")
-        "the provider argument says it names a VENDOR")
-    (is (str/includes? (get-in props ["model" :description]) "serves")
-        "while the model argument says the id belongs to the current provider")
-    (is (str/includes? (:description t) "provider")
-        "and the tool description names the knobs at all")
-    (testing "and the tool still parks for approval"
-      (is (true? (:requires-approval t))))))
-
-(deftest the-configure-result-says-what-it-is-now-serving
-  ;; The model that made the call gets told what changed AND what that resolved
-  ;; to. Without the second half, a provider-only switch reads as 'reconfigured'
-  ;; with no sign that the model id moved too -- and the next thing the model does
-  ;; is guess.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (let [{:keys [content error]} (approve! "t-say" "sc-say" {:provider "beta"})]
-          (is (not= true error))
-          (is (str/includes? content "beta-plain")
-              "the reply names the model the session now serves"))
-        (finally (providers/set-override! "t-say" nil))))))
-
-(deftest a-vetoed-configure-never-writes
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (veto! "t-veto" "sc-veto" {:model "alpha-small"})
-        (is (nil? (providers/override-for "t-veto")))
-        (testing "and no change was queued for the writer"
-          (is (empty? (providers/take-provider-changes! "t-veto"))))
-        (finally (providers/set-override! "t-veto" nil))))))
-
-(deftest an-approved-configure-queues-one-change-for-the-writer
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-queue" "sc-q" {:reasoning-effort "high"})
-        (let [[c & more] (providers/take-provider-changes! "t-queue")]
-          (is (some? c))
-          (is (empty? more) "exactly one change was queued")
-          (is (= "high" (:reasoning-effort (:after c)))
-              "the after side shows the new value")
-          (testing "and the change carries what it resolved to, not just what was asked"
+        (providers/set-override! "t-outbox" {:reasoning-effort "low"})
+        (let [{:keys [before after resolved]}
+              (providers/swap-override! "t-outbox" {:model "alpha-small"})]
+          (providers/record-provider-change! "t-outbox" before after "a-path" after resolved)
+          (let [[c & more] (providers/take-provider-changes! "t-outbox")]
+            (is (some? c))
+            (is (empty? more) "exactly one change was queued")
+            (is (= "a-path" (:trigger c))
+                "the trigger is the caller's string, verbatim -- a path, not a tool")
+            (is (= {:reasoning-effort "low"} (:before c))
+                "the before side is the tier that stood")
+            (is (= {:model "alpha-small" :reasoning-effort "low"} (:after c))
+                "and the after side is the whole tier, not just what moved")
+            (is (= (:after c) (:override c))
+                "the override is the whole tier, so the line stands on its own")
             (is (= "https://alpha/v1" (get-in c [:resolved :base-url])))
-            (is (= "alpha-large" (get-in c [:resolved :model])))))
-        (testing "and draining clears it -- the outbox is not read twice"
-          (is (empty? (providers/take-provider-changes! "t-queue"))))
-        (finally (providers/set-override! "t-queue" nil))))))
-
-(deftest consecutive-changes-chain-before-and-after
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-chain" "sc-c1" {:model "alpha-small"})
-        (approve! "t-chain" "sc-c2" {:model "alpha-vision-free"})
-        (let [[a b] (providers/take-provider-changes! "t-chain")]
-          (is (= "alpha-small" (:model (:after a))))
-          (is (= "alpha-small" (:model (:before b)))
-              "the second change starts where the first ended")
-          (is (= "alpha-vision-free" (:model (:after b)))))
-        (finally (providers/set-override! "t-chain" nil))))))
-
-(deftest a-chained-vendor-switch-resolves-each-step-against-its-own-vendor
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-vchain" "sc-v1" {:provider "beta" :model "beta-big"})
-        (approve! "t-vchain" "sc-v2" {:provider "alpha" :model "alpha-small"})
-        (let [[a b] (providers/take-provider-changes! "t-vchain")]
-          (is (= "https://beta/v1" (get-in a [:resolved :base-url]))
-              "each step resolves against the vendor it names, not the one before it")
-          (is (= "beta-big" (get-in a [:resolved :model])))
-          (is (= "https://alpha/v1" (get-in b [:resolved :base-url])))
-          (is (= "alpha-small" (get-in b [:resolved :model])))
-          (is (= :beta (:provider (:before b))))
-          (is (= :alpha (:provider (:after b)))))
-        (finally (providers/set-override! "t-vchain" nil))))))
-
-(deftest the-change-is-scoped-to-its-own-thread
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-a" "sc-a" {:model "alpha-small"})
-        (is (= "alpha-small" (:model (providers/effective-provider "t-a"))))
-        (is (= "alpha-large" (:model (providers/effective-provider "t-b")))
-            "another session serves from the untouched default")
-        (finally (providers/set-override! "t-a" nil))))))
-
-;; -- provider/changed line shape: :trigger, :override, :resolved ----------
-
-(deftest an-approved-configure-tags-the-change-with-trigger-and-override
-  "Every approved change carries :trigger (the path that pressed it -- currently
-  always session-configure) and :override (the FULL session tier after this
-  change, so a reader can reconstruct post-change session state without asking
-  the resolution)."
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (providers/set-override! "t-tag" {:reasoning-effort "low"})
-        (approve! "t-tag" "sc-tag" {:model "alpha-small"})
-        (let [[c] (providers/take-provider-changes! "t-tag")]
-          (is (some? c))
-          (is (= "session-configure" (:trigger c))
-              "the trigger names the path that pressed the change")
-          (is (= {:model "alpha-small" :reasoning-effort "low"} (:override c))
-              "the override is the full session slice after the change -- every
-              knob the session owns, not just what this call touched"))
-        (finally (providers/set-override! "t-tag" nil))))))
-
-(deftest a-vendor-switch-is-not-recorded-as-an-empty-change
-  ;; The specific way the old shape failed as a RECORD: :provider was not in the
-  ;; audit slice, so switching vendors wrote {:before {} :after {}} -- a change
-  ;; line that documents nothing. The slice is the three knobs now.
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-notempty" "sc-ne" {:provider "beta"})
-        (let [[c] (providers/take-provider-changes! "t-notempty")]
-          (is (= :beta (:provider (:after c)))
-              "the change line names the vendor that was selected")
-          (is (not= {} (:after c)))
-          (is (not= {} (:before c)) "and the one it moved away from"))
-        (finally (providers/set-override! "t-notempty" nil))))))
-
-(deftest consecutive-changes-pin-trigger-and-override-throughout
-  "Chained changes all carry the same trigger, and each :override is the previous
-  :override plus the new patch -- so a reader stepping through the timeline sees
-  the session evolving without consulting the resolution."
-  (with-home (cfg :alpha) reg
-    (fn []
-      (try
-        (approve! "t-ch2" "sc-1" {:model "alpha-small"})
-        (approve! "t-ch2" "sc-2" {:model "alpha-vision-free" :reasoning-effort "high"})
-        (let [[a b] (providers/take-provider-changes! "t-ch2")]
-          (is (every? #(= "session-configure" (:trigger %)) [a b])
-              "every change names its trigger")
-          (is (= {:model "alpha-small"} (:override a))
-              "the first change's override is just what it set")
-          (is (= (:override b)
-                 (merge (:override a)
-                        {:model "alpha-vision-free" :reasoning-effort "high"}))
-              "the second change's override is the first one plus the new patch"))
-        (finally (providers/set-override! "t-ch2" nil))))))
+            (is (= "alpha-small" (get-in c [:resolved :model])))
+            (testing "and it is drained for one thread at a time, exactly once"
+              (providers/record-provider-change! "t-other" before after "a-path" after resolved)
+              (is (empty? (providers/take-provider-changes! "t-outbox"))
+                  "the outbox is not read twice")
+              (is (= 1 (count (providers/take-provider-changes! "t-other")))
+                  "and another session's change was not swept up by it"))))
+        (finally (providers/set-override! "t-outbox" nil))))))
 
 ;; ------------------------------------------------------------------ settings
 
@@ -1959,17 +1719,18 @@
             (is (not (str/includes? (slurp (home/config-file)) "https://inline/v1"))
                 "the description is replaced, not merged with")))))))
 
-;; ------------------------------------------------- the tier, written from two places
+;; ------------------------------------------- the tier, written from an http-kit thread
 ;;
-;; `session-configure` (a tool thread) and the model endpoint (an http-kit thread) write
-;; the SAME session tier, so read-then-write loses one of the two changes -- and both
-;; audit lines then claim a transition that never happened.
+;; The model endpoint is the ONLY writer now, and it runs on an http-kit thread: two
+;; presses of the picker -- or a press while the previous one is still resolving -- can
+;; write the SAME session tier at once, so read-then-write loses one of the two changes
+;; -- and both audit lines then claim a transition that never happened.
 
 (deftest a-change-that-lands-while-another-is-in-flight-is-not-lost
   ;; THE WINDOW IS BETWEEN READING THE TIER AND WRITING IT BACK. Two callers land in it
-  ;; in ordinary use -- the `session-configure` tool on a tool thread, the model endpoint
-  ;; on an http-kit thread -- and the one that writes second erases the other's change,
-  ;; while both audit lines go on to claim a transition that never happened.
+  ;; in ordinary use -- both of them the model endpoint, on two http-kit threads -- and
+  ;; the one that writes second erases the other's change, while both audit lines go on
+  ;; to claim a transition that never happened.
   ;;
   ;; THE GATE HOLDS THE FIRST CALLER INSIDE THAT WINDOW: `:selection` is called on the way
   ;; from the read to the write, and gating it (for the first call only, or the second
@@ -2032,3 +1793,274 @@
         (is (= {:model "alpha-small"} (providers/override-for "p-bad"))
             "and the session keeps exactly what it had")
         (finally (providers/set-override! "p-bad" nil))))))
+
+;; ------------------------------------------- what a provider says it serves
+
+(deftest a-providers-listing-is-read-off-its-own-shape
+  ;; THE LAYER BELOW THE PROBE'S SEAM. `*list-models*` is stubbed in the edge suite,
+  ;; and that stub replaced the PARSING along with the outbound call -- so every case
+  ;; there asked "did the stub's answer come back", and not one of them ever fed a
+  ;; provider-shaped body. The parse is a function of the body now, and this is the test
+  ;; that feeds it: no stub, no network, just the shape a real provider answers with.
+  (testing "the ids the provider lists, in the order it listed them"
+    (is (= ["gpt-x" "gpt-y"]
+           (providers/listed-models "https://gateway.example/v1"
+                                    "{\"data\":[{\"id\":\"gpt-x\"},{\"id\":\"gpt-y\"}]}"))))
+
+  (testing "a row whose id is not a string is skipped rather than failing the lot"
+    (is (= ["gpt-x" "gpt-y"]
+           (providers/listed-models
+            "https://x/v1"
+            (str "{\"data\":[{\"id\":\"gpt-x\"},{\"id\":7},{\"id\":null},"
+                 "{\"no-id\":true},\"junk\",{\"id\":\"gpt-y\"}]}")))))
+
+  (testing "and 'the provider listed nothing' is an ordinary answer, not a failure"
+    ;; Empty, absent, the wrong type -- one answer, and none of them an error: a
+    ;; provider that lists nothing is a provider that lists nothing. The MAP case is the
+    ;; one worth spelling out: `data` as an object iterates its ENTRIES, so a parser
+    ;; that simply walked it would answer ["id" "gpt-x"] for a body with no list in it.
+    (doseq [body ["{\"data\":[]}"
+                  "{}"
+                  "{\"data\":null}"
+                  "{\"data\":\"nope\"}"
+                  "{\"data\":{\"id\":\"gpt-x\"}}"
+                  "{\"data\":[1,2,3]}"]]
+      (is (= [] (providers/listed-models "https://x/v1" body))
+          (str "no ids in " body))))
+
+  (testing "but a body that is not JSON at all is its own refusal, naming the address"
+    (let [e (try (providers/listed-models "https://x/v1" "<html>not json</html>") nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (str/includes? (ex-message e) "not JSON"))
+      (is (str/includes? (ex-message e) "https://x/v1")
+          "the address it came from, because a half-filled form holds several"))))
+
+;; ------------------------------------------------------- the picker's key fact
+
+(deftest the-pickers-list-says-which-providers-this-home-holds-a-key-for
+  ;; TICKET 03's SERVER HALF. The picker offers a provider's models only when this home
+  ;; holds a key pointing at it, and that fact has to arrive WITH the list it filters
+  ;; -- the picker reads /api/choices, not /api/providers, and a fact it has to fetch
+  ;; from somewhere else is a fact that can be out of date by the time it draws.
+  ;;
+  ;; IT IS THE SAME `api-key-source` THE SETTINGS ROWS CARRY, deliberately: 'has a
+  ;; key' has ONE answer in this codebase (.env before the environment, the provider's
+  ;; own credential name before the global one), and a second derivation here would be
+  ;; a second answer free to disagree with the page beside it. FACT ONLY -- that
+  ;; function reports where a key would come from and never a value -- so the value is
+  ;; searched for at no depth below.
+  ;;
+  ;; THIS SITS AT THE END OF THE FILE RATHER THAN BESIDE THE OTHER PICKER CASES, and
+  ;; that is not tidiness. `a-display-name-is-a-label-and-never-an-identity` (above)
+  ;; does not close where its indentation says it does, so everything between it and
+  ;; `the-key-comes-from-the-providers-own-name-then-the-global-one` is swallowed into
+  ;; its body -- and a `deftest` in there comes out NESTED: its `def` runs only when the
+  ;; ENCLOSING test body runs, so the var does not exist yet at the moment this
+  ;; namespace's vars are collected for the pass. It is missing from the run and from
+  ;; the count while looking exactly like a case that passed: 98 `(deftest` forms in
+  ;; this file, 97 tests reported. A second pass in the same JVM would pick it up, which
+  ;; is the tell that this is collection order and not a lost var. (Found while adding
+  ;; this one; the defect is pre-existing, so it is reported rather than fixed here.)
+  (with-home (cfg :alpha) reg
+    (fn []
+      (let [rows (fn [] (:providers (providers/choices "t-key")))
+            row  (fn [n] (first (filter #(= n (:name %)) (rows))))]
+        (testing "a provider with no key says so, and still names the line a key would go on"
+          ;; The NAME is the useful half either way: it is what a person has to add.
+          (is (= {:present? false :source nil :name "ALPHA_API_KEY"} (:key (row "alpha")))))
+
+        (testing "a key in this home's .env is the picker's answer too -- no second rule"
+          (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
+            (fn []
+              (is (= true (get-in (row "alpha") [:key :present?])))
+              (is (= :env-file (get-in (row "alpha") [:key :source]))
+                  ".env first, exactly as a run resolves it"))))
+
+        (testing "and the value is in the answer at NO depth"
+          (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
+            (fn []
+              (let [body (json/write-str (providers/choices "t-key"))]
+                (is (not (str/includes? body sentinel)))
+                (is (not (str/includes? body (subs sentinel 0 12))))
+                (is (not (contains? (:providers (providers/choices "t-key")) :api-key)))))))
+
+        (testing "every row carries the fact, so a client never has to guess by omission"
+          (is (every? #(contains? % :key) (rows))))))))
+
+;; --------------------------------------------------------- the :ui section
+
+(defn- with-config-text
+  "Run F with config.edn's exact bytes, restoring what was there afterwards -- the
+  shared temp home means a file left behind is a file the next case reads."
+  [text f]
+  (let [file (home/config-file)
+        old  (when (.exists file) (slurp file :encoding "UTF-8"))]
+    (try (spit file text :encoding "UTF-8") (f)
+         (finally (spit file (or old "{:default {:protocol :fake}}\n") :encoding "UTF-8")))))
+
+(deftest the-ui-section-is-this-homes-language-setting
+  ;; A language is not a knob a session starts from, so it does not belong in
+  ;; :default -- the closed top level is opened for a section of its own rather than
+  ;; letting that section's description start to lie.
+  (with-config-text "{:default {:provider :openrouter} :ui {:language :zh}}\n"
+    (fn []
+      (testing "a :ui section is read as configuration, not refused"
+        (is (= :zh (get-in (providers/config) [:ui :language]))))
+      (testing "and the knobs beside it are untouched"
+        (is (= :openrouter (get-in (providers/config) [:default :provider]))))))
+  (with-config-text "{:default {:provider :openrouter}}\n"
+    (fn []
+      (is (nil? (:ui (providers/config)))
+          "an absent :ui section is the everyday case, not a failure"))))
+
+(deftest a-ui-key-nobody-declared-is-a-named-failure
+  (with-config-text "{:ui {:langauge :zh}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "a :ui typo fails by name rather than sitting there doing nothing")
+        (is (str/includes? (ex-message e) ":langauge") "the sentence names the typo")
+        (is (str/includes? (ex-message e) ":language") "and the key it meant")))))
+
+(deftest a-language-nobody-speaks-is-a-named-failure
+  (with-config-text "{:ui {:language :fr}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":fr") "the sentence names the value")
+        (is (str/includes? (ex-message e) ":en") "and a language that may be written")))))
+
+(deftest the-top-level-sentence-names-the-ui-section-too
+  (with-config-text "{:oops 1}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":ui")
+            "the closed-top-level sentence says where the language goes")))))
+
+(deftest set-language-writes-the-choice-and-refuses-one-it-cannot-speak
+  (with-config-text "{:default {:provider :openrouter}}\n"
+    (fn []
+      (testing "a language this harness speaks is written into :ui :language"
+        (providers/set-language! "zh")
+        (is (= :zh (get-in (providers/config) [:ui :language])))
+        (is (= :zh (language/config-language))
+            "and the resolver reads it back out of the file"))
+      (testing "a value nobody speaks is refused by name and writes nothing"
+        (let [before (slurp (home/config-file) :encoding "UTF-8")
+              e      (try (providers/set-language! "fr") nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) ":fr") "the sentence names the value")
+          (is (= before (slurp (home/config-file) :encoding "UTF-8"))
+              "the file still holds the last good choice"))))))
+
+;; ---------------------------------------------------- instruction delivery bit
+
+(def ^:private iu-reg
+  "A catalog whose three models say three different things about instruction
+  delivery: one in-place, one explicitly replace, one silent."
+  (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                   :model "silent"
+                   :models {"in-place"    {:input #{:text} :output #{:text}
+                                           :instruction-updates :in-place}
+                            "explicit"    {:input #{:text} :output #{:text}
+                                           :instruction-updates :replace}
+                            "silent"      {:input #{:text} :output #{:text}}}}}))
+
+(def ^:private iu-bad-reg
+  "A catalog whose only model misspells the delivery mode -- alone, because the
+  catalog validates every model in a provider and one bad row refuses them all."
+  (pr-str {:bad {:protocol :openai-completions :base-url "https://bad/v1"
+                 :model "misspelled"
+                 :models {"misspelled" {:input #{:text} :output #{:text}
+                                         :instruction-updates :inplace}}}}))
+
+(defn- iu-row [id]
+  (->> (providers/registry-report)
+       :providers
+       (filter #(= "alpha" (:name %)))
+       first
+       :models
+       (filter #(= id (:id %)))
+       first))
+
+(deftest a-model-says-where-a-moved-instruction-goes
+  (with-home (cfg :alpha :model "in-place") iu-reg
+    (fn []
+      (is (= :in-place
+             (:instruction-updates (:provider (providers/resolve-provider "iu-in-place"))))
+          "a declared mode travels with the resolution")
+      (is (= :in-place (:instruction-updates (iu-row "in-place")))
+          "and the report shows what the file said")))
+
+  (with-home (cfg :alpha :model "explicit") iu-reg
+    (fn []
+      (is (= :replace (:instruction-updates (:provider (providers/resolve-provider "iu-explicit")))))))
+
+  (testing "a model that says nothing is served :replace, but the report keeps the silence"
+    ;; THE TWO ANSWERS ARE DIFFERENT QUESTIONS: 'what is this run served by' always has
+    ;; one, while 'what did the file say' may be nothing -- and a form must be able to
+    ;; tell them apart or an unrelated save would write the default into every line.
+    (with-home (cfg :alpha :model "silent") iu-reg
+      (fn []
+        (is (= :replace (:instruction-updates (:provider (providers/resolve-provider "iu-silent"))))
+            "the default lives in the resolution")
+        (is (not (contains? (iu-row "silent") :instruction-updates))
+            "and not in the report")))))
+
+(deftest a-misspelled-delivery-mode-is-refused-by-name
+  (with-home (cfg :bad :model "misspelled") iu-bad-reg
+    (fn []
+      (let [e (try (providers/resolve-provider "iu-bad") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":instruction-updates"))
+        (is (str/includes? (ex-message e) ":inplace")
+            "the sentence names the value that was written")))))
+
+;; --------------------------------------- the instruction-updates prefill table
+
+(deftest the-longest-prefix-wins-and-a-miss-says-nothing
+  ;; IT TAKES THE TABLE AS AN ARGUMENT, which is what lets an OVERLAPPING table be fed
+  ;; in here: 'the first that matches' would make the answer depend on a map's
+  ;; iteration order, and that is not a fact about the vendor.
+  (let [table [["gpt-4" :in-place] ["gpt-4o" :replace] ["claude-" :in-place]]]
+    (is (= :replace (providers/suggested-instruction-updates table "gpt-4o-2024-08-06"))
+        "both prefixes match; the LONGER one speaks")
+    (is (= :in-place (providers/suggested-instruction-updates table "gpt-4-turbo")))
+    (is (= :in-place (providers/suggested-instruction-updates table "claude-sonnet-4.5")))
+    (is (= :replace (providers/suggested-instruction-updates table "openai/gpt-4o-mini"))
+        "a gateway that writes the vendor into the id still hits, and the longest prefix wins through it")
+    (is (nil? (providers/suggested-instruction-updates table "acme/whatever")))
+    (is (nil? (providers/suggested-instruction-updates table "acme-7"))
+        "a family nothing speaks for carries NO value, not a default")
+    (is (nil? (providers/suggested-instruction-updates [] "gpt-x"))
+        "an empty table says nothing either")
+    (is (nil? (providers/suggested-instruction-updates table "gpt"))
+        "a prefix longer than the id is not a match")))
+
+(deftest the-probe-answer-carries-the-catalogs-suggestion
+  ;; THE SEAM STILL ANSWERS WITH IDS -- the catalog's opinion is added ON TOP of the
+  ;; vendor's answer, not folded into `*list-models*` (whose stub keeps returning a
+  ;; vector of ids).
+  (binding [providers/*list-models* (fn [_] ["gpt-4o-mini" "acme-7"])]
+    (let [answer (providers/probe-models {:base-url "https://x/v1"
+                                          :protocol :openai-completions})]
+      (is (= [{:id "gpt-4o-mini" :instruction-updates :in-place} {:id "acme-7"}]
+             (:models answer))
+          "the hit carries a value, the miss carries no key at all")
+      (is (= "https://x/v1" (:asked answer))))))
+
+(deftest the-suggestion-does-not-participate-in-resolution
+  ;; DECISION 8, ASSERTED: a model whose id the table speaks for, and whose entry says
+  ;; nothing about delivery, is still served :replace -- 'this run goes out under which
+  ;; mode' may not have a master that is not in config.edn.
+  (with-home (cfg :alpha :model "gpt-x")
+             (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                              :model "gpt-x"
+                              :models {"gpt-x" {:input #{:text} :output #{:text}}}}})
+    (fn []
+      (is (= :replace
+             (:instruction-updates (:provider (providers/resolve-provider "iu-hint-unused"))))
+          "the rule prefills a form; it never decides a run"))))

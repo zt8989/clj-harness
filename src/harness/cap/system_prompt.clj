@@ -25,7 +25,8 @@
 
   WHY IT IS ASSEMBLED PER RUN RATHER THAN FROZEN PER SESSION. Every fact a hook
   appends can move mid-session -- tools/session-disable!, project/bind!,
-  session-configure -- so a copy taken once would eventually be a sentence that is
+  the session's own provider tier -- so a copy taken once would eventually be a
+  sentence that is
   no longer true. This is the same discipline as config.edn, harness.edn and
   AGENTS.md, all of which are read fresh on every run. The price
   of a fact that moved is ONE cold prefix; the price of freezing it is a system
@@ -44,11 +45,13 @@
   clean: what the hooks append can be switched off, what prompt.md states cannot --
   prompt.md is not in a hook's hands."
   (:require [clojure.string :as str]
+            [clojure.string :as str]
             [harness.kernel.hooks :as hooks]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.kernel.llm :as llm]
             [harness.cap.project :as project]
-            [harness.infra.env :as env]))
+            [harness.infra.env :as env]
+            [harness.infra.language :as language]))
 
 ;; ------------------------------------------------------------------ assembly
 
@@ -79,27 +82,42 @@
     opening
     (str (str/replace opening #"(?:\r?\n)+$" "") "\n\n" (str/join "\n\n" blocks))))
 
-(defn assemble
-  "The text of THREAD-ID's system message on this run: prompt.md's frozen opening,
-  then each SystemPrompt hook's text, in order, one blank line apart. Every block
-  has been trimmed already, and one that trimmed to nothing is simply not here.
+(declare digest)
 
-  THE EDGE'S HOOK SINK MUST BE BOUND AROUND THIS CALL. `hook/emit` fires nothing
-  when no sink is bound, deliberately -- an offline tool, replay and a test driving
-  the kernel directly all behave exactly as they did before hooks existed -- and
-  the consequence here is that this returns prompt.md's bytes verbatim in those
-  callers. A caller that wants the appended text has to be the edge, or has to bind
-  a sink itself.
-
-  A declaration at this point that exits 2, times out, or cannot be run means THE
-  RUN DOES NOT START: this throws with the hook's own words as the message, and
-  harness.edge.http's set-up catch turns that into the RUN_ERROR a client sees. A
-  hard failure rather than fail-open, because what these hooks write is what the
-  system message is supposed to have said -- the same family as an AGENTS.md that
-  exists but cannot be read, and for the same reason: an instruction that was
-  meant to constrain the run must not be dropped in silence."
+(defn assemble*
+  "THREAD-ID's system message on this run AND the identity of what assembled it:
+ 
+    {:text \"<prompt.md's opening>\\n\\n<block>\\n\\n<block>\"
+     :hooks-names-hash \"<sha-256 of the identities that ran>\"}
+ 
+  :text is prompt.md's frozen opening, then each SystemPrompt hook's text, in order,
+  one blank line apart. Every block has been trimmed already, and one that trimmed to
+  nothing is simply not here.
+ 
+  :hooks-names-hash IS THE HALF THAT ANSWERS 'DID THE SET OF HOOKS MOVE'. The text
+  itself is assembled afresh every run, so comparing it answers a different question
+  than the meter asks: the meter asks whether the PREFIX a replayed call rests on still
+  stands, and the identity of the hooks in force at this point is the half of that
+  answer the hooks own -- the tool table's name set is the other half
+  (`harness.kernel.tools/names-hash`). A hook added, removed or switched moves it;
+  nothing else does. See `.scratch/instruction-updates` decision 1.
+ 
+  THE EDGE'S HOOK SINK MUST BE BOUND AROUND THIS CALL. `hook/emit` fires nothing when
+  no sink is bound, deliberately -- an offline tool, replay and a test driving the
+  kernel directly all behave exactly as they did before hooks existed -- and the
+  consequence here is prompt.md's bytes verbatim and the hash OF NOTHING (the same
+  answer every empty hook set gives). A caller that wants the appended text, or the
+  identity of the hooks, has to be the edge, or has to bind a sink itself.
+ 
+  A declaration at this point that exits 2, times out, or cannot be run means THE RUN
+  DOES NOT START: this throws with the hook's own words as the message, and
+  harness.edge.http's set-up catch turns that into the RUN_ERROR a client sees. A hard
+  failure rather than fail-open, because what these hooks write is what the system
+  message is supposed to have said -- the same family as an AGENTS.md that exists but
+  cannot be read, and for the same reason: an instruction that was meant to constrain
+  the run must not be dropped in silence."
   [thread-id]
-  (let [{:keys [verdict reason blocks]} (hook/emit :system-prompt {})]
+  (let [{:keys [verdict reason blocks hooks]} (hook/emit :system-prompt {})]
     (when (= :block verdict)
       ;; A BLOCK WITH NOTHING ON IT still says something. `verdict-of` gives a
       ;; block the declaration's own stderr, so a blank reason means the
@@ -110,13 +128,53 @@
                         "a SystemPrompt hook refused this run and said nothing"
                         (str reason))
                       {:reason :system-prompt-blocked :thread-id thread-id})))
-    (join-blocks (llm/prompt) blocks)))
+    {:text             (join-blocks (llm/prompt) blocks)
+     :hooks-names-hash (digest (str/join "\n" (or hooks [])))}))
+
+(defn assemble
+  "The TEXT of THREAD-ID's system message on this run -- `assemble*`'s :text, for a
+  caller that wants the bytes and not the identity of the hooks behind them."
+  [thread-id]
+  (:text (assemble* thread-id)))
+
+(defn digest
+  "TEXT's SHA-256, as lowercase hex.
+
+  THE NAME A RUN CAN CALL THE SYSTEM PROMPT IT WAS HANDED. The record keeps the text
+  ONCE per conversation and this hash EVERY run (`.scratch/jsonl-two-kinds`, supplement
+  of 2026-09-21), because the assembled text is the per-run thing a reader cannot
+  otherwise compare -- and the comparison is the point: the prefill (prompt cache) rests
+  on a stable prefix, so 'this run read the same system message as the last one' is a
+  fact worth being able to check, and a run whose hooks moved the prompt says so by
+  carrying a different hash."
+  [text]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (.getBytes (str text) java.nio.charset.StandardCharsets/UTF_8))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn hooks-names-hash
+  "THREAD-ID's hooks at the SystemPrompt point as one hash -- the identity half of
+  `assemble*`'s answer, computed WITHOUT RUNNING A SINGLE HOOK.
+ 
+  THIS IS HOW 'DID THE HOOK SET MOVE' IS ASKED CHEAPLY. `assemble*` can answer it too,
+  but only by firing every declaration -- and a declaration can be a shell command,
+  which is exactly the cost a run that changed nothing must not pay
+  (`.scratch/instruction-updates` decision 1). The two agree because `hook/emit`
+  reports `(mapv :id decls)` for the same `hooks/declarations-at` this reads; the point
+  has no matcher, so nothing is filtered either way.
+ 
+  AN UNBOUND SINK DOES NOT CHANGE THIS ANSWER -- which is the one behavioural
+  difference from `assemble*`, whose unbound answer is the hash of nothing. This
+  function answers about the TABLE (who is in force), not about a run: a caller with no
+  sink that wants the run's answer must use `assemble*`."
+  [thread-id]
+  (digest (str/join "\n" (mapv :id (hooks/declarations-at thread-id :system-prompt)))))
 
 ;; -------------------------------------------------------- the kernel's own rows
 ;;
 ;; TWO rows at the SystemPrompt point, registered from here because building one
 ;; needs the session's binding and the machine's own shell -- see this namespace's
-;; docstring for the require cycle that decides it. harness.kernel.hooks
+;; namespace's docstring for the require cycle that decides it. harness.kernel.hooks
 ;; owns the registry as a SEAM; this is its only writer.
 ;;
 ;; THEY ARE ROWS, NOT A MECHANISM. Source :built-in, visible in effective-hooks,
@@ -174,7 +232,8 @@
 
 (defn- env-block
   "The <env> block: what this MACHINE is -- the platform, the shell a command
-  actually goes to, and which command-line enhancers that shell can see.
+  actually goes to, and which command-line enhancers that shell can see -- plus the
+  one line that is not a machine fact: the language this home speaks.
 
   THE ONE THING A MODEL CANNOT READ OFF THE WIRE. Every tool carries its own
   description in the request's :tools array, and <project> states the binding; none
@@ -187,10 +246,19 @@
   resolution -- the one place that decides it -- and the enhancer list plus the probe
   that fills it are harness.infra.env's. Those are facts about the MACHINE, so they
   are resolved once per process there; this block is still assembled on every run,
-  because that is the discipline for what a hook appends."
+  because that is the discipline for what a hook appends.
+
+  THE LANGUAGE LINE IS THE ONE LINE THAT IS NOT A MACHINE FACT. It is this HOME's
+  setting (config.edn's :ui :language, then the OS's own language, then the
+  terminal's -- see harness.infra.language), read fresh so a person who edits it gets
+  it on the next run. It is stated here, beside the machine, because 'answer in the
+  language <env> names' is the one thing the system prompt and the ask tool both
+  point at -- and that anchor may not vanish when a source is absent."
   [_payload]
   {:exit 0 :err ""
-   :out (str "<env>\n" (str/join "\n" (env/lines)) "\n</env>")})
+   :out (str "<env>\n"
+             (str/join "\n" (concat (env/lines) [(language/line)]))
+             "\n</env>")})
 
 (defn install!
   "Put the kernel's own two rows at the SystemPrompt point, and answer the
@@ -208,4 +276,4 @@
   []
   (hooks/install! {:name "system-prompt rows"
                    :builtins {:system-prompt [["project" {:run project-block}]
-                                              ["env"     {:run env-block}]]}}))
+                                               ["env"     {:run env-block}]]}}))

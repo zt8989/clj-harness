@@ -59,21 +59,24 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { setLanguage } from "@/lib/i18n";
+import { applyLanguage } from "@/lib/i18n";
+import { saveLanguage } from "@/lib/languageSetting";
 import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
 import {
   probeModels,
-  providerLabel,
   putDefaults,
   putProvider,
   registryFor,
   removeProvider,
   type DefaultKnobs,
   type ModelRow,
+  type ModelSuggestion,
   type Origin,
   type ProviderRow,
   type Registry,
 } from "@/lib/providers";
+import { hasKey, splitByKey } from "@/lib/provider-key";
+import { providerLabel } from "@/lib/provider-label";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 import {
   listSubagents,
@@ -382,10 +385,17 @@ const LANGUAGE_NAMES: Record<Language, string> = {
   zh: "中文",
 };
 
-/// The panel's own language, and the only control on any page of it that writes no
-/// file.
+/// The panel's own language -- and the ONE control on any page of it that writes
+/// config.edn's `:ui` section rather than a provider: the language is the HOME's own
+/// setting, not a knob a session starts from.
 const LanguageRow: FC = () => {
   const { t, i18n } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  // THE WRITE IS A ROUND TRIP NOW, so the row owns its own state: whether a save is in
+  // flight, and what the server said when it refused. The language in force is still
+  // i18n's -- nothing here keeps a second copy of it.
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   return (
     <section data-slot="settings-language">
       <SectionTitle>{t("language.title")}</SectionTitle>
@@ -398,12 +408,24 @@ const LanguageRow: FC = () => {
           aria-label={t("language.field")}
           className={inputClass}
           value={i18n.language}
+          disabled={saving}
           onChange={(event) => {
             // The options are generated from the same list, so this is always one of
             // them -- and the guard is here rather than a cast because the value is
             // DOM-supplied, which is exactly where a closed list stops being closed.
             const chosen = event.target.value;
-            if (isLanguage(chosen)) setLanguage(chosen);
+            if (!isLanguage(chosen)) return;
+            setError(null);
+            setSaving(true);
+            // WRITE FIRST, THEN SWITCH: a switch that could not be saved must not be
+            // shown as if it had been. The server's own sentence is what the person
+            // reads when it refuses.
+            void saveLanguage(chosen, tErrors)
+              .then(() => applyLanguage(chosen))
+              .catch((reason: unknown) => {
+                setError(reason instanceof Error ? reason.message : String(reason));
+              })
+              .finally(() => setSaving(false));
           }}
         >
           {SUPPORTED_LANGUAGES.map((language) => (
@@ -412,6 +434,11 @@ const LanguageRow: FC = () => {
             </option>
           ))}
         </select>
+        {error !== null && (
+          <p className="text-destructive mt-2 text-xs break-words" role="alert">
+            {error}
+          </p>
+        )}
       </Field>
     </section>
   );
@@ -547,6 +574,31 @@ const ModelRowEditor: FC<{
           </label>
         ))}
         <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
+        {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
+            as one whose line says `replace`: the first is silence the server fills
+            with the conservative default, the second is something a person wrote. So
+            the empty option DELETES the key rather than writing `replace`, and a save
+            that never touched this control leaves every other model's line alone. */}
+        <label className="flex items-center gap-1 text-xs">
+          {t("form.instructionUpdates")}
+          <select
+            data-slot="settings-provider-model-instruction-updates"
+            aria-label={t("form.instructionUpdatesLabel")}
+            className={inputClass}
+            value={row["instruction-updates"] ?? ""}
+            onChange={(e) => {
+              const next = { ...row };
+              const value = e.target.value;
+              if (value === "") delete next["instruction-updates"];
+              else next["instruction-updates"] = value as "in-place" | "replace";
+              onChange(next);
+            }}
+          >
+            <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+            <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
+            <option value="replace">{t("form.instructionUpdatesReplace")}</option>
+          </select>
+        </label>
         <details data-slot="settings-provider-model-limits" className="ml-auto">
           <summary className="text-muted-foreground cursor-pointer text-xs">
             {t("form.limits")}
@@ -633,7 +685,7 @@ const ProviderForm: FC<{
   const [draft, setDraft] = useState<Draft>(initial);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [offered, setOffered] = useState<string[] | null>(null);
+  const [offered, setOffered] = useState<ModelSuggestion[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
 
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -838,18 +890,30 @@ const ProviderForm: FC<{
                 : t("form.offeredHint")}
             </p>
             <div className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">
-              {offered.map((id) => (
-                <label key={id} className="flex items-center gap-1.5 font-mono text-xs">
+              {offered.map((row) => (
+                <label key={row.id} className="flex items-center gap-1.5 font-mono text-xs">
                   <input
                     type="checkbox"
-                    checked={picked.includes(id)}
+                    checked={picked.includes(row.id)}
                     onChange={(e) =>
                       setPicked(
-                        e.target.checked ? [...picked, id] : picked.filter((p) => p !== id),
+                        e.target.checked ? [...picked, row.id] : picked.filter((p) => p !== row.id),
                       )
                     }
                   />
-                  {id}
+                  {row.id}
+                  {/* THE RULE'S ANSWER, SHOWN AND NOT APPLIED: the server's prefix table
+                      spoke for this family, and the checkbox stays a checkbox. Taking the
+                      row prefills the field with it -- a value the person can see and
+                      change, which is what keeps a wrong guess survivable. */}
+                  {row["instruction-updates"] !== undefined && (
+                    <span
+                      data-slot="settings-provider-model-suggested"
+                      className="text-muted-foreground font-sans"
+                    >
+                      {t("form.offeredSuggested", { value: row["instruction-updates"] })}
+                    </span>
+                  )}
                 </label>
               ))}
             </div>
@@ -861,7 +925,19 @@ const ProviderForm: FC<{
                 data-slot="settings-provider-model-take"
                 onClick={() => {
                   const have = new Set(draft.models.map((m) => m.id));
-                  const add = picked.filter((id) => !have.has(id)).map((id) => emptyModel(id));
+                  // THE PREFILL COMES FROM THE PROBE'S ANSWER, never from a matching
+                  // run here: a second prefix table on this side would be a second answer
+                  // free to drift from the server's.
+                  const hint = new Map(offered.map((r) => [r.id, r["instruction-updates"]]));
+                  const add = picked
+                    .filter((id) => !have.has(id))
+                    .map((id) => {
+                      const row = emptyModel(id);
+                      const value = hint.get(id);
+                      return value === undefined
+                        ? row
+                        : { ...row, "instruction-updates": value };
+                    });
                   set({ models: [...draft.models, ...add] });
                   setOffered(null);
                   setPicked([]);
@@ -904,6 +980,44 @@ const ProviderForm: FC<{
         )}
       </div>
     </div>
+  );
+};
+
+/// ONE ROW, DRAWN IN BOTH SECTIONS: the providers this home holds a key for, and --
+/// behind a sentence that says how to bring them back -- the ones it does not. The same
+/// row either way, because a provider without a key is not a different thing to edit:
+/// opening it is exactly how a person gives it one.
+const ProviderListRow: FC<{ provider: ProviderRow; onOpen: (provider: ProviderRow) => void }> = ({
+  provider: p,
+  onOpen,
+}) => {
+  const { t } = useTranslation("settings");
+  return (
+    <button
+      type="button"
+      data-slot="settings-provider-row"
+      data-origin={p.origin}
+      className="hover:bg-accent/40 flex flex-col gap-0.5 rounded-md p-2 text-left"
+      onClick={() => onOpen(p)}
+    >
+      <span className="flex items-center gap-2 text-xs">
+        <span className="font-medium">{providerLabel(p)}</span>
+        <span className="text-muted-foreground rounded border px-1 text-[10px]">
+          {ORIGIN_LABELS_PROVIDER[p.origin](t)}
+        </span>
+        {hasKey(p) ? (
+          <span className="text-muted-foreground text-[10px]">{t("models.keyPresent")}</span>
+        ) : (
+          <span className="text-muted-foreground text-[10px]">{t("models.keyMissing")}</span>
+        )}
+      </span>
+      <span className="text-muted-foreground font-mono text-[10px] break-all">
+        {p["base-url"]}
+      </span>
+      <span className="text-muted-foreground text-[10px]">
+        {t("models.count", { count: p.models.length, credential: p.credential })}
+      </span>
+    </button>
   );
 };
 
@@ -957,6 +1071,11 @@ const ModelsPage: FC<{
     );
   }
 
+  // ONE RULE, TWO SECTIONS (see `lib/provider-key.ts`): what this home holds a key for
+  // is the list, and what it does not is behind a sentence.
+  const { keyed, unkeyed } = splitByKey(registry.providers);
+  const open = (p: ProviderRow) => setDraft(draftOf(p));
+
   return (
     <div data-slot="settings-page-models" className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -970,36 +1089,40 @@ const ModelsPage: FC<{
           <PlusIcon /> {t("models.add")}
         </Button>
       </div>
+      {/* THE PROVIDERS THIS HOME HOLDS A KEY FOR. One that will certainly refuse is
+          not put in front of a person by default -- `lib/provider-key.ts` is the rule,
+          and the composer's model picker reads the same one. */}
       <div data-slot="settings-providers" className="flex flex-col divide-y">
-        {registry.providers.map((p) => (
-          <button
-            key={p.name}
-            type="button"
-            data-slot="settings-provider-row"
-            data-origin={p.origin}
-            className="hover:bg-accent/40 flex flex-col gap-0.5 rounded-md p-2 text-left"
-            onClick={() => setDraft(draftOf(p))}
-          >
-            <span className="flex items-center gap-2 text-xs">
-              <span className="font-medium">{providerLabel(p)}</span>
-              <span className="text-muted-foreground rounded border px-1 text-[10px]">
-                {ORIGIN_LABELS_PROVIDER[p.origin](t)}
-              </span>
-              {p.key["present?"] ? (
-                <span className="text-muted-foreground text-[10px]">{t("models.keyPresent")}</span>
-              ) : (
-                <span className="text-muted-foreground text-[10px]">{t("models.keyMissing")}</span>
-              )}
-            </span>
-            <span className="text-muted-foreground font-mono text-[10px] break-all">
-              {p["base-url"]}
-            </span>
-            <span className="text-muted-foreground text-[10px]">
-              {t("models.count", { count: p.models.length, credential: p.credential })}
-            </span>
-          </button>
+        {keyed.map((p) => (
+          <ProviderListRow key={p.name} provider={p} onOpen={open} />
         ))}
       </div>
+
+      {/* AND THE REST: not offered, but not gone either. One sentence says how many
+          there are and how to bring them back, and opening it gives today's row --
+          clickable, able to take a key, able to save it.
+
+          IT IS A `<details>` AND NOT STATE OF OURS, which is what makes opening and
+          closing it a LAYOUT act rather than a fetch: the rows are already in the DOM,
+          no request goes out to see them, and no state this panel holds -- including a
+          draft mid-edit -- is touched by a disclosure triangle.
+
+          Hiding them outright would take the built-in table's ids off the page, and
+          'add a provider to give openrouter a key' is an action a person takes by
+          reading one. */}
+      {unkeyed.length > 0 && (
+        <details data-slot="settings-providers-unkeyed" className="rounded-md border p-2">
+          <summary className="cursor-pointer text-xs">
+            {t("models.withoutKeys", { count: unkeyed.length })}
+          </summary>
+          <p className="text-muted-foreground mt-1 text-[10px]">{t("models.withoutKeysHint")}</p>
+          <div data-slot="settings-providers-without-keys" className="mt-1 flex flex-col divide-y">
+            {unkeyed.map((p) => (
+              <ProviderListRow key={p.name} provider={p} onOpen={open} />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 };
@@ -1397,6 +1520,12 @@ const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "subagents", label: (t) => t("page.subagents") },
 ];
 
+/// THE PANEL HAS TWO SHAPES, and `sm` is the whole of the difference. From `sm` up it is
+/// two columns -- the nav beside the page you are on. Below it there is no room for both,
+/// so it becomes TWO LEVELS: the same `PAGES` drawn as a list, and tapping one REPLACES
+/// the list with that page and a way back. One table feeds both shapes, so a page added
+/// here appears in both without a second place to remember.
+
 export const SettingsPanel: FC<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -1405,6 +1534,11 @@ export const SettingsPanel: FC<{
   const { t } = useTranslation("settings");
   const { t: tErrors } = useTranslation("errors");
   const [page, setPage] = useState<Page>("general");
+  /// WHICH LEVEL A NARROW WINDOW IS ON: false is the list, true is a page. WIDE WINDOWS
+  /// IGNORE IT -- they draw the nav and the page at once, and the page they are on is
+  /// `page` above. It is put back to the list every time the dialog closes (see below), so
+  /// reopening on a phone starts at the list rather than wherever the last visit ended.
+  const [drilled, setDrilled] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -1452,6 +1586,14 @@ export const SettingsPanel: FC<{
     if (open) void load();
   }, [open, load]);
 
+  /// NARROW WINDOWS RETURN TO THE LIST WHEN THE DIALOG CLOSES. That is a decision about
+  /// the LEVEL rather than about `page`: the narrow shape keeps the page too, and only
+  /// forgets which level it was on. The wide shape has no list to return to, so this is
+  /// inert there.
+  useEffect(() => {
+    if (!open) setDrilled(false);
+  }, [open]);
+
   /// After a write: the same read, and stay where the person was. Not a second
   /// implementation of it -- a write that needs a different refresh is a sign the
   /// refresh was wrong.
@@ -1473,7 +1615,10 @@ export const SettingsPanel: FC<{
             buttons while somebody is typing in it. So the size is fixed here and the
             PAGE scrolls inside. */}
         <div className="flex h-[min(30rem,62vh)] gap-4">
-          <nav data-slot="settings-nav" className="flex w-36 shrink-0 flex-col gap-0.5">
+          {/* TWO SHAPES, ONE `sm` APART. From `sm` up this is two columns. Below it the nav
+              is not a column at all (`hidden sm:flex`): the list below is its narrow
+              spelling, and a tap on one of its rows swaps the list for that page. */}
+          <nav data-slot="settings-nav" className="hidden w-36 shrink-0 flex-col gap-0.5 sm:flex">
             {PAGES.map((p) => (
               <button
                 key={p.id}
@@ -1493,6 +1638,44 @@ export const SettingsPanel: FC<{
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto pr-1">
+            {/* NARROW, LEVEL ONE. The SAME `PAGES` the nav above reads, so there is one table
+                of pages and not two. `sm:hidden` keeps it out of the wide shape, and `!drilled`
+                keeps it up until a narrow window picks a page. It fills the column the page
+                will occupy, so the list is the whole screen rather than a second sidebar. */}
+            {!drilled && (
+              <div data-slot="settings-nav-list" className="flex flex-col gap-0.5 sm:hidden">
+                {PAGES.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    data-slot={`settings-list-${p.id}`}
+                    className="hover:bg-accent/40 rounded-md px-2 py-2 text-left text-sm"
+                    onClick={() => {
+                      setPage(p.id);
+                      setDrilled(true);
+                    }}
+                  >
+                    {p.label(t)}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* NARROW, LEVEL TWO. Once a page is picked this is the whole screen; `sm:block`
+                keeps it on screen in the wide shape whatever `drilled` says, so the two
+                columns never lose the page they were reading, and the way back is `sm:hidden`
+                because a two-column panel has nowhere to go back TO. */}
+            <div className={drilled ? "block" : "hidden sm:block"}>
+              {drilled && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-slot="settings-page-back"
+                  className="-ml-2 mb-1 sm:hidden"
+                  onClick={() => setDrilled(false)}
+                >
+                  <ArrowLeftIcon /> {t("panel.back")}
+                </Button>
+              )}
             {failure !== null && (
               <Refusal
                 slot="settings-error"
@@ -1537,6 +1720,7 @@ export const SettingsPanel: FC<{
                 and must give the same answer -- which is what "the settings form
                 writes the user level only" is for (see subagents.clj). */}
             {page === "subagents" && <SubagentsPage />}
+            </div>
           </div>
         </div>
 

@@ -1,0 +1,20 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "q1",
+          "name": "ask",
+          "arguments": {
+            "questions": [
+              { "key": "port", "question": "服务应该监听哪个端口？" },
+              { "key": "tests", "question": "需要我一并改测试吗？" }
+            ]
+          }
+        }
+      ]
+    },
+    { "content": "好，端口用你给的那个，测试的事我照你说的办。" }
+  ]
+}

@@ -82,16 +82,16 @@
            (select-keys (editing/editing-mode "ed-overlay")
                         [:mode :diff-context-lines]))))
   (testing "the project level adds to it without erasing it"
-    (write-project! "{:editing {:auto-read false}}")
+    (write-project! "{:editing {:grep false}}")
     (is (= :hashline (:mode (editing/editing-mode "ed-overlay")))
         "the user's mode survived a project that never mentioned :mode")
     (is (= 4 (:diff-context-lines (editing/editing-mode "ed-overlay"))))
-    (is (false? (:auto-read (editing/editing-mode "ed-overlay")))))
+    (is (false? (:grep (editing/editing-mode "ed-overlay")))))
   (testing "and a key BOTH levels name is the project's"
     (write-project! "{:editing {:mode :str-replace}}")
     (is (= :str-replace (:mode (editing/editing-mode "ed-overlay")))))
   (testing "the keys nobody named are still the defaults"
-    (write-project! "{:editing {:auto-read false}}")
+    (write-project! "{:editing {:grep false}}")
     (is (= :on (:boundary-dedup (editing/editing-mode "ed-overlay")))
         "neither level named :boundary-dedup, so it is the default")
     (is (= 4 (:diff-context-lines (editing/editing-mode "ed-overlay")))
@@ -159,6 +159,25 @@
       (is (str/includes? m ":mode"))
       (is (str/includes? m ":diff-context-lines")))))
 
+(deftest a-key-that-was-removed-is-an-unknown-key
+  ;; `:auto-read` used to be legal: a successful write handed the head of the file
+  ;; back with fresh anchors. It is gone -- writing content is not knowing its line
+  ;; numbers -- and a harness.edn that still names it gets the same NAMED failure
+  ;; any typo gets: the key, the file, and what IS legal, so the fix is deleting one
+  ;; line rather than wondering why nothing happened.
+  (project/bind! "ed-auto-read" root)
+  (write-user! "{:editing {:auto-read true}}")
+  (let [e (ex-data-of #(editing/editing-mode "ed-auto-read"))]
+    (is (= :unknown-editing-key (:reason e)))
+    (is (= :auto-read (:key e)))
+    (is (= "user" (name (:level e))))
+    (is (= (.getAbsolutePath user-file) (:path e))))
+  (testing "and the legal list does not offer the removed key back"
+    (is (not (contains? editing/defaults :auto-read))
+        "the key is not a default any more")
+    (is (str/includes? (msg-of #(editing/editing-mode "ed-auto-read")) ":grep")
+        "while the keys that ARE legal are listed")))
+
 (deftest an-unknown-key-in-either-file-fails-even-when-shadowed
   ;; A typo is not a value that loses a merge: it is a request neither level was
   ;; ever going to honour, so looking at what survived the merge would hide it.
@@ -189,8 +208,7 @@
     (testing "a legal mode spelled as a string is refused -- the value is a keyword"
       (check "{:editing {:mode \"hashline\"}}" :mode ":hashline or :str-replace"))
     (testing "the booleans take booleans"
-      (check "{:editing {:auto-read \"yes\"}}" :auto-read "true or false")
-      (check "{:editing {:anchor-grep 1}}" :anchor-grep "true or false")
+      (check "{:editing {:grep 1}}" :grep "true or false")
       (check "{:editing {:require-path nil}}" :require-path "true or false")
       (check "{:editing {:strict-input :on}}" :strict-input "true or false"))
     (testing ":boundary-dedup has its own three values"
@@ -210,13 +228,13 @@
           dedup [:on :strict :off]
           n [0 1 10]]
     (write-user! (str "{:editing {:mode " mode " :boundary-dedup " dedup
-                      " :diff-context-lines " n " :auto-read true"
-                      " :anchor-grep false :require-path true :strict-input false}}"))
+                      " :diff-context-lines " n
+                      " :grep false :require-path true :strict-input false}}"))
     (let [m (editing/editing-mode "ed-legal")]
       (is (= mode (:mode m)))
       (is (= dedup (:boundary-dedup m)))
       (is (= n (:diff-context-lines m)))
-      (is (false? (:anchor-grep m))))))
+      (is (false? (:grep m))))))
 
 (deftest the-edges-of-every-legal-range-are-accepted
   ;; The other end of the message contract: the range a failure names has to be

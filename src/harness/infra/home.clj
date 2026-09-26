@@ -285,6 +285,31 @@
   [dir thread-id]
   (str (log-file dir thread-id)))
 
+(defn log-file-for-stem
+  "The jsonl file THREAD-ID's conversation is in, found ANYWHERE under the log
+  tree, or nil. When a stem somehow names more than one file, the most recently
+  modified one wins -- the same 'which of these is the conversation' question
+  `harness.edge.replay/locate` refuses to guess at, answered differently here
+  because the caller cannot ask a person.
+
+  A WALK, AND IT IS A MIGRATION'S WALK. This exists for one caller -- the store's
+  `sessions-remember-their-last-send`, which has to give rows that predate that
+  column a time -- and for nothing on the serving path: the sidebar's listing used
+  to stat one log per row through a path like this one, and reading a whole tree
+  per row is exactly what the store column replaced. So a future reader who finds
+  this being called per row should read that migration's docstring first.
+
+  IT LIVES HERE AND NOT IN `harness.edge.replay` BECAUSE OF THE LAYERS: the store
+  is infra and `replay` is the edge, so a migration may not require it. What is
+  needed here is the tree's LAYOUT and the filename rule, both of which are this
+  namespace's (see `projects-dir`, `sanitize`)."
+  [thread-id]
+  (let [stem (str (sanitize thread-id) ".jsonl")]
+    (->> (file-seq (projects-dir))
+         (filter #(and (.isFile ^java.io.File %) (= stem (.getName ^java.io.File %))))
+         (sort-by #(.lastModified ^java.io.File %) >)
+         first)))
+
 (defn config
   "config.edn's text, re-read every time so it can be edited while the process runs.
 

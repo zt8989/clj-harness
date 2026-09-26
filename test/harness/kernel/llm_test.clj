@@ -1,8 +1,15 @@
 (ns harness.kernel.llm-test
-  (:require [clojure.java.io :as io]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [harness.kernel.llm :as llm]))
+            [harness.infra.home :as home]
+            [harness.infra.llm-debug :as llm-debug]
+            [harness.kernel.llm :as llm]
+            [harness.test-support :as ts])
+  (:import [com.sun.net.httpserver HttpHandler HttpServer]
+           [java.net InetSocketAddress]
+           [java.nio.charset StandardCharsets]))
 
 (def ^:private fixture
   (slurp (io/resource "harness/fixtures/deepseek_sse.txt") :encoding "UTF-8"))
@@ -62,6 +69,43 @@
                 "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}"])]
     (is (= "stop" (:finish-reason telemetry)))))
 
+(deftest a-null-usage-does-not-wipe-a-real-one
+  ;; THE SAME RULE AS finish_reason, AND THE SHARPER CASE. A vendor that reports usage at
+  ;; all usually carries `"usage": null` on every chunk but the last, so a fold writing
+  ;; every occurrence loses the numbers -- and it does not look like a loss: it reads as a
+  ;; call that reported nothing, which is the one mistake harness.edge.stats cannot tell
+  ;; from the truth. Usage is this log's only copy of the vendor's report.
+  (let [{:keys [telemetry]}
+        (parse ["data: {\"choices\":[{\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":769,\"prompt_tokens_details\":{\"cached_tokens\":512}}}"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}"])]
+    (is (= 769 (get-in telemetry [:usage :prompt_tokens])))
+    (is (= 512 (get-in telemetry [:usage :prompt_tokens_details :cached_tokens])))))
+
+(deftest the-raw-frame-text-survives-beside-the-fold
+  ;; A FOLDED READING CANNOT BE CHECKED AGAINST ITS SOURCE once the source is gone, and
+  ;; the two ways cached_tokens can be missing from a record are not the same thing:
+  ;; the vendor never sent it, or we dropped it. Only the raw text can tell them apart,
+  ;; so the raw text is what `stream!` hands the traffic log beside the fold.
+  (let [sb    (StringBuilder.)
+        lines ["data: {\"a\": 1}" "data: [DONE]"]
+        seen  (vec (llm/tee-lines sb lines))]
+    (is (= lines seen) "the same lines come out, so nothing downstream changes")
+    (is (= (str (str/join "\n" lines) "\n") (str sb))
+        "and the raw frame text is what was collected on the way past"))
+  (testing "a consumer that stops early leaves a PARTIAL record, not no record"
+    ;; LAZY ON PURPOSE, so logging can never make the stream wait for its last line.
+    ;; THE INPUT IS A LAZY SEQ THAT THROWS WHEN OVER-REALIZED, and a vector would prove
+    ;; nothing here: `map` realizes a whole 32-element CHUNK at a time, so a two-line
+    ;; vector is one chunk and `first` pulls both. (The real input is `line-seq`, which
+    ;; is built one `readLine` at a time and is not chunked.) The nested `lazy-seq` is
+    ;; load-bearing: `(cons "a" (throw ...))` would evaluate the throw while BUILDING the
+    ;; cons, so the test would fail on its first element instead of its second.
+    (let [sb   (StringBuilder.)
+          boom (lazy-seq (cons "data: {\"a\": 1}"
+                               (lazy-seq (throw (ex-info "over-realized" {})))))]
+      (is (= "data: {\"a\": 1}" (first (llm/tee-lines sb boom))))
+      (is (= "data: {\"a\": 1}\n" (str sb))))))
+
 (deftest parses-a-streaming-body
   ;; This fixture is a REAL capture from OpenRouter (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free)
   ;; via src/harness/llm.clj:consume-sse. The synthetic 3-chunk split test below
@@ -85,6 +129,51 @@
     (testing "reasoning arrives before the tool call, as the wire does"
       (is (= [:reasoning/delta :tool/call]
              (distinct (map :type seen)))))))
+
+(defn- sse-chunk
+  "One vendor chunk, built from data rather than spelled as JSON here: the escaping in a
+  tool call's arguments is the thing under test, and a hand-escaped literal would hide a
+  mistake in the test instead of showing one in the fold."
+  [delta]
+  (str "data: " (json/write-str {:choices [{:index 0 :delta delta}]})))
+
+(deftest parallel-tool-calls-keep-the-vendors-order-and-their-own-arguments
+  ;; ARRIVAL ORDER IS NOT THE VENDOR'S ORDER. Fragments are keyed by `index` and concatenated
+  ;; per index (`absorb!`), so a vendor may interleave two calls and may even send index 1
+  ;; before index 0 -- and the fold still owes us the calls in the VENDOR's order, each with
+  ;; its arguments exactly as they were spelled. Two reasons that is not cosmetic: the tool
+  ;; call is part of the request's bytes on every later turn (a prefix cache keys on them),
+  ;; and `unanswered-tool-calls` reads the ids in this order when it decides what a request
+  ;; leaves unanswered.
+  (let [c0a "{\"path\":"
+        c0b "\"/tmp/a b\",\"z\":1,\"a\":2}"
+        c1a "{\"pattern\":\""
+        c1b "x\"}"
+        {:keys [msg]} (parse [(sse-chunk {:role "assistant" :content ""
+                                          :tool_calls [{:index 0 :id "call_a" :type "function"
+                                                        :function {:name "read"
+                                                                   :arguments c0a}}]})
+                              ;; index 1 OPENS FIRST -- the fold must not take that as order
+                              (sse-chunk {:tool_calls [{:index 1 :id "call_b" :type "function"
+                                                        :function {:name "grep"
+                                                                   :arguments c1a}}]})
+                              ;; and index 0 is continued after index 1 has spoken
+                              (sse-chunk {:tool_calls [{:index 0
+                                                        :function {:arguments c0b}}]})
+                              (sse-chunk {:tool_calls [{:index 1
+                                                        :function {:arguments c1b}}]})
+                              "data: [DONE]"])]
+    (testing "both calls come back, in the vendor's index order"
+      (is (= ["call_a" "call_b"] (mapv :id (:tool_calls msg))))
+      (is (= ["read" "grep"] (mapv #(get-in % [:function :name]) (:tool_calls msg)))))
+    (testing "each argument string is the vendor's TEXT, reassembled exactly"
+      (is (= "{\"path\":\"/tmp/a b\",\"z\":1,\"a\":2}"
+             (get-in (:tool_calls msg) [0 :function :arguments])))
+      (is (= "{\"pattern\":\"x\"}" (get-in (:tool_calls msg) [1 :function :arguments]))))
+    (testing "and the shape is the one the vendor reads back"
+      (is (= [:role :content :tool_calls] (vec (keys msg))))
+      (is (= [:id :type :function] (vec (keys (first (:tool_calls msg))))))
+      (is (= [:name :arguments] (vec (keys (get-in msg [:tool_calls 0 :function]))))))))
 
 (deftest prompt-is-frozen
   ;; What is frozen is the OPENING of the system message -- prompt.md, read once.
@@ -209,3 +298,147 @@
     (testing "only the calls that are missing are reported"
       (is (= ["c2"] (llm/unanswered-tool-calls [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
                                                  {:role "tool" :tool_call_id "c1" :content "a"}]))))))
+
+(deftest adjacent-answers-moves-a-late-answer-behind-its-call
+  ;; THE RECORD CAN DELIVER AN ANSWER LATE. A run cut off mid-call is closed off by an
+  ;; APPENDED TOOL_CALL_RESULT (`harness.edge.replay/closing-frames`), so a conversation
+  ;; folded in file order can hold the answer BEHIND whatever the client recorded next --
+  ;; the shape the vendor refuses (the case above). Moving the recorded answer behind the
+  ;; call that named it is not inventing a result: the message is already there.
+  (let [call   (fn [id] {:id id :type "function" :function {:name "bash" :arguments "{}"}})
+        answer (fn [id] {:role "tool" :tool_call_id id :content "the run was cut off"})]
+    (testing "a well-shaped history comes back unchanged, message for message"
+      (let [well [{:role "user" :content "hi"}
+                  {:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                  (answer "c1") (answer "c2")
+                  {:role "user" :content "and this"}]]
+        (is (= well (llm/adjacent-answers well)))))
+    (testing "an answer that landed behind a later message is moved behind its call"
+      (let [late [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                  {:role "user" :content "and this"}
+                  (answer "c1")]]
+        (is (= [{:role "assistant" :content "" :tool_calls [(call "c1")]}
+                (answer "c1")
+                {:role "user" :content "and this"}]
+               (llm/adjacent-answers late)))
+        (is (empty? (llm/unanswered-tool-calls (llm/adjacent-answers late))))))
+    (testing "answers are put back in CALL order, whatever order they arrived in"
+      (let [late [{:role "assistant" :content "" :tool_calls [(call "c1") (call "c2")]}
+                  {:role "user" :content "and this"}
+                  (answer "c2") (answer "c1")]]
+        (is (= ["c1" "c2"]
+               (mapv :tool_call_id (filter :tool_call_id (llm/adjacent-answers late))))
+            "call order, not arrival order")))
+    (testing "an answer with no call to sit behind is left where it is"
+      (let [orphan [{:role "user" :content "hi"} (answer "c9")]]
+        (is (= orphan (llm/adjacent-answers orphan)))
+        (is (empty? (llm/unanswered-tool-calls (llm/adjacent-answers orphan)))
+            "a stray answer is not a call, so the vendor's rule has nothing to say")))))
+
+;; ----------------------------------------- the wire, and the traffic log
+
+(defn- sse-server
+  "A REAL HTTP server on an OS-assigned loopback port, answering every request with
+  STATUS and BODY. The smallest thing that drives the wire path at all -- which had
+  no test before this, and which the traffic log now has a stake in.
+
+  Answers [base-url stop]. The PORT IS THE OS'S TO PICK (`0`), the rule this
+  repository follows wherever a listener is needed: a fixed one makes a test that
+  fails whenever something else on the machine happens to hold it."
+  [status body]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/"
+                    (reify HttpHandler
+                      (handle [_ ex]
+                        (let [bytes (.getBytes body StandardCharsets/UTF_8)]
+                          (.sendResponseHeaders ex status (alength bytes))
+                          (with-open [out (.getResponseBody ex)]
+                            (.write out bytes))))))
+    (.start server)
+    [(str "http://127.0.0.1:" (.getPort (.getAddress server)) "/v1")
+     (fn [] (.stop server 0))]))
+
+(defn- traffic-lines
+  "Every line of the traffic log under ROOT, parsed -- empty when no file was
+  written, which is itself an assertion elsewhere."
+  [root]
+  (let [f (io/file root "logs" llm-debug/file-name)]
+    (if (.exists f)
+      (mapv #(json/read-str % :key-fn keyword)
+            (remove str/blank? (str/split-lines (slurp f :encoding "UTF-8"))))
+      [])))
+
+(deftest the-traffic-log-holds-the-request-then-the-response
+  (let [[base-url stop] (sse-server 200 fixture)]
+    (try
+      (let [root (ts/temp-dir "llm-traffic")]
+        (binding [home/*root-override* root
+                  llm-debug/*override* true]
+          (let [out (llm/stream! {:protocol :openai-completions :base-url base-url :model "m"}
+                                 [{:role "user" :content "hi"}]
+                                 (fn [_]) "t-1")
+                ls  (traffic-lines root)]
+            (is (= "assistant" (:role (:message out))))
+            (is (seq (:tool_calls (:message out)))
+                "the tool call the fixture carries came back through the real wire")
+            (is (= ["request" "response"] (mapv :at ls)) "one line each way, in the order they happened")
+            (testing "the request line holds the body that went out, verbatim"
+              (is (= "m" (:model (json/read-str (:body (first ls)) :key-fn keyword))))
+              (is (= "hi" (get-in (json/read-str (:body (first ls)) :key-fn keyword)
+                                   [:messages 0 :content])))
+              (is (= "t-1" (:thread-id (first ls)))))
+            (testing "the response line carries what the vendor reported about the call"
+              (is (= 769 (get-in (second ls) [:telemetry :usage :prompt_tokens])))
+              (is (= 0 (get-in (second ls)
+                               [:telemetry :usage :prompt_tokens_details :cached_tokens]))))
+            (testing "and the frame text the vendor sent, beside the reading of it"
+              ;; THE EVIDENCE, NOT A SECOND OPINION: a folded map cannot be checked
+              ;; against its source once the source is gone, and 'the vendor never sent
+              ;; cached_tokens' is not 'we dropped it'.
+              (is (string? (:body (second ls)))
+                  "the raw SSE text, not a re-serialization of the parsed chunks")
+              (is (str/starts-with? (:body (second ls)) "data: "))
+              (is (= (str/split-lines fixture) (str/split-lines (:body (second ls))))
+                  "every line of what arrived, in the order it arrived")))))
+      (finally (stop)))))
+
+(deftest the-request-is-on-the-log-even-when-the-call-never-leaves
+  ;; THE ORDER IS THE POINT: the line is written BEFORE the request is built and sent,
+  ;; so a hang or a refused connection still leaves what was sent on the record -- the
+  ;; one thing somebody debugging a stall wants. An unparseable base-url is the
+  ;; shortest way to a send that throws without a network at all (`URI/create` refuses
+  ;; the spaces).
+  (let [root (ts/temp-dir "llm-traffic-unreachable")]
+    (binding [home/*root-override* root
+              llm-debug/*override* true]
+      (is (thrown? IllegalArgumentException
+                   (llm/stream! {:protocol :openai-completions :base-url "not a url" :model "m"}
+                                [{:role "user" :content "hi"}]
+                                (fn [_]) "t-1")))
+      (let [ls (traffic-lines root)]
+        (is (= 1 (count ls)) "the request, and no response beside it")
+        (is (= "request" (:at (first ls))))
+        (is (str/includes? (:body (first ls)) "\"model\":\"m\""))))))
+
+(deftest a-length-refusal-is-recognised-and-an-unrelated-400-is-not
+  ;; ONE FAILURE, not every 400. The sentences below are the vendors' own, copied rather than
+  ;; paraphrased -- that is what makes them evidence -- and the near misses are refusals the run
+  ;; must keep reporting as themselves.
+  (let [refusal (fn [status body] (ex-info (str "HTTP " status ": " body) {:status status}))]
+    (testing "the vendors' own overflow refusals"
+      (doseq [body ["This model's maximum context length is 128000 tokens. However, your messages resulted in 200000 tokens."
+                    "{\"error\":{\"message\":\"prompt is too long: 210000 tokens > 200000 maximum\"}}"
+                    "{\"error\":{\"message\":\"This model's maximum context length is 65536 tokens.\",\"code\":\"context_length_exceeded\"}}"
+                    "Please reduce the length of the messages."]]
+        (is (true? (llm/context-overflow? (refusal 400 body))) body)))
+    (testing "a 413 carries it too"
+      (is (true? (llm/context-overflow? (refusal 413 "input is too long")))))
+    (testing "a 400 that is NOT about length stays a plain failure"
+      (is (false? (llm/context-overflow? (refusal 400 "model \"x\" does not accept [\"image\"] input"))))
+      (is (false? (llm/context-overflow? (refusal 400 "unknown parameter: max_tokens")))))
+    (testing "the sentence alone is not enough -- the status must be a client error"
+      (is (false? (llm/context-overflow? (refusal 500 "maximum context length"))))
+      (is (false? (llm/context-overflow? (refusal 429 "maximum context length")))))
+    (testing "nothing, and a throwable with no status, are not refusals"
+      (is (false? (llm/context-overflow? nil)))
+      (is (false? (llm/context-overflow? (ex-info "maximum context length" {})))))))

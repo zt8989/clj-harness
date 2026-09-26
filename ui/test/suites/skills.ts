@@ -86,6 +86,28 @@ function tree(root: string): Record<string, number> {
   return out;
 }
 
+/// TREE(root) ONCE WHAT SOMEBODY ELSE WAS DOING HAS LANDED. The harness answers a bind
+/// BEFORE it finishes one: the session's record is moved into the project's directory a
+/// moment later -- measured, the tree is EMPTY when `bind` resolves and holds the record
+/// seconds afterwards, with no request in between. A case about a call that writes NOTHING
+/// has to take its baseline from the settled tree, or the thing it catches is the bind's own
+/// flush rather than the read it means to be asking about. It waits for a NAMED file, because
+/// other sessions' records live in this same tree: 'something appeared under projects/' is
+/// already true before this case's own bind has written anything at all.
+async function written(
+  root: string,
+  want: (relativePath: string) => boolean,
+  limitMs = 10_000,
+): Promise<Record<string, number>> {
+  const deadline = Date.now() + limitMs;
+  for (;;) {
+    const now = tree(root);
+    if (Object.keys(now).some(want)) return now;
+    if (Date.now() > deadline) throw new Error(`no match under ${root} within ${limitMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 const cases: Case[] = [
   {
     name: "the-skill-list-answers-both-layers-from-the-real-roots",
@@ -183,7 +205,10 @@ const cases: Case[] = [
       try {
         plantSkill(userRoot, name, `name: ${name}\ndescription: a skill for the read-only case`);
         expect((await bind(tid, project)).status).toBe(200);
-        const bound = tree(bookkeeping);
+        // THE BASELINE IS THE TREE ONCE THE BIND'S OWN WRITE IS THERE (see `written`),
+        // so what the comparison below catches is a READ that wrote something -- and not
+        // the record the bind itself moved a moment after it answered.
+        const bound = await written(bookkeeping, (place) => place.endsWith(`${tid}.jsonl`));
         const { groups } = await skillsOf(tid);
         expect(groups.flatMap((g) => g.skills).some((s) => s.name === name)).toBe(true);
         expect(tree(bookkeeping)).toEqual(bound);

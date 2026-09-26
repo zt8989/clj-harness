@@ -18,6 +18,7 @@
             [harness.fake :as fake]
             [harness.infra.home :as home]
             [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
             [harness.cap.mcp :as mcp]
             [harness.cap.providers :as providers]
             [harness.test-support :as support]
@@ -64,26 +65,31 @@
   The port is never written down: see AGENTS.md."
   [thread turns f]
   (providers/use-provider! thread (fake/scripted turns))
+  (support/start-session! thread)
   (let [stop (http/start! {:port 0})
         port (:local-port (meta stop))]
     (try (binding [*port* port] (f))
          (finally (stop) (providers/use-provider! thread nil)))))
 
 (defn- post-run
+  "A real run for THREAD-ID, read from the DOWNLINK (`harness.test-support/mux-run!`): the POST
+  answers an ack and the frames arrive on `events.mux`. What it hands back is the SAME SHAPE it
+  always was -- an `HttpResponse` whose body is the run's SSE -- so `interrupt-of` and every
+  caller read it unchanged."
   ([thread-id] (post-run thread-id {}))
   ([thread-id extra]
     (let [body (json/write-str (merge {:threadId thread-id
-                                      :runId (str (java.util.UUID/randomUUID))
-                                      :messages [{:id "u1" :role "user" :content "go"}]
-                                      :tools [] :context []}
+                                      ;; THE ACTION'S OWN ENTRIES (ticket 03): the server holds
+                                      ;; the conversation, and `with-server` has made sure this
+                                      ;; thread is a session of it.
+                                      :append [{:id "u1" :role "user" :content "go"}]
+                                      :tools []}
                                      extra))
-         req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* "/api/agent")))
-                  (.header "Content-Type" "application/json")
-                  (.header "Accept" "text/event-stream")
-                    (.POST (HttpRequest$BodyPublishers/ofString body StandardCharsets/UTF_8))
-            (.build))]
-       (.send (HttpClient/newHttpClient) req
-              (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))))
+          result (support/mux-run! *port* thread-id body nil)]
+      (reify java.net.http.HttpResponse
+        (statusCode [_] (:status result))
+        (headers [_] (:headers result))
+        (body [_] (:body result))))))
 
 (defn- api-get
   "A management-edge GET, as {:status :body}."
@@ -109,7 +115,10 @@
   (into []
         (keep (fn [l]
                 (when-not (str/blank? l)
-                  (try (json/read-str l :key-fn keyword) (catch Throwable _ nil)))))
+                  ;; THROUGH THE RECORD'S OWN READER (`.scratch/jsonl-two-kinds`): a row
+                  ;; is `{:type .. :payload ..}`, reading it is what validates it, and
+                  ;; `replay/kind` is how an assertion below asks what it is.
+                  (try (first (replay/lines->records [l])) (catch Throwable _ nil)))))
         (try (str/split-lines (slurp f :encoding "UTF-8")) (catch Throwable _ []))))
 
 (defn- wait-for
@@ -153,26 +162,34 @@
   For an assertion about something being ABSENT, waiting for a line that will
   never come is waiting for the timeout -- so the question has to be 'is the
   writer done', and the honest test of that is a file whose size has stopped
-  moving."
+  moving.
+  
+  A FILE THAT IS NOT THERE HAS NOT STOPPED GROWING -- it has not started. `File.length`
+  on a missing file is 0 and STABLE, so the old reading declared the writer done before
+  its first line landed and the caller's own `slurp` threw FileNotFoundException. It
+  flaked exactly there (measured 2026-09-23: the same suite green on one run and red on
+  the next, nothing but timing between them), so absence is now waited out."
   [f ms]
   (let [deadline (+ (System/currentTimeMillis) ms)]
     (loop [last-size -1 stable 0]
-      (let [size (.length f)]
-        (if (and (= size last-size) (>= stable 2))
-          (log-lines f)
-          (if (> (System/currentTimeMillis) deadline)
-            (log-lines f)
-            (do (Thread/sleep 50)
-                (recur size (if (= size last-size) (inc stable) 0)))))))))
+      (let [size (if (.exists f) (.length f) -2)]
+        (cond
+          (= size -2) (if (> (System/currentTimeMillis) deadline)
+                        (log-lines f)
+                        (do (Thread/sleep 50) (recur size 0)))
+          (and (= size last-size) (>= stable 2)) (log-lines f)
+          (> (System/currentTimeMillis) deadline) (log-lines f)
+          :else (do (Thread/sleep 50)
+                    (recur size (if (= size last-size) (inc stable) 0))))))))
 
 (defn- finished? [ls]
-  (some #(= "RUN_FINISHED" (get-in % [:payload :type])) ls))
+  (some #(= "RUN_FINISHED" (get-in (replay/payload %) [:type])) ls))
 
-(defn- of-kind [ls kind] (filterv #(= kind (:kind %)) ls))
+(defn- of-kind [ls kind] (filterv #(= kind (replay/kind %)) ls))
 
 (defn- tool-results [ls]
   (->> (of-kind ls "message")
-       (map :payload)
+       (map replay/payload)
        (filterv #(= "tool" (:role %)))
        (mapv :content)))
 
@@ -194,14 +211,14 @@
                      (testing "and it went through the ONE execution seam, so all
                                three lifecycle lines are there like any built-in's"
                        (doseq [kind ["tools/pre-execute" "tools/execute" "tools/post-execute"]]
-                         (is (= ["c1"] (mapv #(get-in % [:payload :toolCallId])
+                         (is (= ["c1"] (mapv #(get-in (replay/payload %) [:toolCallId])
                                              (of-kind ls kind)))
                              kind)))
                      (testing "the connection is on the record too"
                        (let [lines (of-kind ls "mcp/server")]
                          (is (= 1 (count lines)))
-                         (is (= "fake" (get-in lines [0 :payload :server])))
-                         (is (= "connected" (get-in lines [0 :payload :status]))))))))))
+                         (is (= "fake" (:server (replay/payload (first lines)))))
+                         (is (= "connected" (:status (replay/payload (first lines))))))))))))
 
 (deftest a-server-that-will-not-start-does-not-break-the-run
   (let [thread "wired-broken"]
@@ -212,7 +229,7 @@
                    (io/delete-file (log-file thread) true)
                    (post-run thread)
                    (let [dead? (fn [ls]
-                                 (some #(= "broken" (get-in % [:payload :server]))
+                                 (some #(= "broken" (get-in (replay/payload %) [:server]))
                                        (of-kind ls "mcp/server")))
                          ;; BOTH, because they are written at different moments:
                          ;; the mcp line rides :run/done and the tool MESSAGE is
@@ -227,11 +244,11 @@
                        (is (ran-server-tool? ls)))
                      (testing "and the dead one is NAMED, so its missing tools have an answer"
                        (let [failed (->> (of-kind ls "mcp/server")
-                                         (filter #(= "broken" (get-in % [:payload :server])))
+                                         (filter #(= "broken" (get-in (replay/payload %) [:server])))
                                          first)]
                          (is (some? failed))
-                         (is (= "failed" (get-in failed [:payload :status])))
-                         (is (seq (get-in failed [:payload :error]))))))))))
+                         (is (= "failed" (get-in (replay/payload failed) [:status])))
+                         (is (seq (get-in (replay/payload failed) [:error]))))))))))
 
 ;; ------------------------------------------- the same guards, one table over
 
@@ -267,7 +284,7 @@
                                      (tool-results ls))))
                          (testing "the seam recorded it as a hook block"
                            (is (= ["hook-blocked"]
-                                  (mapv #(get-in % [:payload :outcome])
+                                  (mapv #(get-in (replay/payload %) [:outcome])
                                         (of-kind ls "tools/pre-execute")))))
                          (support/wipe-hooks!))))))))
 
@@ -371,8 +388,18 @@
         marker (str (home/root) "/elicitation-hooks.txt")]
     (write-servers! {"fake" (decl)})
     (io/delete-file marker true)
-    (support/write-hooks! {:elicitation        [{:command (record-script marker "elicitation")}]
-                           :elicitation-result [{:command (record-script marker "elicitation-result")}]})
+    ;; THE ENGINE'S DEFAULT BUDGET FOR A HOOK IS 10s (`dispatch/default-timeout-ms`), AND THAT
+    ;; IS TOO TIGHT HERE. A hook's :command is spawned through the login shell like every
+    ;; other command, which costs 2.2s before it even starts on the machine this was measured
+    ;; on (2026-09-23; the same measurement `harness.infra.shell-test` carries), and under the
+    ;; load of a full run this case was seen timing out -- `:timeout true` and no exit code --
+    ;; while it passes on its own. The generous budget is THIS CASE's, not the engine's: what a
+    ;; default lets a hung hook hold up is a product decision, and this is only a test that
+    ;; wants its own record before it reads it.
+    (support/write-hooks! {:elicitation        [{:command (record-script marker "elicitation")
+                                                 :timeout 30000}]
+                           :elicitation-result [{:command (record-script marker "elicitation-result")
+                                                 :timeout 30000}]})
     (with-server thread (ask-script "What is your name?")
                  (fn []
                    (io/delete-file (log-file thread) true)
@@ -430,7 +457,7 @@
                              ;; and the missing line below would read as a lost file
                              ;; rather than as a hook that timed out. `exit 0` is the
                              ;; engine's own record that the command ran and allowed.
-                             (is (= [0] (mapv :exit (mapcat (comp :results :payload) fired)))
+                             (is (= [0] (mapv :exit (mapcat (comp :results replay/payload) fired)))
                                  (str "the result hook's own outcome: " (pr-str fired)))))
                          ;; WAITED FOR, NOT READ ONCE -- see `wait-marker`: the block
                          ;; above reads the LOG, which the run's own thread finishes
@@ -518,10 +545,10 @@
                                "still listed: off is not hidden")))
                        (testing "the switch landed an mcp/server line, runId null"
                          (let [lines (of-kind (wait-quiet f 3000) "mcp/server")
-                               last-line (last (filter #(= "fake" (get-in % [:payload :server]))
+                               last-line (last (filter #(= "fake" (get-in (replay/payload %) [:server]))
                                                        lines))]
                            (is (some? last-line))
-                           (is (true? (get-in last-line [:payload :disabled])))
+                           (is (true? (get-in (replay/payload last-line) [:disabled])))
                            (is (nil? (:runId last-line))))))
                      (testing "ON: it connects again and its tools run"
                        (is (= 200 (:status (api-post "api/mcp" {:threadId thread

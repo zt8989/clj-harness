@@ -22,14 +22,11 @@
 // "minus", "built-in", "running" are the feature's own vocabulary and there is one
 // wording of each, not one per face: the settings form has its own words for its
 // own fields, and none of them is a restatement of these.
-import { Loader2Icon } from "lucide-react";
 import type { TFunction } from "i18next";
 import type { FC } from "react";
 import { useTranslation } from "react-i18next";
 
-import { formatTime } from "@/lib/format";
-import { asLanguage } from "@/lib/language";
-import type { Baseline, SubagentDefinition, SubagentRun } from "@/lib/subagents";
+import type { Baseline, SubagentDefinition } from "@/lib/subagents";
 
 /// The translator these rows are worded through. `TFunction<"shell">` rather than a
 /// `TFunction` from the call site, because the type is what makes a key that is not
@@ -176,100 +173,19 @@ export const DefinitionButtons: FC<{
   </div>
 );
 
-/// THE RUN RECORDS: one row per delegation, each one a door into that subagent's own
-/// conversation.
-///
-/// `data-running` IS THE STATE, an attribute as well as a word, because the two answer
-/// different questions: the word is what a person reads, and the attribute is what a
-/// stylesheet -- or a walkthrough -- can key off without parsing text. Both are
-/// written from the same boolean, so they cannot disagree.
-///
-/// THE ROW OPENS THE SUBAGENT'S OWN SESSION, not a transcript folded into the parent.
-/// That is the claim ticket 02 makes about a delegation being a session of its own,
-/// and this row is where it becomes visible: the id it opens is not the parent's.
-///
-/// THE WHOLE RUN IS HANDED OVER, not just the id, because the caller has one more
-/// thing to do with it: a subagent belongs to the project its parent was bound to,
-/// and whoever opens the conversation has to be able to leave the SELECTED project
-/// where it was. Passing the id alone would make that impossible without a second
-/// lookup, and the row already holds the answer.
-export const RunRows: FC<{
-  runs: readonly SubagentRun[];
-  busy: boolean;
-  onOpen: (run: SubagentRun) => void;
-}> = ({ runs, busy, onOpen }) => {
-  const { t, i18n } = useTranslation();
-  const locale = asLanguage(i18n.language);
-  if (runs.length === 0) {
-    return (
-      <p
-        data-slot="subagent-runs-empty"
-        className="text-muted-foreground px-1.5 py-1 text-[10px]"
-      >
-        {t("subagents.runsEmpty")}
-      </p>
-    );
-  }
-  return (
-    <ul data-slot="subagent-runs" className="flex flex-col gap-0.5">
-      {runs.map((run) => (
-        <li
-          key={run.threadId}
-          data-slot="subagent-run"
-          data-subagent={run.subagent}
-          data-running={run.running ? "" : undefined}
-        >
-          <button
-            type="button"
-            data-slot="subagent-run-trigger"
-            // NOT DISABLED WHILE IT IS RUNNING. A delegation in flight is still a
-            // conversation with something to read in it, and a row that went dead
-            // exactly while it was most interesting would be the opposite of useful.
-            disabled={busy}
-            onClick={() => onOpen(run)}
-            className="hover:bg-muted/60 focus-visible:ring-ring/50 flex w-full flex-col items-start gap-0.5 rounded-md px-1.5 py-1 text-start outline-none focus-visible:ring-1"
-          >
-            <span className="flex w-full min-w-0 items-center gap-1.5 text-xs">
-              {run.running && (
-                <Loader2Icon
-                  aria-hidden
-                  data-slot="subagent-run-spinner"
-                  className="text-muted-foreground size-3.5 shrink-0 animate-spin"
-                />
-              )}
-              <span data-slot="subagent-run-subagent" className="min-w-0 truncate">
-                {run.subagent}
-              </span>
-              {run.running && (
-                <span
-                  data-slot="subagent-run-state"
-                  className="text-muted-foreground shrink-0 text-[10px]"
-                >
-                  {t("subagents.running")}
-                </span>
-              )}
-            </span>
-            <span
-              data-slot="subagent-run-parent"
-              className="text-muted-foreground w-full truncate font-mono text-[10px]"
-              // The parent's whole id on hover, because the line truncates it: 36
-              // characters of monospace does not fit an 18-rem column, and a
-              // truncated id matches nothing.
-              title={run.parent}
-            >
-              {run.parent}
-            </span>
-            {run.delegatedAt !== null && (
-              <span
-                data-slot="subagent-run-at"
-                className="text-muted-foreground text-[10px]"
-              >
-                {formatTime(run.delegatedAt, locale)}
-              </span>
-            )}
-          </button>
-        </li>
-      ))}
-    </ul>
-  );
-};
+// THE RUN ROWS USED TO BE HERE (`RunRows`), and they are gone with the sidebar block
+// they were written for (`.scratch/subagent-view` ticket 06). It is worth saying what
+// survives and why, because this file is now smaller than the pair of screens it serves:
+//
+//   - `DefinitionRows` STAYS. The settings page draws it, and it is the one place the
+//     range of a subagent is read into a sentence (`rangeText`), shared with the form
+//     above so two screens cannot say two things about one range;
+//   - `RunRows` DOES NOT, because it had exactly one reader. Its door -- open the
+//     subagent's own conversation -- is the transcript's `agent` card now, and the
+//     mirror that card opens (ticket 05) shows the very conversation the row used to
+//     navigate to. The side-by-side panel replaced the navigation, so a second way in
+//     would be a second answer to the same question;
+//   - THE SERVER'S ANSWER IS NOT REMOVED WITH IT. `GET /api/subagents` still reports
+//     `runs`, and the store still keeps every delegation. It has a reader again the
+//     moment the right column's task pane lists delegations (`.scratch/right-pane-tasks`
+//     ticket 03): what was retired was a SCREEN, and the route was never what went.

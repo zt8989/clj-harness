@@ -53,6 +53,13 @@ jsonl 行种类不加。
    （config.edn / harness.edn / providers.edn / AGENTS.md 都是每轮现读），也是它否掉「SessionStart 冻结一次」
    那个方案的理由：绑定会在会话中途变（`project/bind!`），冻结下来的就是一句假话。
 
+>
+> **2026-09-24 修订（决定 3 的落地方式）：** 组装**不是每 run 都跑**。先算一个**廉价的签名**——
+> **hooks 的名字集合 hash + tools 的名字集合 hash**——与上一轮比；没变就**复用**上一轮那份 system 文本，
+> hooks 一个都不跑；变了才重新组装。理由：hooks 可以是 shell 命令，每轮跑一遍是实打实的开销，而
+> `<tools>` 块只报工具**名字集合**（决策 6），它的内容只在名字集合变时才变。**不算的**：工具描述改了
+> 不管；`prompt.md` 不参与（进程内冻结，`reset-prompt!` 显式作废）；project 绑定不许动态变。这条判据
+> 同时给 `.scratch/instruction-updates`（要不要送更新）与压力表的锚点用。
 4. **`SystemPrompt` 是第 27 个 hook 点。** 名字与键：`"SystemPrompt"` / `:system-prompt`；时机「一次 run 的
    system 消息正在被组装，模型看到它之前」；payload 只有公共四个（`hook` / `thread_id` / `project_dir`）；
    没有匹配对象；`:on-error :block`。契约：
@@ -260,6 +267,12 @@ jsonl 行种类不加。
   （平台 + 解析到的 shell + 声明名单里这个 shell 看得见哪些命令行增强工具）。
 - **理由（牛总）：tools 在接口调用的时候就是自描述的**——wire 上的 `:tools` 数组每次都带着每个工具的名字
   与描述，所以一块「点名」是把同一件事说第二遍。`<provider>` 同理。
+
+> **2026-09-24 边界（`.scratch/model-surface-and-meter` 票 04）：** 主人说「tools 应该写进 `role=system`」，
+> 但紧跟着一句「正文不需要 tools 块」——所以**这里不加行，决策 6 也不改**：`<tools>` 块**不进 prompt 正文**
+> （那正是「说第二遍」，模型白付 token）。整张表改由 `harness.edge.http` 写到 **system 那条 `message` 行的
+> 信封** `:tools` 上（名字 + 描述 + parameters），`replay/payload` 把它挡在消息之外：记录里回读得到、模型
+> 读不到。理由：wire 在接口调用时自描述，但 **wire 不留**，而那条行留。
 - **这条推理的边界**（不写下来会被推远）：自描述的是**名册**，不是**技法**。技法不在 wire 上，
   所以它得有地方说——Action Fusion 的说明就是这样一块，那是 `.scratch/action-fusion/` 的票，不是本特征的。
 - **决策 2 的那张来源表**（内建 / 文件 / 会话、先后由来源档位定）与**决策 7 的原则**

@@ -14,8 +14,9 @@
   this table exists.
 
   WHO PUBLISHES: only the edge's subagent runner (harness.edge.http/run-
-  subagent!), which today writes every frame into the subagent's own jsonl and
-  sends none. Publishing beside those writes is one line per frame and nothing
+  subagent!), which today writes every frame but the reasoning family into the
+  subagent's own jsonl (ADR 0009) and sends none. Publishing beside those writes
+  is one line per frame and nothing
   else. The main agent route does not publish -- its frames already have a
   client, the SSE stream the POST opened, and a second channel for them would
   be exactly the record-serving shape this bus exists to avoid.

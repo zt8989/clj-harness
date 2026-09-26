@@ -102,7 +102,7 @@
 (deftest explore-serves-only-what-can-prove-it-changes-nothing
   (let [table (range-of "explore")]
     (testing "the five rows that declare themselves read-only are in"
-      (doseq [n ["read" "anchor_grep" "glob" "web_fetch" "web_search"]]
+      (doseq [n ["read" "grep" "glob" "web_fetch" "web_search"]]
         (is (contains? table n) (str n " reads and says so"))))
     (testing "and everything that can write is out"
       (doseq [n ["write" "edit" "replace" "insert" "undo_last_replace"

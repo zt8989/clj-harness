@@ -15,8 +15,7 @@
     "voiceInputStart": "Start voice input",
     "dictationStop": "Stop dictation",
     "dictationStopLabel": "Stop voice input",
-    "send": "Send message",
-    "stopGenerating": "Stop generating"
+    "send": "Send message"
   },
   "message": {
     "working": "Assistant is working",

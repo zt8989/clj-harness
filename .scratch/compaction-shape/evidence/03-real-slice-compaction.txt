@@ -1,0 +1,25 @@
+== the slice ==
+record: C:\Users\zhouteng\.clj-harness\projects\C__Users_zhouteng_Documents_workspace_lisp-harness\f59c09dd-bedd-4fe6-b852-e643d25fbc5a.jsonl
+lines taken: 20000 of 459765 -- planted at C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-957755735794676231\projects\.unbound\f59c09dd-bedd-4fe6-b852-e643d25fbc5a.jsonl
+entries: 107 plan head messages: 49 {"user" 4, "reasoning" 12, "assistant" 12, "tool" 21}
+model view estimated tokens before: 55849
+
+== 1. RAW: the plan's messages, exactly as the old code sent them ==
+REFUSED, as the vendor refused all fifteen: HTTP 422: {"error":{"message":"Failed to deserialize the JSON body into the target type: messages[4].role: unknown variant `reasoning`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` at line 1 column 18135 (request_id: d7488f91-ebaf-410e-ac53-e714916b4b3b)","type":"invalid_request_error","param":"","code":"invalid_request_error"}}
+
+== 2. THE CODE'S OWN PATH: run-compaction! (aggressive) ==
+shadowed: 49
+summary chars: 6988
+summary opens: # Summary
+
+## Task / state
+
+User asked (in Chinese) whether frontend render frames could be written to SQLite while user session-operation events go to JSONL — goal: faster frontend rendering plus preserved facts ("前端渲染也会快，然后事实也流存了").
+
+**No
+rows: {"tools/execute" 46, "compaction/end" 1, "message" 40, "hook/SystemPrompt" 1, "tools/pre-execute" 46, "model/start" 30, "context/pressure" 2, "event" 19760, "compaction/start" 1, "context/compacted" 1, "model/end" 29, "tools/post-execute" 46, "provider/init" 1, "project/bound" 1}
+compaction/end error: nil
+the fact: {:compactionId "cc95d650-412c-4e9a-b6d0-1948a358f202", :tokens 29887, :range {:start 4, :end 7617}}
+what the code sends instead (roles after the fold): {"user" 4, "assistant" 12, "tool" 21}
+model view estimated tokens after: 27727
+

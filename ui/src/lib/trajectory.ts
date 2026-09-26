@@ -17,8 +17,11 @@ import { API_BASE } from "@/lib/threads";
 
 /// One thing in a turn, in the order the model had it.
 export type TrajectoryItem =
-  | { kind: "system"; text: string; initial?: boolean }
-  | { kind: "context"; text: string; source: "opening" | "run"; call?: number }
+  /// The table the run SERVED, off the system row's envelope (`:tools`) -- so the item
+  /// is self-contained and the pane never pulls a second record. Absent for a record
+  /// written before the table moved to the envelope.
+  | { kind: "system"; text: string; initial?: boolean; tools?: readonly unknown[] }
+  | { kind: "context"; text: string; call?: number }
   | { kind: "user"; text: string; id?: string; at?: number }
   | { kind: "assistant"; text: string; reasoning?: string; call?: number }
   | {
@@ -47,8 +50,10 @@ export type TrajectoryItem =
 export type TrajectoryCall = {
   index: number;
   model?: string;
-  /// The tool table AS SENT, verbatim. Absent when the request carried none.
-  tools?: readonly unknown[];
+  /// THE TOOL TABLE'S SIGNATURE, not the table (ticket 04): the NAME set as a hash and
+  /// how many tools it held. Absent -- not empty -- when the request carried no table.
+  toolsNamesHash?: string;
+  toolsCount?: number;
   startedAt?: number;
   endedAt?: number;
   /// The vendor's own usage map, its own key names intact, and the total derived from
@@ -73,16 +78,89 @@ export type TrajectoryPayload = {
   turns: readonly TrajectoryTurn[];
 };
 
-/// This session's trajectory.
+/// This session's trajectory, STREAMED. The route answers NDJSON (ticket 06 of
+/// `.scratch/events-mux-and-host`): the first line is the header, and every line after
+/// it is one turn written as the fold finishes it. ONPROGRESS is handed the payload so
+/// far -- the header first, then once per turn -- so a view can draw a long record while
+/// the rest of it is still folding; the promise resolves with the whole payload when the
+/// stream ends.
 ///
 /// A 404 IS AN ORDINARY ANSWER, for the reason `statsFor` gives: a session that has
 /// never run has no log to fold, and "nothing to show yet" is what the view draws by
 /// drawing nothing. Any other failure is null too -- the view has nothing useful to say
 /// about a broken log, and a red panel is not the place to try.
-export async function trajectoryFor(threadId: string): Promise<TrajectoryPayload | null> {
-  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/trajectory`);
-  if (!res.ok) return null;
-  return (await res.json()) as TrajectoryPayload;
+export async function trajectoryFor(
+  threadId: string,
+  onProgress?: (payload: TrajectoryPayload) => void,
+  signal?: AbortSignal,
+): Promise<TrajectoryPayload | null> {
+  /// THE STREAM IS LONG-LIVED (ticket 13 of `.scratch/session-as-kernel`): the route keeps
+  /// the connection open for a held session and PUSHES later turns, so this promise settles
+  /// only when the stream ends -- and the caller aborts it when the view goes away.
+  const res = await fetch(`${API_BASE}threads/${encodeURIComponent(threadId)}/trajectory`, { signal });
+  if (!res.ok || res.body === null) return null;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const turns: TrajectoryTurn[] = [];
+  let header: { threadId: string; incomplete: boolean } | null = null;
+
+  /// A HEADER THAT HAS NOT LANDED YET IS NOTHING TO PUBLISH: the payload has a threadId
+  /// and a turns array, and inventing them before the first line would be a shape that
+  /// is not the server's. The turns that arrive after it are what fills it.
+  const publish = (): void => {
+    if (header !== null) {
+      onProgress?.({ threadId: header.threadId, incomplete: header.incomplete, turns: [...turns] });
+    }
+  };
+
+  /// ONE LINE, and a line that is not JSON is DROPPED rather than thrown: a stream cut
+  /// mid-line is a real thing (a navigation away), and the turns already in hand are the
+  /// answer the caller asked for.
+  const take = (line: string): void => {
+    const text = line.trim();
+    if (text === "") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (header === null) {
+      header = parsed as { threadId: string; incomplete: boolean };
+    } else {
+      /// THE OPEN TURN IS RE-SENT AS IT GROWS: a turn whose `:index` is the one already in
+      /// hand REPLACES it in place, the same rule the window's frames use -- appending it
+      /// would draw the same turn twice.
+      const turn = parsed as TrajectoryTurn;
+      const last = turns[turns.length - 1];
+      if (last !== undefined && last.index === turn.index) turns[turns.length - 1] = turn;
+      else turns.push(turn);
+    }
+    publish();
+  };
+
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index = buffer.indexOf("\n");
+    while (index >= 0) {
+      take(buffer.slice(0, index));
+      buffer = buffer.slice(index + 1);
+      index = buffer.indexOf("\n");
+    }
+  }
+  take(buffer);
+  // A READER FOR THE HEADER, rather than reading `header` directly: `take` writes it from
+  // inside a closure, and the compiler narrows the variable to its initial `null` because
+  // it cannot see that write. A function with a declared return type carries the real
+  // shape to the caller.
+  const readHeader = (): { threadId: string; incomplete: boolean } | null => header;
+  const landed = readHeader();
+  if (landed === null) return null;
+  return { threadId: landed.threadId, incomplete: landed.incomplete, turns };
 }
 
 // A NOTE ON THE TOOL MARKS, because their names are not the record's names and someone

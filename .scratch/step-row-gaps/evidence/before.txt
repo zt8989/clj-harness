@@ -1,0 +1,48 @@
+ok   a project session is minted and bound -- {"status":200,"body":{"threadId":"7f420d80-b11d-4bbd-b028-7b2c92e7800d","dir":"C:\\Users\\zhouteng\\Documents\\workspace\\lisp-harness\\.worktrees\\step-row-gaps\\.scratch\\step-row-gaps\\fixture"}}
+
+rows, in document order:
+   0  injection        h= 28  msg# 1 aui_user-injection-root      注入的上下文 · instructions461 B
+   1  injection        h= 28  msg# 2 aui_user-injection-root      注入的上下文 · instructions396 B
+   2  injection        h= 28  msg# 3 aui_user-injection-root      注入的上下文 · instructions408 B
+   3  reasoning        h= 28  msg# 6 aui_assistant-message-root   思考 · 先起一条后台作业，然后我就能去干别的了——这一轮的第一次调用要带着这段
+   4  tool-call        h= 28  msg# 6 aui_assistant-message-root   bash · sleep 1; echo JOB-SAYS-SO完成
+   5  tool-call        h= 28  msg# 7 aui_assistant-message-root   bash · sleep 3完成
+   6  injection        h= 28  msg# 7 aui_assistant-message-root   注入的上下文 · job-ended185 B
+   7  reasoning        h= 28  msg# 7 aui_assistant-message-root   思考 · 去收一下那条作业的结局，顺手把这一轮说完。
+
+gaps between adjacent rows (next.top - previous.bottom):
+  injection        -> injection          24px  neighbouring messages
+  injection        -> injection          24px  neighbouring messages
+  injection        -> reasoning         198px  3 messages apart (a person's message between them)
+  reasoning        -> tool-call           0px  the same message (the rows' own padding is the whole gap)
+  tool-call        -> tool-call           8px  neighbouring messages
+  tool-call        -> injection           0px  the same message (the rows' own padding is the whole gap)
+  injection        -> reasoning           0px  the same message (the rows' own padding is the whole gap)
+ok   the run drew all three kinds of step row -- a tool call, a thought, and an injected card -- ["injection","reasoning","tool-call"]
+ok   the opening drew more than one card, one message each -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1}]
+RED  every pair of neighbouring steps is the same distance apart -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"reasoning","to":"tool-call","gap":0,"sameMessage":true,"messageSpan":0},{"from":"tool-call","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"injection","gap":0,"sameMessage":true,"messageSpan":0},{"from":"injection","to":"reasoning","gap":0,"sameMessage":true,"messageSpan":0}]
+RED  ...and that distance is the two rows' own padding, not a turn's gap -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"reasoning","to":"tool-call","gap":0,"sameMessage":true,"messageSpan":0},{"from":"tool-call","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"injection","gap":0,"sameMessage":true,"messageSpan":0},{"from":"injection","to":"reasoning","gap":0,"sameMessage":true,"messageSpan":0}]
+ok   ...a card among them included -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"reasoning","to":"tool-call","gap":0,"sameMessage":true,"messageSpan":0},{"from":"tool-call","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"injection","gap":0,"sameMessage":true,"messageSpan":0},{"from":"injection","to":"reasoning","gap":0,"sameMessage":true,"messageSpan":0}]
+ok   the first card did not eat the room above it -- first row top 133, message group top 64
+ok   the person's question keeps a turn's gap -- [{"from":"injection","to":"reasoning","gap":198,"sameMessage":false,"messageSpan":3}]
+
+after a refresh:
+   0  injection        msg# 1 aui_user-injection-root      注入的上下文 · instructions461 B
+   1  injection        msg# 2 aui_user-injection-root      注入的上下文 · instructions396 B
+   2  injection        msg# 3 aui_user-injection-root      注入的上下文 · instructions408 B
+   3  reasoning        msg# 6 aui_assistant-message-root   思考 · 先起一条后台作业，然后我就能去干别的了——这一轮的第一次调用要带着这段
+   4  tool-call        msg# 7 aui_assistant-message-root   bash · sleep 1; echo JOB-SAYS-SO完成
+   5  tool-call        msg# 8 aui_assistant-message-root   bash · sleep 3完成
+   6  injection        msg# 9 aui_assistant-message-root   注入的上下文 · job-ended185 B
+   7  reasoning        msg#10 aui_assistant-message-root   思考 · 去收一下那条作业的结局，顺手把这一轮说完。
+  injection        -> injection          24px  span 1
+  injection        -> injection          24px  span 1
+  injection        -> reasoning         198px  span 3
+  reasoning        -> tool-call           8px  span 1
+  tool-call        -> tool-call           8px  span 1
+  tool-call        -> injection           8px  span 1
+  injection        -> reasoning           8px  span 1
+RED  the rebuilt conversation spaces its steps the same way -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"reasoning","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"injection","gap":8,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"reasoning","gap":8,"sameMessage":false,"messageSpan":1}]
+ok   ...and the card is one of them -- [{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"injection","gap":24,"sameMessage":false,"messageSpan":1},{"from":"reasoning","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"tool-call","gap":8,"sameMessage":false,"messageSpan":1},{"from":"tool-call","to":"injection","gap":8,"sameMessage":false,"messageSpan":1},{"from":"injection","to":"reasoning","gap":8,"sameMessage":false,"messageSpan":1}]
+
+3 check(s) failed

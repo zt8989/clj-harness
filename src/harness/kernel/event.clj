@@ -14,12 +14,43 @@
 (defn text-delta [text] {:type :text/delta :text text})
 (defn reasoning-delta [text] {:type :reasoning/delta :text text})
 
+(defn context-injected
+  "MESSAGE was put into the history by the session's pre-LLM step, immediately
+  before the model call that is about to be made.
+
+  THE ONE EVENT THAT SAYS WHAT THE MODEL WAS GIVEN THAT IT DID NOT ASK FOR. A skill
+  body, an instruction block, the ending of a background job -- they are all just
+  messages the step spliced in (see harness.cap.project/before-llm), and until this
+  event existed the run did them SILENTLY: the history grew, the provider got it, the
+  record's `message` lines had it, and the client was never told. The edge turns this
+  into a CUSTOM frame, which the client renders and never sends back."
+  [message] {:type :context/injected
+             :role (:role message) :text (str (:content message))})
+
 (defn tool-call
   "ARGS is the fully accumulated argument text, not a fragment."
   [id name args] {:type :tool/call :id id :name name :args args})
 
 (defn tool-result [id content error?]
   {:type :tool/result :id id :content content :error error?})
+
+;; A CALL'S CUT-OFF ANSWER: the record gets it, the wire does not (`harness.kernel.loop`'s stop
+;; branch emits this, `harness.edge.http`'s drain logs it and refuses to send it).
+;;
+;; TWO READERS, TWO DIFFERENT TRUTHS ABOUT ONE CALL, and both are true: the RECORD needs an
+;; answer, because an assistant message whose tool_calls has no answering tool message is a shape
+;; the vendors refuse on the next request; the CLIENT that pressed stop must NOT be told the call
+;; returned, because it did not -- and a client that received a result would draw the call as
+;; completed (`Done`) when the truthful thing on screen is a cancellation (`message-parts.tsx`
+;; draws `cancelled` from an incomplete part). The record is what a reload and the next run read,
+;; so it is the record that has to be complete; the live page is owed the ending it just asked for.
+;;
+;; SO THIS IS ITS OWN EVENT rather than a flag on `tool-result`: the two differ in WHICH READER
+;; gets them, which is a difference the edge has to dispatch on.
+(defn cut-off-result
+  "The answer a stopped call is given in the RECORD -- never sent to the client -- see above."
+  [id content]
+  {:type :run/cut-off-result :id id :content content})
 
 (defn tool-pre-execute
   "One tool call entered the execution seam. OUTCOME is :pass, :unknown-tool,
@@ -73,23 +104,35 @@
   having no resolution to record, and is the very kind of session a walkthrough
   (`node scripts/dev.mjs --scripted`) drives.
 
-  SPECS IS THE REQUEST'S TOOL TABLE -- the very value that goes into the request
-  body, handed in by the caller that resolved it (harness.kernel.loop). It is
-  recorded because 'the model had these tools, described exactly like this' is a
-  question about the CALL, and the only other witness is the provider's request
-  body, which nothing keeps. PASSING IT IN rather than resolving it again here is
-  the whole point: two resolutions would be two tables that happen to agree today.
-
+  SIGNATURE IS THE REQUEST'S ENVELOPE, SAID SMALL -- the part of 'what went out' that
+  decides whether a LATER request shares this one's cold prefix: the tool table's NAME SET
+  as a hash (`:tools-names-hash`), its size in characters (`:tools-bytes`) and how many
+  tools it held (`:tools-count`). THE TABLE ITSELF IS NOT KEPT. It is runtime
+  configuration -- byte-identical on every call of a run -- and writing it into every
+  `model/start` line was tens of megabytes of the same fact (2026-09-24, thread
+  `bbcd4ae4-…`: 672 lines, 50.2 MB of a 129.7 MB log). 'Did the table change' is
+  answered by the NAME set: a changed description does not move it, an added or removed
+  tool does, and `:tools-bytes` is a number the context ring displays rather than a
+  verdict any reader acts on.
+ 
+  PASSING IT IN rather than resolving it again here is the whole point: the caller that
+  RESOLVED the table (harness.kernel.loop, and the edge that measures its bytes) computes
+  the signature ONCE, and a second resolution would be two tables that happen to agree
+  today. An empty table writes no `:tools-*` key at all, which is what 'this call
+  carried no tool table' has always meant.
+ 
   IT PAIRS WITH :model/end BY ORDER: the nth :model/start of a run is that run's
   nth call. A counter in the record would be the same fact written a second
   time, and two copies drift."
-  [provider specs]
+  [provider signature]
   (cond-> {:type :model/start}
     (:model provider)            (assoc :model (:model provider))
     (:base-url provider)         (assoc :base-url (:base-url provider))
     (:reasoning-effort provider) (assoc :reasoning-effort (:reasoning-effort provider))
     (:context-window provider)   (assoc :context-window (:context-window provider))
-    (seq specs)                  (assoc :tools specs)))
+    (:tools-names-hash signature) (assoc :tools-names-hash (:tools-names-hash signature))
+    (:tools-bytes signature)      (assoc :tools-bytes (:tools-bytes signature))
+    (:tools-count signature)      (assoc :tools-count (:tools-count signature))))
 
 (defn model-end
   "One model call is OVER, and TELEMETRY is what the vendor reported back --
@@ -113,3 +156,16 @@
   [ints] {:type :run/interrupt :interrupts (vec ints)})
 
 (defn run-error [message] {:type :run/error :message message})
+
+(defn run-stopped
+  "The run was stopped by A PERSON, before it finished. TERMINAL, and it reaches the wire
+  as a `RUN_ERROR` -- the vocabulary has two terminals, and `RUN_FINISHED` would be the
+  one line in the record that lies about a run that was cut off.
+
+  WHY IT IS NOT JUST `run-error` WITH A SENTENCE: the CODE the frame carries
+  (`code: \"stopped\"`, `harness.edge.ag-ui`) is how a CLIENT tells an ending somebody
+  asked for from a fault, without reading prose -- the message is for a person, and a
+  client that pattern-matched it would be one wording change away from drawing a stop as
+  a failure. See `harness.kernel.stop` for the switch and `harness.edge.sessions/cancel!`
+  for the request that rings it."
+  [message] {:type :run/stopped :message message})

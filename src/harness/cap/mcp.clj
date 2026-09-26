@@ -528,8 +528,10 @@
 (defn- stdio-command
   "The command LINE a stdio declaration becomes. The declaration gives a command
   and its arguments separately, while `harness.shell` spawns a line through the
-  shell -- so the arguments are quoted as POSIX words on the way in. Nothing here
-  is trusted to be free of spaces."
+  shell -- so the arguments are quoted by `harness.infra.shell/quote-arg`, the one
+  place that knows which shell THIS process's long-lived spawn line lands in: POSIX
+  single quotes where a shell reads them, cmd's double quotes on Windows. Nothing
+  here is trusted to be free of spaces."
   [{:keys [command args]}]
   (str/join " " (cons command (map shell/quote-arg args))))
 

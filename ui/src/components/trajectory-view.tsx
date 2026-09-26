@@ -24,9 +24,9 @@
 //
 // The two things a fixed pane would have shown are still reachable, because both of them
 // ARE items: the system message is the `system` row (first turn, and again whenever its
-// bytes change), and the tool table a call sent lives on that call's `assistant` row --
-// the row is the call's answer, the table is the call's request, and the `:call` pointer
-// the record gives us is what connects the two.
+// bytes change), and the tool table's SIGNATURE a call sent lives on that call's `assistant`
+// row -- the row is the call's answer, the signature is the call's request, and the `:call`
+// pointer the record gives us is what connects the two.
 //
 // Order in the list is the RECORD's order, not the reference screenshot's.
 // `harness.edge.ag-ui/inbound` splices the opening blocks AFTER the system message and
@@ -40,6 +40,14 @@
 // is written. There is no polling: a long call streams for minutes and this view stands
 // still for the length of it, which is honest, because the part of the record it would
 // show does not exist yet.
+//
+// AND IT IS ASKED FOR ONLY WHEN THIS VIEW IS THE ONE ON SCREEN. `app.tsx` mounts this
+// component for the `轨迹` tab alone, so the `对话` tab sends no trajectory request at
+// all -- the downlink carries the conversation and nothing else (ticket 06).
+//
+// THE ANSWER ARRIVES AS A STREAM. The route writes NDJSON, so each turn is drawn the
+// moment the fold reaches it instead of after the whole record has been folded -- which
+// is what 'the trajectory loads when it is asked for' looks like on the page.
 import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import type { TFunction } from "i18next";
@@ -220,35 +228,33 @@ const Facts: FC<{ pairs: readonly (readonly [string, string | null])[] }> = ({ p
   );
 };
 
-/// EVERY DISTINCT TOOL TABLE A TURN SENT, with the calls that sent it.
+/// EVERY DISTINCT TOOL TABLE A TURN SENT, BY ITS SIGNATURE, with the calls that sent it.
 ///
-/// A turn almost always sends one table -- it is the session's toolset, resolved once
-/// per call -- but a turn that changed tools mid-flight (the editing mode was switched,
-/// an MCP server came up) sends more, and then the DIFFERENCE is the fact worth showing.
-/// Grouping by content rather than by call is what makes the common case one list and
-/// the uncommon case legible.
-const tablesOf = (turn: TrajectoryTurn): { calls: readonly number[]; tools: readonly unknown[] }[] => {
-  const groups: { calls: number[]; tools: readonly unknown[]; key: string }[] = [];
+/// A turn almost always sends one table -- it is the session's toolset, resolved once per
+/// call -- but a turn that changed tools mid-flight (the editing mode was switched, an MCP
+/// server came up) sends more, and then the DIFFERENCE is the fact worth showing. THE
+/// TABLE ITSELF IS NOT ON THE RECORD ANY MORE (ticket 04): what a call leaves is the NAME
+/// set as a hash and the count, and grouping by the hash keeps the common case one list --
+/// two tables that differ only in a description group together, which is the point of the
+/// name set.
+const tablesOf = (turn: TrajectoryTurn): { calls: readonly number[]; count: number; key: string }[] => {
+  const groups: { calls: number[]; count: number; key: string }[] = [];
   for (const call of turn.calls ?? []) {
-    if (call.tools === undefined) continue;
-    const key = JSON.stringify(call.tools);
+    if (call.toolsNamesHash === undefined) continue;
+    const key = call.toolsNamesHash;
     const hit = groups.find((g) => g.key === key);
-    if (hit === undefined) groups.push({ calls: [call.index], tools: call.tools, key });
+    if (hit === undefined) groups.push({ calls: [call.index], count: call.toolsCount ?? 0, key });
     else hit.calls.push(call.index);
   }
-  return groups.map(({ calls, tools }) => ({ calls, tools }));
+  return groups;
 };
 
 /// One tool, folded. A NATIVE `<details>`: collapsed it is `name · first line of the
 /// description`, expanded it is the whole description and the definition the model was
-/// handed -- name, description and schema all present, because that entry IS what went
-/// on the wire. No state, no key handling, and it is keyboard- and screen-reader-loud
-/// for free, which is the same reason the composer's pickers are native selects.
+/// handed -- name, description and schema all present, because that entry IS what went on
+/// the wire.
 const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
   const { t } = useTranslation("trajectory");
-  /// The wire shape is `{type: "function", function: {name, description, parameters}}`;
-  /// a bare definition (or a shape from elsewhere) is read as itself rather than
-  /// rejected, because the point of this pane is to show what is there.
   const fn =
     typeof tool === "object" && tool !== null && "function" in tool
       ? (tool as { function?: unknown }).function
@@ -262,7 +268,6 @@ const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
       ? fn.description
       : "";
   const firstLine = description.split("\n").find((l) => l.trim() !== "") ?? "";
-
   return (
     <li data-slot="trajectory-tool">
       <details className="rounded hover:bg-muted/40">
@@ -282,11 +287,28 @@ const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
   );
 };
 
-/// The tool list of one turn: every distinct table, each with the call(s) that sent it.
-const ToolList: FC<{ turn: TrajectoryTurn }> = ({ turn }) => {
+/// The tool list of one turn. THE TABLE ITSELF WHEN THE ITEM CARRIES IT: the system row's
+/// envelope keeps it (`:tools`), so a trajectory item is SELF-CONTAINED and this pane
+/// never has to go and pull a second record to find out what tools the run served. Falls
+/// back to the per-call envelope groups for a record written before the table moved to
+/// the envelope.
+const ToolList: FC<{ turn: TrajectoryTurn; tools?: readonly unknown[] }> = ({ turn, tools }) => {
   const { t } = useTranslation("trajectory");
+  if (tools !== undefined && tools.length > 0) {
+    return (
+      <div data-slot="trajectory-tool-tables">
+        <p className="mb-1 text-[0.7rem] uppercase tracking-wide text-muted-foreground">
+          {t("call.tools", { n: tools.length })}
+        </p>
+        <ul className="rounded border border-border/60">
+          {tools.map((tool, i) => (
+            <ToolRow key={i} tool={tool} />
+          ))}
+        </ul>
+      </div>
+    );
+  }
   const tables = tablesOf(turn);
-
   if (turn.calls === undefined) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -299,19 +321,13 @@ const ToolList: FC<{ turn: TrajectoryTurn }> = ({ turn }) => {
   }
   return (
     <div data-slot="trajectory-tool-tables">
-      {tables.map(({ calls, tools }) => (
+      {tables.map(({ calls, count }) => (
         <div key={calls.join("-")} className="mb-2">
-          {/* Which call sent it, and how many tools -- the count is on the line so a
-              reader knows how much is folded away before opening anything. */}
           <p className="mb-1 text-[0.7rem] uppercase tracking-wide text-muted-foreground">
             {t("call.sent", { count: calls.length, names: calls.join(", ") })} ·{" "}
-            {t("call.tools", { n: tools.length })}
+            {t("call.tools", { n: count })}
           </p>
-          <ul className="rounded border border-border/60">
-            {tools.map((tool, i) => (
-              <ToolRow key={i} tool={tool} />
-            ))}
-          </ul>
+          <p className="text-xs text-muted-foreground">{t("tools.notKept")}</p>
         </div>
       ))}
     </div>
@@ -322,8 +338,8 @@ const ToolList: FC<{ turn: TrajectoryTurn }> = ({ turn }) => {
 /// carries, and -- for the kinds that have them -- the facts the record states about it.
 /// WHICH OF A SYSTEM ITEM'S TWO HALVES IS SHOWING. Only a system item has two: the
 /// prompt the model was given, and the tool table that went out with it. They are ONE
-/// subject with two faces -- the prompt's own `<tools>` block enumerates exactly those
-/// tools -- so they share the pane as tabs rather than stacking, which would bury the
+/// subject with two faces -- the tools the run SERVED ride the item itself (the system row's
+/// envelope `:tools`) -- so they share the pane as tabs rather than stacking, which would
 /// prompt under a wall of JSON.
 type SystemTab = "prompt" | "tools";
 
@@ -412,16 +428,17 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
             <Block text={item.text} mono />
           </>
         )}
-        {item.kind === "system" && tab === "tools" && <ToolList turn={turn} />}
+        {item.kind === "system" && tab === "tools" && <ToolList turn={turn} tools={item.tools} />}
 
         {item.kind === "context" && (
           <>
+            {/* ONE FACT AND THE CALL IT RODE: where a block sat relative to the
+                client's messages used to be a second fact, and it stopped being one
+                when every injection moved behind the question (see
+                harness.edge.trajectory/context-item). */}
             <Facts
               pairs={[
-                [
-                  t("facts.injected"),
-                  item.source === "opening" ? t("values.whenOpened") : t("values.duringRun"),
-                ],
+                [t("facts.injected"), t("values.injected")],
                 [t("facts.by"), item.call === undefined ? null : t("call.label", { n: item.call })],
               ]}
             />
@@ -456,7 +473,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
                 [t("facts.finished"), call?.finishReason ?? null],
                 /// The COUNT only: the table itself is on the turn's system row, and the
                 /// same JSON in two panes is one place to keep in step too many.
-                [t("facts.tools"), call?.tools === undefined ? null : `${call.tools.length}`],
+                [t("facts.tools"), call?.toolsCount === undefined ? null : `${call.toolsCount}`],
               ]}
             />
             {item.reasoning !== undefined && <Block label={t("blocks.reasoning")} text={item.reasoning} />}
@@ -501,14 +518,10 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
 
 export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("trajectory");
-  /// THE REFETCH TRIGGER, read off the runtime here rather than handed in: one ReAct
-  /// round is one assistant message on this side, so a rise in that count is a call that
-  /// just finished, and `isRunning` catches the run that ends without one (an error).
-  /// It has to be read from INSIDE the provider, which is why this component -- not the
-  /// app shell above it -- owns it. Same reading, same reason, as `ComposerStats`.
-  const assistantCount = useAuiState(
-    (s) => s.thread.messages.filter((m) => m.role === "assistant").length,
-  );
+  /// WHETHER A RUN IS IN FLIGHT is read off the runtime here, because the header the stream
+  /// opens with carries `:incomplete`, and a run that just settled changes it -- so the effect
+  /// below reopens the stream on a flip. It has to be read from INSIDE the provider, which is
+  /// why this component -- not the app shell above it -- owns it.
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const [payload, setPayload] = useState<TrajectoryPayload | null>(null);
   /// WHICH ROW IS OPEN, as (turn, position in that turn). NOTHING IS OPEN BY DEFAULT:
@@ -519,14 +532,29 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
 
   useEffect(() => {
     let live = true;
-    void trajectoryFor(threadId).then((next) => {
-      // A late answer from a previous session must not land on this one.
-      if (live) setPayload(next);
-    });
+    const controller = new AbortController();
+    void trajectoryFor(
+      threadId,
+      (soFar) => {
+        // A late turn from a previous session must not land on this one.
+        if (live) setPayload(soFar);
+      },
+      controller.signal,
+    )
+      .then((next) => {
+        if (live && next !== null) setPayload(next);
+      })
+      .catch(() => {
+        // AN ABORT IS THE CLEANUP (a session change, a run settling, an unmount), not a
+        // failure: whatever arrived is already on screen.
+      });
     return () => {
       live = false;
+      // CLOSING THE CONNECTION IS THE CLEANUP TOO: the route keeps it open for pushes, so a
+      // view that went away would otherwise leave a watcher on the session.
+      controller.abort();
     };
-  }, [threadId, isRunning, assistantCount]);
+  }, [threadId, isRunning]);
 
   /// A CLICK ON THE STRIP OPENS THE SAME THING A CLICK ON THE ROW DOES -- so when one
   /// comes from up there, the row it names must be brought into view: otherwise the pane

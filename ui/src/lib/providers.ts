@@ -11,6 +11,8 @@
 // is one thing to parse and one place a field can be forgotten.
 import type { TFunction } from "i18next";
 
+import type { ProviderKey } from "@/lib/provider-key";
+
 import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
@@ -46,6 +48,24 @@ export type ModelRow = {
   output: readonly string[];
   "context-window"?: number;
   "max-output-tokens"?: number;
+  /// WHERE A MOVED INSTRUCTION GOES, IF THIS MODEL's line says. ABSENT is not
+  /// the same as "replace": absent means the file is SILENT (and the server serves
+  /// the conservative default), while "replace" is something a person wrote. The
+  /// control is three-state for exactly that reason (`lib/providers.ts`'s caller,
+  /// the Models form).
+  "instruction-updates"?: "in-place" | "replace";
+};
+
+/// One row of a vendor's own `/models` listing: the id it gave, and -- WHEN A PREFIX
+/// TABLE SPEAKS FOR THAT FAMILY -- the delivery mode to prefill a row with. A miss
+/// carries no key, the same "only when there is something to say" the report keeps.
+///
+/// THE MATCHING IS THE SERVER'S (`.scratch/instruction-updates` decision 8): this side
+/// only carries the answer to the form, because a second prefix table here would be a
+/// second answer free to drift from the one the run's file is written against.
+export type ModelSuggestion = {
+  id: string;
+  "instruction-updates"?: "in-place" | "replace";
 };
 
 /// Where a provider came from, which is what the page must tell apart: the built-in
@@ -66,7 +86,10 @@ export type ProviderRow = {
   /// The `.env` name this provider's key is read from -- derived from the id, and
   /// named here so nobody has to derive it in their head.
   credential: string;
-  key: { "present?": boolean; source: "env-file" | "environment" | null; name?: string };
+  /// WHETHER THIS HOME HOLDS A KEY for it, and where from -- the shared `ProviderKey`,
+  /// because the composer's choices row reports the same fact and one type is what keeps
+  /// the two from describing it differently. No value, at any depth.
+  key: ProviderKey;
 };
 
 /// What `GET /api/providers` answers, and what every write answers with too.
@@ -100,6 +123,7 @@ export type ProviderPayload = {
     output: readonly string[];
     "context-window"?: number;
     "max-output-tokens"?: number;
+    "instruction-updates"?: "in-place" | "replace";
   }[];
   "api-key"?: string;
 };
@@ -150,18 +174,12 @@ export async function putDefaults(knobs: DefaultKnobs, t: Translate): Promise<Re
 export async function probeModels(
   ask: { id?: string; "base-url"?: string; protocol?: string; "api-key"?: string },
   t: Translate,
-): Promise<{ models: string[]; asked: string }> {
+): Promise<{ models: ModelSuggestion[]; asked: string }> {
   const res = await fetch(`${API_BASE}providers/models`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ask),
   });
   if (!res.ok) throw new Error(await reasonFrom(res, t));
-  return (await res.json()) as { models: string[]; asked: string };
+  return (await res.json()) as { models: ModelSuggestion[]; asked: string };
 }
-
-/// What to call a provider on screen: the label its entry declares, the id
-/// otherwise. The fallback is a rendering decision, so it lives here rather than on
-/// the server -- the id is always the truth, and a vendor nobody named has no label.
-export const providerLabel = (provider: ProviderRow): string =>
-  provider["display-name"] ?? provider.name;

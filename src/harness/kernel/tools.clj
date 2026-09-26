@@ -350,6 +350,20 @@
 
   Unbound outside a run, like its sibling."
   nil)
+(def ^:dynamic *stop*
+  "Where a running call puts HOW TO STOP ITSELF, bound by the seam per call.
+
+  A CALL THAT SPAWNS SOMETHING has a handle nobody outside it can reach -- the
+  process the command is, and the tree under it. Stopping a run somebody pressed stop
+  on must reach THAT process (`.scratch/session-after-refresh` ticket 08), and the
+  only party that knows it is the call itself, so this is the slot it leaves it in:
+  an atom, which the call fills with a thunk that stops what it started.
+
+  IT IS AN ATOM AND NOT A CHANNEL: the loop hands one down per call, and reading it
+  is not a wait -- the stop is decided by the loop when it wants to stop something.
+  Unbound outside a run, like its siblings above; a call that finds nil simply has
+  nobody asking to stop it."
+  nil)
 
 (defn suspend!
   "Stop the call that is executing, from INSIDE its own body, and ask a human.
@@ -422,6 +436,42 @@
 
 ;; --------------------------------------------------------------------- specs
 
+(defn- wire-json
+  "VALUE -> the same JSON with every OBJECT's keys in sorted order -- once, here at the
+  door, rather than in each capability that writes a schema.
+
+  WHY A KEY'S ORDER IS A FACT ABOUT THE REQUEST RATHER THAN A DETAIL of how somebody
+  happened to write a map: this table is serialized into the request's HEAD, ahead of
+  the system prompt and of every message, and the vendor's prefix cache keys on those
+  bytes -- so ONE changed byte there throws away the whole prefix, the conversation
+  included (see .scratch/llm-prefix-cache/spec.md).
+
+  A PLAIN MAP'S KEY ORDER IS AN ACCIDENT OF ITS SIZE: an array map keeps insertion
+  order up to eight keys and then silently flips to hash order. Hash order is itself
+  deterministic, but it is NOT the same promise -- it re-shuffles when the key SET
+  changes, and what decides is Clojure's hashing rather than anything written down
+  here. Sorted keys make the order a pure function of the key set, so 'the same table'
+  is a claim about bytes, and two assemblies -- or two processes -- are comparable at
+  all. It also shrinks the blast radius of adding one property: only the keys after it
+  move, where a hash order can move all of them.
+
+  ARRAYS KEEP THEIR ORDER, which is not an oversight: `required`, `enum` and `oneOf`
+  are sequences, and their order is part of what they say.
+
+  A SET IS REFUSED BY NAME. A set in a schema is a bug in a capability rather than a
+  shape a server sent, and its symptom is the one this door exists to prevent -- a cold
+  prefix nobody can explain -- so it fails here, loudly, instead of being quietly given
+  an order that makes the lie look fixed."
+  [value]
+  (cond
+    (map? value)        (into (sorted-map) (map (fn [[k v]] [k (wire-json v)])) value)
+    (set? value)        (throw (ex-info (str "a set may not reach the wire: " (pr-str value)
+                                             " -- a set's iteration order is not a contract,"
+                                             " and the request's prefix cache keys on the bytes")
+                                        {:value value}))
+    (sequential? value) (mapv wire-json value)
+    :else               value))
+
 (defn- tool-face
   "The two fields a model actually reads -- :description and :parameters -- for
   NAME's tool in THREAD-ID's session.
@@ -440,11 +490,15 @@
 
   Everything else about a tool -- :required, :run, the markers the seam reads --
   is untouched by this: only what the MODEL sees varies, which keeps the call's
-  behaviour a function of the session rather than of the description."
+  behaviour a function of the session rather than of the description.
+
+  WHAT COMES BACK IS `wire-json`, so the face's key order is the same whatever a
+  capability's `:describe` or a server's `inputSchema` happened to be -- the reason
+  is written once, on that function, and it is a reason about the wire."
   [thread-id [n t]]
-  (if-let [describe (:describe t)]
-    (describe thread-id)
-    {:description (:description t) :parameters (:parameters t)}))
+  (wire-json (if-let [describe (:describe t)]
+               (describe thread-id)
+               {:description (:description t) :parameters (:parameters t)})))
 
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
@@ -466,15 +520,77 @@
   tool is absent from the list and its calls are refused by name with the
   substitute and the config key to switch (harness.cap.editing/unserved-message).
   Either way nobody is left guessing -- which is the property both mechanisms are
-  actually for."
+  actually for.
+
+  THE ORDER IS A DEFINITION RATHER THAN A SORT, because the order is part of the bytes
+  that go out and those bytes are the request's HEAD. The STABLE half -- the built-ins --
+  occupies one contiguous run first; the half whose membership can change while the
+  process is running (an external server's roster) sits after it, ranked by the `:source`
+  the door stamped at registration rather than by a name prefix, which would be a second
+  place deciding the same thing. A global `sort-by` said the opposite: `mcp__*` sorted in
+  between `job_output` and `read`, so one server's roster moving re-positioned BUILT-INS.
+
+  WHAT THAT DOES NOT BUY, said here so nobody counts it twice: this table is still ahead
+  of the messages, so a roster change still invalidates everything after it -- the
+  conversation included. What it buys is that the stable half stays byte-identical, that
+  the first divergence is always at the roster boundary (so a report can name it), and
+  that nothing changes at all while the roster holds."
   ([] (specs nil))
   ([thread-id]
-   (mapv (fn [[n t]] {:type "function"
-                      :function (assoc (tool-face thread-id [n t])
-                                       :name n)})
-         (sort-by key (into {}
-                            (filter (fn [[n _]] (served? thread-id n))
-                                    (effective-tools thread-id)))))))
+   (let [tools  (into {} (filter (fn [[n _]] (served? thread-id n))
+                                 (effective-tools thread-id)))
+         ;; A tool with no `:source` is one this session contributed; the door that adds
+         ;; one (session-add!) stamps it, so an unstamped row is an UNKNOWN quantity
+         ;; rather than a stable one, and it is ranked with the changing half -- an
+         ;; unknown must not sit inside the run of bytes that is supposed never to move.
+         churn? (fn [n] (not= :builtin (:source (get tools n))))
+         order  (sorted-map-by (fn [a b]
+                                 (let [c (compare (if (churn? a) 1 0)
+                                                  (if (churn? b) 1 0))]
+                                   (if (zero? c) (compare a b) c))))]
+     (mapv (fn [[n t]]
+             (wire-json {:type "function"
+                         :function (assoc (tool-face thread-id [n t]) :name n)}))
+           (into order tools)))))
+
+
+;; ------------------------------------------------------- the table's signature
+;;
+;; WHAT A `model/start` LINE KEEPS INSTEAD OF THE TABLE (`harness.kernel.event`). The
+;; table is runtime configuration repeated byte-for-byte on every call of a run, and
+;; 'did it change' is a question about the NAME SET -- a changed description is not a
+;; change, an added or removed tool is. The signature is computed here, at the one
+;; place that RESOLVES the table, and handed to the event; a reader that wanted the
+;; table back could not get it, and does not need to.
+
+(defn- sha256-hex
+  "TEXT's SHA-256, as lowercase hex."
+  [^String text]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (.getBytes text java.nio.charset.StandardCharsets/UTF_8))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn names-hash
+  "The NAME SET of a resolved tool table as one hash. The names are SORTED first, so
+  the order the table happens to be in cannot move the answer; the descriptions never
+  enter it. A session that adds or removes a tool gets a new hash; one that only
+  re-describes a tool keeps the old one (owner's rule, 2026-09-24)."
+  [specs]
+  (sha256-hex (str/join "\n" (sort (keep #(get-in % [:function :name]) specs)))))
+
+(defn default-signature
+  "The signature a caller can answer WITHOUT A BYTE MEASURE: the name set and the count,
+  or nil for an empty table (which writes no `:tools-*` key at all).
+
+  THE SIZE IN CHARACTERS is deliberately not here. It is `harness.edge.context/size-of`'s
+  number -- the edge owns the wire's character rule -- and the edge merges it in through
+  `harness.kernel.loop`'s :tool-signature. A caller with no measure (an offline test,
+  `harness.edge.replay/resume!`) gets these two and the context ring falls back to the
+  table for the size, which such a caller does not keep either."
+  [specs]
+  (when (seq specs)
+    {:tools-names-hash (names-hash specs)
+     :tools-count      (count specs)}))
 
 
 ;; --------------------------------------------------------------- approvals

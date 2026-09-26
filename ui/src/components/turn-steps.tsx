@@ -32,6 +32,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   turnBounds,
+  turnConclusion,
   turnCounts,
   turnIsSettled,
   turnSummaryLabel,
@@ -80,8 +81,11 @@ const turnKeyOf = (s: AssistantState): string => {
 const isHeadOf = (s: AssistantState): boolean =>
   turnBounds(s.thread.messages, s.message.index).first === s.message.index;
 
-const isTailOf = (s: AssistantState): boolean =>
-  turnBounds(s.thread.messages, s.message.index).last === s.message.index;
+const isConclusionOf = (s: AssistantState): boolean => {
+  const { messages } = s.thread;
+  const { first, last } = turnBounds(messages, s.message.index);
+  return turnConclusion(messages, first, last) === s.message.index;
+};
 
 /// A turn can fold when it has stopped AND has something to fold. A turn of one
 /// message is just the answer, and a summary line in front of it would be a header
@@ -108,29 +112,38 @@ const turnMessagesOf = (s: AssistantState): number => {
 
 /// Where this message stands in its turn's fold:
 ///
-///   "none"  nothing is folded here -- draw the message as it stands
-///   "step"  a step inside a folded turn: the whole message is put away
-///   "head"  the summary line is drawn, and this message's own content is put
-///           away while the turn is folded: the answer further down is what the
-///           reader keeps
+///   "none"    nothing is folded here -- draw the message as it stands
+///   "step"    a step inside a folded turn: the whole message is put away
+///   "head"    the summary line is drawn, and this message's own content is put
+///             away while the turn is folded
+///   "answer"  the turn's CONCLUSION with the turn folded: this message is drawn,
+///             but only what was SAID of it -- its reasoning and its tool calls are
+///             steps like the rest, and the fold puts those away
 ///
 /// "head" is the message's PLACE in the turn, not its state: a head keeps drawing
 /// the summary line after the reader opens the turn, because that line is the only
 /// control that can fold it again -- a trigger that vanishes when used has no way
 /// back. `useTurnFolded` is what the line and the head's own content follow.
 ///
+/// A TURN WITH NO CONCLUSION HAS NO "answer": every message of it is a "step", the
+/// last one included, so a turn that stopped mid-thought is put away WHOLE rather
+/// than leaving its last thought or tool call on screen (see `turnConclusion`). The
+/// running turn never reaches here at all -- `isFoldableOf` is false for it -- which
+/// is what keeps its steps in front of the reader while they are happening.
+///
 /// Every selector above returns a primitive, because `useAuiState` compares with
 /// `Object.is`: a fresh object would re-render this message on every store update,
 /// which during a run is every token.
-export function useStepFold(): "none" | "step" | "head" {
+export function useStepFold(): "none" | "step" | "head" | "answer" {
   const head = useAuiState(isHeadOf);
-  const tail = useAuiState(isTailOf);
   const foldable = useAuiState(isFoldableOf);
   const folded = useTurnFolded();
+  const conclusion = useAuiState(isConclusionOf);
 
   if (!foldable) return "none";
   if (head) return "head";
-  return tail || !folded ? "none" : "step";
+  if (!folded) return "none";
+  return conclusion ? "answer" : "step";
 }
 
 /// Whether the turn is folded right now: what the summary line's chevron and
@@ -142,6 +155,20 @@ export function useTurnFolded(): boolean {
   return foldable && !unfolded;
 }
 
+
+/// Whether THIS message is the turn's conclusion WHILE the turn is folded -- the one
+/// message a folded turn still shows, and of which it shows only what was said. The
+/// head can be the conclusion too (a turn whose first message already answered and
+/// then kept working): that message still draws the summary line, and this is what
+/// keeps its own prose rather than hiding it with the rest of the head.
+///
+/// It is `false` for the running turn and for a turn with no conclusion, which is
+/// exactly the two cases `useStepFold` already answers `"none"`/`"step"` for.
+export function useFoldedAnswer(): boolean {
+  const folded = useTurnFolded();
+  const conclusion = useAuiState(isConclusionOf);
+  return folded && conclusion;
+}
 // ------------------------------------------------------------ the summary line
 
 /// The line a folded turn leaves behind: what is behind it, and the way in.

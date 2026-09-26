@@ -33,4 +33,15 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** `GET /api/threads/<stem>/follow` 在 `src/harness/edge/http.clj`
+（`follow-get`，七条要点写在它的 docstring 里）：先订阅再补发；补发 = 记录里已有的帧；
+总线来的帧按 `:seq` 去重；终帧结束整条流；**第一帧必须是 `RUN_STARTED`**，快照
+（`MESSAGES_SNAPSHOT`，那个没有帧承载的任务原文）跟在它后面 —— 这个顺序是浏览器当场定的
+（先发快照被 `@ag-ui/client` 拒：`First event must be 'RUN_STARTED'`）；
+没有人在跑又没有终帧时用一条 SSE **注释**说清并关流（注释而不是帧：客户端的解析器不认识的帧
+会让它整轮报错）；客户端离开 = 取消订阅。用例：`harness.edge.follow-route-test`（4 条，含边界）。
+
+**与票面的一处偏差，写清理由：** `:seq` 同时写进记录，不只是总线上。票面自己的话
+（「记录里与总线上是同一个数」）要求如此，也是边界比较能成立的唯一方式。

@@ -91,13 +91,45 @@ test/dev → 任意
 - **组合根的 `stop` 必须带回 teardown**，否则测试套件里每起一次服务就叠一层
   （http_test 起上百个），而「缝是空的」那条断言就会看到别人留下的表。
 
+## 一个机制在核心里、适配在边上：会话
+
+**`harness.kernel.session` 是机制，`harness.edge.sessions` 是它的适配**
+（ADR [0005](../adr/0005-sessions-own-the-record-stream.md)）。会话要提供「读 jsonl 的流」与
+「写 jsonl 的流」，其他都是订阅者——这是机制；而**记录是什么**（日志在哪、一行怎么解析、一行
+怎么变成一场对话、provider 能拿到什么、认领归谁）是适配的，从缝里进
+（`harness.kernel.session/install!`）。所以核心层既不 require `harness.cap.claims` 也不 require
+`harness.edge.replay`，`harness.layers-test` 看着这条。
+
+**缝长这样**（对照上面的「安装门的形状」）：
+
+| 缝 | 谁装 | 装了之后核心里有什么 |
+|---|---|---|
+| `:build` | `harness.edge.sessions` | 会话出生那一次走查（`replay/fold-sofar`，一条流，把登记过的折子一起折） |
+| `:model-messages` | `harness.edge.sessions` | 能交给 provider 的那份对话（卡片脱掉、压缩与剪枝折好） |
+| `:read` / `:fold` | `harness.edge.sessions` | 记录的字怎么定位、怎么读、怎么折 |
+| `:claim` | `harness.edge.sessions` | 谁在服务这场会话（`harness.cap.claims`） |
+
+**两道订阅缝由机制定义，消费者只登记**：读流是 `register-fold!`（`(fn [acc ctx [line-index row]] acc)`，
+装会话时按行走，结果落在会话行上，`fold-value` 取）；写流是 `register-step!`（唯一写入口
+`harness.edge.http/log!` 每写一行叫一次 `row-written!`，订阅者原地推进）。**加一个消费者不动
+`log!`**——它不认识任何一个具体消费者。压力表是第一个订阅者：表针是同一个 `band-step` 在
+「出生走查 / 每行落下 / 离线折」三处跑。
+
+**装的是组合根，不是加载**：`harness.edge.http/start!` 调 `(sessions/install!)` 与
+`(pressure/install!)`。所以「为什么这个测试有真会话 / 有表针」的答案是那一行，与
+`harness.kernel.tools/install!` 同一条规矩。要走这条路又不走组合根的命名空间（`sessions-test`、
+`claims-test` 里那个子 JVM）自己说一句 `(sessions/install!)`。
+
+**铁律 3（run 进行中内核不读自己的记录）在机制里**：会话一生只读一次，就是出生那次走查
+（`:build`）；run 里只有订阅者的实时 step。
+
 ## 几处边界判断，连着反面意见
 
 写在这里是因为守卫测试抓不到它们，将来翻案只能靠这张纸。
 
 - **`llm` 里的 `prompt.md` 载体留核心层**：冻结是机制（provider 前缀缓存的前提：一条逐字节稳定的
   首消息），读哪个文件不是能力。
-- **`cap.tools` 与 `kernel.tools` 的分界线是「定义」与「缝」**：十八个工具的描述、参数与 `:run`
+- **`cap.tools` 与 `kernel.tools` 的分界线是「定义」与「缝」**：二十个工具的描述、参数与 `:run`
   在能力层，注册表、overlay、审批、三相执行、声明的词汇在核心层。缝曾经两者都装
   （一份 1320 行的文件），分开之后它的 docstring 才能说一句真话：它不认识任何一个具体工具。
 - **`cap.editing` 是能力，核心层没有 `editing`**：`:hashline` / `:str-replace` 是两套具体编辑实现的
@@ -116,3 +148,10 @@ test/dev → 任意
 - **`replay` 在适配层，不是独立一层**：它是边的日志的**读侧**，与写侧是同一份契约的两半。
 - **`providers` 在能力层而不是基建层**：它是「能跟哪个厂商说话」；基建层只有「东西落在哪、
   错了写哪、进程怎么起来」。
+- **会话的机制留核心层，记录的字留边上**：`harness.kernel.session` 认识「一场会话由哪些状态组成、
+  两道订阅缝怎么长、窗口怎么切」，**不认识 jsonl**——它连「日志在哪」都不知道。
+  **反面意见**：会话的麻烦几乎都在文件上（半行、行号、格式），把文件拿掉是不是把机制掏空了？
+  **留下的理由**：它要守的两条内部规矩（一场会话只出生一次走查、run 里不读记录）与文件格式无关，
+  而窗口 / 条目 / 认领的算术是纯函数，今天在测试里不碰一个字节。
+  **翻案路径**：把整个 `kernel.session` 合回 `edge`，代价是「加一个消费者」要么动 `log!`、
+  要么每个读法各开一次文件（ADR 0005 推翻了这两样）。

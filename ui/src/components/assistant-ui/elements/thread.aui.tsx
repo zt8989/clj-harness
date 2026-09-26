@@ -36,10 +36,28 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
-import { TurnStepsTrigger, useStepFold, useTurnFolded } from "@/components/turn-steps";
+import { TurnStepsTrigger, useFoldedAnswer, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+// LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
+import { WindowTop, type WindowTopProps } from "@/components/window-top";
+// LOCAL (ticket 02): the test that tells an opening entry (a `user` message that is
+// only a card) from something a person typed.
+import { InjectionCard } from "@/components/context-card";
+import { isCardOnly, isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
+// LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
+// action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
+import { SessionRunContext } from "@/components/session-run-state";
+// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE TURN the server says is open
+// (`turn/start` / `turn/end`), which is what the dot at a turn's end is about -- see
+// `lib/live-turn.ts` for why it is not the run's word.
+import { SessionTurnContext } from "@/components/live-turn-state";
+// LOCAL (ticket 02): the criterion the action bar shares with the composer -- this page's run OR
+// the server's word. See `AssistantActionBar`.
+import { stillBeingWritten } from "@/lib/session-status";
+import { wearsWorkingDot } from "@/lib/live-turn";
+import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -103,6 +121,13 @@ export type ThreadComponents = {
   ComposerFrame?: ComponentType<PropsWithChildren> | undefined;
   ComposerTools?: ComponentType | undefined;
   ComposerAddAttachment?: ComponentType | undefined;
+  // LOCAL (ticket 09 of `.scratch/session-after-refresh`): what stands in the send
+  // button's place while the SERVER says this conversation's run is going. The page
+  // supplies it (`App`, which holds the thread id), because stopping a run this page is
+  // not driving is a request to the server -- and this element has no address to aim one
+  // at. Absent means nothing is drawn, which is what a page with no way to stop should
+  // look like: no button, rather than a button that does nothing.
+  ComposerStop?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
@@ -115,6 +140,23 @@ export type ThreadComponents = {
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  /// LOCAL (subagent-view ticket 05): WHETHER THIS THREAD HAS A COMPOSER AT ALL.
+  /// `false` is the MIRROR -- the right-hand panel, which watches a subagent work
+  /// and cannot talk to it -- and it is a switch here rather than a forked element
+  /// for the reason the other optional props exist (`Welcome`, `ComposerFrame`,
+  /// `ComposerTools`, `ComposerAddAttachment`): a second copy of this file would
+  /// start drifting from this one the day either changed, and the message
+  /// rendering is exactly what the two sides must agree about.
+  ///
+  /// NO COMPOSER, NOT A DISABLED ONE. `false` does not render the footer's
+  /// composer, its chrome, or any of the states that say "this conversation could
+  /// be spoken to but is shut" -- those belong to a composer that exists.
+  composer?: boolean | undefined;
+  // LOCAL (ticket 06): the window's top, drawn inside the viewport above the messages.
+  // The page hands it down because the window belongs to the SESSION and this file is
+  // the conversation's own furniture; `null` -- every session read through the sidebar,
+  // and every page whose log had to be repaired -- draws nothing at all.
+  window?: WindowTopProps | null | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -144,17 +186,52 @@ const isHistoryLoadingView = (s: AssistantState) =>
 // because one TEXT_MESSAGE per assistant message is what the wire says -- and
 // the steps of a turn are therefore adjacent assistant messages, while two turns
 // are separated by the user message that started the second one. `isTurnEnd` is
-// "nothing of mine follows", `isTurnContinuation` is "something of mine came
-// before"; both are answered by the neighbours in the thread's own message list.
+// "nothing of mine follows" (what the action bar is keyed on), and `isStepAfter` is
+// "the thing before me was a step of this conversation too" (what the step spacing is
+// keyed on); both are answered by the neighbours in the thread's own message list.
 //
 // Upstream never asks either question, because upstream's `AssistantMessage` is
-// written for a runtime whose turns are single messages. The pair is what the
-// action bar (below) and the step spacing are keyed on.
+// written for a runtime whose turns are single messages.
 const isTurnEnd = (s: AssistantState) =>
   s.thread.messages[s.message.index + 1]?.role !== "assistant";
 
-const isTurnContinuation = (s: AssistantState) =>
-  s.thread.messages[s.message.index - 1]?.role === "assistant";
+// LOCAL: IS THE MESSAGE BEFORE THIS ONE A STEP of the conversation -- a thing the RUN
+// did, rather than the person asking? Two kinds of message answer yes: an assistant
+// message, and an injected-context card (a card the session was born with, or one the
+// rebuild made its own message; see `components/context-card.tsx`). Everything else -- a
+// person's message -- is the turn boundary the message group's own `gap-y-6` is for.
+//
+// A CARD IS A STEP AND NOT A TURN. It says what the model was handed, which is the same
+// kind of fact as what a tool call came back with, and a reader meets both in one list: a
+// row of `bash`, a row of `思考`, a row of `注入的上下文`. So it takes the same spacing as
+// the rows around it -- `STEP_SPACING` below -- instead of a turn's.
+//
+// Answered from the neighbours in the thread's own message list rather than from a field
+// somebody has to keep in step, for the reason `isTurnEnd` gives.
+const isStepAfter = (s: AssistantState) => {
+  const previous = s.thread.messages[s.message.index - 1];
+  if (previous === undefined) return false;
+  return (
+    previous.role === "assistant" ||
+    isCardOnly(previous.parts) ||
+    isOpeningEntryId(previous.id)
+  );
+};
+
+// LOCAL: WHAT TWO ADJACENT STEPS ARE SEPARATED BY, spelled once because three places draw
+// one: an assistant message, an injected-context card, and the rows inside them.
+//
+// THE ARITHMETIC. The message group spaces its children by `gap-y-6` (24px), and every step
+// row carries its own `py-1.5` (6px each side). Two rows inside ONE message are therefore
+// 12px apart -- the rows' own padding and nothing else, which is the rule
+// `.scratch/flat-step-rows/spec.md` states and `message-parts.tsx` repeats. Two steps in
+// DIFFERENT messages get that 24px gap on top of it unless the message cancels it, and
+// `-mt-6` cancels ALL of it (it was `-mt-4`, which cancelled 16 of the 24 -- so a card, or a
+// step of a turn, sat 8px further from its neighbour than the row inside the same message
+// did, and a card the session was born with sat a whole turn's 24px away). Now every pair of
+// adjacent steps is the same 12px, whatever kind of step they are and whichever message
+// each one landed in.
+const STEP_SPACING = "-mt-6";
 
 // LOCAL: upstream's literal "Loading conversation" is gone from this file and read
 // from the `elements-thread` catalog instead. It is the status line a screen reader
@@ -186,20 +263,24 @@ const ThreadHistorySkeleton: FC = () => {
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
+  window = null,
+  composer = true,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} window={window} composer={composer} />
     </ThreadComponentsContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
-  isEmpty,
-  autoFocus,
-}) => {
+const ThreadRoot: FC<{
+  isEmpty: boolean;
+  autoFocus: boolean;
+  window: WindowTopProps | null;
+  composer: boolean;
+}> = ({ isEmpty, autoFocus, window, composer }) => {
   const { Welcome = ThreadWelcome, ComposerFrame = PassthroughFrame } =
     useContext(ThreadComponentsContext);
 
@@ -229,6 +310,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           the bottom, whether by that click or by hand. */}
       <ThreadPrimitive.Viewport
         data-slot="aui_thread-viewport"
+        // LOCAL (ticket 06): the scroll container, registered where the window's
+        // "show earlier" can anchor against it (`lib/window-scroll.ts`). It is a ref on
+        // the viewport rather than a lookup by `data-slot` for the reason the helper
+        // writes down: the element a prepend pushes down is THIS one, and a query would
+        // need a mounted page to find it.
+        ref={registerViewport}
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
         <div
@@ -237,12 +324,25 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             isEmpty && "justify-center",
           )}
         >
-          <AuiIf condition={isNewChatView}>
-            <Welcome />
-          </AuiIf>
+          {/* LOCAL (subagent-view ticket 05): A MIRROR HAS NOTHING TO WELCOME
+              ANYBODY TO. The panel's thread is empty for the moment between mounting
+              and the follow channel's first frame, and the new-chat screen would
+              flash a greeting over a conversation that already exists -- so the
+              opening furniture goes with the composer, under the same switch. */}
+          {composer ? (
+            <AuiIf condition={isNewChatView}>
+              <Welcome />
+            </AuiIf>
+          ) : null}
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
+
+          {/* LOCAL (ticket 06): the window's top sits between the skeleton and the
+              messages, which is above every message in the conversation -- so a prepend
+              grows the content BELOW it and the anchoring works on the messages the
+              reader is actually looking at. */}
+          {window !== null && <WindowTop {...window} />}
 
           <div
             data-slot="aui_message-group"
@@ -263,13 +363,21 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             {/* LOCAL: the frame wraps the composer rather than replacing it, so
-                the default above still renders exactly what upstream renders. */}
-            <ComposerFrame>
-              <Composer autoFocus={autoFocus} />
-            </ComposerFrame>
-            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
-              <ThreadSuggestions />
-            </AuiIf>
+                the default above still renders exactly what upstream renders.
+                LOCAL (subagent-view ticket 05): and `composer={false}` renders
+                NEITHER -- see `ThreadProps`. It is the whole of the mirror: what is
+                gone is the composer, its frame and its chrome, not a disabled
+                version of any of them. */}
+            {composer ? (
+              <ComposerFrame>
+                <Composer autoFocus={autoFocus} />
+              </ComposerFrame>
+            ) : null}
+            {composer ? (
+              <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
+                <ThreadSuggestions />
+              </AuiIf>
+            ) : null}
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
@@ -380,8 +488,19 @@ const ComposerAction: FC = () => {
   // LOCAL: whatever the caller wants on the right of the composer's action row,
   // before the dictate and send buttons -- and, on the left, the attach button
   // itself when the caller has a reason to draw it differently.
-  const { ComposerTools, ComposerAddAttachment: Attach = ComposerAddAttachment } =
+  const { ComposerTools, ComposerStop, ComposerAddAttachment: Attach = ComposerAddAttachment } =
     useContext(ThreadComponentsContext);
+  // LOCAL (ticket 09 of `.scratch/session-after-refresh`): WHICH RUN THE SEND BUTTON IS
+  // ABOUT. Upstream only knows whether THIS PAGE is running a turn (`s.thread.isRunning`);
+  // a run belongs to the PROCESS, so a page that opened somebody else's running
+  // conversation has to close the same door on the SERVER's word -- which is what the
+  // context carries (`App`'s `runState`, off the window's feed). The row then draws, in
+  // the send button's place, the Stop the CALLER supplies: this file does not know what
+  // stopping costs (a request, a signal, a wait), and the one thing every case shares is
+  // that Send is not it.
+  const runState = useContext(SessionRunContext);
+  const ownRunning = useAuiState((s) => s.thread.isRunning);
+  const serverRunning = runState === "running";
   // LOCAL: upstream's literal tooltips and `aria-label`s for the dictation and send
   // buttons -- "Voice input", "Start voice input", "Stop dictation", "Stop voice
   // input", "Send message" (twice: `tooltip` and the send button's `aria-label`) and
@@ -428,7 +547,11 @@ const ComposerAction: FC = () => {
             </ComposerPrimitive.StopDictation>
           </AuiIf>
         </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
+        {/* LOCAL (ticket 09): SEND IS DRAWN ONLY WHEN NOBODY IS ANSWERING THIS
+            CONVERSATION -- not this page, and not the process. While the server says
+            `running`, the send button's place is the caller's STOP: Send against the
+            server's own word is a button whose only answer is the run edge's 409. */}
+        {!ownRunning && !serverRunning && (
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
               tooltip={t("composer.send")}
@@ -442,20 +565,17 @@ const ComposerAction: FC = () => {
               <ArrowUpIcon className="aui-composer-send-icon size-4" />
             </TooltipIconButton>
           </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label={t("composer.stopGenerating")}
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
+        )}
+        {/* LOCAL (ticket 09): THE STOP IS THE SERVER'S, in BOTH the cases above -- this
+            page's own run and a run the process is answering for somebody else. What used
+            to stand here is upstream's `ComposerPrimitive.Cancel`, which ABORTS THIS
+            PAGE'S FETCH and does nothing at all on the other side (the run keeps going
+            and the record keeps growing); the caller's stop asks the server instead, and
+            a page driving the run gets the terminal it produces on this same stream. */}
+        {/* THE CALLER'S STOP, IN BOTH OF THOSE CASES. The component is the page's because
+            stopping is a request to the server, and this element has no address of its own
+            to aim one at (`App` holds the thread id). */}
+        {(ownRunning || serverRunning) && ComposerStop !== undefined && <ComposerStop />}
       </div>
     </div>
   );
@@ -484,13 +604,29 @@ const AssistantMessage: FC = () => {
   // copy.
   const { t } = useTranslation("elements-thread");
 
-  // LOCAL: the two neighbours, read off the thread's message list (see
-  // `isTurnEnd`). `continuation` tightens the gap ABOVE this message so a turn's
-  // steps read as one answer rather than as four separate ones: the message
-  // group's `gap-y-6` stays for the space between turns, and this cancels most
-  // of it between the steps of one turn.
+  // LOCAL: the two neighbours, read off the thread's message list (see `isTurnEnd` and
+  // `isStepAfter`). `continues` tightens the gap ABOVE this message so a turn's steps
+  // read as one answer rather than as four separate ones: the message group's `gap-y-6`
+  // stays for the space between turns, and `STEP_SPACING` cancels the whole of it after
+  // a step -- which is what makes two steps in two messages the same 12px apart as two
+  // rows in one.
   const turnEnd = useAuiState(isTurnEnd);
-  const continuation = useAuiState(isTurnContinuation);
+  const continues = useAuiState(isStepAfter);
+
+  // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): WHO IS WRITING THIS TURN,
+  // read here because the footer draws ONE OF TWO things with it -- the sign that the turn is
+  // still arriving, or the furniture that says it has stopped. See `stillBeingWritten`.
+  const runState = useContext(SessionRunContext);
+  const ownRunning = useAuiState((s) => s.thread.isRunning);
+  const writing = stillBeingWritten(ownRunning, runState);
+  // LOCAL (ticket 02): WHICH OF THE TWO THINGS THIS TURN'S END WEARS -- and the three facts it
+  // takes are in `lib/live-turn.ts`: the TURN is open (the server's `turn/start` / `turn/end`,
+  // seeded from the window's word where the family is silent), somebody is WRITING right now (the
+  // run's, `writing` above), and this footer is the LIVE turn's end (`isLast` -- only one turn can
+  // be open, and it is the last; without that half every earlier turn's end wore a dot too: the
+  // owner's third report, 2026-09-25).
+  const turn = useContext(SessionTurnContext);
+  const lastMessage = useAuiState((s) => s.message.isLast);
 
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
   // of it except the answer, which stays where it is -- and its first message
@@ -501,13 +637,30 @@ const AssistantMessage: FC = () => {
   // which is ours: the boundary of a turn and the arithmetic behind the summary
   // line are in `lib/turns.ts`. `fold === "none"` means "draw this message exactly
   // as this file always did".
+  // `fold === "answer"` and `foldedAnswer` are the folded turn's CONCLUSION: the one
+  // message a folded turn still shows, and only what it SAID -- its reasoning and tool
+  // calls are steps like the rest, and the fold puts those away (see `useStepFold`).
   const fold = useStepFold();
   const folded = useTurnFolded();
+  const foldedAnswer = useFoldedAnswer();
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // LOCAL: A FOLDED TURN'S STEPS ARE NOT DRAWN AT ALL, rather than drawn and hidden.
+  // `display: none` and "no element" are THE SAME THING TO LAYOUT -- a hidden child does not
+  // take part in the message list's flex gap, and its `innerText` is empty, which is already
+  // how `lib/window-scroll.ts` skips it while looking for an anchor -- but they are NOT the
+  // same thing to React: every mounted step is reconciled on EVERY store update, and in a real
+  // conversation the steps are most of the messages (measured on one real session: 99 assistant
+  // messages over 17 turns -- five steps for every answer).
+  //
+  // NO `folded` CHECK IS NEEDED HERE, and that is not an omission: `useStepFold` answers
+  // `"step"` only on the far side of `if (!folded) return "none"`, so a `"step"` message is
+  // one whose turn IS folded. (An earlier cut of this asked for `&& !folded` as well, which
+  // made it dead code -- the first attempt at this change did nothing at all.)
+  if (fold === "step") return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -515,8 +668,9 @@ const AssistantMessage: FC = () => {
       data-fold={fold}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
-        continuation && "-mt-4",
-        fold === "step" && "hidden",
+        continues && STEP_SPACING,
+        // (the `hidden` class a step used to get is gone with the early return above: a step
+        // is not drawn at all, so there is nothing left to hide)
       )}
     >
       {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
@@ -527,7 +681,7 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-content"
         className={cn(
           "text-foreground px-2 leading-relaxed wrap-break-word",
-          fold === "head" && folded && "hidden",
+          fold === "head" && folded && !foldedAnswer && "hidden",
         )}
       >
         <MessagePrimitive.GroupedParts
@@ -536,8 +690,33 @@ const AssistantMessage: FC = () => {
             "tool-call": ["group-chainOfThought", "group-tool"],
             "standalone-tool-call": [],
           })}
+          // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE "STILL WORKING"
+          // DOT IS DRAWN IN ONE PLACE, AND IT IS THE TURN'S END (the footer below). Upstream's
+          // own indicator -- a synthetic `indicator` part it appends itself, `indicator:
+          // "no-text"` -- puts a second dot in the MESSAGE BODY whenever the last part is not
+          // text or reasoning (an empty message, a tool call, and -- while a step is being
+          // handed over -- two messages at once). Two dots for one state is what the owner
+          // reported twice; the sign a reader needs one of is 'this turn is still arriving',
+          // and that is the turn's own end. `never` is upstream's switch for it, and the
+          // footer answers it instead (`stillBeingWritten`).
+          indicator="never"
         >
           {({ part, children }) => {
+            // A FOLDED ANSWER KEEPS ONLY WHAT WAS SAID. Reasoning and tool calls are
+            // the steps that produced the answer, and a folded turn puts the steps away
+            // -- the answer message's own included. `foldedAnswer` is true for exactly
+            // that message while the turn is folded, and for nothing else.
+            if (
+              foldedAnswer &&
+              (part.type === "group-chainOfThought" ||
+                part.type === "group-reasoning" ||
+                part.type === "group-tool" ||
+                part.type === "reasoning" ||
+                part.type === "tool-call" ||
+                part.type === "indicator")
+            ) {
+              return null;
+            }
             switch (part.type) {
               case "group-chainOfThought":
                 return <div data-slot="aui_chain-of-thought">{children}</div>;
@@ -626,10 +805,33 @@ const AssistantMessage: FC = () => {
             THIS message, which is now the turn's last one -- the answer, which is
             what "regenerate" means to a reader. */}
         <AuiIf condition={isTurnEnd}>
-          <AssistantActionBar />
+          {wearsWorkingDot(turn, writing, lastMessage) ? <WorkingDot /> : <AssistantActionBar />}
         </AuiIf>
       </div>
     </MessagePrimitive.Root>
+  );
+};
+
+/// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE SIGN THAT THIS TURN IS
+/// STILL ARRIVING, drawn where the action bar will take over.
+///
+/// IT IS THE DOT UPSTREAM ALREADY DRAWS while an assistant message has no parts yet (the
+/// `indicator` part `MessagePrimitive.Parts` adds): the same glyph, the same pulse, the same
+/// `aria-label`, so one state has one sign. What upstream cannot draw is that dot at the END
+/// of a turn that already has parts -- and that is exactly what a reload lands in: the answer
+/// is on screen, still growing, and the turn's furniture (Copy / Refresh / More) has not been
+/// earned yet. Before this, the row was simply EMPTY, which reads as 'it is done' -- the same
+/// mistake the action bar made, made by saying nothing.
+const WorkingDot: FC = () => {
+  const { t } = useTranslation("elements-thread");
+  return (
+    <span
+      data-slot="aui_assistant-message-indicator"
+      className="animate-pulse font-sans"
+      aria-label={t("message.working")}
+    >
+      {"●"}
+    </span>
   );
 };
 
@@ -637,6 +839,19 @@ const AssistantActionBar: FC = () => {
   // LOCAL: upstream's action-bar literals -- the Copy, Refresh and More tooltips and
   // the "Export as Markdown" menu item -- are gone from this file and read from the
   // `elements-thread` catalog instead. Tooltips are copy, and the menu item is drawn.
+  //
+  // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): WHO IS WRITING THIS TURN.
+  // A turn that is still arriving must not wear Copy / Refresh / More: a reader takes those
+  // for 'this is finished', and a reload in the middle of somebody else's turn is exactly
+  // where they used to appear (measured in a browser, 2026-09-25).
+  //
+  // THE CHOICE IS THE FOOTER'S (`AssistantMessage`: `WorkingDot` while it is being written,
+  // this bar afterwards), rather than upstream's `hideWhenRunning`, and that is the whole
+  // tuning: that prop is ANDed with the RUNTIME's own `isRunning` -- `if (hideWhenRunning &&
+  // s.thread.isRunning) return Hidden` -- and a run this page is only WATCHING is precisely
+  // the case where the runtime says false, so passing `true` hid nothing (measured:
+  // `hideWhenRunning={true}` with `thread.isRunning === false` drew the bar). The prop stays
+  // for the runtime's own case, which is the one it can speak about.
   const { t } = useTranslation("elements-thread");
   return (
     <ActionBarPrimitive.Root
@@ -698,7 +913,73 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
+// LOCAL (ticket 02 of `.scratch/session-opening`): a message that is ONLY an
+// injected-context card is not a bubble.
+//
+// The opening's entries are `role: "user"` -- user messages to the provider, which is
+// what the record says about them -- so without this branch the thread draws the
+// person's AGENTS.md and skills catalog the way it draws anything they typed:
+// right-aligned, in a grey bubble, with an Edit pencil beside them. Nobody typed them.
+// `isCardOnly` is the test; what the row below renders is the SAME card a run streams
+// for its own injections (the assistant path draws it through `dataRendererUI`, and both
+// paths land on the one renderer registered in `components/context-card.tsx`), left
+// where the model read it. The action bar is gone on purpose: there is nothing here to
+// edit or to copy back, because a card is never sent to the server.
+//
+// LOCAL (2026-09-21): AND SOMETIMES THE CARD PART IS NOT THERE. A message the adapter
+// imported from a `MESSAGES_SNAPSHOT` -- which is how a session's birth reaches the page
+// that minted it -- keeps its id and its text and loses the `data` part, because
+// upstream's snapshot conversion has no case for one. So the card is drawn from the
+// message's own text in that case: the server builds the text and the part's value from
+// the one block (`harness.edge.ag_ui/opening-entries`), so the row and its numbers are
+// the same either way. WHICH CASE IT IS is read off the parts, not off the id: a
+// message that carries the part draws it.
+// LOCAL: IT IS A STEP, SO IT IS SPACED LIKE ONE. The card says what the model was handed,
+// and the rows of `bash` / `思考` / `注入的上下文` are one list -- so a card that came in as its
+// own message (a session's opening blocks) tightens the gap above it exactly as a step of a
+// turn does (`isStepAfter` / `STEP_SPACING`). It used to keep the message group's whole
+// `gap-y-6`, which put a stack of opening cards a turn's 24px apart while the rows inside a
+// message sat 12px apart. A card that came in beside rows in the SAME message gets that
+// spacing from the message it landed in, and needs nothing here.
+//
+// AND A PERSON'S MESSAGE IS NOT A STEP: a card drawn under one (the run that answers it
+// starts with its own `<instructions>`) keeps the turn gap, because the bubble above it is
+// where the previous turn ended.
+const UserInjectionCard: FC = () => {
+  const cardOnly = useAuiState((s) => isCardOnly(s.message.parts));
+  const continues = useAuiState(isStepAfter);
+  const text = useAuiState((s) =>
+    isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
+  );
+  return (
+    <MessagePrimitive.Root
+      data-slot="aui_user-injection-root"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        continues && STEP_SPACING,
+      )}
+      data-role="user"
+    >
+      {cardOnly ? (
+        <MessagePrimitive.Parts />
+      ) : (
+        <InjectionCard value={{ role: "user", text }} />
+      )}
+    </MessagePrimitive.Root>
+  );
+};
+
 const UserMessage: FC = () => {
+  // LOCAL: the branch above. The selectors answer a BOOLEAN (and a string) on purpose --
+  // `useAuiState` compares a selector's answer by value, so handing back the parts
+  // themselves would re-render this row on every store update.
+  //
+  // TWO WAYS TO BE A CARD: the message IS only a card (`isCardOnly`), or it is one of the
+  // opening entries the server wrote (whose card part this client may never have had).
+  const card = useAuiState(
+    (s) => isCardOnly(s.message.parts) || isOpeningEntryId(s.message.id),
+  );
+  if (card) return <UserInjectionCard />;
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"

@@ -1,0 +1,38 @@
+{
+ "turns": [
+  {
+   "reasoning": "先起一条没人等的作业，再去写文件、记清单——作业会在忙的时候结束。",
+   "content": "",
+   "tool-calls": [
+    {
+     "id": "c1",
+     "name": "job",
+     "arguments": { "command": "sleep 1; echo JOB-SAYS-SO" }
+    }
+   ]
+  },
+  {
+   "content": "",
+   "tool-calls": [
+    {
+     "id": "c2",
+     "name": "todo_write",
+     "arguments": {
+      "todos": [
+       { "content": "起一条作业", "status": "completed" },
+       { "content": "读回执", "status": "in_progress" }
+      ]
+     }
+    },
+    {
+     "id": "c3",
+     "name": "write",
+     "arguments": { "path": "walkthrough-note.txt", "content": "line one\nline two\n" }
+    }
+   ]
+  },
+  {
+   "content": "作业结束了，回执也拿到了。"
+  }
+ ]
+}

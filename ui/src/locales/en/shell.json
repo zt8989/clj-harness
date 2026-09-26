@@ -5,8 +5,13 @@
   },
   "session": {
     "neverRun": "never run",
-    "noLog": "no log yet",
-    "current": "current",
+    "justNow": "just now",
+    "minutesAgo_one": "{{count}} min ago",
+    "minutesAgo_other": "{{count}} min ago",
+    "hoursAgo_one": "{{count}} h ago",
+    "hoursAgo_other": "{{count}} h ago",
+    "daysAgo_one": "{{count}} d ago",
+    "daysAgo_other": "{{count}} d ago",
     "running": "Running",
     "parked": "Waiting on you",
     "archive": "Archive",
@@ -15,7 +20,11 @@
     "unarchiveTitle": "Unarchive — put this session back with the project's other sessions",
     "empty": "No sessions in this project yet.",
     "allArchived": "Every session here is archived.",
-    "archived": "Archived"
+    "showMore_one": "{{count}} more",
+    "showMore_other": "{{count}} more",
+    "showLess": "Show less",
+    "archived": "Archived",
+    "untitled": "New session"
   },
   "project": {
     "newSession": "New session",
@@ -24,32 +33,31 @@
     "moreTitle": "More — actions for this project",
     "remove": "Remove"
   },
+  "task": {
+    "section": "Tasks"
+  },
   "sidebar": {
     "newTask": "New task",
+    "open": "Open sidebar",
+    "collapse": "Collapse sidebar",
     "addProject": "Add project",
     "addProjectTitle": "Add a project — opens a folder picker, and the directory you choose becomes a project",
     "refresh": "Refresh",
-    "refreshTitle": "Re-read the list from disk and the store",
-    "empty": "No projects yet. A session belongs to a project, so one has to be added before a task can start.",
+    "refreshTitle": "Re-read the list from the store",
+    "empty": "Nothing here yet. Add a project, or start a task.",
     "settings": "Settings",
     "settingsTitle": "Settings: what this session is running on, and what this home can be on"
   },
   "subagents": {
     "title": "Subagents",
-    "titleHint": "Subagents — what this session can hand work to, and what it has handed over",
     "loading": "Reading the subagents…",
-    "definitions": "Defined here",
-    "runs": "Delegations",
     "builtin": "built-in",
     "yours": "yours",
-    "running": "running",
     "baselineAll": "everything this session has, except eval and delegating",
     "baselineReadOnly": "only tools that cannot change anything",
     "minus": "minus {{tools}}",
     "nothingElse": "nothing else taken out",
-    "customEmpty": "No subagents of your own yet — add one in Settings.",
-    "runsEmpty": "Nothing has been delegated yet.",
-    "changeInSettings": "These are read here. Edit them in Settings."
+    "customEmpty": "No subagents of your own yet — add one in Settings."
   },
   "addProject": {
     "path": "Absolute path — D:\\work\\lisp-harness",
@@ -59,12 +67,14 @@
     "emptyPath": "Type the directory's absolute path — nothing was entered."
   },
   "refusal": {
-    "noProject": "Add a project first — a session belongs to a project.",
-    "noProjectSelected": "Pick a project first — a session belongs to a project.",
     "archiveRunning": "That session is still running; archive it once it settles.",
     "archiveParked": "That session is waiting on you; archive it once it settles.",
     "removeProjectRunning": "{{session}} is still running; remove the project once it settles.",
     "removeProjectParked": "{{session}} is waiting on you; remove the project once it settles."
+  },
+  "record": {
+    "degraded_one": "This conversation could not be saved to disk: {{reason}}. {{count}} line is waiting to be written.",
+    "degraded_other": "This conversation could not be saved to disk: {{reason}}. {{count}} lines are waiting to be written."
   },
   "dialog": {
     "removeTitle": "Remove this project?",
@@ -75,5 +85,32 @@
     "removeSessions_other": "{{count}} sessions will stop being listed here.",
     "keep": "Keep it",
     "removeSubmit": "Remove project"
+  },
+  "window": {
+    "earlier": "Show earlier",
+    "loadingEarlier": "Loading earlier messages",
+    "reopened": "This window was closed on the server and has been reopened at the newest messages.",
+    "rebuilt_one": "The window had a gap that could not be filled, so it was rebuilt from the newest page: {{count}} entry was dropped.",
+    "rebuilt_other": "The window had a gap that could not be filled, so it was rebuilt from the newest page: {{count}} entries were dropped.",
+    "ahead_one": "This page was showing {{count}} entry the conversation no longer has. It is gone.",
+    "ahead_other": "This page was showing {{count}} entries the conversation no longer has. They are gone."
+  },
+  "subagentView": {
+    "title": "Subagent · {{name}}"
+  },
+  "rightPane": {
+    "title": "Tasks",
+    "open": "Open task pane",
+    "collapse": "Collapse task pane",
+    "back": "Back to the list",
+    "subagents": "Subagents",
+    "subagentsEmpty": "This session has not delegated to a subagent yet.",
+    "subagentRunning": "Running",
+    "subagentSettled": "Finished",
+    "subagentStarted": "started {{time}}",
+    "jobs": "Background jobs",
+    "jobsEmpty": "This session has no background job.",
+    "jobElapsed": "{{time}} so far",
+    "jobStop": "Stop this job"
   }
 }

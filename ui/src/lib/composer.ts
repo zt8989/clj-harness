@@ -7,6 +7,8 @@
 // a threadId and nothing here is cached across threads.
 import type { TFunction } from "i18next";
 
+import type { ProviderKey } from "@/lib/provider-key";
+
 import { API_BASE } from "@/lib/threads";
 
 /// The translator a FAILURE is worded through, PINNED TO THE `errors` FACE. i18next
@@ -38,21 +40,24 @@ async function reasonFrom(res: Response, t: Translate): Promise<string> {
 ///
 /// `name` is the ID and `display-name` is the label a person gave that vendor --
 /// TWO keys rather than one already-decided string, because what to show is this
-/// side's business (see `providerLabel`) while what to SEND must be the id.
+/// side's business (see `lib/provider-label.ts`) while what to SEND must be the id.
 export type Choices = {
   provider?: string;
   model?: string;
   "reasoning-effort"?: string;
   "reasoning-efforts": string[];
-  providers: { name: string; "display-name"?: string; models: string[] }[];
+  providers: {
+    name: string;
+    "display-name"?: string;
+    models: string[];
+    /// Whether this home holds a key pointing at this provider -- the picker offers a
+    /// provider's models only when it does (`lib/provider-key.ts` is the one copy of
+    /// that rule). It arrives WITH the list rather than being fetched beside it, so the
+    /// fact and the models it filters can never be out of step. The same `ProviderKey`
+    /// the settings registry's rows carry, and no key VALUE at any depth.
+    key: ProviderKey;
+  }[];
 };
-
-/// What to call a vendor on screen: its display name when it has one, its id
-/// otherwise. The fallback lives here rather than on the server because it is a
-/// rendering decision -- the id is always the truth, and a vendor nobody named
-/// has no label to show.
-export const providerLabel = (provider: { name: string; "display-name"?: string }): string =>
-  provider["display-name"] ?? provider.name;
 
 export async function choicesFor(threadId: string, t: Translate): Promise<Choices> {
   const res = await fetch(`${API_BASE}choices?threadId=${encodeURIComponent(threadId)}`);

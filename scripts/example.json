@@ -1,0 +1,23 @@
+{
+  "turns": [
+    {
+      "reasoning": "先读一眼 deps.edn，确认依赖有没有变。",
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "read",
+          "arguments": { "path": "deps.edn" }
+        }
+      ]
+    },
+    {
+      "content": "deps.edn 读完了，依赖没变。这是 scripts/example.json 的第二条 turn：想看别的，照这个形状改就行。",
+      "usage": {
+        "prompt_tokens": 1234,
+        "completion_tokens": 42,
+        "total_tokens": 1276
+      }
+    }
+  ]
+}

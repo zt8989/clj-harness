@@ -1,0 +1,217 @@
+// Ticket 04/09 of `.scratch/session-after-refresh`: a conversation the SERVER is still
+// answering must not offer Send -- and, since ticket 09, must offer the STOP instead.
+//
+// ================================================================ why this file
+//
+// THE BUG THIS PINS was two facts disagreeing about one session. A run belongs to the
+// PROCESS, so a page that reloaded into a running conversation is WATCHING it -- nothing in
+// that page started it, so the runtime's own `isRunning` is false -- while the server's run
+// edge knew perfectly well that a run was going. The composer therefore offered Send, and
+// the only reply was the 409 this repo words as "this session already has a run in this
+// process". Found in a browser (`.scratch/session-after-refresh/walkthrough.mjs`, which is
+// where the 409 is on the record); this file holds the two rules that fix rests on, both of
+// them things no suite could see before.
+//
+// WHAT CHANGED IN TICKET 09: the shut door used to carry a SENTENCE ("this conversation is
+// still being answered; wait for it to settle"). It carries a STOP now -- the server has a
+// cancel verb, so a conversation somebody else is answering is a conversation a person can
+// end -- and the sentence is gone with the state it explained.
+//
+// WHAT THIS FILE CANNOT SEE: `app.tsx` and `thread.aui.tsx`, which is where the server's
+// word is read off the window (`useWindowFeed`'s `onState`), where the action row chooses
+// between Send, Cancel and the Stop (on the server's word) and where the sentence and the
+// stop are reachable at all. Both files reach the assistant runtime and cannot be rendered
+// in this run. The wiring is the walkthrough's; the RULES are here.
+//
+// ================================================================ the two cases
+//
+// 1. `statusOf` -- the arithmetic, pure, both ways round: this page's own reading ORed with
+//    the server's word, and which words do NOT mean "in flight".
+// 2. the STOP, RENDERED in both languages and read back -- for the reason
+//    `suites/record.tsx` gives about its own: a control that reaches the screen is the one
+//    thing a green tree cannot see, and `session-title-blank` is what that costs.
+import { renderToStaticMarkup } from "react-dom/server";
+import { I18nextProvider } from "react-i18next";
+import { expect } from "vitest";
+
+import { type Case, type Suite } from "../e2e";
+import { renderI18n } from "../support/locale";
+import { SessionRunStop } from "../../src/components/session-run-stop";
+import { IDLE, statusOf, stillBeingWritten, type SessionStatus } from "../../src/lib/session-status";
+// THE TURN'S OWN THREE FACTS (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): when the dot
+// is drawn at a turn's end, and where the page learns whether a turn is open.
+import {
+  NO_TURN,
+  turnAfterFact,
+  turnFromWindow,
+  turnIsOpen,
+  wearsWorkingDot,
+} from "../../src/lib/live-turn";
+import type { Language } from "../../src/lib/language";
+
+/// THE BUTTON AS A PERSON MEETS IT: the stop inside a real i18n instance, rendered to a
+/// string. The provider is what the page supplies (`App`), and the thread id is what the
+/// page hands down (`ComposerStop`), so this is the button's own rendering and nothing of
+/// the composer's furniture.
+function drawn(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <SessionRunStop threadId="t-1" />
+    </I18nextProvider>,
+  );
+}
+
+/// Whether the stop drew an element at all. A label with no element would be a word
+/// nothing renders -- the failure this half of the suite exists for.
+const drew = (language: Language): boolean => drawn(language).includes('data-slot="session-stop"');
+
+const cases: Case[] = [
+  {
+    name: "a-run-the-server-is-answering-counts-as-in-flight",
+    run: async () => {
+      // THE BUG, AS ARITHMETIC: nothing in this page is running, and the server says the
+      // conversation is. The answer has to be `running`, because that is what draws the
+      // Stop in the composer and lights the sidebar row.
+      expect(statusOf(IDLE, "running")).toEqual({ running: true, parked: false });
+
+      // AND THE OTHER WAY ROUND, which is why it is an OR and not a replacement: a run this
+      // page just sent is `running` in the runtime BEFORE the window has said anything about
+      // it (the frame that names the state is still in the writer's queue), so a union that
+      // let the server's silence win would open the composer in the middle of a run.
+      expect(statusOf({ running: true, parked: false }, null)).toEqual({
+        running: true,
+        parked: false,
+      });
+
+      // THE WORDS THAT ARE NOT "IN FLIGHT". A parked run has ENDED on its interrupt, a
+      // settled one answered, and a conversation with no window at all has nothing to say --
+      // none of them may draw the Stop, or the composer would offer to end a run that is not
+      // going.
+      //
+      // AND `parked` IS A STATE NOW (ticket 06): the server's word counts, because the CARD
+      // that answers a parked run comes back on a rebuilt conversation -- before this, taking
+      // the server's `parked` would have made a door with no way through it. It is still not
+      // `running`, so it draws no Stop; what it draws is the sidebar's `waiting on you` and
+      // the archive refusal.
+      expect(statusOf(IDLE, "parked"), "the server's parked counts as parked").toEqual({
+        running: false,
+        parked: true,
+      });
+      for (const state of ["settled", "unfinished", null]) {
+        expect(statusOf(IDLE, state), `"${state}" is not a run of any kind`).toEqual(IDLE);
+      }
+      expect(statusOf(IDLE, "something-else")).toEqual(IDLE);
+
+      // AND THIS PAGE'S OWN PARKED READING SURVIVES THE UNION -- it is the one that owns
+      // the approval gate, and a server that has moved on says nothing about it.
+      const parked: SessionStatus = { running: false, parked: true };
+      expect(statusOf(parked, "settled")).toEqual(parked);
+    },
+  },
+  {
+    name: "a-turn-the-server-is-writing-is-not-a-finished-turn-and-wears-no-action-bar",
+    run: async () => {
+      // TICKET 02 OF `.scratch/refreshed-turn-keeps-growing`. The action bar (Copy /
+      // Refresh / More) is drawn for a turn that has STOPPED, and upstream asks the
+      // RUNTIME whether it is running -- which is 'a run THIS PAGE is driving'. After a
+      // reload that is false while the process is still answering, so the bar sat under a
+      // message that was still arriving and (ticket 01) still growing: a reader took it
+      // for finished. `stillBeingWritten` is the criterion the composer's gate uses, and
+      // the bar asks it now.
+      //
+      // THE SERVER'S WORD ALONE IS ENOUGH, which is the case the bug was: nothing in this
+      // page is running, and the conversation is being written.
+      expect(stillBeingWritten(false, "running")).toBe(true);
+
+      // AND THE PAGE'S OWN RUN ALONE IS ENOUGH, for the reason the union exists at all:
+      // a run this page just sent is running in the runtime before the window has said
+      // anything about it (the frame naming the state is still in the writer's queue).
+      expect(stillBeingWritten(true, null)).toBe(true);
+      expect(stillBeingWritten(true, "running")).toBe(true);
+
+      // THE WORDS THAT ARE NOT 'STILL BEING WRITTEN': a settled turn answered, an
+      // unfinished one stopped with nothing more coming, and a conversation with no
+      // window at all has nothing to say -- the bar belongs on all three.
+      for (const state of ["settled", "unfinished", null]) {
+        expect(stillBeingWritten(false, state), `${state} is not a turn still being written`).toBe(false);
+      }
+      expect(stillBeingWritten(false, "something-else")).toBe(false);
+
+      // A PARKED RUN IS NOT STILL BEING WRITTEN EITHER -- it ENDED on its interrupt, and
+      // the card that answers it is the turn's own furniture; the bar is drawn.
+      expect(stillBeingWritten(false, "parked")).toBe(false);
+    },
+  },
+  {
+    name: "only-the-open-turns-own-end-wears-the-dot-every-other-turn-end-keeps-its-furniture",
+    run: async () => {
+      // THE OWNER'S THIRD REPORT (2026-09-25), and the shape that answers it: the moment a second
+      // message is sent, an EARLIER turn's end must not wear the dot too. Three facts decide it
+      // (`lib/live-turn.ts`): the TURN is open, somebody is writing RIGHT NOW, and this footer is
+      // the LIVE turn's end.
+      const open = turnIsOpen;
+      const closed = NO_TURN;
+
+      // THE LIVE TURN, while somebody is answering: the dot.
+      expect(wearsWorkingDot(open, true, true), "the live turn, somebody writing").toBe(true);
+
+      // AN EARLIER TURN'S END, while a NEW one is answered: its own furniture (Copy / Refresh /
+      // More), which is the whole of the owner's report.
+      expect(wearsWorkingDot(open, true, false), "an earlier turn end keeps its furniture").toBe(false);
+
+      // A TURN NOBODY IS WRITING IN RIGHT NOW: a PARKED turn is still OPEN (the server sends no
+      // `turn/end` for an interrupt -- ADR 0006 decision 3) and the card that answers it is the
+      // sign there, so the dot stays off even though the turn has not closed.
+      expect(wearsWorkingDot(open, false, true), "a parked turn: the card, not the dot").toBe(false);
+
+      // AND A CLOSED TURN NEVER WEARS ONE, whatever else is true.
+      expect(wearsWorkingDot(closed, true, true)).toBe(false);
+      expect(wearsWorkingDot(closed, true, false)).toBe(false);
+      expect(wearsWorkingDot(closed, false, true)).toBe(false);
+    },
+  },
+  {
+    name: "the-open-turn-is-seeded-from-the-window-and-then-carried-by-the-turn-family",
+    run: async () => {
+      // TWO SOURCES, ONE VALUE, and neither is an opinion about the other's question: the turn
+      // family is LIVE-ONLY (`.scratch/turn-and-model-events` decision 5), so a page that OPENS a
+      // conversation mid-turn learns it from the window's own state word ...
+      expect(turnFromWindow("running"), "a run going: its turn is open").toEqual(turnIsOpen);
+      expect(turnFromWindow("parked"), "a parked turn is resumed, not closed").toEqual(turnIsOpen);
+      for (const state of ["settled", "unfinished", null, undefined, "something-else"]) {
+        expect(turnFromWindow(state), `${state} is no open turn`).toEqual(NO_TURN);
+      }
+
+      // ... and the FACTS then carry it from there: a turn opens with a person's own words and
+      // closes when its run leaves nothing owed. Every other frame of the family (the model
+      // calls) and every frame of the other families leaves the value alone.
+      expect(turnAfterFact(NO_TURN, "turn/start")).toEqual(turnIsOpen);
+      expect(turnAfterFact(turnIsOpen, "turn/end")).toEqual(NO_TURN);
+      for (const type of ["model/start", "model/end", "RUN_STARTED", "window", "append"]) {
+        expect(turnAfterFact(turnIsOpen, type), `${type} says nothing about the turn`).toEqual(turnIsOpen);
+      }
+    },
+  },
+  {
+    name: "the-stop-is-drawn-and-said-in-both-languages",
+    run: async () => {
+      // THE CONTROL THAT REPLACED THE SENTENCE. What it has to carry is what a person acts
+      // on: that this press STOPS the conversation, said as copy (the `aria-label` and the
+      // tooltip are the same word -- a control's name is copy, and this page follows the
+      // language).
+      const english = drawn("en");
+      expect(drew("en")).toBe(true);
+      expect(english).toContain("Stop");
+
+      // AND THE OTHER LANGUAGE SAYS IT TOO. Chinese has no fallback that would make this
+      // fail -- a missing entry renders English on an otherwise Chinese page, which is the
+      // failure a paraphrase would hide. The two are compared so that a catalog edited into
+      // the same word twice is a failure as well (the Chinese side IS a translation).
+      const chinese = drawn("zh");
+      expect(chinese).toContain("停止");
+      expect(chinese).not.toBe(english);
+    },
+  },
+];
+
+export const runningSuite: Suite = { name: "running", cases };

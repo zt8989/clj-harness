@@ -1,6 +1,7 @@
 (ns harness.test-support-test
-  "Two of the process-wide helpers, on their own: the interleaving gates, and the one
-  promise `temp-dir` makes to the fifty namespaces that lean on it.
+  "Two of the process-wide helpers, on their own: the interleaving gates, and the two
+  promises `temp-dir` makes to the fifty namespaces that lean on it -- a name nobody
+  else has while it lives, and no trace of it once the run is over.
 
   THEY EARN THEIR KEEP ONLY IF THEY WITNESS WHAT THEY FORCE. A gate that lets a case
   pass without racing anything is worse than no gate at all: it also hides the fact
@@ -9,6 +10,7 @@
   threads never meet at all."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
+            [harness.infra.shell :as shell]
             [harness.test-support :as support]))
 
 (defn- probe
@@ -41,6 +43,53 @@
       (finally
         (support/wipe-tree! a)
         (support/wipe-tree! b)))))
+
+(deftest a-temp-dir-is-taken-back-without-the-case-remembering-it
+  ;; THE OTHER HALF OF THE PROMISE, and the half that was missing until 2026-09-22:
+  ;; `temp-dir` handed out trees and none of the hundred-odd call sites said who removed
+  ;; them, so one day of runs left 19,512 `clj-harness-*` directories and 409MB under the
+  ;; system temp directory. The delete now happens where the name is known -- so what
+  ;; this case asserts is that a tree made HERE, with a file planted inside it and no
+  ;; delete written anywhere, is gone after a wipe.
+  (let [a      (support/temp-dir "cleanup-probe")
+        b      (support/temp-dir "cleanup-probe")
+        nested (io/file b "nested/deeper")]
+    (.mkdirs nested)
+    (spit (io/file a "planted.txt") "x")
+    (spit (io/file nested "planted.txt") "x")
+    (try
+      (is (contains? (set (support/tracked-temp-dirs)) a)
+          "a tree is known from the moment it is handed out: that is what removes the need to remember it")
+      (is (= 2 (support/wipe-temp-dirs! [a b]))
+          "and a wipe takes what it is handed -- the case's OWN trees, because the bare call belongs to the run (see wipe-temp-dirs!)")
+      (is (not (.exists (io/file a))) "the tree is gone, planted file and all")
+      (is (not (.exists (io/file b)))
+          "and a tree with directories under it goes entirely: the wipe recurses, which is the trap `deleteOnExit` falls into")
+      (is (not-any? (set (support/tracked-temp-dirs)) [a b])
+          "the registry drops what it just handed over, rather than offering the same tree a second time")
+      (finally
+        ;; IF THE WIPE IS BROKEN, this is what keeps the two trees from outliving the
+        ;; case that made them -- and it is why the assertions above are about the wipe
+        ;; rather than about the tidy-up.
+        (support/wipe-tree! a)
+        (support/wipe-tree! b)))))
+
+(deftest the-cleanup-hook-is-installed-once-and-only-once
+  ;; The trees have to go even on the exits the runner's `finally` never reaches -- a
+  ;; Ctrl+C halts the JVM from inside the shutdown hooks and never returns to the main
+  ;; thread -- so the hook is the backstop, and a SECOND one would wipe twice for no
+  ;; reason. Driven the way harness.infra.shell's own hook is: a counted installation.
+  (let [installs (atom 0)]
+    (try
+      (with-redefs [shell/install-hook! (fn [_] (swap! installs inc))]
+        (support/reset-cleanup-hook!)
+        (dotimes [_ 3] (support/ensure-cleanup-hook!))
+        (is (= 1 @installs) "three calls, one hook"))
+      (finally
+        ;; AND LEAVE THIS PROCESS WITH THE HOOK IT SHOULD HAVE, installed for real: the
+        ;; compare-and-set above was satisfied by the fake.
+        (support/reset-cleanup-hook!)
+        (support/ensure-cleanup-hook!)))))
 
 (deftest a-start-gate-lets-nobody-through-until-everybody-is-there
   (let [gate    (support/start-gate 4)

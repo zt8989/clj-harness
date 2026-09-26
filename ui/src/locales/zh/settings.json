@@ -2,7 +2,7 @@
   "language": {
     "title": "语言",
     "field": "界面语言",
-    "hint": "只管这个浏览器——记在这里，不写任何文件。后端自己的话（工具结果、报错）不翻译。"
+    "hint": "这台 harness 说的语言——写进 config.edn，也是模型被要求用来回答的那个。后端自己的话（工具结果、报错）不翻译。"
   },
   "page": {
     "general": "General",
@@ -17,7 +17,8 @@
     "sourceInline": "config.edn 以行内方式描述这个提供方",
     "sourceRequest": "这次请求选中了它",
     "reread": "重新读",
-    "rereadTitle": "再读一遍这些文件"
+    "rereadTitle": "再读一遍这些文件",
+    "back": "返回"
   },
   "report": {
     "title": "当前生效",
@@ -57,7 +58,9 @@
     "add": "添加提供方",
     "keyPresent": "有密钥 ✓",
     "keyMissing": "没有密钥",
-    "count_other": "{{count}} 个模型 · {{credential}}"
+    "count_other": "{{count}} 个模型 · {{credential}}",
+    "withoutKeys_other": "还有 {{count}} 家没有密钥——点开就能补上",
+    "withoutKeysHint": "没有密钥的提供方跑不起来，所以默认不列在上面。补上它的密钥，它就会回到那份清单里。"
   },
   "origin": {
     "builtin": "内置",
@@ -88,6 +91,7 @@
     "fetchTitle": "问一下这个提供方都提供什么",
     "offeredEmpty": "这个提供方没有列出任何模型。",
     "offeredHint": "勾选你想放进模型目录的。每个加进来时只声明文本——如果这个提供方也收图片，就把它加上。",
+    "offeredSuggested": "建议：{{value}}",
     "takeWithCount_other": "把 {{count}} 个加入模型目录",
     "errorNote": "什么都没写进去——config.edn 与原来一模一样。",
     "save": "保存提供方",
@@ -106,7 +110,12 @@
     "maxOut": "最大输出",
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
-    "limitsNote": "只是报出来，不强制执行。拿不准的就别填。"
+    "limitsNote": "只是报出来，不强制执行。拿不准的就别填。",
+    "instructionUpdates": "指令更新",
+    "instructionUpdatesLabel": "这个模型怎么收下一条变动了的指令",
+    "instructionUpdatesUndeclared": "未声明",
+    "instructionUpdatesInPlace": "in-place",
+    "instructionUpdatesReplace": "replace"
   },
   "mcp": {
     "heading": "MCP 服务器",

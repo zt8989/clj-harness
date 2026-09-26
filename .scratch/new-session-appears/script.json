@@ -1,0 +1,4 @@
+{"turns": [
+  {"content": "", "tool-calls": [{"id": "c1", "name": "bash", "arguments": {"command": "sleep 6"}}]},
+  {"content": "（脚本厂商的回答：会话写进库之后这一轮才来。）"}
+]}

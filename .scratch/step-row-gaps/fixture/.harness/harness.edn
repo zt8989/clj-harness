@@ -1,0 +1,18 @@
+;; THE FIXTURE'S WHOLE REASON TO EXIST: three instruction files instead of the one
+;; a bare directory would give.
+;;
+;; WHAT THE WALKTHROUGH NEEDS TO DRAW is a STACK of injected-context cards -- cards
+;; that arrived as their own messages, one after another -- because that stack is
+;; where the spacing bug hides: a card message used to keep the message group's whole
+;; `gap-y-6` (24px) while the rows inside a message sat on their own `py-1.5` (12px).
+;; A session's opening is one message PER BLOCK (`preamble/messages`), so the number of
+;; cards is the number of blocks -- and a bare checkout draws exactly one (its
+;; AGENTS.md): the other default block, the skills catalog, is absent because this
+;; walkthrough's temp home has no skills. One card is not a stack, and the script's
+;; "the opening drew more than one card, one message each" check goes red for a reason
+;; that has nothing to do with the spacing.
+;;
+;; `:files` REPLACES both defaults (see `preamble/instruction-files`), which makes the
+;; opening exactly these three whatever the machine's OS home happens to hold -- a
+;; measurement that depends on the developer's home directory is not a measurement.
+{:instructions {:files ["AGENTS.md" "NOTES.md" "RULES.md"]}}

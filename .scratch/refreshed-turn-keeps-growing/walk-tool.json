@@ -1,0 +1,13 @@
+{
+  "pace-ms": 120,
+  "turns": [
+    {
+      "reasoning": "先跑一条要等一阵子的命令：走查要看的就是「命令还在跑」这一刻被刷新之后的工具行。",
+      "content": "",
+      "tool-calls": [
+        { "id": "c1", "name": "bash", "arguments": { "command": "sleep 30" } }
+      ]
+    },
+    { "content": "命令回来了。" }
+  ]
+}

@@ -1,7 +1,7 @@
 # spec: `write` 的答案不带内容 —— 写不是读
 
 **这是对已落地的 `hashline-edit` 的一次复议。** 锚点那套一个字不动——铸造、归属、已展示、陈旧判定、
-`read` 的 `a3f9│content` 行、`replace` / `insert` 的载荷、`anchor_grep` 的命中行。动的是 `write`
+`read` 的 `a3f9│content` 行、`replace` / `insert` 的载荷、`grep` 的命中行。动的是 `write`
 **成功之后**交回去的那一段：今天它把文件开头 20 行的带锚点行交回来（`:auto-read`，默认 `true`），
 本特征把它拿掉，只剩一行「写了多少、写到哪里」加一句「锚点已释放，去 `read`」。
 
@@ -67,7 +67,7 @@ omp 在 hashline 显示模式下，`write` 的答案只比普通回答多**一�
    所以今天没有谁的配置被这条失败打到；唯一会写这个键的地方是 `harness.edn.example`。
 3. **`:editing` 逐键合成的例证要换一个键。** `editing.clj` 的 docstring、`README.md`、`CONTEXT.md`
    都拿「项目级只写 `{:auto-read false}`」当那个例子，`docs/architecture/skills-and-instructions.md`
-   还借了它一次。机制一个字不动——逐键合成仍然付得起（`{:anchor-grep false}` 之类同价）——
+   还借了它一次。机制一个字不动——逐键合成仍然付得起（`{:grep false}` 之类同价）——
    只是例子换成真键。**这一条是净损失为零的编辑**，但漏掉就会留下指向一个已不存在的键的说明书。
 
 ## 决策

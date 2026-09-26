@@ -14,7 +14,7 @@
   lives here rather than under harness.cap.hashline.*.
 
   THE SEARCH ITSELF IS harness.infra.rg's -- the same executable, timeout and named
-  refusals `anchor_grep` uses. What is this namespace's own: which files count, how
+  refusals `grep` uses. What is this namespace's own: which files count, how
   many of them one answer may carry, and what the answer looks like.
 
   ORDER IS BY PATH, NOT BY TIME. Two identical calls must answer identically, and a
@@ -26,7 +26,7 @@
             [harness.infra.rg :as rg]))
 
 (def default-limit
-  "How many paths one answer may carry. THE SAME NUMBER AS `anchor_grep`'s
+  "How many paths one answer may carry. THE SAME NUMBER AS `grep`'s
   default-limit, deliberately: it bounds the same kind of thing (how many places in
   the tree one answer may name), and two different caps for one idea would be a
   difference nobody asked for and nobody would remember."
@@ -62,7 +62,7 @@
 (defn- rg-args
   "The flags this listing runs with. PATTERN, when given, is one more `--glob`.
 
-  `--hidden` with `!.git` matches `anchor_grep` exactly, and for the same two
+  `--hidden` with `!.git` matches `grep` exactly, and for the same two
   reasons: a repo's dot-directories are half of what a person means by 'the
   files', and `.git`'s contents are never one of them. `.gitignore` is left to
   rg's default -- see `perform!` for the one thing that needs care."

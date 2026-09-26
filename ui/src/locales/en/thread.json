@@ -23,12 +23,14 @@
     "clear": "clear",
     "lines_one": "{{count}} line",
     "lines_other": "{{count}} lines",
-    "todoDone": "done"
+    "todoDone": "done",
+    "openSubagent": "Open this subagent's conversation"
   },
   "summary": {
     "calls_one": "{{count}} tool call",
     "calls_other": "{{count}} tool calls",
     "messages_one": "{{count}} message",
     "messages_other": "{{count}} messages"
-  }
+  },
+  "injection.name": "Injected context"
 }

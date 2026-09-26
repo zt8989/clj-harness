@@ -21,6 +21,13 @@
 
 ## 二、补一条今天没人写过的用例（后端那一半）
 
+**（2026-09-21）后端那一半已经写好了，别写第二份。** `.scratch/session-after-refresh` 票 05 落地时把它
+和「同一会话的第二条 run 被拒」写成了**同一条用例**：`test/harness/edge/http_test.clj` 的
+`a-session-answers-one-run-at-a-time-and-two-sessions-still-both-run` —— 两个 thread-id 的两条 run
+同时发出去（不 await 完一条再发另一条）、两条都到 terminal、各自的记录里没有对方的东西。理由写在
+那张票面里：拒绝与放行互为边界，拆开写就丢了「同一台服务器上两件事同时为真」这个断言。本票要做的是
+**下面这条 agent 层**的用例（真 `HttpAgent`，两条同时 `runAgent`）——两层问的不是一件事，各写一次是对的。
+
 `ui/test/` 是 agent 层的（真 `HttpAgent` + 真后端 + 脚本厂商，不渲染 React）。**两个 thread-id 各一条
 真 run 同时跑、两条都完成**这件事，服务端早就支持，但**没有任何用例**——而本特征一放开，
 它就是常态。在新的一支 suite（或既有的一支）里加：

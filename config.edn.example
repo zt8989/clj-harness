@@ -4,26 +4,30 @@
 ;; it as config.edn.bak. Editing by hand is still fine -- the form reads this file
 ;; back -- and the next write from the form will reorder it again.
 ;;
-;; THE ONE CONFIG FILE. Its top level is exactly two sections:
+;; THE ONE CONFIG FILE. Its top level is exactly three sections:
 ;;
 ;;   :default    the three knobs a session starts from (or a provider DESCRIBED
 ;;               inline -- the escape hatch, below)
 ;;   :providers  the vendor catalog: which vendors this harness can reach, and
 ;;               which models each one serves
+;;   :ui         the interface's own settings -- today just :language, the language
+;;               this harness speaks (see the note below)
 ;;
-;; TWO SECTIONS, ONE FILE, because they answer two halves of one question -- which
-;; vendors can this machine reach, and which one does it start on -- and a person
-;; answering either should not have to open two files. (What used to be
-;; providers.edn is the :providers section. A home that still has that file is
-;; refused by name, with a sentence saying to move its entries here and delete it.)
+;; THREE SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which
+;; vendors this machine can reach, which one it starts on, and which language it
+;; speaks -- and a person changing any of them should not have to open three files.
+;; (What used to be providers.edn is the :providers section. A home that still has
+;; that file is refused by name, with a sentence saying to move its entries here and
+;; delete it.)
 ;;
-;; THE TOP LEVEL IS CLOSED: a key that is neither section is a named failure. The
-;; case that matters is the shape this file used to have -- :provider / :model /
-;; :reasoning-effort sitting at the top, with no sections at all. There is no
-;; migration and no second shape read: the failure says to put them under :default.
+;; THE TOP LEVEL IS CLOSED: a key that is not one of those sections is a named
+;; failure. The case that matters is the shape this file used to have -- :provider /
+;; :model / :reasoning-effort sitting at the top, with no sections at all. There is
+;; no migration and no second shape read: the failure says to put them under :default.
 
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
 
+ :ui {:language :en}                        ; English (en) or Chinese (zh)
  :providers
  {:openrouter
   {:protocol :openai-completions
@@ -127,4 +131,15 @@
 ;; protocol module decides whether to use it. Nothing to configure for localhost.
 ;;
 ;; reasoning-effort is NOT a provider field. It is one of the three knobs, so it
-;; belongs in :default (or in a session-configure tool call), not here.
+;; belongs in :default (or in a POST /api/model call -- what the picker presses).
+;;
+;; :ui -- THE INTERFACE'S OWN SETTINGS. Today one key:
+;;
+;;   :language  :en or :zh -- the language this harness speaks, to the reader and to
+;;              the model. Read fresh on every run, so an edit takes effect without
+;;              a restart. ABSENT is the everyday case and not a failure: when this
+;;              names no language, the OS's own language is asked, then the
+;;              terminal's, and English is the end of that chain (see
+;;              harness.infra.language). A KEY OR A VALUE THIS SECTION DOES NOT
+;;              KNOW IS a named failure -- a typo here must not sit there doing
+;;              nothing.

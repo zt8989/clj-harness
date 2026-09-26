@@ -4,7 +4,8 @@
 编译不了就加 `--pcre2` 再跑，还不行就按**字面**搜一遍并在答案里说明；今天那条「会挂的形状一律拒绝」
 （`:unsafe-regex`）连同它的出路 `literal: true` 一起退场。
 
-**Blocked by:** 01（它先把工具名从 `anchor_grep` 改成 `grep`；两者动同一张脸——描述、schema、同一批用例）
+**Blocked by:** None —— 01 已于 2026-09-22 落地（工具名与配置键都已是 `grep` / `:grep`，票文件按规矩删掉，
+落地记录在 `spec.md` 的「落地结果」里）。
 
 **Status:** ready-for-agent
 

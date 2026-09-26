@@ -1,0 +1,146 @@
+;; mcp.edn -- external MCP servers, whose tools become rows in this session's
+;; tool table.
+;;
+;; Copy this to ~/.clj-harness/mcp.edn (the configuration home) and edit. A
+;; project can also carry its own at <project>/.harness/mcp.edn, and the two do
+;; NOT compose: the project file REPLACES the whole :servers map. A project that
+;; declares one server declares its own set, and a project whose file says
+;; {:servers {}} declares NONE -- it does not inherit the user level's. That is
+;; the same rule hooks.edn gets per point and harness.edn per key: what will
+;; actually run should be readable in one file, not inferred from how two nest.
+;;
+;; A MISSING file is "nothing was said": no server is declared, no tool appears.
+;; A file that EXISTS and cannot be read -- not EDN, not a map, a key other than
+;; :servers, a name that is not usable, a declaration that does not validate --
+;; is a NAMED failure carrying the absolute path.
+;;
+;; AN EMPTY FILE IS NOT THE EMPTY CONFIGURATION. A file of zero bytes, or one
+;; holding nothing but comments, reads as `nil` and is refused by name. The way
+;; to declare no servers is {:servers {}} -- which is what this file's body is.
+;;
+;; Every call re-reads the file: an edit takes effect at the next use of the
+;; table, not at the next restart.
+;;
+;; ---------------------------------------------------------------------------
+;; ONE DECLARATION PER SERVER, AND ITS TRANSPORT IS READ OFF IT
+;;
+;;   :command ".."    a non-empty string: a LOCAL PROCESS, spoken to over stdio.
+;;   :url ".."        a non-empty string: a REMOTE HTTP ENDPOINT.
+;;
+;; Exactly one of the two. Both, or neither, fails by name -- there is
+;; deliberately no :type field, so a URL can never be spawned as a command and a
+;; command can never be fetched as a URL.
+;;
+;; The rest, all optional, all validated at read time:
+;;
+;;   :args [...]      a vector of STRINGS, only meaningful with :command. They
+;;                    are quoted as POSIX words and joined with the command into
+;;                    ONE line, which the pinned login shell then runs -- so
+;;                    {:command "npx" :args ["@playwright/mcp@latest"]} becomes
+;;                    `npx '@playwright/mcp@latest'`. Nothing here is trusted to
+;;                    be free of spaces.
+;;   :env {..}        a map of STRING -> STRING, only meaningful with :command.
+;;                    ADDED to the inherited environment, never replacing it: a
+;;                    server declared with one token still needs PATH to find its
+;;                    own runtime. These values never reach a log line and never
+;;                    reach an endpoint response, at any depth -- the ledger says
+;;                    a server IS configured, never with what.
+;;   :timeout 60000   milliseconds, positive integer, default 60000. It bounds
+;;                    ONE request -- the handshake's tools/list and every
+;;                    tools/call. After a timeout the connection is DROPPED
+;;                    rather than reused: a request still in flight will answer
+;;                    eventually, and every message after it would be off by one.
+;;
+;; Any other key -- including a misspelling such as :commandd -- fails by name.
+;;
+;; ---------------------------------------------------------------------------
+;; SERVER NAMES
+;;
+;; A name becomes part of every tool name the server provides
+;; (`mcp__<server>__<tool>`), so it must match ^[A-Za-z0-9_-]+$ and must NOT
+;; contain `__`. Without the second rule, server `a__b` + tool `c` and server `a`
+;; + tool `b__c` produce the same tool name -- two different servers sharing one
+;; name, a collision the model cannot see and no log line records.
+;;
+;; ---------------------------------------------------------------------------
+;; WHERE A stdio SERVER PROCESS STARTS
+;;
+;; Its working directory is the bound project's canonical directory. A session
+;; bound to no project gets the directory the harness process was started in.
+;; (A hook command, by contrast, is never given a working directory at all --
+;; see hooks.edn.example.)
+;;
+;; One process per (project, server, declaration shape), shared by every session
+;; of that project. Editing the declaration makes it a DIFFERENT connection, so
+;; the file cannot be changed out from under a running process. A server that
+;; died, or that wrote a line that is not JSON, is reconnected on the next use --
+;; re-spawned, re-handshaken, its tool list asked for again. A declaration
+;; DELETED from the file leaves the table as it goes and its process is reaped.
+;;
+;; The client speaks MCP revision 2025-06-18. A server that answers with a
+;; DIFFERENT revision it supports is accepted: the version is a negotiation, not
+;; a test.
+;;
+;; ---------------------------------------------------------------------------
+;; HOW TO TELL WHETHER IT WORKED
+;;
+;;   GET /api/mcp?threadId=..          the ledger: every declared server, its
+;;                                     transport, status, reason and tool list.
+;;   Settings -> MCP servers           the same thing as a panel, with a switch
+;;                                     per server.
+;;
+;; Four states, each an observation rather than a mood:
+;;
+;;   connected   the handshake worked; its tools are in the table
+;;   failed      the last use did not work -- WITH THE REASON
+;;   disabled    this SESSION switched it off; its tools stay in the table and
+;;               their calls are refused, naming the server and how to switch it
+;;               back on. Its process is closed, and the roster it last reported
+;;               is what stays visible.
+;;   idle        declared, not yet used -- the roster is asked for on the way to
+;;               the first run, so before that there is nothing to report
+;;
+;; failed and disabled are NOT merged in the UI: a failed server reconnects by
+;; itself on the next use, a disabled one does not.
+;;
+;; ---------------------------------------------------------------------------
+;; THE BODY. This is the default state: the key, with no servers under it.
+{:servers {}}
+
+;; ---------------------------------------------------------------------------
+;; WORKED EXAMPLES. Each is a COMPLETE FILE BODY: replace the map above with the
+;; whole thing. Everything outside the map is a comment.
+;;
+;; 1. A stdio server started by a command on PATH. `npx @latest` may have to
+;;    DOWNLOAD the package on its first run, which is what the timeout is for: a
+;;    number too small for that is the difference between "it works" and "it
+;;    timed out once and looked broken".
+;;
+;;    {:servers {"playwright" {:command "npx"
+;;                             :args ["@playwright/mcp@latest"]
+;;                             :timeout 120000}}}
+;;
+;; 2. A local script with a token in its environment. The token is invisible in
+;;    the ledger and in every audit line.
+;;
+;;    {:servers {"workshop" {:command "node"
+;;                           :args ["/abs/path/server.js"]
+;;                           :env {"SOME_TOKEN" ".."}
+;;                           :timeout 60000}}}
+;;
+;; 3. A remote endpoint. No process, no :args, no :env.
+;;
+;;    {:servers {"depot" {:url "https://example.com/mcp"}}}
+;;
+;; 4. TWO SERVERS AT ONCE -- the normal shape of a real file. Nothing merges
+;;    across the two FILES, but any number of servers sit under :servers.
+;;
+;;    {:servers {"playwright" {:command "npx" :args ["@playwright/mcp@latest"]}
+;;               "depot"      {:url "https://example.com/mcp"}}}
+;;
+;; WHAT THE TOOLS ARE CALLED. `<server>` and the server's own tool names are
+;; joined as `mcp__<server>__<tool>`. A bridged name longer than 64 characters,
+;; or containing anything outside [a-zA-Z0-9_-], is SKIPPED BY NAME, never
+;; truncated -- truncation would turn two tools into one name. The ledger lists
+;; what was skipped and why. A tool's :parameters are the server's own
+;; JSON Schema, unchanged.

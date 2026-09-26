@@ -30,4 +30,9 @@
 
 **Blocked by:** 无（与 01/02 可并行）
 
-**Status:** ready-for-agent
+**Status:** done
+
+**落地情况（2026-09-22）：** `run-subagent!` 写一行 `delegation`（`{:toolCallId :subagent :threadId :at}`），
+`toolCallId` 取工具体里可见的 `kernel.tools/*tool-call-id*`，读回是
+`GET /api/threads/<stem>/delegations`（信封 `{:threadId :delegations [..]}`）。
+用例：`harness.edge.delegation-line-test`。

@@ -45,12 +45,18 @@ export type PickerProps = {
   disabled?: boolean;
   /// Hover text for the trigger: the fact that did not fit on the row.
   title?: string;
-  /// The icon before the label, in the composer's own vocabulary (a folder, a
-  /// branch, a brain).
+  /// The icon before the label, in the composer's own vocabulary (a folder, a branch, a
+  /// chip, a brain). It is ALSO what a narrow window shows alone when `iconOnly` is set, so
+  /// a picker that collapses has to have one.
   leading?: ReactNode;
   /// What the trigger says when nothing in the list is the current value.
   placeholder?: string;
   searchable?: boolean;
+  /// WHETHER THE TRIGGER IS ONLY ITS ICON ON A NARROW WINDOW. Below `sm` the current value
+  /// and the disclosure triangle are not drawn, so a phone-sized action row fits -- tap the
+  /// icon and the SAME popover opens, unchanged. Default false: the directory and branch
+  /// pickers keep their labels at every width.
+  iconOnly?: boolean;
   onPick: (option: PickerOption) => void;
 };
 
@@ -64,6 +70,7 @@ export const Picker: FC<PickerProps> = ({
   leading,
   placeholder,
   searchable = true,
+  iconOnly,
   onPick,
 }) => {
   const [open, setOpen] = useState(false);
@@ -148,10 +155,16 @@ export const Picker: FC<PickerProps> = ({
           className="text-muted-foreground hover:text-foreground flex min-w-0 items-center gap-1.5 text-sm outline-none disabled:opacity-50"
         >
           {leading}
-          <span data-slot={`${slot}-value`} className="max-w-[16rem] min-w-0 truncate text-start">
+          <span
+            data-slot={`${slot}-value`}
+            className={cn("max-w-[16rem] min-w-0 truncate text-start", iconOnly && "hidden sm:inline")}
+          >
             {current?.label ?? placeholder ?? ""}
           </span>
-          <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={cn("size-3.5 shrink-0", iconOnly && "hidden sm:block")}
+          />
         </button>
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal>

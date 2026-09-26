@@ -32,14 +32,14 @@
   say so without the user's home agreeing. config.edn is deliberately NOT the
   place: its documented shape is exactly three knobs (provider, model,
   reasoning-effort), and a fourth knob there is a NAMED failure rather than a
-  value somebody quietly drops (see the session-configure tool body). Editing
+  value somebody quietly drops (see harness.edge.http/model-post). Editing
   policy is policy; it belongs with the rest of harness.edn.
 
   THE ONE DEPARTURE FROM harness.edn's SHALLOW MERGE, and it is paid for here.
   harness-config replaces a top-level key WHOLE, project wins -- right for
   :approval, where 'what will the fence do' should be legible in one file, and
   wrong for this one. :editing composes KEY BY KEY, so a project that wants to
-  turn :auto-read off does not have to restate the block and re-decide every
+  turn :grep off does not have to restate the block and re-decide every
   default the user chose. harness-config's own behavior is untouched.
 
   Read fresh on every call, like every other config in this harness: editing
@@ -75,8 +75,7 @@
   anchor editing, or the exact-string editor it had before. See the namespace
   docstring for why it moved and what moves it back."
   {:mode               :hashline
-   :auto-read          true
-   :anchor-grep        true
+   :grep        true
    :require-path       false
    :strict-input       false
    :boundary-dedup     :on
@@ -90,8 +89,7 @@
   the error tell the reader to do something that then fails again."
   {:mode               {:ok    #(contains? #{:hashline :str-replace} %)
                         :legal ":hashline or :str-replace"}
-   :auto-read          {:ok    boolean? :legal "true or false"}
-   :anchor-grep        {:ok    boolean? :legal "true or false"}
+   :grep        {:ok    boolean? :legal "true or false"}
    :require-path       {:ok    boolean? :legal "true or false"}
    :strict-input       {:ok    boolean? :legal "true or false"}
    :boundary-dedup     {:ok    #(contains? #{:on :strict :off} %)
@@ -216,7 +214,7 @@
                  :edits-by   "an exact old_string"
                  :label      "the exact-string editor"
                  :substitute "edit"}
-   :hashline    {:tools      #{"replace" "insert" "anchor_grep" "undo_last_replace"}
+   :hashline    {:tools      #{"replace" "insert" "grep" "undo_last_replace"}
                  :edits-by   "anchor"
                  :label      "the anchor-based editor"
                  :substitute "replace"}})
@@ -233,12 +231,12 @@
 (def ^:private search-tool
   "The one tool inside a family that has a knob of its own, and the knob.
 
-  `anchor_grep` searches rather than edits, so a session can reasonably want
-  `replace`/`insert`/`undo_last_replace` without it -- and `:anchor-grep false`
+  `grep` searches rather than edits, so a session can reasonably want
+  `replace`/`insert`/`undo_last_replace` without it -- and `:grep false`
   means exactly that: the tool is not served, and nothing takes its place. (The
   str-replace mode has no search tool of its own to fall back to; the alternative
   is `bash`, which the model may use whenever it likes.)"
-  {"anchor_grep" :anchor-grep})
+  {"grep" :grep})
 
 (defn served?
   "Is tool NAME served in THREAD-ID's session? True for a tool that belongs to no
@@ -270,7 +268,7 @@
         knob   (get search-tool name)]
     (if (and knob (false? (get (editing-mode thread-id) knob)))
       ;; Switched off by its own key rather than taken away by the mode: saying
-      ;; 'this session edits by anchor, and anchor_grep is the anchor-based
+      ;; 'this session edits by anchor, and grep is the anchor-based
       ;; editor' would be nonsense, and the way back is a different key.
       (str name " is switched off in this session: harness.edn says "
            (pr-str knob) " false. Nothing takes its place -- use `bash` if you"

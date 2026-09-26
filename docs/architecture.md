@@ -29,8 +29,10 @@
 
 ## 系统一句话
 
-一个 Clojure 写的 agent 内核，唯一对外协议是 AG-UI；前端是 TypeScript + React + assistant-ui，
-浏览器直连后端（无中间层，无代理）。会话历史由**客户端持有**，服务端每轮现收现算，jsonl 只是记录。
+一个 Clojure 写的 agent 内核：跑一轮的对外协议是 AG-UI（`POST /api/agent`），其余 `/api/*` 是**管理边**；
+前端是 TypeScript + React + assistant-ui，浏览器直连后端（无中间层，无代理）。**会话归服务端**：权威在
+进程内存里，jsonl 记录是它的恢复源（异步写、允许落后，永远是会话的有序前缀）；浏览器手里只有它读过的
+**一段窗口**，它只发动作、不撰写历史。三条铁律见 [overview](architecture/overview.md)。
 
 前端**曾经**是 ClojureScript + helix + CopilotKit，已整体换成 TypeScript + assistant-ui；
 `ui/` 下没有 `.cljs`，也没有 shadow-cljs 与 helix。协议侧（AG-UI 帧、interrupt/resume）**一字未改**。
@@ -48,7 +50,7 @@
 | `infra.db` | home 的**元数据层**（sqlite）：迁移链（**步骤按名字记账**，不是按版本号位置）、开启时隔离，项目/会话/记账三张表加锚点的四张表 |
 | `infra.logging` | 用代码配 Logback——`SizeAndTimeBasedRollingPolicy`，**日期与大小一起** rotate。`ensure!` 在 `root` 变动时重配，所以测试不会写进真 home |
 | `infra.log` | 一次调用同时写 stderr 与文件的门面（**后端自己的错误日志**，与 session jsonl 是两回事） |
-| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用）：一条**写明的候选链**（Git Bash → bash → pwsh → PowerShell → cmd）+ 每种 shell 自己的起法（`-lc` / `-NoProfile -Command` / `/c`）；Windows 上那个 `bash` 是 WSL 启动器时它**拒绝**并把链走下一级。两种 spawn：**一次性**的 `run`（stdin、`:dir`、`:timeout-ms`，**到点连子孙一起收**并把已经读到的输出还回来）与**长活**的 `start`（stdout 排队、`:close!` 收整棵树）；后者的 argv 有两种形状——`:program`（启动一个程序，Windows 上走 `cmd /c` 以保住反斜杠路径）与 `:shell`（一条 shell 命令，走解析出来的那个 shell） |
+| `infra.shell` | 唯一决定 spawn 哪个 shell 的地方（bash 工具与 hook 引擎共用）：一条**写明的候选链**（Git Bash → bash → pwsh → PowerShell → cmd）+ 每种 shell 自己的起法（`-lc` / `-NoProfile -Command` / `/c`）；Windows 上那个 `bash` 是 WSL 启动器时它**拒绝**并把链走下一级。解析是**按 kind 各自缓存**的：链上那一只（`resolution`）与**调用方指名的那一只**（`(resolution :cmd)`）是同一个纯函数问两次，所以 `bash` 的 `shell` 参数能指名 cmd / pwsh / PowerShell（或另两只 bash）而默认一字不变——指名一只本机没有的壳是**按名字拒绝**，不是回退。两种 spawn：**一次性**的 `run`（stdin 写完即关、`:dir`、`:timeout-ms`，**到点连子孙一起收**并把已经读到的输出还回来——`bash` 的 `stdin` / `workdir` 就是它一直收着的这两个参数）与**长活**的 `start`（stdout 排队、`:close!` 收整棵树）；后者的 argv 有两种形状——`:program`（启动一个程序，Windows 上走 `cmd /c` 以保住反斜杠路径）与 `:shell`（一条 shell 命令，走解析出来的那个 shell）。**进程自己退出时**（Ctrl+C / SIGTERM / 正常结束）由 `reap!` 收掉**这个 JVM 起过的每一个进程**：扫的是 OS 的进程树（`.descendants`，任意深度，每个都直接发信号）而不是一张要各 spawn 点自己登记的名单，先 SIGTERM、共享一个 2 秒预算到期后 SIGKILL；钩子在 spawn **之前**装且只装一次（`ensure-exit-hook!`），所以在飞的 `run`、`rg` / `git` / hook / env 探测、以及自建 ProcessBuilder 的文件夹对话框都在里面——见 `.scratch/exit-reap/spec.md` |
 | `infra.env` | **这台机器长什么样**（`<env>` 块的事实来源）：平台、shell（读 `infra.shell` 的解析）、以及一份声明名单里这个 shell 看得见哪些命令行增强工具。每进程探一次并缓存，**探测走同一个 shell**，`System/getenv` 不算数 |
 | `infra.rg` | **怎么跑 ripgrep**：二进制名、超时、以及「`rg` 不在 PATH 上」那句点名失败（判据是**退出码 127**，不是 `No such file or directory` 那句字符串——后者也是 `rg` 对**不存在的搜索根**说的话）。`cap.hashline.grep` 与 `cap.glob` 共用它，而 `--json` 的解析留在 `grep` 自己手里 |
 
@@ -56,7 +58,7 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `kernel.event` | 内核的全部词汇：11 种事件 |
+| `kernel.event` | 内核的全部词汇：14 种事件 |
 | `kernel.frames` | 帧折叠回消息：日志的**读侧**引擎 |
 | `kernel.loop` | ReAct 循环：流式一轮 → 并发跑工具 → 追加结果 → 再一轮，直到没有工具调用 |
 | `kernel.llm` | provider 协议层（一个按 `:protocol` 分派的 multimethod）+ **system 消息开头（`prompt.md`）的冻结载体** |
@@ -68,29 +70,30 @@
 
 | 命名空间 | 是什么 |
 |---|---|
-| `cap.tools` | **十七个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `anchor_grep` / `glob` / `bash` / `job` / `job_kill` / `eval` / `skill` / `session-configure` / `todo_write` / `web_fetch` / `web_search`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`；批的计划器与编辑模式的收窄策略也从这里装上 |
-| `cap.jobs` | **后台作业**：起一条没人等的命令、写下它说了什么、停掉它。**作业的记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行、不跨重启，进程退出时连文件一起收掉。注册表按会话分家、进程内，并且是**唯一**能让作业离开注册表的地方（`job_kill` 既停也忘，但**不删记录**——删了就等于把答案里的路径变成死链）。也不随 run 结束而死 |
+| `cap.tools` | **二十个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `grep` / `glob` / `bash` / `job` / `job_kill` / `job_list` / `job_output` / `eval` / `skill` / `todo_write` / `todo_read` / `web_fetch` / `web_search` / `ask`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`（**起**它的是 `job`，读它的是 `job_output`，停它的是 `job_kill`，**列**它的是 `job_list`）；批的计划器与编辑模式的收窄策略也从这里装上 |
+| `cap.jobs` | **后台作业与命令的记录**：写下一条命令说了什么、读它、停掉它、**按会话列出来**（**起**它的是 `job`——**模型**那一侧四个动词各做一件事：起 / 读 / 停 / 列，不是一个动词带一个模式开关；**模型**的「列」是 `job_list`（没有参数，读的是**记录**——这一会话目录里的每一个文件，含前面几次运行留下的与前台溢出的 `c*`，一行一份文件），**人**的「列」是 `edge.http` 的 `GET /api/threads/<stem>/jobs`（读的是**这张注册表**而不是记录，所以没有作业、或作业随上一个进程死掉都是 `[]`，不是 404））。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>-<进程戳>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**模型读它有两条路**：`job_output` 读完一条（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号），`job_list` 答「这一会话有什么」（没有参数、不寻址）——`job` 与 `job_kill` 的答案报的就是它，**不是记录的路径**（**回执不报路径**，而**读的那一处报**：答案装不下整份记录时，`job_output` 把记录的路径写进结尾那一行，`bash` 溢出那条截断行也一样带着它——记录本身是一份文件，落在围栏的自由路径上，`bash` / `read` / `grep` 读得了它。`.scratch/job-receipt-no-path`）。另有**它自己会说话**：一条没人等的作业结束时，它的结局会在**下一次模型调用前**作为 `<job-ended id="…">[exit N]</job-ended>` + `<command>…</command>` + 一行「用 `job_output` 读它」注入历史（`before-llm` 的第二半；**人**从任务视图停的那一条多一个 `by="user"` 属性、末句改说「是人停的」，标签仍是 `job-ended`），**两样事实 + 它跑的那条命令 + 一句读法、与记录多大无关**（命令多大它就多大），说一次、不推送（`job_output` / `job_kill` 已经交到模型手里的结局不重复，模型自己 `tail` 过的不算——这条代价照旧）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行——但它**活过写它的那个进程**（文件留下来才是「回头再看昨天那一次」这件事有解的原因；名字里那截进程戳是为了让下一次运行别写到上一次的头上），整棵树按字节封顶，超了从最旧的一份开始删。**进程内存里留下的只有作业本身**：句柄、进程、它跑的那条命令（通知要用它说出「是哪个作业」）、注册表条目（重启后 `job_output` / `job_kill` 答「未知作业」，而文件还在盘上）。注册表按会话分家、进程内，**条目只在进程退出时离开它**（`job_kill` 停的是作业、写的是记录末行，条目留下来答终态；`listing` 只读它），而**停有两个发起人**：`:by :model`（默认，`job_kill`）认领 `:told?`——它的答案就是那次告知；`:by :user`（`POST /api/threads/<stem>/jobs`，人从任务视图按的那颗 ■）不认领，只记 `:stopped-by`，让 `take-notices!` 在**下一通调用**把那句 `by="user"` 的通知说出来。`stop!`（`job_kill` 走的也是它）**不删记录**——删了就等于把已经交出去的答案变成死链。也不随 run 结束而死 |
 | `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
-| `cap.todos` | **本会话的任务清单**：校验、整份替换、渲染，落在 `infra.db` 的 `todos` 表（一行一个会话，清单整存整取）。判据是「能被整份改写的是状态」 |
+| `cap.todos` | **本会话的任务清单**：校验、整份替换，以及把它读回来的那段渲染（`todo_read` 的答案），落在 `infra.db` 的 `todos` 表（一行一个会话，清单整存整取）。判据是「能被整份改写的是状态」 |
 | `cap.web` | **出网**：唯一一处发请求的地方（超时、手工跟随并封顶的重定向链、301/302/303 变 GET 而 307/308 保留方法与 body、字节上限、按声明的字符集解码、以及**有损的** HTML→文本抽取器——不是渲染器）。抽取器是纯函数，所以它不靠 socket 也能测 |
 | `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
 | `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那两条行（工程目录 / 这台机器）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这些行要它，也要 `kernel.hooks.dispatch` |
-| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的技能注入） |
-| `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
+| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：人的 `/name` 要的技能正文 + 作业结束的通知两半，一处组装） |
+| `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（只剩人的 `/name` 那一半——模型那条路是 `skill` 工具自己的结果，没有东西可派生）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
 | `cap.mcp` | **外部服务器作为工具来源**：读两级 `mcp.edn`、按（项目身份 × server × 声明形状）缓存连接、两种 transport（stdio 子进程 / HTTP）、把 `tools/list` 桥成工具表里的行、elicitation（服务器反过来问人）与会话级启停。工具是**动态来源**（`:tools-for`），所以它经 `install!` 装上而不是写死在表里 |
-| `cap.git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
+| `cap.git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。**读一次状态 2 个进程**——一条 `status --porcelain=v2 --branch` 一次答出「是不是仓库 / 在哪个分支 / 路上有什么」，再一条列本地分支（那个格式不给分支列表）；**一次成功切换 5 个**。两者各自降了一半（4 → 2、9 → 5）。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 
 ### `harness.edge` —— 适配：把内核翻译成别人的协议
 
 | 命名空间 | 是什么 |
 |---|---|
-| `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在 system 消息之后 |
+| `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在**这场对话之后**；注入物发的是一条 **`CUSTOM` 帧**（客户端画成一张卡，而**卡不进对话**——只给屏幕，见 [client](architecture/client.md#注入物在会话栏里的一张卡)） |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
+| `edge.ui` | **根上那一页**：把 `ui/dist`（`npm run build` 的产物）当静态资源发出去（只 `GET`/`HEAD`、只在 `/api` 之外、不回落 `index.html`），以及没有构建时那句指名道姓的 404。`clojure -M:run` 因此不用另外起 vite 也是一个完整应用 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
 | `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场。**端点那条载荷里还带着 `edge.context` 那一节**（一次读盘、两个折） |
 | `edge.context` | 记录的第**四**个读侧（`message` 那一半的第二个读者）：最近一次模型调用把上下文窗口填到了多少——分子是那次调用报的 `prompt_tokens`，分母是**那一次调用自己行上**的 `:context-window`——以及填进去的三样各占多少（按记录的字符数**摊**出来的估算，因此三块恰好加起来等于分子）。`records->context` 是对记录的纯函数，**没有自己的端点**：那一节并进 `GET /api/threads/<stem>/stats` 的载荷，composer 里 model 左边那颗圈与它的面板读它。见 [edge](architecture/edge.md) |
@@ -105,24 +108,26 @@
 0. **[layers](architecture/layers.md)** — **四层是什么**：判据、归属、允许的边、能力怎么装进核心
 1. **[overview](architecture/overview.md)** — 一次请求的完整路径，端到端；三条铁律；状态存在哪
 2. **[kernel](architecture/kernel.md)** — event / loop / llm / tools：一轮 run、执行缝的三个出口、悬置与它的 wire 形状
-3. **[edge](architecture/edge.md)** — `harness.edge.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫
+3. **[edge](architecture/edge.md)** — `harness.edge.http`：AG-UI 流、管理端点、jsonl 审计行、入站 parts 与模态守卫；以及 `harness.edge.ui` 发的那一页
 4. **[home-and-storage](architecture/home-and-storage.md)** — 配置根、配置文件、sqlite、日志树、重建
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的两条行、eval 与晋升
-8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
+8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、`skill` 工具（结果即正文）、人的 `/name` 的派生正文、围栏里的技能根
 9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
 10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 
 ```bash
-node scripts/test.mjs            # 三条腿：后端离线全量 + 前端类型门与构建 + 前端端到端全量
-node scripts/test.mjs --backend  # 只跑其中一条（--ui / --build / --ns <命名空间,..> 同理）
+clojure -M:test -m harness.test-runner   # 后端离线全量；只跑几个命名空间就把名字接在后面
+cd ui && npm test                        # 前端端到端全量（自带后端，不需要 api-key / 模型）
+cd ui && npm run build                   # tsc --noEmit + vite build
 ```
 
-**不要自己拼那几条命令**：家目录隔离、端口由 OS 分配、跑完删临时目录，都是**调用方式**的事。
-基线随分支变，报数带上分支与提交。细节见 `AGENTS.md` 与 `scripts/test.mjs` 的头注释。
+**定向跑也要走 runner 的那扇门**：`(isolate!)` 加 `run-tests` 只抄了协议的前半截——不查判据，
+也不收摊，于是**判据挡的那条失败上照样报绿**。所以定向跑是：`clojure -M:test -m harness.test-runner <命名空间,..>`。
+基线随分支变，报数带上分支与提交。细节见 `AGENTS.md` 与 `docs/rules/testing.md`。
 
 UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 provider 是脚本替身；
 它测什么由**脚本文件**决定，服务端不因此多一条测试专用路由。细节见 [client](architecture/client.md)。
@@ -147,8 +152,9 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
 - **编辑合并**：计划见 `.scratch/edit-merge/`（spec + 6 张票，2026-09-17 立）。
   照 omp（`can1357/oh-my-pi`，它的 `docs/tools/edit.md`）的策略：**改写并成一个 `edit`**——
   一个字符串载荷是一段补丁语言（段头 `[path]`、动作 `PUT` / `CUT` / paste / `REM` / `MV`），
-  两个编辑模式共用这个名字、脸由 `:describe` 换；**检索与撤销独立**（`anchor_grep` 保名，
-  `undo_last_replace` 改名 `undo_last_edit`）。寻址仍用本仓的按行锚点，
+  两个编辑模式共用这个名字、脸由 `:describe` 换；**检索与撤销独立**（`grep` 不并进去——它原名
+  `anchor_grep`，2026-09-22 改叫 `grep`，见 `.scratch/omp-parity` 票 01；`undo_last_replace` 改名
+  `undo_last_edit`）。寻址仍用本仓的按行锚点，
  所以 omp 的 `[PATH#TAG]` + 行号与 `N*`（整块，要语法树）两条**不搬**。
   代码里**一行都没有**：今天锚点模式是 `replace` / `insert` 两个名字，`edit` 只在 str-replace 模式存在，
   而载荷、多段、寄存器都还不存在。

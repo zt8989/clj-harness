@@ -17,6 +17,7 @@ import { type Case, type Suite } from "../e2e";
 import { translator } from "../support/locale";
 import {
   turnBounds,
+  turnConclusion,
   turnCounts,
   turnIsSettled,
   turnSummaryLabel,
@@ -164,6 +165,51 @@ const cases: Case[] = [
       expect(turnSummaryLabel(72, 25, zh)).toBe("72 次工具调用 · 25 条消息");
       expect(turnSummaryLabel(1, 2, zh)).toBe("1 次工具调用 · 2 条消息");
       expect(turnSummaryLabel(0, 4, zh)).toBe("4 条消息");
+    },
+  },
+  {
+    name: "a-turns-conclusion-is-the-last-thing-it-said",
+    run: async () => {
+      // A MESSAGE THAT SAID NOTHING IS A STEP. The tool calls and the thinking are
+      // how the turn got where it got; only a message with a non-empty `text` part
+      // is the answer, and the fold keeps that one and hides the rest.
+      const thought: TurnMessage = {
+        role: "assistant",
+        status: { type: "complete" },
+        parts: [{ type: "reasoning" }, { type: "tool-call" }],
+      };
+      const said = (text: string): TurnMessage => ({
+        role: "assistant",
+        status: { type: "complete" },
+        parts: [{ type: "reasoning" }, { type: "text", text }],
+      });
+
+      // THE LAST TEXT WINS, and it need not be the tail: a model may speak, call a
+      // tool, and speak again -- the answer is what it said last, and anything after
+      // it is a step of the same turn.
+      expect(turnConclusion([user, thought, said("here it is"), thought], 1, 3)).toBe(2);
+
+      // A TURN THAT NEVER SPOKE HAS NO CONCLUSION -- undefined, not the tail. This is
+      // the case the fold exists to get right: `useStepFold` answers `"step"` for
+      // every message of it, so the last thought or tool call is NOT left on screen
+      // pretending to be an answer.
+      expect(turnConclusion([user, thought, thought], 1, 2)).toBeUndefined();
+
+      // AN EMPTY (OR BLANK) TEXT PART IS NOT AN ANSWER either. A turn whose last
+      // message carries a text part that is still blank has not said anything yet.
+      const bare: TurnMessage = { role: "assistant", status: { type: "complete" }, parts: [{ type: "text" }] };
+      const blank: TurnMessage = {
+        role: "assistant",
+        status: { type: "complete" },
+        parts: [{ type: "text", text: "   " }],
+      };
+      expect(turnConclusion([user, bare], 1, 1)).toBeUndefined();
+      expect(turnConclusion([user, blank], 1, 1)).toBeUndefined();
+
+      // A USER MESSAGE HAS NO PARTS AT ALL -- and the fold never asks about one --
+      // but returning a neighbour's answer from an index that is not an assistant
+      // message would be the same silent lie `turnBounds` refuses.
+      expect(turnConclusion(THREAD, 0, 0)).toBeUndefined();
     },
   },
 ];
