@@ -852,3 +852,69 @@
     (is (= (replay/compaction-facts records) (:compactions answer)))
     (is (= (replay/prune-facts records) (:prunes answer)))
     (is (= [] (:context answer)))))
+
+(defn- reasoning-frames-of [run-id message-id text]
+  "The per-token REASONING frames a run used to write (ticket 03 of `.scratch/event-persistence`),
+  which are no longer recorded at all: `harness.edge.http/runner` drops the whole family."
+  [{:ts 1 :runId run-id :type "event" :payload {:type "REASONING_START" :messageId message-id}}
+   {:ts 1 :runId run-id :type "event" :payload {:type "REASONING_MESSAGE_START"
+                                                    :messageId message-id :role "reasoning"}}
+   {:ts 1 :runId run-id :type "event" :payload {:type "REASONING_MESSAGE_CONTENT"
+                                                    :messageId message-id :delta text}}
+   {:ts 1 :runId run-id :type "event" :payload {:type "REASONING_MESSAGE_END"
+                                                    :messageId message-id}}
+   {:ts 1 :runId run-id :type "event" :payload {:type "REASONING_END" :messageId message-id}}])
+
+(deftest a-run-without-its-reasoning-frames-rebuilds-the-same-conversation
+  ;; THE JUDGE FOR TICKET 03 OF `.scratch/event-persistence`. The per-token REASONING frames are
+  ;; 82% of a log's bytes and are no longer written; the same text is on the run's OWN `message`
+  ;; row, and the fold reads it back (`reasoning-row?` / `attach-reasoning`, paired by order
+  ;; within the run). So THE SAME RUN, WRITTEN BOTH WAYS, HAS TO REBUILD THE SAME CONVERSATION --
+  ;; entries and provider-shaped messages -- byte for byte. That is what this pins.
+  (let [run-id "r1"
+        user   {:ts 1 :runId run-id :type "message" :source "client" :id "u1"
+                :payload {:role "user" :content "hi"}}
+        head   [{:ts 1 :runId run-id :type "event"
+                 :payload {:type "RUN_STARTED" :threadId "t" :runId run-id}}
+                {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TEXT_MESSAGE_START" :messageId "r1-m0" :role "assistant"}}
+                {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TEXT_MESSAGE_CONTENT" :messageId "r1-m0" :delta "the answer"}}
+                {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TOOL_CALL_START" :messageId "r1-m0" :toolCallId "c1"
+                           :toolCallName "read" :parentMessageId "r1-m0"}}
+                {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TOOL_CALL_END" :messageId "r1-m0" :toolCallId "c1"}}]
+        tail   [{:ts 1 :runId run-id :type "event" :payload {:type "RUN_FINISHED"
+                                                             :threadId "t" :runId run-id}}]
+        ;; THE MODEL'S OWN ROW, which is where the reasoning lives now. Its `:reasoning_content`
+        ;; is the same text the frames used to carry, delta by delta.
+        model  {:ts 1 :runId run-id :type "message" :source "model"
+                :payload {:role "assistant" :content "the answer"
+                          :reasoning_content "THINKING"
+                          :tool_calls [{:id "c1" :type "function"
+                                        :function {:name "read" :arguments "{}"}}]}}
+        tool   {:ts 1 :runId run-id :type "message" :source "tool"
+                :payload {:role "tool" :tool_call_id "c1" :content "result"}}
+        ;; the OLD way: the frames carry the thinking, the row does not have to
+        old-way (into (vec (concat [user] (reasoning-frames-of run-id "r1-r0" "THINKING")
+                                   head tail))
+                      [model tool])
+        ;; the NEW way: no reasoning frames at all
+        new-way (into (vec (concat [user] head tail)) [model tool])]
+    (testing "the entries are the same conversation"
+      ;; THE MESSAGES, NOT THEIR NUMBERS: an entry's `:seq` is the RECORD LINE it arrived in, and the
+      ;; two records are written differently -- the old one spends five lines on the reasoning frames
+      ;; and the new one spends none. The numbering is a fact about each file (ADR 0003 decision 9),
+      ;; so comparing it across two files would be comparing the files, not the conversation.
+      (is (= (mapv :message (replay/entries old-way))
+             (mapv :message (replay/entries new-way)))))
+    (testing "and so is what a provider is handed -- the reasoning reaches the assistant"
+      (is (= (replay/records->messages old-way) (replay/records->messages new-way)))
+      ;; AND IT IS WHERE A PROVIDER READS IT: `records->messages` is AG-UI's spelling, and the
+      ;; reasoning reaches `:reasoning_content` one step later (`ag/provider-messages`, which is what
+      ;; `replay/history` applies).
+      (is (= "THINKING"
+             (:reasoning_content
+              (first (filter #(and (= "assistant" (:role %)) (:tool_calls %))
+                              (ag/provider-messages (replay/records->messages new-way))))))))))

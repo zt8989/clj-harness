@@ -870,7 +870,12 @@
    (fn []
      (let [log (log-file "frames-rebuilt")]
        (io/delete-file log true)
-       (let [sent (sse-frames (.body (post-run "frames-rebuilt")))]
+       ;; THE SOCKET CARRIES ONE FAMILY THE RECORD DELIBERATELY DOES NOT (票 03 of
+       ;; `.scratch/event-persistence`): every `REASONING_*` frame -- 82% of a log's bytes, now carried
+       ;; by the run's own `message` row instead. Window frames and the FACT family are already
+       ;; filtered by the reader (`test_support/mux-run!`).
+       (let [sent (remove #(str/starts-with? (str (:type %)) "REASONING")
+                          (sse-frames (.body (post-run "frames-rebuilt"))))]
          (is (seq sent) "the run answered with frames at all")
          (is (some #(= "TOOL_CALL_START" (:type %)) sent)
              "and with the tool round-trip in them, not just text")

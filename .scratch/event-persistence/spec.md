@@ -115,7 +115,7 @@ SQLite 投影 / 崩溃恢复 / 监控）。这一份**不是照抄它**，而是
 写完**先出锁、再调 `lands`**。这与 0007 决策 1（同步）是同一件事的两半：
 同步之后，「谁在什么时候拿锁」从写手线程的一个实现细节，变成了调用路径上必须说清的一件事。
 
-## 票 03 的第一次尝试：读侧对了，写侧被**两条折叠**挡住（2026-09-25）
+## 票 03 的第一次尝试：读侧对了，写侧被**两条折叠**挡住（2026-09-25）——**已由下一节落地**
 
 **读侧落了并量过**：`harness.edge.replay` 的折叠现在能从**run 自己那一行**取回推理——
 `reasoning-row?` / `insert-entry-before` / `attach-reasoning`，按「这一 run 的帧造出的第 k 条
@@ -141,3 +141,43 @@ assistant 消息 ↔ 这一 run 写下的第 k 条 assistant 行」配对，把�
 
 **文本 delta（2%）另算**：它的口径与推理不同——被掐断的 run 靠它才留得住半句答案，所以那一族
 按票面写的「快照」落（50–100ms 一次），不是丢掉。
+
+## 票 03 落地：推理帧不再进记录（2026-09-26）
+
+上一节的两条折叠已经共享一份实现——`records->messages` 现在就是 `ensure-complete!` + `fold-frames`，
+而 `fold-frames` 是 `(mapv :message (entries records))`——写侧因此能落。这一节记的是**落了什么**、
+**凭什么敢落**、以及**它换不走什么**。
+
+**写侧两处，一处规则。** `harness.edge.http` 的两个帧 sink（agent 路线的 `runner` 与子 agent 路线）
+都不再把 `REASONING_*` 整族写进记录；帧照旧广播、照旧进会话内存，只是不落行。要丢就丢**整族**：
+只丢 CONTENT 的话，`apply-frames` 光凭 START 就造出一条**空的** reasoning 消息，`:reasoned?` 于是
+以为「帧已经带过推理」而跳过模型行那一份——这正是这条票之前卡住的那一格。
+
+**读侧的 id 拼法。** `attach-reasoning` 拼 `<run>-r<n>`（`harness.edge.ag-ui` 拆出的思考消息就是这个
+拼法，客户端按键取消息）。`runId` 在**行**上，不在 payload 里——payload 是模型那条消息，它不认识 run；
+所以函数收整行，从 `(:runId row)` 取。`<n>` 是「这一 run 的第几条带推理的调用」，`RUN_STARTED` 归零。
+（第一次尝试拼的是 `<msg-id>-r`，与帧的拼法**不同名**——同一个思考，两条折叠各叫各的名字，客户端按 id 取
+消息时就会当成两条。）
+
+**判据。** `harness.edge.replay-test/a-run-without-its-reasoning-frames-rebuilds-the-same-conversation`：
+同一场 run 两种写法（带推理帧 / 不带），`entries` 的**消息**与 provider 形状**逐字节相等**（不比 `:seq`，
+两种写法的行数不同，行号自然不同——ADR 0003 决策 9）；`harness.edge.http-test` 那条线上帧 vs 记录的
+契约用例把 `REASONING_*` 从线上那一侧滤掉（线上有、记录没有，正是这条票说的那件事）。
+
+**走查（证据在 `evidence/`）。** 一份真记录 `39be8804-…`（2026-09-25）：13,631 行、8,640 行是推理帧
+（63% 的行）；按写侧那条谓词把整族删掉，3,536,019 → 1,713,228 字节（**51.5%**），而
+`replay/history` 两边答出**同 100 条消息**、每条的角色 / 正文长度 / 推理长度 / 工具调用数**逐个相同**，
+`(= before after)` 为 **true**（25 条消息带着推理）。脚本 `evidence/03-reasoning-out-of-the-record.clj`
+可重跑，`~/.clj-harness` 只读；一次实跑的转写在同名 `.txt`。原始探针留在 `dev/scratch_real_log.clj`。
+
+**测试**：`harness.edge.replay-test` 31 用例 / 178 断言，`harness.edge.http-test` 108 / 1200，
+另跑 mux / sessions / frames-route / stats / record / trajectory / delegation / ag-ui / kernel.event
+合计 127 / 608 —— 全绿（`~/.clj-harness` 只读，每进程一个临时根）。
+
+### 换不走的东西（知道就好，不在本票内）
+
+- **一条没跑到 `:run/done` 的 run**（崩了 / 被掐断）在旧记录里推理还在帧上；新记录里那一族的推理就
+  没有了——模型行要等 `:run/done` 才写。这份真记录里「有推理帧的 run 都有一条模型行」，所以它**没**
+  吃到；脚本每次都会把这个数报出来（`would lose their reasoning`）。
+- **文本 delta（2%）不在此列**，它照旧逐条写——被掐断的 run 靠它才留得住半句答案；合并成快照那一半
+  （票面写的 50–100ms）**还没做**。

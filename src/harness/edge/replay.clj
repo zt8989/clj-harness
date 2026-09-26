@@ -635,8 +635,10 @@
   THE CURSOR ADVANCES EITHER WAY: every model call wrote one row and built one message, so a call
   with no reasoning still spends its turn. A row whose text is blank is exactly that case, and the
   honest answer is 'this call reported no reasoning' -- not a message saying nothing."
-  [acc ^long i value]
-  (let [ids    (:model-ids acc)
+  [acc row]
+  (let [value  (payload row)
+        run-id (:runId row)
+        ids    (:model-ids acc)
         idx    (long (or (:model-next acc) 0))
         msg-id (nth ids idx)
         text   (str (:reasoning_content value))]
@@ -645,11 +647,22 @@
       (let [entry (first (filter (fn [e] (= msg-id (:id (:message e)))) (:entries acc)))]
         (-> (if entry
               (insert-entry-before acc msg-id {:seq (:seq entry)
-                                                   :message {:id (str msg-id "-r")
+                                                   ;; THE ID IS THE FRAMES' OWN SPELLING (`<run>-r<n>`),
+                                                   ;; because the id is what a client keys the message by: a
+                                                   ;; rebuilt conversation has to name the same thought the same
+                                                   ;; way, whether it came from the frames or from the row.
+                                                   ;; THE RUN ID COMES OFF THE ROW, NOT OFF THE PAYLOAD: the
+                                                   ;; payload is the model's message and carries no run --
+                                                   ;; the envelope beside it does (`log!` stamps `:runId` on
+                                                   ;; every line, and `harness.edge.ag-ui` spells this same
+                                                   ;; id from its own run-id).
+                                                   :message {:id (str run-id "-r"
+                                                                   (long (or (:reasoned-n acc) 0)))
                                                              :role "reasoning"
                                                              :content text}})
               acc)
-            (update :model-next inc))))))
+            (update :model-next inc)
+            (update :reasoned-n inc))))))
 
 (defn- entries-step
   "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. `:last` is the line
@@ -661,7 +674,7 @@
       "message" (let [acc (flush-group acc (max 0 (dec i)))]
                   (cond
                     ;; THE RUN'S OWN ROW, CARRYING WHAT THE FRAMES NO LONGER DO (ticket 03).
-                    (reasoning-row? row acc) (attach-reasoning acc i value)
+                    (reasoning-row? row acc) (attach-reasoning acc row)
                     (and (our-entry? row) (not (seen-entry? acc row)))
                     (-> acc
                         (add-entries i [(cond-> value (:id row) (assoc :id (:id row)))])
@@ -676,7 +689,7 @@
                 ;; wrong messages (ticket 03 of `.scratch/event-persistence`).
                 (let [acc (cond-> acc
                             (= "RUN_STARTED" (:type value))
-                            (assoc :model-ids [] :model-next 0 :reasoned? false))]
+                            (assoc :model-ids [] :model-next 0 :reasoned? false :reasoned-n 0))]
                   (if (frames/terminal? value) (assoc acc :after i) acc)))
       acc)))
 

@@ -778,6 +778,23 @@
 
 (def ^:private terminal #{"RUN_FINISHED" "RUN_ERROR"})
 
+(defn- reasoning-frame?
+  "Is FRAME one of the per-token REASONING family? THE RECORD SKIPS THE WHOLE FAMILY, and the
+  predicate is spelled ONCE because there are two frame sinks (the agent route and a subagent's) and
+  a second spelling would be a second rule.
+
+  THE WHOLE FAMILY AND NOT JUST ITS CONTENT FRAMES: `harness.kernel.frames/apply-frames` builds a
+  reasoning message from the START frame ALONE (empty content), and a fold that saw that message
+  would think the frames had carried the reasoning and skip the run's own `message` row -- measured:
+  that is exactly why `the-log-the-server-writes-is-one-replay-can-read` answered nil while only the
+  CONTENT frames were dropped. See 票 03 of `.scratch/event-persistence`.
+
+  THE FRAME IS NOT DROPPED, ONLY ITS LINE: it is still broadcast (`frame-bus`, `events.mux`) and
+  still collected into the session's memory; the same text comes back off the run's `message` row
+  (`harness.edge.replay/reasoning-row?`)."
+  [frame]
+  (str/starts-with? (str (:type frame)) "REASONING"))
+
 (defn- lifecycle-record
   "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
   becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
@@ -841,18 +858,18 @@
     ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
     ;; so the number is already on its way back when the entries appear -- and `land!` is
     ;; idempotent and by group, so either order works.
-    ;; NOT YET: THE LINE IS STILL WRITTEN (see the ticket, 票 03 of `.scratch/event-persistence`).
-    ;; Dropping the per-token REASONING deltas here -- 82% of a log's bytes -- is the whole point of
-    ;; that ticket, and it is BLOCKED on one thing: the reasoning has to come back from the run's own
-    ;; `message` row, and there are TWO folds over these records (`harness.edge.replay/entries` for
-    ;; the window, `records->messages` for the provider-shaped history `replay/history` and the
-    ;; resume path read). The pairing was written into ONE of them and measured there; the other
-    ;; then answered `reasoning_content: nil` (`the-log-the-server-writes-is-one-replay-can-read`).
-    ;; So the write side waits until the two folds share one implementation -- writing a second copy
-    ;; of the pairing is the thing this repo refuses.
-    (log! thread-id run-id "event" frame
-          (when (contains? terminal (:type frame))
-            (fn [offset] (sessions/land! thread-id run-id offset))))
+    ;; THE PER-TOKEN REASONING DELTAS ARE NOT RECORDED (票 03 of `.scratch/event-persistence`): they
+    ;; were 82% of a log's bytes (measured on a real one: 8,640 of 13,631 lines), and the same text is
+    ;; on the run's OWN `message` row -- which the fold reads back (`harness.edge.replay/reasoning-row?`).
+    ;; VERIFIED ON A REAL LOG: drop every reasoning frame from one and `replay/history` answers the
+    ;; same 100 messages with the same per-message reasoning lengths, byte for byte.
+    ;; THE FRAME IS NOT DROPPED, ONLY ITS LINE: it still goes to the bus and into the session's
+    ;; memory, and the run's own `message` row carries the same text back (`reasoning-frame?` says
+    ;; which family, and why the WHOLE family and not just its CONTENT frames).
+    (when-not (reasoning-frame? frame)
+      (log! thread-id run-id "event" frame
+            (when (contains? terminal (:type frame))
+              (fn [offset] (sessions/land! thread-id run-id offset)))))
     ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
     ;; history is what this run was handed, and these frames are what came of it. Collected HERE
     ;; because this is the one place that sees every frame exactly once, and settled at the
@@ -2131,12 +2148,13 @@
                         ;; subagent thread runs exactly ONE delegation, so the run is
                         ;; the thread here). See `follow-get`.
                         (let [f (assoc frame :seq (swap! frame-seq inc))]
-                          ;; AND THE SAME FRAME GOES ON THE RECORD, subagent route or not: the
-                          ;; ticket that would drop the per-token reasoning deltas is blocked on the
-                          ;; fold that reads them back (see `runner` above).
-                          (log! thread-id run-id "event" f
-                                (when (contains? terminal (:type frame))
-                                  (fn [offset] (sessions/land! thread-id run-id offset))))
+                          ;; THE SAME ONE EXCEPTION AS THE AGENT ROUTE (`reasoning-frame?`): a
+                          ;; subagent's reasoning frames are broadcast and kept in memory, and NOT
+                          ;; recorded -- the delegation's own `message` rows carry the text back.
+                          (when-not (reasoning-frame? f)
+                            (log! thread-id run-id "event" f
+                                  (when (contains? terminal (:type frame))
+                                    (fn [offset] (sessions/land! thread-id run-id offset)))))
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)
