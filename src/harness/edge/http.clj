@@ -689,8 +689,10 @@
   [thread-id run-id]
   (sessions/run-started! thread-id run-id)
   ;; AND THE HOST HEARS: a run starting is one of the facts a sidebar draws, and it
-  ;; does not ride on any one conversation's window (that is what `events.host` is for).
-  (host/ring!)
+  ;; does not ride on any one conversation's window (that is what `events.host` is
+  ;; for). The ring itself lives in `sessions/run-started!` now -- the verb that moves
+  ;; both the registry and the column is the one that says the row changed -- so this
+  ;; wrapper is one call, not three.
   nil)
 
 (defn- unregister-run!
@@ -702,8 +704,8 @@
   property of the shape rather than something each call site has to arrange."
   [thread-id run-id]
   (sessions/run-finished! thread-id run-id)
-  ;; AND THE HOST HEARS for the same reason: the row's "running" dot is this registry's.
-  (host/ring!)
+  ;; AND THE HOST HEARS for the same reason: the row's "running" dot -- rung by
+  ;; `sessions/run-finished!` itself, with the column it now shares.
   nil)
 
 (defn entry-source

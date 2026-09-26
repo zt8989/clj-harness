@@ -28,13 +28,14 @@
 // log tree used to supply a size and an mtime per row, and that whole half is gone
 // (see `lib/projects.ts`, and `.scratch/store-backed-sidebar/spec.md`).
 //
-// THE LIST IS A SNAPSHOT, AND THE UI SAYS SO. Nothing here subscribes to the store,
-// so a run that lands while the page is open does not move its row until something
-// refreshes: coming back to the window, switching session, or the refresh button. The
-// button exists because the alternative -- a list that silently disagrees with the
-// store -- is worse than one that is visibly a snapshot. (The one thing that does
-// chase a change is the session this page has just been typing into; see `asked`.)
-//
+// THE LIST IS A SNAPSHOT NO LONGER, and ticket 02 of `.scratch/sidebar-ws-and-run-state`
+// is the change: the FIRST read is HTTP (mount, or the button when the socket is
+// down), and after that every host-level change -- a run starting or ending, a row
+// being written anywhere, a project added or removed, an archive flag -- arrives as a
+// PUSH over `events.host` (ADR 0004). The button stays as the manual fallback for a
+// socket that cannot connect, not as a normal path. What still refreshes on demand is
+// the one thing the push cannot settle: a minted session waiting for its first row
+// (see `asked` below).
 // ----------------------------------------------------------- a new task's shape
 //
 // A CLICK WRITES NOTHING. This is the owner's rule (点击新增不立刻会话，发送才新建) as this
@@ -439,6 +440,12 @@ export const Sidebar: FC<SidebarProps> = ({
   // navigating away from the conversation behind it.
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // THE ONE HTTP READ, and after ticket 02 it is the FALLBACK rather than the path:
+  // the socket's opening frame carries the same listing (see below), so this runs
+  // only when the socket is down or the person presses the button. Kept on its own
+  // because a fallback that does not work is worse than no fallback: a socket that
+  // cannot connect at all (a proxy that refuses upgrades) must still yield a
+  // sidebar, and the button is how a person asks for one without a reload.
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -454,23 +461,39 @@ export const Sidebar: FC<SidebarProps> = ({
     }
   }, [onListed]);
 
-  // On mount, and again whenever the current thread changes -- opening a session
-  // rebuilds it from its log, which appends an audit line to that very file, so
-  // its size and mtime are stale the moment a switch succeeds.
+  // THE FIRST READ, ON MOUNT, over HTTP -- the one `listSidebar` call of this
+  // component's life (ticket 02: 首次拉取走 HTTP). The socket then takes over:
+  // its opening frame is the same store answer, and every later change is a push.
+  // If the socket is already delivering by the time this lands, the read is a
+  // harmless re-read of the same snapshot; if it never connects, this is the
+  // sidebar's only source -- which is exactly what the fallback is for.
   useEffect(() => {
     void refresh();
-  }, [refresh, currentThreadId]);
+    // `refresh` is stable (`onListed` is a `useCallback`), so this is mount-only.
+  // `refresh` is stable (`onListed` is a `useCallback`), so this is mount-only
+  // (mounted once per component; `folded` does not unmount this -- see the prop's
+  // own note above -- so a fold/unfold cycle does not re-read either).
+  }, [refresh]);
 
-  // AND THE LISTING IS PUSHED (ADR 0004, `events.host`): a row that appears because
-  // ANOTHER window sent, a project another window added, a run another window started or
-  // stopped -- all of it arrives here without the refresh button. The opening frame is the
-  // current listing, so this is a second read of what the mount already asked for: the
-  // same store answer, and the store stays the one source. The button remains as the
-  // manual fallback for a socket that cannot connect at all.
+  // AND THE LISTING IS PUSHED (ADR 0004, `events.host`): every change after the
+  // FIRST read arrives here without anyone asking -- a row that appears because
+  // ANOTHER window sent, a project another window added, a run another window
+  // started or stopped, and this window's own run starts and ends too (ticket 02 of
+  // `.scratch/sidebar-ws-and-run-state`: the server rings the host stream from the
+  // run-state writes themselves). The opening frame is the current listing, so the
+  // socket's first word IS the first read this sidebar draws from; `refresh` below
+  // is the manual fallback for a socket that cannot connect at all, not a second
+  // source of truth. THERE IS NO RE-READ ON A SESSION SWITCH: switching rebuilds
+  // nothing the listing reads (the old size/mtime reasons are gone), and the facts
+  // a switch could change -- a row's `running`, its send time -- ride the stream
+  // like everything else. What a switch DOES change on screen is derived state
+  // (`selected`, the current row) and that is a render of the listing already held.
   useEffect(
     () =>
       subscribeHost((listed) => {
         setListing(listed);
+        setListError(null);
+        setLoaded(true);
         onListed(listed);
       }),
     [onListed],

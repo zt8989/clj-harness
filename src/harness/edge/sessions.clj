@@ -32,6 +32,7 @@
   (:require [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
+            [harness.edge.host :as host]
             [harness.edge.record :as record]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
@@ -150,14 +151,22 @@
   last-known state becomes `running` at the same moment the registry says so."
   [thread-id run-id]
   (session/run-started! thread-id run-id)
-  (project/set-run-state! thread-id "running"))
+  (project/set-run-state! thread-id "running")
+  ;; AND THE HOST HEARS: a run starting is a fact the sidebar's row draws (`running`),
+  ;; so every page's listing is pushed the new word -- no other page has to poll or
+  ;; press the button to see the spinner (ticket 02 of
+  ;; `.scratch/sidebar-ws-and-run-state`).
+  (host/ring!))
 
 (defn run-finished!
   "Unpin the run AND record the column: the store's last-known state becomes
   `idle` when the registry's last pin goes."
   [thread-id run-id]
   (session/run-finished! thread-id run-id)
-  (project/set-run-state! thread-id "idle"))
+  (project/set-run-state! thread-id "idle")
+  ;; AND THE HOST HEARS, for the same reason the start does: the row's spinner goes
+  ;; off on every page, not only the one that ran it.
+  (host/ring!))
 
 (def clear-startup-run-state! project/clear-startup-run-state!)
 (def tail session/tail)
