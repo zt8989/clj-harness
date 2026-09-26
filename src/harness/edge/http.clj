@@ -4871,8 +4871,19 @@
                       (put "model/start" (dissoc (ev/model-start p specs) :type))
                       (try
                         (let [{:keys [message telemetry]}
+                              ;; THE SUMMARY CALL IS A PROVIDER CALL, so the array it is handed is
+                              ;; put in the PROVIDER's shape first, by the SAME fold the run path uses
+                              ;; (`ag/provider-messages`) rather than a second copy of it.
+                              ;;
+                              ;; THE PLAN'S MESSAGES ARE THE MODEL VIEW -- AG-UI, where a thought is a message
+                              ;; of its own with role "reasoning" -- and a vendor refuses that role
+                              ;; outright (`messages[N].role: unknown variant \`reasoning\``, measured
+                              ;; on a real log: 15 compactions of one session, 15 refusals, every one
+                              ;; the same sentence, and the record never got a `context/compacted`).
+                              ;; Folding carries the thought across as the `reasoning_content` the
+                              ;; vendor bills instead of dropping it.
                               (llm/stream! p
-                                           (conj (vec messages)
+                                           (conj (vec (ag/provider-messages messages))
                                                  {:role "user" :content compaction/summary-instruction})
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)

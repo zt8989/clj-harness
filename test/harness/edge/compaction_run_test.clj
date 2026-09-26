@@ -11,12 +11,14 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
+            [harness.edge.ag-ui :as ag]
             [harness.edge.compaction :as compaction]
             [harness.edge.pressure :as pressure]
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
             [harness.fake :as fake]
-            [harness.infra.home :as home]))
+            [harness.infra.home :as home]
+            [harness.kernel.event :as ev]))
 
 ;; ------------------------------------------------------------------ the records
 
@@ -269,3 +271,62 @@
                  (row 3 "t2" {:role "tool" :tool_call_id "c2" :content "ok"})]
         plan    (compaction/overflow-plan records)]
     (is (= [0 1] (:shadowed plan)) "the last legal group is kept, the older tool round goes")))
+
+;; ------------------------------------- a thought the record kept (ticket 01)
+
+(defn- frame-rows
+  "One run's AG-UI frames AS THE RECORD KEEPS THEM: the edge's OWN converter builds them
+  (`ag/outbound`), so a fixture cannot spell a frame the server never writes."
+  [events]
+  (let [emit (ag/outbound "reasoning" "r1")]
+    (mapv (fn [f] {:ts 0 :runId "r1" :type "event" :payload f}) (mapcat emit events))))
+
+(defn- model-row
+  "The RUN's own row for one model call -- what `harness.edge.http/log-messages!` writes:
+  the assistant message the vendor returned, REASONING INCLUDED, under the `model` source.
+  It is where the record's copy of a thought lives (`harness.edge.replay/reasoning-row?`)."
+  [ts content reasoning]
+  {:ts ts :runId "r1" :type "message" :source "model" :id "r1-m0"
+   :payload {:role "assistant" :content content :reasoning_content reasoning}})
+
+(deftest a-summary-call-goes-out-in-a-shape-the-vendor-reads
+  ;; A RECORD THAT KEPT ITS THOUGHT. The frames carry the answer; the run's own row carries
+  ;; the reasoning; the fold puts the thought back in FRONT of that answer as a message of its
+  ;; own (`harness.edge.replay/attach-reasoning`). The plan hands exactly those messages to the
+  ;; summarizer -- and a provider refuses the ROLE they are spelled with (`messages[N].role:
+  ;; unknown variant `reasoning`; measured on a real log: 15 compactions of one session, 15
+  ;; refusals, and not one `context/compacted`). A summary call IS a provider call, so it goes
+  ;; out folded -- by the same rule a run's call goes out by.
+  (let [thought (apply str (repeat 4000 "想"))
+        big     (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a"))))
+        ;; THE THOUGHT SITS EARLY AND THE CONVERSATION CONTINUES PAST IT -- the only shape in
+        ;; which the head the summarizer is handed still CONTAINS it: the plan keeps the newest
+        ;; words verbatim, so a thought at the very end is never summarized at all.
+        rows    (vec (concat (map big (range 3))
+                             (frame-rows [(ev/run-start)
+                                          (ev/text-delta "an answer")
+                                          (ev/run-end)])
+                             [(model-row 4 "an answer" thought)]
+                             (map big (range 5 35))))
+        log     (plant! "compact-reasoning" rows)
+        stop    (http/start! {:port 0})]
+    (providers/use-provider! "compact-reasoning" (fake/scripted [{:content "THE SUMMARY"}]))
+    (try
+      (is (some #(= "reasoning" (:role %))
+                (:messages (compaction/plan (replay/read-records log) 128000 0.16)))
+          "the fixture really does fold a thought of its own -- or this proves nothing")
+      (let [resp (#'http/compact-post nil "compact-reasoning")
+            body (json/read-str (String. ^bytes (:body resp) "UTF-8") :key-fn keyword)]
+        (is (= 200 (:status resp)) (pr-str body))
+        (is (true? (:compacted body)) "the summary call was accepted and answered")
+        (let [rows (wait-for-rows log "compaction/end")]
+          (is (some #{"context/compacted"} (mapv replay/kind rows))
+              "the summary reached the record")
+          (is (not-any? (fn [r] (and (= "compaction/end" (replay/kind r))
+                                     (:error (replay/payload r))))
+                        rows)
+              "and the pair closed with no error on it")))
+      (finally
+        (stop)
+        (io/delete-file log true)
+        (providers/use-provider! "compact-reasoning" nil)))))

@@ -490,3 +490,28 @@
                                :source "system-prompt" :hash "h" :hooks-names-hash "H2")])
         records (vec (concat (turn-one :replace nil) (old-two)))]
     (is (= "estimated" (:baseline (pressure-of records))))))
+
+(deftest the-shape-a-thought-arrives-in-does-not-move-its-price
+  ;; THE SAME THOUGHT, TWO SPELLINGS -- and the meter SUBTRACTS one from the other. AG-UI
+  ;; keeps a thought as a message of its own (that is how the record folds it back out of a
+  ;; run's own row); a provider reads it as `reasoning_content` on the assistant it belongs
+  ;; to (that is what `harness.edge.ag-ui/absorbed` folds before a call goes out). A rule
+  ;; that priced only `:content` charged the same conversation 330,648 estimated tokens in
+  ;; one shape and 689,229 in the other (a real 1.4M-character log); the LIVE meter is handed
+  ;; the provider shape while the ANCHOR it subtracts was folded in the AG-UI one, so a
+  ;; session read 62% full when the vendor was about to be asked for 97%
+  ;; (`.scratch/compaction-shape` ticket 02).
+  (let [thought (apply str (repeat 4000 "想"))
+        plain   {:role "assistant" :content "answer"}
+        with    (assoc plain :reasoning_content thought)
+        as-ag-ui    [{:role "user" :content "ask"}
+                     {:role "reasoning" :content thought}
+                     plain]
+        as-provider [{:role "user" :content "ask"}
+                     with]]
+    (is (>= (pressure/estimate-message with) 1000)
+        "a 4000-character thought is in the price of the message that carries it")
+    (is (<= (long (Math/abs (long (- (pressure/estimate-messages as-ag-ui)
+                                   (pressure/estimate-messages as-provider)))))
+            pressure/role-overhead)
+        "the two shapes differ by the framing of one extra message, and by nothing else")))

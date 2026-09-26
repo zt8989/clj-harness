@@ -150,6 +150,34 @@
               messages)
     (throw (ex-info (str "HTTP 400: " thinking-mode-refusal) {:status 400}))))
 
+
+(defn- reasoning-role-refusal
+  "The real vendor's 422, copied -- what the kongming gateway (a DeepSeek-compatible
+  endpoint) answered when a request's message array carried a `role \"reasoning\"` element
+  (measured 2026-09-25 on thread `f59c09dd-…`: fifteen compactions, fifteen refusals, every
+  one this sentence). The vendor's sentence names the offending INDEX, so that is filled in;
+  the request-id and column tail it ends with are per-request and dropped.
+  "
+  [i]
+  (json/write-str {:error {:message (str "Failed to deserialize the JSON body into the target type: "
+                                   "messages[" i "].role: unknown variant `reasoning`, expected "
+                                   "one of `system`, `user`, `assistant`, `tool`, `latest_reminder`")
+                           :type "invalid_request_error"
+                           :param ""
+                           :code "invalid_request_error"}}))
+
+(defn- refuse-reasoning-role!
+  "A MESSAGE WHOSE ROLE IS `reasoning` IS NOT A REQUEST ANY PROVIDER READS. AG-UI keeps a
+  thought as a message of its own; a provider reads it as `reasoning_content` on the
+  assistant message it belongs to (`harness.edge.ag-ui/absorbed` is that fold), and every
+  OpenAI-compatible endpoint refuses the other spelling BY NAME.
+
+  EVERY REQUEST, not only a compaction's: the bug this catches was a request built BESIDE
+  the one path that folds (`.scratch/compaction-shape` ticket 01), so the next path that
+  assembles an array by hand meets this too."
+  [messages]
+  (when-let [i (first (keep-indexed (fn [i m] (when (= "reasoning" (:role m)) i)) messages))]
+    (throw (ex-info (str "HTTP 422: " (reasoning-role-refusal i)) {:status 422}))))
 (defmethod llm/stream! :fake
   [{:keys [script thinking] :as provider} messages on-event _thread-id]
   ;; TWO FACTS, not one: `:thinking` says this is the KIND of vendor that enforces
@@ -157,5 +185,9 @@
   ;; is what the vendor's sentence is conditioned on ("in the thinking mode"). A
   ;; request without it is a different mode and gets no refusal, so the boundary
   ;; between the two is testable.
+  ;; A ROLE NO PROVIDER READS IS REFUSED WHATEVER THE MODE, because that is what the vendor
+  ;; did -- the 422 arrived on a call whose provider was in thinking mode, but the sentence it
+  ;; answered with is about the ROLE, not about the mode.
+  (refuse-reasoning-role! messages)
   (when (and thinking (:reasoning-effort provider)) (refuse-unless-echoed! messages))
   (script-provider (or script test-script) on-event (:pace-ms provider)))

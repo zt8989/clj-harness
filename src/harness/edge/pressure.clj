@@ -70,21 +70,38 @@
   "Tokens of framing per message, for its role field."
   4)
 
+(defn- text-blocks
+  "TEXT -> the blocks this estimator charges for: a string is one block, a vector is its parts
+  (each serialized when it is not already text), nil is none. ONE READER, so a message's content
+  and its reasoning cannot be spelled two different ways."
+  [text]
+  (cond (string? text)     [text]
+        (nil? text)        []
+        (sequential? text) (mapv #(if (string? %)
+                                   %
+                                   (json/write-str % :escape-unicode false))
+                                text)
+        :else              [(json/write-str text :escape-unicode false)]))
+
 (defn estimate-message
   "One provider message -> an estimated token count. CONTENT is a string or a vector of
   blocks; a Chinese character counts as one character either way -- and is therefore
   underpriced, the estimator's known and admitted bias, not a bug to be fixed here. The
   framing overhead is per CONTENT BLOCK, which is why a message of k blocks costs more
-  than the same text in one."
+  than the same text in one.
+
+  REASONING IS PRICED, WHEREVER IT IS SPELLED. A thinking-mode vendor bills the thought on
+  the assistant message it arrives on, and the SAME text reaches this function two ways: as
+  `reasoning_content` on that assistant (the PROVIDER shape `harness.edge.ag-ui/absorbed`
+  folds it into), or as a `role \"reasoning\"` message of its own (the AG-UI shape the
+  RECORD folds back out of the run's own row). Reading only `:content` charged one and not
+  the other -- the same conversation came out 330,648 tokens in one shape and 689,229 in the
+  other (measured on a real 1.4M-character log) -- and the meter SUBTRACTS one of those from
+  the other (`state->pressure`), so the shape it happened to be handed decided the answer.
+  Which shape it is handed must not matter."
   [message]
-  (let [content (:content message)
-        blocks  (cond (string? content)     [content]
-                      (nil? content)        []
-                      (sequential? content) (mapv #(if (string? %)
-                                                     %
-                                                     (json/write-str % :escape-unicode false))
-                                                  content)
-                      :else                 [(json/write-str content :escape-unicode false)])]
+  (let [blocks (into (text-blocks (:content message))
+                     (text-blocks (:reasoning_content message)))]
     (+ (reduce + 0 (map (fn [block]
                           (long (Math/ceil (/ (double (count block))
                                             (double chars-per-token)))))
