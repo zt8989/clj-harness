@@ -149,6 +149,85 @@
   [kind]
   (contains? #{:git-bash :bash} kind))
 
+;; ------------------------------------- the command, as the line carries it
+;;
+;; WINDOWS HAS NO ARGV, and this is where that stops being somebody else's problem.
+;; A POSIX machine is handed the vector [<shell> -lc <command>] and the kernel gives
+;; the child exactly those words. Windows is handed ONE COMMAND LINE, built out of
+;; that vector by the JVM and read back into words by whoever the child is. Two
+;; parsers, one line -- and they disagree about the one character a shell command
+;; cannot do without.
+;;
+;; THE JVM, in the mode it is in by default (`jdk.lang.Process.allowAmbiguousCommands`
+;; is true, and it is read afresh for every spawn), WRAPS an element that holds a
+;; blank in quotes and escapes nothing inside it. `echo ONE "TWO THREE" FOUR` -- one
+;; argv element -- therefore reaches the line as those same bytes inside ANOTHER pair
+;; of quotes.
+;;
+;; GIT BASH READS THAT LINE BACK BY THE MSVCRT RULE: inside a quoted run a quote is
+;; ended only by a backslash-quote, and a backslash by a doubled backslash. A BARE
+;; QUOTE ENDS THE RUN, and a blank outside a run ends the WORD. So every bare quote
+;; in that line is a quote gone, and what follows it is read as more command-line
+;; words rather than as part of the command: the line above arrives as `echo ONE TWO`,
+;; with everything after the second bare quote consumed as argv. One bug, three
+;; faces: the quotes that vanished, the commands after a `|` that never ran, and the
+;; shell's own `unexpected EOF while looking for matching` about a line the caller
+;; never wrote.
+;;
+;; SO THE ESCAPING IS DONE HERE, by the rule the line would have carried had the JVM
+;; quoted for a C runtime -- which is the rule the shell reads, so the caller's bytes
+;; come back out of it unchanged.
+;;
+;; WHAT THIS ASKS OF THE JVM IS ONLY THAT IT KEEP THE MODE IT IS IN: wrapping, and
+;; not escaping. A case in shell-test -- a command with a quoted word arriving whole
+;; -- is what turns red if that ever stops being the mode it quotes in.
+
+(defn- escaped-for-msvcrt
+  "S with the two characters that rule is about doubled, as a command line carries
+  them into a program: a backslash is doubled, and a quote becomes a backslash
+  followed by a quote.
+
+  ORDER IS NOT STYLE: the backslash goes first. Escaping the quotes first and the
+  backslashes second would double the backslash each quote had just gained, and the
+  quote would arrive bare -- which is the very thing this section exists to stop."
+  [s]
+  (-> (str s)
+      (str/replace "\\" "\\\\")
+      (str/replace "\"" "\\\"")))
+
+(defn command-word
+  "COMMAND as the word this process's command LINE must carry for KIND to receive
+  the caller's bytes verbatim -- what goes where `argv-prefix` leaves off, in `run`
+  and in `spawn-argv`'s shell shape.
+
+  OFF WINDOWS IT IS THE COMMAND ITSELF. There the vector IS the argv: the kernel
+  gives the child those words and nothing rewrites them, so an escape added here
+  would be a byte the shell then had to unescape.
+
+  ON WINDOWS IT IS THE COMMAND ESCAPED FOR THE LINE (see the section above), and a
+  command with no blank in it gets A BLANK IN FRONT. That blank is not decoration:
+  the JVM quotes an element only when it holds a blank, and only a QUOTED element is
+  read back by the escaping rule these bytes are written for -- an unquoted one is
+  read literally, and the backslashes just added would stay in the command. A shell
+  skips a leading blank, so what runs is still the caller's command, exactly.
+
+  `cmd` IS HANDED ITS COMMAND UNTOUCHED, and it is the one exception: cmd does not
+  read a command line by the MSVCRT rule, it is the shell that already receives a
+  quote as a quote, and escaping for it would leave backslashes in a command it
+  takes literally. The case that says so is in shell-test.
+
+  PURE IN THE TWO FACTS IT BRANCHES ON -- which kind, and whether this is Windows --
+  the same split as `spawn-argv`, so the branch no machine here will take can still
+  be asserted on any of them."
+  ([kind command] (command-word kind command (windows?)))
+  ([kind command on-windows?]
+   (if-not (and on-windows? (not= kind :cmd))
+     command
+     (let [escaped (escaped-for-msvcrt command)]
+       (if (re-find #"[ \t]" escaped)
+         escaped
+         (str " " escaped))))))
+
 (defn- path-like?
   "Does COMMAND name a place rather than a program to go looking for on PATH?"
   [command]
@@ -629,7 +708,9 @@
         ;; wait nor the drains below has a use for it.
         pb (with-shlvl!
              #(child-env
-               (doto (ProcessBuilder. (vec (concat [(:command r)] (:argv-prefix r) [command])))
+               (doto (ProcessBuilder.
+                      (vec (concat [(:command r)] (:argv-prefix r)
+                                   [(command-word (:kind r) command (windows?))])))
                  (.redirectErrorStream false))))
         _  (when dir (.directory pb (io/file dir)))
         ;; BEFORE THE SPAWN, so that no process exists during a moment when this
@@ -712,7 +793,9 @@
               must survive verbatim -- which on Windows means Windows' own `cmd /c`
               (see `windows-argv` for why bash must not be used for this).
     :shell    a command written FOR A SHELL, exactly as `run` takes one: it goes to
-              the shell this process resolved, with that shell's own argv prefix.
+              the shell this process resolved, with that shell's own argv prefix --
+              and, on Windows, escaped for the line the JVM builds (see
+              `command-word`).
 
   THE TWO SHAPES DIFFER ON WINDOWS ONLY, and that is the whole reason this asks:
   there `:program` needs cmd and `:shell` needs Git Bash. Everywhere else both are
@@ -732,7 +815,8 @@
    (if (and on-windows? (= shape :program))
      (into (vec @windows-argv) [command])
      (let [r (or shell-res (require-shell!))]
-       (into (vec (concat [(:command r)] (:argv-prefix r))) [command])))))
+       (into (vec (concat [(:command r)] (:argv-prefix r)))
+             [(command-word (:kind r) command on-windows?)])))))
 
 (defn start
   "Spawn COMMAND as a LONG-LIVED process -- the kind `run` cannot do: a process
