@@ -949,6 +949,43 @@
              (is (some #(= "reasoning" (:role %)) rebuilt)
                  "the fold gets it back off the record: the frames are gone, the run's own row is not"))))))))
 
+(deftest a-record-opens-with-its-header-and-nothing-else-answers-it
+  ;; TICKET 06, END TO END: the FIRST line a writer puts in a record names the file's format and
+  ;; the conversation. ONE per file -- the second run of the same conversation writes no second
+  ;; one -- and the fold is untouched: the header is a fact, and the conversation still opens
+  ;; with its run.
+  (with-server
+   "with-header"
+   (fn []
+     (let [log (log-file "with-header")]
+       (io/delete-file log true)
+       (post-run "with-header")
+       (wait-for-recorded log
+                          (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+                          5000)
+       (let [rows (replay/read-records log)
+             [h & _] rows]
+         (testing "the first row is the header"
+           (is (replay/header? h))
+           (let [v (replay/header-of h)]
+             (is (= http/record-format (:format v)) "naming the format this build writes")
+             (is (= "with-header" (:thread v)) "and the conversation it belongs to")
+             (is (some? (:created v)))))
+         (testing "exactly one, however many runs wrote the rest"
+           (post-run "with-header")
+           (wait-for-recorded log
+                              (fn [ls] (>= (count (filter #(= "RUN_FINISHED" (:type (replay/payload %))) ls)) 2))
+                              5000)
+           (let [rows (replay/read-records log)]
+             (is (= 1 (count (filter replay/header? rows))))
+             (is (replay/header? (first rows)) "and it is still the file's first row")))
+         (testing "and the fold never saw it"
+           (is (= "with-header"
+                  (:threadId (:payload (first (filter #(= "event" (replay/kind %))
+                                                      (filter #(= "RUN_STARTED" (:type (replay/payload %))) rows))))))
+                  "the conversation still OPENS with the run, not with the file's own line")
+           (is (some #(= "message" (replay/kind %)) rows))))))))
+
 (deftest the-record-holds-the-answer-as-snapshots-not-as-tokens
   ;; TICKET 03'S SECOND HALF. The WIRE is untouched -- the client still receives one frame per token
   ;; -- and the RECORD holds the answer whole, so a log's text is a handful of lines instead of one
@@ -3060,7 +3097,8 @@
           (#'http/log! tid "r2" test-probe {:n 4})
           (drained!)
           (is (.exists ulog))
-          (is (= 2 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))))
+          (is (= 3 (count (str/split-lines (slurp ulog :encoding "UTF-8"))))
+              "two probes PLUS the file's own header line (ticket 06)"))
         (testing "the binding comes back and the writer carries the segment home"
           (project/bind! tid (str proj-dir))
           (#'http/log! tid "r3" test-probe {:n 5})
@@ -3088,7 +3126,8 @@
             (is (some? line) "an audit line says the segment was carried back")
             (is (= (.getAbsolutePath plog) (get-in (replay/payload line) [:to])))
             (is (= (.getAbsolutePath ulog) (get-in (replay/payload line) [:from])))
-            (is (= 2 (get-in (replay/payload line) [:lines])) "and how many lines moved")))
+            (is (= 3 (get-in (replay/payload line) [:lines]))
+                "and how many lines moved -- now three, the header riding along")))
         (finally
           (run! #(io/delete-file % true) (reverse (file-seq proj-dir))))))))
 
