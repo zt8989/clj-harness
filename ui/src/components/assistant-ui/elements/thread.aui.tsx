@@ -49,9 +49,14 @@ import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
 import { SessionRunContext } from "@/components/session-run-state";
-// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): the criterion the action bar
-// shares with the composer -- this page's run OR the server's word. See `AssistantActionBar`.
+// LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE TURN the server says is open
+// (`turn/start` / `turn/end`), which is what the dot at a turn's end is about -- see
+// `lib/live-turn.ts` for why it is not the run's word.
+import { SessionTurnContext } from "@/components/live-turn-state";
+// LOCAL (ticket 02): the criterion the action bar shares with the composer -- this page's run OR
+// the server's word. See `AssistantActionBar`.
 import { stillBeingWritten } from "@/lib/session-status";
+import { wearsWorkingDot } from "@/lib/live-turn";
 import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
@@ -614,6 +619,14 @@ const AssistantMessage: FC = () => {
   const runState = useContext(SessionRunContext);
   const ownRunning = useAuiState((s) => s.thread.isRunning);
   const writing = stillBeingWritten(ownRunning, runState);
+  // LOCAL (ticket 02): WHICH OF THE TWO THINGS THIS TURN'S END WEARS -- and the three facts it
+  // takes are in `lib/live-turn.ts`: the TURN is open (the server's `turn/start` / `turn/end`,
+  // seeded from the window's word where the family is silent), somebody is WRITING right now (the
+  // run's, `writing` above), and this footer is the LIVE turn's end (`isLast` -- only one turn can
+  // be open, and it is the last; without that half every earlier turn's end wore a dot too: the
+  // owner's third report, 2026-09-25).
+  const turn = useContext(SessionTurnContext);
+  const lastMessage = useAuiState((s) => s.message.isLast);
 
   // LOCAL: the fold. A turn that has SETTLED puts its steps away -- every message
   // of it except the answer, which stays where it is -- and its first message
@@ -792,7 +805,7 @@ const AssistantMessage: FC = () => {
             THIS message, which is now the turn's last one -- the answer, which is
             what "regenerate" means to a reader. */}
         <AuiIf condition={isTurnEnd}>
-          {writing ? <WorkingDot /> : <AssistantActionBar />}
+          {wearsWorkingDot(turn, writing, lastMessage) ? <WorkingDot /> : <AssistantActionBar />}
         </AuiIf>
       </div>
     </MessagePrimitive.Root>

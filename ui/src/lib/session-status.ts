@@ -116,6 +116,10 @@ export const statusOf = (local: SessionStatus, server: string | null): SessionSt
 export const stillBeingWritten = (ownRunning: boolean, server: string | null): boolean =>
   statusOf({ running: ownRunning, parked: false }, server).running;
 
+// WHICH OF THE TWO THINGS A TURN'S END WEARS IS NOT ASKED HERE ANY MORE: the dot is about the
+// TURN, and the turn has its own module (`lib/live-turn.ts`: `wearsWorkingDot` over the turn's
+// open/closed fact, this file's `writing`, and whether the footer is the live turn's).
+
 /// Whether this session must not be filed away or have its project removed: it
 /// has work that is not finished with the log.
 export const blocked = (status: SessionStatus): boolean =>

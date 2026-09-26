@@ -199,6 +199,19 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （`indicator: "no-text"`：消息在跑、最后一个 part 不是 text/reasoning 时它就在），于是第一次发送（末尾那条消息
   还是空的）和「一步交给下一步」的当口会**两颗一起出现**。所以那一颗**关掉了**（`indicator="never"`），
   「在写」只由 turn 末尾这一格说——**一个状态一个标记，一个标记一个地方**。
+  **而且只摆在「正在被写的那一轮」的末尾**，判据是**三个事实**，各有各的家（`lib/live-turn.ts` 的
+  `wearsWorkingDot`）：
+    - `turn.open` —— **那一轮自己的生命周期**：`turn/start` / `turn/end`（`lib/mux.ts` 的 fact 家族，ADR 0006）。
+      **一个 turn 比一次 run 大**：它随人的话开，只在这一轮的 run「什么都没欠着」时才关（park 不关，resume 接着写
+      同一轮），所以这一格不能再拿 run 的词去猜。
+    - `writing` —— **此刻有人正在写**（本页的 run **或**窗口说的 `running`）：`turn.open` 与它不是同一个问题
+      （parked 的那一轮**还开着**，而那时谁也没在写——那里的标记是卡）。
+    - `isLast` —— **这一格就是那一轮的末尾**：同时只能有一轮开着，开着的那一轮就是线程最后一条；少了这个，
+      发下一条消息的瞬间**每个** turn 末尾都各长一颗点（主人第三次报的就是这个）。
+  **刷新那一格靠窗口的种子**：fact 家族是**只服务「你看着的时候」**的（`.scratch/turn-and-model-events` 决策 5，
+  过去只作为快照），所以刷新落在一轮中间时它对这一轮**一言不发**——页面从窗口自己的词种下去（`running` ⇒ 开着，
+  `parked` ⇒ 也开着，`settled` / `unfinished` ⇒ 没有开着的轮），此后由 fact 接着走。
+  前面那些 turn 末尾照旧只穿自己的家具（`autohide="not-last"`，悬停才现，一直是这个形状）。
   **这一格也不能交给 upstream 的 `hideWhenRunning`**：它是 `hideWhenRunning && s.thread.isRunning`，而「本页只是
   看着」正是 runtime 说 false 的那一格（实测：传 `true` 照样画出来）。而**空位**和动作条犯的是同一个错：都读作
   「写完了」。

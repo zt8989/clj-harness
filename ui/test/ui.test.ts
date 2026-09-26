@@ -443,8 +443,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// and the window's `running` only wins if the status RIDES ON THE MESSAGE -- the difference
 /// between a `bash` call in flight drawn as a spinner and drawn as 待审批. The second case is
 /// the four words that reading can be.
-// 155 on main, plus the one this branch added (the pushed numbers joining the snapshot).
-const EXPECTED_CASES = 156;
+/// 155 on main, plus the one this branch added: the moment a NEW turn is sent, an earlier turn's
+/// end must not wear the dot -- the owner's third report (two dots, one per turn end). The
+/// assertion is over `lib/live-turn.ts`'s three facts (a turn is open, somebody is writing, and
+/// this is the live turn); its name and its place move with that module.
+const EXPECTED_CASES = 158;
 
 let total = 0;
 for (const suite of SUITES) {
